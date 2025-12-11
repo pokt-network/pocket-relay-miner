@@ -35,7 +35,7 @@ Press Ctrl+C to stop monitoring.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			return monitorPubSub(ctx, client, channel, duration)
 		},
@@ -43,14 +43,14 @@ Press Ctrl+C to stop monitoring.`,
 
 	cmd.Flags().StringVar(&channel, "channel", "", "Channel to monitor (required)")
 	cmd.Flags().IntVar(&duration, "duration", 0, "Duration in seconds (0 = until Ctrl+C)")
-	cmd.MarkFlagRequired("channel")
+	_ = cmd.MarkFlagRequired("channel")
 
 	return cmd
 }
 
 func monitorPubSub(ctx context.Context, client *redisClient, channel string, durationSec int) error {
 	pubsub := client.Subscribe(ctx, channel)
-	defer pubsub.Close()
+	defer func() { _ = pubsub.Close() }()
 
 	// Wait for confirmation
 	_, err := pubsub.Receive(ctx)

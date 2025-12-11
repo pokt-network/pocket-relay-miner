@@ -10,8 +10,8 @@ import (
 	"syscall"
 	"time"
 
-	sdk "github.com/cosmos/cosmos-sdk/types"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
+	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 
@@ -118,7 +118,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		if err := obsServer.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start observability server: %w", err)
 		}
-		defer obsServer.Stop()
+		defer func() { _ = obsServer.Stop() }()
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
 	}
 
@@ -132,7 +132,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("failed to parse Redis URL: %w", err)
 	}
 	redisClient := redis.NewClient(redisOpts)
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	// Test Redis connection
 	if pingErr := redisClient.Ping(ctx).Err(); pingErr != nil {
@@ -153,7 +153,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err := supplierCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start supplier cache: %w", err)
 	}
-	defer supplierCache.Close()
+	defer func() { _ = supplierCache.Close() }()
 	logger.Info().Msg("supplier cache initialized and started")
 
 	// Create query clients for fetching on-chain data (service compute units, etc.)
@@ -180,7 +180,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create query clients: %w", err)
 	}
-	defer queryClients.Close()
+	defer func() { _ = queryClients.Close() }()
 	logger.Info().Str("grpc_endpoint", grpcEndpoint).Bool("tls", useTLS).Msg("query clients initialized")
 
 	// Create new entity caches (relayer only subscribes to pub/sub, doesn't refresh)
@@ -195,7 +195,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err := sharedParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start shared params cache: %w", err)
 	}
-	defer sharedParamsCache.Close()
+	defer func() { _ = sharedParamsCache.Close() }()
 
 	// Create session params cache
 	sessionParamsCache := cache.NewSessionParamsCache(
@@ -206,7 +206,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err := sessionParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start session params cache: %w", err)
 	}
-	defer sessionParamsCache.Close()
+	defer func() { _ = sessionParamsCache.Close() }()
 
 	// Create proof params cache
 	proofParamsCache := cache.NewProofParamsCache(
@@ -217,7 +217,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err := proofParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start proof params cache: %w", err)
 	}
-	defer proofParamsCache.Close()
+	defer func() { _ = proofParamsCache.Close() }()
 
 	// Create application cache
 	applicationCache := cache.NewApplicationCache(
@@ -228,7 +228,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err := applicationCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start application cache: %w", err)
 	}
-	defer applicationCache.Close()
+	defer func() { _ = applicationCache.Close() }()
 
 	// Create service cache
 	serviceCache := cache.NewServiceCache(
@@ -239,7 +239,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err := serviceCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start service cache: %w", err)
 	}
-	defer serviceCache.Close()
+	defer func() { _ = serviceCache.Close() }()
 
 	logger.Info().Msg("entity caches started (pub/sub subscribers)")
 
@@ -260,7 +260,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err := blockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start block subscriber: %w", err)
 	}
-	defer blockSubscriber.Close()
+	defer func() { blockSubscriber.Close() }()
 	logger.Info().Str("rpc_endpoint", rpcURL).Msg("block subscriber started (WebSocket)")
 
 	// NOTE: Cache warmup is now handled by the miner's CacheOrchestrator.
@@ -295,7 +295,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Poll block height updates and push to proxy
 	go func() {
 		ticker := time.NewTicker(1 * time.Second)
-		defer ticker.Stop()
+		defer func() { ticker.Stop() }()
 		for {
 			select {
 			case <-ctx.Done():
@@ -356,7 +356,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 		// Close providers
 		for _, provider := range keyProviders {
-			provider.Close()
+			_ = provider.Close()
 		}
 
 		if len(loadedKeys) == 0 {
@@ -402,7 +402,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			if err := sharedParamCache.Start(ctx); err != nil {
 				return fmt.Errorf("failed to start shared param cache: %w", err)
 			}
-			defer sharedParamCache.Close()
+			defer func() { _ = sharedParamCache.Close() }()
 			logger.Info().Msg("shared param cache started")
 
 			// Create SessionCache for session validation caching
@@ -417,7 +417,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			if err := sessionCache.Start(ctx); err != nil {
 				return fmt.Errorf("failed to start session cache: %w", err)
 			}
-			defer sessionCache.Close()
+			defer func() { _ = sessionCache.Close() }()
 			logger.Info().Msg("session cache started")
 
 			// Create full RelayValidator with all validations:
@@ -497,7 +497,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				if err := relayMeter.Start(ctx); err != nil {
 					return fmt.Errorf("failed to start relay meter: %w", err)
 				}
-				defer relayMeter.Close()
+				defer func() { _ = relayMeter.Close() }()
 
 				proxy.SetRelayMeter(relayMeter)
 				logger.Info().
@@ -529,7 +529,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Start health/readiness server
 	if config.HealthCheck.Enabled {
 		healthServer := startHealthServer(ctx, logger, config.HealthCheck.Addr, supplierCache)
-		defer healthServer.Close()
+		defer func() { _ = healthServer.Close() }()
 		logger.Info().Str("addr", config.HealthCheck.Addr).Msg("health/readiness server started")
 	}
 
@@ -558,8 +558,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	proxy.Close()
-	healthChecker.Close()
+	_ = proxy.Close()
+	_ = healthChecker.Close()
 
 	_ = shutdownCtx // Used for graceful shutdown timing
 
@@ -574,7 +574,7 @@ func startHealthServer(ctx context.Context, logger logging.Logger, addr string, 
 	// /health - liveness probe (always returns OK if server is running)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK"))
 	})
 
 	// /ready - readiness probe (checks if supplier cache has data)
@@ -589,7 +589,7 @@ func startHealthServer(ctx context.Context, logger logging.Logger, addr string, 
 		// For now, always return ready after cache is initialized
 		// TODO: Could check if cache has any suppliers loaded
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("READY"))
+		_, _ = w.Write([]byte("READY"))
 	})
 
 	server := &http.Server{
@@ -608,7 +608,7 @@ func startHealthServer(ctx context.Context, logger logging.Logger, addr string, 
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		server.Shutdown(shutdownCtx)
+		_ = server.Shutdown(shutdownCtx)
 	}()
 
 	return server

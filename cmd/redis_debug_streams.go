@@ -34,7 +34,7 @@ Shows stream length, consumer groups, and pending messages.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			return inspectStream(ctx, client, streamPrefix, supplierAddr, group, limit)
 		},
@@ -44,7 +44,7 @@ Shows stream length, consumer groups, and pending messages.`,
 	cmd.Flags().StringVar(&streamPrefix, "prefix", "ha:relays", "Stream key prefix")
 	cmd.Flags().StringVar(&group, "group", "", "Consumer group name to inspect")
 	cmd.Flags().Int64Var(&limit, "limit", 10, "Number of messages to display")
-	cmd.MarkFlagRequired("supplier")
+	_ = cmd.MarkFlagRequired("supplier")
 
 	return cmd
 }
@@ -83,11 +83,11 @@ func inspectStream(ctx context.Context, client *redisClient, prefix, supplier, g
 		if err == nil {
 			fmt.Printf("Consumer Groups:\n")
 			w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-			fmt.Fprintf(w, "GROUP\tCONSUMERS\tPENDING\tLAST DELIVERED\n")
+			_, _ = fmt.Fprintf(w, "GROUP\tCONSUMERS\tPENDING\tLAST DELIVERED\n")
 			for _, g := range groups {
-				fmt.Fprintf(w, "%s\t%d\t%d\t%s\n", g.Name, g.Consumers, g.Pending, g.LastDeliveredID)
+				_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%s\n", g.Name, g.Consumers, g.Pending, g.LastDeliveredID)
 			}
-			w.Flush()
+			_ = w.Flush()
 			fmt.Printf("\n")
 		}
 
@@ -97,11 +97,11 @@ func inspectStream(ctx context.Context, client *redisClient, prefix, supplier, g
 			if err == nil && len(consumers) > 0 {
 				fmt.Printf("Consumers in Group '%s':\n", group)
 				w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-				fmt.Fprintf(w, "CONSUMER\tPENDING\tIDLE (ms)\n")
+				_, _ = fmt.Fprintf(w, "CONSUMER\tPENDING\tIDLE (ms)\n")
 				for _, c := range consumers {
-					fmt.Fprintf(w, "%s\t%d\t%d\n", c.Name, c.Pending, c.Idle)
+					_, _ = fmt.Fprintf(w, "%s\t%d\t%d\n", c.Name, c.Pending, c.Idle)
 				}
-				w.Flush()
+				_ = w.Flush()
 				fmt.Printf("\n")
 			}
 

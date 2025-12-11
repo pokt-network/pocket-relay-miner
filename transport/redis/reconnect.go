@@ -9,9 +9,9 @@ import (
 
 const (
 	// Reconnection delay constants (matching client/block_subscriber.go pattern)
-	reconnectBaseDelay      = 1 * time.Second
-	reconnectMaxDelay       = 30 * time.Second
-	reconnectBackoffFactor  = 2
+	reconnectBaseDelay     = 1 * time.Second
+	reconnectMaxDelay      = 30 * time.Second
+	reconnectBackoffFactor = 2
 )
 
 // ReconnectionLoop provides exponential backoff reconnection logic for Redis operations.

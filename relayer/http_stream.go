@@ -5,7 +5,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -166,7 +165,7 @@ func (h *StreamingResponseHandler) HandleStreamingResponse(
 	resp *http.Response,
 	w http.ResponseWriter,
 ) ([]byte, int64, error) {
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Copy headers to response
 	for k, v := range resp.Header {
@@ -411,11 +410,3 @@ func (p *ProxyServer) handleStreamingResponseWithSigning(
 }
 
 // closeBody safely closes an io.ReadCloser and logs any errors.
-func closeBody(logger logging.Logger, body io.ReadCloser) {
-	if body == nil {
-		return
-	}
-	if err := body.Close(); err != nil {
-		logger.Debug().Err(err).Msg("failed to close response body")
-	}
-}

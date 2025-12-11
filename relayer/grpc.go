@@ -309,8 +309,8 @@ type billingServerStream struct {
 	messageCount    atomic.Uint64
 
 	// Track request/response pairing
-	lastRequestData []byte
-	mu              sync.Mutex
+	// unused: lastRequestData []byte
+	// unused: mu sync.Mutex
 }
 
 // RecvMsg intercepts incoming messages (from client).
@@ -367,7 +367,7 @@ func (s *billingServerStream) emitRelay() {
 	}
 	msg.SetPublishedAt()
 
-	if pubErr := s.handler.publisher.Publish(s.ServerStream.Context(), msg); pubErr != nil {
+	if pubErr := s.handler.publisher.Publish(s.Context(), msg); pubErr != nil {
 		s.handler.logger.Warn().Err(pubErr).Msg("failed to publish gRPC relay")
 		return
 	}

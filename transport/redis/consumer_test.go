@@ -18,7 +18,7 @@ func TestStreamsConsumer_Consume(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	supplierAddr := "pokt1supplier123"
 	streamPrefix := "test:relays"
 	streamName := transport.StreamName(streamPrefix, supplierAddr)
@@ -35,7 +35,7 @@ func TestStreamsConsumer_Consume(t *testing.T) {
 
 	consumer, err := NewStreamsConsumer(logger, client, config)
 	require.NoError(t, err)
-	defer consumer.Close()
+	defer func() { _ = consumer.Close() }()
 
 	// Publish test messages directly to the stream
 	testMsg := &transport.MinedRelayMessage{
@@ -86,7 +86,7 @@ func TestStreamsConsumer_Ack(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	supplierAddr := "pokt1supplier123"
 	streamPrefix := "test:relays"
 	streamName := transport.StreamName(streamPrefix, supplierAddr)
@@ -103,7 +103,7 @@ func TestStreamsConsumer_Ack(t *testing.T) {
 
 	consumer, err := NewStreamsConsumer(logger, client, config)
 	require.NoError(t, err)
-	defer consumer.Close()
+	defer func() { _ = consumer.Close() }()
 
 	// Publish a message
 	testMsg := &transport.MinedRelayMessage{
@@ -150,7 +150,7 @@ func TestStreamsConsumer_AckBatch(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	supplierAddr := "pokt1supplier123"
 	streamPrefix := "test:relays"
 	streamName := transport.StreamName(streamPrefix, supplierAddr)
@@ -167,7 +167,7 @@ func TestStreamsConsumer_AckBatch(t *testing.T) {
 
 	consumer, err := NewStreamsConsumer(logger, client, config)
 	require.NoError(t, err)
-	defer consumer.Close()
+	defer func() { _ = consumer.Close() }()
 
 	// Publish multiple messages
 	for i := 0; i < 3; i++ {
@@ -213,7 +213,7 @@ func TestStreamsConsumer_AckBatch(t *testing.T) {
 
 func TestStreamsConsumer_ConfigValidation(t *testing.T) {
 	_, client := setupTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	tests := []struct {
 		name        string
@@ -270,7 +270,7 @@ func TestStreamsConsumer_ConfigValidation(t *testing.T) {
 func TestStreamsConsumer_Close(t *testing.T) {
 	_, client := setupTestRedis(t)
 	ctx := context.Background()
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.ConsumerConfig{
 		StreamPrefix:            "test:relays",
@@ -304,7 +304,7 @@ func TestStreamsConsumer_Close(t *testing.T) {
 
 func TestStreamsConsumer_Defaults(t *testing.T) {
 	_, client := setupTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.ConsumerConfig{
 		StreamPrefix:            "test:relays",
@@ -316,7 +316,7 @@ func TestStreamsConsumer_Defaults(t *testing.T) {
 
 	consumer, err := NewStreamsConsumer(logger, client, config)
 	require.NoError(t, err)
-	defer consumer.Close()
+	defer func() { _ = consumer.Close() }()
 
 	// Verify defaults were applied
 	require.Equal(t, int64(100), consumer.config.BatchSize)

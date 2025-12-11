@@ -28,11 +28,11 @@ const (
 // Backend type constants matching on-chain RPCType enum.
 // Reference: poktroll/x/shared/types/service.pb.go
 const (
-	BackendTypeJSONRPC  = "jsonrpc"  // JSON-RPC (RPCType_JSON_RPC = 3)
-	BackendTypeREST     = "rest"     // REST (RPCType_REST = 4)
+	BackendTypeJSONRPC   = "jsonrpc"   // JSON-RPC (RPCType_JSON_RPC = 3)
+	BackendTypeREST      = "rest"      // REST (RPCType_REST = 4)
 	BackendTypeWebSocket = "websocket" // WebSocket (RPCType_WEBSOCKET = 2)
-	BackendTypeGRPC     = "grpc"     // gRPC (RPCType_GRPC = 1)
-	BackendTypeCometBFT = "cometbft" // CometBFT (RPCType_COMET_BFT = 5)
+	BackendTypeGRPC      = "grpc"      // gRPC (RPCType_GRPC = 1)
+	BackendTypeCometBFT  = "cometbft"  // CometBFT (RPCType_COMET_BFT = 5)
 )
 
 // DefaultBackendType is the default backend type when not configured.

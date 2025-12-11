@@ -24,7 +24,7 @@ func setupTestRedis(t *testing.T) (*miniredis.Miniredis, redis.UniversalClient) 
 	})
 
 	t.Cleanup(func() {
-		client.Close()
+		_ = client.Close()
 		mr.Close()
 	})
 
@@ -34,7 +34,7 @@ func setupTestRedis(t *testing.T) (*miniredis.Miniredis, redis.UniversalClient) 
 func TestStreamsPublisher_Publish(t *testing.T) {
 	_, client := setupTestRedis(t)
 	ctx := context.Background()
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.PublisherConfig{
 		StreamPrefix: "test:relays",
@@ -43,7 +43,7 @@ func TestStreamsPublisher_Publish(t *testing.T) {
 	}
 
 	publisher := NewStreamsPublisher(logger, client, config)
-	defer publisher.Close()
+	defer func() { _ = publisher.Close() }()
 
 	msg := &transport.MinedRelayMessage{
 		RelayHash:               []byte("test-hash-123"),
@@ -80,7 +80,7 @@ func TestStreamsPublisher_Publish(t *testing.T) {
 func TestStreamsPublisher_PublishBatch(t *testing.T) {
 	_, client := setupTestRedis(t)
 	ctx := context.Background()
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.PublisherConfig{
 		StreamPrefix: "test:relays",
@@ -88,7 +88,7 @@ func TestStreamsPublisher_PublishBatch(t *testing.T) {
 	}
 
 	publisher := NewStreamsPublisher(logger, client, config)
-	defer publisher.Close()
+	defer func() { _ = publisher.Close() }()
 
 	// Create multiple messages for the same supplier
 	msgs := []*transport.MinedRelayMessage{
@@ -129,14 +129,14 @@ func TestStreamsPublisher_PublishBatch(t *testing.T) {
 func TestStreamsPublisher_PublishBatch_MultipleSuppliers(t *testing.T) {
 	_, client := setupTestRedis(t)
 	ctx := context.Background()
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.PublisherConfig{
 		StreamPrefix: "test:relays",
 	}
 
 	publisher := NewStreamsPublisher(logger, client, config)
-	defer publisher.Close()
+	defer func() { _ = publisher.Close() }()
 
 	// Create messages for different suppliers
 	msgs := []*transport.MinedRelayMessage{
@@ -176,14 +176,14 @@ func TestStreamsPublisher_PublishBatch_MultipleSuppliers(t *testing.T) {
 func TestStreamsPublisher_Publish_NilMessage(t *testing.T) {
 	_, client := setupTestRedis(t)
 	ctx := context.Background()
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.PublisherConfig{
 		StreamPrefix: "test:relays",
 	}
 
 	publisher := NewStreamsPublisher(logger, client, config)
-	defer publisher.Close()
+	defer func() { _ = publisher.Close() }()
 
 	err := publisher.Publish(ctx, nil)
 	require.Error(t, err)
@@ -193,7 +193,7 @@ func TestStreamsPublisher_Publish_NilMessage(t *testing.T) {
 func TestStreamsPublisher_Publish_Closed(t *testing.T) {
 	_, client := setupTestRedis(t)
 	ctx := context.Background()
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.PublisherConfig{
 		StreamPrefix: "test:relays",
@@ -218,14 +218,14 @@ func TestStreamsPublisher_Publish_Closed(t *testing.T) {
 func TestStreamsPublisher_Publish_SetsTimestamp(t *testing.T) {
 	_, client := setupTestRedis(t)
 	ctx := context.Background()
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.PublisherConfig{
 		StreamPrefix: "test:relays",
 	}
 
 	publisher := NewStreamsPublisher(logger, client, config)
-	defer publisher.Close()
+	defer func() { _ = publisher.Close() }()
 
 	before := time.Now()
 
@@ -250,7 +250,7 @@ func TestStreamsPublisher_Publish_SetsTimestamp(t *testing.T) {
 func TestStreamsPublisher_MaxLen_Trimming(t *testing.T) {
 	mr, client := setupTestRedis(t)
 	ctx := context.Background()
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := transport.PublisherConfig{
 		StreamPrefix: "test:relays",
@@ -259,7 +259,7 @@ func TestStreamsPublisher_MaxLen_Trimming(t *testing.T) {
 	}
 
 	publisher := NewStreamsPublisher(logger, client, config)
-	defer publisher.Close()
+	defer func() { _ = publisher.Close() }()
 
 	// Publish more messages than MaxLen
 	for i := 0; i < 10; i++ {

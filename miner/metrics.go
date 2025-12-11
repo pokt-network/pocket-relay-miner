@@ -659,16 +659,16 @@ var (
 		[]string{"param_type"}, // param_type: shared, session, app_stake, service
 	)
 
-	// Meter cleanup metrics
-	meterCleanupPublished = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "meter_cleanup_published_total",
-			Help:      "Total number of meter cleanup signals published",
-		},
-		[]string{"supplier"},
-	)
+	// Meter cleanup metrics (unused - reserved for future meter cleanup tracking)
+	// meterCleanupPublished = observability.MinerFactory.NewCounterVec(
+	// 	prometheus.CounterOpts{
+	// 		Namespace: metricsNamespace,
+	// 		Subsystem: metricsSubsystem,
+	// 		Name:      "meter_cleanup_published_total",
+	// 		Help:      "Total number of meter cleanup signals published",
+	// 	},
+	// 	[]string{"supplier"},
+	// )
 )
 
 // =============================================

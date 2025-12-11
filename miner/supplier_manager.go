@@ -635,18 +635,18 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 
 	// Close lifecycle manager first to stop monitoring
 	if state.LifecycleManager != nil {
-		state.LifecycleManager.Close()
+		_ = state.LifecycleManager.Close()
 	}
 
 	// Close SMST manager
 	if state.SMSTManager != nil {
-		state.SMSTManager.Close()
+		_ = state.SMSTManager.Close()
 	}
 
-	state.Consumer.Close()
-	state.SnapshotManager.Close()
-	state.WAL.Close()
-	state.SessionStore.Close()
+	_ = state.Consumer.Close()
+	_ = state.SnapshotManager.Close()
+	_ = state.WAL.Close()
+	_ = state.SessionStore.Close()
 
 	delete(m.suppliers, operatorAddr)
 
@@ -717,18 +717,18 @@ func (m *SupplierManager) Close() error {
 
 		// Close lifecycle manager first
 		if state.LifecycleManager != nil {
-			state.LifecycleManager.Close()
+			_ = state.LifecycleManager.Close()
 		}
 
 		// Close SMST manager
 		if state.SMSTManager != nil {
-			state.SMSTManager.Close()
+			_ = state.SMSTManager.Close()
 		}
 
-		state.Consumer.Close()
-		state.SnapshotManager.Close()
-		state.WAL.Close()
-		state.SessionStore.Close()
+		_ = state.Consumer.Close()
+		_ = state.SnapshotManager.Close()
+		_ = state.WAL.Close()
+		_ = state.SessionStore.Close()
 	}
 	m.suppliers = make(map[string]*SupplierState)
 	m.suppliersMu.Unlock()

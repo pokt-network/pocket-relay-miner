@@ -26,14 +26,14 @@ This prevents processing the same relay multiple times.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			return inspectDedup(ctx, client, sessionID)
 		},
 	}
 
 	cmd.Flags().StringVar(&sessionID, "session", "", "Session ID (required)")
-	cmd.MarkFlagRequired("session")
+	_ = cmd.MarkFlagRequired("session")
 
 	return cmd
 }

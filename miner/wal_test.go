@@ -20,7 +20,7 @@ func setupWALTestRedis(t *testing.T) (*miniredis.Miniredis, redis.UniversalClien
 	})
 
 	t.Cleanup(func() {
-		client.Close()
+		_ = client.Close()
 		mr.Close()
 	})
 
@@ -29,7 +29,7 @@ func setupWALTestRedis(t *testing.T) (*miniredis.Miniredis, redis.UniversalClien
 
 func TestNewRedisWAL(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
@@ -43,14 +43,14 @@ func TestNewRedisWAL(t *testing.T) {
 
 func TestRedisWAL_Append(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-abc"
@@ -75,14 +75,14 @@ func TestRedisWAL_Append(t *testing.T) {
 
 func TestRedisWAL_AppendBatch(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-batch"
@@ -108,14 +108,14 @@ func TestRedisWAL_AppendBatch(t *testing.T) {
 
 func TestRedisWAL_AppendBatch_Empty(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 
@@ -126,14 +126,14 @@ func TestRedisWAL_AppendBatch_Empty(t *testing.T) {
 
 func TestRedisWAL_ReadFrom(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-read"
@@ -170,14 +170,14 @@ func TestRedisWAL_ReadFrom(t *testing.T) {
 
 func TestRedisWAL_ReadFrom_Empty(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 
@@ -188,14 +188,14 @@ func TestRedisWAL_ReadFrom_Empty(t *testing.T) {
 
 func TestRedisWAL_Checkpoint(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-checkpoint"
@@ -220,14 +220,14 @@ func TestRedisWAL_Checkpoint(t *testing.T) {
 
 func TestRedisWAL_GetCheckpoint_NotSet(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 
@@ -238,14 +238,14 @@ func TestRedisWAL_GetCheckpoint_NotSet(t *testing.T) {
 
 func TestRedisWAL_Trim(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-trim"
@@ -282,14 +282,14 @@ func TestRedisWAL_Trim(t *testing.T) {
 
 func TestRedisWAL_DeleteSession(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-delete"
@@ -323,7 +323,7 @@ func TestRedisWAL_DeleteSession(t *testing.T) {
 
 func TestRedisWAL_RecoveryScenario(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
@@ -348,11 +348,11 @@ func TestRedisWAL_RecoveryScenario(t *testing.T) {
 	require.NoError(t, err)
 
 	// Miner1 crashes
-	wal1.Close()
+	_ = wal1.Close()
 
 	// New miner takes over and recovers
 	wal2 := NewRedisWAL(logger, client, config)
-	defer wal2.Close()
+	defer func() { _ = wal2.Close() }()
 
 	// Get last checkpoint
 	checkpoint, err := wal2.GetCheckpoint(ctx, sessionID)
@@ -370,14 +370,14 @@ func TestRedisWAL_RecoveryScenario(t *testing.T) {
 
 func TestRedisWAL_EntryTimestamp(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 
@@ -397,7 +397,7 @@ func TestRedisWAL_EntryTimestamp(t *testing.T) {
 
 func TestRedisWAL_Close_Safe(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
@@ -415,14 +415,14 @@ func TestRedisWAL_Close_Safe(t *testing.T) {
 
 func TestRedisWAL_MultipleSessionsIsolation(t *testing.T) {
 	_, client := setupWALTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := WALConfig{
 		SupplierAddress: "pokt1supplier123",
 	}
 
 	wal := NewRedisWAL(logger, client, config)
-	defer wal.Close()
+	defer func() { _ = wal.Close() }()
 
 	ctx := context.Background()
 

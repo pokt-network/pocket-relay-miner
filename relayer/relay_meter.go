@@ -9,7 +9,6 @@ import (
 	"sync"
 	"time"
 
-	cosmosmath "cosmossdk.io/math"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/redis/go-redis/v9"
 
@@ -780,7 +779,7 @@ func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 
 	channel := fmt.Sprintf("%s:%s", m.config.RedisKeyPrefix, meterCleanupChannel)
 	pubsub := m.redisClient.Subscribe(ctx, channel)
-	defer pubsub.Close()
+	defer func() { _ = pubsub.Close() }()
 
 	ch := pubsub.Channel()
 
@@ -941,22 +940,3 @@ func (m *RelayMeter) GetSnapshot(ctx context.Context) RelayMeterSnapshot {
 // calculateAppStakePerSessionSupplier calculates the portion of app stake
 // available to a single supplier in a single session.
 // Kept for backwards compatibility with existing callers.
-func calculateAppStakePerSessionSupplier(
-	stake *cosmostypes.Coin,
-	sharedParams *sharedtypes.Params,
-	numSuppliersPerSession uint64,
-) cosmostypes.Coin {
-	// Split among suppliers in the session
-	appStakePerSupplier := stake.Amount.Quo(cosmosmath.NewInt(int64(numSuppliersPerSession)))
-
-	// Account for pending sessions
-	numBlocksPerSession := int64(sharedParams.GetNumBlocksPerSession())
-	numBlocksUntilProofWindowCloses := sharedtypes.GetSessionEndToProofWindowCloseBlocks(sharedParams)
-	numClosedSessionsAwaitingSettlement := math.Ceil(float64(numBlocksUntilProofWindowCloses) / float64(numBlocksPerSession))
-
-	// Add 1 for current session
-	pendingSessions := int64(numClosedSessionsAwaitingSettlement) + 1
-
-	appStakePerSessionSupplier := appStakePerSupplier.Quo(cosmosmath.NewInt(pendingSessions))
-	return cosmostypes.NewCoin(pocket.DenomuPOKT, appStakePerSessionSupplier)
-}

@@ -1,24 +1,41 @@
-# Git
+# Version Control
 .git
 .gitignore
+.github/
 
-# IDE
-.idea
-.vscode
+# IDE & Editors
+.idea/
+.vscode/
+.claude/
 *.swp
 *.swo
 *~
+.DS_Store
+Thumbs.db
 
-# Build artifacts
+# Build Artifacts
 bin/
 pocket-relay-miner
 coverage.out
 coverage.html
+*.prof
+*.test
 
 # Documentation
 README.md
 CLAUDE.md
 *.md
+*.txt
 
-# CI/CD
-.github/
+# Tilt & Development
+.tilt-tmp/
+tilt_config.yaml
+
+# Backend Server (separate build)
+tilt/backend-server/
+
+# OS-specific
+.AppleDouble
+.LSOverride
+ehthumbs.db
+$RECYCLE.BIN/

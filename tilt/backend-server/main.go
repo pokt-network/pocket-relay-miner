@@ -167,25 +167,15 @@ func handleJSONRPC(cfg *Config) http.HandlerFunc {
 
 		requestsTotal.WithLabelValues("http", method).Inc()
 
-		// Static responses based on method
-		var result interface{}
-		switch method {
-		case "eth_blockNumber":
-			result = "0x1"
-		case "eth_getBlockByNumber":
-			result = getStaticBlock()
-		case "eth_getBalance":
-			result = "0x1000000000000000000" // 1 ETH
-		case "eth_call":
-			result = "0x" // Empty bytes
-		default:
-			result = "0x0"
-		}
-
+		// Generic response - echo back method and params
 		resp := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      id,
-			"result":  result,
+			"result": map[string]interface{}{
+				"method": method,
+				"params": req["params"],
+				"status": "ok",
+			},
 		}
 
 		w.Header().Set("Content-Type", "application/json")
@@ -210,61 +200,64 @@ func handleWebSocket(cfg *Config) http.HandlerFunc {
 
 		// Echo server: read message and send it back N times
 		for {
-			messageType, msg, err := conn.ReadMessage()
+			_, msg, err := conn.ReadMessage()
 			if err != nil {
 				break
 			}
 
-			// Echo message back 1 time (can be made configurable)
-			// For JSON messages, parse and respond
-			if messageType == websocket.TextMessage {
-				var jsonMsg map[string]interface{}
-				if err := json.Unmarshal(msg, &jsonMsg); err == nil {
+			// Parse message as JSON (works for both TextMessage and BinaryMessage)
+			// The relayer sends opaque bytes - we don't care about the WebSocket message type
+			var jsonMsg map[string]interface{}
+			if err := json.Unmarshal(msg, &jsonMsg); err == nil {
+				// Valid JSON message - process it
+				{
 					method, _ := jsonMsg["method"].(string)
 					id, _ := jsonMsg["id"]
 
 					requestsTotal.WithLabelValues("websocket", method).Inc()
 
-					// Handle subscription specially
-					if method == "eth_subscribe" {
+					// Check for test instructions (repeat_count and delay_ms)
+					repeatCount := 1
+					delayMs := 0
+					if params, ok := jsonMsg["params"].([]interface{}); ok && len(params) > 0 {
+						if testParams, ok := params[0].(map[string]interface{}); ok {
+							if rc, ok := testParams["repeat_count"].(float64); ok {
+								repeatCount = int(rc)
+							}
+							if dm, ok := testParams["delay_ms"].(float64); ok {
+								delayMs = int(dm)
+							}
+						}
+					}
+
+					// Send multiple responses if instructed (simulates subscriptions)
+					for i := 0; i < repeatCount; i++ {
+						// Generic response - echo back method and params with sequence number
 						resp := map[string]interface{}{
 							"jsonrpc": "2.0",
 							"id":      id,
-							"result":  "0xabc123",
+							"result": map[string]interface{}{
+								"method":   method,
+								"params":   jsonMsg["params"],
+								"sequence": i + 1,
+								"total":    repeatCount,
+								"status":   "ok",
+							},
 						}
-						conn.WriteJSON(resp)
-						continue
-					}
 
-					// Regular JSON-RPC: respond like HTTP endpoint
-					var result interface{}
-					switch method {
-					case "eth_blockNumber":
-						result = "0x1"
-					case "eth_getBlockByNumber":
-						result = getStaticBlock()
-					case "eth_getBalance":
-						result = "0x1000000000000000000"
-					case "eth_call":
-						result = "0x"
-					default:
-						result = "0x0"
-					}
+						if err := conn.WriteJSON(resp); err != nil {
+							log.Printf("Failed to send response %d: %v", i+1, err)
+							break
+						}
 
-					resp := map[string]interface{}{
-						"jsonrpc": "2.0",
-						"id":      id,
-						"result":  result,
+						// Delay before next response (except for last one)
+						if i < repeatCount-1 && delayMs > 0 {
+							time.Sleep(time.Duration(delayMs) * time.Millisecond)
+						}
 					}
-					conn.WriteJSON(resp)
-				}
-			} else {
-				// Binary message: echo it back as-is
-				requestsTotal.WithLabelValues("websocket", "binary").Inc()
-				if err := conn.WriteMessage(messageType, msg); err != nil {
-					break
 				}
 			}
+			// If JSON parsing failed, ignore the message (not a valid JSON-RPC request)
 		}
 	}
 }
@@ -286,11 +279,13 @@ func handleSSE(cfg *Config) http.HandlerFunc {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
+		sequence := 0
 		for range ticker.C {
+			sequence++
 			event := map[string]interface{}{
-				"type":   "block",
-				"number": 1,
-				"hash":   "0x1234567890abcdef",
+				"type":      "update",
+				"sequence":  sequence,
+				"timestamp": time.Now().Unix(),
 			}
 			data, _ := json.Marshal(event)
 			fmt.Fprintf(w, "data: %s\n\n", data)
@@ -315,11 +310,13 @@ func handleNDJSON(cfg *Config) http.HandlerFunc {
 		ticker := time.NewTicker(1 * time.Second)
 		defer ticker.Stop()
 
+		sequence := 0
 		for range ticker.C {
+			sequence++
 			event := map[string]interface{}{
-				"type":   "block",
-				"number": 1,
-				"hash":   "0x1234567890abcdef",
+				"type":      "update",
+				"sequence":  sequence,
+				"timestamp": time.Now().Unix(),
 			}
 			data, _ := json.Marshal(event)
 			fmt.Fprintf(w, "%s\n", data)
@@ -347,16 +344,18 @@ type demoServer struct {
 
 func (s *demoServer) GetBlockHeight(ctx context.Context, req *pb.Empty) (*pb.BlockHeightResponse, error) {
 	requestsTotal.WithLabelValues("grpc", "GetBlockHeight").Inc()
+	// Generic response - just echo back a height value
 	return &pb.BlockHeightResponse{Height: 1}, nil
 }
 
 func (s *demoServer) GetBlock(ctx context.Context, req *pb.BlockRequest) (*pb.BlockResponse, error) {
 	requestsTotal.WithLabelValues("grpc", "GetBlock").Inc()
+	// Generic response - echo back the request data with timestamp
 	return &pb.BlockResponse{
 		Number:       req.Number,
-		Hash:         "0x1234567890abcdef",
+		Hash:         fmt.Sprintf("hash-%d", req.Number),
 		Timestamp:    time.Now().Unix(),
-		Transactions: []string{"0xabc", "0xdef"},
+		Transactions: []string{fmt.Sprintf("tx-%d", req.Number)},
 	}, nil
 }
 
@@ -366,18 +365,19 @@ func (s *demoServer) StreamBlocks(req *pb.StreamRequest, stream pb.DemoService_S
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
 
-	height := req.StartHeight
+	sequence := req.StartHeight
 	for range ticker.C {
+		// Generic streaming response
 		block := &pb.BlockResponse{
-			Number:       height,
-			Hash:         "0x1234567890abcdef",
+			Number:       sequence,
+			Hash:         fmt.Sprintf("hash-%d", sequence),
 			Timestamp:    time.Now().Unix(),
-			Transactions: []string{"0xabc"},
+			Transactions: []string{fmt.Sprintf("tx-%d", sequence)},
 		}
 		if err := stream.Send(block); err != nil {
 			return err
 		}
-		height++
+		sequence++
 	}
 	return nil
 }
@@ -405,16 +405,6 @@ func startGRPCServer(cfg *Config) {
 }
 
 // Helper functions
-
-func getStaticBlock() map[string]interface{} {
-	return map[string]interface{}{
-		"number":       "0x1",
-		"hash":         "0x1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef",
-		"parentHash":   "0x0000000000000000000000000000000000000000000000000000000000000000",
-		"timestamp":    "0x" + fmt.Sprintf("%x", time.Now().Unix()),
-		"transactions": []string{},
-	}
-}
 
 func shouldInjectError(rate float64) bool {
 	return false // Simplified: no random errors for now

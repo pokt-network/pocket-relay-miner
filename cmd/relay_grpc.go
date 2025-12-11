@@ -66,7 +66,7 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	connectDuration := time.Since(connectStart)
 
 	// Send relay request
@@ -139,7 +139,7 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC connection: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	// Create metrics collector
 	metrics := NewRelayMetrics()

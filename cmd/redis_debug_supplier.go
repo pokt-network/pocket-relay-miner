@@ -31,7 +31,7 @@ Shows configured suppliers and their metadata.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			if listAll {
 				return listAllSuppliers(ctx, client)
@@ -67,14 +67,14 @@ func listAllSuppliers(ctx context.Context, client *redisClient) error {
 	fmt.Printf("Registered Suppliers (%d total):\n\n", len(suppliers))
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "SUPPLIER ADDRESS\tKEY\n")
+	_, _ = fmt.Fprintf(w, "SUPPLIER ADDRESS\tKEY\n")
 
 	for _, supplier := range suppliers {
 		key := fmt.Sprintf("ha:suppliers:%s", supplier)
-		fmt.Fprintf(w, "%s\t%s\n", supplier, key)
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", supplier, key)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 
 	return nil
 }
@@ -109,7 +109,7 @@ func inspectSupplier(ctx context.Context, client *redisClient, supplier string) 
 
 	fmt.Printf("Fields:\n")
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "FIELD\tVALUE\n")
+	_, _ = fmt.Fprintf(w, "FIELD\tVALUE\n")
 
 	for field, value := range data {
 		// Truncate long values
@@ -117,10 +117,10 @@ func inspectSupplier(ctx context.Context, client *redisClient, supplier string) 
 		if len(value) > 100 {
 			displayValue = value[:100] + "..."
 		}
-		fmt.Fprintf(w, "%s\t%s\n", field, displayValue)
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", field, displayValue)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 
 	return nil
 }

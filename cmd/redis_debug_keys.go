@@ -35,7 +35,7 @@ Use --stats to show type and TTL information.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			return listKeys(ctx, client, pattern, limit, stats)
 		},
@@ -98,16 +98,16 @@ func listKeys(ctx context.Context, client *redisClient, pattern string, limit in
 
 	// Detailed list with stats
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "#\tKEY\tTYPE\tTTL\n")
+	_, _ = fmt.Fprintf(w, "#\tKEY\tTYPE\tTTL\n")
 
 	for i, key := range keys {
 		keyType, _ := client.Type(ctx, key).Result()
 		ttl, _ := client.TTL(ctx, key).Result()
 
-		fmt.Fprintf(w, "%d\t%s\t%s\t%v\n", i+1, key, keyType, ttl)
+		_, _ = fmt.Fprintf(w, "%d\t%s\t%s\t%v\n", i+1, key, keyType, ttl)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 	fmt.Printf("\nTotal: %d keys\n", len(keys))
 
 	return nil

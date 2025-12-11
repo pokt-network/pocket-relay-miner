@@ -36,7 +36,7 @@ States: active, claiming, claimed, proving, settled, expired`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			// If session ID provided, show specific session
 			if sessionID != "" {
@@ -57,7 +57,7 @@ States: active, claiming, claimed, proving, settled, expired`,
 	cmd.Flags().StringVar(&sessionID, "session", "", "Specific session ID to inspect")
 	cmd.Flags().StringVar(&state, "state", "", "Filter by state (active|claiming|claimed|proving|settled|expired)")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "Output as JSON")
-	cmd.MarkFlagRequired("supplier")
+	_ = cmd.MarkFlagRequired("supplier")
 
 	return cmd
 }
@@ -179,10 +179,10 @@ func fetchAndDisplaySessions(ctx context.Context, client *redisClient, supplier 
 
 	// Display as table
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "SESSION ID\tSTATE\tSERVICE\tRELAYS\tCOMPUTE UNITS\tSTART HEIGHT\tEND HEIGHT\n")
+	_, _ = fmt.Fprintf(w, "SESSION ID\tSTATE\tSERVICE\tRELAYS\tCOMPUTE UNITS\tSTART HEIGHT\tEND HEIGHT\n")
 
 	for _, s := range sessions {
-		fmt.Fprintf(w, "%v\t%v\t%v\t%v\t%v\t%v\t%v\n",
+		_, _ = fmt.Fprintf(w, "%v\t%v\t%v\t%v\t%v\t%v\t%v\n",
 			s["session_id"],
 			s["state"],
 			s["service_id"],
@@ -193,7 +193,7 @@ func fetchAndDisplaySessions(ctx context.Context, client *redisClient, supplier 
 		)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 	fmt.Printf("\nTotal: %d sessions\n", len(sessions))
 
 	return nil

@@ -8,11 +8,12 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
-const (
-	testServiceID     = "anvil"
-	testSupplierAddr  = "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj"
-	testPayload       = `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
-)
+// Unused test constants - may be used for future integration tests
+// const (
+// 	testServiceID    = "anvil"
+// 	testSupplierAddr = "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj"
+// 	testPayload      = `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
+// )
 
 // TestNewRelayClient_EmptyPrivateKey tests that empty private key is rejected.
 func TestNewRelayClient_EmptyPrivateKey(t *testing.T) {

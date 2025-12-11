@@ -1,3 +1,26 @@
-bin
+# Binaries
+bin/
+pocket-relay-miner
+
+# Tilt
 .tilt-tmp/
 tilt_config.yaml
+
+# Test & Coverage
+coverage.out
+coverage.html
+*.prof
+*.test
+
+# Backend server
+tilt/backend-server/backend
+tilt/backend-server/pb/*.pb.go
+
+# IDE
+.idea/
+.vscode/
+.claude/
+
+# OS
+.DS_Store
+Thumbs.db

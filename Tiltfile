@@ -64,10 +64,37 @@ print()
 # )
 
 # Build Docker image (always build inside container)
+# Ignore non-code files to prevent unnecessary rebuilds
+# NOTE: Patterns mirror .dockerignore for consistency
 docker_build(
     config["global"]["image"],
     context=".",
     dockerfile="Dockerfile",
+    ignore=[
+        # Version Control
+        ".git/",
+        ".gitignore",
+        ".github/",
+        # IDE & Editors
+        ".idea/",
+        ".vscode/",
+        ".claude/",
+        # Build Artifacts
+        "bin/",
+        "pocket-relay-miner",
+        "coverage.out",
+        "coverage.html",
+        "*.prof",
+        "*.test",
+        # Documentation
+        "*.md",
+        "*.txt",
+        # Tilt & Development
+        ".tilt-tmp/",
+        "tilt_config.yaml",
+        # Backend Server (separate build)
+        "tilt/backend-server/",
+    ],
 )
 
 # Load all-keys.yaml to extract supplier keys and application addresses

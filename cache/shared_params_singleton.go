@@ -100,7 +100,7 @@ func (c *sharedParamsCache) Close() error {
 	c.wg.Wait()
 
 	if c.pubsub != nil {
-		c.pubsub.Close()
+		_ = c.pubsub.Close()
 	}
 
 	c.logger.Info().Msg("shared params cache stopped")

@@ -35,7 +35,7 @@ Meter data locations:
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			if showAll {
 				return showAllMeterKeys(ctx, client)
@@ -81,13 +81,13 @@ func inspectSessionMeter(ctx context.Context, client *redisClient, sessionID str
 	fmt.Printf("Session Metering Data: %s\n\n", sessionID)
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "FIELD\tVALUE\n")
+	_, _ = fmt.Fprintf(w, "FIELD\tVALUE\n")
 
 	for field, value := range data {
-		fmt.Fprintf(w, "%s\t%s\n", field, value)
+		_, _ = fmt.Fprintf(w, "%s\t%s\n", field, value)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 
 	return nil
 }
@@ -184,7 +184,7 @@ func showAllMeterKeys(ctx context.Context, client *redisClient) error {
 	fmt.Printf("=================\n\n")
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "KEY\tTYPE\tTTL\n")
+	_, _ = fmt.Fprintf(w, "KEY\tTYPE\tTTL\n")
 
 	for _, pattern := range patterns {
 		var cursor uint64
@@ -197,7 +197,7 @@ func showAllMeterKeys(ctx context.Context, client *redisClient) error {
 			for _, key := range keys {
 				keyType, _ := client.Type(ctx, key).Result()
 				ttl, _ := client.TTL(ctx, key).Result()
-				fmt.Fprintf(w, "%s\t%s\t%v\n", key, keyType, ttl)
+				_, _ = fmt.Fprintf(w, "%s\t%s\t%v\n", key, keyType, ttl)
 			}
 
 			cursor = newCursor
@@ -207,7 +207,7 @@ func showAllMeterKeys(ctx context.Context, client *redisClient) error {
 		}
 	}
 
-	w.Flush()
+	_ = w.Flush()
 
 	return nil
 }

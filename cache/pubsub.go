@@ -71,7 +71,7 @@ func runPubSubLoop(
 	handler func(ctx context.Context, payload string) error,
 ) error {
 	pubsub := redisClient.Subscribe(ctx, channel)
-	defer pubsub.Close()
+	defer func() { _ = pubsub.Close() }()
 
 	// Verify subscription
 	if _, err := pubsub.Receive(ctx); err != nil {

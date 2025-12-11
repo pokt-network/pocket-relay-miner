@@ -157,6 +157,11 @@ func (rp *relayProcessor) ProcessRelay(
 
 	relayHash := protocol.GetRelayHashFromBytes(relayBz)
 
+	// Dehydrate the payload for storage efficiency (keep only hash + signature)
+	// The signature was computed over the full payload, and the hash includes it
+	// Now we can clear it to reduce SMST and proof sizes
+	relayResp.Payload = nil
+
 	// Check mining difficulty
 	isApplicable, err := rp.checkMiningDifficulty(ctx, serviceID, relayHash[:])
 	if err != nil {
@@ -167,16 +172,7 @@ func (rp *relayProcessor) ProcessRelay(
 		isApplicable = true // Default to applicable on error
 	}
 
-	if !isApplicable {
-		// Relay doesn't meet difficulty, skip publishing
-		rp.logger.Debug().
-			Str(logging.FieldServiceID, serviceID).
-			Msg("relay does not meet mining difficulty, skipping")
-		relaysSkippedDifficulty.WithLabelValues(serviceID).Inc()
-		return nil, nil
-	}
-
-	// Extract session info from relay request
+	// Extract session info from relay request for logging and message construction
 	sessionHeader := relayReq.Meta.SessionHeader
 	sessionID := ""
 	sessionStartHeight := int64(0)
@@ -187,6 +183,19 @@ func (rp *relayProcessor) ProcessRelay(
 		sessionID = sessionHeader.SessionId
 		sessionStartHeight = sessionHeader.SessionStartBlockHeight
 		sessionEndHeight = sessionHeader.SessionEndBlockHeight
+		appAddress = sessionHeader.ApplicationAddress
+	}
+
+	if !isApplicable {
+		// Relay doesn't meet difficulty, skip publishing
+		sessionCtx := logging.SessionContextPartial(sessionID, serviceID, supplierAddr, appAddress, sessionEndHeight)
+		logging.WithSessionContext(rp.logger.Debug(), sessionCtx).
+			Msg("relay does not meet mining difficulty, skipping")
+		relaysSkippedDifficulty.WithLabelValues(serviceID).Inc()
+		return nil, nil
+	}
+
+	if sessionHeader != nil {
 		appAddress = sessionHeader.ApplicationAddress
 
 		// Notify about discovered app for cache warming persistence
@@ -250,11 +259,8 @@ func (rp *relayProcessor) buildRelayResponse(
 		relayResp.Meta.SupplierOperatorSignature = sig
 	}
 
-	// Dehydrate the payload for storage efficiency (keep only hash + signature)
-	// The signature was computed over the full payload, but we store nil
-	// to reduce SMST and proof sizes
-	relayResp.Payload = nil
-
+	// NOTE: Payload is NOT cleared here - it's cleared in ProcessRelay() after hash computation
+	// This ensures the relay hash includes the full response payload
 	return relayResp, nil
 }
 

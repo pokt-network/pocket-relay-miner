@@ -96,24 +96,24 @@ const (
 	ComponentService            = "ha_relayer"
 	ComponentDifficultyProvider = "difficulty_provider"
 
-	ComponentSessionLifecycle = "session_lifecycle"
-	ComponentSessionStore     = "session_store"
-	ComponentClaimPipeline    = "claim_pipeline"
-	ComponentClaimBatcher     = "claim_batcher"
-	ComponentProofPipeline    = "proof_pipeline"
-	ComponentProofBatcher     = "proof_batcher"
-	ComponentProofChecker     = "proof_requirement_checker"
-	ComponentLeaderElector    = "leader_elector"
-	ComponentSupplierManager  = "supplier_manager"
-	ComponentSupplierRegistry = "supplier_registry"
-	ComponentSubmissionTiming = "submission_timing"
-	ComponentSubmissionSched  = "submission_scheduler"
+	ComponentSessionLifecycle  = "session_lifecycle"
+	ComponentSessionStore      = "session_store"
+	ComponentClaimPipeline     = "claim_pipeline"
+	ComponentClaimBatcher      = "claim_batcher"
+	ComponentProofPipeline     = "proof_pipeline"
+	ComponentProofBatcher      = "proof_batcher"
+	ComponentProofChecker      = "proof_requirement_checker"
+	ComponentLeaderElector     = "leader_elector"
+	ComponentSupplierManager   = "supplier_manager"
+	ComponentSupplierRegistry  = "supplier_registry"
+	ComponentSubmissionTiming  = "submission_timing"
+	ComponentSubmissionSched   = "submission_scheduler"
 	ComponentSMSTRecovery      = "smst_recovery"
 	ComponentSMSTSnapshot      = "smst_snapshot_manager"
 	ComponentCacheOrchestrator = "cache_orchestrator"
 	ComponentWAL               = "wal"
-	ComponentDeduplicator     = "deduplicator"
-	ComponentSupplierDrain    = "supplier_drain"
+	ComponentDeduplicator      = "deduplicator"
+	ComponentSupplierDrain     = "supplier_drain"
 
 	ComponentTxClient = "tx_client"
 
@@ -171,4 +171,12 @@ const (
 	SourceManual = "manual"
 	SourcePubSub = "pubsub"
 	SourceBlock  = "block"
+)
+
+const (
+	// FieldApplication is the application address field
+	FieldApplication = "application"
+
+	// FieldSessionStartHeight is the session start block height
+	FieldSessionStartHeight = "session_start_height"
 )

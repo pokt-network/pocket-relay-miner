@@ -433,3 +433,5 @@ See `go.mod` for complete dependency list.
 
 **Your job is to maintain these standards rigorously.**
 - Always read CLAUDE.md to understand how you should behave on this project
+- This project is always related to his counter party PATH (https://github.com/pokt-network/path) which at local I have it at ../path. We need to always work with that other project in mind, since they need to understand each other.
+- Always read CLAUDE.md to know about this project and how to behave and enforce that behavior.

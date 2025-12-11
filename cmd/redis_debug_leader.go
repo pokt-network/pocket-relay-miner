@@ -26,7 +26,7 @@ The leader must renew every 10 seconds to maintain leadership.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			return checkLeader(ctx, client)
 		},

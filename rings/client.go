@@ -2,7 +2,6 @@ package rings
 
 import (
 	"context"
-	"fmt"
 	"slices"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
@@ -203,8 +202,7 @@ func (rc *ringClient) getRingPubKeysForAddress(
 	slices.Sort(ringAddresses)
 
 	rc.logger.Debug().
-		// TODO_TECHDEBT: implement and use `polylog.Event#Strs([]string)`
-		Str("addresses", fmt.Sprintf("%v", ringAddresses)).
+		Int("num_addresses", len(ringAddresses)).
 		Msg("converting addresses to points")
 
 	return rc.addressesToPubKeys(ctx, ringAddresses)

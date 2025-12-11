@@ -35,7 +35,7 @@ data:
         static_configs:
           - targets: ['redis:6379']
 
-      # Relayer metrics
+      # Relayer metrics (port 9090)
       - job_name: 'relayers'
         kubernetes_sd_configs:
           - role: service
@@ -45,8 +45,13 @@ data:
             action: keep
           - source_labels: [__meta_kubernetes_service_name]
             target_label: instance
+          # Target metrics port explicitly
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: (.+)
+            target_label: __address__
+            replacement: ${{1}}:9090
 
-      # Miner metrics
+      # Miner metrics (port 9092)
       - job_name: 'miners'
         kubernetes_sd_configs:
           - role: service
@@ -56,6 +61,11 @@ data:
             action: keep
           - source_labels: [__meta_kubernetes_service_name]
             target_label: instance
+          # Target metrics port explicitly
+          - source_labels: [__meta_kubernetes_service_name]
+            regex: (.+)
+            target_label: __address__
+            replacement: ${{1}}:9092
 
       # Backend metrics
       - job_name: 'backend'
@@ -141,6 +151,59 @@ def deploy_grafana(config):
     """Deploy Grafana for metrics visualization"""
     grafana_config = config["observability"]["grafana"]
 
+    # Load dashboard JSON files
+    dashboard_system = str(read_file("tilt/grafana/dashboard-system-resources.json"))
+    dashboard_miner = str(read_file("tilt/grafana/dashboard-miner.json"))
+    dashboard_relayer = str(read_file("tilt/grafana/dashboard-relayer.json"))
+    dashboard_overview = str(read_file("tilt/grafana/dashboard-overview.json"))
+
+    # Dashboard provisioning configuration
+    dashboards_provisioning_yaml = """
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards-provisioning
+data:
+  dashboards.yaml: |
+    apiVersion: 1
+    providers:
+      - name: 'default'
+        orgId: 1
+        folder: ''
+        type: file
+        disableDeletion: false
+        updateIntervalSeconds: 10
+        allowUiUpdates: true
+        options:
+          path: /var/lib/grafana/dashboards
+"""
+
+    k8s_yaml(blob(dashboards_provisioning_yaml))
+
+    # Dashboard ConfigMap with all dashboards
+    dashboards_yaml = """
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: grafana-dashboards
+data:
+  overview.json: |
+    {}
+  system-resources.json: |
+    {}
+  miner.json: |
+    {}
+  relayer.json: |
+    {}
+""".format(
+        dashboard_overview.replace("\n", "\n    "),
+        dashboard_system.replace("\n", "\n    "),
+        dashboard_miner.replace("\n", "\n    "),
+        dashboard_relayer.replace("\n", "\n    ")
+    )
+
+    k8s_yaml(blob(dashboards_yaml))
+
     # Grafana Deployment
     grafana_yaml = """
 apiVersion: v1
@@ -221,11 +284,9 @@ spec:
       - name: dashboards-provisioning
         configMap:
           name: grafana-dashboards-provisioning
-          optional: true
       - name: dashboards
         configMap:
           name: grafana-dashboards
-          optional: true
 """
 
     k8s_yaml(blob(grafana_yaml))
@@ -234,7 +295,11 @@ spec:
         "grafana",
         labels=["observability"],
         resource_deps=["prometheus"],
-        objects=["grafana-datasources:configmap"],
+        objects=[
+            "grafana-datasources:configmap",
+            "grafana-dashboards-provisioning:configmap",
+            "grafana-dashboards:configmap"
+        ],
         port_forwards=[format_port_forward(grafana_config["port"], 3000)]
     )
 

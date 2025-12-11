@@ -12,9 +12,9 @@ import (
 
 func redisDebugFlushCmd() *cobra.Command {
 	var (
-		pattern   string
-		flushAll  bool
-		force     bool
+		pattern  string
+		flushAll bool
+		force    bool
 	)
 
 	cmd := &cobra.Command{
@@ -49,7 +49,7 @@ Safety:
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			if flushAll {
 				pattern = "ha:*"

@@ -40,31 +40,31 @@ Examples:
 
 // Relay command flags
 var (
-	relayAppPrivKey    string
-	relayServiceID     string
-	relayNodeGRPC      string
-	relayNodeRPC       string
-	relayChainID       string
-	relayRelayerURL    string
-	relaySupplierAddr  string
-	relayCount         int
-	relayLoadTest      bool
-	relayConcurrency   int
-	relayPayloadJSON   string
-	relayOutputJSON    bool
-	relayTimeout       int
-	relayVerbose       bool
-	relayLocalnet      bool
+	relayAppPrivKey   string
+	relayServiceID    string
+	relayNodeGRPC     string
+	relayNodeRPC      string
+	relayChainID      string
+	relayRelayerURL   string
+	relaySupplierAddr string
+	relayCount        int
+	relayLoadTest     bool
+	relayConcurrency  int
+	relayPayloadJSON  string
+	relayOutputJSON   bool
+	relayTimeout      int
+	relayVerbose      bool
+	relayLocalnet     bool
 )
 
 // Localnet defaults (from tilt/config/all-keys.yaml)
 const (
-	localnetApp1PrivKey     = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
-	localnetSupplier1Addr   = "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj"
-	localnetGRPCEndpoint    = "localhost:9090"
-	localnetRPCEndpoint     = "http://localhost:26657"
-	localnetChainID         = "poktroll"
-	localnetRelayerURL      = "http://localhost:8180"
+	localnetApp1PrivKey   = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
+	localnetSupplier1Addr = "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj"
+	localnetGRPCEndpoint  = "localhost:9090"
+	localnetRPCEndpoint   = "http://localhost:26657"
+	localnetChainID       = "poktroll"
+	localnetRelayerURL    = "http://localhost:8180"
 )
 
 // validateURL validates a URL and ensures it uses an allowed scheme.
@@ -119,10 +119,12 @@ func validateServiceID(serviceID string) error {
 
 	// Basic validation: alphanumeric, hyphens, underscores
 	for _, ch := range serviceID {
-		if !(ch >= 'a' && ch <= 'z') &&
-			!(ch >= 'A' && ch <= 'Z') &&
-			!(ch >= '0' && ch <= '9') &&
-			ch != '-' && ch != '_' {
+		isLower := ch >= 'a' && ch <= 'z'
+		isUpper := ch >= 'A' && ch <= 'Z'
+		isDigit := ch >= '0' && ch <= '9'
+		isHyphen := ch == '-'
+		isUnderscore := ch == '_'
+		if !isLower && !isUpper && !isDigit && !isHyphen && !isUnderscore {
 			return fmt.Errorf("service ID %q contains invalid character %q (allowed: a-z, A-Z, 0-9, -, _)", serviceID, ch)
 		}
 	}
@@ -278,7 +280,7 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create query clients: %w", err)
 	}
-	defer queryClients.Close()
+	defer func() { _ = queryClients.Close() }()
 
 	// Create relay client
 	relayClient, err := relay_client.NewRelayClient(relay_client.Config{

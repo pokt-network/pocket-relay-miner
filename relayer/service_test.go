@@ -4,12 +4,15 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
 func TestServiceDependencies_Empty(t *testing.T) {
 	deps := ServiceDependencies{}
 
-	require.Nil(t, deps.Logger)
+	// Logger is a struct, not a pointer, so check for zero value
+	require.Equal(t, logging.Logger{}, deps.Logger)
 	require.Nil(t, deps.RedisClient)
 	require.Nil(t, deps.RingClient)
 	require.Nil(t, deps.SessionClient)

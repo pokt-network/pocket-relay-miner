@@ -112,7 +112,7 @@ func (s *RedisBlockSubscriber) subscribeLoop(ctx context.Context) {
 func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
 	channel := s.config.PubSubPrefix + ":block"
 	pubsub := s.redisClient.Subscribe(ctx, channel)
-	defer pubsub.Close()
+	defer func() { _ = pubsub.Close() }()
 
 	// Verify subscription
 	if _, err := pubsub.Receive(ctx); err != nil {

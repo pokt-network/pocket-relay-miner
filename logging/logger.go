@@ -125,7 +125,7 @@ func NewLoggerFromConfig(config Config) Logger {
 			// This callback is rarely hit in practice, only when buffer overflows
 			// We can't use the logger here (recursion), so write directly to stderr
 			if missed > 0 {
-				os.Stderr.WriteString("WARN: dropped log messages due to full buffer\n")
+				_, _ = os.Stderr.WriteString("WARN: dropped log messages due to full buffer\n")
 			}
 		})
 	}

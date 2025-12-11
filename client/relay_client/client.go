@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	sdk "github.com/pokt-network/shannon-sdk"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/rings"
@@ -12,6 +11,7 @@ import (
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
+	sdk "github.com/pokt-network/shannon-sdk"
 )
 
 // RelayClient builds and signs relay requests for testing and development.
@@ -151,7 +151,7 @@ func (c *RelayClient) BuildRelayRequest(
 	relayRequest := &servicetypes.RelayRequest{
 		Payload: payloadBz,
 		Meta: servicetypes.RelayRequestMetadata{
-			SessionHeader: session.Header,
+			SessionHeader:           session.Header,
 			SupplierOperatorAddress: supplierAddr,
 			Signature:               nil, // Will be filled by signing
 		},
@@ -201,7 +201,7 @@ func (c *RelayClient) getSession(
 // and identifies the application making relay requests.
 //
 // Returns:
-//   - string: Application address (e.g., "pokt1wsyh8r52y9v0mk5t6y8s4hwhv65cmpj2g8g2dv")
+//   - string: Application address (e.g., "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4")
 func (c *RelayClient) GetAppAddress() string {
 	return c.appAddress
 }

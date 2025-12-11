@@ -20,7 +20,7 @@ func setupMiniredis(t *testing.T) (*miniredis.Miniredis, redis.UniversalClient) 
 	})
 
 	t.Cleanup(func() {
-		client.Close()
+		_ = client.Close()
 		mr.Close()
 	})
 
@@ -29,7 +29,7 @@ func setupMiniredis(t *testing.T) (*miniredis.Miniredis, redis.UniversalClient) 
 
 func TestNewRedisDeduplicator(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := DeduplicatorConfig{
 		KeyPrefix:      "test:dedup",
@@ -45,7 +45,7 @@ func TestNewRedisDeduplicator(t *testing.T) {
 
 func TestRedisDeduplicator_DefaultConfig(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := DeduplicatorConfig{}
 
@@ -57,10 +57,10 @@ func TestRedisDeduplicator_DefaultConfig(t *testing.T) {
 
 func TestRedisDeduplicator_IsDuplicate_NewRelay(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{})
-	defer dedup.Close()
+	defer func() { _ = dedup.Close() }()
 
 	ctx := context.Background()
 	relayHash := []byte("relay-hash-123")
@@ -73,10 +73,10 @@ func TestRedisDeduplicator_IsDuplicate_NewRelay(t *testing.T) {
 
 func TestRedisDeduplicator_IsDuplicate_AfterMark(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{})
-	defer dedup.Close()
+	defer func() { _ = dedup.Close() }()
 
 	ctx := context.Background()
 	relayHash := []byte("relay-hash-456")
@@ -99,14 +99,14 @@ func TestRedisDeduplicator_IsDuplicate_AfterMark(t *testing.T) {
 
 func TestRedisDeduplicator_LocalCache(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := DeduplicatorConfig{
 		LocalCacheSize: 100,
 	}
 
 	dedup := NewRedisDeduplicator(logger, client, config)
-	defer dedup.Close()
+	defer func() { _ = dedup.Close() }()
 
 	ctx := context.Background()
 	relayHash := []byte("relay-hash-789")
@@ -123,10 +123,10 @@ func TestRedisDeduplicator_LocalCache(t *testing.T) {
 
 func TestRedisDeduplicator_MarkProcessedBatch(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{})
-	defer dedup.Close()
+	defer func() { _ = dedup.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-batch"
@@ -151,10 +151,10 @@ func TestRedisDeduplicator_MarkProcessedBatch(t *testing.T) {
 
 func TestRedisDeduplicator_MarkProcessedBatch_Empty(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{})
-	defer dedup.Close()
+	defer func() { _ = dedup.Close() }()
 
 	ctx := context.Background()
 
@@ -165,12 +165,12 @@ func TestRedisDeduplicator_MarkProcessedBatch_Empty(t *testing.T) {
 
 func TestRedisDeduplicator_CleanupSession(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{
 		LocalCacheSize: 100,
 	})
-	defer dedup.Close()
+	defer func() { _ = dedup.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-cleanup"
@@ -197,10 +197,10 @@ func TestRedisDeduplicator_CleanupSession(t *testing.T) {
 
 func TestRedisDeduplicator_DifferentSessions(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{})
-	defer dedup.Close()
+	defer func() { _ = dedup.Close() }()
 
 	ctx := context.Background()
 	relayHash := []byte("same-hash")
@@ -224,10 +224,10 @@ func TestRedisDeduplicator_DifferentSessions(t *testing.T) {
 
 func TestRedisDeduplicator_Start_AlreadyClosed(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{})
-	dedup.Close()
+	_ = dedup.Close()
 
 	err := dedup.Start(context.Background())
 	require.Error(t, err)
@@ -236,7 +236,7 @@ func TestRedisDeduplicator_Start_AlreadyClosed(t *testing.T) {
 
 func TestRedisDeduplicator_Close_Safe(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{})
 
@@ -250,7 +250,7 @@ func TestRedisDeduplicator_Close_Safe(t *testing.T) {
 
 func TestRedisDeduplicator_Start_And_Close(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{
 		CleanupIntervalSeconds: 1, // Fast cleanup for test
@@ -269,14 +269,14 @@ func TestRedisDeduplicator_Start_And_Close(t *testing.T) {
 
 func TestRedisDeduplicator_LocalCacheSizeLimit(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := DeduplicatorConfig{
 		LocalCacheSize: 3, // Small limit
 	}
 
 	dedup := NewRedisDeduplicator(logger, client, config)
-	defer dedup.Close()
+	defer func() { _ = dedup.Close() }()
 
 	ctx := context.Background()
 	sessionID := "session-limit"
@@ -308,7 +308,7 @@ func TestDeduplicatorConfig_Defaults(t *testing.T) {
 
 func TestRedisDeduplicator_TTL(t *testing.T) {
 	_, client := setupMiniredis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := DeduplicatorConfig{
 		TTLBlocks:        10,

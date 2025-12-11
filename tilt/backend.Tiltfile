@@ -13,10 +13,24 @@ def deploy_backend(config):
     backend_config = config["backend"]
 
     # Build backend server Docker image
+    # Only watch specific files to prevent unnecessary rebuilds
     docker_build(
         "demo-backend",
         context="tilt/backend-server",
         dockerfile="tilt/backend-server/Dockerfile",
+        only=[
+            "main.go",
+            "config.yaml",
+            "go.mod",
+            "go.sum",
+            "pb/demo.proto",
+            "pb/demo.pb.go",
+            "pb/demo_grpc.pb.go",
+        ],
+        live_update=[
+            # Sync Go source changes
+            sync("tilt/backend-server/main.go", "/app/main.go"),
+        ],
     )
 
     # Backend Deployment

@@ -17,7 +17,7 @@ const (
 	// Valid test private key (32 bytes hex)
 	testPrivKeyHex = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
 	// Expected address derived from testPrivKeyHex
-	testExpectedAddress = "pokt1wsyh8r52y9v0mk5t6y8s4hwhv65cmpj2g8g2dv"
+	testExpectedAddress = "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
 )
 
 // TestNewSignerFromHex_ValidKey tests signer creation with a valid private key.
@@ -86,11 +86,12 @@ func TestGetPrivKey(t *testing.T) {
 
 // TestDeriveAddressFromPubKey tests Bech32 address derivation.
 func TestDeriveAddressFromPubKey(t *testing.T) {
-	// Create a test private key
+	// Create a test private key (use direct PrivKey construction, NOT GenPrivKeyFromSecret)
 	keyBytes, err := hex.DecodeString(testPrivKeyHex)
 	require.NoError(t, err)
 
-	privKey := secp256k1.GenPrivKeyFromSecret(keyBytes)
+	// Use direct construction like NewSignerFromHex does
+	privKey := &secp256k1.PrivKey{Key: keyBytes}
 	pubKey := privKey.PubKey()
 
 	address, err := deriveAddressFromPubKey(pubKey)

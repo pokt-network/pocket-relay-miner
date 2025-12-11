@@ -58,7 +58,7 @@ func NewSupplierKeysFileProvider(logger logging.Logger, filePath string) (*Suppl
 	}
 
 	if err := watcher.Add(filePath); err != nil {
-		watcher.Close()
+		_ = watcher.Close()
 		return nil, fmt.Errorf("failed to watch supplier keys file: %w", err)
 	}
 
@@ -195,7 +195,7 @@ func (p *SupplierKeysFileProvider) Close() error {
 	p.closed = true
 
 	if p.watcher != nil {
-		p.watcher.Close()
+		_ = p.watcher.Close()
 	}
 
 	close(p.changeCh)

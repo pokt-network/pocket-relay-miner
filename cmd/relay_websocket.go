@@ -19,8 +19,8 @@ import (
 
 // runWebSocketMode sends WebSocket relay requests to the relayer.
 func runWebSocketMode(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient) error {
-	// Build payload (eth_blockNumber by default)
-	payloadBz, err := buildJSONRPCPayload()
+	// Build payload (raw JSON for WebSocket - no HTTP wrapping)
+	payloadBz, err := buildWebSocketPayload()
 	if err != nil {
 		return fmt.Errorf("failed to build payload: %w", err)
 	}
@@ -32,6 +32,35 @@ func runWebSocketMode(ctx context.Context, logger logging.Logger, relayClient *r
 
 	// Load test mode: concurrent requests with metrics
 	return runWebSocketLoadTest(ctx, logger, relayClient, payloadBz)
+}
+
+// buildWebSocketPayload creates a raw JSON-RPC payload for WebSocket relays.
+// Unlike HTTP relays, WebSocket payloads are NOT wrapped in POKTHTTPRequest -
+// they are sent as raw JSON to match WebSocket protocol expectations.
+func buildWebSocketPayload() ([]byte, error) {
+	var jsonPayload []byte
+	var err error
+
+	if relayPayloadJSON != "" {
+		// Use custom payload
+		jsonPayload = []byte(relayPayloadJSON)
+	} else {
+		// Default: eth_blockNumber request
+		payload := map[string]interface{}{
+			"jsonrpc": "2.0",
+			"method":  "eth_blockNumber",
+			"params":  []interface{}{},
+			"id":      1,
+		}
+
+		// Serialize to JSON
+		jsonPayload, err = json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON payload: %w", err)
+		}
+	}
+
+	return jsonPayload, nil
 }
 
 // runWebSocketDiagnostic sends a single WebSocket relay request with detailed output.
@@ -55,7 +84,7 @@ func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayCli
 	if err != nil {
 		return fmt.Errorf("failed to connect to WebSocket: %w", err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	connectDuration := time.Since(connectStart)
 
 	// Send relay request
@@ -65,25 +94,45 @@ func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayCli
 	}
 	sendDuration := time.Since(sendStart)
 
-	// Receive relay response
+	// Receive relay response(s) - support subscription testing
+	fmt.Printf("\n⏳ Waiting for WebSocket responses (5 sec timeout between messages)...\n")
 	receiveStart := time.Now()
-	messageType, responseData, err := conn.ReadMessage()
-	if err != nil {
-		return fmt.Errorf("failed to read relay response: %w", err)
-	}
-	receiveDuration := time.Since(receiveStart)
 
-	if messageType != websocket.BinaryMessage {
-		return fmt.Errorf("unexpected message type: %d (expected binary)", messageType)
-	}
+	var relayResponse *servicetypes.RelayResponse
+	var receiveDuration time.Duration
+	var verifyDuration time.Duration
+	responseCount := 0
+	maxResponses := 500 // Increased for long-running session expiration testing
 
-	// Verify supplier signature
-	verifyStart := time.Now()
-	relayResponse, err := relayClient.VerifyRelayResponse(ctx, relaySupplierAddr, responseData)
-	if err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
+	for i := 0; i < maxResponses; i++ {
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		messageType, responseData, err := conn.ReadMessage()
+		if err != nil {
+			if responseCount > 0 {
+				// Timeout after receiving responses is expected
+				fmt.Printf("✓ Connection closed after %d responses\n", responseCount)
+				break
+			}
+			return fmt.Errorf("failed to read relay response: %w", err)
+		}
+
+		if messageType != websocket.BinaryMessage {
+			return fmt.Errorf("unexpected message type: %d (expected binary)", messageType)
+		}
+
+		// Verify supplier signature
+		verifyStart := time.Now()
+		relayResp, err := relayClient.VerifyRelayResponse(ctx, relaySupplierAddr, responseData)
+		if err != nil {
+			return fmt.Errorf("signature verification failed: %w", err)
+		}
+		verifyDuration += time.Since(verifyStart)
+		relayResponse = relayResp
+
+		responseCount++
+		receiveDuration = time.Since(receiveStart)
+		fmt.Printf("✓ Response #%d received (%d bytes, verified)\n", responseCount, len(responseData))
 	}
-	verifyDuration := time.Since(verifyStart)
 
 	// Display results
 	fmt.Printf("\n=== WebSocket Relay Diagnostic ===\n")
@@ -118,7 +167,7 @@ func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayCli
 
 	// Send close message for graceful shutdown (avoids "abnormal closure" errors)
 	closeMessage := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-	conn.WriteMessage(websocket.CloseMessage, closeMessage)
+	_ = conn.WriteMessage(websocket.CloseMessage, closeMessage)
 
 	return nil
 }
@@ -140,7 +189,7 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 		if err != nil {
 			// Close any connections we already opened
 			for j := 0; j < i; j++ {
-				connPool[j].Close()
+				_ = connPool[j].Close()
 			}
 			return fmt.Errorf("failed to create connection pool: %w", err)
 		}
@@ -150,7 +199,7 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 	}
 	defer func() {
 		for _, conn := range connPool {
-			conn.Close()
+			_ = conn.Close()
 		}
 	}()
 
@@ -261,77 +310,26 @@ func connectWebSocket(relayerURL, serviceID, supplierAddr string) (*websocket.Co
 }
 
 // sendWebSocketRelay sends a relay request via WebSocket and returns the response.
-func sendWebSocketRelay(ctx context.Context, relayRequestBz []byte) (*servicetypes.RelayResponse, error) {
-	// Connect to WebSocket
-	conn, err := connectWebSocket(relayRelayerURL, relayServiceID, relaySupplierAddr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect: %w", err)
-	}
-	defer conn.Close()
-
-	// Set deadline based on context
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetWriteDeadline(deadline)
-		conn.SetReadDeadline(deadline)
-	}
-
-	// Send relay request
-	if err := conn.WriteMessage(websocket.BinaryMessage, relayRequestBz); err != nil {
-		return nil, fmt.Errorf("failed to send: %w", err)
-	}
-
-	// Receive relay response
-	messageType, responseData, err := conn.ReadMessage()
-	if err != nil {
-		return nil, fmt.Errorf("failed to receive: %w", err)
-	}
-
-	if messageType != websocket.BinaryMessage {
-		return nil, fmt.Errorf("unexpected message type: %d", messageType)
-	}
-
-	// Unmarshal response
-	var relayResponse servicetypes.RelayResponse
-	if err := relayResponse.Unmarshal(responseData); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	// Send close message for graceful shutdown
-	closeMessage := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-	conn.WriteMessage(websocket.CloseMessage, closeMessage)
-
-	return &relayResponse, nil
-}
 
 // sendWebSocketRelayOnConnection sends a relay request via an existing WebSocket connection.
 // This is used by the load test to reuse connections from the connection pool.
 func sendWebSocketRelayOnConnection(ctx context.Context, conn *websocket.Conn, relayRequestBz []byte) (*servicetypes.RelayResponse, error) {
-	// Set deadline based on context
-	if deadline, ok := ctx.Deadline(); ok {
-		conn.SetWriteDeadline(deadline)
-		conn.SetReadDeadline(deadline)
-	}
-
-	// Send relay request
+	// Send the relay request
 	if err := conn.WriteMessage(websocket.BinaryMessage, relayRequestBz); err != nil {
-		return nil, fmt.Errorf("failed to send: %w", err)
+		return nil, fmt.Errorf("failed to send relay request: %w", err)
 	}
 
-	// Receive relay response
-	messageType, responseData, err := conn.ReadMessage()
+	// Read the relay response
+	_, responseBz, err := conn.ReadMessage()
 	if err != nil {
-		return nil, fmt.Errorf("failed to receive: %w", err)
+		return nil, fmt.Errorf("failed to read relay response: %w", err)
 	}
 
-	if messageType != websocket.BinaryMessage {
-		return nil, fmt.Errorf("unexpected message type: %d", messageType)
+	// Unmarshal the relay response
+	relayResponse := &servicetypes.RelayResponse{}
+	if err := relayResponse.Unmarshal(responseBz); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal relay response: %w", err)
 	}
 
-	// Unmarshal response
-	var relayResponse servicetypes.RelayResponse
-	if err := relayResponse.Unmarshal(responseData); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal response: %w", err)
-	}
-
-	return &relayResponse, nil
+	return relayResponse, nil
 }

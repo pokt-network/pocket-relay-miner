@@ -239,11 +239,13 @@ func (bs *BlockSubscriber) handleBlockEvent(resultEvent *coretypes.ResultEvent) 
 	oldBlock := bs.lastBlock.Load()
 	bs.lastBlock.Store(block)
 
-	// Log if height changed
+	// Log if height changed (sampled: every 100th block to reduce verbosity)
 	if oldBlock == nil || block.height > oldBlock.height {
-		bs.logger.Debug().
-			Int64("height", block.height).
-			Msg("new block received via WebSocket")
+		if block.height%100 == 0 {
+			bs.logger.Debug().
+				Int64("height", block.height).
+				Msg("new block received via WebSocket")
+		}
 	}
 
 	return nil

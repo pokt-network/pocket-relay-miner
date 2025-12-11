@@ -270,7 +270,7 @@ func (hc *HealthChecker) checkBackend(ctx context.Context, serviceID string, con
 		hc.recordFailure(backend, config, fmt.Sprintf("request failed: %v", err))
 		return
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check response status
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {

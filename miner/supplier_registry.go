@@ -234,7 +234,7 @@ func (r *SupplierRegistry) SubscribeToUpdates(ctx context.Context) <-chan *Suppl
 
 	go func() {
 		defer close(eventCh)
-		defer pubsub.Close()
+		defer func() { _ = pubsub.Close() }()
 
 		for {
 			select {

@@ -96,9 +96,9 @@ func TestBackendHealth_LastCheck(t *testing.T) {
 }
 
 func TestHealthChecker_RegisterBackend(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	// Register without health check config
 	hc.RegisterBackend("service1", "http://localhost:8080", nil)
@@ -121,18 +121,18 @@ func TestHealthChecker_RegisterBackend(t *testing.T) {
 }
 
 func TestHealthChecker_IsHealthy_UnknownBackend(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	// Unknown backend should be treated as healthy
 	require.True(t, hc.IsHealthy("unknown"))
 }
 
 func TestHealthChecker_IsHealthy_RegisteredBackend(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	hc.RegisterBackend("service1", "http://localhost:8080", nil)
 
@@ -150,9 +150,9 @@ func TestHealthChecker_IsHealthy_RegisteredBackend(t *testing.T) {
 }
 
 func TestHealthChecker_GetAllHealth(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	hc.RegisterBackend("service1", "http://localhost:8080", nil)
 	hc.RegisterBackend("service2", "http://localhost:8081", nil)
@@ -173,9 +173,9 @@ func TestHealthChecker_CheckBackend_Success(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	config := &BackendHealthCheckConfig{
 		Enabled:          true,
@@ -204,9 +204,9 @@ func TestHealthChecker_CheckBackend_Failure_StatusCode(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	config := &BackendHealthCheckConfig{
 		Enabled:            true,
@@ -229,9 +229,9 @@ func TestHealthChecker_CheckBackend_Failure_StatusCode(t *testing.T) {
 }
 
 func TestHealthChecker_CheckBackend_Failure_ConnectionRefused(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	config := &BackendHealthCheckConfig{
 		Enabled:            true,
@@ -264,9 +264,9 @@ func TestHealthChecker_Thresholds(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	config := &BackendHealthCheckConfig{
 		Enabled:            true,
@@ -311,7 +311,7 @@ func TestHealthChecker_Start_PeriodicChecks(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
 
 	config := &BackendHealthCheckConfig{
@@ -333,7 +333,7 @@ func TestHealthChecker_Start_PeriodicChecks(t *testing.T) {
 	// Wait for at least 2 checks
 	time.Sleep(2500 * time.Millisecond)
 
-	hc.Close()
+	_ = hc.Close()
 
 	// Should have at least 2 requests (initial + 1 periodic)
 	require.GreaterOrEqual(t, requestCount.Load(), int32(2))
@@ -348,9 +348,9 @@ func TestHealthChecker_CheckNow(t *testing.T) {
 	}))
 	defer server.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	config := &BackendHealthCheckConfig{
 		Enabled:          true,
@@ -370,9 +370,9 @@ func TestHealthChecker_CheckNow(t *testing.T) {
 }
 
 func TestHealthChecker_CheckNow_UnknownService(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	ctx := context.Background()
 	err := hc.CheckNow(ctx, "unknown")
@@ -381,7 +381,7 @@ func TestHealthChecker_CheckNow_UnknownService(t *testing.T) {
 }
 
 func TestHealthChecker_Close(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
 
 	config := &BackendHealthCheckConfig{
@@ -405,9 +405,9 @@ func TestHealthChecker_Close(t *testing.T) {
 }
 
 func TestHealthChecker_Start_AlreadyClosed(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	hc.Close()
+	_ = hc.Close()
 
 	err := hc.Start(context.Background())
 	require.Error(t, err)
@@ -433,9 +433,9 @@ func TestHealthChecker_WithBearerAuth(t *testing.T) {
 }
 
 func TestNewHealthChecker_Defaults(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	require.NotNil(t, hc.httpClient)
 	require.NotNil(t, hc.backends)

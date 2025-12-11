@@ -65,7 +65,7 @@ func NewFileKeyProvider(logger logging.Logger, keysDir string) (*FileKeyProvider
 	}
 
 	if err := watcher.Add(keysDir); err != nil {
-		watcher.Close()
+		_ = watcher.Close()
 		return nil, fmt.Errorf("failed to watch keys directory: %w", err)
 	}
 
@@ -212,7 +212,7 @@ func (p *FileKeyProvider) Close() error {
 	p.closed = true
 
 	if p.watcher != nil {
-		p.watcher.Close()
+		_ = p.watcher.Close()
 	}
 
 	close(p.changeCh)

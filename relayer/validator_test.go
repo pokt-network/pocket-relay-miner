@@ -9,7 +9,7 @@ import (
 )
 
 func TestNewRelayValidator(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &ValidatorConfig{
 		AllowedSupplierAddresses: []string{"pokt1supplier123", "pokt1supplier456"},
 		GracePeriodExtraBlocks:   2,
@@ -26,7 +26,7 @@ func TestNewRelayValidator(t *testing.T) {
 }
 
 func TestRelayValidator_SetGetBlockHeight(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &ValidatorConfig{}
 
 	validator := NewRelayValidator(logger, config, nil, nil, nil)
@@ -44,7 +44,7 @@ func TestRelayValidator_SetGetBlockHeight(t *testing.T) {
 }
 
 func TestRelayValidator_BlockHeightConcurrency(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &ValidatorConfig{}
 
 	validator := NewRelayValidator(logger, config, nil, nil, nil)
@@ -132,14 +132,14 @@ func TestMockRelayValidator(t *testing.T) {
 
 // Test interface compliance
 func TestRelayValidator_InterfaceCompliance(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &ValidatorConfig{}
 
 	_ = NewRelayValidator(logger, config, nil, nil, nil)
 }
 
 func TestRelayValidator_EmptyAllowedSuppliers(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &ValidatorConfig{
 		AllowedSupplierAddresses: []string{},
 	}

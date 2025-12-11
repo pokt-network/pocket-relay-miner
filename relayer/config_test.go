@@ -96,29 +96,33 @@ func TestConfig_Validate_EmptyServices(t *testing.T) {
 func TestConfig_Validate_ServiceMissingBackendURL(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL: "",
+		Backends: map[string]BackendConfig{},
 	}
 
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "service[ethereum].backend_url is required")
+	require.Contains(t, err.Error(), "service[ethereum].backends is required")
 }
 
 func TestConfig_Validate_ServiceInvalidBackendURL(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL: "://invalid",
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "://invalid"},
+		},
 	}
 
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "service[ethereum].backend_url is invalid")
+	require.Contains(t, err.Error(), "service[ethereum].backends[jsonrpc].url is invalid")
 }
 
 func TestConfig_Validate_ServiceInvalidValidationMode(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL:     "http://localhost:8545",
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8545"},
+		},
 		ValidationMode: "invalid",
 	}
 
@@ -136,64 +140,72 @@ func TestConfig_Validate_InvalidDefaultValidationMode(t *testing.T) {
 	require.Contains(t, err.Error(), "invalid default_validation_mode")
 }
 
-func TestConfig_Validate_RPCTypeBackendMissingURL(t *testing.T) {
+func TestConfig_Validate_BackendMissingURL(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL: "http://localhost:8545",
-		RPCTypeBackends: map[string]RPCTypeBackendConfig{
-			"json-rpc": {BackendURL: ""},
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8545"},
+			"grpc":    {URL: ""}, // Missing URL
 		},
 	}
 
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "rpc_type_backends[json-rpc].backend_url is required")
+	require.Contains(t, err.Error(), "service[ethereum].backends[grpc].url is required")
 }
 
-func TestConfig_Validate_RPCTypeBackendInvalidURL(t *testing.T) {
+func TestConfig_Validate_BackendInvalidURL(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL: "http://localhost:8545",
-		RPCTypeBackends: map[string]RPCTypeBackendConfig{
-			"json-rpc": {BackendURL: "://invalid"},
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8545"},
+			"grpc":    {URL: "://invalid"},
 		},
 	}
 
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "rpc_type_backends[json-rpc].backend_url is invalid")
+	require.Contains(t, err.Error(), "service[ethereum].backends[grpc].url is invalid")
 }
 
 func TestConfig_Validate_HealthCheckMissingEndpoint(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL: "http://localhost:8545",
-		HealthCheck: &BackendHealthCheckConfig{
-			Enabled:         true,
-			Endpoint:        "",
-			IntervalSeconds: 10,
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {
+				URL: "http://localhost:8545",
+				HealthCheck: &BackendHealthCheckConfig{
+					Enabled:         true,
+					Endpoint:        "",
+					IntervalSeconds: 10,
+				},
+			},
 		},
 	}
 
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "health_check.endpoint is required")
+	require.Contains(t, err.Error(), "service[ethereum].backends[jsonrpc].health_check.endpoint is required")
 }
 
 func TestConfig_Validate_HealthCheckInvalidInterval(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL: "http://localhost:8545",
-		HealthCheck: &BackendHealthCheckConfig{
-			Enabled:         true,
-			Endpoint:        "/health",
-			IntervalSeconds: 0,
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {
+				URL: "http://localhost:8545",
+				HealthCheck: &BackendHealthCheckConfig{
+					Enabled:         true,
+					Endpoint:        "/health",
+					IntervalSeconds: 0,
+				},
+			},
 		},
 	}
 
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "health_check.interval_seconds must be positive")
+	require.Contains(t, err.Error(), "service[ethereum].backends[jsonrpc].health_check.interval_seconds must be positive")
 }
 
 func TestConfig_Validate_ValidWithAllOptions(t *testing.T) {
@@ -214,28 +226,30 @@ func TestConfig_Validate_ValidWithAllOptions(t *testing.T) {
 		GracePeriodExtraBlocks:       3,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL:            "http://localhost:8545",
 				ValidationMode:        ValidationModeOptimistic,
 				RequestTimeoutSeconds: 30,
 				MaxBodySizeBytes:      1024 * 1024,
-				Headers: map[string]string{
-					"X-Custom-Header": "value",
-				},
-				Authentication: &AuthenticationConfig{
-					Username: "user",
-					Password: "pass",
-				},
-				HealthCheck: &BackendHealthCheckConfig{
-					Enabled:            true,
-					Endpoint:           "/health",
-					IntervalSeconds:    10,
-					TimeoutSeconds:     5,
-					UnhealthyThreshold: 3,
-					HealthyThreshold:   2,
-				},
-				RPCTypeBackends: map[string]RPCTypeBackendConfig{
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {
+						URL: "http://localhost:8545",
+						Headers: map[string]string{
+							"X-Custom-Header": "value",
+						},
+						Authentication: &AuthenticationConfig{
+							Username: "user",
+							Password: "pass",
+						},
+						HealthCheck: &BackendHealthCheckConfig{
+							Enabled:            true,
+							Endpoint:           "/health",
+							IntervalSeconds:    10,
+							TimeoutSeconds:     5,
+							UnhealthyThreshold: 3,
+							HealthyThreshold:   2,
+						},
+					},
 					"rest": {
-						BackendURL: "http://localhost:8546",
+						URL: "http://localhost:8546",
 						Headers: map[string]string{
 							"X-REST-Header": "rest-value",
 						},
@@ -261,11 +275,15 @@ func TestConfig_GetServiceValidationMode(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.DefaultValidationMode = ValidationModeOptimistic
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL:     "http://localhost:8545",
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8545"},
+		},
 		ValidationMode: ValidationModeEager,
 	}
 	cfg.Services["anvil"] = ServiceConfig{
-		BackendURL: "http://localhost:8546",
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8546"},
+		},
 		// No validation mode set
 	}
 
@@ -283,11 +301,15 @@ func TestConfig_GetServiceTimeout(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.DefaultRequestTimeoutSeconds = 30
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL:            "http://localhost:8545",
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8545"},
+		},
 		RequestTimeoutSeconds: 60,
 	}
 	cfg.Services["anvil"] = ServiceConfig{
-		BackendURL: "http://localhost:8546",
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8546"},
+		},
 		// No timeout set
 	}
 
@@ -305,11 +327,15 @@ func TestConfig_GetServiceMaxBodySize(t *testing.T) {
 	cfg := validTestConfig()
 	cfg.DefaultMaxBodySizeBytes = 10 * 1024 * 1024
 	cfg.Services["ethereum"] = ServiceConfig{
-		BackendURL:       "http://localhost:8545",
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8545"},
+		},
 		MaxBodySizeBytes: 5 * 1024 * 1024,
 	}
 	cfg.Services["anvil"] = ServiceConfig{
-		BackendURL: "http://localhost:8546",
+		Backends: map[string]BackendConfig{
+			"jsonrpc": {URL: "http://localhost:8546"},
+		},
 		// No max body size set
 	}
 
@@ -346,7 +372,9 @@ func validTestConfig() Config {
 		DefaultMaxBodySizeBytes:      10 * 1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: "http://localhost:8545",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: "http://localhost:8545"},
+				},
 			},
 		},
 	}

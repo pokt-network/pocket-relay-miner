@@ -45,7 +45,7 @@ type applicationCache struct {
 	queryClient ApplicationQueryClient
 
 	// L1: In-memory cache (xsync for lock-free performance)
-	localCache *xsync.MapOf[string, *apptypes.Application]
+	localCache *xsync.Map[string, *apptypes.Application]
 
 	// Pub/sub
 	pubsub *redis.PubSub
@@ -75,7 +75,7 @@ func NewApplicationCache(
 		logger:      logging.ForComponent(logger, logging.ComponentQueryApp),
 		redisClient: redisClient,
 		queryClient: queryClient,
-		localCache:  xsync.NewMapOf[string, *apptypes.Application](),
+		localCache:  xsync.NewMap[string, *apptypes.Application](),
 	}
 }
 
@@ -107,7 +107,7 @@ func (c *applicationCache) Close() error {
 	c.wg.Wait()
 
 	if c.pubsub != nil {
-		c.pubsub.Close()
+		_ = c.pubsub.Close()
 	}
 
 	c.logger.Info().Msg("application cache stopped")

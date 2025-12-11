@@ -7,18 +7,23 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	sdktypes "github.com/pokt-network/shannon-sdk/types"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
+	servicetypes "github.com/pokt-network/poktroll/x/service/types"
+	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 )
 
 // mockPublisher implements transport.MinedRelayPublisher for testing.
 type mockPublisher struct {
+	mu            sync.Mutex
 	messages      []*transport.MinedRelayMessage
 	publishCalled atomic.Int32
 	publishErr    error
@@ -29,8 +34,18 @@ func (m *mockPublisher) Publish(ctx context.Context, msg *transport.MinedRelayMe
 	if m.publishErr != nil {
 		return m.publishErr
 	}
+	m.mu.Lock()
 	m.messages = append(m.messages, msg)
+	m.mu.Unlock()
 	return nil
+}
+
+func (m *mockPublisher) getMessages() []*transport.MinedRelayMessage {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]*transport.MinedRelayMessage, len(m.messages))
+	copy(result, m.messages)
+	return result
 }
 
 func (m *mockPublisher) PublishBatch(ctx context.Context, msgs []*transport.MinedRelayMessage) error {
@@ -46,28 +61,80 @@ func (m *mockPublisher) Close() error {
 	return nil
 }
 
+// buildTestRelayRequest creates a minimal valid RelayRequest for testing.
+// It constructs a RelayRequest with a SessionHeader and serialized POKTHTTPRequest payload.
+func buildTestRelayRequest(t *testing.T, serviceID, supplierAddr, method, url string, body []byte, opts ...string) []byte {
+	t.Helper()
+
+	// Extract optional sessionID and appAddress
+	sessionID := "test_session_id"
+	appAddress := "pokt1test_app_address"
+	if len(opts) > 0 && opts[0] != "" {
+		sessionID = opts[0]
+	}
+	if len(opts) > 1 && opts[1] != "" {
+		appAddress = opts[1]
+	}
+
+	// Create HTTP request and serialize to POKTHTTPRequest
+	httpReq, err := http.NewRequest(method, url, bytes.NewReader(body))
+	require.NoError(t, err, "failed to create HTTP request")
+	httpReq.Header.Set("Content-Type", "application/json")
+
+	// Serialize HTTP request to POKTHTTPRequest protobuf
+	_, payload, err := sdktypes.SerializeHTTPRequest(httpReq)
+	require.NoError(t, err, "failed to serialize POKTHTTPRequest")
+
+	// Create SessionHeader with minimal required fields
+	sessionHeader := &sessiontypes.SessionHeader{
+		ApplicationAddress:      appAddress,
+		ServiceId:               serviceID,
+		SessionId:               sessionID,
+		SessionStartBlockHeight: 1000,
+		SessionEndBlockHeight:   1100,
+	}
+
+	// Create RelayRequest
+	relayReq := &servicetypes.RelayRequest{
+		Payload: payload,
+		Meta: servicetypes.RelayRequestMetadata{
+			SessionHeader:           sessionHeader,
+			SupplierOperatorAddress: supplierAddr,
+			Signature:               []byte("test_signature"), // Minimal fake signature for testing
+		},
+	}
+
+	// Marshal to protobuf bytes
+	relayReqBz, err := relayReq.Marshal()
+	require.NoError(t, err, "failed to marshal RelayRequest")
+
+	return relayReqBz
+}
+
 func TestNewProxyServer(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "0.0.0.0:8080",
 		DefaultRequestTimeoutSeconds: 30,
 		DefaultMaxBodySizeBytes:      1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: "http://localhost:8545",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: "http://localhost:8545"},
+				},
 			},
 		},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	publisher := &mockPublisher{}
 
 	proxy, err := NewProxyServer(logger, config, hc, publisher)
 	require.NoError(t, err)
 	require.NotNil(t, proxy)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	// Verify backend URL was parsed
 	require.Contains(t, proxy.backendURLs, "ethereum")
@@ -75,18 +142,20 @@ func TestNewProxyServer(t *testing.T) {
 }
 
 func TestNewProxyServer_InvalidBackendURL(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr: "0.0.0.0:8080",
 		Services: map[string]ServiceConfig{
 			"bad": {
-				BackendURL: "://invalid",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: "://invalid"},
+				},
 			},
 		},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	_, err := NewProxyServer(logger, config, hc, nil)
 	require.Error(t, err)
@@ -100,11 +169,11 @@ func TestProxyServer_HandleRelay_Success(t *testing.T) {
 		require.Equal(t, "test request", string(body))
 		w.Header().Set("X-Backend-Response", "true")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("backend response"))
+		_, _ = w.Write([]byte("backend response"))
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "0.0.0.0:0",
 		DefaultRequestTimeoutSeconds: 30,
@@ -112,7 +181,9 @@ func TestProxyServer_HandleRelay_Success(t *testing.T) {
 		DefaultValidationMode:        ValidationModeOptimistic,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: backend.URL,
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: backend.URL},
+				},
 			},
 		},
 	}
@@ -120,18 +191,19 @@ func TestProxyServer_HandleRelay_Success(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", backend.URL, nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	publisher := &mockPublisher{}
 
 	proxy, err := NewProxyServer(logger, config, hc, publisher)
 	require.NoError(t, err)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	// Create test request
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader([]byte("test request")))
+	// Create test request with valid RelayRequest protobuf
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte("test request"))
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/octet-stream")
 
 	// Execute request
 	w := httptest.NewRecorder()
@@ -147,21 +219,23 @@ func TestProxyServer_HandleRelay_Success(t *testing.T) {
 }
 
 func TestProxyServer_HandleRelay_MissingServiceID(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr: "0.0.0.0:0",
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: "http://localhost:8545",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: "http://localhost:8545"},
+				},
 			},
 		},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	// Request without service ID header and path
 	req := httptest.NewRequest(http.MethodPost, "/", nil)
@@ -174,23 +248,27 @@ func TestProxyServer_HandleRelay_MissingServiceID(t *testing.T) {
 }
 
 func TestProxyServer_HandleRelay_UnknownService(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
-		ListenAddr: "0.0.0.0:0",
+		ListenAddr:              "0.0.0.0:0",
+		DefaultMaxBodySizeBytes: 1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: "http://localhost:8545",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: "http://localhost:8545"},
+				},
 			},
 		},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/unknown", nil)
+	relayReqBz := buildTestRelayRequest(t, "unknown", "pokt1supplier123", "POST", "/", []byte("test"))
+	req := httptest.NewRequest(http.MethodPost, "/unknown", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "unknown")
 	w := httptest.NewRecorder()
 
@@ -201,12 +279,15 @@ func TestProxyServer_HandleRelay_UnknownService(t *testing.T) {
 }
 
 func TestProxyServer_HandleRelay_UnhealthyBackend(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
-		ListenAddr: "0.0.0.0:0",
+		ListenAddr:              "0.0.0.0:0",
+		DefaultMaxBodySizeBytes: 1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: "http://localhost:8545",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: "http://localhost:8545"},
+				},
 			},
 		},
 	}
@@ -214,12 +295,13 @@ func TestProxyServer_HandleRelay_UnhealthyBackend(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", "http://localhost:8545", nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusUnhealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", nil)
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte("test"))
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
 	w := httptest.NewRecorder()
 
@@ -230,13 +312,15 @@ func TestProxyServer_HandleRelay_UnhealthyBackend(t *testing.T) {
 }
 
 func TestProxyServer_HandleRelay_BodyTooLarge(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:              "0.0.0.0:0",
 		DefaultMaxBodySizeBytes: 100, // Very small limit
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: "http://localhost:8545",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: "http://localhost:8545"},
+				},
 			},
 		},
 	}
@@ -244,10 +328,10 @@ func TestProxyServer_HandleRelay_BodyTooLarge(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", "http://localhost:8545", nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	// Create request with body larger than limit
 	largeBody := make([]byte, 200)
@@ -263,14 +347,16 @@ func TestProxyServer_HandleRelay_BodyTooLarge(t *testing.T) {
 
 func TestProxyServer_HandleRelay_BackendError(t *testing.T) {
 	// Backend that refuses connections
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "0.0.0.0:0",
 		DefaultRequestTimeoutSeconds: 1, // Short timeout
 		DefaultMaxBodySizeBytes:      1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: "http://localhost:59999", // Non-existent
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: "http://localhost:59999"},
+				}, // Non-existent
 			},
 		},
 	}
@@ -278,12 +364,13 @@ func TestProxyServer_HandleRelay_BackendError(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", "http://localhost:59999", nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader([]byte("test")))
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte("test"))
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
 	w := httptest.NewRecorder()
 
@@ -301,15 +388,19 @@ func TestProxyServer_HandleRelay_WithHeaders(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:              "0.0.0.0:0",
 		DefaultMaxBodySizeBytes: 1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: backend.URL,
-				Headers: map[string]string{
-					"X-Custom-Header": "custom-value",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {
+						URL: backend.URL,
+						Headers: map[string]string{
+							"X-Custom-Header": "custom-value",
+						},
+					},
 				},
 			},
 		},
@@ -318,15 +409,15 @@ func TestProxyServer_HandleRelay_WithHeaders(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", backend.URL, nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", nil)
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte{})
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Pocket-Session-Id", "session123")
+	req.Header.Set("Pocket-Session-Id", "session123") // Should be forwarded to backend
 	w := httptest.NewRecorder()
 
 	proxy.handleRelay(w, req)
@@ -352,16 +443,20 @@ func TestProxyServer_HandleRelay_WithBasicAuth(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:              "0.0.0.0:0",
 		DefaultMaxBodySizeBytes: 1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: backend.URL,
-				Authentication: &AuthenticationConfig{
-					Username: "user",
-					Password: "pass",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {
+						URL: backend.URL,
+						Authentication: &AuthenticationConfig{
+							Username: "user",
+							Password: "pass",
+						},
+					},
 				},
 			},
 		},
@@ -370,12 +465,13 @@ func TestProxyServer_HandleRelay_WithBasicAuth(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", backend.URL, nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", nil)
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte{})
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
 	w := httptest.NewRecorder()
 
@@ -396,15 +492,19 @@ func TestProxyServer_HandleRelay_WithBearerAuth(t *testing.T) {
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:              "0.0.0.0:0",
 		DefaultMaxBodySizeBytes: 1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: backend.URL,
-				Authentication: &AuthenticationConfig{
-					BearerToken: "my-secret-token",
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {
+						URL: backend.URL,
+						Authentication: &AuthenticationConfig{
+							BearerToken: "my-secret-token",
+						},
+					},
 				},
 			},
 		},
@@ -413,12 +513,13 @@ func TestProxyServer_HandleRelay_WithBearerAuth(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", backend.URL, nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", nil)
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte{})
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
 	w := httptest.NewRecorder()
 
@@ -444,17 +545,15 @@ func TestProxyServer_HandleRelay_RPCTypeBackend(t *testing.T) {
 	}))
 	defer restBackend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:              "0.0.0.0:0",
 		DefaultMaxBodySizeBytes: 1024 * 1024,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: jsonRpcBackend.URL, // Default
-				RPCTypeBackends: map[string]RPCTypeBackendConfig{
-					"rest": {
-						BackendURL: restBackend.URL,
-					},
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: jsonRpcBackend.URL}, // Default backend
+					"rest":    {URL: restBackend.URL},    // REST backend
 				},
 			},
 		},
@@ -463,20 +562,22 @@ func TestProxyServer_HandleRelay_RPCTypeBackend(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", jsonRpcBackend.URL, nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	// Test JSON-RPC (default)
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", nil)
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte("test"))
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
 	w := httptest.NewRecorder()
 	proxy.handleRelay(w, req)
 	require.Equal(t, "json-rpc", hitBackend)
 
 	// Test REST
-	req2 := httptest.NewRequest(http.MethodPost, "/ethereum", nil)
+	relayReqBz2 := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte("test"))
+	req2 := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz2))
 	req2.Header.Set("Pocket-Service-Id", "ethereum")
 	req2.Header.Set("Rpc-Type", "rest")
 	w2 := httptest.NewRecorder()
@@ -485,17 +586,17 @@ func TestProxyServer_HandleRelay_RPCTypeBackend(t *testing.T) {
 }
 
 func TestProxyServer_ExtractServiceID(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr: "0.0.0.0:0",
 		Services:   map[string]ServiceConfig{},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	tests := []struct {
 		name     string
@@ -549,17 +650,17 @@ func TestProxyServer_ExtractServiceID(t *testing.T) {
 }
 
 func TestProxyServer_SetBlockHeight(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr: "0.0.0.0:0",
 		Services:   map[string]ServiceConfig{},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	require.Equal(t, int64(0), proxy.currentBlockHeight.Load())
 
@@ -573,11 +674,11 @@ func TestProxyServer_SetBlockHeight(t *testing.T) {
 func TestProxyServer_PublishMinedRelay(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte("response"))
+		_, _ = w.Write([]byte("response"))
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "0.0.0.0:0",
 		DefaultMaxBodySizeBytes:      1024 * 1024,
@@ -585,7 +686,9 @@ func TestProxyServer_PublishMinedRelay(t *testing.T) {
 		DefaultRequestTimeoutSeconds: 30,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: backend.URL,
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: backend.URL},
+				},
 			},
 		},
 	}
@@ -593,19 +696,20 @@ func TestProxyServer_PublishMinedRelay(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", backend.URL, nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	publisher := &mockPublisher{}
 
 	proxy, _ := NewProxyServer(logger, config, hc, publisher)
 	proxy.SetBlockHeight(1000)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader([]byte("test")))
+	// Start worker pool in background
+	go func() { _ = proxy.Start(context.Background()) }()
+
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte("test"), "session123", "pokt1app123")
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
-	req.Header.Set("Pocket-Supplier-Address", "pokt1supplier123")
-	req.Header.Set("Pocket-Session-Id", "session123")
-	req.Header.Set("Pocket-Application-Address", "pokt1app123")
 	w := httptest.NewRecorder()
 
 	proxy.handleRelay(w, req)
@@ -617,9 +721,10 @@ func TestProxyServer_PublishMinedRelay(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	require.Equal(t, int32(1), publisher.publishCalled.Load())
-	require.Len(t, publisher.messages, 1)
+	messages := publisher.getMessages()
+	require.Len(t, messages, 1)
 
-	msg := publisher.messages[0]
+	msg := messages[0]
 	require.Equal(t, "ethereum", msg.ServiceId)
 	require.Equal(t, "pokt1supplier123", msg.SupplierOperatorAddress)
 	require.Equal(t, "session123", msg.SessionId)
@@ -628,17 +733,17 @@ func TestProxyServer_PublishMinedRelay(t *testing.T) {
 }
 
 func TestProxyServer_SendError(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr: "0.0.0.0:0",
 		Services:   map[string]ServiceConfig{},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	w := httptest.NewRecorder()
 	proxy.sendError(w, http.StatusBadRequest, "test error")
@@ -655,14 +760,14 @@ func TestProxyServer_SendError(t *testing.T) {
 }
 
 func TestProxyServer_Close(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr: "0.0.0.0:0",
 		Services:   map[string]ServiceConfig{},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
 
@@ -675,17 +780,17 @@ func TestProxyServer_Close(t *testing.T) {
 }
 
 func TestProxyServer_Start_AlreadyClosed(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr: "0.0.0.0:0",
 		Services:   map[string]ServiceConfig{},
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	proxy.Close()
+	_ = proxy.Close()
 
 	err := proxy.Start(context.Background())
 	require.Error(t, err)
@@ -693,7 +798,7 @@ func TestProxyServer_Start_AlreadyClosed(t *testing.T) {
 }
 
 func TestProxyServer_Start_AlreadyStarted(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "127.0.0.1:0",
 		DefaultRequestTimeoutSeconds: 30,
@@ -701,10 +806,10 @@ func TestProxyServer_Start_AlreadyStarted(t *testing.T) {
 	}
 
 	hc := NewHealthChecker(logger)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, _ := NewProxyServer(logger, config, hc, nil)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -799,13 +904,13 @@ func TestProxyServer_HandleRelay_Streaming_SSE(t *testing.T) {
 		}
 
 		for _, event := range events {
-			w.Write([]byte(event))
+			_, _ = w.Write([]byte(event))
 			flusher.Flush()
 		}
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "0.0.0.0:0",
 		DefaultRequestTimeoutSeconds: 30,
@@ -813,7 +918,9 @@ func TestProxyServer_HandleRelay_Streaming_SSE(t *testing.T) {
 		DefaultValidationMode:        ValidationModeOptimistic,
 		Services: map[string]ServiceConfig{
 			"llm": {
-				BackendURL: backend.URL,
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: backend.URL},
+				},
 			},
 		},
 	}
@@ -821,17 +928,18 @@ func TestProxyServer_HandleRelay_Streaming_SSE(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("llm", backend.URL, nil)
 	hc.GetHealth("llm").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	publisher := &mockPublisher{}
 
 	proxy, err := NewProxyServer(logger, config, hc, publisher)
 	require.NoError(t, err)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/llm", bytes.NewReader([]byte("test request")))
+	relayReqBz := buildTestRelayRequest(t, "llm", "pokt1supplier123", "POST", "/", []byte("test request"))
+	req := httptest.NewRequest(http.MethodPost, "/llm", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "llm")
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/octet-stream")
 
 	w := httptest.NewRecorder()
 	proxy.handleRelay(w, req)
@@ -867,13 +975,13 @@ func TestProxyServer_HandleRelay_Streaming_NDJSON(t *testing.T) {
 		}
 
 		for _, line := range lines {
-			w.Write([]byte(line + "\n"))
+			_, _ = w.Write([]byte(line + "\n"))
 			flusher.Flush()
 		}
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "0.0.0.0:0",
 		DefaultRequestTimeoutSeconds: 30,
@@ -881,7 +989,9 @@ func TestProxyServer_HandleRelay_Streaming_NDJSON(t *testing.T) {
 		DefaultValidationMode:        ValidationModeOptimistic,
 		Services: map[string]ServiceConfig{
 			"llm": {
-				BackendURL: backend.URL,
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: backend.URL},
+				},
 			},
 		},
 	}
@@ -889,17 +999,18 @@ func TestProxyServer_HandleRelay_Streaming_NDJSON(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("llm", backend.URL, nil)
 	hc.GetHealth("llm").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	publisher := &mockPublisher{}
 
 	proxy, err := NewProxyServer(logger, config, hc, publisher)
 	require.NoError(t, err)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/llm", bytes.NewReader([]byte(`{"prompt": "test"}`)))
+	relayReqBz := buildTestRelayRequest(t, "llm", "pokt1supplier123", "POST", "/", []byte(`{"prompt": "test"}`))
+	req := httptest.NewRequest(http.MethodPost, "/llm", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "llm")
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/octet-stream")
 
 	w := httptest.NewRecorder()
 	proxy.handleRelay(w, req)
@@ -935,11 +1046,11 @@ func TestProxyServer_HandleRelay_NonStreaming_JSON(t *testing.T) {
 	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"result": "success"}`))
+		_, _ = w.Write([]byte(`{"result": "success"}`))
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "0.0.0.0:0",
 		DefaultRequestTimeoutSeconds: 30,
@@ -947,7 +1058,9 @@ func TestProxyServer_HandleRelay_NonStreaming_JSON(t *testing.T) {
 		DefaultValidationMode:        ValidationModeOptimistic,
 		Services: map[string]ServiceConfig{
 			"ethereum": {
-				BackendURL: backend.URL,
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: backend.URL},
+				},
 			},
 		},
 	}
@@ -955,15 +1068,16 @@ func TestProxyServer_HandleRelay_NonStreaming_JSON(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("ethereum", backend.URL, nil)
 	hc.GetHealth("ethereum").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	proxy, err := NewProxyServer(logger, config, hc, nil)
 	require.NoError(t, err)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader([]byte(`{}`)))
+	relayReqBz := buildTestRelayRequest(t, "ethereum", "pokt1supplier123", "POST", "/", []byte(`{}`))
+	req := httptest.NewRequest(http.MethodPost, "/ethereum", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "ethereum")
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", "application/octet-stream")
 
 	w := httptest.NewRecorder()
 	proxy.handleRelay(w, req)
@@ -983,14 +1097,14 @@ func TestProxyServer_HandleRelay_Streaming_PublishesRelay(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 
 		flusher, _ := w.(http.Flusher)
-		w.Write([]byte("data: chunk1\n"))
+		_, _ = w.Write([]byte("data: chunk1\n"))
 		flusher.Flush()
-		w.Write([]byte("data: chunk2\n"))
+		_, _ = w.Write([]byte("data: chunk2\n"))
 		flusher.Flush()
 	}))
 	defer backend.Close()
 
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := &Config{
 		ListenAddr:                   "0.0.0.0:0",
 		DefaultRequestTimeoutSeconds: 30,
@@ -998,7 +1112,9 @@ func TestProxyServer_HandleRelay_Streaming_PublishesRelay(t *testing.T) {
 		DefaultValidationMode:        ValidationModeEager,
 		Services: map[string]ServiceConfig{
 			"llm": {
-				BackendURL: backend.URL,
+				Backends: map[string]BackendConfig{
+					"jsonrpc": {URL: backend.URL},
+				},
 			},
 		},
 	}
@@ -1006,19 +1122,21 @@ func TestProxyServer_HandleRelay_Streaming_PublishesRelay(t *testing.T) {
 	hc := NewHealthChecker(logger)
 	hc.RegisterBackend("llm", backend.URL, nil)
 	hc.GetHealth("llm").SetStatus(HealthStatusHealthy)
-	defer hc.Close()
+	defer func() { _ = hc.Close() }()
 
 	publisher := &mockPublisher{}
 
 	proxy, err := NewProxyServer(logger, config, hc, publisher)
 	require.NoError(t, err)
 	proxy.SetBlockHeight(500)
-	defer proxy.Close()
+	defer func() { _ = proxy.Close() }()
 
-	req := httptest.NewRequest(http.MethodPost, "/llm", bytes.NewReader([]byte("test")))
+	// Start worker pool in background
+	go func() { _ = proxy.Start(context.Background()) }()
+
+	relayReqBz := buildTestRelayRequest(t, "llm", "pokt1supplier", "POST", "/", []byte("test"), "session-streaming")
+	req := httptest.NewRequest(http.MethodPost, "/llm", bytes.NewReader(relayReqBz))
 	req.Header.Set("Pocket-Service-Id", "llm")
-	req.Header.Set("Pocket-Supplier-Address", "pokt1supplier")
-	req.Header.Set("Pocket-Session-Id", "session-streaming")
 
 	w := httptest.NewRecorder()
 	proxy.handleRelay(w, req)
@@ -1029,9 +1147,10 @@ func TestProxyServer_HandleRelay_Streaming_PublishesRelay(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	require.Equal(t, int32(1), publisher.publishCalled.Load())
-	require.Len(t, publisher.messages, 1)
+	messages := publisher.getMessages()
+	require.Len(t, messages, 1)
 
-	msg := publisher.messages[0]
+	msg := messages[0]
 	require.Equal(t, "llm", msg.ServiceId)
 	require.Equal(t, "session-streaming", msg.SessionId)
 	require.Equal(t, int64(500), msg.ArrivalBlockHeight)

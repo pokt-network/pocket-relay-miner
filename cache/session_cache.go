@@ -100,7 +100,7 @@ func (c *RedisSessionCache) subscribeToRewardabilityUpdates(ctx context.Context)
 
 	channel := c.config.PubSubPrefix + ":session:rewardable"
 	pubsub := c.redisClient.Subscribe(ctx, channel)
-	defer pubsub.Close()
+	defer func() { _ = pubsub.Close() }()
 
 	for {
 		select {

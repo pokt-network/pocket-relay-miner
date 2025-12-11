@@ -21,7 +21,7 @@ func setupLeaderTestRedis(t *testing.T) (*miniredis.Miniredis, redis.UniversalCl
 	})
 
 	t.Cleanup(func() {
-		client.Close()
+		_ = client.Close()
 		mr.Close()
 	})
 
@@ -30,7 +30,7 @@ func setupLeaderTestRedis(t *testing.T) (*miniredis.Miniredis, redis.UniversalCl
 
 func TestNewRedisLeaderElector(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := LeaderElectorConfig{
 		SupplierAddress: "pokt1supplier123",
@@ -49,7 +49,7 @@ func TestNewRedisLeaderElector(t *testing.T) {
 
 func TestRedisLeaderElector_SingleInstance_BecomesLeader(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	var elected atomic.Bool
 
@@ -88,7 +88,7 @@ func TestRedisLeaderElector_SingleInstance_BecomesLeader(t *testing.T) {
 
 func TestRedisLeaderElector_TwoInstances_OnlyOneLeader(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	var elected1, elected2 atomic.Bool
 
@@ -150,7 +150,7 @@ func TestRedisLeaderElector_TwoInstances_OnlyOneLeader(t *testing.T) {
 
 func TestRedisLeaderElector_Failover(t *testing.T) {
 	mr, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	var elected1, elected2, lost1 atomic.Bool
 
@@ -210,7 +210,7 @@ func TestRedisLeaderElector_Failover(t *testing.T) {
 
 	// Simulate elector1 crash by closing it without releasing lock
 	// Then fast-forward time to expire the lock
-	elector1.Close()
+	_ = elector1.Close()
 
 	// Fast-forward time in miniredis to expire the lock
 	mr.FastForward(2 * time.Second)
@@ -228,7 +228,7 @@ func TestRedisLeaderElector_Failover(t *testing.T) {
 
 func TestRedisLeaderElector_Resign(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	var elected, lost atomic.Bool
 
@@ -281,7 +281,7 @@ func TestRedisLeaderElector_Resign(t *testing.T) {
 
 func TestRedisLeaderElector_LeaderID(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := LeaderElectorConfig{
 		SupplierAddress:      "pokt1supplier123",
@@ -318,7 +318,7 @@ func TestRedisLeaderElector_LeaderID(t *testing.T) {
 
 func TestRedisLeaderElector_Close_Safe(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := LeaderElectorConfig{
 		SupplierAddress: "pokt1supplier123",
@@ -337,7 +337,7 @@ func TestRedisLeaderElector_Close_Safe(t *testing.T) {
 
 func TestRedisLeaderElector_Start_AlreadyClosed(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := LeaderElectorConfig{
 		SupplierAddress: "pokt1supplier123",
@@ -345,7 +345,7 @@ func TestRedisLeaderElector_Start_AlreadyClosed(t *testing.T) {
 	}
 
 	elector := NewRedisLeaderElector(logger, client, config, LeaderCallbacks{})
-	elector.Close()
+	_ = elector.Close()
 
 	err := elector.Start(context.Background())
 	require.Error(t, err)
@@ -354,7 +354,7 @@ func TestRedisLeaderElector_Start_AlreadyClosed(t *testing.T) {
 
 func TestRedisLeaderElector_Start_AlreadyStarted(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config := LeaderElectorConfig{
 		SupplierAddress: "pokt1supplier123",
@@ -377,7 +377,7 @@ func TestRedisLeaderElector_Start_AlreadyStarted(t *testing.T) {
 
 func TestRedisLeaderElector_DifferentSuppliers_BothLeaders(t *testing.T) {
 	_, client := setupLeaderTestRedis(t)
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	config1 := LeaderElectorConfig{
 		SupplierAddress:      "pokt1supplier_A",

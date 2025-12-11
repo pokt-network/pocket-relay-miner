@@ -50,9 +50,9 @@ type CacheOrchestrator struct {
 	// Tracked entities - using xsync for lock-free performance
 	// Apps and Services: dynamically discovered from relay traffic
 	// Suppliers: registered from KeyManager when keyring/keyfile is loaded/updated
-	knownApps      *xsync.MapOf[string, struct{}]
-	knownServices  *xsync.MapOf[string, struct{}]
-	knownSuppliers *xsync.MapOf[string, struct{}]
+	knownApps      *xsync.Map[string, struct{}]
+	knownServices  *xsync.Map[string, struct{}]
+	knownSuppliers *xsync.Map[string, struct{}]
 
 	// Block subscription management (leader-only)
 	blockChan     <-chan BlockEvent
@@ -109,9 +109,9 @@ func NewCacheOrchestrator(
 		serviceCache:       serviceCache,
 		supplierCache:      supplierCache,
 		sessionCache:       sessionCache,
-		knownApps:          xsync.NewMapOf[string, struct{}](),
-		knownServices:      xsync.NewMapOf[string, struct{}](),
-		knownSuppliers:     xsync.NewMapOf[string, struct{}](),
+		knownApps:          xsync.NewMap[string, struct{}](),
+		knownServices:      xsync.NewMap[string, struct{}](),
+		knownSuppliers:     xsync.NewMap[string, struct{}](),
 	}
 }
 
@@ -160,25 +160,25 @@ func (o *CacheOrchestrator) Close() error {
 
 	// Close all caches (with nil checks for partial initialization)
 	if o.sharedParamsCache != nil {
-		o.sharedParamsCache.Close()
+		_ = o.sharedParamsCache.Close()
 	}
 	if o.sessionParamsCache != nil {
-		o.sessionParamsCache.Close()
+		_ = o.sessionParamsCache.Close()
 	}
 	if o.proofParamsCache != nil {
-		o.proofParamsCache.Close()
+		_ = o.proofParamsCache.Close()
 	}
 	if o.applicationCache != nil {
-		o.applicationCache.Close()
+		_ = o.applicationCache.Close()
 	}
 	if o.serviceCache != nil {
-		o.serviceCache.Close()
+		_ = o.serviceCache.Close()
 	}
 	if o.supplierCache != nil {
-		o.supplierCache.Close()
+		_ = o.supplierCache.Close()
 	}
 	if o.sessionCache != nil {
-		o.sessionCache.Close()
+		_ = o.sessionCache.Close()
 	}
 
 	o.logger.Info().Msg("cache orchestrator stopped")
@@ -516,33 +516,33 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 	go logging.RecoverGoRoutine(o.logger, "cache_warmup_apps", func(ctx context.Context) {
 		defer wg.Done()
 		if app, ok := o.applicationCache.(*applicationCache); ok {
-			app.WarmupFromRedis(ctx, knownApps)
+			_ = app.WarmupFromRedis(ctx, knownApps)
 		}
 	})(ctx)
 
 	go logging.RecoverGoRoutine(o.logger, "cache_warmup_services", func(ctx context.Context) {
 		defer wg.Done()
 		if svc, ok := o.serviceCache.(*serviceCache); ok {
-			svc.WarmupFromRedis(ctx, knownServices)
+			_ = svc.WarmupFromRedis(ctx, knownServices)
 		}
 	})(ctx)
 
 	go logging.RecoverGoRoutine(o.logger, "cache_warmup_suppliers", func(ctx context.Context) {
 		defer wg.Done()
-		o.supplierCache.WarmupFromRedis(ctx, knownSuppliers)
+		_ = o.supplierCache.WarmupFromRedis(ctx, knownSuppliers)
 	})(ctx)
 
 	wg.Wait()
 
 	// Warmup singleton caches (params)
 	if shared, ok := o.sharedParamsCache.(*sharedParamsCache); ok {
-		shared.WarmupFromRedis(ctx)
+		_ = shared.WarmupFromRedis(ctx)
 	}
 	if session, ok := o.sessionParamsCache.(*sessionParamsCache); ok {
-		session.WarmupFromRedis(ctx)
+		_ = session.WarmupFromRedis(ctx)
 	}
 	if proof, ok := o.proofParamsCache.(*proofParamsCache); ok {
-		proof.WarmupFromRedis(ctx)
+		_ = proof.WarmupFromRedis(ctx)
 	}
 
 	o.logger.Info().Msg("cache warmup complete")

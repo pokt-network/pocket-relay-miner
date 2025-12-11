@@ -2,6 +2,7 @@ package observability
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
@@ -29,9 +30,9 @@ var (
 
 func init() {
 	// Register standard Go metrics collectors to both registries
-	MinerRegistry.MustRegister(prometheus.NewGoCollector())
-	MinerRegistry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	MinerRegistry.MustRegister(collectors.NewGoCollector())
+	MinerRegistry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 
-	RelayerRegistry.MustRegister(prometheus.NewGoCollector())
-	RelayerRegistry.MustRegister(prometheus.NewProcessCollector(prometheus.ProcessCollectorOpts{}))
+	RelayerRegistry.MustRegister(collectors.NewGoCollector())
+	RelayerRegistry.MustRegister(collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 }

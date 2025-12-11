@@ -105,7 +105,7 @@ func (c *proofParamsCache) Close() error {
 	c.wg.Wait()
 
 	if c.pubsub != nil {
-		c.pubsub.Close()
+		_ = c.pubsub.Close()
 	}
 
 	c.logger.Info().Msg("proof params cache stopped")

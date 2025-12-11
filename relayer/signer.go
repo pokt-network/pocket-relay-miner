@@ -198,8 +198,51 @@ func (rs *ResponseSigner) BuildAndSignRelayResponse(
 	return relayResponse, relayResponseBz, nil
 }
 
+// BuildAndSignWebSocketRelayResponse creates a signed RelayResponse for WebSocket relays.
+// Unlike HTTP, WebSocket responses are NOT wrapped in POKTHTTPResponse - they contain
+// the raw payload directly. This matches the protocol spec for WebSocket transport.
+func (rs *ResponseSigner) BuildAndSignWebSocketRelayResponse(
+	relayRequest *servicetypes.RelayRequest,
+	rawPayload []byte,
+) (*servicetypes.RelayResponse, []byte, error) {
+	if relayRequest == nil || relayRequest.Meta.SessionHeader == nil {
+		return nil, nil, fmt.Errorf("invalid relay request: missing session header")
+	}
+
+	supplierOperatorAddr := relayRequest.Meta.SupplierOperatorAddress
+	if supplierOperatorAddr == "" {
+		return nil, nil, fmt.Errorf("missing supplier operator address in relay request")
+	}
+
+	if !rs.HasSigner(supplierOperatorAddr) {
+		return nil, nil, fmt.Errorf("no signer for supplier %s", supplierOperatorAddr)
+	}
+
+	// Build the RelayResponse with raw payload (no HTTP wrapping)
+	relayResponse := &servicetypes.RelayResponse{
+		Meta: servicetypes.RelayResponseMetadata{
+			SessionHeader: relayRequest.Meta.SessionHeader,
+		},
+		Payload: rawPayload, // Raw WebSocket payload (e.g., JSON-RPC response)
+	}
+
+	// Sign the response
+	if err := rs.SignRelayResponse(relayResponse, supplierOperatorAddr); err != nil {
+		return nil, nil, fmt.Errorf("failed to sign relay response: %w", err)
+	}
+
+	// Marshal the signed response
+	relayResponseBz, err := relayResponse.Marshal()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to marshal relay response: %w", err)
+	}
+
+	return relayResponse, relayResponseBz, nil
+}
+
 // BuildAndSignRelayResponseFromBody creates a signed RelayResponse from the relay request
-// and raw response body (for streaming responses where we've already read the body).
+// and raw response body (for HTTP/gRPC/streaming responses where we've already read the body).
+// This wraps the response in POKTHTTPResponse format.
 func (rs *ResponseSigner) BuildAndSignRelayResponseFromBody(
 	relayRequest *servicetypes.RelayRequest,
 	respBody []byte,
@@ -330,7 +373,7 @@ func (rs *ResponseSigner) serializeHTTPResponse(
 	response *http.Response,
 	maxBodySize int64,
 ) (*sdktypes.POKTHTTPResponse, []byte, error) {
-	defer response.Body.Close()
+	defer func() { _ = response.Body.Close() }()
 
 	// Read body with size limit
 	limitedReader := io.LimitReader(response.Body, maxBodySize+1)

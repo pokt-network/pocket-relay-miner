@@ -44,7 +44,7 @@ type Signer struct {
 //	if err != nil {
 //	    return fmt.Errorf("failed to create signer: %w", err)
 //	}
-//	address := signer.GetAddress() // pokt1wsyh8r52y9v0mk5t6y8s4hwhv65cmpj2g8g2dv
+//	address := signer.GetAddress() // pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
 func NewSignerFromHex(privKeyHex string) (*Signer, error) {
 	if privKeyHex == "" {
 		return nil, fmt.Errorf("private key hex is empty")
@@ -83,7 +83,7 @@ func NewSignerFromHex(privKeyHex string) (*Signer, error) {
 // "pokt" prefix and is derived from the secp256k1 public key.
 //
 // Returns:
-//   - string: Bech32 address (e.g., "pokt1wsyh8r52y9v0mk5t6y8s4hwhv65cmpj2g8g2dv")
+//   - string: Bech32 address (e.g., "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4")
 func (s *Signer) GetAddress() string {
 	return s.address
 }

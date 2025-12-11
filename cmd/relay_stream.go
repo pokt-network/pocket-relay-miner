@@ -137,7 +137,7 @@ func sendStreamingRelay(ctx context.Context, relayRequestBz []byte) ([][]byte, e
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {

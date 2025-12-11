@@ -98,6 +98,35 @@ make build-release
 - Development build: `./pocket-relay-miner`
 - Release build: `bin/pocket-relay-miner`
 
+### Build Backend Test Server
+
+The backend test server is a generic multi-transport server for testing the relay miner:
+
+```bash
+# Build backend server (includes protobuf generation)
+make build-backend
+
+# Or manually
+cd tilt/backend-server
+protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative pb/demo.proto
+go build -o backend main.go
+```
+
+**Backend server location:** `tilt/backend-server/backend`
+
+**Supported transports:**
+- HTTP (JSON-RPC at `/`)
+- WebSocket (at `/ws`)
+- gRPC (port 50051)
+- SSE streaming (at `/stream/sse`)
+- NDJSON streaming (at `/stream/ndjson`)
+
+**Test features:**
+- Configurable error injection (error_rate, error_code)
+- Configurable response delay (delay_ms)
+- Subscription simulation (repeat_count, delay_ms in params)
+- Health check endpoint (`/health`)
+
 ## Configuration
 
 ### Relayer Configuration

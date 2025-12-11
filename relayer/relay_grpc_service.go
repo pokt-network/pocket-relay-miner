@@ -16,13 +16,10 @@ import (
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
-	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
@@ -147,6 +144,10 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	supplierOperatorAddr := relayRequest.Meta.SupplierOperatorAddress
 	applicationAddr := relayRequest.Meta.SessionHeader.ApplicationAddress
 	sessionID := relayRequest.Meta.SessionHeader.SessionId
+	sessionEndHeight := relayRequest.Meta.SessionHeader.SessionEndBlockHeight
+
+	// Create session context for consistent logging
+	sessionCtx := logging.SessionContextPartial(sessionID, serviceID, supplierOperatorAddr, applicationAddr, sessionEndHeight)
 
 	if serviceID == "" {
 		grpcRelayErrors.WithLabelValues("unknown", "missing_service_id").Inc()
@@ -158,11 +159,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		return status.Error(codes.InvalidArgument, "missing supplier operator address in RelayRequest")
 	}
 
-	s.logger.Debug().
-		Str(logging.FieldServiceID, serviceID).
-		Str(logging.FieldSupplier, supplierOperatorAddr).
-		Str("application", applicationAddr).
-		Str("session_id", sessionID).
+	logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 		Msg("received gRPC relay request")
 
 	// Verify we have a signer for this supplier
@@ -185,8 +182,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		return status.Errorf(codes.InvalidArgument, "failed to deserialize POKTHTTPRequest: %v", err)
 	}
 
-	s.logger.Debug().
-		Str(logging.FieldServiceID, serviceID).
+	logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 		Str("method", poktHTTPRequest.Method).
 		Str("url", poktHTTPRequest.Url).
 		Int("body_size", len(poktHTTPRequest.BodyBz)).
@@ -196,9 +192,8 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	respBody, respHeaders, respStatus, err := s.forwardToBackend(ctx, serviceID, &svcConfig, poktHTTPRequest)
 	if err != nil {
 		grpcRelayErrors.WithLabelValues(serviceID, "backend_error").Inc()
-		s.logger.Error().
+		logging.WithSessionContext(s.logger.Error(), sessionCtx).
 			Err(err).
-			Str(logging.FieldServiceID, serviceID).
 			Msg("failed to forward request to backend")
 
 		// Build error response
@@ -217,8 +212,29 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 			return status.Errorf(codes.Internal, "failed to send error response: %v", sendErr)
 		}
 
-		// Still publish the relay for tracking (even failed ones)
-		s.publishRelay(ctx, relayRequest, relayResponse, arrivalHeight, serviceID)
+		// Still publish the error relay for tracking (even failed ones)
+		if s.relayProcessor != nil {
+			reqBz, marshalErr := relayRequest.Marshal()
+			if marshalErr == nil {
+				respBz, marshalErr := relayResponse.Marshal()
+				if marshalErr == nil {
+					// Process error relay (still subject to difficulty check)
+					_, processErr := s.relayProcessor.ProcessRelay(
+						ctx,
+						reqBz,
+						respBz,
+						supplierOperatorAddr,
+						serviceID,
+						arrivalHeight,
+					)
+					if processErr != nil {
+						logging.WithSessionContext(s.logger.Debug(), sessionCtx).
+							Err(processErr).
+							Msg("failed to process error relay")
+					}
+				}
+			}
+		}
 
 		return nil
 	}
@@ -241,16 +257,48 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		return status.Errorf(codes.Internal, "failed to send response: %v", err)
 	}
 
-	// Publish the mined relay
-	s.publishRelay(ctx, relayRequest, relayResponse, arrivalHeight, serviceID)
+	// Use RelayProcessor for consistent relay processing (mining difficulty, deduplication, publishing)
+	if s.relayProcessor != nil {
+		// Marshal request and response for ProcessRelay
+		reqBz, err := relayRequest.Marshal()
+		if err != nil {
+			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+				Err(err).
+				Msg("failed to marshal relay request for processing")
+		} else {
+			respBz := relayResponseBz // Already marshaled above
+
+			// Process relay (includes difficulty check, cache warming, deduplication, publishing)
+			msg, err := s.relayProcessor.ProcessRelay(
+				ctx,
+				reqBz,
+				respBz,
+				supplierOperatorAddr,
+				serviceID,
+				arrivalHeight,
+			)
+			if err != nil {
+				logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+					Err(err).
+					Msg("failed to process relay")
+			} else if msg == nil {
+				// Relay didn't meet mining difficulty
+				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
+					Msg("gRPC relay skipped (did not meet mining difficulty)")
+			} else {
+				// Relay was successfully processed and published
+				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
+					Msg("gRPC relay processed and published")
+				grpcRelaysPublished.WithLabelValues(serviceID).Inc()
+			}
+		}
+	}
 
 	// Update metrics
 	grpcRelaysTotal.WithLabelValues(serviceID).Inc()
 	grpcRelayLatency.WithLabelValues(serviceID).Observe(time.Since(arrivalTime).Seconds())
 
-	s.logger.Debug().
-		Str(logging.FieldServiceID, serviceID).
-		Str(logging.FieldSupplier, supplierOperatorAddr).
+	logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 		Int("response_size", len(relayResponseBz)).
 		Dur("latency", time.Since(arrivalTime)).
 		Msg("gRPC relay completed successfully")
@@ -354,7 +402,7 @@ func (s *RelayGRPCService) forwardToBackend(
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Read response body with size limit
 	limitedReader := io.LimitReader(resp.Body, s.maxBodySize+1)
@@ -369,106 +417,41 @@ func (s *RelayGRPCService) forwardToBackend(
 	return respBody, resp.Header, resp.StatusCode, nil
 }
 
-// publishRelay publishes the mined relay to the transport layer.
-func (s *RelayGRPCService) publishRelay(
-	ctx context.Context,
-	relayRequest *servicetypes.RelayRequest,
-	relayResponse *servicetypes.RelayResponse,
-	arrivalHeight int64,
-	serviceID string,
-) {
-	if s.publisher == nil {
-		return
-	}
-
-	supplierOperatorAddr := relayRequest.Meta.SupplierOperatorAddress
-
-	// Build the relay for mining
-	relay := &servicetypes.Relay{
-		Req: relayRequest,
-		Res: relayResponse,
-	}
-
-	relayBz, err := relay.Marshal()
-	if err != nil {
-		s.logger.Warn().Err(err).Msg("failed to marshal relay for publishing")
-		return
-	}
-
-	// Compute relay hash (convert fixed-size array to slice)
-	relayHashArr := protocol.GetRelayHashFromBytes(relayBz)
-	relayHash := relayHashArr[:]
-
-	// Build mined relay message
-	msg := &transport.MinedRelayMessage{
-		RelayHash:               relayHash,
-		RelayBytes:              relayBz,
-		ComputeUnitsPerRelay:    1, // TODO: Get from service config
-		SupplierOperatorAddress: supplierOperatorAddr,
-		ServiceId:               serviceID,
-		ArrivalBlockHeight:      arrivalHeight,
-	}
-	msg.SetPublishedAt()
-
-	// Add session metadata if available
-	if relayRequest.Meta.SessionHeader != nil {
-		msg.SessionId = relayRequest.Meta.SessionHeader.SessionId
-		msg.ApplicationAddress = relayRequest.Meta.SessionHeader.ApplicationAddress
-		msg.SessionEndHeight = relayRequest.Meta.SessionHeader.SessionEndBlockHeight
-	}
-
-	// Publish
-	if err := s.publisher.Publish(ctx, msg); err != nil {
-		s.logger.Warn().
-			Err(err).
-			Str(logging.FieldServiceID, serviceID).
-			Str(logging.FieldSupplier, supplierOperatorAddr).
-			Msg("failed to publish gRPC relay")
-		return
-	}
-
-	grpcRelaysPublished.WithLabelValues(serviceID).Inc()
-
-	s.logger.Debug().
-		Str(logging.FieldServiceID, serviceID).
-		Str(logging.FieldSupplier, supplierOperatorAddr).
-		Msg("gRPC relay published")
-}
-
+// Unused - reserved for future gRPC streaming support
 // connectToGRPCBackend establishes a gRPC connection to a backend (for future streaming support).
-func (s *RelayGRPCService) connectToGRPCBackend(backendURL string) (*grpc.ClientConn, error) {
-	// Check cache
-	if conn, ok := s.grpcBackends.Load(backendURL); ok {
-		return conn.(*grpc.ClientConn), nil
-	}
-
-	// Parse URL to determine TLS
-	useTLS := strings.HasPrefix(backendURL, "grpcs://") || strings.HasPrefix(backendURL, "https://")
-
-	// Strip scheme
-	address := backendURL
-	address = strings.TrimPrefix(address, "grpcs://")
-	address = strings.TrimPrefix(address, "grpc://")
-	address = strings.TrimPrefix(address, "https://")
-	address = strings.TrimPrefix(address, "http://")
-
-	var opts []grpc.DialOption
-	if useTLS {
-		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
-			MinVersion: tls.VersionTLS12,
-		})))
-	} else {
-		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-	}
-
-	conn, err := grpc.NewClient(address, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	s.grpcBackends.Store(backendURL, conn)
-	return conn, nil
-}
+// func (s *RelayGRPCService) connectToGRPCBackend(backendURL string) (*grpc.ClientConn, error) {
+// 	// Check cache
+// 	if conn, ok := s.grpcBackends.Load(backendURL); ok {
+// 		return conn.(*grpc.ClientConn), nil
+// 	}
+//
+// 	// Parse URL to determine TLS
+// 	useTLS := strings.HasPrefix(backendURL, "grpcs://") || strings.HasPrefix(backendURL, "https://")
+//
+// 	// Strip scheme
+// 	address := backendURL
+// 	address = strings.TrimPrefix(address, "grpcs://")
+// 	address = strings.TrimPrefix(address, "grpc://")
+// 	address = strings.TrimPrefix(address, "https://")
+// 	address = strings.TrimPrefix(address, "http://")
+//
+// 	var opts []grpc.DialOption
+// 	if useTLS {
+// 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
+// 			MinVersion: tls.VersionTLS12,
+// 		})))
+// 	} else {
+// 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+// 	}
+//
+// 	conn, err := grpc.NewClient(address, opts...)
+// 	if err != nil {
+// 		return nil, err
+// 	}
+//
+// 	s.grpcBackends.Store(backendURL, conn)
+// 	return conn, nil
+// }
 
 // Close closes all backend connections.
 func (s *RelayGRPCService) Close() error {

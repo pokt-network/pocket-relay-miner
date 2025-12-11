@@ -28,10 +28,10 @@ const (
 	supplierCacheType = "supplier"
 
 	// Lock key prefix for distributed locking during L3 query
-	supplierLockPrefix = "ha:cache:lock:supplier:"
+	// supplierLockPrefix = "ha:cache:lock:supplier:"
 
 	// Default TTL for supplier cache (5 minutes)
-	supplierCacheTTL = 5 * time.Minute
+	// supplierCacheTTL = 5 * time.Minute
 )
 
 // SupplierState represents the cached state of a supplier.
@@ -102,7 +102,7 @@ type SupplierCache struct {
 	failOpen  bool
 
 	// L1: In-memory cache (xsync for lock-free performance)
-	localCache *xsync.MapOf[string, *SupplierState]
+	localCache *xsync.Map[string, *SupplierState]
 
 	// Pub/sub
 	pubsub *redis.PubSub
@@ -143,7 +143,7 @@ func NewSupplierCache(
 		redis:      redisClient,
 		keyPrefix:  keyPrefix,
 		failOpen:   config.FailOpen,
-		localCache: xsync.NewMapOf[string, *SupplierState](),
+		localCache: xsync.NewMap[string, *SupplierState](),
 	}
 }
 
@@ -366,7 +366,7 @@ func (c *SupplierCache) Close() error {
 	c.wg.Wait()
 
 	if c.pubsub != nil {
-		c.pubsub.Close()
+		_ = c.pubsub.Close()
 	}
 
 	c.logger.Info().Msg("supplier cache stopped")

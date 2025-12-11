@@ -131,7 +131,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		if err := obsServer.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start observability server: %w", err)
 		}
-		defer obsServer.Stop()
+		defer func() { _ = obsServer.Stop() }()
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
 	}
 
@@ -141,7 +141,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("failed to parse Redis URL: %w", err)
 	}
 	redisClient := redis.NewClient(redisOpts)
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	// Test Redis connection
 	if err := redisClient.Ping(ctx).Err(); err != nil {
@@ -175,7 +175,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := keyManager.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start key manager: %w", err)
 	}
-	defer keyManager.Close()
+	defer func() { _ = keyManager.Close() }()
 
 	// Check if any keys were loaded
 	suppliers := keyManager.ListSuppliers()
@@ -221,7 +221,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to create query clients: %w", err)
 	}
-	defer queryClients.Close()
+	defer func() { _ = queryClients.Close() }()
 	logger.Info().Str("grpc_endpoint", config.PocketNode.QueryNodeGRPCUrl).Msg("query clients initialized")
 
 	// Create proof requirement checker for probabilistic proof selection
@@ -251,7 +251,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := blockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start block subscriber: %w", err)
 	}
-	defer blockSubscriber.Close()
+	defer func() { blockSubscriber.Close() }()
 	logger.Info().Msg("block subscriber started (WebSocket)")
 
 	// Create Redis block subscriber for distributing block events across instances
@@ -264,7 +264,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := redisBlockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start redis block subscriber: %w", err)
 	}
-	defer redisBlockSubscriber.Close()
+	defer func() { _ = redisBlockSubscriber.Close() }()
 	logger.Info().Msg("redis block subscriber started")
 
 	// Generate unique instance ID for global leader election
@@ -280,7 +280,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := globalLeader.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start global leader elector: %w", err)
 	}
-	defer globalLeader.Close()
+	defer func() { globalLeader.Close() }()
 	logger.Info().
 		Str("instance_id", instanceID).
 		Msg("global leader elector started")
@@ -294,7 +294,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := sharedParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start shared params cache: %w", err)
 	}
-	defer sharedParamsCache.Close()
+	defer func() { _ = sharedParamsCache.Close() }()
 
 	// Create session params cache
 	sessionParamsCache := cache.NewSessionParamsCache(
@@ -305,7 +305,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := sessionParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start session params cache: %w", err)
 	}
-	defer sessionParamsCache.Close()
+	defer func() { _ = sessionParamsCache.Close() }()
 
 	// Create proof params cache
 	proofParamsCache := cache.NewProofParamsCache(
@@ -316,7 +316,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := proofParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start proof params cache: %w", err)
 	}
-	defer proofParamsCache.Close()
+	defer func() { _ = proofParamsCache.Close() }()
 
 	// Create application cache
 	applicationCache := cache.NewApplicationCache(
@@ -327,7 +327,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := applicationCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start application cache: %w", err)
 	}
-	defer applicationCache.Close()
+	defer func() { _ = applicationCache.Close() }()
 
 	// Create service cache
 	serviceCache := cache.NewServiceCache(
@@ -338,13 +338,13 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := serviceCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start service cache: %w", err)
 	}
-	defer serviceCache.Close()
+	defer func() { _ = serviceCache.Close() }()
 
 	// Start supplier cache for pub/sub subscription
 	if err := supplierCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start supplier cache: %w", err)
 	}
-	defer supplierCache.Close()
+	defer func() { _ = supplierCache.Close() }()
 
 	// Create session cache (placeholder for now - will be implemented separately)
 	var sessionCache cache.SessionCache
@@ -371,7 +371,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := cacheOrchestrator.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start cache orchestrator: %w", err)
 	}
-	defer cacheOrchestrator.Close()
+	defer func() { _ = cacheOrchestrator.Close() }()
 	logger.Info().Msg("cache orchestrator started (parallel refresh with 6 workers)")
 
 	// Fetch chain ID from the node
@@ -396,7 +396,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err != nil {
 		return fmt.Errorf("failed to create transaction client: %w", err)
 	}
-	defer txClient.Close()
+	defer func() { _ = txClient.Close() }()
 	logger.Info().Str("grpc_endpoint", config.PocketNode.QueryNodeGRPCUrl).Msg("transaction client initialized")
 
 	// Create supplier manager
@@ -472,7 +472,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	if err := supplierManager.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start supplier manager: %w", err)
 	}
-	defer supplierManager.Close()
+	defer func() { _ = supplierManager.Close() }()
 
 	logger.Info().
 		Int("suppliers", len(supplierManager.ListSuppliers())).

@@ -1,10 +1,13 @@
-.PHONY: build test clean install help docker-build docker-push
+.PHONY: build test clean install help docker-build docker-push build-backend proto-backend
 
 # Binary name
 BINARY_NAME=pocket-relay-miner
 
 # Build directory
 BUILD_DIR=bin
+
+# Backend server directory
+BACKEND_DIR=tilt/backend-server
 
 # Docker image configuration
 DOCKER_IMAGE?=ghcr.io/pokt-network/pocket-relay-miner:rc
@@ -50,6 +53,8 @@ clean: ## Clean build artifacts
 	@rm -f $(BINARY_NAME)
 	@rm -rf $(BUILD_DIR)
 	@rm -f coverage.out coverage.html
+	@rm -f $(BACKEND_DIR)/backend
+	@rm -f $(BACKEND_DIR)/pb/*.pb.go
 	@echo "Clean complete"
 
 tidy: ## Run go mod tidy
@@ -73,5 +78,15 @@ docker-push: ## Push Docker image to registry
 	@echo "Pushing Docker image: $(DOCKER_IMAGE)..."
 	@docker push $(DOCKER_IMAGE)
 	@echo "Docker push complete: $(DOCKER_IMAGE)"
+
+proto-backend: ## Generate protobuf code for backend server
+	@echo "Generating protobuf code for backend server..."
+	@cd $(BACKEND_DIR) && protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative pb/demo.proto
+	@echo "Protobuf generation complete"
+
+build-backend: proto-backend ## Build the backend test server
+	@echo "Building backend test server..."
+	@cd $(BACKEND_DIR) && go mod tidy && go build -o backend main.go
+	@echo "Backend build complete: $(BACKEND_DIR)/backend"
 
 .DEFAULT_GOAL := help

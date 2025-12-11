@@ -33,7 +33,7 @@ This shows the number of nodes and sample keys.`,
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			return inspectSMST(ctx, client, sessionID, limit)
 		},
@@ -41,7 +41,7 @@ This shows the number of nodes and sample keys.`,
 
 	cmd.Flags().StringVar(&sessionID, "session", "", "Session ID (required)")
 	cmd.Flags().Int64Var(&limit, "limit", 10, "Number of sample nodes to display")
-	cmd.MarkFlagRequired("session")
+	_ = cmd.MarkFlagRequired("session")
 
 	return cmd
 }
@@ -104,7 +104,7 @@ func inspectSMST(ctx context.Context, client *redisClient, sessionID string, lim
 	// Display sample nodes
 	fmt.Printf("Sample Nodes (showing %d):\n\n", len(sampleKeys))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "NODE KEY (HEX)\tVALUE SIZE\n")
+	_, _ = fmt.Fprintf(w, "NODE KEY (HEX)\tVALUE SIZE\n")
 
 	for i, keyHex := range sampleKeys {
 		var valueSize int
@@ -117,10 +117,10 @@ func inspectSMST(ctx context.Context, client *redisClient, sessionID string, lim
 				valueSize = len(sampleValues[i])
 			}
 		}
-		fmt.Fprintf(w, "%s\t%d bytes\n", keyHex, valueSize)
+		_, _ = fmt.Fprintf(w, "%s\t%d bytes\n", keyHex, valueSize)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 
 	// Offer to delete
 	fmt.Printf("\nTo delete this SMST tree, use: redis-debug flush --pattern 'ha:smst:%s:*'\n", sessionID)

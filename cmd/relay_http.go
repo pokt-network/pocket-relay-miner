@@ -101,9 +101,9 @@ func runHTTPDiagnostic(ctx context.Context, logger logging.Logger, client *relay
 
 // relayRequestCache holds the current relay request with thread-safe access.
 type relayRequestCache struct {
-	mu             sync.RWMutex
-	relayRequestBz []byte
-	session        *sessiontypes.Session
+	mu               sync.RWMutex
+	relayRequestBz   []byte
+	session          *sessiontypes.Session
 	sessionEndHeight int64
 }
 
@@ -165,7 +165,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	if err != nil {
 		return fmt.Errorf("failed to create block subscriber: %w", err)
 	}
-	defer blockSubscriber.Close()
+	defer func() { blockSubscriber.Close() }()
 
 	if err := blockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start block subscriber: %w", err)
@@ -354,7 +354,7 @@ func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {

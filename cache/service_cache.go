@@ -45,7 +45,7 @@ type serviceCache struct {
 	queryClient ServiceQueryClient
 
 	// L1: In-memory cache (xsync for lock-free performance)
-	localCache *xsync.MapOf[string, *sharedtypes.Service]
+	localCache *xsync.Map[string, *sharedtypes.Service]
 
 	// Pub/sub
 	pubsub *redis.PubSub
@@ -75,7 +75,7 @@ func NewServiceCache(
 		logger:      logging.ForComponent(logger, logging.ComponentQueryService),
 		redisClient: redisClient,
 		queryClient: queryClient,
-		localCache:  xsync.NewMapOf[string, *sharedtypes.Service](),
+		localCache:  xsync.NewMap[string, *sharedtypes.Service](),
 	}
 }
 
@@ -107,7 +107,7 @@ func (c *serviceCache) Close() error {
 	c.wg.Wait()
 
 	if c.pubsub != nil {
-		c.pubsub.Close()
+		_ = c.pubsub.Close()
 	}
 
 	c.logger.Info().Msg("service cache stopped")

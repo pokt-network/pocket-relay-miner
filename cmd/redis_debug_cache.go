@@ -11,10 +11,10 @@ import (
 
 func redisDebugCacheCmd() *cobra.Command {
 	var (
-		cacheType   string
-		key         string
-		invalidate  bool
-		listAll     bool
+		cacheType  string
+		key        string
+		invalidate bool
+		listAll    bool
 	)
 
 	cmd := &cobra.Command{
@@ -40,7 +40,7 @@ Cache tracking sets:
 			if err != nil {
 				return err
 			}
-			defer client.Close()
+			defer func() { _ = client.Close() }()
 
 			if invalidate && key != "" {
 				return invalidateCache(ctx, client, cacheType, key)
@@ -62,7 +62,7 @@ Cache tracking sets:
 	cmd.Flags().StringVar(&key, "key", "", "Cache key (address, service ID, etc)")
 	cmd.Flags().BoolVar(&invalidate, "invalidate", false, "Invalidate the cache entry")
 	cmd.Flags().BoolVar(&listAll, "list", false, "List all cached entries")
-	cmd.MarkFlagRequired("type")
+	_ = cmd.MarkFlagRequired("type")
 
 	return cmd
 }
@@ -168,15 +168,15 @@ func listCacheKeys(ctx context.Context, client *redisClient, cacheType string) e
 
 	fmt.Printf("Cache entries for type '%s':\n", cacheType)
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "KEY\tTTL\tSIZE\n")
+	_, _ = fmt.Fprintf(w, "KEY\tTTL\tSIZE\n")
 
 	for _, key := range keys {
 		ttl, _ := client.TTL(ctx, key).Result()
 		size := client.StrLen(ctx, key).Val()
-		fmt.Fprintf(w, "%s\t%v\t%d bytes\n", key, ttl, size)
+		_, _ = fmt.Fprintf(w, "%s\t%v\t%d bytes\n", key, ttl, size)
 	}
 
-	w.Flush()
+	_ = w.Flush()
 	fmt.Printf("\nTotal: %d entries\n", len(keys))
 
 	return nil
