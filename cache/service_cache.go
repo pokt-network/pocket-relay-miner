@@ -116,41 +116,73 @@ func (c *serviceCache) Close() error {
 }
 
 // Get retrieves a service using L1 → L2 → L3 fallback pattern.
-func (c *serviceCache) Get(ctx context.Context, serviceID string) (*sharedtypes.Service, error) {
-	// L1: Check local cache (xsync)
-	if cached, ok := c.localCache.Load(serviceID); ok {
-		cacheHits.WithLabelValues(serviceCacheType, CacheLevelL1).Inc()
-		return cached, nil
-	}
+// If force=true, bypasses L1/L2 cache, queries L3 (chain), stores in L2+L1, and publishes invalidation.
+// This is used by the leader's RefreshEntity() to ensure fresh data on every block.
+func (c *serviceCache) Get(ctx context.Context, serviceID string, force ...bool) (*sharedtypes.Service, error) {
+	start := time.Now()
+	forceRefresh := len(force) > 0 && force[0]
 
-	// L2: Check Redis cache
-	redisKey := serviceCachePrefix + serviceID
-	data, err := c.redisClient.Get(ctx, redisKey).Bytes()
-	if err == nil {
-		var svc sharedtypes.Service
-		if err := proto.Unmarshal(data, &svc); err == nil {
-			// Store in L1 for next time
-			c.localCache.Store(serviceID, &svc)
-			cacheHits.WithLabelValues(serviceCacheType, CacheLevelL2).Inc()
-
+	if !forceRefresh {
+		// L1: Check local cache (xsync)
+		if cached, ok := c.localCache.Load(serviceID); ok {
+			cacheHits.WithLabelValues(serviceCacheType, CacheLevelL1).Inc()
+			cacheGetLatency.WithLabelValues(serviceCacheType, CacheLevelL1).Observe(time.Since(start).Seconds())
 			c.logger.Debug().
 				Str(logging.FieldServiceID, serviceID).
-				Msg("service cache hit (L2)")
+				Msg("service cache hit (L1)")
+			return cached, nil
+		}
 
-			return &svc, nil
-		} else {
-			c.logger.Warn().
-				Err(err).
-				Str(logging.FieldServiceID, serviceID).
-				Msg("failed to unmarshal service from Redis")
+		// L2: Check Redis cache
+		redisKey := serviceCachePrefix + serviceID
+		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+		if err == nil {
+			svc := &sharedtypes.Service{} // CRITICAL FIX: Allocate on heap, not stack
+			if err := proto.Unmarshal(data, svc); err == nil {
+				// Store in L1 for next time
+				c.localCache.Store(serviceID, svc)
+				cacheHits.WithLabelValues(serviceCacheType, CacheLevelL2).Inc()
+				cacheGetLatency.WithLabelValues(serviceCacheType, CacheLevelL2).Observe(time.Since(start).Seconds())
+
+				c.logger.Debug().
+					Str(logging.FieldServiceID, serviceID).
+					Msg("service cache hit (L2) → stored in L1")
+
+				return svc, nil
+			} else {
+				c.logger.Warn().
+					Err(err).
+					Str(logging.FieldServiceID, serviceID).
+					Msg("failed to unmarshal service from Redis")
+			}
 		}
 	}
 
-	// L3: Query chain with distributed lock
-	svc, err := c.queryChainWithLock(ctx, serviceID)
-	if err != nil {
-		cacheMisses.WithLabelValues(serviceCacheType, "l3_error").Inc()
-		return nil, fmt.Errorf("failed to query service %s: %w", serviceID, err)
+	// L3: Query chain (force=true bypasses distributed lock since leader refreshes serially)
+	var svc *sharedtypes.Service
+	var err error
+
+	if forceRefresh {
+		// Leader force refresh: Direct query without lock (refreshes serially via pond workers)
+		chainQueries.WithLabelValues("service").Inc()
+		chainStart := time.Now()
+		svc, err = c.queryClient.GetService(ctx, serviceID)
+		chainQueryLatency.WithLabelValues("service").Observe(time.Since(chainStart).Seconds())
+
+		if err != nil {
+			chainQueryErrors.WithLabelValues("service").Inc()
+			cacheMisses.WithLabelValues(serviceCacheType, "l3_error").Inc()
+			cacheGetLatency.WithLabelValues(serviceCacheType, "l3_error").Observe(time.Since(start).Seconds())
+			return nil, fmt.Errorf("failed to query service %s: %w", serviceID, err)
+		}
+	} else {
+		// Normal lazy load: Use distributed lock to prevent duplicate queries
+		svc, err = c.queryChainWithLock(ctx, serviceID)
+		if err != nil {
+			cacheMisses.WithLabelValues(serviceCacheType, "l3_error").Inc()
+			cacheGetLatency.WithLabelValues(serviceCacheType, "l3_error").Observe(time.Since(start).Seconds())
+			return nil, fmt.Errorf("failed to query service %s: %w", serviceID, err)
+		}
 	}
 
 	// Store in L2 and L1
@@ -159,12 +191,31 @@ func (c *serviceCache) Get(ctx context.Context, serviceID string) (*sharedtypes.
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
 			Msg("failed to cache service after L3 query")
+	} else {
+		if forceRefresh {
+			c.logger.Debug().
+				Str(logging.FieldServiceID, serviceID).
+				Msg("service force refreshed from chain → stored in L1 and L2")
+		} else {
+			c.logger.Debug().
+				Str(logging.FieldServiceID, serviceID).
+				Msg("service cache miss (L3) → stored in L1 and L2")
+		}
 	}
 
-	cacheMisses.WithLabelValues(serviceCacheType, "l3").Inc()
-	c.logger.Debug().
-		Str(logging.FieldServiceID, serviceID).
-		Msg("service cache miss (L3)")
+	// Publish invalidation event if force refresh (leader only)
+	if forceRefresh {
+		payload := fmt.Sprintf(`{"service_id": "%s"}`, serviceID)
+		if err := PublishInvalidation(ctx, c.redisClient, c.logger, serviceCacheType, payload); err != nil {
+			c.logger.Warn().
+				Err(err).
+				Str(logging.FieldServiceID, serviceID).
+				Msg("failed to publish invalidation event after force refresh")
+		}
+	}
+
+	cacheMisses.WithLabelValues(serviceCacheType, CacheLevelL3).Inc()
+	cacheGetLatency.WithLabelValues(serviceCacheType, CacheLevelL3).Observe(time.Since(start).Seconds())
 
 	return svc, nil
 }
@@ -232,8 +283,17 @@ func (c *serviceCache) Invalidate(ctx context.Context, serviceID string) error {
 func (c *serviceCache) Refresh(ctx context.Context) error {
 	// This method is intentionally empty because services are refreshed
 	// individually by the CacheOrchestrator based on the list of known services.
-	// The orchestrator calls Get() for each known service, which triggers L3 queries if needed.
+	// The orchestrator calls RefreshEntity() for each known service.
 	return nil
+}
+
+// RefreshEntity force-refreshes a single service from the chain (L3),
+// stores in L2+L1, and publishes invalidation event to notify followers.
+// Called by leader's CacheOrchestrator on each block.
+func (c *serviceCache) RefreshEntity(ctx context.Context, serviceID string) error {
+	// Force refresh: bypass L1/L2, query L3, store in L2+L1, publish invalidation
+	_, err := c.Get(ctx, serviceID, true)
+	return err
 }
 
 // InvalidateAll clears the entire cache (both L1 and L2).
@@ -272,41 +332,27 @@ func (c *serviceCache) InvalidateAll(ctx context.Context) error {
 	return nil
 }
 
-// WarmupFromRedis populates L1 cache from Redis on startup.
-func (c *serviceCache) WarmupFromRedis(ctx context.Context, knownServiceIDs []string) error {
-	// warmup function
-	c.logger.Info().Int("count", len(knownServiceIDs)).Msg("warming up service cache from Redis")
-
-	var wg sync.WaitGroup
-	for _, serviceID := range knownServiceIDs {
-		wg.Add(1)
-		go func(id string) {
-			defer wg.Done()
-
-			// Load from Redis (L2) into local cache (L1)
-			redisKey := serviceCachePrefix + id
-			data, err := c.redisClient.Get(ctx, redisKey).Bytes()
-			if err != nil {
-				// Key doesn't exist in Redis, skip
-				return
-			}
-
-			var svc sharedtypes.Service
-			if err := proto.Unmarshal(data, &svc); err != nil {
-				c.logger.Warn().
-					Err(err).
-					Str(logging.FieldServiceID, id).
-					Msg("failed to unmarshal service during warmup")
-				return
-			}
-
-			c.localCache.Store(id, &svc)
-		}(serviceID)
+// warmupSingleService loads a single service from Redis (L2) into L1 cache.
+// This is called by the orchestrator's pond worker pool for parallel warmup.
+func (c *serviceCache) warmupSingleService(ctx context.Context, id string) error {
+	// Load from Redis (L2) into local cache (L1)
+	redisKey := serviceCachePrefix + id
+	data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+	if err != nil {
+		// Key doesn't exist in Redis, skip
+		return nil
 	}
 
-	wg.Wait()
-	c.logger.Info().Msg("service cache warmup complete")
+	svc := &sharedtypes.Service{}
+	if err := proto.Unmarshal(data, svc); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Str(logging.FieldServiceID, id).
+			Msg("failed to unmarshal service during warmup")
+		return err
+	}
 
+	c.localCache.Store(id, svc)
 	return nil
 }
 
@@ -324,30 +370,36 @@ func (c *serviceCache) queryChainWithLock(ctx context.Context, serviceID string)
 
 	if !locked {
 		// Another instance is querying, wait and retry L2
+		lockAcquisitions.WithLabelValues(serviceCacheType, "contended").Inc()
 		c.logger.Debug().
 			Str(logging.FieldServiceID, serviceID).
 			Msg("another instance is querying service, waiting")
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 
 		// Retry L2 after waiting
 		redisKey := serviceCachePrefix + serviceID
 		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 		if err == nil {
-			var svc sharedtypes.Service
-			if err := proto.Unmarshal(data, &svc); err == nil {
-				c.localCache.Store(serviceID, &svc)
+			svc := &sharedtypes.Service{} // CRITICAL FIX: Allocate on heap, not stack
+			if err := proto.Unmarshal(data, svc); err == nil {
+				c.localCache.Store(serviceID, svc)
 				cacheHits.WithLabelValues(serviceCacheType, CacheLevelL2Retry).Inc()
-				return &svc, nil
+				return svc, nil
 			}
 		}
 
 		// If still not in Redis, query chain anyway
+	} else {
+		lockAcquisitions.WithLabelValues(serviceCacheType, "acquired").Inc()
 	}
 
 	// Query chain
 	chainQueries.WithLabelValues("service").Inc()
+	chainStart := time.Now()
 
 	svc, err := c.queryClient.GetService(ctx, serviceID)
+	chainQueryLatency.WithLabelValues("service").Observe(time.Since(chainStart).Seconds())
+
 	if err != nil {
 		chainQueryErrors.WithLabelValues("service").Inc()
 		return nil, err
@@ -382,12 +434,40 @@ func (c *serviceCache) handleInvalidation(ctx context.Context, payload string) e
 		return err
 	}
 
-	// Remove from L1 (local cache)
+	// Clear L1 (local cache) for this service
 	if event.ServiceID != "" {
 		c.localCache.Delete(event.ServiceID)
 	}
 
 	cacheInvalidations.WithLabelValues(serviceCacheType, SourcePubSub).Inc()
+
+	// Eagerly reload from L2 (Redis) to avoid cold cache on next relay
+	// Services are needed for relay metering (compute units, relay difficulty)
+	// so first relay after invalidation should not experience L2/L3 latency
+	if event.ServiceID != "" {
+		redisKey := serviceCachePrefix + event.ServiceID
+		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+		if err == nil {
+			svc := &sharedtypes.Service{}
+			if err := proto.Unmarshal(data, svc); err == nil {
+				// Warm L1 cache immediately
+				c.localCache.Store(event.ServiceID, svc)
+				c.logger.Debug().
+					Str(logging.FieldServiceID, event.ServiceID).
+					Msg("eagerly reloaded service from L2 into L1")
+			} else {
+				c.logger.Warn().
+					Err(err).
+					Str(logging.FieldServiceID, event.ServiceID).
+					Msg("failed to unmarshal service during eager reload")
+			}
+		} else if err != redis.Nil {
+			c.logger.Warn().
+				Err(err).
+				Str(logging.FieldServiceID, event.ServiceID).
+				Msg("failed to eagerly reload service from L2")
+		}
+	}
 
 	return nil
 }

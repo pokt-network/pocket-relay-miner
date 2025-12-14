@@ -104,20 +104,20 @@ type ConsumerConfig struct {
 // PublisherConfig contains configuration for a MinedRelayPublisher.
 type PublisherConfig struct {
 	// StreamPrefix is the prefix for Redis stream names.
-	// Full stream name: {StreamPrefix}:{SupplierOperatorAddress}
+	// Full stream name: {StreamPrefix}:{SupplierOperatorAddress}:{SessionID}
+	// Streams use TTL-based expiration instead of MAXLEN trimming.
 	StreamPrefix string
-
-	// MaxLen is the maximum number of messages in each stream.
-	// Older messages are trimmed when this limit is exceeded.
-	// Set to 0 for no limit (not recommended in production).
-	MaxLen int64
-
-	// ApproxMaxLen uses approximate trimming for better performance.
-	// Recommended for high-throughput scenarios.
-	ApproxMaxLen bool
 }
 
-// StreamName returns the full Redis stream name for a supplier.
-func StreamName(prefix, supplierOperatorAddress string) string {
-	return prefix + ":" + supplierOperatorAddress
+// StreamName returns the full Redis stream name for a session.
+// Format: {prefix}:{supplierAddr}:{sessionID}
+// This allows per-session streams with automatic TTL cleanup.
+func StreamName(prefix, supplierOperatorAddress, sessionID string) string {
+	return prefix + ":" + supplierOperatorAddress + ":" + sessionID
+}
+
+// StreamPattern returns a Redis key pattern for discovering all streams for a supplier.
+// Use with SCAN to find all session streams for a supplier.
+func StreamPattern(prefix, supplierOperatorAddress string) string {
+	return prefix + ":" + supplierOperatorAddress + ":*"
 }

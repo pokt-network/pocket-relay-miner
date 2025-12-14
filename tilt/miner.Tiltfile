@@ -87,11 +87,11 @@ spec:
           mountPath: /keys
         resources:
           requests:
-            cpu: "200m"
-            memory: "256Mi"
+            cpu: "500m"
+            memory: "512Mi"
           limits:
-            cpu: "1000m"
-            memory: "1Gi"
+            cpu: "4000m"  # 4 cores - miner is the core component doing SMST, claims, proofs
+            memory: "2Gi"
         readinessProbe:
           httpGet:
             path: /health
@@ -133,12 +133,12 @@ spec:
 
     k8s_resource(
         "miner",
-        labels=["miners"],
+        labels=["relay-miner"],
         resource_deps=["redis", "validator"],
         objects=["miner-config:configmap", "supplier-keys:secret"],
         port_forwards=[
             "{}:9092".format(config["miner"]["metrics_base_port"]),
-            "{}:6060".format(config["miner"]["pprof_port"]),
+            "{}:{}".format(config["miner"]["pprof_port"], config["miner"]["pprof_port"]),
         ]
     )
 
@@ -182,6 +182,8 @@ def generate_miner_config(config):
         "metrics": {
             "enabled": True,
             "addr": "0.0.0.0:9092",
+            "pprof_enabled": True,
+            "pprof_addr": "0.0.0.0:6065"
         },
         "logging": {
             "level": miner_cfg.get("logging", {}).get("level", "info"),
@@ -194,6 +196,23 @@ def generate_miner_config(config):
         "session_ttl": miner_cfg.get("session_ttl", "24h"),
         "wal_max_len": miner_cfg.get("wal_max_len", 100000),
         "cache_refresh_workers": miner_cfg.get("cache_refresh_workers", 6),
+        # New features
+        "block_time_seconds": miner_cfg.get("block_time_seconds", 10),
+        "block_health_monitor": {
+            "enabled": miner_cfg.get("block_health_monitor", {}).get("enabled", True),
+            "slowness_threshold": miner_cfg.get("block_health_monitor", {}).get("slowness_threshold", 1.5),
+        },
+        "balance_monitor": {
+            "enabled": miner_cfg.get("balance_monitor", {}).get("enabled", True),
+            "check_interval_seconds": miner_cfg.get("balance_monitor", {}).get("check_interval_seconds", 300),
+            "balance_threshold_upokt": miner_cfg.get("balance_monitor", {}).get("balance_threshold_upokt", 1000),
+            "stake_warning_ratio": miner_cfg.get("balance_monitor", {}).get("stake_warning_ratio", 1.2),
+        },
+        "session_lifecycle": {
+            "window_start_buffer_blocks": miner_cfg.get("session_lifecycle", {}).get("window_start_buffer_blocks", 10),
+            "submission_buffer_blocks": miner_cfg.get("session_lifecycle", {}).get("submission_buffer_blocks", 2),
+            "stream_discovery_interval_seconds": miner_cfg.get("session_lifecycle", {}).get("stream_discovery_interval_seconds", 10),
+        },
     }
 
 def format_port_forward(local_port, container_port):

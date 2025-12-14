@@ -12,170 +12,177 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
-var (
-	// Runtime metrics
-	runtimeGoroutines = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "goroutines",
-			Help:      "Number of goroutines",
-		},
-	)
+// runtimeMetrics holds all runtime metric collectors
+type runtimeMetrics struct {
+	goroutines    prometheus.Gauge
+	threads       prometheus.Gauge
+	heapAlloc     prometheus.Gauge
+	heapSys       prometheus.Gauge
+	heapIdle      prometheus.Gauge
+	heapInuse     prometheus.Gauge
+	heapReleased  prometheus.Gauge
+	heapObjects   prometheus.Gauge
+	stackInuse    prometheus.Gauge
+	stackSys      prometheus.Gauge
+	mallocs       prometheus.Counter
+	frees         prometheus.Counter
+	gcPauseTotal  prometheus.Counter
+	numGC         prometheus.Counter
+	numForcedGC   prometheus.Counter
+	lastGC        prometheus.Gauge
+	nextGC        prometheus.Gauge
+	gcCPUFraction prometheus.Gauge
+}
 
-	runtimeThreads = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "threads",
-			Help:      "Number of OS threads",
-		},
-	)
-
-	runtimeHeapAlloc = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "heap_alloc_bytes",
-			Help:      "Bytes of allocated heap objects",
-		},
-	)
-
-	runtimeHeapSys = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "heap_sys_bytes",
-			Help:      "Bytes of heap memory obtained from the OS",
-		},
-	)
-
-	runtimeHeapIdle = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "heap_idle_bytes",
-			Help:      "Bytes in idle (unused) spans",
-		},
-	)
-
-	runtimeHeapInuse = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "heap_inuse_bytes",
-			Help:      "Bytes in in-use spans",
-		},
-	)
-
-	runtimeHeapReleased = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "heap_released_bytes",
-			Help:      "Bytes of physical memory returned to the OS",
-		},
-	)
-
-	runtimeHeapObjects = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "heap_objects",
-			Help:      "Number of allocated heap objects",
-		},
-	)
-
-	runtimeStackInuse = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "stack_inuse_bytes",
-			Help:      "Bytes in stack spans",
-		},
-	)
-
-	runtimeStackSys = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "stack_sys_bytes",
-			Help:      "Bytes of stack memory obtained from the OS",
-		},
-	)
-
-	runtimeMallocs = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "mallocs_total",
-			Help:      "Cumulative count of heap objects allocated",
-		},
-	)
-
-	runtimeFrees = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "frees_total",
-			Help:      "Cumulative count of heap objects freed",
-		},
-	)
-
-	runtimeGCPauseTotal = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "gc_pause_total_nanoseconds",
-			Help:      "Cumulative nanoseconds in GC stop-the-world pauses",
-		},
-	)
-
-	runtimeNumGC = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "gc_completed_total",
-			Help:      "Number of completed GC cycles",
-		},
-	)
-
-	runtimeNumForcedGC = promauto.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "gc_forced_total",
-			Help:      "Number of GC cycles forced by the application",
-		},
-	)
-
-	runtimeLastGC = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "last_gc_timestamp_seconds",
-			Help:      "Timestamp of last GC",
-		},
-	)
-
-	runtimeNextGC = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "next_gc_heap_size_bytes",
-			Help:      "Target heap size of the next GC cycle",
-		},
-	)
-
-	runtimeGCCPUFraction = promauto.NewGauge(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "runtime",
-			Name:      "gc_cpu_fraction",
-			Help:      "Fraction of CPU time used by GC",
-		},
-	)
-)
+// newRuntimeMetrics creates runtime metrics using the given factory
+func newRuntimeMetrics(factory promauto.Factory) *runtimeMetrics {
+	return &runtimeMetrics{
+		goroutines: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "goroutines",
+				Help:      "Number of goroutines",
+			},
+		),
+		threads: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "threads",
+				Help:      "Number of OS threads",
+			},
+		),
+		heapAlloc: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "heap_alloc_bytes",
+				Help:      "Bytes of allocated heap objects",
+			},
+		),
+		heapSys: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "heap_sys_bytes",
+				Help:      "Bytes of heap memory obtained from the OS",
+			},
+		),
+		heapIdle: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "heap_idle_bytes",
+				Help:      "Bytes in idle (unused) spans",
+			},
+		),
+		heapInuse: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "heap_inuse_bytes",
+				Help:      "Bytes in in-use spans",
+			},
+		),
+		heapReleased: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "heap_released_bytes",
+				Help:      "Bytes of physical memory returned to the OS",
+			},
+		),
+		heapObjects: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "heap_objects",
+				Help:      "Number of allocated heap objects",
+			},
+		),
+		stackInuse: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "stack_inuse_bytes",
+				Help:      "Bytes in stack spans",
+			},
+		),
+		stackSys: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "stack_sys_bytes",
+				Help:      "Bytes of stack memory obtained from the OS",
+			},
+		),
+		mallocs: factory.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "mallocs_total",
+				Help:      "Cumulative count of heap objects allocated",
+			},
+		),
+		frees: factory.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "frees_total",
+				Help:      "Cumulative count of heap objects freed",
+			},
+		),
+		gcPauseTotal: factory.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "gc_pause_total_nanoseconds",
+				Help:      "Cumulative nanoseconds in GC stop-the-world pauses",
+			},
+		),
+		numGC: factory.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "gc_completed_total",
+				Help:      "Number of completed GC cycles",
+			},
+		),
+		numForcedGC: factory.NewCounter(
+			prometheus.CounterOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "gc_forced_total",
+				Help:      "Number of GC cycles forced by the application",
+			},
+		),
+		lastGC: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "last_gc_timestamp_seconds",
+				Help:      "Timestamp of last GC",
+			},
+		),
+		nextGC: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "next_gc_heap_size_bytes",
+				Help:      "Target heap size of the next GC cycle",
+			},
+		),
+		gcCPUFraction: factory.NewGauge(
+			prometheus.GaugeOpts{
+				Namespace: metricsNamespace,
+				Subsystem: "runtime",
+				Name:      "gc_cpu_fraction",
+				Help:      "Fraction of CPU time used by GC",
+			},
+		),
+	}
+}
 
 // RuntimeMetricsCollectorConfig configures the runtime metrics collector.
 type RuntimeMetricsCollectorConfig struct {
@@ -192,8 +199,9 @@ func DefaultRuntimeMetricsCollectorConfig() RuntimeMetricsCollectorConfig {
 
 // RuntimeMetricsCollector periodically collects Go runtime metrics.
 type RuntimeMetricsCollector struct {
-	logger logging.Logger
-	config RuntimeMetricsCollectorConfig
+	logger  logging.Logger
+	config  RuntimeMetricsCollectorConfig
+	metrics *runtimeMetrics
 
 	// Previous values for delta calculations
 	lastMallocs      uint64
@@ -214,14 +222,16 @@ type RuntimeMetricsCollector struct {
 func NewRuntimeMetricsCollector(
 	logger logging.Logger,
 	config RuntimeMetricsCollectorConfig,
+	factory promauto.Factory,
 ) *RuntimeMetricsCollector {
 	if config.CollectionInterval == 0 {
 		config.CollectionInterval = 10 * time.Second
 	}
 
 	return &RuntimeMetricsCollector{
-		logger: logging.ForComponent(logger, logging.ComponentRuntimeMetrics),
-		config: config,
+		logger:  logging.ForComponent(logger, logging.ComponentRuntimeMetrics),
+		config:  config,
+		metrics: newRuntimeMetrics(factory),
 	}
 }
 
@@ -294,48 +304,48 @@ func (c *RuntimeMetricsCollector) collect() {
 	runtime.ReadMemStats(&memStats)
 
 	// Goroutines and threads
-	runtimeGoroutines.Set(float64(runtime.NumGoroutine()))
-	runtimeThreads.Set(float64(runtime.GOMAXPROCS(0)))
+	c.metrics.goroutines.Set(float64(runtime.NumGoroutine()))
+	c.metrics.threads.Set(float64(runtime.GOMAXPROCS(0)))
 
 	// Heap metrics
-	runtimeHeapAlloc.Set(float64(memStats.HeapAlloc))
-	runtimeHeapSys.Set(float64(memStats.HeapSys))
-	runtimeHeapIdle.Set(float64(memStats.HeapIdle))
-	runtimeHeapInuse.Set(float64(memStats.HeapInuse))
-	runtimeHeapReleased.Set(float64(memStats.HeapReleased))
-	runtimeHeapObjects.Set(float64(memStats.HeapObjects))
+	c.metrics.heapAlloc.Set(float64(memStats.HeapAlloc))
+	c.metrics.heapSys.Set(float64(memStats.HeapSys))
+	c.metrics.heapIdle.Set(float64(memStats.HeapIdle))
+	c.metrics.heapInuse.Set(float64(memStats.HeapInuse))
+	c.metrics.heapReleased.Set(float64(memStats.HeapReleased))
+	c.metrics.heapObjects.Set(float64(memStats.HeapObjects))
 
 	// Stack metrics
-	runtimeStackInuse.Set(float64(memStats.StackInuse))
-	runtimeStackSys.Set(float64(memStats.StackSys))
+	c.metrics.stackInuse.Set(float64(memStats.StackInuse))
+	c.metrics.stackSys.Set(float64(memStats.StackSys))
 
 	// Allocation deltas (as counters)
 	if memStats.Mallocs > c.lastMallocs {
-		runtimeMallocs.Add(float64(memStats.Mallocs - c.lastMallocs))
+		c.metrics.mallocs.Add(float64(memStats.Mallocs - c.lastMallocs))
 		c.lastMallocs = memStats.Mallocs
 	}
 	if memStats.Frees > c.lastFrees {
-		runtimeFrees.Add(float64(memStats.Frees - c.lastFrees))
+		c.metrics.frees.Add(float64(memStats.Frees - c.lastFrees))
 		c.lastFrees = memStats.Frees
 	}
 
 	// GC metrics
 	if memStats.PauseTotalNs > c.lastGCPauseTotal {
-		runtimeGCPauseTotal.Add(float64(memStats.PauseTotalNs - c.lastGCPauseTotal))
+		c.metrics.gcPauseTotal.Add(float64(memStats.PauseTotalNs - c.lastGCPauseTotal))
 		c.lastGCPauseTotal = memStats.PauseTotalNs
 	}
 	if memStats.NumGC > c.lastNumGC {
-		runtimeNumGC.Add(float64(memStats.NumGC - c.lastNumGC))
+		c.metrics.numGC.Add(float64(memStats.NumGC - c.lastNumGC))
 		c.lastNumGC = memStats.NumGC
 	}
 	if memStats.NumForcedGC > c.lastNumForcedGC {
-		runtimeNumForcedGC.Add(float64(memStats.NumForcedGC - c.lastNumForcedGC))
+		c.metrics.numForcedGC.Add(float64(memStats.NumForcedGC - c.lastNumForcedGC))
 		c.lastNumForcedGC = memStats.NumForcedGC
 	}
 
-	runtimeLastGC.Set(float64(memStats.LastGC) / 1e9)
-	runtimeNextGC.Set(float64(memStats.NextGC))
-	runtimeGCCPUFraction.Set(memStats.GCCPUFraction)
+	c.metrics.lastGC.Set(float64(memStats.LastGC) / 1e9)
+	c.metrics.nextGC.Set(float64(memStats.NextGC))
+	c.metrics.gcCPUFraction.Set(memStats.GCCPUFraction)
 }
 
 // CollectNow triggers an immediate collection of runtime metrics.

@@ -86,11 +86,11 @@ spec:
           mountPath: /keys
         resources:
           requests:
-            cpu: "200m"
-            memory: "256Mi"
-          limits:
             cpu: "1000m"
-            memory: "1Gi"
+            memory: "512Mi"
+          limits:
+            cpu: "4000m"  # 2 cores - handles relay validation and signing at high RPS
+            memory: "2Gi"
         readinessProbe:
           httpGet:
             path: /ready
@@ -144,14 +144,14 @@ spec:
 
     k8s_resource(
         "relayer",
-        labels=["relayers"],
+        labels=["relay-miner"],
         objects=["relayer-config:configmap"],
         resource_deps=["redis", "validator", "miner"],
         port_forwards=[
             "{}:8080".format(config["relayer"]["base_port"]),
             "{}:9090".format(config["relayer"]["metrics_base_port"]),
             "{}:8081".format(config["relayer"]["health_base_port"]),
-            "{}:6060".format(config["relayer"]["pprof_port"]),
+            "{}:{}".format(config["relayer"]["pprof_port"], config["relayer"]["pprof_port"]),
         ]
     )
 
@@ -181,6 +181,7 @@ def generate_relayer_config(config):
             "query_node_rpc_url": "tcp://validator:26657",
             "query_node_grpc_url": "validator:9090",
             "grpc_insecure": True,  # Disable TLS for local development
+            "use_redis_for_blocks": True,  # Subscribe to Redis pub/sub for block events (HA mode)
         },
         "keys": {
             "keys_file": "/keys/supplier-keys.yaml",
@@ -201,13 +202,15 @@ def generate_relayer_config(config):
                 },
             },
         }),
-        "default_validation_mode": relayer_cfg.get("validation_mode", "optimistic"),
+        "default_validation_mode": relayer_cfg.get("default_validation_mode", "optimistic"),
         "default_request_timeout_seconds": relayer_cfg.get("default_request_timeout_seconds", 30),
         "default_max_body_size_bytes": relayer_cfg.get("default_max_body_size_bytes", 10485760),  # 10MB default
         "grace_period_extra_blocks": relayer_cfg.get("grace_period_extra_blocks", 2),
         "metrics": {
             "enabled": True,
             "addr": "0.0.0.0:9090",
+            "pprof_enabled": True,
+            "pprof_addr": "0.0.0.0:6060"
         },
         "health_check": {
             "enabled": True,

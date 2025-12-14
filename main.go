@@ -28,6 +28,7 @@ with shared state via Redis. This provides:
 	rootCmd.AddCommand(cmd.MinerCmd())
 	rootCmd.AddCommand(cmd.RedisDebugCmd())
 	rootCmd.AddCommand(cmd.RelayCmd())
+	rootCmd.AddCommand(cmd.VersionCmd())
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)

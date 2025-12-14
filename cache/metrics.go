@@ -2,7 +2,8 @@ package cache
 
 import (
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/pokt-network/pocket-relay-miner/observability"
 )
 
 const (
@@ -26,7 +27,7 @@ const (
 
 var (
 	// Cache hit/miss metrics
-	cacheHits = promauto.NewCounterVec(
+	cacheHits = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -36,7 +37,7 @@ var (
 		[]string{"cache_type", "level"}, // level: l1, l2, l2_retry
 	)
 
-	cacheMisses = promauto.NewCounterVec(
+	cacheMisses = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -46,7 +47,7 @@ var (
 		[]string{"cache_type", "level"},
 	)
 
-	cacheInvalidations = promauto.NewCounterVec(
+	cacheInvalidations = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -57,7 +58,7 @@ var (
 	)
 
 	// Chain query metrics
-	chainQueries = promauto.NewCounterVec(
+	chainQueries = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -67,7 +68,7 @@ var (
 		[]string{"query_type"},
 	)
 
-	chainQueryErrors = promauto.NewCounterVec(
+	chainQueryErrors = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -77,20 +78,32 @@ var (
 		[]string{"query_type"},
 	)
 
-	// chainQueryLatency tracks latency of chain queries (for future use)
-	_ = promauto.NewHistogramVec(
+	// chainQueryLatency tracks latency of L3 chain queries
+	chainQueryLatency = observability.SharedFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "chain_query_latency_seconds",
-			Help:      "Latency of chain queries",
-			Buckets:   prometheus.DefBuckets,
+			Help:      "Latency of chain queries (L3 cache misses)",
+			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"query_type"},
 	)
 
+	// cacheGetLatency tracks total cache Get operation latency (all levels)
+	cacheGetLatency = observability.SharedFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "get_latency_seconds",
+			Help:      "Latency of cache Get operations (includes all cache levels)",
+			Buckets:   []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1},
+		},
+		[]string{"cache_type", "level"}, // level indicates which cache level resolved the query
+	)
+
 	// Session cache specific metrics
-	sessionRewardableChecks = promauto.NewCounterVec(
+	sessionRewardableChecks = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -100,7 +113,7 @@ var (
 		[]string{"result"}, // result: rewardable, non_rewardable
 	)
 
-	sessionMarkedNonRewardable = promauto.NewCounterVec(
+	sessionMarkedNonRewardable = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -111,7 +124,7 @@ var (
 	)
 
 	// Block event metrics
-	blockEventsPublished = promauto.NewCounter(
+	blockEventsPublished = observability.SharedFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -120,7 +133,7 @@ var (
 		},
 	)
 
-	blockEventsReceived = promauto.NewCounter(
+	blockEventsReceived = observability.SharedFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -129,7 +142,7 @@ var (
 		},
 	)
 
-	currentBlockHeight = promauto.NewGauge(
+	currentBlockHeight = observability.SharedFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -138,15 +151,15 @@ var (
 		},
 	)
 
-	// lockAcquisitions tracks distributed lock acquisitions (for future use)
-	_ = promauto.NewCounterVec(
+	// lockAcquisitions tracks distributed lock acquisitions during L3 queries
+	lockAcquisitions = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "lock_acquisitions_total",
-			Help:      "Total number of distributed lock acquisitions",
+			Help:      "Total number of distributed lock acquisitions for cache queries",
 		},
-		[]string{"lock_type", "result"}, // result: success, failed
+		[]string{"cache_type", "result"}, // result: acquired, contended
 	)
 
 	// ========================================================================
@@ -155,7 +168,7 @@ var (
 
 	// cacheOrchestratorRefreshes tracks the number of complete refresh cycles.
 	// Each refresh cycle updates all caches in parallel.
-	cacheOrchestratorRefreshes = promauto.NewCounterVec(
+	cacheOrchestratorRefreshes = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -167,7 +180,7 @@ var (
 
 	// cacheOrchestratorRefreshDuration tracks how long each refresh cycle takes.
 	// This includes the time to refresh all caches in parallel.
-	cacheOrchestratorRefreshDuration = promauto.NewHistogram(
+	cacheOrchestratorRefreshDuration = observability.SharedFactory.NewHistogram(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -179,7 +192,7 @@ var (
 
 	// cacheOrchestratorLeaderStatus indicates whether this instance is the global leader.
 	// 1 = leader (performs cache refresh), 0 = follower (only consumes cache).
-	cacheOrchestratorLeaderStatus = promauto.NewGauge(
+	cacheOrchestratorLeaderStatus = observability.SharedFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -188,27 +201,9 @@ var (
 		},
 	)
 
-	// cacheRefreshDuration tracks the duration of individual cache refresh operations.
-	// Each cache type (application, service, params, etc.) is tracked separately.
-	cacheRefreshDuration = promauto.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "refresh_duration_seconds",
-			Help:      "Duration of individual cache refresh operations",
-			Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1.0, 5.0}, // 10ms to 5s
-		},
-		[]string{"cache_type"}, // cache_type: application, service, shared_params, etc.
-	)
-
-	// cacheRefreshErrors tracks refresh errors for each cache type.
-	cacheRefreshErrors = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "refresh_errors_total",
-			Help:      "Total number of cache refresh errors",
-		},
-		[]string{"cache_type"},
-	)
+	// NOTE: Refresh metrics removed - Refresh() now calls Get(force=true) which uses:
+	// - chainQueries: Tracks L3 queries
+	// - chainQueryLatency: Tracks L3 query duration
+	// - chainQueryErrors: Tracks L3 query errors
+	// - cacheGetLatency: Tracks overall Get() latency including L3
 )

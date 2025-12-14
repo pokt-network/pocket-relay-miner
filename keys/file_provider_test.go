@@ -13,7 +13,7 @@ import (
 )
 
 func TestFileKeyProvider_NewWithNonExistentDir(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 	keysDir := filepath.Join(tempDir, "new_keys_dir")
 
@@ -30,7 +30,7 @@ func TestFileKeyProvider_NewWithNonExistentDir(t *testing.T) {
 }
 
 func TestFileKeyProvider_NewWithExistingDir(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
@@ -42,7 +42,7 @@ func TestFileKeyProvider_NewWithExistingDir(t *testing.T) {
 }
 
 func TestFileKeyProvider_NewWithFile(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 	filePath := filepath.Join(tempDir, "not_a_dir")
 
@@ -57,7 +57,7 @@ func TestFileKeyProvider_NewWithFile(t *testing.T) {
 }
 
 func TestFileKeyProvider_LoadKeys_EmptyDir(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
@@ -71,7 +71,7 @@ func TestFileKeyProvider_LoadKeys_EmptyDir(t *testing.T) {
 }
 
 func TestFileKeyProvider_LoadKeys_ValidKeyFile(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	// Create a valid key file
@@ -100,7 +100,7 @@ private_key_hex: 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 }
 
 func TestFileKeyProvider_LoadKeys_InvalidKeyFile(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	// Create an invalid key file (missing fields)
@@ -122,7 +122,7 @@ operator_address: pokt1test
 }
 
 func TestFileKeyProvider_LoadKeys_InvalidHexKey(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	// Create a key file with invalid hex
@@ -145,7 +145,7 @@ private_key_hex: not_valid_hex
 }
 
 func TestFileKeyProvider_LoadKeys_WrongKeyLength(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	// Create a key file with wrong key length (16 bytes instead of 32)
@@ -168,7 +168,7 @@ private_key_hex: 0123456789abcdef0123456789abcdef
 }
 
 func TestFileKeyProvider_LoadKeys_SkipsNonYamlFiles(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	// Create a non-yaml file
@@ -190,7 +190,7 @@ func TestFileKeyProvider_LoadKeys_SkipsNonYamlFiles(t *testing.T) {
 }
 
 func TestFileKeyProvider_SupportsHotReload(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
@@ -201,7 +201,7 @@ func TestFileKeyProvider_SupportsHotReload(t *testing.T) {
 }
 
 func TestFileKeyProvider_Close(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
@@ -217,7 +217,7 @@ func TestFileKeyProvider_Close(t *testing.T) {
 }
 
 func TestFileKeyProvider_MultipleKeyFiles(t *testing.T) {
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())()
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	tempDir := t.TempDir()
 
 	// Create multiple key files

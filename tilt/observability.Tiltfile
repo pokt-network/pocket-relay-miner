@@ -17,6 +17,51 @@ def deploy_prometheus(config):
     """Deploy Prometheus for metrics collection"""
     prom_config = config["observability"]["prometheus"]
 
+    # Prometheus RBAC (ServiceAccount, ClusterRole, ClusterRoleBinding)
+    # Required for kubernetes service discovery to work
+    prometheus_rbac_yaml = """
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+  - apiGroups: [""]
+    resources:
+      - nodes
+      - nodes/proxy
+      - services
+      - endpoints
+      - pods
+    verbs: ["get", "list", "watch"]
+  - apiGroups:
+      - extensions
+    resources:
+      - ingresses
+    verbs: ["get", "list", "watch"]
+  - nonResourceURLs: ["/metrics"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+  - kind: ServiceAccount
+    name: prometheus
+    namespace: default
+"""
+
+    k8s_yaml(blob(prometheus_rbac_yaml))
+
     # Prometheus ConfigMap
     prometheus_config_yaml = """
 apiVersion: v1
@@ -30,40 +75,44 @@ data:
       evaluation_interval: {}
 
     scrape_configs:
-      # Redis metrics (if redis-exporter is deployed)
+      # Redis metrics (redis-exporter on port 9121)
       - job_name: 'redis'
         static_configs:
-          - targets: ['redis:6379']
+          - targets: ['redis-standalone:9121']
 
       # Relayer metrics (port 9090)
       - job_name: 'relayers'
         kubernetes_sd_configs:
-          - role: service
+          - role: pod
         relabel_configs:
-          - source_labels: [__meta_kubernetes_service_label_app]
+          - source_labels: [__meta_kubernetes_pod_label_app]
             regex: relayer
             action: keep
-          - source_labels: [__meta_kubernetes_service_name]
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: exported_instance
+          - source_labels: [__meta_kubernetes_pod_label_app]
             target_label: instance
           # Target metrics port explicitly
-          - source_labels: [__meta_kubernetes_service_name]
-            regex: (.+)
+          - source_labels: [__address__]
+            regex: ([^:]+)(?::\\d+)?
             target_label: __address__
             replacement: ${{1}}:9090
 
       # Miner metrics (port 9092)
       - job_name: 'miners'
         kubernetes_sd_configs:
-          - role: service
+          - role: pod
         relabel_configs:
-          - source_labels: [__meta_kubernetes_service_label_app]
+          - source_labels: [__meta_kubernetes_pod_label_app]
             regex: miner
             action: keep
-          - source_labels: [__meta_kubernetes_service_name]
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: exported_instance
+          - source_labels: [__meta_kubernetes_pod_label_app]
             target_label: instance
           # Target metrics port explicitly
-          - source_labels: [__meta_kubernetes_service_name]
-            regex: (.+)
+          - source_labels: [__address__]
+            regex: ([^:]+)(?::\\d+)?
             target_label: __address__
             replacement: ${{1}}:9092
 
@@ -107,6 +156,7 @@ spec:
       labels:
         app: prometheus
     spec:
+      serviceAccountName: prometheus
       containers:
       - name: prometheus
         image: prom/prometheus:latest
@@ -143,7 +193,12 @@ spec:
     k8s_resource(
         "prometheus",
         labels=["observability"],
-        objects=["prometheus-config:configmap"],
+        objects=[
+            "prometheus-config:configmap",
+            "prometheus:serviceaccount",
+            "prometheus:clusterrole",
+            "prometheus:clusterrolebinding"
+        ],
         port_forwards=[format_port_forward(prom_config["port"], 9090)]
     )
 
@@ -156,6 +211,7 @@ def deploy_grafana(config):
     dashboard_miner = str(read_file("tilt/grafana/dashboard-miner.json"))
     dashboard_relayer = str(read_file("tilt/grafana/dashboard-relayer.json"))
     dashboard_overview = str(read_file("tilt/grafana/dashboard-overview.json"))
+    dashboard_redis = str(read_file("tilt/grafana/dashboard-redis.json"))
 
     # Dashboard provisioning configuration
     dashboards_provisioning_yaml = """
@@ -195,11 +251,14 @@ data:
     {}
   relayer.json: |
     {}
+  redis.json: |
+    {}
 """.format(
         dashboard_overview.replace("\n", "\n    "),
         dashboard_system.replace("\n", "\n    "),
         dashboard_miner.replace("\n", "\n    "),
-        dashboard_relayer.replace("\n", "\n    ")
+        dashboard_relayer.replace("\n", "\n    "),
+        dashboard_redis.replace("\n", "\n    ")
     )
 
     k8s_yaml(blob(dashboards_yaml))

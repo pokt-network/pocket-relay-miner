@@ -14,6 +14,7 @@ import (
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	accounttypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -76,6 +77,7 @@ type QueryClients struct {
 	proofClient       *proofQueryClient
 	serviceClient     *serviceQueryClient
 	accountClient     *accountQueryClient
+	bankClient        *bankQueryClient
 
 	// Lifecycle
 	mu     sync.RWMutex
@@ -126,6 +128,7 @@ func NewQueryClients(
 	qc.proofClient = newProofQueryClient(logger, grpcConn, config.QueryTimeout)
 	qc.serviceClient = newServiceQueryClient(logger, grpcConn, config.QueryTimeout)
 	qc.accountClient = newAccountQueryClient(logger, grpcConn, config.QueryTimeout)
+	qc.bankClient = newBankQueryClient(logger, grpcConn, config.QueryTimeout)
 
 	qc.logger.Info().
 		Str("endpoint", config.GRPCEndpoint).
@@ -167,6 +170,11 @@ func (qc *QueryClients) Service() client.ServiceQueryClient {
 // Account returns the account query client.
 func (qc *QueryClients) Account() client.AccountQueryClient {
 	return qc.accountClient
+}
+
+// Bank returns the bank query client.
+func (qc *QueryClients) Bank() client.BankQueryClient {
+	return qc.bankClient
 }
 
 // GRPCConnection returns the underlying gRPC connection.
@@ -978,4 +986,39 @@ func (c *blockQueryClient) Block(ctx context.Context, height *int64) (*cometrpct
 
 func (c *blockQueryClient) Close() error {
 	return nil
+}
+
+// =============================================================================
+// Bank Query Client
+// =============================================================================
+
+type bankQueryClient struct {
+	logger       logging.Logger
+	queryClient  banktypes.QueryClient
+	queryTimeout time.Duration
+}
+
+var _ client.BankQueryClient = (*bankQueryClient)(nil)
+
+func newBankQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *bankQueryClient {
+	return &bankQueryClient{
+		logger:       logger.With().Str("query_client", "bank").Logger(),
+		queryClient:  banktypes.NewQueryClient(conn),
+		queryTimeout: timeout,
+	}
+}
+
+func (c *bankQueryClient) GetBalance(ctx context.Context, address string) (*cosmostypes.Coin, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+	defer cancel()
+
+	res, err := c.queryClient.Balance(queryCtx, &banktypes.QueryBalanceRequest{
+		Address: address,
+		Denom:   "upokt",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query balance for %s: %w", address, err)
+	}
+
+	return res.Balance, nil
 }

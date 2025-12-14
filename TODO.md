@@ -1,0 +1,9 @@
+- [] Test with PATH
+- [] Health checks (live vs. ready)
+- [] Backend Health checks (like path to answer fast error)
+- [] Config review
+- [] Code Review with the team and operators
+- [] CI - fmt, lint, build, docker image
+- [] Redis Cluster in Tilt
+- [] E2E Tests
+- [] Docker Compose example (community contribution needed here!)

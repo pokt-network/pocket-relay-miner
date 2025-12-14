@@ -1,8 +1,8 @@
 package keys
 
 import (
+	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 const (
@@ -11,7 +11,7 @@ const (
 )
 
 var (
-	supplierKeysActive = promauto.NewGauge(
+	supplierKeysActive = observability.SharedFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -20,7 +20,7 @@ var (
 		},
 	)
 
-	keyReloadsTotal = promauto.NewCounter(
+	keyReloadsTotal = observability.SharedFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -29,7 +29,7 @@ var (
 		},
 	)
 
-	keyChangesTotal = promauto.NewCounterVec(
+	keyChangesTotal = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -39,7 +39,7 @@ var (
 		[]string{"type"}, // type: added, removed
 	)
 
-	keyLoadErrors = promauto.NewCounterVec(
+	keyLoadErrors = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,

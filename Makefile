@@ -12,8 +12,17 @@ BACKEND_DIR=tilt/backend-server
 # Docker image configuration
 DOCKER_IMAGE?=ghcr.io/pokt-network/pocket-relay-miner:rc
 
-# Go build flags
-LDFLAGS=-ldflags "-s -w"
+# Version information
+VERSION?=$(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+COMMIT?=$(shell git rev-parse HEAD 2>/dev/null || echo "unknown")
+BUILD_DATE?=$(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+# Go build flags with version injection
+LDFLAGS=-ldflags "\
+	-s -w \
+	-X 'main.Version=$(VERSION)' \
+	-X 'main.Commit=$(COMMIT)' \
+	-X 'main.BuildDate=$(BUILD_DATE)'"
 
 help: ## Display this help message
 	@echo "Pocket RelayMiner Makefile"
@@ -38,13 +47,26 @@ install: ## Install the binary to $GOPATH/bin
 	@go install $(LDFLAGS) .
 	@echo "Install complete"
 
-test: ## Run tests
+test: ## Run tests (PKG=package_name for specific package, VERBOSE=1 for verbose output)
 	@echo "Running tests..."
-	@go test -v -race -tags test ./...
+	@if [ -n "$(PKG)" ]; then \
+		if [ "$(PKG)" = "cache" ]; then \
+			echo "Running cache tests sequentially (143 tests with shared miniredis)..."; \
+			go test $(if $(VERBOSE),-v) -tags test -p 1 -parallel 1 ./$(PKG)/...; \
+		else \
+			go test $(if $(VERBOSE),-v) -tags test -p 4 -parallel 4 ./$(PKG)/...; \
+		fi; \
+	else \
+		go test $(if $(VERBOSE),-v) -tags test -p 4 -parallel 4 ./...; \
+	fi
 
-test-coverage: ## Run tests with coverage
+test-coverage: ## Run tests with coverage (use PKG=package for specific package)
 	@echo "Running tests with coverage..."
-	@go test -v -race -tags test -coverprofile=coverage.out ./...
+ifdef PKG
+	@go test -v -tags test -p 4 -parallel 4 -coverprofile=coverage.out ./$(PKG)/...
+else
+	@go test -v -tags test -p 4 -parallel 4 -coverprofile=coverage.out ./...
+endif
 	@go tool cover -html=coverage.out -o coverage.html
 	@echo "Coverage report generated: coverage.html"
 

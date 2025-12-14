@@ -1,0 +1,332 @@
+$schema: http://json-schema.org/draft-07/schema#
+title: Pocket RelayMiner Miner Configuration
+description: Configuration schema for the Pocket RelayMiner Miner component (stateful claim/proof submitter with leader election)
+type: object
+required:
+  - redis
+  - pocket_node
+  - keys
+
+properties:
+  redis:
+    type: object
+    description: Redis connection configuration
+    required:
+      - url
+      - stream_prefix
+      - consumer_group
+      - consumer_name
+    properties:
+      url:
+        type: string
+        description: Redis connection URL
+        pattern: ^redis(s)?://
+        examples:
+          - redis://localhost:6379
+          - redis://redis-node1:6379,redis-node2:6379
+      stream_prefix:
+        type: string
+        description: Prefix for Redis stream keys
+        default: ha:relays
+      consumer_group:
+        type: string
+        description: Consumer group name for Redis Streams
+        default: ha-miners
+      consumer_name:
+        type: string
+        description: Unique consumer name for this miner instance (auto-generated from hostname if not set)
+      block_timeout_ms:
+        type: integer
+        description: XREADGROUP blocking timeout in milliseconds
+        default: 5000
+        minimum: 100
+      claim_idle_timeout_ms:
+        type: integer
+        description: Timeout for reclaiming idle messages from crashed consumers
+        default: 60000
+        minimum: 1000
+
+  pocket_node:
+    type: object
+    description: Pocket blockchain connection configuration
+    required:
+      - query_node_rpc_url
+      - query_node_grpc_url
+    properties:
+      query_node_rpc_url:
+        type: string
+        description: RPC endpoint for queries and block subscription
+        examples:
+          - https://rpc.testnet.pokt.network
+          - http://localhost:26657
+      query_node_grpc_url:
+        type: string
+        description: gRPC endpoint for queries
+        examples:
+          - grpc.testnet.pokt.network:443
+          - localhost:9090
+      tx_node_rpc_url:
+        type: string
+        description: RPC endpoint for transaction submission (if different from query node)
+      grpc_insecure:
+        type: boolean
+        description: Disable TLS for gRPC connections (use for local development only)
+        default: false
+
+  keys:
+    type: object
+    description: Supplier signing key configuration
+    properties:
+      keys_file:
+        type: string
+        description: Path to YAML file with hex-encoded private keys
+      keys_dir:
+        type: string
+        description: Directory containing individual key files
+      keyring:
+        type: object
+        description: Cosmos SDK keyring configuration
+        properties:
+          backend:
+            type: string
+            enum:
+              - file
+              - os
+              - test
+              - memory
+            description: Keyring backend type
+          dir:
+            type: string
+            description: Directory for keyring (file backend only)
+          app_name:
+            type: string
+            description: Application name for keyring
+            default: pocket
+          key_names:
+            type: array
+            description: Specific key names to load (empty = load all)
+            items:
+              type: string
+
+  suppliers:
+    type: array
+    description: Explicit supplier configurations (alternative to auto-discovery from keys)
+    items:
+      type: object
+      required:
+        - operator_address
+        - signing_key_name
+      properties:
+        operator_address:
+          type: string
+          description: Supplier operator address (bech32)
+        signing_key_name:
+          type: string
+          description: Key name in keyring for signing
+        services:
+          type: array
+          description: Service IDs this supplier serves
+          items:
+            type: string
+
+  session_tree:
+    type: object
+    description: Session tree (SMST) management configuration
+    properties:
+      wal_enabled:
+        type: boolean
+        description: Enable Write-Ahead Log for crash recovery
+        default: true
+      flush_interval_blocks:
+        type: integer
+        description: How often to flush session trees (in blocks)
+        default: 1
+        minimum: 1
+
+  metrics:
+    type: object
+    description: Prometheus metrics server configuration
+    properties:
+      enabled:
+        type: boolean
+        description: Enable metrics collection
+        default: true
+      addr:
+        type: string
+        description: Metrics HTTP server address
+        default: ":9092"
+        pattern: ^.*:[0-9]+$
+      pprof_enabled:
+        type: boolean
+        description: Enable pprof profiling server (for debugging, disable in production)
+        default: false
+      pprof_addr:
+        type: string
+        description: Pprof HTTP server address (use localhost for security)
+        default: "localhost:6060"
+        pattern: ^.*:[0-9]+$
+
+  logging:
+    type: object
+    description: Logging configuration
+    properties:
+      level:
+        type: string
+        enum:
+          - trace
+          - debug
+          - info
+          - warn
+          - error
+        default: info
+      format:
+        type: string
+        enum:
+          - json
+          - text
+        default: json
+      output:
+        type: string
+        description: Log output destination
+        default: stdout
+      async:
+        type: boolean
+        description: Enable async logging for better performance
+        default: true
+      async_buffer_size:
+        type: integer
+        description: Async log buffer size
+        default: 100000
+        minimum: 1000
+
+  block_time_seconds:
+    type: integer
+    description: Expected block time in seconds (30s for mainnet/testnet, 6s for localnet)
+    default: 30
+    minimum: 1
+    maximum: 600
+
+  block_health_monitor:
+    type: object
+    description: Block health monitoring configuration (Feature 1)
+    properties:
+      enabled:
+        type: boolean
+        description: Enable block health monitoring
+        default: false
+      slowness_threshold:
+        type: number
+        description: Alert when blocks arrive slower than threshold × configured time
+        default: 1.5
+        minimum: 1.0
+
+  balance_monitor:
+    type: object
+    description: Balance and stake monitoring configuration (Feature 4)
+    properties:
+      enabled:
+        type: boolean
+        description: Enable balance/stake monitoring
+        default: true
+      check_interval_seconds:
+        type: integer
+        description: How often to check balance/stake (seconds)
+        default: 300
+        minimum: 60
+      balance_threshold_upokt:
+        type: integer
+        description: Alert when balance falls below this threshold (upokt)
+        default: 2000
+        minimum: 0
+      stake_warning_ratio:
+        type: number
+        description: Alert when stake health ratio falls below this value
+        default: 1.2
+        minimum: 1.0
+
+  session_lifecycle:
+    type: object
+    description: Session lifecycle configuration (event-driven via block events)
+    properties:
+      window_start_buffer_blocks:
+        type: integer
+        description: Delay submissions after window opens (spread submissions)
+        default: 10
+        minimum: 0
+      claim_submission_buffer:
+        type: integer
+        description: Blocks before claim window close to start claiming
+        default: 2
+        minimum: 0
+      proof_submission_buffer:
+        type: integer
+        description: Blocks before proof window close to start proving
+        default: 2
+        minimum: 0
+      max_concurrent_transitions:
+        type: integer
+        description: Max number of sessions transitioning simultaneously
+        default: 10
+        minimum: 1
+      stream_discovery_interval_seconds:
+        type: integer
+        description: SCAN interval for discovering session streams (seconds)
+        default: 10
+        minimum: 1
+
+  leader_election:
+    type: object
+    description: Distributed leader election configuration (HA deployments)
+    properties:
+      leader_ttl_seconds:
+        type: integer
+        description: How long leader lock lasts before expiring (seconds)
+        default: 30
+        minimum: 5
+      heartbeat_rate_seconds:
+        type: integer
+        description: How often to attempt acquire/renew leadership (seconds)
+        default: 10
+        minimum: 1
+
+  deduplication_ttl_blocks:
+    type: integer
+    description: How many blocks to keep relay hashes for deduplication
+    default: 10
+    minimum: 1
+
+  batch_size:
+    type: integer
+    description: Number of relays to process in a single batch
+    default: 100
+    minimum: 1
+
+  ack_batch_size:
+    type: integer
+    description: Number of messages to acknowledge in a batch
+    default: 50
+    minimum: 1
+
+  hot_reload_enabled:
+    type: boolean
+    description: Enable hot-reload of supplier keys
+    default: true
+
+  session_ttl:
+    type: string
+    description: TTL for session data (duration string, e.g., "24h")
+    default: 24h
+    pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+
+  wal_max_len:
+    type: integer
+    description: Maximum WAL entries per session
+    default: 100000
+    minimum: 1000
+
+  known_applications:
+    type: array
+    description: Application addresses to pre-discover at startup
+    items:
+      type: string
+      description: Application address (bech32)

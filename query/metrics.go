@@ -1,13 +1,13 @@
 package query
 
 import (
+	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 // Query metrics (reserved for future instrumentation)
 var (
-	_ = promauto.NewCounterVec(
+	_ = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ha",
 			Subsystem: "query",
@@ -17,7 +17,7 @@ var (
 		[]string{"client", "method"},
 	)
 
-	_ = promauto.NewCounterVec(
+	_ = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ha",
 			Subsystem: "query",
@@ -27,19 +27,19 @@ var (
 		[]string{"client", "method"},
 	)
 
-	_ = promauto.NewHistogramVec(
+	_ = observability.SharedFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: "ha",
 			Subsystem: "query",
 			Name:      "query_latency_seconds",
 			Help:      "Query latency in seconds",
-			Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10},
+			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"client", "method"},
 	)
 
 	// Cache metrics (reserved for future instrumentation)
-	_ = promauto.NewCounterVec(
+	_ = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ha",
 			Subsystem: "query",
@@ -49,7 +49,7 @@ var (
 		[]string{"client", "cache_type"},
 	)
 
-	_ = promauto.NewCounterVec(
+	_ = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ha",
 			Subsystem: "query",
@@ -59,7 +59,7 @@ var (
 		[]string{"client", "cache_type"},
 	)
 
-	_ = promauto.NewGaugeVec(
+	_ = observability.SharedFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ha",
 			Subsystem: "query",

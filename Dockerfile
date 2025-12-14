@@ -18,8 +18,19 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the binary
-RUN CGO_ENABLED=0 go build -ldflags "-s -w" -trimpath -o pocket-relay-miner .
+# Build arguments for version information
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_DATE=unknown
+
+# Build the binary with version information
+RUN CGO_ENABLED=0 go build \
+    -ldflags "-s -w \
+    -X 'main.Version=${VERSION}' \
+    -X 'main.Commit=${COMMIT}' \
+    -X 'main.BuildDate=${BUILD_DATE}'" \
+    -trimpath \
+    -o pocket-relay-miner .
 
 # Runtime stage
 FROM alpine:latest

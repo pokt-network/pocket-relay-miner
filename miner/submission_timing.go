@@ -15,6 +15,10 @@ type SubmissionTimingConfig struct {
 	// BlockTimeSeconds is the estimated block time.
 	BlockTimeSeconds int64
 
+	// WindowStartBufferBlocks is blocks after window open to wait before earliest submission.
+	// This spreads out supplier submissions more evenly across the window.
+	WindowStartBufferBlocks int64
+
 	// SubmissionBufferBlocks is blocks before window close to ensure submission.
 	SubmissionBufferBlocks int64
 }
@@ -22,8 +26,9 @@ type SubmissionTimingConfig struct {
 // DefaultSubmissionTimingConfig returns sensible defaults.
 func DefaultSubmissionTimingConfig() SubmissionTimingConfig {
 	return SubmissionTimingConfig{
-		BlockTimeSeconds:       6,
-		SubmissionBufferBlocks: 2,
+		BlockTimeSeconds:        6,
+		WindowStartBufferBlocks: 10,
+		SubmissionBufferBlocks:  2,
 	}
 }
 
@@ -89,7 +94,10 @@ func NewSubmissionTimingCalculator(
 	config SubmissionTimingConfig,
 ) *SubmissionTimingCalculator {
 	if config.BlockTimeSeconds == 0 {
-		config.BlockTimeSeconds = 6
+		config.BlockTimeSeconds = 30
+	}
+	if config.WindowStartBufferBlocks == 0 {
+		config.WindowStartBufferBlocks = 10
 	}
 	if config.SubmissionBufferBlocks == 0 {
 		config.SubmissionBufferBlocks = 2
@@ -118,14 +126,23 @@ func (c *SubmissionTimingCalculator) CalculateClaimWindow(
 	windowOpen := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
 	windowClose := sharedtypes.GetClaimWindowCloseHeight(sharedParams, sessionEndHeight)
 
-	earliestSubmit := sharedtypes.GetEarliestSupplierClaimCommitHeight(
+	// Calculate protocol-defined earliest submit height (deterministic spread)
+	protocolEarliestSubmit := sharedtypes.GetEarliestSupplierClaimCommitHeight(
 		sharedParams,
 		sessionEndHeight,
 		windowOpenBlockHash,
 		supplierOperatorAddr,
 	)
 
+	// Add window start buffer to spread submissions further
+	earliestSubmit := protocolEarliestSubmit + c.config.WindowStartBufferBlocks
+
+	// Ensure earliest submit doesn't exceed safe deadline
 	safeDeadline := windowClose - c.config.SubmissionBufferBlocks
+	if earliestSubmit > safeDeadline {
+		// If buffer pushes us past safe deadline, use protocol earliest
+		earliestSubmit = protocolEarliestSubmit
+	}
 	if safeDeadline < earliestSubmit {
 		safeDeadline = earliestSubmit
 	}
@@ -154,14 +171,23 @@ func (c *SubmissionTimingCalculator) CalculateProofWindow(
 	windowOpen := sharedtypes.GetProofWindowOpenHeight(sharedParams, sessionEndHeight)
 	windowClose := sharedtypes.GetProofWindowCloseHeight(sharedParams, sessionEndHeight)
 
-	earliestSubmit := sharedtypes.GetEarliestSupplierProofCommitHeight(
+	// Calculate protocol-defined earliest submit height (deterministic spread)
+	protocolEarliestSubmit := sharedtypes.GetEarliestSupplierProofCommitHeight(
 		sharedParams,
 		sessionEndHeight,
 		windowOpenBlockHash,
 		supplierOperatorAddr,
 	)
 
+	// Add window start buffer to spread submissions further
+	earliestSubmit := protocolEarliestSubmit + c.config.WindowStartBufferBlocks
+
+	// Ensure earliest submit doesn't exceed safe deadline
 	safeDeadline := windowClose - c.config.SubmissionBufferBlocks
+	if earliestSubmit > safeDeadline {
+		// If buffer pushes us past safe deadline, use protocol earliest
+		earliestSubmit = protocolEarliestSubmit
+	}
 	if safeDeadline < earliestSubmit {
 		safeDeadline = earliestSubmit
 	}

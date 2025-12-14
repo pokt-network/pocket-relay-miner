@@ -116,6 +116,57 @@ type Config struct {
 
 	// RelayMeter configuration for rate limiting based on app stakes
 	RelayMeter RelayMeterYAMLConfig `yaml:"relay_meter,omitempty"`
+
+	// HTTPTransport configuration for backend HTTP client connection pooling.
+	HTTPTransport HTTPTransportConfig `yaml:"http_transport,omitempty"`
+}
+
+// HTTPTransportConfig contains HTTP transport settings for backend connections.
+// These settings optimize connection reuse, reduce latency, and prevent resource exhaustion.
+// Defaults are tuned for 1000+ RPS with connection pooling.
+type HTTPTransportConfig struct {
+	// MaxIdleConns controls the maximum number of idle (keep-alive) connections across all hosts.
+	// Default: 500 (5x increase: supports multiple backends and services)
+	MaxIdleConns int `yaml:"max_idle_conns"`
+
+	// MaxIdleConnsPerHost controls the maximum idle (keep-alive) connections to keep per-host.
+	// Default: 100 (5x increase: keeps connections warm after traffic bursts)
+	MaxIdleConnsPerHost int `yaml:"max_idle_conns_per_host"`
+
+	// MaxConnsPerHost limits the total number of connections per host (including active and idle).
+	// Default: 500 (5x increase: handles p99 latency spikes and slow backends)
+	// Set to 0 for unlimited.
+	MaxConnsPerHost int `yaml:"max_conns_per_host"`
+
+	// IdleConnTimeoutSeconds is how long idle connections are kept alive.
+	// Default: 90 (seconds)
+	IdleConnTimeoutSeconds int64 `yaml:"idle_conn_timeout_seconds"`
+
+	// DialTimeoutSeconds is the timeout for establishing a new connection.
+	// Default: 5 (seconds)
+	DialTimeoutSeconds int64 `yaml:"dial_timeout_seconds"`
+
+	// TLSHandshakeTimeoutSeconds is the timeout for completing the TLS handshake.
+	// Default: 10 (seconds)
+	TLSHandshakeTimeoutSeconds int64 `yaml:"tls_handshake_timeout_seconds"`
+
+	// ResponseHeaderTimeoutSeconds is the timeout for receiving response headers after sending the request.
+	// This prevents hanging on slow backends that never send headers.
+	// Default: 30 (seconds)
+	ResponseHeaderTimeoutSeconds int64 `yaml:"response_header_timeout_seconds"`
+
+	// ExpectContinueTimeoutSeconds is the timeout for receiving server's first response headers
+	// after fully writing the request headers if the request has "Expect: 100-continue".
+	// Default: 1 (second) - zero means no timeout
+	ExpectContinueTimeoutSeconds int64 `yaml:"expect_continue_timeout_seconds"`
+
+	// TCPKeepAliveSeconds is the keep-alive period for active network connections.
+	// Default: 30 (seconds) - 0 disables keep-alive
+	TCPKeepAliveSeconds int64 `yaml:"tcp_keep_alive_seconds"`
+
+	// DisableCompression disables automatic gzip compression for requests and responses.
+	// Default: true (don't modify content encoding for relay protocol)
+	DisableCompression bool `yaml:"disable_compression"`
 }
 
 // RedisConfig contains Redis connection configuration.
@@ -126,9 +177,6 @@ type RedisConfig struct {
 
 	// StreamPrefix is the prefix for Redis stream names.
 	StreamPrefix string `yaml:"stream_prefix"`
-
-	// MaxStreamLen is the maximum length of each supplier stream.
-	MaxStreamLen int64 `yaml:"max_stream_len"`
 }
 
 // PocketNodeConfig contains Pocket blockchain connection configuration.
@@ -138,6 +186,13 @@ type PocketNodeConfig struct {
 
 	// QueryNodeGRPCUrl is the URL for gRPC queries.
 	QueryNodeGRPCUrl string `yaml:"query_node_grpc_url"`
+
+	// UseRedisForBlocks enables Redis pub/sub for block events (recommended for HA).
+	// When true (default), relayers subscribe to Redis events published by the miner,
+	// ensuring all relayers see the same block progression and cache refreshes.
+	// When false, relayers use independent WebSocket connections to CometBFT.
+	// Default: true (recommended for production HA deployments)
+	UseRedisForBlocks bool `yaml:"use_redis_for_blocks"`
 }
 
 // ServiceConfig contains configuration for a single service.
@@ -222,6 +277,14 @@ type MetricsConfig struct {
 
 	// Addr is the address for the metrics server.
 	Addr string `yaml:"addr"`
+
+	// PprofEnabled enables pprof profiling server.
+	// Default: false (disabled for production safety)
+	PprofEnabled bool `yaml:"pprof_enabled,omitempty"`
+
+	// PprofAddr is the address for pprof server.
+	// Default: "localhost:6060" (localhost only for security)
+	PprofAddr string `yaml:"pprof_addr,omitempty"`
 }
 
 // HealthCheckConfig contains health check server configuration for the relayer.
@@ -344,7 +407,6 @@ func DefaultConfig() Config {
 		Redis: RedisConfig{
 			URL:          "redis://localhost:6379",
 			StreamPrefix: "ha:relays",
-			MaxStreamLen: 100000,
 		},
 		DefaultValidationMode:        ValidationModeOptimistic,
 		DefaultRequestTimeoutSeconds: 30,
@@ -366,6 +428,18 @@ func DefaultConfig() Config {
 			SessionCleanupInterval: 5 * time.Minute,
 			ParamsCacheTTL:         10 * time.Minute,
 			AppStakeCacheTTL:       10 * time.Minute,
+		},
+		HTTPTransport: HTTPTransportConfig{
+			MaxIdleConns:                 500,  // Total idle connections across all hosts (5x for 1000+ RPS)
+			MaxIdleConnsPerHost:          100,  // Idle connections per backend host (5x - keeps warm after bursts)
+			MaxConnsPerHost:              500,  // Total connections per host (5x - handles p99 spikes)
+			IdleConnTimeoutSeconds:       90,   // Keep idle connections for 90s
+			DialTimeoutSeconds:           5,    // 5s to establish connection
+			TLSHandshakeTimeoutSeconds:   10,   // 10s for TLS handshake
+			ResponseHeaderTimeoutSeconds: 30,   // 30s to receive headers
+			ExpectContinueTimeoutSeconds: 1,    // 1s for 100-continue
+			TCPKeepAliveSeconds:          30,   // TCP keepalive every 30s
+			DisableCompression:           true, // Don't modify content encoding
 		},
 	}
 }

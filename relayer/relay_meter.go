@@ -18,6 +18,16 @@ import (
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
+// SharedParamCache defines the interface for accessing shared params with L1->L2->L3 caching.
+type SharedParamCache interface {
+	GetLatestSharedParams(ctx context.Context) (*sharedtypes.Params, error)
+}
+
+// ServiceCache defines the interface for accessing service data with L1->L2->L3 caching.
+type ServiceCache interface {
+	Get(ctx context.Context, serviceID string, force ...bool) (*sharedtypes.Service, error)
+}
+
 // FailBehavior determines how the relay meter behaves when Redis is unavailable.
 type FailBehavior string
 
@@ -135,6 +145,10 @@ type RelayMeter struct {
 	sessionClient client.SessionQueryClient
 	blockClient   client.BlockClient
 
+	// Caches (L1 -> L2 -> L3 with pub/sub invalidation)
+	sharedParamCache SharedParamCache
+	serviceCache     ServiceCache
+
 	// Local L1 cache for hot path performance
 	// This is a read-through cache; writes go to Redis first
 	localCache   map[string]*SessionMeterMeta
@@ -156,6 +170,8 @@ func NewRelayMeter(
 	sharedClient client.SharedQueryClient,
 	sessionClient client.SessionQueryClient,
 	blockClient client.BlockClient,
+	sharedParamCache SharedParamCache,
+	serviceCache ServiceCache,
 	config RelayMeterConfig,
 ) *RelayMeter {
 	if config.RedisKeyPrefix == "" {
@@ -175,14 +191,16 @@ func NewRelayMeter(
 	}
 
 	return &RelayMeter{
-		logger:        logging.ForComponent(logger, logging.ComponentRelayMeter),
-		config:        config,
-		redisClient:   redisClient,
-		appClient:     appClient,
-		sharedClient:  sharedClient,
-		sessionClient: sessionClient,
-		blockClient:   blockClient,
-		localCache:    make(map[string]*SessionMeterMeta),
+		logger:           logging.ForComponent(logger, logging.ComponentRelayMeter),
+		config:           config,
+		redisClient:      redisClient,
+		appClient:        appClient,
+		sharedClient:     sharedClient,
+		sessionClient:    sessionClient,
+		blockClient:      blockClient,
+		sharedParamCache: sharedParamCache,
+		serviceCache:     serviceCache,
+		localCache:       make(map[string]*SessionMeterMeta),
 	}
 }
 
@@ -272,12 +290,21 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	relayMeterConsumptions.WithLabelValues(serviceID, "over_limit").Inc()
 
 	if m.config.OverServicingEnabled {
+		// Track over-servicing metrics
+		overServicedUpokt := newConsumed - maxStakeUpokt
+		relayMeterOverServicedUpokt.WithLabelValues(serviceID, sessionID).Add(float64(overServicedUpokt))
+		relayMeterOverServicedRelays.WithLabelValues(serviceID, sessionID).Inc()
+
 		// Log at power-of-2 intervals
 		if shouldLogOverServicing(uint64(overServicedCount)) {
 			m.logger.Warn().
 				Str("application", meta.AppAddress).
+				Str(logging.FieldServiceID, serviceID).
 				Str(logging.FieldSessionID, sessionID).
 				Int64("over_serviced_count", overServicedCount).
+				Int64("over_serviced_upokt", overServicedUpokt).
+				Int64("consumed_upokt", newConsumed).
+				Int64("max_stake_upokt", maxStakeUpokt).
 				Msg("application over-serviced (over-servicing enabled)")
 		}
 		return true, true, nil
@@ -590,36 +617,21 @@ func (m *RelayMeter) getAppStake(ctx context.Context, appAddress string) (int64,
 	return stakeUpokt, nil
 }
 
-// getSharedParams gets shared params from Redis cache or queries the chain.
+// getSharedParams gets shared params using L1 -> L2 -> L3 cache.
 func (m *RelayMeter) getSharedParams(ctx context.Context) (*CachedSharedParams, error) {
-	cacheKey := m.sharedParamsKey()
-
-	// Check Redis cache
-	data, err := m.redisClient.Get(ctx, cacheKey).Bytes()
-	if err == nil {
-		var cached CachedSharedParams
-		if json.Unmarshal(data, &cached) == nil {
-			return &cached, nil
-		}
-	}
-
-	// Query chain
-	params, err := m.sharedClient.GetParams(ctx)
+	// Use shared param cache (L1 -> L2 -> L3)
+	params, err := m.sharedParamCache.GetLatestSharedParams(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared params: %w", err)
 	}
 
+	// Convert to CachedSharedParams format
 	cached := &CachedSharedParams{
 		NumBlocksPerSession:                uint64(params.GetNumBlocksPerSession()),
 		ComputeUnitsToTokensMultiplier:     params.GetComputeUnitsToTokensMultiplier(),
 		ComputeUnitCostGranularity:         params.GetComputeUnitCostGranularity(),
 		SessionEndToProofWindowCloseBlocks: sharedtypes.GetSessionEndToProofWindowCloseBlocks(params),
 		UpdatedAt:                          time.Now().Unix(),
-	}
-
-	// Cache in Redis with session-wide TTL
-	if cacheBytes, err := json.Marshal(cached); err == nil {
-		m.redisClient.Set(ctx, cacheKey, cacheBytes, m.config.ParamsCacheTTL)
 	}
 
 	return cached, nil
@@ -657,21 +669,23 @@ func (m *RelayMeter) getSessionParams(ctx context.Context) (*CachedSessionParams
 	return cached, nil
 }
 
-// getServiceComputeUnits gets compute units per relay for a service.
+// getServiceComputeUnits gets compute units per relay for a service using L1 -> L2 -> L3 cache.
 func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID string) (uint64, error) {
-	cacheKey := m.serviceComputeUnitsKey(serviceID)
-
-	// Check Redis cache
-	data, err := m.redisClient.Get(ctx, cacheKey).Bytes()
-	if err == nil {
-		var cached CachedServiceData
-		if json.Unmarshal(data, &cached) == nil {
-			return cached.ComputeUnitsPerRelay, nil
-		}
+	// Use service cache (L1 -> L2 -> L3)
+	service, err := m.serviceCache.Get(ctx, serviceID)
+	if err != nil {
+		// Service not found - default to 1 compute unit
+		// This is safe because miners will populate the cache with actual values
+		return 1, nil
 	}
 
-	// Default to 1 - miners will populate the actual value
-	return 1, nil
+	computeUnits := service.GetComputeUnitsPerRelay()
+	if computeUnits == 0 {
+		// Ensure we never return 0 (would break cost calculations)
+		return 1, nil
+	}
+
+	return computeUnits, nil
 }
 
 // RefreshSharedParams refreshes shared params cache from chain.

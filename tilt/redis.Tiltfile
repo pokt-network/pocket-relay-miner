@@ -48,6 +48,7 @@ def deploy_redis_standalone(redis_config):
     print("Deploying Redis (standalone mode via operator)...")
 
     # Redis CR for standalone
+    # Performance-tuned persistence settings - see REDIS.md for details
     redis_cr = """
 apiVersion: redis.redis.opstreelabs.in/v1beta2
 kind: Redis
@@ -62,9 +63,24 @@ spec:
         cpu: 100m
         memory: 256Mi
       limits:
-        cpu: 500m
-        memory: {}
+        cpu: 2000m
+        memory: 2Gi
     serviceType: ClusterIP
+  redisConfig:
+    # AOF (Append Only File) - Critical for SMST/Streams/Sessions persistence
+    appendonly: "yes"
+    appendfsync: "everysec"              # Sync every 1s (NOT every write) - balances durability vs performance
+    no-appendfsync-on-rewrite: "yes"     # Don't block writes during AOF rewrites
+    auto-aof-rewrite-percentage: "100"   # Rewrite when AOF is 2x base size
+    auto-aof-rewrite-min-size: "64mb"    # Minimum AOF size to trigger rewrite
+    # Disable RDB snapshots (redundant with AOF, adds write amplification)
+    save: ""
+    # Memory management
+    maxmemory-policy: "noeviction"       # Fail writes when full - never drop data
+    # Performance tuning
+    tcp-backlog: "511"
+    timeout: "0"
+    tcp-keepalive: "300"
   storage:
     volumeClaimTemplate:
       spec:
@@ -91,17 +107,28 @@ spec:
 def deploy_redis_cluster(redis_config):
     """Deploy Redis cluster using operator"""
     cluster_config = redis_config["cluster"]
-    print("Deploying Redis cluster (via operator with leaders={} followers={} shards)...".format(cluster_config["redisLeader"], cluster_config["redisFollower"]))
+    leader_count = cluster_config["redisLeader"]
+    follower_count = cluster_config["redisFollower"]
+    total_nodes = leader_count + follower_count
+
+    print("Deploying Redis cluster (via operator with {} leader + {} follower = {} total nodes)...".format(
+        leader_count, follower_count, total_nodes))
 
     # RedisCluster CR
+    # Performance-tuned persistence settings - see REDIS.md for details
+    #
+    # IMPORTANT: clusterSize = total nodes (leaders + followers)
+    # The operator automatically distributes nodes based on clusterSize
+    # For 3 leaders + 3 followers: clusterSize = 6
     redis_cluster_cr = """
 apiVersion: redis.redis.opstreelabs.in/v1beta2
 kind: RedisCluster
 metadata:
   name: redis-cluster
 spec:
-  clusterSize: {}
+  clusterSize: {cluster_size}
   clusterVersion: v7
+  persistenceEnabled: true
   kubernetesConfig:
     image: quay.io/opstree/redis:v7.0.12
     imagePullPolicy: IfNotPresent
@@ -110,8 +137,26 @@ spec:
         cpu: 100m
         memory: 256Mi
       limits:
-        cpu: 500m
-        memory: {}
+        cpu: 1000m
+        memory: {max_memory}
+  redisConfig:
+    # AOF (Append Only File) - Critical for SMST/Streams/Sessions persistence
+    appendonly: "yes"
+    appendfsync: "everysec"              # Sync every 1s (NOT every write) - balances durability vs performance
+    no-appendfsync-on-rewrite: "yes"     # Don't block writes during AOF rewrites
+    auto-aof-rewrite-percentage: "100"   # Rewrite when AOF is 2x base size
+    auto-aof-rewrite-min-size: "64mb"    # Minimum AOF size to trigger rewrite
+    # Disable RDB snapshots (redundant with AOF, adds write amplification)
+    save: ""
+    # Memory management
+    maxmemory-policy: "noeviction"       # Fail writes when full - never drop data
+    # Performance tuning
+    tcp-backlog: "511"
+    timeout: "0"
+    tcp-keepalive: "300"
+    # Cluster-specific settings
+    cluster-enabled: "yes"
+    cluster-node-timeout: "5000"
   storage:
     volumeClaimTemplate:
       spec:
@@ -123,22 +168,24 @@ spec:
     enabled: true
     image: quay.io/opstree/redis-exporter:v1.44.0
   redisLeader:
-    replicas: {}
+    replicas: {leader_replicas}
   redisFollower:
-    replicas: {}
+    replicas: {follower_replicas}
 """.format(
-        cluster_config["redisLeader"] + cluster_config["redisFollower"],  # Total nodes (leaders + followers)
-        redis_config["max_memory"],
-        cluster_config["redisLeader"],
-        cluster_config["redisFollower"]
+        cluster_size=total_nodes,
+        max_memory=redis_config["max_memory"],
+        leader_replicas=leader_count,
+        follower_replicas=follower_count
     )
 
     k8s_yaml(blob(redis_cluster_cr))
 
     # Attach to Redis Cluster created by operator using k8s_resource with objects
+    # Forward to one of the leader nodes for cluster-wide access
     k8s_resource(
         objects=["redis-operator:namespace", "redis-cluster:rediscluster:default"],
         new_name="redis-cluster",
         labels=["redis"],
+        port_forwards=["{}:6379".format(get_port("redis"))],
         resource_deps=["redis-operator"],
     )

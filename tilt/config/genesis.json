@@ -1,7 +1,7 @@
 {
   "app_name": "pocket",
   "app_version": "0.1.31-rc1-3174a8f0",
-  "genesis_time": "2025-12-07T00:49:49.946836722Z",
+  "genesis_time": "2025-12-14T09:53:08.748231368Z",
   "chain_id": "pocket",
   "initial_height": 1,
   "app_hash": null,
@@ -470,7 +470,7 @@
                 "validator_address": "poktvaloper18kk3aqe2pjz7x7993qp2pjt95ghurra9c5ef0t",
                 "pubkey": {
                   "@type": "/cosmos.crypto.ed25519.PubKey",
-                  "key": "GdNMdZPQNQ/5Euh4g+5puH8rg/6Ezon311vwHHEm1s4="
+                  "key": "pq33l6BKY1rqUO1E3xlha0YMMyT3Ys6zXsvpuw9wx60="
                 },
                 "value": {
                   "denom": "upokt",
@@ -478,7 +478,7 @@
                 }
               }
             ],
-            "memo": "50cb084628293eeb4004a4ec8c3a1fad522674c1@192.168.49.5:26656",
+            "memo": "4bf71f16596ebbcd9373d191da5dc27aba3f19db@192.168.49.5:26656",
             "timeout_height": "0",
             "unordered": false,
             "timeout_timestamp": null,
@@ -509,7 +509,7 @@
             "tip": null
           },
           "signatures": [
-            "dMbhBTLOTDLmnQ4Dywde8mujklSdt8xsr+SbxkA65RdBYrzZP8lZrGcddZaSkxSUag3O0UcRm0EtAJweb+Y91Q=="
+            "f/CwrsRVDUVfrsNmRHrJQAkoc+9UdRc1xlGfzvqWro131Sd/D75z1XhYEzGtzkVb/Fx9PMlLW19Q0kzKHvo+ig=="
           ]
         }
       ]

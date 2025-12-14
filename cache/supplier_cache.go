@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -156,9 +157,15 @@ func (c *SupplierCache) supplierKey(operatorAddress string) string {
 // Returns nil if the supplier is not in the cache.
 // If Redis is unavailable and FailOpen is true, returns a synthetic "active" state.
 func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress string) (*SupplierState, error) {
+	start := time.Now()
+
 	// L1: Check local cache (xsync)
 	if cached, ok := c.localCache.Load(operatorAddress); ok {
 		cacheHits.WithLabelValues(supplierCacheType, CacheLevelL1).Inc()
+		cacheGetLatency.WithLabelValues(supplierCacheType, CacheLevelL1).Observe(time.Since(start).Seconds())
+		c.logger.Debug().
+			Str(logging.FieldSupplierOperator, operatorAddress).
+			Msg("supplier cache hit (L1)")
 		return cached, nil
 	}
 
@@ -169,6 +176,7 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 		if err == redis.Nil {
 			// Supplier not in cache
 			cacheMisses.WithLabelValues(supplierCacheType, "l2_not_found").Inc()
+			cacheGetLatency.WithLabelValues(supplierCacheType, "l2_not_found").Observe(time.Since(start).Seconds())
 			return nil, nil
 		}
 
@@ -184,27 +192,31 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 			c.logger.Warn().
 				Str(logging.FieldSupplierOperator, operatorAddress).
 				Msg("fail-open: treating supplier as active due to cache error")
+			cacheGetLatency.WithLabelValues(supplierCacheType, "l2_error").Observe(time.Since(start).Seconds())
 			return &SupplierState{
 				Status:          SupplierStatusActive,
 				OperatorAddress: operatorAddress,
 			}, nil
 		}
 
+		cacheGetLatency.WithLabelValues(supplierCacheType, "l2_error").Observe(time.Since(start).Seconds())
 		return nil, fmt.Errorf("failed to get supplier state: %w", err)
 	}
 
 	var state SupplierState
 	if err := json.Unmarshal(data, &state); err != nil {
+		cacheGetLatency.WithLabelValues(supplierCacheType, "l2_error").Observe(time.Since(start).Seconds())
 		return nil, fmt.Errorf("failed to unmarshal supplier state: %w", err)
 	}
 
 	// Store in L1 for next time
 	c.localCache.Store(operatorAddress, &state)
 	cacheHits.WithLabelValues(supplierCacheType, CacheLevelL2).Inc()
+	cacheGetLatency.WithLabelValues(supplierCacheType, CacheLevelL2).Observe(time.Since(start).Seconds())
 
 	c.logger.Debug().
 		Str(logging.FieldSupplierOperator, operatorAddress).
-		Msg("supplier cache hit (L2)")
+		Msg("supplier cache hit (L2) → stored in L1")
 
 	return &state, nil
 }
@@ -375,9 +387,34 @@ func (c *SupplierCache) Close() error {
 }
 
 // WarmupFromRedis populates L1 cache from Redis on startup.
+// If knownSupplierAddresses is nil or empty, automatically discovers all suppliers in Redis.
 func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddresses []string) error {
-	// warmup function
-	c.logger.Info().Int("count", len(knownSupplierAddresses)).Msg("warming up supplier cache from Redis")
+	// If no addresses provided, discover all suppliers in Redis
+	if len(knownSupplierAddresses) == 0 {
+		c.logger.Info().Msg("discovering all suppliers in Redis for warmup")
+		pattern := fmt.Sprintf("%s:*", c.keyPrefix)
+		keys, err := c.redis.Keys(ctx, pattern).Result()
+		if err != nil {
+			return fmt.Errorf("failed to discover suppliers: %w", err)
+		}
+
+		// Extract operator addresses from keys (ha:supplier:{operator} -> {operator})
+		for _, key := range keys {
+			// Remove prefix to get operator address
+			addr := strings.TrimPrefix(key, c.keyPrefix+":")
+			if addr != key { // Ensure prefix was found and removed
+				knownSupplierAddresses = append(knownSupplierAddresses, addr)
+			}
+		}
+		c.logger.Info().Int("discovered_suppliers", len(knownSupplierAddresses)).Msg("discovered suppliers in Redis")
+	} else {
+		c.logger.Info().Int("count", len(knownSupplierAddresses)).Msg("warming up supplier cache from Redis")
+	}
+
+	if len(knownSupplierAddresses) == 0 {
+		c.logger.Info().Msg("no suppliers found in Redis, skipping warmup")
+		return nil
+	}
 
 	var wg sync.WaitGroup
 	for _, operatorAddr := range knownSupplierAddresses {
@@ -403,11 +440,15 @@ func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddres
 			}
 
 			c.localCache.Store(addr, &state)
+			c.logger.Debug().
+				Str(logging.FieldSupplierOperator, addr).
+				Int("services", len(state.Services)).
+				Msg("loaded supplier into cache during warmup")
 		}(operatorAddr)
 	}
 
 	wg.Wait()
-	c.logger.Info().Msg("supplier cache warmup complete")
+	c.logger.Info().Int("loaded_count", len(knownSupplierAddresses)).Msg("supplier cache warmup complete")
 
 	return nil
 }

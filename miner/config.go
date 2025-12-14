@@ -59,13 +59,99 @@ type Config struct {
 	// Default: 100000
 	WALMaxLen int64 `yaml:"wal_max_len"`
 
-	// CacheRefreshWorkers is the number of concurrent workers for parallel cache refresh.
-	// Default: 6
-	CacheRefreshWorkers int `yaml:"cache_refresh_workers"`
-
 	// KnownApplications is a list of application addresses to pre-discover at startup.
 	// These apps will be fetched from the network and added to the cache during initialization.
 	KnownApplications []string `yaml:"known_applications,omitempty"`
+
+	// LeaderElection configures the global leader election for HA deployments.
+	LeaderElection LeaderElectionConfig `yaml:"leader_election,omitempty"`
+
+	// SessionLifecycle configures session lifecycle management.
+	SessionLifecycle SessionLifecycleConfigYAML `yaml:"session_lifecycle,omitempty"`
+
+	// BalanceMonitor configures balance and stake monitoring with alerts.
+	BalanceMonitor BalanceMonitorConfigYAML `yaml:"balance_monitor,omitempty"`
+
+	// BlockTimeSeconds is the expected block time in seconds.
+	// This is used for timing calculations in caches, deduplication, and submission windows.
+	// Default: 30
+	BlockTimeSeconds int64 `yaml:"block_time_seconds,omitempty"`
+
+	// BlockHealthMonitor configures block time health monitoring.
+	BlockHealthMonitor BlockHealthConfig `yaml:"block_health_monitor,omitempty"`
+}
+
+// SessionLifecycleConfigYAML contains configuration for session lifecycle management.
+type SessionLifecycleConfigYAML struct {
+	// WindowStartBufferBlocks is blocks after window open to wait before earliest submission.
+	// This spreads out supplier submissions more evenly across the window.
+	// Default: 10
+	WindowStartBufferBlocks int64 `yaml:"window_start_buffer_blocks,omitempty"`
+
+	// ClaimSubmissionBuffer is blocks before claim window close to start claiming.
+	// This provides buffer time for transaction confirmation.
+	// Default: 2
+	ClaimSubmissionBuffer int64 `yaml:"claim_submission_buffer,omitempty"`
+
+	// ProofSubmissionBuffer is blocks before proof window close to start proving.
+	// Default: 2
+	ProofSubmissionBuffer int64 `yaml:"proof_submission_buffer,omitempty"`
+
+	// MaxConcurrentTransitions is the max number of sessions transitioning at once.
+	// Default: 10
+	MaxConcurrentTransitions int `yaml:"max_concurrent_transitions,omitempty"`
+
+	// StreamDiscoveryIntervalSeconds is how often to scan for new session streams (in seconds).
+	// This controls how quickly new session streams are discovered for consumption.
+	// Default: 10 seconds
+	StreamDiscoveryIntervalSeconds int64 `yaml:"stream_discovery_interval_seconds,omitempty"`
+}
+
+// LeaderElectionConfig contains configuration for distributed leader election.
+type LeaderElectionConfig struct {
+	// LeaderTTLSeconds is how long the leader lock lasts before expiring (in seconds).
+	// The leader must renew the lock before this expires to maintain leadership.
+	// Default: 30 seconds
+	LeaderTTLSeconds int `yaml:"leader_ttl_seconds,omitempty"`
+
+	// HeartbeatRateSeconds is how often to attempt acquire/renew leadership (in seconds).
+	// Should be less than LeaderTTLSeconds to ensure renewal before expiration.
+	// Default: 10 seconds
+	HeartbeatRateSeconds int `yaml:"heartbeat_rate_seconds,omitempty"`
+}
+
+// BalanceMonitorConfigYAML contains configuration for balance/stake monitoring.
+type BalanceMonitorConfigYAML struct {
+	// Enabled enables balance/stake monitoring.
+	// Default: true
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// CheckIntervalSeconds is how often to check balances and stakes (in seconds).
+	// Default: 300 (5 minutes)
+	CheckIntervalSeconds int64 `yaml:"check_interval_seconds,omitempty"`
+
+	// BalanceThresholdUpokt is the minimum balance in uPOKT before triggering warnings.
+	// Operators should set this based on their operational needs.
+	// Example: 1000 (1000 uPOKT)
+	BalanceThresholdUpokt int64 `yaml:"balance_threshold_upokt,omitempty"`
+
+	// StakeWarningRatio is the ratio of current stake to minimum required stake.
+	// If current stake is below (min stake * ratio), a warning is triggered.
+	// This accounts for proof missing penalties that reduce stake.
+	// Default: 1.2 (20% buffer above minimum)
+	StakeWarningRatio float64 `yaml:"stake_warning_ratio,omitempty"`
+}
+
+// BlockHealthConfig contains configuration for block time health monitoring.
+type BlockHealthConfig struct {
+	// Enabled enables block time health monitoring.
+	// Default: false
+	Enabled bool `yaml:"enabled,omitempty"`
+
+	// SlownessThreshold is the multiplier for determining slow blocks.
+	// If actualTime > configuredTime × threshold, a warning is logged.
+	// Default: 1.5 (50% slower than expected)
+	SlownessThreshold float64 `yaml:"slowness_threshold,omitempty"`
 }
 
 // KeysConfig contains key provider configuration.
@@ -169,8 +255,16 @@ type MetricsConfig struct {
 	Enabled bool `yaml:"enabled"`
 
 	// Addr is the address to expose metrics on.
-	// Default: ":9091"
+	// Default: ":9092"
 	Addr string `yaml:"addr"`
+
+	// PprofEnabled enables pprof profiling server.
+	// Default: false (disabled for production safety)
+	PprofEnabled bool `yaml:"pprof_enabled,omitempty"`
+
+	// PprofAddr is the address for pprof server.
+	// Default: "localhost:6060" (localhost only for security)
+	PprofAddr string `yaml:"pprof_addr,omitempty"`
 }
 
 // Validate validates the configuration.
@@ -281,12 +375,103 @@ func (c *Config) GetDeduplicationTTL() int64 {
 	return 10 // Default (session length + grace + buffer)
 }
 
-// GetCacheRefreshWorkers returns the number of cache refresh workers with defaults.
-func (c *Config) GetCacheRefreshWorkers() int {
-	if c.CacheRefreshWorkers > 0 {
-		return c.CacheRefreshWorkers
+// GetLeaderTTL returns the leader TTL as a duration.
+func (c *Config) GetLeaderTTL() time.Duration {
+	if c.LeaderElection.LeaderTTLSeconds > 0 {
+		return time.Duration(c.LeaderElection.LeaderTTLSeconds) * time.Second
 	}
-	return 6 // Default (parallel worker pool size)
+	return 30 * time.Second // Default
+}
+
+// GetLeaderHeartbeatRate returns the leader heartbeat rate as a duration.
+func (c *Config) GetLeaderHeartbeatRate() time.Duration {
+	if c.LeaderElection.HeartbeatRateSeconds > 0 {
+		return time.Duration(c.LeaderElection.HeartbeatRateSeconds) * time.Second
+	}
+	return 10 * time.Second // Default
+}
+
+// GetSessionLifecycleWindowStartBuffer returns the window start buffer in blocks.
+func (c *Config) GetSessionLifecycleWindowStartBuffer() int64 {
+	if c.SessionLifecycle.WindowStartBufferBlocks > 0 {
+		return c.SessionLifecycle.WindowStartBufferBlocks
+	}
+	return 10 // Default
+}
+
+// GetSessionLifecycleClaimBuffer returns the claim submission buffer in blocks.
+func (c *Config) GetSessionLifecycleClaimBuffer() int64 {
+	if c.SessionLifecycle.ClaimSubmissionBuffer > 0 {
+		return c.SessionLifecycle.ClaimSubmissionBuffer
+	}
+	return 2 // Default
+}
+
+// GetSessionLifecycleProofBuffer returns the proof submission buffer in blocks.
+func (c *Config) GetSessionLifecycleProofBuffer() int64 {
+	if c.SessionLifecycle.ProofSubmissionBuffer > 0 {
+		return c.SessionLifecycle.ProofSubmissionBuffer
+	}
+	return 2 // Default
+}
+
+// GetSessionLifecycleMaxConcurrentTransitions returns the max concurrent transitions.
+func (c *Config) GetSessionLifecycleMaxConcurrentTransitions() int {
+	if c.SessionLifecycle.MaxConcurrentTransitions > 0 {
+		return c.SessionLifecycle.MaxConcurrentTransitions
+	}
+	return 10 // Default
+}
+
+// GetBalanceMonitorEnabled returns whether balance monitoring is enabled.
+func (c *Config) GetBalanceMonitorEnabled() bool {
+	// Default to true if not explicitly set
+	return c.BalanceMonitor.Enabled
+}
+
+// GetBalanceMonitorCheckInterval returns the balance check interval as a duration.
+func (c *Config) GetBalanceMonitorCheckInterval() time.Duration {
+	if c.BalanceMonitor.CheckIntervalSeconds > 0 {
+		return time.Duration(c.BalanceMonitor.CheckIntervalSeconds) * time.Second
+	}
+	return 5 * time.Minute // Default: 5 minutes
+}
+
+// GetBalanceMonitorThreshold returns the balance threshold in uPOKT.
+func (c *Config) GetBalanceMonitorThreshold() int64 {
+	return c.BalanceMonitor.BalanceThresholdUpokt
+}
+
+// GetBalanceMonitorStakeWarningRatio returns the stake warning ratio.
+func (c *Config) GetBalanceMonitorStakeWarningRatio() float64 {
+	if c.BalanceMonitor.StakeWarningRatio > 0 {
+		return c.BalanceMonitor.StakeWarningRatio
+	}
+	return 1.2 // Default: 20% buffer above minimum
+}
+
+// GetBlockTimeSeconds returns the configured block time in seconds.
+func (c *Config) GetBlockTimeSeconds() int64 {
+	if c.BlockTimeSeconds > 0 {
+		return c.BlockTimeSeconds
+	}
+	return 30 // Default: 30s (not 6s - that was old testnet value)
+}
+
+// GetBlockHealthSlownessThreshold returns the slowness threshold for block health monitoring.
+func (c *Config) GetBlockHealthSlownessThreshold() float64 {
+	if c.BlockHealthMonitor.SlownessThreshold > 0 {
+		return c.BlockHealthMonitor.SlownessThreshold
+	}
+	return 1.5 // Default: 50% slower than expected
+}
+
+// GetStreamDiscoveryInterval returns the stream discovery interval as a duration.
+func (c *Config) GetStreamDiscoveryInterval() time.Duration {
+	if c.SessionLifecycle.StreamDiscoveryIntervalSeconds > 0 {
+		return time.Duration(c.SessionLifecycle.StreamDiscoveryIntervalSeconds) * time.Second
+	}
+	return 10 * time.Second // Default: 10 seconds
 }
 
 // DefaultConfig returns a config with sensible defaults.
@@ -319,7 +504,9 @@ func DefaultConfig() *Config {
 		HotReloadEnabled:       true,
 		SessionTTL:             24 * time.Hour,
 		WALMaxLen:              100000,
-		CacheRefreshWorkers:    6,
+		BalanceMonitor: BalanceMonitorConfigYAML{
+			Enabled: true, // Enable by default
+		},
 	}
 }
 

@@ -92,7 +92,7 @@ func NewRedisDeduplicator(
 		config.TTLBlocks = 10 // Default: session length + grace period + buffer
 	}
 	if config.BlockTimeSeconds == 0 {
-		config.BlockTimeSeconds = 6
+		config.BlockTimeSeconds = 30
 	}
 	if config.CleanupIntervalSeconds == 0 {
 		config.CleanupIntervalSeconds = 60

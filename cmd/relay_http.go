@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,23 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 )
+
+// Shared HTTP client with connection pooling for load tests.
+// Reuses connections to avoid TCP handshake overhead.
+var sharedHTTPClient = &http.Client{
+	Timeout: 30 * time.Second, // Default timeout, overridden per-request if needed
+	Transport: &http.Transport{
+		MaxIdleConns:        200,              // Total pool size
+		MaxIdleConnsPerHost: 200,              // Per-host pool (all requests go to same relayer)
+		IdleConnTimeout:     90 * time.Second, // Keep connections alive
+		DialContext: (&net.Dialer{
+			Timeout:   10 * time.Second,
+			KeepAlive: 30 * time.Second,
+		}).DialContext,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: 1 * time.Second,
+	},
+}
 
 // runHTTPMode sends HTTP/JSONRPC relay requests to the relayer.
 func runHTTPMode(ctx context.Context, logger logging.Logger, client *relay_client.RelayClient) error {
@@ -157,6 +175,10 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	requestCache := &relayRequestCache{}
 	requestCache.update(relayRequestBz, initialSession)
 
+	// Create cancellable context for monitor goroutine
+	monitorCtx, cancelMonitor := context.WithCancel(ctx)
+	defer cancelMonitor()
+
 	// Start block subscriber to monitor for session rollover
 	blockSubscriber, err := client.NewBlockSubscriber(logger, client.BlockSubscriberConfig{
 		RPCEndpoint: relayNodeRPC, // CometBFT RPC endpoint (e.g., http://localhost:26657)
@@ -167,7 +189,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	}
 	defer func() { blockSubscriber.Close() }()
 
-	if err := blockSubscriber.Start(ctx); err != nil {
+	if err := blockSubscriber.Start(monitorCtx); err != nil {
 		return fmt.Errorf("failed to start block subscriber: %w", err)
 	}
 
@@ -176,7 +198,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	monitorWg.Add(1)
 	go func() {
 		defer monitorWg.Done()
-		monitorSessionRollover(ctx, logger, relayClient, blockSubscriber, requestCache, payloadBz)
+		monitorSessionRollover(monitorCtx, logger, relayClient, blockSubscriber, requestCache, payloadBz)
 	}()
 
 	// Create metrics collector
@@ -210,7 +232,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			defer cancel()
 
 			start := time.Now()
-			_, err := sendHTTPRelay(requestCtx, currentRelayRequestBz)
+			relayResponseBz, err := sendHTTPRelay(requestCtx, currentRelayRequestBz)
 			latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
 
 			if err != nil {
@@ -218,14 +240,41 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 				logger.Debug().
 					Err(err).
 					Int("request_num", reqNum).
-					Msg("relay request failed")
-			} else {
-				metrics.RecordSuccess(latencyMs)
-				logger.Debug().
-					Int("request_num", reqNum).
-					Float64("latency_ms", latencyMs).
-					Msg("relay request succeeded")
+					Msg("relay request failed (HTTP error)")
+				return
 			}
+
+			// Verify relay response signature
+			relayResponse, err := relayClient.VerifyRelayResponse(requestCtx, relaySupplierAddr, relayResponseBz)
+			if err != nil {
+				metrics.RecordError(fmt.Errorf("signature verification failed: %w", err))
+				logger.Debug().
+					Err(err).
+					Int("request_num", reqNum).
+					Msg("relay request failed (invalid signature)")
+				return
+			}
+
+			// Check for JSON-RPC errors in the payload
+			var jsonrpcResp map[string]interface{}
+			if err := json.Unmarshal(relayResponse.Payload, &jsonrpcResp); err == nil {
+				// Check for JSON-RPC error field
+				if errField, hasError := jsonrpcResp["error"]; hasError && errField != nil {
+					metrics.RecordError(fmt.Errorf("JSON-RPC error: %v", errField))
+					logger.Debug().
+						Int("request_num", reqNum).
+						Interface("error", errField).
+						Msg("relay request failed (JSON-RPC error)")
+					return
+				}
+			}
+
+			// Success: HTTP 200 + valid signature + no JSON-RPC error
+			metrics.RecordSuccess(latencyMs)
+			logger.Debug().
+				Int("request_num", reqNum).
+				Float64("latency_ms", latencyMs).
+				Msg("relay request succeeded")
 		}(i)
 	}
 
@@ -233,7 +282,10 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	wg.Wait()
 	metrics.End()
 
-	// Wait for monitor goroutine to finish (will exit when ctx is done)
+	// Cancel monitor context now that load test is complete
+	cancelMonitor()
+
+	// Wait for monitor goroutine to finish (will exit immediately after cancel)
 	monitorWg.Wait()
 
 	// Display results
@@ -282,7 +334,7 @@ func monitorSessionRollover(
 					Msg("session boundary crossed - refreshing relay request")
 
 				// LOCK: Pause all workers, refresh session, rebuild relay request
-				if err := refreshRelayRequest(ctx, logger, relayClient, requestCache, payloadBz); err != nil {
+				if err := refreshRelayRequest(ctx, logger, relayClient, requestCache, payloadBz, currentHeight); err != nil {
 					logger.Error().
 						Err(err).
 						Msg("failed to refresh relay request on session rollover")
@@ -307,14 +359,15 @@ func refreshRelayRequest(
 	relayClient *relay_client.RelayClient,
 	requestCache *relayRequestCache,
 	payloadBz []byte,
+	currentHeight int64,
 ) error {
 	// Clear session cache to force fresh lookup
 	relayClient.ClearSessionCache()
 
-	// Get new session
-	newSession, err := relayClient.GetCurrentSession(ctx, relayServiceID)
+	// Get new session at current height (forces session rollover if boundary crossed)
+	newSession, err := relayClient.GetSessionAtHeight(ctx, relayServiceID, currentHeight)
 	if err != nil {
-		return fmt.Errorf("failed to get new session: %w", err)
+		return fmt.Errorf("failed to get new session at height %d: %w", currentHeight, err)
 	}
 
 	// Build new relay request
@@ -330,6 +383,7 @@ func refreshRelayRequest(
 }
 
 // sendHTTPRelay sends a relay request via HTTP and returns the raw response bytes.
+// Uses the shared HTTP client with connection pooling to avoid TCP handshake overhead.
 func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
 	// Build URL: {relayerURL}/{serviceID}
 	url := fmt.Sprintf("%s/%s", relayRelayerURL, relayServiceID)
@@ -346,11 +400,8 @@ func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
 	// Reference: poktroll/x/shared/types/service.pb.go RPCType enum
 	req.Header.Set("Rpc-Type", "3") // JSON_RPC = 3
 
-	// Send request
-	client := &http.Client{
-		Timeout: time.Duration(relayTimeout) * time.Second,
-	}
-	resp, err := client.Do(req)
+	// Send request using shared client with connection pooling
+	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}

@@ -1,0 +1,184 @@
+# Pocket RelayMiner Miner Configuration Example
+# Copy this file to config.yaml and customize for your deployment
+#
+# This is the MINER component (stateful claim/proof submitter with leader election).
+# For the RELAYER component, see config.relayer.example.yaml
+
+# ==============================================================================
+# Redis Configuration (REQUIRED)
+# ==============================================================================
+redis:
+  # Redis connection URL (supports single node, sentinel, cluster)
+  url: "redis://localhost:6379"
+  # url: "redis://user:password@localhost:6379/0"  # With auth
+  # url: "redis://node1:6379,node2:6379,node3:6379"  # Cluster
+
+  # Stream configuration
+  stream_prefix: "ha:relays"  # Prefix for Redis stream keys
+  consumer_group: "ha-miners"  # Consumer group (all miner instances should use same group)
+  consumer_name: ""  # Auto-generated from hostname if not set
+
+  # Timeouts
+  block_timeout_ms: 5000  # XREADGROUP blocking timeout (5 seconds)
+  claim_idle_timeout_ms: 60000  # Reclaim idle messages after 60s (crashed consumer recovery)
+
+# ==============================================================================
+# Pocket Blockchain Connection (REQUIRED)
+# ==============================================================================
+pocket_node:
+  # Query node endpoints
+  query_node_rpc_url: "https://rpc.testnet.pokt.network"  # RPC for block subscription
+  query_node_grpc_url: "grpc.testnet.pokt.network:443"  # gRPC for queries
+
+  # Optional: Separate TX node (if different from query node)
+  # tx_node_rpc_url: "https://rpc-tx.testnet.pokt.network"
+
+  # gRPC settings
+  grpc_insecure: false  # Disable TLS for gRPC (use true for local development only)
+
+# ==============================================================================
+# Supplier Keys Configuration (REQUIRED)
+# ==============================================================================
+keys:
+  # Option 1: Load from YAML file with hex-encoded keys
+  keys_file: "/keys/supplier-keys.yaml"
+
+  # Option 2: Load from directory with individual key files
+  # keys_dir: "/keys/suppliers"
+
+  # Option 3: Use Cosmos SDK keyring (recommended for production)
+  # keyring:
+  #   backend: "file"  # file, os, test, memory
+  #   dir: "/keys/keyring"
+  #   app_name: "pocket"
+  #   key_names:  # Optional: specific keys to load (empty = load all)
+  #     - "supplier1"
+  #     - "supplier2"
+
+# ==============================================================================
+# Explicit Supplier Configuration (OPTIONAL)
+# ==============================================================================
+# If not specified, suppliers are auto-discovered from keys.
+# Use this for explicit control over which suppliers/services to handle.
+# suppliers:
+#   - operator_address: "pokt1abc..."
+#     signing_key_name: "supplier1"  # Must match key in keyring/keys file
+#     services:  # Optional: filter which services this supplier handles
+#       - "develop"
+#       - "eth-mainnet"
+
+# ==============================================================================
+# Block Time Configuration (Feature 1)
+# ==============================================================================
+block_time_seconds: 30  # Expected block time (PRODUCTION: 30s for mainnet/testnet)
+
+# Block health monitoring
+block_health_monitor:
+  enabled: true  # Monitor for slow blocks (fullnode lag/network issues)
+  slowness_threshold: 1.5  # Alert if blocks > 1.5× configured time (e.g., >45s for 30s blocks)
+
+# ==============================================================================
+# Balance and Stake Monitoring (Feature 4)
+# ==============================================================================
+balance_monitor:
+  enabled: true  # Enable proactive balance/stake monitoring
+  check_interval_seconds: 300  # Check every 5 minutes
+
+  # Balance threshold - set based on your daily TX volume
+  # Example calculation:
+  #   - Average TX fee: 0.5 upokt
+  #   - Daily TXs (claims + proofs): ~1800 (at 5x load with batching)
+  #   - Daily cost: 1800 × 0.5 = 900 upokt
+  #   - Recommended threshold: 2-3 days buffer = 1800-2700 upokt
+  balance_threshold_upokt: 2000  # Alert if balance < 2000 upokt
+
+  # Stake health - alert when close to auto-unstake threshold
+  stake_warning_ratio: 1.2  # Alert if stake health ratio < 1.2 (20% buffer above minimum)
+
+# ==============================================================================
+# Session Lifecycle Configuration (Features 2, 3, 5)
+# ==============================================================================
+# NOTE: Session lifecycle is now event-driven (uses block events instead of polling)
+session_lifecycle:
+  # Spread buffer configuration (Feature 2: Spread Buffers)
+  # Controls when submissions occur within claim/proof windows
+  window_start_buffer_blocks: 10  # Delay after window opens (avoids network congestion)
+  claim_submission_buffer: 2  # Blocks before claim window close
+  proof_submission_buffer: 2  # Blocks before proof window close
+
+  # Example with 100-block claim window:
+  #   Window: [height 1000, height 1100]
+  #   Earliest submit: 1000 + 10 = 1010
+  #   Safe deadline: 1100 - 2 = 1098
+  #   Available spread range: [1010, 1098] = 88 blocks
+  #   → Submissions pseudo-randomly distributed across 88 blocks
+
+  # Concurrent transitions
+  max_concurrent_transitions: 10  # Limit parallel claim/proof submissions
+
+  # Stream discovery (Feature 5: Session-Based Streams)
+  stream_discovery_interval_seconds: 10  # SCAN Redis for new session streams every 10s
+
+# ==============================================================================
+# Leader Election Configuration (HA Deployments)
+# ==============================================================================
+leader_election:
+  leader_ttl_seconds: 30  # Leader lock TTL (must renew before expiry)
+  heartbeat_rate_seconds: 10  # Attempt acquire/renew every 10s
+
+# ==============================================================================
+# Session Tree (SMST) Configuration
+# ==============================================================================
+session_tree:
+  wal_enabled: true  # Write-Ahead Log for crash recovery
+  flush_interval_blocks: 1  # Flush SMST to Redis every block
+
+# ==============================================================================
+# Processing Configuration
+# ==============================================================================
+deduplication_ttl_blocks: 10  # Keep relay hashes for 10 blocks to prevent duplicates
+batch_size: 100  # Relay batch size for processing
+ack_batch_size: 50  # Acknowledge messages in batches
+hot_reload_enabled: true  # Enable hot-reload of keys on startup
+session_ttl: "24h"  # How long to keep session metadata in Redis
+wal_max_len: 100000  # Max messages in Redis stream before trimming
+
+# Pre-discovered applications (optional - speeds up startup)
+known_applications:
+  - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
+  # - "pokt1abc..."
+
+# ==============================================================================
+# Observability Configuration
+# ==============================================================================
+metrics:
+  enabled: true
+  addr: ":9092"  # Prometheus metrics HTTP server
+  # pprof_enabled: false  # Enable pprof profiling (for debugging, disable in production)
+  # pprof_addr: "localhost:6060"  # Pprof HTTP server (use localhost for security)
+
+logging:
+  level: "info"  # trace, debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, stderr, or file path
+  async: true  # Enable async logging for better performance
+  async_buffer_size: 100000  # Async log buffer size
+
+# ==============================================================================
+# Environment-Specific Defaults
+# ==============================================================================
+
+# Production (Mainnet):
+#   block_time_seconds: 30
+#   balance_threshold_upokt: 5000  # Higher threshold for production
+#   logging.level: "info"
+#   logging.format: "json"
+
+# Testnet:
+#   block_time_seconds: 30
+#   balance_threshold_upokt: 2000
+#   logging.level: "debug"
+
+# Localnet (Development):
+#   See tilt_config.yaml for localnet-specific settings
+#   Note: Localnet uses much faster block times (check tilt/config/config.toml)

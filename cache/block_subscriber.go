@@ -266,9 +266,9 @@ func (s *RedisBlockSubscriber) Close() error {
 	return nil
 }
 
-// BlockHeightWatcher watches the blockchain for new blocks and publishes events.
+// BlockPublisher watches the blockchain for new blocks and publishes events.
 // This should run on a single instance (leader) to avoid duplicate events.
-type BlockHeightWatcher struct {
+type BlockPublisher struct {
 	logger      logging.Logger
 	blockClient client.BlockClient
 	subscriber  *RedisBlockSubscriber
@@ -279,21 +279,21 @@ type BlockHeightWatcher struct {
 	wg       sync.WaitGroup
 }
 
-// NewBlockHeightWatcher creates a new watcher that publishes block events.
-func NewBlockHeightWatcher(
+// NewBlockPublisher creates a new watcher that publishes block events.
+func NewBlockPublisher(
 	logger logging.Logger,
 	blockClient client.BlockClient,
 	subscriber *RedisBlockSubscriber,
-) *BlockHeightWatcher {
-	return &BlockHeightWatcher{
-		logger:      logger.With().Str("component", "block_watcher").Logger(),
+) *BlockPublisher {
+	return &BlockPublisher{
+		logger:      logger.With().Str("component", "block_publisher").Logger(),
 		blockClient: blockClient,
 		subscriber:  subscriber,
 	}
 }
 
 // Start begins watching for new blocks and publishing events.
-func (w *BlockHeightWatcher) Start(ctx context.Context) error {
+func (w *BlockPublisher) Start(ctx context.Context) error {
 	w.mu.Lock()
 	if w.closed {
 		w.mu.Unlock()
@@ -306,14 +306,70 @@ func (w *BlockHeightWatcher) Start(ctx context.Context) error {
 	w.wg.Add(1)
 	go w.watchLoop(ctx)
 
-	w.logger.Info().Msg("block height watcher started")
+	w.logger.Info().Msg("block publisher started")
 	return nil
 }
 
-// watchLoop polls for new blocks and publishes events.
-func (w *BlockHeightWatcher) watchLoop(ctx context.Context) {
+// BlockEventsProvider is an optional interface for event-driven block clients.
+type BlockEventsProvider interface {
+	BlockEvents() <-chan client.Block
+}
+
+// watchLoop watches for new blocks and publishes events.
+// Uses event-driven notifications via Subscribe() method.
+func (w *BlockPublisher) watchLoop(ctx context.Context) {
 	defer w.wg.Done()
 
+	// Check if block client supports Subscribe() method for fan-out
+	if subscriber, ok := w.blockClient.(interface {
+		Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
+	}); ok {
+		w.logger.Info().Msg("using event-driven block notifications (Subscribe)")
+		w.watchLoopEventDriven(ctx, subscriber)
+	} else {
+		w.logger.Warn().Msg("block client does not support Subscribe(), falling back to polling")
+		w.watchLoopPolling(ctx)
+	}
+}
+
+// watchLoopEventDriven uses block events for immediate cache refresh triggers.
+func (w *BlockPublisher) watchLoopEventDriven(ctx context.Context, subscriber interface {
+	Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
+}) {
+	// Subscribe to block events with 100-block buffer for publishing to Redis
+	blockCh := subscriber.Subscribe(ctx, 100)
+	w.logger.Info().Msg("using Subscribe() for block events (fan-out mode)")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+
+		case block, ok := <-blockCh:
+			if !ok {
+				// Channel closed, block client shut down
+				w.logger.Warn().Msg("block events channel closed")
+				return
+			}
+
+			event := BlockEvent{
+				Height:    block.Height(),
+				Hash:      block.Hash(),
+				Timestamp: time.Now(),
+			}
+
+			if err := w.subscriber.PublishBlockHeight(ctx, event); err != nil {
+				w.logger.Error().
+					Err(err).
+					Int64("height", event.Height).
+					Msg("failed to publish block event")
+			}
+		}
+	}
+}
+
+// watchLoopPolling polls for new blocks as a fallback.
+func (w *BlockPublisher) watchLoopPolling(ctx context.Context) {
 	lastHeight := w.blockClient.LastBlock(ctx).Height()
 
 	ticker := time.NewTicker(time.Second) // Poll every second
@@ -351,7 +407,7 @@ func (w *BlockHeightWatcher) watchLoop(ctx context.Context) {
 }
 
 // Close gracefully shuts down the watcher.
-func (w *BlockHeightWatcher) Close() error {
+func (w *BlockPublisher) Close() error {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 

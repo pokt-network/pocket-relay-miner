@@ -91,7 +91,6 @@ const (
 	ComponentRelayProcessor     = "relay_processor"
 	ComponentRelayValidator     = "relay_validator"
 	ComponentRelayMeter         = "relay_meter"
-	ComponentSessionValidator   = "session_validator"
 	ComponentHealthChecker      = "health_checker"
 	ComponentService            = "ha_relayer"
 	ComponentDifficultyProvider = "difficulty_provider"
@@ -123,6 +122,8 @@ const (
 	ComponentLifecycleCallback = "lifecycle_callback"
 	ComponentSharedParamCache  = "shared_param_cache"
 	ComponentParamsRefresher   = "params_refresher"
+	ComponentBalanceMonitor    = "balance_monitor"
+	ComponentBlockHealth       = "block_health_monitor"
 
 	ComponentRedisPublisher = "redis_streams_publisher"
 	ComponentRedisConsumer  = "redis_streams_consumer"
@@ -140,6 +141,7 @@ const (
 	ComponentQuerySupplier = "query_supplier"
 	ComponentQueryProof    = "query_proof"
 	ComponentQueryService  = "query_service"
+	ComponentQueryAccount  = "query_account"
 
 	ComponentObservability  = "observability_server"
 	ComponentRuntimeMetrics = "runtime_metrics_collector"

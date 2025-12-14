@@ -116,41 +116,73 @@ func (c *applicationCache) Close() error {
 }
 
 // Get retrieves an application using L1 → L2 → L3 fallback pattern.
-func (c *applicationCache) Get(ctx context.Context, appAddress string) (*apptypes.Application, error) {
-	// L1: Check local cache (xsync)
-	if cached, ok := c.localCache.Load(appAddress); ok {
-		cacheHits.WithLabelValues(applicationCacheType, CacheLevelL1).Inc()
-		return cached, nil
-	}
+// If force=true, bypasses L1/L2 cache, queries L3 (chain), stores in L2+L1, and publishes invalidation.
+// This is used by the leader's RefreshEntity() to ensure fresh data on every block.
+func (c *applicationCache) Get(ctx context.Context, appAddress string, force ...bool) (*apptypes.Application, error) {
+	start := time.Now()
+	forceRefresh := len(force) > 0 && force[0]
 
-	// L2: Check Redis cache
-	redisKey := applicationCachePrefix + appAddress
-	data, err := c.redisClient.Get(ctx, redisKey).Bytes()
-	if err == nil {
-		var app apptypes.Application
-		if err := proto.Unmarshal(data, &app); err == nil {
-			// Store in L1 for next time
-			c.localCache.Store(appAddress, &app)
-			cacheHits.WithLabelValues(applicationCacheType, CacheLevelL2).Inc()
-
+	if !forceRefresh {
+		// L1: Check local cache (xsync)
+		if cached, ok := c.localCache.Load(appAddress); ok {
+			cacheHits.WithLabelValues(applicationCacheType, CacheLevelL1).Inc()
+			cacheGetLatency.WithLabelValues(applicationCacheType, CacheLevelL1).Observe(time.Since(start).Seconds())
 			c.logger.Debug().
 				Str(logging.FieldAppAddress, appAddress).
-				Msg("application cache hit (L2)")
+				Msg("application cache hit (L1)")
+			return cached, nil
+		}
 
-			return &app, nil
-		} else {
-			c.logger.Warn().
-				Err(err).
-				Str(logging.FieldAppAddress, appAddress).
-				Msg("failed to unmarshal application from Redis")
+		// L2: Check Redis cache
+		redisKey := applicationCachePrefix + appAddress
+		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+		if err == nil {
+			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
+			if err := proto.Unmarshal(data, app); err == nil {
+				// Store in L1 for next time
+				c.localCache.Store(appAddress, app)
+				cacheHits.WithLabelValues(applicationCacheType, CacheLevelL2).Inc()
+				cacheGetLatency.WithLabelValues(applicationCacheType, CacheLevelL2).Observe(time.Since(start).Seconds())
+
+				c.logger.Debug().
+					Str(logging.FieldAppAddress, appAddress).
+					Msg("application cache hit (L2) → stored in L1")
+
+				return app, nil
+			} else {
+				c.logger.Warn().
+					Err(err).
+					Str(logging.FieldAppAddress, appAddress).
+					Msg("failed to unmarshal application from Redis")
+			}
 		}
 	}
 
-	// L3: Query chain with distributed lock
-	app, err := c.queryChainWithLock(ctx, appAddress)
-	if err != nil {
-		cacheMisses.WithLabelValues(applicationCacheType, "l3_error").Inc()
-		return nil, fmt.Errorf("failed to query application %s: %w", appAddress, err)
+	// L3: Query chain (force=true bypasses distributed lock since leader refreshes serially)
+	var app *apptypes.Application
+	var err error
+
+	if forceRefresh {
+		// Leader force refresh: Direct query without lock (refreshes serially via pond workers)
+		chainQueries.WithLabelValues("application").Inc()
+		chainStart := time.Now()
+		app, err = c.queryClient.GetApplication(ctx, appAddress)
+		chainQueryLatency.WithLabelValues("application").Observe(time.Since(chainStart).Seconds())
+
+		if err != nil {
+			chainQueryErrors.WithLabelValues("application").Inc()
+			cacheMisses.WithLabelValues(applicationCacheType, "l3_error").Inc()
+			cacheGetLatency.WithLabelValues(applicationCacheType, "l3_error").Observe(time.Since(start).Seconds())
+			return nil, fmt.Errorf("failed to query application %s: %w", appAddress, err)
+		}
+	} else {
+		// Normal lazy load: Use distributed lock to prevent duplicate queries
+		app, err = c.queryChainWithLock(ctx, appAddress)
+		if err != nil {
+			cacheMisses.WithLabelValues(applicationCacheType, "l3_error").Inc()
+			cacheGetLatency.WithLabelValues(applicationCacheType, "l3_error").Observe(time.Since(start).Seconds())
+			return nil, fmt.Errorf("failed to query application %s: %w", appAddress, err)
+		}
 	}
 
 	// Store in L2 and L1
@@ -159,12 +191,31 @@ func (c *applicationCache) Get(ctx context.Context, appAddress string) (*apptype
 			Err(err).
 			Str(logging.FieldAppAddress, appAddress).
 			Msg("failed to cache application after L3 query")
+	} else {
+		if forceRefresh {
+			c.logger.Debug().
+				Str(logging.FieldAppAddress, appAddress).
+				Msg("application force refreshed from chain → stored in L1 and L2")
+		} else {
+			c.logger.Debug().
+				Str(logging.FieldAppAddress, appAddress).
+				Msg("application cache miss (L3) → stored in L1 and L2")
+		}
 	}
 
-	cacheMisses.WithLabelValues(applicationCacheType, "l3").Inc()
-	c.logger.Debug().
-		Str(logging.FieldAppAddress, appAddress).
-		Msg("application cache miss (L3)")
+	// Publish invalidation event if force refresh (leader only)
+	if forceRefresh {
+		payload := fmt.Sprintf(`{"address": "%s"}`, appAddress)
+		if err := PublishInvalidation(ctx, c.redisClient, c.logger, applicationCacheType, payload); err != nil {
+			c.logger.Warn().
+				Err(err).
+				Str(logging.FieldAppAddress, appAddress).
+				Msg("failed to publish invalidation event after force refresh")
+		}
+	}
+
+	cacheMisses.WithLabelValues(applicationCacheType, CacheLevelL3).Inc()
+	cacheGetLatency.WithLabelValues(applicationCacheType, CacheLevelL3).Observe(time.Since(start).Seconds())
 
 	return app, nil
 }
@@ -232,8 +283,17 @@ func (c *applicationCache) Invalidate(ctx context.Context, appAddress string) er
 func (c *applicationCache) Refresh(ctx context.Context) error {
 	// This method is intentionally empty because applications are refreshed
 	// individually by the CacheOrchestrator based on the list of known apps.
-	// The orchestrator calls Get() for each known app, which triggers L3 queries if needed.
+	// The orchestrator calls RefreshEntity() for each known app.
 	return nil
+}
+
+// RefreshEntity force-refreshes a single application from the chain (L3),
+// stores in L2+L1, and publishes invalidation event to notify followers.
+// Called by leader's CacheOrchestrator on each block.
+func (c *applicationCache) RefreshEntity(ctx context.Context, appAddress string) error {
+	// Force refresh: bypass L1/L2, query L3, store in L2+L1, publish invalidation
+	_, err := c.Get(ctx, appAddress, true)
+	return err
 }
 
 // InvalidateAll clears the entire cache (both L1 and L2).
@@ -274,42 +334,27 @@ func (c *applicationCache) InvalidateAll(ctx context.Context) error {
 	return nil
 }
 
-// WarmupFromRedis populates L1 cache from Redis on startup.
-func (c *applicationCache) WarmupFromRedis(ctx context.Context, knownAppAddresses []string) error {
-	c.logger.Info().
-		Int("count", len(knownAppAddresses)).
-		Msg("warming up application cache from Redis")
-
-	var wg sync.WaitGroup
-	for _, appAddr := range knownAppAddresses {
-		wg.Add(1)
-		go func(addr string) {
-			defer wg.Done()
-
-			// Load from Redis (L2) into local cache (L1)
-			redisKey := applicationCachePrefix + addr
-			data, err := c.redisClient.Get(ctx, redisKey).Bytes()
-			if err != nil {
-				// Key doesn't exist in Redis, skip
-				return
-			}
-
-			var app apptypes.Application
-			if err := proto.Unmarshal(data, &app); err != nil {
-				c.logger.Warn().
-					Err(err).
-					Str(logging.FieldAppAddress, addr).
-					Msg("failed to unmarshal application during warmup")
-				return
-			}
-
-			c.localCache.Store(addr, &app)
-		}(appAddr)
+// warmupSingleApp loads a single application from Redis (L2) into L1 cache.
+// This is called by the orchestrator's pond worker pool for parallel warmup.
+func (c *applicationCache) warmupSingleApp(ctx context.Context, addr string) error {
+	// Load from Redis (L2) into local cache (L1)
+	redisKey := applicationCachePrefix + addr
+	data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+	if err != nil {
+		// Key doesn't exist in Redis, skip
+		return nil
 	}
 
-	wg.Wait()
-	c.logger.Info().Msg("application cache warmup complete")
+	app := &apptypes.Application{}
+	if err := proto.Unmarshal(data, app); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Str(logging.FieldAppAddress, addr).
+			Msg("failed to unmarshal application during warmup")
+		return err
+	}
 
+	c.localCache.Store(addr, app)
 	return nil
 }
 
@@ -327,30 +372,36 @@ func (c *applicationCache) queryChainWithLock(ctx context.Context, appAddress st
 
 	if !locked {
 		// Another instance is querying, wait and retry L2
+		lockAcquisitions.WithLabelValues(applicationCacheType, "contended").Inc()
 		c.logger.Debug().
 			Str(logging.FieldAppAddress, appAddress).
 			Msg("another instance is querying application, waiting")
-		time.Sleep(100 * time.Millisecond)
+		time.Sleep(5 * time.Millisecond)
 
 		// Retry L2 after waiting
 		redisKey := applicationCachePrefix + appAddress
 		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 		if err == nil {
-			var app apptypes.Application
-			if err := proto.Unmarshal(data, &app); err == nil {
-				c.localCache.Store(appAddress, &app)
+			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
+			if err := proto.Unmarshal(data, app); err == nil {
+				c.localCache.Store(appAddress, app)
 				cacheHits.WithLabelValues(applicationCacheType, CacheLevelL2Retry).Inc()
-				return &app, nil
+				return app, nil
 			}
 		}
 
 		// If still not in Redis, query chain anyway
+	} else {
+		lockAcquisitions.WithLabelValues(applicationCacheType, "acquired").Inc()
 	}
 
 	// Query chain
 	chainQueries.WithLabelValues("application").Inc()
+	chainStart := time.Now()
 
 	app, err := c.queryClient.GetApplication(ctx, appAddress)
+	chainQueryLatency.WithLabelValues("application").Observe(time.Since(chainStart).Seconds())
+
 	if err != nil {
 		chainQueryErrors.WithLabelValues("application").Inc()
 		return nil, err
@@ -385,12 +436,40 @@ func (c *applicationCache) handleInvalidation(ctx context.Context, payload strin
 		return err
 	}
 
-	// Remove from L1 (local cache)
+	// Clear L1 (local cache) for this application
 	if event.Address != "" {
 		c.localCache.Delete(event.Address)
 	}
 
 	cacheInvalidations.WithLabelValues(applicationCacheType, SourcePubSub).Inc()
+
+	// Eagerly reload from L2 (Redis) to avoid cold cache on next relay
+	// Applications are needed for relay validation (ring signatures, metering)
+	// so first relay after invalidation should not experience L2/L3 latency
+	if event.Address != "" {
+		redisKey := applicationCachePrefix + event.Address
+		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+		if err == nil {
+			app := &apptypes.Application{}
+			if err := proto.Unmarshal(data, app); err == nil {
+				// Warm L1 cache immediately
+				c.localCache.Store(event.Address, app)
+				c.logger.Debug().
+					Str(logging.FieldAppAddress, event.Address).
+					Msg("eagerly reloaded application from L2 into L1")
+			} else {
+				c.logger.Warn().
+					Err(err).
+					Str(logging.FieldAppAddress, event.Address).
+					Msg("failed to unmarshal application during eager reload")
+			}
+		} else if err != redis.Nil {
+			c.logger.Warn().
+				Err(err).
+				Str(logging.FieldAppAddress, event.Address).
+				Msg("failed to eagerly reload application from L2")
+		}
+	}
 
 	return nil
 }

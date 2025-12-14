@@ -3,11 +3,15 @@ package cache
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
+	pond "github.com/alitto/pond/v2"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -54,6 +58,9 @@ type CacheOrchestrator struct {
 	knownServices  *xsync.Map[string, struct{}]
 	knownSuppliers *xsync.Map[string, struct{}]
 
+	// Pond subpool for parallel cache refresh (I/O-bound network queries)
+	refreshSubpool pond.Pool
+
 	// Block subscription management (leader-only)
 	blockChan     <-chan BlockEvent
 	blockCancelFn context.CancelFunc
@@ -67,16 +74,13 @@ type CacheOrchestrator struct {
 
 // CacheOrchestratorConfig contains configuration for the CacheOrchestrator.
 type CacheOrchestratorConfig struct {
-	// RefreshWorkers is the number of concurrent workers for parallel refresh.
-	// Default: 6
-	RefreshWorkers int
-
 	// KnownApplications is a list of application addresses to pre-discover at startup.
 	// These apps will be fetched from the network and added to the cache during warmup.
 	KnownApplications []string
 }
 
 // NewCacheOrchestrator creates a new cache orchestrator.
+// The workerPool parameter is required for creating refresh subpool.
 func NewCacheOrchestrator(
 	logger logging.Logger,
 	config CacheOrchestratorConfig,
@@ -90,11 +94,28 @@ func NewCacheOrchestrator(
 	serviceCache KeyedEntityCache[string, *sharedtypes.Service],
 	supplierCache *SupplierCache,
 	sessionCache SessionCache,
+	workerPool pond.Pool,
 ) *CacheOrchestrator {
-	// Default config values
-	if config.RefreshWorkers == 0 {
-		config.RefreshWorkers = 6
+	// Calculate refresh workers: 15% of master pool for I/O-bound cache refresh
+	// Cache refresh is network I/O (chain queries, Redis ops)
+	numCPU := runtime.NumCPU()
+	masterPoolSize := numCPU * 8
+	refreshWorkers := int(float64(masterPoolSize) * 0.15)
+	if refreshWorkers < 4 {
+		refreshWorkers = 4 // Minimum 4 workers
 	}
+
+	// Create refresh subpool from master pool (percentage-based)
+	refreshSubpool := workerPool.NewSubpool(refreshWorkers)
+
+	percentage := int(float64(refreshWorkers) / float64(masterPoolSize) * 100)
+
+	logger.Info().
+		Int("refresh_workers", refreshWorkers).
+		Int("master_pool_size", masterPoolSize).
+		Int("percentage", percentage).
+		Int("num_cpu", numCPU).
+		Msg("created cache refresh subpool with percentage-based allocation")
 
 	return &CacheOrchestrator{
 		logger:             logging.ForComponent(logger, logging.ComponentCacheOrchestrator),
@@ -112,6 +133,7 @@ func NewCacheOrchestrator(
 		knownApps:          xsync.NewMap[string, struct{}](),
 		knownServices:      xsync.NewMap[string, struct{}](),
 		knownSuppliers:     xsync.NewMap[string, struct{}](),
+		refreshSubpool:     refreshSubpool,
 	}
 }
 
@@ -137,9 +159,7 @@ func (o *CacheOrchestrator) Start(ctx context.Context) error {
 		o.onBecameLeader(o.ctx)
 	}
 
-	o.logger.Info().
-		Int("refresh_workers", o.config.RefreshWorkers).
-		Msg("cache orchestrator started")
+	o.logger.Info().Msg("cache orchestrator started")
 
 	return nil
 }
@@ -157,6 +177,11 @@ func (o *CacheOrchestrator) Close() error {
 		o.cancelFn()
 	}
 	o.wg.Wait()
+
+	// Stop refresh subpool gracefully (drains queued tasks)
+	if o.refreshSubpool != nil {
+		o.refreshSubpool.StopAndWait()
+	}
 
 	// Close all caches (with nil checks for partial initialization)
 	if o.sharedParamsCache != nil {
@@ -270,7 +295,7 @@ func (o *CacheOrchestrator) refreshWorker(ctx context.Context) {
 	}
 }
 
-// refreshAllCaches refreshes all caches in parallel using worker pool.
+// refreshAllCaches refreshes all caches in parallel using pond subpool.
 func (o *CacheOrchestrator) refreshAllCaches(ctx context.Context) error {
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
@@ -289,54 +314,35 @@ func (o *CacheOrchestrator) refreshAllCaches(ctx context.Context) error {
 		// Note: Sessions are not refreshed globally, they're cached on-demand
 	}
 
-	// Create worker pool
-	taskCh := make(chan int, len(tasks))
-	errCh := make(chan error, len(tasks))
-	var wg sync.WaitGroup
+	// Use pond Group for coordinated task submission and error collection
+	group := o.refreshSubpool.NewGroup()
 
-	// Spawn workers
-	for i := 0; i < o.config.RefreshWorkers; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for taskIdx := range taskCh {
-				task := tasks[taskIdx]
-				start := time.Now()
+	// Submit all refresh tasks to the subpool
+	for _, task := range tasks {
+		// Capture for closure
+		capturedTask := task
+		group.SubmitErr(func() error {
+			start := time.Now()
 
-				if err := task.fn(ctx); err != nil {
-					o.logger.Warn().
-						Err(err).
-						Str("cache", task.name).
-						Msg("cache refresh failed")
-					errCh <- fmt.Errorf("%s: %w", task.name, err)
-				} else {
-					o.logger.Debug().
-						Str("cache", task.name).
-						Dur("duration", time.Since(start)).
-						Msg("cache refreshed")
-				}
+			if err := capturedTask.fn(ctx); err != nil {
+				o.logger.Warn().
+					Err(err).
+					Str("cache", capturedTask.name).
+					Msg("cache refresh failed")
+				return fmt.Errorf("%s: %w", capturedTask.name, err)
 			}
-		}()
+
+			o.logger.Debug().
+				Str("cache", capturedTask.name).
+				Dur("duration", time.Since(start)).
+				Msg("cache refreshed")
+			return nil
+		})
 	}
 
-	// Enqueue tasks
-	for i := range tasks {
-		taskCh <- i
-	}
-	close(taskCh)
-
-	// Wait for completion
-	wg.Wait()
-	close(errCh)
-
-	// Collect errors
-	var errs []error
-	for err := range errCh {
-		errs = append(errs, err)
-	}
-
-	if len(errs) > 0 {
-		return fmt.Errorf("cache refresh had %d errors: %v", len(errs), errs)
+	// Wait for all tasks to complete and collect errors
+	if err := group.Wait(); err != nil {
+		return fmt.Errorf("cache refresh failed: %w", err)
 	}
 
 	return nil
@@ -366,14 +372,60 @@ func (o *CacheOrchestrator) refreshApplications(ctx context.Context) error {
 		return true // continue iteration
 	})
 
-	// Refresh each known app by calling Get (which will trigger L3 if needed)
-	for _, appAddr := range knownApps {
-		if _, err := o.applicationCache.Get(ctx, appAddr); err != nil {
-			o.logger.Warn().
-				Err(err).
-				Str(logging.FieldAppAddress, appAddr).
-				Msg("failed to refresh application")
+	// Type assert to get RefreshEntity method
+	type RefreshableCache interface {
+		RefreshEntity(ctx context.Context, key string) error
+	}
+
+	refresher, ok := o.applicationCache.(RefreshableCache)
+	if !ok {
+		// Fallback to Get() if RefreshEntity not available
+		o.logger.Warn().Msg("application cache does not support RefreshEntity, using Get()")
+		for _, appAddr := range knownApps {
+			if _, err := o.applicationCache.Get(ctx, appAddr); err != nil {
+				o.logger.Warn().
+					Err(err).
+					Str(logging.FieldAppAddress, appAddr).
+					Msg("failed to refresh application")
+			}
 		}
+		return nil
+	}
+
+	// Force refresh from L3 (chain) for each known app IN PARALLEL using pond workers
+	// This ensures fresh data in L2 (Redis) and publishes invalidation events
+	group := o.refreshSubpool.NewGroup()
+	for _, appAddr := range knownApps {
+		// Capture for closure
+		addr := appAddr
+		group.SubmitErr(func() error {
+			if err := refresher.RefreshEntity(ctx, addr); err != nil {
+				// Check if it's a NotFound error (app was unstaked/deleted)
+				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+					// Expected: App was unstaked or deleted from chain
+					// Log at Debug level to reduce noise
+					o.logger.Debug().
+						Str(logging.FieldAppAddress, addr).
+						Msg("application not found on chain (likely unstaked)")
+					// TODO: Consider removing from knownApps after N consecutive NotFound
+					return nil // Don't fail the group for NotFound
+				} else {
+					// Unexpected error (network, timeout, etc.)
+					o.logger.Warn().
+						Err(err).
+						Str(logging.FieldAppAddress, addr).
+						Msg("failed to refresh application")
+					return err
+				}
+			}
+			return nil
+		})
+	}
+
+	// Wait for all application refreshes to complete
+	if err := group.Wait(); err != nil {
+		o.logger.Warn().Err(err).Msg("some application refreshes failed")
+		// Don't return error - continue with other caches
 	}
 
 	// Update Redis set with known apps (for warmup on restart)
@@ -393,14 +445,60 @@ func (o *CacheOrchestrator) refreshServices(ctx context.Context) error {
 		return true // continue iteration
 	})
 
-	// Refresh each known service by calling Get (which will trigger L3 if needed)
-	for _, serviceID := range knownServices {
-		if _, err := o.serviceCache.Get(ctx, serviceID); err != nil {
-			o.logger.Warn().
-				Err(err).
-				Str(logging.FieldServiceID, serviceID).
-				Msg("failed to refresh service")
+	// Type assert to get RefreshEntity method
+	type RefreshableCache interface {
+		RefreshEntity(ctx context.Context, key string) error
+	}
+
+	refresher, ok := o.serviceCache.(RefreshableCache)
+	if !ok {
+		// Fallback to Get() if RefreshEntity not available
+		o.logger.Warn().Msg("service cache does not support RefreshEntity, using Get()")
+		for _, serviceID := range knownServices {
+			if _, err := o.serviceCache.Get(ctx, serviceID); err != nil {
+				o.logger.Warn().
+					Err(err).
+					Str(logging.FieldServiceID, serviceID).
+					Msg("failed to refresh service")
+			}
 		}
+		return nil
+	}
+
+	// Force refresh from L3 (chain) for each known service IN PARALLEL using pond workers
+	// This ensures fresh data in L2 (Redis) and publishes invalidation events
+	group := o.refreshSubpool.NewGroup()
+	for _, serviceID := range knownServices {
+		// Capture for closure
+		svcID := serviceID
+		group.SubmitErr(func() error {
+			if err := refresher.RefreshEntity(ctx, svcID); err != nil {
+				// Check if it's a NotFound error (service was removed from chain)
+				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+					// Expected: Service was removed from chain
+					// Log at Debug level to reduce noise
+					o.logger.Debug().
+						Str(logging.FieldServiceID, svcID).
+						Msg("service not found on chain (likely removed)")
+					// TODO: Consider removing from knownServices after N consecutive NotFound
+					return nil // Don't fail the group for NotFound
+				} else {
+					// Unexpected error (network, timeout, etc.)
+					o.logger.Warn().
+						Err(err).
+						Str(logging.FieldServiceID, svcID).
+						Msg("failed to refresh service")
+					return err
+				}
+			}
+			return nil
+		})
+	}
+
+	// Wait for all service refreshes to complete
+	if err := group.Wait(); err != nil {
+		o.logger.Warn().Err(err).Msg("some service refreshes failed")
+		// Don't return error - continue with other caches
 	}
 
 	// Update Redis set with known services (for warmup on restart)
@@ -428,10 +526,21 @@ func (o *CacheOrchestrator) refreshSuppliers(ctx context.Context) error {
 	for _, supplierAddr := range knownSuppliers {
 		state, err := o.supplierCache.GetSupplierState(ctx, supplierAddr)
 		if err != nil {
-			o.logger.Warn().
-				Err(err).
-				Str("supplier_address", supplierAddr).
-				Msg("failed to get supplier state during refresh")
+			// Check if it's a NotFound error (supplier was unstaked/deleted)
+			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+				// Expected: Supplier was unstaked or deleted from chain
+				// Log at Debug level to reduce noise
+				o.logger.Debug().
+					Str("supplier_address", supplierAddr).
+					Msg("supplier not found on chain (likely unstaked)")
+				// TODO: Consider removing from knownSuppliers after N consecutive NotFound
+			} else {
+				// Unexpected error (network, timeout, etc.)
+				o.logger.Warn().
+					Err(err).
+					Str("supplier_address", supplierAddr).
+					Msg("failed to get supplier state during refresh")
+			}
 			continue
 		}
 
@@ -509,30 +618,46 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 		Int("suppliers", len(knownSuppliers)).
 		Msg("discovered known entities from Redis")
 
-	// Warmup keyed caches in parallel
-	var wg sync.WaitGroup
-	wg.Add(3)
+	// Warmup keyed caches in parallel using pond workers
+	o.logger.Info().
+		Int("apps", len(knownApps)).
+		Int("services", len(knownServices)).
+		Int("suppliers", len(knownSuppliers)).
+		Msg("warming up caches from Redis using pond workers")
 
-	go logging.RecoverGoRoutine(o.logger, "cache_warmup_apps", func(ctx context.Context) {
-		defer wg.Done()
-		if app, ok := o.applicationCache.(*applicationCache); ok {
-			_ = app.WarmupFromRedis(ctx, knownApps)
+	// Create pond group for warmup tasks
+	group := o.refreshSubpool.NewGroup()
+
+	// Warmup applications in parallel
+	if app, ok := o.applicationCache.(*applicationCache); ok {
+		for _, appAddr := range knownApps {
+			addr := appAddr
+			group.SubmitErr(func() error {
+				return app.warmupSingleApp(ctx, addr)
+			})
 		}
-	})(ctx)
+	}
 
-	go logging.RecoverGoRoutine(o.logger, "cache_warmup_services", func(ctx context.Context) {
-		defer wg.Done()
-		if svc, ok := o.serviceCache.(*serviceCache); ok {
-			_ = svc.WarmupFromRedis(ctx, knownServices)
+	// Warmup services in parallel
+	if svc, ok := o.serviceCache.(*serviceCache); ok {
+		for _, serviceID := range knownServices {
+			svcID := serviceID
+			group.SubmitErr(func() error {
+				return svc.warmupSingleService(ctx, svcID)
+			})
 		}
-	})(ctx)
+	}
 
-	go logging.RecoverGoRoutine(o.logger, "cache_warmup_suppliers", func(ctx context.Context) {
-		defer wg.Done()
-		_ = o.supplierCache.WarmupFromRedis(ctx, knownSuppliers)
-	})(ctx)
+	// Warmup suppliers - use existing method (already handles concurrency internally)
+	group.SubmitErr(func() error {
+		return o.supplierCache.WarmupFromRedis(ctx, knownSuppliers)
+	})
 
-	wg.Wait()
+	// Wait for all warmup tasks to complete
+	if err := group.Wait(); err != nil {
+		o.logger.Warn().Err(err).Msg("some cache warmup tasks failed")
+		// Continue even if warmup fails - caches will be populated on demand
+	}
 
 	// Warmup singleton caches (params)
 	if shared, ok := o.sharedParamsCache.(*sharedParamsCache); ok {

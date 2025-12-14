@@ -58,18 +58,31 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_dropped_total",
-			Help:      "Total number of relays dropped (e.g., publish queue full)",
+			Help:      "Total number of relays served but not mined (optimistic mode: validation failed, meter error, stake exhausted)",
 		},
 		[]string{"service_id", "reason"},
 	)
+
+	relaysOverServiced = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_over_serviced_total",
+			Help:      "Total number of relays that exceeded app stake but were allowed due to over_servicing_enabled=true",
+		},
+		[]string{"service_id", "mode"}, // mode: optimistic, eager
+	)
+
+	// === CRITICAL HISTOGRAMS (async recorded to avoid hot path blocking) ===
+	// Only 4 histograms to minimize lock contention - recorded via MetricRecorder worker
 
 	relayLatency = observability.RelayerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relay_latency_seconds",
-			Help:      "Latency of relay requests (time to serve response)",
-			Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+			Help:      "End-to-end latency of relay requests (request received to response sent)",
+			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"service_id"},
 	)
@@ -79,20 +92,30 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "backend_latency_seconds",
-			Help:      "Latency of backend requests",
-			Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+			Help:      "Total latency of backend requests (upstream service call)",
+			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"service_id"},
 	)
 
-	// Validation metrics
 	validationLatency = observability.RelayerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "validation_latency_seconds",
-			Help:      "Latency of relay validation",
-			Buckets:   prometheus.DefBuckets,
+			Help:      "Latency of relay validation (signature, session, params)",
+			Buckets:   observability.FineGrainedLatencyBuckets,
+		},
+		[]string{"service_id", "mode"}, // mode: eager, optimistic
+	)
+
+	relayMeterLatency = observability.RelayerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_meter_latency_seconds",
+			Help:      "Latency of relay meter check and consume operations (Redis calls)",
+			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"service_id", "mode"}, // mode: eager, optimistic
 	)
@@ -404,7 +427,7 @@ var (
 			Subsystem: metricsSubsystem,
 			Name:      "grpc_relay_latency_seconds",
 			Help:      "Latency of gRPC relay requests",
-			Buckets:   []float64{0.01, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30},
+			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"service_id"},
 	)
@@ -427,46 +450,6 @@ var (
 			Help:      "Total number of gRPC-Web requests received",
 		},
 		[]string{"service_id"},
-	)
-
-	// Session validation metrics
-	sessionValidationsTotal = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_validations_total",
-			Help:      "Total number of session validations",
-		},
-		[]string{"result", "reason"}, // result: valid, invalid, error
-	)
-
-	sessionValidationLatency = observability.RelayerFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_validation_latency_seconds",
-			Help:      "Latency of session validation operations",
-			Buckets:   []float64{0.001, 0.005, 0.01, 0.05, 0.1, 0.25, 0.5, 1},
-		},
-		[]string{"mode"}, // mode: sync, async
-	)
-
-	asyncValidationQueued = observability.RelayerFactory.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "async_validation_queued_total",
-			Help:      "Total number of requests queued for async validation",
-		},
-	)
-
-	asyncValidationDropped = observability.RelayerFactory.NewCounter(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "async_validation_dropped_total",
-			Help:      "Total number of async validation requests dropped (queue full)",
-		},
 	)
 
 	// Relay meter metrics
@@ -497,6 +480,27 @@ var (
 			Help:      "Total relay meter Redis errors",
 		},
 		[]string{"operation"},
+	)
+
+	// Over-servicing metrics (when over_servicing_enabled=true)
+	relayMeterOverServicedUpokt = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_meter_over_serviced_upokt_total",
+			Help:      "Total uPOKT value served beyond app stake limit (when over_servicing_enabled=true)",
+		},
+		[]string{"service_id", "session_id"},
+	)
+
+	relayMeterOverServicedRelays = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_meter_over_serviced_relays_total",
+			Help:      "Total number of relays served beyond app stake limit (when over_servicing_enabled=true)",
+		},
+		[]string{"service_id", "session_id"},
 	)
 
 	// Unused - reserved for future relay meter parameter refresh tracking

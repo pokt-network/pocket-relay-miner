@@ -1,0 +1,399 @@
+$schema: http://json-schema.org/draft-07/schema#
+title: Pocket RelayMiner Relayer Configuration
+description: Configuration schema for the Pocket RelayMiner Relayer component (stateless HTTP/WebSocket/gRPC/Streaming proxy)
+type: object
+required:
+  - listen_addr
+  - redis
+  - pocket_node
+  - keys
+  - services
+
+properties:
+  listen_addr:
+    type: string
+    description: HTTP server listen address
+    default: "0.0.0.0:8080"
+    pattern: ^.+:[0-9]+$
+
+  redis:
+    type: object
+    description: Redis connection configuration
+    required:
+      - url
+    properties:
+      url:
+        type: string
+        description: Redis connection URL (supports single, sentinel, cluster)
+        pattern: ^redis(s)?://
+        examples:
+          - redis://localhost:6379
+          - redis://node1:6379,node2:6379,node3:6379
+      stream_prefix:
+        type: string
+        description: Prefix for Redis stream keys
+        default: ha:relays
+      max_stream_len:
+        type: integer
+        description: Max stream length (DEPRECATED - Feature 5 uses per-session streams with TTL)
+        default: 100000
+        minimum: 1000
+
+  pocket_node:
+    type: object
+    description: Pocket blockchain connection
+    required:
+      - query_node_rpc_url
+      - query_node_grpc_url
+    properties:
+      query_node_rpc_url:
+        type: string
+        description: RPC endpoint for queries and block subscription
+      query_node_grpc_url:
+        type: string
+        description: gRPC endpoint for queries
+      use_redis_for_blocks:
+        type: boolean
+        description: Use Redis pub/sub for block events instead of direct WebSocket (recommended for HA)
+        default: true
+
+  keys:
+    type: object
+    description: Supplier signing key configuration
+    properties:
+      keys_file:
+        type: string
+        description: Path to YAML file with hex-encoded private keys
+      keys_dir:
+        type: string
+        description: Directory containing individual key files
+      keyring:
+        type: object
+        description: Cosmos SDK keyring configuration
+        properties:
+          backend:
+            type: string
+            enum:
+              - file
+              - os
+              - test
+              - memory
+            description: Keyring backend type
+          dir:
+            type: string
+            description: Directory for keyring (file backend only)
+          app_name:
+            type: string
+            description: Application name for keyring
+            default: pocket
+          key_names:
+            type: array
+            description: Specific key names to load (empty = load all)
+            items:
+              type: string
+
+  services:
+    type: object
+    description: Service configurations (map of service_id -> ServiceConfig)
+    minProperties: 1
+    additionalProperties:
+      type: object
+      description: Configuration for a single service
+      required:
+        - backends
+      properties:
+        validation_mode:
+          type: string
+          enum:
+            - eager
+            - optimistic
+          description: Validation mode override for this service
+        request_timeout_seconds:
+          type: integer
+          description: Timeout for backend requests (seconds)
+          minimum: 1
+        max_body_size_bytes:
+          type: integer
+          description: Max request/response body size (bytes)
+          minimum: 1024
+        default_backend:
+          type: string
+          enum:
+            - jsonrpc
+            - websocket
+            - grpc
+            - rest
+            - cometbft
+          description: Default backend when Rpc-Type header not provided
+          default: jsonrpc
+        backends:
+          type: object
+          description: Backend configurations per RPC type
+          minProperties: 1
+          additionalProperties:
+            type: object
+            description: Configuration for a specific RPC type backend
+            required:
+              - url
+            properties:
+              url:
+                type: string
+                description: Backend URL (http://, https://, ws://, wss://, grpc://, grpcs://)
+              headers:
+                type: object
+                description: Additional headers for backend requests
+                additionalProperties:
+                  type: string
+              authentication:
+                type: object
+                description: Authentication configuration for this backend
+                properties:
+                  username:
+                    type: string
+                    description: Username for basic auth
+                  password:
+                    type: string
+                    description: Password for basic auth
+                  bearer_token:
+                    type: string
+                    description: Bearer token for token auth
+              health_check:
+                type: object
+                description: Health check configuration for this backend
+                properties:
+                  enabled:
+                    type: boolean
+                    description: Enable health checking
+                    default: false
+                  endpoint:
+                    type: string
+                    description: Health check endpoint path (e.g., /health)
+                  interval_seconds:
+                    type: integer
+                    description: How often to check health (seconds)
+                    minimum: 1
+                  timeout_seconds:
+                    type: integer
+                    description: Timeout for health check requests (seconds)
+                    minimum: 1
+                  unhealthy_threshold:
+                    type: integer
+                    description: Failures before marking unhealthy
+                    minimum: 1
+                  healthy_threshold:
+                    type: integer
+                    description: Successes before marking healthy
+                    minimum: 1
+
+  default_validation_mode:
+    type: string
+    enum:
+      - eager
+      - optimistic
+    description: Default validation mode for services (eager=validate first, optimistic=forward first)
+    default: optimistic
+
+  default_request_timeout_seconds:
+    type: integer
+    description: Default backend request timeout (seconds)
+    default: 30
+    minimum: 1
+
+  default_max_body_size_bytes:
+    type: integer
+    description: Default max body size for requests/responses (bytes)
+    default: 10485760
+    minimum: 1024
+
+  grace_period_extra_blocks:
+    type: integer
+    description: Additional grace period blocks beyond on-chain config
+    default: 2
+    minimum: 0
+
+  metrics:
+    type: object
+    description: Prometheus metrics server configuration
+    properties:
+      enabled:
+        type: boolean
+        default: true
+      addr:
+        type: string
+        description: Metrics HTTP server address
+        default: "0.0.0.0:9090"
+      pprof_enabled:
+        type: boolean
+        description: Enable pprof profiling server (for debugging, disable in production)
+        default: false
+      pprof_addr:
+        type: string
+        description: Pprof HTTP server address (use localhost for security)
+        default: "localhost:6060"
+        pattern: ^.*:[0-9]+$
+
+  health_check:
+    type: object
+    description: Health check server configuration
+    properties:
+      enabled:
+        type: boolean
+        default: true
+      addr:
+        type: string
+        description: Health check HTTP server address
+        default: "0.0.0.0:8081"
+
+  cache_warmup:
+    type: object
+    description: Cache pre-warming configuration
+    properties:
+      enabled:
+        type: boolean
+        description: Enable cache warmup at startup
+        default: false
+      known_applications:
+        type: array
+        description: Application addresses to pre-warm
+        items:
+          type: string
+      persist_discovered_apps:
+        type: boolean
+        description: Save discovered apps for next restart
+        default: true
+      warmup_concurrency:
+        type: integer
+        description: Number of parallel warmup operations
+        default: 10
+        minimum: 1
+      warmup_timeout_seconds:
+        type: integer
+        description: Timeout for warming each application (seconds)
+        default: 5
+        minimum: 1
+
+  logging:
+    type: object
+    description: Logging configuration
+    properties:
+      level:
+        type: string
+        enum:
+          - trace
+          - debug
+          - info
+          - warn
+          - error
+        default: info
+      format:
+        type: string
+        enum:
+          - json
+          - text
+        default: json
+      output:
+        type: string
+        description: Log output destination
+        default: stdout
+      async:
+        type: boolean
+        description: Enable async logging for better performance
+        default: true
+      async_buffer_size:
+        type: integer
+        description: Async log buffer size
+        default: 100000
+        minimum: 1000
+
+  relay_meter:
+    type: object
+    description: Relay metering and rate limiting configuration
+    properties:
+      enabled:
+        type: boolean
+        description: Enable metering and rate limiting
+        default: true
+      over_servicing_enabled:
+        type: boolean
+        description: Allow apps to exceed stake limits temporarily
+        default: false
+      redis_key_prefix:
+        type: string
+        description: Prefix for Redis keys used by relay meter
+        default: ha
+      fail_behavior:
+        type: string
+        enum:
+          - open
+          - closed
+        description: Behavior when Redis unavailable (open=allow, closed=reject)
+        default: open
+      session_cleanup_interval:
+        type: string
+        description: How often to clean up expired sessions (duration string)
+        default: 5m
+        pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+      params_cache_ttl:
+        type: string
+        description: TTL for cached shared/session params (duration string)
+        default: 10m
+        pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+      app_stake_cache_ttl:
+        type: string
+        description: TTL for cached app stakes (duration string)
+        default: 10m
+        pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+
+  http_transport:
+    type: object
+    description: HTTP transport settings for backend connection pooling (tuned for 1000+ RPS)
+    properties:
+      max_idle_conns:
+        type: integer
+        description: Total idle connections across all backends
+        default: 500
+        minimum: 1
+      max_idle_conns_per_host:
+        type: integer
+        description: Idle connections per backend (keeps connections warm after bursts)
+        default: 100
+        minimum: 1
+      max_conns_per_host:
+        type: integer
+        description: Total concurrent connections per backend (0 = unlimited)
+        default: 500
+        minimum: 0
+      idle_conn_timeout_seconds:
+        type: integer
+        description: How long to keep idle connections alive (seconds)
+        default: 90
+        minimum: 1
+      dial_timeout_seconds:
+        type: integer
+        description: Timeout for establishing new connection (seconds)
+        default: 5
+        minimum: 1
+      tls_handshake_timeout_seconds:
+        type: integer
+        description: Timeout for TLS handshake (seconds)
+        default: 10
+        minimum: 1
+      response_header_timeout_seconds:
+        type: integer
+        description: Timeout waiting for response headers (seconds)
+        default: 30
+        minimum: 1
+      expect_continue_timeout_seconds:
+        type: integer
+        description: Timeout for 100-continue response (seconds)
+        default: 1
+        minimum: 0
+      tcp_keep_alive_seconds:
+        type: integer
+        description: TCP keepalive period for active connections (0 = disabled)
+        default: 30
+        minimum: 0
+      disable_compression:
+        type: boolean
+        description: Don't modify content encoding (required for relay protocol)
+        default: true

@@ -12,6 +12,16 @@ def deploy_backend(config):
 
     backend_config = config["backend"]
 
+    # Get resource limits from config with defaults
+    resources = backend_config.get("resources", {})
+    requests = resources.get("requests", {})
+    limits = resources.get("limits", {})
+
+    cpu_request = requests.get("cpu", "200m")
+    memory_request = requests.get("memory", "256Mi")
+    cpu_limit = limits.get("cpu", "2000m")
+    memory_limit = limits.get("memory", "1Gi")
+
     # Build backend server Docker image
     # Only watch specific files to prevent unnecessary rebuilds
     docker_build(
@@ -84,11 +94,11 @@ spec:
           name: metrics
         resources:
           requests:
-            cpu: "100m"
-            memory: "128Mi"
+            cpu: "{}"
+            memory: "{}"
           limits:
-            cpu: "500m"
-            memory: "512Mi"
+            cpu: "{}"
+            memory: "{}"
         readinessProbe:
           httpGet:
             path: /health
@@ -101,7 +111,12 @@ spec:
             port: 8545
           initialDelaySeconds: 10
           periodSeconds: 10
-"""
+""".format(
+        cpu_request,
+        memory_request,
+        cpu_limit,
+        memory_limit
+    )
 
     k8s_yaml(blob(backend_yaml))
 

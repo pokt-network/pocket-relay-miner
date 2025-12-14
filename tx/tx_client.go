@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -222,7 +223,7 @@ func (tc *TxClient) CreateClaims(
 		msgs[i] = claim
 	}
 
-	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, msgs...)
+	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, "claim", msgs...)
 	if err != nil {
 		txClaimErrors.WithLabelValues(supplierOperatorAddr, "broadcast").Inc()
 		return fmt.Errorf("failed to broadcast claims: %w", err)
@@ -261,7 +262,7 @@ func (tc *TxClient) SubmitProofs(
 		msgs[i] = proof
 	}
 
-	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, msgs...)
+	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, "proof", msgs...)
 	if err != nil {
 		txProofErrors.WithLabelValues(supplierOperatorAddr, "broadcast").Inc()
 		return fmt.Errorf("failed to broadcast proofs: %w", err)
@@ -278,9 +279,11 @@ func (tc *TxClient) SubmitProofs(
 }
 
 // signAndBroadcast signs and broadcasts a transaction.
+// txType should be "claim" or "proof" for proper metrics labeling.
 func (tc *TxClient) signAndBroadcast(
 	ctx context.Context,
 	signerAddr string,
+	txType string,
 	msgs ...cosmostypes.Msg,
 ) (string, error) {
 	tc.txMu.Lock()
@@ -339,8 +342,33 @@ func (tc *TxClient) signAndBroadcast(
 	}
 
 	if res.TxResponse.Code != 0 {
+		// Check for insufficient balance error
+		if isInsufficientBalanceError(res.TxResponse.RawLog) {
+			txInsufficientBalanceErrors.WithLabelValues(signerAddr).Inc()
+			tc.logger.Warn().
+				Str("supplier", signerAddr).
+				Str("tx_type", txType).
+				Str("error", res.TxResponse.RawLog).
+				Msg("transaction failed due to insufficient balance")
+		}
 		return res.TxResponse.TxHash, fmt.Errorf("transaction failed: %s", res.TxResponse.RawLog)
 	}
+
+	// Track gas metrics from successful transaction
+	txGasUsed.WithLabelValues(signerAddr, txType).Observe(float64(res.TxResponse.GasUsed))
+	txGasWanted.WithLabelValues(signerAddr, txType).Observe(float64(res.TxResponse.GasWanted))
+
+	// Calculate and track actual fee charged
+	actualFeeUpokt := tc.calculateActualFee(res.TxResponse.GasUsed)
+	txActualFeeUpokt.WithLabelValues(signerAddr, txType).Observe(actualFeeUpokt)
+
+	tc.logger.Debug().
+		Str("supplier", signerAddr).
+		Str("tx_type", txType).
+		Int64("gas_used", res.TxResponse.GasUsed).
+		Int64("gas_wanted", res.TxResponse.GasWanted).
+		Float64("actual_fee_upokt", actualFeeUpokt).
+		Msg("transaction gas metrics tracked")
 
 	// Increment account sequence for next transaction
 	tc.incrementSequence(signerAddr)
@@ -468,7 +496,8 @@ func (tc *TxClient) InvalidateAccount(addr string) {
 	delete(tc.accountCache, addr)
 }
 
-// calculateFee calculates the transaction fee.
+// calculateFee calculates the transaction fee based on gas limit.
+// This is the MAXIMUM fee we're willing to pay (set before broadcast).
 func (tc *TxClient) calculateFee() cosmostypes.Coins {
 	gasLimitDec := math.LegacyNewDec(int64(tc.config.GasLimit))
 	feeAmount := tc.config.GasPrice.Amount.Mul(gasLimitDec)
@@ -480,6 +509,37 @@ func (tc *TxClient) calculateFee() cosmostypes.Coins {
 	}
 
 	return cosmostypes.NewCoins(cosmostypes.NewCoin(tc.config.GasPrice.Denom, feeInt))
+}
+
+// calculateActualFee calculates the ACTUAL fee charged based on gas used.
+// Formula: actual_fee = GasUsed × GasPrice
+// Returns fee amount in upokt.
+func (tc *TxClient) calculateActualFee(gasUsed int64) float64 {
+	gasUsedDec := math.LegacyNewDec(gasUsed)
+	feeAmount := tc.config.GasPrice.Amount.Mul(gasUsedDec)
+
+	// Convert to float64 for metrics (assumes denom is upokt)
+	// Example: 100000 gas × 0.000001 upokt/gas = 0.1 upokt
+	feeFloat, _ := feeAmount.Float64()
+	return feeFloat
+}
+
+// isInsufficientBalanceError checks if the error message indicates insufficient balance.
+func isInsufficientBalanceError(errorMsg string) bool {
+	// Common error patterns from Cosmos SDK
+	insufficientFundsPatterns := []string{
+		"insufficient funds",
+		"insufficient account balance",
+		"spendable balance",
+	}
+
+	errorLower := strings.ToLower(errorMsg)
+	for _, pattern := range insufficientFundsPatterns {
+		if strings.Contains(errorLower, pattern) {
+			return true
+		}
+	}
+	return false
 }
 
 // Close closes the transaction client.

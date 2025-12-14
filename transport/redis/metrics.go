@@ -1,8 +1,8 @@
 package redis
 
 import (
+	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
 const (
@@ -13,7 +13,7 @@ const (
 var (
 	// Publisher metrics
 
-	publishedTotal = promauto.NewCounterVec(
+	publishedTotal = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -23,7 +23,7 @@ var (
 		[]string{"supplier_addr", "service_id"},
 	)
 
-	publishErrorsTotal = promauto.NewCounterVec(
+	publishErrorsTotal = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -34,20 +34,20 @@ var (
 	)
 
 	// publishLatency reserved for future instrumentation
-	_ = promauto.NewHistogramVec(
+	_ = observability.SharedFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "publish_latency_seconds",
 			Help:      "Latency of publish operations",
-			Buckets:   prometheus.DefBuckets,
+			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"supplier_addr"},
 	)
 
 	// Consumer metrics
 
-	consumedTotal = promauto.NewCounterVec(
+	consumedTotal = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -57,7 +57,7 @@ var (
 		[]string{"supplier_addr", "service_id"},
 	)
 
-	consumeErrorsTotal = promauto.NewCounterVec(
+	consumeErrorsTotal = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -67,7 +67,7 @@ var (
 		[]string{"supplier_addr", "error_type"},
 	)
 
-	ackedTotal = promauto.NewCounterVec(
+	ackedTotal = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -77,7 +77,7 @@ var (
 		[]string{"supplier_addr"},
 	)
 
-	pendingMessages = promauto.NewGaugeVec(
+	pendingMessages = observability.SharedFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -88,7 +88,7 @@ var (
 	)
 
 	// consumerLag reserved for future instrumentation
-	_ = promauto.NewGaugeVec(
+	_ = observability.SharedFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -99,7 +99,7 @@ var (
 	)
 
 	// streamLength reserved for future instrumentation
-	_ = promauto.NewGaugeVec(
+	_ = observability.SharedFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -109,7 +109,7 @@ var (
 		[]string{"supplier_addr"},
 	)
 
-	claimedMessages = promauto.NewCounterVec(
+	claimedMessages = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -119,7 +119,7 @@ var (
 		[]string{"supplier_addr"},
 	)
 
-	deserializationErrors = promauto.NewCounterVec(
+	deserializationErrors = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -130,7 +130,7 @@ var (
 	)
 
 	// End-to-end latency from publish to consume
-	endToEndLatency = promauto.NewHistogramVec(
+	endToEndLatency = observability.SharedFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -144,7 +144,7 @@ var (
 	// Reconnection metrics
 	// Track reconnection attempts and successes for Redis operations
 
-	redisReconnectionAttempts = promauto.NewCounterVec(
+	redisReconnectionAttempts = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -154,7 +154,7 @@ var (
 		[]string{"component"},
 	)
 
-	redisReconnectionSuccess = promauto.NewCounterVec(
+	redisReconnectionSuccess = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
@@ -162,5 +162,38 @@ var (
 			Help:      "Successful Redis reconnections by component",
 		},
 		[]string{"component"},
+	)
+
+	// Stream discovery metrics (for session-based streams)
+
+	activeSessionStreams = observability.SharedFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "active_session_streams",
+			Help:      "Number of active session streams being consumed",
+		},
+		[]string{"supplier_addr"},
+	)
+
+	streamDiscoveryScanDuration = observability.SharedFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "stream_discovery_scan_duration_seconds",
+			Help:      "Duration of stream discovery SCAN operations",
+			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5},
+		},
+		[]string{"supplier_addr"},
+	)
+
+	streamDiscoveryErrors = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "stream_discovery_errors_total",
+			Help:      "Total stream discovery errors",
+		},
+		[]string{"supplier_addr", "error_type"},
 	)
 )

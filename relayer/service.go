@@ -3,8 +3,10 @@ package relayer
 import (
 	"context"
 	"fmt"
+	"runtime"
 	"sync"
 
+	pond "github.com/alitto/pond/v2"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
@@ -39,6 +41,9 @@ type Service struct {
 
 	// Ring client for signature verification
 	ringClient crypto.RingClient
+
+	// Worker pool for async operations
+	workerPool pond.Pool
 
 	// Lifecycle
 	mu       sync.Mutex
@@ -126,21 +131,30 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 	// Create Redis publisher
 	publisherConfig := transport.PublisherConfig{
 		StreamPrefix: config.Redis.StreamPrefix,
-		MaxLen:       config.Redis.MaxStreamLen,
-		ApproxMaxLen: true, // Use approximate trimming for better performance
-	}
-	if publisherConfig.MaxLen == 0 {
-		publisherConfig.MaxLen = 100000 // Default max stream length
 	}
 
 	publisher := redistransport.NewStreamsPublisher(
 		logger,
 		deps.RedisClient,
 		publisherConfig,
+		30, // Default block time: 30s (used for stream TTL calculation)
 	)
 
+	// Create master worker pool for relayer
+	numCPU := runtime.NumCPU()
+	masterPoolSize := numCPU * 8
+	masterPool := pond.NewPool(
+		masterPoolSize,
+		pond.WithQueueSize(pond.Unbounded),
+		pond.WithNonBlocking(true),
+	)
+	logger.Info().
+		Int("max_workers", masterPoolSize).
+		Int("num_cpu", numCPU).
+		Msg("created master worker pool (unbounded, non-blocking, 8x CPU)")
+
 	// Create proxy server
-	proxyServer, err := NewProxyServer(logger, config, healthChecker, publisher)
+	proxyServer, err := NewProxyServer(logger, config, healthChecker, publisher, masterPool)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create proxy server: %w", err)
 	}
@@ -173,6 +187,7 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 		sessionCache:     sessionCache,
 		blockSubscriber:  blockSubscriber,
 		ringClient:       deps.RingClient,
+		workerPool:       masterPool,
 	}, nil
 }
 

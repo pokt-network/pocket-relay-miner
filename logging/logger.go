@@ -4,6 +4,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/diode"
@@ -33,6 +34,13 @@ type Config struct {
 	// Default: 100000 (100KB)
 	AsyncBufferSize int `yaml:"async_buffer_size"`
 
+	// AsyncPollInterval is how often the async writer polls for messages (in milliseconds).
+	// Shorter interval = lower latency but more CPU overhead.
+	// Longer interval = less CPU overhead but batches more messages.
+	// Default: 100 (100ms) - good balance for most use cases
+	// Production high-throughput: 10-50ms
+	AsyncPollInterval int `yaml:"async_poll_interval"`
+
 	// Sampling enables probabilistic log sampling to reduce volume.
 	// When enabled, only a fraction of logs at each level are written.
 	// Useful for extremely high throughput scenarios.
@@ -61,6 +69,7 @@ func DefaultConfig() Config {
 		Format:             "json",
 		Async:              true,   // Enable async by default for performance
 		AsyncBufferSize:    100000, // 100KB buffer
+		AsyncPollInterval:  100,    // 100ms poll interval - balances latency vs CPU
 		Sampling:           false,  // Disabled by default, enable for extreme throughput
 		SamplingInitial:    100,    // First 100 messages always logged
 		SamplingThereafter: 10,     // Then 1 in 10
@@ -78,6 +87,7 @@ func NewLoggerFromConfig(config Config) Logger {
 	level := parseLevel(config.Level)
 
 	// Determine output writer
+	// Note: diode (async writer) handles batching, so no need for additional bufio
 	var output io.Writer = os.Stderr
 
 	// Configure output format
@@ -119,9 +129,14 @@ func NewLoggerFromConfig(config Config) Logger {
 			bufferSize = 100000 // Default 100KB
 		}
 
+		pollInterval := config.AsyncPollInterval
+		if pollInterval <= 0 {
+			pollInterval = 100 // Default 100ms
+		}
+
 		// Diode writer: drops old messages when buffer full
-		// pollInterval = 10ms is reasonable for most use cases
-		output = diode.NewWriter(output, bufferSize, 10, func(missed int) {
+		// pollInterval controls CPU usage - longer interval = less CPU overhead
+		output = diode.NewWriter(output, bufferSize, time.Duration(pollInterval)*time.Millisecond, func(missed int) {
 			// This callback is rarely hit in practice, only when buffer overflows
 			// We can't use the logger here (recursion), so write directly to stderr
 			if missed > 0 {

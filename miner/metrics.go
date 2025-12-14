@@ -203,23 +203,110 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
-	// Compute units totals - helps track revenue
+	// ====== REVENUE TRACKING METRICS ======
+	// These metrics track the complete lifecycle of revenue: claimed -> proved -> lost
+	// Available in 3 views: Compute Units (protocol), uPOKT (revenue), Relays (workload)
+
+	// Compute Units - Protocol's unit of work
 	computeUnitsClaimedTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "compute_units_claimed_total",
-			Help:      "Total compute units claimed across all sessions",
+			Help:      "Total compute units successfully claimed (claim tx accepted on-chain)",
 		},
 		[]string{"supplier", "service_id"},
 	)
 
+	computeUnitsProvedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "compute_units_proved_total",
+			Help:      "Total compute units successfully proved (proof tx accepted on-chain or proof not required)",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
+	computeUnitsLostTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "compute_units_lost_total",
+			Help:      "Total compute units lost due to claim/proof failures",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
+	// uPOKT - Revenue view (compute units * service rate)
+	upoktClaimedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_claimed_total",
+			Help:      "Total uPOKT successfully claimed (compute units * service rate)",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
+	upoktProvedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_proved_total",
+			Help:      "Total uPOKT successfully proved (revenue that will be settled)",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
+	upoktLostTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_lost_total",
+			Help:      "Total uPOKT lost due to claim/proof failures",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
+	// Relays - Workload view (number of relays processed)
+	relaysClaimedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_claimed_total",
+			Help:      "Total relays successfully claimed",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
+	relaysProvedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_proved_total",
+			Help:      "Total relays successfully proved",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
+	relaysLostTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_lost_total",
+			Help:      "Total relays lost due to claim/proof failures",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
+	// Legacy metric for backward compatibility (deprecated - use compute_units_proved_total)
 	computeUnitsSettledTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "compute_units_settled_total",
-			Help:      "Total compute units settled (proven) across all sessions",
+			Help:      "DEPRECATED: Use compute_units_proved_total instead. Total compute units settled (proven) across all sessions",
 		},
 		[]string{"supplier", "service_id"},
 	)
@@ -450,13 +537,51 @@ var (
 		},
 	)
 
-	// Leader election metrics
+	// Block health metrics
+	configuredBlockTimeSeconds = observability.MinerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "configured_block_time_seconds",
+			Help:      "Configured expected block time in seconds",
+		},
+	)
+
+	currentBlockIntervalSeconds = observability.MinerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "current_block_interval_seconds",
+			Help:      "Actual time between the last two blocks in seconds",
+		},
+	)
+
+	fullnodeSlowBlocksTotal = observability.MinerFactory.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "fullnode_slow_blocks_total",
+			Help:      "Total number of slow blocks detected (block time > configured time × threshold)",
+		},
+	)
+
+	fullnodeSlowBlocksConsecutive = observability.MinerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "fullnode_slow_blocks_consecutive",
+			Help:      "Number of consecutive slow blocks currently detected (resets when block time normalizes)",
+		},
+	)
+
+	// Leader election metrics (legacy - from old per-supplier leader elector)
+	// These are kept for backwards compatibility with miner/leader.go but not actively used
 	leaderStatus = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "leader_status",
-			Help:      "Whether this instance is the leader (1=leader, 0=standby)",
+			Name:      "leader_status_legacy",
+			Help:      "LEGACY: Whether this instance is the leader (1=leader, 0=standby) - per supplier",
 		},
 		[]string{"supplier", "instance"},
 	)
@@ -466,7 +591,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "leader_acquisitions_total",
-			Help:      "Total number of times this instance acquired leadership",
+			Help:      "LEGACY: Total number of times this instance acquired leadership",
 		},
 		[]string{"supplier"},
 	)
@@ -475,8 +600,8 @@ var (
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "leader_losses_total",
-			Help:      "Total number of times this instance lost leadership",
+			Name:      "leader_losses_total_legacy",
+			Help:      "LEGACY: Total number of times this instance lost leadership",
 		},
 		[]string{"supplier"},
 	)
@@ -560,7 +685,7 @@ var (
 			Subsystem: metricsSubsystem,
 			Name:      "smst_snapshot_latency_seconds",
 			Help:      "Time to create SMST snapshot",
-			Buckets:   []float64{0.01, 0.05, 0.1, 0.5, 1, 5},
+			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"supplier"},
 	)
@@ -659,6 +784,87 @@ var (
 		[]string{"param_type"}, // param_type: shared, session, app_stake, service
 	)
 
+	// Balance monitor metrics
+	supplierBalanceUpokt = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_balance_upokt",
+			Help:      "Current account balance in uPOKT for each supplier",
+		},
+		[]string{"supplier"},
+	)
+
+	supplierStakeUpokt = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_stake_upokt",
+			Help:      "Current staked amount in uPOKT for each supplier",
+		},
+		[]string{"supplier"},
+	)
+
+	supplierBalanceHealthStatus = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_balance_health_status",
+			Help:      "Balance health status: 0=critical (below threshold), 1=warning, 2=healthy",
+		},
+		[]string{"supplier"},
+	)
+
+	supplierStakeHealthRatio = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_stake_health_ratio",
+			Help:      "Ratio of current stake to minimum required stake (higher is better)",
+		},
+		[]string{"supplier"},
+	)
+
+	supplierBalanceCriticalAlerts = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_balance_critical_alerts_total",
+			Help:      "Total number of critical balance alerts (below threshold)",
+		},
+		[]string{"supplier"},
+	)
+
+	supplierBalanceWarningAlerts = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_balance_warning_alerts_total",
+			Help:      "Total number of balance warning alerts",
+		},
+		[]string{"supplier"},
+	)
+
+	supplierStakeWarningAlerts = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_stake_warning_alerts_total",
+			Help:      "Total number of stake warning alerts (close to auto-unstake threshold)",
+		},
+		[]string{"supplier"},
+	)
+
+	supplierMonitorErrors = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_monitor_errors_total",
+			Help:      "Total number of errors during balance/stake monitoring",
+		},
+		[]string{"supplier", "error_type"}, // error_type: balance_query, stake_query
+	)
+
 	// Meter cleanup metrics (unused - reserved for future meter cleanup tracking)
 	// meterCleanupPublished = observability.MinerFactory.NewCounterVec(
 	// 	prometheus.CounterOpts{
@@ -669,6 +875,28 @@ var (
 	// 	},
 	// 	[]string{"supplier"},
 	// )
+
+	// Late relay detection metrics - tracks relays that arrived but weren't consumed before claim
+
+	sessionLateRelays = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "session_late_relays",
+			Help:      "Number of late-arriving relays per session (pending in stream but not consumed before claim)",
+		},
+		[]string{"supplier", "session_id"},
+	)
+
+	sessionLateRelaysTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "session_late_relays_total",
+			Help:      "Total number of late-arriving relays across all sessions",
+		},
+		[]string{"supplier"},
+	)
 )
 
 // =============================================
@@ -777,13 +1005,66 @@ func RecordSessionFailed(supplier, serviceID, reason string) {
 }
 
 // RecordComputeUnitsClaimed adds to the claimed compute units total.
+// DEPRECATED: Use RecordRevenueClaimed instead to track all revenue metrics.
 func RecordComputeUnitsClaimed(supplier, serviceID string, units float64) {
 	computeUnitsClaimedTotal.WithLabelValues(supplier, serviceID).Add(units)
 }
 
 // RecordComputeUnitsSettled adds to the settled compute units total.
+// DEPRECATED: Use RecordRevenueProved instead to track all revenue metrics.
 func RecordComputeUnitsSettled(supplier, serviceID string, units float64) {
 	computeUnitsSettledTotal.WithLabelValues(supplier, serviceID).Add(units)
+	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID).Add(units)
+}
+
+// RecordRevenueClaimed records successful claim submission across all revenue views.
+// This tracks compute units, uPOKT revenue, and relay count when a claim is accepted.
+func RecordRevenueClaimed(supplier, serviceID string, computeUnits uint64, relayCount int64) {
+	cu := float64(computeUnits)
+	relays := float64(relayCount)
+
+	// Compute Units view
+	computeUnitsClaimedTotal.WithLabelValues(supplier, serviceID).Add(cu)
+
+	// uPOKT view (compute units are already in uPOKT units - 1:1 mapping)
+	upoktClaimedTotal.WithLabelValues(supplier, serviceID).Add(cu)
+
+	// Relays view
+	relaysClaimedTotal.WithLabelValues(supplier, serviceID).Add(relays)
+}
+
+// RecordRevenueProved records successful proof submission across all revenue views.
+// This tracks compute units, uPOKT revenue, and relay count when a proof is accepted.
+func RecordRevenueProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
+	cu := float64(computeUnits)
+	relays := float64(relayCount)
+
+	// Compute Units view
+	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
+	computeUnitsSettledTotal.WithLabelValues(supplier, serviceID).Add(cu) // Legacy metric
+
+	// uPOKT view (compute units are already in uPOKT units - 1:1 mapping)
+	upoktProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
+
+	// Relays view
+	relaysProvedTotal.WithLabelValues(supplier, serviceID).Add(relays)
+}
+
+// RecordRevenueLost records failed claim/proof submission across all revenue views.
+// This tracks compute units, uPOKT revenue, and relay count when revenue is lost.
+// Common reasons: "claim_tx_failed", "proof_tx_failed", "exhausted_retries"
+func RecordRevenueLost(supplier, serviceID, reason string, computeUnits uint64, relayCount int64) {
+	cu := float64(computeUnits)
+	relays := float64(relayCount)
+
+	// Compute Units view
+	computeUnitsLostTotal.WithLabelValues(supplier, serviceID, reason).Add(cu)
+
+	// uPOKT view
+	upoktLostTotal.WithLabelValues(supplier, serviceID, reason).Add(cu)
+
+	// Relays view
+	relaysLostTotal.WithLabelValues(supplier, serviceID, reason).Add(relays)
 }
 
 // RecordClaimSubmitted increments the claims submitted counter.

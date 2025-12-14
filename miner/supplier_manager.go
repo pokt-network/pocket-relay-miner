@@ -3,11 +3,13 @@ package miner
 import (
 	"context"
 	"fmt"
-	"strings"
 	"sync"
 	"time"
 
+	pond "github.com/alitto/pond/v2"
 	"github.com/redis/go-redis/v9"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/keys"
@@ -108,6 +110,14 @@ type SupplierManagerConfig struct {
 	// ProofChecker determines if a proof is required for a claimed session.
 	// If nil, proofs are always submitted (legacy behavior).
 	ProofChecker *ProofRequirementChecker
+
+	// SessionLifecycleConfig contains configuration for session lifecycle management.
+	SessionLifecycleConfig SessionLifecycleConfig
+
+	// WorkerPool is the master worker pool shared across all concurrent operations.
+	// MUST be set by caller. Should be limited to runtime.NumCPU().
+	// Subpools will be created from this for different workloads.
+	WorkerPool pond.Pool
 }
 
 // SupplierManager manages multiple suppliers in the HA Miner.
@@ -125,6 +135,9 @@ type SupplierManager struct {
 	// Message processing callback
 	onRelay func(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error
 
+	// Pond subpool for bounded supplier queries (prevents unbounded goroutine spawning)
+	querySubpool pond.Pool
+
 	// Lifecycle
 	ctx      context.Context
 	cancelFn context.CancelFunc
@@ -139,12 +152,17 @@ func NewSupplierManager(
 	registry *SupplierRegistry,
 	config SupplierManagerConfig,
 ) *SupplierManager {
+	// Create subpool for bounded supplier queries (prevents system overwhelm)
+	// Limit to 20 concurrent queries to avoid spawning 100+ goroutines
+	querySubpool := config.WorkerPool.NewSubpool(20)
+
 	return &SupplierManager{
-		logger:     logging.ForComponent(logger, logging.ComponentSupplierManager),
-		config:     config,
-		keyManager: keyManager,
-		registry:   registry,
-		suppliers:  make(map[string]*SupplierState),
+		logger:       logging.ForComponent(logger, logging.ComponentSupplierManager),
+		config:       config,
+		keyManager:   keyManager,
+		registry:     registry,
+		suppliers:    make(map[string]*SupplierState),
+		querySubpool: querySubpool,
 	}
 }
 
@@ -209,8 +227,9 @@ type SupplierWarmupData struct {
 	Services     []string
 }
 
-// warmupSuppliersParallel queries all supplier data from chain in parallel.
-// This avoids sequential startup delays when many suppliers are configured.
+// warmupSuppliersParallel queries all supplier data from chain in parallel using a worker pool.
+// This avoids sequential startup delays when many suppliers are configured while respecting CPU limits.
+// Uses a subpool from the master worker pool to ensure we don't exceed system capacity.
 func (m *SupplierManager) warmupSuppliersParallel(ctx context.Context, supplierAddrs []string) map[string]*SupplierWarmupData {
 	if m.config.SupplierQueryClient == nil {
 		m.logger.Debug().Msg("no supplier query client configured, skipping warmup")
@@ -219,24 +238,39 @@ func (m *SupplierManager) warmupSuppliersParallel(ctx context.Context, supplierA
 
 	results := make(map[string]*SupplierWarmupData)
 	var mu sync.Mutex
-	var wg sync.WaitGroup
 
-	// Query all suppliers in parallel
+	m.logger.Info().
+		Int("suppliers", len(supplierAddrs)).
+		Int("max_concurrent", 20).
+		Msg("starting parallel supplier warmup with bounded pond subpool")
+
+	// Use pond Group for coordinated task submission and waiting
+	// This allows us to wait for all warmup tasks to complete without blocking the persistent subpool
+	group := m.querySubpool.NewGroup()
+
+	// Submit all warmup tasks to the persistent querySubpool (20 workers max)
+	// This prevents unbounded goroutine spawning when warming up 100+ suppliers
 	for _, addr := range supplierAddrs {
-		wg.Add(1)
-		go func(operatorAddr string) {
-			defer wg.Done()
-
+		operatorAddr := addr // capture for closure
+		group.Submit(func() {
 			// Create timeout context for this query
 			queryCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()
 
 			supplier, err := m.config.SupplierQueryClient.GetSupplier(queryCtx, operatorAddr)
 			if err != nil {
-				m.logger.Debug().
-					Err(err).
-					Str(logging.FieldSupplier, operatorAddr).
-					Msg("failed to query supplier during warmup (will retry during init)")
+				// Check if it's a NotFound error (supplier not staked)
+				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+					m.logger.Debug().
+						Str(logging.FieldSupplier, operatorAddr).
+						Msg("supplier not staked (pre-loaded key or unstaked)")
+				} else {
+					// Other errors (network, timeout, etc.)
+					m.logger.Warn().
+						Err(err).
+						Str(logging.FieldSupplier, operatorAddr).
+						Msg("failed to query supplier during warmup")
+				}
 				return
 			}
 
@@ -261,10 +295,13 @@ func (m *SupplierManager) warmupSuppliersParallel(ctx context.Context, supplierA
 				Str(logging.FieldSupplier, operatorAddr).
 				Int("services", len(services)).
 				Msg("warmed supplier data")
-		}(addr)
+		})
 	}
 
-	wg.Wait()
+	// Wait for all warmup tasks to complete
+	if err := group.Wait(); err != nil {
+		m.logger.Warn().Err(err).Msg("some supplier warmup tasks failed")
+	}
 	return results
 }
 
@@ -338,6 +375,10 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		},
 	)
 
+	// Use default stream discovery interval (10s)
+	// TODO: Make this configurable in the future via SessionLifecycleConfig
+	streamDiscoveryInterval := time.Duration(10) * time.Second
+
 	// Create consumer for this supplier
 	consumer, err := redistransport.NewStreamsConsumer(
 		m.logger,
@@ -352,6 +393,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			ClaimIdleTimeout:        30000,
 			MaxRetries:              3,
 		},
+		streamDiscoveryInterval, // Stream discovery interval from config
 	)
 	if err != nil {
 		cancelFn()
@@ -400,19 +442,17 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		)
 
 		// Create lifecycle manager for monitoring sessions and triggering claim/proof
+		lifecycleConfig := m.config.SessionLifecycleConfig
+		lifecycleConfig.SupplierAddress = operatorAddr // Override for this supplier
 		lifecycleManager = NewSessionLifecycleManager(
 			m.logger,
 			sessionStore,
 			m.config.SharedClient,
 			m.config.BlockClient,
 			lifecycleCallback,
-			SessionLifecycleConfig{
-				SupplierAddress:          operatorAddr,
-				CheckIntervalBlocks:      1,
-				ClaimSubmissionBuffer:    2,
-				ProofSubmissionBuffer:    2,
-				MaxConcurrentTransitions: 10,
-			},
+			lifecycleConfig,
+			consumer,            // Pass consumer as PendingRelayChecker for late relay detection
+			m.config.WorkerPool, // Pass master worker pool for transition subpool
 		)
 
 		// Start lifecycle manager
@@ -486,18 +526,17 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		supplier, queryErr := m.config.SupplierQueryClient.GetSupplier(ctx, operatorAddr)
 		if queryErr != nil {
 			// Distinguish between "not found" (unstaked, expected) vs actual errors
-			errMsg := queryErr.Error()
-			if strings.Contains(errMsg, "not found") || strings.Contains(errMsg, "NotFound") {
+			if st, ok := status.FromError(queryErr); ok && st.Code() == codes.NotFound {
 				// Expected: supplier key loaded but not yet staked on-chain
-				m.logger.Info().
+				m.logger.Debug().
 					Str(logging.FieldSupplier, operatorAddr).
-					Msg("supplier not staked on-chain yet, publishing as unstaked with no services")
+					Msg("supplier not staked on-chain yet (pre-loaded key)")
 			} else {
 				// Unexpected: network or other errors
 				m.logger.Warn().
 					Err(queryErr).
 					Str(logging.FieldSupplier, operatorAddr).
-					Msg("failed to query supplier from blockchain, will publish without services")
+					Msg("failed to query supplier from blockchain")
 			}
 		} else {
 			ownerAddr = supplier.OwnerAddress
@@ -572,8 +611,8 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 			}
 		}
 
-		// Acknowledge
-		if err := state.Consumer.Ack(ctx, msg.ID); err != nil {
+		// Acknowledge using AckMessage (multi-stream compatible)
+		if err := state.Consumer.AckMessage(ctx, msg); err != nil {
 			m.logger.Warn().
 				Err(err).
 				Str(logging.FieldSupplier, state.OperatorAddr).
@@ -732,6 +771,11 @@ func (m *SupplierManager) Close() error {
 	}
 	m.suppliers = make(map[string]*SupplierState)
 	m.suppliersMu.Unlock()
+
+	// Stop query subpool gracefully (drains queued tasks)
+	if m.querySubpool != nil {
+		m.querySubpool.StopAndWait()
+	}
 
 	m.logger.Info().Msg("supplier manager closed")
 	return nil

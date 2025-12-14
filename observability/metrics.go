@@ -11,6 +11,18 @@ const (
 )
 
 var (
+	// FineGrainedLatencyBuckets provides sub-millisecond to multi-second measurement.
+	// Use for: relay latency, query latency, cache operations, signing, validation, etc.
+	// Buckets: 1ms, 2ms, 5ms, 10ms, 25ms, 50ms, 100ms, 250ms, 500ms, 1s, 2.5s, 5s, 10s, 30s
+	FineGrainedLatencyBuckets = []float64{0.001, 0.002, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5, 5, 10, 30}
+
+	// MicroLatencyBuckets provides ultra-fine-grained measurement for sub-millisecond operations.
+	// Use for: SMST operations, in-memory cache hits, hash computations, marshaling, etc.
+	// Buckets: 10µs, 50µs, 100µs, 500µs, 1ms, 5ms, 10ms, 50ms, 100ms
+	MicroLatencyBuckets = []float64{0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1}
+)
+
+var (
 	// InstructionTimeSeconds tracks the duration of individual instructions.
 	InstructionTimeSeconds = promauto.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -222,7 +234,7 @@ var (
 			Subsystem: "smst",
 			Name:      "redis_operation_duration_seconds",
 			Help:      "Duration of Redis operations for SMST storage",
-			Buckets:   []float64{0.00001, 0.00005, 0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1},
+			Buckets:   MicroLatencyBuckets,
 		},
 		[]string{"operation"},
 	)

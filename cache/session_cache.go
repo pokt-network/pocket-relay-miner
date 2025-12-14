@@ -132,6 +132,8 @@ type SessionRewardableUpdate struct {
 
 // GetSession returns the session for the given application, service, and block height.
 func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceId string, height int64) (*sessiontypes.Session, error) {
+	start := time.Now()
+
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
@@ -143,7 +145,13 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 
 	// L1: Check local cache
 	if cached, ok := c.sessionCache.Load(key); ok {
-		cacheHits.WithLabelValues("session", "l1").Inc()
+		cacheHits.WithLabelValues("session", CacheLevelL1).Inc()
+		cacheGetLatency.WithLabelValues("session", CacheLevelL1).Observe(time.Since(start).Seconds())
+		c.logger.Debug().
+			Str("app_address", appAddress).
+			Str("service_id", serviceId).
+			Int64("height", height).
+			Msg("session cache hit (L1)")
 		return cached.(*sessiontypes.Session), nil
 	}
 	cacheMisses.WithLabelValues("session", "l1").Inc()
@@ -155,8 +163,14 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 		if unmarshalErr := json.Unmarshal(data, session); unmarshalErr != nil {
 			c.logger.Warn().Err(unmarshalErr).Msg("failed to unmarshal cached session")
 		} else {
-			cacheHits.WithLabelValues("session", "l2").Inc()
+			cacheHits.WithLabelValues("session", CacheLevelL2).Inc()
+			cacheGetLatency.WithLabelValues("session", CacheLevelL2).Observe(time.Since(start).Seconds())
 			c.sessionCache.Store(key, session)
+			c.logger.Debug().
+				Str("app_address", appAddress).
+				Str("service_id", serviceId).
+				Int64("height", height).
+				Msg("session cache hit (L2) → stored in L1")
 			return session, nil
 		}
 	}
@@ -166,17 +180,22 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 	cacheMisses.WithLabelValues("session", "l2").Inc()
 
 	// L3: Query chain
+	chainStart := time.Now()
 	session, err := c.sessionClient.GetSession(ctx, appAddress, serviceId, height)
+	chainQueryLatency.WithLabelValues("session").Observe(time.Since(chainStart).Seconds())
+
 	if err != nil {
 		chainQueryErrors.WithLabelValues("session").Inc()
+		cacheGetLatency.WithLabelValues("session", "l3_error").Observe(time.Since(start).Seconds())
 		return nil, fmt.Errorf("failed to query session: %w", err)
 	}
 	chainQueries.WithLabelValues("session").Inc()
+	cacheGetLatency.WithLabelValues("session", CacheLevelL3).Observe(time.Since(start).Seconds())
 
 	// Calculate TTL based on session end height
 	ttl := c.calculateSessionTTL(ctx, session.Header.SessionEndBlockHeight)
 
-	// Cache in Redis
+	// Cache in Redis (L2)
 	data, err = json.Marshal(session)
 	if err == nil {
 		if err := c.redisClient.Set(ctx, key, data, ttl).Err(); err != nil {
@@ -186,6 +205,11 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 
 	// Cache in L1
 	c.sessionCache.Store(key, session)
+	c.logger.Debug().
+		Str("app_address", appAddress).
+		Str("service_id", serviceId).
+		Int64("height", height).
+		Msg("session cache miss (L3) → stored in L1 and L2")
 
 	return session, nil
 }

@@ -153,7 +153,7 @@ func DefaultCacheConfig() CacheConfig {
 		CachePrefix:            "ha:cache",
 		PubSubPrefix:           "ha:events",
 		TTLBlocks:              1,
-		BlockTimeSeconds:       6,
+		BlockTimeSeconds:       30,
 		ExtraGracePeriodBlocks: 2,
 		LockTimeout:            5 * time.Second,
 	}
@@ -182,6 +182,12 @@ func (k CacheKeys) SharedParamsLock(height int64) string {
 // Session returns the cache key for a session.
 func (k CacheKeys) Session(appAddr, serviceId string, height int64) string {
 	return k.Prefix + ":session:" + appAddr + ":" + serviceId + ":" + formatHeight(height)
+}
+
+// SessionByID returns the cache key for a session by session ID.
+// Use this for caching sessions since session ID is constant for the session duration.
+func (k CacheKeys) SessionByID(sessionID string) string {
+	return k.Prefix + ":session:id:" + sessionID
 }
 
 // SessionValidation returns the cache key for session validation result.
@@ -234,8 +240,9 @@ type KeyedEntityCache[K comparable, V any] interface {
 	EntityCache
 
 	// Get retrieves an entity using L1 → L2 → L3 fallback pattern.
+	// If force=true, bypasses L1/L2 cache, queries L3 (chain), stores in L2+L1, and publishes invalidation.
 	// Returns an error if the entity doesn't exist or query fails.
-	Get(ctx context.Context, key K) (V, error)
+	Get(ctx context.Context, key K, force ...bool) (V, error)
 
 	// Set stores an entity in both L1 and L2 caches with the specified TTL.
 	Set(ctx context.Context, key K, value V, ttl time.Duration) error
@@ -258,7 +265,8 @@ type SingletonEntityCache[V any] interface {
 	EntityCache
 
 	// Get retrieves the singleton entity using L1 → L2 → L3 fallback pattern.
-	Get(ctx context.Context) (V, error)
+	// If force=true, bypasses L1/L2 cache, queries L3 (chain), stores in L2+L1, and publishes invalidation.
+	Get(ctx context.Context, force ...bool) (V, error)
 
 	// Set stores the singleton entity in both L1 and L2 caches with the specified TTL.
 	Set(ctx context.Context, value V, ttl time.Duration) error

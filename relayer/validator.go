@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -93,9 +94,11 @@ func (rv *relayValidator) ValidateRelayRequest(
 	relayRequest *servicetypes.RelayRequest,
 ) error {
 	// Basic validation
+	step1 := time.Now()
 	if err := relayRequest.ValidateBasic(); err != nil {
 		return fmt.Errorf("basic validation failed: %w", err)
 	}
+	step1Duration := time.Since(step1)
 
 	meta := relayRequest.GetMeta()
 	sessionHeader := meta.GetSessionHeader()
@@ -107,24 +110,38 @@ func (rv *relayValidator) ValidateRelayRequest(
 	}
 
 	// Get target session block height (handles grace period)
+	step2 := time.Now()
 	sessionBlockHeight, err := rv.getTargetSessionBlockHeight(ctx, relayRequest)
 	if err != nil {
 		return fmt.Errorf("session timing validation failed: %w", err)
 	}
+	step2Duration := time.Since(step2)
 
 	// Verify ring signature
+	step3 := time.Now()
 	if sigErr := rv.ringClient.VerifyRelayRequestSignature(ctx, relayRequest); sigErr != nil {
 		return fmt.Errorf("ring signature verification failed: %w", sigErr)
 	}
+	step3Duration := time.Since(step3)
 
 	// Verify session validity
 	appAddress := sessionHeader.GetApplicationAddress()
 	serviceID := sessionHeader.GetServiceId()
 
+	step4 := time.Now()
 	session, err := rv.sessionCache.GetSession(ctx, appAddress, serviceID, sessionBlockHeight)
 	if err != nil {
 		return fmt.Errorf("failed to get session: %w", err)
 	}
+	step4Duration := time.Since(step4)
+
+	rv.logger.Debug().
+		Dur("validate_basic", step1Duration).
+		Dur("session_block_height", step2Duration).
+		Dur("ring_signature", step3Duration).
+		Dur("session_cache", step4Duration).
+		Str(logging.FieldSessionID, sessionHeader.GetSessionId()).
+		Msg("validation timing breakdown")
 
 	// Verify session ID matches
 	if session.SessionId != sessionHeader.GetSessionId() {
@@ -201,17 +218,17 @@ func (rv *relayValidator) getTargetSessionBlockHeight(
 	ctx context.Context,
 	relayRequest *servicetypes.RelayRequest,
 ) (int64, error) {
-	currentHeight := rv.GetCurrentBlockHeight()
-	if currentHeight == 0 {
-		// If we don't have block height info, use the session end height
-		return relayRequest.Meta.SessionHeader.GetSessionEndBlockHeight(), nil
-	}
-
+	sessionStartHeight := relayRequest.Meta.SessionHeader.GetSessionStartBlockHeight()
 	sessionEndHeight := relayRequest.Meta.SessionHeader.GetSessionEndBlockHeight()
+	currentHeight := rv.GetCurrentBlockHeight()
 
-	// If session hasn't ended yet, use current height
-	if sessionEndHeight >= currentHeight {
-		return currentHeight, nil
+	// CRITICAL: For active sessions, use sessionStartHeight for cache consistency!
+	// Session start height is constant for the session duration (~10 blocks),
+	// while currentHeight changes every block, causing L1 cache misses.
+	// This matches the logic in session_validator.go
+	if currentHeight == 0 || sessionEndHeight >= currentHeight {
+		// Session is active - use sessionStartHeight as canonical height
+		return sessionStartHeight, nil
 	}
 
 	// Session has ended, check grace period

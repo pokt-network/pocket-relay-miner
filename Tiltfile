@@ -27,6 +27,7 @@ load("./tilt/account-init.Tiltfile", "deploy_account_init")
 load("./tilt/miner.Tiltfile", "deploy_miners", "generate_miner_config")
 load("./tilt/relayer.Tiltfile", "deploy_relayers", "generate_relayer_config")
 load("./tilt/backend.Tiltfile", "deploy_backend")
+load("./tilt/nginx-backend.Tiltfile", "provision_nginx_backend")
 load("./tilt/observability.Tiltfile", "deploy_observability")
 
 print("=" * 60)
@@ -44,24 +45,6 @@ print("  Redis mode: {}".format(config["redis"]["mode"]))
 print("  Hot reload: {}".format(config["hot_reload"]))
 print("  Observability: {}".format(config["observability"]["enabled"]))
 print()
-
-# Build genesis generator
-# TODO: Fix genesis-generator API incompatibilities with Cosmos SDK
-# local_resource(
-#     "genesis-generator",
-#     cmd="cd tilt/genesis-generator && go build -o ../../bin/genesis-generator",
-#     deps=["tilt/genesis-generator/"],
-#     labels=["build"],
-# )
-
-# Generate genesis.json (if config provided)
-# TODO: Implement genesis generation from tilt_config.yaml
-# local_resource(
-#     "generate-genesis",
-#     cmd="./bin/genesis-generator -c tilt_config.yaml -o localnet/genesis.json",
-#     resource_deps=["genesis-generator"],
-#     labels=["build"],
-# )
 
 # Build Docker image (always build inside container)
 # Ignore non-code files to prevent unnecessary rebuilds
@@ -201,6 +184,7 @@ deploy_relayers(config)
 # Deploy backends
 print("Deploying backend services...")
 deploy_backend(config)
+provision_nginx_backend()
 
 # Deploy observability (optional)
 if config["observability"]["enabled"]:

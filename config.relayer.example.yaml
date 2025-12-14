@@ -1,0 +1,225 @@
+# Pocket RelayMiner Relayer - Production Configuration Example
+# The relayer is a stateless HTTP/WebSocket/gRPC/Streaming proxy
+# Copy this file to config.yaml and customize for your deployment
+
+# HTTP server listen address
+listen_addr: "0.0.0.0:8080"
+
+# Redis connection (required for publishing relays to miners)
+redis:
+  # Single Redis instance
+  url: "redis://localhost:6379"
+
+  # OR Redis Cluster (comment out url above, uncomment below)
+  # url: "redis://redis-node1:6379,redis-node2:6379,redis-node3:6379"
+
+  # Stream prefix for relay messages
+  stream_prefix: "ha:relays"
+
+  # Max stream length (REMOVED in Feature 5 - now using per-session streams with TTL)
+  # max_stream_len is ignored when session-based streams are enabled
+  max_stream_len: 100000
+
+# Pocket blockchain connection
+pocket_node:
+  # RPC endpoint for block subscriptions and queries
+  query_node_rpc_url: "https://rpc.testnet.pokt.network"
+
+  # gRPC endpoint for queries (sessions, applications, services)
+  query_node_grpc_url: "grpc.testnet.pokt.network:443"
+
+  # Use Redis pub/sub for block events (recommended for HA)
+  # When true (default), relayers subscribe to Redis events published by the miner.
+  # This ensures all relayers see the same block progression and cache refreshes,
+  # eliminating timing differences from independent WebSocket connections.
+  # When false, relayers use independent WebSocket connections to CometBFT.
+  # Default: true (recommended for production HA deployments)
+  use_redis_for_blocks: true
+
+# Supplier signing keys (required for signing relay responses)
+keys:
+  # Option 1: Load from YAML file (simple, recommended for testing)
+  keys_file: "/keys/supplier-keys.yaml"
+
+  # Option 2: Load from directory (one file per key)
+  # keys_dir: "/keys/supplier-keys"
+
+  # Option 3: Use Cosmos SDK keyring (recommended for production)
+  # keyring:
+  #   backend: "file"  # file, os, test, memory
+  #   dir: "/path/to/keyring"
+  #   app_name: "pocket"
+  #   key_names:  # Optional: specific keys to load
+  #     - "supplier1"
+  #     - "supplier2"
+
+# Service configurations (map of service_id -> config)
+services:
+  # Example: develop service (localnet)
+  develop:
+    # Validation mode for this service
+    # - "eager": Validate BEFORE forwarding (use for expensive backends)
+    # - "optimistic": Forward first, validate in background (use for cheap/fast backends)
+    validation_mode: eager
+
+    # Request timeout for backends (overrides default)
+    request_timeout_seconds: 30
+
+    # Max body size for requests/responses (overrides default)
+    max_body_size_bytes: 10485760  # 10MB
+
+    # Default backend when Rpc-Type header is not provided
+    # Must match one of the keys in backends map
+    default_backend: jsonrpc
+
+    # Backend configurations per RPC type
+    backends:
+      # JSON-RPC backend (Rpc-Type: 3 or "jsonrpc")
+      jsonrpc:
+        url: "http://eth-node:8545"
+        headers:
+          X-Custom-Header: "value"
+        # Optional: Basic auth
+        # authentication:
+        #   username: "user"
+        #   password: "pass"
+        # Optional: Bearer token (alternative to basic auth)
+        # authentication:
+        #   bearer_token: "your-token"
+        # Optional: Backend health check
+        # health_check:
+        #   enabled: true
+        #   endpoint: "/health"
+        #   interval_seconds: 30
+        #   timeout_seconds: 5
+        #   unhealthy_threshold: 3
+        #   healthy_threshold: 2
+
+      # WebSocket backend (Rpc-Type: 2 or "websocket")
+      websocket:
+        url: "ws://eth-node:8545/ws"
+
+      # gRPC backend (Rpc-Type: 1 or "grpc")
+      grpc:
+        url: "eth-node:50051"
+
+      # REST/Streaming backend (Rpc-Type: 4 or "rest")
+      rest:
+        url: "http://eth-node:8545/stream/sse"
+
+  # Example: eth-mainnet service
+  # eth-mainnet:
+  #   validation_mode: optimistic
+  #   default_backend: jsonrpc
+  #   backends:
+  #     jsonrpc:
+  #       url: "https://mainnet.infura.io/v3/YOUR_PROJECT_ID"
+  #       authentication:
+  #         bearer_token: "YOUR_API_KEY"
+  #     websocket:
+  #       url: "wss://mainnet.infura.io/ws/v3/YOUR_PROJECT_ID"
+
+  # Example: Solana service
+  # solana-mainnet:
+  #   validation_mode: eager
+  #   request_timeout_seconds: 60  # Solana can be slower
+  #   default_backend: jsonrpc
+  #   backends:
+  #     jsonrpc:
+  #       url: "https://api.mainnet-beta.solana.com"
+
+# Default validation mode (used when not specified per-service)
+# Options: "eager" | "optimistic"
+default_validation_mode: optimistic
+
+# Default request timeout in seconds (used when not specified per-service)
+default_request_timeout_seconds: 30
+
+# Default max body size in bytes (used when not specified per-service)
+default_max_body_size_bytes: 10485760  # 10MB
+
+# Grace period extra blocks beyond on-chain configuration
+# Helps handle clock drift and network delays between gateway and relayer
+grace_period_extra_blocks: 2
+
+# Metrics server (Prometheus)
+metrics:
+  enabled: true
+  addr: "0.0.0.0:9090"
+  # pprof_enabled: false  # Enable pprof profiling (for debugging, disable in production)
+  # pprof_addr: "localhost:6060"  # Pprof HTTP server (use localhost for security)
+
+# Health check endpoint
+health_check:
+  enabled: true
+  addr: "0.0.0.0:8081"
+
+# Relay meter (rate limiting based on app stakes)
+relay_meter:
+  # Enable metering and rate limiting
+  enabled: true
+
+  # Over-servicing: Allow apps to exceed stake limits temporarily
+  # - false: Strict enforcement (reject when over limit)
+  # - true: Allow temporary over-servicing (eventual consistency)
+  over_servicing_enabled: false
+
+  # Redis key prefix for metering data
+  redis_key_prefix: "ha"
+
+  # Fail behavior when Redis is unavailable
+  # - "open": Allow relays when Redis down (prioritize availability)
+  # - "closed": Reject relays when Redis down (prioritize safety)
+  fail_behavior: "open"
+
+  # Session cleanup interval (remove expired session data)
+  session_cleanup_interval: 5m
+
+  # Cache TTLs
+  params_cache_ttl: 10m  # Shared/session params cache
+  app_stake_cache_ttl: 10m  # Application stake cache
+
+# HTTP transport settings (connection pooling and timeouts for backend requests)
+# These settings optimize connection reuse and prevent resource exhaustion.
+# Defaults are tuned for 1000+ RPS - override based on your backend characteristics.
+http_transport:
+  # Connection pool limits (5x increased for high throughput)
+  max_idle_conns: 500  # Total idle connections across all backends (default: 500)
+  max_idle_conns_per_host: 100  # Idle connections per backend (default: 100)
+  max_conns_per_host: 500  # Total connections per backend to prevent port exhaustion (default: 500, 0 = unlimited)
+
+  # Connection timeout settings
+  idle_conn_timeout_seconds: 90  # How long to keep idle connections alive (default: 90)
+  dial_timeout_seconds: 5  # Timeout for establishing new connection (default: 5)
+  tls_handshake_timeout_seconds: 10  # Timeout for TLS handshake (default: 10)
+  response_header_timeout_seconds: 30  # Timeout waiting for response headers (default: 30)
+  expect_continue_timeout_seconds: 1  # Timeout for 100-continue response (default: 1)
+  tcp_keep_alive_seconds: 30  # TCP keepalive period for active connections (default: 30, 0 = disabled)
+
+  # Content handling
+  disable_compression: true  # Don't modify content encoding (required for relay protocol)
+
+# Cache warmup (optional - pre-load application data at startup)
+cache_warmup:
+  # Enable cache warmup
+  enabled: false
+
+  # Known applications to pre-load (if you know your app addresses)
+  # known_applications:
+  #   - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
+  #   - "pokt1abc..."
+
+  # Persist discovered apps to Redis for faster warmup on restart
+  persist_discovered_apps: true
+
+  # Concurrency for warmup operations (higher = faster but more load)
+  warmup_concurrency: 10
+
+  # Timeout per application warmup
+  warmup_timeout_seconds: 5
+
+# Logging configuration
+logging:
+  level: "info"  # trace, debug, info, warn, error
+  format: "json"  # json, text
+  output: "stdout"  # stdout, stderr, or file path

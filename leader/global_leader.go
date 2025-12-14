@@ -15,11 +15,11 @@ const (
 	// Redis key for global leader lock
 	globalLeaderKey = "ha:miner:global_leader"
 
-	// globalLeaderTTL is how long the leader lock lasts before expiring
-	globalLeaderTTL = 30 * time.Second
+	// Default leader lock TTL (how long before expiring)
+	defaultLeaderTTL = 30 * time.Second
 
-	// globalHeartbeatRate is how often we try to acquire/renew leadership
-	globalHeartbeatRate = 10 * time.Second
+	// Default heartbeat rate (how often we try to acquire/renew leadership)
+	defaultHeartbeatRate = 10 * time.Second
 )
 
 // Lua script for atomic acquire (only if key doesn't exist or is expired)
@@ -55,6 +55,23 @@ end
 // LeadershipCallback is called when leadership status changes.
 type LeadershipCallback func(ctx context.Context)
 
+// GlobalLeaderElectorConfig holds configuration for the leader elector.
+type GlobalLeaderElectorConfig struct {
+	// LeaderTTL is how long the leader lock lasts before expiring
+	LeaderTTL time.Duration
+
+	// HeartbeatRate is how often we try to acquire/renew leadership
+	HeartbeatRate time.Duration
+}
+
+// DefaultGlobalLeaderElectorConfig returns the default configuration.
+func DefaultGlobalLeaderElectorConfig() GlobalLeaderElectorConfig {
+	return GlobalLeaderElectorConfig{
+		LeaderTTL:     defaultLeaderTTL,
+		HeartbeatRate: defaultHeartbeatRate,
+	}
+}
+
 // GlobalLeaderElector is the SINGLE lighthouse component for leadership.
 // All components that need leader awareness check this instance.
 // Uses Lua scripts for atomic acquire/renew/release operations.
@@ -67,6 +84,8 @@ type GlobalLeaderElector struct {
 	logger      logging.Logger
 	redisClient redis.UniversalClient
 	instanceID  string // Unique ID for this miner instance (hostname + UUID)
+	config      GlobalLeaderElectorConfig
+	metrics     *leaderMetrics
 
 	isLeader atomic.Bool
 
@@ -86,7 +105,7 @@ type GlobalLeaderElector struct {
 	wg       sync.WaitGroup
 }
 
-// NewGlobalLeaderElector creates a new global leader elector.
+// NewGlobalLeaderElector creates a new global leader elector with default configuration.
 //
 // Parameters:
 //   - logger: Logger instance for this component
@@ -99,10 +118,30 @@ func NewGlobalLeaderElector(
 	redisClient redis.UniversalClient,
 	instanceID string,
 ) *GlobalLeaderElector {
+	return NewGlobalLeaderElectorWithConfig(logger, redisClient, instanceID, DefaultGlobalLeaderElectorConfig())
+}
+
+// NewGlobalLeaderElectorWithConfig creates a new global leader elector with custom configuration.
+//
+// Parameters:
+//   - logger: Logger instance for this component
+//   - redisClient: Redis client for distributed locking
+//   - instanceID: Unique identifier for this instance (e.g., hostname + UUID)
+//   - config: Configuration for leader election timing
+//
+// The instance ID should be unique across all miner instances to prevent conflicts.
+func NewGlobalLeaderElectorWithConfig(
+	logger logging.Logger,
+	redisClient redis.UniversalClient,
+	instanceID string,
+	config GlobalLeaderElectorConfig,
+) *GlobalLeaderElector {
 	return &GlobalLeaderElector{
 		logger:        logging.ForComponent(logger, logging.ComponentLeaderElector),
 		redisClient:   redisClient,
 		instanceID:    instanceID,
+		config:        config,
+		metrics:       initMetrics(), // Lazy-load metrics only when elector is created
 		acquireScript: redis.NewScript(acquireLuaScript),
 		renewScript:   redis.NewScript(renewLuaScript),
 		releaseScript: redis.NewScript(releaseLuaScript),
@@ -137,7 +176,10 @@ func (e *GlobalLeaderElector) Start(ctx context.Context) error {
 func (e *GlobalLeaderElector) leaderLoop(ctx context.Context) {
 	defer e.wg.Done()
 
-	ticker := time.NewTicker(globalHeartbeatRate)
+	// Attempt leadership immediately on startup (don't wait for first ticker)
+	e.attemptLeadership(ctx)
+
+	ticker := time.NewTicker(e.config.HeartbeatRate)
 	defer ticker.Stop()
 
 	for {
@@ -174,7 +216,7 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 		result, err := e.renewScript.Run(ctx, e.redisClient,
 			[]string{globalLeaderKey},
 			e.instanceID,
-			int(globalLeaderTTL.Seconds()),
+			int(e.config.LeaderTTL.Seconds()),
 		).Int()
 
 		if err != nil {
@@ -183,6 +225,8 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 				Str(logging.FieldInstance, e.instanceID).
 				Msg("failed to renew leadership (Redis error)")
 			e.isLeader.Store(false)
+			e.metrics.status.WithLabelValues(e.instanceID).Set(0)
+			e.metrics.losses.WithLabelValues(e.instanceID).Inc()
 			e.invokeOnLostCallbacks(ctx)
 		} else if result == 0 {
 			// Lost leadership - another instance took over
@@ -190,6 +234,8 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 				Str(logging.FieldInstance, e.instanceID).
 				Msg("LOST global leadership")
 			e.isLeader.Store(false)
+			e.metrics.status.WithLabelValues(e.instanceID).Set(0)
+			e.metrics.losses.WithLabelValues(e.instanceID).Inc()
 			e.invokeOnLostCallbacks(ctx)
 		} else {
 			// Successfully renewed - log periodically for visibility
@@ -202,7 +248,7 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 		result, err := e.acquireScript.Run(ctx, e.redisClient,
 			[]string{globalLeaderKey},
 			e.instanceID,
-			int(globalLeaderTTL.Seconds()),
+			int(e.config.LeaderTTL.Seconds()),
 		).Int()
 
 		if err != nil {
@@ -216,9 +262,12 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 				Str(logging.FieldInstance, e.instanceID).
 				Msg("ELECTED as GLOBAL leader")
 			e.isLeader.Store(true)
+			e.metrics.status.WithLabelValues(e.instanceID).Set(1)
+			e.metrics.elections.WithLabelValues(e.instanceID).Inc()
 			e.invokeOnElectedCallbacks(ctx)
 		} else {
-			// Another instance is leader - log at trace level
+			// Another instance is leader - always set metric to 0 for standby
+			e.metrics.status.WithLabelValues(e.instanceID).Set(0)
 			e.logger.Debug().
 				Str(logging.FieldInstance, e.instanceID).
 				Msg("standing by (not leader)")

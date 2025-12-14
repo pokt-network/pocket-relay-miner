@@ -6,12 +6,15 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"strings"
 	"syscall"
 	"time"
 
+	pond "github.com/alitto/pond/v2"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 
@@ -107,19 +110,44 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
 
-	// Start observability server (metrics)
+	// Start observability server (metrics and pprof)
 	if config.Metrics.Enabled {
+		// Default pprof addr to localhost:6060 for security if not specified
+		pprofAddr := config.Metrics.PprofAddr
+		if pprofAddr == "" {
+			pprofAddr = "localhost:6060"
+		}
+
+		// Combine RelayerRegistry and SharedRegistry so cache metrics are exposed
+		combinedRegistry := prometheus.Gatherers{
+			observability.RelayerRegistry,
+			observability.SharedRegistry,
+		}
+
 		obsServer := observability.NewServer(logger, observability.ServerConfig{
 			MetricsEnabled: config.Metrics.Enabled,
 			MetricsAddr:    config.Metrics.Addr,
-			PprofEnabled:   false,
-			Registry:       observability.RelayerRegistry,
+			PprofEnabled:   config.Metrics.PprofEnabled,
+			PprofAddr:      pprofAddr,
+			Registry:       combinedRegistry,
 		})
 		if err := obsServer.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start observability server: %w", err)
 		}
 		defer func() { _ = obsServer.Stop() }()
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
+
+		// Start runtime metrics collector
+		runtimeMetrics := observability.NewRuntimeMetricsCollector(
+			logger,
+			observability.DefaultRuntimeMetricsCollectorConfig(),
+			observability.RelayerFactory,
+		)
+		if err := runtimeMetrics.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start runtime metrics collector: %w", err)
+		}
+		defer runtimeMetrics.Stop()
+		logger.Info().Msg("runtime metrics collector started")
 	}
 
 	// Use Redis URL from config, allow flag override
@@ -156,6 +184,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = supplierCache.Close() }()
 	logger.Info().Msg("supplier cache initialized and started")
 
+	// Warmup supplier cache from Redis (load existing suppliers into L1 cache)
+	// This prevents relying solely on pub/sub, which can miss messages if relayer starts after miner
+	if err := supplierCache.WarmupFromRedis(ctx, nil); err != nil {
+		return fmt.Errorf("failed to warmup supplier cache: %w", err)
+	}
+
 	// Create query clients for fetching on-chain data (service compute units, etc.)
 	// Determine TLS from URL - if port 443 or grpcs:// prefix, use TLS
 	grpcURL := config.PocketNode.QueryNodeGRPCUrl
@@ -186,33 +220,41 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create new entity caches (relayer only subscribes to pub/sub, doesn't refresh)
 	// These caches provide L1/L2/L3 pattern with pub/sub invalidation
 
-	// Create shared params cache
-	sharedParamsCache := cache.NewSharedParamsCache(
-		logger,
-		redisClient,
-		queryClients.Shared(),
-	)
-	if err := sharedParamsCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start shared params cache: %w", err)
-	}
-	defer func() { _ = sharedParamsCache.Close() }()
+	// Relayer uses default 30s block time (production default for mainnet/testnet)
+	blockTimeSeconds := int64(30)
 
-	// Create session params cache
+	// Create session params cache with dynamic session-duration TTL
 	sessionParamsCache := cache.NewSessionParamsCache(
 		logger,
 		redisClient,
 		cache.NewSessionQueryClientAdapter(queryClients.Session()),
+		queryClients.Shared(), // For TTL calculation
+		blockTimeSeconds,
 	)
 	if err := sessionParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start session params cache: %w", err)
 	}
 	defer func() { _ = sessionParamsCache.Close() }()
 
-	// Create proof params cache
+	// Create shared params cache with dynamic 2-session TTL
+	sharedParamsCache := cache.NewSharedParamsCache(
+		logger,
+		redisClient,
+		queryClients.Shared(),
+		blockTimeSeconds,
+	)
+	if err := sharedParamsCache.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start shared params cache: %w", err)
+	}
+	defer func() { _ = sharedParamsCache.Close() }()
+
+	// Create proof params cache with dynamic session-duration TTL
 	proofParamsCache := cache.NewProofParamsCache(
 		logger,
 		redisClient,
 		cache.NewProofQueryClientAdapter(queryClients.Proof()),
+		queryClients.Shared(), // For TTL calculation
+		blockTimeSeconds,
 	)
 	if err := proofParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start proof params cache: %w", err)
@@ -241,13 +283,44 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = serviceCache.Close() }()
 
+	// Create account cache for public key lookups (used by ring client)
+	// IMPORTANT: Public keys are immutable, so this cache has NO EXPIRY
+	accountCache := cache.NewAccountCache(
+		logger,
+		redisClient,
+		queryClients.Account(),
+	)
+	if err := accountCache.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start account cache: %w", err)
+	}
+	defer func() { _ = accountCache.Close() }()
+
 	logger.Info().Msg("entity caches started (pub/sub subscribers)")
 
-	// Create block subscriber for monitoring new blocks via WebSocket subscription
-	// Used for relay validation and relay meter
+	// NOTE: Cache warmup (L2→L1) is handled by the miner's CacheOrchestrator.
+	// The relayer's caches will populate on-demand during relay validation.
+	// Supplier cache warmup is handled separately above since it's critical for relay acceptance.
+
+	// Create Redis block subscriber to receive block events from miner
+	// This ensures all relayers see the same block progression as the miner,
+	// eliminating timing differences from independent WebSocket connections.
+	redisBlockSubscriber := cache.NewRedisBlockSubscriber(
+		logger,
+		redisClient,
+		nil, // No direct blockchain client - events come from miner via Redis
+		cache.DefaultCacheConfig(),
+	)
+	if err := redisBlockSubscriber.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start redis block subscriber: %w", err)
+	}
+	defer func() { _ = redisBlockSubscriber.Close() }()
+	logger.Info().Msg("redis block subscriber started (receiving events from miner)")
+
+	// ONE-TIME query for initial state (chain version, starting height)
+	// This avoids the need for a persistent WebSocket connection
 	rpcURL := config.PocketNode.QueryNodeRPCUrl
 	rpcUseTLS := strings.HasPrefix(rpcURL, "https://") || strings.HasSuffix(rpcURL, ":443")
-	blockSubscriber, err := haclient.NewBlockSubscriber(
+	initialSubscriber, err := haclient.NewBlockSubscriber(
 		logger,
 		haclient.BlockSubscriberConfig{
 			RPCEndpoint: rpcURL,
@@ -255,13 +328,33 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		},
 	)
 	if err != nil {
-		return fmt.Errorf("failed to create block subscriber: %w", err)
+		return fmt.Errorf("failed to create initial block query: %w", err)
 	}
+	if err := initialSubscriber.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start initial block query: %w", err)
+	}
+	initialBlock := initialSubscriber.LastBlock(ctx)
+	chainVersion := initialSubscriber.GetChainVersion()
+	initialSubscriber.Close() // Close immediately after initial query
+	logger.Info().
+		Int64("initial_height", initialBlock.Height()).
+		Str("chain_version", chainVersion.String()).
+		Msg("fetched initial block state via one-time RPC query")
+
+	// Create RedisBlockClientAdapter to implement client.BlockClient interface
+	// This adapter receives events from Redis pub/sub and provides the BlockClient
+	// interface required by relayer components (proxy, relay meter, etc.)
+	blockSubscriber := cache.NewRedisBlockClientAdapter(
+		logger,
+		redisBlockSubscriber,
+		initialBlock,
+		chainVersion,
+	)
 	if err := blockSubscriber.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start block subscriber: %w", err)
+		return fmt.Errorf("failed to start block client adapter: %w", err)
 	}
 	defer func() { blockSubscriber.Close() }()
-	logger.Info().Str("rpc_endpoint", rpcURL).Msg("block subscriber started (WebSocket)")
+	logger.Info().Msg("block client adapter started (Redis-backed)")
 
 	// NOTE: Cache warmup is now handled by the miner's CacheOrchestrator.
 	// The relayer's ApplicationCache.WarmupFromRedis() will populate L1 from L2 on startup.
@@ -273,13 +366,27 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		redisClient,
 		transport.PublisherConfig{
 			StreamPrefix: config.Redis.StreamPrefix,
-			MaxLen:       config.Redis.MaxStreamLen,
-			ApproxMaxLen: true,
 		},
+		30, // Default block time: 30s (used for stream TTL calculation)
 	)
 
 	// Create health checker
 	healthChecker := relayer.NewHealthChecker(logger)
+
+	// Create master worker pool for controlled concurrency
+	// Uses unbounded queue with non-blocking submission to prevent goroutine explosion
+	numCPU := runtime.NumCPU()
+	masterPoolSize := numCPU * 8
+	masterPool := pond.NewPool(
+		masterPoolSize,
+		pond.WithQueueSize(pond.Unbounded),
+		pond.WithNonBlocking(true),
+	)
+	defer masterPool.StopAndWait()
+	logger.Info().
+		Int("max_workers", masterPoolSize).
+		Int("num_cpu", numCPU).
+		Msg("created master worker pool (unbounded, non-blocking, 8x CPU)")
 
 	// Create proxy server
 	proxy, err := relayer.NewProxyServer(
@@ -287,26 +394,31 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		config,
 		healthChecker,
 		publisher,
+		masterPool, // Pass master worker pool
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create proxy server: %w", err)
 	}
 
-	// Poll block height updates and push to proxy
+	// Event-driven block height updates (replaces 1s polling)
+	// Receives block events from Redis pub/sub for ~1-2ms latency (vs 1s polling)
 	go func() {
-		ticker := time.NewTicker(1 * time.Second)
-		defer func() { ticker.Stop() }()
+		logger.Info().Msg("using event-driven block updates from Redis")
 		for {
 			select {
 			case <-ctx.Done():
 				return
-			case <-ticker.C:
-				block := blockSubscriber.LastBlock(ctx)
+			case block, ok := <-blockSubscriber.BlockEvents():
+				if !ok {
+					// Channel closed
+					logger.Warn().Msg("block events channel closed")
+					return
+				}
 				proxy.SetBlockHeight(block.Height())
 			}
 		}
 	}()
-	logger.Info().Msg("proxy subscribed to block height updates")
+	logger.Info().Msg("proxy subscribed to block height updates from Redis")
 
 	// Load keys and create response signer
 	// Support multiple key sources: keys_file, keys_dir, keyring
@@ -375,11 +487,21 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			// Create RingClient for relay request signature verification
 			// This is critical for security - it validates that relay requests
 			// are properly signed by the application or a delegated gateway
+			//
+			// IMPORTANT: Use Redis-backed caches for all queries to minimize latency:
+			// - Application cache: L1→L2→L3 for app delegation info
+			// - Account cache: L1→L2→L3 for public key lookups (NO EXPIRY - keys are immutable)
+			// - Shared params cache: L1→L2→L3 for session parameters
+			//
+			// At 1000 RPS, this prevents:
+			// - 1000+ application queries/sec to blockchain
+			// - 2000-4000 public key queries/sec to blockchain (N keys per ring)
+			// - 1000+ shared params queries/sec to blockchain
 			ringClient := rings.NewRingClient(
 				logger,
-				queryClients.Application(),
-				queryClients.Account(),
-				queryClients.Shared(),
+				cache.NewCachedApplicationQueryClient(applicationCache),
+				cache.NewCachedAccountQueryClient(accountCache),
+				cache.NewCachedSharedQueryClient(sharedParamsCache, queryClients.Shared()),
 			)
 
 			// Create caches for full session validation
@@ -491,6 +613,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 					queryClients.Shared(),
 					queryClients.Session(),
 					blockSubscriber,
+					sharedParamCache, // L1->L2->L3 cache for shared params (no Redis blocking!)
+					serviceCache,     // L1->L2->L3 cache for service data (no Redis blocking!)
 					relayMeterConfig,
 				)
 

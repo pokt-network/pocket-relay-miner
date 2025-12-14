@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	"github.com/pokt-network/poktroll/pkg/client"
+	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
@@ -69,9 +69,9 @@ type SessionQueryClient interface {
 type LifecycleCallback struct {
 	logger         logging.Logger
 	config         LifecycleCallbackConfig
-	supplierClient client.SupplierClient
-	sharedClient   client.SharedQueryClient
-	blockClient    client.BlockClient
+	supplierClient pocktclient.SupplierClient
+	sharedClient   pocktclient.SharedQueryClient
+	blockClient    pocktclient.BlockClient
 	sessionClient  SessionQueryClient
 	smstManager    SMSTManager
 	snapshotMgr    *SMSTSnapshotManager
@@ -89,9 +89,9 @@ type LifecycleCallback struct {
 // The proofChecker parameter is optional - if nil, proofs are always submitted (legacy behavior).
 func NewLifecycleCallback(
 	logger logging.Logger,
-	supplierClient client.SupplierClient,
-	sharedClient client.SharedQueryClient,
-	blockClient client.BlockClient,
+	supplierClient pocktclient.SupplierClient,
+	sharedClient pocktclient.SharedQueryClient,
+	blockClient pocktclient.BlockClient,
 	sessionClient SessionQueryClient,
 	smstManager SMSTManager,
 	snapshotMgr *SMSTSnapshotManager,
@@ -157,8 +157,182 @@ func (lc *LifecycleCallback) OnSessionActive(ctx context.Context, snapshot *Sess
 	return nil
 }
 
-// OnSessionNeedsClaim is called when a session needs a claim submitted.
-// It waits for the proper timing spread, flushes the SMST, and submits the claim.
+// OnSessionsNeedClaim is called when sessions need claims submitted (batched).
+// It waits for the proper timing spread, flushes SMSTs, and submits all claims in a single transaction.
+func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots []*SessionSnapshot) (rootHashes [][]byte, err error) {
+	if len(snapshots) == 0 {
+		return nil, nil
+	}
+
+	// All sessions for a single supplier, so we can batch them
+	firstSnapshot := snapshots[0]
+	logger := lc.logger.With().
+		Str(logging.FieldSupplier, firstSnapshot.SupplierOperatorAddress).
+		Int("batch_size", len(snapshots)).
+		Logger()
+
+	logger.Info().Msg("batched sessions need claims - starting claim process")
+
+	// Get shared params
+	sharedParams, err := lc.sharedClient.GetParams(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get shared params: %w", err)
+	}
+
+	// Group sessions by session end height (they might have different claim windows)
+	sessionsByEndHeight := make(map[int64][]*SessionSnapshot)
+	for _, snapshot := range snapshots {
+		sessionsByEndHeight[snapshot.SessionEndHeight] = append(sessionsByEndHeight[snapshot.SessionEndHeight], snapshot)
+	}
+
+	// Process each group (same claim window) separately
+	allRootHashes := make([][]byte, len(snapshots))
+	sessionIndex := 0
+
+	for sessionEndHeight, groupSnapshots := range sessionsByEndHeight {
+		// Wait for claim window to open and get the block hash for timing spread
+		claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
+		logger.Info().
+			Int64("claim_window_open_height", claimWindowOpenHeight).
+			Int64("session_end_height", sessionEndHeight).
+			Int("group_size", len(groupSnapshots)).
+			Msg("waiting for claim window to open")
+
+		claimWindowOpenBlock, blockErr := lc.waitForBlock(ctx, claimWindowOpenHeight)
+		if blockErr != nil {
+			return nil, fmt.Errorf("failed to wait for claim window open: %w", blockErr)
+		}
+
+		// Calculate the earliest claim commit height for this supplier (timing spread)
+		earliestClaimHeight := sharedtypes.GetEarliestSupplierClaimCommitHeight(
+			sharedParams,
+			sessionEndHeight,
+			claimWindowOpenBlock.Hash(),
+			firstSnapshot.SupplierOperatorAddress,
+		)
+
+		logger.Info().
+			Int64("earliest_claim_height", earliestClaimHeight).
+			Int64("session_end_height", sessionEndHeight).
+			Msg("waiting for assigned claim timing")
+
+		// Wait for the earliest claim height (timing spread ensures suppliers don't all submit at once)
+		if _, waitErr := lc.waitForBlock(ctx, earliestClaimHeight); waitErr != nil {
+			return nil, fmt.Errorf("failed to wait for claim timing: %w", waitErr)
+		}
+
+		logger.Info().
+			Int("group_size", len(groupSnapshots)).
+			Msg("claim window timing reached - flushing SMSTs and submitting batched claims")
+
+		// Build all claims for this group
+		var claimMsgs []*prooftypes.MsgCreateClaim
+		var groupRootHashes [][]byte
+
+		for _, snapshot := range groupSnapshots {
+			// Record the scheduled claim height for operators
+			SetClaimScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestClaimHeight))
+
+			// Flush the SMST to get the root hash
+			rootHash, flushErr := lc.smstManager.FlushTree(ctx, snapshot.SessionID)
+			if flushErr != nil {
+				return nil, fmt.Errorf("failed to flush SMST for session %s: %w", snapshot.SessionID, flushErr)
+			}
+			groupRootHashes = append(groupRootHashes, rootHash)
+
+			// Build the session header
+			sessionHeader, headerErr := lc.buildSessionHeader(ctx, snapshot)
+			if headerErr != nil {
+				return nil, fmt.Errorf("failed to build session header for %s: %w", snapshot.SessionID, headerErr)
+			}
+
+			// Build claim message
+			claimMsg := &prooftypes.MsgCreateClaim{
+				SupplierOperatorAddress: snapshot.SupplierOperatorAddress,
+				SessionHeader:           sessionHeader,
+				RootHash:                rootHash,
+			}
+			claimMsgs = append(claimMsgs, claimMsg)
+		}
+
+		// Calculate timeout height (claim window close)
+		claimWindowClose := sharedtypes.GetClaimWindowCloseHeight(sharedParams, sessionEndHeight)
+
+		// Convert to interface types for variadic call
+		interfaceClaimMsgs := make([]pocktclient.MsgCreateClaim, len(claimMsgs))
+		for i, msg := range claimMsgs {
+			interfaceClaimMsgs[i] = msg
+		}
+
+		// Submit all claims in a single transaction with retries
+		var lastErr error
+		for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; attempt++ {
+			if submitErr := lc.supplierClient.CreateClaims(ctx, claimWindowClose, interfaceClaimMsgs...); submitErr != nil {
+				lastErr = submitErr
+				logger.Warn().
+					Err(submitErr).
+					Int(logging.FieldAttempt, attempt).
+					Int(logging.FieldMaxRetry, lc.config.ClaimRetryAttempts).
+					Int("batch_size", len(claimMsgs)).
+					Msg("batched claim submission failed, retrying")
+
+				if attempt < lc.config.ClaimRetryAttempts {
+					select {
+					case <-ctx.Done():
+						return nil, ctx.Err()
+					case <-time.After(lc.config.ClaimRetryDelay):
+						continue
+					}
+				}
+			} else {
+				// Success
+				currentBlock := lc.blockClient.LastBlock(ctx)
+				blocksAfterWindowOpen := float64(currentBlock.Height() - claimWindowOpenHeight)
+
+				// Record metrics for all sessions in the batch
+				for i, snapshot := range groupSnapshots {
+					RecordClaimSubmitted(snapshot.SupplierOperatorAddress)
+					RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
+					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+
+					// Update snapshot manager
+					if lc.snapshotMgr != nil {
+						if updateErr := lc.snapshotMgr.OnSessionClaimed(ctx, snapshot.SessionID, groupRootHashes[i]); updateErr != nil {
+							logger.Warn().
+								Err(updateErr).
+								Str("session_id", snapshot.SessionID).
+								Msg("failed to update snapshot after claim")
+						}
+					}
+
+					// Copy root hash to result (maintain order)
+					allRootHashes[sessionIndex] = groupRootHashes[i]
+					sessionIndex++
+				}
+
+				logger.Info().
+					Int("batch_size", len(claimMsgs)).
+					Int64("blocks_after_window", int64(blocksAfterWindowOpen)).
+					Msg("batched claims submitted successfully")
+
+				break // Success, exit retry loop
+			}
+		}
+
+		if lastErr != nil {
+			for _, snapshot := range groupSnapshots {
+				RecordClaimError(snapshot.SupplierOperatorAddress, "exhausted_retries")
+				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
+			}
+			return nil, fmt.Errorf("batched claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr)
+		}
+	}
+
+	return allRootHashes, nil
+}
+
+// OnSessionNeedsClaim is DEPRECATED - use OnSessionsNeedClaim instead.
+// Kept for backward compatibility with old code paths.
 func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *SessionSnapshot) (rootHash []byte, err error) {
 	lock := lc.getSessionLock(snapshot.SessionID)
 	lock.Lock()
@@ -256,7 +430,7 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 
 			RecordClaimSubmitted(snapshot.SupplierOperatorAddress)
 			RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-			RecordComputeUnitsClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, float64(snapshot.TotalComputeUnits))
+			RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 			logger.Info().
 				Int("root_hash_len", len(rootHash)).
@@ -275,11 +449,208 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 	}
 
 	RecordClaimError(snapshot.SupplierOperatorAddress, "exhausted_retries")
+	RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "claim_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
 	return nil, fmt.Errorf("claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr)
 }
 
-// OnSessionNeedsProof is called when a session needs a proof submitted.
-// It waits for the proper timing spread, generates the proof, and submits it.
+// OnSessionsNeedProof is called when sessions need proofs submitted (batched).
+// It waits for the proper timing spread, generates proofs, and submits all proofs in a single transaction.
+func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots []*SessionSnapshot) error {
+	if len(snapshots) == 0 {
+		return nil
+	}
+
+	// All sessions for a single supplier, so we can batch them
+	firstSnapshot := snapshots[0]
+	logger := lc.logger.With().
+		Str(logging.FieldSupplier, firstSnapshot.SupplierOperatorAddress).
+		Int("batch_size", len(snapshots)).
+		Logger()
+
+	logger.Info().Msg("batched sessions need proofs - starting proof process")
+
+	// Get shared params
+	sharedParams, err := lc.sharedClient.GetParams(ctx)
+	if err != nil {
+		return fmt.Errorf("failed to get shared params: %w", err)
+	}
+
+	// Group sessions by session end height (they might have different proof windows)
+	sessionsByEndHeight := make(map[int64][]*SessionSnapshot)
+	for _, snapshot := range snapshots {
+		sessionsByEndHeight[snapshot.SessionEndHeight] = append(sessionsByEndHeight[snapshot.SessionEndHeight], snapshot)
+	}
+
+	// Process each group (same proof window) separately
+	for sessionEndHeight, groupSnapshots := range sessionsByEndHeight {
+		// Wait for proof window to open
+		proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, sessionEndHeight)
+		logger.Info().
+			Int64("proof_window_open_height", proofWindowOpenHeight).
+			Int64("session_end_height", sessionEndHeight).
+			Int("group_size", len(groupSnapshots)).
+			Msg("waiting for proof window to open")
+
+		proofWindowOpenBlock, blockErr := lc.waitForBlock(ctx, proofWindowOpenHeight)
+		if blockErr != nil {
+			return fmt.Errorf("failed to wait for proof window open: %w", blockErr)
+		}
+
+		// Filter sessions based on proof requirement (probabilistic proof selection)
+		var sessionsNeedingProof []*SessionSnapshot
+		for _, snapshot := range groupSnapshots {
+			if lc.proofChecker != nil {
+				required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofWindowOpenBlock.Hash())
+				if checkErr != nil {
+					logger.Warn().
+						Err(checkErr).
+						Str("session_id", snapshot.SessionID).
+						Msg("failed to check proof requirement, submitting proof anyway to avoid potential penalty")
+					sessionsNeedingProof = append(sessionsNeedingProof, snapshot)
+				} else if !required {
+					logger.Info().
+						Str("session_id", snapshot.SessionID).
+						Msg("proof NOT required for this claim - skipping proof submission")
+					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+				} else {
+					logger.Info().
+						Str("session_id", snapshot.SessionID).
+						Msg("proof IS required for this claim")
+					sessionsNeedingProof = append(sessionsNeedingProof, snapshot)
+				}
+			} else {
+				// No proof checker, always submit proofs (legacy behavior)
+				sessionsNeedingProof = append(sessionsNeedingProof, snapshot)
+			}
+		}
+
+		if len(sessionsNeedingProof) == 0 {
+			logger.Info().
+				Int64("session_end_height", sessionEndHeight).
+				Msg("no proofs required for this group")
+			continue
+		}
+
+		// Calculate the earliest proof commit height for this supplier (timing spread)
+		earliestProofHeight := sharedtypes.GetEarliestSupplierProofCommitHeight(
+			sharedParams,
+			sessionEndHeight,
+			proofWindowOpenBlock.Hash(),
+			firstSnapshot.SupplierOperatorAddress,
+		)
+
+		logger.Info().
+			Int64("earliest_proof_height", earliestProofHeight).
+			Int64("session_end_height", sessionEndHeight).
+			Int("proofs_to_submit", len(sessionsNeedingProof)).
+			Msg("waiting for assigned proof timing")
+
+		// Wait for the proof path seed block (one before earliest proof height)
+		proofPathSeedBlockHeight := earliestProofHeight - 1
+		proofPathSeedBlock, seedErr := lc.waitForBlock(ctx, proofPathSeedBlockHeight)
+		if seedErr != nil {
+			return fmt.Errorf("failed to wait for proof path seed block: %w", seedErr)
+		}
+
+		logger.Info().
+			Int("group_size", len(sessionsNeedingProof)).
+			Msg("proof window timing reached - generating and submitting batched proofs")
+
+		// Build all proofs for this group
+		var proofMsgs []*prooftypes.MsgSubmitProof
+
+		for _, snapshot := range sessionsNeedingProof {
+			// Record the scheduled proof height for operators
+			SetProofScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestProofHeight))
+
+			// Generate the proof path from the seed block hash
+			path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snapshot.SessionID)
+
+			// Generate the proof
+			proofBytes, proofErr := lc.smstManager.ProveClosest(ctx, snapshot.SessionID, path)
+			if proofErr != nil {
+				return fmt.Errorf("failed to generate proof for session %s: %w", snapshot.SessionID, proofErr)
+			}
+
+			// Build the session header
+			sessionHeader, headerErr := lc.buildSessionHeader(ctx, snapshot)
+			if headerErr != nil {
+				return fmt.Errorf("failed to build session header for %s: %w", snapshot.SessionID, headerErr)
+			}
+
+			// Build proof message
+			proofMsg := &prooftypes.MsgSubmitProof{
+				SupplierOperatorAddress: snapshot.SupplierOperatorAddress,
+				SessionHeader:           sessionHeader,
+				Proof:                   proofBytes,
+			}
+			proofMsgs = append(proofMsgs, proofMsg)
+		}
+
+		// Calculate timeout height (proof window close)
+		proofWindowClose := sharedtypes.GetProofWindowCloseHeight(sharedParams, sessionEndHeight)
+
+		// Convert to interface types for variadic call
+		interfaceProofMsgs := make([]pocktclient.MsgSubmitProof, len(proofMsgs))
+		for i, msg := range proofMsgs {
+			interfaceProofMsgs[i] = msg
+		}
+
+		// Submit all proofs in a single transaction with retries
+		var lastErr error
+		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
+			if submitErr := lc.supplierClient.SubmitProofs(ctx, proofWindowClose, interfaceProofMsgs...); submitErr != nil {
+				lastErr = submitErr
+				logger.Warn().
+					Err(submitErr).
+					Int(logging.FieldAttempt, attempt).
+					Int(logging.FieldMaxRetry, lc.config.ProofRetryAttempts).
+					Int("batch_size", len(proofMsgs)).
+					Msg("batched proof submission failed, retrying")
+
+				if attempt < lc.config.ProofRetryAttempts {
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-time.After(lc.config.ProofRetryDelay):
+						continue
+					}
+				}
+			} else {
+				// Success
+				currentBlock := lc.blockClient.LastBlock(ctx)
+				blocksAfterWindowOpen := float64(currentBlock.Height() - proofWindowOpenHeight)
+
+				// Record metrics for all sessions in the batch
+				for _, snapshot := range sessionsNeedingProof {
+					RecordProofSubmitted(snapshot.SupplierOperatorAddress)
+					RecordProofSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
+					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+				}
+
+				logger.Info().
+					Int("batch_size", len(proofMsgs)).
+					Int64("blocks_after_window", int64(blocksAfterWindowOpen)).
+					Msg("batched proofs submitted successfully")
+
+				break // Success, exit retry loop
+			}
+		}
+
+		if lastErr != nil {
+			for _, snapshot := range sessionsNeedingProof {
+				RecordProofError(snapshot.SupplierOperatorAddress, "exhausted_retries")
+				RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
+			}
+			return fmt.Errorf("batched proof submission failed after %d attempts: %w", lc.config.ProofRetryAttempts, lastErr)
+		}
+	}
+
+	return nil
+}
+
+// OnSessionNeedsProof is DEPRECATED - use OnSessionsNeedProof instead.
+// Kept for backward compatibility with old code paths.
 func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *SessionSnapshot) error {
 	lock := lc.getSessionLock(snapshot.SessionID)
 	lock.Lock()
@@ -322,7 +693,7 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 				Msg("proof NOT required for this claim (below threshold and not randomly selected) - skipping proof submission")
 
 			// Still record compute units as settled since claim was accepted
-			RecordComputeUnitsSettled(snapshot.SupplierOperatorAddress, snapshot.ServiceID, float64(snapshot.TotalComputeUnits))
+			RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 			return nil
 		}
@@ -404,7 +775,7 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 
 			RecordProofSubmitted(snapshot.SupplierOperatorAddress)
 			RecordProofSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
-			RecordComputeUnitsSettled(snapshot.SupplierOperatorAddress, snapshot.ServiceID, float64(snapshot.TotalComputeUnits))
+			RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 			logger.Info().
 				Int("proof_len", len(proofBytes)).
@@ -416,6 +787,7 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 	}
 
 	RecordProofError(snapshot.SupplierOperatorAddress, "exhausted_retries")
+	RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "proof_exhausted_retries", snapshot.TotalComputeUnits, snapshot.RelayCount)
 	return fmt.Errorf("proof submission failed after %d attempts: %w", lc.config.ProofRetryAttempts, lastErr)
 }
 
@@ -464,6 +836,7 @@ func (lc *LifecycleCallback) OnSessionExpired(ctx context.Context, snapshot *Ses
 
 	// Record session failed metrics
 	RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, reason)
+	RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, reason, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 	// Clean up session-specific metrics (gauges with session_id label)
 	ClearSessionMetrics(snapshot.SupplierOperatorAddress, snapshot.SessionID, snapshot.ServiceID)
@@ -480,7 +853,7 @@ func (lc *LifecycleCallback) OnSessionExpired(ctx context.Context, snapshot *Ses
 }
 
 // waitForBlock waits for a specific block height to be reached.
-func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int64) (client.Block, error) {
+func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 

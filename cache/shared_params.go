@@ -52,7 +52,7 @@ func NewRedisSharedParamCache(
 		config.TTLBlocks = 1
 	}
 	if config.BlockTimeSeconds == 0 {
-		config.BlockTimeSeconds = 6
+		config.BlockTimeSeconds = 30
 	}
 	if config.LockTimeout == 0 {
 		config.LockTimeout = 5 * time.Second
@@ -117,6 +117,8 @@ func (c *RedisSharedParamCache) subscribeToInvalidations(ctx context.Context) {
 
 // GetSharedParams returns the shared module parameters for the given block height.
 func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int64) (*sharedtypes.Params, error) {
+	start := time.Now()
+
 	c.mu.RLock()
 	if c.closed {
 		c.mu.RUnlock()
@@ -128,7 +130,8 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 
 	// L1: Check local cache
 	if cached, ok := c.localCache.Load(key); ok {
-		cacheHits.WithLabelValues("shared_params", "l1").Inc()
+		cacheHits.WithLabelValues("shared_params", CacheLevelL1).Inc()
+		cacheGetLatency.WithLabelValues("shared_params", CacheLevelL1).Observe(time.Since(start).Seconds())
 		return cached.(*sharedtypes.Params), nil
 	}
 	cacheMisses.WithLabelValues("shared_params", "l1").Inc()
@@ -140,7 +143,8 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 		if unmarshalErr := json.Unmarshal(data, params); unmarshalErr != nil {
 			c.logger.Warn().Err(unmarshalErr).Msg("failed to unmarshal cached params")
 		} else {
-			cacheHits.WithLabelValues("shared_params", "l2").Inc()
+			cacheHits.WithLabelValues("shared_params", CacheLevelL2).Inc()
+			cacheGetLatency.WithLabelValues("shared_params", CacheLevelL2).Observe(time.Since(start).Seconds())
 			// Store in L1
 			c.localCache.Store(key, params)
 			return params, nil
@@ -152,7 +156,13 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 	cacheMisses.WithLabelValues("shared_params", "l2").Inc()
 
 	// L3: Query chain with distributed lock
-	return c.queryAndCacheParams(ctx, height, key)
+	params, err := c.queryAndCacheParams(ctx, height, key)
+	if err != nil {
+		cacheGetLatency.WithLabelValues("shared_params", "l3_error").Observe(time.Since(start).Seconds())
+		return nil, err
+	}
+	cacheGetLatency.WithLabelValues("shared_params", CacheLevelL3).Observe(time.Since(start).Seconds())
+	return params, nil
 }
 
 // queryAndCacheParams queries the chain and caches the result.
@@ -168,14 +178,19 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 
 	if locked {
 		// We got the lock - query chain
+		lockAcquisitions.WithLabelValues("shared_params", "acquired").Inc()
 		defer c.redisClient.Del(ctx, lockKey)
 
+		chainQueries.WithLabelValues("shared_params").Inc()
+		chainStart := time.Now()
+
 		params, queryErr := c.sharedClient.GetParams(ctx)
+		chainQueryLatency.WithLabelValues("shared_params").Observe(time.Since(chainStart).Seconds())
+
 		if queryErr != nil {
 			chainQueryErrors.WithLabelValues("shared_params").Inc()
 			return nil, fmt.Errorf("failed to query chain: %w", queryErr)
 		}
-		chainQueries.WithLabelValues("shared_params").Inc()
 
 		// Cache in Redis
 		data, marshalErr := json.Marshal(params)
@@ -193,13 +208,14 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 	}
 
 	// Another instance is populating - wait and retry from Redis
-	time.Sleep(100 * time.Millisecond)
+	lockAcquisitions.WithLabelValues("shared_params", "contended").Inc()
+	time.Sleep(5 * time.Millisecond)
 
 	retryData, retryErr := c.redisClient.Get(ctx, key).Bytes()
 	if retryErr == nil {
 		params := &sharedtypes.Params{}
 		if unmarshalErr := json.Unmarshal(retryData, params); unmarshalErr == nil {
-			cacheHits.WithLabelValues("shared_params", "l2_retry").Inc()
+			cacheHits.WithLabelValues("shared_params", CacheLevelL2Retry).Inc()
 			c.localCache.Store(key, params)
 			return params, nil
 		}

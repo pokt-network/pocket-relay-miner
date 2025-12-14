@@ -19,12 +19,7 @@ def get_defaults():
                 "grpc": 9090,
                 "rpc": 26657,
                 "rest": 1317,
-            },
-            "genesis": {
-                "accounts": [],
-                "suppliers": [],
-                "applications": [],
-            },
+            }
         },
         "redis": {
             "enabled": True,

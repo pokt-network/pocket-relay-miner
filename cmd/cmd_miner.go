@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 
+	pond "github.com/alitto/pond/v2"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 
@@ -122,17 +125,42 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 
 	// Start observability server (metrics and pprof)
 	if config.Metrics.Enabled {
+		// Default pprof addr to localhost:6060 for security if not specified
+		pprofAddr := config.Metrics.PprofAddr
+		if pprofAddr == "" {
+			pprofAddr = "localhost:6060"
+		}
+
+		// Combine MinerRegistry and SharedRegistry so cache metrics are exposed
+		combinedRegistry := prometheus.Gatherers{
+			observability.MinerRegistry,
+			observability.SharedRegistry,
+		}
+
 		obsServer := observability.NewServer(logger, observability.ServerConfig{
 			MetricsEnabled: config.Metrics.Enabled,
 			MetricsAddr:    config.Metrics.Addr,
-			PprofEnabled:   false, // pprof not yet configurable for miner
-			Registry:       observability.MinerRegistry,
+			PprofEnabled:   config.Metrics.PprofEnabled,
+			PprofAddr:      pprofAddr,
+			Registry:       combinedRegistry,
 		})
 		if err := obsServer.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start observability server: %w", err)
 		}
 		defer func() { _ = obsServer.Stop() }()
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
+
+		// Start runtime metrics collector
+		runtimeMetrics := observability.NewRuntimeMetricsCollector(
+			logger,
+			observability.DefaultRuntimeMetricsCollectorConfig(),
+			observability.MinerFactory,
+		)
+		if err := runtimeMetrics.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start runtime metrics collector: %w", err)
+		}
+		defer runtimeMetrics.Stop()
+		logger.Info().Msg("runtime metrics collector started")
 	}
 
 	// Parse Redis URL
@@ -254,28 +282,52 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	defer func() { blockSubscriber.Close() }()
 	logger.Info().Msg("block subscriber started (WebSocket)")
 
-	// Create Redis block subscriber for distributing block events across instances
+	// Create BlockSubscriberAdapter for CacheOrchestrator
+	// This adapter converts WebSocket BlockSubscriber (client.Block) to BlockEvent format
+	// required by CacheOrchestrator. It subscribes to the WebSocket fan-out, ensuring
+	// the miner's CacheOrchestrator gets block events from the same source as other consumers.
+	blockSubscriberAdapter := cache.NewBlockSubscriberAdapter(
+		logger,
+		blockSubscriber, // WebSocket-based BlockSubscriber with fan-out
+	)
+	if err := blockSubscriberAdapter.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start block subscriber adapter: %w", err)
+	}
+	defer func() { _ = blockSubscriberAdapter.Close() }()
+	logger.Info().Msg("block subscriber adapter started for cache orchestrator")
+
+	// NOTE: blockSubscriberAdapter will be passed directly to CacheOrchestrator
+	// It provides the Subscribe() method needed for cache refresh triggers
+
+	// Create Redis block subscriber for publishing block events to Redis
+	// This is used by BlockPublisher to distribute events to relayers
+	// Uses the WebSocket blockSubscriber as the source of block events
 	redisBlockSubscriber := cache.NewRedisBlockSubscriber(
 		logger,
 		redisClient,
-		blockSubscriber, // Uses WebSocket client as source
+		blockSubscriber, // WebSocket client for block events
 		cache.DefaultCacheConfig(),
 	)
 	if err := redisBlockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start redis block subscriber: %w", err)
 	}
 	defer func() { _ = redisBlockSubscriber.Close() }()
-	logger.Info().Msg("redis block subscriber started")
+	logger.Info().Msg("redis block subscriber started for publishing to Redis")
 
 	// Generate unique instance ID for global leader election
 	hostname, _ := os.Hostname()
 	instanceID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
 
 	// Create global leader elector (single source of truth for leadership)
-	globalLeader := leader.NewGlobalLeaderElector(
+	leaderConfig := leader.GlobalLeaderElectorConfig{
+		LeaderTTL:     config.GetLeaderTTL(),
+		HeartbeatRate: config.GetLeaderHeartbeatRate(),
+	}
+	globalLeader := leader.NewGlobalLeaderElectorWithConfig(
 		logger,
 		redisClient,
 		instanceID,
+		leaderConfig,
 	)
 	if err := globalLeader.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start global leader elector: %w", err)
@@ -285,33 +337,41 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Str("instance_id", instanceID).
 		Msg("global leader elector started")
 
-	// Create shared params cache
-	sharedParamsCache := cache.NewSharedParamsCache(
-		logger,
-		redisClient,
-		queryClients.Shared(),
-	)
-	if err := sharedParamsCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start shared params cache: %w", err)
-	}
-	defer func() { _ = sharedParamsCache.Close() }()
+	// Get block time for cache TTL calculations (default: 30s)
+	blockTimeSeconds := config.GetBlockTimeSeconds()
 
-	// Create session params cache
+	// Create session params cache with dynamic session-duration TTL
 	sessionParamsCache := cache.NewSessionParamsCache(
 		logger,
 		redisClient,
 		cache.NewSessionQueryClientAdapter(queryClients.Session()),
+		queryClients.Shared(), // For TTL calculation
+		blockTimeSeconds,
 	)
 	if err := sessionParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start session params cache: %w", err)
 	}
 	defer func() { _ = sessionParamsCache.Close() }()
 
-	// Create proof params cache
+	// Create shared params cache with dynamic 2-session TTL
+	sharedParamsCache := cache.NewSharedParamsCache(
+		logger,
+		redisClient,
+		queryClients.Shared(),
+		blockTimeSeconds,
+	)
+	if err := sharedParamsCache.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start shared params cache: %w", err)
+	}
+	defer func() { _ = sharedParamsCache.Close() }()
+
+	// Create proof params cache with dynamic session-duration TTL
 	proofParamsCache := cache.NewProofParamsCache(
 		logger,
 		redisClient,
 		cache.NewProofQueryClientAdapter(queryClients.Proof()),
+		queryClients.Shared(), // For TTL calculation
+		blockTimeSeconds,
 	)
 	if err := proofParamsCache.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start proof params cache: %w", err)
@@ -349,15 +409,31 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// Create session cache (placeholder for now - will be implemented separately)
 	var sessionCache cache.SessionCache
 
+	// Create master worker pool for controlled concurrency
+	// IMPORTANT: All concurrent operations will use subpools from this master pool
+	// This prevents goroutine explosion when scaling to 1000+ suppliers
+	// Uses unbounded queue with non-blocking submission like relayer pattern
+	numCPU := runtime.NumCPU()
+	masterPoolSize := numCPU * 8
+	masterPool := pond.NewPool(
+		masterPoolSize,
+		pond.WithQueueSize(pond.Unbounded),
+		pond.WithNonBlocking(true),
+	)
+	defer masterPool.StopAndWait()
+	logger.Info().
+		Int("max_workers", masterPoolSize).
+		Int("num_cpu", numCPU).
+		Msg("created master worker pool (unbounded, non-blocking, 8x CPU)")
+
 	// Create cache orchestrator to coordinate all caches
 	cacheOrchestrator := cache.NewCacheOrchestrator(
 		logger,
 		cache.CacheOrchestratorConfig{
-			RefreshWorkers:    config.GetCacheRefreshWorkers(),
 			KnownApplications: config.KnownApplications,
 		},
 		globalLeader,
-		redisBlockSubscriber,
+		blockSubscriberAdapter, // Uses WebSocket fan-out for block events
 		redisClient,
 		sharedParamsCache,
 		sessionParamsCache,
@@ -366,13 +442,71 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		serviceCache,
 		supplierCache,
 		sessionCache,
+		masterPool, // Pass master worker pool for cache refresh subpool
 	)
 
 	if err := cacheOrchestrator.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start cache orchestrator: %w", err)
 	}
 	defer func() { _ = cacheOrchestrator.Close() }()
-	logger.Info().Msg("cache orchestrator started (parallel refresh with 6 workers)")
+	logger.Info().Msg("cache orchestrator started with pond workers")
+
+	// Create BlockPublisher for publishing block events to Redis
+	// This enables distributed cache refresh across all relayer instances
+	// IMPORTANT: Only runs when this instance is the global leader
+	blockPublisher := cache.NewBlockPublisher(
+		logger,
+		blockSubscriber,
+		redisBlockSubscriber,
+	)
+
+	// Register leader election callbacks for dynamic start/stop
+	globalLeader.OnElected(func(ctx context.Context) {
+		logger.Info().Msg("starting block publisher (became leader)")
+		if err := blockPublisher.Start(ctx); err != nil {
+			logger.Error().Err(err).Msg("failed to start block publisher")
+		}
+	})
+
+	globalLeader.OnLost(func(ctx context.Context) {
+		logger.Info().Msg("stopping block publisher (lost leadership)")
+		_ = blockPublisher.Close()
+	})
+
+	// If already leader at startup, start immediately
+	if globalLeader.IsLeader() {
+		if err := blockPublisher.Start(ctx); err != nil {
+			// Non-fatal: Log error but don't crash miner - cache refresh can work via polling
+			logger.Error().Err(err).Msg("failed to start block height watcher (degraded mode)")
+		} else {
+			logger.Info().Msg("block height watcher started (initial leader)")
+		}
+	}
+
+	// Ensure cleanup on miner shutdown
+	defer func() { _ = blockPublisher.Close() }()
+
+	// Block time already retrieved above for shared params cache
+	logger.Info().Int64("block_time_seconds", blockTimeSeconds).Msg("using configured block time")
+
+	// Start block health monitor if enabled
+	var blockHealthMonitor *miner.BlockHealthMonitor
+	if config.BlockHealthMonitor.Enabled {
+		blockHealthMonitor = miner.NewBlockHealthMonitor(
+			logger,
+			blockSubscriber,
+			globalLeader,
+			miner.BlockHealthMonitorConfig{
+				BlockTimeSeconds:  blockTimeSeconds,
+				SlownessThreshold: config.GetBlockHealthSlownessThreshold(),
+			},
+		)
+		if err := blockHealthMonitor.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start block health monitor: %w", err)
+		}
+		defer func() { _ = blockHealthMonitor.Close() }()
+		logger.Info().Msg("block health monitor started (leader-only)")
+	}
 
 	// Fetch chain ID from the node
 	chainID, err := blockSubscriber.GetChainID(ctx)
@@ -399,6 +533,12 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	defer func() { _ = txClient.Close() }()
 	logger.Info().Str("grpc_endpoint", config.PocketNode.QueryNodeGRPCUrl).Msg("transaction client initialized")
 
+	// Create cached shared query client for claim/proof timing calculations
+	// IMPORTANT: This prevents blockchain queries during claim/proof submission
+	// The miner calls GetParams() repeatedly when calculating timing windows
+	// Using the cache reduces submission latency and blockchain load
+	cachedSharedClient := cache.NewCachedSharedQueryClient(sharedParamsCache, queryClients.Shared())
+
 	// Create supplier manager
 	supplierManager := miner.NewSupplierManager(
 		logger,
@@ -414,14 +554,25 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 			SupplierCache:       supplierCache,
 			MinerID:             config.Redis.ConsumerName,
 			SupplierQueryClient: queryClients.Supplier(),
+			WorkerPool:          masterPool, // Master pool for all concurrent operations
 			// New clients for claim/proof lifecycle management
 			TxClient:      txClient,
 			BlockClient:   blockSubscriber,
-			SharedClient:  queryClients.Shared(),
+			SharedClient:  cachedSharedClient, // Use cached version for timing calculations
 			SessionClient: queryClients.Session(),
 
 			// Proof requirement checker for probabilistic proof selection
 			ProofChecker: proofChecker,
+
+			// Session lifecycle configuration
+			SessionLifecycleConfig: miner.SessionLifecycleConfig{
+				// CheckInterval defaults to 30s (used as polling fallback if block events unavailable)
+				CheckInterval:            0, // Event-driven mode (uses block events, not polling)
+				ClaimSubmissionBuffer:    config.GetSessionLifecycleClaimBuffer(),
+				ProofSubmissionBuffer:    config.GetSessionLifecycleProofBuffer(),
+				MaxConcurrentTransitions: config.GetSessionLifecycleMaxConcurrentTransitions(),
+				// SupplierAddress will be set per-supplier by SupplierManager
+			},
 		},
 	)
 
@@ -473,6 +624,33 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("failed to start supplier manager: %w", err)
 	}
 	defer func() { _ = supplierManager.Close() }()
+
+	// Start balance monitor (leader-only operation)
+	// Only start if enabled and threshold is configured
+	if config.GetBalanceMonitorEnabled() || config.GetBalanceMonitorThreshold() > 0 {
+		balanceMonitor := miner.NewBalanceMonitor(
+			logger,
+			miner.BalanceMonitorConfig{
+				CheckInterval:         config.GetBalanceMonitorCheckInterval(),
+				BalanceThresholdUpokt: config.GetBalanceMonitorThreshold(),
+				StakeWarningRatio:     config.GetBalanceMonitorStakeWarningRatio(),
+			},
+			queryClients.Bank(),
+			queryClients.Supplier(),
+			supplierManager,
+			globalLeader,
+		)
+		if err := balanceMonitor.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start balance monitor: %w", err)
+		}
+		defer func() { _ = balanceMonitor.Close() }()
+		logger.Info().
+			Dur("check_interval", config.GetBalanceMonitorCheckInterval()).
+			Int64("balance_threshold_upokt", config.GetBalanceMonitorThreshold()).
+			Msg("balance monitor started")
+	} else {
+		logger.Info().Msg("balance monitor disabled (enable with balance_monitor.enabled or set balance_threshold_upokt)")
+	}
 
 	logger.Info().
 		Int("suppliers", len(supplierManager.ListSuppliers())).

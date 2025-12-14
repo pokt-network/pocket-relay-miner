@@ -64,6 +64,12 @@ type BlockSubscriber struct {
 	chainVersion   *version.Version
 	chainVersionMu sync.RWMutex
 
+	// Fan-out pub/sub for multiple consumers
+	// Each subscriber gets an independent channel to avoid race conditions
+	subscribers   map[uint64]chan client.Block
+	subscribersMu sync.RWMutex
+	nextSubID     atomic.Uint64
+
 	// Lifecycle
 	ctx      context.Context
 	cancelFn context.CancelFunc
@@ -101,6 +107,7 @@ func NewBlockSubscriber(
 		logger:      logging.ForComponent(logger, logging.ComponentBlockSubscriber),
 		config:      config,
 		cometClient: cometClient,
+		subscribers: make(map[uint64]chan client.Block),
 	}, nil
 }
 
@@ -239,8 +246,12 @@ func (bs *BlockSubscriber) handleBlockEvent(resultEvent *coretypes.ResultEvent) 
 	oldBlock := bs.lastBlock.Load()
 	bs.lastBlock.Store(block)
 
-	// Log if height changed (sampled: every 100th block to reduce verbosity)
+	// Publish block event to all subscribers (fan-out)
+	// Only publish if height actually changed to avoid duplicate events
 	if oldBlock == nil || block.height > oldBlock.height {
+		bs.publishToSubscribers(block)
+
+		// Log if height changed (sampled: every 100th block to reduce verbosity)
 		if block.height%100 == 0 {
 			bs.logger.Debug().
 				Int64("height", block.height).
@@ -258,6 +269,86 @@ func (bs *BlockSubscriber) increaseBackoff(current time.Duration) time.Duration 
 		return reconnectMaxDelay
 	}
 	return next
+}
+
+// Subscribe creates an independent channel for a consumer to receive block events.
+// Each subscriber gets its own buffered channel, preventing race conditions that
+// occur when multiple goroutines read from a shared channel.
+//
+// The subscriber channel will be automatically closed when:
+// - The provided context is cancelled
+// - The BlockSubscriber is closed
+//
+// Buffer size controls how many events can be queued before dropping.
+// Recommended values:
+// - 50-100 for monitoring/health checks
+// - 100-200 for session lifecycle management
+// - 100+ for publishing to Redis
+func (bs *BlockSubscriber) Subscribe(ctx context.Context, bufferSize int) <-chan client.Block {
+	if bufferSize <= 0 {
+		bufferSize = 100 // Default buffer size
+	}
+
+	bs.subscribersMu.Lock()
+	defer bs.subscribersMu.Unlock()
+
+	// Generate unique subscriber ID
+	subID := bs.nextSubID.Add(1)
+
+	// Create buffered channel for this subscriber
+	ch := make(chan client.Block, bufferSize)
+	bs.subscribers[subID] = ch
+
+	// Auto-cleanup on context cancellation
+	go func() {
+		<-ctx.Done()
+		bs.unsubscribe(subID)
+	}()
+
+	bs.logger.Debug().
+		Uint64("subscriber_id", subID).
+		Int("buffer_size", bufferSize).
+		Msg("new block subscriber registered")
+
+	return ch
+}
+
+// unsubscribe removes a subscriber and closes its channel.
+// This prevents goroutine leaks by ensuring consumers exit their range loops.
+func (bs *BlockSubscriber) unsubscribe(subID uint64) {
+	bs.subscribersMu.Lock()
+	defer bs.subscribersMu.Unlock()
+
+	if ch, exists := bs.subscribers[subID]; exists {
+		close(ch) // MUST close to prevent goroutine leak
+		delete(bs.subscribers, subID)
+		bs.logger.Debug().
+			Uint64("subscriber_id", subID).
+			Msg("block subscriber unregistered")
+	}
+}
+
+// publishToSubscribers sends a block event to all registered subscribers.
+// Uses non-blocking send to prevent slow consumers from blocking the publisher.
+// If a subscriber's buffer is full, the event is dropped for that subscriber only.
+func (bs *BlockSubscriber) publishToSubscribers(block *simpleBlock) {
+	bs.subscribersMu.RLock()
+	defer bs.subscribersMu.RUnlock()
+
+	// Send to all subscribers (non-blocking)
+	for subID, ch := range bs.subscribers {
+		select {
+		case ch <- block:
+			// Event delivered successfully
+		default:
+			// Buffer full - drop event for this subscriber
+			// Don't block other subscribers or the WebSocket event loop
+			bs.logger.Warn().
+				Uint64("subscriber_id", subID).
+				Int64("height", block.height).
+				Msg("subscriber buffer full, dropping block event")
+		}
+	}
 }
 
 // fetchLatestBlock fetches and stores the latest block via RPC query.
@@ -364,6 +455,18 @@ func (bs *BlockSubscriber) Close() {
 	}
 
 	bs.wg.Wait()
+
+	// Close all subscriber channels after all goroutines have stopped
+	bs.subscribersMu.Lock()
+	for subID, ch := range bs.subscribers {
+		close(ch)
+		bs.logger.Debug().
+			Uint64("subscriber_id", subID).
+			Msg("closed subscriber channel on shutdown")
+	}
+	// Clear the subscribers map
+	bs.subscribers = make(map[uint64]chan client.Block)
+	bs.subscribersMu.Unlock()
 
 	bs.logger.Info().Msg("block subscriber closed")
 }

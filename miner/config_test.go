@@ -1,319 +1,319 @@
 package miner
 
 import (
-	"testing"
-	"time"
+    "testing"
+    "time"
 
-	"github.com/stretchr/testify/require"
+    "github.com/stretchr/testify/require"
 )
 
 func TestDefaultConfig(t *testing.T) {
-	config := DefaultConfig()
+    config := DefaultConfig()
 
-	require.Equal(t, "ha:relays", config.Redis.StreamPrefix)
-	require.Equal(t, "ha-miners", config.Redis.ConsumerGroup)
-	require.Equal(t, int64(5000), config.Redis.BlockTimeoutMs)
-	require.Equal(t, int64(60000), config.Redis.ClaimIdleTimeoutMs)
-	require.True(t, config.SessionTree.WALEnabled)
-	require.Equal(t, int64(1), config.SessionTree.FlushIntervalBlocks)
-	require.Equal(t, int64(10), config.DeduplicationTTLBlocks)
-	require.Equal(t, int64(100), config.BatchSize)
-	require.Equal(t, int64(50), config.AckBatchSize)
+    require.Equal(t, "ha:relays", config.Redis.StreamPrefix)
+    require.Equal(t, "ha-miners", config.Redis.ConsumerGroup)
+    require.Equal(t, int64(5000), config.Redis.BlockTimeoutMs)
+    require.Equal(t, int64(60000), config.Redis.ClaimIdleTimeoutMs)
+    require.True(t, config.SessionTree.WALEnabled)
+    require.Equal(t, int64(1), config.SessionTree.FlushIntervalBlocks)
+    require.Equal(t, int64(10), config.DeduplicationTTLBlocks)
+    require.Equal(t, int64(100), config.BatchSize)
+    require.Equal(t, int64(50), config.AckBatchSize)
 }
 
 func TestConfig_Validate_Valid(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Suppliers: []SupplierConfig{
-			{
-				OperatorAddress: "pokt1supplier123",
-				SigningKeyName:  "supplier_key",
-			},
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+        PocketNode: PocketNodeConfig{
+            QueryNodeRPCUrl:  "http://localhost:26657",
+            QueryNodeGRPCUrl: "localhost:9090",
+        },
+        Suppliers: []SupplierConfig{
+            {
+                OperatorAddress: "pokt1supplier123",
+                SigningKeyName:  "supplier_key",
+            },
+        },
+    }
 
-	err := config.Validate()
-	require.NoError(t, err)
+    err := config.Validate()
+    require.NoError(t, err)
 }
 
 func TestConfig_Validate_MissingRedisURL(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "redis.url is required")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "redis.url is required")
 }
 
 func TestConfig_Validate_InvalidRedisURL(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "://invalid",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "://invalid",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid redis.url")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "invalid redis.url")
 }
 
 func TestConfig_Validate_MissingStreamPrefix(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "redis.stream_prefix is required")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "redis.stream_prefix is required")
 }
 
 func TestConfig_Validate_MissingConsumerGroup(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:          "redis://localhost:6379",
-			StreamPrefix: "test:relays",
-			ConsumerName: "miner-1",
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:          "redis://localhost:6379",
+            StreamPrefix: "test:relays",
+            ConsumerName: "miner-1",
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "redis.consumer_group is required")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "redis.consumer_group is required")
 }
 
 func TestConfig_Validate_MissingConsumerName(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "redis.consumer_name is required")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "redis.consumer_name is required")
 }
 
 func TestConfig_Validate_MissingPocketNodeRPC(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+        PocketNode: PocketNodeConfig{
+            QueryNodeGRPCUrl: "localhost:9090",
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "pocket_node.query_node_rpc_url is required")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "pocket_node.query_node_rpc_url is required")
 }
 
 func TestConfig_Validate_MissingPocketNodeGRPC(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl: "http://localhost:26657",
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+        PocketNode: PocketNodeConfig{
+            QueryNodeRPCUrl: "http://localhost:26657",
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "pocket_node.query_node_grpc_url is required")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "pocket_node.query_node_grpc_url is required")
 }
 
 func TestConfig_Validate_NoSuppliers(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Suppliers: []SupplierConfig{},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+        PocketNode: PocketNodeConfig{
+            QueryNodeRPCUrl:  "http://localhost:26657",
+            QueryNodeGRPCUrl: "localhost:9090",
+        },
+        Suppliers: []SupplierConfig{},
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "at least one supplier must be configured")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "at least one supplier must be configured")
 }
 
 func TestConfig_Validate_SupplierMissingAddress(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Suppliers: []SupplierConfig{
-			{
-				SigningKeyName: "key1",
-			},
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+        PocketNode: PocketNodeConfig{
+            QueryNodeRPCUrl:  "http://localhost:26657",
+            QueryNodeGRPCUrl: "localhost:9090",
+        },
+        Suppliers: []SupplierConfig{
+            {
+                SigningKeyName: "key1",
+            },
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "suppliers[0].operator_address is required")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "suppliers[0].operator_address is required")
 }
 
 func TestConfig_Validate_SupplierMissingKeyName(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Suppliers: []SupplierConfig{
-			{
-				OperatorAddress: "pokt1supplier123",
-			},
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+        PocketNode: PocketNodeConfig{
+            QueryNodeRPCUrl:  "http://localhost:26657",
+            QueryNodeGRPCUrl: "localhost:9090",
+        },
+        Suppliers: []SupplierConfig{
+            {
+                OperatorAddress: "pokt1supplier123",
+            },
+        },
+    }
 
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "suppliers[0].signing_key_name is required")
+    err := config.Validate()
+    require.Error(t, err)
+    require.Contains(t, err.Error(), "suppliers[0].signing_key_name is required")
 }
 
 func TestConfig_GetRedisBlockTimeout(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			BlockTimeoutMs: 10000,
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            BlockTimeoutMs: 10000,
+        },
+    }
 
-	require.Equal(t, 10*time.Second, config.GetRedisBlockTimeout())
+    require.Equal(t, 10*time.Second, config.GetRedisBlockTimeout())
 
-	// Test default
-	config.Redis.BlockTimeoutMs = 0
-	require.Equal(t, 5*time.Second, config.GetRedisBlockTimeout())
+    // Test default
+    config.Redis.BlockTimeoutMs = 0
+    require.Equal(t, 5*time.Second, config.GetRedisBlockTimeout())
 }
 
 func TestConfig_GetClaimIdleTimeout(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			ClaimIdleTimeoutMs: 120000,
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            ClaimIdleTimeoutMs: 120000,
+        },
+    }
 
-	require.Equal(t, 2*time.Minute, config.GetClaimIdleTimeout())
+    require.Equal(t, 2*time.Minute, config.GetClaimIdleTimeout())
 
-	// Test default
-	config.Redis.ClaimIdleTimeoutMs = 0
-	require.Equal(t, time.Minute, config.GetClaimIdleTimeout())
+    // Test default
+    config.Redis.ClaimIdleTimeoutMs = 0
+    require.Equal(t, time.Minute, config.GetClaimIdleTimeout())
 }
 
 func TestConfig_GetBatchSize(t *testing.T) {
-	config := &Config{BatchSize: 200}
-	require.Equal(t, int64(200), config.GetBatchSize())
+    config := &Config{BatchSize: 200}
+    require.Equal(t, int64(200), config.GetBatchSize())
 
-	// Test default
-	config.BatchSize = 0
-	require.Equal(t, int64(100), config.GetBatchSize())
+    // Test default
+    config.BatchSize = 0
+    require.Equal(t, int64(100), config.GetBatchSize())
 }
 
 func TestConfig_GetAckBatchSize(t *testing.T) {
-	config := &Config{AckBatchSize: 25}
-	require.Equal(t, int64(25), config.GetAckBatchSize())
+    config := &Config{AckBatchSize: 25}
+    require.Equal(t, int64(25), config.GetAckBatchSize())
 
-	// Test default
-	config.AckBatchSize = 0
-	require.Equal(t, int64(50), config.GetAckBatchSize())
+    // Test default
+    config.AckBatchSize = 0
+    require.Equal(t, int64(50), config.GetAckBatchSize())
 }
 
 func TestConfig_GetDeduplicationTTL(t *testing.T) {
-	config := &Config{DeduplicationTTLBlocks: 20}
-	require.Equal(t, int64(20), config.GetDeduplicationTTL())
+    config := &Config{DeduplicationTTLBlocks: 20}
+    require.Equal(t, int64(20), config.GetDeduplicationTTL())
 
-	// Test default
-	config.DeduplicationTTLBlocks = 0
-	require.Equal(t, int64(10), config.GetDeduplicationTTL())
+    // Test default
+    config.DeduplicationTTLBlocks = 0
+    require.Equal(t, int64(10), config.GetDeduplicationTTL())
 }
 
 func TestSupplierConfig_WithServices(t *testing.T) {
-	supplier := SupplierConfig{
-		OperatorAddress: "pokt1supplier123",
-		SigningKeyName:  "key1",
-		Services:        []string{"ethereum", "polygon", "anvil"},
-	}
+    supplier := SupplierConfig{
+        OperatorAddress: "pokt1supplier123",
+        SigningKeyName:  "key1",
+        Services:        []string{"ethereum", "polygon", "develop"},
+    }
 
-	require.Equal(t, "pokt1supplier123", supplier.OperatorAddress)
-	require.Equal(t, "key1", supplier.SigningKeyName)
-	require.Len(t, supplier.Services, 3)
-	require.Contains(t, supplier.Services, "ethereum")
+    require.Equal(t, "pokt1supplier123", supplier.OperatorAddress)
+    require.Equal(t, "key1", supplier.SigningKeyName)
+    require.Len(t, supplier.Services, 3)
+    require.Contains(t, supplier.Services, "ethereum")
 }
 
 func TestConfig_Validate_MultipleSuppliers(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Suppliers: []SupplierConfig{
-			{
-				OperatorAddress: "pokt1supplier1",
-				SigningKeyName:  "key1",
-				Services:        []string{"ethereum"},
-			},
-			{
-				OperatorAddress: "pokt1supplier2",
-				SigningKeyName:  "key2",
-				Services:        []string{"polygon", "anvil"},
-			},
-		},
-	}
+    config := &Config{
+        Redis: RedisConfig{
+            URL:           "redis://localhost:6379",
+            StreamPrefix:  "test:relays",
+            ConsumerGroup: "miner-group",
+            ConsumerName:  "miner-1",
+        },
+        PocketNode: PocketNodeConfig{
+            QueryNodeRPCUrl:  "http://localhost:26657",
+            QueryNodeGRPCUrl: "localhost:9090",
+        },
+        Suppliers: []SupplierConfig{
+            {
+                OperatorAddress: "pokt1supplier1",
+                SigningKeyName:  "key1",
+                Services:        []string{"ethereum"},
+            },
+            {
+                OperatorAddress: "pokt1supplier2",
+                SigningKeyName:  "key2",
+                Services:        []string{"polygon", "develop"},
+            },
+        },
+    }
 
-	err := config.Validate()
-	require.NoError(t, err)
+    err := config.Validate()
+    require.NoError(t, err)
 }
