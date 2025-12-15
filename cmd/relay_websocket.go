@@ -7,14 +7,12 @@ import (
 	"net/http"
 	"net/url"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 
 	"github.com/pokt-network/pocket-relay-miner/client/relay_client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
 // runWebSocketMode sends WebSocket relay requests to the relayer.
@@ -65,109 +63,49 @@ func buildWebSocketPayload() ([]byte, error) {
 
 // runWebSocketDiagnostic sends a single WebSocket relay request with detailed output.
 func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
-	// Build and sign relay request
-	buildStart := time.Now()
-	relayRequest, relayRequestBz, err := relayClient.BuildRelayRequest(ctx, relayServiceID, relaySupplierAddr, payloadBz)
-	if err != nil {
-		return fmt.Errorf("failed to build relay request: %w", err)
-	}
-	buildDuration := time.Since(buildStart)
+	// Create sendFunc that connects and sends via WebSocket
+	sendFunc := func(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
+		// Connect to WebSocket
+		conn, err := connectWebSocket(relayRelayerURL, relayServiceID, relaySupplierAddr)
+		if err != nil {
+			return nil, fmt.Errorf("failed to connect to WebSocket: %w", err)
+		}
+		defer func() {
+			// Send close message for graceful shutdown
+			closeMessage := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
+			_ = conn.WriteMessage(websocket.CloseMessage, closeMessage)
+			_ = conn.Close()
+		}()
 
-	logger.Info().
-		Dur("build_time", buildDuration).
-		Int("request_size", len(relayRequestBz)).
-		Msg("relay request built and signed")
+		// Send relay request
+		if err := conn.WriteMessage(websocket.BinaryMessage, relayRequestBz); err != nil {
+			return nil, fmt.Errorf("failed to send relay request: %w", err)
+		}
 
-	// Connect to WebSocket
-	connectStart := time.Now()
-	conn, err := connectWebSocket(relayRelayerURL, relayServiceID, relaySupplierAddr)
-	if err != nil {
-		return fmt.Errorf("failed to connect to WebSocket: %w", err)
-	}
-	defer func() { _ = conn.Close() }()
-	connectDuration := time.Since(connectStart)
-
-	// Send relay request
-	sendStart := time.Now()
-	if err := conn.WriteMessage(websocket.BinaryMessage, relayRequestBz); err != nil {
-		return fmt.Errorf("failed to send relay request: %w", err)
-	}
-	sendDuration := time.Since(sendStart)
-
-	// Receive relay response(s) - support subscription testing
-	fmt.Printf("\n⏳ Waiting for WebSocket responses (5 sec timeout between messages)...\n")
-	receiveStart := time.Now()
-
-	var relayResponse *servicetypes.RelayResponse
-	var receiveDuration time.Duration
-	var verifyDuration time.Duration
-	responseCount := 0
-	maxResponses := 500 // Increased for long-running session expiration testing
-
-	for i := 0; i < maxResponses; i++ {
+		// Receive relay response
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 		messageType, responseData, err := conn.ReadMessage()
 		if err != nil {
-			if responseCount > 0 {
-				// Timeout after receiving responses is expected
-				fmt.Printf("✓ Connection closed after %d responses\n", responseCount)
-				break
-			}
-			return fmt.Errorf("failed to read relay response: %w", err)
+			return nil, fmt.Errorf("failed to read relay response: %w", err)
 		}
 
 		if messageType != websocket.BinaryMessage {
-			return fmt.Errorf("unexpected message type: %d (expected binary)", messageType)
+			return nil, fmt.Errorf("unexpected message type: %d (expected binary)", messageType)
 		}
 
-		// Verify supplier signature
-		verifyStart := time.Now()
-		relayResp, err := relayClient.VerifyRelayResponse(ctx, relaySupplierAddr, responseData)
-		if err != nil {
-			return fmt.Errorf("signature verification failed: %w", err)
-		}
-		verifyDuration += time.Since(verifyStart)
-		relayResponse = relayResp
-
-		responseCount++
-		receiveDuration = time.Since(receiveStart)
-		fmt.Printf("✓ Response #%d received (%d bytes, verified)\n", responseCount, len(responseData))
+		return responseData, nil
 	}
 
-	// Display results
-	fmt.Printf("\n=== WebSocket Relay Diagnostic ===\n")
-	fmt.Printf("App Address: %s\n", relayClient.GetAppAddress())
-	fmt.Printf("Service ID: %s\n", relayServiceID)
-	fmt.Printf("Session ID: %s\n", relayRequest.Meta.SessionHeader.SessionId)
-	fmt.Printf("Supplier: %s\n", relaySupplierAddr)
-	fmt.Printf("\n=== Timings ===\n")
-	fmt.Printf("Build Time: %v\n", buildDuration)
-	fmt.Printf("Connect Time: %v\n", connectDuration)
-	fmt.Printf("Send Time: %v\n", sendDuration)
-	fmt.Printf("Receive Time: %v\n", receiveDuration)
-	fmt.Printf("Verify Time: %v\n", verifyDuration)
-	fmt.Printf("Total Time: %v\n", buildDuration+connectDuration+sendDuration+receiveDuration+verifyDuration)
-	fmt.Printf("\n=== Response ===\n")
-	fmt.Printf("Signature: ✅ VALID\n")
-	fmt.Printf("Size: %d bytes\n", len(relayResponse.Payload))
+	// Use shared build/send/verify logic
+	result := BuildAndSendRelay(ctx, logger, relayClient, payloadBz, sendFunc)
 
-	// Parse and display response payload
-	if relayOutputJSON {
-		fmt.Printf("Payload (raw): %s\n", string(relayResponse.Payload))
-	} else {
-		// Try to pretty-print JSON
-		var payloadData interface{}
-		if err := json.Unmarshal(relayResponse.Payload, &payloadData); err == nil {
-			prettyJSON, _ := json.MarshalIndent(payloadData, "", "  ")
-			fmt.Printf("Payload:\n%s\n", string(prettyJSON))
-		} else {
-			fmt.Printf("Payload: %s\n", string(relayResponse.Payload))
-		}
+	// Display results using shared formatter
+	DisplayDiagnosticResult(relayClient, result)
+
+	// Return error if relay failed
+	if !result.Success {
+		return result.Error
 	}
-
-	// Send close message for graceful shutdown (avoids "abnormal closure" errors)
-	closeMessage := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-	_ = conn.WriteMessage(websocket.CloseMessage, closeMessage)
 
 	return nil
 }
@@ -182,23 +120,26 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 		return fmt.Errorf("failed to build relay request template: %w", err)
 	}
 
-	// Create connection pool (one connection per worker for efficiency)
-	connPool := make([]*websocket.Conn, relayConcurrency)
+	// Create connection pool as a buffered channel (thread-safe queue)
+	// Workers will pop a connection, use it exclusively, then push it back
+	connPool := make(chan *websocket.Conn, relayConcurrency)
 	for i := 0; i < relayConcurrency; i++ {
 		conn, err := connectWebSocket(relayRelayerURL, relayServiceID, relaySupplierAddr)
 		if err != nil {
 			// Close any connections we already opened
-			for j := 0; j < i; j++ {
-				_ = connPool[j].Close()
+			close(connPool)
+			for c := range connPool {
+				_ = c.Close()
 			}
 			return fmt.Errorf("failed to create connection pool: %w", err)
 		}
-		connPool[i] = conn
 		// Set ping/pong handlers to keep connections alive
 		conn.SetPongHandler(func(string) error { return nil })
+		connPool <- conn // Push to queue
 	}
 	defer func() {
-		for _, conn := range connPool {
+		close(connPool)
+		for conn := range connPool {
 			_ = conn.Close()
 		}
 	}()
@@ -210,19 +151,26 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 	semaphore := make(chan struct{}, relayConcurrency)
 	var wg sync.WaitGroup
 
+	// Create rate limiter if RPS targeting is enabled
+	rateLimiter := NewRateLimiter(relayRPS)
+	if rateLimiter != nil {
+		defer rateLimiter.Stop()
+	}
+
 	logger.Info().
 		Int("count", relayCount).
 		Int("concurrency", relayConcurrency).
-		Int("connection_pool_size", len(connPool)).
+		Int("connection_pool_size", relayConcurrency).
+		Int("rps", relayRPS).
 		Msg("starting WebSocket load test with connection pool")
 
 	metrics.Start()
 
-	// Track which worker gets which connection (round-robin)
-	var connIdx atomic.Int32
-
 	// Spawn workers
 	for i := 0; i < relayCount; i++ {
+		// Wait for rate limiter if enabled (pace request launches)
+		WaitForRateLimit(rateLimiter)
+
 		wg.Add(1)
 		semaphore <- struct{}{} // Acquire slot
 
@@ -230,16 +178,16 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 			defer wg.Done()
 			defer func() { <-semaphore }() // Release slot
 
-			// Get a connection from the pool (round-robin)
-			idx := int(connIdx.Add(1)-1) % len(connPool)
-			conn := connPool[idx]
+			// Pop a connection from the pool (blocking until one is available)
+			conn := <-connPool
+			defer func() { connPool <- conn }() // Push back when done
 
 			// Send relay with timeout
 			requestCtx, cancel := context.WithTimeout(ctx, time.Duration(relayTimeout)*time.Second)
 			defer cancel()
 
 			start := time.Now()
-			_, err := sendWebSocketRelayOnConnection(requestCtx, conn, relayRequestBz)
+			relayResponseBz, err := sendWebSocketRelayOnConnection(requestCtx, conn, relayRequestBz)
 			latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
 
 			if err != nil {
@@ -247,16 +195,37 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 				logger.Debug().
 					Err(err).
 					Int("request_num", reqNum).
-					Int("conn_idx", idx).
-					Msg("WebSocket relay request failed")
-			} else {
-				metrics.RecordSuccess(latencyMs)
-				logger.Debug().
-					Int("request_num", reqNum).
-					Int("conn_idx", idx).
-					Float64("latency_ms", latencyMs).
-					Msg("WebSocket relay request succeeded")
+					Msg("WebSocket relay request failed (network error)")
+				return
 			}
+
+			// Verify relay response signature
+			relayResponse, err := relayClient.VerifyRelayResponse(requestCtx, relaySupplierAddr, relayResponseBz)
+			if err != nil {
+				metrics.RecordError(fmt.Errorf("signature verification failed: %w", err))
+				logger.Debug().
+					Err(err).
+					Int("request_num", reqNum).
+					Msg("WebSocket relay request failed (invalid signature)")
+				return
+			}
+
+			// Check for JSON-RPC errors in the payload
+			if err := CheckRelayResponseError(relayResponse); err != nil {
+				metrics.RecordError(err)
+				logger.Debug().
+					Err(err).
+					Int("request_num", reqNum).
+					Msg("WebSocket relay request failed (JSON-RPC error)")
+				return
+			}
+
+			// Success: valid signature + no JSON-RPC error
+			metrics.RecordSuccess(latencyMs)
+			logger.Debug().
+				Int("request_num", reqNum).
+				Float64("latency_ms", latencyMs).
+				Msg("WebSocket relay request succeeded")
 		}(i)
 	}
 
@@ -313,23 +282,18 @@ func connectWebSocket(relayerURL, serviceID, supplierAddr string) (*websocket.Co
 
 // sendWebSocketRelayOnConnection sends a relay request via an existing WebSocket connection.
 // This is used by the load test to reuse connections from the connection pool.
-func sendWebSocketRelayOnConnection(ctx context.Context, conn *websocket.Conn, relayRequestBz []byte) (*servicetypes.RelayResponse, error) {
+// Returns raw response bytes for signature verification.
+func sendWebSocketRelayOnConnection(ctx context.Context, conn *websocket.Conn, relayRequestBz []byte) ([]byte, error) {
 	// Send the relay request
 	if err := conn.WriteMessage(websocket.BinaryMessage, relayRequestBz); err != nil {
 		return nil, fmt.Errorf("failed to send relay request: %w", err)
 	}
 
-	// Read the relay response
+	// Read the relay response (return raw bytes)
 	_, responseBz, err := conn.ReadMessage()
 	if err != nil {
 		return nil, fmt.Errorf("failed to read relay response: %w", err)
 	}
 
-	// Unmarshal the relay response
-	relayResponse := &servicetypes.RelayResponse{}
-	if err := relayResponse.Unmarshal(responseBz); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal relay response: %w", err)
-	}
-
-	return relayResponse, nil
+	return responseBz, nil
 }

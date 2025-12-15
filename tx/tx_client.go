@@ -351,6 +351,17 @@ func (tc *TxClient) signAndBroadcast(
 				Str("error", res.TxResponse.RawLog).
 				Msg("transaction failed due to insufficient balance")
 		}
+
+		// Check for sequence mismatch error and invalidate cache
+		if isSequenceMismatchError(res.TxResponse.RawLog) {
+			tc.logger.Warn().
+				Str("supplier", signerAddr).
+				Str("tx_type", txType).
+				Str("error", res.TxResponse.RawLog).
+				Msg("account sequence mismatch detected, invalidating cache for retry")
+			tc.InvalidateAccount(signerAddr)
+		}
+
 		return res.TxResponse.TxHash, fmt.Errorf("transaction failed: %s", res.TxResponse.RawLog)
 	}
 
@@ -535,6 +546,24 @@ func isInsufficientBalanceError(errorMsg string) bool {
 
 	errorLower := strings.ToLower(errorMsg)
 	for _, pattern := range insufficientFundsPatterns {
+		if strings.Contains(errorLower, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isSequenceMismatchError checks if the error message indicates account sequence mismatch.
+func isSequenceMismatchError(errorMsg string) bool {
+	// Common error patterns from Cosmos SDK
+	sequenceMismatchPatterns := []string{
+		"account sequence mismatch",
+		"incorrect account sequence",
+		"sequence mismatch",
+	}
+
+	errorLower := strings.ToLower(errorMsg)
+	for _, pattern := range sequenceMismatchPatterns {
 		if strings.Contains(errorLower, pattern) {
 			return true
 		}

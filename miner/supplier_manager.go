@@ -19,11 +19,13 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 )
 
 // SupplierQueryClient queries supplier information from the blockchain.
 type SupplierQueryClient interface {
 	GetSupplier(ctx context.Context, supplierOperatorAddress string) (sharedtypes.Supplier, error)
+	GetParams(ctx context.Context) (*suppliertypes.Params, error)
 }
 
 // SupplierStatus represents the state of a supplier in the miner.
@@ -545,7 +547,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 					services = append(services, svc.ServiceId)
 				}
 			}
-			m.logger.Info().
+			m.logger.Debug().
 				Str(logging.FieldSupplier, operatorAddr).
 				Str("services", fmt.Sprintf("%v", services)).
 				Msg("queried supplier services from blockchain")
@@ -568,7 +570,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 				Str(logging.FieldSupplier, operatorAddr).
 				Msg("failed to publish supplier state to cache")
 		} else {
-			m.logger.Info().
+			m.logger.Debug().
 				Str(logging.FieldSupplier, operatorAddr).
 				Str("services", fmt.Sprintf("%v", services)).
 				Msg("published supplier state to cache")
@@ -577,7 +579,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 	supplierManagerSuppliersActive.Inc()
 
-	m.logger.Info().
+	m.logger.Debug().
 		Str(logging.FieldSupplier, operatorAddr).
 		Msg("supplier added and consuming")
 

@@ -181,18 +181,13 @@ type RedisConfig struct {
 
 // PocketNodeConfig contains Pocket blockchain connection configuration.
 type PocketNodeConfig struct {
-	// QueryNodeRPCUrl is the URL for RPC queries.
+	// QueryNodeRPCUrl is the URL for RPC queries (HTTP endpoint).
+	// Used for health checks and fallback queries.
 	QueryNodeRPCUrl string `yaml:"query_node_rpc_url"`
 
 	// QueryNodeGRPCUrl is the URL for gRPC queries.
+	// Primary interface for chain queries (application, session, service, etc.)
 	QueryNodeGRPCUrl string `yaml:"query_node_grpc_url"`
-
-	// UseRedisForBlocks enables Redis pub/sub for block events (recommended for HA).
-	// When true (default), relayers subscribe to Redis events published by the miner,
-	// ensuring all relayers see the same block progression and cache refreshes.
-	// When false, relayers use independent WebSocket connections to CometBFT.
-	// Default: true (recommended for production HA deployments)
-	UseRedisForBlocks bool `yaml:"use_redis_for_blocks"`
 }
 
 // ServiceConfig contains configuration for a single service.

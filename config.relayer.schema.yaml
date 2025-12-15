@@ -48,14 +48,10 @@ properties:
     properties:
       query_node_rpc_url:
         type: string
-        description: RPC endpoint for queries and block subscription
+        description: RPC endpoint for health checks and fallback queries
       query_node_grpc_url:
         type: string
-        description: gRPC endpoint for queries
-      use_redis_for_blocks:
-        type: boolean
-        description: Use Redis pub/sub for block events instead of direct WebSocket (recommended for HA)
-        default: true
+        description: gRPC endpoint for chain queries (primary interface)
 
   keys:
     type: object

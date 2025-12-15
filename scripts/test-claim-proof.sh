@@ -62,6 +62,9 @@ done
 # Find miner binary
 MINER_BIN=$(find_miner_binary) || exit 1
 
+# Set metrics URL to miner endpoint (not relayer)
+export PROMETHEUS_URL="http://localhost:9092"
+
 # Get session state from redis-debug
 get_session_state() {
     local session_id=$1
@@ -87,11 +90,13 @@ phase1_generate_relays() {
 
     log_info "Sending $RELAY_COUNT relays to create a session..."
 
-    # Send relays
+    # Send relays (use load-test mode for count > 1)
     "$MINER_BIN" relay jsonrpc \
         --localnet \
         --service "$SERVICE" \
+        --load-test \
         --count "$RELAY_COUNT" \
+        --concurrency 10 \
         --timeout 60 >/dev/null 2>&1 || {
         log_error "Failed to send relays"
         exit 1

@@ -135,11 +135,16 @@ type BalanceMonitorConfigYAML struct {
 	// Example: 1000 (1000 uPOKT)
 	BalanceThresholdUpokt int64 `yaml:"balance_threshold_upokt,omitempty"`
 
-	// StakeWarningRatio is the ratio of current stake to minimum required stake.
-	// If current stake is below (min stake * ratio), a warning is triggered.
-	// This accounts for proof missing penalties that reduce stake.
-	// Default: 1.2 (20% buffer above minimum)
-	StakeWarningRatio float64 `yaml:"stake_warning_ratio,omitempty"`
+	// StakeWarningProofThreshold is the number of missed proofs remaining before triggering a warning.
+	// Warning triggers when: (stake - min_stake) / proof_missing_penalty < threshold
+	// This is calculated dynamically based on protocol parameters.
+	// Default: 1000 (warn when less than 1000 missed proofs away from auto-unstake)
+	StakeWarningProofThreshold int64 `yaml:"stake_warning_proof_threshold,omitempty"`
+
+	// StakeCriticalProofThreshold is the number of missed proofs remaining before triggering a critical alert.
+	// Critical triggers when: (stake - min_stake) / proof_missing_penalty < threshold
+	// Default: 100 (critical when less than 100 missed proofs away from auto-unstake)
+	StakeCriticalProofThreshold int64 `yaml:"stake_critical_proof_threshold,omitempty"`
 }
 
 // BlockHealthConfig contains configuration for block time health monitoring.
@@ -442,12 +447,20 @@ func (c *Config) GetBalanceMonitorThreshold() int64 {
 	return c.BalanceMonitor.BalanceThresholdUpokt
 }
 
-// GetBalanceMonitorStakeWarningRatio returns the stake warning ratio.
-func (c *Config) GetBalanceMonitorStakeWarningRatio() float64 {
-	if c.BalanceMonitor.StakeWarningRatio > 0 {
-		return c.BalanceMonitor.StakeWarningRatio
+// GetBalanceMonitorStakeWarningProofThreshold returns the warning threshold in missed proofs.
+func (c *Config) GetBalanceMonitorStakeWarningProofThreshold() int64 {
+	if c.BalanceMonitor.StakeWarningProofThreshold > 0 {
+		return c.BalanceMonitor.StakeWarningProofThreshold
 	}
-	return 1.2 // Default: 20% buffer above minimum
+	return 1000 // Default: warn when < 1000 missed proofs remaining
+}
+
+// GetBalanceMonitorStakeCriticalProofThreshold returns the critical threshold in missed proofs.
+func (c *Config) GetBalanceMonitorStakeCriticalProofThreshold() int64 {
+	if c.BalanceMonitor.StakeCriticalProofThreshold > 0 {
+		return c.BalanceMonitor.StakeCriticalProofThreshold
+	}
+	return 100 // Default: critical when < 100 missed proofs remaining
 }
 
 // GetBlockTimeSeconds returns the configured block time in seconds.

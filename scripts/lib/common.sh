@@ -11,12 +11,13 @@ COLOR_BLUE='\033[0;34m'
 COLOR_RESET='\033[0m'
 
 # Logging functions with timestamps
+# All log functions write to stderr to avoid polluting stdout when capturing command output
 log_info() {
-    echo -e "${COLOR_BLUE}[$(date +'%H:%M:%S')]${COLOR_RESET} $*"
+    echo -e "${COLOR_BLUE}[$(date +'%H:%M:%S')]${COLOR_RESET} $*" >&2
 }
 
 log_success() {
-    echo -e "${COLOR_GREEN}[$(date +'%H:%M:%S')] ✅${COLOR_RESET} $*"
+    echo -e "${COLOR_GREEN}[$(date +'%H:%M:%S')] ✅${COLOR_RESET} $*" >&2
 }
 
 log_error() {
@@ -24,7 +25,7 @@ log_error() {
 }
 
 log_warn() {
-    echo -e "${COLOR_YELLOW}[$(date +'%H:%M:%S')] ⚠️${COLOR_RESET} $*"
+    echo -e "${COLOR_YELLOW}[$(date +'%H:%M:%S')] ⚠️${COLOR_RESET} $*" >&2
 }
 
 # Wait for a TCP port to be open

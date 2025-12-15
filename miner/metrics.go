@@ -855,6 +855,16 @@ var (
 		[]string{"supplier"},
 	)
 
+	supplierStakeCriticalAlerts = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_stake_critical_alerts_total",
+			Help:      "Total number of stake critical alerts (very close to auto-unstake threshold)",
+		},
+		[]string{"supplier"},
+	)
+
 	supplierMonitorErrors = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

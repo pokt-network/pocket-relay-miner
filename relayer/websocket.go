@@ -51,6 +51,7 @@ type WebSocketBridge struct {
 	relayProcessor RelayProcessor
 	publisher      transport.MinedRelayPublisher
 	responseSigner *ResponseSigner
+	relayPipeline  *RelayPipeline // Unified relay processing pipeline
 
 	// Message channel for bridge communication
 	msgChan chan wsMessage
@@ -64,6 +65,7 @@ type WebSocketBridge struct {
 	serviceID       string
 	supplierAddress string
 	arrivalHeight   int64
+	computeUnits    uint64 // Compute units for this service
 
 	// Relay counting for billing
 	relayCount atomic.Uint64
@@ -100,6 +102,8 @@ func NewWebSocketBridge(
 	responseSigner *ResponseSigner,
 	headers http.Header,
 	sessionMonitor *SessionMonitor,
+	relayPipeline *RelayPipeline,
+	computeUnits uint64,
 ) (*WebSocketBridge, error) {
 	ctx, cancelFn := context.WithCancel(context.Background())
 
@@ -117,10 +121,12 @@ func NewWebSocketBridge(
 		relayProcessor:   relayProcessor,
 		publisher:        publisher,
 		responseSigner:   responseSigner,
+		relayPipeline:    relayPipeline,
 		msgChan:          make(chan wsMessage, 100),
 		serviceID:        serviceID,
 		supplierAddress:  supplierAddress,
 		arrivalHeight:    arrivalHeight,
+		computeUnits:     computeUnits,
 		sessionMonitor:   sessionMonitor,
 		sessionEndHeight: 0, // Will be set from first relay request
 		ctx:              ctx,
@@ -349,6 +355,53 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		// Register with global session monitor
 		if b.sessionMonitor != nil {
 			b.sessionMonitor.RegisterBridge(b, b.sessionEndHeight)
+		}
+	}
+
+	// Validate and meter the relay if pipeline is available
+	if b.relayPipeline != nil {
+		// Build relay context for validation/metering
+		relayCtx := &RelayContext{
+			Request:            relayReq,
+			ServiceID:          b.serviceID,
+			SupplierAddress:    b.supplierAddress,
+			SessionID:          relayReq.Meta.SessionHeader.SessionId,
+			ComputeUnits:       b.computeUnits,
+			ArrivalBlockHeight: b.arrivalHeight,
+		}
+
+		// Validate relay request (ring signature + session)
+		if err := b.relayPipeline.ValidateRelay(b.ctx, relayCtx); err != nil {
+			b.logger.Warn().
+				Err(err).
+				Str("session_id", relayCtx.SessionID).
+				Msg("relay validation failed - closing connection")
+			_ = b.Close()
+			return
+		}
+
+		// Meter relay (check stake before serving)
+		allowed, overServiced, meterErr := b.relayPipeline.MeterRelay(b.ctx, relayCtx)
+		if meterErr != nil {
+			// Fail-open: log warning but allow relay
+			b.logger.Warn().
+				Err(meterErr).
+				Str("session_id", relayCtx.SessionID).
+				Msg("relay metering error (fail-open: allowing relay)")
+		} else if !allowed {
+			// Stake limit exceeded - reject relay
+			b.logger.Warn().
+				Str("session_id", relayCtx.SessionID).
+				Bool("over_serviced", overServiced).
+				Msg("relay rejected - stake limit exceeded")
+			_ = b.Close()
+			return
+		}
+
+		if overServiced {
+			b.logger.Warn().
+				Str("session_id", relayCtx.SessionID).
+				Msg("relay over-serviced (will be served but not mined)")
 		}
 	}
 
@@ -765,6 +818,10 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 
 		arrivalHeight := p.currentBlockHeight.Load()
 
+		// TODO: Get actual compute units from service config or relay processor
+		// For now, use default value of 1 (will be refined in future PR)
+		computeUnits := uint64(1)
+
 		// Create and run bridge
 		// Session end height will be set when the first relay request arrives
 		bridge, err := NewWebSocketBridge(
@@ -779,6 +836,8 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			p.responseSigner,
 			headers,
 			p.sessionMonitor, // Global session monitor (shared across all connections)
+			p.relayPipeline,  // Unified relay pipeline for validation/metering/signing
+			computeUnits,
 		)
 		if err != nil {
 			p.logger.Warn().Err(err).Msg("failed to create websocket bridge")

@@ -7,6 +7,7 @@ import (
 
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 )
 
 // SharedParamCache provides cached access to on-chain shared parameters.
@@ -26,6 +27,27 @@ type SharedParamCache interface {
 	// InvalidateSharedParams invalidates the cached shared params for a specific height.
 	// Call this when you know params have changed (e.g., governance proposal passed).
 	InvalidateSharedParams(ctx context.Context, height int64) error
+
+	// Start begins the cache's background processes (pub/sub subscriptions, etc.)
+	Start(ctx context.Context) error
+
+	// Close gracefully shuts down the cache.
+	Close() error
+}
+
+// SupplierParamCache provides cached access to on-chain supplier parameters.
+// It implements a multi-level cache strategy:
+// - L1: Local in-memory cache for sub-microsecond access
+// - L2: Redis cache for cross-instance consistency
+// - L3: Chain query for cache misses (with distributed locking)
+type SupplierParamCache interface {
+	// GetSupplierParams returns the supplier module parameters.
+	// Uses L1 -> L2 -> L3 fallback strategy.
+	GetSupplierParams(ctx context.Context) (*suppliertypes.Params, error)
+
+	// InvalidateSupplierParams invalidates the cached supplier params.
+	// Call this when you know params have changed (e.g., governance proposal passed).
+	InvalidateSupplierParams(ctx context.Context) error
 
 	// Start begins the cache's background processes (pub/sub subscriptions, etc.)
 	Start(ctx context.Context) error
@@ -177,6 +199,16 @@ func (k CacheKeys) SharedParams(height int64) string {
 // SharedParamsLock returns the lock key for shared params at a given height.
 func (k CacheKeys) SharedParamsLock(height int64) string {
 	return k.Prefix + ":lock:params:shared:" + formatHeight(height)
+}
+
+// SupplierParams returns the cache key for supplier params (singleton, not height-based).
+func (k CacheKeys) SupplierParams() string {
+	return k.Prefix + ":params:supplier"
+}
+
+// SupplierParamsLock returns the lock key for supplier params.
+func (k CacheKeys) SupplierParamsLock() string {
+	return k.Prefix + ":lock:params:supplier"
 }
 
 // Session returns the cache key for a session.

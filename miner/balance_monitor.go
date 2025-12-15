@@ -12,6 +12,8 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"
+	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
+	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 )
 
 // BalanceMonitorConfig contains configuration for balance monitoring.
@@ -23,19 +25,28 @@ type BalanceMonitorConfig struct {
 	// If 0, balance warnings are disabled.
 	BalanceThresholdUpokt int64
 
-	// StakeWarningRatio is the ratio of current stake to minimum required stake.
-	// If current stake is below (min stake * ratio), a warning is triggered.
-	// Default: 1.2 (20% buffer above minimum)
-	StakeWarningRatio float64
+	// StakeWarningProofThreshold is the number of missed proofs remaining before triggering a warning.
+	// Default: 1000 (warn when less than 1000 missed proofs away from auto-unstake)
+	StakeWarningProofThreshold int64
+
+	// StakeCriticalProofThreshold is the number of missed proofs remaining before triggering a critical alert.
+	// Default: 100 (critical when less than 100 missed proofs away from auto-unstake)
+	StakeCriticalProofThreshold int64
 }
 
 // BalanceMonitor monitors supplier account balances and stake health.
 // This is a leader-only operation to avoid duplicate alerts.
 type BalanceMonitor struct {
-	logger          logging.Logger
-	config          BalanceMonitorConfig
-	bankClient      client.BankQueryClient
-	supplierClient  client.SupplierQueryClient
+	logger              logging.Logger
+	config              BalanceMonitorConfig
+	bankClient          client.BankQueryClient
+	supplierClient      client.SupplierQueryClient
+	supplierParamsCache interface {
+		GetSupplierParams(ctx context.Context) (*suppliertypes.Params, error)
+	}
+	proofParamsCache interface {
+		Get(ctx context.Context, force ...bool) (*prooftypes.Params, error)
+	}
 	supplierManager *SupplierManager
 	globalLeader    *leader.GlobalLeaderElector
 
@@ -53,16 +64,24 @@ func NewBalanceMonitor(
 	config BalanceMonitorConfig,
 	bankClient client.BankQueryClient,
 	supplierClient client.SupplierQueryClient,
+	supplierParamsCache interface {
+		GetSupplierParams(ctx context.Context) (*suppliertypes.Params, error)
+	},
+	proofParamsCache interface {
+		Get(ctx context.Context, force ...bool) (*prooftypes.Params, error)
+	},
 	supplierManager *SupplierManager,
 	globalLeader *leader.GlobalLeaderElector,
 ) *BalanceMonitor {
 	return &BalanceMonitor{
-		logger:          logging.ForComponent(logger, logging.ComponentBalanceMonitor),
-		config:          config,
-		bankClient:      bankClient,
-		supplierClient:  supplierClient,
-		supplierManager: supplierManager,
-		globalLeader:    globalLeader,
+		logger:              logging.ForComponent(logger, logging.ComponentBalanceMonitor),
+		config:              config,
+		bankClient:          bankClient,
+		supplierClient:      supplierClient,
+		supplierParamsCache: supplierParamsCache,
+		proofParamsCache:    proofParamsCache,
+		supplierManager:     supplierManager,
+		globalLeader:        globalLeader,
 	}
 }
 
@@ -84,7 +103,8 @@ func (m *BalanceMonitor) Start(ctx context.Context) error {
 	m.logger.Info().
 		Dur("check_interval", m.config.CheckInterval).
 		Int64("balance_threshold_upokt", m.config.BalanceThresholdUpokt).
-		Float64("stake_warning_ratio", m.config.StakeWarningRatio).
+		Int64("stake_warning_proof_threshold", m.config.StakeWarningProofThreshold).
+		Int64("stake_critical_proof_threshold", m.config.StakeCriticalProofThreshold).
 		Msg("balance monitor started")
 
 	return nil
@@ -137,6 +157,30 @@ func (m *BalanceMonitor) checkAllSuppliers(ctx context.Context) {
 
 // checkSupplier checks balance and stake for a single supplier.
 func (m *BalanceMonitor) checkSupplier(ctx context.Context, supplierAddr string) {
+	// Query supplier stake FIRST to determine if we should monitor balance
+	// Pre-loaded keys (not yet staked) should not trigger balance alerts
+	supplier, err := m.supplierClient.GetSupplier(ctx, supplierAddr)
+	isStaked := false
+	if err != nil {
+		// Check if it's a NotFound error (supplier not staked)
+		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+			m.logger.Debug().
+				Str("supplier", supplierAddr).
+				Msg("supplier not staked (skipping balance/stake monitoring)")
+			// Skip balance alerts for unstaked suppliers (pre-loaded keys)
+			return
+		} else {
+			// Other errors (network, timeout, etc.) - still try to check balance
+			m.logger.Warn().
+				Err(err).
+				Str("supplier", supplierAddr).
+				Msg("failed to query supplier stake, will still check balance")
+			supplierMonitorErrors.WithLabelValues(supplierAddr, "stake_query").Inc()
+		}
+	} else {
+		isStaked = true
+	}
+
 	// Query account balance using bank module
 	balanceCoin, err := m.bankClient.GetBalance(ctx, supplierAddr)
 	if err != nil {
@@ -157,8 +201,9 @@ func (m *BalanceMonitor) checkSupplier(ctx context.Context, supplierAddr string)
 	// Update balance metric
 	supplierBalanceUpokt.WithLabelValues(supplierAddr).Set(float64(balanceUpokt))
 
-	// Check balance threshold
-	if m.config.BalanceThresholdUpokt > 0 && balanceUpokt < m.config.BalanceThresholdUpokt {
+	// Only check balance threshold if supplier is actually staked
+	// Pre-loaded keys should not trigger balance alerts
+	if isStaked && m.config.BalanceThresholdUpokt > 0 && balanceUpokt < m.config.BalanceThresholdUpokt {
 		m.logger.Warn().
 			Str("supplier", supplierAddr).
 			Int64("balance_upokt", balanceUpokt).
@@ -166,7 +211,7 @@ func (m *BalanceMonitor) checkSupplier(ctx context.Context, supplierAddr string)
 			Msg("CRITICAL: Supplier balance below threshold")
 		supplierBalanceCriticalAlerts.WithLabelValues(supplierAddr).Inc()
 		supplierBalanceHealthStatus.WithLabelValues(supplierAddr).Set(0) // 0 = critical
-	} else if m.config.BalanceThresholdUpokt > 0 && balanceUpokt < m.config.BalanceThresholdUpokt*2 {
+	} else if isStaked && m.config.BalanceThresholdUpokt > 0 && balanceUpokt < m.config.BalanceThresholdUpokt*2 {
 		m.logger.Warn().
 			Str("supplier", supplierAddr).
 			Int64("balance_upokt", balanceUpokt).
@@ -178,23 +223,8 @@ func (m *BalanceMonitor) checkSupplier(ctx context.Context, supplierAddr string)
 		supplierBalanceHealthStatus.WithLabelValues(supplierAddr).Set(2) // 2 = healthy
 	}
 
-	// Query supplier stake
-	supplier, err := m.supplierClient.GetSupplier(ctx, supplierAddr)
-	if err != nil {
-		// Check if it's a NotFound error (supplier not staked)
-		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-			m.logger.Debug().
-				Str("supplier", supplierAddr).
-				Msg("supplier not staked (cannot monitor stake)")
-			supplierMonitorErrors.WithLabelValues(supplierAddr, "stake_query").Inc()
-		} else {
-			// Other errors (network, timeout, etc.)
-			m.logger.Warn().
-				Err(err).
-				Str("supplier", supplierAddr).
-				Msg("failed to query supplier stake")
-			supplierMonitorErrors.WithLabelValues(supplierAddr, "stake_query").Inc()
-		}
+	// Process stake information if supplier is staked
+	if !isStaked {
 		return
 	}
 
@@ -202,37 +232,75 @@ func (m *BalanceMonitor) checkSupplier(ctx context.Context, supplierAddr string)
 	stakeUpokt := supplier.GetStake().Amount.Int64()
 	supplierStakeUpokt.WithLabelValues(supplierAddr).Set(float64(stakeUpokt))
 
-	// Calculate minimum stake requirement
-	// This should match the protocol's minimum stake for suppliers
-	// For now, we use a simple heuristic based on service count
-	// TODO: Query actual minimum stake from supplier module params when available
-	numServices := len(supplier.GetServices())
-	if numServices == 0 {
-		numServices = 1 // Assume at least one service
+	// Query supplier module params from cache to get actual minimum stake requirement
+	// This avoids 1000+ chain queries per monitoring interval
+	params, err := m.supplierParamsCache.GetSupplierParams(ctx)
+	if err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str("supplier", supplierAddr).
+			Msg("failed to get cached supplier params, skipping stake health check")
+		supplierMonitorErrors.WithLabelValues(supplierAddr, "params_cache").Inc()
+		return
 	}
 
-	// Estimate minimum stake (this is a rough heuristic - adjust based on protocol)
-	// Typical minimum stake might be 15000 uPOKT per service
-	// This should be confirmed with actual protocol parameters
-	estimatedMinStake := int64(numServices) * 15000
+	// Get actual minimum stake from protocol params (not hardcoded!)
+	minStakeUpokt := params.MinStake.Amount.Int64()
 
-	// Calculate warning threshold based on minimum stake
-	// The warning ratio accounts for potential penalties that reduce stake
-	requiredStake := estimatedMinStake
-	warningThreshold := float64(requiredStake) * m.config.StakeWarningRatio
+	// Get proof missing penalty from proof params cache
+	proofParams, err := m.proofParamsCache.Get(ctx)
+	if err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str("supplier", supplierAddr).
+			Msg("failed to get cached proof params, skipping stake health check")
+		supplierMonitorErrors.WithLabelValues(supplierAddr, "proof_params_cache").Inc()
+		return
+	}
 
-	stakeHealthRatio := float64(stakeUpokt) / float64(requiredStake)
+	proofMissingPenalty := proofParams.GetProofMissingPenalty()
+	if proofMissingPenalty == nil || proofMissingPenalty.Amount.Int64() == 0 {
+		m.logger.Warn().
+			Str("supplier", supplierAddr).
+			Msg("proof missing penalty is zero, skipping stake health check")
+		return
+	}
+
+	penaltyUpokt := proofMissingPenalty.Amount.Int64()
+
+	// Calculate missed proofs remaining before auto-unstake
+	// Formula: missedProofsRemaining = (stake - minStake) / penaltyPerProof
+	bufferUpokt := stakeUpokt - minStakeUpokt
+	missedProofsRemaining := bufferUpokt / penaltyUpokt
+
+	// Calculate stake health ratio for metrics
+	stakeHealthRatio := float64(stakeUpokt) / float64(minStakeUpokt)
 	supplierStakeHealthRatio.WithLabelValues(supplierAddr).Set(stakeHealthRatio)
 
-	// Check stake health
-	if float64(stakeUpokt) < warningThreshold {
+	// Check stake health based on missed proofs remaining
+	if missedProofsRemaining < m.config.StakeCriticalProofThreshold {
+		m.logger.Error().
+			Str("supplier", supplierAddr).
+			Int64("stake_upokt", stakeUpokt).
+			Int64("min_stake_upokt", minStakeUpokt).
+			Int64("buffer_upokt", bufferUpokt).
+			Int64("penalty_per_proof_upokt", penaltyUpokt).
+			Int64("missed_proofs_remaining", missedProofsRemaining).
+			Int64("critical_threshold", m.config.StakeCriticalProofThreshold).
+			Float64("stake_health_ratio", stakeHealthRatio).
+			Msg("CRITICAL: Supplier stake critically low - very close to auto-unstake!")
+		supplierStakeCriticalAlerts.WithLabelValues(supplierAddr).Inc()
+	} else if missedProofsRemaining < m.config.StakeWarningProofThreshold {
 		m.logger.Warn().
 			Str("supplier", supplierAddr).
 			Int64("stake_upokt", stakeUpokt).
-			Int64("required_stake_upokt", requiredStake).
+			Int64("min_stake_upokt", minStakeUpokt).
+			Int64("buffer_upokt", bufferUpokt).
+			Int64("penalty_per_proof_upokt", penaltyUpokt).
+			Int64("missed_proofs_remaining", missedProofsRemaining).
+			Int64("warning_threshold", m.config.StakeWarningProofThreshold).
 			Float64("stake_health_ratio", stakeHealthRatio).
-			Float64("warning_ratio", m.config.StakeWarningRatio).
-			Msg("WARNING: Supplier stake close to auto-unstake threshold")
+			Msg("WARNING: Supplier stake below healthy buffer threshold")
 		supplierStakeWarningAlerts.WithLabelValues(supplierAddr).Inc()
 	}
 

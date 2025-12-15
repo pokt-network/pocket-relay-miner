@@ -36,6 +36,7 @@ type RelayGRPCService struct {
 	responseSigner *ResponseSigner
 	publisher      transport.MinedRelayPublisher
 	relayProcessor RelayProcessor
+	relayPipeline  *RelayPipeline // Unified relay processing pipeline
 	httpClient     *http.Client
 
 	// Backend gRPC connections for passthrough mode
@@ -54,6 +55,7 @@ type RelayGRPCServiceConfig struct {
 	ResponseSigner     *ResponseSigner
 	Publisher          transport.MinedRelayPublisher
 	RelayProcessor     RelayProcessor
+	RelayPipeline      *RelayPipeline // Unified relay processing pipeline
 	CurrentBlockHeight *atomic.Int64
 	MaxBodySize        int64
 	HTTPClient         *http.Client
@@ -87,6 +89,7 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		responseSigner:     config.ResponseSigner,
 		publisher:          config.Publisher,
 		relayProcessor:     config.RelayProcessor,
+		relayPipeline:      config.RelayPipeline,
 		currentBlockHeight: config.CurrentBlockHeight,
 		maxBodySize:        maxBodySize,
 		httpClient:         httpClient,
@@ -173,6 +176,53 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	if !ok {
 		grpcRelayErrors.WithLabelValues(serviceID, "unknown_service").Inc()
 		return status.Errorf(codes.NotFound, "unknown service: %s", serviceID)
+	}
+
+	// Validate and meter the relay if pipeline is available
+	if s.relayPipeline != nil {
+		// TODO: Get actual compute units from service config
+		// For now, use default value of 1 (will be refined in future PR)
+		computeUnits := uint64(1)
+
+		// Build relay context for validation/metering
+		relayCtx := &RelayContext{
+			Request:            relayRequest,
+			ServiceID:          serviceID,
+			SupplierAddress:    supplierOperatorAddr,
+			SessionID:          sessionID,
+			ComputeUnits:       computeUnits,
+			ArrivalBlockHeight: arrivalHeight,
+		}
+
+		// Validate relay request (ring signature + session)
+		if err := s.relayPipeline.ValidateRelay(ctx, relayCtx); err != nil {
+			grpcRelayErrors.WithLabelValues(serviceID, "validation_failed").Inc()
+			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+				Err(err).
+				Msg("relay validation failed")
+			return status.Errorf(codes.PermissionDenied, "relay validation failed: %v", err)
+		}
+
+		// Meter relay (check stake before serving)
+		allowed, overServiced, meterErr := s.relayPipeline.MeterRelay(ctx, relayCtx)
+		if meterErr != nil {
+			// Fail-open: log warning but allow relay
+			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+				Err(meterErr).
+				Msg("relay metering error (fail-open: allowing relay)")
+		} else if !allowed {
+			// Stake limit exceeded - reject relay
+			grpcRelayErrors.WithLabelValues(serviceID, "meter_rejected").Inc()
+			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+				Bool("over_serviced", overServiced).
+				Msg("relay rejected - stake limit exceeded")
+			return status.Error(codes.ResourceExhausted, "relay rejected - stake limit exceeded")
+		}
+
+		if overServiced {
+			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+				Msg("relay over-serviced (will be served but not mined)")
+		}
 	}
 
 	// Deserialize the POKTHTTPRequest from the relay payload

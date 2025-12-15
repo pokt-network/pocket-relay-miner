@@ -116,14 +116,15 @@ const (
 
 	ComponentTxClient = "tx_client"
 
-	ComponentBlockSubscriber   = "block_subscriber"
-	ComponentSessionCache      = "session_cache"
-	ComponentSupplierTxClient  = "supplier_tx_client"
-	ComponentLifecycleCallback = "lifecycle_callback"
-	ComponentSharedParamCache  = "shared_param_cache"
-	ComponentParamsRefresher   = "params_refresher"
-	ComponentBalanceMonitor    = "balance_monitor"
-	ComponentBlockHealth       = "block_health_monitor"
+	ComponentBlockSubscriber    = "block_subscriber"
+	ComponentSessionCache       = "session_cache"
+	ComponentSupplierTxClient   = "supplier_tx_client"
+	ComponentLifecycleCallback  = "lifecycle_callback"
+	ComponentSharedParamCache   = "shared_param_cache"
+	ComponentSupplierParamCache = "supplier_param_cache"
+	ComponentParamsRefresher    = "params_refresher"
+	ComponentBalanceMonitor     = "balance_monitor"
+	ComponentBlockHealth        = "block_health_monitor"
 
 	ComponentRedisPublisher = "redis_streams_publisher"
 	ComponentRedisConsumer  = "redis_streams_consumer"

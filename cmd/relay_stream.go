@@ -60,7 +60,7 @@ func runStreamDiagnostic(ctx context.Context, logger logging.Logger, relayClient
 	}
 	networkDuration := time.Since(networkStart)
 
-	// Verify signatures for all batches
+	// Verify signatures for all batches and check for JSON-RPC errors
 	verifyStart := time.Now()
 	batches := make([]*servicetypes.RelayResponse, 0, len(batchesRaw))
 	for i, batchBz := range batchesRaw {
@@ -68,6 +68,12 @@ func runStreamDiagnostic(ctx context.Context, logger logging.Logger, relayClient
 		if err != nil {
 			return fmt.Errorf("signature verification failed for batch %d: %w", i+1, err)
 		}
+
+		// Check for JSON-RPC errors in batch payload
+		if err := CheckRelayResponseError(batch); err != nil {
+			return fmt.Errorf("batch %d contains error: %w", i+1, err)
+		}
+
 		batches = append(batches, batch)
 	}
 	verifyDuration := time.Since(verifyStart)

@@ -19,12 +19,10 @@ import (
 // 1. Subscribe to Redis pub/sub for block events from miner
 // 2. Maintain local cache of last block (for LastBlock() calls)
 // 3. Provide BlockEvents() channel for components expecting it
-// 4. Return chain version from initial query
 type RedisBlockClientAdapter struct {
 	logger          logging.Logger
 	redisSubscriber *RedisBlockSubscriber
 	lastBlock       atomic.Pointer[simpleBlock]
-	chainVersion    *version.Version
 	blockEventsCh   chan client.Block
 	ctx             context.Context
 	cancel          context.CancelFunc
@@ -37,30 +35,15 @@ type RedisBlockClientAdapter struct {
 // Parameters:
 // - logger: Logger for the adapter
 // - redisSubscriber: RedisBlockSubscriber that receives events from Redis pub/sub
-// - initialBlock: Initial block from one-time RPC query (for starting height)
-// - chainVersion: Chain version from one-time RPC query
 func NewRedisBlockClientAdapter(
 	logger logging.Logger,
 	redisSubscriber *RedisBlockSubscriber,
-	initialBlock client.Block,
-	chainVersion *version.Version,
 ) *RedisBlockClientAdapter {
-	adapter := &RedisBlockClientAdapter{
+	return &RedisBlockClientAdapter{
 		logger:          logging.ForComponent(logger, "redis_block_client_adapter"),
 		redisSubscriber: redisSubscriber,
-		chainVersion:    chainVersion,
 		blockEventsCh:   make(chan client.Block, 100),
 	}
-
-	// Initialize last block from initial query
-	if initialBlock != nil {
-		adapter.lastBlock.Store(&simpleBlock{
-			height: initialBlock.Height(),
-			hash:   initialBlock.Hash(),
-		})
-	}
-
-	return adapter
 }
 
 // Start begins forwarding Redis block events to the local cache and channel.
@@ -134,9 +117,10 @@ func (a *RedisBlockClientAdapter) LastBlock(ctx context.Context) client.Block {
 	return block
 }
 
-// GetChainVersion returns the cached chain version from initial query.
+// GetChainVersion returns nil - chain version is not cached.
+// Relayers receive block events from Redis and don't need chain version.
 func (a *RedisBlockClientAdapter) GetChainVersion() *version.Version {
-	return a.chainVersion
+	return nil
 }
 
 // CommittedBlocksSequence returns nil - not implemented.

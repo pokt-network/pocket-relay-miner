@@ -63,9 +63,10 @@ done
 MINER_BIN=$(find_miner_binary) || exit 1
 
 # Get metrics value
+# Returns empty string on failure (doesn't exit script)
 get_metric_value() {
     local metric_name=$1
-    curl -s "$METRICS_URL" 2>/dev/null | grep "^$metric_name " | awk '{print $2}' | head -1
+    curl -s "$METRICS_URL" 2>/dev/null | grep "^$metric_name " | awk '{print $2}' | head -1 || true
 }
 
 # Main script

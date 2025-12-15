@@ -178,10 +178,9 @@ def generate_relayer_config(config):
             "max_stream_len": relayer_cfg.get("redis", {}).get("max_stream_len", 100000),
         },
         "pocket_node": {
-            "query_node_rpc_url": "tcp://validator:26657",
+            "query_node_rpc_url": "http://validator:26657",
             "query_node_grpc_url": "validator:9090",
             "grpc_insecure": True,  # Disable TLS for local development
-            "use_redis_for_blocks": True,  # Subscribe to Redis pub/sub for block events (HA mode)
         },
         "keys": {
             "keys_file": "/keys/supplier-keys.yaml",

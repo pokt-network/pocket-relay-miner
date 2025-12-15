@@ -255,23 +255,25 @@ histogram_quantile(0.99,
 )
 ```
 
-### 5. Redis Block Events for Relayers (HA Synchronization)
+### 5. Redis Block Events for Relayers (HA Synchronization - MANDATORY)
 
 **Problem**: Each relayer had independent WebSocket connections to CometBFT, potentially seeing different blocks due to network timing.
 
-**Solution**: Added `use_redis_for_blocks` config option (relayer/config.go:198`)
+**Solution**: Relayers now **always** use Redis pub/sub for block events (no config option)
 - Relayers subscribe to Redis pub/sub for block events published by miner
 - All relayers see same blocks as miner (synchronized cache refreshes)
-- Reduces WebSocket connections to blockchain (miner publishes, relayers consume)
+- Eliminates WebSocket connections from relayers (miner publishes, relayers consume)
+- RPC/gRPC endpoints used only for health checks at startup
 
 **Impact**:
 - **Event-driven block updates** (~1-2ms latency vs 1s polling)
 - **Perfect synchronization** between miner and relayers
-- **Reduced blockchain load** (N relayers don't all need WebSocket connections)
+- **Reduced blockchain load** (N relayers don't need WebSocket connections)
+- **Simplified configuration** (one less setting to configure)
 
-**Files Modified**:
-- `config.relayer.schema.yaml:55-58` - Added schema field
-- `tilt/relayer.Tiltfile:184` - Enabled in Tilt config
+**Health Checks**:
+- `cmd/cmd_relayer.go:729-780` - HTTP `/status` and gRPC health checks at startup
+- Non-blocking - failures logged but don't prevent startup
 
 ## Development Workflow
 

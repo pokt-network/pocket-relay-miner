@@ -56,62 +56,15 @@ func runHTTPMode(ctx context.Context, logger logging.Logger, client *relay_clien
 
 // runHTTPDiagnostic sends a single HTTP relay request with detailed output.
 func runHTTPDiagnostic(ctx context.Context, logger logging.Logger, client *relay_client.RelayClient, payloadBz []byte) error {
-	// Build and sign relay request
-	buildStart := time.Now()
-	relayRequest, relayRequestBz, err := client.BuildRelayRequest(ctx, relayServiceID, relaySupplierAddr, payloadBz)
-	if err != nil {
-		return fmt.Errorf("failed to build relay request: %w", err)
-	}
-	buildDuration := time.Since(buildStart)
+	// Use shared build/send/verify logic
+	result := BuildAndSendRelay(ctx, logger, client, payloadBz, sendHTTPRelay)
 
-	logger.Info().
-		Dur("build_time", buildDuration).
-		Int("request_size", len(relayRequestBz)).
-		Msg("relay request built and signed")
+	// Display results using shared formatter
+	DisplayDiagnosticResult(client, result)
 
-	// Send HTTP request
-	networkStart := time.Now()
-	relayResponseBz, err := sendHTTPRelay(ctx, relayRequestBz)
-	if err != nil {
-		return fmt.Errorf("failed to send relay: %w", err)
-	}
-	networkDuration := time.Since(networkStart)
-
-	// Verify supplier signature
-	verifyStart := time.Now()
-	relayResponse, err := client.VerifyRelayResponse(ctx, relaySupplierAddr, relayResponseBz)
-	if err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
-	}
-	verifyDuration := time.Since(verifyStart)
-
-	// Display results
-	fmt.Printf("\n=== Relay Request Diagnostic ===\n")
-	fmt.Printf("App Address: %s\n", client.GetAppAddress())
-	fmt.Printf("Service ID: %s\n", relayServiceID)
-	fmt.Printf("Session ID: %s\n", relayRequest.Meta.SessionHeader.SessionId)
-	fmt.Printf("Supplier: %s\n", relaySupplierAddr)
-	fmt.Printf("\n=== Timings ===\n")
-	fmt.Printf("Build Time: %v\n", buildDuration)
-	fmt.Printf("Network Time: %v\n", networkDuration)
-	fmt.Printf("Verify Time: %v\n", verifyDuration)
-	fmt.Printf("Total Time: %v\n", buildDuration+networkDuration+verifyDuration)
-	fmt.Printf("\n=== Response ===\n")
-	fmt.Printf("Signature: ✅ VALID\n")
-	fmt.Printf("Size: %d bytes\n", len(relayResponse.Payload))
-
-	// Parse and display response payload
-	if relayOutputJSON {
-		fmt.Printf("Payload (raw): %s\n", string(relayResponse.Payload))
-	} else {
-		// Try to pretty-print JSON
-		var payloadData interface{}
-		if err := json.Unmarshal(relayResponse.Payload, &payloadData); err == nil {
-			prettyJSON, _ := json.MarshalIndent(payloadData, "", "  ")
-			fmt.Printf("Payload:\n%s\n", string(prettyJSON))
-		} else {
-			fmt.Printf("Payload: %s\n", string(relayResponse.Payload))
-		}
+	// Return error if relay failed
+	if !result.Success {
+		return result.Error
 	}
 
 	return nil
@@ -208,15 +161,25 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	semaphore := make(chan struct{}, relayConcurrency)
 	var wg sync.WaitGroup
 
+	// Create rate limiter if RPS targeting is enabled
+	rateLimiter := NewRateLimiter(relayRPS)
+	if rateLimiter != nil {
+		defer rateLimiter.Stop()
+	}
+
 	logger.Info().
 		Int("count", relayCount).
 		Int("concurrency", relayConcurrency).
+		Int("rps", relayRPS).
 		Msg("starting load test")
 
 	metrics.Start()
 
 	// Spawn workers
 	for i := 0; i < relayCount; i++ {
+		// Wait for rate limiter if enabled (pace request launches)
+		WaitForRateLimit(rateLimiter)
+
 		wg.Add(1)
 		semaphore <- struct{}{} // Acquire slot
 

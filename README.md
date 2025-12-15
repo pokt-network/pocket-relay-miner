@@ -169,9 +169,8 @@ See `config.relayer.example.yaml` for complete example configuration.
 **Key settings:**
 - `listen_addr`: HTTP server bind address (e.g., `0.0.0.0:8080`)
 - `redis.url`: Redis connection string (e.g., `redis://localhost:6379`)
-- `pocket_node.query_node_grpc_url`: Pocket node gRPC endpoint
-- `pocket_node.query_node_rpc_url`: Pocket node RPC endpoint (WebSocket)
-- `pocket_node.use_redis_for_blocks`: Use Redis pub/sub for block events (recommended for HA)
+- `pocket_node.query_node_grpc_url`: Pocket node gRPC endpoint (primary query interface)
+- `pocket_node.query_node_rpc_url`: Pocket node RPC endpoint (health checks only)
 - `services`: Backend service configurations per service ID and RPC type
 - `default_validation_mode`: "eager" (validate first) or "optimistic" (serve first, validate async)
 

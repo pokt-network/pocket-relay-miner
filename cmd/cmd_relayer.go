@@ -19,7 +19,6 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
-	haclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/observability"
@@ -301,9 +300,23 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// The relayer's caches will populate on-demand during relay validation.
 	// Supplier cache warmup is handled separately above since it's critical for relay acceptance.
 
+	// Verify RPC endpoint connectivity via HTTP /status (health check)
+	rpcURL := config.PocketNode.QueryNodeRPCUrl
+	if err := verifyRPCConnectivity(ctx, logger, rpcURL); err != nil {
+		logger.Warn().Err(err).Str("rpc_url", rpcURL).Msg("RPC health check failed (continuing anyway)")
+	} else {
+		logger.Info().Str("rpc_url", rpcURL).Msg("RPC endpoint connectivity verified")
+	}
+
+	// Verify gRPC endpoint connectivity (health check)
+	if err = verifyGRPCConnectivity(ctx, logger, grpcURL, queryClients); err != nil {
+		logger.Warn().Err(err).Str("grpc_url", grpcURL).Msg("gRPC health check failed (continuing anyway)")
+	} else {
+		logger.Info().Str("grpc_url", grpcURL).Msg("gRPC endpoint connectivity verified")
+	}
+
 	// Create Redis block subscriber to receive block events from miner
-	// This ensures all relayers see the same block progression as the miner,
-	// eliminating timing differences from independent WebSocket connections.
+	// Relayers use Redis pub/sub for block synchronization (no WebSocket connections).
 	redisBlockSubscriber := cache.NewRedisBlockSubscriber(
 		logger,
 		redisClient,
@@ -316,39 +329,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = redisBlockSubscriber.Close() }()
 	logger.Info().Msg("redis block subscriber started (receiving events from miner)")
 
-	// ONE-TIME query for initial state (chain version, starting height)
-	// This avoids the need for a persistent WebSocket connection
-	rpcURL := config.PocketNode.QueryNodeRPCUrl
-	rpcUseTLS := strings.HasPrefix(rpcURL, "https://") || strings.HasSuffix(rpcURL, ":443")
-	initialSubscriber, err := haclient.NewBlockSubscriber(
-		logger,
-		haclient.BlockSubscriberConfig{
-			RPCEndpoint: rpcURL,
-			UseTLS:      rpcUseTLS,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create initial block query: %w", err)
-	}
-	if err := initialSubscriber.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start initial block query: %w", err)
-	}
-	initialBlock := initialSubscriber.LastBlock(ctx)
-	chainVersion := initialSubscriber.GetChainVersion()
-	initialSubscriber.Close() // Close immediately after initial query
-	logger.Info().
-		Int64("initial_height", initialBlock.Height()).
-		Str("chain_version", chainVersion.String()).
-		Msg("fetched initial block state via one-time RPC query")
-
 	// Create RedisBlockClientAdapter to implement client.BlockClient interface
 	// This adapter receives events from Redis pub/sub and provides the BlockClient
 	// interface required by relayer components (proxy, relay meter, etc.)
 	blockSubscriber := cache.NewRedisBlockClientAdapter(
 		logger,
 		redisBlockSubscriber,
-		initialBlock,
-		chainVersion,
 	)
 	if err := blockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start block client adapter: %w", err)
@@ -634,6 +620,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 			// Initialize gRPC handler for gRPC and gRPC-Web requests
 			proxy.InitGRPCHandler()
+			// Initialize unified relay pipeline (validation + metering + signing + publishing)
+			proxy.InitializeRelayPipeline()
 		}
 	}
 
@@ -736,4 +724,64 @@ func startHealthServer(ctx context.Context, logger logging.Logger, addr string, 
 	}()
 
 	return server
+}
+
+// verifyRPCConnectivity checks HTTP RPC endpoint health via /status endpoint.
+// This is a non-blocking health check - failure is logged but doesn't prevent startup.
+func verifyRPCConnectivity(ctx context.Context, logger logging.Logger, rpcURL string) error {
+	// Create HTTP client with short timeout for health check
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	// Convert tcp:// scheme to http:// for HTTP client
+	// CometBFT RPC URLs often use tcp:// prefix but serve HTTP
+	httpURL := rpcURL
+	if strings.HasPrefix(rpcURL, "tcp://") {
+		httpURL = "http://" + strings.TrimPrefix(rpcURL, "tcp://")
+	}
+
+	// Query /status endpoint
+	statusURL := strings.TrimSuffix(httpURL, "/") + "/status"
+	req, err := http.NewRequestWithContext(ctx, "GET", statusURL, nil)
+	if err != nil {
+		return fmt.Errorf("failed to create request: %w", err)
+	}
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("HTTP request failed: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	logger.Debug().
+		Str("rpc_url", httpURL).
+		Int("status_code", resp.StatusCode).
+		Msg("RPC /status endpoint responded successfully")
+
+	return nil
+}
+
+// verifyGRPCConnectivity checks gRPC endpoint health by querying shared params.
+// This is a non-blocking health check - failure is logged but doesn't prevent startup.
+func verifyGRPCConnectivity(ctx context.Context, logger logging.Logger, grpcURL string, queryClients *query.QueryClients) error {
+	// Create context with short timeout for health check
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	// Try to query shared params as a connectivity test
+	_, err := queryClients.Shared().GetParams(checkCtx)
+	if err != nil {
+		return fmt.Errorf("gRPC query failed: %w", err)
+	}
+
+	logger.Debug().
+		Str("grpc_url", grpcURL).
+		Msg("gRPC endpoint responded successfully to GetParams query")
+
+	return nil
 }

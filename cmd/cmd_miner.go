@@ -286,18 +286,16 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// This adapter converts WebSocket BlockSubscriber (client.Block) to BlockEvent format
 	// required by CacheOrchestrator. It subscribes to the WebSocket fan-out, ensuring
 	// the miner's CacheOrchestrator gets block events from the same source as other consumers.
+	// NOTE: The adapter lifecycle is controlled by CacheOrchestrator's leader callbacks.
+	// It only starts when this instance becomes leader (to avoid channel overflow on non-leader pods).
 	blockSubscriberAdapter := cache.NewBlockSubscriberAdapter(
 		logger,
 		blockSubscriber, // WebSocket-based BlockSubscriber with fan-out
 	)
-	if err := blockSubscriberAdapter.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start block subscriber adapter: %w", err)
-	}
-	defer func() { _ = blockSubscriberAdapter.Close() }()
-	logger.Info().Msg("block subscriber adapter started for cache orchestrator")
+	logger.Info().Msg("block subscriber adapter created (will start on leader election)")
 
 	// NOTE: blockSubscriberAdapter will be passed directly to CacheOrchestrator
-	// It provides the Subscribe() method needed for cache refresh triggers
+	// The orchestrator controls its Start()/Close() lifecycle via leader callbacks
 
 	// Create Redis block subscriber for publishing block events to Redis
 	// This is used by BlockPublisher to distribute events to relayers
@@ -378,6 +376,24 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	}
 	defer func() { _ = proofParamsCache.Close() }()
 
+	// Create supplier params cache (min_stake, staking_fee)
+	supplierParamsCache := cache.NewRedisSupplierParamCache(
+		logger,
+		redisClient,
+		queryClients.Supplier(),
+		cache.CacheConfig{
+			CachePrefix:      "ha:cache",
+			TTLBlocks:        100, // Supplier params rarely change
+			BlockTimeSeconds: blockTimeSeconds,
+			LockTimeout:      5 * time.Second,
+			PubSubPrefix:     "ha:events:cache",
+		},
+	)
+	if err := supplierParamsCache.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start supplier params cache: %w", err)
+	}
+	defer func() { _ = supplierParamsCache.Close() }()
+
 	// Create application cache
 	applicationCache := cache.NewApplicationCache(
 		logger,
@@ -438,6 +454,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		sharedParamsCache,
 		sessionParamsCache,
 		proofParamsCache,
+		supplierParamsCache,
 		applicationCache,
 		serviceCache,
 		supplierCache,
@@ -631,12 +648,15 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		balanceMonitor := miner.NewBalanceMonitor(
 			logger,
 			miner.BalanceMonitorConfig{
-				CheckInterval:         config.GetBalanceMonitorCheckInterval(),
-				BalanceThresholdUpokt: config.GetBalanceMonitorThreshold(),
-				StakeWarningRatio:     config.GetBalanceMonitorStakeWarningRatio(),
+				CheckInterval:               config.GetBalanceMonitorCheckInterval(),
+				BalanceThresholdUpokt:       config.GetBalanceMonitorThreshold(),
+				StakeWarningProofThreshold:  config.GetBalanceMonitorStakeWarningProofThreshold(),
+				StakeCriticalProofThreshold: config.GetBalanceMonitorStakeCriticalProofThreshold(),
 			},
 			queryClients.Bank(),
 			queryClients.Supplier(),
+			supplierParamsCache, // Use cached params (avoids 1000+ queries per interval)
+			proofParamsCache,    // Use cached proof params for penalty calculation
 			supplierManager,
 			globalLeader,
 		)

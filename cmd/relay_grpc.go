@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -41,78 +40,42 @@ func runGRPCMode(ctx context.Context, logger logging.Logger, relayClient *relay_
 
 // runGRPCDiagnostic sends a single gRPC relay request with detailed output.
 func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
-	// Build and sign relay request
-	buildStart := time.Now()
-	relayRequest, _, err := relayClient.BuildRelayRequest(ctx, relayServiceID, relaySupplierAddr, payloadBz)
-	if err != nil {
-		return fmt.Errorf("failed to build relay request: %w", err)
-	}
-	buildDuration := time.Since(buildStart)
-
-	logger.Info().
-		Dur("build_time", buildDuration).
-		Msg("relay request built and signed")
-
-	// Connect to gRPC server
-	connectStart := time.Now()
-	// Parse URL to extract host:port (gRPC doesn't accept http:// prefix)
+	// Parse gRPC address (remove http:// prefix if present)
 	grpcAddr := relayRelayerURL
 	if strings.HasPrefix(grpcAddr, "http://") {
 		grpcAddr = strings.TrimPrefix(grpcAddr, "http://")
 	} else if strings.HasPrefix(grpcAddr, "https://") {
 		grpcAddr = strings.TrimPrefix(grpcAddr, "https://")
 	}
+
+	// Create gRPC connection
 	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		return fmt.Errorf("failed to create gRPC connection: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
-	connectDuration := time.Since(connectStart)
 
-	// Send relay request
-	sendStart := time.Now()
-	relayResponseBz, err := invokeGRPCRelay(ctx, conn, relayRequest)
-	if err != nil {
-		return fmt.Errorf("failed to invoke gRPC relay: %w", err)
-	}
-	sendDuration := time.Since(sendStart)
-
-	// Verify supplier signature
-	verifyStart := time.Now()
-	relayResponse, err := relayClient.VerifyRelayResponse(ctx, relaySupplierAddr, relayResponseBz)
-	if err != nil {
-		return fmt.Errorf("signature verification failed: %w", err)
-	}
-	verifyDuration := time.Since(verifyStart)
-
-	// Display results
-	fmt.Printf("\n=== gRPC Relay Diagnostic ===\n")
-	fmt.Printf("App Address: %s\n", relayClient.GetAppAddress())
-	fmt.Printf("Service ID: %s\n", relayServiceID)
-	fmt.Printf("Session ID: %s\n", relayRequest.Meta.SessionHeader.SessionId)
-	fmt.Printf("Supplier: %s\n", relaySupplierAddr)
-	fmt.Printf("\n=== Timings ===\n")
-	fmt.Printf("Build Time: %v\n", buildDuration)
-	fmt.Printf("Connect Time: %v\n", connectDuration)
-	fmt.Printf("RPC Time: %v\n", sendDuration)
-	fmt.Printf("Verify Time: %v\n", verifyDuration)
-	fmt.Printf("Total Time: %v\n", buildDuration+connectDuration+sendDuration+verifyDuration)
-	fmt.Printf("\n=== Response ===\n")
-	fmt.Printf("Signature: ✅ VALID\n")
-	fmt.Printf("Size: %d bytes\n", len(relayResponse.Payload))
-
-	// Parse and display response payload
-	if relayOutputJSON {
-		fmt.Printf("Payload (raw): %s\n", string(relayResponse.Payload))
-	} else {
-		// Try to pretty-print JSON
-		var payloadData interface{}
-		if err := json.Unmarshal(relayResponse.Payload, &payloadData); err == nil {
-			prettyJSON, _ := json.MarshalIndent(payloadData, "", "  ")
-			fmt.Printf("Payload:\n%s\n", string(prettyJSON))
-		} else {
-			fmt.Printf("Payload: %s\n", string(relayResponse.Payload))
+	// Create sendFunc that invokes gRPC relay
+	sendFunc := func(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
+		// Unmarshal relay request (needed for gRPC invocation)
+		relayRequest := &servicetypes.RelayRequest{}
+		if err := relayRequest.Unmarshal(relayRequestBz); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal relay request: %w", err)
 		}
+
+		// Invoke gRPC relay
+		return invokeGRPCRelay(ctx, conn, relayRequest)
+	}
+
+	// Use shared build/send/verify logic
+	result := BuildAndSendRelay(ctx, logger, relayClient, payloadBz, sendFunc)
+
+	// Display results using shared formatter
+	DisplayDiagnosticResult(relayClient, result)
+
+	// Return error if relay failed
+	if !result.Success {
+		return result.Error
 	}
 
 	return nil
@@ -148,15 +111,25 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	semaphore := make(chan struct{}, relayConcurrency)
 	var wg sync.WaitGroup
 
+	// Create rate limiter if RPS targeting is enabled
+	rateLimiter := NewRateLimiter(relayRPS)
+	if rateLimiter != nil {
+		defer rateLimiter.Stop()
+	}
+
 	logger.Info().
 		Int("count", relayCount).
 		Int("concurrency", relayConcurrency).
+		Int("rps", relayRPS).
 		Msg("starting gRPC load test")
 
 	metrics.Start()
 
 	// Spawn workers
 	for i := 0; i < relayCount; i++ {
+		// Wait for rate limiter if enabled (pace request launches)
+		WaitForRateLimit(rateLimiter)
+
 		wg.Add(1)
 		semaphore <- struct{}{} // Acquire slot
 
@@ -169,7 +142,7 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			defer cancel()
 
 			start := time.Now()
-			_, err := invokeGRPCRelay(requestCtx, conn, relayRequest)
+			relayResponseBz, err := invokeGRPCRelay(requestCtx, conn, relayRequest)
 			latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
 
 			if err != nil {
@@ -177,14 +150,37 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 				logger.Debug().
 					Err(err).
 					Int("request_num", reqNum).
-					Msg("gRPC relay request failed")
-			} else {
-				metrics.RecordSuccess(latencyMs)
-				logger.Debug().
-					Int("request_num", reqNum).
-					Float64("latency_ms", latencyMs).
-					Msg("gRPC relay request succeeded")
+					Msg("gRPC relay request failed (network error)")
+				return
 			}
+
+			// Verify relay response signature
+			relayResponse, err := relayClient.VerifyRelayResponse(requestCtx, relaySupplierAddr, relayResponseBz)
+			if err != nil {
+				metrics.RecordError(fmt.Errorf("signature verification failed: %w", err))
+				logger.Debug().
+					Err(err).
+					Int("request_num", reqNum).
+					Msg("gRPC relay request failed (invalid signature)")
+				return
+			}
+
+			// Check for JSON-RPC errors in the payload
+			if err := CheckRelayResponseError(relayResponse); err != nil {
+				metrics.RecordError(err)
+				logger.Debug().
+					Err(err).
+					Int("request_num", reqNum).
+					Msg("gRPC relay request failed (JSON-RPC error)")
+				return
+			}
+
+			// Success: valid signature + no JSON-RPC error
+			metrics.RecordSuccess(latencyMs)
+			logger.Debug().
+				Int("request_num", reqNum).
+				Float64("latency_ms", latencyMs).
+				Msg("gRPC relay request succeeded")
 		}(i)
 	}
 

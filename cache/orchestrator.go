@@ -43,13 +43,14 @@ type CacheOrchestrator struct {
 	redisClient redis.UniversalClient
 
 	// All entity caches
-	sharedParamsCache  SingletonEntityCache[*sharedtypes.Params]
-	sessionParamsCache SingletonEntityCache[*sessiontypes.Params]
-	proofParamsCache   SingletonEntityCache[*prooftypes.Params]
-	applicationCache   KeyedEntityCache[string, *apptypes.Application]
-	serviceCache       KeyedEntityCache[string, *sharedtypes.Service]
-	supplierCache      *SupplierCache // Uses SupplierState, not proto types
-	sessionCache       SessionCache   // Existing implementation
+	sharedParamsCache   SingletonEntityCache[*sharedtypes.Params]
+	sessionParamsCache  SingletonEntityCache[*sessiontypes.Params]
+	proofParamsCache    SingletonEntityCache[*prooftypes.Params]
+	supplierParamsCache SupplierParamCache // Supplier module params (min_stake, etc.)
+	applicationCache    KeyedEntityCache[string, *apptypes.Application]
+	serviceCache        KeyedEntityCache[string, *sharedtypes.Service]
+	supplierCache       *SupplierCache // Uses SupplierState, not proto types
+	sessionCache        SessionCache   // Existing implementation
 
 	// Tracked entities - using xsync for lock-free performance
 	// Apps and Services: dynamically discovered from relay traffic
@@ -90,6 +91,7 @@ func NewCacheOrchestrator(
 	sharedParamsCache SingletonEntityCache[*sharedtypes.Params],
 	sessionParamsCache SingletonEntityCache[*sessiontypes.Params],
 	proofParamsCache SingletonEntityCache[*prooftypes.Params],
+	supplierParamsCache SupplierParamCache,
 	applicationCache KeyedEntityCache[string, *apptypes.Application],
 	serviceCache KeyedEntityCache[string, *sharedtypes.Service],
 	supplierCache *SupplierCache,
@@ -118,22 +120,23 @@ func NewCacheOrchestrator(
 		Msg("created cache refresh subpool with percentage-based allocation")
 
 	return &CacheOrchestrator{
-		logger:             logging.ForComponent(logger, logging.ComponentCacheOrchestrator),
-		config:             config,
-		leaderElector:      leaderElector,
-		blockSubscriber:    blockSubscriber,
-		redisClient:        redisClient,
-		sharedParamsCache:  sharedParamsCache,
-		sessionParamsCache: sessionParamsCache,
-		proofParamsCache:   proofParamsCache,
-		applicationCache:   applicationCache,
-		serviceCache:       serviceCache,
-		supplierCache:      supplierCache,
-		sessionCache:       sessionCache,
-		knownApps:          xsync.NewMap[string, struct{}](),
-		knownServices:      xsync.NewMap[string, struct{}](),
-		knownSuppliers:     xsync.NewMap[string, struct{}](),
-		refreshSubpool:     refreshSubpool,
+		logger:              logging.ForComponent(logger, logging.ComponentCacheOrchestrator),
+		config:              config,
+		leaderElector:       leaderElector,
+		blockSubscriber:     blockSubscriber,
+		redisClient:         redisClient,
+		sharedParamsCache:   sharedParamsCache,
+		sessionParamsCache:  sessionParamsCache,
+		proofParamsCache:    proofParamsCache,
+		supplierParamsCache: supplierParamsCache,
+		applicationCache:    applicationCache,
+		serviceCache:        serviceCache,
+		supplierCache:       supplierCache,
+		sessionCache:        sessionCache,
+		knownApps:           xsync.NewMap[string, struct{}](),
+		knownServices:       xsync.NewMap[string, struct{}](),
+		knownSuppliers:      xsync.NewMap[string, struct{}](),
+		refreshSubpool:      refreshSubpool,
 	}
 }
 
@@ -220,6 +223,16 @@ func (o *CacheOrchestrator) onBecameLeader(ctx context.Context) {
 	blockCtx, blockCancel := context.WithCancel(o.ctx)
 	o.blockCancelFn = blockCancel
 
+	// Start the BlockSubscriberAdapter (leader-only to prevent channel overflow)
+	// On non-leader pods, the adapter doesn't start, so no events are produced
+	if starter, ok := o.blockSubscriber.(interface{ Start(context.Context) error }); ok {
+		if err := starter.Start(blockCtx); err != nil {
+			o.logger.Error().Err(err).Msg("failed to start block subscriber adapter")
+			return
+		}
+		o.logger.Info().Msg("block subscriber adapter started (leader)")
+	}
+
 	// Subscribe to block events (push pattern, not polling)
 	o.blockChan = o.blockSubscriber.Subscribe(blockCtx)
 
@@ -245,6 +258,16 @@ func (o *CacheOrchestrator) onLostLeadership(ctx context.Context) {
 
 	// Wait for refresh worker to stop
 	o.blockWg.Wait()
+
+	// Close the BlockSubscriberAdapter (leader-only)
+	// This prevents channel accumulation on non-leader pods
+	if closer, ok := o.blockSubscriber.(interface{ Close() error }); ok {
+		if err := closer.Close(); err != nil {
+			o.logger.Warn().Err(err).Msg("failed to close block subscriber adapter")
+		} else {
+			o.logger.Info().Msg("block subscriber adapter closed (lost leadership)")
+		}
+	}
 
 	// Update leader status metric
 	cacheOrchestratorLeaderStatus.Set(0)
@@ -668,6 +691,9 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 	}
 	if proof, ok := o.proofParamsCache.(*proofParamsCache); ok {
 		_ = proof.WarmupFromRedis(ctx)
+	}
+	if supplier, ok := o.supplierParamsCache.(*RedisSupplierParamCache); ok {
+		_ = supplier.WarmupFromRedis(ctx)
 	}
 
 	o.logger.Info().Msg("cache warmup complete")

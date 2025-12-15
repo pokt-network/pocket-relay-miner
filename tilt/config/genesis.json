@@ -738,17 +738,22 @@
                 },
                 {
                   "configs": [],
+                  "rpc_type": "COMET_BFT",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                },
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                },
+                {
+                  "configs": [],
                   "rpc_type": "WEBSOCKET",
                   "url": "ws://relayer.default.svc.cluster.local:8080"
                 },
                 {
                   "configs": [],
                   "rpc_type": "GRPC",
-                  "url": "http://relayer.default.svc.cluster.local:8080"
-                },
-                {
-                  "configs": [],
-                  "rpc_type": "REST",
                   "url": "http://relayer.default.svc.cluster.local:8080"
                 }
               ],
