@@ -35,8 +35,12 @@ RUN CGO_ENABLED=0 go build \
 # Runtime stage
 FROM alpine:latest
 
+# TARGETARCH is automatically set by buildx (amd64, arm64, etc.)
+ARG TARGETARCH
+
 # Install runtime tools for debugging and testing
-RUN apk add --no-cache \
+# Use --no-scripts to avoid QEMU emulation issues with package triggers
+RUN apk add --no-cache --no-scripts \
     ca-certificates \
     curl \
     jq \
@@ -45,14 +49,26 @@ RUN apk add --no-cache \
     && rm -rf /var/cache/apk/*
 
 # Install grpcurl (not available in alpine repos)
+# Map Docker TARGETARCH to grpcurl architecture naming
 RUN GRPCURL_VERSION=1.9.1 && \
-    wget -qO- "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_x86_64.tar.gz" | \
+    case "${TARGETARCH}" in \
+        amd64) GRPCURL_ARCH=x86_64 ;; \
+        arm64) GRPCURL_ARCH=arm64 ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    wget -qO- "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${GRPCURL_ARCH}.tar.gz" | \
     tar -xz -C /usr/local/bin grpcurl && \
     chmod +x /usr/local/bin/grpcurl
 
 # Install websocat (websocket testing tool)
+# Map Docker TARGETARCH to Rust target triple
 RUN WEBSOCAT_VERSION=1.14.0 && \
-    wget -qO /usr/local/bin/websocat "https://github.com/vi/websocat/releases/download/v${WEBSOCAT_VERSION}/websocat.x86_64-unknown-linux-musl" && \
+    case "${TARGETARCH}" in \
+        amd64) WEBSOCAT_ARCH=x86_64-unknown-linux-musl ;; \
+        arm64) WEBSOCAT_ARCH=aarch64-unknown-linux-musl ;; \
+        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
+    esac && \
+    wget -qO /usr/local/bin/websocat "https://github.com/vi/websocat/releases/download/v${WEBSOCAT_VERSION}/websocat.${WEBSOCAT_ARCH}" && \
     chmod +x /usr/local/bin/websocat
 
 # Copy the binary from builder
