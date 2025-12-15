@@ -46,6 +46,7 @@ RUN apk add --no-cache --no-scripts \
     jq \
     yq \
     tini \
+    ws \
     && rm -rf /var/cache/apk/*
 
 # Install grpcurl (not available in alpine repos)
@@ -59,17 +60,6 @@ RUN GRPCURL_VERSION=1.9.1 && \
     wget -qO- "https://github.com/fullstorydev/grpcurl/releases/download/v${GRPCURL_VERSION}/grpcurl_${GRPCURL_VERSION}_linux_${GRPCURL_ARCH}.tar.gz" | \
     tar -xz -C /usr/local/bin grpcurl && \
     chmod +x /usr/local/bin/grpcurl
-
-# Install websocat (websocket testing tool)
-# Map Docker TARGETARCH to Rust target triple
-RUN WEBSOCAT_VERSION=1.14.0 && \
-    case "${TARGETARCH}" in \
-        amd64) WEBSOCAT_ARCH=x86_64-unknown-linux-musl ;; \
-        arm64) WEBSOCAT_ARCH=aarch64-unknown-linux-musl ;; \
-        *) echo "Unsupported architecture: ${TARGETARCH}" && exit 1 ;; \
-    esac && \
-    wget -qO /usr/local/bin/websocat "https://github.com/vi/websocat/releases/download/v${WEBSOCAT_VERSION}/websocat.${WEBSOCAT_ARCH}" && \
-    chmod +x /usr/local/bin/websocat
 
 # Copy the binary from builder
 COPY --from=builder /build/pocket-relay-miner /usr/local/bin/pocket-relay-miner
