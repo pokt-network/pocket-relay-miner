@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	pond "github.com/alitto/pond/v2"
 	"github.com/redis/go-redis/v9"
@@ -133,11 +134,17 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 		StreamPrefix: config.Redis.StreamPrefix,
 	}
 
+	// CacheTTL default: 2h if not configured
+	cacheTTL := config.RelayMeter.CacheTTL
+	if cacheTTL == 0 {
+		cacheTTL = 2 * time.Hour
+	}
+
 	publisher := redistransport.NewStreamsPublisher(
 		logger,
 		deps.RedisClient,
 		publisherConfig,
-		30, // Default block time: 30s (used for stream TTL calculation)
+		cacheTTL, // TTL for relay streams (backup safety net)
 	)
 
 	// Create master worker pool for relayer

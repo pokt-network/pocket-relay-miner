@@ -21,8 +21,8 @@ type StreamsPublisher struct {
 	client redis.UniversalClient
 	config transport.PublisherConfig
 
-	// blockTimeSeconds is the expected block time for TTL calculation
-	blockTimeSeconds int64
+	// cacheTTL is the TTL for relay stream data (backup safety net)
+	cacheTTL time.Duration
 
 	// mu protects closed state
 	mu     sync.RWMutex
@@ -30,22 +30,22 @@ type StreamsPublisher struct {
 }
 
 // NewStreamsPublisher creates a new Redis Streams publisher.
-// blockTimeSeconds is used to calculate stream TTL (default: 30s if not provided).
+// cacheTTL is the TTL for relay stream data (default: 2h if not provided).
 func NewStreamsPublisher(
 	logger logging.Logger,
 	client redis.UniversalClient,
 	config transport.PublisherConfig,
-	blockTimeSeconds int64,
+	cacheTTL time.Duration,
 ) *StreamsPublisher {
-	if blockTimeSeconds <= 0 {
-		blockTimeSeconds = 30 // Default to 30s block time
+	if cacheTTL <= 0 {
+		cacheTTL = 2 * time.Hour // Default to 2h
 	}
 
 	return &StreamsPublisher{
-		logger:           logging.ForComponent(logger, logging.ComponentRedisPublisher),
-		client:           client,
-		config:           config,
-		blockTimeSeconds: blockTimeSeconds,
+		logger:   logging.ForComponent(logger, logging.ComponentRedisPublisher),
+		client:   client,
+		config:   config,
+		cacheTTL: cacheTTL,
 	}
 }
 
@@ -104,18 +104,13 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 	}
 
 	// Set stream expiration (this is idempotent - safe to call multiple times)
-	// TTL is calculated to expire shortly after the session is no longer useful
-	// We don't have shared params here, so use a conservative estimate
-	// Assume: claim window opens ~grace period after session end
-	// Conservative: session_end + 10 blocks buffer + extra safety margin
-	// This will be overridden by the consumer with accurate params
-	ttl := p.calculateConservativeTTL(msg.SessionEndHeight)
-	if ttlErr := p.client.Expire(ctx, streamName, ttl).Err(); ttlErr != nil {
+	// TTL is a backup safety net - manual cleanup is primary
+	if ttlErr := p.client.Expire(ctx, streamName, p.cacheTTL).Err(); ttlErr != nil {
 		// Log but don't fail - stream will still work, just won't auto-expire
 		p.logger.Warn().
 			Err(ttlErr).
 			Str(logging.FieldStreamID, streamName).
-			Int64("ttl_seconds", int64(ttl.Seconds())).
+			Int64("ttl_seconds", int64(p.cacheTTL.Seconds())).
 			Msg("failed to set stream TTL")
 	}
 
@@ -127,26 +122,10 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 		Str(logging.FieldMessageID, messageID).
 		Str(logging.FieldSessionID, msg.SessionId).
 		Str(logging.FieldSupplier, msg.SupplierOperatorAddress).
-		Int64("ttl_seconds", int64(ttl.Seconds())).
+		Int64("ttl_seconds", int64(p.cacheTTL.Seconds())).
 		Msg("published mined relay to session stream")
 
 	return nil
-}
-
-// calculateConservativeTTL calculates a conservative TTL for the stream.
-// This is a fallback when we don't have access to shared params.
-// The consumer will set a more accurate TTL when it has access to params.
-func (p *StreamsPublisher) calculateConservativeTTL(sessionEndHeight int64) time.Duration {
-	// Conservative estimate: session might need to stay around until claim window closes + buffer
-	// Assume: grace period ~4 blocks, claim window ~4 blocks, buffer ~10 blocks
-	// Total: ~18 blocks after session end
-	conservativeBlocks := int64(20)
-	ttlSeconds := conservativeBlocks * p.blockTimeSeconds
-
-	// Add 5 minute safety margin
-	ttlSeconds += 300
-
-	return time.Duration(ttlSeconds) * time.Second
 }
 
 // PublishBatch sends multiple mined relay messages in a single pipeline operation.
@@ -209,9 +188,10 @@ func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.M
 
 			cmds = append(cmds, pipe.XAdd(ctx, args))
 
-			// Calculate TTL for this stream (only once per stream)
+			// Set TTL for this stream (only once per stream)
+			// TTL is a backup safety net - manual cleanup is primary
 			if _, exists := streamTTLs[streamName]; !exists {
-				streamTTLs[streamName] = p.calculateConservativeTTL(msg.SessionEndHeight)
+				streamTTLs[streamName] = p.cacheTTL
 			}
 		}
 	}

@@ -406,13 +406,18 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Discovery of apps/services happens on the miner side when processing relays from Redis streams.
 
 	// Create publisher for mined relays
+	// CacheTTL default: 2h if not configured
+	cacheTTL := config.RelayMeter.CacheTTL
+	if cacheTTL == 0 {
+		cacheTTL = 2 * time.Hour
+	}
 	publisher := redistransport.NewStreamsPublisher(
 		logger,
 		redisClient,
 		transport.PublisherConfig{
 			StreamPrefix: config.Redis.StreamPrefix,
 		},
-		30, // Default block time: 30s (used for stream TTL calculation)
+		cacheTTL, // TTL for relay streams (backup safety net)
 	)
 
 	// Create health checker

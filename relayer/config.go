@@ -427,6 +427,11 @@ type RelayMeterYAMLConfig struct {
 	// AppStakeCacheTTL is the TTL for cached app stakes.
 	// Default: 10 minutes
 	AppStakeCacheTTL time.Duration `yaml:"app_stake_cache_ttl"`
+
+	// CacheTTL is the TTL for Redis stream data (relay messages).
+	// This is a backup safety net - manual cleanup is primary, TTL prevents leaks if cleanup fails.
+	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
+	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
 
 // CacheWarmupConfig contains configuration for cache pre-warming at startup.
@@ -484,6 +489,7 @@ func DefaultConfig() Config {
 			SessionCleanupInterval: 5 * time.Minute,
 			ParamsCacheTTL:         10 * time.Minute,
 			AppStakeCacheTTL:       10 * time.Minute,
+			CacheTTL:               2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
 		},
 		HTTPTransport: HTTPTransportConfig{
 			MaxIdleConns:                 500,  // Total idle connections across all hosts (5x for 1000+ RPS)
