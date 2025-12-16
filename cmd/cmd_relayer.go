@@ -296,9 +296,59 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	logger.Info().Msg("entity caches started (pub/sub subscribers)")
 
-	// NOTE: Cache warmup (L2→L1) is handled by the miner's CacheOrchestrator.
-	// The relayer's caches will populate on-demand during relay validation.
-	// Supplier cache warmup is handled separately above since it's critical for relay acceptance.
+	// Cache warmup: Pre-warm L1 caches from L2 (Redis) for known applications
+	// This significantly speeds up cold starts by avoiding L3 (chain) queries during first relays
+	if config.CacheWarmup.Enabled {
+		logger.Info().
+			Int("known_apps", len(config.CacheWarmup.KnownApplications)).
+			Bool("persist_discovered", config.CacheWarmup.PersistDiscoveredApps).
+			Int("concurrency", config.CacheWarmup.WarmupConcurrency).
+			Msg("starting cache warmup for faster cold starts")
+
+		// Create ring client first (needed by cache warmer)
+		ringClientForWarmup := rings.NewRingClient(
+			logger,
+			cache.NewCachedApplicationQueryClient(applicationCache),
+			cache.NewCachedAccountQueryClient(accountCache),
+			cache.NewCachedSharedQueryClient(sharedParamsCache, queryClients.Shared()),
+		)
+
+		// Create cache warmer
+		cacheWarmer := cache.NewCacheWarmer(
+			logger,
+			cache.CacheWarmerConfig{
+				KnownApplications:     config.CacheWarmup.KnownApplications,
+				PersistDiscoveredApps: config.CacheWarmup.PersistDiscoveredApps,
+				WarmupConcurrency:     config.CacheWarmup.WarmupConcurrency,
+				WarmupTimeout:         time.Duration(config.CacheWarmup.WarmupTimeoutSeconds) * time.Second,
+			},
+			redisClient,
+			queryClients.Application(),
+			queryClients.Account(),
+			queryClients.Shared(),
+			ringClientForWarmup,
+		)
+		// Ensure worker pool cleanup
+		defer cacheWarmer.Stop()
+
+		// Execute warmup (this populates L1 cache from L2/L3)
+		warmupCtx, warmupCancel := context.WithTimeout(ctx, 30*time.Second)
+		warmupResult, err := cacheWarmer.Warmup(warmupCtx)
+		warmupCancel()
+
+		if err != nil {
+			logger.Warn().Err(err).Msg("cache warmup failed (continuing anyway)")
+		} else {
+			logger.Info().
+				Int("total_apps", warmupResult.TotalApps).
+				Int("warmed", warmupResult.WarmedApps).
+				Int("failed", warmupResult.FailedApps).
+				Int64("duration_ms", warmupResult.DurationMs).
+				Msg("cache warmup completed - relayer ready with pre-warmed caches")
+		}
+	} else {
+		logger.Info().Msg("cache warmup disabled - caches will populate on-demand during relays")
+	}
 
 	// Verify RPC endpoint connectivity via HTTP /status (health check)
 	rpcURL := config.PocketNode.QueryNodeRPCUrl

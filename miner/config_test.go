@@ -14,8 +14,6 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, "ha-miners", config.Redis.ConsumerGroup)
 	require.Equal(t, int64(5000), config.Redis.BlockTimeoutMs)
 	require.Equal(t, int64(60000), config.Redis.ClaimIdleTimeoutMs)
-	require.True(t, config.SessionTree.WALEnabled)
-	require.Equal(t, int64(1), config.SessionTree.FlushIntervalBlocks)
 	require.Equal(t, int64(10), config.DeduplicationTTLBlocks)
 	require.Equal(t, int64(100), config.BatchSize)
 	require.Equal(t, int64(50), config.AckBatchSize)

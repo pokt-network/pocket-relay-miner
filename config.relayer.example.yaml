@@ -16,10 +16,6 @@ redis:
   # Stream prefix for relay messages
   stream_prefix: "ha:relays"
 
-  # Max stream length (REMOVED in Feature 5 - now using per-session streams with TTL)
-  # max_stream_len is ignored when session-based streams are enabled
-  max_stream_len: 100000
-
 # Pocket blockchain connection
 pocket_node:
   # RPC endpoint for block subscriptions and queries

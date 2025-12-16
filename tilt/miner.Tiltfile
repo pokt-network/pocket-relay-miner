@@ -205,8 +205,9 @@ def generate_miner_config(config):
         "balance_monitor": {
             "enabled": miner_cfg.get("balance_monitor", {}).get("enabled", True),
             "check_interval_seconds": miner_cfg.get("balance_monitor", {}).get("check_interval_seconds", 300),
-            "balance_threshold_upokt": miner_cfg.get("balance_monitor", {}).get("balance_threshold_upokt", 1000),
-            "stake_warning_ratio": miner_cfg.get("balance_monitor", {}).get("stake_warning_ratio", 1.2),
+            "balance_threshold_upokt": miner_cfg.get("balance_monitor", {}).get("balance_threshold_upokt", 1000000),
+            "stake_warning_proof_threshold": miner_cfg.get("balance_monitor", {}).get("stake_warning_proof_threshold", 1000),
+            "stake_critical_proof_threshold": miner_cfg.get("balance_monitor", {}).get("stake_critical_proof_threshold", 100),
         },
         "session_lifecycle": {
             "window_start_buffer_blocks": miner_cfg.get("session_lifecycle", {}).get("window_start_buffer_blocks", 10),

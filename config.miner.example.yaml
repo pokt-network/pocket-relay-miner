@@ -27,11 +27,8 @@ redis:
 # ==============================================================================
 pocket_node:
   # Query node endpoints
-  query_node_rpc_url: "https://rpc.testnet.pokt.network"  # RPC for block subscription
+  query_node_rpc_url: "https://rpc.testnet.pokt.network"  # RPC for queries, blocks, and TX submission
   query_node_grpc_url: "grpc.testnet.pokt.network:443"  # gRPC for queries
-
-  # Optional: Separate TX node (if different from query node)
-  # tx_node_rpc_url: "https://rpc-tx.testnet.pokt.network"
 
   # gRPC settings
   grpc_insecure: false  # Disable TLS for gRPC (use true for local development only)
@@ -84,16 +81,32 @@ balance_monitor:
   enabled: true  # Enable proactive balance/stake monitoring
   check_interval_seconds: 300  # Check every 5 minutes
 
-  # Balance threshold - set based on your daily TX volume
+  # Balance threshold (in upokt: 1 POKT = 1,000,000 upokt)
+  # Set based on your daily TX volume and desired buffer
   # Example calculation:
   #   - Average TX fee: 0.5 upokt
   #   - Daily TXs (claims + proofs): ~1800 (at 5x load with batching)
   #   - Daily cost: 1800 × 0.5 = 900 upokt
   #   - Recommended threshold: 2-3 days buffer = 1800-2700 upokt
-  balance_threshold_upokt: 2000  # Alert if balance < 2000 upokt
+  # Default: 1,000,000 upokt (1 POKT) - adjust based on your operations
+  balance_threshold_upokt: 1000000  # Alert if balance < 1 POKT
 
-  # Stake health - alert when close to auto-unstake threshold
-  stake_warning_ratio: 1.2  # Alert if stake health ratio < 1.2 (20% buffer above minimum)
+  # Stake health monitoring - alerts based on missed proofs until auto-unstake
+  # Formula: missedProofsRemaining = (currentStake - minStake) / proofMissingPenalty
+  # These thresholds trigger alerts when you're running low on buffer before auto-unstake
+  #
+  # WARNING threshold: Alert when < 1000 missed proofs away from auto-unstake
+  # CRITICAL threshold: Alert when < 100 missed proofs away from auto-unstake
+  #
+  # Example with mainnet values:
+  #   - Current stake: 60,000,000,000 upokt (60,000 POKT)
+  #   - Minimum stake: 59,500,000,000 upokt (59,500 POKT)
+  #   - Proof missing penalty: 1 upokt per missed proof
+  #   - Buffer: 500,000,000 upokt = 500 million missed proofs (very safe)
+  #   - You'd get WARNING when buffer drops below 1000 missed proofs
+  #   - You'd get CRITICAL when buffer drops below 100 missed proofs
+  stake_warning_proof_threshold: 1000   # Warn when < 1000 missed proofs remaining
+  stake_critical_proof_threshold: 100   # Critical when < 100 missed proofs remaining
 
 # ==============================================================================
 # Session Lifecycle Configuration (Features 2, 3, 5)
@@ -127,15 +140,10 @@ leader_election:
   heartbeat_rate_seconds: 10  # Attempt acquire/renew every 10s
 
 # ==============================================================================
-# Session Tree (SMST) Configuration
-# ==============================================================================
-session_tree:
-  wal_enabled: true  # Write-Ahead Log for crash recovery
-  flush_interval_blocks: 1  # Flush SMST to Redis every block
-
-# ==============================================================================
 # Processing Configuration
 # ==============================================================================
+# NOTE: Session trees (SMST) are always stored in Redis with Write-Ahead Log (WAL)
+# enabled for crash recovery. This ensures HA compatibility and data durability.
 deduplication_ttl_blocks: 10  # Keep relay hashes for 10 blocks to prevent duplicates
 batch_size: 100  # Relay batch size for processing
 ack_batch_size: 50  # Acknowledge messages in batches

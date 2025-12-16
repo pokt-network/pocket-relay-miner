@@ -33,11 +33,6 @@ properties:
         type: string
         description: Prefix for Redis stream keys
         default: ha:relays
-      max_stream_len:
-        type: integer
-        description: Max stream length (DEPRECATED - Feature 5 uses per-session streams with TTL)
-        default: 100000
-        minimum: 1000
 
   pocket_node:
     type: object

@@ -65,9 +65,6 @@ properties:
         examples:
           - grpc.testnet.pokt.network:443
           - localhost:9090
-      tx_node_rpc_url:
-        type: string
-        description: RPC endpoint for transaction submission (if different from query node)
       grpc_insecure:
         type: boolean
         description: Disable TLS for gRPC connections (use for local development only)
@@ -128,20 +125,6 @@ properties:
           description: Service IDs this supplier serves
           items:
             type: string
-
-  session_tree:
-    type: object
-    description: Session tree (SMST) management configuration
-    properties:
-      wal_enabled:
-        type: boolean
-        description: Enable Write-Ahead Log for crash recovery
-        default: true
-      flush_interval_blocks:
-        type: integer
-        description: How often to flush session trees (in blocks)
-        default: 1
-        minimum: 1
 
   metrics:
     type: object
@@ -204,7 +187,6 @@ properties:
     description: Expected block time in seconds (30s for mainnet/testnet, 6s for localnet)
     default: 30
     minimum: 1
-    maximum: 600
 
   block_health_monitor:
     type: object
@@ -235,14 +217,19 @@ properties:
         minimum: 60
       balance_threshold_upokt:
         type: integer
-        description: Alert when balance falls below this threshold (upokt)
-        default: 2000
+        description: Alert when balance falls below this threshold (upokt, 1 POKT = 1,000,000 upokt)
+        default: 1000000
         minimum: 0
-      stake_warning_ratio:
-        type: number
-        description: Alert when stake health ratio falls below this value
-        default: 1.2
-        minimum: 1.0
+      stake_warning_proof_threshold:
+        type: integer
+        description: Alert when remaining missed proofs before auto-unstake falls below this threshold
+        default: 1000
+        minimum: 1
+      stake_critical_proof_threshold:
+        type: integer
+        description: Critical alert when remaining missed proofs before auto-unstake falls below this threshold
+        default: 100
+        minimum: 1
 
   session_lifecycle:
     type: object

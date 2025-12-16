@@ -321,6 +321,15 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		LeaderTTL:     config.GetLeaderTTL(),
 		HeartbeatRate: config.GetLeaderHeartbeatRate(),
 	}
+
+	// Warn if heartbeat rate is too close to TTL (risk of lock expiration)
+	if leaderConfig.HeartbeatRate > leaderConfig.LeaderTTL/2 {
+		logger.Warn().
+			Dur("heartbeat_rate", leaderConfig.HeartbeatRate).
+			Dur("leader_ttl", leaderConfig.LeaderTTL).
+			Msg("WARNING: heartbeat_rate is more than half of leader_ttl - risk of lock expiration before renewal! Recommended: heartbeat_rate <= leader_ttl/3")
+	}
+
 	globalLeader := leader.NewGlobalLeaderElectorWithConfig(
 		logger,
 		redisClient,

@@ -220,6 +220,8 @@ def generate_relayer_config(config):
             "format": relayer_cfg.get("logging", {}).get("format", "text"),
         },
         "relay_meter": relayer_cfg.get("relay_meter", {"enabled": True, "over_servicing_enabled": False}),
+        "http_transport": relayer_cfg.get("http_transport", {}),
+        "cache_warmup": relayer_cfg.get("cache_warmup", {"enabled": False}),
     }
 
 def format_port_forward(local_port, container_port):

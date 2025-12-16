@@ -26,9 +26,6 @@ type Config struct {
 	// Each supplier has its own session trees, claims, and proofs.
 	Suppliers []SupplierConfig `yaml:"suppliers"`
 
-	// SessionTree configuration for SMST management.
-	SessionTree SessionTreeConfig `yaml:"session_tree"`
-
 	// Metrics configuration.
 	Metrics MetricsConfig `yaml:"metrics"`
 
@@ -214,14 +211,11 @@ type RedisConfig struct {
 
 // PocketNodeConfig contains Pocket blockchain connection configuration.
 type PocketNodeConfig struct {
-	// QueryNodeRPCUrl is the URL for RPC queries.
+	// QueryNodeRPCUrl is the URL for RPC queries and transaction submission.
 	QueryNodeRPCUrl string `yaml:"query_node_rpc_url"`
 
 	// QueryNodeGRPCUrl is the URL for gRPC queries.
 	QueryNodeGRPCUrl string `yaml:"query_node_grpc_url"`
-
-	// TxNodeRPCUrl is the URL for transaction submission (if different from query).
-	TxNodeRPCUrl string `yaml:"tx_node_rpc_url,omitempty"`
 
 	// GRPCInsecure disables TLS for gRPC connections.
 	// Default: false (use TLS for secure connections)
@@ -239,19 +233,6 @@ type SupplierConfig struct {
 	// Services is a list of service IDs this supplier serves.
 	// Used for filtering relays from the stream.
 	Services []string `yaml:"services,omitempty"`
-}
-
-// SessionTreeConfig contains configuration for session tree management.
-// All session trees are now stored in Redis for HA compatibility.
-type SessionTreeConfig struct {
-	// WALEnabled enables Write-Ahead Log for crash recovery.
-	// WAL is always Redis-based (stored in Redis Streams).
-	// Default: true
-	WALEnabled bool `yaml:"wal_enabled"`
-
-	// FlushInterval is how often to flush session trees (in blocks).
-	// Default: 1
-	FlushIntervalBlocks int64 `yaml:"flush_interval_blocks"`
 }
 
 // MetricsConfig contains Prometheus metrics configuration.
@@ -320,6 +301,19 @@ func (c *Config) Validate() error {
 		if !validBackends[c.Keys.Keyring.Backend] {
 			return fmt.Errorf("invalid keys.keyring.backend: %s", c.Keys.Keyring.Backend)
 		}
+	}
+
+	// Validate leader election: heartbeat must be less than TTL
+	if c.LeaderElection.HeartbeatRateSeconds > 0 && c.LeaderElection.LeaderTTLSeconds > 0 {
+		if c.LeaderElection.HeartbeatRateSeconds >= c.LeaderElection.LeaderTTLSeconds {
+			return fmt.Errorf("leader_election.heartbeat_rate_seconds (%d) must be less than leader_ttl_seconds (%d) to prevent lock expiration before renewal",
+				c.LeaderElection.HeartbeatRateSeconds, c.LeaderElection.LeaderTTLSeconds)
+		}
+	}
+
+	// Validate WAL max length (minimum 1000 for safety)
+	if c.WALMaxLen > 0 && c.WALMaxLen < 1000 {
+		return fmt.Errorf("wal_max_len (%d) must be at least 1000 to prevent data loss from frequent trimming", c.WALMaxLen)
 	}
 
 	// Note: Storage validation removed - all session trees now use Redis
@@ -497,10 +491,6 @@ func DefaultConfig() *Config {
 			BlockTimeoutMs:     5000,
 			ClaimIdleTimeoutMs: 60000,
 		},
-		SessionTree: SessionTreeConfig{
-			WALEnabled:          true,
-			FlushIntervalBlocks: 1,
-		},
 		Metrics: MetricsConfig{
 			Enabled: true,
 			Addr:    ":9092",
@@ -518,7 +508,10 @@ func DefaultConfig() *Config {
 		SessionTTL:             24 * time.Hour,
 		WALMaxLen:              100000,
 		BalanceMonitor: BalanceMonitorConfigYAML{
-			Enabled: true, // Enable by default
+			Enabled:                     true,    // Enable by default
+			BalanceThresholdUpokt:       1000000, // 1 POKT = 1,000,000 upokt
+			StakeWarningProofThreshold:  1000,    // Warn when < 1000 missed proofs remaining
+			StakeCriticalProofThreshold: 100,     // Critical when < 100 missed proofs remaining
 		},
 	}
 }

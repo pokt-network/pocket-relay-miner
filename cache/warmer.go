@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	pond "github.com/alitto/pond/v2"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -62,6 +63,9 @@ type CacheWarmer struct {
 	discoveredApps   map[string]struct{}
 	discoveredAppsMu sync.RWMutex
 
+	// Worker pool for parallel warmup operations
+	workerPool pond.Pool
+
 	// Metrics
 	warmedApps   int64
 	failedApps   int64
@@ -85,6 +89,15 @@ func NewCacheWarmer(
 		config.WarmupTimeout = defaultWarmupTimeout
 	}
 
+	// Create worker pool for parallel warmup operations
+	// This is a bounded pool to prevent overwhelming the network/Redis
+	workerPool := pond.NewPool(config.WarmupConcurrency)
+
+	logger.Info().
+		Int("warmup_workers", config.WarmupConcurrency).
+		Dur("warmup_timeout", config.WarmupTimeout).
+		Msg("created cache warmer worker pool")
+
 	return &CacheWarmer{
 		logger:         logger.With().Str("component", "cache_warmer").Logger(),
 		config:         config,
@@ -94,6 +107,7 @@ func NewCacheWarmer(
 		sharedClient:   sharedClient,
 		ringClient:     ringClient,
 		discoveredApps: make(map[string]struct{}),
+		workerPool:     workerPool,
 	}
 }
 
@@ -175,56 +189,54 @@ func (w *CacheWarmer) collectAppsToWarm(ctx context.Context) []string {
 	return apps
 }
 
-// warmAppsParallel warms applications in parallel for speed.
+// warmAppsParallel warms applications in parallel for speed using pond workers.
 func (w *CacheWarmer) warmAppsParallel(ctx context.Context, apps []string) *WarmupResult {
 	result := &WarmupResult{
 		TotalApps: len(apps),
 	}
 
-	// Create work channel
-	workCh := make(chan string, len(apps))
-	for _, app := range apps {
-		workCh <- app
-	}
-	close(workCh)
-
-	// Results collection
+	// Results collection (protected by mutex)
 	var mu sync.Mutex
-	var wg sync.WaitGroup
 
-	// Launch workers
-	for i := 0; i < w.config.WarmupConcurrency; i++ {
-		wg.Add(1)
-		go func(workerID int) {
-			defer wg.Done()
+	// Create pond Group for coordinated task execution
+	group := w.workerPool.NewGroup()
 
-			for appAddr := range workCh {
-				warmCtx, cancel := context.WithTimeout(ctx, w.config.WarmupTimeout)
-				err := w.warmApp(warmCtx, appAddr)
-				cancel()
+	// Submit warmup tasks to the worker pool
+	for _, appAddr := range apps {
+		// Capture for closure
+		capturedAddr := appAddr
+		group.Submit(func() {
+			// Create timeout context for this warmup operation
+			warmCtx, cancel := context.WithTimeout(ctx, w.config.WarmupTimeout)
+			defer cancel()
 
-				mu.Lock()
-				if err != nil {
-					result.FailedApps++
-					result.FailedAddrs = append(result.FailedAddrs, appAddr)
-					w.logger.Debug().
-						Err(err).
-						Str("app_address", appAddr).
-						Int("worker", workerID).
-						Msg("failed to warm app")
-				} else {
-					result.WarmedApps++
-					w.logger.Debug().
-						Str("app_address", appAddr).
-						Int("worker", workerID).
-						Msg("warmed app successfully")
-				}
-				mu.Unlock()
+			// Warm the application
+			err := w.warmApp(warmCtx, capturedAddr)
+
+			// Update results (thread-safe)
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				result.FailedApps++
+				result.FailedAddrs = append(result.FailedAddrs, capturedAddr)
+				w.logger.Debug().
+					Err(err).
+					Str("app_address", capturedAddr).
+					Msg("failed to warm app")
+			} else {
+				result.WarmedApps++
+				w.logger.Debug().
+					Str("app_address", capturedAddr).
+					Msg("warmed app successfully")
 			}
-		}(i)
+		})
 	}
 
-	wg.Wait()
+	// Wait for all warmup tasks to complete
+	// We track errors manually in result struct, so discard pond's error
+	_ = group.Wait()
+
 	return result
 }
 
@@ -343,4 +355,13 @@ func (w *CacheWarmer) GetDiscoveredAppsCount() int {
 	w.discoveredAppsMu.RLock()
 	defer w.discoveredAppsMu.RUnlock()
 	return len(w.discoveredApps)
+}
+
+// Stop stops the cache warmer and cleans up resources.
+// This should be called when the cache warmer is no longer needed.
+func (w *CacheWarmer) Stop() {
+	if w.workerPool != nil {
+		w.workerPool.StopAndWait()
+		w.logger.Debug().Msg("cache warmer worker pool stopped")
+	}
 }
