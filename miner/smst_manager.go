@@ -18,6 +18,9 @@ import (
 type RedisSMSTManagerConfig struct {
 	// SupplierAddress is the supplier this manager is for.
 	SupplierAddress string
+
+	// CacheTTL is how long to keep SMST data in Redis (backup if manual cleanup fails).
+	CacheTTL time.Duration
 }
 
 // redisSMST holds a Redis-backed sparse merkle sum trie for a session.
@@ -121,6 +124,19 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	if redisStore, ok := tree.store.(*RedisMapStore); ok {
 		if err := redisStore.FlushPipeline(); err != nil {
 			return fmt.Errorf("failed to flush pipeline: %w", err)
+		}
+	}
+
+	// Set TTL as backup safety net (auto-expire if manual cleanup fails)
+	// Manual deletion happens in OnSessionSettled/OnSessionExpired
+	if m.config.CacheTTL > 0 {
+		hashKey := fmt.Sprintf("ha:smst:%s:nodes", sessionID)
+		if err := m.redisClient.Expire(ctx, hashKey, m.config.CacheTTL).Err(); err != nil {
+			// Log but don't fail - TTL is just a safety net
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to set SMST TTL (non-fatal)")
 		}
 	}
 

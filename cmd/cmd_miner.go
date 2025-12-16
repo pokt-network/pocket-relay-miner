@@ -40,7 +40,7 @@ const (
 	flagSessionTTL     = "session-ttl"
 )
 
-// startMinerCmd returns the command for starting the HA Miner component.
+// MinerCmd returns the command for starting the HA Miner component.
 func MinerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "miner",
@@ -667,14 +667,38 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return nil
 	})
 
-	// Start supplier manager
-	if err := supplierManager.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start supplier manager: %w", err)
+	// Register leader election callbacks for dynamic supplier manager start/stop
+	// Leader: Consume streams, build SMST, submit claims/proofs, refresh cache, publish state
+	// Standby: Idle, waiting to become leader (no consumption, no processing)
+	globalLeader.OnElected(func(ctx context.Context) {
+		logger.Info().Msg("starting supplier manager (became leader)")
+		if err := supplierManager.Start(ctx); err != nil {
+			logger.Error().Err(err).Msg("FATAL: failed to start supplier manager after gaining leadership - exiting process")
+			// Exit the process to release leadership lock
+			// In K8s HA deployment, another pod can become leader or this pod will restart
+			// NOTE: Kubernetes pod restart count tracks this failure
+			os.Exit(1)
+		}
+	})
+
+	globalLeader.OnLost(func(ctx context.Context) {
+		logger.Info().Msg("stopping supplier manager (lost leadership)")
+		_ = supplierManager.Close()
+	})
+
+	// If we're already the leader at startup, start immediately
+	if globalLeader.IsLeader() {
+		logger.Info().Msg("starting supplier manager (already leader at startup)")
+		if err := supplierManager.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start supplier manager: %w", err)
+		}
+	} else {
+		logger.Info().Msg("supplier manager in standby mode (not leader)")
 	}
 	defer func() { _ = supplierManager.Close() }()
 
-	// Start balance monitor (leader-only operation)
-	// Only start if enabled and threshold is configured
+	// Start a balance monitor (leader-only operation)
+	// Only start if enabled and a threshold is configured
 	if config.GetBalanceMonitorEnabled() || config.GetBalanceMonitorThreshold() > 0 {
 		balanceMonitor := miner.NewBalanceMonitor(
 			logger,
@@ -731,7 +755,7 @@ func loadMinerConfig(cmd *cobra.Command) (*miner.Config, error) {
 	var err error
 
 	if configPath != "" {
-		// Load from config file
+		// Load from a config file
 		config, err = miner.LoadConfig(configPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to load config: %w", err)

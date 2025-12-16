@@ -397,6 +397,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		m.config.RedisClient,
 		RedisSMSTManagerConfig{
 			SupplierAddress: operatorAddr,
+			CacheTTL:        m.config.SessionTTL, // TODO: Rename SessionTTL → CacheTTL
 		},
 	)
 

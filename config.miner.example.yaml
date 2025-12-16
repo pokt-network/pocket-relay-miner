@@ -155,7 +155,7 @@ deduplication_ttl_blocks: 10  # Keep relay hashes for 10 blocks to prevent dupli
 batch_size: 1000  # Relay batch size for XREADGROUP (increased from 100 for better throughput)
 ack_batch_size: 50  # Acknowledge messages in batches (pipelined Redis XACK)
 hot_reload_enabled: true  # Enable hot-reload of keys on startup
-session_ttl: "24h"  # How long to keep session metadata in Redis
+cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h covers ~15 session lifecycles at 30s blocks. Backup safety net if manual cleanup fails.
 
 # Pre-discovered applications (optional - speeds up startup)
 known_applications:

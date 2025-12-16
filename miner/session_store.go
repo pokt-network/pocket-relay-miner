@@ -142,7 +142,7 @@ func NewRedisSessionStore(
 		config.KeyPrefix = "ha:miner:sessions"
 	}
 	if config.SessionTTL == 0 {
-		config.SessionTTL = 24 * time.Hour
+		config.SessionTTL = 3 * time.Hour // Default 3h - sessions complete in ~10 minutes
 	}
 
 	return &RedisSessionStore{
