@@ -16,6 +16,13 @@ redis:
   # Stream prefix for relay messages
   stream_prefix: "ha:relays"
 
+  # Connection pool settings (2x go-redis defaults for production)
+  # Omit these to use defaults (auto-calculated based on CPU cores)
+  # pool_size: 320                   # Max connections (default: 20 × runtime.GOMAXPROCS)
+  # min_idle_conns: 80               # Warm idle connections (default: pool_size / 4)
+  # pool_timeout_seconds: 4          # Wait time for connection from pool
+  # conn_max_idle_time_seconds: 300  # Close idle connections after 5 minutes
+
 # Pocket blockchain connection
 pocket_node:
   # RPC endpoint for block subscriptions and queries
@@ -74,9 +81,12 @@ services:
         # authentication:
         #   username: "user"
         #   password: "pass"
-        # Optional: Bearer token (alternative to basic auth)
+        # Optional: Bearer token (sent as "Authorization: Bearer <token>")
         # authentication:
         #   bearer_token: "your-token"
+        # Optional: Plain token (sent as "Authorization: <token>" without "Bearer " prefix)
+        # authentication:
+        #   plain_token: "your-token"
         # Optional: Backend health check
         # health_check:
         #   enabled: true

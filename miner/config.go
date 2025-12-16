@@ -203,6 +203,28 @@ type RedisConfig struct {
 	// ClaimIdleTimeoutMs is how long a message can be pending before being claimed.
 	// Default: 60000 (1 minute)
 	ClaimIdleTimeoutMs int64 `yaml:"claim_idle_timeout_ms"`
+
+	// PoolSize is the maximum number of socket connections.
+	// Default: 20 × runtime.GOMAXPROCS (2x go-redis default for production)
+	// Set to 0 to use go-redis default (10 × GOMAXPROCS)
+	PoolSize int `yaml:"pool_size,omitempty"`
+
+	// MinIdleConns is the minimum number of idle connections to maintain.
+	// Keeping idle connections warm eliminates connection dial latency (~1-5ms).
+	// Default: PoolSize / 4
+	// Set to 0 to disable (connections created on demand)
+	MinIdleConns int `yaml:"min_idle_conns,omitempty"`
+
+	// PoolTimeout is the amount of time to wait for a connection from the pool.
+	// Default: 4 seconds
+	// Set to 0 to wait indefinitely
+	PoolTimeoutSeconds int `yaml:"pool_timeout_seconds,omitempty"`
+
+	// ConnMaxIdleTime is the maximum amount of time a connection can be idle.
+	// Idle connections older than this are closed.
+	// Default: 5 minutes
+	// Set to 0 to disable (connections never closed due to idle time)
+	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
 }
 
 // PocketNodeConfig contains Pocket blockchain connection configuration.
@@ -269,6 +291,20 @@ func (c *Config) Validate() error {
 
 	if c.Redis.ConsumerName == "" {
 		return fmt.Errorf("redis.consumer_name is required")
+	}
+
+	// Validate Redis pool settings (all are optional, 0 = use defaults)
+	if c.Redis.PoolSize < 0 {
+		return fmt.Errorf("redis.pool_size must be >= 0 (0 = use default)")
+	}
+	if c.Redis.MinIdleConns < 0 {
+		return fmt.Errorf("redis.min_idle_conns must be >= 0 (0 = use default)")
+	}
+	if c.Redis.PoolTimeoutSeconds < 0 {
+		return fmt.Errorf("redis.pool_timeout_seconds must be >= 0 (0 = use default)")
+	}
+	if c.Redis.ConnMaxIdleTimeSeconds < 0 {
+		return fmt.Errorf("redis.conn_max_idle_time_seconds must be >= 0 (0 = use default)")
 	}
 
 	if c.PocketNode.QueryNodeRPCUrl == "" {
@@ -346,7 +382,7 @@ func (c *Config) GetBatchSize() int64 {
 	if c.BatchSize > 0 {
 		return c.BatchSize
 	}
-	return 100 // Default
+	return 1000 // Default (increased from 100 for better throughput)
 }
 
 // GetAckBatchSize returns the ack batch size with defaults.
@@ -493,7 +529,7 @@ func DefaultConfig() *Config {
 			AsyncBufferSize: 100000,
 		},
 		DeduplicationTTLBlocks: 10,
-		BatchSize:              100,
+		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
 		AckBatchSize:           50,
 		HotReloadEnabled:       true,
 		SessionTTL:             24 * time.Hour,

@@ -45,6 +45,26 @@ properties:
         description: Timeout for reclaiming idle messages from crashed consumers
         default: 60000
         minimum: 1000
+      pool_size:
+        type: integer
+        description: Maximum number of socket connections (0 = use default 20 × GOMAXPROCS)
+        default: 0
+        minimum: 0
+      min_idle_conns:
+        type: integer
+        description: Minimum number of idle connections to keep warm (0 = use default pool_size / 4)
+        default: 0
+        minimum: 0
+      pool_timeout_seconds:
+        type: integer
+        description: Wait time for connection from pool in seconds (0 = use default 4s)
+        default: 0
+        minimum: 0
+      conn_max_idle_time_seconds:
+        type: integer
+        description: Close idle connections after this many seconds (0 = use default 300s)
+        default: 0
+        minimum: 0
 
   pocket_node:
     type: object
@@ -284,8 +304,8 @@ properties:
 
   batch_size:
     type: integer
-    description: Number of relays to process in a single batch
-    default: 100
+    description: Number of messages to fetch per XREADGROUP operation
+    default: 1000
     minimum: 1
 
   ack_batch_size:

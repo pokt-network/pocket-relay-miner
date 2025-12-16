@@ -729,6 +729,22 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 
+			// DEBUG: Log compression-related headers for debugging
+			if contentEncoding := respHeaders.Get("Content-Encoding"); contentEncoding != "" {
+				p.logger.Debug().
+					Str("content_encoding", contentEncoding).
+					Str("service_id", serviceID).
+					Int("body_size", len(respBody)).
+					Msg("forwarding compressed response with Content-Encoding header")
+			}
+			if acceptEncoding := r.Header.Get("Accept-Encoding"); acceptEncoding != "" {
+				p.logger.Debug().
+					Str("accept_encoding", acceptEncoding).
+					Str("service_id", serviceID).
+					Bool("has_content_encoding", respHeaders.Get("Content-Encoding") != "").
+					Msg("client requested compression via Accept-Encoding")
+			}
+
 			// Write response
 			w.WriteHeader(respStatus)
 			if _, err := w.Write(respBody); err != nil {
@@ -1206,7 +1222,18 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 			req.SetBasicAuth(auth.Username, auth.Password)
 		} else if auth.BearerToken != "" {
 			req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
+		} else if auth.PlainToken != "" {
+			req.Header.Set("Authorization", auth.PlainToken)
 		}
+	}
+
+	// DEBUG: Log if client requested compression
+	if acceptEncoding := req.Header.Get("Accept-Encoding"); acceptEncoding != "" {
+		p.logger.Debug().
+			Str("accept_encoding", acceptEncoding).
+			Str("service_id", serviceID).
+			Str("backend_url", req.URL.String()).
+			Msg("sending backend request with Accept-Encoding header")
 	}
 
 	// Execute backend request using service-specific HTTP client
@@ -1249,6 +1276,35 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, nil, 0, false, fmt.Errorf("failed to read response: %w", err)
+	}
+
+	// Auto-fix: If we sent Accept-Encoding and got gzip without Content-Encoding header
+	// This fixes backends that violate HTTP RFC 7231 by compressing without setting the header
+	if acceptEncoding := originalReq.Header.Get("Accept-Encoding"); acceptEncoding != "" {
+		if strings.Contains(acceptEncoding, "gzip") {
+			if resp.Header.Get("Content-Encoding") == "" {
+				// Check for gzip magic bytes (0x1f 0x8b)
+				if len(respBody) >= 2 && respBody[0] == 0x1f && respBody[1] == 0x8b {
+					// Backend sent gzipped content without header (RFC violation)
+					resp.Header.Set("Content-Encoding", "gzip")
+
+					p.logger.Warn().
+						Str("service_id", serviceID).
+						Str("backend_url", backendURL).
+						Int("response_size", len(respBody)).
+						Msg("[COMPRESSION_FIX] backend sent gzipped content without Content-Encoding header - adding header automatically (backend bug)")
+				}
+			}
+		}
+	}
+
+	// DEBUG: Log backend response headers if compressed
+	if contentEncoding := resp.Header.Get("Content-Encoding"); contentEncoding != "" {
+		p.logger.Debug().
+			Str("content_encoding", contentEncoding).
+			Str("service_id", serviceID).
+			Int("response_size", len(respBody)).
+			Msg("received compressed response from backend")
 	}
 
 	return respBody, resp.Header, resp.StatusCode, false, nil

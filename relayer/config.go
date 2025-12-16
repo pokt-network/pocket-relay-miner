@@ -209,6 +209,28 @@ type RedisConfig struct {
 
 	// StreamPrefix is the prefix for Redis stream names.
 	StreamPrefix string `yaml:"stream_prefix"`
+
+	// PoolSize is the maximum number of socket connections.
+	// Default: 20 × runtime.GOMAXPROCS (2x go-redis default for production)
+	// Set to 0 to use go-redis default (10 × GOMAXPROCS)
+	PoolSize int `yaml:"pool_size,omitempty"`
+
+	// MinIdleConns is the minimum number of idle connections to maintain.
+	// Keeping idle connections warm eliminates connection dial latency (~1-5ms).
+	// Default: PoolSize / 4
+	// Set to 0 to disable (connections created on demand)
+	MinIdleConns int `yaml:"min_idle_conns,omitempty"`
+
+	// PoolTimeout is the amount of time to wait for a connection from the pool.
+	// Default: 4 seconds
+	// Set to 0 to wait indefinitely
+	PoolTimeoutSeconds int `yaml:"pool_timeout_seconds,omitempty"`
+
+	// ConnMaxIdleTime is the maximum amount of time a connection can be idle.
+	// Idle connections older than this are closed.
+	// Default: 5 minutes
+	// Set to 0 to disable (connections never closed due to idle time)
+	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
 }
 
 // PocketNodeConfig contains Pocket blockchain connection configuration.
@@ -276,8 +298,11 @@ type AuthenticationConfig struct {
 	// Password for basic auth.
 	Password string `yaml:"password,omitempty"`
 
-	// BearerToken for bearer auth (alternative to basic auth).
+	// BearerToken for bearer token auth (sent as "Authorization: Bearer <token>").
 	BearerToken string `yaml:"bearer_token,omitempty"`
+
+	// PlainToken for plain token auth (sent as "Authorization: <token>" without "Bearer " prefix).
+	PlainToken string `yaml:"plain_token,omitempty"`
 }
 
 // BackendHealthCheckConfig contains health check configuration for a backend.
@@ -501,6 +526,20 @@ func (c *Config) Validate() error {
 
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
+	}
+
+	// Validate Redis pool settings (all are optional, 0 = use defaults)
+	if c.Redis.PoolSize < 0 {
+		return fmt.Errorf("redis.pool_size must be >= 0 (0 = use default)")
+	}
+	if c.Redis.MinIdleConns < 0 {
+		return fmt.Errorf("redis.min_idle_conns must be >= 0 (0 = use default)")
+	}
+	if c.Redis.PoolTimeoutSeconds < 0 {
+		return fmt.Errorf("redis.pool_timeout_seconds must be >= 0 (0 = use default)")
+	}
+	if c.Redis.ConnMaxIdleTimeSeconds < 0 {
+		return fmt.Errorf("redis.conn_max_idle_time_seconds must be >= 0 (0 = use default)")
 	}
 
 	if c.PocketNode.QueryNodeRPCUrl == "" {

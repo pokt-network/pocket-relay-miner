@@ -22,6 +22,8 @@ import (
 
 // Shared HTTP client with connection pooling for load tests.
 // Reuses connections to avoid TCP handshake overhead.
+// IMPORTANT: DisableCompression is false (Go default) to mimic PATH's behavior.
+// This makes Go automatically add "Accept-Encoding: gzip" and decompress responses.
 var sharedHTTPClient = &http.Client{
 	Timeout: 30 * time.Second, // Default timeout, overridden per-request if needed
 	Transport: &http.Transport{
@@ -34,6 +36,7 @@ var sharedHTTPClient = &http.Client{
 		}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+		DisableCompression:    false, // Mimic PATH: auto-add Accept-Encoding, auto-decompress
 	},
 }
 
@@ -357,11 +360,22 @@ func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
-	// Set headers
-	req.Header.Set("Content-Type", "application/octet-stream")
+	// Set headers to match PATH's behavior exactly
+	req.Header.Set("Content-Type", "application/json")
 	// Set Rpc-Type header to JSON_RPC (3) for proper backend selection
 	// Reference: poktroll/x/shared/types/service.pb.go RPCType enum
 	req.Header.Set("Rpc-Type", "3") // JSON_RPC = 3
+	// NOTE: Accept-Encoding is automatically added by Go's http.Client because
+	// DisableCompression is false (mimicking PATH's behavior)
+
+	// Log request headers being sent
+	fmt.Printf("\n=== Request Headers ===\n")
+	for key, values := range req.Header {
+		for _, value := range values {
+			fmt.Printf("  %s: %s\n", key, value)
+		}
+	}
+	fmt.Printf("=======================\n\n")
 
 	// Send request using shared client with connection pooling
 	resp, err := sharedHTTPClient.Do(req)
@@ -369,6 +383,20 @@ func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
 		return nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
+
+	// Log response headers for compression debugging
+	fmt.Printf("\n=== Response Headers ===\n")
+	fmt.Printf("Status: %s\n", resp.Status)
+	fmt.Printf("Content-Type: %s\n", resp.Header.Get("Content-Type"))
+	fmt.Printf("Content-Encoding: %s\n", resp.Header.Get("Content-Encoding"))
+	fmt.Printf("Content-Length: %s\n", resp.Header.Get("Content-Length"))
+	fmt.Printf("All Headers:\n")
+	for key, values := range resp.Header {
+		for _, value := range values {
+			fmt.Printf("  %s: %s\n", key, value)
+		}
+	}
+	fmt.Printf("========================\n\n")
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {

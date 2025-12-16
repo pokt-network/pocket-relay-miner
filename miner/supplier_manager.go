@@ -82,6 +82,10 @@ type SupplierManagerConfig struct {
 	// Session configuration
 	SessionTTL time.Duration
 
+	// Batch configuration
+	BatchSize    int64 // Number of messages to fetch per XREADGROUP
+	AckBatchSize int64 // Number of messages to ACK in a batch
+
 	// SupplierCache for publishing supplier state to relayers
 	SupplierCache *cache.SupplierCache
 
@@ -375,7 +379,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			SupplierOperatorAddress: operatorAddr,
 			ConsumerGroup:           m.config.ConsumerGroup,
 			ConsumerName:            m.config.ConsumerName,
-			BatchSize:               100,
+			BatchSize:               int64(m.config.BatchSize), // Use config value (default: 1000)
 			BlockTimeout:            5000,
 			ClaimIdleTimeout:        30000,
 			MaxRetries:              3,
@@ -583,39 +587,100 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	return nil
 }
 
-// consumeForSupplier runs the consume loop for a single supplier.
+// consumeForSupplier runs the consume loop for a single supplier with batch ACK optimization.
 func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *SupplierState) {
 	defer state.wg.Done()
 
 	msgChan := state.Consumer.Consume(ctx)
 
-	for msg := range msgChan {
-		// When draining, we continue processing existing messages
-		// but log that we're in drain mode for visibility
-		if state.Status == SupplierStatusDraining {
-			m.logger.Debug().
-				Str(logging.FieldSupplier, state.OperatorAddr).
-				Msg("processing relay during drain")
+	// Batch ACK optimization: buffer messages and ACK in batches
+	ackBatchSize := int(m.config.AckBatchSize)
+	if ackBatchSize <= 0 {
+		ackBatchSize = 50 // Default if not configured
+	}
+
+	msgBuffer := make([]transport.StreamMessage, 0, ackBatchSize)
+	flushTimer := time.NewTimer(100 * time.Millisecond)
+	defer flushTimer.Stop()
+
+	// Helper function to flush accumulated messages
+	flushAcks := func() {
+		if len(msgBuffer) == 0 {
+			return
 		}
 
-		// Process the relay
-		if m.onRelay != nil {
-			if err := m.onRelay(ctx, state.OperatorAddr, &msg); err != nil {
-				m.logger.Warn().
-					Err(err).
-					Str(logging.FieldSupplier, state.OperatorAddr).
-					Str("session_id", msg.Message.SessionId).
-					Msg("failed to process relay")
-				continue
-			}
-		}
-
-		// Acknowledge using AckMessage (multi-stream compatible)
-		if err := state.Consumer.AckMessage(ctx, msg); err != nil {
+		if err := state.Consumer.AckMessageBatch(ctx, msgBuffer); err != nil {
 			m.logger.Warn().
 				Err(err).
 				Str(logging.FieldSupplier, state.OperatorAddr).
-				Msg("failed to acknowledge message")
+				Int("batch_size", len(msgBuffer)).
+				Msg("failed to batch acknowledge messages")
+		} else {
+			m.logger.Debug().
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Int("batch_size", len(msgBuffer)).
+				Msg("batch acknowledged messages")
+		}
+
+		// Clear buffer
+		msgBuffer = msgBuffer[:0]
+
+		// Reset timer for next batch
+		if !flushTimer.Stop() {
+			select {
+			case <-flushTimer.C:
+			default:
+			}
+		}
+		flushTimer.Reset(100 * time.Millisecond)
+	}
+
+	for {
+		select {
+		case msg, ok := <-msgChan:
+			if !ok {
+				// Channel closed, flush remaining and exit
+				flushAcks()
+				return
+			}
+
+			// When draining, we continue processing existing messages
+			// but log that we're in drain mode for visibility
+			if state.Status == SupplierStatusDraining {
+				m.logger.Debug().
+					Str(logging.FieldSupplier, state.OperatorAddr).
+					Msg("processing relay during drain")
+			}
+
+			// Process the relay
+			if m.onRelay != nil {
+				if err := m.onRelay(ctx, state.OperatorAddr, &msg); err != nil {
+					m.logger.Warn().
+						Err(err).
+						Str(logging.FieldSupplier, state.OperatorAddr).
+						Str("session_id", msg.Message.SessionId).
+						Msg("failed to process relay")
+					// Don't add to ACK buffer on processing failure
+					continue
+				}
+			}
+
+			// Add to ACK buffer
+			msgBuffer = append(msgBuffer, msg)
+
+			// Flush if buffer is full
+			if len(msgBuffer) >= ackBatchSize {
+				flushAcks()
+			}
+
+		case <-flushTimer.C:
+			// Flush on timeout to avoid holding ACKs too long
+			flushAcks()
+
+		case <-ctx.Done():
+			// Context cancelled, flush remaining and exit
+			flushAcks()
+			return
 		}
 	}
 }

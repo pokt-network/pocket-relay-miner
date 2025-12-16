@@ -33,6 +33,26 @@ properties:
         type: string
         description: Prefix for Redis stream keys
         default: ha:relays
+      pool_size:
+        type: integer
+        description: Maximum number of socket connections (0 = use default 20 × GOMAXPROCS)
+        default: 0
+        minimum: 0
+      min_idle_conns:
+        type: integer
+        description: Minimum number of idle connections to keep warm (0 = use default pool_size / 4)
+        default: 0
+        minimum: 0
+      pool_timeout_seconds:
+        type: integer
+        description: Wait time for connection from pool in seconds (0 = use default 4s)
+        default: 0
+        minimum: 0
+      conn_max_idle_time_seconds:
+        type: integer
+        description: Close idle connections after this many seconds (0 = use default 300s)
+        default: 0
+        minimum: 0
 
   pocket_node:
     type: object
@@ -157,7 +177,10 @@ properties:
                     description: Password for basic auth
                   bearer_token:
                     type: string
-                    description: Bearer token for token auth
+                    description: Bearer token for token auth (sent as "Authorization: Bearer <token>")
+                  plain_token:
+                    type: string
+                    description: Plain token for token auth (sent as "Authorization: <token>" without "Bearer " prefix)
               health_check:
                 type: object
                 description: Health check configuration for this backend

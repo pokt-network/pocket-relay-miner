@@ -447,8 +447,14 @@ func (s *RelayGRPCService) forwardToBackend(
 	}
 
 	// Add authentication if configured
-	if auth != nil && auth.Username != "" {
-		req.SetBasicAuth(auth.Username, auth.Password)
+	if auth != nil {
+		if auth.Username != "" && auth.Password != "" {
+			req.SetBasicAuth(auth.Username, auth.Password)
+		} else if auth.BearerToken != "" {
+			req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
+		} else if auth.PlainToken != "" {
+			req.Header.Set("Authorization", auth.PlainToken)
+		}
 	}
 
 	// Set host header
