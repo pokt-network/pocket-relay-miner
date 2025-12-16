@@ -271,6 +271,14 @@ type MetricsConfig struct {
 	PprofAddr string `yaml:"pprof_addr,omitempty"`
 }
 
+// PProf contains pprof configuration.
+type PProf struct {
+	// Enabled enables pprof profiling server.
+	Enabled bool `yaml:"enabled,omitempty"`
+	// Addr is the address for pprof server.
+	Addr string `yaml:"addr,omitempty"`
+}
+
 // Validate validates the configuration.
 func (c *Config) Validate() error {
 	if c.Redis.URL == "" {

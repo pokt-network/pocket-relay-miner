@@ -122,7 +122,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("invalid configuration: %w", err)
 	}
 
-	// Start observability server (metrics and pprof)
+	// Start an observability server (metrics and pprof)
 	if config.Metrics.Enabled {
 		// Default pprof addr to localhost:6060 for security if not specified
 		pprofAddr := config.Metrics.PprofAddr

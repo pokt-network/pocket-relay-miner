@@ -38,12 +38,12 @@ const (
 	// FailClosed rejects relays when Redis is unavailable (safer, lower availability).
 	FailClosed FailBehavior = "closed"
 
-	// Redis key prefixes
-	meterKeyPrefix      = "ha:meter"         // Session metering data
-	paramsKeyPrefix     = "ha:params"        // Cached on-chain params
-	appStakeKeyPrefix   = "ha:app_stake"     // Cached app stakes
-	serviceKeyPrefix    = "ha:service"       // Cached service data
-	meterCleanupChannel = "ha:meter:cleanup" // Pub/sub channel for cleanup signals
+	// Redis key suffixes (combined with RedisKeyPrefix config to form full keys)
+	meterKeySuffix      = "meter"         // Session metering data
+	paramsKeySuffix     = "params"        // Cached on-chain params
+	appStakeKeySuffix   = "app_stake"     // Cached app stakes
+	serviceKeySuffix    = "service"       // Cached service data
+	meterCleanupChannel = "meter:cleanup" // Pub/sub channel for cleanup signals
 )
 
 // RelayMeterConfig contains configuration for the relay meter.
@@ -897,31 +897,31 @@ func (m *RelayMeter) Close() error {
 
 // Redis key helpers
 func (m *RelayMeter) metaKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:%s:meta", m.config.RedisKeyPrefix, meterKeyPrefix, sessionID)
+	return fmt.Sprintf("%s:%s:%s:meta", m.config.RedisKeyPrefix, meterKeySuffix, sessionID)
 }
 
 func (m *RelayMeter) consumedKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:%s:consumed", m.config.RedisKeyPrefix, meterKeyPrefix, sessionID)
+	return fmt.Sprintf("%s:%s:%s:consumed", m.config.RedisKeyPrefix, meterKeySuffix, sessionID)
 }
 
 func (m *RelayMeter) overServicedKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:%s:over_serviced", m.config.RedisKeyPrefix, meterKeyPrefix, sessionID)
+	return fmt.Sprintf("%s:%s:%s:over_serviced", m.config.RedisKeyPrefix, meterKeySuffix, sessionID)
 }
 
 func (m *RelayMeter) appStakeKey(appAddress string) string {
-	return fmt.Sprintf("%s:%s:%s", m.config.RedisKeyPrefix, appStakeKeyPrefix, appAddress)
+	return fmt.Sprintf("%s:%s:%s", m.config.RedisKeyPrefix, appStakeKeySuffix, appAddress)
 }
 
 func (m *RelayMeter) sharedParamsKey() string {
-	return fmt.Sprintf("%s:%s:shared", m.config.RedisKeyPrefix, paramsKeyPrefix)
+	return fmt.Sprintf("%s:%s:shared", m.config.RedisKeyPrefix, paramsKeySuffix)
 }
 
 func (m *RelayMeter) sessionParamsKey() string {
-	return fmt.Sprintf("%s:%s:session", m.config.RedisKeyPrefix, paramsKeyPrefix)
+	return fmt.Sprintf("%s:%s:session", m.config.RedisKeyPrefix, paramsKeySuffix)
 }
 
 func (m *RelayMeter) serviceComputeUnitsKey(serviceID string) string {
-	return fmt.Sprintf("%s:%s:%s:compute_units", m.config.RedisKeyPrefix, serviceKeyPrefix, serviceID)
+	return fmt.Sprintf("%s:%s:%s:compute_units", m.config.RedisKeyPrefix, serviceKeySuffix, serviceID)
 }
 
 // shouldLogOverServicing returns true if the occurrence count is a power of 2.

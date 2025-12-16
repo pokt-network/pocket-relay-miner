@@ -3,6 +3,7 @@ package miner
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -16,8 +17,8 @@ const (
 	// Default refresh interval for on-chain params
 	defaultParamsRefreshInterval = 5 * time.Minute
 
-	// Redis cleanup channel for session meters
-	meterCleanupChannel = "ha:meter:cleanup"
+	// Redis key suffix for meter cleanup channel (combined with RedisKeyPrefix config)
+	meterCleanupSuffix = "meter:cleanup"
 )
 
 // ParamsRefresherConfig contains configuration for the params refresher.
@@ -147,7 +148,7 @@ func (r *ParamsRefresher) AddKnownService(serviceID string) {
 // PublishMeterCleanup publishes a cleanup signal for a session.
 // Called when a claim is successfully submitted to free Redis space.
 func (r *ParamsRefresher) PublishMeterCleanup(ctx context.Context, sessionID string) error {
-	channel := r.config.RedisKeyPrefix + ":" + meterCleanupChannel
+	channel := fmt.Sprintf("%s:%s", r.config.RedisKeyPrefix, meterCleanupSuffix)
 	return r.redisClient.Publish(ctx, channel, sessionID).Err()
 }
 
@@ -233,7 +234,7 @@ func (r *ParamsRefresher) refreshSharedParams(ctx context.Context) error {
 		UpdatedAt:                          time.Now().Unix(),
 	}
 
-	key := r.config.RedisKeyPrefix + ":ha:params:shared"
+	key := fmt.Sprintf("%s:params:shared", r.config.RedisKeyPrefix)
 	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), 10*time.Minute).Err(); err != nil {
 		return err
 	}
@@ -261,7 +262,7 @@ func (r *ParamsRefresher) refreshSessionParams(ctx context.Context) error {
 		UpdatedAt:              time.Now().Unix(),
 	}
 
-	key := r.config.RedisKeyPrefix + ":ha:params:session"
+	key := fmt.Sprintf("%s:params:session", r.config.RedisKeyPrefix)
 	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), 10*time.Minute).Err(); err != nil {
 		return err
 	}
@@ -308,7 +309,7 @@ func (r *ParamsRefresher) refreshAppStake(ctx context.Context, appAddress string
 		UpdatedAt:  time.Now().Unix(),
 	}
 
-	key := r.config.RedisKeyPrefix + ":ha:app_stake:" + appAddress
+	key := fmt.Sprintf("%s:app_stake:%s", r.config.RedisKeyPrefix, appAddress)
 	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), 10*time.Minute).Err(); err != nil {
 		return err
 	}
@@ -357,7 +358,7 @@ func (r *ParamsRefresher) refreshServiceComputeUnitsForService(ctx context.Conte
 		UpdatedAt:            time.Now().Unix(),
 	}
 
-	key := r.config.RedisKeyPrefix + ":ha:service:" + serviceID + ":compute_units"
+	key := fmt.Sprintf("%s:service:%s:compute_units", r.config.RedisKeyPrefix, serviceID)
 	if err := r.redisClient.Set(ctx, key, mustMarshalJSON(cached), 10*time.Minute).Err(); err != nil {
 		return err
 	}
