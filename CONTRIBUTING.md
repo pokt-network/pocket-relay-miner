@@ -48,25 +48,39 @@ dev (development) → main (release candidate) → vX.Y.Z (production)
    git checkout -b feature/your-feature-name
    ```
 
-2. **Make your changes** following our [Code Standards](#code-standards)
-
-3. **Test thoroughly:**
+2. **Install pre-commit hooks (first time only):**
    ```bash
-   make fmt      # Format code
-   make lint     # Run linters
+   make install-hooks
+   ```
+
+   This installs a git pre-commit hook that automatically runs `make fmt` and `make lint` before each commit. The hook will:
+   - Format your code automatically
+   - Catch linting errors before they reach CI
+   - Prevent commits with code quality issues
+
+   **Note**: The hook will reject commits that fail linting. Fix the issues before committing.
+
+3. **Make your changes** following our [Code Standards](#code-standards)
+
+4. **Test thoroughly:**
+   ```bash
+   make fmt      # Format code (also runs automatically via pre-commit hook)
+   make lint     # Run linters (also runs automatically via pre-commit hook)
    make test     # Run tests
    make build    # Verify build
    ```
 
-4. **Commit with conventional format** (see below)
+   **Note**: If you installed pre-commit hooks (recommended), `make fmt` and `make lint` run automatically on each commit.
 
-5. **Push and create PR to `dev`:**
+5. **Commit with conventional format** (see below)
+
+6. **Push and create PR to `dev`:**
    ```bash
    git push origin feature/your-feature-name
    # Create PR targeting 'dev' branch
    ```
 
-6. **After merge to dev**, changes will be promoted to main and eventually released
+7. **After merge to dev**, changes will be promoted to main and eventually released
 
 ## Commit Message Format
 
@@ -177,6 +191,8 @@ Common scopes:
    make test    # All tests must pass
    ```
 
+   **Enforce automatically**: Run `make install-hooks` to install a pre-commit hook that runs `fmt` and `lint` before each commit.
+
 5. **Performance**
    - Profile before optimizing: `go test -bench . -benchmem`
    - Use Redis pipelining for batch operations
@@ -274,10 +290,12 @@ go test -bench=BenchmarkCriticalFunction -benchmem ./package
 
 1. ✅ Rebase on latest `dev` branch
 2. ✅ All tests pass (`make test`)
-3. ✅ Code is formatted (`make fmt`)
-4. ✅ Linters pass (`make lint`)
+3. ✅ Code is formatted (`make fmt` - automatic if you installed pre-commit hooks)
+4. ✅ Linters pass (`make lint` - automatic if you installed pre-commit hooks)
 5. ✅ Commit messages follow conventional format
 6. ✅ Added/updated tests for new functionality
+
+**Tip**: Install pre-commit hooks (`make install-hooks`) to automatically enforce formatting and linting on every commit.
 
 ### PR Requirements
 

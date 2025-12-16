@@ -91,6 +91,13 @@ lint: ## Run golangci-lint
 	@echo "Running linters..."
 	@golangci-lint run
 
+install-hooks: ## Install git pre-commit hooks
+	@echo "Installing git hooks..."
+	@ln -sf ../../scripts/pre-commit-hook.sh .git/hooks/pre-commit
+	@chmod +x .git/hooks/pre-commit
+	@echo "Pre-commit hook installed successfully"
+	@echo "The hook will run 'make fmt' and 'make lint' before each commit"
+
 docker-build: ## Build Docker image (override with DOCKER_IMAGE env var)
 	@echo "Building Docker image: $(DOCKER_IMAGE)..."
 	@docker build -t $(DOCKER_IMAGE) .
