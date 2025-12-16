@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"compress/gzip"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -9,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -23,12 +26,13 @@ import (
 
 // Config holds backend server configuration.
 type Config struct {
-	HTTPPort    int     `yaml:"http_port"`
-	GRPCPort    int     `yaml:"grpc_port"`
-	MetricsPort int     `yaml:"metrics_port"`
-	ErrorRate   float64 `yaml:"error_rate"` // 0.0-1.0
-	ErrorCode   int     `yaml:"error_code"` // HTTP error code to inject
-	DelayMs     int     `yaml:"delay_ms"`   // Delay in milliseconds
+	HTTPPort          int     `yaml:"http_port"`
+	GRPCPort          int     `yaml:"grpc_port"`
+	MetricsPort       int     `yaml:"metrics_port"`
+	ErrorRate         float64 `yaml:"error_rate"`          // 0.0-1.0
+	ErrorCode         int     `yaml:"error_code"`          // HTTP error code to inject
+	DelayMs           int     `yaml:"delay_ms"`            // Delay in milliseconds
+	BrokenCompression bool    `yaml:"broken_compression"`  // Compress WITHOUT Content-Encoding header (simulate bug)
 }
 
 var (
@@ -178,8 +182,40 @@ func handleJSONRPC(cfg *Config) http.HandlerFunc {
 			},
 		}
 
+		// Serialize response to JSON
+		respBytes, err := json.Marshal(resp)
+		if err != nil {
+			http.Error(w, "failed to marshal response", http.StatusInternalServerError)
+			return
+		}
+
+		// BROKEN COMPRESSION MODE: Simulate backend bug (compress without Content-Encoding header)
+		if cfg.BrokenCompression && strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			log.Printf("[BROKEN_COMPRESSION_MODE] Client sent Accept-Encoding: gzip - compressing WITHOUT Content-Encoding header")
+
+			// Compress the response
+			var buf bytes.Buffer
+			gzipWriter := gzip.NewWriter(&buf)
+			if _, err := gzipWriter.Write(respBytes); err != nil {
+				http.Error(w, "compression failed", http.StatusInternalServerError)
+				return
+			}
+			if err := gzipWriter.Close(); err != nil {
+				http.Error(w, "compression close failed", http.StatusInternalServerError)
+				return
+			}
+
+			// Send compressed response WITHOUT Content-Encoding header (simulate bug)
+			w.Header().Set("Content-Type", "application/json")
+			// NOTE: Deliberately NOT setting Content-Encoding header to simulate broken backend
+			w.Write(buf.Bytes())
+			log.Printf("[BROKEN_COMPRESSION_MODE] Sent gzipped response (%d bytes compressed from %d bytes) WITHOUT Content-Encoding header", buf.Len(), len(respBytes))
+			return
+		}
+
+		// Normal mode: send uncompressed response
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		w.Write(respBytes)
 	}
 }
 

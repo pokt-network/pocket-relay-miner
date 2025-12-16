@@ -75,8 +75,10 @@ spec:
     auto-aof-rewrite-min-size: "64mb"    # Minimum AOF size to trigger rewrite
     # Disable RDB snapshots (redundant with AOF, adds write amplification)
     save: ""
-    # Memory management
-    maxmemory-policy: "noeviction"       # Fail writes when full - never drop data
+    # Memory management (88% of 2Gi container limit = ~1.76GB for local dev)
+    # Calculated as: 2 * 1024^3 * 0.88 = 1887436800 bytes
+    maxmemory: "1887436800"
+    maxmemory-policy: "allkeys-lru"      # LRU eviction for local dev (avoid write failures)
     # Performance tuning
     tcp-backlog: "511"
     timeout: "0"
@@ -148,8 +150,11 @@ spec:
     auto-aof-rewrite-min-size: "64mb"    # Minimum AOF size to trigger rewrite
     # Disable RDB snapshots (redundant with AOF, adds write amplification)
     save: ""
-    # Memory management
-    maxmemory-policy: "noeviction"       # Fail writes when full - never drop data
+    # Memory management (88% of default 512Mi = ~450MB for local dev)
+    # Adjust if using different max_memory in tilt_config.yaml
+    # Calculated as: 512 * 1024^2 * 0.88 = 471859200 bytes
+    maxmemory: "471859200"
+    maxmemory-policy: "allkeys-lru"      # LRU eviction for local dev (avoid write failures)
     # Performance tuning
     tcp-backlog: "511"
     timeout: "0"

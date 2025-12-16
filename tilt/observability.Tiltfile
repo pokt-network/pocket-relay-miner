@@ -206,12 +206,10 @@ def deploy_grafana(config):
     """Deploy Grafana for metrics visualization"""
     grafana_config = config["observability"]["grafana"]
 
-    # Load dashboard JSON files
-    dashboard_system = str(read_file("tilt/grafana/dashboard-system-resources.json"))
-    dashboard_miner = str(read_file("tilt/grafana/dashboard-miner.json"))
-    dashboard_relayer = str(read_file("tilt/grafana/dashboard-relayer.json"))
-    dashboard_overview = str(read_file("tilt/grafana/dashboard-overview.json"))
-    dashboard_redis = str(read_file("tilt/grafana/dashboard-redis.json"))
+    # Load dashboard JSON files (reorganized by concern)
+    dashboard_business_economics = str(read_file("tilt/grafana/dashboard-business-economics.json"))
+    dashboard_service_performance = str(read_file("tilt/grafana/dashboard-service-performance.json"))
+    dashboard_operational_health = str(read_file("tilt/grafana/dashboard-operational-health.json"))
 
     # Dashboard provisioning configuration
     dashboards_provisioning_yaml = """
@@ -236,29 +234,23 @@ data:
 
     k8s_yaml(blob(dashboards_provisioning_yaml))
 
-    # Dashboard ConfigMap with all dashboards
+    # Dashboard ConfigMap with all concern-based dashboards
     dashboards_yaml = """
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: grafana-dashboards
 data:
-  overview.json: |
+  business-economics.json: |
     {}
-  system-resources.json: |
+  service-performance.json: |
     {}
-  miner.json: |
-    {}
-  relayer.json: |
-    {}
-  redis.json: |
+  operational-health.json: |
     {}
 """.format(
-        dashboard_overview.replace("\n", "\n    "),
-        dashboard_system.replace("\n", "\n    "),
-        dashboard_miner.replace("\n", "\n    "),
-        dashboard_relayer.replace("\n", "\n    "),
-        dashboard_redis.replace("\n", "\n    ")
+        dashboard_business_economics.replace("\n", "\n    "),
+        dashboard_service_performance.replace("\n", "\n    "),
+        dashboard_operational_health.replace("\n", "\n    ")
     )
 
     k8s_yaml(blob(dashboards_yaml))

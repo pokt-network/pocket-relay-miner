@@ -526,7 +526,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			proxy.SetResponseSigner(responseSigner)
 			logger.Info().
 				Int("num_keys", len(responseSigner.GetOperatorAddresses())).
-				Str("operator_addresses", strings.Join(responseSigner.GetOperatorAddresses(), ", ")).
 				Msg("response signer initialized")
 
 			// Create RingClient for relay request signature verification

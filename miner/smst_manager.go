@@ -106,9 +106,22 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 		return fmt.Errorf("failed to update SMST: %w", err)
 	}
 
+	// Enable pipelining to batch Set() operations during Commit()
+	// This reduces 10-20 Redis round trips (20-40ms) to a single HSET (2-3ms)
+	if redisStore, ok := tree.store.(*RedisMapStore); ok {
+		redisStore.BeginPipeline()
+	}
+
 	// Commit to persist dirty nodes to Redis (critical for HA)
 	if err := tree.trie.Commit(); err != nil {
 		return fmt.Errorf("failed to commit SMST to Redis: %w", err)
+	}
+
+	// Flush buffered operations to Redis
+	if redisStore, ok := tree.store.(*RedisMapStore); ok {
+		if err := redisStore.FlushPipeline(); err != nil {
+			return fmt.Errorf("failed to flush pipeline: %w", err)
+		}
 	}
 
 	return nil

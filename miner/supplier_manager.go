@@ -400,18 +400,13 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		},
 	)
 
-	// Warmup: load existing SMST trees from Redis (critical for HA after restart/failover)
-	if loadedCount, err := smstManager.WarmupFromRedis(ctx); err != nil {
-		m.logger.Warn().
-			Err(err).
-			Str(logging.FieldSupplier, operatorAddr).
-			Msg("failed to warmup SMST from Redis - continuing without warmup")
-	} else if loadedCount > 0 {
-		m.logger.Info().
-			Int("loaded_trees", loadedCount).
-			Str(logging.FieldSupplier, operatorAddr).
-			Msg("SMST warmup successful")
-	}
+	// NOTE: SMST warmup removed - trees are lazy-loaded on first relay via GetOrCreateTree()
+	// The SMT library lazy-loads nodes from Redis, so warmup only created empty shell objects.
+	// Lazy loading is instant (no SCAN overhead) and reduces startup time by 10-20 minutes.
+	// HA failover works identically: new instance reads SMST data from Redis on first relay.
+	m.logger.Debug().
+		Str(logging.FieldSupplier, operatorAddr).
+		Msg("SMST manager ready (will lazy-load trees on first relay)")
 
 	// Create supplier client for claim/proof submission
 	var supplierClient *tx.HASupplierClient

@@ -2,7 +2,6 @@ package redis
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -80,9 +79,11 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 	// Use per-session stream naming
 	streamName := transport.StreamName(p.config.StreamPrefix, msg.SupplierOperatorAddress, msg.SessionId)
 
-	// Serialize message to JSON for Redis Stream
-	// Using JSON for human readability and debugging; can switch to protobuf for efficiency
-	data, err := json.Marshal(msg)
+	// Serialize message to protobuf for Redis Stream
+	// Protobuf binary format is 3-5× smaller than JSON and eliminates JSON decoder
+	// memory overhead (literalStore accumulation with 1000 suppliers).
+	// Performance: protobuf Marshal is ~2× faster than json.Marshal
+	data, err := msg.Marshal()
 	if err != nil {
 		return fmt.Errorf("failed to serialize message: %w", err)
 	}
@@ -193,7 +194,8 @@ func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.M
 
 			streamName := transport.StreamName(p.config.StreamPrefix, msg.SupplierOperatorAddress, msg.SessionId)
 
-			data, err := json.Marshal(msg)
+			// Use protobuf binary serialization (same as single publish)
+			data, err := msg.Marshal()
 			if err != nil {
 				return fmt.Errorf("failed to serialize message: %w", err)
 			}

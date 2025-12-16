@@ -45,8 +45,10 @@ http {
     output_buffers 1 32k;
     postpone_output 1460;
 
-    # Disable unnecessary features
-    gzip off;
+    # Enable gzip compression for testing compression handling
+    gzip on;
+    gzip_types application/json text/plain;
+    gzip_min_length 20;
 
     server {
         listen 80 backlog=65535 reuseport;
