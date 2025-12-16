@@ -29,10 +29,10 @@ type Config struct {
 	HTTPPort          int     `yaml:"http_port"`
 	GRPCPort          int     `yaml:"grpc_port"`
 	MetricsPort       int     `yaml:"metrics_port"`
-	ErrorRate         float64 `yaml:"error_rate"`          // 0.0-1.0
-	ErrorCode         int     `yaml:"error_code"`          // HTTP error code to inject
-	DelayMs           int     `yaml:"delay_ms"`            // Delay in milliseconds
-	BrokenCompression bool    `yaml:"broken_compression"`  // Compress WITHOUT Content-Encoding header (simulate bug)
+	ErrorRate         float64 `yaml:"error_rate"`         // 0.0-1.0
+	ErrorCode         int     `yaml:"error_code"`         // HTTP error code to inject
+	DelayMs           int     `yaml:"delay_ms"`           // Delay in milliseconds
+	BrokenCompression bool    `yaml:"broken_compression"` // Compress WITHOUT Content-Encoding header (simulate bug)
 }
 
 var (
@@ -85,7 +85,7 @@ func loadConfig() *Config {
 	}
 
 	if data, err := os.ReadFile("config.yaml"); err == nil {
-		yaml.Unmarshal(data, cfg)
+		_ = yaml.Unmarshal(data, cfg)
 	}
 
 	return cfg
@@ -95,7 +95,9 @@ func startMetricsServer(port int) {
 	http.Handle("/metrics", promhttp.Handler())
 	addr := fmt.Sprintf(":%d", port)
 	log.Printf("Metrics server listening on %s", addr)
-	http.ListenAndServe(addr, nil)
+	if err := http.ListenAndServe(addr, nil); err != nil {
+		log.Printf("Metrics server error: %v", err)
+	}
 }
 
 func startHTTPServer(cfg *Config) {
@@ -138,7 +140,9 @@ func startHTTPServer(cfg *Config) {
 	log.Println("Shutting down HTTP server...")
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	server.Shutdown(ctx)
+	if err := server.Shutdown(ctx); err != nil {
+		log.Printf("Server shutdown error: %v", err)
+	}
 }
 
 func handleJSONRPC(cfg *Config) http.HandlerFunc {
@@ -167,7 +171,7 @@ func handleJSONRPC(cfg *Config) http.HandlerFunc {
 		}
 
 		method, _ := req["method"].(string)
-		id, _ := req["id"]
+		id := req["id"]
 
 		requestsTotal.WithLabelValues("http", method).Inc()
 
@@ -208,14 +212,14 @@ func handleJSONRPC(cfg *Config) http.HandlerFunc {
 			// Send compressed response WITHOUT Content-Encoding header (simulate bug)
 			w.Header().Set("Content-Type", "application/json")
 			// NOTE: Deliberately NOT setting Content-Encoding header to simulate broken backend
-			w.Write(buf.Bytes())
+			_, _ = w.Write(buf.Bytes())
 			log.Printf("[BROKEN_COMPRESSION_MODE] Sent gzipped response (%d bytes compressed from %d bytes) WITHOUT Content-Encoding header", buf.Len(), len(respBytes))
 			return
 		}
 
 		// Normal mode: send uncompressed response
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(respBytes)
+		_, _ = w.Write(respBytes)
 	}
 }
 
@@ -230,7 +234,11 @@ func handleWebSocket(cfg *Config) http.HandlerFunc {
 			log.Printf("WebSocket upgrade error: %v", err)
 			return
 		}
-		defer conn.Close()
+		defer func() {
+			if err := conn.Close(); err != nil {
+				log.Printf("WebSocket close error: %v", err)
+			}
+		}()
 
 		requestsTotal.WithLabelValues("websocket", "connection").Inc()
 
@@ -248,7 +256,7 @@ func handleWebSocket(cfg *Config) http.HandlerFunc {
 				// Valid JSON message - process it
 				{
 					method, _ := jsonMsg["method"].(string)
-					id, _ := jsonMsg["id"]
+					id := jsonMsg["id"]
 
 					requestsTotal.WithLabelValues("websocket", method).Inc()
 
@@ -324,7 +332,7 @@ func handleSSE(cfg *Config) http.HandlerFunc {
 				"timestamp": time.Now().Unix(),
 			}
 			data, _ := json.Marshal(event)
-			fmt.Fprintf(w, "data: %s\n\n", data)
+			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
 			flusher.Flush()
 		}
 	}
@@ -355,7 +363,7 @@ func handleNDJSON(cfg *Config) http.HandlerFunc {
 				"timestamp": time.Now().Unix(),
 			}
 			data, _ := json.Marshal(event)
-			fmt.Fprintf(w, "%s\n", data)
+			_, _ = fmt.Fprintf(w, "%s\n", data)
 			flusher.Flush()
 		}
 	}
@@ -368,7 +376,7 @@ func handleHealth() http.HandlerFunc {
 			"service": "demo-backend",
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}
 }
 

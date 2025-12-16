@@ -86,10 +86,12 @@ tidy: ## Run go mod tidy
 fmt: ## Format code
 	@echo "Formatting code..."
 	@go fmt ./...
+	@cd $(BACKEND_DIR) && go fmt ./...
 
 lint: ## Run golangci-lint
 	@echo "Running linters..."
 	@golangci-lint run
+	@cd $(BACKEND_DIR) && golangci-lint run
 
 install-hooks: ## Install git pre-commit hooks
 	@echo "Installing git hooks..."
