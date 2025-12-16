@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -37,7 +38,6 @@ const (
 	flagStreamPrefix   = "stream-prefix"
 	flagHotReload      = "hot-reload"
 	flagSessionTTL     = "session-ttl"
-	flagWALMaxLen      = "wal-max-len"
 )
 
 // startMinerCmd returns the command for starting the HA Miner component.
@@ -92,7 +92,6 @@ Example:
 	// Configuration flags (can override config)
 	cmd.Flags().Bool(flagHotReload, true, "Enable hot-reload of keys")
 	cmd.Flags().Duration(flagSessionTTL, 24*time.Hour, "Session data TTL")
-	cmd.Flags().Int64(flagWALMaxLen, 100000, "Maximum WAL entries per session")
 
 	return cmd
 }
@@ -576,7 +575,6 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 			ConsumerGroup:       config.Redis.ConsumerGroup,
 			ConsumerName:        config.Redis.ConsumerName,
 			SessionTTL:          config.SessionTTL,
-			WALMaxLen:           config.WALMaxLen,
 			SupplierCache:       supplierCache,
 			MinerID:             config.Redis.ConsumerName,
 			SupplierQueryClient: queryClients.Supplier(),
@@ -617,13 +615,34 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 			cacheOrchestrator.RecordDiscoveredService(msg.Message.ServiceId)
 		}
 
-		// Use the full metadata method to create session if it doesn't exist
-		// This updates the WAL and session snapshot in Redis
-		if err := state.SnapshotManager.OnRelayMinedWithMetadata(
+		// Update SMST for claim/proof generation (persists to Redis via Commit)
+		if err := state.SMSTManager.UpdateTree(
 			ctx,
 			msg.Message.SessionId,
 			msg.Message.RelayHash,
 			msg.Message.RelayBytes,
+			msg.Message.ComputeUnitsPerRelay,
+		); err != nil {
+			// Check if session is already claimed/sealed
+			if strings.Contains(err.Error(), "already been claimed") {
+				// This is expected for late relays - log and track metric but don't fail
+				logger.Debug().
+					Str("session_id", msg.Message.SessionId).
+					Str("supplier", supplierAddr).
+					Msg("dropping late relay - session already claimed")
+
+				// Track late relay metric for lag detection
+				miner.RecordRelayRejected(supplierAddr, "session_sealed")
+				return nil // ACK the message to remove from stream
+			}
+			// Other errors are unexpected - fail the handler
+			return fmt.Errorf("failed to update SMST: %w", err)
+		}
+
+		// Track relay in session coordinator (creates session if needed, updates relay count)
+		if err := state.SessionCoordinator.OnRelayProcessed(
+			ctx,
+			msg.Message.SessionId,
 			msg.Message.ComputeUnitsPerRelay,
 			msg.Message.SupplierOperatorAddress,
 			msg.Message.ServiceId,
@@ -631,18 +650,10 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 			msg.Message.SessionStartHeight,
 			msg.Message.SessionEndHeight,
 		); err != nil {
-			return fmt.Errorf("failed to update snapshot manager: %w", err)
+			return fmt.Errorf("failed to update session coordinator: %w", err)
 		}
 
-		// Also update the in-memory SMST for claim/proof generation
-		// This is critical - without this, FlushTree will fail with "session not found"
-		return state.SMSTManager.UpdateTree(
-			ctx,
-			msg.Message.SessionId,
-			msg.Message.RelayHash,
-			msg.Message.RelayBytes,
-			msg.Message.ComputeUnitsPerRelay,
-		)
+		return nil
 	})
 
 	// Start supplier manager
@@ -780,10 +791,6 @@ func applyFlagOverrides(cmd *cobra.Command, config *miner.Config) {
 		sessionTTL, _ := cmd.Flags().GetDuration(flagSessionTTL)
 		config.SessionTTL = sessionTTL
 	}
-	if cmd.Flags().Changed(flagWALMaxLen) {
-		walMaxLen, _ := cmd.Flags().GetInt64(flagWALMaxLen)
-		config.WALMaxLen = walMaxLen
-	}
 }
 
 // createKeyProviders creates key providers based on the config.
@@ -865,9 +872,6 @@ func validateMinerConfig(config *miner.Config) error {
 	// Validate timeouts and limits
 	if config.SessionTTL <= 0 {
 		return fmt.Errorf("session_ttl must be positive")
-	}
-	if config.WALMaxLen <= 0 {
-		return fmt.Errorf("wal_max_len must be positive")
 	}
 
 	return nil

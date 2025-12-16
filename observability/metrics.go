@@ -217,7 +217,7 @@ var (
 	)
 
 	// SMSTRedisOperations tracks Redis operations for SMST storage.
-	SMSTRedisOperations = promauto.NewCounterVec(
+	SMSTRedisOperations = MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: "smst",
@@ -228,7 +228,7 @@ var (
 	)
 
 	// SMSTRedisOperationDuration tracks latency of Redis operations for SMST.
-	SMSTRedisOperationDuration = promauto.NewHistogramVec(
+	SMSTRedisOperationDuration = MinerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: "smst",
@@ -240,7 +240,7 @@ var (
 	)
 
 	// SMSTRedisErrors tracks Redis error counts for SMST storage.
-	SMSTRedisErrors = promauto.NewCounterVec(
+	SMSTRedisErrors = MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: "smst",

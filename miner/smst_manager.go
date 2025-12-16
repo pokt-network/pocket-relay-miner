@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/pokt-network/smt"
 	"github.com/pokt-network/smt/kvstore"
@@ -105,6 +106,11 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 		return fmt.Errorf("failed to update SMST: %w", err)
 	}
 
+	// Commit to persist dirty nodes to Redis (critical for HA)
+	if err := tree.trie.Commit(); err != nil {
+		return fmt.Errorf("failed to commit SMST to Redis: %w", err)
+	}
+
 	return nil
 }
 
@@ -203,20 +209,46 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 	return proofBz, nil
 }
 
-// DeleteTree removes the SMST for a session.
+// SetTreeTTL sets a TTL on the Redis SMST hash for a session.
+// This is called after successful settlement to ensure cleanup without losing proof data prematurely.
+func (m *RedisSMSTManager) SetTreeTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
+	hashKey := fmt.Sprintf("ha:smst:%s:nodes", sessionID)
+
+	if err := m.redisClient.Expire(ctx, hashKey, ttl).Err(); err != nil {
+		return fmt.Errorf("failed to set TTL on SMST: %w", err)
+	}
+
+	m.logger.Debug().
+		Str(logging.FieldSessionID, sessionID).
+		Dur("ttl", ttl).
+		Msg("set SMST TTL in Redis")
+
+	return nil
+}
+
+// DeleteTree removes the SMST for a session from both memory and Redis.
 func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) error {
 	m.treesMu.Lock()
 	defer m.treesMu.Unlock()
 
-	if _, exists := m.trees[sessionID]; !exists {
-		return nil // Already deleted
+	// Remove from memory
+	if _, exists := m.trees[sessionID]; exists {
+		delete(m.trees, sessionID)
 	}
 
-	delete(m.trees, sessionID)
+	// Remove from Redis
+	hashKey := fmt.Sprintf("ha:smst:%s:nodes", sessionID)
+	if err := m.redisClient.Del(ctx, hashKey).Err(); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("failed to delete SMST from Redis")
+		// Don't return error - memory cleanup succeeded
+	}
 
 	m.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
-		Msg("deleted SMST")
+		Msg("deleted SMST from memory and Redis")
 
 	return nil
 }
@@ -226,6 +258,72 @@ func (m *RedisSMSTManager) GetTreeCount() int {
 	m.treesMu.RLock()
 	defer m.treesMu.RUnlock()
 	return len(m.trees)
+}
+
+// WarmupFromRedis scans Redis for existing SMST keys and loads them into memory.
+// This is called on startup or leader election to restore state after restart/failover.
+func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
+	m.logger.Info().Msg("warming up SMST trees from Redis")
+
+	// Scan for SMST keys matching pattern ha:smst:*:nodes
+	var cursor uint64
+	var loadedCount int
+
+	for {
+		keys, nextCursor, err := m.redisClient.Scan(ctx, cursor, "ha:smst:*:nodes", 100).Result()
+		if err != nil {
+			return loadedCount, fmt.Errorf("failed to scan Redis for SMST keys: %w", err)
+		}
+
+		for _, hashKey := range keys {
+			// Extract session ID from key: ha:smst:{sessionID}:nodes
+			// Remove prefix "ha:smst:" and suffix ":nodes"
+			sessionID := hashKey[8 : len(hashKey)-6]
+
+			// Check if tree already exists in memory
+			m.treesMu.RLock()
+			_, exists := m.trees[sessionID]
+			m.treesMu.RUnlock()
+
+			if exists {
+				continue // Skip - already loaded
+			}
+
+			// Create RedisMapStore for this session (doesn't load data yet)
+			store := NewRedisMapStore(ctx, m.redisClient, sessionID)
+
+			// Create SMST with the Redis store
+			// The SMT library will lazy-load nodes from Redis as needed
+			trie := smt.NewSparseMerkleSumTrie(store, protocol.NewTrieHasher(), protocol.SMTValueHasher())
+
+			tree := &redisSMST{
+				sessionID: sessionID,
+				trie:      trie,
+				store:     store,
+			}
+
+			m.treesMu.Lock()
+			m.trees[sessionID] = tree
+			m.treesMu.Unlock()
+
+			loadedCount++
+
+			m.logger.Debug().
+				Str(logging.FieldSessionID, sessionID).
+				Msg("warmed up SMST from Redis")
+		}
+
+		cursor = nextCursor
+		if cursor == 0 {
+			break
+		}
+	}
+
+	m.logger.Info().
+		Int("loaded_trees", loadedCount).
+		Msg("SMST warmup complete")
+
+	return loadedCount, nil
 }
 
 // GetTreeStats returns statistics for a session tree.
@@ -245,37 +343,6 @@ func (m *RedisSMSTManager) GetTreeStats(sessionID string) (count uint64, sum uin
 	sum = tree.trie.MustSum()
 
 	return count, sum, nil
-}
-
-// RebuildFromWAL rebuilds an SMST from WAL entries.
-// This is used during recovery when a new leader takes over.
-func (m *RedisSMSTManager) RebuildFromWAL(ctx context.Context, sessionID string, entries []*WALEntry) error {
-	tree, err := m.GetOrCreateTree(ctx, sessionID)
-	if err != nil {
-		return err
-	}
-
-	tree.mu.Lock()
-	defer tree.mu.Unlock()
-
-	for _, entry := range entries {
-		if err := tree.trie.Update(entry.RelayHash, entry.RelayBytes, entry.ComputeUnits); err != nil {
-			m.logger.Warn().
-				Err(err).
-				Str(logging.FieldSessionID, sessionID).
-				Msg("failed to replay WAL entry, continuing")
-			continue
-		}
-	}
-
-	count := tree.trie.MustCount()
-	m.logger.Info().
-		Str(logging.FieldSessionID, sessionID).
-		Int("wal_entries", len(entries)).
-		Uint64("tree_count", count).
-		Msg("rebuilt SMST from WAL")
-
-	return nil
 }
 
 // Close cleans up all managed trees.

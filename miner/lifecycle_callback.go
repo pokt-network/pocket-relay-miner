@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
@@ -71,10 +72,10 @@ type LifecycleCallback struct {
 	config         LifecycleCallbackConfig
 	supplierClient pocktclient.SupplierClient
 	sharedClient   pocktclient.SharedQueryClient
-	blockClient    pocktclient.BlockClient
-	sessionClient  SessionQueryClient
-	smstManager    SMSTManager
-	snapshotMgr    *SMSTSnapshotManager
+	blockClient        pocktclient.BlockClient
+	sessionClient      SessionQueryClient
+	smstManager        SMSTManager
+	sessionCoordinator *SessionCoordinator
 
 	// proofChecker determines if a proof is required for a claimed session.
 	// If nil, proofs are always submitted (legacy behavior).
@@ -94,7 +95,7 @@ func NewLifecycleCallback(
 	blockClient pocktclient.BlockClient,
 	sessionClient SessionQueryClient,
 	smstManager SMSTManager,
-	snapshotMgr *SMSTSnapshotManager,
+	sessionCoordinator *SessionCoordinator,
 	proofChecker *ProofRequirementChecker,
 	config LifecycleCallbackConfig,
 ) *LifecycleCallback {
@@ -112,16 +113,16 @@ func NewLifecycleCallback(
 	}
 
 	return &LifecycleCallback{
-		logger:         logging.ForSupplierComponent(logger, logging.ComponentLifecycleCallback, config.SupplierAddress),
-		config:         config,
-		supplierClient: supplierClient,
-		sharedClient:   sharedClient,
-		blockClient:    blockClient,
-		sessionClient:  sessionClient,
-		smstManager:    smstManager,
-		snapshotMgr:    snapshotMgr,
-		proofChecker:   proofChecker,
-		sessionLocks:   make(map[string]*sync.Mutex),
+		logger:             logging.ForSupplierComponent(logger, logging.ComponentLifecycleCallback, config.SupplierAddress),
+		config:             config,
+		supplierClient:     supplierClient,
+		sharedClient:       sharedClient,
+		blockClient:        blockClient,
+		sessionClient:      sessionClient,
+		smstManager:        smstManager,
+		sessionCoordinator: sessionCoordinator,
+		proofChecker:       proofChecker,
+		sessionLocks:       make(map[string]*sync.Mutex),
 	}
 }
 
@@ -143,6 +144,21 @@ func (lc *LifecycleCallback) removeSessionLock(sessionID string) {
 	lc.sessionLocksMu.Lock()
 	defer lc.sessionLocksMu.Unlock()
 	delete(lc.sessionLocks, sessionID)
+}
+
+// isClaimEconomicallyViable checks if submitting a claim is profitable.
+// Returns false if the expected reward is less than the estimated transaction fee.
+func (lc *LifecycleCallback) isClaimEconomicallyViable(
+	snapshot *SessionSnapshot,
+	computeUnitsToTokensMultiplier uint64,
+	estimatedFeeUpokt uint64,
+) bool {
+	// Calculate expected reward in upokt
+	// Formula: reward = TotalComputeUnits * ComputeUnitsToTokensMultiplier
+	expectedRewardUpokt := snapshot.TotalComputeUnits * computeUnitsToTokensMultiplier
+
+	// Compare reward vs fee
+	return expectedRewardUpokt > estimatedFeeUpokt
 }
 
 // OnSessionActive is called when a new session starts.
@@ -230,6 +246,49 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		var groupRootHashes [][]byte
 
 		for _, snapshot := range groupSnapshots {
+			// CRITICAL: Never submit claims with 0 relays or 0 value - waste of fees
+			if snapshot.RelayCount == 0 {
+				logger.Warn().
+					Str(logging.FieldSessionID, snapshot.SessionID).
+					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+					Msg("skipping claim - session has 0 relays")
+				RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "zero_relays")
+				continue // Skip this session
+			}
+
+			if snapshot.TotalComputeUnits == 0 {
+				logger.Warn().
+					Str(logging.FieldSessionID, snapshot.SessionID).
+					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+					Int64("relay_count", snapshot.RelayCount).
+					Msg("skipping claim - session has 0 compute units despite having relays")
+				RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "zero_value")
+				continue // Skip this session
+			}
+
+			// CRITICAL: Economic validation - never submit claims where fee > reward
+			// This prevents wasting fees on unprofitable claims
+			if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
+				estimatedFeeUpokt := haClient.GetEstimatedFeeUpokt()
+				computeUnitsToTokensMultiplier := sharedParams.GetComputeUnitsToTokensMultiplier()
+
+				if !lc.isClaimEconomicallyViable(snapshot, computeUnitsToTokensMultiplier, estimatedFeeUpokt) {
+					expectedRewardUpokt := snapshot.TotalComputeUnits * computeUnitsToTokensMultiplier
+
+					logger.Warn().
+						Str(logging.FieldSessionID, snapshot.SessionID).
+						Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+						Uint64("expected_reward_upokt", expectedRewardUpokt).
+						Uint64("estimated_fee_upokt", estimatedFeeUpokt).
+						Int64("relay_count", snapshot.RelayCount).
+						Uint64("total_compute_units", snapshot.TotalComputeUnits).
+						Msg("skipping claim - estimated fee exceeds expected reward (unprofitable)")
+
+					RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "unprofitable")
+					continue // Skip this session
+				}
+			}
+
 			// Record the scheduled claim height for operators
 			SetClaimScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestClaimHeight))
 
@@ -296,8 +355,8 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
 					// Update snapshot manager
-					if lc.snapshotMgr != nil {
-						if updateErr := lc.snapshotMgr.OnSessionClaimed(ctx, snapshot.SessionID, groupRootHashes[i]); updateErr != nil {
+					if lc.sessionCoordinator != nil {
+						if updateErr := lc.sessionCoordinator.OnSessionClaimed(ctx, snapshot.SessionID, groupRootHashes[i]); updateErr != nil {
 							logger.Warn().
 								Err(updateErr).
 								Str("session_id", snapshot.SessionID).
@@ -438,8 +497,8 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 				Msg("claim submitted successfully")
 
 			// Update snapshot manager
-			if lc.snapshotMgr != nil {
-				if updateErr := lc.snapshotMgr.OnSessionClaimed(ctx, snapshot.SessionID, rootHash); updateErr != nil {
+			if lc.sessionCoordinator != nil {
+				if updateErr := lc.sessionCoordinator.OnSessionClaimed(ctx, snapshot.SessionID, rootHash); updateErr != nil {
 					logger.Warn().Err(updateErr).Msg("failed to update snapshot after claim")
 				}
 			}
@@ -812,8 +871,8 @@ func (lc *LifecycleCallback) OnSessionSettled(ctx context.Context, snapshot *Ses
 	}
 
 	// Update snapshot manager
-	if lc.snapshotMgr != nil {
-		if err := lc.snapshotMgr.OnSessionSettled(ctx, snapshot.SessionID); err != nil {
+	if lc.sessionCoordinator != nil {
+		if err := lc.sessionCoordinator.OnSessionSettled(ctx, snapshot.SessionID); err != nil {
 			logger.Warn().Err(err).Msg("failed to update snapshot after settlement")
 		}
 	}

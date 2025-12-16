@@ -617,6 +617,19 @@ func NewHASupplierClient(
 	}
 }
 
+// GetEstimatedFeeUpokt returns the estimated transaction fee in upokt.
+// This is used for economic validation before submitting claims.
+func (c *HASupplierClient) GetEstimatedFeeUpokt() uint64 {
+	// Formula: fee = GasLimit × GasPrice
+	gasLimitDec := math.LegacyNewDec(int64(c.txClient.config.GasLimit))
+	feeAmount := c.txClient.config.GasPrice.Amount.Mul(gasLimitDec)
+	feeInt := feeAmount.TruncateInt()
+	if feeAmount.Sub(math.LegacyNewDecFromInt(feeInt)).IsPositive() {
+		feeInt = feeInt.Add(math.OneInt())
+	}
+	return feeInt.Uint64()
+}
+
 // CreateClaims implements client.SupplierClient.
 func (c *HASupplierClient) CreateClaims(
 	ctx context.Context,

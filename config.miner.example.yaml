@@ -142,14 +142,13 @@ leader_election:
 # ==============================================================================
 # Processing Configuration
 # ==============================================================================
-# NOTE: Session trees (SMST) are always stored in Redis with Write-Ahead Log (WAL)
-# enabled for crash recovery. This ensures HA compatibility and data durability.
+# NOTE: Session trees (SMST) are always stored in Redis and committed after each relay.
+# Redis streams serve as the WAL for relays, enabling HA compatibility and data durability.
 deduplication_ttl_blocks: 10  # Keep relay hashes for 10 blocks to prevent duplicates
 batch_size: 100  # Relay batch size for processing
 ack_batch_size: 50  # Acknowledge messages in batches
 hot_reload_enabled: true  # Enable hot-reload of keys on startup
 session_ttl: "24h"  # How long to keep session metadata in Redis
-wal_max_len: 100000  # Max messages in Redis stream before trimming
 
 # Pre-discovered applications (optional - speeds up startup)
 known_applications:

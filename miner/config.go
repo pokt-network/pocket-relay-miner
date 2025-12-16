@@ -52,10 +52,6 @@ type Config struct {
 	// Default: 24h
 	SessionTTL time.Duration `yaml:"session_ttl"`
 
-	// WALMaxLen is the maximum WAL entries per session.
-	// Default: 100000
-	WALMaxLen int64 `yaml:"wal_max_len"`
-
 	// KnownApplications is a list of application addresses to pre-discover at startup.
 	// These apps will be fetched from the network and added to the cache during initialization.
 	KnownApplications []string `yaml:"known_applications,omitempty"`
@@ -311,11 +307,6 @@ func (c *Config) Validate() error {
 		}
 	}
 
-	// Validate WAL max length (minimum 1000 for safety)
-	if c.WALMaxLen > 0 && c.WALMaxLen < 1000 {
-		return fmt.Errorf("wal_max_len (%d) must be at least 1000 to prevent data loss from frequent trimming", c.WALMaxLen)
-	}
-
 	// Note: Storage validation removed - all session trees now use Redis
 
 	return nil
@@ -506,7 +497,6 @@ func DefaultConfig() *Config {
 		AckBatchSize:           50,
 		HotReloadEnabled:       true,
 		SessionTTL:             24 * time.Hour,
-		WALMaxLen:              100000,
 		BalanceMonitor: BalanceMonitorConfigYAML{
 			Enabled:                     true,    // Enable by default
 			BalanceThresholdUpokt:       1000000, // 1 POKT = 1,000,000 upokt

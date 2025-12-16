@@ -305,12 +305,6 @@ properties:
     default: 24h
     pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
-  wal_max_len:
-    type: integer
-    description: Maximum WAL entries per session
-    default: 100000
-    minimum: 1000
-
   known_applications:
     type: array
     description: Application addresses to pre-discover at startup

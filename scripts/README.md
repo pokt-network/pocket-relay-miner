@@ -295,6 +295,123 @@ curl http://localhost:8180/health
 curl http://localhost:9090/metrics | grep "ha_miner"
 ```
 
+## Production/Multi-Context Testing
+
+For testing across multiple Kubernetes contexts (production, staging, etc.), use these scripts:
+
+### `test-relay-gateway.sh` - Test Relay Gateway
+
+Test relay submission through mainnet-gateway platform (relay-router-mainnet service).
+
+```bash
+./scripts/test-relay-gateway.sh [options]
+
+Options:
+  -v, --verbose    Show verbose curl output
+  -s, --stream     Keep connection open for streaming response
+  -h, --help       Show help message
+
+Environment Variables:
+  GATEWAY_URL      Gateway URL (default: http://mainnet-gateway.pnyxai.com)
+  SERVICE_ID       Service ID (default: text-generation)
+  AUTH_TOKEN       Authorization token
+
+Examples:
+  # Basic test
+  ./scripts/test-relay-gateway.sh
+
+  # Verbose output
+  ./scripts/test-relay-gateway.sh --verbose
+
+  # Custom gateway
+  GATEWAY_URL=https://staging.example.com ./scripts/test-relay-gateway.sh
+```
+
+### `debug-relay-pipeline.sh` - Debug Multi-Context Pipeline
+
+Debug relay flow across platform and nodes contexts:
+- `relay-router-mainnet` (platform context) → relayers (nodes context) → blockchain
+
+```bash
+./scripts/debug-relay-pipeline.sh <command> [options]
+
+Commands:
+  status              Show status of all components
+  logs-gateway        Show relay-router-mainnet logs (platform context)
+  logs-relayers       Show relayer pod logs (nodes context)
+  logs-miners         Show miner pod logs (nodes context)
+  metrics-relayers    Show relayer metrics (nodes context)
+  redis-streams       Check Redis streams (nodes context)
+  redis-sessions      Check active sessions (nodes context)
+  trace               Run full pipeline trace
+  watch               Watch relay flow in real-time
+
+Environment Variables:
+  PLATFORM_CTX     Platform context name (default: platform)
+  NODES_CTX        Nodes context name (default: nodes)
+  GATEWAY_NS       Gateway namespace (default: mainnet-gateway)
+  NODES_NS         Nodes namespace (default: mainnet)
+
+Examples:
+  # Check status across both contexts
+  ./scripts/debug-relay-pipeline.sh status
+
+  # View gateway logs
+  ./scripts/debug-relay-pipeline.sh logs-gateway --tail 100
+
+  # View relayer logs
+  ./scripts/debug-relay-pipeline.sh logs-relayers --tail 50
+
+  # Full pipeline trace
+  ./scripts/debug-relay-pipeline.sh trace
+
+  # Watch in real-time
+  ./scripts/debug-relay-pipeline.sh watch
+
+  # Custom contexts
+  PLATFORM_CTX=staging NODES_CTX=staging-nodes ./scripts/debug-relay-pipeline.sh status
+```
+
+### Complete Debugging Workflow
+
+```bash
+# 1. Check overall status
+./scripts/debug-relay-pipeline.sh status
+
+# 2. Send test relay
+./scripts/test-relay-gateway.sh --verbose
+
+# 3. Trace the relay through pipeline
+./scripts/debug-relay-pipeline.sh trace
+
+# 4. Watch live relay flow
+./scripts/debug-relay-pipeline.sh watch
+
+# 5. Check specific components
+./scripts/debug-relay-pipeline.sh metrics-relayers
+./scripts/debug-relay-pipeline.sh redis-streams
+./scripts/debug-relay-pipeline.sh redis-sessions
+```
+
+### Quick Diagnosis Commands
+
+```bash
+# Is the gateway receiving requests?
+./scripts/debug-relay-pipeline.sh logs-gateway --tail 20 | grep -i relay
+
+# Are relayers processing requests?
+./scripts/debug-relay-pipeline.sh logs-relayers --tail 20 | grep -i "relay processed"
+
+# Check relayer performance
+./scripts/debug-relay-pipeline.sh metrics-relayers | grep relays_total
+
+# Check if relays are in Redis WAL
+./scripts/debug-relay-pipeline.sh redis-streams
+
+# Check active sessions
+./scripts/debug-relay-pipeline.sh redis-sessions
+```
+
 ## Development
 
 ### Adding New Tests

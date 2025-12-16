@@ -48,9 +48,8 @@ type SupplierState struct {
 	Consumer *redistransport.StreamsConsumer
 
 	// Session management
-	SessionStore    *RedisSessionStore
-	WAL             *RedisWAL
-	SnapshotManager *SMSTSnapshotManager
+	SessionStore       *RedisSessionStore
+	SessionCoordinator *SessionCoordinator
 
 	// SMST management (for building and managing session trees)
 	SMSTManager *RedisSMSTManager
@@ -82,9 +81,6 @@ type SupplierManagerConfig struct {
 
 	// Session configuration
 	SessionTTL time.Duration
-
-	// WAL configuration
-	WALMaxLen int64
 
 	// SupplierCache for publishing supplier state to relayers
 	SupplierCache *cache.SupplierCache
@@ -355,22 +351,11 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		},
 	)
 
-	// Create WAL for this supplier
-	wal := NewRedisWAL(
-		m.logger,
-		m.config.RedisClient,
-		WALConfig{
-			SupplierAddress: operatorAddr,
-			KeyPrefix:       "ha:miner:wal",
-			MaxLen:          m.config.WALMaxLen,
-		},
-	)
-
-	// Create SMST snapshot manager
-	snapshotManager := NewSMSTSnapshotManager(
+	// Create session coordinator (replaces WAL-based SMSTSnapshotManager)
+	// No WAL needed - SMST persists to Redis via Commit(), and relay streams act as WAL
+	sessionCoordinator := NewSessionCoordinator(
 		m.logger,
 		sessionStore,
-		wal,
 		SMSTRecoveryConfig{
 			SupplierAddress: operatorAddr,
 			RecoveryTimeout: 5 * time.Minute,
@@ -411,6 +396,19 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		},
 	)
 
+	// Warmup: load existing SMST trees from Redis (critical for HA after restart/failover)
+	if loadedCount, err := smstManager.WarmupFromRedis(ctx); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("failed to warmup SMST from Redis - continuing without warmup")
+	} else if loadedCount > 0 {
+		m.logger.Info().
+			Int("loaded_trees", loadedCount).
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("SMST warmup successful")
+	}
+
 	// Create supplier client for claim/proof submission
 	var supplierClient *tx.HASupplierClient
 	var lifecycleCallback *LifecycleCallback
@@ -432,7 +430,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			m.config.BlockClient,
 			m.config.SessionClient,
 			smstManager,
-			snapshotManager,
+			sessionCoordinator,
 			m.config.ProofChecker, // May be nil - if so, proofs are always submitted (legacy)
 			LifecycleCallbackConfig{
 				SupplierAddress:    operatorAddr,
@@ -465,10 +463,10 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 				Msg("failed to start lifecycle manager, continuing without lifecycle management")
 			lifecycleManager = nil
 		} else {
-			// Wire up callback so snapshot manager notifies lifecycle manager of new sessions
+			// Wire up callback so session coordinator notifies lifecycle manager of new sessions
 			// This is critical for tracking sessions created after startup
 			lm := lifecycleManager // capture for closure
-			snapshotManager.SetOnSessionCreatedCallback(func(ctx context.Context, snapshot *SessionSnapshot) error {
+			sessionCoordinator.SetOnSessionCreatedCallback(func(ctx context.Context, snapshot *SessionSnapshot) error {
 				return lm.TrackSession(ctx, snapshot)
 			})
 			m.logger.Info().
@@ -482,17 +480,16 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	}
 
 	state := &SupplierState{
-		OperatorAddr:      operatorAddr,
-		Status:            SupplierStatusActive,
-		Consumer:          consumer,
-		SessionStore:      sessionStore,
-		WAL:               wal,
-		SnapshotManager:   snapshotManager,
-		SMSTManager:       smstManager,
-		LifecycleManager:  lifecycleManager,
-		LifecycleCallback: lifecycleCallback,
-		SupplierClient:    supplierClient,
-		cancelFn:          cancelFn,
+		OperatorAddr:       operatorAddr,
+		Status:             SupplierStatusActive,
+		Consumer:           consumer,
+		SessionStore:       sessionStore,
+		SessionCoordinator: sessionCoordinator,
+		SMSTManager:        smstManager,
+		LifecycleManager:   lifecycleManager,
+		LifecycleCallback:  lifecycleCallback,
+		SupplierClient:     supplierClient,
+		cancelFn:           cancelFn,
 	}
 
 	m.suppliers[operatorAddr] = state
@@ -685,8 +682,7 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	}
 
 	_ = state.Consumer.Close()
-	_ = state.SnapshotManager.Close()
-	_ = state.WAL.Close()
+	_ = state.SessionCoordinator.Close()
 	_ = state.SessionStore.Close()
 
 	delete(m.suppliers, operatorAddr)
@@ -767,8 +763,7 @@ func (m *SupplierManager) Close() error {
 		}
 
 		_ = state.Consumer.Close()
-		_ = state.SnapshotManager.Close()
-		_ = state.WAL.Close()
+		_ = state.SessionCoordinator.Close()
 		_ = state.SessionStore.Close()
 	}
 	m.suppliers = make(map[string]*SupplierState)
