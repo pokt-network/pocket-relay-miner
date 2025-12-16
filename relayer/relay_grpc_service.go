@@ -37,7 +37,9 @@ type RelayGRPCService struct {
 	publisher      transport.MinedRelayPublisher
 	relayProcessor RelayProcessor
 	relayPipeline  *RelayPipeline // Unified relay processing pipeline
-	httpClient     *http.Client
+
+	// Function to get HTTP client for a service (supports per-service timeout profiles)
+	getHTTPClient func(serviceID string) *http.Client
 
 	// Backend gRPC connections for passthrough mode
 	grpcBackends sync.Map // map[string]*grpc.ClientConn
@@ -58,14 +60,16 @@ type RelayGRPCServiceConfig struct {
 	RelayPipeline      *RelayPipeline // Unified relay processing pipeline
 	CurrentBlockHeight *atomic.Int64
 	MaxBodySize        int64
-	HTTPClient         *http.Client
+	// GetHTTPClient returns the HTTP client for a service (supports per-service timeout profiles)
+	GetHTTPClient func(serviceID string) *http.Client
 }
 
 // NewRelayGRPCService creates a new gRPC relay service.
 func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *RelayGRPCService {
-	httpClient := config.HTTPClient
-	if httpClient == nil {
-		httpClient = &http.Client{
+	getHTTPClient := config.GetHTTPClient
+	if getHTTPClient == nil {
+		// Default client factory (fallback for tests or legacy usage)
+		defaultClient := &http.Client{
 			Timeout: 30 * time.Second,
 			Transport: &http.Transport{
 				MaxIdleConns:        100,
@@ -75,6 +79,9 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 					MinVersion: tls.VersionTLS12,
 				},
 			},
+		}
+		getHTTPClient = func(_ string) *http.Client {
+			return defaultClient
 		}
 	}
 
@@ -92,7 +99,7 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		relayPipeline:      config.RelayPipeline,
 		currentBlockHeight: config.CurrentBlockHeight,
 		maxBodySize:        maxBodySize,
-		httpClient:         httpClient,
+		getHTTPClient:      getHTTPClient,
 	}
 }
 
@@ -447,8 +454,9 @@ func (s *RelayGRPCService) forwardToBackend(
 	// Set host header
 	req.Host = backendParsed.Host
 
-	// Execute request
-	resp, err := s.httpClient.Do(req)
+	// Execute request using service-specific HTTP client
+	client := s.getHTTPClient(serviceID)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("request failed: %w", err)
 	}

@@ -98,6 +98,20 @@ services:
       rest:
         url: "http://eth-node:8545/stream/sse"
 
+  # Example: text-generation service with streaming profile
+  # This demonstrates using the "streaming" timeout profile for long-running LLM requests
+  # text-generation:
+  #   validation_mode: eager
+  #   request_timeout_seconds: 600  # 10 minutes for LLM completion
+  #   # HTTP client configuration (uses streaming timeout profile)
+  #   http:
+  #     timeout_profile: "streaming"  # No header timeout for streaming responses
+  #   backends:
+  #     jsonrpc:
+  #       url: "https://llm-backend.example.com"
+  #       authentication:
+  #         bearer_token: "your-api-key"
+
   # Example: eth-mainnet service
   # eth-mainnet:
   #   validation_mode: optimistic
@@ -189,6 +203,24 @@ http_transport:
 
   # Content handling
   disable_compression: true  # Don't modify content encoding (required for relay protocol)
+
+# ==============================================================================
+# HTTP Timeout Profiles (Advanced)
+# ==============================================================================
+# Define timeout profiles for different service types.
+# Auto-populated with "fast" and "streaming" defaults if not specified.
+timeout_profiles:
+  # Fast profile for standard RPC services (default for all services)
+  fast:
+    response_header_timeout_seconds: 30  # Timeout waiting for response headers
+    dial_timeout_seconds: 5  # Timeout for establishing connection
+    tls_handshake_timeout_seconds: 10  # Timeout for TLS handshake
+
+  # Streaming profile for long-running services (LLMs, AI models)
+  streaming:
+    response_header_timeout_seconds: 0  # No header timeout for streaming responses
+    dial_timeout_seconds: 10  # Allow more time for connection
+    tls_handshake_timeout_seconds: 15  # Allow more time for TLS
 
 # Cache warmup (optional - pre-load application data at startup)
 cache_warmup:

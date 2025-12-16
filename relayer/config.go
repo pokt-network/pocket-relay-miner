@@ -69,6 +69,34 @@ func RPCTypeToBackendType(rpcType string) string {
 	}
 }
 
+// TimeoutProfile defines a set of HTTP client timeout settings.
+// Multiple profiles can be defined to support different service types (fast RPCs vs streaming).
+type TimeoutProfile struct {
+	// Name is the profile name (e.g., "fast", "streaming")
+	Name string `yaml:"name,omitempty"`
+
+	// ResponseHeaderTimeoutSeconds is the timeout for receiving response headers.
+	// Set to 0 for no timeout (useful for streaming responses).
+	// Default: inherits from HTTPTransportConfig if 0
+	ResponseHeaderTimeoutSeconds int64 `yaml:"response_header_timeout_seconds"`
+
+	// DialTimeoutSeconds is the timeout for establishing a new connection.
+	// Default: inherits from HTTPTransportConfig if 0
+	DialTimeoutSeconds int64 `yaml:"dial_timeout_seconds"`
+
+	// TLSHandshakeTimeoutSeconds is the timeout for completing the TLS handshake.
+	// Default: inherits from HTTPTransportConfig if 0
+	TLSHandshakeTimeoutSeconds int64 `yaml:"tls_handshake_timeout_seconds"`
+}
+
+// ServiceHTTPConfig allows per-service HTTP client customization.
+type ServiceHTTPConfig struct {
+	// TimeoutProfile is the name of the timeout profile to use.
+	// Must match a profile name in Config.TimeoutProfiles.
+	// Default: "fast" if not specified
+	TimeoutProfile string `yaml:"timeout_profile"`
+}
+
 // Config is the configuration for the HA Relayer service.
 type Config struct {
 	// ListenAddr is the address to listen on for incoming relay requests.
@@ -119,6 +147,10 @@ type Config struct {
 
 	// HTTPTransport configuration for backend HTTP client connection pooling.
 	HTTPTransport HTTPTransportConfig `yaml:"http_transport,omitempty"`
+
+	// TimeoutProfiles defines HTTP client timeout profiles.
+	// Auto-populated with "fast" and "streaming" defaults if not specified.
+	TimeoutProfiles map[string]TimeoutProfile `yaml:"timeout_profiles,omitempty"`
 }
 
 // HTTPTransportConfig contains HTTP transport settings for backend connections.
@@ -214,6 +246,10 @@ type ServiceConfig struct {
 	// Key is RPC type: "jsonrpc", "rest", "websocket", "grpc", "cometbft"
 	// At least one backend type is required.
 	Backends map[string]BackendConfig `yaml:"backends"`
+
+	// HTTP client configuration for this service.
+	// If not specified, uses the "fast" timeout profile.
+	HTTP *ServiceHTTPConfig `yaml:"http,omitempty"`
 }
 
 // BackendConfig contains configuration for a specific RPC type backend.
@@ -436,6 +472,20 @@ func DefaultConfig() Config {
 			TCPKeepAliveSeconds:          30,   // TCP keepalive every 30s
 			DisableCompression:           true, // Don't modify content encoding
 		},
+		TimeoutProfiles: map[string]TimeoutProfile{
+			"fast": {
+				Name:                         "fast",
+				ResponseHeaderTimeoutSeconds: 30, // Standard RPC services
+				DialTimeoutSeconds:           5,
+				TLSHandshakeTimeoutSeconds:   10,
+			},
+			"streaming": {
+				Name:                         "streaming",
+				ResponseHeaderTimeoutSeconds: 0,  // No header timeout for LLM streaming
+				DialTimeoutSeconds:           10, // Allow more time for connection
+				TLSHandshakeTimeoutSeconds:   15, // Allow more time for TLS
+			},
+		},
 	}
 }
 
@@ -473,6 +523,11 @@ func (c *Config) Validate() error {
 
 	if c.DefaultValidationMode != ValidationModeEager && c.DefaultValidationMode != ValidationModeOptimistic {
 		return fmt.Errorf("invalid default_validation_mode: %s", c.DefaultValidationMode)
+	}
+
+	// Validate and auto-populate timeout profiles
+	if err := c.ValidateTimeoutProfiles(); err != nil {
+		return err
 	}
 
 	return nil
@@ -541,6 +596,82 @@ func (c *Config) GetServiceMaxBodySize(serviceID string) int64 {
 		return svc.MaxBodySizeBytes
 	}
 	return c.DefaultMaxBodySizeBytes
+}
+
+// getMaxServiceTimeout returns the maximum timeout across all services.
+// Used to set HTTP server timeouts that accommodate the longest-running service.
+func (c *Config) getMaxServiceTimeout() time.Duration {
+	max := time.Duration(c.DefaultRequestTimeoutSeconds) * time.Second
+
+	for _, svc := range c.Services {
+		if svc.RequestTimeoutSeconds > 0 {
+			svcTimeout := time.Duration(svc.RequestTimeoutSeconds) * time.Second
+			if svcTimeout > max {
+				max = svcTimeout
+			}
+		}
+	}
+
+	return max
+}
+
+// normalizeTimeoutProfile fills in missing timeout values from HTTPTransportConfig.
+// Note: ResponseHeaderTimeoutSeconds can legitimately be 0 (no timeout for streaming),
+// so it is not auto-populated.
+func normalizeTimeoutProfile(profile *TimeoutProfile, transportConfig *HTTPTransportConfig) {
+	if profile.DialTimeoutSeconds == 0 {
+		profile.DialTimeoutSeconds = transportConfig.DialTimeoutSeconds
+	}
+	if profile.TLSHandshakeTimeoutSeconds == 0 {
+		profile.TLSHandshakeTimeoutSeconds = transportConfig.TLSHandshakeTimeoutSeconds
+	}
+}
+
+// ValidateTimeoutProfiles validates and auto-populates timeout profiles.
+func (c *Config) ValidateTimeoutProfiles() error {
+	// Auto-populate missing timeout_profiles with defaults
+	if len(c.TimeoutProfiles) == 0 {
+		c.TimeoutProfiles = map[string]TimeoutProfile{
+			"fast": {
+				Name:                         "fast",
+				ResponseHeaderTimeoutSeconds: 30,
+				DialTimeoutSeconds:           5,
+				TLSHandshakeTimeoutSeconds:   10,
+			},
+			"streaming": {
+				Name:                         "streaming",
+				ResponseHeaderTimeoutSeconds: 0,
+				DialTimeoutSeconds:           10,
+				TLSHandshakeTimeoutSeconds:   15,
+			},
+		}
+	}
+
+	// Ensure required profiles exist (either from config or auto-populated)
+	if _, ok := c.TimeoutProfiles["fast"]; !ok {
+		return fmt.Errorf("required timeout profile 'fast' not defined")
+	}
+	if _, ok := c.TimeoutProfiles["streaming"]; !ok {
+		return fmt.Errorf("required timeout profile 'streaming' not defined")
+	}
+
+	// Normalize all profiles (fill in missing timeout values from HTTPTransportConfig)
+	for name, profile := range c.TimeoutProfiles {
+		normalizeTimeoutProfile(&profile, &c.HTTPTransport)
+		c.TimeoutProfiles[name] = profile
+	}
+
+	// Validate all service HTTP configs reference valid profiles
+	for svcID, svc := range c.Services {
+		if svc.HTTP != nil && svc.HTTP.TimeoutProfile != "" {
+			if _, ok := c.TimeoutProfiles[svc.HTTP.TimeoutProfile]; !ok {
+				return fmt.Errorf("service %s references undefined timeout profile %s",
+					svcID, svc.HTTP.TimeoutProfile)
+			}
+		}
+	}
+
+	return nil
 }
 
 // GetBackend returns the backend configuration for a service and RPC type.

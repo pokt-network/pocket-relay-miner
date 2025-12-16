@@ -60,8 +60,11 @@ type ProxyServer struct {
 	supplierCache  *cache.SupplierCache
 	relayMeter     *RelayMeter
 
-	// HTTP client for backend requests
-	httpClient *http.Client
+	// HTTP client pool for backend requests (one client per timeout profile)
+	// Key: timeout profile name (e.g., "fast", "streaming")
+	// Value: *http.Client configured with that profile's timeouts
+	clientPool   map[string]*http.Client
+	clientPoolMu sync.RWMutex
 
 	// HTTP server
 	server *http.Server
@@ -149,8 +152,8 @@ func NewProxyServer(
 		backendURLs[id] = parsed
 	}
 
-	// Build optimized HTTP client using configured transport settings
-	httpClient := buildHTTPClient(&config.HTTPTransport)
+	// Build HTTP client pool (one client per timeout profile)
+	clientPool := buildClientPool(config, &config.HTTPTransport)
 
 	// Initialize thread-safe parsed URL cache
 	parsedURLCache := xsync.NewMap[string, *url.URL]()
@@ -196,7 +199,7 @@ func NewProxyServer(
 		publisher:         publisher,
 		backendURLs:       backendURLs,
 		parsedBackendURLs: parsedURLCache,
-		httpClient:        httpClient,
+		clientPool:        clientPool,
 		workerPool:        workerPool,
 		validationSubpool: validationSubpool,
 		publishSubpool:    publishSubpool,
@@ -294,6 +297,50 @@ func buildHTTPClient(cfg *HTTPTransportConfig) *http.Client {
 	}
 }
 
+// buildClientPool creates HTTP clients for each timeout profile.
+// Each client is optimized for a specific use case (fast RPCs vs long-running streaming).
+func buildClientPool(
+	config *Config,
+	transportConfig *HTTPTransportConfig,
+) map[string]*http.Client {
+	pool := make(map[string]*http.Client)
+
+	for profileName, profile := range config.TimeoutProfiles {
+		// Clone transport config and apply profile-specific timeouts
+		profileTransport := *transportConfig
+		profileTransport.ResponseHeaderTimeoutSeconds = profile.ResponseHeaderTimeoutSeconds
+		profileTransport.DialTimeoutSeconds = profile.DialTimeoutSeconds
+		profileTransport.TLSHandshakeTimeoutSeconds = profile.TLSHandshakeTimeoutSeconds
+
+		pool[profileName] = buildHTTPClient(&profileTransport)
+	}
+
+	return pool
+}
+
+// getClientForService returns the appropriate HTTP client for a service.
+// Falls back to "fast" profile if service doesn't specify a profile or profile doesn't exist.
+func (p *ProxyServer) getClientForService(serviceID string) *http.Client {
+	p.clientPoolMu.RLock()
+	defer p.clientPoolMu.RUnlock()
+
+	// Check if service has custom HTTP config
+	if svc, ok := p.config.Services[serviceID]; ok && svc.HTTP != nil {
+		if svc.HTTP.TimeoutProfile != "" {
+			if client, ok := p.clientPool[svc.HTTP.TimeoutProfile]; ok {
+				return client
+			}
+			p.logger.Warn().
+				Str("service_id", serviceID).
+				Str("profile", svc.HTTP.TimeoutProfile).
+				Msg("timeout profile not found, using default 'fast'")
+		}
+	}
+
+	// Default to "fast" profile
+	return p.clientPool["fast"]
+}
+
 // Start starts the HTTP proxy server.
 func (p *ProxyServer) Start(ctx context.Context) error {
 	p.mu.Lock()
@@ -340,11 +387,16 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	// Wrap with panic recovery middleware to prevent handler panics from crashing the server
 	handler := PanicRecoveryMiddleware(p.logger, h2cHandler)
 
+	// Calculate server timeouts based on max service timeout to accommodate long-running services
+	maxServiceTimeout := p.config.getMaxServiceTimeout()
+
 	p.server = &http.Server{
-		Addr:         p.config.ListenAddr,
-		Handler:      handler,
-		ReadTimeout:  time.Duration(p.config.DefaultRequestTimeoutSeconds+5) * time.Second,
-		WriteTimeout: time.Duration(p.config.DefaultRequestTimeoutSeconds+10) * time.Second,
+		Addr:    p.config.ListenAddr,
+		Handler: handler,
+		// ReadTimeout: max service timeout + 5s buffer for request parsing
+		ReadTimeout: maxServiceTimeout + 5*time.Second,
+		// WriteTimeout: max service timeout + 30s buffer for response signing + write
+		WriteTimeout: maxServiceTimeout + 30*time.Second,
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -1157,8 +1209,9 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		}
 	}
 
-	// Execute backend request
-	resp, err := p.httpClient.Do(req)
+	// Execute backend request using service-specific HTTP client
+	client := p.getClientForService(serviceID)
+	resp, err := client.Do(req)
 
 	if err != nil {
 		return nil, nil, 0, false, fmt.Errorf("backend request failed: %w", err)
@@ -1383,7 +1436,7 @@ func (p *ProxyServer) InitGRPCHandler() {
 			RelayPipeline:      p.relayPipeline, // Unified relay processing pipeline
 			CurrentBlockHeight: &p.currentBlockHeight,
 			MaxBodySize:        p.config.DefaultMaxBodySizeBytes,
-			HTTPClient:         p.httpClient,
+			GetHTTPClient:      p.getClientForService,
 		},
 	)
 

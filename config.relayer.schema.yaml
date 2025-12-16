@@ -117,6 +117,16 @@ properties:
             - cometbft
           description: Default backend when Rpc-Type header not provided
           default: jsonrpc
+        http:
+          type: object
+          description: HTTP client configuration for this service
+          properties:
+            timeout_profile:
+              type: string
+              description: Name of timeout profile to use (must exist in timeout_profiles)
+              examples:
+                - fast
+                - streaming
         backends:
           type: object
           description: Backend configurations per RPC type
@@ -388,3 +398,26 @@ properties:
         type: boolean
         description: Don't modify content encoding (required for relay protocol)
         default: true
+
+  timeout_profiles:
+    type: object
+    description: HTTP client timeout profiles for different service types (auto-populated with defaults if not specified)
+    additionalProperties:
+      type: object
+      description: A timeout profile defining HTTP client timeouts
+      properties:
+        response_header_timeout_seconds:
+          type: integer
+          description: Timeout waiting for response headers (0 = no timeout for streaming)
+          minimum: 0
+          default: 30
+        dial_timeout_seconds:
+          type: integer
+          description: Timeout for establishing new connection (seconds)
+          minimum: 0
+          default: 5
+        tls_handshake_timeout_seconds:
+          type: integer
+          description: Timeout for TLS handshake (seconds)
+          minimum: 0
+          default: 10

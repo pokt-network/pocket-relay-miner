@@ -221,6 +221,18 @@ def generate_relayer_config(config):
         },
         "relay_meter": relayer_cfg.get("relay_meter", {"enabled": True, "over_servicing_enabled": False}),
         "http_transport": relayer_cfg.get("http_transport", {}),
+        "timeout_profiles": relayer_cfg.get("timeout_profiles", {
+            "fast": {
+                "response_header_timeout_seconds": 30,
+                "dial_timeout_seconds": 5,
+                "tls_handshake_timeout_seconds": 10,
+            },
+            "streaming": {
+                "response_header_timeout_seconds": 0,
+                "dial_timeout_seconds": 10,
+                "tls_handshake_timeout_seconds": 15,
+            },
+        }),
         "cache_warmup": relayer_cfg.get("cache_warmup", {"enabled": False}),
     }
 
