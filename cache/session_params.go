@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"fmt"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,12 +17,6 @@ import (
 )
 
 const (
-	// Redis key for session params cache
-	sessionParamsRedisKey = "ha:cache:session_params"
-
-	// Lock key for distributed locking during L3 query
-	sessionParamsLockKey = "ha:cache:lock:session_params"
-
 	// Cache type for pub/sub and metrics
 	sessionParamsCacheType = "session_params"
 )
@@ -42,7 +37,7 @@ const (
 // if governance changes params mid-session. See shared_params_singleton.go for details.
 type sessionParamsCache struct {
 	logger           logging.Logger
-	redisClient      redis.UniversalClient
+	redisClient      *redisutil.Client
 	queryClient      SessionQueryClient
 	sharedClient     SharedQueryClient
 	blockTimeSeconds int64
@@ -80,7 +75,7 @@ type SharedQueryClient interface {
 // TTL is calculated as: num_blocks_per_session (from shared params) × blockTimeSeconds
 func NewSessionParamsCache(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	queryClient SessionQueryClient,
 	sharedClient SharedQueryClient,
 	blockTimeSeconds int64,
@@ -151,7 +146,7 @@ func (c *sessionParamsCache) Get(ctx context.Context, force ...bool) (*sessionty
 		}
 
 		// L2: Check Redis cache
-		data, err := c.redisClient.Get(ctx, sessionParamsRedisKey).Bytes()
+		data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsSessionCacheKey()).Bytes()
 		if err == nil {
 			params := &sessiontypes.Params{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, params); err == nil {
@@ -199,11 +194,8 @@ func (c *sessionParamsCache) Get(ctx context.Context, force ...bool) (*sessionty
 	}
 
 	// Store in L2 and L1 with dynamically calculated TTL
-	ttl, err := c.calculateTTL(ctx)
-	if err != nil {
-		c.logger.Warn().Err(err).Msg("failed to calculate TTL, using 10min fallback")
-		ttl = 10 * time.Minute
-	}
+	// Use already-fetched shared params to avoid extra gRPC call
+	ttl := c.calculateTTLFromSharedParams()
 	if err := c.Set(ctx, params, ttl); err != nil {
 		c.logger.Warn().
 			Err(err).
@@ -247,7 +239,7 @@ func (c *sessionParamsCache) Set(ctx context.Context, params *sessiontypes.Param
 		return fmt.Errorf("failed to marshal session params: %w", err)
 	}
 
-	if err := c.redisClient.Set(ctx, sessionParamsRedisKey, data, ttl).Err(); err != nil {
+	if err := c.redisClient.Set(ctx, c.redisClient.KB().ParamsSessionCacheKey(), data, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set Redis cache: %w", err)
 	}
 
@@ -271,7 +263,7 @@ func (c *sessionParamsCache) InvalidateAll(ctx context.Context) error {
 	c.localCache.Store(nil)
 
 	// Remove from L2 (Redis)
-	if err := c.redisClient.Del(ctx, sessionParamsRedisKey).Err(); err != nil {
+	if err := c.redisClient.Del(ctx, c.redisClient.KB().ParamsSessionCacheKey()).Err(); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to delete session params from Redis")
@@ -297,7 +289,7 @@ func (c *sessionParamsCache) WarmupFromRedis(ctx context.Context) error {
 	c.logger.Info().Msg("warming up session params cache from Redis")
 
 	// Load from Redis (L2) into local cache (L1)
-	data, err := c.redisClient.Get(ctx, sessionParamsRedisKey).Bytes()
+	data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsSessionCacheKey()).Bytes()
 	if err != nil {
 		// Key doesn't exist in Redis, skip warmup
 		c.logger.Debug().Msg("no session params in Redis to warm up")
@@ -322,12 +314,13 @@ func (c *sessionParamsCache) WarmupFromRedis(ctx context.Context) error {
 // queryChainWithLock queries the chain with distributed locking to prevent
 // duplicate queries from multiple instances.
 func (c *sessionParamsCache) queryChainWithLock(ctx context.Context) (*sessiontypes.Params, error) {
+	lockKey := c.redisClient.KB().ParamsSessionLockKey()
 	// Try to acquire distributed lock
-	locked, err := c.redisClient.SetNX(ctx, sessionParamsLockKey, "1", 5*time.Second).Result()
+	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
-	defer c.redisClient.Del(ctx, sessionParamsLockKey)
+	defer c.redisClient.Del(ctx, lockKey)
 
 	if !locked {
 		// Another instance is querying, wait and retry L2
@@ -335,7 +328,7 @@ func (c *sessionParamsCache) queryChainWithLock(ctx context.Context) (*sessionty
 		time.Sleep(5 * time.Millisecond)
 
 		// Retry L2 after waiting
-		data, err := c.redisClient.Get(ctx, sessionParamsRedisKey).Bytes()
+		data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsSessionCacheKey()).Bytes()
 		if err == nil {
 			params := &sessiontypes.Params{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, params); err == nil {
@@ -359,27 +352,15 @@ func (c *sessionParamsCache) queryChainWithLock(ctx context.Context) (*sessionty
 	return params, nil
 }
 
-// calculateTTL calculates the TTL as one session duration.
-// Formula: TTL = num_blocks_per_session × block_time_seconds
-// This ensures params stay cached for the entire session lifecycle.
-func (c *sessionParamsCache) calculateTTL(ctx context.Context) (time.Duration, error) {
-	// Query shared params to get num_blocks_per_session
-	sharedParams, err := c.sharedClient.GetParams(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to query shared params for TTL calculation: %w", err)
-	}
-
-	// Calculate: blocks_per_session × block_time
-	numBlocksPerSession := sharedParams.NumBlocksPerSession
-	ttlSeconds := int64(numBlocksPerSession) * c.blockTimeSeconds
-
-	c.logger.Debug().
-		Uint64("blocks_per_session", numBlocksPerSession).
-		Int64("block_time_seconds", c.blockTimeSeconds).
-		Int64("ttl_seconds", ttlSeconds).
-		Msg("calculated session params TTL")
-
-	return time.Duration(ttlSeconds) * time.Second, nil
+// calculateTTLFromSharedParams returns a fixed TTL for session params.
+// This is just a Redis key expiration safety net - actual refresh frequency
+// is controlled by CacheOrchestratorConfig.RefreshIntervalBlocks.
+// Uses 10-minute TTL which is long enough for any reasonable refresh interval.
+func (c *sessionParamsCache) calculateTTLFromSharedParams() time.Duration {
+	// 10-minute TTL: just a safety net for Redis key expiration
+	// Actual refresh is controlled by RefreshIntervalBlocks (operator configurable)
+	// If leader dies, new leader refreshes immediately on election
+	return 10 * time.Minute
 }
 
 // handleInvalidation handles cache invalidation events from pub/sub.
@@ -395,7 +376,7 @@ func (c *sessionParamsCache) handleInvalidation(ctx context.Context, payload str
 
 	// Eagerly reload from L2 (Redis) to avoid cold cache on next relay
 	// This eliminates the latency penalty on the first relay after invalidation
-	data, err := c.redisClient.Get(ctx, sessionParamsRedisKey).Bytes()
+	data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsSessionCacheKey()).Bytes()
 	if err == nil {
 		params := &sessiontypes.Params{}
 		if err := proto.Unmarshal(data, params); err == nil {

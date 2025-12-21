@@ -4,8 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
@@ -14,7 +12,7 @@ import (
 // It spawns a goroutine with automatic reconnection that listens for messages on the
 // invalidation channel and calls the provided handler function for each message.
 //
-// Channel naming convention: ha:events:cache:{cacheType}:invalidate
+// Channel naming is managed by KeyBuilder: {namespace}:events:cache:{cacheType}:invalidate
 //
 // The subscription uses exponential backoff reconnection (1s → 2s → 4s → max 30s) to
 // handle Redis disconnections gracefully.
@@ -27,12 +25,12 @@ import (
 //	})
 func SubscribeToInvalidations(
 	ctx context.Context,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	logger logging.Logger,
 	cacheType string,
 	handler func(ctx context.Context, payload string) error,
 ) error {
-	channel := fmt.Sprintf("ha:events:cache:%s:invalidate", cacheType)
+	channel := redisClient.KB().EventChannel(cacheType, "invalidate")
 
 	logger.Info().
 		Str(logging.FieldCacheType, cacheType).
@@ -64,7 +62,7 @@ func SubscribeToInvalidations(
 // Returns error to trigger reconnection via the reconnection loop.
 func runPubSubLoop(
 	ctx context.Context,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	logger logging.Logger,
 	channel string,
 	cacheType string,
@@ -89,7 +87,7 @@ func runPubSubLoop(
 			return ctx.Err()
 
 		case msg := <-pubsub.Channel():
-			// Check if msg is nil (channel closed - Redis disconnected)
+			// Check if msg is nil (a channel closed - Redis disconnected)
 			if msg == nil {
 				return fmt.Errorf("pub/sub channel closed")
 			}
@@ -113,7 +111,7 @@ func runPubSubLoop(
 // PublishInvalidation publishes a cache invalidation event to notify other instances
 // that a specific cache entry should be invalidated.
 //
-// Channel naming convention: ha:events:cache:{cacheType}:invalidate
+// Channel naming is managed by KeyBuilder: {namespace}:events:cache:{cacheType}:invalidate
 //
 // Example usage:
 //
@@ -121,12 +119,12 @@ func runPubSubLoop(
 //	err := PublishInvalidation(ctx, redisClient, logger, "application", payload)
 func PublishInvalidation(
 	ctx context.Context,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	logger logging.Logger,
 	cacheType string,
 	payload string,
 ) error {
-	channel := fmt.Sprintf("ha:events:cache:%s:invalidate", cacheType)
+	channel := redisClient.KB().EventChannel(cacheType, "invalidate")
 
 	if err := redisClient.Publish(ctx, channel, payload).Err(); err != nil {
 		logger.Error().

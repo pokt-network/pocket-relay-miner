@@ -43,6 +43,7 @@ func TestServer_Start_Stop(t *testing.T) {
 		MetricsEnabled: true,
 		MetricsAddr:    ":0", // Use random available port
 		PprofEnabled:   false,
+		Registry:       prometheus.NewRegistry(), // Use isolated registry for tests
 	}
 
 	server := NewServer(logger, config)
@@ -70,6 +71,7 @@ func TestServer_Start_AlreadyRunning(t *testing.T) {
 		MetricsEnabled: true,
 		MetricsAddr:    ":0",
 		PprofEnabled:   false,
+		Registry:       prometheus.NewRegistry(), // Use isolated registry for tests
 	}
 
 	server := NewServer(logger, config)
@@ -92,6 +94,7 @@ func TestServer_Stop_NotRunning(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	config := DefaultServerConfig()
 	config.MetricsAddr = ":0"
+	config.Registry = prometheus.NewRegistry() // Use isolated registry for tests
 
 	server := NewServer(logger, config)
 
@@ -137,6 +140,7 @@ func TestServer_HealthEndpoint(t *testing.T) {
 		MetricsEnabled: true,
 		MetricsAddr:    "127.0.0.1:0",
 		PprofEnabled:   false,
+		Registry:       prometheus.NewRegistry(), // Use isolated registry for tests
 	}
 
 	server := NewServer(logger, config)
@@ -158,6 +162,7 @@ func TestServer_ReadyEndpoint(t *testing.T) {
 		MetricsEnabled: true,
 		MetricsAddr:    "127.0.0.1:0",
 		PprofEnabled:   false,
+		Registry:       prometheus.NewRegistry(), // Use isolated registry for tests
 	}
 
 	server := NewServer(logger, config)
@@ -180,6 +185,7 @@ func TestServer_WithPprof(t *testing.T) {
 		MetricsAddr:    ":0",
 		PprofEnabled:   true,
 		PprofAddr:      ":0",
+		Registry:       prometheus.NewRegistry(), // Use isolated registry for tests
 	}
 
 	server := NewServer(logger, config)
@@ -200,6 +206,7 @@ func TestServer_MetricsDisabled(t *testing.T) {
 	config := ServerConfig{
 		MetricsEnabled: false,
 		PprofEnabled:   false,
+		Registry:       prometheus.NewRegistry(), // Use isolated registry for tests
 	}
 
 	server := NewServer(logger, config)
@@ -220,6 +227,7 @@ func TestServer_ContextCancellation(t *testing.T) {
 		MetricsEnabled: true,
 		MetricsAddr:    ":0",
 		PprofEnabled:   false,
+		Registry:       prometheus.NewRegistry(), // Use isolated registry for tests
 	}
 
 	server := NewServer(logger, config)
@@ -278,6 +286,7 @@ func TestServer_IsRunning(t *testing.T) {
 		MetricsEnabled: true,
 		MetricsAddr:    ":0",
 		PprofEnabled:   false,
+		Registry:       prometheus.NewRegistry(), // Use isolated registry for tests
 	}
 
 	server := NewServer(logger, config)

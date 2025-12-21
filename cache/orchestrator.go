@@ -3,13 +3,13 @@ package cache
 import (
 	"context"
 	"fmt"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"runtime"
 	"sync"
 	"time"
 
 	pond "github.com/alitto/pond/v2"
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/redis/go-redis/v9"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -40,7 +40,7 @@ type CacheOrchestrator struct {
 	blockSubscriber BlockHeightSubscriber
 
 	// Redis client for warmup operations
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 
 	// All entity caches
 	sharedParamsCache   SingletonEntityCache[*sharedtypes.Params]
@@ -63,9 +63,10 @@ type CacheOrchestrator struct {
 	refreshSubpool pond.Pool
 
 	// Block subscription management (leader-only)
-	blockChan     <-chan BlockEvent
-	blockCancelFn context.CancelFunc
-	blockWg       sync.WaitGroup
+	blockChan        <-chan BlockEvent
+	blockCancelFn    context.CancelFunc
+	blockWg          sync.WaitGroup
+	lastRefreshBlock int64 // Last block height that triggered a full cache refresh
 
 	// Lifecycle
 	ctx      context.Context
@@ -78,6 +79,13 @@ type CacheOrchestratorConfig struct {
 	// KnownApplications is a list of application addresses to pre-discover at startup.
 	// These apps will be fetched from the network and added to the cache during warmup.
 	KnownApplications []string
+
+	// RefreshIntervalBlocks controls how often caches are refreshed.
+	// A value of 1 means refresh every block (default).
+	// A value of 2 means refresh every 2nd block (50% reduction in gRPC calls).
+	// This is useful for reducing load on slow blockchain nodes.
+	// Params rarely change, so values of 2-4 are safe for most use cases.
+	RefreshIntervalBlocks int64
 }
 
 // NewCacheOrchestrator creates a new cache orchestrator.
@@ -87,7 +95,7 @@ func NewCacheOrchestrator(
 	config CacheOrchestratorConfig,
 	leaderElector *leader.GlobalLeaderElector,
 	blockSubscriber BlockHeightSubscriber,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	sharedParamsCache SingletonEntityCache[*sharedtypes.Params],
 	sessionParamsCache SingletonEntityCache[*sessiontypes.Params],
 	proofParamsCache SingletonEntityCache[*prooftypes.Params],
@@ -279,7 +287,15 @@ func (o *CacheOrchestrator) onLostLeadership(ctx context.Context) {
 func (o *CacheOrchestrator) refreshWorker(ctx context.Context) {
 	defer o.blockWg.Done()
 
-	o.logger.Info().Msg("refresh worker started (leader mode)")
+	// Default to refreshing every block if not configured
+	refreshInterval := o.config.RefreshIntervalBlocks
+	if refreshInterval <= 0 {
+		refreshInterval = 1
+	}
+
+	o.logger.Info().
+		Int64("refresh_interval_blocks", refreshInterval).
+		Msg("refresh worker started (leader mode)")
 
 	for {
 		select {
@@ -294,6 +310,17 @@ func (o *CacheOrchestrator) refreshWorker(ctx context.Context) {
 				return
 			}
 
+			// Skip blocks based on refresh interval
+			// Always refresh the first block and then every N blocks after that
+			if o.lastRefreshBlock > 0 && (block.Height-o.lastRefreshBlock) < refreshInterval {
+				o.logger.Debug().
+					Int64("height", block.Height).
+					Int64("last_refresh", o.lastRefreshBlock).
+					Int64("interval", refreshInterval).
+					Msg("skipping cache refresh (interval not reached)")
+				continue
+			}
+
 			o.logger.Debug().
 				Int64("height", block.Height).
 				Msg("new block event received, refreshing caches")
@@ -306,6 +333,7 @@ func (o *CacheOrchestrator) refreshWorker(ctx context.Context) {
 					Msg("failed to refresh caches")
 				cacheOrchestratorRefreshes.WithLabelValues(ResultFailure).Inc()
 			} else {
+				o.lastRefreshBlock = block.Height
 				cacheOrchestratorRefreshes.WithLabelValues(ResultSuccess).Inc()
 				cacheOrchestratorRefreshDuration.Observe(time.Since(start).Seconds())
 
@@ -545,38 +573,51 @@ func (o *CacheOrchestrator) refreshSuppliers(ctx context.Context) error {
 		return true
 	})
 
-	// For each supplier, get their state and discover their services
+	// For each supplier, get their state and discover their services IN PARALLEL
+	// This is critical for operators with 2000+ suppliers
+	group := o.refreshSubpool.NewGroup()
 	for _, supplierAddr := range knownSuppliers {
-		state, err := o.supplierCache.GetSupplierState(ctx, supplierAddr)
-		if err != nil {
-			// Check if it's a NotFound error (supplier was unstaked/deleted)
-			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-				// Expected: Supplier was unstaked or deleted from chain
-				// Log at Debug level to reduce noise
-				o.logger.Debug().
-					Str("supplier_address", supplierAddr).
-					Msg("supplier not found on chain (likely unstaked)")
-				// TODO: Consider removing from knownSuppliers after N consecutive NotFound
-			} else {
+		// Capture for closure
+		addr := supplierAddr
+		group.SubmitErr(func() error {
+			state, err := o.supplierCache.GetSupplierState(ctx, addr)
+			if err != nil {
+				// Check if it's a NotFound error (supplier was unstaked/deleted)
+				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+					// Expected: Supplier was unstaked or deleted from chain
+					// Log at Debug level to reduce noise
+					o.logger.Debug().
+						Str("supplier_address", addr).
+						Msg("supplier not found on chain (likely unstaked)")
+					// TODO: Consider removing from knownSuppliers after N consecutive NotFound
+					return nil // Don't fail the group for NotFound
+				}
 				// Unexpected error (network, timeout, etc.)
 				o.logger.Warn().
 					Err(err).
-					Str("supplier_address", supplierAddr).
+					Str("supplier_address", addr).
 					Msg("failed to get supplier state during refresh")
+				return err
 			}
-			continue
-		}
 
-		if state == nil {
-			continue
-		}
-
-		// Register services from this supplier
-		for _, serviceID := range state.Services {
-			if serviceID != "" {
-				o.knownServices.Store(serviceID, struct{}{})
+			if state == nil {
+				return nil
 			}
-		}
+
+			// Register services from this supplier
+			for _, serviceID := range state.Services {
+				if serviceID != "" {
+					o.knownServices.Store(serviceID, struct{}{})
+				}
+			}
+			return nil
+		})
+	}
+
+	// Wait for all supplier refreshes to complete
+	if err := group.Wait(); err != nil {
+		o.logger.Warn().Err(err).Msg("some supplier refreshes failed")
+		// Don't return error - continue with Redis update
 	}
 
 	// Update Redis set with known suppliers (for warmup on restart)
@@ -617,7 +658,7 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 			go func() {
 				for _, addr := range o.config.KnownApplications {
 					if addr != "" {
-						_ = o.redisClient.SAdd(ctx, "ha:cache:known:applications", addr).Err()
+						_ = o.redisClient.SAdd(ctx, o.redisClient.KB().CacheKnownKey("applications"), addr).Err()
 					}
 				}
 			}()
@@ -703,7 +744,7 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 
 // getKnownAppsFromRedis retrieves the list of known app addresses from Redis.
 func (o *CacheOrchestrator) getKnownAppsFromRedis(ctx context.Context) []string {
-	members, err := o.redisClient.SMembers(ctx, "ha:cache:known:applications").Result()
+	members, err := o.redisClient.SMembers(ctx, o.redisClient.KB().CacheKnownKey("applications")).Result()
 	if err != nil {
 		o.logger.Warn().Err(err).Msg("failed to get known apps from Redis")
 		return nil
@@ -713,7 +754,7 @@ func (o *CacheOrchestrator) getKnownAppsFromRedis(ctx context.Context) []string 
 
 // getKnownServicesFromRedis retrieves the list of known service IDs from Redis.
 func (o *CacheOrchestrator) getKnownServicesFromRedis(ctx context.Context) []string {
-	members, err := o.redisClient.SMembers(ctx, "ha:cache:known:services").Result()
+	members, err := o.redisClient.SMembers(ctx, o.redisClient.KB().CacheKnownKey("services")).Result()
 	if err != nil {
 		o.logger.Warn().Err(err).Msg("failed to get known services from Redis")
 		return nil
@@ -723,7 +764,7 @@ func (o *CacheOrchestrator) getKnownServicesFromRedis(ctx context.Context) []str
 
 // getKnownSuppliersFromRedis retrieves the list of known supplier addresses from Redis.
 func (o *CacheOrchestrator) getKnownSuppliersFromRedis(ctx context.Context) []string {
-	members, err := o.redisClient.SMembers(ctx, "ha:cache:known:suppliers").Result()
+	members, err := o.redisClient.SMembers(ctx, o.redisClient.KB().CacheKnownKey("suppliers")).Result()
 	if err != nil {
 		o.logger.Warn().Err(err).Msg("failed to get known suppliers from Redis")
 		return nil
@@ -733,27 +774,30 @@ func (o *CacheOrchestrator) getKnownSuppliersFromRedis(ctx context.Context) []st
 
 // updateKnownAppsSet updates the Redis set with known apps (for warmup on restart).
 func (o *CacheOrchestrator) updateKnownAppsSet(ctx context.Context, knownApps []string) error {
-	o.redisClient.Del(ctx, "ha:cache:known:applications")
+	key := o.redisClient.KB().CacheKnownKey("applications")
+	o.redisClient.Del(ctx, key)
 	if len(knownApps) > 0 {
-		return o.redisClient.SAdd(ctx, "ha:cache:known:applications", knownApps).Err()
+		return o.redisClient.SAdd(ctx, key, knownApps).Err()
 	}
 	return nil
 }
 
 // updateKnownServicesSet updates the Redis set with known services (for warmup on restart).
 func (o *CacheOrchestrator) updateKnownServicesSet(ctx context.Context, knownServices []string) error {
-	o.redisClient.Del(ctx, "ha:cache:known:services")
+	key := o.redisClient.KB().CacheKnownKey("services")
+	o.redisClient.Del(ctx, key)
 	if len(knownServices) > 0 {
-		return o.redisClient.SAdd(ctx, "ha:cache:known:services", knownServices).Err()
+		return o.redisClient.SAdd(ctx, key, knownServices).Err()
 	}
 	return nil
 }
 
 // updateKnownSuppliersSet updates the Redis set with known suppliers (for warmup on restart).
 func (o *CacheOrchestrator) updateKnownSuppliersSet(ctx context.Context, knownSuppliers []string) error {
-	o.redisClient.Del(ctx, "ha:cache:known:suppliers")
+	key := o.redisClient.KB().CacheKnownKey("suppliers")
+	o.redisClient.Del(ctx, key)
 	if len(knownSuppliers) > 0 {
-		return o.redisClient.SAdd(ctx, "ha:cache:known:suppliers", knownSuppliers).Err()
+		return o.redisClient.SAdd(ctx, key, knownSuppliers).Err()
 	}
 	return nil
 }

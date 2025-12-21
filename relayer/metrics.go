@@ -63,16 +63,6 @@ var (
 		[]string{"service_id", "reason"},
 	)
 
-	relaysOverServiced = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relays_over_serviced_total",
-			Help:      "Total number of relays that exceeded app stake but were allowed due to over_servicing_enabled=true",
-		},
-		[]string{"service_id", "mode"}, // mode: optimistic, eager
-	)
-
 	// === CRITICAL HISTOGRAMS (async recorded to avoid hot path blocking) ===
 	// Only 4 histograms to minimize lock contention - recorded via MetricRecorder worker
 
@@ -480,27 +470,6 @@ var (
 			Help:      "Total relay meter Redis errors",
 		},
 		[]string{"operation"},
-	)
-
-	// Over-servicing metrics (when over_servicing_enabled=true)
-	relayMeterOverServicedUpokt = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relay_meter_over_serviced_upokt_total",
-			Help:      "Total uPOKT value served beyond app stake limit (when over_servicing_enabled=true)",
-		},
-		[]string{"service_id", "session_id"},
-	)
-
-	relayMeterOverServicedRelays = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relay_meter_over_serviced_relays_total",
-			Help:      "Total number of relays served beyond app stake limit (when over_servicing_enabled=true)",
-		},
-		[]string{"service_id", "session_id"},
 	)
 
 	// Unused - reserved for future relay meter parameter refresh tracking

@@ -126,18 +126,22 @@ type StreamingResponseHandler struct {
 	logger         logging.Logger
 	responseSigner *ResponseSigner
 	relayRequest   *servicetypes.RelayRequest
+	serviceTimeout time.Duration // Timeout from profile (for deadline extension)
 }
 
 // NewStreamingResponseHandler creates a new streaming response handler.
+// serviceTimeout is used to extend write deadlines during long streaming responses.
 func NewStreamingResponseHandler(
 	logger logging.Logger,
 	responseSigner *ResponseSigner,
 	relayRequest *servicetypes.RelayRequest,
+	serviceTimeout time.Duration,
 ) *StreamingResponseHandler {
 	return &StreamingResponseHandler{
 		logger:         logging.ForComponent(logger, logging.ComponentHTTPStream),
 		responseSigner: responseSigner,
 		relayRequest:   relayRequest,
+		serviceTimeout: serviceTimeout,
 	}
 }
 
@@ -274,6 +278,7 @@ func (h *StreamingResponseHandler) HandleStreamingResponse(
 }
 
 // flushBatch signs and writes the accumulated batch to the client.
+// Also extends the write deadline to allow for continued streaming.
 // Returns the size of the signed batch written.
 func (h *StreamingResponseHandler) flushBatch(
 	batch *chunkBatch,
@@ -283,6 +288,17 @@ func (h *StreamingResponseHandler) flushBatch(
 ) (int64, error) {
 	if batch.totalChunks == 0 {
 		return 0, nil
+	}
+
+	// Extend write deadline for continued streaming
+	// This prevents timeout for long-running streams (LLM responses, etc.)
+	if h.serviceTimeout > 0 {
+		rc := http.NewResponseController(w)
+		// Extend deadline by the service timeout + buffer
+		if err := rc.SetWriteDeadline(time.Now().Add(h.serviceTimeout + 30*time.Second)); err != nil {
+			// Non-fatal: log debug and continue
+			h.logger.Debug().Err(err).Msg("failed to extend write deadline (non-fatal)")
+		}
 	}
 
 	// Combine all chunks into a single payload
@@ -391,11 +407,16 @@ func (p *ProxyServer) handleStreamingResponseWithSigning(
 	resp *http.Response,
 	w http.ResponseWriter,
 	relayRequest *servicetypes.RelayRequest,
+	serviceID string,
 ) ([]byte, error) {
+	// Get service timeout for deadline extension during streaming
+	serviceTimeout := p.config.GetServiceTimeout(serviceID)
+
 	handler := NewStreamingResponseHandler(
 		p.logger,
 		p.responseSigner,
 		relayRequest,
+		serviceTimeout,
 	)
 
 	fullBody, totalSize, err := handler.HandleStreamingResponse(ctx, resp, w)
@@ -404,7 +425,7 @@ func (p *ProxyServer) handleStreamingResponseWithSigning(
 	}
 
 	// Track metrics
-	responseBodySize.WithLabelValues(relayRequest.Meta.SessionHeader.ServiceId).Observe(float64(totalSize))
+	responseBodySize.WithLabelValues(serviceID).Observe(float64(totalSize))
 
 	return fullBody, nil
 }

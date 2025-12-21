@@ -2,10 +2,12 @@ package relayer
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -59,10 +61,14 @@ func NewResponseSigner(
 		rs.signers[operatorAddr] = &privKeySigner{privKey: privKey}
 		rs.operatorAddresses = append(rs.operatorAddresses, operatorAddr)
 
-		logger.Info().
+		logger.Debug().
 			Str("operator_address", operatorAddr).
 			Msg("loaded signing key")
 	}
+
+	logger.Info().
+		Int("count", len(keys)).
+		Msg("signing keys loaded")
 
 	return rs, nil
 }
@@ -243,6 +249,8 @@ func (rs *ResponseSigner) BuildAndSignWebSocketRelayResponse(
 // BuildAndSignRelayResponseFromBody creates a signed RelayResponse from the relay request
 // and raw response body (for HTTP/gRPC/streaming responses where we've already read the body).
 // This wraps the response in POKTHTTPResponse format.
+// NOTE: If the response is gzip-compressed, it will be decompressed before signing.
+// This ensures PATH receives uncompressed JSON-RPC payloads it can parse.
 func (rs *ResponseSigner) BuildAndSignRelayResponseFromBody(
 	relayRequest *servicetypes.RelayRequest,
 	respBody []byte,
@@ -262,6 +270,37 @@ func (rs *ResponseSigner) BuildAndSignRelayResponseFromBody(
 		return nil, nil, fmt.Errorf("no signer for supplier %s", supplierOperatorAddr)
 	}
 
+	// Decompress gzipped response body if needed
+	// This ensures the RelayResponse payload contains uncompressed JSON-RPC that PATH can parse
+	bodyToSign := respBody
+	contentEncoding := ""
+	if respHeaders != nil {
+		contentEncoding = respHeaders.Get("Content-Encoding")
+	}
+
+	// Check for gzip by header OR magic bytes (some backends don't set Content-Encoding properly)
+	isGzipped := strings.EqualFold(contentEncoding, "gzip") ||
+		(len(respBody) >= 2 && respBody[0] == 0x1f && respBody[1] == 0x8b)
+
+	if isGzipped {
+		decompressed, err := decompressGzip(respBody)
+		if err != nil {
+			// If decompression fails, log warning but continue with original body
+			// This handles edge cases where magic bytes match but content isn't actually gzip
+			rs.logger.Warn().
+				Err(err).
+				Int("body_size", len(respBody)).
+				Str("content_encoding", contentEncoding).
+				Msg("failed to decompress gzip response, using original body")
+		} else {
+			bodyToSign = decompressed
+			// Remove Content-Encoding header since body is now decompressed
+			if respHeaders != nil {
+				respHeaders.Del("Content-Encoding")
+			}
+		}
+	}
+
 	// Convert headers to POKT format
 	headers := make(map[string]*sdktypes.Header, len(respHeaders))
 	for key := range respHeaders {
@@ -276,7 +315,7 @@ func (rs *ResponseSigner) BuildAndSignRelayResponseFromBody(
 	poktResponse := &sdktypes.POKTHTTPResponse{
 		StatusCode: uint32(respStatus),
 		Header:     headers,
-		BodyBz:     respBody,
+		BodyBz:     bodyToSign,
 	}
 
 	// Serialize with deterministic marshaling
@@ -435,3 +474,19 @@ func (a *ResponseSignerAdapter) SignRelayResponse(
 
 // Verify interface compliance.
 var _ RelaySignerKeyring = (*ResponseSignerAdapter)(nil)
+
+// decompressGzip decompresses a gzip-compressed byte slice.
+func decompressGzip(data []byte) ([]byte, error) {
+	reader, err := gzip.NewReader(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
+	}
+	defer func() { _ = reader.Close() }()
+
+	decompressed, err := io.ReadAll(reader)
+	if err != nil {
+		return nil, fmt.Errorf("failed to decompress gzip data: %w", err)
+	}
+
+	return decompressed, nil
+}

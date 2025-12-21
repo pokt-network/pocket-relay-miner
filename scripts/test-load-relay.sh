@@ -3,6 +3,15 @@
 # Test script to run load tests on relay endpoints
 # Supports configurable concurrency and request counts
 #
+# Genesis has 4 services, each with a corresponding app:
+#   - develop-http      -> app1 (JSON-RPC/HTTP)
+#   - develop-websocket -> app2 (WebSocket)
+#   - develop-stream    -> app3 (Streaming/SSE)
+#   - develop-grpc      -> app4 (gRPC)
+#
+# When using --localnet, the correct app key is auto-selected based on service.
+# Gateway mode is enabled by default for localnet (matches PATH's signing approach).
+#
 
 set -euo pipefail
 
@@ -13,7 +22,8 @@ source "$SCRIPT_DIR/lib/common.sh"
 PROTOCOL="jsonrpc"
 COUNT=10000
 CONCURRENCY=100
-SERVICE="develop"
+# develop-http is the default for JSON-RPC testing (most common)
+SERVICE="develop-http"
 METRICS_URL="http://localhost:9090/metrics"
 
 # Parse command-line arguments
@@ -43,13 +53,14 @@ while [[ $# -gt 0 ]]; do
         echo "                          Options: jsonrpc, websocket, grpc, stream"
         echo "  --count, -n <num>       Number of requests (default: 10000)"
         echo "  --concurrency, -c <num> Concurrent workers (default: 100)"
-        echo "  --service <id>          Service ID (default: develop)"
+        echo "  --service <id>          Service ID (default: develop-http)"
+        echo "                          Localnet services: develop-http, develop-websocket, develop-stream, develop-grpc"
         echo "  --help                  Show this help message"
         echo
         echo "Examples:"
         echo "  $0                                         # 10k requests, 100 workers, jsonrpc"
         echo "  $0 --count 50000 --concurrency 200         # 50k requests, 200 workers"
-        echo "  $0 --protocol websocket -n 1000 -c 50      # 1k WebSocket requests, 50 workers"
+        echo "  $0 --protocol websocket --service develop-websocket  # WebSocket on websocket service"
         exit 0
         ;;
     *)

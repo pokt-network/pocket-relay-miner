@@ -27,7 +27,7 @@ func TestGetApplication_Success(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -56,7 +56,7 @@ func TestGetApplication_NotFound(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -85,7 +85,7 @@ func TestGetApplication_InvalidAddress(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -113,7 +113,7 @@ func TestGetApplication_NetworkError(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -142,7 +142,7 @@ func TestGetApplication_EmptyResponse(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -173,7 +173,7 @@ func TestGetApplication_Cache(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -213,7 +213,7 @@ func TestGetApplication_ConcurrentAccess(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -249,7 +249,7 @@ func TestGetAllApplications_Success(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -276,7 +276,7 @@ func TestGetApplicationParams_Success(t *testing.T) {
 	mock.applicationParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -304,7 +304,7 @@ func TestGetApplicationParams_Cache(t *testing.T) {
 	mock.applicationParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -344,7 +344,7 @@ func TestGetApplication_Timeout(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 10 * time.Millisecond, // Very short timeout
 	}

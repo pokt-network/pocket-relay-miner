@@ -8,6 +8,7 @@ import (
 	"time"
 
 	pond "github.com/alitto/pond/v2"
+	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -147,7 +148,7 @@ func NewSessionLifecycleManager(
 	// Create transition subpool from master pool
 	transitionSubpool := workerPool.NewSubpool(config.MaxConcurrentTransitions)
 
-	logger.Info().
+	logger.Debug().
 		Int("transition_workers", config.MaxConcurrentTransitions).
 		Int("num_cpu", runtime.NumCPU()).
 		Msg("created transition subpool with dynamic CPU-based allocation")
@@ -184,6 +185,20 @@ func (m *SessionLifecycleManager) Start(ctx context.Context) error {
 	// Load existing sessions from store
 	if err := m.loadExistingSessions(ctx); err != nil {
 		m.logger.Warn().Err(err).Msg("failed to load existing sessions, starting fresh")
+	}
+
+	// LATE SESSION PRIORITIZATION: Check for sessions needing immediate attention
+	// If we have loaded sessions and any are past their claim window, process them now
+	// instead of waiting for the next block event (could be 10+ seconds)
+	if len(m.activeSessions) > 0 {
+		block := m.blockClient.LastBlock(ctx)
+		if block != nil {
+			m.logger.Debug().
+				Int64("current_height", block.Height()).
+				Int("loaded_sessions", len(m.activeSessions)).
+				Msg("checking for late sessions on startup")
+			m.checkSessionTransitions(ctx, block.Height())
+		}
 	}
 
 	// Start lifecycle checker
@@ -228,6 +243,11 @@ func (m *SessionLifecycleManager) loadExistingSessions(ctx context.Context) erro
 					Msg("skipping session at startup: already settled (rewards claimed)")
 			} else {
 				// Expired without settling - historical data (actual WARN was logged when it expired)
+				// Only mention "rewards lost" if there were actually relays
+				msg := "skipping session at startup: expired with 0 relays"
+				if session.RelayCount > 0 {
+					msg = "skipping session at startup: expired without settling (rewards lost)"
+				}
 				m.logger.Debug().
 					Str("session_id", session.SessionID).
 					Str("state", string(session.State)).
@@ -235,7 +255,7 @@ func (m *SessionLifecycleManager) loadExistingSessions(ctx context.Context) erro
 					Int64("session_end_height", session.SessionEndHeight).
 					Int64("relay_count", session.RelayCount).
 					Uint64("compute_units", session.TotalComputeUnits).
-					Msg("skipping session at startup: expired without settling (rewards lost)")
+					Msg(msg)
 			}
 		}
 	}
@@ -349,11 +369,6 @@ func (m *SessionLifecycleManager) UpdateSessionRelayCount(ctx context.Context, s
 	return nil
 }
 
-// BlockEventsProvider is an optional interface for block clients that support event-driven updates.
-type BlockEventsProvider interface {
-	BlockEvents() <-chan client.Block
-}
-
 // lifecycleChecker monitors blocks and checks sessions for state transitions.
 // Uses event-driven block notifications via Subscribe() method.
 func (m *SessionLifecycleManager) lifecycleChecker(ctx context.Context) {
@@ -363,7 +378,7 @@ func (m *SessionLifecycleManager) lifecycleChecker(ctx context.Context) {
 
 	// Check if block client supports Subscribe() method for fan-out
 	if subscriber, ok := m.blockClient.(interface {
-		Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
+		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
 	}); ok {
 		m.logger.Info().Msg("using event-driven block notifications (Subscribe)")
 		m.lifecycleCheckerEventDriven(ctx, subscriber)
@@ -375,13 +390,13 @@ func (m *SessionLifecycleManager) lifecycleChecker(ctx context.Context) {
 
 // lifecycleCheckerEventDriven uses block events for immediate session transition checks.
 func (m *SessionLifecycleManager) lifecycleCheckerEventDriven(ctx context.Context, subscriber interface {
-	Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
+	Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
 }) {
 	lastHeight := int64(0)
 
-	// Subscribe to block events with 100-block buffer
-	blockCh := subscriber.Subscribe(ctx, 100)
-	m.logger.Info().Msg("using Subscribe() for block events (fan-out mode)")
+	// Subscribe to block events with 2000-block buffer
+	blockCh := subscriber.Subscribe(ctx, 2000)
+	m.logger.Debug().Msg("using Subscribe() for block events (fan-out mode)")
 
 	for {
 		select {
@@ -419,10 +434,12 @@ func (m *SessionLifecycleManager) lifecycleCheckerEventDriven(ctx context.Contex
 
 // lifecycleCheckerPolling uses time-based polling as a fallback.
 func (m *SessionLifecycleManager) lifecycleCheckerPolling(ctx context.Context) {
-	// Get check interval from config, default to 30 seconds
+	// AGGRESSIVE: 1 second polling by default.
+	// Claims/proofs = money. Missing them = losing money.
+	// Better to poll frequently than risk missing a window.
 	checkInterval := m.config.CheckInterval
 	if checkInterval == 0 {
-		checkInterval = 30 * time.Second
+		checkInterval = 1 * time.Second
 	}
 
 	ticker := time.NewTicker(checkInterval)
@@ -502,7 +519,19 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 
 	// Execute batched transitions using pond subpool
 	// Non-blocking submission with unbounded queue (tasks queue if workers are busy)
+	//
+	// CRITICAL: Update session states SYNCHRONOUSLY before submitting async callbacks.
+	// This prevents race conditions where the next block event sees stale state
+	// and incorrectly expires a session that's already transitioning.
 	if len(claimingSessions) > 0 {
+		// Update states synchronously to prevent race conditions
+		m.activeSessionsMu.Lock()
+		for _, session := range claimingSessions {
+			session.State = SessionStateClaiming
+			session.LastUpdatedAt = time.Now()
+		}
+		m.activeSessionsMu.Unlock()
+
 		// Capture for closure
 		capturedSessions := claimingSessions
 		m.transitionSubpool.Submit(func() {
@@ -511,6 +540,14 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 	}
 
 	if len(provingSessions) > 0 {
+		// Update states synchronously to prevent race conditions
+		m.activeSessionsMu.Lock()
+		for _, session := range provingSessions {
+			session.State = SessionStateProving
+			session.LastUpdatedAt = time.Now()
+		}
+		m.activeSessionsMu.Unlock()
+
 		// Capture for closure
 		capturedSessions := provingSessions
 		m.transitionSubpool.Submit(func() {
@@ -548,14 +585,38 @@ func (m *SessionLifecycleManager) determineTransition(
 		claimWindowOpen := sharedtypes.GetClaimWindowOpenHeight(params, session.SessionEndHeight)
 		claimWindowClose := sharedtypes.GetClaimWindowCloseHeight(params, session.SessionEndHeight)
 
-		// If we're in the claim window, transition to claiming
-		if currentHeight >= claimWindowOpen && currentHeight < claimWindowClose-m.config.ClaimSubmissionBuffer {
-			return SessionStateClaiming, "claim_window_open"
-		}
+		// DEBUG: Log window calculation details
+		m.logger.Debug().
+			Str("session_id", session.SessionID).
+			Str("current_state", string(session.State)).
+			Int64("current_height", currentHeight).
+			Int64("session_start", session.SessionStartHeight).
+			Int64("session_end", session.SessionEndHeight).
+			Int64("claim_window_open", claimWindowOpen).
+			Int64("claim_window_close", claimWindowClose).
+			Int64("claim_submission_buffer", m.config.ClaimSubmissionBuffer).
+			Msg("evaluating active session window")
 
 		// If claim window has passed without claiming, session expired
 		if currentHeight >= claimWindowClose {
 			return SessionStateExpired, "claim_window_missed"
+		}
+
+		// If we're in the claim window (including buffer zone), transition to claiming
+		// The buffer zone is for giving tx confirmation time, but if we're late starting,
+		// we should still try to claim rather than just waiting to expire
+		if currentHeight >= claimWindowOpen && currentHeight < claimWindowClose {
+			if currentHeight >= claimWindowClose-m.config.ClaimSubmissionBuffer {
+				// We're in the buffer zone - log warning but still try to claim
+				m.logger.Warn().
+					Str("session_id", session.SessionID).
+					Int64("current_height", currentHeight).
+					Int64("claim_window_close", claimWindowClose).
+					Int64("blocks_remaining", claimWindowClose-currentHeight).
+					Msg("LATE CLAIM: starting claim in buffer zone - tx may not confirm in time")
+				return SessionStateClaiming, "claim_window_late"
+			}
+			return SessionStateClaiming, "claim_window_open"
 		}
 
 	case SessionStateClaiming:
@@ -572,15 +633,27 @@ func (m *SessionLifecycleManager) determineTransition(
 		proofWindowOpen := sharedtypes.GetProofWindowOpenHeight(params, session.SessionEndHeight)
 		proofWindowClose := sharedtypes.GetProofWindowCloseHeight(params, session.SessionEndHeight)
 
-		// If we're in the proof window, transition to proving
-		if currentHeight >= proofWindowOpen && currentHeight < proofWindowClose-m.config.ProofSubmissionBuffer {
-			return SessionStateProving, "proof_window_open"
-		}
-
 		// If proof window passed without proving, session may still settle
 		// (proof is optional if not selected for proof requirement)
 		if currentHeight >= proofWindowClose {
 			return SessionStateSettled, "proof_window_passed"
+		}
+
+		// If we're in the proof window (including buffer zone), transition to proving
+		// The buffer zone is for giving tx confirmation time, but if we're late starting,
+		// we should still try to prove rather than just waiting
+		if currentHeight >= proofWindowOpen && currentHeight < proofWindowClose {
+			if currentHeight >= proofWindowClose-m.config.ProofSubmissionBuffer {
+				// We're in the buffer zone - log warning but still try to prove
+				m.logger.Warn().
+					Str("session_id", session.SessionID).
+					Int64("current_height", currentHeight).
+					Int64("proof_window_close", proofWindowClose).
+					Int64("blocks_remaining", proofWindowClose-currentHeight).
+					Msg("LATE PROOF: starting proof in buffer zone - tx may not confirm in time")
+				return SessionStateProving, "proof_window_late"
+			}
+			return SessionStateProving, "proof_window_open"
 		}
 
 	case SessionStateProving:
@@ -602,7 +675,7 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 		return
 	}
 
-	m.logger.Info().
+	m.logger.Debug().
 		Int("batch_size", len(sessions)).
 		Msg("executing batched claim transition")
 
@@ -628,6 +701,35 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 				sessionLateRelays.WithLabelValues(m.config.SupplierAddress, session.SessionID).Add(float64(pendingCount))
 				sessionLateRelaysTotal.WithLabelValues(m.config.SupplierAddress).Add(float64(pendingCount))
 			}
+		}
+	}
+
+	// CRITICAL: Refresh session snapshots from Redis to get latest relay counts.
+	// The in-memory activeSessions may have stale RelayCount values because
+	// SessionCoordinator.OnRelayProcessed() updates Redis directly without
+	// updating the in-memory map. This ensures claim decisions use fresh data.
+	for _, session := range sessions {
+		freshSnapshot, err := m.sessionStore.Get(ctx, session.SessionID)
+		if err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str("session_id", session.SessionID).
+				Msg("failed to refresh session from Redis, using in-memory data")
+			continue
+		}
+		if freshSnapshot != nil {
+			// Update in-memory state with fresh Redis data
+			m.activeSessionsMu.Lock()
+			session.RelayCount = freshSnapshot.RelayCount
+			session.TotalComputeUnits = freshSnapshot.TotalComputeUnits
+			session.LastUpdatedAt = freshSnapshot.LastUpdatedAt
+			m.activeSessionsMu.Unlock()
+
+			m.logger.Debug().
+				Str("session_id", session.SessionID).
+				Int64("relay_count", freshSnapshot.RelayCount).
+				Uint64("compute_units", freshSnapshot.TotalComputeUnits).
+				Msg("refreshed session snapshot from Redis")
 		}
 	}
 
@@ -682,7 +784,7 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		return
 	}
 
-	m.logger.Info().
+	m.logger.Debug().
 		Int("batch_size", len(sessions)).
 		Msg("executing batched proof transition")
 
@@ -718,6 +820,14 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 			string(SessionStateSettled),
 		).Inc()
 
+		// Call OnSessionSettled for cleanup (stream deletion, SMST cleanup, metrics)
+		if settleErr := m.callback.OnSessionSettled(ctx, session); settleErr != nil {
+			m.logger.Warn().
+				Err(settleErr).
+				Str("session_id", session.SessionID).
+				Msg("settle callback failed in batched transition")
+		}
+
 		// Remove from active tracking
 		m.activeSessionsMu.Lock()
 		delete(m.activeSessions, session.SessionID)
@@ -742,7 +852,7 @@ func (m *SessionLifecycleManager) executeTransition(
 	// Create session-scoped logger for this transition
 	sessionLogger := logging.WithSession(m.logger, session.SessionID)
 
-	sessionLogger.Info().
+	sessionLogger.Debug().
 		Str(logging.FieldOldState, string(oldState)).
 		Str(logging.FieldNewState, string(newState)).
 		Str(logging.FieldAction, action).

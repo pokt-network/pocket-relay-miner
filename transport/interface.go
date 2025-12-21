@@ -66,6 +66,11 @@ type MinedRelayConsumer interface {
 	// Close gracefully shuts down the consumer.
 	// Any unacknowledged messages will be redelivered to other consumers in the group.
 	Close() error
+
+	// DeleteStream deletes a session stream after the session settles.
+	// This stops the consumer from reading stale messages and frees Redis memory.
+	// Safe to call even if the stream doesn't exist.
+	DeleteStream(ctx context.Context, sessionID string) error
 }
 
 // ConsumerConfig contains configuration for a MinedRelayConsumer.
@@ -88,9 +93,8 @@ type ConsumerConfig struct {
 	// BatchSize is the maximum number of messages to fetch per read operation.
 	BatchSize int64
 
-	// BlockTimeout is how long to wait for new messages when the stream is empty.
-	// Set to 0 for non-blocking reads.
-	BlockTimeout int64
+	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption.
+	// This is hardcoded in the consumer and not configurable.
 
 	// MaxRetries is the maximum number of times to retry a failed message.
 	// After this, the message is moved to the dead letter queue.
@@ -101,23 +105,24 @@ type ConsumerConfig struct {
 	ClaimIdleTimeout int64
 }
 
-// PublisherConfig contains configuration for a MinedRelayPublisher.
-type PublisherConfig struct {
-	// StreamPrefix is the prefix for Redis stream names.
-	// Full stream name: {StreamPrefix}:{SupplierOperatorAddress}:{SessionID}
-	// Streams use TTL-based expiration instead of MAXLEN trimming.
-	StreamPrefix string
+// SupplierStreamName returns the Redis stream name for a supplier.
+// Format: {prefix}:{supplierAddr}
+// All relays for a supplier go to this single stream (simplified architecture).
+// The sessionID is embedded in the message, not in the stream name.
+func SupplierStreamName(prefix, supplierOperatorAddress string) string {
+	return prefix + ":" + supplierOperatorAddress
 }
 
 // StreamName returns the full Redis stream name for a session.
 // Format: {prefix}:{supplierAddr}:{sessionID}
-// This allows per-session streams with automatic TTL cleanup.
+// DEPRECATED: Use SupplierStreamName instead. Kept for backwards compatibility.
 func StreamName(prefix, supplierOperatorAddress, sessionID string) string {
 	return prefix + ":" + supplierOperatorAddress + ":" + sessionID
 }
 
 // StreamPattern returns a Redis key pattern for discovering all streams for a supplier.
 // Use with SCAN to find all session streams for a supplier.
+// DEPRECATED: No longer needed with single stream per supplier architecture.
 func StreamPattern(prefix, supplierOperatorAddress string) string {
 	return prefix + ":" + supplierOperatorAddress + ":*"
 }

@@ -5,26 +5,19 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"runtime"
-	"strings"
 	"syscall"
 	"time"
 
-	pond "github.com/alitto/pond/v2"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 
-	"github.com/pokt-network/pocket-relay-miner/cache"
-	haclient "github.com/pokt-network/pocket-relay-miner/client"
+	configpkg "github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/pokt-network/pocket-relay-miner/observability"
-	"github.com/pokt-network/pocket-relay-miner/query"
-	"github.com/pokt-network/pocket-relay-miner/transport"
-	"github.com/pokt-network/pocket-relay-miner/tx"
+	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 const (
@@ -33,9 +26,7 @@ const (
 	flagKeysDir        = "keys-dir"
 	flagKeyringBackend = "keyring-backend"
 	flagKeyringDir     = "keyring-dir"
-	flagConsumerGroup  = "consumer-group"
 	flagConsumerName   = "consumer-name"
-	flagStreamPrefix   = "stream-prefix"
 	flagHotReload      = "hot-reload"
 	flagSessionTTL     = "session-ttl"
 )
@@ -85,9 +76,7 @@ Example:
 
 	// Redis flags (can override config)
 	cmd.Flags().String(flagRedisURL, "", "Redis connection URL (overrides config)")
-	cmd.Flags().String(flagConsumerGroup, "", "Redis consumer group name (overrides config)")
 	cmd.Flags().String(flagConsumerName, "", "Consumer name (defaults to hostname)")
-	cmd.Flags().String(flagStreamPrefix, "", "Redis stream name prefix (overrides config)")
 
 	// Configuration flags (can override config)
 	cmd.Flags().Bool(flagHotReload, true, "Enable hot-reload of keys")
@@ -144,27 +133,23 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
 	}
 
-	// Parse Redis URL
-	redisOpts, err := redis.ParseURL(config.Redis.URL)
-	if err != nil {
-		return fmt.Errorf("failed to parse Redis URL: %w", err)
-	}
-
-	// Apply connection pool settings from config (2x go-redis defaults for production)
-	applyRedisPoolConfig(redisOpts, RedisPoolSettings{
+	// Create a wrapped Redis client with KeyBuilder for namespace-aware key construction
+	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
+		URL:                    config.Redis.URL,
 		PoolSize:               config.Redis.PoolSize,
 		MinIdleConns:           config.Redis.MinIdleConns,
 		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
 		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		Namespace:              config.Redis.Namespace,
 	})
-
-	redisClient := redis.NewClient(redisOpts)
-	defer func() { _ = redisClient.Close() }()
-
-	// Test Redis connection
-	if err := redisClient.Ping(ctx).Err(); err != nil {
-		return fmt.Errorf("failed to connect to Redis: %w", err)
+	if err != nil {
+		return fmt.Errorf("failed to create Redis client: %w", err)
 	}
+	defer func() {
+		if err = redisClient.Close(); err != nil {
+			logger.Error().Err(err).Msg("failed to close Redis client")
+		}
+	}()
 	logger.Info().
 		Str("redis_url", config.Redis.URL).
 		Str("consumer_name", config.Redis.ConsumerName).
@@ -180,7 +165,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("no key providers configured")
 	}
 
-	// Create key manager
+	// Create a key manager
 	keyManager := keys.NewMultiProviderKeyManager(
 		logger,
 		providers,
@@ -191,128 +176,31 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	defer func() { _ = keyManager.Close() }()
 
 	// Start key manager
-	if err := keyManager.Start(ctx); err != nil {
+	if err = keyManager.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start key manager: %w", err)
 	}
 
 	// Check if any keys were loaded
 	suppliers := keyManager.ListSuppliers()
 	if len(suppliers) == 0 {
-		logger.Warn().Msg("no supplier keys found - miner will wait for keys to be added")
+		logger.Warn().Msg("no supplier keys found - miner will watch for keys to be added")
 	} else {
 		logger.Info().
 			Int("count", len(suppliers)).
 			Msg("loaded supplier keys")
 	}
 
-	// Create supplier registry
-	registry := miner.NewSupplierRegistry(
-		logger,
-		redisClient,
-		miner.SupplierRegistryConfig{
-			KeyPrefix:    "ha:suppliers",
-			IndexKey:     "ha:suppliers:index",
-			EventChannel: "ha:events:supplier_update",
-		},
-	)
-
-	// Create supplier cache for publishing supplier state to relayers
-	supplierCache := cache.NewSupplierCache(
-		logger,
-		redisClient,
-		cache.SupplierCacheConfig{
-			KeyPrefix: "ha:supplier",
-			FailOpen:  false, // Miner should fail-closed for writes
-		},
-	)
-	logger.Info().Msg("supplier cache initialized for state publishing")
-
-	// Create query clients to query supplier information from the blockchain
-	queryClients, err := query.NewQueryClients(
-		logger,
-		query.QueryClientConfig{
-			GRPCEndpoint: config.PocketNode.QueryNodeGRPCUrl,
-			QueryTimeout: 30 * time.Second,
-			UseTLS:       !config.PocketNode.GRPCInsecure,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create query clients: %w", err)
-	}
-	defer func() { _ = queryClients.Close() }()
-	logger.Info().Str("grpc_endpoint", config.PocketNode.QueryNodeGRPCUrl).Msg("query clients initialized")
-
-	// Create proof requirement checker for probabilistic proof selection
-	// This determines whether a proof is required for a claimed session based on:
-	// 1. Threshold check: High-value claims always require proof
-	// 2. Probabilistic check: Random selection based on claim hash + block hash
-	proofChecker := miner.NewProofRequirementChecker(
-		logger,
-		queryClients.Proof(),
-		queryClients.Shared(),
-		queryClients.Service(),
-	)
-	logger.Info().Msg("proof requirement checker initialized")
-
-	// Create block subscriber for monitoring new blocks via WebSocket subscription
-	// Uses tm.event='NewBlockHeader' for immediate block notifications with automatic reconnection
-	blockSubscriber, err := haclient.NewBlockSubscriber(
-		logger,
-		haclient.BlockSubscriberConfig{
-			RPCEndpoint: config.PocketNode.QueryNodeRPCUrl,
-			UseTLS:      !config.PocketNode.GRPCInsecure,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create block subscriber: %w", err)
-	}
-	if err := blockSubscriber.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start block subscriber: %w", err)
-	}
-	defer func() { blockSubscriber.Close() }()
-	logger.Info().Msg("block subscriber started (WebSocket)")
-
-	// Create BlockSubscriberAdapter for CacheOrchestrator
-	// This adapter converts WebSocket BlockSubscriber (client.Block) to BlockEvent format
-	// required by CacheOrchestrator. It subscribes to the WebSocket fan-out, ensuring
-	// the miner's CacheOrchestrator gets block events from the same source as other consumers.
-	// NOTE: The adapter lifecycle is controlled by CacheOrchestrator's leader callbacks.
-	// It only starts when this instance becomes leader (to avoid channel overflow on non-leader pods).
-	blockSubscriberAdapter := cache.NewBlockSubscriberAdapter(
-		logger,
-		blockSubscriber, // WebSocket-based BlockSubscriber with fan-out
-	)
-	logger.Info().Msg("block subscriber adapter created (will start on leader election)")
-
-	// NOTE: blockSubscriberAdapter will be passed directly to CacheOrchestrator
-	// The orchestrator controls its Start()/Close() lifecycle via leader callbacks
-
-	// Create Redis block subscriber for publishing block events to Redis
-	// This is used by BlockPublisher to distribute events to relayers
-	// Uses the WebSocket blockSubscriber as the source of block events
-	redisBlockSubscriber := cache.NewRedisBlockSubscriber(
-		logger,
-		redisClient,
-		blockSubscriber, // WebSocket client for block events
-		cache.DefaultCacheConfig(),
-	)
-	if err := redisBlockSubscriber.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start redis block subscriber: %w", err)
-	}
-	defer func() { _ = redisBlockSubscriber.Close() }()
-	logger.Info().Msg("redis block subscriber started for publishing to Redis")
-
 	// Generate unique instance ID for global leader election
 	hostname, _ := os.Hostname()
 	instanceID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
 
-	// Create global leader elector (single source of truth for leadership)
+	// Create global leader elector FIRST to determine replica status before other components start
 	leaderConfig := leader.GlobalLeaderElectorConfig{
 		LeaderTTL:     config.GetLeaderTTL(),
 		HeartbeatRate: config.GetLeaderHeartbeatRate(),
 	}
 
-	// Warn if heartbeat rate is too close to TTL (risk of lock expiration)
+	// Warn if the heartbeat rate is too close to TTL (risk of lock expiration)
 	if leaderConfig.HeartbeatRate > leaderConfig.LeaderTTL/2 {
 		logger.Warn().
 			Dur("heartbeat_rate", leaderConfig.HeartbeatRate).
@@ -326,393 +214,97 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		instanceID,
 		leaderConfig,
 	)
-	if err := globalLeader.Start(ctx); err != nil {
+	if err = globalLeader.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start global leader elector: %w", err)
 	}
 	defer func() { globalLeader.Close() }()
-	logger.Info().
-		Str("instance_id", instanceID).
-		Msg("global leader elector started")
 
-	// Get block time for cache TTL calculations (default: 30s)
-	blockTimeSeconds := config.GetBlockTimeSeconds()
-
-	// Create session params cache with dynamic session-duration TTL
-	sessionParamsCache := cache.NewSessionParamsCache(
-		logger,
-		redisClient,
-		cache.NewSessionQueryClientAdapter(queryClients.Session()),
-		queryClients.Shared(), // For TTL calculation
-		blockTimeSeconds,
-	)
-	if err := sessionParamsCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start session params cache: %w", err)
-	}
-	defer func() { _ = sessionParamsCache.Close() }()
-
-	// Create shared params cache with dynamic 2-session TTL
-	sharedParamsCache := cache.NewSharedParamsCache(
-		logger,
-		redisClient,
-		queryClients.Shared(),
-		blockTimeSeconds,
-	)
-	if err := sharedParamsCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start shared params cache: %w", err)
-	}
-	defer func() { _ = sharedParamsCache.Close() }()
-
-	// Create proof params cache with dynamic session-duration TTL
-	proofParamsCache := cache.NewProofParamsCache(
-		logger,
-		redisClient,
-		cache.NewProofQueryClientAdapter(queryClients.Proof()),
-		queryClients.Shared(), // For TTL calculation
-		blockTimeSeconds,
-	)
-	if err := proofParamsCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start proof params cache: %w", err)
-	}
-	defer func() { _ = proofParamsCache.Close() }()
-
-	// Create supplier params cache (min_stake, staking_fee)
-	supplierParamsCache := cache.NewRedisSupplierParamCache(
-		logger,
-		redisClient,
-		queryClients.Supplier(),
-		cache.CacheConfig{
-			CachePrefix:      "ha:cache",
-			TTLBlocks:        100, // Supplier params rarely change
-			BlockTimeSeconds: blockTimeSeconds,
-			LockTimeout:      5 * time.Second,
-			PubSubPrefix:     "ha:events:cache",
-		},
-	)
-	if err := supplierParamsCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start supplier params cache: %w", err)
-	}
-	defer func() { _ = supplierParamsCache.Close() }()
-
-	// Create application cache
-	applicationCache := cache.NewApplicationCache(
-		logger,
-		redisClient,
-		cache.NewApplicationQueryClientAdapter(queryClients.Application()),
-	)
-	if err := applicationCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start application cache: %w", err)
-	}
-	defer func() { _ = applicationCache.Close() }()
-
-	// Create service cache
-	serviceCache := cache.NewServiceCache(
-		logger,
-		redisClient,
-		cache.NewServiceQueryClientAdapter(queryClients.Service()),
-	)
-	if err := serviceCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start service cache: %w", err)
-	}
-	defer func() { _ = serviceCache.Close() }()
-
-	// Start supplier cache for pub/sub subscription
-	if err := supplierCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start supplier cache: %w", err)
-	}
-	defer func() { _ = supplierCache.Close() }()
-
-	// Create session cache (placeholder for now - will be implemented separately)
-	var sessionCache cache.SessionCache
-
-	// Create master worker pool for controlled concurrency
-	// IMPORTANT: All concurrent operations will use subpools from this master pool
-	// This prevents goroutine explosion when scaling to 1000+ suppliers
-	// Uses unbounded queue with non-blocking submission like relayer pattern
-	numCPU := runtime.NumCPU()
-	masterPoolSize := numCPU * 8
-	masterPool := pond.NewPool(
-		masterPoolSize,
-		pond.WithQueueSize(pond.Unbounded),
-		pond.WithNonBlocking(true),
-	)
-	defer masterPool.StopAndWait()
-	logger.Info().
-		Int("max_workers", masterPoolSize).
-		Int("num_cpu", numCPU).
-		Msg("created master worker pool (unbounded, non-blocking, 8x CPU)")
-
-	// Create cache orchestrator to coordinate all caches
-	cacheOrchestrator := cache.NewCacheOrchestrator(
-		logger,
-		cache.CacheOrchestratorConfig{
-			KnownApplications: config.KnownApplications,
-		},
-		globalLeader,
-		blockSubscriberAdapter, // Uses WebSocket fan-out for block events
-		redisClient,
-		sharedParamsCache,
-		sessionParamsCache,
-		proofParamsCache,
-		supplierParamsCache,
-		applicationCache,
-		serviceCache,
-		supplierCache,
-		sessionCache,
-		masterPool, // Pass master worker pool for cache refresh subpool
-	)
-
-	if err := cacheOrchestrator.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start cache orchestrator: %w", err)
-	}
-	defer func() { _ = cacheOrchestrator.Close() }()
-	logger.Info().Msg("cache orchestrator started with pond workers")
-
-	// Create BlockPublisher for publishing block events to Redis
-	// This enables distributed cache refresh across all relayer instances
-	// IMPORTANT: Only runs when this instance is the global leader
-	blockPublisher := cache.NewBlockPublisher(
-		logger,
-		blockSubscriber,
-		redisBlockSubscriber,
-	)
-
-	// Register leader election callbacks for dynamic start/stop
-	globalLeader.OnElected(func(ctx context.Context) {
-		logger.Info().Msg("starting block publisher (became leader)")
-		if err := blockPublisher.Start(ctx); err != nil {
-			logger.Error().Err(err).Msg("failed to start block publisher")
-		}
-	})
-
-	globalLeader.OnLost(func(ctx context.Context) {
-		logger.Info().Msg("stopping block publisher (lost leadership)")
-		_ = blockPublisher.Close()
-	})
-
-	// If already leader at startup, start immediately
+	// Determine initial replica status and add to logger context
+	// This status is checked once at startup - callbacks handle dynamic changes
+	replicaStatus := logging.ReplicaStandby
 	if globalLeader.IsLeader() {
-		if err := blockPublisher.Start(ctx); err != nil {
-			// Non-fatal: Log error but don't crash miner - cache refresh can work via polling
-			logger.Error().Err(err).Msg("failed to start block height watcher (degraded mode)")
-		} else {
-			logger.Info().Msg("block height watcher started (initial leader)")
-		}
+		replicaStatus = logging.ReplicaLeader
 	}
+	logger = logging.ForMiner(logger, instanceID, replicaStatus)
+	logger.Info().Msg("miner context initialized")
 
-	// Ensure cleanup on miner shutdown
-	defer func() { _ = blockPublisher.Close() }()
-
-	// Block time already retrieved above for shared params cache
-	logger.Info().Int64("block_time_seconds", blockTimeSeconds).Msg("using configured block time")
-
-	// Start block health monitor if enabled
-	var blockHealthMonitor *miner.BlockHealthMonitor
-	if config.BlockHealthMonitor.Enabled {
-		blockHealthMonitor = miner.NewBlockHealthMonitor(
-			logger,
-			blockSubscriber,
-			globalLeader,
-			miner.BlockHealthMonitorConfig{
-				BlockTimeSeconds:  blockTimeSeconds,
-				SlownessThreshold: config.GetBlockHealthSlownessThreshold(),
-			},
-		)
-		if err := blockHealthMonitor.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start block health monitor: %w", err)
-		}
-		defer func() { _ = blockHealthMonitor.Close() }()
-		logger.Info().Msg("block health monitor started (leader-only)")
-	}
-
-	// Fetch chain ID from the node
-	chainID, err := blockSubscriber.GetChainID(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get chain ID from node: %w", err)
-	}
-	logger.Info().Str("chain_id", chainID).Msg("fetched chain ID from node")
-
-	// Create transaction client for submitting claims and proofs
-	// Reuse the gRPC connection from QueryClients to avoid creating a duplicate connection
-	txClient, err := tx.NewTxClient(
-		logger,
-		keyManager,
-		tx.TxClientConfig{
-			GRPCConn:      queryClients.GRPCConnection(), // Share gRPC connection with QueryClients
-			ChainID:       chainID,
-			GasLimit:      tx.DefaultGasLimit,
-			TimeoutBlocks: tx.DefaultTimeoutHeight,
-		},
-	)
-	if err != nil {
-		return fmt.Errorf("failed to create transaction client: %w", err)
-	}
-	defer func() { _ = txClient.Close() }()
-	logger.Info().Str("grpc_endpoint", config.PocketNode.QueryNodeGRPCUrl).Msg("transaction client initialized")
-
-	// Create cached shared query client for claim/proof timing calculations
-	// IMPORTANT: This prevents blockchain queries during claim/proof submission
-	// The miner calls GetParams() repeatedly when calculating timing windows
-	// Using the cache reduces submission latency and blockchain load
-	cachedSharedClient := cache.NewCachedSharedQueryClient(sharedParamsCache, queryClients.Shared())
-
-	// Create supplier manager
-	supplierManager := miner.NewSupplierManager(
-		logger,
-		keyManager,
-		registry,
-		miner.SupplierManagerConfig{
-			RedisClient:         redisClient,
-			StreamPrefix:        config.Redis.StreamPrefix,
-			ConsumerGroup:       config.Redis.ConsumerGroup,
-			ConsumerName:        config.Redis.ConsumerName,
-			SessionTTL:          config.SessionTTL,
-			CacheTTL:            config.GetCacheTTL(),
-			BatchSize:           config.BatchSize,    // XREADGROUP batch size
-			AckBatchSize:        config.AckBatchSize, // ACK batch size
-			SupplierCache:       supplierCache,
-			MinerID:             config.Redis.ConsumerName,
-			SupplierQueryClient: queryClients.Supplier(),
-			WorkerPool:          masterPool, // Master pool for all concurrent operations
-			// New clients for claim/proof lifecycle management
-			TxClient:      txClient,
-			BlockClient:   blockSubscriber,
-			SharedClient:  cachedSharedClient, // Use cached version for timing calculations
-			SessionClient: queryClients.Session(),
-
-			// Proof requirement checker for probabilistic proof selection
-			ProofChecker: proofChecker,
-
-			// Session lifecycle configuration
-			SessionLifecycleConfig: miner.SessionLifecycleConfig{
-				// CheckInterval defaults to 30s (used as polling fallback if block events unavailable)
-				CheckInterval:            0, // Event-driven mode (uses block events, not polling)
-				ClaimSubmissionBuffer:    config.GetSessionLifecycleClaimBuffer(),
-				ProofSubmissionBuffer:    config.GetSessionLifecycleProofBuffer(),
-				MaxConcurrentTransitions: config.GetSessionLifecycleMaxConcurrentTransitions(),
-				// SupplierAddress will be set per-supplier by SupplierManager
-			},
-		},
-	)
-
-	// Set relay handler
-	supplierManager.SetRelayHandler(func(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error {
-		state, ok := supplierManager.GetSupplierState(supplierAddr)
-		if !ok {
-			return fmt.Errorf("supplier state not found: %s", supplierAddr)
-		}
-
-		// Track discovered apps and services for cache orchestrator
-		if msg.Message.ApplicationAddress != "" {
-			cacheOrchestrator.RecordDiscoveredApp(msg.Message.ApplicationAddress)
-		}
-		if msg.Message.ServiceId != "" {
-			cacheOrchestrator.RecordDiscoveredService(msg.Message.ServiceId)
-		}
-
-		// Update SMST for claim/proof generation (persists to Redis via Commit)
-		if err := state.SMSTManager.UpdateTree(
-			ctx,
-			msg.Message.SessionId,
-			msg.Message.RelayHash,
-			msg.Message.RelayBytes,
-			msg.Message.ComputeUnitsPerRelay,
-		); err != nil {
-			// Check if session is already claimed/sealed
-			if strings.Contains(err.Error(), "already been claimed") {
-				// This is expected for late relays - log and track metric but don't fail
-				logger.Debug().
-					Str("session_id", msg.Message.SessionId).
-					Str("supplier", supplierAddr).
-					Msg("dropping late relay - session already claimed")
-
-				// Track late relay metric for lag detection
-				miner.RecordRelayRejected(supplierAddr, "session_sealed")
-				return nil // ACK the message to remove from stream
-			}
-			// Other errors are unexpected - fail the handler
-			return fmt.Errorf("failed to update SMST: %w", err)
-		}
-
-		// Track relay in session coordinator (creates session if needed, updates relay count)
-		if err := state.SessionCoordinator.OnRelayProcessed(
-			ctx,
-			msg.Message.SessionId,
-			msg.Message.ComputeUnitsPerRelay,
-			msg.Message.SupplierOperatorAddress,
-			msg.Message.ServiceId,
-			msg.Message.ApplicationAddress,
-			msg.Message.SessionStartHeight,
-			msg.Message.SessionEndHeight,
-		); err != nil {
-			return fmt.Errorf("failed to update session coordinator: %w", err)
-		}
-
-		return nil
+	// Start SupplierWorker for ALL miners
+	// This runs BEFORE leader callbacks - every miner claims and processes its share of suppliers.
+	// If there's only 1 miner, it claims all suppliers.
+	// If there are multiple miners, they automatically distribute suppliers via Redis leases.
+	supplierWorker := miner.NewSupplierWorker(miner.SupplierWorkerConfig{
+		Logger:           logger,
+		RedisClient:      redisClient,
+		KeyManager:       keyManager,
+		Config:           config,
+		QueryNodeGRPCUrl: config.PocketNode.QueryNodeGRPCUrl,
+		GRPCInsecure:     config.PocketNode.GRPCInsecure,
+		ChainID:          "", // Will be fetched from blockchain or use default
 	})
 
-	// Register leader election callbacks for dynamic supplier manager start/stop
-	// Leader: Consume streams, build SMST, submit claims/proofs, refresh cache, publish state
-	// Standby: Idle, waiting to become leader (no consumption, no processing)
+	if err = supplierWorker.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start supplier worker: %w", err)
+	}
+	defer func() {
+		if closeErr := supplierWorker.Close(); closeErr != nil {
+			logger.Error().Err(closeErr).Msg("failed to close supplier worker")
+		}
+	}()
+
+	logger.Info().
+		Int("suppliers", len(suppliers)).
+		Msg("SupplierWorker started - claiming suppliers")
+
+	// Create leader controller for leader-only resources (cache refresh + block publishing)
+	// SupplierWorker handles all supplier processing - LeaderController only needs to:
+	// - Refresh caches (shared params, session params, applications, services)
+	// - Publish block events to Redis for all miners to consume
+	leaderController := miner.NewLeaderController(miner.LeaderControllerConfig{
+		Logger:                  logger,
+		RedisClient:             redisClient,
+		KeyManager:              keyManager,
+		Config:                  config,
+		GlobalLeader:            globalLeader,
+		QueryNodeRPCUrl:         config.PocketNode.QueryNodeRPCUrl,
+		QueryNodeGRPCUrl:        config.PocketNode.QueryNodeGRPCUrl,
+		GRPCInsecure:            config.PocketNode.GRPCInsecure,
+		SkipSupplierManager:     true, // SupplierWorker handles supplier processing
+		ExternalSupplierManager: supplierWorker.GetSupplierManager(),
+	})
+
+	// Register leader election callbacks
+	// On elected: Start all leader-only resources
 	globalLeader.OnElected(func(ctx context.Context) {
-		logger.Info().Msg("starting supplier manager (became leader)")
-		if err := supplierManager.Start(ctx); err != nil {
-			logger.Error().Err(err).Msg("FATAL: failed to start supplier manager after gaining leadership - exiting process")
-			// Exit the process to release leadership lock
-			// In K8s HA deployment, another pod can become leader or this pod will restart
-			// NOTE: Kubernetes pod restart count tracks this failure
-			os.Exit(1)
+		logger.Info().Msg("starting leader controller (became leader)")
+		if err = leaderController.Start(ctx); err != nil {
+			logger.Fatal().Err(err).Msg("failed to start leader controller - exiting process")
 		}
 	})
 
+	// On lost: Clean up all resources
 	globalLeader.OnLost(func(ctx context.Context) {
-		logger.Info().Msg("stopping supplier manager (lost leadership)")
-		_ = supplierManager.Close()
+		logger.Info().Msg("stopping leader controller (lost leadership)")
+		if err = leaderController.Close(); err != nil {
+			logger.Fatal().Err(err).Msg("failed to close leader controller")
+		}
 	})
 
-	// If we're already the leader at startup, start immediately
+	// If already a leader at startup, start immediately
 	if globalLeader.IsLeader() {
-		logger.Info().Msg("starting supplier manager (already leader at startup)")
-		if err := supplierManager.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start supplier manager: %w", err)
+		logger.Info().Msg("starting leader controller (already leader at startup)")
+		if err = leaderController.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start leader controller: %w", err)
 		}
 	} else {
-		logger.Info().Msg("supplier manager in standby mode (not leader)")
+		logger.Info().Msg("leader controller in standby mode (not leader)")
 	}
-	defer func() { _ = supplierManager.Close() }()
-
-	// Start a balance monitor (leader-only operation)
-	// Only start if enabled and a threshold is configured
-	if config.GetBalanceMonitorEnabled() || config.GetBalanceMonitorThreshold() > 0 {
-		balanceMonitor := miner.NewBalanceMonitor(
-			logger,
-			miner.BalanceMonitorConfig{
-				CheckInterval:               config.GetBalanceMonitorCheckInterval(),
-				BalanceThresholdUpokt:       config.GetBalanceMonitorThreshold(),
-				StakeWarningProofThreshold:  config.GetBalanceMonitorStakeWarningProofThreshold(),
-				StakeCriticalProofThreshold: config.GetBalanceMonitorStakeCriticalProofThreshold(),
-			},
-			queryClients.Bank(),
-			queryClients.Supplier(),
-			supplierParamsCache, // Use cached params (avoids 1000+ queries per interval)
-			proofParamsCache,    // Use cached proof params for penalty calculation
-			supplierManager,
-			globalLeader,
-		)
-		if err := balanceMonitor.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start balance monitor: %w", err)
+	defer func() {
+		if err = leaderController.Close(); err != nil {
+			logger.Error().Err(err).Msg("failed to close leader controller")
 		}
-		defer func() { _ = balanceMonitor.Close() }()
-		logger.Info().
-			Dur("check_interval", config.GetBalanceMonitorCheckInterval()).
-			Int64("balance_threshold_upokt", config.GetBalanceMonitorThreshold()).
-			Msg("balance monitor started")
-	} else {
-		logger.Info().Msg("balance monitor disabled (enable with balance_monitor.enabled or set balance_threshold_upokt)")
-	}
+	}()
 
 	logger.Info().
-		Int("suppliers", len(supplierManager.ListSuppliers())).
-		Str("consumer_group", config.Redis.ConsumerGroup).
 		Str("consumer_name", config.Redis.ConsumerName).
 		Bool("hot_reload", config.HotReloadEnabled).
 		Msg("HA Miner started")
@@ -721,16 +313,16 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Wait for shutdown signal
+	// Wait for a shutdown signal
 	<-sigCh
 	logger.Info().Msg("shutdown signal received, stopping HA Miner...")
 
-	// Graceful shutdown is handled by defers
+	// Deferring handles graceful shutdown
 	logger.Info().Msg("HA Miner stopped")
 	return nil
 }
 
-// loadMinerConfig loads the miner configuration from file or flags.
+// loadMinerConfig loads the miner configuration from a file or flags.
 func loadMinerConfig(cmd *cobra.Command) (*miner.Config, error) {
 	configPath, _ := cmd.Flags().GetString(flagMinerConfig)
 
@@ -759,7 +351,7 @@ func loadMinerConfig(cmd *cobra.Command) (*miner.Config, error) {
 			if keyringDir == "" {
 				keyringDir = os.ExpandEnv("$HOME/.pocket")
 			}
-			config.Keys.Keyring = &miner.KeyringConfig{
+			config.Keys.Keyring = &configpkg.KeyringConfig{
 				Backend: keyringBackend,
 				Dir:     keyringDir,
 			}
@@ -786,28 +378,16 @@ func loadMinerConfig(cmd *cobra.Command) (*miner.Config, error) {
 // applyFlagOverrides applies command-line flag overrides to the config.
 func applyFlagOverrides(cmd *cobra.Command, config *miner.Config) {
 	if cmd.Flags().Changed(flagRedisURL) {
-		redisURL, _ := cmd.Flags().GetString(flagRedisURL)
-		config.Redis.URL = redisURL
-	}
-	if cmd.Flags().Changed(flagConsumerGroup) {
-		consumerGroup, _ := cmd.Flags().GetString(flagConsumerGroup)
-		config.Redis.ConsumerGroup = consumerGroup
+		config.Redis.URL, _ = cmd.Flags().GetString(flagRedisURL)
 	}
 	if cmd.Flags().Changed(flagConsumerName) {
-		consumerName, _ := cmd.Flags().GetString(flagConsumerName)
-		config.Redis.ConsumerName = consumerName
-	}
-	if cmd.Flags().Changed(flagStreamPrefix) {
-		streamPrefix, _ := cmd.Flags().GetString(flagStreamPrefix)
-		config.Redis.StreamPrefix = streamPrefix
+		config.Redis.ConsumerName, _ = cmd.Flags().GetString(flagConsumerName)
 	}
 	if cmd.Flags().Changed(flagHotReload) {
-		hotReload, _ := cmd.Flags().GetBool(flagHotReload)
-		config.HotReloadEnabled = hotReload
+		config.HotReloadEnabled, _ = cmd.Flags().GetBool(flagHotReload)
 	}
 	if cmd.Flags().Changed(flagSessionTTL) {
-		sessionTTL, _ := cmd.Flags().GetDuration(flagSessionTTL)
-		config.SessionTTL = sessionTTL
+		config.SessionTTL, _ = cmd.Flags().GetDuration(flagSessionTTL)
 	}
 }
 
@@ -863,12 +443,6 @@ func validateMinerConfig(config *miner.Config) error {
 	// Validate Redis configuration
 	if config.Redis.URL == "" {
 		return fmt.Errorf("redis.url is required")
-	}
-	if config.Redis.StreamPrefix == "" {
-		return fmt.Errorf("redis.stream_prefix is required")
-	}
-	if config.Redis.ConsumerGroup == "" {
-		return fmt.Errorf("redis.consumer_group is required")
 	}
 	if config.Redis.ConsumerName == "" {
 		return fmt.Errorf("redis.consumer_name is required")

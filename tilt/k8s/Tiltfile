@@ -1,0 +1,120 @@
+# Tiltfile - Main entry point for Kubernetes development environment
+#
+# This orchestrates the deployment of all pocket-relay-miner components
+# including Redis, Validator, Backend, Relayer, Miner, and optionally PATH.
+#
+# Usage:
+#   tilt up -f tilt/k8s/Tiltfile
+#   # Or from project root:
+#   make tilt-up-k8s
+
+# Disable analytics
+analytics_settings(enable=False)
+
+# Allow Tilt to discover resources in kind cluster
+allow_k8s_contexts('kind-kind')
+
+# Load Tilt extensions
+load("ext://secret", "secret_create_generic")
+
+# Create redis-operator namespace (required for Redis Operator helm chart)
+k8s_yaml(blob("""
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-operator
+"""))
+
+# Load configuration
+load("./config.Tiltfile", "load_config")
+
+# Load deployment functions
+load("./redis.Tiltfile", "deploy_redis")
+load("./validator.Tiltfile", "deploy_validator")
+load("./backend.Tiltfile", "deploy_backend")
+load("./account-init.Tiltfile", "deploy_account_init")
+load("./relayer.Tiltfile", "deploy_relayers")
+load("./miner.Tiltfile", "deploy_miners")
+load("./observability.Tiltfile", "deploy_observability")
+load("./path.Tiltfile", "deploy_path")
+
+# Load config files and secrets
+load("./utils.Tiltfile", "create_all_keys_configmap", "create_genesis_configmap", "create_validator_secrets", "create_supplier_keys_secret")
+
+# ============================================================================
+# Docker Builds
+# ============================================================================
+
+# Build pocket-relay-miner Docker image
+# Ignore non-code files to prevent unnecessary rebuilds
+docker_build(
+    "pocket-relay-miner",
+    context="../..",
+    dockerfile="../../Dockerfile",
+    ignore=[
+        # Version Control
+        ".git/",
+        ".gitignore",
+        ".github/",
+        # IDE & Editors
+        ".idea/",
+        ".vscode/",
+        ".claude/",
+        # Build Artifacts
+        "bin/",
+        "pocket-relay-miner",
+        "coverage.out",
+        "coverage.html",
+        "*.prof",
+        "*.test",
+        # Documentation
+        "*.md",
+        "*.txt",
+        # Tilt & Development
+        ".tilt-tmp/",
+        "tilt_config.yaml",
+        # Backend Server (separate build)
+        "tilt/backend-server/",
+        # Profiling Output
+        "profiles/",
+    ],
+)
+
+# ============================================================================
+# Main Deployment
+# ============================================================================
+
+def main():
+    """Deploy all components based on configuration"""
+
+    # Load and validate configuration
+    config = load_config()
+
+    # Create shared ConfigMaps and Secrets
+    create_genesis_configmap()
+    create_all_keys_configmap()
+    create_validator_secrets()
+    create_supplier_keys_secret()
+
+    # Deploy infrastructure (Tier 1)
+    deploy_redis(config)
+    deploy_validator(config)
+    deploy_backend(config)
+    deploy_observability(config)
+
+    # Deploy account initialization (Tier 2)
+    deploy_account_init(config)
+
+    # Deploy application components (Tier 3)
+    deploy_relayers(config)
+    deploy_miners(config)
+
+    # Deploy optional gateway (Tier 4)
+    deploy_path(config)
+
+    print("=" * 60)
+    print("Pocket RelayMiner K8s environment starting...")
+    print("=" * 60)
+
+# Run main deployment
+main()

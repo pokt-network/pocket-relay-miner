@@ -161,7 +161,7 @@ func (sm *SessionMonitor) checkSessionExpiration() {
 			Int64("session_end_height", sessionEndHeight).
 			Int64("grace_end_height", graceEndHeight).
 			Int64("blocks_over", currentHeight-graceEndHeight).
-			Msg("SESSION EXPIRED - notifying all WebSocket bridges")
+			Msg("session expired - notifying websocket bridges")
 
 		sm.notifyBridges(sessionEndHeight, graceEndHeight, currentHeight)
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"sync"
 	"time"
 
@@ -16,12 +17,6 @@ import (
 )
 
 const (
-	// Redis key prefix for application cache
-	applicationCachePrefix = "ha:cache:application:"
-
-	// Lock key prefix for distributed locking during L3 query
-	applicationLockPrefix = "ha:cache:lock:application:"
-
 	// Cache type for pub/sub and metrics
 	applicationCacheType = "application"
 
@@ -41,7 +36,7 @@ const (
 // across all instances.
 type applicationCache struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	queryClient ApplicationQueryClient
 
 	// L1: In-memory cache (xsync for lock-free performance)
@@ -68,7 +63,7 @@ type ApplicationQueryClient interface {
 // with Close() when no longer needed.
 func NewApplicationCache(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	queryClient ApplicationQueryClient,
 ) KeyedEntityCache[string, *apptypes.Application] {
 	return &applicationCache{
@@ -134,7 +129,7 @@ func (c *applicationCache) Get(ctx context.Context, appAddress string, force ...
 		}
 
 		// L2: Check Redis cache
-		redisKey := applicationCachePrefix + appAddress
+		redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
 		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 		if err == nil {
 			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
@@ -231,7 +226,7 @@ func (c *applicationCache) Set(ctx context.Context, appAddress string, app *appt
 		return fmt.Errorf("failed to marshal application: %w", err)
 	}
 
-	redisKey := applicationCachePrefix + appAddress
+	redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
 	if err := c.redisClient.Set(ctx, redisKey, data, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set Redis cache: %w", err)
 	}
@@ -251,7 +246,7 @@ func (c *applicationCache) Invalidate(ctx context.Context, appAddress string) er
 	c.localCache.Delete(appAddress)
 
 	// Remove from L2 (Redis)
-	redisKey := applicationCachePrefix + appAddress
+	redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
 	if err := c.redisClient.Del(ctx, redisKey).Err(); err != nil {
 		c.logger.Warn().
 			Err(err).
@@ -304,7 +299,7 @@ func (c *applicationCache) InvalidateAll(ctx context.Context) error {
 	// Clear L2 (Redis) - delete all keys with the prefix
 	// Note: This is an expensive operation, consider using a more efficient approach
 	// if there are many applications cached.
-	iter := c.redisClient.Scan(ctx, 0, applicationCachePrefix+"*", 0).Iterator()
+	iter := c.redisClient.Scan(ctx, 0, c.redisClient.KB().CacheKey(applicationCacheType, "*"), 0).Iterator()
 	for iter.Next(ctx) {
 		if err := c.redisClient.Del(ctx, iter.Val()).Err(); err != nil {
 			c.logger.Warn().
@@ -338,7 +333,7 @@ func (c *applicationCache) InvalidateAll(ctx context.Context) error {
 // This is called by the orchestrator's pond worker pool for parallel warmup.
 func (c *applicationCache) warmupSingleApp(ctx context.Context, addr string) error {
 	// Load from Redis (L2) into local cache (L1)
-	redisKey := applicationCachePrefix + addr
+	redisKey := c.redisClient.KB().CacheKey(applicationCacheType, addr)
 	data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 	if err != nil {
 		// Key doesn't exist in Redis, skip
@@ -361,7 +356,7 @@ func (c *applicationCache) warmupSingleApp(ctx context.Context, addr string) err
 // queryChainWithLock queries the chain with distributed locking to prevent
 // duplicate queries from multiple instances.
 func (c *applicationCache) queryChainWithLock(ctx context.Context, appAddress string) (*apptypes.Application, error) {
-	lockKey := applicationLockPrefix + appAddress
+	lockKey := c.redisClient.KB().CacheLockKey(applicationCacheType, appAddress)
 
 	// Try to acquire distributed lock
 	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
@@ -379,7 +374,7 @@ func (c *applicationCache) queryChainWithLock(ctx context.Context, appAddress st
 		time.Sleep(5 * time.Millisecond)
 
 		// Retry L2 after waiting
-		redisKey := applicationCachePrefix + appAddress
+		redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
 		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 		if err == nil {
 			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
@@ -447,7 +442,7 @@ func (c *applicationCache) handleInvalidation(ctx context.Context, payload strin
 	// Applications are needed for relay validation (ring signatures, metering)
 	// so first relay after invalidation should not experience L2/L3 latency
 	if event.Address != "" {
-		redisKey := applicationCachePrefix + event.Address
+		redisKey := c.redisClient.KB().CacheKey(applicationCacheType, event.Address)
 		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 		if err == nil {
 			app := &apptypes.Application{}

@@ -16,6 +16,9 @@ import (
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
+// WebSocket timeout constants for connection keep-alive.
+// These are fixed values for ping/pong health checks and are NOT derived from timeout profiles.
+// WebSocket connections are long-lived and session-based - they don't follow request/response timeout patterns.
 const (
 	// wsWriteWait is the time allowed to write a message to the peer.
 	wsWriteWait = 10 * time.Second
@@ -25,7 +28,98 @@ const (
 
 	// wsPingPeriod is the send pings to peer with this period. Must be less than pongWait.
 	wsPingPeriod = (wsPongWait * 9) / 10
+
+	// defaultWSDialTimeout is the default timeout for establishing WebSocket connection.
+	defaultWSDialTimeout = 10 * time.Second
 )
+
+// RFC 6455 WebSocket Close Codes
+// https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1
+const (
+	CloseNormalClosure           = 1000 // Normal closure; the connection successfully completed
+	CloseGoingAway               = 1001 // Endpoint is going away (e.g., server shutdown, browser navigating away)
+	CloseProtocolError           = 1002 // Protocol error
+	CloseUnsupportedData         = 1003 // Received data type cannot be accepted
+	CloseNoStatusReceived        = 1005 // No status code was provided (reserved, must not be sent)
+	CloseAbnormalClosure         = 1006 // Connection closed abnormally (reserved, must not be sent)
+	CloseInvalidPayload          = 1007 // Received data was inconsistent with message type
+	ClosePolicyViolation         = 1008 // Received message violates policy
+	CloseMessageTooBig           = 1009 // Message too big to process
+	CloseMandatoryExtension      = 1010 // Expected extension was not negotiated
+	CloseInternalError           = 1011 // Server encountered unexpected condition
+	CloseServiceRestart          = 1012 // Server is restarting
+	CloseTryAgainLater           = 1013 // Server is overloaded, try again later
+	CloseBadGateway              = 1014 // Gateway received invalid response from upstream (unofficial)
+	CloseTLSHandshakeFailed      = 1015 // TLS handshake failed (reserved, must not be sent)
+	CloseSessionExpired          = 4000 // Custom: Pocket session expired
+	CloseValidationFailed        = 4001 // Custom: Relay validation failed
+	CloseStakeLimitExceeded      = 4002 // Custom: Application stake limit exceeded
+	CloseBackendConnectionFailed = 4003 // Custom: Failed to connect to backend
+)
+
+// closeCodeName returns a human-readable name for a WebSocket close code.
+func closeCodeName(code int) string {
+	switch code {
+	case CloseNormalClosure:
+		return "NormalClosure"
+	case CloseGoingAway:
+		return "GoingAway"
+	case CloseProtocolError:
+		return "ProtocolError"
+	case CloseUnsupportedData:
+		return "UnsupportedData"
+	case CloseNoStatusReceived:
+		return "NoStatusReceived"
+	case CloseAbnormalClosure:
+		return "AbnormalClosure"
+	case CloseInvalidPayload:
+		return "InvalidPayload"
+	case ClosePolicyViolation:
+		return "PolicyViolation"
+	case CloseMessageTooBig:
+		return "MessageTooBig"
+	case CloseMandatoryExtension:
+		return "MandatoryExtension"
+	case CloseInternalError:
+		return "InternalError"
+	case CloseServiceRestart:
+		return "ServiceRestart"
+	case CloseTryAgainLater:
+		return "TryAgainLater"
+	case CloseBadGateway:
+		return "BadGateway"
+	case CloseTLSHandshakeFailed:
+		return "TLSHandshakeFailed"
+	case CloseSessionExpired:
+		return "SessionExpired"
+	case CloseValidationFailed:
+		return "ValidationFailed"
+	case CloseStakeLimitExceeded:
+		return "StakeLimitExceeded"
+	case CloseBackendConnectionFailed:
+		return "BackendConnectionFailed"
+	default:
+		return "Unknown"
+	}
+}
+
+// wsCloseInitiator identifies who initiated a WebSocket close.
+type wsCloseInitiator string
+
+const (
+	wsCloseInitiatorClient  wsCloseInitiator = "client"  // PATH gateway (upstream)
+	wsCloseInitiatorBackend wsCloseInitiator = "backend" // Backend service (downstream)
+	wsCloseInitiatorRelayer wsCloseInitiator = "relayer" // This relayer (bridge)
+)
+
+// getWSDialTimeout returns the dial timeout for WebSocket connections.
+// Uses the dial_timeout_seconds from the timeout profile if available.
+func getWSDialTimeout(profile *TimeoutProfile) time.Duration {
+	if profile != nil && profile.DialTimeoutSeconds > 0 {
+		return time.Duration(profile.DialTimeoutSeconds) * time.Second
+	}
+	return defaultWSDialTimeout
+}
 
 // wsMessageSource represents the source of a WebSocket message.
 type wsMessageSource string
@@ -87,9 +181,12 @@ var WebSocketUpgrader = websocket.Upgrader{
 	WriteBufferSize: 4096,
 	// Accept connections from any origin for cross-origin support
 	CheckOrigin: func(r *http.Request) bool { return true },
+	// Enable per-message compression (RFC 7692 - permessage-deflate)
+	EnableCompression: true,
 }
 
 // NewWebSocketBridge creates a new WebSocket bridge.
+// The dialTimeout is derived from the service's timeout profile.
 func NewWebSocketBridge(
 	logger logging.Logger,
 	gatewayConn *websocket.Conn,
@@ -104,11 +201,12 @@ func NewWebSocketBridge(
 	sessionMonitor *SessionMonitor,
 	relayPipeline *RelayPipeline,
 	computeUnits uint64,
+	dialTimeout time.Duration,
 ) (*WebSocketBridge, error) {
 	ctx, cancelFn := context.WithCancel(context.Background())
 
-	// Connect to backend WebSocket
-	backendConn, err := connectWebSocketBackend(backendURL, headers)
+	// Connect to backend WebSocket using dial timeout from profile
+	backendConn, err := connectWebSocketBackend(backendURL, headers, dialTimeout)
 	if err != nil {
 		cancelFn()
 		return nil, err
@@ -122,7 +220,7 @@ func NewWebSocketBridge(
 		publisher:        publisher,
 		responseSigner:   responseSigner,
 		relayPipeline:    relayPipeline,
-		msgChan:          make(chan wsMessage, 100),
+		msgChan:          make(chan wsMessage, 2000),
 		serviceID:        serviceID,
 		supplierAddress:  supplierAddress,
 		arrivalHeight:    arrivalHeight,
@@ -141,18 +239,22 @@ func NewWebSocketBridge(
 }
 
 // connectWebSocketBackend establishes a WebSocket connection to the backend.
-func connectWebSocketBackend(backendURL string, headers http.Header) (*websocket.Conn, error) {
+// The dialTimeout is derived from the service's timeout profile.
+func connectWebSocketBackend(backendURL string, headers http.Header, dialTimeout time.Duration) (*websocket.Conn, error) {
 	parsedURL, err := url.Parse(backendURL)
 	if err != nil {
 		return nil, err
 	}
 
+	// Create dialer with compression and timeout from profile
+	dialer := &websocket.Dialer{
+		EnableCompression: true, // Enable per-message compression for backend connections
+		HandshakeTimeout:  dialTimeout,
+	}
+
 	// Use TLS for wss:// scheme
-	var dialer *websocket.Dialer
 	if parsedURL.Scheme == "wss" {
-		dialer = &websocket.Dialer{TLSClientConfig: &tls.Config{}}
-	} else {
-		dialer = websocket.DefaultDialer
+		dialer.TLSClientConfig = &tls.Config{}
 	}
 
 	conn, _, err := dialer.Dial(backendURL, headers)
@@ -216,19 +318,18 @@ func (b *WebSocketBridge) readLoop(conn *websocket.Conn, source wsMessageSource)
 					Msg("readLoop exiting due to shutdown")
 				return
 			default:
-				// Real error - log it
-				if !websocket.IsCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway) {
-					b.logger.Warn().
-						Err(err).
-						Str(logging.FieldSource, string(source)).
-						Msg("websocket read error")
-				}
+				// Parse and log close error details
+				b.logCloseError(err, source)
 			}
-			b.logger.Debug().
-				Str(logging.FieldSource, string(source)).
-				Err(err).
-				Msg("readLoop calling Close() due to read error")
-			_ = b.Close()
+			// Extract close code from peer and propagate it to the other side
+			// This enables proper session rollover signaling (e.g., 4000 SessionExpired from PATH → backend)
+			closeCode, closeText := extractCloseInfo(err)
+			if closeCode == 0 {
+				// Not a close frame - use GoingAway as default
+				closeCode = CloseGoingAway
+				closeText = "peer disconnected"
+			}
+			_ = b.closeWithReason(closeCode, closeText, wsCloseInitiator(source))
 			return
 		}
 
@@ -278,8 +379,18 @@ func (b *WebSocketBridge) pingLoop(conn *websocket.Conn, name string) {
 				b.logger.Debug().
 					Err(err).
 					Str("connection", name).
-					Msg("failed to send ping")
-				_ = b.Close()
+					Msg("ping failed - connection may be dead")
+				// Determine initiator based on which connection failed
+				var initiator wsCloseInitiator
+				switch name {
+				case "gateway":
+					initiator = wsCloseInitiatorClient
+				case "backend":
+					initiator = wsCloseInitiatorBackend
+				default:
+					initiator = wsCloseInitiatorRelayer
+				}
+				_ = b.closeWithReason(CloseGoingAway, "ping timeout", initiator)
 				return
 			}
 		}
@@ -303,17 +414,15 @@ func (b *WebSocketBridge) handleSessionExpiration(sessionEndHeight, graceEndHeig
 		Int64("session_end_height", sessionEndHeight).
 		Int64("grace_end_height", graceEndHeight).
 		Int64("blocks_over", currentHeight-graceEndHeight).
-		Msg("SESSION EXPIRED - closing WebSocket connection")
+		Msg("session expired - closing websocket connection")
 
 	// Send session expiration message to client
 	if err := b.sendSessionExpirationMessage(); err != nil {
 		b.logger.Warn().Err(err).Msg("failed to send session expiration message")
-	} else {
-		b.logger.Info().Msg("session expiration message sent to client")
 	}
 
-	// Close the connection
-	_ = b.Close()
+	// Close the connection with session expired code
+	_ = b.closeWithReason(CloseSessionExpired, "session expired", wsCloseInitiatorRelayer)
 }
 
 // messageLoop processes messages from both connections.
@@ -376,12 +485,12 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 				Err(err).
 				Str("session_id", relayCtx.SessionID).
 				Msg("relay validation failed - closing connection")
-			_ = b.Close()
+			_ = b.closeWithReason(CloseValidationFailed, "relay validation failed", wsCloseInitiatorRelayer)
 			return
 		}
 
 		// Meter relay (check stake before serving)
-		allowed, overServiced, meterErr := b.relayPipeline.MeterRelay(b.ctx, relayCtx)
+		allowed, meterErr := b.relayPipeline.MeterRelay(b.ctx, relayCtx)
 		if meterErr != nil {
 			// Fail-open: log warning but allow relay
 			b.logger.Warn().
@@ -392,16 +501,9 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 			// Stake limit exceeded - reject relay
 			b.logger.Warn().
 				Str("session_id", relayCtx.SessionID).
-				Bool("over_serviced", overServiced).
 				Msg("relay rejected - stake limit exceeded")
-			_ = b.Close()
+			_ = b.closeWithReason(CloseStakeLimitExceeded, "stake limit exceeded", wsCloseInitiatorRelayer)
 			return
-		}
-
-		if overServiced {
-			b.logger.Warn().
-				Str("session_id", relayCtx.SessionID).
-				Msg("relay over-serviced (will be served but not mined)")
 		}
 	}
 
@@ -421,8 +523,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	// The relayer doesn't inspect or care about the payload format (JSON, protobuf, etc.)
 	if err := b.backendConn.WriteMessage(websocket.BinaryMessage, relayReq.Payload); err != nil {
 		b.logger.Warn().Err(err).Msg("failed to forward to backend")
-		b.logger.Debug().Msg("handleGatewayMessage calling Close() - failed to forward to backend")
-		_ = b.Close()
+		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
 		return
 	}
 
@@ -447,9 +548,8 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 		b.logger.Debug().Msg("no latestRequest - forwarding raw to gateway")
 		// No request yet - just forward raw data
 		if err := b.gatewayConn.WriteMessage(msg.messageType, msg.data); err != nil {
-			b.logger.Warn().Err(err).Msg("failed to forward to gateway")
-			b.logger.Debug().Msg("handleBackendMessage calling Close() - failed forward (no request)")
-			_ = b.Close()
+			b.logger.Warn().Err(err).Msg("failed to forward to client (PATH)")
+			_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		}
 		return
 	}
@@ -500,9 +600,8 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	// Forward signed RelayResponse to gateway as BinaryMessage (protobuf format)
 	// Always use BinaryMessage for RelayResponse (protobuf is binary data)
 	if err := b.gatewayConn.WriteMessage(websocket.BinaryMessage, respBytes); err != nil {
-		b.logger.Warn().Err(err).Msg("failed to forward to gateway")
-		b.logger.Debug().Msg("handleBackendMessage calling Close() - failed forward (after signing)")
-		_ = b.Close()
+		b.logger.Warn().Err(err).Msg("failed to forward signed response to client (PATH)")
+		_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		return
 	}
 
@@ -522,7 +621,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 func (b *WebSocketBridge) forwardToBackend(msg wsMessage) {
 	if err := b.backendConn.WriteMessage(msg.messageType, msg.data); err != nil {
 		b.logger.Warn().Err(err).Msg("failed to forward raw message to backend")
-		_ = b.Close()
+		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
 	}
 }
 
@@ -728,8 +827,69 @@ func (b *WebSocketBridge) clearLatestRequest() {
 	b.latestRequest = nil
 }
 
-// Close shuts down the WebSocket bridge.
-func (b *WebSocketBridge) Close() error {
+// logCloseError parses and logs WebSocket close errors with proper RFC 6455 codes.
+func (b *WebSocketBridge) logCloseError(err error, source wsMessageSource) {
+	// Try to extract close code from error
+	closeErr, ok := err.(*websocket.CloseError)
+	if ok {
+		// Log with structured close code info
+		b.logger.Debug().
+			Int("close_code", closeErr.Code).
+			Str("close_code_name", closeCodeName(closeErr.Code)).
+			Str("close_text", closeErr.Text).
+			Str("initiated_by", string(source)).
+			Msg("websocket connection closed by peer")
+		return
+	}
+
+	// Not a close error - log as unexpected error
+	b.logger.Warn().
+		Err(err).
+		Str("initiated_by", string(source)).
+		Msg("websocket read error (not a close frame)")
+}
+
+// extractCloseInfo extracts close code and text from a WebSocket close error.
+// Returns 0 and empty string if the error is not a close error.
+// This is used to propagate close codes bidirectionally through the bridge.
+func extractCloseInfo(err error) (int, string) {
+	closeErr, ok := err.(*websocket.CloseError)
+	if ok {
+		return closeErr.Code, closeErr.Text
+	}
+	return 0, ""
+}
+
+// mapToRFCCloseCode converts custom Pocket close codes to standard RFC 6455 codes.
+// This is used when closing the backend connection - backends don't understand Pocket codes.
+// Pocket codes (4000-4999) are mapped to appropriate RFC codes for clean disconnection.
+func mapToRFCCloseCode(code int) (int, string) {
+	// Standard RFC codes (1000-1015) pass through unchanged
+	if code >= 1000 && code <= 1015 {
+		return code, ""
+	}
+
+	// Map custom Pocket codes to RFC equivalents for backend
+	switch code {
+	case CloseSessionExpired: // 4000 - session ended, clean shutdown
+		return CloseGoingAway, "session ended"
+	case CloseValidationFailed: // 4001 - protocol/validation error
+		return ClosePolicyViolation, "request rejected"
+	case CloseStakeLimitExceeded: // 4002 - rate limiting
+		return CloseTryAgainLater, "rate limited"
+	case CloseBackendConnectionFailed: // 4003 - already a backend issue
+		return CloseInternalError, "connection failed"
+	default:
+		// Unknown custom code - use generic going away
+		return CloseGoingAway, "connection closing"
+	}
+}
+
+// closeWithReason closes the bridge with a specific close code and reason.
+// Close codes are handled differently for each connection:
+// - Gateway (PATH): Receives the original code (including custom Pocket codes like 4000)
+// - Backend: Receives RFC 6455 standard codes only (custom codes are mapped)
+func (b *WebSocketBridge) closeWithReason(code int, reason string, initiator wsCloseInitiator) error {
 	if !b.closed.CompareAndSwap(false, true) {
 		return nil // Already closed
 	}
@@ -745,24 +905,30 @@ func (b *WebSocketBridge) Close() error {
 	// Log final stats for this connection
 	relayCount := b.relayCount.Load()
 	b.logger.Debug().
+		Int("close_code", code).
+		Str("close_code_name", closeCodeName(code)).
+		Str("close_reason", reason).
+		Str("initiated_by", string(initiator)).
 		Uint64("relays_emitted", relayCount).
-		Msg("Close() called")
-	if relayCount > 0 {
-		b.logger.Info().
-			Uint64("relays_emitted", relayCount).
-			Msg("websocket bridge closing with relays emitted")
-	}
+		Msg("websocket bridge closing")
 
 	b.cancelFn()
 
-	// Send close messages (best-effort, errors are logged but not propagated)
-	closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "bridge closing")
 	deadline := time.Now().Add(wsWriteWait)
 
-	if err := b.gatewayConn.WriteControl(websocket.CloseMessage, closeMsg, deadline); err != nil {
-		b.logger.Debug().Err(err).Msg("failed to send close to gateway")
+	// Send close to gateway (PATH) with original code - PATH understands Pocket codes
+	gatewayCloseMsg := websocket.FormatCloseMessage(code, reason)
+	if err := b.gatewayConn.WriteControl(websocket.CloseMessage, gatewayCloseMsg, deadline); err != nil {
+		b.logger.Debug().Err(err).Msg("failed to send close to client (PATH)")
 	}
-	if err := b.backendConn.WriteControl(websocket.CloseMessage, closeMsg, deadline); err != nil {
+
+	// Send close to backend with RFC-compliant code - backends don't understand Pocket codes
+	backendCode, backendReason := mapToRFCCloseCode(code)
+	if backendReason == "" {
+		backendReason = reason // Use original reason if no mapping override
+	}
+	backendCloseMsg := websocket.FormatCloseMessage(backendCode, backendReason)
+	if err := b.backendConn.WriteControl(websocket.CloseMessage, backendCloseMsg, deadline); err != nil {
 		b.logger.Debug().Err(err).Msg("failed to send close to backend")
 	}
 
@@ -774,6 +940,11 @@ func (b *WebSocketBridge) Close() error {
 
 	b.logger.Debug().Msg("websocket bridge closed")
 	return nil
+}
+
+// Close shuts down the WebSocket bridge with normal closure.
+func (b *WebSocketBridge) Close() error {
+	return b.closeWithReason(CloseNormalClosure, "bridge closing", wsCloseInitiatorRelayer)
 }
 
 // WebSocketHandler returns an HTTP handler for WebSocket upgrades.
@@ -791,6 +962,9 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			p.sendError(w, http.StatusNotFound, "unknown service")
 			return
 		}
+
+		// Log handshake headers for debugging (new WebSocket handshake validation protocol)
+		p.logHandshakeHeaders(r, serviceID)
 
 		// Upgrade HTTP connection to WebSocket
 		gatewayConn, err := WebSocketUpgrader.Upgrade(w, r, nil)
@@ -816,11 +990,19 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			headers.Set(k, v)
 		}
 
+		// Add Pocket context headers for backend visibility
+		headers.Set(HeaderPocketSupplier, p.supplierAddress)
+		headers.Set(HeaderPocketService, serviceID)
+		// Note: Application address is not known until first relay request arrives on the WebSocket
+
 		arrivalHeight := p.currentBlockHeight.Load()
 
 		// TODO: Get actual compute units from service config or relay processor
 		// For now, use default value of 1 (will be refined in future PR)
 		computeUnits := uint64(1)
+
+		// Get dial timeout from service's timeout profile
+		dialTimeout := getWSDialTimeout(p.config.GetServiceTimeoutProfile(serviceID))
 
 		// Create and run bridge
 		// Session end height will be set when the first relay request arrives
@@ -838,6 +1020,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			p.sessionMonitor, // Global session monitor (shared across all connections)
 			p.relayPipeline,  // Unified relay pipeline for validation/metering/signing
 			computeUnits,
+			dialTimeout, // Dial timeout from service's timeout profile
 		)
 		if err != nil {
 			p.logger.Warn().Err(err).Msg("failed to create websocket bridge")
@@ -853,4 +1036,57 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 // IsWebSocketUpgrade checks if the request is a WebSocket upgrade request.
 func IsWebSocketUpgrade(r *http.Request) bool {
 	return websocket.IsWebSocketUpgrade(r)
+}
+
+// WebSocket handshake header constants (matching PATH's request/parser.go)
+const (
+	// Headers sent by PATH during WebSocket handshake for validation
+	HeaderPocketSessionID          = "Pocket-Session-Id"
+	HeaderPocketSessionStartHeight = "Pocket-Session-Start-Height"
+	HeaderPocketSessionEndHeight   = "Pocket-Session-End-Height"
+	HeaderPocketSupplierAddress    = "Pocket-Supplier-Address"
+	HeaderPocketSignature          = "Pocket-Signature"
+	HeaderPocketAppAddress         = "App-Address"
+	HeaderTargetServiceID          = "Target-Service-Id"
+	HeaderRpcType                  = "Rpc-Type"
+)
+
+// logHandshakeHeaders logs WebSocket handshake headers for debugging.
+// These headers are part of the WebSocket handshake validation protocol.
+func (p *ProxyServer) logHandshakeHeaders(r *http.Request, serviceID string) {
+	// Extract handshake headers
+	sessionID := r.Header.Get(HeaderPocketSessionID)
+	sessionStartHeight := r.Header.Get(HeaderPocketSessionStartHeight)
+	sessionEndHeight := r.Header.Get(HeaderPocketSessionEndHeight)
+	supplierAddress := r.Header.Get(HeaderPocketSupplierAddress)
+	appAddress := r.Header.Get(HeaderPocketAppAddress)
+	signature := r.Header.Get(HeaderPocketSignature)
+	rpcType := r.Header.Get(HeaderRpcType)
+
+	// Check if we have the new handshake headers (v2 protocol)
+	hasNewHeaders := sessionID != "" || supplierAddress != "" || signature != ""
+
+	logEvent := p.logger.Info().
+		Str(logging.FieldServiceID, serviceID).
+		Str("remote_addr", r.RemoteAddr)
+
+	if hasNewHeaders {
+		// Log full handshake details for v2 protocol
+		logEvent.
+			Str("session_id", sessionID).
+			Str("session_start_height", sessionStartHeight).
+			Str("session_end_height", sessionEndHeight).
+			Str("supplier_address", supplierAddress).
+			Str("app_address", appAddress).
+			Str("rpc_type", rpcType).
+			Bool("has_signature", signature != "").
+			Int("signature_length", len(signature)).
+			Msg("websocket handshake received (v2 protocol with validation headers)")
+	} else {
+		// Log minimal info for legacy connections (no new headers)
+		logEvent.
+			Str("app_address", appAddress).
+			Str("rpc_type", rpcType).
+			Msg("websocket handshake received (legacy - no validation headers)")
+	}
 }

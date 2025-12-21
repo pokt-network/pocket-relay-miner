@@ -4,29 +4,42 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"runtime"
 	"sync"
+	"sync/atomic"
 	"time"
-
-	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 )
 
+const (
+	blockSubscriberComponentName = "block_subscriber"
+)
+
 var _ BlockHeightSubscriber = (*RedisBlockSubscriber)(nil)
+
+// subscriberInfo holds metadata about a subscriber for debugging.
+type subscriberInfo struct {
+	id         uint64
+	ch         chan BlockEvent
+	callerFunc string // Function that created the subscriber
+	callerFile string // File that created the subscriber
+	callerLine int    // Line that created the subscriber
+}
 
 // RedisBlockSubscriber implements BlockHeightSubscriber using Redis Pub/Sub.
 // It allows multiple Relayer instances to stay synchronized on the current block height.
 type RedisBlockSubscriber struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	blockClient client.BlockClient
-	config      CacheConfig
 
-	// Subscribers
-	subscribers   []chan BlockEvent
+	// Subscribers with metadata for debugging
+	subscribers   map[uint64]*subscriberInfo
 	subscribersMu sync.RWMutex
+	nextSubID     atomic.Uint64
 
 	// Current block height (cached locally)
 	currentHeight int64
@@ -40,21 +53,17 @@ type RedisBlockSubscriber struct {
 }
 
 // NewRedisBlockSubscriber creates a new BlockHeightSubscriber backed by Redis Pub/Sub.
+// Uses the Redis client wrapper with KeyBuilder for namespace-aware channel names.
 func NewRedisBlockSubscriber(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	blockClient client.BlockClient,
-	config CacheConfig,
 ) *RedisBlockSubscriber {
-	if config.PubSubPrefix == "" {
-		config.PubSubPrefix = "ha:events"
-	}
-
 	return &RedisBlockSubscriber{
 		logger:      logging.ForComponent(logger, logging.ComponentBlockSubscriber),
 		redisClient: redisClient,
 		blockClient: blockClient,
-		config:      config,
+		subscribers: make(map[uint64]*subscriberInfo),
 	}
 }
 
@@ -69,7 +78,7 @@ func (s *RedisBlockSubscriber) Start(ctx context.Context) error {
 	ctx, s.cancelFn = context.WithCancel(ctx)
 	s.mu.Unlock()
 
-	// Initialize current height from block client
+	// Initialize the current height from a block client
 	if s.blockClient != nil {
 		lastBlock := s.blockClient.LastBlock(ctx)
 		s.heightMu.Lock()
@@ -93,7 +102,7 @@ func (s *RedisBlockSubscriber) subscribeLoop(ctx context.Context) {
 
 	reconnectLoop := redisutil.NewReconnectionLoop(
 		s.logger,
-		"block_subscriber",
+		blockSubscriberComponentName,
 		// connectFn: Test Redis connection
 		func(ctx context.Context) error {
 			return s.redisClient.Ping(ctx).Err()
@@ -110,9 +119,13 @@ func (s *RedisBlockSubscriber) subscribeLoop(ctx context.Context) {
 // runBlockPubSubLoop runs the pub/sub listener for block events until disconnect.
 // Returns error to trigger reconnection via the reconnection loop.
 func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
-	channel := s.config.PubSubPrefix + ":block"
+	channel := s.redisClient.KB().BlockEventChannel()
 	pubsub := s.redisClient.Subscribe(ctx, channel)
-	defer func() { _ = pubsub.Close() }()
+	defer func() {
+		if err := pubsub.Close(); err != nil {
+			s.logger.Error().Err(err).Msg("failed to close pubsub channel")
+		}
+	}()
 
 	// Verify subscription
 	if _, err := pubsub.Receive(ctx); err != nil {
@@ -126,14 +139,14 @@ func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case msg := <-pubsub.Channel():
-			// Check if msg is nil (channel closed - Redis disconnected)
+			// Check if msg is nil (pubsub channel is closed = Redis disconnected)
 			if msg == nil {
 				return fmt.Errorf("pub/sub channel closed")
 			}
 
 			var event BlockEvent
 			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-				s.logger.Warn().Err(err).Str("payload", msg.Payload).Msg("invalid block event")
+				s.logger.Error().Err(err).Str("payload", msg.Payload).Msg("invalid block event")
 				continue
 			}
 
@@ -144,7 +157,7 @@ func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
 
 // handleBlockEvent processes a received block event.
 func (s *RedisBlockSubscriber) handleBlockEvent(event BlockEvent) {
-	// Update current height
+	// Update the current height
 	s.heightMu.Lock()
 	if event.Height > s.currentHeight {
 		s.currentHeight = event.Height
@@ -158,44 +171,81 @@ func (s *RedisBlockSubscriber) handleBlockEvent(event BlockEvent) {
 	s.subscribersMu.RLock()
 	defer s.subscribersMu.RUnlock()
 
-	for _, ch := range s.subscribers {
+	for _, info := range s.subscribers {
 		select {
-		case ch <- event:
+		case info.ch <- event:
 		default:
 			// Channel full, skip (subscriber is slow)
-			s.logger.Warn().Int64("height", event.Height).Msg("subscriber channel full, dropping event")
+			s.logger.Error().
+				Uint64("subscriber_id", info.id).
+				Int64("height", event.Height).
+				Str("caller_func", info.callerFunc).
+				Str("caller_file", info.callerFile).
+				Int("caller_line", info.callerLine).
+				Msg("subscriber channel full, dropping event")
 		}
 	}
 }
 
 // Subscribe returns a channel that receives new block heights.
 func (s *RedisBlockSubscriber) Subscribe(ctx context.Context) <-chan BlockEvent {
-	ch := make(chan BlockEvent, 10)
+	// Capture caller info for debugging
+	_, file, line, _ := runtime.Caller(1)
+	pc, _, _, _ := runtime.Caller(1)
+	callerFunc := "unknown"
+	if fn := runtime.FuncForPC(pc); fn != nil {
+		callerFunc = fn.Name()
+	}
 
 	s.subscribersMu.Lock()
-	s.subscribers = append(s.subscribers, ch)
-	s.subscribersMu.Unlock()
+	defer s.subscribersMu.Unlock()
 
-	// Clean up when context is cancelled
+	// Generate unique subscriber ID
+	subID := s.nextSubID.Add(1)
+
+	// Create a buffered channel (2000 blocks handles any reasonable backlog)
+	ch := make(chan BlockEvent, 2000)
+
+	// Store subscriber info
+	info := &subscriberInfo{
+		id:         subID,
+		ch:         ch,
+		callerFunc: callerFunc,
+		callerFile: file,
+		callerLine: line,
+	}
+	s.subscribers[subID] = info
+
+	// Auto-cleanup on context cancellation
 	go func() {
 		<-ctx.Done()
-		s.unsubscribe(ch)
+		s.unsubscribe(subID)
 	}()
+
+	s.logger.Debug().
+		Uint64("subscriber_id", subID).
+		Str("caller_func", callerFunc).
+		Str("caller_file", file).
+		Int("caller_line", line).
+		Msg("new block subscriber registered")
 
 	return ch
 }
 
 // unsubscribe removes a subscriber channel.
-func (s *RedisBlockSubscriber) unsubscribe(ch chan BlockEvent) {
+func (s *RedisBlockSubscriber) unsubscribe(subID uint64) {
 	s.subscribersMu.Lock()
 	defer s.subscribersMu.Unlock()
 
-	for i, sub := range s.subscribers {
-		if sub == ch {
-			s.subscribers = append(s.subscribers[:i], s.subscribers[i+1:]...)
-			close(ch)
-			break
-		}
+	if info, exists := s.subscribers[subID]; exists {
+		close(info.ch)
+		delete(s.subscribers, subID)
+		s.logger.Debug().
+			Uint64("subscriber_id", subID).
+			Str("caller_func", info.callerFunc).
+			Str("caller_file", info.callerFile).
+			Int("caller_line", info.callerLine).
+			Msg("block subscriber unregistered")
 	}
 }
 
@@ -208,19 +258,19 @@ func (s *RedisBlockSubscriber) PublishBlockHeight(ctx context.Context, event Blo
 	}
 	s.mu.RUnlock()
 
-	// Set timestamp if not set
+	// Set the timestamp if not set
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
 
-	channel := s.config.PubSubPrefix + ":block"
+	channel := s.redisClient.KB().BlockEventChannel()
 
 	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal block event: %w", err)
 	}
 
-	if err := s.redisClient.Publish(ctx, channel, data).Err(); err != nil {
+	if err = s.redisClient.Publish(ctx, channel, data).Err(); err != nil {
 		return fmt.Errorf("failed to publish block event: %w", err)
 	}
 
@@ -254,8 +304,8 @@ func (s *RedisBlockSubscriber) Close() error {
 
 	// Close all subscriber channels
 	s.subscribersMu.Lock()
-	for _, ch := range s.subscribers {
-		close(ch)
+	for _, info := range s.subscribers {
+		close(info.ch)
 	}
 	s.subscribers = nil
 	s.subscribersMu.Unlock()
@@ -263,166 +313,5 @@ func (s *RedisBlockSubscriber) Close() error {
 	s.wg.Wait()
 
 	s.logger.Info().Msg("block subscriber closed")
-	return nil
-}
-
-// BlockPublisher watches the blockchain for new blocks and publishes events.
-// This should run on a single instance (leader) to avoid duplicate events.
-type BlockPublisher struct {
-	logger      logging.Logger
-	blockClient client.BlockClient
-	subscriber  *RedisBlockSubscriber
-
-	mu       sync.Mutex
-	closed   bool
-	cancelFn context.CancelFunc
-	wg       sync.WaitGroup
-}
-
-// NewBlockPublisher creates a new watcher that publishes block events.
-func NewBlockPublisher(
-	logger logging.Logger,
-	blockClient client.BlockClient,
-	subscriber *RedisBlockSubscriber,
-) *BlockPublisher {
-	return &BlockPublisher{
-		logger:      logger.With().Str("component", "block_publisher").Logger(),
-		blockClient: blockClient,
-		subscriber:  subscriber,
-	}
-}
-
-// Start begins watching for new blocks and publishing events.
-func (w *BlockPublisher) Start(ctx context.Context) error {
-	w.mu.Lock()
-	if w.closed {
-		w.mu.Unlock()
-		return fmt.Errorf("watcher is closed")
-	}
-
-	ctx, w.cancelFn = context.WithCancel(ctx)
-	w.mu.Unlock()
-
-	w.wg.Add(1)
-	go w.watchLoop(ctx)
-
-	w.logger.Info().Msg("block publisher started")
-	return nil
-}
-
-// BlockEventsProvider is an optional interface for event-driven block clients.
-type BlockEventsProvider interface {
-	BlockEvents() <-chan client.Block
-}
-
-// watchLoop watches for new blocks and publishes events.
-// Uses event-driven notifications via Subscribe() method.
-func (w *BlockPublisher) watchLoop(ctx context.Context) {
-	defer w.wg.Done()
-
-	// Check if block client supports Subscribe() method for fan-out
-	if subscriber, ok := w.blockClient.(interface {
-		Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
-	}); ok {
-		w.logger.Info().Msg("using event-driven block notifications (Subscribe)")
-		w.watchLoopEventDriven(ctx, subscriber)
-	} else {
-		w.logger.Warn().Msg("block client does not support Subscribe(), falling back to polling")
-		w.watchLoopPolling(ctx)
-	}
-}
-
-// watchLoopEventDriven uses block events for immediate cache refresh triggers.
-func (w *BlockPublisher) watchLoopEventDriven(ctx context.Context, subscriber interface {
-	Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
-}) {
-	// Subscribe to block events with 100-block buffer for publishing to Redis
-	blockCh := subscriber.Subscribe(ctx, 100)
-	w.logger.Info().Msg("using Subscribe() for block events (fan-out mode)")
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-
-		case block, ok := <-blockCh:
-			if !ok {
-				// Channel closed, block client shut down
-				w.logger.Warn().Msg("block events channel closed")
-				return
-			}
-
-			event := BlockEvent{
-				Height:    block.Height(),
-				Hash:      block.Hash(),
-				Timestamp: time.Now(),
-			}
-
-			if err := w.subscriber.PublishBlockHeight(ctx, event); err != nil {
-				w.logger.Error().
-					Err(err).
-					Int64("height", event.Height).
-					Msg("failed to publish block event")
-			}
-		}
-	}
-}
-
-// watchLoopPolling polls for new blocks as a fallback.
-func (w *BlockPublisher) watchLoopPolling(ctx context.Context) {
-	lastHeight := w.blockClient.LastBlock(ctx).Height()
-
-	ticker := time.NewTicker(time.Second) // Poll every second
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			currentBlock := w.blockClient.LastBlock(ctx)
-			currentHeight := currentBlock.Height()
-
-			if currentHeight > lastHeight {
-				// New block(s) - publish events for each
-				for h := lastHeight + 1; h <= currentHeight; h++ {
-					event := BlockEvent{
-						Height:    h,
-						Timestamp: time.Now(),
-					}
-
-					if h == currentHeight {
-						event.Hash = currentBlock.Hash()
-					}
-
-					if err := w.subscriber.PublishBlockHeight(ctx, event); err != nil {
-						w.logger.Error().Err(err).Int64("height", h).Msg("failed to publish block event")
-					}
-				}
-
-				lastHeight = currentHeight
-			}
-		}
-	}
-}
-
-// Close gracefully shuts down the watcher.
-func (w *BlockPublisher) Close() error {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-
-	if w.closed {
-		return nil
-	}
-
-	w.closed = true
-
-	if w.cancelFn != nil {
-		w.cancelFn()
-	}
-
-	w.wg.Wait()
-
-	w.logger.Info().Msg("block height watcher closed")
 	return nil
 }

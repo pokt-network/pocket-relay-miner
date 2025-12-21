@@ -289,6 +289,18 @@ histogram_quantile(0.99,
 
 ## Development Workflow
 
+### Tilt Development Environment
+
+**IMPORTANT**: This project uses [Tilt](https://tilt.dev/) for local development with Kubernetes.
+
+- **No manual port-forwards needed** - Tilt handles all service exposure automatically
+- **No manual builds needed** - Tilt watches for file changes and rebuilds automatically
+- **No manual pod deletion** - Tilt automatically restarts pods after rebuilds
+- **PATH gateway accessible** at `localhost:3069` (services: develop-http, develop-websocket, develop-grpc, develop-stream)
+- **Test scripts** in `scripts/` folder are the primary source for running tests
+- Use `tilt up` to start the development environment
+- Use `tilt down` to stop and clean up
+
 ### Before Making Changes
 
 1. **Read the code** - Don't assume, verify

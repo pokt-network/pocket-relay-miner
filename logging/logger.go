@@ -146,7 +146,7 @@ func NewLoggerFromConfig(config Config) Logger {
 	}
 
 	// Create base logger
-	ctx := zerolog.New(output).Level(level).With().Timestamp()
+	ctx := zerolog.New(output).Level(level).With().Caller().Timestamp()
 	if config.EnableCaller {
 		ctx = ctx.Caller()
 	}
@@ -236,4 +236,25 @@ func ForServiceComponent(logger Logger, component, serviceID string) Logger {
 // ForSessionOperation returns a logger configured for session-specific operations.
 func ForSessionOperation(logger Logger, sessionID string) Logger {
 	return WithSession(logger, sessionID)
+}
+
+// WithMinerID returns a logger with the miner_id field set.
+// This should be called early in miner startup to set the context for all logs.
+func WithMinerID(logger Logger, minerID string) Logger {
+	return logger.With().Str(FieldMinerID, minerID).Logger()
+}
+
+// WithReplica returns a logger with the replica role field set.
+// Use ReplicaLeader or ReplicaStandby constants.
+func WithReplica(logger Logger, role string) Logger {
+	return logger.With().Str(FieldReplica, role).Logger()
+}
+
+// ForMiner returns a logger configured with miner_id and replica role.
+// This is the preferred way to create the top-level miner logger.
+func ForMiner(logger Logger, minerID, replica string) Logger {
+	return logger.With().
+		Str(FieldMinerID, minerID).
+		Str(FieldReplica, replica).
+		Logger()
 }

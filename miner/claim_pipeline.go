@@ -144,7 +144,7 @@ func NewClaimPipeline(
 		sharedClient:  sharedClient,
 		blockClient:   blockClient,
 		smstFlusher:   smstFlusher,
-		claimQueue:    make(chan *ClaimRequest, 1000),
+		claimQueue:    make(chan *ClaimRequest, 2000),
 		pendingClaims: make([]*ClaimRequest, 0, config.MaxClaimsPerBatch),
 	}
 }

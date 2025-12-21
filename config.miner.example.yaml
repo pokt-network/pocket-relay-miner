@@ -1,5 +1,6 @@
 # Pocket RelayMiner Miner Configuration Example
-# Copy this file to config.yaml and customize for your deployment
+# This file uses LOCALNET defaults - ready for local development with Tilt.
+# For PRODUCTION, see comments marked [PRODUCTION] for recommended values.
 #
 # This is the MINER component (stateful claim/proof submitter with leader election).
 # For the RELAYER component, see config.relayer.example.yaml
@@ -10,35 +11,69 @@
 redis:
   # Redis connection URL (supports single node, sentinel, cluster)
   url: "redis://localhost:6379"
-  # url: "redis://user:password@localhost:6379/0"  # With auth
-  # url: "redis://node1:6379,node2:6379,node3:6379"  # Cluster
+  # [PRODUCTION] url: "redis://user:password@redis-host:6379/0"
+  # [PRODUCTION] url: "redis-sentinel://sentinel1:26379,sentinel2:26379/mymaster?db=0"
 
-  # Stream configuration
-  stream_prefix: "ha:relays"  # Prefix for Redis stream keys
-  consumer_group: "ha-miners"  # Consumer group (all miner instances should use same group)
-  consumer_name: ""  # Auto-generated from hostname if not set
+  # Consumer name (auto-generated from hostname if not set)
+  consumer_name: ""
 
   # Timeouts
-  block_timeout_ms: 5000  # XREADGROUP blocking timeout (5 seconds)
+  # Note: XREADGROUP uses BLOCK 0 (TRUE PUSH) for live consumption - not configurable
   claim_idle_timeout_ms: 60000  # Reclaim idle messages after 60s (crashed consumer recovery)
 
-  # Connection pool settings (2x go-redis defaults for production)
-  # Omit these to use defaults (auto-calculated based on CPU cores)
-  # pool_size: 320                   # Max connections (default: 20 × runtime.GOMAXPROCS)
-  # min_idle_conns: 80               # Warm idle connections (default: pool_size / 4)
+  # Connection pool settings
+  # Pool size must accommodate blocked + non-blocked connections:
+  #
+  # BLOCKED (held indefinitely):
+  #   - 1 per supplier: XREADGROUP BLOCK 0 (stream consumption)
+  #   - 1: Block event pub/sub
+  #   - 2-3: Cache invalidation pub/sub
+  #   - 1: Supplier registry pub/sub
+  #
+  # NON-BLOCKED (share pool, fast release):
+  #   - SMST operations, ACK batches, session store, cache, leader heartbeat
+  #
+  # Formula: pool_size = numSuppliers + 20 overhead
+  #   - 1 supplier:   1 + 20 = 21 connections
+  #   - 10 suppliers: 10 + 20 = 30 connections
+  #   - 100 suppliers: 100 + 20 = 120 connections
+  #
+  # Default: 50 (handles up to ~30 suppliers)
+  # pool_size: 50
+  # min_idle_conns: 10               # Warm idle connections
   # pool_timeout_seconds: 4          # Wait time for connection from pool
   # conn_max_idle_time_seconds: 300  # Close idle connections after 5 minutes
+
+  # Namespace configuration (optional - defaults match historical "ha:" prefix structure)
+  # All Redis key prefixes are derived from this config.
+  # Must match between miner and relayer for proper operation.
+  # namespace:
+  #   base_prefix: "ha"                # Root prefix for all keys (default: "ha")
+  #   cache_prefix: "cache"            # Cache data: ha:cache:* (default: "cache")
+  #   events_prefix: "events"          # Pub/sub channels: ha:events:* (default: "events")
+  #   streams_prefix: "relays"         # Relay streams: ha:relays:* (default: "relays")
+  #   miner_prefix: "miner"            # Miner state: ha:miner:* (default: "miner")
+  #   supplier_prefix: "supplier"      # Supplier data: ha:supplier:* (default: "supplier")
+  #   meter_prefix: "meter"            # Metering data: ha:meter:* (default: "meter")
+  #   params_prefix: "params"          # Cached params: ha:params:* (default: "params")
+  #   consumer_group_prefix: "miners"  # Consumer group: ha-miners (default: "miners")
 
 # ==============================================================================
 # Pocket Blockchain Connection (REQUIRED)
 # ==============================================================================
 pocket_node:
-  # Query node endpoints
-  query_node_rpc_url: "https://rpc.testnet.pokt.network"  # RPC for queries, blocks, and TX submission
-  query_node_grpc_url: "grpc.testnet.pokt.network:443"  # gRPC for queries
+  # Query node endpoints (localnet defaults)
+  query_node_rpc_url: "http://localhost:26657"  # RPC for queries, blocks, and TX submission
+  query_node_grpc_url: "localhost:9090"  # gRPC for queries
+  # [PRODUCTION] query_node_rpc_url: "https://rpc.testnet.pokt.network"
+  # [PRODUCTION] query_node_grpc_url: "grpc.testnet.pokt.network:443"
 
   # gRPC settings
-  grpc_insecure: false  # Disable TLS for gRPC (use true for local development only)
+  grpc_insecure: true  # Disable TLS for gRPC (localnet)
+  # [PRODUCTION] grpc_insecure: false
+
+  # Query timeout
+  query_timeout_seconds: 5  # Timeout for blockchain queries (default: 5s)
 
 # ==============================================================================
 # Supplier Keys Configuration (REQUIRED)
@@ -74,12 +109,13 @@ keys:
 # ==============================================================================
 # Block Time Configuration (Feature 1)
 # ==============================================================================
-block_time_seconds: 30  # Expected block time (PRODUCTION: 30s for mainnet/testnet)
+block_time_seconds: 10  # Expected block time (localnet uses faster blocks)
+# [PRODUCTION] block_time_seconds: 30  # Mainnet/testnet use 30s blocks
 
 # Block health monitoring
 block_health_monitor:
   enabled: true  # Monitor for slow blocks (fullnode lag/network issues)
-  slowness_threshold: 1.5  # Alert if blocks > 1.5× configured time (e.g., >45s for 30s blocks)
+  slowness_threshold: 1.5  # Alert if blocks > 1.5× configured time (e.g., >15s for 10s blocks)
 
 # ==============================================================================
 # Balance and Stake Monitoring (Feature 4)
@@ -112,8 +148,8 @@ balance_monitor:
   #   - Buffer: 500,000,000 upokt = 500 million missed proofs (very safe)
   #   - You'd get WARNING when buffer drops below 1000 missed proofs
   #   - You'd get CRITICAL when buffer drops below 100 missed proofs
-  stake_warning_proof_threshold: 1000   # Warn when < 1000 missed proofs remaining
-  stake_critical_proof_threshold: 100   # Critical when < 100 missed proofs remaining
+  stake_warning_proof_threshold: 10   # Warn when < 10 missed proofs remaining
+  stake_critical_proof_threshold: 3    # Critical when < 3 missed proofs remaining
 
 # ==============================================================================
 # Session Lifecycle Configuration (Features 2, 3, 5)
@@ -147,6 +183,34 @@ leader_election:
   heartbeat_rate_seconds: 10  # Attempt acquire/renew every 10s
 
 # ==============================================================================
+# Supplier Claiming (HA Multi-Miner) - Automatic, No Configuration Needed
+# ==============================================================================
+# Suppliers are automatically distributed across miner replicas using Redis leases.
+# - Single miner: Claims all configured suppliers
+# - Multiple miners: Fair distribution with automatic rebalancing
+#
+# How it works:
+#   1. Each miner claims suppliers via Redis SET NX with TTL (30s)
+#   2. Miners register in an "active" set with heartbeat (every 10s)
+#   3. Fair share is calculated: ceil(totalSuppliers / activeMiners)
+#   4. Rebalancing releases excess claims when new miners join (every 30s)
+#   5. If a miner crashes, its claims expire after 30s
+#
+# Example with 3 miners and 9 suppliers:
+#   - Fair share = ceil(9/3) = 3 suppliers per miner
+#   - Each miner claims up to 3 suppliers
+#   - If miner-1 crashes, miner-2 and miner-3 claim its 3 suppliers
+#
+# Timing values are HARDCODED (not configurable) to ensure production reliability:
+#   - ClaimTTL: 30s (time before claim expires)
+#   - RenewRate: 10s (claims renewed 3x before expiry)
+#   - InstanceTTL: 30s (miner registration TTL)
+#   - RebalanceInterval: 30s (redistribution check interval)
+#   - Maximum failover time: ~60s (ClaimTTL + RebalanceInterval)
+#
+# See miner/supplier_claimer.go for the constant definitions.
+
+# ==============================================================================
 # Processing Configuration
 # ==============================================================================
 # NOTE: Session trees (SMST) are always stored in Redis and committed after each relay.
@@ -159,8 +223,54 @@ cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h 
 
 # Pre-discovered applications (optional - speeds up startup)
 known_applications:
-  - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
-  # - "pokt1abc..."
+  - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"  # app1
+  - "pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm"  # app2
+  - "pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex"  # app3
+  - "pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst"  # app4
+
+# ==============================================================================
+# ServiceFactor Configuration (Economic Policy)
+# ==============================================================================
+# ServiceFactor controls how much of the application's stake the supplier will accept for billing.
+# This is configured on the MINER ONLY and shared with relayers via Redis.
+#
+# How it works:
+#   - If serviceFactor is SET: effectiveLimit = appStake × serviceFactor
+#   - If serviceFactor is NOT SET: effectiveLimit = (appStake / numSuppliers) / proof_window_close_offset_blocks
+#
+# The baseLimit formula gives the MOST CONSERVATIVE calculation:
+#   baseLimit = (appStake / numSuppliersPerSession) / proof_window_close_offset_blocks
+#
+# IMPORTANT: The protocol NEVER guarantees any payment amount!
+# Due to race conditions, claim ordering, and session dynamics, actual settlement varies.
+# The baseLimit formula is the most conservative estimate, NOT a guarantee.
+#
+# Operator Strategies:
+#   - serviceFactor NOT SET: Use baseLimit formula - most conservative
+#   - serviceFactor < (baseLimit / appStake): Even more conservative
+#   - serviceFactor > (baseLimit / appStake): Aggressive - betting on app stake increases
+#
+# WARNING: If effectiveLimit > baseLimit, you may do UNPAID WORK!
+#
+# Real-world example (mainnet-like values):
+#   appStake = 1,000,000 upokt
+#   numSuppliers = 50
+#   proof_window_close_offset_blocks = 4
+#   baseLimit = 1,000,000 / 50 / 4 = 5,000 upokt (most conservative)
+#
+#   Strategy examples:
+#     serviceFactor not set   → effectiveLimit = 5,000 upokt (most conservative)
+#     serviceFactor = 0.003   → effectiveLimit = 3,000 upokt (even more conservative)
+#     serviceFactor = 0.005   → effectiveLimit = 5,000 upokt (same as baseLimit)
+#     serviceFactor = 0.010   → effectiveLimit = 10,000 upokt (aggressive, risk of unpaid work)
+#
+# Leave unset to use the most conservative baseLimit formula:
+# default_service_factor: 0.005
+
+# Per-service overrides (simple map, NOT full service config)
+# service_factors:
+#   eth-mainnet: 0.007   # More aggressive for high-value service
+#   polygon: 0.003       # More conservative
 
 # ==============================================================================
 # Observability Configuration
@@ -168,31 +278,16 @@ known_applications:
 metrics:
   enabled: true
   addr: ":9092"  # Prometheus metrics HTTP server
-  # pprof_enabled: false  # Enable pprof profiling (for debugging, disable in production)
-  # pprof_addr: "localhost:6060"  # Pprof HTTP server (use localhost for security)
+
+pprof:
+  enabled: true  # Enable pprof profiling (for debugging, disable in production)
+  addr: ":6060"  # Pprof HTTP server (use localhost for security)
 
 logging:
-  level: "info"  # trace, debug, info, warn, error
-  format: "json"  # json, text
+  level: "debug"  # trace, debug, info, warn, error (localnet uses debug)
+  format: "text"  # json, text (text is easier to read in development)
   output: "stdout"  # stdout, stderr, or file path
   async: true  # Enable async logging for better performance
   async_buffer_size: 100000  # Async log buffer size
-
-# ==============================================================================
-# Environment-Specific Defaults
-# ==============================================================================
-
-# Production (Mainnet):
-#   block_time_seconds: 30
-#   balance_threshold_upokt: 5000  # Higher threshold for production
-#   logging.level: "info"
-#   logging.format: "json"
-
-# Testnet:
-#   block_time_seconds: 30
-#   balance_threshold_upokt: 2000
-#   logging.level: "debug"
-
-# Localnet (Development):
-#   See tilt_config.yaml for localnet-specific settings
-#   Note: Localnet uses much faster block times (check tilt/config/config.toml)
+  # [PRODUCTION] level: "info"
+  # [PRODUCTION] format: "json"

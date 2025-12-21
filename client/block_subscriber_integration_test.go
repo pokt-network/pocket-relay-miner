@@ -531,8 +531,10 @@ func TestBlockSubscriber_FetchLatestBlock_Error(t *testing.T) {
 	require.Contains(t, err.Error(), "failed to query block")
 }
 
-// TestBlockSubscriber_InitializeChainVersion tests chain version initialization.
-func TestBlockSubscriber_InitializeChainVersion(t *testing.T) {
+// TestBlockSubscriber_GetChainVersion tests that GetChainVersion returns nil.
+// This method exists only for interface compliance and always returns nil
+// since the chain version is not used in production.
+func TestBlockSubscriber_GetChainVersion(t *testing.T) {
 	mockServer := newMockCometBFTServer(t)
 	defer mockServer.Close()
 
@@ -545,36 +547,9 @@ func TestBlockSubscriber_InitializeChainVersion(t *testing.T) {
 	require.NoError(t, err)
 	defer subscriber.Close()
 
-	ctx := context.Background()
-	err = subscriber.initializeChainVersion(ctx)
-	require.NoError(t, err)
-
+	// GetChainVersion always returns nil (interface compliance only)
 	version := subscriber.GetChainVersion()
-	require.NotNil(t, version)
-	require.Equal(t, "0.38.0", version.String())
-}
-
-// TestBlockSubscriber_InitializeChainVersion_Error tests error handling in version initialization.
-func TestBlockSubscriber_InitializeChainVersion_Error(t *testing.T) {
-	mockServer := newMockCometBFTServer(t)
-	defer mockServer.Close()
-
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := BlockSubscriberConfig{
-		RPCEndpoint: mockServer.server.URL,
-	}
-
-	subscriber, err := NewBlockSubscriber(logger, config)
-	require.NoError(t, err)
-	defer subscriber.Close()
-
-	// Make ABCI query fail
-	mockServer.failNextABCI.Store(true)
-
-	ctx := context.Background()
-	err = subscriber.initializeChainVersion(ctx)
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "failed to get ABCI info")
+	require.Nil(t, version, "GetChainVersion should return nil")
 }
 
 // TestBlockSubscriber_GetChainID tests fetching chain ID.

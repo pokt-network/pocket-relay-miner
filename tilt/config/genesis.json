@@ -1,7 +1,7 @@
 {
   "app_name": "pocket",
   "app_version": "0.1.31-rc1-3174a8f0",
-  "genesis_time": "2025-12-14T09:53:08.748231368Z",
+  "genesis_time": "2025-12-19T23:17:58.285290945Z",
   "chain_id": "pocket",
   "initial_height": 1,
   "app_hash": null,
@@ -15,11 +15,11 @@
           ],
           "service_configs": [
             {
-              "service_id": "develop"
+              "service_id": "develop-http"
             }
           ],
           "stake": {
-            "amount": "100000068",
+            "amount": "10000000000",
             "denom": "upokt"
           }
         },
@@ -30,11 +30,11 @@
           ],
           "service_configs": [
             {
-              "service_id": "develop"
+              "service_id": "develop-websocket"
             }
           ],
           "stake": {
-            "amount": "100000068",
+            "amount": "10000000000",
             "denom": "upokt"
           }
         },
@@ -45,11 +45,11 @@
           ],
           "service_configs": [
             {
-              "service_id": "develop"
+              "service_id": "develop-stream"
             }
           ],
           "stake": {
-            "amount": "100000068",
+            "amount": "10000000000",
             "denom": "upokt"
           }
         },
@@ -60,11 +60,11 @@
           ],
           "service_configs": [
             {
-              "service_id": "develop"
+              "service_id": "develop-grpc"
             }
           ],
           "stake": {
-            "amount": "10000000000000",
+            "amount": "10000000000",
             "denom": "upokt"
           }
         }
@@ -138,58 +138,121 @@
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt1ad28jdap2zfanjd7hpkh984yveney6k9a42man",
+          "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
           "pub_key": null,
           "account_number": "7",
           "sequence": "0"
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+          "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
           "pub_key": null,
           "account_number": "8",
           "sequence": "0"
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+          "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
           "pub_key": null,
           "account_number": "9",
           "sequence": "0"
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+          "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
           "pub_key": null,
           "account_number": "10",
           "sequence": "0"
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4",
+          "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
           "pub_key": null,
           "account_number": "11",
           "sequence": "0"
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt15w3fhfyc0lttv7r585e2ncpf6t2kl9uh8rsnyz",
+          "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
           "pub_key": null,
           "account_number": "12",
           "sequence": "0"
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt1zhmkkd0rh788mc9prfq0m2h88t9ge0j83gnxya",
+          "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
           "pub_key": null,
           "account_number": "13",
           "sequence": "0"
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5",
+          "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
           "pub_key": null,
           "account_number": "14",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+          "pub_key": null,
+          "account_number": "15",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+          "pub_key": null,
+          "account_number": "16",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+          "pub_key": null,
+          "account_number": "17",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+          "pub_key": null,
+          "account_number": "18",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+          "pub_key": null,
+          "account_number": "19",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+          "pub_key": null,
+          "account_number": "20",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+          "pub_key": null,
+          "account_number": "21",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4",
+          "pub_key": null,
+          "account_number": "22",
+          "sequence": "0"
+        },
+        {
+          "@type": "/cosmos.auth.v1beta1.BaseAccount",
+          "address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5",
+          "pub_key": null,
+          "account_number": "23",
           "sequence": "0"
         }
       ]
@@ -204,20 +267,38 @@
       },
       "balances": [
         {
-          "address": "pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst",
+          "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
           "coins": [
             {
               "denom": "upokt",
-              "amount": "300000000"
+              "amount": "1000000000000"
             }
           ]
         },
         {
-          "address": "pokt1zhmkkd0rh788mc9prfq0m2h88t9ge0j83gnxya",
+          "address": "pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst",
           "coins": [
             {
               "denom": "upokt",
-              "amount": "300000000"
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
             }
           ]
         },
@@ -226,7 +307,7 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "220000000"
+              "amount": "1000000000000"
             }
           ]
         },
@@ -235,7 +316,25 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "200000136"
+              "amount": "40000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
             }
           ]
         },
@@ -244,7 +343,7 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "110000000"
+              "amount": "1000000000000"
             }
           ]
         },
@@ -253,7 +352,7 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "200000000"
+              "amount": "1000000000000"
             }
           ]
         },
@@ -267,11 +366,29 @@
           ]
         },
         {
+          "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
           "address": "pokt1f6j7u6875p2cvyrgjr0d2uecyzah0kget9vlpl",
           "coins": [
             {
               "denom": "upokt",
-              "amount": "1000068"
+              "amount": "2000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
             }
           ]
         },
@@ -280,7 +397,7 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "1000068"
+              "amount": "30000000"
             }
           ]
         },
@@ -289,7 +406,7 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "330000000"
+              "amount": "1000000000000"
             }
           ]
         },
@@ -298,7 +415,16 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "1000000000"
+              "amount": "4000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
             }
           ]
         },
@@ -307,16 +433,16 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "100000000"
+              "amount": "1000000000000"
             }
           ]
         },
         {
-          "address": "pokt15w3fhfyc0lttv7r585e2ncpf6t2kl9uh8rsnyz",
+          "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
           "coins": [
             {
               "denom": "upokt",
-              "amount": "200000000"
+              "amount": "1000000000000"
             }
           ]
         },
@@ -347,16 +473,34 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "100000000000"
+              "amount": "1000000000000"
             }
           ]
         },
         {
-          "address": "pokt1ad28jdap2zfanjd7hpkh984yveney6k9a42man",
+          "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
           "coins": [
             {
               "denom": "upokt",
-              "amount": "300000000"
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
+            }
+          ]
+        },
+        {
+          "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+          "coins": [
+            {
+              "denom": "upokt",
+              "amount": "1000000000000"
             }
           ]
         },
@@ -374,7 +518,7 @@
           "coins": [
             {
               "denom": "upokt",
-              "amount": "300000000"
+              "amount": "1000000000000"
             }
           ]
         }
@@ -386,7 +530,7 @@
         },
         {
           "denom": "upokt",
-          "amount": "1001597003562000355"
+          "amount": "1001616944032000083"
         }
       ],
       "denom_metadata": [],
@@ -433,7 +577,7 @@
         {
           "address": "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4",
           "stake": {
-            "amount": "1000068",
+            "amount": "2000000",
             "denom": "upokt"
           }
         }
@@ -470,7 +614,7 @@
                 "validator_address": "poktvaloper18kk3aqe2pjz7x7993qp2pjt95ghurra9c5ef0t",
                 "pubkey": {
                   "@type": "/cosmos.crypto.ed25519.PubKey",
-                  "key": "pq33l6BKY1rqUO1E3xlha0YMMyT3Ys6zXsvpuw9wx60="
+                  "key": "JK3j8wGDGw052XLwU9VkuXa+vT57ZwwnaY/CPtWZkdg="
                 },
                 "value": {
                   "denom": "upokt",
@@ -478,7 +622,7 @@
                 }
               }
             ],
-            "memo": "4bf71f16596ebbcd9373d191da5dc27aba3f19db@192.168.49.5:26656",
+            "memo": "e129407f16366e1d3dbd5a69cd4388aa9b7d69a1@192.168.49.5:26656",
             "timeout_height": "0",
             "unordered": false,
             "timeout_timestamp": null,
@@ -509,7 +653,7 @@
             "tip": null
           },
           "signatures": [
-            "f/CwrsRVDUVfrsNmRHrJQAkoc+9UdRc1xlGfzvqWro131Sd/D75z1XhYEzGtzkVb/Fx9PMlLW19Q0kzKHvo+ig=="
+            "TctI6t9VAwnoKDpJORoxhmr7Rhy7Sf/NkrLd2sIoUP1VqJAQcm2RF6bZcIqwbVsM2V0rTu/QbMv8HuiPvDbw4A=="
           ]
         }
       ]
@@ -630,7 +774,7 @@
       "claim_list": [],
       "params": {
         "proof_missing_penalty": {
-          "amount": "320000000",
+          "amount": "250000",
           "denom": "upokt"
         },
         "proof_request_probability": "0.25",
@@ -658,8 +802,26 @@
       "serviceList": [
         {
           "compute_units_per_relay": 100,
-          "id": "develop",
-          "name": "develop",
+          "id": "develop-http",
+          "name": "develop-http",
+          "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
+        },
+        {
+          "compute_units_per_relay": 100,
+          "id": "develop-websocket",
+          "name": "develop-websocket",
+          "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
+        },
+        {
+          "compute_units_per_relay": 100,
+          "id": "develop-stream",
+          "name": "develop-stream",
+          "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
+        },
+        {
+          "compute_units_per_relay": 100,
+          "id": "develop-grpc",
+          "name": "develop-grpc",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
         }
       ],
@@ -676,7 +838,7 @@
         "claim_window_close_offset_blocks": 4,
         "claim_window_open_offset_blocks": 1,
         "compute_unit_cost_granularity": 1000000,
-        "compute_units_to_tokens_multiplier": 42000000,
+        "compute_units_to_tokens_multiplier": 42,
         "gateway_unbonding_period_sessions": 1,
         "grace_period_end_offset_blocks": 1,
         "num_blocks_per_session": 10,
@@ -735,22 +897,50 @@
                   "configs": [],
                   "rpc_type": "JSON_RPC",
                   "url": "http://relayer.default.svc.cluster.local:8080"
-                },
+                }
+              ],
+              "rev_share": [
                 {
-                  "configs": [],
-                  "rpc_type": "COMET_BFT",
-                  "url": "http://relayer.default.svc.cluster.local:8080"
-                },
-                {
-                  "configs": [],
-                  "rpc_type": "REST",
-                  "url": "http://relayer.default.svc.cluster.local:8080"
-                },
+                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
                 {
                   "configs": [],
                   "rpc_type": "WEBSOCKET",
                   "url": "ws://relayer.default.svc.cluster.local:8080"
-                },
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
                 {
                   "configs": [],
                   "rpc_type": "GRPC",
@@ -763,11 +953,1047 @@
                   "rev_share_percentage": 100
                 }
               ],
-              "service_id": "develop"
+              "service_id": "develop-grpc"
             }
           ],
           "stake": {
-            "amount": "1000068",
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+          "owner_address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+          "owner_address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+          "owner_address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+          "owner_address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+          "owner_address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+          "owner_address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+          "owner_address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+          "owner_address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+          "owner_address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+          "owner_address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+          "owner_address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+          "owner_address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+          "owner_address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
+            "denom": "upokt"
+          }
+        },
+        {
+          "operator_address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+          "owner_address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+          "services": [
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "JSON_RPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-http"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "WEBSOCKET",
+                  "url": "ws://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-websocket"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "REST",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-stream"
+            },
+            {
+              "endpoints": [
+                {
+                  "configs": [],
+                  "rpc_type": "GRPC",
+                  "url": "http://relayer.default.svc.cluster.local:8080"
+                }
+              ],
+              "rev_share": [
+                {
+                  "address": "pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k",
+                  "rev_share_percentage": 100
+                }
+              ],
+              "service_id": "develop-grpc"
+            }
+          ],
+          "stake": {
+            "amount": "2000000",
             "denom": "upokt"
           }
         }

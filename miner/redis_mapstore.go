@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/smt/kvstore"
 	"github.com/redis/go-redis/v9"
 
@@ -27,12 +28,12 @@ import (
 //
 // Redis Hash Structure:
 //
-//	Key: "ha:smst:{sessionID}:nodes"
+//	Key: Built via KeyBuilder.SMSTNodesKey(sessionID)
 //	Fields: hex-encoded SMST node keys
 //	Values: raw SMST node data
 type RedisMapStore struct {
-	redisClient redis.UniversalClient
-	hashKey     string // Redis hash key: "ha:smst:{sessionID}:nodes"
+	redisClient *redisutil.Client
+	hashKey     string // Redis hash key built via KeyBuilder.SMSTNodesKey()
 	ctx         context.Context
 
 	// Pipeline buffer for batching Set() operations during Commit()
@@ -54,12 +55,12 @@ type RedisMapStore struct {
 //	A MapStore implementation backed by Redis
 func NewRedisMapStore(
 	ctx context.Context,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	sessionID string,
 ) kvstore.MapStore {
 	return &RedisMapStore{
 		redisClient:    redisClient,
-		hashKey:        fmt.Sprintf("ha:smst:%s:nodes", sessionID),
+		hashKey:        redisClient.KB().SMSTNodesKey(sessionID),
 		ctx:            ctx,
 		pipelineBuffer: make(map[string][]byte),
 	}

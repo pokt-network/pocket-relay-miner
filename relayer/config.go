@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -69,11 +70,16 @@ func RPCTypeToBackendType(rpcType string) string {
 	}
 }
 
-// TimeoutProfile defines a set of HTTP client timeout settings.
+// TimeoutProfile defines a complete set of timeout settings for a service.
 // Multiple profiles can be defined to support different service types (fast RPCs vs streaming).
 type TimeoutProfile struct {
 	// Name is the profile name (e.g., "fast", "streaming")
 	Name string `yaml:"name,omitempty"`
+
+	// RequestTimeoutSeconds is the overall timeout for backend requests.
+	// This is the total time allowed for the request/response cycle.
+	// Default: 30 seconds
+	RequestTimeoutSeconds int64 `yaml:"request_timeout_seconds"`
 
 	// ResponseHeaderTimeoutSeconds is the timeout for receiving response headers.
 	// Set to 0 for no timeout (useful for streaming responses).
@@ -87,14 +93,6 @@ type TimeoutProfile struct {
 	// TLSHandshakeTimeoutSeconds is the timeout for completing the TLS handshake.
 	// Default: inherits from HTTPTransportConfig if 0
 	TLSHandshakeTimeoutSeconds int64 `yaml:"tls_handshake_timeout_seconds"`
-}
-
-// ServiceHTTPConfig allows per-service HTTP client customization.
-type ServiceHTTPConfig struct {
-	// TimeoutProfile is the name of the timeout profile to use.
-	// Must match a profile name in Config.TimeoutProfiles.
-	// Default: "fast" if not specified
-	TimeoutProfile string `yaml:"timeout_profile"`
 }
 
 // Config is the configuration for the HA Relayer service.
@@ -128,6 +126,9 @@ type Config struct {
 
 	// Metrics configuration
 	Metrics MetricsConfig `yaml:"metrics"`
+
+	// Pprof configuration for profiling
+	Pprof config.PprofConfig `yaml:"pprof,omitempty"`
 
 	// HealthCheck configuration for the relayer itself
 	HealthCheck HealthCheckConfig `yaml:"health_check"`
@@ -207,9 +208,6 @@ type RedisConfig struct {
 	// Supports: redis://, rediss://, redis-sentinel://, redis-cluster://
 	URL string `yaml:"url"`
 
-	// StreamPrefix is the prefix for Redis stream names.
-	StreamPrefix string `yaml:"stream_prefix"`
-
 	// PoolSize is the maximum number of socket connections.
 	// Default: 20 × runtime.GOMAXPROCS (2x go-redis default for production)
 	// Set to 0 to use go-redis default (10 × GOMAXPROCS)
@@ -231,6 +229,12 @@ type RedisConfig struct {
 	// Default: 5 minutes
 	// Set to 0 to disable (connections never closed due to idle time)
 	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
+
+	// Namespace configures Redis key prefixes for all data types.
+	// All components (miner, relayer, cache) read from this config to build keys.
+	// Must match miner configuration for proper operation.
+	// If not specified, defaults are used (ha:cache, ha:events, ha:relays, etc.)
+	Namespace config.RedisNamespaceConfig `yaml:"namespace,omitempty"`
 }
 
 // PocketNodeConfig contains Pocket blockchain connection configuration.
@@ -242,6 +246,11 @@ type PocketNodeConfig struct {
 	// QueryNodeGRPCUrl is the URL for gRPC queries.
 	// Primary interface for chain queries (application, session, service, etc.)
 	QueryNodeGRPCUrl string `yaml:"query_node_grpc_url"`
+
+	// GRPCInsecure disables TLS for gRPC connections.
+	// Default: false (TLS enabled for production)
+	// Set to true for localnet/development without TLS.
+	GRPCInsecure bool `yaml:"grpc_insecure,omitempty"`
 }
 
 // ServiceConfig contains configuration for a single service.
@@ -252,8 +261,11 @@ type ServiceConfig struct {
 	// ValidationMode overrides the default validation mode for this service.
 	ValidationMode ValidationMode `yaml:"validation_mode,omitempty"`
 
-	// RequestTimeoutSeconds overrides the default timeout for this service.
-	RequestTimeoutSeconds int64 `yaml:"request_timeout_seconds,omitempty"`
+	// TimeoutProfile is the name of the timeout profile to use for this service.
+	// The profile defines request_timeout_seconds and HTTP client timeouts.
+	// Must match a profile name in Config.TimeoutProfiles.
+	// If not specified, uses the "fast" profile.
+	TimeoutProfile string `yaml:"timeout_profile,omitempty"`
 
 	// MaxBodySizeBytes overrides the default max body size for this service.
 	MaxBodySizeBytes int64 `yaml:"max_body_size_bytes,omitempty"`
@@ -268,10 +280,6 @@ type ServiceConfig struct {
 	// Key is RPC type: "jsonrpc", "rest", "websocket", "grpc", "cometbft"
 	// At least one backend type is required.
 	Backends map[string]BackendConfig `yaml:"backends"`
-
-	// HTTP client configuration for this service.
-	// If not specified, uses the "fast" timeout profile.
-	HTTP *ServiceHTTPConfig `yaml:"http,omitempty"`
 }
 
 // BackendConfig contains configuration for a specific RPC type backend.
@@ -333,14 +341,6 @@ type MetricsConfig struct {
 
 	// Addr is the address for the metrics server.
 	Addr string `yaml:"addr"`
-
-	// PprofEnabled enables pprof profiling server.
-	// Default: false (disabled for production safety)
-	PprofEnabled bool `yaml:"pprof_enabled,omitempty"`
-
-	// PprofAddr is the address for pprof server.
-	// Default: "localhost:6060" (localhost only for security)
-	PprofAddr string `yaml:"pprof_addr,omitempty"`
 }
 
 // HealthCheckConfig contains health check server configuration for the relayer.
@@ -401,10 +401,6 @@ type RelayMeterYAMLConfig struct {
 	// Default: true
 	Enabled bool `yaml:"enabled"`
 
-	// OverServicingEnabled allows relays to exceed app stake limits temporarily.
-	// Default: false (strict enforcement)
-	OverServicingEnabled bool `yaml:"over_servicing_enabled"`
-
 	// RedisKeyPrefix is the prefix for Redis keys used by the relay meter.
 	// Default: "ha"
 	RedisKeyPrefix string `yaml:"redis_key_prefix"`
@@ -415,21 +411,8 @@ type RelayMeterYAMLConfig struct {
 	// Default: "open"
 	FailBehavior string `yaml:"fail_behavior"`
 
-	// SessionCleanupInterval is how often to clean up expired sessions.
-	// Default: 5 minutes
-	SessionCleanupInterval time.Duration `yaml:"session_cleanup_interval"`
-
-	// ParamsCacheTTL is the TTL for cached shared/session params.
-	// Should be session-wide duration to avoid stale data.
-	// Default: 10 minutes
-	ParamsCacheTTL time.Duration `yaml:"params_cache_ttl"`
-
-	// AppStakeCacheTTL is the TTL for cached app stakes.
-	// Default: 10 minutes
-	AppStakeCacheTTL time.Duration `yaml:"app_stake_cache_ttl"`
-
-	// CacheTTL is the TTL for Redis stream data (relay messages).
-	// This is a backup safety net - manual cleanup is primary, TTL prevents leaks if cleanup fails.
+	// CacheTTL is the TTL for all cached Redis data (streams, params, app stakes, meters).
+	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 }
@@ -438,7 +421,7 @@ type RelayMeterYAMLConfig struct {
 // This helps reduce latency for the first requests by pre-loading application data.
 type CacheWarmupConfig struct {
 	// Enabled enables cache warmup at startup.
-	// Default: false
+	// Default: true (speeds up first requests by pre-loading application data)
 	Enabled bool `yaml:"enabled"`
 
 	// KnownApplications is a list of application addresses to pre-warm on startup.
@@ -466,8 +449,7 @@ func DefaultConfig() Config {
 	return Config{
 		ListenAddr: "0.0.0.0:8080",
 		Redis: RedisConfig{
-			URL:          "redis://localhost:6379",
-			StreamPrefix: "ha:relays",
+			URL: "redis://localhost:6379",
 		},
 		DefaultValidationMode:        ValidationModeOptimistic,
 		DefaultRequestTimeoutSeconds: 30,
@@ -477,19 +459,19 @@ func DefaultConfig() Config {
 			Enabled: true,
 			Addr:    "0.0.0.0:9090",
 		},
+		Pprof: config.PprofConfig{
+			Enabled: true, // Enable by default for debugging
+			Addr:    "0.0.0.0:6060",
+		},
 		HealthCheck: HealthCheckConfig{
 			Enabled: true,
 			Addr:    "0.0.0.0:8081",
 		},
 		RelayMeter: RelayMeterYAMLConfig{
-			Enabled:                true,
-			OverServicingEnabled:   false,
-			RedisKeyPrefix:         "ha",
-			FailBehavior:           "open",
-			SessionCleanupInterval: 5 * time.Minute,
-			ParamsCacheTTL:         10 * time.Minute,
-			AppStakeCacheTTL:       10 * time.Minute,
-			CacheTTL:               2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
+			Enabled:        true,
+			RedisKeyPrefix: "ha",
+			FailBehavior:   "open",
+			CacheTTL:       2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
 		},
 		HTTPTransport: HTTPTransportConfig{
 			MaxIdleConns:                 500,  // Total idle connections across all hosts (5x for 1000+ RPS)
@@ -506,16 +488,24 @@ func DefaultConfig() Config {
 		TimeoutProfiles: map[string]TimeoutProfile{
 			"fast": {
 				Name:                         "fast",
-				ResponseHeaderTimeoutSeconds: 30, // Standard RPC services
+				RequestTimeoutSeconds:        30, // Standard RPC services
+				ResponseHeaderTimeoutSeconds: 30,
 				DialTimeoutSeconds:           5,
 				TLSHandshakeTimeoutSeconds:   10,
 			},
 			"streaming": {
 				Name:                         "streaming",
-				ResponseHeaderTimeoutSeconds: 0,  // No header timeout for LLM streaming
-				DialTimeoutSeconds:           10, // Allow more time for connection
-				TLSHandshakeTimeoutSeconds:   15, // Allow more time for TLS
+				RequestTimeoutSeconds:        600, // 10 minutes for LLM streaming
+				ResponseHeaderTimeoutSeconds: 0,   // No header timeout for streaming
+				DialTimeoutSeconds:           10,  // Allow more time for connection
+				TLSHandshakeTimeoutSeconds:   15,  // Allow more time for TLS
 			},
+		},
+		CacheWarmup: CacheWarmupConfig{
+			Enabled:               true, // Enable by default for faster first requests
+			PersistDiscoveredApps: true,
+			WarmupConcurrency:     10,
+			WarmupTimeoutSeconds:  5,
 		},
 	}
 }
@@ -624,15 +614,36 @@ func (c *Config) GetServiceValidationMode(serviceID string) ValidationMode {
 }
 
 // GetServiceTimeout returns the request timeout for a service.
+// Uses the timeout profile's request_timeout_seconds, falling back to "fast" profile.
 func (c *Config) GetServiceTimeout(serviceID string) time.Duration {
-	if svc, ok := c.Services[serviceID]; ok && svc.RequestTimeoutSeconds > 0 {
-		return time.Duration(svc.RequestTimeoutSeconds) * time.Second
+	// Get timeout profile for service
+	profile := c.GetServiceTimeoutProfile(serviceID)
+	if profile != nil && profile.RequestTimeoutSeconds > 0 {
+		return time.Duration(profile.RequestTimeoutSeconds) * time.Second
 	}
+	// Fallback to default request timeout
 	if c.DefaultRequestTimeoutSeconds > 0 {
 		return time.Duration(c.DefaultRequestTimeoutSeconds) * time.Second
 	}
 	// Default to 30 seconds if not configured
 	return 30 * time.Second
+}
+
+// GetServiceTimeoutProfile returns the timeout profile for a service.
+// Falls back to "fast" profile if service doesn't specify one.
+func (c *Config) GetServiceTimeoutProfile(serviceID string) *TimeoutProfile {
+	profileName := "fast" // default
+	if svc, ok := c.Services[serviceID]; ok && svc.TimeoutProfile != "" {
+		profileName = svc.TimeoutProfile
+	}
+	if profile, ok := c.TimeoutProfiles[profileName]; ok {
+		return &profile
+	}
+	// Fallback to fast if specified profile doesn't exist
+	if profile, ok := c.TimeoutProfiles["fast"]; ok {
+		return &profile
+	}
+	return nil
 }
 
 // GetServiceMaxBodySize returns the max body size for a service.
@@ -648,12 +659,11 @@ func (c *Config) GetServiceMaxBodySize(serviceID string) int64 {
 func (c *Config) getMaxServiceTimeout() time.Duration {
 	max := time.Duration(c.DefaultRequestTimeoutSeconds) * time.Second
 
-	for _, svc := range c.Services {
-		if svc.RequestTimeoutSeconds > 0 {
-			svcTimeout := time.Duration(svc.RequestTimeoutSeconds) * time.Second
-			if svcTimeout > max {
-				max = svcTimeout
-			}
+	// Check all services for their timeout profile
+	for svcID := range c.Services {
+		svcTimeout := c.GetServiceTimeout(svcID)
+		if svcTimeout > max {
+			max = svcTimeout
 		}
 	}
 
@@ -679,13 +689,15 @@ func (c *Config) ValidateTimeoutProfiles() error {
 		c.TimeoutProfiles = map[string]TimeoutProfile{
 			"fast": {
 				Name:                         "fast",
+				RequestTimeoutSeconds:        30, // Standard RPC services
 				ResponseHeaderTimeoutSeconds: 30,
 				DialTimeoutSeconds:           5,
 				TLSHandshakeTimeoutSeconds:   10,
 			},
 			"streaming": {
 				Name:                         "streaming",
-				ResponseHeaderTimeoutSeconds: 0,
+				RequestTimeoutSeconds:        600, // 10 minutes for LLM streaming
+				ResponseHeaderTimeoutSeconds: 0,   // No header timeout for streaming
 				DialTimeoutSeconds:           10,
 				TLSHandshakeTimeoutSeconds:   15,
 			},
@@ -706,12 +718,12 @@ func (c *Config) ValidateTimeoutProfiles() error {
 		c.TimeoutProfiles[name] = profile
 	}
 
-	// Validate all service HTTP configs reference valid profiles
+	// Validate all service timeout_profile references are valid
 	for svcID, svc := range c.Services {
-		if svc.HTTP != nil && svc.HTTP.TimeoutProfile != "" {
-			if _, ok := c.TimeoutProfiles[svc.HTTP.TimeoutProfile]; !ok {
+		if svc.TimeoutProfile != "" {
+			if _, ok := c.TimeoutProfiles[svc.TimeoutProfile]; !ok {
 				return fmt.Errorf("service %s references undefined timeout profile %s",
-					svcID, svc.HTTP.TimeoutProfile)
+					svcID, svc.TimeoutProfile)
 			}
 		}
 	}

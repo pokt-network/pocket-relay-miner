@@ -27,7 +27,7 @@ func TestGetService_Success(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -57,7 +57,7 @@ func TestGetService_NotFound(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -86,7 +86,7 @@ func TestGetService_InvalidID(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -114,7 +114,7 @@ func TestGetService_NetworkError(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -143,7 +143,7 @@ func TestGetService_EmptyResponse(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -174,7 +174,7 @@ func TestGetService_Cache(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -214,7 +214,7 @@ func TestGetService_ConcurrentAccess(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -257,7 +257,7 @@ func TestGetServiceRelayDifficulty_Success(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -286,7 +286,7 @@ func TestGetServiceRelayDifficulty_NotFound(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -318,7 +318,7 @@ func TestGetServiceRelayDifficulty_Cache(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -360,7 +360,7 @@ func TestGetService_Timeout(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 10 * time.Millisecond, // Very short timeout
 	}
@@ -388,7 +388,7 @@ func TestGetService_MultipleServices(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}

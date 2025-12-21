@@ -10,6 +10,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
+	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -65,6 +66,27 @@ type SessionQueryClient interface {
 	GetSession(ctx context.Context, appAddr, serviceID string, blockHeight int64) (*sessiontypes.Session, error)
 }
 
+// ApplicationQueryClient queries application information from the blockchain.
+type ApplicationQueryClient interface {
+	GetApplication(ctx context.Context, appAddress string) (*apptypes.Application, error)
+}
+
+// ServiceFactorProvider provides service factor configuration.
+// This allows the lifecycle callback to check claim amounts against configured ceilings.
+type ServiceFactorProvider interface {
+	// GetServiceFactor returns the service factor for a service.
+	// Returns (factor, true) if configured, (0, false) if not.
+	GetServiceFactor(serviceID string) (float64, bool)
+}
+
+// StreamDeleter deletes session streams after settlement.
+// This stops late relays from being consumed and frees Redis memory.
+type StreamDeleter interface {
+	// DeleteStream deletes the stream for a session.
+	// Safe to call even if the stream doesn't exist.
+	DeleteStream(ctx context.Context, sessionID string) error
+}
+
 // LifecycleCallback implements SessionLifecycleCallback to handle claim and proof submission.
 // It coordinates SMST operations with transaction submission and uses proper timing spread.
 type LifecycleCallback struct {
@@ -80,6 +102,18 @@ type LifecycleCallback struct {
 	// proofChecker determines if a proof is required for a claimed session.
 	// If nil, proofs are always submitted (legacy behavior).
 	proofChecker *ProofRequirementChecker
+
+	// serviceFactorProvider provides service factor configuration for claim ceiling warnings.
+	// If nil, no ceiling warnings are logged.
+	serviceFactorProvider ServiceFactorProvider
+
+	// appClient queries application data for claim ceiling calculations.
+	// If nil, ceiling warnings are skipped.
+	appClient ApplicationQueryClient
+
+	// streamDeleter deletes session streams after settlement.
+	// If nil, streams are not deleted (will rely on TTL expiration).
+	streamDeleter StreamDeleter
 
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
@@ -126,6 +160,24 @@ func NewLifecycleCallback(
 	}
 }
 
+// SetServiceFactorProvider sets the service factor provider for claim ceiling warnings.
+// This is optional - if not set, no ceiling warnings are logged.
+func (lc *LifecycleCallback) SetServiceFactorProvider(provider ServiceFactorProvider) {
+	lc.serviceFactorProvider = provider
+}
+
+// SetAppClient sets the application query client for claim ceiling calculations.
+// This is optional - if not set, ceiling warnings are skipped.
+func (lc *LifecycleCallback) SetAppClient(client ApplicationQueryClient) {
+	lc.appClient = client
+}
+
+// SetStreamDeleter sets the stream deleter for cleanup after session settlement.
+// This is optional - if not set, streams rely on TTL expiration.
+func (lc *LifecycleCallback) SetStreamDeleter(deleter StreamDeleter) {
+	lc.streamDeleter = deleter
+}
+
 // getSessionLock returns a per-session lock.
 func (lc *LifecycleCallback) getSessionLock(sessionID string) *sync.Mutex {
 	lc.sessionLocksMu.Lock()
@@ -161,10 +213,123 @@ func (lc *LifecycleCallback) isClaimEconomicallyViable(
 	return expectedRewardUpokt > estimatedFeeUpokt
 }
 
+// checkClaimCeiling checks if the claimed amount exceeds the configured ceiling.
+// This is a WARNING ONLY - we do not cap claims, as relays have already been accepted.
+// The warning helps operators understand when they may be doing unpaid work.
+func (lc *LifecycleCallback) checkClaimCeiling(
+	ctx context.Context,
+	snapshot *SessionSnapshot,
+	sharedParams *sharedtypes.Params,
+	computeUnitsToTokensMultiplier uint64,
+) {
+	// Skip if no service factor provider or app client configured
+	if lc.serviceFactorProvider == nil || lc.appClient == nil {
+		return
+	}
+
+	logger := lc.logger.With().
+		Str(logging.FieldSessionID, snapshot.SessionID).
+		Str(logging.FieldServiceID, snapshot.ServiceID).
+		Str(logging.FieldApplication, snapshot.ApplicationAddress).
+		Logger()
+
+	// Get application stake
+	app, err := lc.appClient.GetApplication(ctx, snapshot.ApplicationAddress)
+	if err != nil {
+		logger.Debug().
+			Err(err).
+			Msg("failed to get application for claim ceiling check")
+		return
+	}
+
+	appStake := app.Stake.Amount.Int64()
+	if appStake <= 0 {
+		logger.Debug().
+			Int64("app_stake", appStake).
+			Msg("skipping ceiling check - invalid app stake")
+		return
+	}
+
+	// Get proof_window_close_offset_blocks for baseLimit calculation
+	proofWindowCloseBlocks := int64(sharedParams.GetProofWindowCloseOffsetBlocks())
+	if proofWindowCloseBlocks <= 0 {
+		proofWindowCloseBlocks = 1 // Avoid division by zero
+	}
+
+	// Query session to get numSuppliersPerSession
+	session, err := lc.sessionClient.GetSession(
+		ctx,
+		snapshot.ApplicationAddress,
+		snapshot.ServiceID,
+		snapshot.SessionStartHeight,
+	)
+	if err != nil {
+		logger.Debug().
+			Err(err).
+			Msg("failed to get session for claim ceiling check")
+		return
+	}
+
+	numSuppliers := int64(len(session.Suppliers))
+	if numSuppliers <= 0 {
+		numSuppliers = 1 // Avoid division by zero
+	}
+
+	// Calculate baseLimit: (appStake / numSuppliers) / proof_window_close_offset_blocks
+	appStakePerSupplier := appStake / numSuppliers
+	baseLimitUpokt := appStakePerSupplier / proofWindowCloseBlocks
+
+	// Get serviceFactor for this service
+	serviceFactor, hasServiceFactor := lc.serviceFactorProvider.GetServiceFactor(snapshot.ServiceID)
+
+	// Calculate ceiling
+	var ceilingUpokt int64
+	if hasServiceFactor && serviceFactor > 0 {
+		// ServiceFactor provided: apply directly to appStake
+		ceilingUpokt = int64(float64(appStake) * serviceFactor)
+	} else {
+		// No serviceFactor: use baseLimit (protocol match)
+		ceilingUpokt = baseLimitUpokt
+	}
+
+	// Calculate claimed amount in uPOKT
+	claimedUpokt := int64(snapshot.TotalComputeUnits * computeUnitsToTokensMultiplier)
+
+	// Check if claimed exceeds ceiling
+	if claimedUpokt > ceilingUpokt {
+		potentiallyUnpaidUpokt := claimedUpokt - ceilingUpokt
+
+		// Record metric for monitoring/alerting
+		RecordClaimCeilingExceeded(snapshot.SupplierOperatorAddress, snapshot.ServiceID, potentiallyUnpaidUpokt)
+
+		logger.Warn().
+			Int64("claimed_upokt", claimedUpokt).
+			Int64("ceiling_upokt", ceilingUpokt).
+			Int64("base_limit_upokt", baseLimitUpokt).
+			Int64("potentially_unpaid_upokt", potentiallyUnpaidUpokt).
+			Int64("app_stake_upokt", appStake).
+			Int64("num_suppliers", numSuppliers).
+			Int64("proof_window_close_blocks", proofWindowCloseBlocks).
+			Bool("has_service_factor", hasServiceFactor).
+			Float64("service_factor", serviceFactor).
+			Uint64("total_compute_units", snapshot.TotalComputeUnits).
+			Int64("relay_count", snapshot.RelayCount).
+			Msg("CLAIM EXCEEDS CEILING - potential unpaid work detected (this is informational, claim will still be submitted)")
+	} else if hasServiceFactor && claimedUpokt < baseLimitUpokt {
+		// Informational: serviceFactor is conservative (below protocol guarantee)
+		logger.Debug().
+			Int64("claimed_upokt", claimedUpokt).
+			Int64("ceiling_upokt", ceilingUpokt).
+			Int64("base_limit_upokt", baseLimitUpokt).
+			Float64("service_factor", serviceFactor).
+			Msg("claim is below configured ceiling (conservative serviceFactor)")
+	}
+}
+
 // OnSessionActive is called when a new session starts.
 // For HA miner, sessions are created on-demand when relays arrive, so this is mostly informational.
 func (lc *LifecycleCallback) OnSessionActive(ctx context.Context, snapshot *SessionSnapshot) error {
-	lc.logger.Info().
+	lc.logger.Debug().
 		Str(logging.FieldSessionID, snapshot.SessionID).
 		Int64(logging.FieldSessionEndHeight, snapshot.SessionEndHeight).
 		Str(logging.FieldServiceID, snapshot.ServiceID).
@@ -187,7 +352,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		Int("batch_size", len(snapshots)).
 		Logger()
 
-	logger.Info().Msg("batched sessions need claims - starting claim process")
+	logger.Debug().Msg("batched sessions need claims - starting claim process")
 
 	// Get shared params
 	sharedParams, err := lc.sharedClient.GetParams(ctx)
@@ -208,26 +373,28 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 	for sessionEndHeight, groupSnapshots := range sessionsByEndHeight {
 		// Wait for claim window to open and get the block hash for timing spread
 		claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
-		logger.Info().
+		logger.Debug().
 			Int64("claim_window_open_height", claimWindowOpenHeight).
 			Int64("session_end_height", sessionEndHeight).
 			Int("group_size", len(groupSnapshots)).
 			Msg("waiting for claim window to open")
 
-		claimWindowOpenBlock, blockErr := lc.waitForBlock(ctx, claimWindowOpenHeight)
-		if blockErr != nil {
+		if _, blockErr := lc.waitForBlock(ctx, claimWindowOpenHeight); blockErr != nil {
 			return nil, fmt.Errorf("failed to wait for claim window open: %w", blockErr)
 		}
 
 		// Calculate the earliest claim commit height for this supplier (timing spread)
-		earliestClaimHeight := sharedtypes.GetEarliestSupplierClaimCommitHeight(
-			sharedParams,
+		// Use interface method - block hash not needed since poktroll ignores it currently
+		earliestClaimHeight, err := lc.sharedClient.GetEarliestSupplierClaimCommitHeight(
+			ctx,
 			sessionEndHeight,
-			claimWindowOpenBlock.Hash(),
 			firstSnapshot.SupplierOperatorAddress,
 		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to calculate earliest claim height: %w", err)
+		}
 
-		logger.Info().
+		logger.Debug().
 			Int64("earliest_claim_height", earliestClaimHeight).
 			Int64("session_end_height", sessionEndHeight).
 			Msg("waiting for assigned claim timing")
@@ -237,7 +404,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			return nil, fmt.Errorf("failed to wait for claim timing: %w", waitErr)
 		}
 
-		logger.Info().
+		logger.Debug().
 			Int("group_size", len(groupSnapshots)).
 			Msg("claim window timing reached - flushing SMSTs and submitting batched claims")
 
@@ -287,6 +454,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, "unprofitable")
 					continue // Skip this session
 				}
+
+				// Check if claim exceeds configured ceiling (warning only, does not block claim)
+				lc.checkClaimCeiling(ctx, snapshot, sharedParams, computeUnitsToTokensMultiplier)
 			}
 
 			// Record the scheduled claim height for operators
@@ -399,7 +569,7 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 
 	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Int64(logging.FieldSessionEndHeight, snapshot.SessionEndHeight).Logger()
 
-	logger.Info().
+	logger.Debug().
 		Int64(logging.FieldCount, snapshot.RelayCount).
 		Msg("session needs claim - starting claim process")
 
@@ -411,27 +581,29 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 
 	// Wait for claim window to open and get the block hash for timing spread
 	claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, snapshot.SessionEndHeight)
-	logger.Info().
+	logger.Debug().
 		Int64("claim_window_open_height", claimWindowOpenHeight).
 		Msg("waiting for claim window to open")
 
-	claimWindowOpenBlock, err := lc.waitForBlock(ctx, claimWindowOpenHeight)
-	if err != nil {
+	if _, err := lc.waitForBlock(ctx, claimWindowOpenHeight); err != nil {
 		return nil, fmt.Errorf("failed to wait for claim window open: %w", err)
 	}
 
 	// Calculate the earliest claim commit height for this supplier (timing spread)
-	earliestClaimHeight := sharedtypes.GetEarliestSupplierClaimCommitHeight(
-		sharedParams,
+	// Use interface method - block hash not needed since poktroll ignores it currently
+	earliestClaimHeight, err := lc.sharedClient.GetEarliestSupplierClaimCommitHeight(
+		ctx,
 		snapshot.SessionEndHeight,
-		claimWindowOpenBlock.Hash(),
 		snapshot.SupplierOperatorAddress,
 	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to calculate earliest claim height: %w", err)
+	}
 
 	// Record the scheduled claim height for operators
 	SetClaimScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestClaimHeight))
 
-	logger.Info().
+	logger.Debug().
 		Int64("earliest_claim_height", earliestClaimHeight).
 		Msg("waiting for assigned claim timing")
 
@@ -440,7 +612,7 @@ func (lc *LifecycleCallback) OnSessionNeedsClaim(ctx context.Context, snapshot *
 		return nil, fmt.Errorf("failed to wait for claim timing: %w", err)
 	}
 
-	logger.Info().Msg("claim window timing reached - flushing SMST and submitting claim")
+	logger.Debug().Msg("claim window timing reached - flushing SMST and submitting claim")
 
 	// Flush the SMST to get the root hash
 	rootHash, err = lc.smstManager.FlushTree(ctx, snapshot.SessionID)
@@ -526,7 +698,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		Int("batch_size", len(snapshots)).
 		Logger()
 
-	logger.Info().Msg("batched sessions need proofs - starting proof process")
+	logger.Debug().Msg("batched sessions need proofs - starting proof process")
 
 	// Get shared params
 	sharedParams, err := lc.sharedClient.GetParams(ctx)
@@ -544,7 +716,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 	for sessionEndHeight, groupSnapshots := range sessionsByEndHeight {
 		// Wait for proof window to open
 		proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, sessionEndHeight)
-		logger.Info().
+		logger.Debug().
 			Int64("proof_window_open_height", proofWindowOpenHeight).
 			Int64("session_end_height", sessionEndHeight).
 			Int("group_size", len(groupSnapshots)).
@@ -591,14 +763,17 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		}
 
 		// Calculate the earliest proof commit height for this supplier (timing spread)
-		earliestProofHeight := sharedtypes.GetEarliestSupplierProofCommitHeight(
-			sharedParams,
+		// Use interface method - block hash not needed since poktroll ignores it currently
+		earliestProofHeight, err := lc.sharedClient.GetEarliestSupplierProofCommitHeight(
+			ctx,
 			sessionEndHeight,
-			proofWindowOpenBlock.Hash(),
 			firstSnapshot.SupplierOperatorAddress,
 		)
+		if err != nil {
+			return fmt.Errorf("failed to calculate earliest proof height: %w", err)
+		}
 
-		logger.Info().
+		logger.Debug().
 			Int64("earliest_proof_height", earliestProofHeight).
 			Int64("session_end_height", sessionEndHeight).
 			Int("proofs_to_submit", len(sessionsNeedingProof)).
@@ -611,7 +786,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			return fmt.Errorf("failed to wait for proof path seed block: %w", seedErr)
 		}
 
-		logger.Info().
+		logger.Debug().
 			Int("group_size", len(sessionsNeedingProof)).
 			Msg("proof window timing reached - generating and submitting batched proofs")
 
@@ -717,7 +892,7 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 
 	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Int64(logging.FieldSessionEndHeight, snapshot.SessionEndHeight).Logger()
 
-	logger.Info().Msg("session needs proof - starting proof process")
+	logger.Debug().Msg("session needs proof - starting proof process")
 
 	// Get shared params
 	sharedParams, err := lc.sharedClient.GetParams(ctx)
@@ -727,7 +902,7 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 
 	// Wait for proof window to open
 	proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, snapshot.SessionEndHeight)
-	logger.Info().
+	logger.Debug().
 		Int64("proof_window_open_height", proofWindowOpenHeight).
 		Msg("waiting for proof window to open")
 
@@ -761,17 +936,20 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 	}
 
 	// Calculate the earliest proof commit height for this supplier (timing spread)
-	earliestProofHeight := sharedtypes.GetEarliestSupplierProofCommitHeight(
-		sharedParams,
+	// Use interface method - block hash not needed since poktroll ignores it currently
+	earliestProofHeight, err := lc.sharedClient.GetEarliestSupplierProofCommitHeight(
+		ctx,
 		snapshot.SessionEndHeight,
-		proofWindowOpenBlock.Hash(),
 		snapshot.SupplierOperatorAddress,
 	)
+	if err != nil {
+		return fmt.Errorf("failed to calculate earliest proof height: %w", err)
+	}
 
 	// Record the scheduled proof height for operators
 	SetProofScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestProofHeight))
 
-	logger.Info().
+	logger.Debug().
 		Int64("earliest_proof_height", earliestProofHeight).
 		Msg("waiting for assigned proof timing")
 
@@ -782,7 +960,7 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 		return fmt.Errorf("failed to wait for proof path seed block: %w", err)
 	}
 
-	logger.Info().Msg("proof window timing reached - generating and submitting proof")
+	logger.Debug().Msg("proof window timing reached - generating and submitting proof")
 
 	// Generate the proof path from the seed block hash
 	path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snapshot.SessionID)
@@ -855,7 +1033,7 @@ func (lc *LifecycleCallback) OnSessionNeedsProof(ctx context.Context, snapshot *
 func (lc *LifecycleCallback) OnSessionSettled(ctx context.Context, snapshot *SessionSnapshot) error {
 	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Logger()
 
-	logger.Info().
+	logger.Debug().
 		Int64(logging.FieldCount, snapshot.RelayCount).
 		Msg("session settled - cleaning up")
 
@@ -868,6 +1046,13 @@ func (lc *LifecycleCallback) OnSessionSettled(ctx context.Context, snapshot *Ses
 	// Clean up SMST
 	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
 		logger.Warn().Err(err).Msg("failed to delete SMST tree")
+	}
+
+	// Delete the session stream to stop consuming late relays
+	if lc.streamDeleter != nil {
+		if err := lc.streamDeleter.DeleteStream(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to delete session stream")
+		}
 	}
 
 	// Update snapshot manager
@@ -888,14 +1073,27 @@ func (lc *LifecycleCallback) OnSessionSettled(ctx context.Context, snapshot *Ses
 func (lc *LifecycleCallback) OnSessionExpired(ctx context.Context, snapshot *SessionSnapshot, reason string) error {
 	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Logger()
 
-	logger.Warn().
-		Str(logging.FieldReason, reason).
-		Int64(logging.FieldCount, snapshot.RelayCount).
-		Msg("session expired - rewards lost")
+	// Only warn about "rewards lost" if there were actually relays to claim
+	// Sessions with 0 relays have no rewards to lose - use Debug level
+	if snapshot.RelayCount > 0 {
+		logger.Warn().
+			Str(logging.FieldReason, reason).
+			Int64(logging.FieldCount, snapshot.RelayCount).
+			Uint64("compute_units", snapshot.TotalComputeUnits).
+			Msg("session expired - rewards lost")
+	} else {
+		logger.Debug().
+			Str(logging.FieldReason, reason).
+			Msg("session expired with 0 relays - no rewards lost")
+	}
 
 	// Record session failed metrics
 	RecordSessionFailed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, reason)
-	RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, reason, snapshot.TotalComputeUnits, snapshot.RelayCount)
+
+	// Only record revenue lost if there was actually revenue (relays > 0)
+	if snapshot.RelayCount > 0 {
+		RecordRevenueLost(snapshot.SupplierOperatorAddress, snapshot.ServiceID, reason, snapshot.TotalComputeUnits, snapshot.RelayCount)
+	}
 
 	// Clean up session-specific metrics (gauges with session_id label)
 	ClearSessionMetrics(snapshot.SupplierOperatorAddress, snapshot.SessionID, snapshot.ServiceID)
@@ -905,6 +1103,13 @@ func (lc *LifecycleCallback) OnSessionExpired(ctx context.Context, snapshot *Ses
 		logger.Warn().Err(err).Msg("failed to delete SMST tree")
 	}
 
+	// Delete the session stream to stop consuming late relays
+	if lc.streamDeleter != nil {
+		if err := lc.streamDeleter.DeleteStream(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to delete session stream")
+		}
+	}
+
 	// Remove session lock
 	lc.removeSessionLock(snapshot.SessionID)
 
@@ -912,8 +1117,16 @@ func (lc *LifecycleCallback) OnSessionExpired(ctx context.Context, snapshot *Ses
 }
 
 // waitForBlock waits for a specific block height to be reached.
+// AGGRESSIVE: 500ms polling to minimize latency when waiting for windows to open.
+// Claims/proofs = money - we want to detect new blocks as fast as possible.
 func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
-	ticker := time.NewTicker(time.Second)
+	// Immediate check - don't wait if already at target
+	block := lc.blockClient.LastBlock(ctx)
+	if block.Height() >= targetHeight {
+		return block, nil
+	}
+
+	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
 	for {

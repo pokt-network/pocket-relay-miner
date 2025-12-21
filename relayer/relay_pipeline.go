@@ -39,7 +39,7 @@ func NewRelayPipeline(
 		relayMeter:     relayMeter,
 		responseSigner: responseSigner,
 		relayProcessor: relayProcessor,
-		logger:         logging.ForComponent(logger, "relay_pipeline"),
+		logger:         logging.ForComponent(logger, logging.ComponentRelayPipeline),
 		metricRecorder: metricRecorder,
 		config:         config,
 	}
@@ -76,10 +76,6 @@ type RelayContext struct {
 type ProcessingResult struct {
 	// Allowed indicates if the relay passed validation and metering checks
 	Allowed bool
-
-	// OverServiced indicates if the relay exceeded application stake limits
-	// (relay served but won't be mined)
-	OverServiced bool
 
 	// ValidationErr contains validation error (signature/session)
 	ValidationErr error
@@ -138,11 +134,11 @@ func (p *RelayPipeline) ValidateRelay(
 }
 
 // MeterRelay checks and consumes relay stake (rate limiting).
-// Returns (allowed, overServiced, error).
+// Returns (allowed, error).
 func (p *RelayPipeline) MeterRelay(
 	ctx context.Context,
 	relayCtx *RelayContext,
-) (bool, bool, error) {
+) (bool, error) {
 	p.logger.Debug().
 		Str("service_id", relayCtx.ServiceID).
 		Str("session_id", relayCtx.SessionID).
@@ -155,7 +151,7 @@ func (p *RelayPipeline) MeterRelay(
 	appAddress := sessionHeader.ApplicationAddress
 
 	// Check and consume relay stake
-	allowed, overServiced, err := p.relayMeter.CheckAndConsumeRelay(
+	allowed, err := p.relayMeter.CheckAndConsumeRelay(
 		ctx,
 		sessionID,
 		appAddress,
@@ -169,14 +165,7 @@ func (p *RelayPipeline) MeterRelay(
 			Str("service_id", relayCtx.ServiceID).
 			Str("session_id", relayCtx.SessionID).
 			Msg("relay metering failed")
-		return false, false, fmt.Errorf("metering failed: %w", err)
-	}
-
-	if overServiced {
-		p.logger.Warn().
-			Str("service_id", relayCtx.ServiceID).
-			Str("session_id", relayCtx.SessionID).
-			Msg("relay over-serviced (will be served but not mined)")
+		return false, fmt.Errorf("metering failed: %w", err)
 	}
 
 	if !allowed {
@@ -186,7 +175,7 @@ func (p *RelayPipeline) MeterRelay(
 			Msg("relay not allowed (stake limit exceeded)")
 	}
 
-	return allowed, overServiced, nil
+	return allowed, nil
 }
 
 // SignResponse signs the relay response with the supplier's private key.
@@ -222,20 +211,19 @@ func (p *RelayPipeline) SignResponse(
 }
 
 // PublishRelay publishes the relay to Redis Streams for mining.
-// Only publishes if the relay is allowed and not over-serviced.
+// Only publishes if the relay is allowed.
 func (p *RelayPipeline) PublishRelay(
 	ctx context.Context,
 	relayCtx *RelayContext,
 	result *ProcessingResult,
 ) error {
-	// Don't publish if not allowed or over-serviced
-	if !result.Allowed || result.OverServiced {
+	// Don't publish if not allowed
+	if !result.Allowed {
 		p.logger.Debug().
 			Bool("allowed", result.Allowed).
-			Bool("over_serviced", result.OverServiced).
 			Str("service_id", relayCtx.ServiceID).
 			Str("session_id", relayCtx.SessionID).
-			Msg("skipping relay publishing (not allowed or over-serviced)")
+			Msg("skipping relay publishing (not allowed)")
 		return nil
 	}
 
@@ -293,8 +281,7 @@ func (p *RelayPipeline) ProcessRelayEager(
 	relayCtx *RelayContext,
 ) *ProcessingResult {
 	result := &ProcessingResult{
-		Allowed:      true,
-		OverServiced: false,
+		Allowed: true,
 	}
 
 	p.logger.Debug().
@@ -313,7 +300,7 @@ func (p *RelayPipeline) ProcessRelayEager(
 	}
 
 	// Step 2: Meter relay (check stake)
-	allowed, overServiced, err := p.MeterRelay(ctx, relayCtx)
+	allowed, err := p.MeterRelay(ctx, relayCtx)
 	if err != nil {
 		result.MeteringErr = err
 		// Fail-open: allow relay on metering error (log error)
@@ -324,7 +311,6 @@ func (p *RelayPipeline) ProcessRelayEager(
 			Msg("metering error (fail-open: allowing relay)")
 	} else {
 		result.Allowed = allowed
-		result.OverServiced = overServiced
 
 		if !allowed {
 			relaysRejected.WithLabelValues(relayCtx.ServiceID, "stake_limit_exceeded").Inc()
@@ -391,8 +377,7 @@ func (p *RelayPipeline) ProcessRelayOptimistic(
 	relayCtx *RelayContext,
 ) (*servicev1.RelayResponse, *ProcessingResult) {
 	result := &ProcessingResult{
-		Allowed:      true,
-		OverServiced: false,
+		Allowed: true,
 	}
 
 	p.logger.Debug().
@@ -449,7 +434,7 @@ func (p *RelayPipeline) ValidateAndMeterAsync(
 	}
 
 	// Step 2: Meter
-	allowed, overServiced, err := p.MeterRelay(ctx, relayCtx)
+	allowed, err := p.MeterRelay(ctx, relayCtx)
 	if err != nil {
 		result.MeteringErr = err
 		// Fail-open: allow relay on metering error
@@ -460,7 +445,6 @@ func (p *RelayPipeline) ValidateAndMeterAsync(
 			Msg("metering error (fail-open: allowing relay)")
 	} else {
 		result.Allowed = allowed
-		result.OverServiced = overServiced
 
 		if !allowed {
 			relaysDropped.WithLabelValues(relayCtx.ServiceID, "meter_rejected").Inc()
@@ -468,7 +452,7 @@ func (p *RelayPipeline) ValidateAndMeterAsync(
 		}
 	}
 
-	// Step 3: Publish if allowed and not over-serviced
+	// Step 3: Publish if allowed
 	if err := p.PublishRelay(ctx, relayCtx, result); err != nil {
 		result.PublishingErr = err
 		p.logger.Warn().
@@ -480,7 +464,6 @@ func (p *RelayPipeline) ValidateAndMeterAsync(
 
 	p.logger.Debug().
 		Bool("allowed", result.Allowed).
-		Bool("over_serviced", result.OverServiced).
 		Str("service_id", relayCtx.ServiceID).
 		Str("session_id", relayCtx.SessionID).
 		Msg("async validation and metering complete")

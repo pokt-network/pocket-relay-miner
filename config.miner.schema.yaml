@@ -13,9 +13,6 @@ properties:
     description: Redis connection configuration
     required:
       - url
-      - stream_prefix
-      - consumer_group
-      - consumer_name
     properties:
       url:
         type: string
@@ -24,22 +21,9 @@ properties:
         examples:
           - redis://localhost:6379
           - redis://redis-node1:6379,redis-node2:6379
-      stream_prefix:
-        type: string
-        description: Prefix for Redis stream keys
-        default: ha:relays
-      consumer_group:
-        type: string
-        description: Consumer group name for Redis Streams
-        default: ha-miners
       consumer_name:
         type: string
         description: Unique consumer name for this miner instance (auto-generated from hostname if not set)
-      block_timeout_ms:
-        type: integer
-        description: XREADGROUP blocking timeout in milliseconds
-        default: 5000
-        minimum: 100
       claim_idle_timeout_ms:
         type: integer
         description: Timeout for reclaiming idle messages from crashed consumers
@@ -65,6 +49,46 @@ properties:
         description: Close idle connections after this many seconds (0 = use default 300s)
         default: 0
         minimum: 0
+      namespace:
+        type: object
+        description: Redis key namespace configuration (defaults match historical "ha:" prefix structure)
+        properties:
+          base_prefix:
+            type: string
+            description: Root prefix for all Redis keys
+            default: ha
+          cache_prefix:
+            type: string
+            description: Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)
+            default: cache
+          events_prefix:
+            type: string
+            description: Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)
+            default: events
+          streams_prefix:
+            type: string
+            description: Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)
+            default: relays
+          miner_prefix:
+            type: string
+            description: Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)
+            default: miner
+          supplier_prefix:
+            type: string
+            description: Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)
+            default: supplier
+          meter_prefix:
+            type: string
+            description: Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)
+            default: meter
+          params_prefix:
+            type: string
+            description: Cached params prefix (full key: {base_prefix}:{params_prefix}:*)
+            default: params
+          consumer_group_prefix:
+            type: string
+            description: Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})
+            default: miners
 
   pocket_node:
     type: object
@@ -125,27 +149,6 @@ properties:
             items:
               type: string
 
-  suppliers:
-    type: array
-    description: Explicit supplier configurations (alternative to auto-discovery from keys)
-    items:
-      type: object
-      required:
-        - operator_address
-        - signing_key_name
-      properties:
-        operator_address:
-          type: string
-          description: Supplier operator address (bech32)
-        signing_key_name:
-          type: string
-          description: Key name in keyring for signing
-        services:
-          type: array
-          description: Service IDs this supplier serves
-          items:
-            type: string
-
   metrics:
     type: object
     description: Prometheus metrics server configuration
@@ -159,14 +162,19 @@ properties:
         description: Metrics HTTP server address
         default: ":9092"
         pattern: ^.*:[0-9]+$
-      pprof_enabled:
+
+  pprof:
+    type: object
+    description: Prometheus metrics server configuration
+    properties:
+      enabled:
         type: boolean
         description: Enable pprof profiling server (for debugging, disable in production)
-        default: false
-      pprof_addr:
+        default: true
+      addr:
         type: string
         description: Pprof HTTP server address (use localhost for security)
-        default: "localhost:6060"
+        default: ":6060"
         pattern: ^.*:[0-9]+$
 
   logging:
@@ -222,6 +230,19 @@ properties:
         default: 1.5
         minimum: 1.0
 
+  default_service_factor:
+    type: number
+    description: Global serviceFactor applied to all services. If set, effectiveLimit = appStake × serviceFactor. If 0 or unset, use baseLimit formula.
+    default: 0
+    minimum: 0
+
+  service_factors:
+    type: object
+    description: Per-service serviceFactor overrides. Key is serviceID, value is serviceFactor.
+    additionalProperties:
+      type: number
+      minimum: 0
+
   balance_monitor:
     type: object
     description: Balance and stake monitoring configuration (Feature 4)
@@ -243,12 +264,12 @@ properties:
       stake_warning_proof_threshold:
         type: integer
         description: Alert when remaining missed proofs before auto-unstake falls below this threshold
-        default: 1000
+        default: 10
         minimum: 1
       stake_critical_proof_threshold:
         type: integer
         description: Critical alert when remaining missed proofs before auto-unstake falls below this threshold
-        default: 100
+        default: 3
         minimum: 1
 
   session_lifecycle:
@@ -323,6 +344,12 @@ properties:
     type: string
     description: TTL for session data (duration string, e.g., "24h")
     default: 24h
+    pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+
+  cache_ttl:
+    type: string
+    description: TTL for Redis cached data (sessions, SMST trees). Backup safety net - manual cleanup is primary.
+    default: 2h
     pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
   known_applications:

@@ -9,6 +9,7 @@ import (
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/cosmos/cosmos-sdk/types/bech32"
 	ring_secp256k1 "github.com/pokt-network/go-dleq/secp256k1"
+	"github.com/pokt-network/ring-go"
 
 	"github.com/pokt-network/poktroll/pkg/crypto"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
@@ -88,11 +89,11 @@ func (s *Signer) GetAddress() string {
 	return s.address
 }
 
-// SignRelayRequest signs a relay request with the application's ring signature.
+// SignRelayRequest signs a relay request with a ring signature.
 //
 // This implements the Pocket Network relay authentication protocol using ring signatures,
-// which allows an application to sign relay requests while maintaining privacy about
-// which specific key (application or delegated gateway) is signing.
+// which allows an application or gateway to sign relay requests while maintaining privacy
+// about which specific key (application or delegated gateway) is signing.
 //
 // Signing flow:
 //  1. Get the application ring from the RingClient (includes app + delegate gateways)
@@ -111,6 +112,10 @@ func (s *Signer) GetAddress() string {
 //   - error: If relay request is nil, missing session header, ring fetch fails, or signing fails
 //
 // The signature is set directly in relayRequest.Meta.Signature.
+//
+// Gateway Mode: When the signer's address differs from the app's address, this enables
+// gateway signing mode (matching PATH's approach). The ring is still constructed from
+// the app's address + delegated gateways, but signed with the signer's private key.
 func (s *Signer) SignRelayRequest(
 	ctx context.Context,
 	relayRequest *servicetypes.RelayRequest,
@@ -127,8 +132,10 @@ func (s *Signer) SignRelayRequest(
 	// Get session end height for ring construction
 	sessionEndHeight := relayRequest.Meta.SessionHeader.SessionEndBlockHeight
 
-	// Get the application ring (includes app + delegate gateways)
-	appRing, err := ringClient.GetRingForAddressAtHeight(ctx, s.address, sessionEndHeight)
+	// Get the application ring using the APP'S address (not the signer's address)
+	// This is critical for gateway mode where the signer is a gateway but the ring
+	// must be constructed from the app's delegations.
+	appRing, err := ringClient.GetRingForAddressAtHeight(ctx, app.Address, sessionEndHeight)
 	if err != nil {
 		return fmt.Errorf("failed to get application ring: %w", err)
 	}
@@ -146,7 +153,71 @@ func (s *Signer) SignRelayRequest(
 		return fmt.Errorf("failed to convert private key to scalar: %w", err)
 	}
 
-	// Sign the relay request with the application's private key using ring signature
+	// Sign the relay request with the signer's private key using ring signature
+	// In gateway mode, this is the gateway's key; in app mode, this is the app's key
+	signature, err := appRing.Sign(relayReqSignableBz, signingKey)
+	if err != nil {
+		return fmt.Errorf("failed to sign relay request: %w", err)
+	}
+
+	// Serialize the ring signature
+	signatureBz, err := signature.Serialize()
+	if err != nil {
+		return fmt.Errorf("failed to serialize signature: %w", err)
+	}
+
+	// Set the signature in the relay request metadata
+	relayRequest.Meta.Signature = signatureBz
+
+	return nil
+}
+
+// SignRelayRequestWithRing signs a relay request using a pre-built ring.
+//
+// This is an optimized version of SignRelayRequest that takes a pre-built ring
+// instead of fetching it each time. This enables ring caching at the client level,
+// matching PATH's caching approach where rings are built once per session.
+//
+// The ring should be built from the app's address + delegated gateways using
+// RingClient.GetRingForAddressAtHeight(). The signer's private key is used for signing,
+// which may be either the app's key (standard mode) or gateway's key (gateway mode).
+//
+// Parameters:
+//   - relayRequest: The relay request to sign (must have valid session header)
+//   - appRing: Pre-built ring for the application (includes app + delegate gateways)
+//
+// Returns:
+//   - error: If relay request is nil, missing session header, or signing fails
+//
+// The signature is set directly in relayRequest.Meta.Signature.
+func (s *Signer) SignRelayRequestWithRing(
+	relayRequest *servicetypes.RelayRequest,
+	appRing *ring.Ring,
+) error {
+	if relayRequest == nil {
+		return fmt.Errorf("relay request is nil")
+	}
+	if relayRequest.Meta.SessionHeader == nil {
+		return fmt.Errorf("relay request missing session header")
+	}
+	if appRing == nil {
+		return fmt.Errorf("ring is nil")
+	}
+
+	// Get signable bytes hash from relay request
+	relayReqSignableBz, err := relayRequest.GetSignableBytesHash()
+	if err != nil {
+		return fmt.Errorf("failed to get signable bytes hash: %w", err)
+	}
+
+	// Convert private key to scalar for ring signature
+	curve := ring_secp256k1.NewCurve()
+	signingKey, err := curve.DecodeToScalar(s.privKey.Bytes())
+	if err != nil {
+		return fmt.Errorf("failed to convert private key to scalar: %w", err)
+	}
+
+	// Sign the relay request with the signer's private key using ring signature
 	signature, err := appRing.Sign(relayReqSignableBz, signingKey)
 	if err != nil {
 		return fmt.Errorf("failed to sign relay request: %w", err)

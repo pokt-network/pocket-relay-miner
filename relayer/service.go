@@ -8,12 +8,11 @@ import (
 	"time"
 
 	pond "github.com/alitto/pond/v2"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
-	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto"
 )
@@ -31,7 +30,7 @@ type Service struct {
 	publisher     transport.MinedRelayPublisher
 
 	// Redis client
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 
 	// Caches (created from Redis client)
 	sharedParamCache cache.SharedParamCache
@@ -60,7 +59,7 @@ type ServiceDependencies struct {
 	Logger logging.Logger
 
 	// RedisClient is the Redis client for pub/sub and caching.
-	RedisClient redis.UniversalClient
+	RedisClient *redisutil.Client
 
 	// RingClient is used for ring signature verification.
 	RingClient crypto.RingClient
@@ -86,8 +85,6 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 	// Create cache config
 	cacheConfig := cache.CacheConfig{
 		RedisURL:               config.Redis.URL,
-		CachePrefix:            config.Redis.StreamPrefix + ":cache",
-		PubSubPrefix:           config.Redis.StreamPrefix + ":events",
 		ExtraGracePeriodBlocks: config.GracePeriodExtraBlocks,
 	}
 
@@ -115,7 +112,6 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 		logger,
 		deps.RedisClient,
 		deps.BlockClient,
-		cacheConfig,
 	)
 
 	// Create health checker
@@ -130,21 +126,17 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 	}
 
 	// Create Redis publisher
-	publisherConfig := transport.PublisherConfig{
-		StreamPrefix: config.Redis.StreamPrefix,
-	}
-
 	// CacheTTL default: 2h if not configured
 	cacheTTL := config.RelayMeter.CacheTTL
 	if cacheTTL == 0 {
 		cacheTTL = 2 * time.Hour
 	}
 
-	publisher := redistransport.NewStreamsPublisher(
+	publisher := redisutil.NewStreamsPublisher(
 		logger,
-		deps.RedisClient,
-		publisherConfig,
-		cacheTTL, // TTL for relay streams (backup safety net)
+		deps.RedisClient.UniversalClient,     // Embedded go-redis client
+		deps.RedisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
+		cacheTTL,                             // TTL for relay streams (backup safety net)
 	)
 
 	// Create master worker pool for relayer

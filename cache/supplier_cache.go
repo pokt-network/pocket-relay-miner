@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"strings"
 	"sync"
 	"time"
@@ -25,6 +26,10 @@ const (
 	// Check UnstakeSessionEndHeight to determine if still in grace period.
 	SupplierStatusUnstaking = "unstaking"
 
+	// SupplierStatusNotStaked indicates the address is in keys but NOT staked on-chain.
+	// This allows operators to see which keys are not yet staked as suppliers.
+	SupplierStatusNotStaked = "not_staked"
+
 	// Cache type for pub/sub and metrics
 	supplierCacheType = "supplier"
 
@@ -38,10 +43,16 @@ const (
 // SupplierState represents the cached state of a supplier.
 // This is stored in Redis and shared between miner (writer) and relayer (reader).
 type SupplierState struct {
-	// Status is the supplier's current status: "active" or "unstaking"
+	// Status is the supplier's current status: "active", "unstaking", or "not_staked"
 	Status string `json:"status"`
 
+	// Staked indicates if this address is staked as a supplier on-chain.
+	// false means the address is in the keys file but NOT staked on-chain.
+	// This allows the miner to track all configured keys and report staking status.
+	Staked bool `json:"staked"`
+
 	// Services is the list of service IDs this supplier is staked for.
+	// Empty if not staked (Staked=false).
 	Services []string `json:"services"`
 
 	// UnstakeSessionEndHeight is the session end height when unstaking takes effect.
@@ -64,6 +75,10 @@ type SupplierState struct {
 	// LastUpdated is the Unix timestamp when this state was last updated.
 	LastUpdated int64 `json:"last_updated"`
 
+	// LastRefreshSessionStart is the session start height when staking status was last checked.
+	// Staking status is only refreshed at session boundaries to avoid unnecessary queries.
+	LastRefreshSessionStart int64 `json:"last_refresh_session_start,omitempty"`
+
 	// UpdatedBy identifies which miner instance updated this state (for debugging).
 	UpdatedBy string `json:"updated_by,omitempty"`
 }
@@ -72,7 +87,7 @@ type SupplierState struct {
 // TODO_IMPROVE: Add session height comparison for proper unstaking grace period.
 // For now, any unstaking supplier is considered inactive.
 func (s *SupplierState) IsActive() bool {
-	return s.Status == SupplierStatusActive && s.UnstakeSessionEndHeight == 0
+	return s.Staked && s.Status == SupplierStatusActive && s.UnstakeSessionEndHeight == 0
 }
 
 // IsActiveForService returns true if the supplier is active for the given service.
@@ -98,7 +113,7 @@ func (s *SupplierState) IsActiveForService(serviceID string) bool {
 // across all instances.
 type SupplierCache struct {
 	logger    logging.Logger
-	redis     redis.UniversalClient
+	redis     *redisutil.Client
 	keyPrefix string
 	failOpen  bool
 
@@ -131,7 +146,7 @@ type SupplierCacheConfig struct {
 // with Close() when no longer needed.
 func NewSupplierCache(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	config SupplierCacheConfig,
 ) *SupplierCache {
 	keyPrefix := config.KeyPrefix
@@ -222,7 +237,7 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 }
 
 // SetSupplierState stores a supplier's state in both L1 and L2 caches.
-// This is typically called by the miner to update supplier state.
+// The miner typically calls this to update supplier state.
 func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierState) error {
 	if state.OperatorAddress == "" {
 		return fmt.Errorf("operator_address is required")

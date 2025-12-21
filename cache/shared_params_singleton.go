@@ -2,7 +2,9 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,12 +18,6 @@ import (
 )
 
 const (
-	// Redis key for shared params cache
-	sharedParamsRedisKey = "ha:cache:shared_params"
-
-	// Lock key for distributed locking during L3 query
-	sharedParamsLockKey = "ha:cache:lock:shared_params"
-
 	// Cache type for pub/sub and metrics
 	sharedParamsCacheType = "shared_params"
 
@@ -62,7 +58,7 @@ const (
 // - All instances clear L1 and query fresh from chain or L2
 type sharedParamsCache struct {
 	logger           logging.Logger
-	redisClient      redis.UniversalClient
+	redisClient      *redisutil.Client
 	queryClient      client.SharedQueryClient
 	blockTimeSeconds int64
 
@@ -87,7 +83,7 @@ type sharedParamsCache struct {
 // TTL is calculated as: 2 × num_blocks_per_session (from shared params) × blockTimeSeconds
 func NewSharedParamsCache(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	queryClient client.SharedQueryClient,
 	blockTimeSeconds int64,
 ) SingletonEntityCache[*sharedtypes.Params] {
@@ -154,10 +150,10 @@ func (c *sharedParamsCache) Get(ctx context.Context, force ...bool) (*sharedtype
 		}
 
 		// L2: Check Redis cache
-		data, err := c.redisClient.Get(ctx, sharedParamsRedisKey).Bytes()
+		data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsSharedCacheKey()).Bytes()
 		if err == nil {
-			params := &sharedtypes.Params{} // CRITICAL FIX: Allocate on heap, not stack
-			if err := proto.Unmarshal(data, params); err == nil {
+			params := &sharedtypes.Params{}
+			if err = proto.Unmarshal(data, params); err == nil {
 				// Store in L1 for next time
 				c.localCache.Store(params)
 				cacheHits.WithLabelValues(sharedParamsCacheType, CacheLevelL2).Inc()
@@ -165,11 +161,11 @@ func (c *sharedParamsCache) Get(ctx context.Context, force ...bool) (*sharedtype
 				c.logger.Debug().Msg("shared params cache hit (L2) → stored in L1")
 
 				return params, nil
-			} else {
-				c.logger.Warn().
-					Err(err).
-					Msg("failed to unmarshal shared params from Redis")
 			}
+
+			c.logger.Warn().
+				Err(err).
+				Msg("failed to unmarshal shared params from Redis")
 		}
 	}
 
@@ -199,13 +195,10 @@ func (c *sharedParamsCache) Get(ctx context.Context, force ...bool) (*sharedtype
 	}
 
 	// Store in L2 and L1 with dynamically calculated TTL
-	ttl, err := c.calculateTTL(ctx)
-	if err != nil {
-		c.logger.Warn().Err(err).Msg("failed to calculate TTL, using default 10min")
-		ttl = 10 * time.Minute
-	}
+	// Use the params we just fetched instead of querying again
+	ttl := c.calculateTTLFromParams(params)
 
-	if err := c.Set(ctx, params, ttl); err != nil {
+	if err = c.Set(ctx, params, ttl); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to cache shared params after L3 query")
@@ -221,7 +214,7 @@ func (c *sharedParamsCache) Get(ctx context.Context, force ...bool) (*sharedtype
 		}
 	}
 
-	// Publish invalidation event if force refresh (leader only)
+	// Publish the invalidation event if force refresh (leader only)
 	if forceRefresh {
 		payload := "{}"
 		if err := PublishInvalidation(ctx, c.redisClient, c.logger, sharedParamsCacheType, payload); err != nil {
@@ -238,7 +231,7 @@ func (c *sharedParamsCache) Get(ctx context.Context, force ...bool) (*sharedtype
 
 // Set stores the shared params in both L1 and L2 caches.
 func (c *sharedParamsCache) Set(ctx context.Context, params *sharedtypes.Params, ttl time.Duration) error {
-	// L1: Store in local cache
+	// L1: Store in a local cache
 	c.localCache.Store(params)
 
 	// L2: Store in Redis (proto marshaling)
@@ -247,7 +240,7 @@ func (c *sharedParamsCache) Set(ctx context.Context, params *sharedtypes.Params,
 		return fmt.Errorf("failed to marshal shared params: %w", err)
 	}
 
-	if err := c.redisClient.Set(ctx, sharedParamsRedisKey, data, ttl).Err(); err != nil {
+	if err := c.redisClient.Set(ctx, c.redisClient.KB().ParamsSharedCacheKey(), data, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set Redis cache: %w", err)
 	}
 
@@ -271,7 +264,7 @@ func (c *sharedParamsCache) InvalidateAll(ctx context.Context) error {
 	c.localCache.Store(nil)
 
 	// Clear L2 (Redis)
-	if err := c.redisClient.Del(ctx, sharedParamsRedisKey).Err(); err != nil {
+	if err := c.redisClient.Del(ctx, c.redisClient.KB().ParamsSharedCacheKey()).Err(); err != nil {
 		c.logger.Warn().
 			Err(err).
 			Msg("failed to delete from Redis")
@@ -297,9 +290,9 @@ func (c *sharedParamsCache) WarmupFromRedis(ctx context.Context) error {
 	c.logger.Info().Msg("warming up shared params cache from Redis")
 
 	// Try to load from Redis into L1
-	data, err := c.redisClient.Get(ctx, sharedParamsRedisKey).Bytes()
+	data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsSharedCacheKey()).Bytes()
 	if err != nil {
-		if err == redis.Nil {
+		if errors.Is(err, redis.Nil) {
 			// Not in cache yet, that's OK
 			c.logger.Debug().Msg("shared params not in Redis, will be loaded on first query")
 			return nil
@@ -324,12 +317,13 @@ func (c *sharedParamsCache) WarmupFromRedis(ctx context.Context) error {
 // queryChainWithLock queries the chain with distributed locking to prevent
 // duplicate queries from multiple instances.
 func (c *sharedParamsCache) queryChainWithLock(ctx context.Context) (*sharedtypes.Params, error) {
+	lockKey := c.redisClient.KB().ParamsSharedLockKey()
 	// Try to acquire distributed lock
-	locked, err := c.redisClient.SetNX(ctx, sharedParamsLockKey, "1", 5*time.Second).Result()
+	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
-	defer c.redisClient.Del(ctx, sharedParamsLockKey)
+	defer c.redisClient.Del(ctx, lockKey)
 
 	if !locked {
 		// Another instance is querying, wait and retry L2
@@ -337,7 +331,7 @@ func (c *sharedParamsCache) queryChainWithLock(ctx context.Context) (*sharedtype
 		time.Sleep(5 * time.Millisecond)
 
 		// Retry L2 after waiting
-		data, err := c.redisClient.Get(ctx, sharedParamsRedisKey).Bytes()
+		data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsSharedCacheKey()).Bytes()
 		if err == nil {
 			params := &sharedtypes.Params{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, params); err == nil {
@@ -362,18 +356,15 @@ func (c *sharedParamsCache) queryChainWithLock(ctx context.Context) (*sharedtype
 	return params, nil
 }
 
-// calculateTTL calculates the TTL as 2 sessions worth of time.
+// calculateTTLFromParams calculates the TTL from already-fetched params.
+// This avoids an extra gRPC call during refresh.
 // Formula: TTL = 2 × num_blocks_per_session × block_time_seconds
-func (c *sharedParamsCache) calculateTTL(ctx context.Context) (time.Duration, error) {
-	// Query shared params directly to get num_blocks_per_session
-	// (We can't use the cache here to avoid circular dependency)
-	sharedParams, err := c.queryClient.GetParams(ctx)
-	if err != nil {
-		return 0, fmt.Errorf("failed to query shared params: %w", err)
+func (c *sharedParamsCache) calculateTTLFromParams(params *sharedtypes.Params) time.Duration {
+	if params == nil {
+		return 10 * time.Minute // Default fallback
 	}
 
-	// Calculate: 2 sessions × blocks_per_session × block_time
-	numBlocksPerSession := sharedParams.NumBlocksPerSession
+	numBlocksPerSession := params.NumBlocksPerSession
 	ttlSeconds := int64(sessionTTLMultiplier*numBlocksPerSession) * c.blockTimeSeconds
 
 	c.logger.Debug().
@@ -382,7 +373,7 @@ func (c *sharedParamsCache) calculateTTL(ctx context.Context) (time.Duration, er
 		Int64("ttl_seconds", ttlSeconds).
 		Msg("calculated shared params TTL")
 
-	return time.Duration(ttlSeconds) * time.Second, nil
+	return time.Duration(ttlSeconds) * time.Second
 }
 
 // handleInvalidation handles cache invalidation events from pub/sub.
@@ -398,7 +389,7 @@ func (c *sharedParamsCache) handleInvalidation(ctx context.Context, payload stri
 
 	// Eagerly reload from L2 (Redis) to avoid cold cache on next relay
 	// This eliminates the latency penalty on the first relay after invalidation
-	data, err := c.redisClient.Get(ctx, sharedParamsRedisKey).Bytes()
+	data, err := c.redisClient.Get(ctx, c.redisClient.KB().ParamsSharedCacheKey()).Bytes()
 	if err == nil {
 		params := &sharedtypes.Params{}
 		if err := proto.Unmarshal(data, params); err == nil {

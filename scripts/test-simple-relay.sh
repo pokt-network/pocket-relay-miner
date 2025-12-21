@@ -3,6 +3,14 @@
 # Test script to send simple relay requests on each protocol
 # Verifies basic relay functionality across all transports
 #
+# Genesis has 4 services, each with a corresponding app:
+#   - develop-http      -> app1 (JSON-RPC/HTTP)
+#   - develop-websocket -> app2 (WebSocket)
+#   - develop-stream    -> app3 (Streaming/SSE)
+#   - develop-grpc      -> app4 (gRPC)
+#
+# When using --localnet, the correct app key is auto-selected based on service.
+#
 
 set -euo pipefail
 
@@ -10,7 +18,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib/common.sh"
 
 # Default parameters
-SERVICE="develop"
+# develop-http is the default for JSON-RPC testing (most common)
+SERVICE="develop-http"
 PROTOCOLS="jsonrpc,websocket,grpc,stream"
 
 # Parse command-line arguments
@@ -28,13 +37,14 @@ while [[ $# -gt 0 ]]; do
         echo "Usage: $0 [options]"
         echo
         echo "Options:"
-        echo "  --service <id>        Service ID (default: develop)"
+        echo "  --service <id>        Service ID (default: develop-http)"
+        echo "                        Localnet services: develop-http, develop-websocket, develop-stream, develop-grpc"
         echo "  --protocols <list>    Comma-separated protocol list (default: jsonrpc,websocket,grpc,stream)"
         echo "  --help                Show this help message"
         echo
         echo "Examples:"
-        echo "  $0                                    # Test all protocols on develop"
-        echo "  $0 --service eth-mainnet              # Test all protocols on eth-mainnet"
+        echo "  $0                                    # Test all protocols on develop-http"
+        echo "  $0 --service develop-websocket        # Test all protocols on websocket service"
         echo "  $0 --protocols jsonrpc,websocket      # Test only HTTP and WebSocket"
         exit 0
         ;;

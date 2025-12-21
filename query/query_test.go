@@ -20,7 +20,7 @@ func TestNewQueryClients_ValidConfig(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 		UseTLS:       false,
@@ -48,7 +48,7 @@ func TestNewQueryClients_ValidConfig(t *testing.T) {
 // TestNewQueryClients_InvalidEndpoint tests failure with invalid endpoint
 func TestNewQueryClients_InvalidEndpoint(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: "invalid-endpoint:999999", // Invalid port
 		QueryTimeout: 5 * time.Second,
 		UseTLS:       false,
@@ -68,7 +68,7 @@ func TestNewQueryClients_InvalidEndpoint(t *testing.T) {
 // TestNewQueryClients_MissingEndpoint tests failure with missing endpoint
 func TestNewQueryClients_MissingEndpoint(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: "",
 		QueryTimeout: 5 * time.Second,
 	}
@@ -85,7 +85,7 @@ func TestNewQueryClients_WithTLS(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 		UseTLS:       true,
@@ -106,7 +106,7 @@ func TestNewQueryClients_WithoutTLS(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 		UseTLS:       false,
@@ -126,7 +126,7 @@ func TestQueryClients_Close_Success(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -145,7 +145,7 @@ func TestQueryClients_Close_AlreadyClosed(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -169,7 +169,7 @@ func TestGRPCConnection_Success(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -196,7 +196,7 @@ func TestGRPCConnection_Timeout(t *testing.T) {
 	slowDuration := 100 * time.Millisecond
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 10 * time.Millisecond, // Very short timeout
 	}
@@ -227,7 +227,7 @@ func TestGRPCConnection_Refused(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	// Use an address that's not listening
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: "localhost:0", // Port 0 is reserved, nothing listening
 		QueryTimeout: 1 * time.Second,
 	}
@@ -252,7 +252,7 @@ func TestQueryClientConfig_DefaultTimeout(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 0, // Should use default
 	}
@@ -274,7 +274,7 @@ func TestQueryClients_AllClients(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -304,7 +304,7 @@ func TestQueryClients_ConcurrentAccess(t *testing.T) {
 	mock.sharedParams = generateTestSharedParams()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -346,7 +346,7 @@ func TestQueryClients_NetworkError(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}

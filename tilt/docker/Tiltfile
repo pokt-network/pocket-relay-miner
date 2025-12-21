@@ -1,0 +1,160 @@
+# Tiltfile for Docker Compose Development
+# This Tiltfile provides hot-reload development using Docker Compose.
+#
+# Usage (from project root):
+#   tilt up -f tilt/docker/Tiltfile
+#
+# Or from this directory:
+#   cd tilt/docker && tilt up
+#
+# Prerequisites:
+#   - Docker and Docker Compose installed
+#   - PATH image built and available (or set PATH_IMAGE env var)
+#   - tilt installed (https://tilt.dev)
+#
+# Dependency Flow:
+#   Tier 1 (Infrastructure): redis, validator, prometheus, grafana, backend
+#   Tier 2 (Initialization):  accounts-init (registers app pubkeys on-chain)
+#   Tier 3 (Gateway/Miner):   path, miner
+#   Tier 4 (Relayer):         relayer
+
+# docker_compose() is built-in to Tilt - no extension needed
+docker_compose('./docker-compose.yaml')
+
+# =============================================================================
+# Live Update for Hot Reload Development
+# =============================================================================
+
+# Build pocket-relay-miner image
+# Use ignore patterns to prevent unnecessary rebuilds
+# Image name must match what's in docker-compose.yaml
+docker_build(
+    'pocket-relay-miner:local',
+    context='../..',
+    dockerfile='../../Dockerfile',
+    ignore=[
+        # Version Control
+        '.git/',
+        '.gitignore',
+        '.github/',
+        # IDE & Editors
+        '.idea/',
+        '.vscode/',
+        '.claude/',
+        # Build Artifacts
+        'bin/',
+        'pocket-relay-miner',
+        'coverage.out',
+        'coverage.html',
+        '*.prof',
+        '*.test',
+        # Documentation
+        '*.md',
+        '*.txt',
+        # Tilt & Development
+        '.tilt-tmp/',
+        'tilt_config.yaml',
+        'tilt/',
+        # Profiling Output
+        'profiles/',
+    ],
+)
+
+# =============================================================================
+# Resource Configuration - Tiered Dependencies
+# =============================================================================
+
+# Tier 1: Infrastructure (no dependencies)
+dc_resource('redis', labels=['infrastructure'])
+
+dc_resource('validator', labels=['infrastructure'],
+    resource_deps=['redis'])
+
+dc_resource('backend', labels=['infrastructure'])
+
+dc_resource('prometheus', labels=['observability'])
+
+dc_resource('grafana', labels=['observability'],
+    resource_deps=['prometheus'])
+
+# Tier 2: Account Initialization (registers pubkeys before PATH/miner start)
+dc_resource('accounts-init', labels=['initialization'],
+    resource_deps=['validator', 'redis'])
+
+# Tier 3: Gateway and Miner (depend on accounts-init)
+dc_resource('path', labels=['gateway'],
+    resource_deps=['validator', 'redis', 'accounts-init'])
+
+dc_resource('miner', labels=['relay-miner'],
+    resource_deps=['validator', 'redis', 'accounts-init'])
+
+# Tier 4: Relayer (depends on path and miner being healthy)
+dc_resource('relayer', labels=['relay-miner'],
+    resource_deps=['validator', 'redis', 'backend', 'path', 'miner'])
+
+# =============================================================================
+# Port Forwards and Links
+# =============================================================================
+
+# Display helpful links in Tilt UI
+# Note: dc_resource doesn't support links directly, ports are from docker-compose.yaml:
+#   - Redis: 6379
+#   - Validator RPC: 26657, gRPC: 9090, REST: 1317
+#   - Backend: HTTP 8545, gRPC 50051, Metrics 9095
+#   - PATH Gateway: 3069, Metrics 9096
+#   - Relayer: HTTP 8080, Health 8081, Metrics 9190, pprof 6060
+#   - Miner: Metrics 9092, pprof 6065
+#   - Prometheus: 9091
+#   - Grafana: 3000
+
+print("""
+=============================================================================
+                    Pocket RelayMiner - Docker Compose
+=============================================================================
+
+Startup Order:
+  1. Infrastructure: redis, validator, backend, prometheus, grafana
+  2. Initialization:  accounts-init (registers app pubkeys)
+  3. Gateway/Miner:   path, miner
+  4. Relayer:         relayer
+
+Services:
+  Redis:           redis://localhost:6379
+  Validator RPC:   http://localhost:26657
+  Validator gRPC:  localhost:9090
+  Backend:         http://localhost:8545
+  PATH Gateway:    http://localhost:3069/v1
+  Relayer:         http://localhost:8080
+  Miner Metrics:   http://localhost:9092/metrics
+  Prometheus:      http://localhost:9091
+  Grafana:         http://localhost:3000 (admin/admin)
+
+Quick Test:
+  # Wait for services to be healthy, then send a test relay via PATH
+  curl -X POST http://localhost:3069/v1 \\
+    -H "Target-Service-Id: develop-http" \\
+    -H "Content-Type: application/json" \\
+    -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+
+  # Load test with hey (3k relays @ 50 concurrency)
+  hey -n 3000 -c 50 \\
+    -H "Target-Service-Id: develop-http" \\
+    -H "Content-Type: application/json" \\
+    -m POST \\
+    -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \\
+    http://localhost:3069/v1
+
+Debugging:
+  # Redis debug commands
+  go run ../../main.go redis keys --pattern "ha:*" --stats --redis redis://localhost:6379
+  go run ../../main.go redis sessions --supplier pokt1... --redis redis://localhost:6379
+
+  # View logs
+  docker-compose logs -f relayer miner
+
+  # pprof profiling
+  go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30
+  go tool pprof http://localhost:6065/debug/pprof/heap
+
+=============================================================================
+""")

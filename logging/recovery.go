@@ -25,7 +25,7 @@ var (
 // RecoverGoRoutine wraps a goroutine with panic recovery and structured logging.
 // Use this for ALL spawned goroutines to prevent crashes from propagating.
 //
-// The function logs panic details including:
+// The function logs panic details including
 // - Component name
 // - Panic value
 // - Full stack trace

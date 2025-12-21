@@ -3,12 +3,13 @@ package miner
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/smt"
 	"github.com/pokt-network/smt/kvstore"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
@@ -39,7 +40,7 @@ type redisSMST struct {
 // This enables shared storage across HA instances for instant failover.
 type RedisSMSTManager struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	config      RedisSMSTManagerConfig
 
 	// Per-session SMST trees (cached in memory, but backed by Redis)
@@ -51,7 +52,7 @@ type RedisSMSTManager struct {
 // The manager stores SMST nodes in Redis, enabling shared storage across HA instances.
 func NewRedisSMSTManager(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	config RedisSMSTManagerConfig,
 ) *RedisSMSTManager {
 	return &RedisSMSTManager{
@@ -130,7 +131,7 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	// Set TTL as backup safety net (auto-expire if manual cleanup fails)
 	// Manual deletion happens in OnSessionSettled/OnSessionExpired
 	if m.config.CacheTTL > 0 {
-		hashKey := fmt.Sprintf("ha:smst:%s:nodes", sessionID)
+		hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
 		if err := m.redisClient.Expire(ctx, hashKey, m.config.CacheTTL).Err(); err != nil {
 			// Log but don't fail - TTL is just a safety net
 			m.logger.Warn().
@@ -241,7 +242,7 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 // SetTreeTTL sets a TTL on the Redis SMST hash for a session.
 // This is called after successful settlement to ensure cleanup without losing proof data prematurely.
 func (m *RedisSMSTManager) SetTreeTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
-	hashKey := fmt.Sprintf("ha:smst:%s:nodes", sessionID)
+	hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
 
 	if err := m.redisClient.Expire(ctx, hashKey, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set TTL on SMST: %w", err)
@@ -264,7 +265,7 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	delete(m.trees, sessionID)
 
 	// Remove from Redis
-	hashKey := fmt.Sprintf("ha:smst:%s:nodes", sessionID)
+	hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
 	if err := m.redisClient.Del(ctx, hashKey).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
@@ -295,17 +296,19 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 	// Scan for SMST keys matching pattern ha:smst:*:nodes
 	var cursor uint64
 	var loadedCount int
+	smstPrefix := m.redisClient.KB().SMSTNodesPrefix()
 
 	for {
-		keys, nextCursor, err := m.redisClient.Scan(ctx, cursor, "ha:smst:*:nodes", 100).Result()
+		keys, nextCursor, err := m.redisClient.Scan(ctx, cursor, m.redisClient.KB().SMSTNodesPattern(), 100).Result()
 		if err != nil {
 			return loadedCount, fmt.Errorf("failed to scan Redis for SMST keys: %w", err)
 		}
 
 		for _, hashKey := range keys {
-			// Extract session ID from key: ha:smst:{sessionID}:nodes
-			// Remove prefix "ha:smst:" and suffix ":nodes"
-			sessionID := hashKey[8 : len(hashKey)-6]
+			// Extract session ID from key: {prefix}:smst:{sessionID}:nodes
+			// Remove prefix and suffix ":nodes"
+			sessionID := strings.TrimPrefix(hashKey, smstPrefix)
+			sessionID = strings.TrimSuffix(sessionID, ":nodes")
 
 			// Check if tree already exists in memory
 			m.treesMu.RLock()

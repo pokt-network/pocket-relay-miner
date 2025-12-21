@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/keepalive"
 	"sync"
 	"time"
 
@@ -15,10 +17,6 @@ import (
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	accounttypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
-
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
@@ -27,6 +25,9 @@ import (
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials"
+	"google.golang.org/grpc/credentials/insecure"
 )
 
 // queryCodec is a codec used to unmarshal the account interface returned by the
@@ -45,8 +46,8 @@ const (
 	defaultQueryTimeout = 5 * time.Second
 )
 
-// QueryClientConfig contains configuration for query clients.
-type QueryClientConfig struct {
+// ClientConfig contains configuration for query clients.
+type ClientConfig struct {
 	// GRPCEndpoint is the gRPC endpoint for the full node.
 	// Example: "localhost:9090"
 	GRPCEndpoint string
@@ -61,10 +62,10 @@ type QueryClientConfig struct {
 	UseTLS bool
 }
 
-// QueryClients provides access to all on-chain query clients.
-type QueryClients struct {
+// Clients provide access to all on-chain query clients.
+type Clients struct {
 	logger logging.Logger
-	config QueryClientConfig
+	config ClientConfig
 
 	// gRPC connection
 	grpcConn *grpc.ClientConn
@@ -84,11 +85,11 @@ type QueryClients struct {
 	closed bool
 }
 
-// NewQueryClients creates a new QueryClients instance.
+// NewQueryClients creates a new Clients instance.
 func NewQueryClients(
 	logger logging.Logger,
-	config QueryClientConfig,
-) (*QueryClients, error) {
+	config ClientConfig,
+) (*Clients, error) {
 	if config.GRPCEndpoint == "" {
 		return nil, fmt.Errorf("gRPC endpoint is required")
 	}
@@ -106,15 +107,47 @@ func NewQueryClients(
 		transportCreds = insecure.NewCredentials()
 	}
 
+	// Production-optimized gRPC connection for high-volume queries
 	grpcConn, err := grpc.NewClient(
 		config.GRPCEndpoint,
 		grpc.WithTransportCredentials(transportCreds),
+
+		// Keepalive: Prevent connection timeouts and detect broken connections
+		// Note: Servers enforce minimum ping intervals (often 5 minutes).
+		// Pinging too frequently triggers ENHANCE_YOUR_CALM / GoAway.
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                60 * time.Second, // Send keepalive ping every 60s if no activity
+			Timeout:             10 * time.Second, // Wait 10s for ping ack before considering connection dead
+			PermitWithoutStream: false,            // Only ping when there are active RPCs
+		}),
+
+		// Initial window size: Improve throughput for large query responses
+		grpc.WithInitialWindowSize(1<<20), // 1MB (default 64KB)
+
+		// Connection window size: Control flow control for the connection
+		grpc.WithInitialConnWindowSize(1<<20), // 1MB
+
+		// Max message size: Allow larger responses for bulk queries
+		grpc.WithDefaultCallOptions(
+			grpc.MaxCallRecvMsgSize(10*1024*1024), // 10MB max receive
+		),
+
+		// Connection backoff: Graceful reconnection on network issues
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  1.0 * time.Second,
+				Multiplier: 1.6,
+				Jitter:     0.2,
+				MaxDelay:   30 * time.Second,
+			},
+			MinConnectTimeout: 5 * time.Second, // Fail fast on dead nodes
+		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC connection: %w", err)
 	}
 
-	qc := &QueryClients{
+	qc := &Clients{
 		logger:   logging.ForComponent(logger, logging.ComponentQueryClients),
 		config:   config,
 		grpcConn: grpcConn,
@@ -138,53 +171,53 @@ func NewQueryClients(
 }
 
 // Shared returns the shared module query client.
-func (qc *QueryClients) Shared() client.SharedQueryClient {
+func (qc *Clients) Shared() client.SharedQueryClient {
 	return qc.sharedClient
 }
 
 // Session returns the session module query client.
-func (qc *QueryClients) Session() client.SessionQueryClient {
+func (qc *Clients) Session() client.SessionQueryClient {
 	return qc.sessionClient
 }
 
 // Application returns the application module query client.
-func (qc *QueryClients) Application() client.ApplicationQueryClient {
+func (qc *Clients) Application() client.ApplicationQueryClient {
 	return qc.applicationClient
 }
 
 // Supplier returns the supplier module query client.
-func (qc *QueryClients) Supplier() client.SupplierQueryClient {
+func (qc *Clients) Supplier() client.SupplierQueryClient {
 	return qc.supplierClient
 }
 
 // Proof returns the proof module query client.
-func (qc *QueryClients) Proof() client.ProofQueryClient {
+func (qc *Clients) Proof() client.ProofQueryClient {
 	return qc.proofClient
 }
 
 // Service returns the service module query client.
-func (qc *QueryClients) Service() client.ServiceQueryClient {
+func (qc *Clients) Service() client.ServiceQueryClient {
 	return qc.serviceClient
 }
 
 // Account returns the account query client.
-func (qc *QueryClients) Account() client.AccountQueryClient {
+func (qc *Clients) Account() client.AccountQueryClient {
 	return qc.accountClient
 }
 
 // Bank returns the bank query client.
-func (qc *QueryClients) Bank() client.BankQueryClient {
+func (qc *Clients) Bank() client.BankQueryClient {
 	return qc.bankClient
 }
 
 // GRPCConnection returns the underlying gRPC connection.
 // This allows sharing the connection with other clients (e.g., TxClient).
-func (qc *QueryClients) GRPCConnection() *grpc.ClientConn {
+func (qc *Clients) GRPCConnection() *grpc.ClientConn {
 	return qc.grpcConn
 }
 
 // Close closes all query clients and the underlying gRPC connection.
-func (qc *QueryClients) Close() error {
+func (qc *Clients) Close() error {
 	qc.mu.Lock()
 	defer qc.mu.Unlock()
 
@@ -241,7 +274,7 @@ func (c *sharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Params,
 	c.paramsCacheMu.Lock()
 	defer c.paramsCacheMu.Unlock()
 
-	// Double-check after acquiring lock
+	// Double-check after acquiring a lock
 	if c.paramsCache != nil {
 		return c.paramsCache, nil
 	}
@@ -280,13 +313,17 @@ func (c *sharedQueryClient) GetEarliestSupplierClaimCommitHeight(ctx context.Con
 		return 0, err
 	}
 
-	// TODO: For now, use a simple calculation without block hash
-	// In production, we should query the block hash at claim window open height
-	// claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(params, queryHeight)
+	// NOTE: Block hash parameter not included in interface signature.
+	// Poktroll's GetEarliestSupplierClaimCommitHeight (x/shared/types/session.go:107-124)
+	// currently ignores the block hash - distribution logic is commented out and it just
+	// returns claimWindowOpenHeight. See poktroll TODO_TECHDEBT(@red-0ne) line 129-133.
+	//
+	// When poktroll enables claim distribution, this interface will need to be extended
+	// to accept block hash, or callers will need to call sharedtypes directly.
 	return sharedtypes.GetEarliestSupplierClaimCommitHeight(
 		params,
 		queryHeight,
-		nil, // Block hash - simplified for now
+		nil, // Block hash - not in interface signature, ignored by poktroll anyway
 		supplierOperatorAddr,
 	), nil
 }
@@ -305,12 +342,17 @@ func (c *sharedQueryClient) GetEarliestSupplierProofCommitHeight(ctx context.Con
 		return 0, err
 	}
 
-	// TODO: For now, use a simple calculation without block hash
-	// In production, we should query the block hash at proof window open height
+	// NOTE: Block hash parameter not included in interface signature.
+	// Poktroll's GetEarliestSupplierProofCommitHeight (x/shared/types/session.go:134-151)
+	// currently ignores the block hash - distribution logic is commented out and it just
+	// returns proofWindowOpenHeight. See poktroll TODO_TECHDEBT(@red-0ne) line 129-133.
+	//
+	// When poktroll enables proof distribution, this interface will need to be extended
+	// to accept block hash, or callers will need to call sharedtypes directly.
 	return sharedtypes.GetEarliestSupplierProofCommitHeight(
 		params,
 		queryHeight,
-		nil, // Block hash - simplified for now
+		nil, // Block hash - not in interface signature, ignored by poktroll anyway
 		supplierOperatorAddr,
 	), nil
 }

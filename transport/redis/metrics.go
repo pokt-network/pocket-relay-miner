@@ -164,36 +164,6 @@ var (
 		[]string{"component"},
 	)
 
-	// Stream discovery metrics (for session-based streams)
-
-	activeSessionStreams = observability.SharedFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "active_session_streams",
-			Help:      "Number of active session streams being consumed",
-		},
-		[]string{"supplier_addr"},
-	)
-
-	streamDiscoveryScanDuration = observability.SharedFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "stream_discovery_scan_duration_seconds",
-			Help:      "Duration of stream discovery SCAN operations",
-			Buckets:   []float64{0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5},
-		},
-		[]string{"supplier_addr"},
-	)
-
-	streamDiscoveryErrors = observability.SharedFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "stream_discovery_errors_total",
-			Help:      "Total stream discovery errors",
-		},
-		[]string{"supplier_addr", "error_type"},
-	)
+	// Note: Stream discovery metrics removed with single-stream-per-supplier architecture.
+	// Discovery is no longer needed - we consume from a single known stream per supplier.
 )

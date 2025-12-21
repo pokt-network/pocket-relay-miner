@@ -4,23 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"time"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/puzpuzpuz/xsync/v4"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
 const (
-	// Redis key prefix for account public keys
-	accountPubKeyPrefix = "ha:cache:account:"
-
-	// Lock key prefix for distributed locking during L3 query
-	accountPubKeyLockPrefix = "ha:cache:lock:account:"
-
 	// Cache type for pub/sub and metrics
 	accountCacheType = "account"
 
@@ -50,7 +44,7 @@ type AccountQueryClient interface {
 // Even if an app/gateway unstakes, their public key remains valid and static.
 type accountCache struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	queryClient AccountQueryClient
 
 	// L1: In-memory cache (xsync for lock-free performance)
@@ -67,7 +61,7 @@ type accountCache struct {
 // with Close() when no longer needed.
 func NewAccountCache(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	queryClient AccountQueryClient,
 ) KeyedEntityCache[string, cryptotypes.PubKey] {
 	return &accountCache{
@@ -126,7 +120,7 @@ func (c *accountCache) Get(ctx context.Context, address string, force ...bool) (
 	}
 
 	// L2: Check Redis cache
-	redisKey := accountPubKeyPrefix + address
+	redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
 	data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 	if err == nil {
 		// Unmarshal proto-encoded public key
@@ -187,7 +181,7 @@ func (c *accountCache) Set(ctx context.Context, address string, pubKey cryptotyp
 		return fmt.Errorf("failed to marshal public key: %w", err)
 	}
 
-	redisKey := accountPubKeyPrefix + address
+	redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
 	if err := c.redisClient.Set(ctx, redisKey, data, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set Redis cache: %w", err)
 	}
@@ -207,7 +201,7 @@ func (c *accountCache) Invalidate(ctx context.Context, address string) error {
 	c.localCache.Delete(address)
 
 	// Remove from L2 (Redis)
-	redisKey := accountPubKeyPrefix + address
+	redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
 	if err := c.redisClient.Del(ctx, redisKey).Err(); err != nil {
 		c.logger.Warn().
 			Err(err).
@@ -246,7 +240,7 @@ func (c *accountCache) InvalidateAll(ctx context.Context) error {
 	c.localCache.Clear()
 
 	// Clear L2 (Redis) - delete all keys matching prefix
-	pattern := accountPubKeyPrefix + "*"
+	pattern := c.redisClient.KB().CacheKey(accountCacheType, "*")
 	iter := c.redisClient.Scan(ctx, 0, pattern, 100).Iterator()
 	for iter.Next(ctx) {
 		if err := c.redisClient.Del(ctx, iter.Val()).Err(); err != nil {
@@ -285,7 +279,7 @@ func (c *accountCache) WarmupFromRedis(ctx context.Context, knownAddresses []str
 
 	warmedCount := 0
 	for _, address := range knownAddresses {
-		redisKey := accountPubKeyPrefix + address
+		redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
 		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 		if err != nil {
 			// Key doesn't exist in Redis, skip
@@ -316,7 +310,7 @@ func (c *accountCache) WarmupFromRedis(ctx context.Context, knownAddresses []str
 // queryChainWithLock queries the chain with distributed locking to prevent
 // duplicate queries from multiple instances.
 func (c *accountCache) queryChainWithLock(ctx context.Context, address string) (cryptotypes.PubKey, error) {
-	lockKey := accountPubKeyLockPrefix + address
+	lockKey := c.redisClient.KB().CacheLockKey(accountCacheType, address)
 
 	// Try to acquire distributed lock
 	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
@@ -334,7 +328,7 @@ func (c *accountCache) queryChainWithLock(ctx context.Context, address string) (
 		time.Sleep(5 * time.Millisecond)
 
 		// Retry L2 after waiting
-		redisKey := accountPubKeyPrefix + address
+		redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
 		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
 		if err == nil {
 			pubKey, err := c.unmarshalPubKey(data)

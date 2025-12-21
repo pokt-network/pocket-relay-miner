@@ -5,313 +5,172 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/config"
 )
 
 func TestDefaultConfig(t *testing.T) {
-	config := DefaultConfig()
+	cfg := DefaultConfig()
 
-	require.Equal(t, "ha:relays", config.Redis.StreamPrefix)
-	require.Equal(t, "ha-miners", config.Redis.ConsumerGroup)
-	require.Equal(t, int64(5000), config.Redis.BlockTimeoutMs)
-	require.Equal(t, int64(60000), config.Redis.ClaimIdleTimeoutMs)
-	require.Equal(t, int64(10), config.DeduplicationTTLBlocks)
-	require.Equal(t, int64(1000), config.BatchSize) // Increased from 100 for better throughput
-	require.Equal(t, int64(50), config.AckBatchSize)
+	// Redis config now uses namespace configuration for stream prefix and consumer group
+	// These are derived from the namespace config at runtime
+	require.Equal(t, "redis://localhost:6379", cfg.Redis.URL)
+	// Note: BlockTimeout removed - BLOCK 0 (TRUE PUSH) is now hardcoded in consumer
+	require.Equal(t, int64(60000), cfg.Redis.ClaimIdleTimeoutMs)
+	require.Equal(t, int64(10), cfg.DeduplicationTTLBlocks)
+	require.Equal(t, int64(1000), cfg.BatchSize) // Increased from 100 for better throughput
+	require.Equal(t, int64(50), cfg.AckBatchSize)
 }
 
 func TestConfig_Validate_Valid(t *testing.T) {
-	config := &Config{
+	cfg := &Config{
 		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
+			RedisConfig: config.RedisConfig{
+				URL: "redis://localhost:6379",
+			},
+			ConsumerName: "miner-1",
 		},
-		PocketNode: PocketNodeConfig{
+		PocketNode: config.PocketNodeConfig{
 			QueryNodeRPCUrl:  "http://localhost:26657",
 			QueryNodeGRPCUrl: "localhost:9090",
 		},
-		Suppliers: []SupplierConfig{
-			{
-				OperatorAddress: "pokt1supplier123",
-				SigningKeyName:  "supplier_key",
-			},
+		Keys: config.KeysConfig{
+			KeysFile: "/path/to/keys.yaml",
 		},
 	}
 
-	err := config.Validate()
+	err := cfg.Validate()
 	require.NoError(t, err)
 }
 
 func TestConfig_Validate_MissingRedisURL(t *testing.T) {
-	config := &Config{
+	cfg := &Config{
 		Redis: RedisConfig{
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
+			ConsumerName: "miner-1",
 		},
 	}
 
-	err := config.Validate()
+	err := cfg.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "redis.url is required")
 }
 
 func TestConfig_Validate_InvalidRedisURL(t *testing.T) {
-	config := &Config{
+	cfg := &Config{
 		Redis: RedisConfig{
-			URL:           "://invalid",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-	}
-
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "invalid redis.url")
-}
-
-func TestConfig_Validate_MissingStreamPrefix(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-	}
-
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "redis.stream_prefix is required")
-}
-
-func TestConfig_Validate_MissingConsumerGroup(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:          "redis://localhost:6379",
-			StreamPrefix: "test:relays",
+			RedisConfig: config.RedisConfig{
+				URL: "://invalid",
+			},
 			ConsumerName: "miner-1",
 		},
 	}
 
-	err := config.Validate()
+	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "redis.consumer_group is required")
-}
-
-func TestConfig_Validate_MissingConsumerName(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-		},
-	}
-
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "redis.consumer_name is required")
+	require.Contains(t, err.Error(), "invalid redis.url")
 }
 
 func TestConfig_Validate_MissingPocketNodeRPC(t *testing.T) {
-	config := &Config{
+	cfg := &Config{
 		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
+			RedisConfig: config.RedisConfig{
+				URL: "redis://localhost:6379",
+			},
+			ConsumerName: "miner-1",
 		},
-		PocketNode: PocketNodeConfig{
+		PocketNode: config.PocketNodeConfig{
 			QueryNodeGRPCUrl: "localhost:9090",
 		},
 	}
 
-	err := config.Validate()
+	err := cfg.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "pocket_node.query_node_rpc_url is required")
 }
 
 func TestConfig_Validate_MissingPocketNodeGRPC(t *testing.T) {
-	config := &Config{
+	cfg := &Config{
 		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
+			RedisConfig: config.RedisConfig{
+				URL: "redis://localhost:6379",
+			},
+			ConsumerName: "miner-1",
 		},
-		PocketNode: PocketNodeConfig{
+		PocketNode: config.PocketNodeConfig{
 			QueryNodeRPCUrl: "http://localhost:26657",
 		},
 	}
 
-	err := config.Validate()
+	err := cfg.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "pocket_node.query_node_grpc_url is required")
 }
 
-func TestConfig_Validate_NoSuppliers(t *testing.T) {
-	config := &Config{
+func TestConfig_Validate_NoKeySource(t *testing.T) {
+	cfg := &Config{
 		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Suppliers: []SupplierConfig{},
-	}
-
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "at least one supplier must be configured")
-}
-
-func TestConfig_Validate_SupplierMissingAddress(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Suppliers: []SupplierConfig{
-			{
-				SigningKeyName: "key1",
+			RedisConfig: config.RedisConfig{
+				URL: "redis://localhost:6379",
 			},
+			ConsumerName: "miner-1",
 		},
-	}
-
-	err := config.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "suppliers[0].operator_address is required")
-}
-
-func TestConfig_Validate_SupplierMissingKeyName(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
+		PocketNode: config.PocketNodeConfig{
 			QueryNodeRPCUrl:  "http://localhost:26657",
 			QueryNodeGRPCUrl: "localhost:9090",
 		},
-		Suppliers: []SupplierConfig{
-			{
-				OperatorAddress: "pokt1supplier123",
-			},
-		},
+		Keys: config.KeysConfig{},
 	}
 
-	err := config.Validate()
+	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "suppliers[0].signing_key_name is required")
+	require.Contains(t, err.Error(), "keys config is required")
 }
 
-func TestConfig_GetRedisBlockTimeout(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			BlockTimeoutMs: 10000,
-		},
-	}
+// Note: Supplier validation tests removed - suppliers are auto-discovered from keys
+// See TestConfig_Validate_NoKeySource for key validation
 
-	require.Equal(t, 10*time.Second, config.GetRedisBlockTimeout())
-
-	// Test default
-	config.Redis.BlockTimeoutMs = 0
-	require.Equal(t, 5*time.Second, config.GetRedisBlockTimeout())
-}
+// Note: TestConfig_GetRedisBlockTimeout removed - BLOCK 0 is now hardcoded
 
 func TestConfig_GetClaimIdleTimeout(t *testing.T) {
-	config := &Config{
+	cfg := &Config{
 		Redis: RedisConfig{
 			ClaimIdleTimeoutMs: 120000,
 		},
 	}
 
-	require.Equal(t, 2*time.Minute, config.GetClaimIdleTimeout())
+	require.Equal(t, 2*time.Minute, cfg.GetClaimIdleTimeout())
 
 	// Test default
-	config.Redis.ClaimIdleTimeoutMs = 0
-	require.Equal(t, time.Minute, config.GetClaimIdleTimeout())
+	cfg.Redis.ClaimIdleTimeoutMs = 0
+	require.Equal(t, time.Minute, cfg.GetClaimIdleTimeout())
 }
 
 func TestConfig_GetBatchSize(t *testing.T) {
-	config := &Config{BatchSize: 200}
-	require.Equal(t, int64(200), config.GetBatchSize())
+	cfg := &Config{BatchSize: 200}
+	require.Equal(t, int64(200), cfg.GetBatchSize())
 
 	// Test default
-	config.BatchSize = 0
-	require.Equal(t, int64(1000), config.GetBatchSize()) // Default increased from 100
+	cfg.BatchSize = 0
+	require.Equal(t, int64(1000), cfg.GetBatchSize()) // Default increased from 100
 }
 
 func TestConfig_GetAckBatchSize(t *testing.T) {
-	config := &Config{AckBatchSize: 25}
-	require.Equal(t, int64(25), config.GetAckBatchSize())
+	cfg := &Config{AckBatchSize: 25}
+	require.Equal(t, int64(25), cfg.GetAckBatchSize())
 
 	// Test default
-	config.AckBatchSize = 0
-	require.Equal(t, int64(50), config.GetAckBatchSize())
+	cfg.AckBatchSize = 0
+	require.Equal(t, int64(50), cfg.GetAckBatchSize())
 }
 
 func TestConfig_GetDeduplicationTTL(t *testing.T) {
-	config := &Config{DeduplicationTTLBlocks: 20}
-	require.Equal(t, int64(20), config.GetDeduplicationTTL())
+	cfg := &Config{DeduplicationTTLBlocks: 20}
+	require.Equal(t, int64(20), cfg.GetDeduplicationTTL())
 
 	// Test default
-	config.DeduplicationTTLBlocks = 0
-	require.Equal(t, int64(10), config.GetDeduplicationTTL())
+	cfg.DeduplicationTTLBlocks = 0
+	require.Equal(t, int64(10), cfg.GetDeduplicationTTL())
 }
 
-func TestSupplierConfig_WithServices(t *testing.T) {
-	supplier := SupplierConfig{
-		OperatorAddress: "pokt1supplier123",
-		SigningKeyName:  "key1",
-		Services:        []string{"ethereum", "polygon", "develop"},
-	}
-
-	require.Equal(t, "pokt1supplier123", supplier.OperatorAddress)
-	require.Equal(t, "key1", supplier.SigningKeyName)
-	require.Len(t, supplier.Services, 3)
-	require.Contains(t, supplier.Services, "ethereum")
-}
-
-func TestConfig_Validate_MultipleSuppliers(t *testing.T) {
-	config := &Config{
-		Redis: RedisConfig{
-			URL:           "redis://localhost:6379",
-			StreamPrefix:  "test:relays",
-			ConsumerGroup: "miner-group",
-			ConsumerName:  "miner-1",
-		},
-		PocketNode: PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Suppliers: []SupplierConfig{
-			{
-				OperatorAddress: "pokt1supplier1",
-				SigningKeyName:  "key1",
-				Services:        []string{"ethereum"},
-			},
-			{
-				OperatorAddress: "pokt1supplier2",
-				SigningKeyName:  "key2",
-				Services:        []string{"polygon", "develop"},
-			},
-		},
-	}
-
-	err := config.Validate()
-	require.NoError(t, err)
-}
+// Note: TestSupplierConfig_WithServices and TestConfig_Validate_MultipleSuppliers removed
+// Suppliers are now auto-discovered from keys configuration - no explicit supplier config needed

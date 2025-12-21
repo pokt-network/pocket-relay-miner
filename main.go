@@ -26,7 +26,7 @@ with shared state via Redis. This provides:
 	// Add relayer and miner subcommands directly under root
 	rootCmd.AddCommand(cmd.RelayerCmd())
 	rootCmd.AddCommand(cmd.MinerCmd())
-	rootCmd.AddCommand(cmd.RedisDebugCmd())
+	rootCmd.AddCommand(cmd.RedisCmd())
 	rootCmd.AddCommand(cmd.RelayCmd())
 	rootCmd.AddCommand(cmd.VersionCmd())
 

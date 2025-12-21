@@ -1,0 +1,68 @@
+# Miner Configuration for Docker Compose
+# This config is optimized for local development with docker-compose.
+
+redis:
+  url: "redis://redis:6379"
+  consumer_name: ""
+  claim_idle_timeout_ms: 60000
+
+pocket_node:
+  query_node_rpc_url: "http://validator:26657"
+  query_node_grpc_url: "validator:9090"
+  grpc_insecure: true
+  query_timeout_seconds: 5
+
+keys:
+  keys_file: "/keys/supplier-keys.yaml"
+
+# Localnet uses faster 10s blocks
+block_time_seconds: 10
+
+block_health_monitor:
+  enabled: true
+  slowness_threshold: 1.5
+
+balance_monitor:
+  enabled: true
+  check_interval_seconds: 300
+  balance_threshold_upokt: 10000
+  stake_warning_proof_threshold: 10
+  stake_critical_proof_threshold: 3
+
+session_lifecycle:
+  window_start_buffer_blocks: 10
+  claim_submission_buffer: 2
+  proof_submission_buffer: 2
+  max_concurrent_transitions: 10
+  stream_discovery_interval_seconds: 2
+
+leader_election:
+  leader_ttl_seconds: 30
+  heartbeat_rate_seconds: 10
+
+deduplication_ttl_blocks: 10
+batch_size: 1000
+hot_reload_enabled: true
+cache_ttl: "2h"
+
+# Pre-discovered applications from genesis (all 4 localnet apps)
+known_applications:
+  - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"  # app1
+  - "pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm"  # app2
+  - "pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex"  # app3
+  - "pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst"  # app4
+
+metrics:
+  enabled: true
+  addr: "0.0.0.0:9092"
+
+pprof:
+  enabled: true
+  addr: "0.0.0.0:6065"
+
+logging:
+  level: "info"
+  format: "text"
+  output: "stdout"
+  async: true
+  async_buffer_size: 100000

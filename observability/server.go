@@ -2,6 +2,8 @@ package observability
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/pprof"
@@ -50,11 +52,17 @@ type Server struct {
 	metricsServer *http.Server
 	pprofServer   *http.Server
 	mu            sync.Mutex
+	rm            *RuntimeMetricsCollector
 	running       bool
 }
 
 // NewServer creates a new observability server.
 func NewServer(logger logging.Logger, config ServerConfig) *Server {
+	// Default pprof addr to :6060 for security if not specified
+	if config.PprofAddr == "" {
+		config.PprofAddr = ":6060"
+	}
+
 	return &Server{
 		logger: logging.ForComponent(logger, logging.ComponentObservability),
 		config: config,
@@ -73,6 +81,7 @@ func (s *Server) Start(ctx context.Context) error {
 	startTime := time.Now()
 
 	if s.config.MetricsEnabled {
+		// Start runtime metrics collector
 		if err := s.startMetricsServer(ctx); err != nil {
 			return err
 		}
@@ -96,6 +105,30 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 	if err != nil {
 		s.logger.Error().Err(err).Str("addr", s.config.MetricsAddr).Msg("failed to listen for metrics server")
 		return err
+	}
+	defer func() {
+		// Close only if we haven't passed ownership to http.Server
+		if s.metricsServer == nil {
+			err := ln.Close()
+			if err != nil {
+				s.logger.Error().Err(err).Msg("failed to close metrics listener")
+				return
+			}
+		}
+	}()
+
+	// Only start runtime metrics collector when using default registry (production mode).
+	// Custom registry indicates test mode - skip to avoid duplicate metric registration.
+	if s.config.Registry == nil {
+		s.rm = NewRuntimeMetricsCollector(
+			s.logger,
+			DefaultRuntimeMetricsCollectorConfig(),
+			MinerFactory,
+		)
+		if err := s.rm.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start runtime metrics collector: %w", err)
+		}
+		s.logger.Info().Msg("runtime metrics collector started")
 	}
 
 	mux := http.NewServeMux()
@@ -122,7 +155,7 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 
 	go func() {
 		s.logger.Info().Str("addr", s.config.MetricsAddr).Msg("serving metrics")
-		if err := s.metricsServer.Serve(ln); err != nil && err != http.ErrServerClosed {
+		if err := s.metricsServer.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.logger.Error().Err(err).Msg("metrics server failed")
 		}
 	}()
@@ -133,6 +166,9 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.metricsServer.Shutdown(shutdownCtx)
+		if s.rm != nil {
+			s.rm.Stop()
+		}
 	}()
 
 	return nil
@@ -162,7 +198,7 @@ func (s *Server) startPprofServer(ctx context.Context) error {
 
 	go func() {
 		s.logger.Info().Str("addr", s.config.PprofAddr).Msg("serving pprof")
-		if err := s.pprofServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		if err := s.pprofServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			s.logger.Error().Err(err).Msg("pprof server failed")
 		}
 	}()
@@ -197,6 +233,10 @@ func (s *Server) Stop() error {
 			s.logger.Error().Err(err).Msg("failed to shutdown metrics server")
 			lastErr = err
 		}
+	}
+
+	if s.rm != nil {
+		s.rm.Stop()
 	}
 
 	if s.pprofServer != nil {

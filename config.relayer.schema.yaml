@@ -29,10 +29,6 @@ properties:
         examples:
           - redis://localhost:6379
           - redis://node1:6379,node2:6379,node3:6379
-      stream_prefix:
-        type: string
-        description: Prefix for Redis stream keys
-        default: ha:relays
       pool_size:
         type: integer
         description: Maximum number of socket connections (0 = use default 20 × GOMAXPROCS)
@@ -53,6 +49,46 @@ properties:
         description: Close idle connections after this many seconds (0 = use default 300s)
         default: 0
         minimum: 0
+      namespace:
+        type: object
+        description: Redis key namespace configuration (must match miner configuration)
+        properties:
+          base_prefix:
+            type: string
+            description: Root prefix for all Redis keys
+            default: ha
+          cache_prefix:
+            type: string
+            description: Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)
+            default: cache
+          events_prefix:
+            type: string
+            description: Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)
+            default: events
+          streams_prefix:
+            type: string
+            description: Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)
+            default: relays
+          miner_prefix:
+            type: string
+            description: Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)
+            default: miner
+          supplier_prefix:
+            type: string
+            description: Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)
+            default: supplier
+          meter_prefix:
+            type: string
+            description: Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)
+            default: meter
+          params_prefix:
+            type: string
+            description: Cached params prefix (full key: {base_prefix}:{params_prefix}:*)
+            default: params
+          consumer_group_prefix:
+            type: string
+            description: Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})
+            default: miners
 
   pocket_node:
     type: object
@@ -67,6 +103,10 @@ properties:
       query_node_grpc_url:
         type: string
         description: gRPC endpoint for chain queries (primary interface)
+      grpc_insecure:
+        type: boolean
+        description: Disable TLS for gRPC connections (use only for localnet/development)
+        default: false
 
   keys:
     type: object
@@ -119,10 +159,13 @@ properties:
             - eager
             - optimistic
           description: Validation mode override for this service
-        request_timeout_seconds:
-          type: integer
-          description: Timeout for backend requests (seconds)
-          minimum: 1
+        timeout_profile:
+          type: string
+          description: Name of timeout profile to use for this service (defines request timeout and HTTP client timeouts)
+          default: fast
+          examples:
+            - fast
+            - streaming
         max_body_size_bytes:
           type: integer
           description: Max request/response body size (bytes)
@@ -137,16 +180,6 @@ properties:
             - cometbft
           description: Default backend when Rpc-Type header not provided
           default: jsonrpc
-        http:
-          type: object
-          description: HTTP client configuration for this service
-          properties:
-            timeout_profile:
-              type: string
-              description: Name of timeout profile to use (must exist in timeout_profiles)
-              examples:
-                - fast
-                - streaming
         backends:
           type: object
           description: Backend configurations per RPC type
@@ -246,14 +279,19 @@ properties:
         type: string
         description: Metrics HTTP server address
         default: "0.0.0.0:9090"
-      pprof_enabled:
+
+  pprof:
+    type: object
+    description: Pprof profiling server configuration (for debugging)
+    properties:
+      enabled:
         type: boolean
         description: Enable pprof profiling server (for debugging, disable in production)
-        default: false
-      pprof_addr:
+        default: true
+      addr:
         type: string
-        description: Pprof HTTP server address (use localhost for security)
-        default: "localhost:6060"
+        description: Pprof HTTP server address (use localhost for security in production)
+        default: "0.0.0.0:6060"
         pattern: ^.*:[0-9]+$
 
   health_check:
@@ -275,7 +313,7 @@ properties:
       enabled:
         type: boolean
         description: Enable cache warmup at startup
-        default: false
+        default: true
       known_applications:
         type: array
         description: Application addresses to pre-warm
@@ -337,10 +375,6 @@ properties:
         type: boolean
         description: Enable metering and rate limiting
         default: true
-      over_servicing_enabled:
-        type: boolean
-        description: Allow apps to exceed stake limits temporarily
-        default: false
       redis_key_prefix:
         type: string
         description: Prefix for Redis keys used by relay meter
@@ -352,20 +386,10 @@ properties:
           - closed
         description: Behavior when Redis unavailable (open=allow, closed=reject)
         default: open
-      session_cleanup_interval:
+      cache_ttl:
         type: string
-        description: How often to clean up expired sessions (duration string)
-        default: 5m
-        pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
-      params_cache_ttl:
-        type: string
-        description: TTL for cached shared/session params (duration string)
-        default: 10m
-        pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
-      app_stake_cache_ttl:
-        type: string
-        description: TTL for cached app stakes (duration string)
-        default: 10m
+        description: TTL for all cached Redis data (streams, params, app stakes, meters). Redis TTL handles automatic expiration.
+        default: 2h
         pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
   http_transport:
@@ -424,11 +448,16 @@ properties:
 
   timeout_profiles:
     type: object
-    description: HTTP client timeout profiles for different service types (auto-populated with defaults if not specified)
+    description: Timeout profiles for different service types. Each profile defines request timeout and HTTP client timeouts. Services select a profile via timeout_profile field. Auto-populated with "fast" and "streaming" defaults if not specified.
     additionalProperties:
       type: object
-      description: A timeout profile defining HTTP client timeouts
+      description: A timeout profile defining all timeout settings for a service
       properties:
+        request_timeout_seconds:
+          type: integer
+          description: Overall request timeout for backend requests (seconds)
+          minimum: 1
+          default: 30
         response_header_timeout_seconds:
           type: integer
           description: Timeout waiting for response headers (0 = no timeout for streaming)

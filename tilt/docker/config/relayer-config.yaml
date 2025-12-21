@@ -1,0 +1,110 @@
+# Relayer Configuration for Docker Compose
+# This config is optimized for local development with docker-compose.
+
+listen_addr: "0.0.0.0:8080"
+
+redis:
+  url: "redis://redis:6379"
+
+pocket_node:
+  query_node_rpc_url: "http://validator:26657"
+  query_node_grpc_url: "validator:9090"
+  grpc_insecure: true
+
+keys:
+  keys_file: "/keys/supplier-keys.yaml"
+
+services:
+  develop-http:
+    validation_mode: eager
+    timeout_profile: fast
+    max_body_size_bytes: 10485760
+    default_backend: jsonrpc
+    backends:
+      jsonrpc:
+        url: "http://backend:8545"
+
+  develop-websocket:
+    validation_mode: eager
+    timeout_profile: fast
+    max_body_size_bytes: 10485760
+    default_backend: websocket
+    backends:
+      websocket:
+        url: "ws://backend:8545/ws"
+
+  develop-stream:
+    validation_mode: eager
+    timeout_profile: streaming
+    max_body_size_bytes: 10485760
+    default_backend: rest
+    backends:
+      rest:
+        url: "http://backend:8545/stream/sse"
+
+  develop-grpc:
+    validation_mode: eager
+    timeout_profile: fast
+    max_body_size_bytes: 10485760
+    default_backend: grpc
+    backends:
+      grpc:
+        url: "backend:50051"
+
+default_validation_mode: optimistic
+default_request_timeout_seconds: 30
+default_max_body_size_bytes: 10485760
+grace_period_extra_blocks: 2
+
+metrics:
+  enabled: true
+  addr: "0.0.0.0:9090"
+
+pprof:
+  enabled: true
+  addr: "0.0.0.0:6060"
+
+health_check:
+  enabled: true
+  addr: "0.0.0.0:8081"
+
+relay_meter:
+  enabled: true
+  redis_key_prefix: "ha"
+  fail_behavior: "open"
+  cache_ttl: 2h
+
+http_transport:
+  max_idle_conns: 500
+  max_idle_conns_per_host: 100
+  max_conns_per_host: 500
+  idle_conn_timeout_seconds: 90
+  dial_timeout_seconds: 5
+  tls_handshake_timeout_seconds: 10
+  response_header_timeout_seconds: 30
+  expect_continue_timeout_seconds: 1
+  tcp_keep_alive_seconds: 30
+  disable_compression: true
+
+timeout_profiles:
+  fast:
+    request_timeout_seconds: 30
+    response_header_timeout_seconds: 30
+    dial_timeout_seconds: 5
+    tls_handshake_timeout_seconds: 10
+  streaming:
+    request_timeout_seconds: 600
+    response_header_timeout_seconds: 0
+    dial_timeout_seconds: 10
+    tls_handshake_timeout_seconds: 15
+
+cache_warmup:
+  enabled: true
+  persist_discovered_apps: true
+  warmup_concurrency: 10
+  warmup_timeout_seconds: 5
+
+logging:
+  level: "info"
+  format: "text"
+  output: "stdout"

@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -125,7 +126,7 @@ type SessionStoreConfig struct {
 // RedisSessionStore implements SessionStore using Redis.
 type RedisSessionStore struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	config      SessionStoreConfig
 
 	mu     sync.Mutex
@@ -135,7 +136,7 @@ type RedisSessionStore struct {
 // NewRedisSessionStore creates a new Redis-backed session store.
 func NewRedisSessionStore(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	config SessionStoreConfig,
 ) *RedisSessionStore {
 	if config.KeyPrefix == "" {
@@ -430,6 +431,7 @@ func (s *RedisSessionStore) UpdateWALPosition(ctx context.Context, sessionID str
 }
 
 // IncrementRelayCount atomically increments the relay count and compute units.
+// Returns an error if the session is in a terminal state (claimed, settled, expired).
 func (s *RedisSessionStore) IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {
 	snapshot, err := s.Get(ctx, sessionID)
 	if err != nil {
@@ -437,6 +439,14 @@ func (s *RedisSessionStore) IncrementRelayCount(ctx context.Context, sessionID s
 	}
 	if snapshot == nil {
 		return fmt.Errorf("session not found: %s", sessionID)
+	}
+
+	// CRITICAL: Reject updates for sessions in terminal states.
+	// This is a defense-in-depth check - the handler should also check state,
+	// but this ensures relay counts can never be modified after claim/settlement.
+	switch snapshot.State {
+	case SessionStateClaimed, SessionStateSettled, SessionStateExpired:
+		return fmt.Errorf("cannot increment relay count: session %s is in terminal state %s", sessionID, snapshot.State)
 	}
 
 	snapshot.RelayCount++

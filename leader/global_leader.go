@@ -9,12 +9,10 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 const (
-	// Redis key for global leader lock
-	globalLeaderKey = "ha:miner:global_leader"
-
 	// Default leader lock TTL (how long before expiring)
 	defaultLeaderTTL = 30 * time.Second
 
@@ -82,10 +80,11 @@ func DefaultGlobalLeaderElectorConfig() GlobalLeaderElectorConfig {
 // - Any future leader-only operations
 type GlobalLeaderElector struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	instanceID  string // Unique ID for this miner instance (hostname + UUID)
 	config      GlobalLeaderElectorConfig
 	metrics     *leaderMetrics
+	leaderKey   string // Redis key for global leader lock (built via KeyBuilder)
 
 	isLeader atomic.Bool
 
@@ -115,7 +114,7 @@ type GlobalLeaderElector struct {
 // The instance ID should be unique across all miner instances to prevent conflicts.
 func NewGlobalLeaderElector(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	instanceID string,
 ) *GlobalLeaderElector {
 	return NewGlobalLeaderElectorWithConfig(logger, redisClient, instanceID, DefaultGlobalLeaderElectorConfig())
@@ -132,7 +131,7 @@ func NewGlobalLeaderElector(
 // The instance ID should be unique across all miner instances to prevent conflicts.
 func NewGlobalLeaderElectorWithConfig(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	instanceID string,
 	config GlobalLeaderElectorConfig,
 ) *GlobalLeaderElector {
@@ -142,6 +141,7 @@ func NewGlobalLeaderElectorWithConfig(
 		instanceID:    instanceID,
 		config:        config,
 		metrics:       initMetrics(), // Lazy-load metrics only when elector is created
+		leaderKey:     redisClient.KB().GlobalLeaderKey(),
 		acquireScript: redis.NewScript(acquireLuaScript),
 		renewScript:   redis.NewScript(renewLuaScript),
 		releaseScript: redis.NewScript(releaseLuaScript),
@@ -188,12 +188,13 @@ func (e *GlobalLeaderElector) leaderLoop(ctx context.Context) {
 			// Atomic release on shutdown (only if we own the lock)
 			if e.isLeader.Load() {
 				releaseCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-				defer cancel()
 
 				result, err := e.releaseScript.Run(releaseCtx, e.redisClient,
-					[]string{globalLeaderKey},
+					[]string{e.leaderKey},
 					e.instanceID,
 				).Int()
+
+				cancel() // Call directly to avoid a defer-in-loop antipattern
 
 				if err == nil && result == 1 {
 					e.logger.Info().Msg("released leadership on shutdown")
@@ -212,9 +213,9 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 	wasLeader := e.isLeader.Load()
 
 	if wasLeader {
-		// We think we're leader - try to renew
+		// We think we're a leader - try to renew
 		result, err := e.renewScript.Run(ctx, e.redisClient,
-			[]string{globalLeaderKey},
+			[]string{e.leaderKey},
 			e.instanceID,
 			int(e.config.LeaderTTL.Seconds()),
 		).Int()
@@ -241,12 +242,12 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 			// Successfully renewed - log periodically for visibility
 			e.logger.Debug().
 				Str(logging.FieldInstance, e.instanceID).
-				Msg("renewed global leadership")
+				Msg("leadership renewed successfully")
 		}
 	} else {
 		// Not leader - try to acquire
 		result, err := e.acquireScript.Run(ctx, e.redisClient,
-			[]string{globalLeaderKey},
+			[]string{e.leaderKey},
 			e.instanceID,
 			int(e.config.LeaderTTL.Seconds()),
 		).Int()
@@ -270,7 +271,7 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 			e.metrics.status.WithLabelValues(e.instanceID).Set(0)
 			e.logger.Debug().
 				Str(logging.FieldInstance, e.instanceID).
-				Msg("standing by (not leader)")
+				Msg("still standing as standby replica (not leader)")
 		}
 	}
 }

@@ -3,6 +3,7 @@ package relayer
 import (
 	"bufio"
 	"bytes"
+	"compress/gzip"
 	"context"
 	"fmt"
 	"io"
@@ -36,6 +37,17 @@ var httpStreamingTypes = []string{
 	"text/event-stream",    // Server-Sent Events (SSE)
 	"application/x-ndjson", // Newline-Delimited JSON (common for LLM APIs)
 }
+
+// Pocket context headers sent to backends.
+// These headers provide the backend with information about the relay context.
+const (
+	// HeaderPocketSupplier is the supplier operator address processing the relay.
+	HeaderPocketSupplier = "Pocket-Supplier"
+	// HeaderPocketService is the service ID for the relay.
+	HeaderPocketService = "Pocket-Service"
+	// HeaderPocketApplication is the application address that signed the relay.
+	HeaderPocketApplication = "Pocket-Application"
+)
 
 // publishTask holds the data needed for publishing a mined relay.
 type publishTask struct {
@@ -319,22 +331,20 @@ func buildClientPool(
 }
 
 // getClientForService returns the appropriate HTTP client for a service.
-// Falls back to "fast" profile if service doesn't specify a profile or profile doesn't exist.
+// Uses the service's timeout_profile, falling back to "fast" profile.
 func (p *ProxyServer) getClientForService(serviceID string) *http.Client {
 	p.clientPoolMu.RLock()
 	defer p.clientPoolMu.RUnlock()
 
-	// Check if service has custom HTTP config
-	if svc, ok := p.config.Services[serviceID]; ok && svc.HTTP != nil {
-		if svc.HTTP.TimeoutProfile != "" {
-			if client, ok := p.clientPool[svc.HTTP.TimeoutProfile]; ok {
-				return client
-			}
-			p.logger.Warn().
-				Str("service_id", serviceID).
-				Str("profile", svc.HTTP.TimeoutProfile).
-				Msg("timeout profile not found, using default 'fast'")
+	// Check if service has a custom timeout profile
+	if svc, ok := p.config.Services[serviceID]; ok && svc.TimeoutProfile != "" {
+		if client, ok := p.clientPool[svc.TimeoutProfile]; ok {
+			return client
 		}
+		p.logger.Warn().
+			Str("service_id", serviceID).
+			Str("profile", svc.TimeoutProfile).
+			Msg("timeout profile not found, using default 'fast'")
 	}
 
 	// Default to "fast" profile
@@ -387,7 +397,13 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	// Wrap with panic recovery middleware to prevent handler panics from crashing the server
 	handler := PanicRecoveryMiddleware(p.logger, h2cHandler)
 
-	// Calculate server timeouts based on max service timeout to accommodate long-running services
+	// Server timeout configuration:
+	// - ReadTimeout: max timeout for reading entire request (including body)
+	// - WriteTimeout: set to 0 - we use ResponseController for per-request write deadlines
+	// - IdleTimeout: how long to keep idle keep-alive connections open
+	//
+	// Per-request write deadlines are controlled via http.ResponseController in handleRelay(),
+	// allowing different timeouts per service (e.g., 30s for fast services, 600s for streaming).
 	maxServiceTimeout := p.config.getMaxServiceTimeout()
 
 	p.server = &http.Server{
@@ -395,8 +411,9 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 		Handler: handler,
 		// ReadTimeout: max service timeout + 5s buffer for request parsing
 		ReadTimeout: maxServiceTimeout + 5*time.Second,
-		// WriteTimeout: max service timeout + 30s buffer for response signing + write
-		WriteTimeout: maxServiceTimeout + 30*time.Second,
+		// WriteTimeout: 0 (disabled) - we use ResponseController for per-request deadlines
+		// This allows streaming services to have 600s while fast services have 30s
+		WriteTimeout: 0,
 		IdleTimeout:  120 * time.Second,
 	}
 
@@ -517,6 +534,20 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Set per-request write deadline using ResponseController.
+	// This allows different timeouts per service (e.g., 30s fast vs 600s streaming).
+	// The deadline is set based on the service's timeout profile.
+	serviceTimeout := p.config.GetServiceTimeout(serviceID)
+	rc := http.NewResponseController(w)
+	// Add 30s buffer for response signing and network write
+	if err := rc.SetWriteDeadline(time.Now().Add(serviceTimeout + 30*time.Second)); err != nil {
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
+			Err(err).
+			Dur("timeout", serviceTimeout).
+			Msg("failed to set write deadline (non-fatal)")
+		// Non-fatal: continue without per-request deadline
+	}
+
 	// Check supplier state if we have a valid relay request and supplier cache
 	if relayRequest != nil && p.supplierCache != nil {
 		supplierOperatorAddr := relayRequest.Meta.SupplierOperatorAddress
@@ -529,15 +560,15 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					Msg("failed to check supplier state in cache")
 				// Continue processing - fail-open behavior is handled by the cache
 			} else if supplierState == nil {
-				// Supplier not found in cache
-				logging.WithSessionContext(p.logger.Info(), sessionCtx).
+				// Supplier isn't found in cache
+				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
 					Msg("supplier not found in cache")
 				p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not registered with any miner", supplierOperatorAddr))
 				relaysRejected.WithLabelValues(serviceID, "supplier_not_found").Inc()
 				return
 			} else if !supplierState.IsActive() {
 				// Supplier exists but not active (e.g., unstaking)
-				logging.WithSessionContext(p.logger.Info(), sessionCtx).
+				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
 					Str("status", supplierState.Status).
 					Msg("supplier not active")
 				p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s is %s", supplierOperatorAddr, supplierState.Status))
@@ -545,14 +576,14 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				return
 			} else if len(supplierState.Services) == 0 {
 				// Supplier active but has no services registered
-				logging.WithSessionContext(p.logger.Info(), sessionCtx).
+				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
 					Msg("supplier has no services registered")
 				p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s has no services registered", supplierOperatorAddr))
 				relaysRejected.WithLabelValues(serviceID, "no_services").Inc()
 				return
 			} else if !supplierState.IsActiveForService(serviceID) {
 				// Supplier active but not for this service
-				logging.WithSessionContext(p.logger.Info(), sessionCtx).
+				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
 					Int("num_services", len(supplierState.Services)).
 					Msg("supplier not staked for service")
 				p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not staked for service %s", supplierOperatorAddr, serviceID))
@@ -594,10 +625,6 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		Str("validation_mode", string(validationMode)).
 		Msg("relay received")
 
-	// Track whether this relay is over-serviced (for eager mode)
-	// If true, we serve the relay but don't mine it
-	var isOverServiced bool
-
 	// For eager validation, validate before forwarding
 	if validationMode == ValidationModeEager {
 		// EAGER MODE: Check meter BEFORE backend call (synchronous, blocks hot path)
@@ -608,7 +635,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 			meterStart := time.Now()
-			allowed, overServiced, meterErr := p.relayMeter.CheckAndConsumeRelay(
+			allowed, meterErr := p.relayMeter.CheckAndConsumeRelay(
 				r.Context(),
 				sessionID,
 				appAddress,
@@ -630,17 +657,11 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			} else if !allowed {
-				logging.WithSessionContext(p.logger.Info(), sessionCtx).
-					Bool("over_serviced", overServiced).
+				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 					Msg("relay rejected: app stake exhausted (eager mode)")
 				p.sendError(w, http.StatusPaymentRequired, "application stake exhausted for session")
 				relaysRejected.WithLabelValues(serviceID, "stake_exhausted").Inc()
 				return
-			} else if overServiced {
-				isOverServiced = true
-				relaysOverServiced.WithLabelValues(serviceID, "eager").Inc()
-				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-					Msg("relay allowed but over-serviced (eager mode) - will serve but not mine")
 			}
 		}
 
@@ -703,16 +724,42 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			}
 
 			// Send the signed RelayResponse protobuf
-			w.Header().Set("Content-Type", "application/x-protobuf")
+			// Respect Accept header for content type negotiation (RFC 7231)
+			responseContentType := r.Header.Get("Accept")
+			if responseContentType == "" || responseContentType == "*/*" {
+				responseContentType = "application/json" // Default to what gateways typically expect
+			}
+			w.Header().Set("Content-Type", responseContentType)
+
+			// RFC compliance: Compress response if client accepts gzip
+			responseData := signedResponseBz
+			if clientAcceptsGzip(r) {
+				compressed, compressErr := compressGzip(signedResponseBz)
+				if compressErr != nil {
+					logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+						Err(compressErr).
+						Msg("failed to gzip compress response, sending uncompressed")
+				} else {
+					responseData = compressed
+					w.Header().Set("Content-Encoding", "gzip")
+					logging.WithSessionContext(p.logger.Debug(), sessionCtx).
+						Int("original_size", len(signedResponseBz)).
+						Int("compressed_size", len(compressed)).
+						Float64("compression_ratio", float64(len(compressed))/float64(len(signedResponseBz))).
+						Msg("gzip compressed response for client")
+				}
+			}
+
 			w.WriteHeader(http.StatusOK)
 
 			// Measure response write time
-			if _, err := w.Write(signedResponseBz); err != nil {
+			if _, err := w.Write(responseData); err != nil {
 				p.logger.Debug().Err(err).Msg("failed to write signed response body")
 			}
 
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-				Int("response_size", len(signedResponseBz)).
+				Int("response_size", len(responseData)).
+				Bool("compressed", len(responseData) != len(signedResponseBz)).
 				Msg("sent signed relay response")
 		} else {
 			// Fallback: no response signer or not a relay request - send raw response
@@ -819,7 +866,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 				meterStart := time.Now()
-				allowed, overServiced, meterErr := p.relayMeter.CheckAndConsumeRelay(
+				allowed, meterErr := p.relayMeter.CheckAndConsumeRelay(
 					context.Background(),
 					sessionID,
 					appAddress,
@@ -843,19 +890,11 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					}
 				} else if !allowed {
 					relaysDropped.WithLabelValues(capturedServiceID, "stake_exhausted").Inc()
-					logging.WithSessionContext(p.logger.Info(), capturedSessionCtx).
-						Bool("over_serviced", overServiced).
+					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 						Str("validation_mode", "optimistic").
 						Msg("relay rejected: app stake exhausted (optimistic mode) - relay dropped")
 					// Stake exhausted - discard, don't submit to miner
 					// Note: We already served the response, but we won't mine it
-					return
-				} else if overServiced {
-					relaysOverServiced.WithLabelValues(capturedServiceID, "optimistic").Inc()
-					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
-						Str("validation_mode", "optimistic").
-						Msg("relay allowed but over-serviced (optimistic mode) - served but not mined")
-					// Over-serviced: We served the relay for free, but don't mine it
 					return
 				}
 			}
@@ -866,14 +905,8 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		})
 	} else {
 		// For eager validation, submit publish task to worker pool
-		// Only publish if not over-serviced
-		if !isOverServiced {
-			p.submitPublishTask(relayRequest, r, body, respBody, arrivalBlockHeight, serviceID)
-		} else {
-			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-				Str("validation_mode", "eager").
-				Msg("skipping publish for over-serviced relay (served but not mined)")
-		}
+		// If we reached here, the relay was allowed by the meter (stake not exhausted)
+		p.submitPublishTask(relayRequest, r, body, respBody, arrivalBlockHeight, serviceID)
 	}
 }
 
@@ -996,7 +1029,12 @@ func (p *ProxyServer) parseRelayRequest(body []byte) (*servicetypes.RelayRequest
 // extractServiceID extracts the service ID from request headers or path.
 // This is a fallback method for non-relay traffic or when the body cannot be parsed.
 func (p *ProxyServer) extractServiceID(r *http.Request) string {
-	// Try header first
+	// Try Target-Service-Id header (PATH gateway uses this)
+	if serviceID := r.Header.Get("Target-Service-Id"); serviceID != "" {
+		return serviceID
+	}
+
+	// Try Pocket-Service-Id header (legacy/alternative)
 	if serviceID := r.Header.Get("Pocket-Service-Id"); serviceID != "" {
 		return serviceID
 	}
@@ -1227,6 +1265,16 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		}
 	}
 
+	// Set Pocket context headers for backend visibility
+	req.Header.Set(HeaderPocketSupplier, p.supplierAddress)
+	req.Header.Set(HeaderPocketService, serviceID)
+	if relayRequest != nil {
+		meta := relayRequest.GetMeta()
+		if sessionHeader := meta.GetSessionHeader(); sessionHeader != nil {
+			req.Header.Set(HeaderPocketApplication, sessionHeader.GetApplicationAddress())
+		}
+	}
+
 	// DEBUG: Log if client requested compression
 	if acceptEncoding := req.Header.Get("Accept-Encoding"); acceptEncoding != "" {
 		p.logger.Debug().
@@ -1241,6 +1289,17 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	resp, err := client.Do(req)
 
 	if err != nil {
+		// Distinguish between client disconnection vs internal timeout vs other errors
+		// for proper metrics and logging
+		if originalReq.Context().Err() != nil {
+			// Client disconnected - their context was cancelled
+			return nil, nil, 0, false, fmt.Errorf("client disconnected: %w", originalReq.Context().Err())
+		}
+		if ctx.Err() != nil {
+			// Our internal timeout fired
+			return nil, nil, 0, false, fmt.Errorf("backend timeout (service=%s, timeout=%v): %w", serviceID, timeout, ctx.Err())
+		}
+		// Other network/backend error
 		return nil, nil, 0, false, fmt.Errorf("backend request failed: %w", err)
 	}
 
@@ -1258,7 +1317,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		if relayRequest != nil && p.responseSigner != nil {
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Msg("handling streaming response with batch-based signing (SSE/NDJSON)")
-			respBody, streamErr := p.handleStreamingResponseWithSigning(ctx, resp, w, relayRequest)
+			respBody, streamErr := p.handleStreamingResponseWithSigning(ctx, resp, w, relayRequest, serviceID)
 			return respBody, resp.Header, resp.StatusCode, true, streamErr
 		}
 
@@ -1493,6 +1552,7 @@ func (p *ProxyServer) InitGRPCHandler() {
 			CurrentBlockHeight: &p.currentBlockHeight,
 			MaxBodySize:        p.config.DefaultMaxBodySizeBytes,
 			GetHTTPClient:      p.getClientForService,
+			GetServiceTimeout:  p.config.GetServiceTimeout, // Timeout from profile
 		},
 	)
 
@@ -1700,4 +1760,25 @@ func (p *ProxyServer) Close() error {
 
 	p.logger.Info().Msg("proxy server closed")
 	return nil
+}
+
+// compressGzip compresses data using gzip compression.
+// Returns the compressed data or an error if compression fails.
+func compressGzip(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf)
+	if _, err := writer.Write(data); err != nil {
+		_ = writer.Close() // Close on error path, main error already captured
+		return nil, fmt.Errorf("failed to write gzip data: %w", err)
+	}
+	if err := writer.Close(); err != nil {
+		return nil, fmt.Errorf("failed to close gzip writer: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
+// clientAcceptsGzip checks if the client accepts gzip encoding
+func clientAcceptsGzip(r *http.Request) bool {
+	acceptEncoding := r.Header.Get("Accept-Encoding")
+	return strings.Contains(strings.ToLower(acceptEncoding), "gzip")
 }

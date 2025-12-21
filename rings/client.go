@@ -3,6 +3,7 @@ package rings
 import (
 	"context"
 	"slices"
+	"sync"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
@@ -33,9 +34,24 @@ var (
 	ringCurve = ring_secp256k1.NewCurve()
 )
 
+// ringPointsCacheKey is the key for caching ring points by app address and session.
+// Ring points are cached because:
+// - Converting public keys to curve points (DecodeToPoint) is cryptographically expensive
+// - Ring composition only changes at session boundaries (delegation changes)
+// - At 1000 RPS, this prevents 2000-4000 DecodeToPoint calls/sec
+type ringPointsCacheKey struct {
+	appAddress       string
+	sessionEndHeight int64
+}
+
 // ringClient is an implementation of the RingClient interface that uses the
 // client.ApplicationQueryClient to get application's delegation information
 // needed to construct the ring for signing relay requests.
+//
+// Ring Points Caching: We cache ring points (map[string]ringtypes.Point) by (appAddress, sessionEndHeight) because:
+// - Converting public keys to curve points (DecodeToPoint) is cryptographically expensive
+// - Ring composition only changes at session boundaries (delegation changes)
+// - At 1000 RPS, this prevents 2000-4000 DecodeToPoint calls/sec (N keys per ring)
 type ringClient struct {
 	logger logging.Logger
 
@@ -48,6 +64,11 @@ type ringClient struct {
 
 	// sharedQuerier is used to fetch the shared module's parameters.
 	sharedQuerier client.SharedQueryClient
+
+	// ringPointsCache caches ring points by (appAddress, sessionEndHeight).
+	// This ensures expensive DecodeToPoint operations are done once per session,
+	// while allowing new ring points when sessions change (delegations may differ).
+	ringPointsCache sync.Map // map[ringPointsCacheKey]map[string]ringtypes.Point
 }
 
 // NewRingClient creates a new RingClient with the provided query clients.
@@ -234,11 +255,27 @@ func (rc *ringClient) addressesToPubKeys(
 // application at a specific height. It takes into account the application itself
 // as well as all the addresses it delegated to. It returns a map of encoded
 // ring points to Point objects (i.e. public keys).
+//
+// Ring points are cached by (appAddress, sessionEndHeight) since:
+// - Converting public keys to curve points (DecodeToPoint) is cryptographically expensive
+// - Ring composition only changes at session boundaries (delegation changes)
+// - At 1000 RPS, this prevents 2000-4000 DecodeToPoint calls/sec
 func (rc *ringClient) getRingPointsForAddressAtHeight(
 	ctx context.Context,
 	appAddress string,
 	blockHeight int64,
 ) (map[string]ringtypes.Point, error) {
+	cacheKey := ringPointsCacheKey{
+		appAddress:       appAddress,
+		sessionEndHeight: blockHeight,
+	}
+
+	// Check cache first
+	if cached, ok := rc.ringPointsCache.Load(cacheKey); ok {
+		return cached.(map[string]ringtypes.Point), nil
+	}
+
+	// Cache miss - compute ring points
 	ringPubKeys, err := rc.getRingPubKeysForAddress(ctx, appAddress, blockHeight)
 	if err != nil {
 		return nil, err
@@ -260,8 +297,9 @@ func (rc *ringClient) getRingPointsForAddressAtHeight(
 		ringPoints[keyFromPoint] = point
 	}
 
-	// Return the ring the constructed from the points retrieved above.
-	return ringPoints, nil
+	// Cache the ring points (use LoadOrStore to handle concurrent creation)
+	actual, _ := rc.ringPointsCache.LoadOrStore(cacheKey, ringPoints)
+	return actual.(map[string]ringtypes.Point), nil
 }
 
 // GetRingAddressesAtBlock returns the active gateway addresses that need to be

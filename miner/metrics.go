@@ -50,7 +50,7 @@ var (
 			Name:      "relays_rejected_total",
 			Help:      "Total number of relays rejected due to errors",
 		},
-		[]string{"supplier", "reason"},
+		[]string{"supplier", "reason", "service_id"},
 	)
 
 	relayProcessingLatency = observability.MinerFactory.NewHistogramVec(
@@ -59,9 +59,9 @@ var (
 			Subsystem: metricsSubsystem,
 			Name:      "relay_processing_latency_seconds",
 			Help:      "Time to process a single relay",
-			Buckets:   []float64{0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1},
+			Buckets:   []float64{0.05, 0.1, 0.5, 1, 2, 3, 5, 7, 10},
 		},
-		[]string{"supplier"},
+		[]string{"supplier", "service_id", "status_code"},
 	)
 
 	// ====== OPERATOR-FOCUSED METRICS ======
@@ -298,6 +298,29 @@ var (
 			Help:      "Total relays lost due to claim/proof failures",
 		},
 		[]string{"supplier", "service_id", "reason"},
+	)
+
+	// ====== SERVICE FACTOR METRICS ======
+	// These metrics track claim ceiling events when claims exceed configured limits
+
+	claimCeilingExceededTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claim_ceiling_exceeded_total",
+			Help:      "Total number of claims that exceeded the configured ceiling (potential unpaid work)",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
+	claimCeilingExceededUpokt = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claim_ceiling_exceeded_upokt",
+			Help:      "Total uPOKT claimed above the configured ceiling (potential unpaid amount)",
+		},
+		[]string{"supplier", "service_id"},
 	)
 
 	// Legacy metric for backward compatibility (deprecated - use compute_units_proved_total)
@@ -822,6 +845,52 @@ var (
 		},
 		[]string{"supplier"},
 	)
+
+	// ====== SUPPLIER CLAIMER METRICS ======
+
+	// supplierClaimedTotal tracks how many times a supplier was claimed by an instance.
+	supplierClaimedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_claimed_total",
+			Help:      "Total number of supplier claim events per supplier and instance",
+		},
+		[]string{"supplier", "instance"},
+	)
+
+	// supplierReleasedTotal tracks how many times a supplier was released by an instance.
+	supplierReleasedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_released_total",
+			Help:      "Total number of supplier release events per supplier and instance",
+		},
+		[]string{"supplier", "instance"},
+	)
+
+	// supplierClaimedGauge tracks current number of suppliers claimed by each instance.
+	supplierClaimedGauge = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_claimed_count",
+			Help:      "Current number of suppliers claimed by this instance",
+		},
+		[]string{"instance"},
+	)
+
+	// supplierFairShareGauge tracks the calculated fair share for each instance.
+	supplierFairShareGauge = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_fair_share",
+			Help:      "Calculated fair share of suppliers for this instance",
+		},
+		[]string{"instance"},
+	)
 )
 
 // =============================================
@@ -844,13 +913,13 @@ func RecordRelayDeduplicated(supplier, serviceID string) {
 }
 
 // RecordRelayRejected records a relay that was rejected.
-func RecordRelayRejected(supplier, reason string) {
-	relaysRejected.WithLabelValues(supplier, reason).Inc()
+func RecordRelayRejected(supplier, reason, serviceID string) {
+	relaysRejected.WithLabelValues(supplier, reason, serviceID).Inc()
 }
 
 // RecordRelayProcessingLatency records how long it took to process a relay.
-func RecordRelayProcessingLatency(supplier string, seconds float64) {
-	relayProcessingLatency.WithLabelValues(supplier).Observe(seconds)
+func RecordRelayProcessingLatency(supplier string, seconds float64, statusCode string) {
+	relayProcessingLatency.WithLabelValues(supplier, statusCode).Observe(seconds)
 }
 
 // SetSessionsByState sets the count of sessions in a given state.
@@ -1045,4 +1114,11 @@ func RecordProofRequirementSkipped(supplier string) {
 // RecordProofRequirementCheckError records an error during proof requirement checking.
 func RecordProofRequirementCheckError(supplier, operation string) {
 	proofRequirementErrors.WithLabelValues(supplier, operation).Inc()
+}
+
+// RecordClaimCeilingExceeded records when a claim exceeds the configured ceiling.
+// excessUpokt is the amount of uPOKT claimed above the ceiling.
+func RecordClaimCeilingExceeded(supplier, serviceID string, excessUpokt int64) {
+	claimCeilingExceededTotal.WithLabelValues(supplier, serviceID).Inc()
+	claimCeilingExceededUpokt.WithLabelValues(supplier, serviceID).Add(float64(excessUpokt))
 }

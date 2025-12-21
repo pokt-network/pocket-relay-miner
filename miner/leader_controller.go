@@ -1,0 +1,696 @@
+package miner
+
+import (
+	"context"
+	"fmt"
+	"runtime"
+	"strings"
+	"sync"
+
+	pond "github.com/alitto/pond/v2"
+
+	"github.com/pokt-network/pocket-relay-miner/cache"
+	haclient "github.com/pokt-network/pocket-relay-miner/client"
+	"github.com/pokt-network/pocket-relay-miner/keys"
+	"github.com/pokt-network/pocket-relay-miner/leader"
+	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
+	"github.com/pokt-network/pocket-relay-miner/transport"
+	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
+	"github.com/pokt-network/pocket-relay-miner/tx"
+
+	apptypes "github.com/pokt-network/poktroll/x/application/types"
+	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
+	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
+	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+)
+
+// LeaderControllerConfig contains configuration for leader-only resources.
+type LeaderControllerConfig struct {
+	// Core dependencies (lightweight, created before election)
+	Logger      logging.Logger
+	RedisClient *redistransport.Client // Wrapped client with KeyBuilder
+	KeyManager  keys.KeyManager
+	Config      *Config
+
+	// Leader election
+	GlobalLeader *leader.GlobalLeaderElector
+
+	// Blockchain connection config
+	QueryNodeRPCUrl  string
+	QueryNodeGRPCUrl string
+	GRPCInsecure     bool
+	ChainID          string
+
+	// SkipSupplierManager skips creating SupplierManager when true.
+	// Set to true when SupplierWorker is running independently (distributed claiming).
+	SkipSupplierManager bool
+
+	// ExternalSupplierManager is the externally managed SupplierManager.
+	// Used for wiring relay handler when SkipSupplierManager is true.
+	ExternalSupplierManager *SupplierManager
+}
+
+// LeaderController manages all leader-only resources.
+// It creates expensive resources (query clients, caches, supplier manager) only when elected leader
+// and cleans them up when losing leadership. This prevents resource waste on standby instances.
+type LeaderController struct {
+	logger logging.Logger
+	config LeaderControllerConfig
+
+	// Heavy resources (only created when leader)
+	queryClients          *query.Clients
+	blockSubscriber       *haclient.BlockSubscriber
+	redisBlockSubscriber  *cache.RedisBlockSubscriber
+	blockPublisher        *cache.BlockPublisher
+	sharedParamsCache     cache.SingletonEntityCache[*sharedtypes.Params]
+	sessionParamsCache    cache.SingletonEntityCache[*sessiontypes.Params]
+	proofParamsCache      cache.SingletonEntityCache[*prooftypes.Params]
+	supplierParamsCache   *cache.RedisSupplierParamCache
+	applicationCache      cache.KeyedEntityCache[string, *apptypes.Application]
+	serviceCache          cache.KeyedEntityCache[string, *sharedtypes.Service]
+	supplierCache         *cache.SupplierCache
+	cacheOrchestrator     *cache.CacheOrchestrator
+	txClient              *tx.TxClient
+	proofChecker          *ProofRequirementChecker
+	supplierManager       *SupplierManager
+	balanceMonitor        *BalanceMonitor
+	blockHealthMonitor    *BlockHealthMonitor
+	supplierRegistry      *SupplierRegistry
+	serviceFactorRegistry *ServiceFactorRegistry
+	masterPool            pond.Pool
+
+	// Lifecycle
+	mu     sync.Mutex
+	active bool
+}
+
+// NewLeaderController creates a new leader controller.
+func NewLeaderController(config LeaderControllerConfig) *LeaderController {
+	return &LeaderController{
+		logger: logging.ForComponent(config.Logger, logging.ComponentLeaderController),
+		config: config,
+	}
+}
+
+// Start creates all leader-only resources and starts them.
+// This is called when the instance becomes leader.
+func (c *LeaderController) Start(ctx context.Context) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.active {
+		return fmt.Errorf("leader controller already active")
+	}
+
+	c.logger.Info().Msg("starting leader controller - creating all resources")
+
+	// Create a master worker pool for controlled concurrency
+	numCPU := runtime.NumCPU()
+	masterPoolSize := numCPU * 8
+	c.masterPool = pond.NewPool(
+		masterPoolSize,
+		pond.WithQueueSize(pond.Unbounded),
+		pond.WithNonBlocking(true),
+	)
+	c.logger.Info().
+		Int("max_workers", masterPoolSize).
+		Int("num_cpu", numCPU).
+		Msg("created master worker pool (unbounded, non-blocking, 8x CPU)")
+
+	// Create query clients
+	var err error
+	c.queryClients, err = query.NewQueryClients(
+		c.logger,
+		query.ClientConfig{
+			GRPCEndpoint: c.config.QueryNodeGRPCUrl,
+			QueryTimeout: c.config.Config.GetQueryTimeout(),
+			UseTLS:       !c.config.GRPCInsecure,
+		},
+	)
+	if err != nil {
+		return fmt.Errorf("failed to create query clients: %w", err)
+	}
+	c.logger.Info().
+		Str("grpc_endpoint", c.config.QueryNodeGRPCUrl).
+		Dur("query_timeout", c.config.Config.GetQueryTimeout()).
+		Msg("query clients initialized")
+
+	// Create a block subscriber
+	c.blockSubscriber, err = haclient.NewBlockSubscriber(
+		c.logger,
+		haclient.BlockSubscriberConfig{
+			RPCEndpoint: c.config.QueryNodeRPCUrl,
+			UseTLS:      !c.config.GRPCInsecure,
+		},
+	)
+	if err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to create block subscriber: %w", err)
+	}
+	if err = c.blockSubscriber.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start block subscriber: %w", err)
+	}
+	c.logger.Info().Msg("block subscriber started (WebSocket)")
+
+	// Create a Redis block subscriber for publishing to relayers
+	// Uses KeyBuilder for namespace-aware channel names
+	c.redisBlockSubscriber = cache.NewRedisBlockSubscriber(
+		c.logger,
+		c.config.RedisClient,
+		c.blockSubscriber,
+	)
+	if err = c.redisBlockSubscriber.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start redis block subscriber: %w", err)
+	}
+	c.logger.Info().Msg("redis block subscriber started for publishing to Redis")
+
+	// Get block time
+	blockTimeSeconds := c.config.Config.GetBlockTimeSeconds()
+
+	// Create caches
+	c.sessionParamsCache = cache.NewSessionParamsCache(
+		c.logger,
+		c.config.RedisClient,
+		cache.NewSessionQueryClientAdapter(c.queryClients.Session()),
+		c.queryClients.Shared(),
+		blockTimeSeconds,
+	)
+	if err := c.sessionParamsCache.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start session params cache: %w", err)
+	}
+
+	c.sharedParamsCache = cache.NewSharedParamsCache(
+		c.logger,
+		c.config.RedisClient,
+		c.queryClients.Shared(),
+		blockTimeSeconds,
+	)
+	if err = c.sharedParamsCache.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start shared params cache: %w", err)
+	}
+
+	c.proofParamsCache = cache.NewProofParamsCache(
+		c.logger,
+		c.config.RedisClient,
+		cache.NewProofQueryClientAdapter(c.queryClients.Proof()),
+		c.queryClients.Shared(),
+		blockTimeSeconds,
+	)
+	if err := c.proofParamsCache.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start proof params cache: %w", err)
+	}
+
+	c.supplierParamsCache = cache.NewRedisSupplierParamCache(
+		c.logger,
+		c.config.RedisClient,
+		c.queryClients.Supplier(),
+		cache.CacheConfig{
+			CachePrefix:      c.config.RedisClient.KB().CachePrefix(),
+			TTLBlocks:        100,
+			BlockTimeSeconds: blockTimeSeconds,
+			LockTimeout:      5,
+			PubSubPrefix:     c.config.RedisClient.KB().EventsCachePrefix(),
+		},
+	)
+	if err := c.supplierParamsCache.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start supplier params cache: %w", err)
+	}
+
+	c.applicationCache = cache.NewApplicationCache(
+		c.logger,
+		c.config.RedisClient,
+		cache.NewApplicationQueryClientAdapter(c.queryClients.Application()),
+	)
+	if err := c.applicationCache.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start application cache: %w", err)
+	}
+
+	c.serviceCache = cache.NewServiceCache(
+		c.logger,
+		c.config.RedisClient,
+		cache.NewServiceQueryClientAdapter(c.queryClients.Service()),
+	)
+	if err := c.serviceCache.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start service cache: %w", err)
+	}
+
+	// Create supplier cache
+	c.supplierCache = cache.NewSupplierCache(
+		c.logger,
+		c.config.RedisClient,
+		cache.SupplierCacheConfig{
+			KeyPrefix: c.config.RedisClient.KB().SupplierKeyPrefix(),
+			FailOpen:  false,
+		},
+	)
+	if err := c.supplierCache.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start supplier cache: %w", err)
+	}
+	c.logger.Info().Msg("supplier cache initialized for state publishing")
+
+	// Create block subscriber adapter for orchestrator
+	blockSubscriberAdapter := cache.NewBlockSubscriberAdapter(
+		c.logger,
+		c.blockSubscriber,
+	)
+
+	// Create cache orchestrator
+	c.cacheOrchestrator = cache.NewCacheOrchestrator(
+		c.logger,
+		cache.CacheOrchestratorConfig{
+			KnownApplications:     c.config.Config.KnownApplications,
+			RefreshIntervalBlocks: 4, // Refresh every 4 blocks to reduce gRPC load (params/apps/services rarely change)
+		},
+		c.config.GlobalLeader,
+		blockSubscriberAdapter,
+		c.config.RedisClient,
+		c.sharedParamsCache,
+		c.sessionParamsCache,
+		c.proofParamsCache,
+		c.supplierParamsCache,
+		c.applicationCache,
+		c.serviceCache,
+		c.supplierCache,
+		nil, // session cache placeholder
+		c.masterPool,
+	)
+	if err := c.cacheOrchestrator.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start cache orchestrator: %w", err)
+	}
+	c.logger.Info().Msg("cache orchestrator started with pond workers")
+
+	// Create a block publisher
+	c.blockPublisher = cache.NewBlockPublisher(
+		c.logger,
+		c.blockSubscriber,
+		c.redisBlockSubscriber,
+	)
+	if err = c.blockPublisher.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start block publisher: %w", err)
+	}
+	c.logger.Info().Msg("block publisher started")
+
+	// Fetch chain ID of the network using the provided RPC.
+	chainID := c.config.ChainID
+	if chainID == "" {
+		chainID, err = c.blockSubscriber.GetChainID(ctx)
+		if err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to get chain ID from node: %w", err)
+		}
+		c.logger.Info().Str("chain_id", chainID).Msg("fetched chain ID from node")
+	}
+
+	// Create a proof checker
+	c.proofChecker = NewProofRequirementChecker(
+		c.logger,
+		c.queryClients.Proof(),
+		c.queryClients.Shared(),
+		c.queryClients.Service(),
+	)
+	c.logger.Info().Msg("proof requirement checker initialized")
+
+	// Create tx client
+	c.txClient, err = tx.NewTxClient(
+		c.logger,
+		c.config.KeyManager,
+		tx.TxClientConfig{
+			GRPCConn:      c.queryClients.GRPCConnection(),
+			ChainID:       chainID,
+			GasLimit:      tx.DefaultGasLimit,
+			TimeoutBlocks: tx.DefaultTimeoutHeight,
+		},
+	)
+	if err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to create transaction client: %w", err)
+	}
+	c.logger.Info().Msg("transaction client initialized")
+
+	// Create supplier registry
+	c.supplierRegistry = NewSupplierRegistry(
+		c.logger,
+		c.config.RedisClient,
+		SupplierRegistryConfig{
+			KeyPrefix:    c.config.RedisClient.KB().SuppliersRegistryPrefix(),
+			IndexKey:     c.config.RedisClient.KB().SuppliersRegistryIndexKey(),
+			EventChannel: c.config.RedisClient.KB().SupplierUpdateChannel(),
+		},
+	)
+
+	// Create and publish service factor registry
+	// This publishes serviceFactor config to Redis for relayers to consume
+	c.serviceFactorRegistry = NewServiceFactorRegistry(
+		c.logger,
+		c.config.RedisClient,
+		c.config.RedisClient.KB(),
+		ServiceFactorRegistryConfig{
+			DefaultServiceFactor: c.config.Config.DefaultServiceFactor,
+			ServiceFactors:       c.config.Config.ServiceFactors,
+			CacheTTL:             c.config.Config.GetCacheTTL(),
+		},
+	)
+	if err = c.serviceFactorRegistry.PublishServiceFactors(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to publish service factors: %w", err)
+	}
+	c.logger.Info().
+		Float64("default_service_factor", c.config.Config.DefaultServiceFactor).
+		Int("per_service_count", len(c.config.Config.ServiceFactors)).
+		Msg("service factor registry published")
+
+	// Create cached shared query client
+	cachedSharedClient := cache.NewCachedSharedQueryClient(c.sharedParamsCache, c.queryClients.Shared())
+
+	// Create and start supplier manager (unless SupplierWorker is handling it)
+	if !c.config.SkipSupplierManager {
+		c.supplierManager = NewSupplierManager(
+			c.logger,
+			c.config.KeyManager,
+			c.supplierRegistry,
+			SupplierManagerConfig{
+				RedisClient:             c.config.RedisClient,
+				ConsumerName:            c.config.Config.Redis.ConsumerName,
+				SessionTTL:              c.config.Config.SessionTTL,
+				CacheTTL:                c.config.Config.GetCacheTTL(),
+				BatchSize:               c.config.Config.BatchSize,
+				AckBatchSize:            c.config.Config.AckBatchSize,
+				ClaimIdleTimeout:        c.config.Config.GetClaimIdleTimeout(),
+				StreamDiscoveryInterval: c.config.Config.GetStreamDiscoveryInterval(),
+				SupplierCache:           c.supplierCache,
+				MinerID:                 c.config.Config.Redis.ConsumerName,
+				SupplierQueryClient:     c.queryClients.Supplier(),
+				WorkerPool:              c.masterPool,
+				TxClient:                c.txClient,
+				BlockClient:             c.blockSubscriber,
+				SharedClient:            cachedSharedClient,
+				SessionClient:           c.queryClients.Session(),
+				ProofChecker:            c.proofChecker,
+				ServiceFactorProvider:   c.serviceFactorRegistry,                                              // For claim ceiling warnings
+				AppClient:               cache.NewApplicationQueryClientAdapter(c.queryClients.Application()), // For claim ceiling calculations
+				SessionLifecycleConfig: SessionLifecycleConfig{
+					CheckInterval:            0, // Event-driven
+					ClaimSubmissionBuffer:    c.config.Config.GetSessionLifecycleClaimBuffer(),
+					ProofSubmissionBuffer:    c.config.Config.GetSessionLifecycleProofBuffer(),
+					MaxConcurrentTransitions: c.config.Config.GetSessionLifecycleMaxConcurrentTransitions(),
+				},
+				EnableDistributedClaiming: true, // Always enabled
+				ClaimerConfig:             c.config.Config.GetSupplierClaimingConfig(),
+			},
+		)
+
+		// Set relay handler
+		c.supplierManager.SetRelayHandler(func(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error {
+			state, ok := c.supplierManager.GetSupplierState(supplierAddr)
+			if !ok {
+				return fmt.Errorf("supplier state not found: %s", supplierAddr)
+			}
+
+			// Track discovered apps and services
+			if msg.Message.ApplicationAddress != "" {
+				c.cacheOrchestrator.RecordDiscoveredApp(msg.Message.ApplicationAddress)
+			}
+			if msg.Message.ServiceId != "" {
+				c.cacheOrchestrator.RecordDiscoveredService(msg.Message.ServiceId)
+			}
+
+			// CRITICAL: Check session state BEFORE updating SMST.
+			// This is essential for HA failover - the new instance may not know the session
+			// was already claimed (claimedRoot is only in-memory). Without this check,
+			// late relays would be accepted and counted after the session was already settled.
+			if state.SessionStore != nil {
+				snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
+				if storeErr == nil && snapshot != nil {
+					// Check if session is in a terminal state (claimed, settled, or expired)
+					if snapshot.State == SessionStateClaimed ||
+						snapshot.State == SessionStateSettled ||
+						snapshot.State == SessionStateExpired {
+						c.logger.Info().
+							Str("session_id", msg.Message.SessionId).
+							Str("supplier", supplierAddr).
+							Str("session_state", string(snapshot.State)).
+							Str("service", msg.Message.ServiceId).
+							Int64("relay_session_start", msg.Message.SessionStartHeight).
+							Int64("relay_session_end", msg.Message.SessionEndHeight).
+							Int64("snapshot_session_start", snapshot.SessionStartHeight).
+							Int64("snapshot_session_end", snapshot.SessionEndHeight).
+							Int64("snapshot_relay_count", snapshot.RelayCount).
+							Msg("LATE_RELAY: dropping relay - session already in terminal state")
+						RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
+						return nil // Return nil to ACK the message and prevent infinite reclaim
+					}
+				}
+				// If session doesn't exist yet or store error, continue with normal processing
+			}
+
+			// Update SMST
+			if err = state.SMSTManager.UpdateTree(
+				ctx,
+				msg.Message.SessionId,
+				msg.Message.RelayHash,
+				msg.Message.RelayBytes,
+				msg.Message.ComputeUnitsPerRelay,
+			); err != nil {
+				// Handle session sealed errors (backup check - SMST's in-memory claimedRoot)
+				if strings.Contains(err.Error(), "already been claimed") {
+					c.logger.Info().
+						Str("session_id", msg.Message.SessionId).
+						Str("supplier", supplierAddr).
+						Msg("dropping late relay - session already claimed (SMST check)")
+					RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
+					return nil
+				}
+				return fmt.Errorf("failed to update SMST: %w", err)
+			}
+
+			// Track relay in session coordinator
+			if err := state.SessionCoordinator.OnRelayProcessed(
+				ctx,
+				msg.Message.SessionId,
+				msg.Message.ComputeUnitsPerRelay,
+				msg.Message.SupplierOperatorAddress,
+				msg.Message.ServiceId,
+				msg.Message.ApplicationAddress,
+				msg.Message.SessionStartHeight,
+				msg.Message.SessionEndHeight,
+			); err != nil {
+				return fmt.Errorf("failed to update session coordinator: %w", err)
+			}
+
+			return nil
+		})
+
+		// Start supplier manager
+		if err := c.supplierManager.Start(ctx); err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to start supplier manager: %w", err)
+		}
+		c.logger.Info().Msg("supplier manager started")
+	} else {
+		// When using SupplierWorker, the external supplier manager is already running
+		c.supplierManager = c.config.ExternalSupplierManager
+		c.logger.Info().Msg("using external supplier manager (SupplierWorker)")
+	}
+
+	// Start block health monitor if enabled
+	if c.config.Config.BlockHealthMonitor.Enabled {
+		c.blockHealthMonitor = NewBlockHealthMonitor(
+			c.logger,
+			c.blockSubscriber,
+			c.config.GlobalLeader,
+			BlockHealthMonitorConfig{
+				BlockTimeSeconds:  blockTimeSeconds,
+				SlownessThreshold: c.config.Config.GetBlockHealthSlownessThreshold(),
+			},
+		)
+		if err := c.blockHealthMonitor.Start(ctx); err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to start block health monitor: %w", err)
+		}
+		c.logger.Info().Msg("block health monitor started (leader-only)")
+	}
+
+	// Start balance monitor if enabled
+	if c.config.Config.GetBalanceMonitorEnabled() || c.config.Config.GetBalanceMonitorThreshold() > 0 {
+		c.balanceMonitor = NewBalanceMonitor(
+			c.logger,
+			BalanceMonitorConfig{
+				CheckInterval:               c.config.Config.GetBalanceMonitorCheckInterval(),
+				BalanceThresholdUpokt:       c.config.Config.GetBalanceMonitorThreshold(),
+				StakeWarningProofThreshold:  c.config.Config.GetBalanceMonitorStakeWarningProofThreshold(),
+				StakeCriticalProofThreshold: c.config.Config.GetBalanceMonitorStakeCriticalProofThreshold(),
+			},
+			c.queryClients.Bank(),
+			c.queryClients.Supplier(),
+			c.supplierParamsCache,
+			c.proofParamsCache,
+			c.supplierManager,
+			c.config.GlobalLeader,
+		)
+		if err := c.balanceMonitor.Start(ctx); err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to start balance monitor: %w", err)
+		}
+		c.logger.Info().Msg("balance monitor started")
+	}
+
+	c.active = true
+	c.logger.Info().Msg("leader controller started - all resources active")
+	return nil
+}
+
+// Close shuts down all leader-only resources.
+// This is called when the instance loses leadership.
+func (c *LeaderController) Close() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if !c.active {
+		return nil
+	}
+
+	c.logger.Info().Msg("stopping leader controller - cleaning up all resources")
+	c.cleanup()
+	c.active = false
+	c.logger.Info().Msg("leader controller stopped")
+	return nil
+}
+
+// cleanup closes all resources (called during Start errors or Close).
+// Must be called with c.mu held.
+func (c *LeaderController) cleanup() {
+	// Close in reverse order of creation
+	if c.balanceMonitor != nil {
+		if err := c.balanceMonitor.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close balance monitor")
+		}
+		c.balanceMonitor = nil
+	}
+
+	if c.blockHealthMonitor != nil {
+		if err := c.blockHealthMonitor.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close block health monitor")
+		}
+		c.blockHealthMonitor = nil
+	}
+
+	// Only close supplier manager if we created it (not when using external SupplierWorker)
+	if c.supplierManager != nil && !c.config.SkipSupplierManager {
+		if err := c.supplierManager.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close supplier manager")
+		}
+	}
+	c.supplierManager = nil
+
+	// ServiceFactorRegistry doesn't have a Close method - it just holds config
+	// Keys will expire based on Redis TTL or stay until overwritten
+	c.serviceFactorRegistry = nil
+
+	if c.txClient != nil {
+		if err := c.txClient.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close tx client")
+		}
+		c.txClient = nil
+	}
+
+	if c.blockPublisher != nil {
+		if err := c.blockPublisher.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close block publisher")
+		}
+		c.blockPublisher = nil
+	}
+
+	if c.cacheOrchestrator != nil {
+		if err := c.cacheOrchestrator.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close cache orchestrator")
+		}
+		c.cacheOrchestrator = nil
+	}
+
+	if c.supplierCache != nil {
+		if err := c.supplierCache.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close supplier cache")
+		}
+		c.supplierCache = nil
+	}
+
+	if c.serviceCache != nil {
+		if err := c.serviceCache.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close service cache")
+		}
+		c.serviceCache = nil
+	}
+
+	if c.applicationCache != nil {
+		if err := c.applicationCache.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close application cache")
+		}
+		c.applicationCache = nil
+	}
+
+	if c.supplierParamsCache != nil {
+		if err := c.supplierParamsCache.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close supplier params cache")
+		}
+		c.supplierParamsCache = nil
+	}
+
+	if c.proofParamsCache != nil {
+		if err := c.proofParamsCache.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close proof params cache")
+		}
+		c.proofParamsCache = nil
+	}
+
+	if c.sharedParamsCache != nil {
+		if err := c.sharedParamsCache.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close shared params cache")
+		}
+		c.sharedParamsCache = nil
+	}
+
+	if c.sessionParamsCache != nil {
+		if err := c.sessionParamsCache.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close session params cache")
+		}
+		c.sessionParamsCache = nil
+	}
+
+	if c.redisBlockSubscriber != nil {
+		if err := c.redisBlockSubscriber.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close redis block subscriber")
+		}
+		c.redisBlockSubscriber = nil
+	}
+
+	if c.blockSubscriber != nil {
+		c.blockSubscriber.Close()
+		c.blockSubscriber = nil
+	}
+
+	if c.queryClients != nil {
+		if err := c.queryClients.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close query clients")
+		}
+		c.queryClients = nil
+	}
+
+	if c.masterPool != nil {
+		c.masterPool.StopAndWait()
+		c.masterPool = nil
+	}
+
+	c.logger.Info().Msg("all resources cleaned up")
+}

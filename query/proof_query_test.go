@@ -28,7 +28,7 @@ func TestGetClaim_Success(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -63,7 +63,7 @@ func TestGetClaim_NotFound(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -92,7 +92,7 @@ func TestGetClaim_InvalidSessionID(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -120,7 +120,7 @@ func TestGetClaim_NetworkError(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -152,7 +152,7 @@ func TestGetClaim_Cache(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -189,7 +189,7 @@ func TestGetClaim_ConcurrentAccess(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -233,7 +233,7 @@ func TestGetClaim_Timeout(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 10 * time.Millisecond, // Very short timeout
 	}
@@ -261,7 +261,7 @@ func TestGetClaim_MultipleClaims(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -302,7 +302,7 @@ func TestGetClaim_EmptyResponse(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}

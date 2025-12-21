@@ -16,6 +16,7 @@ import (
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
+	_ "google.golang.org/grpc/encoding/gzip" // Register gzip compressor for grpc-encoding: gzip
 	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -41,6 +42,9 @@ type RelayGRPCService struct {
 	// Function to get HTTP client for a service (supports per-service timeout profiles)
 	getHTTPClient func(serviceID string) *http.Client
 
+	// Function to get service timeout (from timeout profile)
+	getServiceTimeout func(serviceID string) time.Duration
+
 	// Backend gRPC connections for passthrough mode
 	grpcBackends sync.Map // map[string]*grpc.ClientConn
 
@@ -62,6 +66,8 @@ type RelayGRPCServiceConfig struct {
 	MaxBodySize        int64
 	// GetHTTPClient returns the HTTP client for a service (supports per-service timeout profiles)
 	GetHTTPClient func(serviceID string) *http.Client
+	// GetServiceTimeout returns the request timeout for a service (from timeout profile)
+	GetServiceTimeout func(serviceID string) time.Duration
 }
 
 // NewRelayGRPCService creates a new gRPC relay service.
@@ -85,6 +91,14 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		}
 	}
 
+	getServiceTimeout := config.GetServiceTimeout
+	if getServiceTimeout == nil {
+		// Default timeout (fallback for tests or legacy usage)
+		getServiceTimeout = func(_ string) time.Duration {
+			return 30 * time.Second
+		}
+	}
+
 	maxBodySize := config.MaxBodySize
 	if maxBodySize == 0 {
 		maxBodySize = 10 * 1024 * 1024 // 10MB default
@@ -100,6 +114,7 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		currentBlockHeight: config.CurrentBlockHeight,
 		maxBodySize:        maxBodySize,
 		getHTTPClient:      getHTTPClient,
+		getServiceTimeout:  getServiceTimeout,
 	}
 }
 
@@ -185,6 +200,11 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		return status.Errorf(codes.NotFound, "unknown service: %s", serviceID)
 	}
 
+	// Apply service timeout to context (from timeout profile)
+	serviceTimeout := s.getServiceTimeout(serviceID)
+	ctx, cancel := context.WithTimeout(ctx, serviceTimeout)
+	defer cancel()
+
 	// Validate and meter the relay if pipeline is available
 	if s.relayPipeline != nil {
 		// TODO: Get actual compute units from service config
@@ -211,7 +231,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		}
 
 		// Meter relay (check stake before serving)
-		allowed, overServiced, meterErr := s.relayPipeline.MeterRelay(ctx, relayCtx)
+		allowed, meterErr := s.relayPipeline.MeterRelay(ctx, relayCtx)
 		if meterErr != nil {
 			// Fail-open: log warning but allow relay
 			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
@@ -221,14 +241,8 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 			// Stake limit exceeded - reject relay
 			grpcRelayErrors.WithLabelValues(serviceID, "meter_rejected").Inc()
 			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
-				Bool("over_serviced", overServiced).
 				Msg("relay rejected - stake limit exceeded")
 			return status.Error(codes.ResourceExhausted, "relay rejected - stake limit exceeded")
-		}
-
-		if overServiced {
-			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
-				Msg("relay over-serviced (will be served but not mined)")
 		}
 	}
 

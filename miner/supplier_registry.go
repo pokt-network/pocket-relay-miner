@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -56,14 +57,14 @@ type SupplierRegistryConfig struct {
 // It allows relayers to discover available suppliers and their services.
 type SupplierRegistry struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	config      SupplierRegistryConfig
 }
 
 // NewSupplierRegistry creates a new supplier registry.
 func NewSupplierRegistry(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	config SupplierRegistryConfig,
 ) *SupplierRegistry {
 	if config.KeyPrefix == "" {
@@ -228,7 +229,7 @@ func (r *SupplierRegistry) GetAllSuppliers(ctx context.Context) (map[string]*Sup
 // SubscribeToUpdates subscribes to supplier update events.
 // Returns a channel that receives update events.
 func (r *SupplierRegistry) SubscribeToUpdates(ctx context.Context) <-chan *SupplierUpdateEvent {
-	eventCh := make(chan *SupplierUpdateEvent, 100)
+	eventCh := make(chan *SupplierUpdateEvent, 2000)
 
 	pubsub := r.redisClient.Subscribe(ctx, r.config.EventChannel)
 

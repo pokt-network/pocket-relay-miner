@@ -27,7 +27,7 @@ func TestGetSupplier_Success(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -57,7 +57,7 @@ func TestGetSupplier_NotFound(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -86,7 +86,7 @@ func TestGetSupplier_InvalidAddress(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -114,7 +114,7 @@ func TestGetSupplier_NetworkError(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -143,7 +143,7 @@ func TestGetSupplier_EmptyResponse(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -174,7 +174,7 @@ func TestGetSupplier_Cache(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -214,7 +214,7 @@ func TestGetSupplier_ConcurrentAccess(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -258,7 +258,7 @@ func TestGetSupplier_Timeout(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 10 * time.Millisecond, // Very short timeout
 	}
@@ -286,7 +286,7 @@ func TestGetSupplier_MultipleSuppliers(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -328,7 +328,7 @@ func TestGetSupplier_WithServices(t *testing.T) {
 	}
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}

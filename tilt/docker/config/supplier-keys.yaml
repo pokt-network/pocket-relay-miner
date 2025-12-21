@@ -1,0 +1,37 @@
+# Supplier private keys for Docker Compose development
+# All 15 suppliers from genesis - matches tilt/config/all-keys.yaml
+#
+# Format: list of hex-encoded secp256k1 private keys
+# The operator address is derived from each key automatically.
+
+keys:
+  # supplier1 - pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj
+  - "cd41a98ac7ac3b190c345b88e2885422d7bb553c59bca03c6e2618d49f8b1c06"
+  # supplier2 - pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa
+  - "7b2d353bf74a0aade09bf21928a9e195b54fd1309d19b11e63e16f92efdb610c"
+  # supplier3 - pokt1j6dun0x8eyq5mmsmq83zs3c2utt85q8478c89u
+  - "3f132ad18b97a7adcbbc45d1741997406c5a2625829f9bdac51736f748857710"
+  # supplier4 - pokt1c26hxrnsfc8s53rrx9edrmel73kw3plexhkdtm
+  - "1e84c17eec3ae7455a46ec08d0254d9fe0cf7952c82a2ca026e31d67298d2920"
+  # supplier5 - pokt1zfc6y3dxz9cqe56ykd300f9yze67lauuup5uy9
+  - "f0bdaa5b487138560fe43b187018b0fc8b5ba07a09357612ee47b115e10225db"
+  # supplier6 - pokt1mrchgg9jzcumavwn8x0fcr7q0qhw2jrc7yzcez
+  - "75533ccabda3431dba1198ef761f157632f13f9752fd32e9265d1b88ce8d4f22"
+  # supplier7 - pokt192lpngthv6l87uh6u50yl8050h43ucveks32jt
+  - "7ea7aa76c8bcbbb1cab93faa92ccec31b2b52a5dce6d038b678dd68c98183006"
+  # supplier8 - pokt1aq5r5m6fssf24nqpcn9gulkcelkf20nrwc6d6y
+  - "f39be26fbb70dd43301377e703494f8c10166bd6c088c3074b35495fbd668e8d"
+  # supplier9 - pokt1qdhw2cpv3r7vrvsxpgvs8athmcfqe23k0s32ls
+  - "00a146ce362b2d193a091d24eb31491d88ed94468b73f18c7529b38a6fcdd429"
+  # supplier10 - pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s
+  - "92daafb0fc7a061cb2cad6d2eeea65700965eab5eb1b8f9ccb19d5594127f6b3"
+  # supplier11 - pokt1m7tn3834h6xj6r3d7mvrh3c065fp6yz459q375
+  - "dc4bcddf623d4ccabf49b80a647d5f6a6eb82c64deaa4c6bdfc8d42d81555561"
+  # supplier12 - pokt1yht4xtvkwkd4dqqay8qzqyed4fc6janq9vmzat
+  - "39efcaf10ad3aae093ed64f3145b8bcad48a7fc71c1298f1bf0c6198d0ceb6b4"
+  # supplier13 - pokt1pl89udvrau07sw968z5p3pw9pur6mqwu250rj2
+  - "d2cd3196d580e34ecce3ebec5446cea0013a9cdf50bc91af75066970a142f13c"
+  # supplier14 - pokt1nan5lxnxny0vgc386g28zuk2kp8zk53wwn4q82
+  - "f5cdf38536b68d23d13da5e241b91841eb29d5eee31e7983b90b0f039264a9cf"
+  # supplier15 - pokt13gyxtzds0n5qt8fjw3awr726zjma2xywac2m0k
+  - "9314b707725f5eb82eac29a2fdb819ca8e8fafef5ed8198ae5cac7b1697d159c"

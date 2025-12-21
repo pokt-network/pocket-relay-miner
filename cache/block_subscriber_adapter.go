@@ -5,42 +5,40 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
-	"time"
 
+	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	"github.com/pokt-network/poktroll/pkg/client"
 )
 
 // BlockSubscriberAdapter wraps BlockSubscriber to implement BlockHeightSubscriber.
-// Converts client.Block → BlockEvent for CacheOrchestrator compatibility.
+// Converts *SimpleBlock → BlockEvent for CacheOrchestrator compatibility.
 //
 // This adapter is used in the miner to bridge the WebSocket-based BlockSubscriber
-// (which provides client.Block events) to the CacheOrchestrator (which expects
+// (which provides *SimpleBlock events) to the CacheOrchestrator (which expects
 // BlockEvent via BlockHeightSubscriber interface).
 type BlockSubscriberAdapter struct {
 	logger          logging.Logger
-	blockSubscriber interface {
-		Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
-	}
-	eventCh chan BlockEvent
-	ctx     context.Context
-	cancel  context.CancelFunc
-	wg      sync.WaitGroup
+	blockSubscriber *localclient.BlockSubscriber
+	eventCh         chan BlockEvent
+	ctx             context.Context
+	cancel          context.CancelFunc
+	wg              sync.WaitGroup
 }
 
 // NewBlockSubscriberAdapter creates an adapter for miner's CacheOrchestrator.
 // The adapter subscribes to the WebSocket BlockSubscriber and converts
-// client.Block events to BlockEvent format.
+// *SimpleBlock events to BlockEvent format.
+//
+// Buffer size 2000: Large buffer to handle any reasonable backlog.
+// Memory cost is negligible (~160KB) vs risk of dropping blocks.
 func NewBlockSubscriberAdapter(
 	logger logging.Logger,
-	blockSubscriber interface {
-		Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
-	},
+	blockSubscriber *localclient.BlockSubscriber,
 ) *BlockSubscriberAdapter {
 	return &BlockSubscriberAdapter{
-		logger:          logging.ForComponent(logger, "block_subscriber_adapter"),
+		logger:          logging.ForComponent(logger, logging.ComponentBlockSubscriberAdapter),
 		blockSubscriber: blockSubscriber,
-		eventCh:         make(chan BlockEvent, 100),
+		eventCh:         make(chan BlockEvent, 2000),
 	}
 }
 
@@ -53,8 +51,8 @@ func NewBlockSubscriberAdapter(
 func (a *BlockSubscriberAdapter) Start(ctx context.Context) error {
 	a.ctx, a.cancel = context.WithCancel(ctx)
 
-	// Subscribe to WebSocket fan-out
-	blockCh := a.blockSubscriber.Subscribe(a.ctx, 100)
+	// Subscribe to WebSocket fan-out (buffer matches eventCh for consistency)
+	blockCh := a.blockSubscriber.Subscribe(a.ctx, 2000)
 
 	// Convert client.Block → BlockEvent with panic recovery
 	a.wg.Add(1)
@@ -84,7 +82,7 @@ func (a *BlockSubscriberAdapter) Start(ctx context.Context) error {
 				event := BlockEvent{
 					Height:    block.Height(),
 					Hash:      block.Hash(),
-					Timestamp: time.Now(),
+					Timestamp: block.Time(),
 				}
 
 				// Non-blocking send: drop event if channel is full

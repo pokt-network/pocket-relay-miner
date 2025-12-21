@@ -1,6 +1,8 @@
-# Pocket RelayMiner Relayer - Production Configuration Example
+# Pocket RelayMiner Relayer Configuration Example
+# This file uses LOCALNET defaults - ready for local development with Tilt.
+# For PRODUCTION, see comments marked [PRODUCTION] for recommended values.
+#
 # The relayer is a stateless HTTP/WebSocket/gRPC/Streaming proxy
-# Copy this file to config.yaml and customize for your deployment
 
 # HTTP server listen address
 listen_addr: "0.0.0.0:8080"
@@ -13,9 +15,6 @@ redis:
   # OR Redis Cluster (comment out url above, uncomment below)
   # url: "redis://redis-node1:6379,redis-node2:6379,redis-node3:6379"
 
-  # Stream prefix for relay messages
-  stream_prefix: "ha:relays"
-
   # Connection pool settings (2x go-redis defaults for production)
   # Omit these to use defaults (auto-calculated based on CPU cores)
   # pool_size: 320                   # Max connections (default: 20 × runtime.GOMAXPROCS)
@@ -23,13 +22,33 @@ redis:
   # pool_timeout_seconds: 4          # Wait time for connection from pool
   # conn_max_idle_time_seconds: 300  # Close idle connections after 5 minutes
 
+  # Namespace configuration (optional - defaults match historical "ha:" prefix structure)
+  # All Redis key prefixes are derived from this config.
+  # Must match miner configuration for proper operation.
+  # namespace:
+  #   base_prefix: "ha"                # Root prefix for all keys (default: "ha")
+  #   cache_prefix: "cache"            # Cache data: ha:cache:* (default: "cache")
+  #   events_prefix: "events"          # Pub/sub channels: ha:events:* (default: "events")
+  #   streams_prefix: "relays"         # Relay streams: ha:relays:* (default: "relays")
+  #   miner_prefix: "miner"            # Miner state: ha:miner:* (default: "miner")
+  #   supplier_prefix: "supplier"      # Supplier data: ha:supplier:* (default: "supplier")
+  #   meter_prefix: "meter"            # Metering data: ha:meter:* (default: "meter")
+  #   params_prefix: "params"          # Cached params: ha:params:* (default: "params")
+  #   consumer_group_prefix: "miners"  # Consumer group: ha-miners (default: "miners")
+
 # Pocket blockchain connection
 pocket_node:
-  # RPC endpoint for block subscriptions and queries
-  query_node_rpc_url: "https://rpc.testnet.pokt.network"
+  # RPC endpoint for block subscriptions and queries (localnet defaults)
+  query_node_rpc_url: "http://localhost:26657"
+  # [PRODUCTION] query_node_rpc_url: "https://rpc.testnet.pokt.network"
 
   # gRPC endpoint for queries (sessions, applications, services)
-  query_node_grpc_url: "grpc.testnet.pokt.network:443"
+  query_node_grpc_url: "localhost:9090"
+  # [PRODUCTION] query_node_grpc_url: "grpc.testnet.pokt.network:443"
+
+  # gRPC settings
+  grpc_insecure: true  # Disable TLS for gRPC (localnet)
+  # [PRODUCTION] grpc_insecure: false
 
   # NOTE: Relayers always use Redis pub/sub for block events (synchronized with miner).
   # RPC/gRPC endpoints are used for health checks and fallback queries only.
@@ -52,70 +71,74 @@ keys:
   #     - "supplier2"
 
 # Service configurations (map of service_id -> config)
+# Genesis defines 4 services: develop-http, develop-websocket, develop-stream, develop-grpc
+# Each has 15 suppliers staked for it.
 services:
-  # Example: develop service (localnet)
-  develop:
-    # Validation mode for this service
-    # - "eager": Validate BEFORE forwarding (use for expensive backends)
-    # - "optimistic": Forward first, validate in background (use for cheap/fast backends)
+  # HTTP/JSON-RPC service (localnet)
+  # Two backends available:
+  #   - nginx: High-throughput static response (50k+ RPS, for load testing)
+  #   - jsonrpc: Full-featured demo backend (lower throughput, realistic responses)
+  develop-http:
     validation_mode: eager
-
-    # Request timeout for backends (overrides default)
-    request_timeout_seconds: 30
-
-    # Max body size for requests/responses (overrides default)
+    timeout_profile: fast
     max_body_size_bytes: 10485760  # 10MB
-
-    # Default backend when Rpc-Type header is not provided
-    # Must match one of the keys in backends map
-    default_backend: jsonrpc
-
-    # Backend configurations per RPC type
+    default_backend: nginx  # Use nginx for load testing (switch to jsonrpc for feature testing)
     backends:
-      # JSON-RPC backend (Rpc-Type: 3 or "jsonrpc")
+      # High-throughput nginx backend - static JSON-RPC response
+      # Returns: {"jsonrpc":"2.0","id":1,"result":"0x1"}
+      # Use for: Load testing, benchmarking relay throughput
+      nginx:
+        url: "http://nginx-backend:80"
+      # Full-featured demo backend - dynamic responses
+      # Use for: Feature testing, WebSocket, gRPC, streaming
       jsonrpc:
-        url: "http://eth-node:8545"
-        headers:
-          X-Custom-Header: "value"
-        # Optional: Basic auth
-        # authentication:
-        #   username: "user"
-        #   password: "pass"
-        # Optional: Bearer token (sent as "Authorization: Bearer <token>")
+        url: "http://backend:8545"
+        # [PRODUCTION] url: "http://eth-node:8545"
+        # Optional headers/auth:
+        # headers:
+        #   X-Custom-Header: "value"
         # authentication:
         #   bearer_token: "your-token"
-        # Optional: Plain token (sent as "Authorization: <token>" without "Bearer " prefix)
-        # authentication:
-        #   plain_token: "your-token"
-        # Optional: Backend health check
-        # health_check:
-        #   enabled: true
-        #   endpoint: "/health"
-        #   interval_seconds: 30
-        #   timeout_seconds: 5
-        #   unhealthy_threshold: 3
-        #   healthy_threshold: 2
 
-      # WebSocket backend (Rpc-Type: 2 or "websocket")
+  # WebSocket service (localnet)
+  develop-websocket:
+    validation_mode: eager
+    timeout_profile: fast
+    max_body_size_bytes: 10485760
+    default_backend: websocket
+    backends:
       websocket:
-        url: "ws://eth-node:8545/ws"
+        url: "ws://backend:8545/ws"
+        # [PRODUCTION] url: "ws://eth-node:8545/ws"
 
-      # gRPC backend (Rpc-Type: 1 or "grpc")
-      grpc:
-        url: "eth-node:50051"
-
-      # REST/Streaming backend (Rpc-Type: 4 or "rest")
+  # Streaming/SSE service (localnet)
+  develop-stream:
+    validation_mode: eager
+    timeout_profile: streaming  # 10 min timeout for streaming responses
+    max_body_size_bytes: 10485760
+    default_backend: rest
+    backends:
       rest:
-        url: "http://eth-node:8545/stream/sse"
+        url: "http://backend:8545/stream/sse"
+        # [PRODUCTION] url: "http://eth-node:8545/stream/sse"
+
+  # gRPC service (localnet)
+  develop-grpc:
+    validation_mode: eager
+    timeout_profile: fast
+    max_body_size_bytes: 10485760
+    default_backend: grpc
+    backends:
+      grpc:
+        url: "backend:50051"
+        # [PRODUCTION] url: "eth-node:50051"
 
   # Example: text-generation service with streaming profile
   # This demonstrates using the "streaming" timeout profile for long-running LLM requests
+  # The profile defines request_timeout_seconds (600s) and response_header_timeout (0 for streaming)
   # text-generation:
   #   validation_mode: eager
-  #   request_timeout_seconds: 600  # 10 minutes for LLM completion
-  #   # HTTP client configuration (uses streaming timeout profile)
-  #   http:
-  #     timeout_profile: "streaming"  # No header timeout for streaming responses
+  #   timeout_profile: streaming  # 10 min request timeout, no header timeout for streaming
   #   backends:
   #     jsonrpc:
   #       url: "https://llm-backend.example.com"
@@ -161,8 +184,13 @@ grace_period_extra_blocks: 2
 metrics:
   enabled: true
   addr: "0.0.0.0:9090"
-  # pprof_enabled: false  # Enable pprof profiling (for debugging, disable in production)
-  # pprof_addr: "localhost:6060"  # Pprof HTTP server (use localhost for security)
+
+# Pprof profiling (for debugging, disable in production)
+pprof:
+  enabled: true  # Enabled by default for localnet debugging
+  addr: "0.0.0.0:6060"
+  # [PRODUCTION] enabled: false
+  # [PRODUCTION] addr: "localhost:6060"
 
 # Health check endpoint
 health_check:
@@ -174,11 +202,6 @@ relay_meter:
   # Enable metering and rate limiting
   enabled: true
 
-  # Over-servicing: Allow apps to exceed stake limits temporarily
-  # - false: Strict enforcement (reject when over limit)
-  # - true: Allow temporary over-servicing (eventual consistency)
-  over_servicing_enabled: false
-
   # Redis key prefix for metering data
   redis_key_prefix: "ha"
 
@@ -187,12 +210,10 @@ relay_meter:
   # - "closed": Reject relays when Redis down (prioritize safety)
   fail_behavior: "open"
 
-  # Session cleanup interval (remove expired session data)
-  session_cleanup_interval: 5m
-
-  # Cache TTLs
-  params_cache_ttl: 10m  # Shared/session params cache
-  app_stake_cache_ttl: 10m  # Application stake cache
+  # Cache TTL for all Redis data (streams, params, app stakes, meters)
+  # Redis TTL handles automatic expiration - no cleanup goroutines needed.
+  # Default: 2h (covers ~15 session lifecycles at 30s blocks)
+  cache_ttl: 2h
 
 # HTTP transport settings (connection pooling and timeouts for backend requests)
 # These settings optimize connection reuse and prevent resource exhaustion.
@@ -218,24 +239,28 @@ http_transport:
 # HTTP Timeout Profiles (Advanced)
 # ==============================================================================
 # Define timeout profiles for different service types.
+# Each profile defines request_timeout_seconds and HTTP client timeouts.
+# Services select a profile via the timeout_profile field.
 # Auto-populated with "fast" and "streaming" defaults if not specified.
 timeout_profiles:
   # Fast profile for standard RPC services (default for all services)
   fast:
+    request_timeout_seconds: 30  # Overall request timeout (30s default)
     response_header_timeout_seconds: 30  # Timeout waiting for response headers
     dial_timeout_seconds: 5  # Timeout for establishing connection
     tls_handshake_timeout_seconds: 10  # Timeout for TLS handshake
 
   # Streaming profile for long-running services (LLMs, AI models)
   streaming:
+    request_timeout_seconds: 600  # 10 minute timeout for LLM completions
     response_header_timeout_seconds: 0  # No header timeout for streaming responses
     dial_timeout_seconds: 10  # Allow more time for connection
     tls_handshake_timeout_seconds: 15  # Allow more time for TLS
 
-# Cache warmup (optional - pre-load application data at startup)
+# Cache warmup (optional - preload application data at startup)
 cache_warmup:
-  # Enable cache warmup
-  enabled: false
+  # Enable cache warmup (speeds up first requests)
+  enabled: true
 
   # Known applications to pre-load (if you know your app addresses)
   # known_applications:
@@ -253,6 +278,8 @@ cache_warmup:
 
 # Logging configuration
 logging:
-  level: "info"  # trace, debug, info, warn, error
-  format: "json"  # json, text
+  level: "debug"  # trace, debug, info, warn, error (localnet uses debug)
+  format: "text"  # json, text (text is easier to read in development)
   output: "stdout"  # stdout, stderr, or file path
+  # [PRODUCTION] level: "info"
+  # [PRODUCTION] format: "json"

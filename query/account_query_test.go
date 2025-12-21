@@ -23,7 +23,7 @@ func TestGetAccount_Success(t *testing.T) {
 	// integration tests with real blockchain nodes for full coverage.
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -48,7 +48,7 @@ func TestGetAccount_NotFound(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -71,7 +71,7 @@ func TestGetAccount_InvalidAddress(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -93,7 +93,7 @@ func TestGetAccount_NetworkError(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -115,7 +115,7 @@ func TestGetAccount_Timeout(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 10 * time.Millisecond, // Very short timeout
 	}
@@ -137,7 +137,7 @@ func TestGetPubKeyFromAddress_Success(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -157,7 +157,7 @@ func TestGetPubKeyFromAddress_NotFound(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -179,7 +179,7 @@ func TestGetPubKeyFromAddress_NoPubKey(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -199,7 +199,7 @@ func TestGetAccount_Cache(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -219,7 +219,7 @@ func TestGetAccount_ConcurrentAccess(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -254,7 +254,7 @@ func TestAccountQueryClient_ClientCreation(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -275,7 +275,7 @@ func TestAccountQueryClient_ErrorPropagation(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}

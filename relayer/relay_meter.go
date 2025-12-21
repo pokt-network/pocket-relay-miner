@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"math"
 	"math/big"
 	"sync"
 	"time"
@@ -13,8 +12,10 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/app/pocket"
 	"github.com/pokt-network/poktroll/pkg/client"
+	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -26,6 +27,14 @@ type SharedParamCache interface {
 // ServiceCache defines the interface for accessing service data with L1->L2->L3 caching.
 type ServiceCache interface {
 	Get(ctx context.Context, serviceID string, force ...bool) (*sharedtypes.Service, error)
+}
+
+// ServiceFactorProvider defines the interface for getting service factors.
+// The service factor controls how much of the app stake the supplier will accept for billing.
+type ServiceFactorProvider interface {
+	// GetServiceFactor returns the service factor for a service.
+	// Returns (factor, true) if configured, (0, false) if not configured.
+	GetServiceFactor(ctx context.Context, serviceID string) (float64, bool)
 }
 
 // FailBehavior determines how the relay meter behaves when Redis is unavailable.
@@ -48,9 +57,6 @@ const (
 
 // RelayMeterConfig contains configuration for the relay meter.
 type RelayMeterConfig struct {
-	// OverServicingEnabled allows suppliers to serve beyond app stake limits.
-	OverServicingEnabled bool
-
 	// RedisKeyPrefix is the prefix for Redis keys.
 	RedisKeyPrefix string
 
@@ -59,28 +65,17 @@ type RelayMeterConfig struct {
 	// "closed" = reject relays (safer)
 	FailBehavior FailBehavior
 
-	// SessionCleanupInterval is how often to clean up expired session meters.
-	SessionCleanupInterval time.Duration
-
-	// ParamsCacheTTL is the TTL for cached on-chain params.
-	// Should be session-wide (e.g., session duration).
-	// Miners will refresh this in background.
-	ParamsCacheTTL time.Duration
-
-	// AppStakeCacheTTL is the TTL for cached app stakes.
-	// Should be session-wide.
-	AppStakeCacheTTL time.Duration
+	// CacheTTL is the TTL for all cached Redis data (params, app stakes, meters).
+	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
+	CacheTTL time.Duration
 }
 
 // DefaultRelayMeterConfig returns sensible defaults.
 func DefaultRelayMeterConfig() RelayMeterConfig {
 	return RelayMeterConfig{
-		OverServicingEnabled:   true,
-		RedisKeyPrefix:         "ha",
-		FailBehavior:           FailOpen, // Default to availability
-		SessionCleanupInterval: 30 * time.Second,
-		ParamsCacheTTL:         10 * time.Minute, // Session-wide, refreshed by miners
-		AppStakeCacheTTL:       10 * time.Minute, // Session-wide, refreshed by miners
+		RedisKeyPrefix: "ha",
+		FailBehavior:   FailOpen,      // Default to availability
+		CacheTTL:       2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
 	}
 }
 
@@ -124,14 +119,13 @@ type CachedServiceData struct {
 // SessionMeterState represents the metering state for a session.
 // Used for local caching and API responses.
 type SessionMeterState struct {
-	SessionID          string
-	AppAddress         string
-	ServiceID          string
-	MaxStake           cosmostypes.Coin
-	ConsumedStake      cosmostypes.Coin
-	OverServicedRelays uint64
-	SessionEndHeight   int64
-	LastUpdated        time.Time
+	SessionID        string
+	AppAddress       string
+	ServiceID        string
+	MaxStake         cosmostypes.Coin
+	ConsumedStake    cosmostypes.Coin
+	SessionEndHeight int64
+	LastUpdated      time.Time
 }
 
 // RelayMeter manages rate limiting based on application stake.
@@ -139,15 +133,16 @@ type SessionMeterState struct {
 type RelayMeter struct {
 	logger        logging.Logger
 	config        RelayMeterConfig
-	redisClient   redis.UniversalClient
+	redisClient   *redisutil.Client
 	appClient     client.ApplicationQueryClient
 	sharedClient  client.SharedQueryClient
 	sessionClient client.SessionQueryClient
 	blockClient   client.BlockClient
 
 	// Caches (L1 -> L2 -> L3 with pub/sub invalidation)
-	sharedParamCache SharedParamCache
-	serviceCache     ServiceCache
+	sharedParamCache      SharedParamCache
+	serviceCache          ServiceCache
+	serviceFactorProvider ServiceFactorProvider
 
 	// Local L1 cache for hot path performance
 	// This is a read-through cache; writes go to Redis first
@@ -165,13 +160,14 @@ type RelayMeter struct {
 // NewRelayMeter creates a new relay meter.
 func NewRelayMeter(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	appClient client.ApplicationQueryClient,
 	sharedClient client.SharedQueryClient,
 	sessionClient client.SessionQueryClient,
 	blockClient client.BlockClient,
 	sharedParamCache SharedParamCache,
 	serviceCache ServiceCache,
+	serviceFactorProvider ServiceFactorProvider,
 	config RelayMeterConfig,
 ) *RelayMeter {
 	if config.RedisKeyPrefix == "" {
@@ -180,27 +176,22 @@ func NewRelayMeter(
 	if config.FailBehavior == "" {
 		config.FailBehavior = FailOpen
 	}
-	if config.SessionCleanupInterval == 0 {
-		config.SessionCleanupInterval = 30 * time.Second
-	}
-	if config.ParamsCacheTTL == 0 {
-		config.ParamsCacheTTL = 10 * time.Minute
-	}
-	if config.AppStakeCacheTTL == 0 {
-		config.AppStakeCacheTTL = 10 * time.Minute
+	if config.CacheTTL == 0 {
+		config.CacheTTL = 2 * time.Hour
 	}
 
 	return &RelayMeter{
-		logger:           logging.ForComponent(logger, logging.ComponentRelayMeter),
-		config:           config,
-		redisClient:      redisClient,
-		appClient:        appClient,
-		sharedClient:     sharedClient,
-		sessionClient:    sessionClient,
-		blockClient:      blockClient,
-		sharedParamCache: sharedParamCache,
-		serviceCache:     serviceCache,
-		localCache:       make(map[string]*SessionMeterMeta),
+		logger:                logging.ForComponent(logger, logging.ComponentRelayMeter),
+		config:                config,
+		redisClient:           redisClient,
+		appClient:             appClient,
+		sharedClient:          sharedClient,
+		sessionClient:         sessionClient,
+		blockClient:           blockClient,
+		sharedParamCache:      sharedParamCache,
+		serviceCache:          serviceCache,
+		serviceFactorProvider: serviceFactorProvider,
+		localCache:            make(map[string]*SessionMeterMeta),
 	}
 }
 
@@ -215,17 +206,13 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 	m.ctx, m.cancelFn = context.WithCancel(ctx)
 	m.mu.Unlock()
 
-	// Start cleanup subscription worker
+	// Start cleanup subscription worker (receives cleanup signals from miners)
 	m.wg.Add(1)
 	go m.cleanupSubscriber(m.ctx)
 
-	// Start periodic local cache cleanup
-	m.wg.Add(1)
-	go m.localCacheCleanupWorker(m.ctx)
-
 	m.logger.Info().
-		Bool("over_servicing_enabled", m.config.OverServicingEnabled).
 		Str("fail_behavior", string(m.config.FailBehavior)).
+		Dur("cache_ttl", m.config.CacheTTL).
 		Msg("relay meter started")
 
 	return nil
@@ -235,7 +222,6 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 // Uses atomic Redis INCRBY for distributed state.
 // Returns:
 // - allowed: true if the relay should be served
-// - overServiced: true if this relay exceeds the app's stake limit
 // - err: any error that occurred
 func (m *RelayMeter) CheckAndConsumeRelay(
 	ctx context.Context,
@@ -243,11 +229,11 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	appAddress string,
 	serviceID string,
 	sessionEndHeight int64,
-) (allowed bool, overServiced bool, err error) {
+) (allowed bool, err error) {
 	m.mu.RLock()
 	if m.closed {
 		m.mu.RUnlock()
-		return false, false, fmt.Errorf("relay meter is closed")
+		return false, fmt.Errorf("relay meter is closed")
 	}
 	m.mu.RUnlock()
 
@@ -260,7 +246,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	}
 
 	// Get or create session meter
-	meta, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, sessionEndHeight)
+	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, sessionEndHeight)
 	if err != nil {
 		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
@@ -280,47 +266,42 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	if newConsumed <= maxStakeUpokt {
 		// Within limits
 		relayMeterConsumptions.WithLabelValues(serviceID, "within_limit").Inc()
-		return true, false, nil
+		return true, nil
 	}
 
-	// Over the limit - atomically increment over-serviced counter
-	overServicedKey := m.overServicedKey(sessionID)
-	overServicedCount, _ := m.redisClient.Incr(ctx, overServicedKey).Result()
-
+	// Over the limit - reject the relay
 	relayMeterConsumptions.WithLabelValues(serviceID, "over_limit").Inc()
 
-	if m.config.OverServicingEnabled {
-		// Track over-servicing metrics
-		overServicedUpokt := newConsumed - maxStakeUpokt
-		relayMeterOverServicedUpokt.WithLabelValues(serviceID, sessionID).Add(float64(overServicedUpokt))
-		relayMeterOverServicedRelays.WithLabelValues(serviceID, sessionID).Inc()
+	// Get diagnostic data for exhaustion logging
+	appStakeUpokt, _ := m.getAppStake(ctx, appAddress)
+	appParams, _ := m.getApplicationParams(ctx)
+	sessionParams, _ := m.getSessionParams(ctx)
 
-		// Log at power-of-2 intervals
-		if shouldLogOverServicing(uint64(overServicedCount)) {
-			m.logger.Warn().
-				Str("application", meta.AppAddress).
-				Str(logging.FieldServiceID, serviceID).
-				Str(logging.FieldSessionID, sessionID).
-				Int64("over_serviced_count", overServicedCount).
-				Int64("over_serviced_upokt", overServicedUpokt).
-				Int64("consumed_upokt", newConsumed).
-				Int64("max_stake_upokt", maxStakeUpokt).
-				Msg("application over-serviced (over-servicing enabled)")
-		}
-		return true, true, nil
+	var minStakeUpokt int64
+	var numSuppliers uint64
+	if appParams != nil {
+		minStakeUpokt = appParams.GetMinStake().Amount.Int64()
+	}
+	if sessionParams != nil {
+		numSuppliers = sessionParams.NumSuppliersPerSession
 	}
 
-	m.logger.Debug().
+	m.logger.Warn().
 		Str("application", appAddress).
+		Str(logging.FieldServiceID, serviceID).
 		Str(logging.FieldSessionID, sessionID).
+		Int64("session_end_height", sessionEndHeight).
 		Int64("consumed_upokt", newConsumed).
 		Int64("max_stake_upokt", maxStakeUpokt).
-		Msg("relay rejected due to stake limit")
+		Int64("app_stake_upokt", appStakeUpokt).
+		Int64("app_min_stake_upokt", minStakeUpokt).
+		Uint64("num_suppliers_in_session", numSuppliers).
+		Msg("relay rejected: app stake exhausted")
 
 	// Revert the increment since we're rejecting
 	m.redisClient.DecrBy(ctx, consumedKey, relayCostUpokt)
 
-	return false, true, nil
+	return false, nil
 }
 
 // RevertRelayConsumption reverts the stake consumption for a relay that wasn't mined.
@@ -348,11 +329,6 @@ func (m *RelayMeter) RevertRelayConsumption(
 	return nil
 }
 
-// AllowOverServicing returns whether over-servicing is enabled.
-func (m *RelayMeter) AllowOverServicing() bool {
-	return m.config.OverServicingEnabled
-}
-
 // GetSessionMeterState returns the current meter state for a session.
 func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID string) *SessionMeterState {
 	meta, err := m.getSessionMeta(ctx, sessionID)
@@ -361,17 +337,15 @@ func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID string)
 	}
 
 	consumed, _ := m.redisClient.Get(ctx, m.consumedKey(sessionID)).Int64()
-	overServiced, _ := m.redisClient.Get(ctx, m.overServicedKey(sessionID)).Uint64()
 
 	return &SessionMeterState{
-		SessionID:          meta.SessionID,
-		AppAddress:         meta.AppAddress,
-		ServiceID:          meta.ServiceID,
-		MaxStake:           cosmostypes.NewInt64Coin(pocket.DenomuPOKT, meta.MaxStakeUpokt),
-		ConsumedStake:      cosmostypes.NewInt64Coin(pocket.DenomuPOKT, consumed),
-		OverServicedRelays: overServiced,
-		SessionEndHeight:   meta.SessionEndHeight,
-		LastUpdated:        time.Unix(meta.CreatedAt, 0),
+		SessionID:        meta.SessionID,
+		AppAddress:       meta.AppAddress,
+		ServiceID:        meta.ServiceID,
+		MaxStake:         cosmostypes.NewInt64Coin(pocket.DenomuPOKT, meta.MaxStakeUpokt),
+		ConsumedStake:    cosmostypes.NewInt64Coin(pocket.DenomuPOKT, consumed),
+		SessionEndHeight: meta.SessionEndHeight,
+		LastUpdated:      time.Unix(meta.CreatedAt, 0),
 	}
 }
 
@@ -381,7 +355,6 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) er
 	keys := []string{
 		m.metaKey(sessionID),
 		m.consumedKey(sessionID),
-		m.overServicedKey(sessionID),
 	}
 
 	if err := m.redisClient.Del(ctx, keys...).Err(); err != nil {
@@ -437,7 +410,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	}
 
 	// Create new session meter
-	maxStakeUpokt, err := m.calculateMaxStake(ctx, appAddress)
+	maxStakeUpokt, err := m.calculateMaxStake(ctx, appAddress, serviceID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to calculate max stake: %w", err)
 	}
@@ -459,7 +432,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 
 	// Use SETNX to handle race conditions
 	metaKey := m.metaKey(sessionID)
-	set, err := m.redisClient.SetNX(ctx, metaKey, metaBytes, m.config.ParamsCacheTTL).Result()
+	set, err := m.redisClient.SetNX(ctx, metaKey, metaBytes, m.config.CacheTTL).Result()
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create session meter: %w", err)
 	}
@@ -471,7 +444,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 
 	// Initialize consumed counter
 	consumedKey := m.consumedKey(sessionID)
-	m.redisClient.Set(ctx, consumedKey, 0, m.config.ParamsCacheTTL)
+	m.redisClient.Set(ctx, consumedKey, 0, m.config.CacheTTL)
 
 	// Cache locally
 	m.localCacheMu.Lock()
@@ -502,16 +475,23 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID string) (*Ses
 }
 
 // calculateMaxStake calculates the maximum stake an app can consume per session/supplier.
-// Uses cached params from Redis when available.
-func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string) (int64, error) {
+// Uses cached params from Redis when available and applies serviceFactor if configured.
+//
+// ServiceFactor mechanism:
+//   - If serviceFactor is SET: effectiveLimit = appStake × serviceFactor
+//   - If serviceFactor is NOT SET: effectiveLimit = baseLimit = (appStake / numSuppliers) / proof_window_close_offset_blocks
+//
+// The baseLimit formula gives the MOST CONSERVATIVE calculation.
+// The protocol NEVER guarantees any payment amount - baseLimit is an estimate.
+func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string) (int64, error) {
 	// Get app stake (from Redis cache or chain)
 	appStakeUpokt, err := m.getAppStake(ctx, appAddress)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get app stake: %w", err)
 	}
 
-	// Get shared params (from Redis cache or chain)
-	sharedParams, err := m.getSharedParams(ctx)
+	// Get shared params to calculate baseLimit (for comparison/warnings)
+	sharedParams, err := m.sharedParamCache.GetLatestSharedParams(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get shared params: %w", err)
 	}
@@ -522,7 +502,7 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string) (
 		return 0, fmt.Errorf("failed to get session params: %w", err)
 	}
 
-	// Calculate: stake / numSuppliers / pendingSessions
+	// Calculate baseLimit = (appStake / numSuppliers) / proof_window_close_offset_blocks
 	numSuppliers := int64(sessionParams.NumSuppliersPerSession)
 	if numSuppliers == 0 {
 		numSuppliers = 1
@@ -530,23 +510,64 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string) (
 
 	appStakePerSupplier := appStakeUpokt / numSuppliers
 
-	// Account for pending sessions
-	numBlocksPerSession := int64(sharedParams.NumBlocksPerSession)
-	if numBlocksPerSession == 0 {
-		numBlocksPerSession = 1
+	// Use proof_window_close_offset_blocks from shared params
+	proofWindowCloseBlocks := int64(sharedParams.GetProofWindowCloseOffsetBlocks())
+	if proofWindowCloseBlocks == 0 {
+		m.logger.Warn().Msg("proof_window_close_offset_blocks is 0, using 1 to avoid division by zero")
+		proofWindowCloseBlocks = 1
 	}
 
-	numBlocksUntilProofWindowCloses := sharedParams.SessionEndToProofWindowCloseBlocks
-	numClosedSessionsAwaitingSettlement := int64(math.Ceil(
-		float64(numBlocksUntilProofWindowCloses) / float64(numBlocksPerSession),
-	))
+	baseLimit := appStakePerSupplier / proofWindowCloseBlocks
 
-	// Add 1 for current session
-	pendingSessions := numClosedSessionsAwaitingSettlement + 1
+	// Check if serviceFactor is configured
+	var effectiveLimit int64
+	var serviceFactor float64
+	hasServiceFactor := false
 
-	maxStakePerSession := appStakePerSupplier / pendingSessions
+	if m.serviceFactorProvider != nil {
+		serviceFactor, hasServiceFactor = m.serviceFactorProvider.GetServiceFactor(ctx, serviceID)
+	}
 
-	return maxStakePerSession, nil
+	if hasServiceFactor {
+		// ServiceFactor provided: apply directly to appStake
+		effectiveLimit = int64(float64(appStakeUpokt) * serviceFactor)
+
+		// Warning if effectiveLimit exceeds baseLimit (potential unpaid work)
+		if effectiveLimit > baseLimit {
+			m.logger.Warn().
+				Str("service_id", serviceID).
+				Str("app_address", appAddress).
+				Float64("service_factor", serviceFactor).
+				Int64("app_stake_upokt", appStakeUpokt).
+				Int64("base_limit_upokt", baseLimit).
+				Int64("effective_limit_upokt", effectiveLimit).
+				Int64("proof_window_close_blocks", proofWindowCloseBlocks).
+				Int64("num_suppliers", numSuppliers).
+				Int64("potentially_unpaid_upokt", effectiveLimit-baseLimit).
+				Msg("serviceFactor results in limit exceeding protocol guarantee - may result in unpaid work")
+		} else {
+			m.logger.Debug().
+				Str("service_id", serviceID).
+				Float64("service_factor", serviceFactor).
+				Int64("base_limit_upokt", baseLimit).
+				Int64("effective_limit_upokt", effectiveLimit).
+				Msg("serviceFactor is conservative (at or below protocol guarantee)")
+		}
+	} else {
+		// No serviceFactor: use baseLimit (most conservative)
+		effectiveLimit = baseLimit
+
+		m.logger.Debug().
+			Str("service_id", serviceID).
+			Str("app_address", appAddress).
+			Int64("app_stake_upokt", appStakeUpokt).
+			Int64("base_limit_upokt", baseLimit).
+			Int64("proof_window_close_blocks", proofWindowCloseBlocks).
+			Int64("num_suppliers", numSuppliers).
+			Msg("using baseLimit formula (no serviceFactor configured)")
+	}
+
+	return effectiveLimit, nil
 }
 
 // getRelayCost calculates the cost of a single relay in uPOKT.
@@ -611,7 +632,7 @@ func (m *RelayMeter) getAppStake(ctx context.Context, appAddress string) (int64,
 		UpdatedAt:  time.Now().Unix(),
 	}
 	if cacheBytes, err := json.Marshal(cached); err == nil {
-		m.redisClient.Set(ctx, cacheKey, cacheBytes, m.config.AppStakeCacheTTL)
+		m.redisClient.Set(ctx, cacheKey, cacheBytes, m.config.CacheTTL)
 	}
 
 	return stakeUpokt, nil
@@ -663,10 +684,20 @@ func (m *RelayMeter) getSessionParams(ctx context.Context) (*CachedSessionParams
 
 	// Cache in Redis with session-wide TTL
 	if cacheBytes, err := json.Marshal(cached); err == nil {
-		m.redisClient.Set(ctx, cacheKey, cacheBytes, m.config.ParamsCacheTTL)
+		m.redisClient.Set(ctx, cacheKey, cacheBytes, m.config.CacheTTL)
 	}
 
 	return cached, nil
+}
+
+// getApplicationParams gets application params using L1 cache from appClient.
+func (m *RelayMeter) getApplicationParams(ctx context.Context) (*apptypes.Params, error) {
+	// Use appClient which already has L1 caching (query/query.go:524-552)
+	params, err := m.appClient.GetParams(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get application params: %w", err)
+	}
+	return params, nil
 }
 
 // getServiceComputeUnits gets compute units per relay for a service using L1 -> L2 -> L3 cache.
@@ -709,7 +740,7 @@ func (m *RelayMeter) RefreshSharedParams(ctx context.Context) error {
 		return err
 	}
 
-	return m.redisClient.Set(ctx, m.sharedParamsKey(), cacheBytes, m.config.ParamsCacheTTL).Err()
+	return m.redisClient.Set(ctx, m.sharedParamsKey(), cacheBytes, m.config.CacheTTL).Err()
 }
 
 // RefreshSessionParams refreshes session params cache from chain.
@@ -730,7 +761,7 @@ func (m *RelayMeter) RefreshSessionParams(ctx context.Context) error {
 		return err
 	}
 
-	return m.redisClient.Set(ctx, m.sessionParamsKey(), cacheBytes, m.config.ParamsCacheTTL).Err()
+	return m.redisClient.Set(ctx, m.sessionParamsKey(), cacheBytes, m.config.CacheTTL).Err()
 }
 
 // RefreshAppStake refreshes app stake cache from chain.
@@ -751,7 +782,7 @@ func (m *RelayMeter) RefreshAppStake(ctx context.Context, appAddress string) err
 		return err
 	}
 
-	return m.redisClient.Set(ctx, m.appStakeKey(appAddress), cacheBytes, m.config.AppStakeCacheTTL).Err()
+	return m.redisClient.Set(ctx, m.appStakeKey(appAddress), cacheBytes, m.config.CacheTTL).Err()
 }
 
 // RefreshServiceComputeUnits refreshes service compute units cache.
@@ -767,24 +798,24 @@ func (m *RelayMeter) RefreshServiceComputeUnits(ctx context.Context, serviceID s
 		return err
 	}
 
-	return m.redisClient.Set(ctx, m.serviceComputeUnitsKey(serviceID), cacheBytes, m.config.ParamsCacheTTL).Err()
+	return m.redisClient.Set(ctx, m.serviceComputeUnitsKey(serviceID), cacheBytes, m.config.CacheTTL).Err()
 }
 
 // handleRedisError handles Redis errors based on fail behavior.
-func (m *RelayMeter) handleRedisError(operation string) (allowed bool, overServiced bool, err error) {
+func (m *RelayMeter) handleRedisError(operation string) (allowed bool, err error) {
 	relayMeterRedisErrors.WithLabelValues(operation).Inc()
 
 	if m.config.FailBehavior == FailOpen {
 		m.logger.Warn().
 			Str("operation", operation).
 			Msg("Redis error, fail-open: allowing relay")
-		return true, false, nil
+		return true, nil
 	}
 
 	m.logger.Warn().
 		Str("operation", operation).
 		Msg("Redis error, fail-closed: rejecting relay")
-	return false, false, fmt.Errorf("redis unavailable and fail-closed configured")
+	return false, fmt.Errorf("redis unavailable and fail-closed configured")
 }
 
 // cleanupSubscriber subscribes to cleanup signals from miners.
@@ -817,64 +848,6 @@ func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 	}
 }
 
-// localCacheCleanupWorker periodically cleans up the local L1 cache.
-func (m *RelayMeter) localCacheCleanupWorker(ctx context.Context) {
-	defer m.wg.Done()
-
-	ticker := time.NewTicker(m.config.SessionCleanupInterval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			m.cleanupLocalCache(ctx)
-		}
-	}
-}
-
-// cleanupLocalCache removes expired entries from local cache.
-func (m *RelayMeter) cleanupLocalCache(ctx context.Context) {
-	sharedParams, err := m.getSharedParams(ctx)
-	if err != nil {
-		return
-	}
-
-	block := m.blockClient.LastBlock(ctx)
-	currentHeight := block.Height()
-
-	// Find sessions to delete
-	m.localCacheMu.RLock()
-	var toDelete []string
-	for sessionID, meta := range m.localCache {
-		// Convert shared params to check claim window
-		params := &sharedtypes.Params{
-			NumBlocksPerSession: sharedParams.NumBlocksPerSession,
-		}
-		claimWindowOpen := sharedtypes.GetClaimWindowOpenHeight(params, meta.SessionEndHeight)
-		if currentHeight >= claimWindowOpen {
-			toDelete = append(toDelete, sessionID)
-		}
-	}
-	m.localCacheMu.RUnlock()
-
-	if len(toDelete) == 0 {
-		return
-	}
-
-	// Delete expired sessions from local cache
-	m.localCacheMu.Lock()
-	for _, sessionID := range toDelete {
-		delete(m.localCache, sessionID)
-	}
-	m.localCacheMu.Unlock()
-
-	m.logger.Debug().
-		Int("cleaned_up", len(toDelete)).
-		Msg("cleaned up local cache entries")
-}
-
 // Close gracefully shuts down the relay meter.
 func (m *RelayMeter) Close() error {
 	m.mu.Lock()
@@ -904,10 +877,6 @@ func (m *RelayMeter) consumedKey(sessionID string) string {
 	return fmt.Sprintf("%s:%s:%s:consumed", m.config.RedisKeyPrefix, meterKeySuffix, sessionID)
 }
 
-func (m *RelayMeter) overServicedKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:%s:over_serviced", m.config.RedisKeyPrefix, meterKeySuffix, sessionID)
-}
-
 func (m *RelayMeter) appStakeKey(appAddress string) string {
 	return fmt.Sprintf("%s:%s:%s", m.config.RedisKeyPrefix, appStakeKeySuffix, appAddress)
 }
@@ -924,18 +893,10 @@ func (m *RelayMeter) serviceComputeUnitsKey(serviceID string) string {
 	return fmt.Sprintf("%s:%s:%s:compute_units", m.config.RedisKeyPrefix, serviceKeySuffix, serviceID)
 }
 
-// shouldLogOverServicing returns true if the occurrence count is a power of 2.
-// This provides exponential backoff for logging.
-func shouldLogOverServicing(occurrence uint64) bool {
-	return (occurrence & (occurrence - 1)) == 0
-}
-
 // RelayMeterSnapshot captures the current state for monitoring/debugging.
 type RelayMeterSnapshot struct {
-	ActiveSessions       int
-	TotalOverServiced    uint64
-	OverServicingEnabled bool
-	FailBehavior         FailBehavior
+	ActiveSessions int
+	FailBehavior   FailBehavior
 }
 
 // GetSnapshot returns a snapshot of the relay meter state.
@@ -945,9 +906,8 @@ func (m *RelayMeter) GetSnapshot(ctx context.Context) RelayMeterSnapshot {
 	m.localCacheMu.RUnlock()
 
 	return RelayMeterSnapshot{
-		ActiveSessions:       activeLocal,
-		OverServicingEnabled: m.config.OverServicingEnabled,
-		FailBehavior:         m.config.FailBehavior,
+		ActiveSessions: activeLocal,
+		FailBehavior:   m.config.FailBehavior,
 	}
 }
 

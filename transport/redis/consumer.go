@@ -17,24 +17,21 @@ var _ transport.MinedRelayConsumer = (*StreamsConsumer)(nil)
 
 // StreamsConsumer implements MinedRelayConsumer using Redis Streams with consumer groups.
 // It provides exactly-once delivery semantics within the consumer group.
-// Supports multi-stream consumption via periodic SCAN for session-based streams.
+// TRUE PUSH architecture: BLOCK 0 means zero latency when data arrives.
+// - Each consumer holds 1 connection indefinitely waiting on XREADGROUP BLOCK 0
+// - Pool sizing: Allocate numSuppliers + 20 overhead for cache/pubsub
+// - Context cancellation cleanly interrupts blocked calls
+// - Claims = money - we cannot afford ANY latency consuming relays.
 type StreamsConsumer struct {
-	logger        logging.Logger
-	client        redis.UniversalClient
-	config        transport.ConsumerConfig
-	streamPattern string // Pattern for discovering streams (e.g., "ha:relays:pokt1abc:*")
-
-	// Active streams being consumed
-	activeStreams   []string
-	activeStreamsMu sync.RWMutex
-
-	// Stream discovery interval
-	discoveryInterval time.Duration
+	logger     logging.Logger
+	client     redis.UniversalClient
+	config     transport.ConsumerConfig
+	streamName string // Single stream per supplier: ha:relays:{supplierAddr}
 
 	// Message channel
 	msgCh chan transport.StreamMessage
 
-	// Claiming rate limit (prevent excessive claiming when streams are idle)
+	// Claiming rate limit (prevent excessive claiming when stream is idle)
 	lastClaimTime time.Time
 	claimMu       sync.Mutex
 
@@ -45,13 +42,14 @@ type StreamsConsumer struct {
 	wg       sync.WaitGroup
 }
 
-// NewStreamsConsumer creates a new Redis Streams consumer with multi-stream support.
-// It discovers session streams via periodic SCAN and consumes from all active sessions.
+// NewStreamsConsumer creates a new Redis Streams consumer.
+// TRUE PUSH architecture: BLOCK 0 for zero-latency message delivery.
+// The discoveryInterval parameter is ignored (kept for API compatibility).
 func NewStreamsConsumer(
 	logger logging.Logger,
 	client redis.UniversalClient,
 	config transport.ConsumerConfig,
-	discoveryInterval time.Duration,
+	discoveryInterval time.Duration, // Ignored - kept for API compatibility
 ) (*StreamsConsumer, error) {
 	if config.StreamPrefix == "" {
 		return nil, fmt.Errorf("stream prefix is required")
@@ -66,42 +64,32 @@ func NewStreamsConsumer(
 		return nil, fmt.Errorf("consumer name is required")
 	}
 
-	// Set defaults
+	// Set defaults - VERY AGGRESSIVE for minimal latency
+	// TRUE PUSH: BLOCK 0 returns instantly when data arrives, holds connection when empty
+	// Claims = money, we cannot afford to be slow consuming relays
 	if config.BatchSize <= 0 {
-		config.BatchSize = 100
+		config.BatchSize = 5000 // Large batch for throughput
 	}
-	if config.BlockTimeout <= 0 {
-		config.BlockTimeout = 5000 // 5 seconds
-	}
+	// ClaimIdleTimeout: How long before we claim messages from crashed consumers
 	if config.ClaimIdleTimeout <= 0 {
-		config.ClaimIdleTimeout = 30000 // 30 seconds
+		config.ClaimIdleTimeout = 30000 // 30 seconds for claiming idle messages
 	}
 	if config.MaxRetries <= 0 {
 		config.MaxRetries = 3
 	}
-	if discoveryInterval <= 0 {
-		discoveryInterval = 10 * time.Second // Default: 10 seconds
-	}
 
-	// Channel buffer size: BALANCED buffer to prevent deadlock while limiting growth
-	// OLD: BatchSize*2 (1000 msgs/supplier × 1000 suppliers = 1M msgs = 1GB)
-	// TESTED: Fixed 10 msgs → DEADLOCK (channel fills, blocks XREADGROUP, miner can't drain)
-	// NEW: 100 msgs/supplier (100 × 1000 suppliers = 100K msgs = ~200MB)
-	//
-	// Rationale: Balance backpressure vs throughput
-	// - 100 msgs = 2× BatchSize (50 default) allows smooth pipelining without blocking
-	// - Still prevents unbounded growth (10× reduction from 1GB)
-	// - Enough buffer for Redis pipelining flush latency (~2-5ms)
-	channelBufferSize := int64(100) // Balanced buffer per supplier
+	// Channel buffer: 5000 messages to match batch size for smooth pipelining
+	channelBufferSize := int64(5000)
+
+	// Single stream per supplier (simplified architecture)
+	streamName := transport.SupplierStreamName(config.StreamPrefix, config.SupplierOperatorAddress)
 
 	return &StreamsConsumer{
-		logger:            logging.ForSupplierComponent(logger, logging.ComponentRedisConsumer, config.SupplierOperatorAddress),
-		client:            client,
-		config:            config,
-		streamPattern:     transport.StreamPattern(config.StreamPrefix, config.SupplierOperatorAddress),
-		discoveryInterval: discoveryInterval,
-		activeStreams:     []string{},
-		msgCh:             make(chan transport.StreamMessage, channelBufferSize),
+		logger:     logging.ForSupplierComponent(logger, logging.ComponentRedisConsumer, config.SupplierOperatorAddress),
+		client:     client,
+		config:     config,
+		streamName: streamName,
+		msgCh:      make(chan transport.StreamMessage, channelBufferSize),
 	}, nil
 }
 
@@ -118,106 +106,31 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 	ctx, c.cancelFn = context.WithCancel(ctx)
 	c.mu.Unlock()
 
-	// Start stream discovery loop (this will also ensure consumer groups exist)
-	c.wg.Add(1)
-	go c.streamDiscoveryLoop(ctx)
+	// Ensure consumer group exists for the single stream
+	if err := c.ensureConsumerGroup(ctx); err != nil {
+		c.logger.Warn().Err(err).Str("stream", c.streamName).Msg("failed to ensure consumer group at startup")
+	}
 
-	// Start consumer goroutine (includes integrated claiming when idle)
+	// Start consumer goroutine (fast 100ms polling, no discovery needed)
 	c.wg.Add(1)
 	go c.consumeLoop(ctx)
+
+	c.logger.Info().
+		Str("stream", c.streamName).
+		Str("consumer_group", c.config.ConsumerGroup).
+		Msg("started consuming from supplier stream")
 
 	return c.msgCh
 }
 
-// streamDiscoveryLoop periodically scans for new session streams and updates the active streams list.
-func (c *StreamsConsumer) streamDiscoveryLoop(ctx context.Context) {
-	defer c.wg.Done()
-
-	ticker := time.NewTicker(c.discoveryInterval)
-	defer ticker.Stop()
-
-	// Do an initial discovery immediately
-	c.discoverStreams(ctx)
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			c.discoverStreams(ctx)
-		}
-	}
-}
-
-// discoverStreams scans Redis for session streams matching the pattern and updates the active streams list.
-func (c *StreamsConsumer) discoverStreams(ctx context.Context) {
-	start := time.Now()
-
-	// Use SCAN to find all matching stream keys
-	var cursor uint64
-	var discoveredStreams []string
-
-	for {
-		keys, nextCursor, err := c.client.Scan(ctx, cursor, c.streamPattern, 100).Result()
-		if err != nil {
-			streamDiscoveryErrors.WithLabelValues(c.config.SupplierOperatorAddress, "scan_failed").Inc()
-			c.logger.Warn().Err(err).Msg("failed to scan for session streams")
-			return
-		}
-
-		// Filter out non-stream keys and ensure consumer group exists
-		for _, key := range keys {
-			// Verify it's actually a stream by checking its type
-			keyType, typeErr := c.client.Type(ctx, key).Result()
-			if typeErr != nil || keyType != "stream" {
-				continue
-			}
-
-			// Ensure consumer group exists for this stream
-			if groupErr := c.ensureConsumerGroupForStream(ctx, key); groupErr != nil {
-				c.logger.Debug().
-					Err(groupErr).
-					Str("stream", key).
-					Msg("failed to ensure consumer group for stream")
-				continue
-			}
-
-			discoveredStreams = append(discoveredStreams, key)
-		}
-
-		cursor = nextCursor
-		if cursor == 0 {
-			break
-		}
-	}
-
-	// Update active streams list
-	c.activeStreamsMu.Lock()
-	oldCount := len(c.activeStreams)
-	c.activeStreams = discoveredStreams
-	newCount := len(c.activeStreams)
-	c.activeStreamsMu.Unlock()
-
-	// Update metrics
-	activeSessionStreams.WithLabelValues(c.config.SupplierOperatorAddress).Set(float64(newCount))
-	streamDiscoveryScanDuration.WithLabelValues(c.config.SupplierOperatorAddress).Observe(time.Since(start).Seconds())
-
-	if newCount != oldCount {
-		c.logger.Debug().
-			Int("old_count", oldCount).
-			Int("new_count", newCount).
-			Msg("stream discovery updated active streams")
-	}
-}
-
-// ensureConsumerGroupForStream creates the consumer group for a specific stream if it doesn't exist.
-func (c *StreamsConsumer) ensureConsumerGroupForStream(ctx context.Context, streamName string) error {
-	// Try to create the consumer group
-	err := c.client.XGroupCreateMkStream(ctx, streamName, c.config.ConsumerGroup, "0").Err()
+// ensureConsumerGroup creates the consumer group for the single supplier stream if it doesn't exist.
+func (c *StreamsConsumer) ensureConsumerGroup(ctx context.Context) error {
+	// Try to create the consumer group (XGroupCreateMkStream creates stream if needed)
+	err := c.client.XGroupCreateMkStream(ctx, c.streamName, c.config.ConsumerGroup, "0").Err()
 	if err != nil {
 		// Ignore "BUSYGROUP" error - group already exists
 		if !strings.Contains(err.Error(), "BUSYGROUP") {
-			return fmt.Errorf("failed to create consumer group for %s: %w", streamName, err)
+			return fmt.Errorf("failed to create consumer group for %s: %w", c.streamName, err)
 		}
 	}
 	return nil
@@ -250,50 +163,36 @@ func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
 
 // consumeMessagesUntilError runs the message consumption loop until an error occurs.
 // Returns error to trigger reconnection via the reconnection loop.
-// Consumes from multiple session streams simultaneously.
+// TRUE PUSH SEMANTICS: Uses BLOCK 0 (infinite wait).
+// - Returns INSTANTLY when data arrives (zero latency)
+// - Blocks indefinitely when stream is empty (zero CPU waste)
+// - Context cancellation interrupts the blocked call (clean shutdown)
+// This is the most efficient approach - no polling, pure push.
 func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		// Get current active streams list
-		c.activeStreamsMu.RLock()
-		streamsCopy := make([]string, len(c.activeStreams))
-		copy(streamsCopy, c.activeStreams)
-		c.activeStreamsMu.RUnlock()
-
-		// Skip if no streams discovered yet
-		if len(streamsCopy) == 0 {
-			time.Sleep(100 * time.Millisecond) // Small delay before retry
-			continue
-		}
-
-		// Build XREADGROUP arguments with all active streams
-		// XREADGROUP requires stream names followed by IDs in alternating order
-		streamArgs := make([]string, 0, len(streamsCopy)*2)
-		streamArgs = append(streamArgs, streamsCopy...)
-		// Append ">" for each stream (read only new messages)
-		for range streamsCopy {
-			streamArgs = append(streamArgs, ">")
-		}
-
-		// Read new messages from all streams
+		// TRUE PUSH: BLOCK 0 = infinite wait until data arrives (live consumption)
+		// go-redis respects context cancellation, so this is safe:
+		// - When data arrives: returns immediately with messages
+		// - When context cancelled: returns with context.Canceled error
+		// - No polling, no wasted CPU cycles
+		// Note: Each blocked call holds 1 connection from the pool
 		streams, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    c.config.ConsumerGroup,
 			Consumer: c.config.ConsumerName,
-			Streams:  streamArgs,
+			Streams:  []string{c.streamName, ">"},
 			Count:    c.config.BatchSize,
-			Block:    time.Duration(c.config.BlockTimeout) * time.Millisecond,
+			Block:    0, // TRUE PUSH: infinite wait, context cancellation interrupts
 		}).Result()
 
 		if err != nil {
+			// With BLOCK 0, context cancellation is the normal shutdown path
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+
 			if err == redis.Nil {
-				// No new messages in normal consumption - consider claiming
-				// Rate limit: only claim if ClaimIdleTimeout has passed since last claim
-				// This prevents excessive claiming when streams are frequently idle
+				// With BLOCK 0, this shouldn't happen often (only on timeout which we don't have)
+				// But handle it gracefully - consider claiming idle messages
 				c.claimMu.Lock()
 				timeSinceLastClaim := time.Since(c.lastClaimTime)
 				shouldClaim := timeSinceLastClaim >= time.Duration(c.config.ClaimIdleTimeout)*time.Millisecond
@@ -307,142 +206,123 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 				}
 				continue
 			}
-			if ctx.Err() != nil {
-				// Context cancelled - return to stop gracefully
-				return ctx.Err()
-			}
 
-			// Handle race conditions with stream expiration
-			// NOGROUP or stream not found errors are expected when streams expire
-			if strings.Contains(err.Error(), "NOGROUP") ||
-				strings.Contains(err.Error(), "no such key") {
-				streamDiscoveryErrors.WithLabelValues(c.config.SupplierOperatorAddress, "stream_expired").Inc()
-				c.logger.Debug().Err(err).Msg("stream expired or consumer group missing, will rediscover")
-				// Trigger immediate rediscovery
-				go c.discoverStreams(ctx)
+			// Handle NOGROUP error - recreate consumer group
+			if strings.Contains(err.Error(), "NOGROUP") {
+				c.logger.Warn().Err(err).Msg("consumer group missing, recreating")
+				if groupErr := c.ensureConsumerGroup(ctx); groupErr != nil {
+					c.logger.Error().Err(groupErr).Msg("failed to recreate consumer group")
+				}
 				continue
 			}
 
 			consumeErrorsTotal.WithLabelValues(c.config.SupplierOperatorAddress, "read_error").Inc()
-			c.logger.Error().Err(err).Msg("error reading from streams")
-			// Return error to trigger reconnection (replaces time.Sleep backoff)
+			c.logger.Error().Err(err).Msg("error reading from stream")
 			return err
 		}
 
-		// Process messages from all streams
-		for _, stream := range streams {
-			for _, message := range stream.Messages {
-				msg, parseErr := c.parseMessage(message, stream.Stream)
-				if parseErr != nil {
-					deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
-					c.logger.Error().
-						Err(parseErr).
-						Str(logging.FieldMessageID, message.ID).
-						Str("stream", stream.Stream).
-						Msg("failed to parse message")
-					// Acknowledge bad message to avoid redelivery
-					_ = c.client.XAck(ctx, stream.Stream, c.config.ConsumerGroup, message.ID)
-					continue
-				}
+		// Process messages (single stream, so streams[0])
+		if len(streams) == 0 {
+			continue
+		}
 
-				// Record end-to-end latency
-				if msg.Message.PublishedAtUnixNano > 0 {
-					latency := time.Since(msg.Message.PublishedAt()).Seconds()
-					endToEndLatency.WithLabelValues(
-						c.config.SupplierOperatorAddress,
-						msg.Message.ServiceId,
-					).Observe(latency)
-				}
+		for _, message := range streams[0].Messages {
+			msg, parseErr := c.parseMessage(message, c.streamName)
+			if parseErr != nil {
+				deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
+				c.logger.Error().
+					Err(parseErr).
+					Str(logging.FieldMessageID, message.ID).
+					Msg("failed to parse message")
+				// Acknowledge bad message to avoid redelivery
+				_ = c.client.XAck(ctx, c.streamName, c.config.ConsumerGroup, message.ID)
+				continue
+			}
 
-				consumedTotal.WithLabelValues(
+			// Log consume details for tracing
+			c.logger.Debug().
+				Str("stream_name", c.streamName).
+				Str("session_id", msg.Message.SessionId).
+				Str("supplier", msg.Message.SupplierOperatorAddress).
+				Str("service", msg.Message.ServiceId).
+				Str("message_id", message.ID).
+				Msg("consumed relay from supplier stream")
+
+			// Record end-to-end latency
+			if msg.Message.PublishedAtUnixNano > 0 {
+				latency := time.Since(msg.Message.PublishedAt()).Seconds()
+				endToEndLatency.WithLabelValues(
 					c.config.SupplierOperatorAddress,
 					msg.Message.ServiceId,
-				).Inc()
+				).Observe(latency)
+			}
 
-				// Send to channel (blocks if channel is full)
-				select {
-				case c.msgCh <- *msg:
-				case <-ctx.Done():
-					return ctx.Err()
-				}
+			consumedTotal.WithLabelValues(
+				c.config.SupplierOperatorAddress,
+				msg.Message.ServiceId,
+			).Inc()
+
+			// Send to channel (blocks if channel is full)
+			select {
+			case c.msgCh <- *msg:
+			case <-ctx.Done():
+				return ctx.Err()
 			}
 		}
 	}
 }
 
-// claimPendingMessages claims messages that have been pending too long across all active streams.
+// claimPendingMessages claims messages that have been pending too long.
 // This is only called when normal XREADGROUP consumption returns no new messages (idle state).
 // It recovers messages from consumers that crashed without acknowledging.
 func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
-	// Get all active streams
-	c.activeStreamsMu.RLock()
-	streamsCopy := make([]string, len(c.activeStreams))
-	copy(streamsCopy, c.activeStreams)
-	c.activeStreamsMu.RUnlock()
+	// Claim idle messages from the single supplier stream
+	messages, _, err := c.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+		Stream:   c.streamName,
+		Group:    c.config.ConsumerGroup,
+		Consumer: c.config.ConsumerName,
+		MinIdle:  time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond,
+		Start:    "0-0",
+		Count:    50, // Reasonable batch size for claiming
+	}).Result()
 
-	// Claim batch size: use smaller batch for claiming vs normal consumption
-	// Normal consumption: config.BatchSize (500) - handles steady flow
-	// Claiming: 50 msgs/stream - prevents memory spikes when claiming across many streams
-	// With 1000 streams × 500 msgs = 500K msgs in memory (500MB+)
-	// With 1000 streams × 50 msgs = 50K msgs in memory (~50MB)
-	claimBatchSize := int64(50)
-	if c.config.BatchSize < 100 {
-		// For small batch sizes, use half for claiming
-		claimBatchSize = c.config.BatchSize / 2
+	if err != nil {
+		// Stream may not exist yet - skip
+		if strings.Contains(err.Error(), "no such key") ||
+			strings.Contains(err.Error(), "NOGROUP") {
+			return
+		}
+		if ctx.Err() == nil {
+			c.logger.Debug().Err(err).Msg("error claiming idle messages")
+		}
+		return
 	}
 
-	// Claim idle messages from each stream
-	for _, streamName := range streamsCopy {
-		messages, _, err := c.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
-			Stream:   streamName,
-			Group:    c.config.ConsumerGroup,
-			Consumer: c.config.ConsumerName,
-			MinIdle:  time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond,
-			Start:    "0-0",
-			Count:    claimBatchSize,
-		}).Result()
+	if len(messages) == 0 {
+		return
+	}
 
-		if err != nil {
-			// Stream may have expired - skip
-			if strings.Contains(err.Error(), "no such key") ||
-				strings.Contains(err.Error(), "NOGROUP") {
-				continue
-			}
-			if ctx.Err() == nil {
-				c.logger.Debug().
-					Err(err).
-					Str("stream", streamName).
-					Msg("error claiming idle messages")
-			}
+	claimedMessages.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(messages)))
+
+	c.logger.Debug().
+		Int("count", len(messages)).
+		Str("stream", c.streamName).
+		Msg("claimed idle messages")
+
+	// Process claimed messages
+	for _, message := range messages {
+		msg, parseErr := c.parseMessage(message, c.streamName)
+		if parseErr != nil {
+			deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
+			// Acknowledge bad message
+			_ = c.client.XAck(ctx, c.streamName, c.config.ConsumerGroup, message.ID)
 			continue
 		}
 
-		if len(messages) == 0 {
-			continue
-		}
-
-		claimedMessages.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(messages)))
-
-		c.logger.Debug().
-			Int("count", len(messages)).
-			Str("stream", streamName).
-			Msg("claimed idle messages")
-
-		// Process claimed messages
-		for _, message := range messages {
-			msg, parseErr := c.parseMessage(message, streamName)
-			if parseErr != nil {
-				deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
-				// Acknowledge bad message
-				_ = c.client.XAck(ctx, streamName, c.config.ConsumerGroup, message.ID)
-				continue
-			}
-
-			select {
-			case c.msgCh <- *msg:
-			case <-ctx.Done():
-				return
-			}
+		select {
+		case c.msgCh <- *msg:
+		case <-ctx.Done():
+			return
 		}
 	}
 }
@@ -571,7 +451,7 @@ func (c *StreamsConsumer) AckMessageBatch(ctx context.Context, msgs []transport.
 	return nil
 }
 
-// Pending returns the number of messages that have been delivered but not yet acknowledged across all streams.
+// Pending returns the number of messages that have been delivered but not yet acknowledged.
 func (c *StreamsConsumer) Pending(ctx context.Context) (int64, error) {
 	c.mu.RLock()
 	if c.closed {
@@ -580,52 +460,39 @@ func (c *StreamsConsumer) Pending(ctx context.Context) (int64, error) {
 	}
 	c.mu.RUnlock()
 
-	// Get all active streams
-	c.activeStreamsMu.RLock()
-	streamsCopy := make([]string, len(c.activeStreams))
-	copy(streamsCopy, c.activeStreams)
-	c.activeStreamsMu.RUnlock()
-
-	// Sum pending across all streams
-	var totalPending int64
-	for _, streamName := range streamsCopy {
-		info, err := c.client.XPending(ctx, streamName, c.config.ConsumerGroup).Result()
-		if err != nil {
-			// Stream may have expired - skip
-			continue
-		}
-		totalPending += info.Count
-	}
-
-	pendingMessages.WithLabelValues(c.config.SupplierOperatorAddress).Set(float64(totalPending))
-	return totalPending, nil
-}
-
-// GetPendingRelayCount returns the number of pending relays for a specific session stream.
-// This implements the PendingRelayChecker interface for late relay detection.
-func (c *StreamsConsumer) GetPendingRelayCount(ctx context.Context, sessionID string) (int64, error) {
-	c.mu.RLock()
-	if c.closed {
-		c.mu.RUnlock()
-		return 0, fmt.Errorf("consumer is closed")
-	}
-	c.mu.RUnlock()
-
-	// Build stream name for this session
-	streamName := transport.StreamName(c.config.StreamPrefix, c.config.SupplierOperatorAddress, sessionID)
-
-	// Check pending messages for this specific stream
-	info, err := c.client.XPending(ctx, streamName, c.config.ConsumerGroup).Result()
+	// Check pending on the single supplier stream
+	info, err := c.client.XPending(ctx, c.streamName, c.config.ConsumerGroup).Result()
 	if err != nil {
-		// Stream may not exist or may have expired
+		// Stream may not exist yet
 		if strings.Contains(err.Error(), "no such key") ||
 			strings.Contains(err.Error(), "NOGROUP") {
-			return 0, nil // Stream doesn't exist - no pending messages
+			return 0, nil
 		}
-		return 0, fmt.Errorf("failed to get pending info for session %s: %w", sessionID, err)
+		return 0, fmt.Errorf("failed to get pending info: %w", err)
 	}
 
+	pendingMessages.WithLabelValues(c.config.SupplierOperatorAddress).Set(float64(info.Count))
 	return info.Count, nil
+}
+
+// GetPendingRelayCount returns the total pending count for the supplier stream.
+// With single stream per supplier, we can't get per-session pending counts.
+// This returns the total pending for the supplier.
+func (c *StreamsConsumer) GetPendingRelayCount(ctx context.Context, sessionID string) (int64, error) {
+	// With single stream architecture, all sessions share one stream.
+	// Return total pending for the supplier (sessionID is ignored).
+	return c.Pending(ctx)
+}
+
+// DeleteStream is a no-op with single stream architecture.
+// Messages are naturally consumed and ACK'd. The single stream per supplier persists.
+func (c *StreamsConsumer) DeleteStream(ctx context.Context, sessionID string) error {
+	// No-op: single stream per supplier persists across all sessions.
+	// Messages are consumed and removed via ACK.
+	c.logger.Debug().
+		Str("session_id", sessionID).
+		Msg("DeleteStream is no-op with single stream architecture")
+	return nil
 }
 
 // Close gracefully shuts down the consumer.

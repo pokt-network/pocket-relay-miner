@@ -2,12 +2,12 @@ package cache
 
 import (
 	"context"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	pond "github.com/alitto/pond/v2"
-	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -15,9 +15,6 @@ import (
 )
 
 const (
-	// Redis key for persisted application addresses
-	discoveredAppsKey = "ha:discovered_apps"
-
 	// Default warmup concurrency
 	defaultWarmupConcurrency = 10
 
@@ -49,7 +46,7 @@ type CacheWarmer struct {
 	config CacheWarmerConfig
 
 	// Redis client for persistence
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 
 	// Query clients for warming
 	appClient     client.ApplicationQueryClient
@@ -76,7 +73,7 @@ type CacheWarmer struct {
 func NewCacheWarmer(
 	logger logging.Logger,
 	config CacheWarmerConfig,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	appClient client.ApplicationQueryClient,
 	accountClient client.AccountQueryClient,
 	sharedClient client.SharedQueryClient,
@@ -168,7 +165,7 @@ func (w *CacheWarmer) collectAppsToWarm(ctx context.Context) []string {
 
 	// Load persisted apps from Redis (if enabled and available)
 	if w.config.PersistDiscoveredApps && w.redisClient != nil {
-		persistedApps, err := w.redisClient.SMembers(ctx, discoveredAppsKey).Result()
+		persistedApps, err := w.redisClient.SMembers(ctx, w.redisClient.KB().DiscoveredAppsKey()).Result()
 		if err != nil {
 			w.logger.Warn().Err(err).Msg("failed to load persisted apps from Redis")
 		} else {
@@ -299,7 +296,7 @@ func (w *CacheWarmer) RecordDiscoveredApp(ctx context.Context, appAddr string) {
 			persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			err := w.redisClient.SAdd(persistCtx, discoveredAppsKey, appAddr).Err()
+			err := w.redisClient.SAdd(persistCtx, w.redisClient.KB().DiscoveredAppsKey(), appAddr).Err()
 			if err != nil {
 				w.logger.Warn().
 					Err(err).
@@ -332,7 +329,7 @@ func (w *CacheWarmer) RemoveDiscoveredApp(ctx context.Context, appAddr string) {
 			persistCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
 
-			err := w.redisClient.SRem(persistCtx, discoveredAppsKey, appAddr).Err()
+			err := w.redisClient.SRem(persistCtx, w.redisClient.KB().DiscoveredAppsKey(), appAddr).Err()
 			if err != nil {
 				w.logger.Warn().
 					Err(err).

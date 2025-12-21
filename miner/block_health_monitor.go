@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -90,24 +91,17 @@ func (m *BlockHealthMonitor) Start(ctx context.Context) error {
 func (m *BlockHealthMonitor) monitorLoop(ctx context.Context) {
 	defer m.wg.Done()
 
-	// Try to use the new Subscribe() method for independent channel
-	// Falls back to BlockEvents() for backward compatibility
-	var blockEventsCh <-chan client.Block
-
-	if subscriber, ok := m.blockClient.(interface {
-		Subscribe(ctx context.Context, bufferSize int) <-chan client.Block
-	}); ok {
-		blockEventsCh = subscriber.Subscribe(ctx, 50) // 50-block buffer for health monitoring
-		m.logger.Info().Msg("using Subscribe() for block events (fan-out mode)")
-	} else if legacySubscriber, ok := m.blockClient.(interface {
-		BlockEvents() <-chan client.Block
-	}); ok {
-		blockEventsCh = legacySubscriber.BlockEvents()
-		m.logger.Info().Msg("using BlockEvents() for block events (legacy mode)")
-	} else {
-		m.logger.Error().Msg("block client does not support Subscribe() or BlockEvents() - block health monitoring disabled")
+	// Use Subscribe() method which returns concrete *SimpleBlock type
+	subscriber, ok := m.blockClient.(interface {
+		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
+	})
+	if !ok {
+		m.logger.Error().Msg("block client does not support Subscribe() - block health monitoring disabled")
 		return
 	}
+
+	blockEventsCh := subscriber.Subscribe(ctx, 2000) // Large buffer to avoid dropping blocks
+	m.logger.Info().Msg("using Subscribe() for block events (fan-out mode)")
 
 	for {
 		select {

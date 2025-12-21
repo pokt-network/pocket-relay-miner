@@ -10,6 +10,10 @@ const (
 	FieldComponent = "component"
 	FieldService   = "service"
 
+	// Miner identification (top-level context)
+	FieldMinerID = "miner_id"
+	FieldReplica = "replica" // "leader" or "standby"
+
 	// Supplier/operator identification
 	FieldSupplier         = "supplier"
 	FieldSupplierOperator = "supplier_operator"
@@ -84,35 +88,39 @@ const (
 // Component name constants for the "component" field.
 // These identify the source of log messages.
 const (
-	ComponentProxyServer        = "proxy_server"
-	ComponentWebsocketBridge    = "websocket_bridge"
-	ComponentGRPCBridge         = "grpc_bridge"
-	ComponentHTTPStream         = "http_stream"
-	ComponentRelayProcessor     = "relay_processor"
-	ComponentRelayValidator     = "relay_validator"
-	ComponentRelayMeter         = "relay_meter"
-	ComponentHealthChecker      = "health_checker"
-	ComponentService            = "ha_relayer"
-	ComponentDifficultyProvider = "difficulty_provider"
+	ComponentProxyServer         = "proxy_server"
+	ComponentWebsocketBridge     = "websocket_bridge"
+	ComponentGRPCBridge          = "grpc_bridge"
+	ComponentHTTPStream          = "http_stream"
+	ComponentRelayProcessor      = "relay_processor"
+	ComponentRelayValidator      = "relay_validator"
+	ComponentRelayMeter          = "relay_meter"
+	ComponentServiceFactorClient = "service_factor_client"
+	ComponentHealthChecker       = "health_checker"
+	ComponentService             = "ha_relayer"
+	ComponentDifficultyProvider  = "difficulty_provider"
 
-	ComponentSessionLifecycle  = "session_lifecycle"
-	ComponentSessionStore      = "session_store"
-	ComponentClaimPipeline     = "claim_pipeline"
-	ComponentClaimBatcher      = "claim_batcher"
-	ComponentProofPipeline     = "proof_pipeline"
-	ComponentProofBatcher      = "proof_batcher"
-	ComponentProofChecker      = "proof_requirement_checker"
-	ComponentLeaderElector     = "leader_elector"
-	ComponentSupplierManager   = "supplier_manager"
-	ComponentSupplierRegistry  = "supplier_registry"
-	ComponentSubmissionTiming  = "submission_timing"
-	ComponentSubmissionSched   = "submission_scheduler"
-	ComponentSMSTRecovery      = "smst_recovery"
-	ComponentSMSTSnapshot      = "smst_snapshot_manager"
-	ComponentCacheOrchestrator = "cache_orchestrator"
-	ComponentWAL               = "wal"
-	ComponentDeduplicator      = "deduplicator"
-	ComponentSupplierDrain     = "supplier_drain"
+	ComponentSessionLifecycle      = "session_lifecycle"
+	ComponentSessionStore          = "session_store"
+	ComponentClaimPipeline         = "claim_pipeline"
+	ComponentClaimBatcher          = "claim_batcher"
+	ComponentProofPipeline         = "proof_pipeline"
+	ComponentProofBatcher          = "proof_batcher"
+	ComponentProofChecker          = "proof_requirement_checker"
+	ComponentLeaderElector         = "leader_elector"
+	ComponentLeaderController      = "leader_controller"
+	ComponentSupplierManager       = "supplier_manager"
+	ComponentSupplierRegistry      = "supplier_registry"
+	ComponentServiceFactorRegistry = "service_factor_registry"
+	ComponentSubmissionTiming      = "submission_timing"
+	ComponentSubmissionSched       = "submission_scheduler"
+	ComponentSMSTRecovery          = "smst_recovery"
+	ComponentSMSTSnapshot          = "smst_snapshot_manager"
+	ComponentCacheOrchestrator     = "cache_orchestrator"
+	ComponentWAL                   = "wal"
+	ComponentDeduplicator          = "deduplicator"
+	ComponentSupplierDrain         = "supplier_drain"
+	ComponentSupplierClaimer       = "supplier_claimer"
 
 	ComponentTxClient = "tx_client"
 
@@ -146,6 +154,12 @@ const (
 
 	ComponentObservability  = "observability_server"
 	ComponentRuntimeMetrics = "runtime_metrics_collector"
+
+	// Internal adapters and helpers
+	ComponentRelayPipeline           = "relay_pipeline"
+	ComponentRedisBlockClientAdapter = "redis_block_client_adapter"
+	ComponentBlockSubscriberAdapter  = "block_subscriber_adapter"
+	ComponentGracefulRemover         = "graceful_remover"
 )
 
 // Cache level constants for the "cache_level" field.
@@ -182,4 +196,10 @@ const (
 
 	// FieldSessionStartHeight is the session start block height
 	FieldSessionStartHeight = "session_start_height"
+)
+
+// Replica role constants for the "replica" field.
+const (
+	ReplicaLeader  = "leader"
+	ReplicaStandby = "standby"
 )

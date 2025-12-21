@@ -1,0 +1,40 @@
+# Prometheus Configuration for Docker Compose
+# Scrapes metrics from all pocket-relay-miner services
+
+global:
+  scrape_interval: 10s
+  evaluation_interval: 10s
+
+scrape_configs:
+  # Relayer metrics
+  - job_name: 'relayer'
+    static_configs:
+      - targets: ['relayer:9090']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'relayer-1'
+
+  # Miner metrics
+  - job_name: 'miner'
+    static_configs:
+      - targets: ['miner:9092']
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+        replacement: 'miner-1'
+
+  # Backend metrics
+  - job_name: 'backend'
+    static_configs:
+      - targets: ['backend:9095']
+
+  # PATH gateway metrics
+  - job_name: 'path'
+    static_configs:
+      - targets: ['path:9096']
+
+  # Redis metrics (requires redis_exporter sidecar if you want detailed Redis metrics)
+  # - job_name: 'redis'
+  #   static_configs:
+  #     - targets: ['redis-exporter:9121']

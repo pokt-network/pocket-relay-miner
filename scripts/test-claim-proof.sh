@@ -3,6 +3,14 @@
 # Test script to monitor session lifecycle and verify claim+proof submission
 # Tracks session from active → claimed → settled
 #
+# Genesis has 4 services, each with a corresponding app:
+#   - develop-http      -> app1 (JSON-RPC/HTTP)
+#   - develop-websocket -> app2 (WebSocket)
+#   - develop-stream    -> app3 (Streaming/SSE)
+#   - develop-grpc      -> app4 (gRPC)
+#
+# When using --localnet, the correct app key is auto-selected based on service.
+#
 
 set -euo pipefail
 
@@ -12,7 +20,8 @@ source "$SCRIPT_DIR/lib/metrics-helpers.sh"
 
 # Default parameters
 SUPPLIER="pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj" # localnet supplier 1
-SERVICE="develop"
+# develop-http is the default for JSON-RPC testing (most common)
+SERVICE="develop-http"
 RELAY_COUNT=100
 WAIT_TIMEOUT=600
 POLL_INTERVAL=5
@@ -41,7 +50,8 @@ while [[ $# -gt 0 ]]; do
         echo
         echo "Options:"
         echo "  --supplier <address>   Supplier operator address (default: localnet supplier 1)"
-        echo "  --service <id>         Service ID (default: develop)"
+        echo "  --service <id>         Service ID (default: develop-http)"
+        echo "                         Localnet services: develop-http, develop-websocket, develop-stream, develop-grpc"
         echo "  --relay-count <num>    Number of relays to send (default: 100)"
         echo "  --wait-timeout <sec>   Max time to wait for settlement (default: 600)"
         echo "  --help                 Show this help message"
@@ -49,7 +59,7 @@ while [[ $# -gt 0 ]]; do
         echo "Examples:"
         echo "  $0                                    # Use defaults"
         echo "  $0 --relay-count 200                  # Send 200 relays"
-        echo "  $0 --service eth-mainnet              # Test eth-mainnet service"
+        echo "  $0 --service develop-websocket        # Test websocket service"
         exit 0
         ;;
     *)

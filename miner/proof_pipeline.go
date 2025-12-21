@@ -138,7 +138,7 @@ func NewProofPipeline(
 		proofClient:   proofClient,
 		blockClient:   blockClient,
 		smstProver:    smstProver,
-		proofQueue:    make(chan *ProofRequest, 1000),
+		proofQueue:    make(chan *ProofRequest, 2000),
 		pendingProofs: make([]*ProofRequest, 0, config.MaxProofsPerBatch),
 	}
 }

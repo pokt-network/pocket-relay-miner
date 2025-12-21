@@ -8,6 +8,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
@@ -17,20 +18,16 @@ type Config struct {
 	Redis RedisConfig `yaml:"redis"`
 
 	// PocketNode is the configuration for connecting to the Pocket blockchain.
-	PocketNode PocketNodeConfig `yaml:"pocket_node"`
+	PocketNode config.PocketNodeConfig `yaml:"pocket_node"`
 
 	// Keys configuration for loading supplier signing keys.
-	Keys KeysConfig `yaml:"keys"`
-
-	// Suppliers is a list of supplier configurations this miner manages.
-	// Each supplier has its own session trees, claims, and proofs.
-	Suppliers []SupplierConfig `yaml:"suppliers"`
+	Keys config.KeysConfig `yaml:"keys"`
 
 	// Metrics configuration.
-	Metrics MetricsConfig `yaml:"metrics"`
+	Metrics config.MetricsConfig `yaml:"metrics"`
 
 	// PProf configuration.
-	PProf PProf `yaml:"pprof"`
+	PProf config.PprofConfig `yaml:"pprof"`
 
 	// Logging configuration.
 	Logging logging.Config `yaml:"logging"`
@@ -80,11 +77,27 @@ type Config struct {
 
 	// BlockHealthMonitor configures block time health monitoring.
 	BlockHealthMonitor BlockHealthConfig `yaml:"block_health_monitor,omitempty"`
+
+	// DefaultServiceFactor is the global serviceFactor applied to all services.
+	// If set, effectiveLimit = appStake × DefaultServiceFactor
+	// If not set (0), use baseLimit formula: (appStake / numSuppliers) / proof_window_close_offset_blocks
+	// Default: 0 (use baseLimit formula)
+	DefaultServiceFactor float64 `yaml:"default_service_factor,omitempty"`
+
+	// ServiceFactors is a map of per-service serviceFactor overrides.
+	// Key: serviceID, Value: serviceFactor
+	// Example: {"eth-mainnet": 0.007, "polygon": 0.003}
+	// If a service has an override, it takes precedence over DefaultServiceFactor.
+	ServiceFactors map[string]float64 `yaml:"service_factors,omitempty"`
+
+	// Note: Supplier claiming is always enabled with hardcoded timing values.
+	// See miner/supplier_claimer.go for the constants (ClaimTTL, RenewRate, etc.)
+	// These values are NOT user-configurable to ensure production reliability.
 }
 
 // SessionLifecycleConfigYAML contains configuration for session lifecycle management.
 type SessionLifecycleConfigYAML struct {
-	// WindowStartBufferBlocks is blocks after window open to wait before earliest submission.
+	// WindowStartBufferBlocks is blocks after a window open to wait before the earliest submission.
 	// This spreads out supplier submissions more evenly across the window.
 	// Default: 10
 	WindowStartBufferBlocks int64 `yaml:"window_start_buffer_blocks,omitempty"`
@@ -94,7 +107,7 @@ type SessionLifecycleConfigYAML struct {
 	// Default: 2
 	ClaimSubmissionBuffer int64 `yaml:"claim_submission_buffer,omitempty"`
 
-	// ProofSubmissionBuffer is blocks before proof window close to start proving.
+	// ProofSubmissionBuffer is blocks before a proof window close to start proving.
 	// Default: 2
 	ProofSubmissionBuffer int64 `yaml:"proof_submission_buffer,omitempty"`
 
@@ -115,7 +128,7 @@ type LeaderElectionConfig struct {
 	// Default: 30 seconds
 	LeaderTTLSeconds int `yaml:"leader_ttl_seconds,omitempty"`
 
-	// HeartbeatRateSeconds is how often to attempt acquire/renew leadership (in seconds).
+	// HeartbeatRateSeconds is how frequent to attempt to acquire/renew leadership (in seconds).
 	// Should be less than LeaderTTLSeconds to ensure renewal before expiration.
 	// Default: 10 seconds
 	HeartbeatRateSeconds int `yaml:"heartbeat_rate_seconds,omitempty"`
@@ -127,7 +140,7 @@ type BalanceMonitorConfigYAML struct {
 	// Default: true
 	Enabled bool `yaml:"enabled,omitempty"`
 
-	// CheckIntervalSeconds is how often to check balances and stakes (in seconds).
+	// CheckIntervalSeconds is how frequent to check balances and stakes (in seconds).
 	// Default: 300 (5 minutes)
 	CheckIntervalSeconds int64 `yaml:"check_interval_seconds,omitempty"`
 
@@ -139,12 +152,12 @@ type BalanceMonitorConfigYAML struct {
 	// StakeWarningProofThreshold is the number of missed proofs remaining before triggering a warning.
 	// Warning triggers when: (stake - min_stake) / proof_missing_penalty < threshold
 	// This is calculated dynamically based on protocol parameters.
-	// Default: 1000 (warn when less than 1000 missed proofs away from auto-unstake)
+	// Default: 10 (warn when less than 10 missed proofs away from auto-unstake)
 	StakeWarningProofThreshold int64 `yaml:"stake_warning_proof_threshold,omitempty"`
 
 	// StakeCriticalProofThreshold is the number of missed proofs remaining before triggering a critical alert.
 	// Critical triggers when: (stake - min_stake) / proof_missing_penalty < threshold
-	// Default: 100 (critical when less than 100 missed proofs away from auto-unstake)
+	// Default: 3 (critical when less than 3 missed proofs away from auto-unstake)
 	StakeCriticalProofThreshold int64 `yaml:"stake_critical_proof_threshold,omitempty"`
 }
 
@@ -160,95 +173,27 @@ type BlockHealthConfig struct {
 	SlownessThreshold float64 `yaml:"slowness_threshold,omitempty"`
 }
 
-// KeysConfig contains key provider configuration.
-type KeysConfig struct {
-	// KeysFile is the path to a supplier.yaml file with hex-encoded keys.
-	KeysFile string `yaml:"keys_file,omitempty"`
-
-	// KeysDir is a directory containing individual key files.
-	KeysDir string `yaml:"keys_dir,omitempty"`
-
-	// Keyring configuration for Cosmos SDK keyring.
-	Keyring *KeyringConfig `yaml:"keyring,omitempty"`
-}
-
-// KeyringConfig contains Cosmos SDK keyring configuration.
-type KeyringConfig struct {
-	// Backend is the keyring backend type: "file", "os", "test", "memory"
-	Backend string `yaml:"backend"`
-
-	// Dir is the directory containing the keyring (for "file" backend).
-	Dir string `yaml:"dir,omitempty"`
-
-	// AppName is the application name for the keyring.
-	// Default: "pocket"
-	AppName string `yaml:"app_name,omitempty"`
-
-	// KeyNames is an optional list of specific key names to load.
-	KeyNames []string `yaml:"key_names,omitempty"`
-}
-
-// RedisConfig contains Redis connection configuration.
+// RedisConfig embeds shared RedisConfig and adds miner-specific fields.
 type RedisConfig struct {
-	// URL is the Redis connection URL.
-	URL string `yaml:"url"`
-
-	// StreamPrefix is the prefix for Redis stream names.
-	StreamPrefix string `yaml:"stream_prefix"`
-
-	// ConsumerGroup is the consumer group name for this miner cluster.
-	// All miner instances for the same supplier should use the same group.
-	ConsumerGroup string `yaml:"consumer_group"`
+	config.RedisConfig `yaml:",inline"`
 
 	// ConsumerName is the unique name of this miner instance.
-	// Typically derived from hostname/pod name.
-	ConsumerName string `yaml:"consumer_name"`
+	// Typically derived from the hostname / pod name.
+	// If not set, auto-generated from the hostname.
+	ConsumerName string `yaml:"consumer_name,omitempty"`
 
-	// BlockTimeout is how long to wait for new messages (milliseconds).
-	// Default: 5000 (5 seconds)
-	BlockTimeoutMs int64 `yaml:"block_timeout_ms"`
+	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption.
+	// This is not configurable - messages are delivered instantly when available.
 
 	// ClaimIdleTimeoutMs is how long a message can be pending before being claimed.
 	// Default: 60000 (1 minute)
-	ClaimIdleTimeoutMs int64 `yaml:"claim_idle_timeout_ms"`
-
-	// PoolSize is the maximum number of socket connections.
-	// Default: 20 × runtime.GOMAXPROCS (2x go-redis default for production)
-	// Set to 0 to use go-redis default (10 × GOMAXPROCS)
-	PoolSize int `yaml:"pool_size,omitempty"`
-
-	// MinIdleConns is the minimum number of idle connections to maintain.
-	// Keeping idle connections warm eliminates connection dial latency (~1-5ms).
-	// Default: PoolSize / 4
-	// Set to 0 to disable (connections created on demand)
-	MinIdleConns int `yaml:"min_idle_conns,omitempty"`
-
-	// PoolTimeout is the amount of time to wait for a connection from the pool.
-	// Default: 4 seconds
-	// Set to 0 to wait indefinitely
-	PoolTimeoutSeconds int `yaml:"pool_timeout_seconds,omitempty"`
-
-	// ConnMaxIdleTime is the maximum amount of time a connection can be idle.
-	// Idle connections older than this are closed.
-	// Default: 5 minutes
-	// Set to 0 to disable (connections never closed due to idle time)
-	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
-}
-
-// PocketNodeConfig contains Pocket blockchain connection configuration.
-type PocketNodeConfig struct {
-	// QueryNodeRPCUrl is the URL for RPC queries and transaction submission.
-	QueryNodeRPCUrl string `yaml:"query_node_rpc_url"`
-
-	// QueryNodeGRPCUrl is the URL for gRPC queries.
-	QueryNodeGRPCUrl string `yaml:"query_node_grpc_url"`
-
-	// GRPCInsecure disables TLS for gRPC connections.
-	// Default: false (use TLS for secure connections)
-	GRPCInsecure bool `yaml:"grpc_insecure,omitempty"`
+	ClaimIdleTimeoutMs int64 `yaml:"claim_idle_timeout_ms,omitempty"`
 }
 
 // SupplierConfig contains configuration for a single supplier.
+// DEPRECATED: This type is no longer used in production code.
+// Suppliers are auto-discovered from keys configuration.
+// Kept only for legacy test compatibility.
 type SupplierConfig struct {
 	// OperatorAddress is the supplier's operator address (bech32).
 	OperatorAddress string `yaml:"operator_address"`
@@ -261,24 +206,6 @@ type SupplierConfig struct {
 	Services []string `yaml:"services,omitempty"`
 }
 
-// MetricsConfig contains Prometheus metrics configuration.
-type MetricsConfig struct {
-	// Enabled enables metrics collection.
-	Enabled bool `yaml:"enabled"`
-
-	// Addr is the address to expose metrics on.
-	// Default: ":9092"
-	Addr string `yaml:"addr"`
-}
-
-// PProf contains pprof configuration.
-type PProf struct {
-	// Enabled enables pprof profiling server.
-	Enabled bool `yaml:"enabled,omitempty"`
-	// Addr is the address for pprof server.
-	Addr string `yaml:"addr,omitempty"`
-}
-
 // Validate validates the configuration.
 func (c *Config) Validate() error {
 	if c.Redis.URL == "" {
@@ -289,17 +216,8 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
 
-	if c.Redis.StreamPrefix == "" {
-		return fmt.Errorf("redis.stream_prefix is required")
-	}
-
-	if c.Redis.ConsumerGroup == "" {
-		return fmt.Errorf("redis.consumer_group is required")
-	}
-
-	if c.Redis.ConsumerName == "" {
-		return fmt.Errorf("redis.consumer_name is required")
-	}
+	// ConsumerName is optional - auto-generated if not set
+	// ConsumerGroup is derived from namespace config
 
 	// Validate Redis pool settings (all are optional, 0 = use defaults)
 	if c.Redis.PoolSize < 0 {
@@ -323,16 +241,9 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("pocket_node.query_node_grpc_url is required")
 	}
 
-	// Either keys config or explicit suppliers must be configured
-	if !c.HasKeySource() && len(c.Suppliers) == 0 {
-		return fmt.Errorf("either keys config or at least one supplier must be configured")
-	}
-
-	// Validate explicit suppliers if configured
-	for i, supplier := range c.Suppliers {
-		if err := c.validateSupplierConfig(i, supplier); err != nil {
-			return err
-		}
+	// Keys config is required (suppliers are auto-discovered from keys)
+	if !c.HasKeySource() {
+		return fmt.Errorf("keys config is required (at least one of: keys_file, keys_dir, or keyring)")
 	}
 
 	// Validate keyring config if provided
@@ -354,27 +265,6 @@ func (c *Config) Validate() error {
 	// Note: Storage validation removed - all session trees now use Redis
 
 	return nil
-}
-
-// validateSupplierConfig validates a single supplier configuration.
-func (c *Config) validateSupplierConfig(index int, supplier SupplierConfig) error {
-	if supplier.OperatorAddress == "" {
-		return fmt.Errorf("suppliers[%d].operator_address is required", index)
-	}
-
-	if supplier.SigningKeyName == "" {
-		return fmt.Errorf("suppliers[%d].signing_key_name is required", index)
-	}
-
-	return nil
-}
-
-// GetRedisBlockTimeout returns the Redis block timeout as a duration.
-func (c *Config) GetRedisBlockTimeout() time.Duration {
-	if c.Redis.BlockTimeoutMs > 0 {
-		return time.Duration(c.Redis.BlockTimeoutMs) * time.Millisecond
-	}
-	return 5 * time.Second // Default
 }
 
 // GetClaimIdleTimeout returns the claim idle timeout as a duration.
@@ -426,6 +316,10 @@ func (c *Config) GetLeaderHeartbeatRate() time.Duration {
 }
 
 // GetSessionLifecycleWindowStartBuffer returns the window start buffer in blocks.
+// TODO: This is not yet wired up in production code.
+// The SubmissionTimingCalculator (miner/submission_timing.go) uses WindowStartBufferBlocks,
+// but it's only instantiated in tests. Wire this config value through when the timing
+// calculator is integrated into the session lifecycle manager.
 func (c *Config) GetSessionLifecycleWindowStartBuffer() int64 {
 	if c.SessionLifecycle.WindowStartBufferBlocks > 0 {
 		return c.SessionLifecycle.WindowStartBufferBlocks
@@ -481,7 +375,7 @@ func (c *Config) GetBalanceMonitorStakeWarningProofThreshold() int64 {
 	if c.BalanceMonitor.StakeWarningProofThreshold > 0 {
 		return c.BalanceMonitor.StakeWarningProofThreshold
 	}
-	return 1000 // Default: warn when < 1000 missed proofs remaining
+	return 10 // Default: warn when < 10 missed proofs remaining
 }
 
 // GetBalanceMonitorStakeCriticalProofThreshold returns the critical threshold in missed proofs.
@@ -489,7 +383,7 @@ func (c *Config) GetBalanceMonitorStakeCriticalProofThreshold() int64 {
 	if c.BalanceMonitor.StakeCriticalProofThreshold > 0 {
 		return c.BalanceMonitor.StakeCriticalProofThreshold
 	}
-	return 100 // Default: critical when < 100 missed proofs remaining
+	return 3 // Default: critical when < 3 missed proofs remaining
 }
 
 // GetBlockTimeSeconds returns the configured block time in seconds.
@@ -497,7 +391,7 @@ func (c *Config) GetBlockTimeSeconds() int64 {
 	if c.BlockTimeSeconds > 0 {
 		return c.BlockTimeSeconds
 	}
-	return 30 // Default: 30s (not 6s - that was old testnet value)
+	return 30 // Default: 30s
 }
 
 // GetBlockHealthSlownessThreshold returns the slowness threshold for block health monitoring.
@@ -524,17 +418,60 @@ func (c *Config) GetCacheTTL() time.Duration {
 	return 2 * time.Hour // Default: 2h (covers ~15 session lifecycles at 30s blocks)
 }
 
+// GetQueryTimeout returns the blockchain query timeout as a duration.
+func (c *Config) GetQueryTimeout() time.Duration {
+	if c.PocketNode.QueryTimeoutSeconds > 0 {
+		return time.Duration(c.PocketNode.QueryTimeoutSeconds) * time.Second
+	}
+	return 5 * time.Second // Default: 5s
+}
+
+// GetServiceFactor returns the serviceFactor for a specific service.
+// Returns (factor, hasServiceFactor):
+// - If a service has an override in ServiceFactors, returns (override, true)
+// - If DefaultServiceFactor is set (>0), returns (default, true)
+// - Otherwise returns (0, false) meaning use baseLimit formula
+func (c *Config) GetServiceFactor(serviceID string) (float64, bool) {
+	// Check per-service override first
+	if factor, exists := c.ServiceFactors[serviceID]; exists && factor > 0 {
+		return factor, true
+	}
+
+	// Fall back to default
+	if c.DefaultServiceFactor > 0 {
+		return c.DefaultServiceFactor, true
+	}
+
+	return 0, false
+}
+
+// GetSupplierClaimingConfig returns the SupplierClaimerConfig for supplier claiming.
+// All timing values are hardcoded constants to ensure production reliability.
+// See supplier_claimer.go for the constant definitions and documentation.
+func (c *Config) GetSupplierClaimingConfig() SupplierClaimerConfig {
+	// Always return hardcoded constants - these are NOT user-configurable
+	// to prevent operators from accidentally breaking the claiming system.
+	return SupplierClaimerConfig{
+		ClaimTTL:              ClaimTTL,
+		RenewRate:             RenewRate,
+		InstanceTTL:           InstanceTTL,
+		InstanceHeartbeatRate: InstanceHeartbeatRate,
+		RebalanceInterval:     RebalanceInterval,
+	}
+}
+
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{
 		Redis: RedisConfig{
-			URL:                "redis://localhost:6379",
-			StreamPrefix:       "ha:relays",
-			ConsumerGroup:      "ha-miners",
-			BlockTimeoutMs:     5000,
+			RedisConfig: config.RedisConfig{
+				URL: "redis://localhost:6379",
+				// Namespace uses defaults (ha:cache, ha:events, ha-miners, etc.)
+			},
+			// Note: BlockTimeout removed - BLOCK 0 (TRUE PUSH) is now hardcoded in consumer
 			ClaimIdleTimeoutMs: 60000,
 		},
-		Metrics: MetricsConfig{
+		Metrics: config.MetricsConfig{
 			Enabled: true,
 			Addr:    ":9092",
 		},
@@ -553,8 +490,8 @@ func DefaultConfig() *Config {
 		BalanceMonitor: BalanceMonitorConfigYAML{
 			Enabled:                     true,    // Enable by default
 			BalanceThresholdUpokt:       1000000, // 1 POKT = 1,000,000 upokt
-			StakeWarningProofThreshold:  1000,    // Warn when < 1000 missed proofs remaining
-			StakeCriticalProofThreshold: 100,     // Critical when < 100 missed proofs remaining
+			StakeWarningProofThreshold:  10,      // Warn when < 10 missed proofs remaining
+			StakeCriticalProofThreshold: 3,       // Critical when < 3 missed proofs remaining
 		},
 	}
 }
@@ -563,27 +500,27 @@ func DefaultConfig() *Config {
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read config file: %w", err)
+		return nil, fmt.Errorf("failed to read cf file: %w", err)
 	}
 
 	// Start with defaults
-	config := DefaultConfig()
+	cf := DefaultConfig()
 
-	if err := yaml.Unmarshal(data, config); err != nil {
-		return nil, fmt.Errorf("failed to parse config file: %w", err)
+	if err = yaml.Unmarshal(data, cf); err != nil {
+		return nil, fmt.Errorf("failed to parse cf file: %w", err)
 	}
 
 	// Generate consumer name from hostname if not set
-	if config.Redis.ConsumerName == "" {
+	if cf.Redis.ConsumerName == "" {
 		hostname, _ := os.Hostname()
-		config.Redis.ConsumerName = fmt.Sprintf("miner-%s-%d", hostname, os.Getpid())
+		cf.Redis.ConsumerName = fmt.Sprintf("miner-%s-%d", hostname, os.Getpid())
 	}
 
-	if err := config.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid config: %w", err)
+	if err = cf.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid cf: %w", err)
 	}
 
-	return config, nil
+	return cf, nil
 }
 
 // HasKeySource returns true if at least one key source is configured.

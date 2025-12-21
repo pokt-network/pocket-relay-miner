@@ -1,0 +1,274 @@
+# Docker Compose configuration for Pocket RelayMiner
+# This demonstrates a complete local development environment.
+#
+# Usage:
+#   cd tilt/docker
+#   docker-compose up -d        # Start all services
+#   docker-compose logs -f      # Follow logs
+#   docker-compose down -v      # Stop and remove volumes
+#
+# With Tilt (from project root):
+#   tilt up -f tilt/docker/Tiltfile
+#
+# Dependency Flow:
+#   Tier 1 (Infrastructure): redis, validator, prometheus, grafana, backend
+#   Tier 2 (Initialization):  accounts-init (registers app pubkeys on-chain)
+#   Tier 3 (Gateway/Miner):   path, miner
+#   Tier 4 (Relayer):         relayer
+
+services:
+  # =============================================================================
+  # Tier 1: Infrastructure
+  # =============================================================================
+
+  # Redis - Shared state and message broker
+  redis:
+    image: redis:7-alpine
+    container_name: prm-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pocket-network
+
+  # Validator - Pocket Network local node (pocketd)
+  validator:
+    image: ghcr.io/pokt-network/pocketd:0.1.30
+    container_name: prm-validator
+    user: root
+    ports:
+      - "26657:26657"  # RPC
+      - "9090:9090"    # gRPC
+      - "1317:1317"    # REST API
+    volumes:
+      - validator-data:/root/.pocket
+      - ../config/genesis.json:/config/genesis.json:ro
+      - ../config/config.toml:/config/config.toml:ro
+      - ../config/app.toml:/config/app.toml:ro
+      - ../config/client.toml:/config/client.toml:ro
+      - ../config/node_key.json:/config/node_key.json:ro
+      - ../config/priv_validator_key.json:/config/priv_validator_key.json:ro
+      - ../config/priv_validator_state.json:/config/priv_validator_state.json:ro
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        mkdir -p /root/.pocket/config /root/.pocket/data
+        cp /config/genesis.json /root/.pocket/config/genesis.json
+        cp /config/config.toml /root/.pocket/config/config.toml
+        cp /config/app.toml /root/.pocket/config/app.toml
+        cp /config/client.toml /root/.pocket/config/client.toml
+        cp /config/node_key.json /root/.pocket/config/node_key.json
+        cp /config/priv_validator_key.json /root/.pocket/config/priv_validator_key.json
+        cp /config/priv_validator_state.json /root/.pocket/data/priv_validator_state.json
+        exec pocketd start --home /root/.pocket
+    healthcheck:
+      test: ["CMD-SHELL", "pocketd status --node http://localhost:26657 2>/dev/null | grep -q latest_block_height"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 60s
+    networks:
+      - pocket-network
+
+  # Backend - Demo backend server for testing
+  backend:
+    build:
+      context: ../backend-server
+      dockerfile: Dockerfile
+    container_name: prm-backend
+    ports:
+      - "8545:8545"    # HTTP/JSON-RPC
+      - "50051:50051"  # gRPC
+      - "9095:9095"    # Metrics
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:8545/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    networks:
+      - pocket-network
+
+  # Prometheus - Metrics collection
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    container_name: prm-prometheus
+    user: root
+    ports:
+      - "9091:9090"
+    volumes:
+      - ./config/prometheus.yaml:/etc/prometheus/prometheus.yml
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.enable-lifecycle'
+    networks:
+      - pocket-network
+
+  # Grafana - Dashboards
+  grafana:
+    image: grafana/grafana:10.0.0
+    container_name: prm-grafana
+    user: root
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - ../grafana/provisioning:/etc/grafana/provisioning
+      - ../grafana/dashboards:/var/lib/grafana/dashboards
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    depends_on:
+      - prometheus
+    networks:
+      - pocket-network
+
+  # =============================================================================
+  # Tier 2: Account Initialization
+  # =============================================================================
+
+  # Accounts Init - Registers app public keys on-chain
+  # This is required because PATH needs to create ring signatures using app pubkeys.
+  # Sending any tx from an account registers its pubkey on-chain.
+  accounts-init:
+    image: ghcr.io/pokt-network/pocketd:0.1.30
+    container_name: prm-accounts-init
+    user: root
+    volumes:
+      - ./scripts/init-accounts.sh:/scripts/init-accounts.sh:ro
+    entrypoint: ["/bin/sh"]
+    command: ["/scripts/init-accounts.sh"]
+    depends_on:
+      validator:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: "no"
+    networks:
+      - pocket-network
+
+  # =============================================================================
+  # Tier 3: Gateway and Miner
+  # =============================================================================
+
+  # PATH - Gateway that routes relay requests
+  path:
+    image: ${PATH_IMAGE:-ghcr.io/pokt-network/path:sha-f51fe86-rc}
+    container_name: prm-path
+    user: root
+    ports:
+      - "3069:3069"    # Gateway HTTP
+      - "9096:9096"    # Metrics
+    volumes:
+      - ./config/path-config.yaml:/config/config.yaml
+    entrypoint: ["./path"]
+    command: ["--config", "/config/config.yaml"]
+    depends_on:
+      validator:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      accounts-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3069/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks:
+      - pocket-network
+
+  # Miner - Stateful claim/proof submitter
+  miner:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: pocket-relay-miner:local
+    container_name: prm-miner
+    ports:
+      - "9092:9092"    # Metrics
+      - "6065:6065"    # pprof
+    volumes:
+      - ./config/miner-config.yaml:/config/config.yaml:ro
+      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
+    command: ["miner", "--config", "/config/config.yaml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      validator:
+        condition: service_healthy
+      accounts-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9092/metrics"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+    networks:
+      - pocket-network
+
+  # =============================================================================
+  # Tier 4: Relayer
+  # =============================================================================
+
+  # Relayer - Stateless relay processor
+  relayer:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: pocket-relay-miner:local
+    container_name: prm-relayer
+    ports:
+      - "8080:8080"    # Relay HTTP
+      - "8081:8081"    # Health check
+      - "9190:9090"    # Metrics (9190 host to avoid conflict with validator gRPC)
+      - "6060:6060"    # pprof
+    volumes:
+      - ./config/relayer-config.yaml:/config/config.yaml:ro
+      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
+    command: ["relayer", "--config", "/config/config.yaml"]
+    depends_on:
+      redis:
+        condition: service_healthy
+      validator:
+        condition: service_healthy
+      backend:
+        condition: service_healthy
+      accounts-init:
+        condition: service_completed_successfully
+      path:
+        condition: service_healthy
+      miner:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8081/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      start_period: 30s
+    networks:
+      pocket-network:
+        # Add K8s-style aliases so genesis URLs work in Docker
+        aliases:
+          - relayer.default.svc.cluster.local
+
+networks:
+  pocket-network:
+    driver: bridge
+
+volumes:
+  redis-data:
+  validator-data:
+  prometheus-data:
+  grafana-data:

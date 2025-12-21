@@ -21,7 +21,7 @@ func TestGetSharedParams_Success(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -51,7 +51,7 @@ func TestGetSessionParams_Success(t *testing.T) {
 	mock.sessionParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -78,7 +78,7 @@ func TestGetProofParams_Success(t *testing.T) {
 	mock.proofParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -101,7 +101,7 @@ func TestGetParams_NetworkError(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -138,7 +138,7 @@ func TestGetParams_Timeout(t *testing.T) {
 	mock.sharedParams = generateTestSharedParams()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 10 * time.Millisecond, // Very short timeout
 	}
@@ -164,7 +164,7 @@ func TestGetSharedParams_Cache(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -200,7 +200,7 @@ func TestSharedParams_InvalidateCache(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -240,7 +240,7 @@ func TestGetSharedParams_ConcurrentAccess(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -281,7 +281,7 @@ func TestGetSessionGracePeriodEndHeight(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -309,7 +309,7 @@ func TestGetClaimWindowOpenHeight(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -337,7 +337,7 @@ func TestGetProofWindowOpenHeight(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -365,7 +365,7 @@ func TestGetEarliestSupplierClaimCommitHeight(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -393,7 +393,7 @@ func TestGetEarliestSupplierProofCommitHeight(t *testing.T) {
 	mock.sharedParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -421,7 +421,7 @@ func TestGetSupplierParams_Success(t *testing.T) {
 	mock.supplierParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -449,7 +449,7 @@ func TestGetServiceParams_Success(t *testing.T) {
 	mock.serviceParams = testParams
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -473,7 +473,7 @@ func TestGetParams_ParamsMissing(t *testing.T) {
 	defer cleanup()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -515,7 +515,7 @@ func TestGetParams_ServerError(t *testing.T) {
 	// by not setting params in mock (which triggers NotFound error)
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}
@@ -548,7 +548,7 @@ func TestParams_ContextCancellation(t *testing.T) {
 	mock.sharedParams = generateTestSharedParams()
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := QueryClientConfig{
+	config := ClientConfig{
 		GRPCEndpoint: address,
 		QueryTimeout: 5 * time.Second,
 	}

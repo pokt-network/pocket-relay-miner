@@ -15,11 +15,12 @@ import (
 var _ transport.MinedRelayPublisher = (*StreamsPublisher)(nil)
 
 // StreamsPublisher implements MinedRelayPublisher using Redis Streams.
-// It publishes mined relays to session-specific streams with automatic TTL cleanup.
+// It publishes mined relays to a single supplier stream (simplified architecture).
+// Each message contains the sessionID for routing by the consumer.
 type StreamsPublisher struct {
-	logger logging.Logger
-	client redis.UniversalClient
-	config transport.PublisherConfig
+	logger       logging.Logger
+	client       redis.UniversalClient
+	streamPrefix string
 
 	// cacheTTL is the TTL for relay stream data (backup safety net)
 	cacheTTL time.Duration
@@ -34,7 +35,7 @@ type StreamsPublisher struct {
 func NewStreamsPublisher(
 	logger logging.Logger,
 	client redis.UniversalClient,
-	config transport.PublisherConfig,
+	streamPrefix string,
 	cacheTTL time.Duration,
 ) *StreamsPublisher {
 	if cacheTTL <= 0 {
@@ -42,10 +43,10 @@ func NewStreamsPublisher(
 	}
 
 	return &StreamsPublisher{
-		logger:   logging.ForComponent(logger, logging.ComponentRedisPublisher),
-		client:   client,
-		config:   config,
-		cacheTTL: cacheTTL,
+		logger:       logging.ForComponent(logger, logging.ComponentRedisPublisher),
+		client:       client,
+		streamPrefix: streamPrefix,
+		cacheTTL:     cacheTTL,
 	}
 }
 
@@ -76,8 +77,8 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 		msg.SetPublishedAt()
 	}
 
-	// Use per-session stream naming
-	streamName := transport.StreamName(p.config.StreamPrefix, msg.SupplierOperatorAddress, msg.SessionId)
+	// Use single stream per supplier (simplified architecture)
+	streamName := transport.SupplierStreamName(p.streamPrefix, msg.SupplierOperatorAddress)
 
 	// Serialize message to protobuf for Redis Stream
 	// Protobuf binary format is 3-5× smaller than JSON and eliminates JSON decoder
@@ -103,6 +104,15 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 		return fmt.Errorf("failed to publish to stream %s: %w", streamName, err)
 	}
 
+	// Log publish details for tracing (DEBUG level - per-relay)
+	p.logger.Debug().
+		Str("stream_name", streamName).
+		Str("session_id", msg.SessionId).
+		Str("supplier", msg.SupplierOperatorAddress).
+		Str("service", msg.ServiceId).
+		Str("message_id", messageID).
+		Msg("relay published to stream")
+
 	// Set stream expiration (this is idempotent - safe to call multiple times)
 	// TTL is a backup safety net - manual cleanup is primary
 	if ttlErr := p.client.Expire(ctx, streamName, p.cacheTTL).Err(); ttlErr != nil {
@@ -123,13 +133,13 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 		Str(logging.FieldSessionID, msg.SessionId).
 		Str(logging.FieldSupplier, msg.SupplierOperatorAddress).
 		Int64("ttl_seconds", int64(p.cacheTTL.Seconds())).
-		Msg("published mined relay to session stream")
+		Msg("published mined relay to supplier stream")
 
 	return nil
 }
 
 // PublishBatch sends multiple mined relay messages in a single pipeline operation.
-// Each message goes to its own session-specific stream with automatic TTL.
+// All messages for the same supplier go to the same stream (simplified architecture).
 func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.MinedRelayMessage) error {
 	p.mu.RLock()
 	if p.closed {
@@ -142,8 +152,8 @@ func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.M
 		return nil
 	}
 
-	// Group messages by session for efficient pipelining
-	bySession := make(map[string][]*transport.MinedRelayMessage)
+	// Group messages by supplier for efficient pipelining
+	bySupplier := make(map[string][]*transport.MinedRelayMessage)
 	for _, msg := range msgs {
 		if msg == nil {
 			continue
@@ -155,8 +165,7 @@ func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.M
 				Msg("skipping message with missing session info")
 			continue
 		}
-		sessionKey := msg.SupplierOperatorAddress + ":" + msg.SessionId
-		bySession[sessionKey] = append(bySession[sessionKey], msg)
+		bySupplier[msg.SupplierOperatorAddress] = append(bySupplier[msg.SupplierOperatorAddress], msg)
 	}
 
 	// Use pipeline for batch efficiency
@@ -164,14 +173,15 @@ func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.M
 	var cmds []*redis.StringCmd
 	streamTTLs := make(map[string]time.Duration) // Track TTL per stream
 
-	for _, sessionMsgs := range bySession {
-		for _, msg := range sessionMsgs {
+	for supplierAddr, supplierMsgs := range bySupplier {
+		// Single stream per supplier
+		streamName := transport.SupplierStreamName(p.streamPrefix, supplierAddr)
+
+		for _, msg := range supplierMsgs {
 			// Set published timestamp
 			if msg.PublishedAtUnixNano == 0 {
 				msg.SetPublishedAt()
 			}
-
-			streamName := transport.StreamName(p.config.StreamPrefix, msg.SupplierOperatorAddress, msg.SessionId)
 
 			// Use protobuf binary serialization (same as single publish)
 			data, err := msg.Marshal()
@@ -187,21 +197,18 @@ func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.M
 			}
 
 			cmds = append(cmds, pipe.XAdd(ctx, args))
-
-			// Set TTL for this stream (only once per stream)
-			// TTL is a backup safety net - manual cleanup is primary
-			if _, exists := streamTTLs[streamName]; !exists {
-				streamTTLs[streamName] = p.cacheTTL
-			}
 		}
+
+		// Set TTL for this stream (only once per supplier)
+		streamTTLs[streamName] = p.cacheTTL
 	}
 
 	// Execute pipeline
 	_, err := pipe.Exec(ctx)
 	if err != nil {
-		// Count errors per session
-		for _, sessionMsgs := range bySession {
-			for _, msg := range sessionMsgs {
+		// Count errors per supplier
+		for _, supplierMsgs := range bySupplier {
+			for _, msg := range supplierMsgs {
 				publishErrorsTotal.WithLabelValues(msg.SupplierOperatorAddress, msg.ServiceId).Inc()
 			}
 		}
@@ -225,16 +232,16 @@ func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.M
 	}
 
 	// Update success metrics
-	for _, sessionMsgs := range bySession {
-		for _, msg := range sessionMsgs {
+	for _, supplierMsgs := range bySupplier {
+		for _, msg := range supplierMsgs {
 			publishedTotal.WithLabelValues(msg.SupplierOperatorAddress, msg.ServiceId).Inc()
 		}
 	}
 
 	p.logger.Debug().
 		Int("batch_size", len(msgs)).
-		Int("sessions", len(bySession)).
-		Msg("published batch of mined relays to session streams")
+		Int("suppliers", len(bySupplier)).
+		Msg("published batch of mined relays to supplier streams")
 
 	return nil
 }

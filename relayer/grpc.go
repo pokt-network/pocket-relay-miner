@@ -54,6 +54,17 @@ func (b *billingBackend) String() string {
 func (b *billingBackend) GetConnection(ctx context.Context, _ string) (context.Context, *grpc.ClientConn, error) {
 	// Forward metadata to the outgoing context
 	md, _ := metadata.FromIncomingContext(ctx)
+
+	// Add Pocket context metadata for backend visibility
+	// gRPC metadata keys are lowercase
+	md = md.Copy()
+	md.Set("pocket-supplier", b.supplierAddress)
+	md.Set("pocket-service", b.serviceID)
+	// Application address is extracted from incoming metadata if present
+	if vals := md.Get("pocket-application-address"); len(vals) > 0 {
+		md.Set("pocket-application", vals[0])
+	}
+
 	outCtx := metadata.NewOutgoingContext(ctx, md)
 	return outCtx, b.conn, nil
 }

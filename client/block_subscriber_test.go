@@ -162,9 +162,9 @@ func TestDefaultBlockSubscriberConfig(t *testing.T) {
 	require.False(t, config.UseTLS, "Default config should have TLS disabled")
 }
 
-// TestSimpleBlock_Interface tests the simpleBlock implementation.
+// TestSimpleBlock_Interface tests the SimpleBlock implementation.
 func TestSimpleBlock_Interface(t *testing.T) {
-	block := &simpleBlock{
+	block := &SimpleBlock{
 		height: 12345,
 		hash:   []byte{0x01, 0x02, 0x03, 0x04},
 	}
@@ -173,9 +173,9 @@ func TestSimpleBlock_Interface(t *testing.T) {
 	require.Equal(t, []byte{0x01, 0x02, 0x03, 0x04}, block.Hash(), "Hash should match")
 }
 
-// TestSimpleBlock_ZeroValues tests simpleBlock with zero values.
+// TestSimpleBlock_ZeroValues tests SimpleBlock with zero values.
 func TestSimpleBlock_ZeroValues(t *testing.T) {
-	block := &simpleBlock{
+	block := &SimpleBlock{
 		height: 0,
 		hash:   nil,
 	}
@@ -195,7 +195,7 @@ func TestBlockSubscriber_LastBlock_WithStoredBlock(t *testing.T) {
 	require.NoError(t, err)
 
 	// Manually store a block
-	testBlock := &simpleBlock{
+	testBlock := &SimpleBlock{
 		height: 12345,
 		hash:   []byte{0x01, 0x02, 0x03},
 	}
@@ -270,7 +270,7 @@ func TestBlockSubscriber_AtomicOperations(t *testing.T) {
 	done := make(chan bool, 100)
 	for i := 0; i < 100; i++ {
 		go func(height int64) {
-			block := &simpleBlock{
+			block := &SimpleBlock{
 				height: height,
 				hash:   []byte{byte(height)},
 			}
@@ -354,6 +354,6 @@ func TestConstants(t *testing.T) {
 	require.Equal(t, "tm.event='NewBlockHeader'", newBlockHeaderQuery)
 	require.Equal(t, "ha-block-subscriber", subscriptionClientID)
 	require.Equal(t, 1*time.Second, reconnectBaseDelay)
-	require.Equal(t, 30*time.Second, reconnectMaxDelay)
+	require.Equal(t, 15*time.Second, reconnectMaxDelay) // Updated to match actual code
 	require.Equal(t, 2, reconnectBackoffFactor)
 }

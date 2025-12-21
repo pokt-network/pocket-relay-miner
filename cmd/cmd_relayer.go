@@ -15,7 +15,6 @@ import (
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
@@ -25,7 +24,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/rings"
-	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -110,9 +108,9 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	logger := logging.NewLoggerFromConfig(config.Logging)
 
 	// Start observability server (metrics and pprof)
-	if config.Metrics.Enabled {
+	if config.Metrics.Enabled || config.Pprof.Enabled {
 		// Default pprof addr to localhost:6060 for security if not specified
-		pprofAddr := config.Metrics.PprofAddr
+		pprofAddr := config.Pprof.Addr
 		if pprofAddr == "" {
 			pprofAddr = "localhost:6060"
 		}
@@ -126,7 +124,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		obsServer := observability.NewServer(logger, observability.ServerConfig{
 			MetricsEnabled: config.Metrics.Enabled,
 			MetricsAddr:    config.Metrics.Addr,
-			PprofEnabled:   config.Metrics.PprofEnabled,
+			PprofEnabled:   config.Pprof.Enabled,
 			PprofAddr:      pprofAddr,
 			Registry:       combinedRegistry,
 		})
@@ -154,26 +152,20 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if cmd.Flags().Changed(flagRedisURL) {
 		redisURL, _ = cmd.Flags().GetString(flagRedisURL)
 	}
-	redisOpts, err := redis.ParseURL(redisURL)
-	if err != nil {
-		return fmt.Errorf("failed to parse Redis URL: %w", err)
-	}
 
-	// Apply connection pool settings from config (2x go-redis defaults for production)
-	applyRedisPoolConfig(redisOpts, RedisPoolSettings{
+	// Create wrapped Redis client with KeyBuilder for namespace-aware key construction
+	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
+		URL:                    redisURL,
 		PoolSize:               config.Redis.PoolSize,
 		MinIdleConns:           config.Redis.MinIdleConns,
 		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
 		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		Namespace:              config.Redis.Namespace,
 	})
-
-	redisClient := redis.NewClient(redisOpts)
-	defer func() { _ = redisClient.Close() }()
-
-	// Test Redis connection
-	if pingErr := redisClient.Ping(ctx).Err(); pingErr != nil {
-		return fmt.Errorf("failed to connect to Redis: %w", pingErr)
+	if err != nil {
+		return fmt.Errorf("failed to create Redis client: %w", err)
 	}
+	defer func() { _ = redisClient.Close() }()
 	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
 
 	// Create supplier cache for checking supplier staking state
@@ -199,11 +191,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	}
 
 	// Create query clients for fetching on-chain data (service compute units, etc.)
-	// Determine TLS from URL - if port 443 or grpcs:// prefix, use TLS
+	// Determine TLS setting - use config.PocketNode.GRPCInsecure to match miner behavior
 	grpcURL := config.PocketNode.QueryNodeGRPCUrl
-	useTLS := strings.HasPrefix(grpcURL, "grpcs://") ||
-		strings.HasPrefix(grpcURL, "https://") ||
-		strings.HasSuffix(grpcURL, ":443")
 	// Strip scheme for gRPC endpoint
 	grpcEndpoint := grpcURL
 	grpcEndpoint = strings.TrimPrefix(grpcEndpoint, "grpcs://")
@@ -213,17 +202,17 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	queryClients, err := query.NewQueryClients(
 		logger,
-		query.QueryClientConfig{
+		query.ClientConfig{
 			GRPCEndpoint: grpcEndpoint,
 			QueryTimeout: 30 * time.Second,
-			UseTLS:       useTLS,
+			UseTLS:       !config.PocketNode.GRPCInsecure,
 		},
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create query clients: %w", err)
 	}
 	defer func() { _ = queryClients.Close() }()
-	logger.Info().Str("grpc_endpoint", grpcEndpoint).Bool("tls", useTLS).Msg("query clients initialized")
+	logger.Info().Str("grpc_endpoint", grpcEndpoint).Bool("tls", !config.PocketNode.GRPCInsecure).Msg("query clients initialized")
 
 	// Create new entity caches (relayer only subscribes to pub/sub, doesn't refresh)
 	// These caches provide L1/L2/L3 pattern with pub/sub invalidation
@@ -380,7 +369,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		logger,
 		redisClient,
 		nil, // No direct blockchain client - events come from miner via Redis
-		cache.DefaultCacheConfig(),
 	)
 	if err := redisBlockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start redis block subscriber: %w", err)
@@ -413,11 +401,9 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	}
 	publisher := redistransport.NewStreamsPublisher(
 		logger,
-		redisClient,
-		transport.PublisherConfig{
-			StreamPrefix: config.Redis.StreamPrefix,
-		},
-		cacheTTL, // TTL for relay streams (backup safety net)
+		redisClient.UniversalClient,     // Embedded go-redis client
+		redisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
+		cacheTTL,                        // TTL for relay streams (backup safety net)
 	)
 
 	// Create health checker
@@ -484,7 +470,17 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		logger.Info().Str("file", config.Keys.KeysFile).Msg("added supplier keys file provider")
 	}
 
-	// Try keyring as additional source (can combine both)
+	// Try keys_dir as additional source (directory of individual key files)
+	if config.Keys.KeysDir != "" {
+		provider, keyErr := keys.NewFileKeyProvider(logger, config.Keys.KeysDir)
+		if keyErr != nil {
+			return fmt.Errorf("failed to create keys directory provider: %w", keyErr)
+		}
+		keyProviders = append(keyProviders, provider)
+		logger.Info().Str("dir", config.Keys.KeysDir).Msg("added file key provider")
+	}
+
+	// Try keyring as additional source (can combine all)
 	if config.Keys.Keyring != nil && config.Keys.Keyring.Backend != "" {
 		provider, keyErr := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{
 			Backend:  config.Keys.Keyring.Backend,
@@ -647,13 +643,21 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				}
 
 				relayMeterConfig := relayer.RelayMeterConfig{
-					OverServicingEnabled:   config.RelayMeter.OverServicingEnabled,
-					RedisKeyPrefix:         config.RelayMeter.RedisKeyPrefix,
-					FailBehavior:           failBehavior,
-					SessionCleanupInterval: config.RelayMeter.SessionCleanupInterval,
-					ParamsCacheTTL:         config.RelayMeter.ParamsCacheTTL,
-					AppStakeCacheTTL:       config.RelayMeter.AppStakeCacheTTL,
+					RedisKeyPrefix: config.RelayMeter.RedisKeyPrefix,
+					FailBehavior:   failBehavior,
+					CacheTTL:       config.RelayMeter.CacheTTL,
 				}
+
+				// Create service factor client for reading service factors from Redis
+				// Service factors are published by the miner
+				serviceFactorClient := relayer.NewServiceFactorClient(
+					logger,
+					redisClient,
+				)
+				if err := serviceFactorClient.Start(ctx); err != nil {
+					return fmt.Errorf("failed to start service factor client: %w", err)
+				}
+				defer func() { _ = serviceFactorClient.Close() }()
 
 				relayMeter := relayer.NewRelayMeter(
 					logger,
@@ -662,8 +666,9 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 					queryClients.Shared(),
 					queryClients.Session(),
 					blockSubscriber,
-					sharedParamCache, // L1->L2->L3 cache for shared params (no Redis blocking!)
-					serviceCache,     // L1->L2->L3 cache for service data (no Redis blocking!)
+					sharedParamCache,    // L1->L2->L3 cache for shared params (no Redis blocking!)
+					serviceCache,        // L1->L2->L3 cache for service data (no Redis blocking!)
+					serviceFactorClient, // Reads service factors from Redis (published by miner)
 					relayMeterConfig,
 				)
 
@@ -674,7 +679,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 				proxy.SetRelayMeter(relayMeter)
 				logger.Info().
-					Bool("over_servicing", config.RelayMeter.OverServicingEnabled).
 					Str("fail_behavior", string(failBehavior)).
 					Msg("relay meter initialized and wired")
 			} else {
@@ -831,7 +835,7 @@ func verifyRPCConnectivity(ctx context.Context, logger logging.Logger, rpcURL st
 
 // verifyGRPCConnectivity checks gRPC endpoint health by querying shared params.
 // This is a non-blocking health check - failure is logged but doesn't prevent startup.
-func verifyGRPCConnectivity(ctx context.Context, logger logging.Logger, grpcURL string, queryClients *query.QueryClients) error {
+func verifyGRPCConnectivity(ctx context.Context, logger logging.Logger, grpcURL string, queryClients *query.Clients) error {
 	// Create context with short timeout for health check
 	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
