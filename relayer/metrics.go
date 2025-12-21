@@ -349,47 +349,6 @@ var (
 		[]string{"service_id"},
 	)
 
-	// gRPC metrics
-	grpcStreamsActive = observability.RelayerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "grpc_streams_active",
-			Help:      "Number of active gRPC streams",
-		},
-		[]string{"service_id"},
-	)
-
-	grpcStreamsTotal = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "grpc_streams_total",
-			Help:      "Total number of gRPC streams established",
-		},
-		[]string{"service_id"},
-	)
-
-	grpcMessagesForwarded = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "grpc_messages_forwarded_total",
-			Help:      "Total number of gRPC messages forwarded",
-		},
-		[]string{"service_id", "direction"}, // direction: client_to_backend, backend_to_client
-	)
-
-	grpcRelaysEmitted = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "grpc_relays_emitted_total",
-			Help:      "Total number of relays emitted for billing from gRPC streams",
-		},
-		[]string{"service_id"},
-	)
-
 	// gRPC Relay Service metrics (for proper relay protocol over gRPC)
 	grpcRelaysTotal = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{

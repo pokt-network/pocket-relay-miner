@@ -104,24 +104,18 @@ type ProxyServer struct {
 	// Global session monitor (shared across all WebSocket connections)
 	sessionMonitor *SessionMonitor
 
-	// Supplier address for this proxy instance
-	supplierAddress string
-
 	// Async metric recorder (avoids histogram lock contention in hot path)
 	metricRecorder *MetricRecorder
 
 	// Unified relay processing pipeline (validation + metering + signing + publishing)
 	relayPipeline *RelayPipeline
 
-	// gRPC proxy handler (legacy transparent proxy - deprecated)
-	grpcHandler    *GRPCProxyHandler
-	grpcWebWrapper *GRPCWebWrapper
-
 	// gRPC relay service (proper relay protocol over gRPC)
 	grpcRelayService *RelayGRPCService
 	grpcRelayServer  *grpc.Server // gRPC server for the relay service
+	grpcWebWrapper   *GRPCWebWrapper
 
-	// Protects gRPC handler fields (grpcHandler, grpcWebWrapper, grpcRelayService, grpcRelayServer)
+	// Protects gRPC handler fields (grpcWebWrapper, grpcRelayService, grpcRelayServer)
 	grpcMu sync.RWMutex
 
 	// Lifecycle
@@ -461,6 +455,10 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check for native gRPC request (HTTP/2 with application/grpc content type)
+	// isGRPCRequest checks Content-Type for "application/grpc" prefix
+	isGRPC := strings.HasPrefix(r.Header.Get("Content-Type"), "application/grpc")
+
 	// Get gRPC handlers (protected by mutex for safe concurrent access)
 	p.grpcMu.RLock()
 	grpcWebWrapper := p.grpcWebWrapper
@@ -475,7 +473,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// Check for native gRPC requests (HTTP/2 with application/grpc content type)
 	// Uses the new relay service that properly handles RelayRequest/RelayResponse protocol
-	if IsGRPCRequest(r) && grpcRelayServer != nil {
+	if isGRPC && grpcRelayServer != nil {
 		grpcRelayServer.ServeHTTP(w, r)
 		return
 	}
@@ -515,13 +513,30 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		relaysRejected.WithLabelValues("unknown", "missing_service_id").Inc()
 		return
 	}
+	if relayRequest == nil {
+		p.sendError(w, http.StatusBadRequest, "invalid relay request")
+		relaysRejected.WithLabelValues("unknown", "nil_relay_request").Inc()
+		return
+	}
 
 	// Extract session context early for consistent logging throughout the request
-	var sessionCtx *logging.SessionContext
-	if relayRequest != nil {
-		sessionCtx = logging.SessionContextFromRelayRequest(relayRequest)
-	} else {
-		sessionCtx = &logging.SessionContext{ServiceID: serviceID}
+	sessionCtx := logging.SessionContextFromRelayRequest(relayRequest)
+
+	// Validate critical dependencies are configured - fail fast before any processing
+	if p.responseSigner == nil {
+		logging.WithSessionContext(p.logger.Error(), sessionCtx).
+			Msg("response signer not configured")
+		p.sendError(w, http.StatusInternalServerError, "relayer not properly configured")
+		relaysRejected.WithLabelValues(serviceID, "response_signer_not_configured").Inc()
+		return
+	}
+
+	if p.supplierCache == nil {
+		logging.WithSessionContext(p.logger.Error(), sessionCtx).
+			Msg("supplier cache not configured")
+		p.sendError(w, http.StatusInternalServerError, "relayer not properly configured")
+		relaysRejected.WithLabelValues(serviceID, "supplier_cache_not_configured").Inc()
+		return
 	}
 
 	// Check if service exists
@@ -532,18 +547,17 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Extract rpc_type for metrics (same logic as forwardToBackend)
-	rpcTypeForMetrics := r.Header.Get("Rpc-Type")
-	if rpcTypeForMetrics == "" {
+	// Determine RPC type from header, with fallback to service default
+	rpcType := r.Header.Get("Rpc-Type")
+	if rpcType == "" {
 		if svcConfig.DefaultBackend != "" {
-			rpcTypeForMetrics = svcConfig.DefaultBackend
+			rpcType = svcConfig.DefaultBackend
 		} else {
-			rpcTypeForMetrics = DefaultBackendType
+			rpcType = DefaultBackendType
 		}
 	}
-	rpcTypeForMetrics = RPCTypeToBackendType(rpcTypeForMetrics)
-
-	relaysReceived.WithLabelValues(serviceID, rpcTypeForMetrics).Inc()
+	rpcType = RPCTypeToBackendType(rpcType)
+	relaysReceived.WithLabelValues(serviceID, rpcType).Inc()
 
 	// Set per-request write deadline using ResponseController.
 	// This allows different timeouts per service (e.g., 30s fast vs 600s streaming).
@@ -551,7 +565,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	serviceTimeout := p.config.GetServiceTimeout(serviceID)
 	rc := http.NewResponseController(w)
 	// Add 30s buffer for response signing and network write
-	if err := rc.SetWriteDeadline(time.Now().Add(serviceTimeout + 30*time.Second)); err != nil {
+	if err = rc.SetWriteDeadline(time.Now().Add(serviceTimeout + 30*time.Second)); err != nil {
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Err(err).
 			Dur("timeout", serviceTimeout).
@@ -559,58 +573,62 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		// Non-fatal: continue without per-request deadline
 	}
 
-	// Check supplier state if we have a valid relay request and supplier cache
-	if relayRequest != nil && p.supplierCache != nil {
-		supplierOperatorAddr := relayRequest.Meta.SupplierOperatorAddress
-		if supplierOperatorAddr != "" {
-			supplierState, cacheErr := p.supplierCache.GetSupplierState(r.Context(), supplierOperatorAddr)
-			if cacheErr != nil {
-				// Cache error - fail-open behavior depends on cache configuration
-				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-					Err(cacheErr).
-					Msg("failed to check supplier state in cache")
-				// Continue processing - fail-open behavior is handled by the cache
-			} else if supplierState == nil {
-				// Supplier isn't found in cache
-				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-					Msg("supplier not found in cache")
-				p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not registered with any miner", supplierOperatorAddr))
-				relaysRejected.WithLabelValues(serviceID, "supplier_not_found").Inc()
-				return
-			} else if !supplierState.IsActive() {
-				// Supplier exists but not active (e.g., unstaking)
-				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-					Str("status", supplierState.Status).
-					Msg("supplier not active")
-				p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s is %s", supplierOperatorAddr, supplierState.Status))
-				relaysRejected.WithLabelValues(serviceID, "supplier_inactive").Inc()
-				return
-			} else if len(supplierState.Services) == 0 {
-				// Supplier active but has no services registered
-				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-					Msg("supplier has no services registered")
-				p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s has no services registered", supplierOperatorAddr))
-				relaysRejected.WithLabelValues(serviceID, "no_services").Inc()
-				return
-			} else if !supplierState.IsActiveForService(serviceID) {
-				// Supplier active but not for this service
-				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-					Int("num_services", len(supplierState.Services)).
-					Msg("supplier not staked for service")
-				p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not staked for service %s", supplierOperatorAddr, serviceID))
-				relaysRejected.WithLabelValues(serviceID, "wrong_service").Inc()
-				return
-			}
-			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-				Msg("supplier is active for service")
-		}
+	// Validate supplier operator address - REQUIRED in every valid RelayRequest
+	supplierOperatorAddr := relayRequest.Meta.SupplierOperatorAddress
+	if supplierOperatorAddr == "" {
+		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			Msg("missing supplier operator address in relay request")
+		p.sendError(w, http.StatusBadRequest, "missing supplier operator address in relay request")
+		relaysRejected.WithLabelValues(serviceID, "missing_supplier_address").Inc()
+		return
 	}
 
-	// NOTE: Relay meter check moved to respect validation mode.
-	// - For eager mode: checked BEFORE backend call (with validation)
-	// - For optimistic mode: checked AFTER serving (in background with validation)
+	// Check supplier state against our registry
+	supplierState, cacheErr := p.supplierCache.GetSupplierState(r.Context(), supplierOperatorAddr)
+	if cacheErr != nil {
+		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			Err(cacheErr).
+			Msg("failed to check supplier state in cache")
+		p.sendError(w, http.StatusServiceUnavailable, "failed to verify supplier state")
+		relaysRejected.WithLabelValues(serviceID, "supplier_cache_error").Inc()
+		return
+	}
+	if supplierState == nil {
+		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			Msg("supplier not found in cache")
+		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not registered with any miner", supplierOperatorAddr))
+		relaysRejected.WithLabelValues(serviceID, "supplier_not_found").Inc()
+		return
+	}
+	if !supplierState.IsActive() {
+		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			Str("status", supplierState.Status).
+			Msg("supplier not active")
+		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s is %s", supplierOperatorAddr, supplierState.Status))
+		relaysRejected.WithLabelValues(serviceID, "supplier_inactive").Inc()
+		return
+	}
+	if len(supplierState.Services) == 0 {
+		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			Msg("supplier has no services registered")
+		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s has no services registered", supplierOperatorAddr))
+		relaysRejected.WithLabelValues(serviceID, "no_services").Inc()
+		return
+	}
+	if !supplierState.IsActiveForService(serviceID) {
+		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			Int("num_services", len(supplierState.Services)).
+			Msg("supplier not staked for service")
+		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not staked for service %s", supplierOperatorAddr, serviceID))
+		relaysRejected.WithLabelValues(serviceID, "wrong_service").Inc()
+		return
+	}
+	logging.WithSessionContext(p.logger.Debug(), sessionCtx).
+		Msg("supplier is active for service")
+
 	// Check backend health
 	if !p.healthChecker.IsHealthy(serviceID) {
+		// NOTE: this will return true always until is properly implemented.
 		p.sendError(w, http.StatusServiceUnavailable, "backend unhealthy")
 		relaysRejected.WithLabelValues(serviceID, "backend_unhealthy").Inc()
 		return
@@ -638,8 +656,8 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// For eager validation, validate before forwarding
 	if validationMode == ValidationModeEager {
-		// EAGER MODE: Check meter BEFORE backend call (synchronous, blocks hot path)
-		if p.relayMeter != nil && relayRequest != nil && relayRequest.Meta.SessionHeader != nil {
+		// EAGER MODE: Check meter BEFORE backend call (synchronous, blocks the hot path)
+		if p.relayMeter != nil && relayRequest.Meta.SessionHeader != nil {
 			sessionHeader := relayRequest.Meta.SessionHeader
 			sessionID := sessionHeader.SessionId
 			appAddress := sessionHeader.ApplicationAddress
@@ -697,7 +715,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Forward request to backend (handles both streaming and non-streaming)
 	// Use the parsed POKTHTTPRequest if available, otherwise fall back to raw body
 	backendStart := time.Now()
-	respBody, respHeaders, respStatus, isStreaming, err := p.forwardToBackendWithStreaming(r.Context(), r, body, serviceID, &svcConfig, poktHTTPRequest, w, relayRequest)
+	respBody, respHeaders, respStatus, isStreaming, err := p.forwardToBackendWithStreaming(r.Context(), r, body, serviceID, &svcConfig, rpcType, poktHTTPRequest, w, relayRequest)
 	backendDuration := time.Since(backendStart)
 
 	// Record backend latency asynchronously (no blocking on histogram locks)
@@ -716,102 +734,64 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	if !isStreaming {
 		responseBodySize.WithLabelValues(serviceID).Observe(float64(len(respBody)))
 
-		// Check if this is a valid relay request that requires a signed response
-		if relayRequest != nil && p.responseSigner != nil {
-			// Build and sign the RelayResponse
-			_, signedResponseBz, signErr := p.responseSigner.BuildAndSignRelayResponseFromBody(
-				relayRequest,
-				respBody,
-				respHeaders,
-				respStatus,
-			)
-			if signErr != nil {
-				logging.WithSessionContext(p.logger.Error(), sessionCtx).
-					Err(signErr).
-					Msg("failed to sign relay response")
-				p.sendError(w, http.StatusInternalServerError, "failed to sign response")
-				relaysRejected.WithLabelValues(serviceID, "signing_error").Inc()
-				return
-			}
+		// Build and sign the RelayResponse
+		// responseSigner is guaranteed to be non-nil (validated early in handleRelay)
+		_, signedResponseBz, signErr := p.responseSigner.BuildAndSignRelayResponseFromBody(
+			relayRequest,
+			respBody,
+			respHeaders,
+			respStatus,
+		)
+		if signErr != nil {
+			logging.WithSessionContext(p.logger.Error(), sessionCtx).
+				Err(signErr).
+				Msg("failed to sign relay response")
+			p.sendError(w, http.StatusInternalServerError, "failed to sign response")
+			relaysRejected.WithLabelValues(serviceID, "signing_error").Inc()
+			return
+		}
 
-			// Send the signed RelayResponse protobuf
-			// Respect Accept header for content type negotiation (RFC 7231)
-			responseContentType := r.Header.Get("Accept")
-			if responseContentType == "" || responseContentType == "*/*" {
-				responseContentType = "application/json" // Default to what gateways typically expect
-			}
-			w.Header().Set("Content-Type", responseContentType)
+		// Send the signed RelayResponse protobuf
+		// Respect Accept header for content type negotiation (RFC 7231)
+		responseContentType := r.Header.Get("Accept")
+		if responseContentType == "" || responseContentType == "*/*" {
+			responseContentType = "application/json" // Default to what gateways typically expect
+		}
+		w.Header().Set("Content-Type", responseContentType)
 
-			// RFC compliance: Compress response if client accepts gzip
-			responseData := signedResponseBz
-			if clientAcceptsGzip(r) {
-				compressed, compressErr := compressGzip(signedResponseBz)
-				if compressErr != nil {
-					logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-						Err(compressErr).
-						Msg("failed to gzip compress response, sending uncompressed")
-				} else {
-					responseData = compressed
-					w.Header().Set("Content-Encoding", "gzip")
-					logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-						Int("original_size", len(signedResponseBz)).
-						Int("compressed_size", len(compressed)).
-						Float64("compression_ratio", float64(len(compressed))/float64(len(signedResponseBz))).
-						Msg("gzip compressed response for client")
-				}
-			}
-
-			w.WriteHeader(http.StatusOK)
-
-			// Measure response write time
-			if _, err := w.Write(responseData); err != nil {
-				p.logger.Debug().Err(err).Msg("failed to write signed response body")
-			}
-
-			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-				Int("response_size", len(responseData)).
-				Bool("compressed", len(responseData) != len(signedResponseBz)).
-				Msg("sent signed relay response")
-		} else {
-			// Fallback: no response signer or not a relay request - send raw response
-			// This path should only be used for non-relay traffic (health checks, etc.)
-			if relayRequest != nil && p.responseSigner == nil {
+		// RFC compliance: Compress response if client accepts gzip
+		responseData := signedResponseBz
+		if clientAcceptsGzip(r) {
+			compressed, compressErr := compressGzip(signedResponseBz)
+			if compressErr != nil {
 				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-					Msg("no response signer configured - sending unsigned response (NOT valid for relay protocol)")
-			}
-
-			// Copy response headers
-			for key, values := range respHeaders {
-				for _, value := range values {
-					w.Header().Add(key, value)
-				}
-			}
-
-			// DEBUG: Log compression-related headers for debugging
-			if contentEncoding := respHeaders.Get("Content-Encoding"); contentEncoding != "" {
-				p.logger.Debug().
-					Str("content_encoding", contentEncoding).
-					Str("service_id", serviceID).
-					Int("body_size", len(respBody)).
-					Msg("forwarding compressed response with Content-Encoding header")
-			}
-			if acceptEncoding := r.Header.Get("Accept-Encoding"); acceptEncoding != "" {
-				p.logger.Debug().
-					Str("accept_encoding", acceptEncoding).
-					Str("service_id", serviceID).
-					Bool("has_content_encoding", respHeaders.Get("Content-Encoding") != "").
-					Msg("client requested compression via Accept-Encoding")
-			}
-
-			// Write response
-			w.WriteHeader(respStatus)
-			if _, err := w.Write(respBody); err != nil {
-				p.logger.Debug().Err(err).Msg("failed to write response body")
+					Err(compressErr).
+					Msg("failed to gzip compress response, sending uncompressed")
+			} else {
+				responseData = compressed
+				w.Header().Set("Content-Encoding", "gzip")
+				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
+					Int("original_size", len(signedResponseBz)).
+					Int("compressed_size", len(compressed)).
+					Float64("compression_ratio", float64(len(compressed))/float64(len(signedResponseBz))).
+					Msg("gzip compressed response for client")
 			}
 		}
+
+		w.WriteHeader(http.StatusOK)
+
+		// Measure response write time
+		if _, err := w.Write(responseData); err != nil {
+			p.logger.Debug().Err(err).Msg("failed to write signed response body")
+		}
+
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
+			Int("response_size", len(responseData)).
+			Bool("compressed", len(responseData) != len(signedResponseBz)).
+			Msg("sent signed relay response")
 	}
 
-	relaysServed.WithLabelValues(serviceID, rpcTypeForMetrics).Inc()
+	relaysServed.WithLabelValues(serviceID, rpcType).Inc()
 	totalRelayDuration := time.Since(startTime)
 
 	// Record total relay latency asynchronously (no blocking on histogram locks)
@@ -943,15 +923,10 @@ func (p *ProxyServer) submitPublishTask(
 		}
 	}
 
-	// SECURITY: sessionID and applicationAddr MUST come from the signed RelayRequest.
+	// SECURITY: All values MUST come from the signed RelayRequest.
 	// Never read these from HTTP headers as they can be spoofed.
 	// The RelayRequest is cryptographically signed by the application/gateway.
 
-	// Supplier address can fallback to the proxy's configured address since
-	// the supplier is the one running this relayer.
-	if supplierAddr == "" {
-		supplierAddr = p.supplierAddress
-	}
 	if supplierAddr == "" {
 		// Create minimal session context from what we have
 		sessionCtx := logging.SessionContextPartial("", serviceID, "", "", 0)
@@ -1091,25 +1066,18 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	body []byte,
 	serviceID string,
 	svcConfig *ServiceConfig,
+	rpcType string,
 	poktHTTPRequest *sdktypes.POKTHTTPRequest,
 	w http.ResponseWriter,
 	relayRequest *servicetypes.RelayRequest,
 ) ([]byte, http.Header, int, bool, error) {
-	// Get backend URL based on RPC type
-	// If no Rpc-Type header, use the configured default or fall back to DefaultBackendType
-	rpcType := originalReq.Header.Get("Rpc-Type")
-	if rpcType == "" {
-		// Use configured default backend, or DefaultBackendType if not specified
-		if svcConfig.DefaultBackend != "" {
-			rpcType = svcConfig.DefaultBackend
-		} else {
-			rpcType = DefaultBackendType
-		}
+	// Create session context once for all logging in this function
+	var sessionCtx *logging.SessionContext
+	if relayRequest != nil {
+		sessionCtx = logging.SessionContextFromRelayRequest(relayRequest)
+	} else {
+		sessionCtx = &logging.SessionContext{ServiceID: serviceID}
 	}
-
-	// Convert numeric RPCType codes to backend type names
-	// (e.g., "4" → "rest", "3" → "jsonrpc")
-	rpcType = RPCTypeToBackendType(rpcType)
 
 	// Find the backend configuration
 	var backendURL string
@@ -1123,7 +1091,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	} else {
 		// Fallback chain if requested type not found
 		// Try: configured default → DefaultBackendType → rest → any available
-		fallbackTypes := []string{}
+		fallbackTypes := make([]string, 0)
 
 		if svcConfig.DefaultBackend != "" && svcConfig.DefaultBackend != rpcType {
 			fallbackTypes = append(fallbackTypes, svcConfig.DefaultBackend)
@@ -1141,13 +1109,6 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 				backendURL = backend.URL
 				configHeaders = backend.Headers
 				auth = backend.Authentication
-				// Create session context for logging if we have relay request
-				var sessionCtx *logging.SessionContext
-				if relayRequest != nil {
-					sessionCtx = logging.SessionContextFromRelayRequest(relayRequest)
-				} else {
-					sessionCtx = &logging.SessionContext{ServiceID: serviceID}
-				}
 				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 					Str("requested_type", rpcType).
 					Str("fallback_type", tryType).
@@ -1227,13 +1188,6 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		// Also copy headers from wrapper request (e.g., Pocket-* headers)
 		p.copyHeaders(req, originalReq)
 
-		// Create session context for logging
-		var sessionCtx *logging.SessionContext
-		if relayRequest != nil {
-			sessionCtx = logging.SessionContextFromRelayRequest(relayRequest)
-		} else {
-			sessionCtx = &logging.SessionContext{ServiceID: serviceID}
-		}
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Str("method", poktHTTPRequest.Method).
 			Str("url", requestURL.String()).
@@ -1277,14 +1231,32 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	}
 
 	// Set Pocket context headers for backend visibility
-	req.Header.Set(HeaderPocketSupplier, p.supplierAddress)
-	req.Header.Set(HeaderPocketService, serviceID)
+	// Use supplier address from relay request if available, fall back to proxy's configured address
+	var supplierAddress string
+	var applicationAddress string
 	if relayRequest != nil {
 		meta := relayRequest.GetMeta()
+		supplierAddress = meta.GetSupplierOperatorAddress()
 		if sessionHeader := meta.GetSessionHeader(); sessionHeader != nil {
-			req.Header.Set(HeaderPocketApplication, sessionHeader.GetApplicationAddress())
+			applicationAddress = sessionHeader.GetApplicationAddress()
 		}
 	}
+	req.Header.Set(HeaderPocketSupplier, supplierAddress)
+	req.Header.Set(HeaderPocketService, serviceID)
+	if applicationAddress != "" {
+		req.Header.Set(HeaderPocketApplication, applicationAddress)
+	}
+
+	// DEBUG: Log Pocket context headers being sent to backend
+	p.logger.Debug().
+		Str("backend_url", req.URL.String()).
+		Str("method", req.Method).
+		Str("service_id", serviceID).
+		Str("header_pocket_supplier", req.Header.Get(HeaderPocketSupplier)).
+		Str("header_pocket_service", req.Header.Get(HeaderPocketService)).
+		Str("header_pocket_application", req.Header.Get(HeaderPocketApplication)).
+		Int("total_headers_count", len(req.Header)).
+		Msg("sending request to backend with Pocket context headers")
 
 	// DEBUG: Log if client requested compression
 	if acceptEncoding := req.Header.Get("Accept-Encoding"); acceptEncoding != "" {
@@ -1314,16 +1286,17 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		return nil, nil, 0, false, fmt.Errorf("backend request failed: %w", err)
 	}
 
-	// Check if this is a streaming response
-	if isStreamingResponse(resp) {
-		// Create session context for logging
-		var sessionCtx *logging.SessionContext
-		if relayRequest != nil {
-			sessionCtx = logging.SessionContextFromRelayRequest(relayRequest)
-		} else {
-			sessionCtx = &logging.SessionContext{ServiceID: serviceID}
-		}
+	isStreaming := isStreamingResponse(resp)
 
+	// Non-streaming: read entire response
+	defer func() {
+		if isStreaming {
+			_ = resp.Body.Close()
+		}
+	}()
+
+	// Check if this is a streaming response
+	if isStreaming {
 		// Use the new streaming handler with proper batch-based signing when we have a relay request
 		if relayRequest != nil && p.responseSigner != nil {
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
@@ -1338,9 +1311,6 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		respBody, streamErr := p.handleStreamingResponse(resp, w)
 		return respBody, resp.Header, resp.StatusCode, true, streamErr
 	}
-
-	// Non-streaming: read entire response
-	defer func() { _ = resp.Body.Close() }()
 
 	// Measure response read latency
 	respBody, err := io.ReadAll(resp.Body)
@@ -1496,6 +1466,8 @@ func (p *ProxyServer) SetRelayProcessor(processor RelayProcessor) {
 	p.relayProcessor = processor
 }
 
+// TODO: this should use a sync map with a lock, since if we need to update on keys hot reload this will panic
+
 // SetResponseSigner sets the response signer for signing relay responses.
 // This is REQUIRED for proper relay handling - clients expect signed RelayResponse protobufs.
 func (p *ProxyServer) SetResponseSigner(signer *ResponseSigner) {
@@ -1511,11 +1483,6 @@ func (p *ProxyServer) SetSupplierCache(cache *cache.SupplierCache) {
 // SetRelayMeter sets the relay meter for rate limiting based on app stakes.
 func (p *ProxyServer) SetRelayMeter(meter *RelayMeter) {
 	p.relayMeter = meter
-}
-
-// SetSupplierAddress sets the supplier address for this proxy instance.
-func (p *ProxyServer) SetSupplierAddress(addr string) {
-	p.supplierAddress = addr
 }
 
 // InitializeRelayPipeline initializes the unified relay processing pipeline.
@@ -1572,18 +1539,7 @@ func (p *ProxyServer) InitGRPCHandler() {
 	p.grpcRelayServer = NewGRPCServerForRelayService(p.grpcRelayService)
 	p.logger.Info().Msg("gRPC relay service server initialized")
 
-	// Legacy: Initialize the transparent proxy handler (deprecated - kept for gRPC-Web compatibility)
-	p.grpcHandler = NewGRPCProxyHandler(
-		p.logger,
-		p.config.Services,
-		p.supplierAddress,
-		p.relayProcessor,
-		p.publisher,
-		p.responseSigner,
-		&p.currentBlockHeight,
-	)
-
-	// Initialize gRPC-Web wrapper using the relay server (not legacy handler)
+	// Initialize gRPC-Web wrapper using the relay server
 	// gRPC-Web clients should send proper RelayRequest messages
 	p.grpcWebWrapper = NewGRPCWebWrapper(
 		p.logger,

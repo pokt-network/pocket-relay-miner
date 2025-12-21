@@ -557,41 +557,26 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	b.logger.Debug().Msg("latestRequest found - building signed response")
 
 	// Build and sign RelayResponse
+	// responseSigner is guaranteed to be non-nil (validated early in WebSocketHandler)
 	var respBytes []byte
 	var relayResp *servicetypes.RelayResponse
 
-	if b.responseSigner != nil {
-		// Build signed WebSocket response (raw payload, no HTTP wrapping)
-		var signErr error
-		relayResp, respBytes, signErr = b.responseSigner.BuildAndSignWebSocketRelayResponse(
-			latestReq,
-			msg.data, // Raw WebSocket payload (e.g., JSON-RPC response)
-		)
-		if signErr != nil {
-			b.logger.Warn().Err(signErr).Msg("failed to sign websocket response")
-			// Fall back to unsigned
-			relayResp = &servicetypes.RelayResponse{
-				Meta: servicetypes.RelayResponseMetadata{
-					SessionHeader: latestReq.Meta.SessionHeader,
-				},
-				Payload: msg.data,
-			}
-			respBytes, _ = relayResp.Marshal()
-		}
-	} else {
-		// No signer - create unsigned response
+	// Build signed WebSocket response (raw payload, no HTTP wrapping)
+	var signErr error
+	relayResp, respBytes, signErr = b.responseSigner.BuildAndSignWebSocketRelayResponse(
+		latestReq,
+		msg.data, // Raw WebSocket payload (e.g., JSON-RPC response)
+	)
+	if signErr != nil {
+		b.logger.Warn().Err(signErr).Msg("failed to sign websocket response")
+		// Fall back to unsigned on signing error only (not nil signer)
 		relayResp = &servicetypes.RelayResponse{
 			Meta: servicetypes.RelayResponseMetadata{
 				SessionHeader: latestReq.Meta.SessionHeader,
 			},
 			Payload: msg.data,
 		}
-		var marshalErr error
-		respBytes, marshalErr = relayResp.Marshal()
-		if marshalErr != nil {
-			b.logger.Warn().Err(marshalErr).Msg("failed to marshal response")
-			respBytes = msg.data
-		}
+		respBytes, _ = relayResp.Marshal()
 	}
 
 	// Store latest response for relay emission
@@ -963,8 +948,29 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			return
 		}
 
-		// Log handshake headers for debugging (new WebSocket handshake validation protocol)
-		p.logHandshakeHeaders(r, serviceID)
+		// Validate critical dependencies are configured - fail fast before upgrade
+		if p.responseSigner == nil {
+			p.logger.Error().Str(logging.FieldServiceID, serviceID).Msg("response signer not configured")
+			p.sendError(w, http.StatusInternalServerError, "relayer not properly configured")
+			return
+		}
+
+		if p.relayProcessor == nil {
+			p.logger.Error().Str(logging.FieldServiceID, serviceID).Msg("relay processor not configured")
+			p.sendError(w, http.StatusInternalServerError, "relayer not properly configured")
+			return
+		}
+
+		if p.publisher == nil {
+			p.logger.Error().Str(logging.FieldServiceID, serviceID).Msg("publisher not configured")
+			p.sendError(w, http.StatusInternalServerError, "relayer not properly configured")
+			return
+		}
+
+		// Validate and log WebSocket handshake (permissive - never rejects)
+		// - PATH v2: Attempts signature verification, logs WARN if fails
+		// - PATH v1: Logs INFO about legacy handshake
+		p.validateAndLogWebSocketHandshake(r, serviceID)
 
 		// Upgrade HTTP connection to WebSocket
 		gatewayConn, err := WebSocketUpgrader.Upgrade(w, r, nil)
@@ -990,8 +996,12 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			headers.Set(k, v)
 		}
 
+		// Extract supplier address from handshake header (sent by PATH v2 protocol)
+		// For PATH v1, this will be empty and should be extracted from first RelayRequest
+		supplierAddress := r.Header.Get(HeaderPocketSupplierAddress)
+
 		// Add Pocket context headers for backend visibility
-		headers.Set(HeaderPocketSupplier, p.supplierAddress)
+		headers.Set(HeaderPocketSupplier, supplierAddress)
 		headers.Set(HeaderPocketService, serviceID)
 		// Note: Application address is not known until first relay request arrives on the WebSocket
 
@@ -1006,12 +1016,13 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 
 		// Create and run bridge
 		// Session end height will be set when the first relay request arrives
+		// Note: supplierAddress may be empty for PATH v1 - bridge will extract from first RelayRequest
 		bridge, err := NewWebSocketBridge(
 			p.logger,
 			gatewayConn,
 			backendURL,
 			serviceID,
-			p.supplierAddress,
+			supplierAddress,
 			arrivalHeight,
 			p.relayProcessor,
 			p.publisher,
@@ -1051,9 +1062,11 @@ const (
 	HeaderRpcType                  = "Rpc-Type"
 )
 
-// logHandshakeHeaders logs WebSocket handshake headers for debugging.
-// These headers are part of the WebSocket handshake validation protocol.
-func (p *ProxyServer) logHandshakeHeaders(r *http.Request, serviceID string) {
+// validateAndLogWebSocketHandshake validates and logs WebSocket handshake.
+// This function is permissive - it never rejects connections, only logs validation results.
+// - PATH v2: Attempts signature verification, logs WARN if fails (but continues)
+// - PATH v1: Logs INFO about legacy handshake (no validation headers)
+func (p *ProxyServer) validateAndLogWebSocketHandshake(r *http.Request, serviceID string) {
 	// Extract handshake headers
 	sessionID := r.Header.Get(HeaderPocketSessionID)
 	sessionStartHeight := r.Header.Get(HeaderPocketSessionStartHeight)
@@ -1063,30 +1076,71 @@ func (p *ProxyServer) logHandshakeHeaders(r *http.Request, serviceID string) {
 	signature := r.Header.Get(HeaderPocketSignature)
 	rpcType := r.Header.Get(HeaderRpcType)
 
-	// Check if we have the new handshake headers (v2 protocol)
-	hasNewHeaders := sessionID != "" || supplierAddress != "" || signature != ""
+	// Check if we have PATH v2 validation headers
+	hasV2Headers := sessionID != "" && supplierAddress != "" && signature != ""
 
-	logEvent := p.logger.Info().
+	if !hasV2Headers {
+		// PATH v1 - no validation headers present
+		p.logger.Info().
+			Str(logging.FieldServiceID, serviceID).
+			Str("remote_addr", r.RemoteAddr).
+			Str("app_address", appAddress).
+			Str("rpc_type", rpcType).
+			Msg("websocket handshake from PATH v1 (no validation headers)")
+		return
+	}
+
+	// PATH v2 - validation headers present, attempt verification
+	p.logger.Info().
 		Str(logging.FieldServiceID, serviceID).
-		Str("remote_addr", r.RemoteAddr)
+		Str("remote_addr", r.RemoteAddr).
+		Str("session_id", sessionID).
+		Str("session_start_height", sessionStartHeight).
+		Str("session_end_height", sessionEndHeight).
+		Str("supplier_address", supplierAddress).
+		Str("app_address", appAddress).
+		Str("rpc_type", rpcType).
+		Bool("has_signature", true).
+		Int("signature_length", len(signature)).
+		Msg("websocket handshake from PATH v2 (with validation headers)")
 
-	if hasNewHeaders {
-		// Log full handshake details for v2 protocol
-		logEvent.
+	// TODO(PATH-v2): Implement full handshake signature verification
+	// The signature should be verified against a reconstructed message containing:
+	// - Session ID, session start/end heights
+	// - Supplier address, application address
+	// - Service ID, RPC type
+	//
+	// For now, we accept all handshakes permissively until PATH v2 protocol is finalized.
+	// When ready, we should:
+	// 1. Reconstruct the signed message structure (matching PATH's signing logic)
+	// 2. Verify signature using application's public key (from session or blockchain)
+	// 3. Log WARN if verification fails (but still allow connection for backward compatibility)
+
+	if p.validator != nil {
+		// Placeholder for future signature verification
+		// When PATH v2 is stable, uncomment and implement:
+		/*
+			verifyErr := p.verifyWebSocketHandshakeSignature(sessionID, sessionStartHeight, sessionEndHeight,
+				supplierAddress, appAddress, serviceID, rpcType, signature)
+			if verifyErr != nil {
+				p.logger.Warn().
+					Err(verifyErr).
+					Str(logging.FieldServiceID, serviceID).
+					Str("session_id", sessionID).
+					Str("supplier_address", supplierAddress).
+					Msg("websocket handshake signature verification failed (accepting permissively)")
+				return
+			}
+			p.logger.Debug().
+				Str(logging.FieldServiceID, serviceID).
+				Str("session_id", sessionID).
+				Msg("websocket handshake signature verified successfully")
+		*/
+
+		// For now, just log that verification is not yet implemented
+		p.logger.Debug().
+			Str(logging.FieldServiceID, serviceID).
 			Str("session_id", sessionID).
-			Str("session_start_height", sessionStartHeight).
-			Str("session_end_height", sessionEndHeight).
-			Str("supplier_address", supplierAddress).
-			Str("app_address", appAddress).
-			Str("rpc_type", rpcType).
-			Bool("has_signature", signature != "").
-			Int("signature_length", len(signature)).
-			Msg("websocket handshake received (v2 protocol with validation headers)")
-	} else {
-		// Log minimal info for legacy connections (no new headers)
-		logEvent.
-			Str("app_address", appAddress).
-			Str("rpc_type", rpcType).
-			Msg("websocket handshake received (legacy - no validation headers)")
+			Msg("websocket handshake signature verification not yet implemented (accepting permissively)")
 	}
 }

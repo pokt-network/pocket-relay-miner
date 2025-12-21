@@ -152,6 +152,19 @@ func handleJSONRPC(cfg *Config) http.HandlerFunc {
 			requestDuration.WithLabelValues("http").Observe(time.Since(start).Seconds())
 		}()
 
+		// DEBUG: Log Pocket context headers received from relayer
+		pocketSupplier := r.Header.Get("Pocket-Supplier")
+		pocketService := r.Header.Get("Pocket-Service")
+		pocketApplication := r.Header.Get("Pocket-Application")
+		log.Printf("[HEADERS] Pocket-Supplier=%q Pocket-Service=%q Pocket-Application=%q",
+			pocketSupplier, pocketService, pocketApplication)
+
+		// Log all headers for detailed debugging
+		log.Printf("[HEADERS] All headers received:")
+		for name, values := range r.Header {
+			log.Printf("  %s: %s", name, strings.Join(values, ", "))
+		}
+
 		// Apply delay if configured
 		if cfg.DelayMs > 0 {
 			time.Sleep(time.Duration(cfg.DelayMs) * time.Millisecond)
