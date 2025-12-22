@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -176,7 +177,7 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 			return session, nil
 		}
 	}
-	if err != nil && err != redis.Nil {
+	if err != nil && !errors.Is(err, redis.Nil) {
 		c.logger.Warn().Err(err).Msg("error fetching session from Redis")
 	}
 	cacheMisses.WithLabelValues("session", "l2").Inc()
@@ -192,20 +193,6 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 		return nil, fmt.Errorf("failed to query session: %w", err)
 	}
 
-	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-	// ADDING SESSION DEBUG INFORMATION SINCE WE ARE OBSERVING THAN SOME SESSIONS ARE NOT DETERMINISTIC AT THE END
-	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-	bytes, _ := session.Marshal()
-	hash := sha256.Sum256(bytes)
-	sessionHash := hex.EncodeToString(hash[:])
-	c.logger.Info().
-		Str("session_id", session.SessionId).
-		Str("service_id", serviceId).
-		Int64("height", height).
-		Str("raw", string(bytes)).
-		Str("sha256", sessionHash).
-		Msg("session fetched from chain")
-
 	chainQueries.WithLabelValues("session").Inc()
 	cacheGetLatency.WithLabelValues("session", CacheLevelL3).Observe(time.Since(start).Seconds())
 
@@ -214,15 +201,42 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 
 	// Cache in Redis (L2)
 	data, err = json.Marshal(session)
+	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+	// ADDING SESSION DEBUG INFORMATION SINCE WE ARE OBSERVING THAN SOME SESSIONS ARE NOT DETERMINISTIC AT THE END
+	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+	bytes, _ := session.Marshal()
+	hash := sha256.Sum256(data)
+	sessionHash := hex.EncodeToString(hash[:])
+	c.logger.Info().
+		Str("session_id", session.SessionId).
+		Str("service_id", serviceId).
+		Str("app_address", appAddress).
+		Int64("height", height).
+		Str("raw", string(bytes)).
+		Str("sha256", sessionHash).
+		Msg("session fetched from chain")
+	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+	// +++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
 	if err == nil {
-		if err := c.redisClient.Set(ctx, key, data, ttl).Err(); err != nil {
+		if err = c.redisClient.Set(ctx, key, data, ttl).Err(); err != nil {
 			c.logger.Warn().Err(err).Msg("failed to cache session in Redis")
+		} else {
+			c.logger.Info().
+				Str("session_id", session.SessionId).
+				Str("service_id", serviceId).
+				Str("app_address", appAddress).
+				Int64("height", height).
+				Str("raw", string(data)).
+				Str("sha256", sessionHash).
+				Msg("session write from L3 to L2")
 		}
+	} else {
+		c.logger.Error().Err(err).Msg("failed to marshal session for caching in Redis (Saving to L2")
 	}
 
 	// Cache in L1
 	c.sessionCache.Store(key, session)
-	c.logger.Debug().
+	c.logger.Info().
 		Str("app_address", appAddress).
 		Str("service_id", serviceId).
 		Int64("height", height).

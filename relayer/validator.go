@@ -2,6 +2,7 @@ package relayer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -106,7 +107,7 @@ func (rv *relayValidator) ValidateRelayRequest(
 		return fmt.Errorf("supplier %s is not allowed by this relayer", supplierAddr)
 	}
 
-	// Get target session block height (handles grace period)
+	// Get target session block height
 	step2 := time.Now()
 	sessionBlockHeight, err := rv.getTargetSessionBlockHeight(ctx, relayRequest)
 	if err != nil {
@@ -151,13 +152,33 @@ func (rv *relayValidator) ValidateRelayRequest(
 
 	// Verify supplier is in session
 	supplierFound := false
+	currentHeight := rv.GetCurrentBlockHeight()
+
 	for _, supplier := range session.Suppliers {
 		if supplier.OperatorAddress == supplierAddr {
 			supplierFound = true
+			bytes, _ := json.Marshal(session)
+			rv.logger.Info().
+				Str("supplier", supplier.OperatorAddress).
+				Str("session_id", session.SessionId).
+				Str("service_id", serviceID).
+				Int64("session_height", sessionBlockHeight).
+				Int64("current_height", currentHeight).
+				Str("raw", string(bytes)).
+				Msg("supplier found in session")
 			break
 		}
 	}
 	if !supplierFound {
+		bytes, _ := json.Marshal(session)
+		rv.logger.Info().
+			Str("supplier", supplierAddr).
+			Str("session_id", session.SessionId).
+			Str("service_id", serviceID).
+			Int64("session_height", sessionBlockHeight).
+			Int64("current_height", currentHeight).
+			Str("raw", string(bytes)).
+			Msg("supplier not found in session")
 		return fmt.Errorf("supplier %s not found in session", supplierAddr)
 	}
 
@@ -276,6 +297,7 @@ func (rv *relayValidator) getTargetSessionBlockHeight(
 	// NOTE: grace_period_extra_blocks was removed - it created inconsistency between
 	// getTargetSessionBlockHeight() and CheckRewardEligibility() causing relays to be
 	// accepted but marked as ineligible for rewards.
+	// 10 - 572340 - 572320
 	if !sharedtypes.IsGracePeriodElapsed(sharedParams, sessionEndHeight, currentHeight) {
 		// Within grace period, use session end height for lookup
 		return sessionEndHeight, nil
