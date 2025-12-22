@@ -32,15 +32,12 @@ import (
 )
 
 const (
-	// DefaultGasLimit is the default gas limit for transactions when not using simulation.
-	DefaultGasLimit = 500000
-
 	// DefaultGasPrice is the default gas price in upokt.
 	DefaultGasPrice = "0.000001upokt"
 
 	// DefaultGasAdjustment is the default multiplier for simulated gas.
 	// Applied when GasLimit=0 (auto) to add safety margin: actual_gas = simulated_gas * adjustment
-	DefaultGasAdjustment = 1.5
+	DefaultGasAdjustment = 1.7
 
 	// DefaultTimeoutHeight is the number of blocks after which a transaction times out.
 	DefaultTimeoutHeight = 100
@@ -66,7 +63,7 @@ type TxClientConfig struct {
 	// GasLimit is the gas limit for transactions.
 	// Set to 0 for automatic gas estimation (simulation).
 	// Set to a positive value for a fixed gas limit.
-	// Default: 500000
+	// No default - must be explicitly configured (0 for auto, or explicit value)
 	GasLimit uint64
 
 	// GasPrice is the gas price for transactions.
@@ -75,7 +72,7 @@ type TxClientConfig struct {
 	// GasAdjustment is the multiplier applied to simulated gas to add safety margin.
 	// Only used when GasLimit=0 (automatic simulation).
 	// Actual gas = simulated_gas * GasAdjustment
-	// Default: 1.5 (adds 50% safety margin)
+	// Default: 1.7 (adds 70% safety margin)
 	GasAdjustment float64
 
 	// TimeoutBlocks is the number of blocks after which a transaction times out.
@@ -128,9 +125,7 @@ func NewTxClient(
 	if config.ChainID == "" {
 		config.ChainID = DefaultChainID
 	}
-	if config.GasLimit == 0 {
-		config.GasLimit = DefaultGasLimit
-	}
+	// GasLimit: No default applied - 0 means automatic (simulation), non-zero means explicit limit
 	// Check Denom instead of IsZero() since zero-value DecCoin has nil internal state
 	if config.GasPrice.Denom == "" {
 		gasPrice, err := cosmostypes.ParseDecCoin(DefaultGasPrice)
