@@ -32,9 +32,6 @@ import (
 )
 
 const (
-	// DefaultGasLimit is the default gas limit for transactions when not using simulation.
-	DefaultGasLimit = 600000
-
 	// DefaultGasPrice is the default gas price in upokt.
 	DefaultGasPrice = "0.000001upokt"
 
@@ -66,7 +63,7 @@ type TxClientConfig struct {
 	// GasLimit is the gas limit for transactions.
 	// Set to 0 for automatic gas estimation (simulation).
 	// Set to a positive value for a fixed gas limit.
-	// Default: 500000
+	// No default - must be explicitly configured (0 for auto, or explicit value)
 	GasLimit uint64
 
 	// GasPrice is the gas price for transactions.
@@ -75,7 +72,7 @@ type TxClientConfig struct {
 	// GasAdjustment is the multiplier applied to simulated gas to add safety margin.
 	// Only used when GasLimit=0 (automatic simulation).
 	// Actual gas = simulated_gas * GasAdjustment
-	// Default: 1.5 (adds 50% safety margin)
+	// Default: 1.7 (adds 70% safety margin)
 	GasAdjustment float64
 
 	// TimeoutBlocks is the number of blocks after which a transaction times out.
@@ -128,9 +125,7 @@ func NewTxClient(
 	if config.ChainID == "" {
 		config.ChainID = DefaultChainID
 	}
-	if config.GasLimit == 0 {
-		config.GasLimit = DefaultGasLimit
-	}
+	// GasLimit: No default applied - 0 means automatic (simulation), non-zero means explicit limit
 	// Check Denom instead of IsZero() since zero-value DecCoin has nil internal state
 	if config.GasPrice.Denom == "" {
 		gasPrice, err := cosmostypes.ParseDecCoin(DefaultGasPrice)
@@ -303,7 +298,7 @@ func (tc *TxClient) SubmitProofs(
 func (tc *TxClient) signAndBroadcast(
 	ctx context.Context,
 	signerAddr string,
-	timeoutHeight uint64,
+	_ uint64,
 	txType string,
 	msgs ...cosmostypes.Msg,
 ) (string, error) {
@@ -333,9 +328,23 @@ func (tc *TxClient) signAndBroadcast(
 		return "", fmt.Errorf("failed to set messages: %w", setMsgsErr)
 	}
 
+	// Set memo (optional)
+	txBuilder.SetMemo("HA RelayMiner")
+
+	// Set unordered=true to eliminate account sequence issues
+	// With unordered, TXs don't check sequence numbers and can be included in any order
+	txBuilder.SetUnordered(true)
+
+	// Set timeout timestamp (required for unordered TXs)
+	// Cosmos SDK requires time.Time for unordered TXs
+	// Use 2 minute timeout - sufficient for TX inclusion
+	// The timeoutHeight parameter is ignored for unordered TXs (only used for logging)
+	timeoutDuration := 2 * time.Minute
+	timeoutTimestamp := time.Now().Add(timeoutDuration)
+	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
+
 	// Determine gas limit and fees
 	var gasLimit uint64
-	var feeAmount cosmostypes.Coins
 
 	if tc.config.GasLimit == 0 {
 		// Automatic gas estimation: simulate transaction to estimate gas
@@ -353,32 +362,13 @@ func (tc *TxClient) signAndBroadcast(
 			Float64("gas_adjustment", tc.config.GasAdjustment).
 			Uint64("final_gas_limit", gasLimit).
 			Msg("gas simulation succeeded")
-
-		feeAmount = tc.calculateFeeForGas(gasLimit)
 	} else {
 		// Use explicit gas limit
 		gasLimit = tc.config.GasLimit
-		feeAmount = tc.calculateFee()
 	}
 
 	// Set gas limit and fees
 	txBuilder.SetGasLimit(gasLimit)
-	txBuilder.SetFeeAmount(feeAmount)
-
-	// Set memo (optional)
-	txBuilder.SetMemo("HA RelayMiner")
-
-	// Set unordered=true to eliminate account sequence issues
-	// With unordered, TXs don't check sequence numbers and can be included in any order
-	txBuilder.SetUnordered(true)
-
-	// Set timeout timestamp (required for unordered TXs)
-	// Cosmos SDK requires time.Time for unordered TXs
-	// Use 2 minute timeout - sufficient for TX inclusion
-	// The timeoutHeight parameter is ignored for unordered TXs (only used for logging)
-	timeoutDuration := 2 * time.Minute
-	timeoutTimestamp := time.Now().Add(timeoutDuration)
-	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
 
 	// Sign the transaction (unordered=true means sequence=0)
 	err = tc.signTx(ctx, txBuilder, privKey, account, true)
@@ -602,23 +592,23 @@ func (tc *TxClient) simulateTx(
 
 // calculateFee calculates the transaction fee based on configured gas limit.
 // This is the MAXIMUM fee we're willing to pay (set before broadcast).
-func (tc *TxClient) calculateFee() cosmostypes.Coins {
-	return tc.calculateFeeForGas(tc.config.GasLimit)
-}
+//func (tc *TxClient) calculateFee() cosmostypes.Coins {
+//	return tc.calculateFeeForGas(tc.config.GasLimit)
+//}
 
 // calculateFeeForGas calculates the transaction fee for a given gas limit.
-func (tc *TxClient) calculateFeeForGas(gasLimit uint64) cosmostypes.Coins {
-	gasLimitDec := math.LegacyNewDec(int64(gasLimit))
-	feeAmount := tc.config.GasPrice.Amount.Mul(gasLimitDec)
-
-	// Truncate and add 1 if there's a remainder to ensure we don't underpay
-	feeInt := feeAmount.TruncateInt()
-	if feeAmount.Sub(math.LegacyNewDecFromInt(feeInt)).IsPositive() {
-		feeInt = feeInt.Add(math.OneInt())
-	}
-
-	return cosmostypes.NewCoins(cosmostypes.NewCoin(tc.config.GasPrice.Denom, feeInt))
-}
+//func (tc *TxClient) calculateFeeForGas(gasLimit uint64) cosmostypes.Coins {
+//	gasLimitDec := math.LegacyNewDec(int64(gasLimit))
+//	feeAmount := tc.config.GasPrice.Amount.Mul(gasLimitDec)
+//
+//	// Truncate and add 1 if there's a remainder to ensure we don't underpay
+//	feeInt := feeAmount.TruncateInt()
+//	if feeAmount.Sub(math.LegacyNewDecFromInt(feeInt)).IsPositive() {
+//		feeInt = feeInt.Add(math.OneInt())
+//	}
+//
+//	return cosmostypes.NewCoins(cosmostypes.NewCoin(tc.config.GasPrice.Denom, feeInt))
+//}
 
 // NOTE: calculateActualFee() removed - not available in SYNC mode (only CheckTx, no execution result)
 

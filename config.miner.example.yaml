@@ -94,7 +94,7 @@ pocket_node:
   # Adds safety margin: actual_gas = simulated_gas * gas_adjustment
   # Default: 1.7 (adds 70% safety margin to simulated gas)
   # Increase if transactions fail with code 11 (out of gas) despite simulation
-  gas_adjustment: 1.7
+  # gas_adjustment: 1.7
 
   # NOTE: Unordered transactions with SYNC broadcast mode
   # We use unordered=true with 2-minute timeout_timestamp to eliminate account
