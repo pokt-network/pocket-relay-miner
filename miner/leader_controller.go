@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"runtime"
-	"strings"
 	"sync"
 
 	pond "github.com/alitto/pond/v2"
@@ -15,7 +14,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
-	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
@@ -40,19 +38,12 @@ type LeaderControllerConfig struct {
 	QueryNodeGRPCUrl string
 	GRPCInsecure     bool
 	ChainID          string
-
-	// SkipSupplierManager skips creating SupplierManager when true.
-	// Set to true when SupplierWorker is running independently (distributed claiming).
-	SkipSupplierManager bool
-
-	// ExternalSupplierManager is the externally managed SupplierManager.
-	// Used for wiring relay handler when SkipSupplierManager is true.
-	ExternalSupplierManager *SupplierManager
 }
 
 // LeaderController manages all leader-only resources.
-// It creates expensive resources (query clients, caches, supplier manager) only when elected leader
+// It creates expensive resources (query clients, caches, monitors) only when elected leader
 // and cleans them up when losing leadership. This prevents resource waste on standby instances.
+// Note: Supplier processing is handled by SupplierWorker (distributed across all replicas), not LeaderController.
 type LeaderController struct {
 	logger logging.Logger
 	config LeaderControllerConfig
@@ -71,7 +62,6 @@ type LeaderController struct {
 	supplierCache         *cache.SupplierCache
 	cacheOrchestrator     *cache.CacheOrchestrator
 	proofChecker          *ProofRequirementChecker
-	supplierManager       *SupplierManager
 	balanceMonitor        *BalanceMonitor
 	blockHealthMonitor    *BlockHealthMonitor
 	supplierRegistry      *SupplierRegistry
@@ -355,141 +345,11 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		Int("per_service_count", len(c.config.Config.ServiceFactors)).
 		Msg("service factor registry published")
 
-	// Create cached shared query client
-	cachedSharedClient := cache.NewCachedSharedQueryClient(c.sharedParamsCache, c.queryClients.Shared())
+	// Create cached shared query client (used by SupplierWorker)
+	_ = cache.NewCachedSharedQueryClient(c.sharedParamsCache, c.queryClients.Shared())
 
-	// Create and start supplier manager (unless SupplierWorker is handling it)
-	// NOTE: This is legacy/dead code - SkipSupplierManager is ALWAYS true in production.
-	// Keeping for backward compatibility with old deployment modes.
-	if !c.config.SkipSupplierManager {
-		c.logger.Warn().Msg("SkipSupplierManager=false is deprecated - use SupplierWorker for distributed claiming")
-
-		c.supplierManager = NewSupplierManager(
-			c.logger,
-			c.config.KeyManager,
-			c.supplierRegistry,
-			SupplierManagerConfig{
-				RedisClient:             c.config.RedisClient,
-				ConsumerName:            c.config.Config.Redis.ConsumerName,
-				SessionTTL:              c.config.Config.SessionTTL,
-				CacheTTL:                c.config.Config.GetCacheTTL(),
-				BatchSize:               c.config.Config.BatchSize,
-				AckBatchSize:            c.config.Config.AckBatchSize,
-				ClaimIdleTimeout:        c.config.Config.GetClaimIdleTimeout(),
-				StreamDiscoveryInterval: c.config.Config.GetStreamDiscoveryInterval(),
-				SupplierCache:           c.supplierCache,
-				MinerID:                 c.config.Config.Redis.ConsumerName,
-				SupplierQueryClient:     c.queryClients.Supplier(),
-				WorkerPool:              c.masterPool,
-				TxClient:                nil, // DEPRECATED: TxClient only used in SupplierWorker (distributed mode)
-				BlockClient:             c.blockSubscriber,
-				SharedClient:            cachedSharedClient,
-				SessionClient:           c.queryClients.Session(),
-				ProofChecker:            c.proofChecker,
-				ServiceFactorProvider:   c.serviceFactorRegistry,                                              // For claim ceiling warnings
-				AppClient:               cache.NewApplicationQueryClientAdapter(c.queryClients.Application()), // For claim ceiling calculations
-				SessionLifecycleConfig: SessionLifecycleConfig{
-					CheckInterval:            0, // Event-driven
-					MaxConcurrentTransitions: c.config.Config.GetSessionLifecycleMaxConcurrentTransitions(),
-				},
-				EnableDistributedClaiming: true, // Always enabled
-				ClaimerConfig:             c.config.Config.GetSupplierClaimingConfig(),
-			},
-		)
-
-		// Set relay handler
-		c.supplierManager.SetRelayHandler(func(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error {
-			state, ok := c.supplierManager.GetSupplierState(supplierAddr)
-			if !ok {
-				return fmt.Errorf("supplier state not found: %s", supplierAddr)
-			}
-
-			// Track discovered apps and services
-			if msg.Message.ApplicationAddress != "" {
-				c.cacheOrchestrator.RecordDiscoveredApp(msg.Message.ApplicationAddress)
-			}
-			if msg.Message.ServiceId != "" {
-				c.cacheOrchestrator.RecordDiscoveredService(msg.Message.ServiceId)
-			}
-
-			// CRITICAL: Check session state BEFORE updating SMST.
-			// This is essential for HA failover - the new instance may not know the session
-			// was already claimed (claimedRoot is only in-memory). Without this check,
-			// late relays would be accepted and counted after the session was already settled.
-			if state.SessionStore != nil {
-				snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
-				if storeErr == nil && snapshot != nil {
-					// Check if session is in a terminal state (claimed, settled, or expired)
-					if snapshot.State == SessionStateClaimed ||
-						snapshot.State == SessionStateSettled ||
-						snapshot.State == SessionStateExpired {
-						c.logger.Info().
-							Str("session_id", msg.Message.SessionId).
-							Str("supplier", supplierAddr).
-							Str("session_state", string(snapshot.State)).
-							Str("service", msg.Message.ServiceId).
-							Int64("relay_session_start", msg.Message.SessionStartHeight).
-							Int64("relay_session_end", msg.Message.SessionEndHeight).
-							Int64("snapshot_session_start", snapshot.SessionStartHeight).
-							Int64("snapshot_session_end", snapshot.SessionEndHeight).
-							Int64("snapshot_relay_count", snapshot.RelayCount).
-							Msg("LATE_RELAY: dropping relay - session already in terminal state")
-						RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
-						return nil // Return nil to ACK the message and prevent infinite reclaim
-					}
-				}
-				// If session doesn't exist yet or store error, continue with normal processing
-			}
-
-			// Update SMST
-			if err = state.SMSTManager.UpdateTree(
-				ctx,
-				msg.Message.SessionId,
-				msg.Message.RelayHash,
-				msg.Message.RelayBytes,
-				msg.Message.ComputeUnitsPerRelay,
-			); err != nil {
-				// Handle session sealed errors (backup check - SMST's in-memory seal/claimed state)
-				errMsg := err.Error()
-				if strings.Contains(errMsg, "already been claimed") || strings.Contains(errMsg, "is sealing") {
-					c.logger.Info().
-						Str("session_id", msg.Message.SessionId).
-						Str("supplier", supplierAddr).
-						Msg("dropping late relay - session sealed or claimed (SMST check)")
-					RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
-					return nil
-				}
-				return fmt.Errorf("failed to update SMST: %w", err)
-			}
-
-			// Track relay in session coordinator
-			if err := state.SessionCoordinator.OnRelayProcessed(
-				ctx,
-				msg.Message.SessionId,
-				msg.Message.ComputeUnitsPerRelay,
-				msg.Message.SupplierOperatorAddress,
-				msg.Message.ServiceId,
-				msg.Message.ApplicationAddress,
-				msg.Message.SessionStartHeight,
-				msg.Message.SessionEndHeight,
-			); err != nil {
-				return fmt.Errorf("failed to update session coordinator: %w", err)
-			}
-
-			return nil
-		})
-
-		// Start supplier manager
-		if err := c.supplierManager.Start(ctx); err != nil {
-			c.cleanup()
-			return fmt.Errorf("failed to start supplier manager: %w", err)
-		}
-		c.logger.Info().Msg("supplier manager started")
-	} else {
-		// When using SupplierWorker, the external supplier manager is already running
-		c.supplierManager = c.config.ExternalSupplierManager
-		c.logger.Info().Msg("using external supplier manager (SupplierWorker)")
-	}
+	// NOTE: Supplier processing is handled by SupplierWorker (distributed across all replicas).
+	// LeaderController only manages shared caches, block publishing, and monitoring.
 
 	// Start block health monitor if enabled
 	if c.config.Config.BlockHealthMonitor.Enabled {
@@ -523,7 +383,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 			c.queryClients.Supplier(),
 			c.supplierParamsCache,
 			c.proofParamsCache,
-			c.supplierManager,
+			c.supplierRegistry,
 			c.config.GlobalLeader,
 		)
 		if err := c.balanceMonitor.Start(ctx); err != nil {
@@ -603,14 +463,6 @@ func (c *LeaderController) cleanup() {
 		}
 		c.blockHealthMonitor = nil
 	}
-
-	// Only close supplier manager if we created it (not when using external SupplierWorker)
-	if c.supplierManager != nil && !c.config.SkipSupplierManager {
-		if err := c.supplierManager.Close(); err != nil {
-			c.logger.Error().Err(err).Msg("failed to close supplier manager")
-		}
-	}
-	c.supplierManager = nil
 
 	// ServiceFactorRegistry doesn't have a Close method - it just holds config
 	// Keys will expire based on Redis TTL or stay until overwritten

@@ -253,20 +253,20 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Msg("SupplierWorker started - claiming suppliers")
 
 	// Create leader controller for leader-only resources (cache refresh + block publishing)
-	// SupplierWorker handles all supplier processing - LeaderController only needs to:
-	// - Refresh caches (shared params, session params, applications, services)
-	// - Publish block events to Redis for all miners to consume
+	// SupplierWorker handles all supplier processing (distributed across all replicas).
+	// LeaderController only manages:
+	// - Shared cache refresh (params, applications, services)
+	// - Block event publishing to Redis for distributed consumption
+	// - Balance and health monitoring
 	leaderController := miner.NewLeaderController(miner.LeaderControllerConfig{
-		Logger:                  logger,
-		RedisClient:             redisClient,
-		KeyManager:              keyManager,
-		Config:                  config,
-		GlobalLeader:            globalLeader,
-		QueryNodeRPCUrl:         config.PocketNode.QueryNodeRPCUrl,
-		QueryNodeGRPCUrl:        config.PocketNode.QueryNodeGRPCUrl,
-		GRPCInsecure:            config.PocketNode.GRPCInsecure,
-		SkipSupplierManager:     true, // SupplierWorker handles supplier processing
-		ExternalSupplierManager: supplierWorker.GetSupplierManager(),
+		Logger:           logger,
+		RedisClient:      redisClient,
+		KeyManager:       keyManager,
+		Config:           config,
+		GlobalLeader:     globalLeader,
+		QueryNodeRPCUrl:  config.PocketNode.QueryNodeRPCUrl,
+		QueryNodeGRPCUrl: config.PocketNode.QueryNodeGRPCUrl,
+		GRPCInsecure:     config.PocketNode.GRPCInsecure,
 	})
 
 	// Register leader election callbacks

@@ -47,8 +47,8 @@ type BalanceMonitor struct {
 	proofParamsCache interface {
 		Get(ctx context.Context, force ...bool) (*prooftypes.Params, error)
 	}
-	supplierManager *SupplierManager
-	globalLeader    *leader.GlobalLeaderElector
+	supplierRegistry *SupplierRegistry
+	globalLeader     *leader.GlobalLeaderElector
 
 	// Lifecycle
 	ctx      context.Context
@@ -70,7 +70,7 @@ func NewBalanceMonitor(
 	proofParamsCache interface {
 		Get(ctx context.Context, force ...bool) (*prooftypes.Params, error)
 	},
-	supplierManager *SupplierManager,
+	supplierRegistry *SupplierRegistry,
 	globalLeader *leader.GlobalLeaderElector,
 ) *BalanceMonitor {
 	return &BalanceMonitor{
@@ -80,7 +80,7 @@ func NewBalanceMonitor(
 		supplierClient:      supplierClient,
 		supplierParamsCache: supplierParamsCache,
 		proofParamsCache:    proofParamsCache,
-		supplierManager:     supplierManager,
+		supplierRegistry:    supplierRegistry,
 		globalLeader:        globalLeader,
 	}
 }
@@ -140,7 +140,11 @@ func (m *BalanceMonitor) checkAllSuppliers(ctx context.Context) {
 	}
 
 	// Get all suppliers from manager
-	suppliers := m.supplierManager.ListSuppliers()
+	suppliers, err := m.supplierRegistry.ListSuppliers(m.ctx)
+	if err != nil {
+		m.logger.Warn().Err(err).Msg("failed to list suppliers from registry")
+		return
+	}
 	if len(suppliers) == 0 {
 		m.logger.Debug().Msg("no suppliers to monitor")
 		return
