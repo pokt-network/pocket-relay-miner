@@ -930,10 +930,12 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// Between initial check (at proof window open) and now (at earliestProofHeight),
 		// the blockchain might have already settled claims without requiring proofs.
 		// This prevents wasting gas on simulation failures.
+		// IMPORTANT: MUST use the same seed block as the validator (proofRequirementSeedBlock),
+		// NOT proofPathSeedBlock, even though we're at a later height now.
 		if lc.proofChecker != nil {
 			stillNeedingProof := make([]*SessionSnapshot, 0, len(sessionsNeedingProof))
 			for _, snapshot := range sessionsNeedingProof {
-				required, recheckErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofPathSeedBlock.Hash())
+				required, recheckErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofRequirementSeedBlock.Hash())
 				if recheckErr != nil {
 					// Error checking - err on side of caution and submit anyway
 					logger.Warn().
