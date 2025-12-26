@@ -306,10 +306,10 @@ func buildHTTPClient(cfg *HTTPTransportConfig) *http.Client {
 		tlsHandshakeTimeout = 10 * time.Second
 	}
 
+	// ResponseHeaderTimeout: Respect 0 as "no timeout" for streaming services.
+	// Defaults are applied in DefaultConfig and http_transport config.
+	// Timeout profiles can explicitly set 0 to disable header timeout for long-running streams.
 	responseHeaderTimeout := time.Duration(cfg.ResponseHeaderTimeoutSeconds) * time.Second
-	if responseHeaderTimeout == 0 {
-		responseHeaderTimeout = 30 * time.Second
-	}
 
 	expectContinueTimeout := time.Duration(cfg.ExpectContinueTimeoutSeconds) * time.Second
 	if expectContinueTimeout == 0 {
