@@ -85,6 +85,7 @@ type SessionMeterMeta struct {
 	SessionID        string `json:"session_id"`
 	AppAddress       string `json:"app_address"`
 	ServiceID        string `json:"service_id"`
+	SupplierAddress  string `json:"supplier_address"`
 	SessionEndHeight int64  `json:"session_end_height"`
 	MaxStakeUpokt    int64  `json:"max_stake_upokt"` // Max allowed stake in uPOKT
 	CreatedAt        int64  `json:"created_at"`      // Unix timestamp
@@ -229,6 +230,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	sessionID string,
 	appAddress string,
 	serviceID string,
+	supplierAddress string,
 	sessionEndHeight int64,
 ) (allowed bool, err error) {
 	m.mu.RLock()
@@ -247,7 +249,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	}
 
 	// Get or create session meter
-	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, sessionEndHeight)
+	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight)
 	if err != nil {
 		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
@@ -353,6 +355,9 @@ func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID string)
 // ClearSessionMeter clears all metering data for a session.
 // Called by miners when claims are processed to free Redis space.
 func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) error {
+	// Get meta before deleting (need supplier/service_id for metric labels)
+	meta, _ := m.getSessionMeta(ctx, sessionID)
+
 	keys := []string{
 		m.metaKey(sessionID),
 		m.consumedKey(sessionID),
@@ -367,7 +372,10 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) er
 	delete(m.localCache, sessionID)
 	m.localCacheMu.Unlock()
 
-	relayMeterSessionsActive.Dec()
+	// Decrement metric with labels (if we have meta)
+	if meta != nil {
+		relayMeterSessionsActive.WithLabelValues(meta.SupplierAddress, meta.ServiceID).Dec()
+	}
 
 	m.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
@@ -390,6 +398,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	sessionID string,
 	appAddress string,
 	serviceID string,
+	supplierAddress string,
 	sessionEndHeight int64,
 ) (*SessionMeterMeta, int64, error) {
 	// Check local cache first (L1)
@@ -420,6 +429,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 		SessionID:        sessionID,
 		AppAddress:       appAddress,
 		ServiceID:        serviceID,
+		SupplierAddress:  supplierAddress,
 		SessionEndHeight: sessionEndHeight,
 		MaxStakeUpokt:    maxStakeUpokt,
 		CreatedAt:        time.Now().Unix(),
@@ -440,7 +450,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 
 	if !set {
 		// Another replica created it first, fetch their version
-		return m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, sessionEndHeight)
+		return m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight)
 	}
 
 	// Initialize consumed counter
@@ -452,7 +462,8 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	m.localCache[sessionID] = meta
 	m.localCacheMu.Unlock()
 
-	relayMeterSessionsActive.Inc()
+	// Increment active sessions metric
+	relayMeterSessionsActive.WithLabelValues(meta.SupplierAddress, meta.ServiceID).Inc()
 
 	return meta, maxStakeUpokt, nil
 }

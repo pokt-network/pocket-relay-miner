@@ -149,6 +149,8 @@ func (p *RelayPipeline) MeterRelay(
 	sessionHeader := relayCtx.Request.Meta.SessionHeader
 	sessionID := sessionHeader.SessionId
 	appAddress := sessionHeader.ApplicationAddress
+	supplierAddress := relayCtx.SupplierAddress
+	sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 	// Check and consume relay stake
 	allowed, err := p.relayMeter.CheckAndConsumeRelay(
@@ -156,7 +158,8 @@ func (p *RelayPipeline) MeterRelay(
 		sessionID,
 		appAddress,
 		relayCtx.ServiceID,
-		int64(relayCtx.ComputeUnits),
+		supplierAddress,
+		sessionEndHeight,
 	)
 
 	if err != nil {

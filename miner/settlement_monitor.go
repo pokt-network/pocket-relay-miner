@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 	abcitypes "github.com/cometbft/cometbft/abci/types"
 	"github.com/cometbft/cometbft/rpc/client/http"
 
@@ -385,7 +385,10 @@ func (sm *SettlementMonitor) handleClaimExpired(attributes []abcitypes.EventAttr
 	numRelays := extractIntValue(attrs["num_relays"])
 	computeUnits := extractIntValue(attrs["num_claimed_compute_units"])
 	sessionEndHeight := extractIntValue(attrs["session_end_block_height"])
-	claimedUpokt := extractStringValue(attrs["claimed_upokt"])
+	claimedUpoktStr := extractStringValue(attrs["claimed_upokt"])
+
+	// Parse claimed uPOKT amount (e.g., "70upokt" -> 70)
+	claimedUpokt := parseUpoktAmount(claimedUpoktStr)
 
 	// Map expiration reason string from blockchain to lowercase metric label
 	// Blockchain sends: "PROOF_MISSING", "PROOF_INVALID", etc.
@@ -405,13 +408,13 @@ func (sm *SettlementMonitor) handleClaimExpired(attributes []abcitypes.EventAttr
 		Str("expiration_reason", reason).
 		Int64("num_relays", numRelays).
 		Int64("compute_units", computeUnits).
-		Str("claimed_upokt", claimedUpokt).
+		Int64("claimed_upokt", claimedUpokt).
 		Int64("session_end_height", sessionEndHeight).
 		Int64("settlement_height", settlementHeight).
 		Msg("claim expired on-chain")
 
 	// Record metrics
-	RecordClaimExpired(supplier, serviceID, reason, numRelays, computeUnits, sessionEndHeight, settlementHeight)
+	RecordClaimExpired(supplier, serviceID, reason, numRelays, computeUnits, claimedUpokt, sessionEndHeight, settlementHeight)
 }
 
 // handleSupplierSlashed processes a single EventSupplierSlashed event.

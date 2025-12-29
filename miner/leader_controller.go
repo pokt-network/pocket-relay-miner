@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"sync"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	haclient "github.com/pokt-network/pocket-relay-miner/client"

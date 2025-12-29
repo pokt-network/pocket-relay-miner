@@ -77,7 +77,7 @@ var (
 			Name:      "claim_scheduled_height",
 			Help:      "Block height when claim is scheduled to be submitted",
 		},
-		[]string{"supplier", "session_id"},
+		[]string{"supplier", "service_id", "session_id"},
 	)
 
 	claimSubmissionLatencyBlocks = observability.MinerFactory.NewHistogramVec(
@@ -99,7 +99,7 @@ var (
 			Name:      "proof_scheduled_height",
 			Help:      "Block height when proof is scheduled to be submitted",
 		},
-		[]string{"supplier", "session_id"},
+		[]string{"supplier", "service_id", "session_id"},
 	)
 
 	proofSubmissionLatencyBlocks = observability.MinerFactory.NewHistogramVec(
@@ -189,7 +189,7 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
-	// uPOKT - Revenue view (compute units * service rate)
+	// uPOKT - Revenue view (compute units = uPOKT, 1:1 mapping)
 	upoktClaimedTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -215,7 +215,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "upokt_lost_total",
-			Help:      "Total uPOKT lost due to claim/proof failures",
+			Help:      "Total uPOKT lost due to claim/proof failures (compute units = uPOKT, 1:1)",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -370,6 +370,16 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
+	upoktExpiredByReason = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_expired_by_reason_total",
+			Help:      "Total uPOKT lost due to claim expiration by reason (from claimed_upokt field)",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
 	// EventSupplierSlashed metrics
 	supplierSlashedTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
@@ -513,7 +523,7 @@ var (
 			Name:      "claims_submitted_total",
 			Help:      "Total number of claims submitted on-chain",
 		},
-		[]string{"supplier"},
+		[]string{"supplier", "service_id"},
 	)
 
 	claimErrors = observability.MinerFactory.NewCounterVec(
@@ -544,7 +554,7 @@ var (
 			Name:      "proofs_submitted_total",
 			Help:      "Total number of proofs submitted on-chain",
 		},
-		[]string{"supplier"},
+		[]string{"supplier", "service_id"},
 	)
 
 	proofErrors = observability.MinerFactory.NewCounterVec(
@@ -756,7 +766,7 @@ var (
 			Name:      "session_state_transitions_total",
 			Help:      "Total number of session state transitions",
 		},
-		[]string{"supplier", "from_state", "to_state"},
+		[]string{"supplier", "service_id", "from_state", "to_state"},
 	)
 
 	// Supplier manager metrics
@@ -986,9 +996,9 @@ func RecordRelayRejected(supplier, reason, serviceID string) {
 	relaysRejected.WithLabelValues(supplier, reason, serviceID).Inc()
 }
 
-// RecordRelayProcessingLatency records how long it took to process a relay.
-func RecordRelayProcessingLatency(supplier string, seconds float64, statusCode string) {
-	relayProcessingLatency.WithLabelValues(supplier, statusCode).Observe(seconds)
+// RecordRelayProcessingLatency records how long it took to mine a relay on miner side.
+func RecordRelayProcessingLatency(supplier, serviceID, statusCode string, seconds float64) {
+	relayProcessingLatency.WithLabelValues(supplier, serviceID, statusCode).Observe(seconds)
 }
 
 // RecordSessionCreated increments the session created counter.
@@ -998,13 +1008,13 @@ func RecordSessionCreated(supplier, serviceID string) {
 
 // ClearSessionMetrics removes session-specific metrics when session completes.
 func ClearSessionMetrics(supplier, sessionID, serviceID string) {
-	claimScheduledHeight.DeleteLabelValues(supplier, sessionID)
-	proofScheduledHeight.DeleteLabelValues(supplier, sessionID)
+	claimScheduledHeight.DeleteLabelValues(supplier, serviceID, sessionID)
+	proofScheduledHeight.DeleteLabelValues(supplier, serviceID, sessionID)
 }
 
 // SetClaimScheduledHeight sets when a claim is scheduled to be submitted.
-func SetClaimScheduledHeight(supplier, sessionID string, height float64) {
-	claimScheduledHeight.WithLabelValues(supplier, sessionID).Set(height)
+func SetClaimScheduledHeight(supplier, serviceID, sessionID string, height float64) {
+	claimScheduledHeight.WithLabelValues(supplier, serviceID, sessionID).Set(height)
 }
 
 // RecordClaimSubmissionLatency records how many blocks after window opened the claim was submitted.
@@ -1013,8 +1023,8 @@ func RecordClaimSubmissionLatency(supplier string, blocksAfterWindowOpened float
 }
 
 // SetProofScheduledHeight sets when a proof is scheduled to be submitted.
-func SetProofScheduledHeight(supplier, sessionID string, height float64) {
-	proofScheduledHeight.WithLabelValues(supplier, sessionID).Set(height)
+func SetProofScheduledHeight(supplier, serviceID, sessionID string, height float64) {
+	proofScheduledHeight.WithLabelValues(supplier, serviceID, sessionID).Set(height)
 }
 
 // RecordProofSubmissionLatency records how many blocks after window opened the proof was submitted.
@@ -1032,141 +1042,102 @@ func RecordSessionProbabilisticProved(supplier, serviceID string) {
 	sessionsProbabilisticProvedTotal.WithLabelValues(supplier, serviceID).Inc()
 }
 
+// recordSessionFailure is the internal function that records all failure metrics.
+// This tracks sessions, relays, compute units, and uPOKT lost due to claim/proof failures.
+func recordSessionFailure(supplier, serviceID, reason string, relays, computeUnits int64) {
+	cu := float64(computeUnits)
+	relayCount := float64(relays)
+
+	// Session failure count
+	sessionsFailedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
+
+	// Relays lost
+	relaysLostTotal.WithLabelValues(supplier, serviceID, reason).Add(relayCount)
+
+	// Compute units lost (in pPOKT from service config)
+	computeUnitsLostTotal.WithLabelValues(supplier, serviceID, reason).Add(cu)
+
+	// uPOKT lost (convert pPOKT to uPOKT by dividing by 1e6)
+	upoktLostTotal.WithLabelValues(supplier, serviceID, reason).Add(cu / 1e6)
+}
+
 // RecordClaimWindowClosed records a claim window timeout failure.
 func RecordClaimWindowClosed(supplier, serviceID string, relays, computeUnits int64) {
-	sessionsFailedTotal.WithLabelValues(supplier, serviceID, "claim_window_closed").Inc()
-	relaysLostTotal.WithLabelValues(supplier, serviceID, "claim_window_closed").Add(float64(relays))
-	computeUnitsLostTotal.WithLabelValues(supplier, serviceID, "claim_window_closed").Add(float64(computeUnits))
+	recordSessionFailure(supplier, serviceID, "claim_window_closed", relays, computeUnits)
 }
 
 // RecordClaimTxError records a claim transaction error failure.
 func RecordClaimTxError(supplier, serviceID string, relays, computeUnits int64) {
-	sessionsFailedTotal.WithLabelValues(supplier, serviceID, "claim_tx_error").Inc()
-	relaysLostTotal.WithLabelValues(supplier, serviceID, "claim_tx_error").Add(float64(relays))
-	computeUnitsLostTotal.WithLabelValues(supplier, serviceID, "claim_tx_error").Add(float64(computeUnits))
+	recordSessionFailure(supplier, serviceID, "claim_tx_error", relays, computeUnits)
 }
 
 // RecordProofWindowClosed records a proof window timeout failure.
 func RecordProofWindowClosed(supplier, serviceID string, relays, computeUnits int64) {
-	sessionsFailedTotal.WithLabelValues(supplier, serviceID, "proof_window_closed").Inc()
-	relaysLostTotal.WithLabelValues(supplier, serviceID, "proof_window_closed").Add(float64(relays))
-	computeUnitsLostTotal.WithLabelValues(supplier, serviceID, "proof_window_closed").Add(float64(computeUnits))
+	recordSessionFailure(supplier, serviceID, "proof_window_closed", relays, computeUnits)
 }
 
 // RecordProofTxError records a proof transaction error failure.
 func RecordProofTxError(supplier, serviceID string, relays, computeUnits int64) {
-	sessionsFailedTotal.WithLabelValues(supplier, serviceID, "proof_tx_error").Inc()
-	relaysLostTotal.WithLabelValues(supplier, serviceID, "proof_tx_error").Add(float64(relays))
-	computeUnitsLostTotal.WithLabelValues(supplier, serviceID, "proof_tx_error").Add(float64(computeUnits))
+	recordSessionFailure(supplier, serviceID, "proof_tx_error", relays, computeUnits)
 }
 
-// RecordComputeUnitsClaimed adds to the claimed compute units total.
-// DEPRECATED: Use RecordRevenueClaimed instead to track all revenue metrics.
-func RecordComputeUnitsClaimed(supplier, serviceID string, units float64) {
-	computeUnitsClaimedTotal.WithLabelValues(supplier, serviceID).Add(units)
-}
-
-// RecordComputeUnitsSettled adds to the settled compute units total.
-// DEPRECATED: Use RecordRevenueProved instead to track all revenue metrics.
-func RecordComputeUnitsSettled(supplier, serviceID string, units float64) {
-	computeUnitsSettledTotal.WithLabelValues(supplier, serviceID).Add(units)
-	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID).Add(units)
-}
-
-// RecordRevenueClaimed records successful claim submission across all revenue views.
+// recordRevenueClaimed is the internal function that records all claim success metrics.
 // This tracks compute units, uPOKT revenue, and relay count when a claim is accepted.
-func RecordRevenueClaimed(supplier, serviceID string, computeUnits uint64, relayCount int64) {
+func recordRevenueClaimed(supplier, serviceID string, computeUnits uint64, relayCount int64) {
 	cu := float64(computeUnits)
 	relays := float64(relayCount)
 
-	// Compute Units view
+	// Compute Units view (in pPOKT from service config)
 	computeUnitsClaimedTotal.WithLabelValues(supplier, serviceID).Add(cu)
 
-	// uPOKT view (compute units are already in uPOKT units - 1:1 mapping)
-	upoktClaimedTotal.WithLabelValues(supplier, serviceID).Add(cu)
+	// uPOKT view (convert pPOKT to uPOKT by dividing by 1e6)
+	upoktClaimedTotal.WithLabelValues(supplier, serviceID).Add(cu / 1e6)
 
 	// Relays view
 	relaysClaimedTotal.WithLabelValues(supplier, serviceID).Add(relays)
 }
 
-// RecordRevenueProved records successful proof submission across all revenue views.
+// recordRevenueProved is the internal function that records all proof success metrics.
 // This tracks compute units, uPOKT revenue, and relay count when a proof is accepted.
-func RecordRevenueProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
+func recordRevenueProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
 	cu := float64(computeUnits)
 	relays := float64(relayCount)
 
-	// Compute Units view
+	// Compute Units view (in pPOKT from service config)
 	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
 	computeUnitsSettledTotal.WithLabelValues(supplier, serviceID).Add(cu) // Legacy metric
 
-	// uPOKT view (compute units are already in uPOKT units - 1:1 mapping)
-	upoktProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
+	// uPOKT view (convert pPOKT to uPOKT by dividing by 1e6)
+	upoktProvedTotal.WithLabelValues(supplier, serviceID).Add(cu / 1e6)
 
 	// Relays view
 	relaysProvedTotal.WithLabelValues(supplier, serviceID).Add(relays)
+}
+
+// RecordRevenueClaimed records successful claim submission across all revenue views.
+func RecordRevenueClaimed(supplier, serviceID string, computeUnits uint64, relayCount int64) {
+	recordRevenueClaimed(supplier, serviceID, computeUnits, relayCount)
+}
+
+// RecordRevenueProved records successful proof submission across all revenue views.
+func RecordRevenueProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
+	recordRevenueProved(supplier, serviceID, computeUnits, relayCount)
 }
 
 // RecordRevenueProbabilisticProved records revenue from a probabilistically proved session.
+// Uses same metrics as explicit proof since both are successful outcomes.
 func RecordRevenueProbabilisticProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
-	cu := float64(computeUnits)
-	relays := float64(relayCount)
-
-	// Compute Units view
-	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
-	computeUnitsSettledTotal.WithLabelValues(supplier, serviceID).Add(cu) // Legacy metric
-
-	// uPOKT view (compute units are already in uPOKT units - 1:1 mapping)
-	upoktProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
-
-	// Relays view
-	relaysProvedTotal.WithLabelValues(supplier, serviceID).Add(relays)
-}
-
-// RecordRevenueLost records failed claim/proof submission across all revenue views.
-// This tracks compute units, uPOKT revenue, and relay count when revenue is lost.
-// Common reasons: "claim_tx_failed", "proof_tx_failed", "exhausted_retries"
-func RecordRevenueLost(supplier, serviceID, reason string, computeUnits uint64, relayCount int64) {
-	cu := float64(computeUnits)
-	relays := float64(relayCount)
-
-	// Compute Units view
-	computeUnitsLostTotal.WithLabelValues(supplier, serviceID, reason).Add(cu)
-
-	// uPOKT view
-	upoktLostTotal.WithLabelValues(supplier, serviceID, reason).Add(cu)
-
-	// Relays view
-	relaysLostTotal.WithLabelValues(supplier, serviceID, reason).Add(relays)
+	recordRevenueProved(supplier, serviceID, computeUnits, relayCount)
 }
 
 // RecordClaimSubmitted increments the claims submitted counter.
-func RecordClaimSubmitted(supplier string) {
-	claimsSubmitted.WithLabelValues(supplier).Inc()
-}
-
-// RecordClaimError increments the claim errors counter.
-func RecordClaimError(supplier, reason string) {
-	claimErrors.WithLabelValues(supplier, reason).Inc()
+func RecordClaimSubmitted(supplier, serviceID string) {
+	claimsSubmitted.WithLabelValues(supplier, serviceID).Inc()
 }
 
 // RecordProofSubmitted increments the proofs submitted counter.
-func RecordProofSubmitted(supplier string) {
-	proofsSubmitted.WithLabelValues(supplier).Inc()
-}
-
-// RecordProofError increments the proof errors counter.
-func RecordProofError(supplier, reason string) {
-	proofErrors.WithLabelValues(supplier, reason).Inc()
-}
-
-// SetCurrentBlockHeight sets the current block height.
-func SetCurrentBlockHeight(height float64) {
-	currentBlockHeight.Set(height)
-}
-
-// RecordSessionStateTransition records a state change.
-func RecordSessionStateTransition(supplier, fromState, toState string) {
-	sessionStateTransitions.WithLabelValues(supplier, fromState, toState).Inc()
+func RecordProofSubmitted(supplier, serviceID string) {
+	proofsSubmitted.WithLabelValues(supplier, serviceID).Inc()
 }
 
 // =============================================
@@ -1203,19 +1174,22 @@ func RecordClaimCeilingExceeded(supplier, serviceID string, excessUpokt int64) {
 
 // ====== ON-CHAIN SETTLEMENT TRACKING ======
 
-// RecordClaimSettled records an on-chain claim settlement event.
-// status should be one of: "proven" (1), "invalid" (2), "expired" (3).
-func RecordClaimSettled(supplier, serviceID, status string, numRelays, computeUnits int64, upoktEarned int64, sessionEndHeight, settlementHeight int64) {
+// recordOnChainSettlement is the internal function that records claim settlement metrics.
+// This tracks on-chain settlement events (EventClaimSettled) by status.
+func recordOnChainSettlement(supplier, serviceID, status string, numRelays, computeUnits, upoktEarned int64, sessionEndHeight, settlementHeight int64) {
+	relays := float64(numRelays)
+	cu := float64(computeUnits)
+
 	// Track settlement by status
 	claimsSettledByStatus.WithLabelValues(supplier, serviceID, status).Inc()
 
 	// Track relays settled by status
-	relaysSettledByStatus.WithLabelValues(supplier, serviceID, status).Add(float64(numRelays))
+	relaysSettledByStatus.WithLabelValues(supplier, serviceID, status).Add(relays)
 
 	// Track compute units settled by status
-	computeUnitsSettledByStatus.WithLabelValues(supplier, serviceID, status).Add(float64(computeUnits))
+	computeUnitsSettledByStatus.WithLabelValues(supplier, serviceID, status).Add(cu)
 
-	// Track revenue earned (only for proven claims)
+	// Track ACTUAL revenue earned from blockchain (only for proven claims)
 	if status == "proven" && upoktEarned > 0 {
 		upoktEarnedTotal.WithLabelValues(supplier, serviceID).Add(float64(upoktEarned))
 	}
@@ -1225,43 +1199,59 @@ func RecordClaimSettled(supplier, serviceID, status string, numRelays, computeUn
 	settlementLatencyBlocks.WithLabelValues(supplier, status).Observe(float64(latency))
 }
 
-// RecordClaimExpired records an on-chain claim expiration event.
-// reason should be one of: "proof_missing" (1), "proof_invalid" (2), "unspecified" (0).
-func RecordClaimExpired(supplier, serviceID, reason string, numRelays, computeUnits int64, sessionEndHeight, settlementHeight int64) {
+// recordOnChainExpiration is the internal function that records claim expiration metrics.
+// This tracks on-chain expiration events (EventClaimExpired) by reason.
+func recordOnChainExpiration(supplier, serviceID, reason string, numRelays, computeUnits, claimedUpokt int64, sessionEndHeight, settlementHeight int64) {
+	relays := float64(numRelays)
+	cu := float64(computeUnits)
+	upokt := float64(claimedUpokt)
+
 	// Track expiration by reason
 	claimsExpiredByReason.WithLabelValues(supplier, serviceID, reason).Inc()
 
 	// Track relays lost due to expiration
-	relaysExpiredByReason.WithLabelValues(supplier, serviceID, reason).Add(float64(numRelays))
+	relaysExpiredByReason.WithLabelValues(supplier, serviceID, reason).Add(relays)
 
 	// Track compute units lost due to expiration
-	computeUnitsExpiredByReason.WithLabelValues(supplier, serviceID, reason).Add(float64(computeUnits))
+	computeUnitsExpiredByReason.WithLabelValues(supplier, serviceID, reason).Add(cu)
+
+	// Track uPOKT lost due to expiration (claimed amount that was forfeited)
+	upoktExpiredByReason.WithLabelValues(supplier, serviceID, reason).Add(upokt)
 
 	// Track settlement latency for expired claims
 	latency := settlementHeight - sessionEndHeight
 	settlementLatencyBlocks.WithLabelValues(supplier, "expired").Observe(float64(latency))
 }
 
+// RecordClaimSettled records an on-chain claim settlement event.
+// status should be one of: "proven" (1), "invalid" (2), "expired" (3).
+func RecordClaimSettled(supplier, serviceID, status string, numRelays, computeUnits, upoktEarned int64, sessionEndHeight, settlementHeight int64) {
+	recordOnChainSettlement(supplier, serviceID, status, numRelays, computeUnits, upoktEarned, sessionEndHeight, settlementHeight)
+}
+
+// RecordClaimExpired records an on-chain claim expiration event.
+// reason should be one of: "proof_missing" (1), "proof_invalid" (2), "unspecified" (0).
+func RecordClaimExpired(supplier, serviceID, reason string, numRelays, computeUnits, claimedUpokt int64, sessionEndHeight, settlementHeight int64) {
+	recordOnChainExpiration(supplier, serviceID, reason, numRelays, computeUnits, claimedUpokt, sessionEndHeight, settlementHeight)
+}
+
 // RecordSupplierSlashed records an on-chain supplier slashing event.
-func RecordSupplierSlashed(supplier, serviceID, penalty string, sessionEndHeight, settlementHeight int64) {
+func RecordSupplierSlashed(supplier, serviceID, _ string, _, _ int64) {
 	// Track slashing events
 	supplierSlashedTotal.WithLabelValues(supplier, serviceID).Inc()
-
-	// Note: penalty amount is a string like "100upokt" - could parse and track if needed
-	// For now we just count occurrences
 }
 
 // RecordClaimDiscarded records an on-chain claim discard event.
-func RecordClaimDiscarded(supplier, serviceID, errorMsg string, sessionEndHeight, settlementHeight int64) {
+func RecordClaimDiscarded(supplier, serviceID, _ string, _, _ int64) {
 	// Track claim discard events
 	claimsDiscardedTotal.WithLabelValues(supplier, serviceID).Inc()
 
-	// Note: errorMsg provides context on why claim was discarded
+	// Note: errorMsg provides context on why claim was discarded (not used in metric)
 	// These are rare and indicate unexpected issues that could halt the chain
 }
 
 // RecordBlockResultsRetry records a retry attempt for block_results query.
-func RecordBlockResultsRetry(height int64, attempt int) {
+func RecordBlockResultsRetry(height int64, _ int) {
 	// Track retry attempts (helps identify ABCI indexing lag)
 	blockResultsRetriesTotal.WithLabelValues(fmt.Sprintf("%d", height)).Inc()
 }

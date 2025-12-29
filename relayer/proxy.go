@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 	"github.com/puzpuzpuz/xsync/v4"
 	"golang.org/x/net/http2"
@@ -706,7 +706,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	requestBodySize.WithLabelValues(serviceID).Observe(float64(len(body)))
+	requestBodySize.WithLabelValues(serviceID, rpcType).Observe(float64(len(body)))
 
 	// Pin block height at arrival time (for grace period calculation)
 	arrivalBlockHeight := p.currentBlockHeight.Load()
@@ -725,6 +725,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			sessionHeader := relayRequest.Meta.SessionHeader
 			sessionID := sessionHeader.SessionId
 			appAddress := sessionHeader.ApplicationAddress
+			supplierAddress := relayRequest.Meta.SupplierOperatorAddress
 			sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 			meterStart := time.Now()
@@ -733,6 +734,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				sessionID,
 				appAddress,
 				serviceID,
+				supplierAddress,
 				sessionEndHeight,
 			)
 			meterDuration := time.Since(meterStart)
@@ -822,7 +824,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// For non-streaming responses, build and return signed RelayResponse
 	if !isStreaming {
-		responseBodySize.WithLabelValues(serviceID).Observe(float64(len(respBody)))
+		responseBodySize.WithLabelValues(serviceID, rpcType).Observe(float64(len(respBody)))
 
 		// Build and sign the RelayResponse
 		// responseSigner is guaranteed to be non-nil (validated early in handleRelay)
@@ -956,6 +958,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			if p.relayMeter != nil && capturedRequest != nil && capturedRequest.Meta.SessionHeader != nil {
 				sessionHeader := capturedRequest.Meta.SessionHeader
 				sessionID := sessionHeader.SessionId
+				supplierAddress := capturedRequest.Meta.SupplierOperatorAddress
 				sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 				meterStart := time.Now()
@@ -964,6 +967,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					sessionID,
 					appAddress,
 					capturedServiceID,
+					supplierAddress,
 					sessionEndHeight,
 				)
 				meterDuration := time.Since(meterStart)
@@ -1389,7 +1393,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		if relayRequest != nil && p.responseSigner != nil {
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Msg("handling streaming response with batch-based signing (SSE/NDJSON)")
-			respBody, streamErr := p.handleStreamingResponseWithSigning(ctx, resp, w, relayRequest, serviceID)
+			respBody, streamErr := p.handleStreamingResponseWithSigning(ctx, resp, w, relayRequest, serviceID, rpcType)
 			return respBody, resp.Header, resp.StatusCode, true, streamErr
 		}
 

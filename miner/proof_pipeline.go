@@ -356,7 +356,7 @@ func (p *ProofPipeline) submitProofsForHeight(
 			p.logger.Info().
 				Int("count", len(proofs)).
 				Msg("proofs submitted successfully")
-			proofsSubmitted.WithLabelValues(p.config.SupplierAddress).Add(float64(len(proofs)))
+			// Metrics are recorded per-service in lifecycle_callback.go after proof confirmation
 			p.notifyProofResults(proofs, true, nil)
 			return
 		}

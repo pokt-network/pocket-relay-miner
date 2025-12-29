@@ -131,6 +131,18 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		}
 		defer func() { _ = obsServer.Stop() }()
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
+
+		// Start runtime metrics collector (not started automatically when using custom registry)
+		runtimeMetrics := observability.NewRuntimeMetricsCollector(
+			logger,
+			observability.DefaultRuntimeMetricsCollectorConfig(),
+			observability.MinerFactory,
+		)
+		if err := runtimeMetrics.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start runtime metrics collector: %w", err)
+		}
+		defer runtimeMetrics.Stop()
+		logger.Info().Msg("runtime metrics collector started")
 	}
 
 	// Create a wrapped Redis client with KeyBuilder for namespace-aware key construction

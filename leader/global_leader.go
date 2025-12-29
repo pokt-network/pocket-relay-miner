@@ -12,14 +12,6 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-const (
-	// Default leader lock TTL (how long before expiring)
-	defaultLeaderTTL = 30 * time.Second
-
-	// Default heartbeat rate (how often we try to acquire/renew leadership)
-	defaultHeartbeatRate = 10 * time.Second
-)
-
 // Lua script for atomic acquire (only if key doesn't exist or is expired)
 const acquireLuaScript = `
 if redis.call("EXISTS", KEYS[1]) == 0 then
@@ -60,14 +52,6 @@ type GlobalLeaderElectorConfig struct {
 
 	// HeartbeatRate is how often we try to acquire/renew leadership
 	HeartbeatRate time.Duration
-}
-
-// DefaultGlobalLeaderElectorConfig returns the default configuration.
-func DefaultGlobalLeaderElectorConfig() GlobalLeaderElectorConfig {
-	return GlobalLeaderElectorConfig{
-		LeaderTTL:     defaultLeaderTTL,
-		HeartbeatRate: defaultHeartbeatRate,
-	}
 }
 
 // GlobalLeaderElector is the SINGLE lighthouse component for leadership.

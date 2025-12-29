@@ -355,7 +355,7 @@ func (p *ClaimPipeline) submitClaimsForHeight(
 			p.logger.Info().
 				Int("count", len(claims)).
 				Msg("claims submitted successfully")
-			claimsSubmitted.WithLabelValues(p.config.SupplierAddress).Add(float64(len(claims)))
+			// Metrics are recorded per-service in lifecycle_callback.go after claim confirmation
 			p.notifyClaimResults(claims, true, nil)
 			return
 		}

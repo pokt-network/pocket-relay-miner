@@ -385,7 +385,7 @@ func (lc *LifecycleCallback) checkClaimCeiling(
 
 // OnSessionActive is called when a new session starts.
 // For HA miner, sessions are created on-demand when relays arrive, so this is mostly informational.
-func (lc *LifecycleCallback) OnSessionActive(ctx context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnSessionActive(_ context.Context, snapshot *SessionSnapshot) error {
 	lc.logger.Debug().
 		Str(logging.FieldSessionID, snapshot.SessionID).
 		Int64(logging.FieldSessionEndHeight, snapshot.SessionEndHeight).
@@ -578,7 +578,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					Str(logging.FieldSessionID, snapshot.SessionID).
 					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
 					Msg("skipping claim - session has 0 relays")
-					// Session remains in active state - not a failure, just skipped
+				// Session remains in active state - not a failure, just skipped
 				continue // Skip this session
 			}
 
@@ -588,7 +588,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
 					Int64("relay_count", snapshot.RelayCount).
 					Msg("skipping claim - session has 0 compute units despite having relays")
-					// Session remains in active state - not a failure, just skipped
+				// Session remains in active state - not a failure, just skipped
 				continue // Skip this session
 			}
 
@@ -610,7 +610,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 						Uint64("total_compute_units", snapshot.TotalComputeUnits).
 						Msg("skipping claim - estimated fee exceeds expected reward (unprofitable)")
 
-						// Session remains in active state - not a failure, just skipped
+					// Session remains in active state - not a failure, just skipped
 					continue // Skip this session
 				}
 
@@ -619,7 +619,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			}
 
 			// Record the scheduled claim height for operators
-			SetClaimScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.SessionID, float64(earliestClaimHeight))
+			SetClaimScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.SessionID, float64(earliestClaimHeight))
 
 			validSnapshots = append(validSnapshots, snapshot)
 		}
@@ -872,7 +872,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 				// Record metrics for all sessions in the batch
 				for i, snapshot := range validSnapshots {
-					RecordClaimSubmitted(snapshot.SupplierOperatorAddress)
+					RecordClaimSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
 					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
@@ -1315,7 +1315,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				}
 
 				// Record the scheduled proof height for operators
-				SetProofScheduledHeight(snap.SupplierOperatorAddress, snap.SessionID, float64(earliestProofHeight))
+				SetProofScheduledHeight(snap.SupplierOperatorAddress, snap.ServiceID, snap.SessionID, float64(earliestProofHeight))
 
 				// Generate the proof path from the seed block hash
 				path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
@@ -1492,7 +1492,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 				// Record metrics for all sessions in the batch
 				for _, snapshot := range sessionsNeedingProof {
-					RecordProofSubmitted(snapshot.SupplierOperatorAddress)
+					RecordProofSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordProofSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
 					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 				}
@@ -1670,28 +1670,28 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 }
 
 // OnClaimWindowClosed is called when a session fails due to claim window timeout.
-func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnClaimWindowClosed(_ context.Context, snapshot *SessionSnapshot) error {
 	// Metrics already recorded at failure point, just cleanup
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
 // OnClaimTxError is called when a session fails due to claim transaction error.
-func (lc *LifecycleCallback) OnClaimTxError(ctx context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnClaimTxError(_ context.Context, snapshot *SessionSnapshot) error {
 	// Metrics already recorded at failure point, just cleanup
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
 // OnProofWindowClosed is called when a session fails due to proof window timeout.
-func (lc *LifecycleCallback) OnProofWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnProofWindowClosed(_ context.Context, snapshot *SessionSnapshot) error {
 	// Metrics already recorded at failure point, just cleanup
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
 // OnProofTxError is called when a session fails due to proof transaction error.
-func (lc *LifecycleCallback) OnProofTxError(ctx context.Context, snapshot *SessionSnapshot) error {
+func (lc *LifecycleCallback) OnProofTxError(_ context.Context, snapshot *SessionSnapshot) error {
 	// Metrics already recorded at failure point, just cleanup
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil

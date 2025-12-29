@@ -5,7 +5,7 @@ import (
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	ring_secp256k1 "github.com/pokt-network/go-dleq/secp256k1"
 	ringtypes "github.com/pokt-network/go-dleq/types"
-	ring "github.com/pokt-network/ring-go"
+	"github.com/pokt-network/ring-go"
 )
 
 // GetRingFromPubKeys returns a ring constructed from the public keys provided.

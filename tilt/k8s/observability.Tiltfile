@@ -210,6 +210,7 @@ def deploy_grafana(config):
     dashboard_business_economics = str(read_file("tilt/grafana/dashboards/business-economics.json"))
     dashboard_service_performance = str(read_file("tilt/grafana/dashboards/service-performance.json"))
     dashboard_operational_health = str(read_file("tilt/grafana/dashboards/operational-health.json"))
+    dashboard_unified_overview = str(read_file("tilt/grafana/dashboards/unified-overview.json"))
 
     # Dashboard provisioning configuration
     dashboards_provisioning_yaml = """
@@ -247,10 +248,13 @@ data:
     {}
   operational-health.json: |
     {}
+  unified-overview.json: |
+    {}
 """.format(
         dashboard_business_economics.replace("\n", "\n    "),
         dashboard_service_performance.replace("\n", "\n    "),
-        dashboard_operational_health.replace("\n", "\n    ")
+        dashboard_operational_health.replace("\n", "\n    "),
+        dashboard_unified_overview.replace("\n", "\n    ")
     )
 
     k8s_yaml(blob(dashboards_yaml))

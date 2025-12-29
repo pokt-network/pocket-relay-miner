@@ -11,7 +11,7 @@ import (
 	"syscall"
 	"time"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/prometheus/client_golang/prometheus"

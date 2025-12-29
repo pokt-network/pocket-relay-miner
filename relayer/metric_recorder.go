@@ -3,7 +3,7 @@ package relayer
 import (
 	"time"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"

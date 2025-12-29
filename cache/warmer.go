@@ -7,7 +7,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"

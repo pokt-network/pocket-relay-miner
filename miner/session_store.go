@@ -153,10 +153,10 @@ type SessionStore interface {
 	Get(ctx context.Context, sessionID string) (*SessionSnapshot, error)
 
 	// GetBySupplier retrieves all active sessions for a supplier.
-	GetBySupplier(ctx context.Context, supplierAddress string) ([]*SessionSnapshot, error)
+	GetBySupplier(ctx context.Context) ([]*SessionSnapshot, error)
 
 	// GetByState retrieves all sessions in a given state for a supplier.
-	GetByState(ctx context.Context, supplierAddress string, state SessionState) ([]*SessionSnapshot, error)
+	GetByState(ctx context.Context, state SessionState) ([]*SessionSnapshot, error)
 
 	// Delete removes a session snapshot.
 	Delete(ctx context.Context, sessionID string) error
@@ -307,7 +307,7 @@ func (s *RedisSessionStore) Get(ctx context.Context, sessionID string) (*Session
 }
 
 // GetBySupplier retrieves all sessions for a supplier.
-func (s *RedisSessionStore) GetBySupplier(ctx context.Context, supplierAddress string) ([]*SessionSnapshot, error) {
+func (s *RedisSessionStore) GetBySupplier(ctx context.Context) ([]*SessionSnapshot, error) {
 	// Get all session IDs from the index
 	sessionIDs, err := s.redisClient.SMembers(ctx, s.supplierSessionsKey()).Result()
 	if err != nil {
@@ -353,7 +353,7 @@ func (s *RedisSessionStore) GetBySupplier(ctx context.Context, supplierAddress s
 }
 
 // GetByState retrieves all sessions in a given state for a supplier.
-func (s *RedisSessionStore) GetByState(ctx context.Context, supplierAddress string, state SessionState) ([]*SessionSnapshot, error) {
+func (s *RedisSessionStore) GetByState(ctx context.Context, state SessionState) ([]*SessionSnapshot, error) {
 	// Get session IDs from state index
 	sessionIDs, err := s.redisClient.SMembers(ctx, s.stateIndexKey(state)).Result()
 	if err != nil {

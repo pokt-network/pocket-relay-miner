@@ -6,7 +6,7 @@ import (
 	"sync"
 	"time"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -473,7 +473,7 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 	)
 
 	// Get all sessions for this supplier
-	sessions, err := sessionStore.GetBySupplier(ctx, supplier)
+	sessions, err := sessionStore.GetBySupplier(ctx)
 	if err != nil {
 		m.logger.Warn().
 			Err(err).
@@ -878,15 +878,20 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 
 			// Process the relay (adds to SMST tree)
 			if m.onRelay != nil {
+				startTime := time.Now()
 				if err := m.onRelay(ctx, state.OperatorAddr, &msg); err != nil {
 					m.logger.Warn().
 						Err(err).
 						Str(logging.FieldSupplier, state.OperatorAddr).
 						Str("session_id", msg.Message.SessionId).
 						Msg("failed to process relay")
+					// Record processing latency even on failure
+					RecordRelayProcessingLatency(state.OperatorAddr, msg.Message.ServiceId, "error", time.Since(startTime).Seconds())
 					// Don't ACK on processing failure - let XAUTOCLAIM retry
 					continue
 				}
+				// Record processing latency on success
+				RecordRelayProcessingLatency(state.OperatorAddr, msg.Message.ServiceId, "success", time.Since(startTime).Seconds())
 			}
 
 			// ACK immediately after successful processing

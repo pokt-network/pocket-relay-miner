@@ -9,7 +9,7 @@ import (
 	"strings"
 	"sync"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 	"github.com/cometbft/cometbft/rpc/client/http"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 
@@ -523,8 +523,12 @@ func (w *SupplierWorker) cleanup() {
 	}
 
 	if w.redisBlockSubscriber != nil {
-		w.redisBlockSubscriber.Close()
-		w.redisBlockSubscriber = nil
+		err := w.redisBlockSubscriber.Close()
+		if err != nil {
+			w.logger.Error().Err(err).Msg("failed to close redis block subscriber")
+		} else {
+			w.redisBlockSubscriber = nil
+		}
 	}
 
 	if w.queryClients != nil {

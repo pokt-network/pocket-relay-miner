@@ -408,6 +408,7 @@ func (p *ProxyServer) handleStreamingResponseWithSigning(
 	w http.ResponseWriter,
 	relayRequest *servicetypes.RelayRequest,
 	serviceID string,
+	rpcType string,
 ) ([]byte, error) {
 	// Get service timeout for deadline extension during streaming
 	serviceTimeout := p.config.GetServiceTimeout(serviceID)
@@ -425,7 +426,7 @@ func (p *ProxyServer) handleStreamingResponseWithSigning(
 	}
 
 	// Track metrics
-	responseBodySize.WithLabelValues(serviceID).Observe(float64(totalSize))
+	responseBodySize.WithLabelValues(serviceID, rpcType).Observe(float64(totalSize))
 
 	return fullBody, nil
 }

@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	pond "github.com/alitto/pond/v2"
+	"github.com/alitto/pond/v2"
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -201,7 +201,7 @@ func (m *SessionLifecycleManager) Start(ctx context.Context) error {
 
 // loadExistingSessions loads sessions from the store on startup.
 func (m *SessionLifecycleManager) loadExistingSessions(ctx context.Context) error {
-	sessions, err := m.sessionStore.GetBySupplier(ctx, m.config.SupplierAddress)
+	sessions, err := m.sessionStore.GetBySupplier(ctx)
 	if err != nil {
 		return err
 	}
@@ -760,6 +760,7 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 		// Record the transition
 		sessionStateTransitions.WithLabelValues(
 			m.config.SupplierAddress,
+			session.ServiceID,
 			string(SessionStateClaiming),
 			string(SessionStateClaimed),
 		).Inc()
@@ -804,6 +805,7 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		// Record the transition
 		sessionStateTransitions.WithLabelValues(
 			m.config.SupplierAddress,
+			session.ServiceID,
 			string(SessionStateProving),
 			string(SessionStateProved),
 		).Inc()
@@ -898,6 +900,7 @@ func (m *SessionLifecycleManager) executeTransition(
 	// Record the transition
 	sessionStateTransitions.WithLabelValues(
 		m.config.SupplierAddress,
+		session.ServiceID,
 		string(oldState),
 		string(newState),
 	).Inc()

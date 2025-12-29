@@ -191,7 +191,7 @@ var (
 			Help:      "Size of request bodies in bytes",
 			Buckets:   []float64{100, 1000, 10000, 100000, 1000000, 10000000},
 		},
-		[]string{"service_id"},
+		[]string{"service_id", "rpc_type"},
 	)
 
 	responseBodySize = observability.RelayerFactory.NewHistogramVec(
@@ -202,7 +202,7 @@ var (
 			Help:      "Size of response bodies in bytes",
 			Buckets:   []float64{100, 1000, 10000, 100000, 1000000, 10000000},
 		},
-		[]string{"service_id"},
+		[]string{"service_id", "rpc_type"},
 	)
 
 	// Block height metric
@@ -412,13 +412,14 @@ var (
 		[]string{"service_id", "result"}, // result: within_limit, over_limit
 	)
 
-	relayMeterSessionsActive = observability.RelayerFactory.NewGauge(
+	relayMeterSessionsActive = observability.RelayerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relay_meter_sessions_active",
 			Help:      "Number of active session meters",
 		},
+		[]string{"supplier", "service_id"},
 	)
 
 	relayMeterRedisErrors = observability.RelayerFactory.NewCounterVec(
