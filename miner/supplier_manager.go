@@ -720,6 +720,20 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			m.config.WorkerPool, // Pass master worker pool for transition subpool
 		)
 
+		// Wire meter cleanup publisher for notifying relayers when sessions leave active state.
+		// This publishes cleanup signals to ha:meter:cleanup so relayers can decrement their
+		// active sessions metric and clear session meter data.
+		meterCleanupChannel := m.config.RedisClient.KB().MeterCleanupChannel()
+		redisClient := m.config.RedisClient
+		meterCleanupPublisher := NewRedisMeterCleanupPublisher(
+			m.logger,
+			func(ctx context.Context, channel string, message interface{}) error {
+				return redisClient.Publish(ctx, channel, message).Err()
+			},
+			meterCleanupChannel,
+		)
+		lifecycleManager.SetMeterCleanupPublisher(meterCleanupPublisher)
+
 		// Start lifecycle manager
 		if startErr := lifecycleManager.Start(supplierCtx); startErr != nil {
 			m.logger.Warn().

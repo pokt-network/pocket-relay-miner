@@ -31,14 +31,60 @@ type FileKeyProvider struct {
 	closed bool
 }
 
-// KeyFile is the structure of a key file.
+// KeyFile is the structure of an individual key file.
+//
+// Schema:
+//
+//	operator_address: "pokt1..."    # bech32-encoded operator address
+//	private_key_hex: "0x..."        # hex-encoded secp256k1 private key (64 hex chars)
 type KeyFile struct {
 	// OperatorAddress is the bech32 operator address.
 	OperatorAddress string `yaml:"operator_address" json:"operator_address"`
 
 	// PrivateKeyHex is the hex-encoded secp256k1 private key.
 	// Can be prefixed with "0x" or not.
+	// Must be a valid 64-character hex string (32 bytes).
 	PrivateKeyHex string `yaml:"private_key_hex" json:"private_key_hex"`
+}
+
+// Validate validates the key file structure and returns detailed errors.
+func (f *KeyFile) Validate() error {
+	var errors []string
+
+	if f.OperatorAddress == "" {
+		errors = append(errors, "missing required field 'operator_address'")
+	} else if !strings.HasPrefix(f.OperatorAddress, "pokt1") {
+		errors = append(errors, fmt.Sprintf("invalid operator_address: must start with 'pokt1', got '%s'", f.OperatorAddress[:min(10, len(f.OperatorAddress))]+"..."))
+	}
+
+	if f.PrivateKeyHex == "" {
+		errors = append(errors, "missing required field 'private_key_hex'")
+	} else {
+		// Validate hex format
+		cleaned := strings.TrimPrefix(f.PrivateKeyHex, "0x")
+		cleaned = strings.TrimSpace(cleaned)
+
+		if len(cleaned) != 64 {
+			errors = append(errors, fmt.Sprintf("invalid private_key_hex length: expected 64 hex characters (32 bytes), got %d", len(cleaned)))
+		} else {
+			// Check hex characters
+			for i, c := range cleaned {
+				isDigit := c >= '0' && c <= '9'
+				isLowerHex := c >= 'a' && c <= 'f'
+				isUpperHex := c >= 'A' && c <= 'F'
+				if !isDigit && !isLowerHex && !isUpperHex {
+					errors = append(errors, fmt.Sprintf("invalid hex character '%c' at position %d in private_key_hex", c, i))
+					break
+				}
+			}
+		}
+	}
+
+	if len(errors) > 0 {
+		return fmt.Errorf("key file validation failed:\n  - %s", strings.Join(errors, "\n  - "))
+	}
+
+	return nil
 }
 
 // NewFileKeyProvider creates a new file-based key provider.
@@ -123,7 +169,7 @@ func (p *FileKeyProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	return keys, nil
 }
 
-// loadKeyFile loads a single key file.
+// loadKeyFile loads a single key file with validation.
 func (p *FileKeyProvider) loadKeyFile(path string) (cryptotypes.PrivKey, string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -132,19 +178,17 @@ func (p *FileKeyProvider) loadKeyFile(path string) (cryptotypes.PrivKey, string,
 
 	var keyFile KeyFile
 	if unmarshalErr := yaml.Unmarshal(data, &keyFile); unmarshalErr != nil {
-		return nil, "", fmt.Errorf("failed to parse file: %w", unmarshalErr)
+		return nil, "", fmt.Errorf("failed to parse file as YAML: %w", unmarshalErr)
 	}
 
-	if keyFile.OperatorAddress == "" {
-		return nil, "", fmt.Errorf("missing operator_address")
-	}
-
-	if keyFile.PrivateKeyHex == "" {
-		return nil, "", fmt.Errorf("missing private_key_hex")
+	// Validate file structure before attempting to parse
+	if err := keyFile.Validate(); err != nil {
+		return nil, "", err
 	}
 
 	// Parse hex-encoded private key
 	hexKey := strings.TrimPrefix(keyFile.PrivateKeyHex, "0x")
+	hexKey = strings.TrimSpace(hexKey)
 	keyBytes, err := hex.DecodeString(hexKey)
 	if err != nil {
 		return nil, "", fmt.Errorf("invalid hex private key: %w", err)

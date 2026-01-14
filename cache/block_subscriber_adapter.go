@@ -23,6 +23,7 @@ type BlockSubscriberAdapter struct {
 	ctx             context.Context
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
+	closeOnce       sync.Once // Ensures Close() is idempotent and safe for concurrent calls
 }
 
 // NewBlockSubscriberAdapter creates an adapter for miner's CacheOrchestrator.
@@ -123,12 +124,18 @@ func (a *BlockSubscriberAdapter) PublishBlockHeight(ctx context.Context, event B
 // Close stops the adapter and waits for goroutine cleanup.
 // It cancels the context, waits for the conversion goroutine to exit,
 // and closes the event channel.
+//
+// This method is idempotent - safe to call multiple times concurrently.
+// Uses sync.Once to prevent "close of closed channel" panic when multiple
+// CacheOrchestrators lose leadership simultaneously and call Close().
 func (a *BlockSubscriberAdapter) Close() error {
-	if a.cancel != nil {
-		a.cancel()
-	}
-	a.wg.Wait()
-	close(a.eventCh)
-	a.logger.Info().Msg("block subscriber adapter closed")
+	a.closeOnce.Do(func() {
+		if a.cancel != nil {
+			a.cancel()
+		}
+		a.wg.Wait()
+		close(a.eventCh)
+		a.logger.Info().Msg("block subscriber adapter closed")
+	})
 	return nil
 }

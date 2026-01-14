@@ -74,6 +74,41 @@ type PendingRelayChecker interface {
 	GetPendingRelayCount(ctx context.Context, sessionID string) (int64, error)
 }
 
+// MeterCleanupPublisher publishes cleanup signals to relayers when sessions leave active state.
+// This notifies relayers to clear their session meter data and decrement active session metrics.
+type MeterCleanupPublisher interface {
+	// PublishMeterCleanup publishes a cleanup signal for a session.
+	PublishMeterCleanup(ctx context.Context, sessionID string) error
+}
+
+// RedisMeterCleanupPublisher implements MeterCleanupPublisher using Redis pub/sub.
+// It publishes session IDs to the meter cleanup channel so relayers can clear their
+// session meter data and decrement the active sessions metric.
+type RedisMeterCleanupPublisher struct {
+	logger  logging.Logger
+	publish func(ctx context.Context, channel string, message interface{}) error
+	channel string
+}
+
+// NewRedisMeterCleanupPublisher creates a new Redis-based meter cleanup publisher.
+// The publish function should be the Redis client's Publish method wrapped to return error.
+func NewRedisMeterCleanupPublisher(
+	logger logging.Logger,
+	publish func(ctx context.Context, channel string, message interface{}) error,
+	channel string,
+) *RedisMeterCleanupPublisher {
+	return &RedisMeterCleanupPublisher{
+		logger:  logger,
+		publish: publish,
+		channel: channel,
+	}
+}
+
+// PublishMeterCleanup publishes a cleanup signal for a session via Redis pub/sub.
+func (p *RedisMeterCleanupPublisher) PublishMeterCleanup(ctx context.Context, sessionID string) error {
+	return p.publish(ctx, p.channel, sessionID)
+}
+
 // SessionLifecycleManager manages the lifecycle of sessions from active to settled.
 // It monitors block heights and triggers state transitions at the appropriate times.
 type SessionLifecycleManager struct {
@@ -86,6 +121,9 @@ type SessionLifecycleManager struct {
 
 	// Optional pending relay checker for late relay detection
 	pendingChecker PendingRelayChecker
+
+	// Optional meter cleanup publisher for notifying relayers when sessions leave active state
+	meterCleanupPublisher MeterCleanupPublisher
 
 	// Current shared params (cached)
 	sharedParams   *sharedtypes.Params
@@ -151,6 +189,12 @@ func NewSessionLifecycleManager(
 		activeSessions:    make(map[string]*SessionSnapshot),
 		transitionSubpool: transitionSubpool,
 	}
+}
+
+// SetMeterCleanupPublisher sets the meter cleanup publisher for notifying relayers
+// when sessions leave active state. This should be called before Start().
+func (m *SessionLifecycleManager) SetMeterCleanupPublisher(publisher MeterCleanupPublisher) {
+	m.meterCleanupPublisher = publisher
 }
 
 // Start begins monitoring sessions and triggering lifecycle transitions.
@@ -526,39 +570,80 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 	// Execute batched transitions using pond subpool
 	// Non-blocking submission with unbounded queue (tasks queue if workers are busy)
 	//
-	// CRITICAL: Update session states SYNCHRONOUSLY before submitting async callbacks.
-	// This prevents race conditions where the next block event sees stale state
-	// and incorrectly expires a session that's already transitioning.
+	// CRITICAL: Persist state changes to REDIS before submitting async callbacks.
+	// This prevents duplicate submissions where the same sessions are resubmitted
+	// every block because Redis still shows them in Active state.
+	// Without this, sessions can be submitted dozens of times before the callback
+	// completes, flooding the worker pool and causing claim window timeouts.
 	if len(claimingSessions) > 0 {
-		// Update states synchronously to prevent race conditions
-		m.activeSessionsMu.Lock()
+		// Persist state to Redis FIRST to prevent duplicate submissions
+		// If Redis update fails, we skip submitting to avoid inconsistent state
+		var validClaimingSessions []*SessionSnapshot
 		for _, session := range claimingSessions {
+			if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateClaiming); err != nil {
+				m.logger.Error().
+					Err(err).
+					Str("session_id", session.SessionID).
+					Msg("failed to persist claiming state to Redis - skipping to prevent duplicate submission")
+				sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state_claiming").Inc()
+				continue
+			}
+
+			// Publish meter cleanup signal BEFORE updating in-memory state.
+			// Once a session transitions to claiming, it's no longer "active" from the
+			// relayer's perspective. This notifies relayers to clear their session meter
+			// data and decrement the active sessions metric.
+			if m.meterCleanupPublisher != nil {
+				if cleanupErr := m.meterCleanupPublisher.PublishMeterCleanup(ctx, session.SessionID); cleanupErr != nil {
+					m.logger.Warn().
+						Err(cleanupErr).
+						Str("session_id", session.SessionID).
+						Msg("failed to publish meter cleanup signal")
+				} else {
+					m.logger.Debug().
+						Str("session_id", session.SessionID).
+						Msg("published meter cleanup signal for session leaving active state")
+				}
+			}
+
 			session.State = SessionStateClaiming
 			session.LastUpdatedAt = time.Now()
+			validClaimingSessions = append(validClaimingSessions, session)
 		}
-		m.activeSessionsMu.Unlock()
 
-		// Capture for closure
-		capturedSessions := claimingSessions
-		m.transitionSubpool.Submit(func() {
-			m.executeBatchedClaimTransition(ctx, capturedSessions)
-		})
+		if len(validClaimingSessions) > 0 {
+			// Capture for closure
+			capturedSessions := validClaimingSessions
+			m.transitionSubpool.Submit(func() {
+				m.executeBatchedClaimTransition(ctx, capturedSessions)
+			})
+		}
 	}
 
 	if len(provingSessions) > 0 {
-		// Update states synchronously to prevent race conditions
-		m.activeSessionsMu.Lock()
+		// Persist state to Redis FIRST to prevent duplicate submissions
+		var validProvingSessions []*SessionSnapshot
 		for _, session := range provingSessions {
+			if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateProving); err != nil {
+				m.logger.Error().
+					Err(err).
+					Str("session_id", session.SessionID).
+					Msg("failed to persist proving state to Redis - skipping to prevent duplicate submission")
+				sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state_proving").Inc()
+				continue
+			}
 			session.State = SessionStateProving
 			session.LastUpdatedAt = time.Now()
+			validProvingSessions = append(validProvingSessions, session)
 		}
-		m.activeSessionsMu.Unlock()
 
-		// Capture for closure
-		capturedSessions := provingSessions
-		m.transitionSubpool.Submit(func() {
-			m.executeBatchedProofTransition(ctx, capturedSessions)
-		})
+		if len(validProvingSessions) > 0 {
+			// Capture for closure
+			capturedSessions := validProvingSessions
+			m.transitionSubpool.Submit(func() {
+				m.executeBatchedProofTransition(ctx, capturedSessions)
+			})
+		}
 	}
 
 	// Terminal states handled individually (no batching benefit)
@@ -612,7 +697,7 @@ func (m *SessionLifecycleManager) determineTransition(
 		}
 
 	case SessionStateClaiming:
-		// Transition to claimed happens after callback succeeds
+		// Transition to claimed shappens after callback succeeds
 		claimWindowClose := sharedtypes.GetClaimWindowCloseHeight(params, session.SessionEndHeight)
 
 		// If claim window passed without submitting, window closed (fallback if callback didn't run)

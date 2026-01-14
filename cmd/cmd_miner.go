@@ -192,15 +192,18 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("failed to start key manager: %w", err)
 	}
 
-	// Check if any keys were loaded
+	// Check if any keys were loaded - FAIL FAST if no keys
+	// This prevents the miner from silently running with no keys and doing nothing.
+	// Users with invalid key files will see clear error messages instead of exit 0.
 	suppliers := keyManager.ListSuppliers()
 	if len(suppliers) == 0 {
-		logger.Warn().Msg("no supplier keys found - miner will watch for keys to be added")
-	} else {
-		logger.Info().
-			Int("count", len(suppliers)).
-			Msg("loaded supplier keys")
+		return fmt.Errorf("no supplier keys loaded at startup - cannot proceed. " +
+			"Check your key file configuration and ensure at least one valid key is provided. " +
+			"Key file errors are logged above with details about what's wrong")
 	}
+	logger.Info().
+		Int("count", len(suppliers)).
+		Msg("loaded supplier keys")
 
 	// Generate unique instance ID for global leader election
 	hostname, _ := os.Hostname()

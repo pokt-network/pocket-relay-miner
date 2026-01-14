@@ -207,9 +207,6 @@ def deploy_grafana(config):
     grafana_config = config["observability"]["grafana"]
 
     # Load dashboard JSON files (reorganized by concern)
-    dashboard_business_economics = str(read_file("tilt/grafana/dashboards/business-economics.json"))
-    dashboard_service_performance = str(read_file("tilt/grafana/dashboards/service-performance.json"))
-    dashboard_operational_health = str(read_file("tilt/grafana/dashboards/operational-health.json"))
     dashboard_unified_overview = str(read_file("tilt/grafana/dashboards/unified-overview.json"))
 
     # Dashboard provisioning configuration

@@ -22,10 +22,70 @@ var _ KeyProvider = (*SupplierKeysFileProvider)(nil)
 // SupplierKeysFile is the structure of the supplier.yaml file.
 // It contains a simple list of hex-encoded private keys.
 // The operator address is derived from each private key.
+//
+// Schema:
+//
+//	keys:
+//	  - "0x..."  # hex-encoded secp256k1 private key (64 hex chars = 32 bytes)
+//	  - "..."    # 0x prefix is optional
 type SupplierKeysFile struct {
 	// Keys is a list of hex-encoded secp256k1 private keys.
 	// Can be prefixed with "0x" or not.
+	// Must be non-empty and each key must be a valid 64-character hex string.
 	Keys []string `yaml:"keys" json:"keys"`
+}
+
+// Validate validates the key file structure and returns detailed errors.
+// This is called before attempting to parse individual keys.
+func (f *SupplierKeysFile) Validate() error {
+	if f.Keys == nil {
+		return fmt.Errorf("invalid key file: 'keys' field is required")
+	}
+	if len(f.Keys) == 0 {
+		return fmt.Errorf("invalid key file: 'keys' array is empty - at least one key is required")
+	}
+
+	var validationErrors []string
+	for i, hexKey := range f.Keys {
+		if err := validateHexKeyFormat(hexKey); err != nil {
+			validationErrors = append(validationErrors, fmt.Sprintf("key[%d]: %s", i, err.Error()))
+		}
+	}
+
+	if len(validationErrors) > 0 {
+		return fmt.Errorf("key file validation failed:\n  - %s", strings.Join(validationErrors, "\n  - "))
+	}
+
+	return nil
+}
+
+// validateHexKeyFormat validates the format of a hex-encoded key WITHOUT parsing it.
+// This provides fast, detailed error messages before attempting expensive crypto operations.
+func validateHexKeyFormat(hexKey string) error {
+	// Remove 0x prefix if present
+	cleaned := strings.TrimPrefix(hexKey, "0x")
+	cleaned = strings.TrimSpace(cleaned)
+
+	if cleaned == "" {
+		return fmt.Errorf("empty key")
+	}
+
+	// Check length (64 hex chars = 32 bytes)
+	if len(cleaned) != 64 {
+		return fmt.Errorf("invalid length: expected 64 hex characters (32 bytes), got %d", len(cleaned))
+	}
+
+	// Check hex format
+	for i, c := range cleaned {
+		isDigit := c >= '0' && c <= '9'
+		isLowerHex := c >= 'a' && c <= 'f'
+		isUpperHex := c >= 'A' && c <= 'F'
+		if !isDigit && !isLowerHex && !isUpperHex {
+			return fmt.Errorf("invalid hex character '%c' at position %d", c, i)
+		}
+	}
+
+	return nil
 }
 
 // SupplierKeysFileProvider loads keys from a single supplier.yaml file
@@ -77,6 +137,12 @@ func (p *SupplierKeysFileProvider) Name() string {
 
 // LoadKeys loads all keys from the supplier.yaml file.
 // The operator address is derived from each private key.
+//
+// Returns an error if:
+// - File cannot be read
+// - File is not valid YAML
+// - File fails schema validation (missing 'keys', empty array, invalid hex format)
+// - No valid keys could be loaded
 func (p *SupplierKeysFileProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.PrivKey, error) {
 	keys := make(map[string]cryptotypes.PrivKey)
 
@@ -87,12 +153,21 @@ func (p *SupplierKeysFileProvider) LoadKeys(ctx context.Context) (map[string]cry
 
 	var keysFile SupplierKeysFile
 	if err := yaml.Unmarshal(data, &keysFile); err != nil {
-		return nil, fmt.Errorf("failed to parse supplier keys file: %w", err)
+		return nil, fmt.Errorf("failed to parse supplier keys file as YAML: %w", err)
 	}
 
+	// Validate file structure before attempting to parse keys
+	if err := keysFile.Validate(); err != nil {
+		return nil, fmt.Errorf("supplier keys file %s: %w", p.filePath, err)
+	}
+
+	// Parse each key - at this point format validation has passed
+	var parseErrors []string
 	for i, hexKey := range keysFile.Keys {
 		privKey, operatorAddr, err := parseHexKeyWithAddress(hexKey)
 		if err != nil {
+			// This shouldn't happen after format validation, but handle it
+			parseErrors = append(parseErrors, fmt.Sprintf("key[%d]: %s", i, err.Error()))
 			p.logger.Warn().
 				Err(err).
 				Int("index", i).
@@ -108,9 +183,16 @@ func (p *SupplierKeysFileProvider) LoadKeys(ctx context.Context) (map[string]cry
 			Msg("loaded key from supplier.yaml")
 	}
 
+	// If ALL keys failed to parse, return error (should be rare after validation)
+	if len(keys) == 0 {
+		return nil, fmt.Errorf("supplier keys file %s: no valid keys loaded - parsing errors:\n  - %s",
+			p.filePath, strings.Join(parseErrors, "\n  - "))
+	}
+
 	p.logger.Info().
 		Int("total_in_file", len(keysFile.Keys)).
 		Int("loaded", len(keys)).
+		Str("file", p.filePath).
 		Msg("loaded keys from supplier.yaml")
 
 	return keys, nil

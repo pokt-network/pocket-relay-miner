@@ -106,12 +106,8 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 	ctx, c.cancelFn = context.WithCancel(ctx)
 	c.mu.Unlock()
 
-	// Ensure consumer group exists for the single stream
-	if err := c.ensureConsumerGroup(ctx); err != nil {
-		c.logger.Warn().Err(err).Str("stream", c.streamName).Msg("failed to ensure consumer group at startup")
-	}
-
-	// Start consumer goroutine (fast 100ms polling, no discovery needed)
+	// Start consumer goroutine - consumer group creation happens in connectFn
+	// with proper exponential backoff retry via ReconnectionLoop
 	c.wg.Add(1)
 	go c.consumeLoop(ctx)
 
@@ -147,9 +143,11 @@ func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
 	reconnectLoop := NewReconnectionLoop(
 		c.logger,
 		"streams_consumer",
-		// connectFn: No-op since stream discovery handles consumer group creation
+		// connectFn: Create consumer group proactively on connect/reconnect.
+		// XGroupCreateMkStream creates both stream and group if they don't exist.
+		// This ensures the group exists before we try to consume, avoiding NOGROUP errors.
 		func(ctx context.Context) error {
-			return nil
+			return c.ensureConsumerGroup(ctx)
 		},
 		// runFn: Consume messages until error or context cancellation
 		func(ctx context.Context) error {
@@ -208,11 +206,17 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			}
 
 			// Handle NOGROUP error - recreate consumer group
+			// This is a fallback safety net. Normally connectFn creates the group at startup.
+			// This handles edge cases like external deletion of the consumer group.
 			if strings.Contains(err.Error(), "NOGROUP") {
-				c.logger.Warn().Err(err).Msg("consumer group missing, recreating")
+				c.logger.Debug().Err(err).Msg("consumer group missing (unexpected - recreating)")
 				if groupErr := c.ensureConsumerGroup(ctx); groupErr != nil {
-					c.logger.Error().Err(groupErr).Msg("failed to recreate consumer group")
+					// Failed to recreate consumer group - return error to trigger
+					// reconnection loop with exponential backoff instead of tight loop
+					c.logger.Warn().Err(groupErr).Msg("failed to recreate consumer group, triggering reconnection")
+					return fmt.Errorf("failed to recreate consumer group: %w", groupErr)
 				}
+				// Successfully created consumer group, retry XREADGROUP
 				continue
 			}
 

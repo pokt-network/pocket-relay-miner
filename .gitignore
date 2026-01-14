@@ -24,3 +24,6 @@ tilt/backend-server/pb/*.pb.go
 # OS
 .DS_Store
 Thumbs.db
+
+# Research/Reports
+reports
