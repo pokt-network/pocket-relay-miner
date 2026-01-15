@@ -129,9 +129,6 @@ type TxClient struct {
 	accountCache   map[string]*authtypes.BaseAccount
 	accountCacheMu sync.RWMutex
 
-	// Mutex to prevent concurrent transactions
-	txMu sync.Mutex
-
 	// Lifecycle
 	closed bool
 	mu     sync.RWMutex
@@ -339,8 +336,8 @@ func (tc *TxClient) signAndBroadcast(
 	txType string,
 	msgs ...cosmostypes.Msg,
 ) (string, error) {
-	tc.txMu.Lock()
-	defer tc.txMu.Unlock()
+	// NOTE: No global mutex needed - unordered transactions (SetUnordered(true))
+	// use sequence=0, eliminating sequence number conflicts between concurrent TXs.
 
 	startTime := time.Now()
 	defer func() {

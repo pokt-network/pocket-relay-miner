@@ -95,10 +95,10 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	c.logger.Info().Msg("starting leader controller - creating all resources")
 
 	// Create a master worker pool for controlled concurrency
-	// AGGRESSIVE: 32x CPU for high parallelism (claim/proof building + blockchain queries)
-	// With 300 max_concurrent_transitions, we need enough workers in the master pool
-	numCPU := runtime.NumCPU()
-	masterPoolSize := numCPU * 32
+	// Formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+	// This scales with both CPU count and supplier count for optimal parallelism
+	numSuppliers := len(c.config.KeyManager.ListSuppliers())
+	masterPoolSize := c.config.Config.GetMasterPoolSize(numSuppliers)
 	c.masterPool = pond.NewPool(
 		masterPoolSize,
 		pond.WithQueueSize(pond.Unbounded),
@@ -106,8 +106,12 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	)
 	c.logger.Info().
 		Int("max_workers", masterPoolSize).
-		Int("num_cpu", numCPU).
-		Msg("created master worker pool (AGGRESSIVE: unbounded, non-blocking, 32x CPU for high supplier count)")
+		Int("num_suppliers", numSuppliers).
+		Int("num_cpu", runtime.NumCPU()).
+		Msg("created master worker pool (auto-sized based on supplier count and CPU)")
+
+	// Start worker pool metrics ticker for Prometheus monitoring
+	StartWorkerPoolMetricsTicker(ctx, c.logger, c.masterPool, "leader_controller", masterPoolSize)
 
 	// Create query clients
 	var err error
@@ -412,6 +416,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		supplierAddresses,
 		c.masterPool,
 		nil, // SessionStore not available in LeaderController (settlement metadata won't be updated)
+		c.config.Config.GetSettlementWorkers(),
 	)
 	if err := c.settlementMonitor.Start(ctx); err != nil {
 		c.cleanup()

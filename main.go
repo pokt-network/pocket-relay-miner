@@ -4,6 +4,7 @@ import (
 	"os"
 
 	"github.com/spf13/cobra"
+	_ "go.uber.org/automaxprocs" // Automatically set GOMAXPROCS based on cgroup limits
 
 	"github.com/pokt-network/pocket-relay-miner/cmd"
 )

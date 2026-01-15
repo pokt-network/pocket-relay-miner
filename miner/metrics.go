@@ -1,10 +1,14 @@
 package miner
 
 import (
+	"context"
 	"fmt"
+	"time"
 
+	"github.com/alitto/pond/v2"
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/observability"
 )
 
@@ -970,6 +974,98 @@ var (
 		},
 		[]string{"instance"},
 	)
+
+	// ====== WORKER POOL METRICS ======
+	// These metrics track the pond worker pool state and performance.
+	// Useful for diagnosing concurrency bottlenecks with many suppliers.
+
+	// workerPoolConfiguredSize tracks the configured/calculated pool size.
+	workerPoolConfiguredSize = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_configured_size",
+			Help:      "Configured maximum size of the worker pool",
+		},
+		[]string{"pool_name"},
+	)
+
+	// workerPoolRunningWorkers tracks the current number of active workers.
+	workerPoolRunningWorkers = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_running_workers",
+			Help:      "Current number of running workers in the pool",
+		},
+		[]string{"pool_name"},
+	)
+
+	// workerPoolWaitingTasks tracks tasks waiting in the queue.
+	workerPoolWaitingTasks = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_waiting_tasks",
+			Help:      "Current number of tasks waiting in the queue",
+		},
+		[]string{"pool_name"},
+	)
+
+	// workerPoolSubmittedTasksTotal tracks total tasks submitted.
+	workerPoolSubmittedTasksTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_submitted_tasks_total",
+			Help:      "Total number of tasks submitted to the pool",
+		},
+		[]string{"pool_name"},
+	)
+
+	// workerPoolCompletedTasksTotal tracks total tasks completed (success + failed).
+	workerPoolCompletedTasksTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_completed_tasks_total",
+			Help:      "Total number of tasks completed (success + failed)",
+		},
+		[]string{"pool_name"},
+	)
+
+	// workerPoolSuccessfulTasksTotal tracks tasks completed successfully.
+	workerPoolSuccessfulTasksTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_successful_tasks_total",
+			Help:      "Total number of tasks completed successfully",
+		},
+		[]string{"pool_name"},
+	)
+
+	// workerPoolFailedTasksTotal tracks tasks that panicked.
+	workerPoolFailedTasksTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_failed_tasks_total",
+			Help:      "Total number of tasks that completed with panic",
+		},
+		[]string{"pool_name"},
+	)
+
+	// workerPoolDroppedTasksTotal tracks tasks dropped due to full queue.
+	workerPoolDroppedTasksTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_dropped_tasks_total",
+			Help:      "Total number of tasks dropped because the queue was full",
+		},
+		[]string{"pool_name"},
+	)
 )
 
 // =============================================
@@ -1254,4 +1350,139 @@ func RecordClaimDiscarded(supplier, serviceID, _ string, _, _ int64) {
 func RecordBlockResultsRetry(height int64, _ int) {
 	// Track retry attempts (helps identify ABCI indexing lag)
 	blockResultsRetriesTotal.WithLabelValues(fmt.Sprintf("%d", height)).Inc()
+}
+
+// ====== WORKER POOL METRICS HELPERS ======
+
+// WorkerPoolMetrics represents the metrics from a pond worker pool.
+type WorkerPoolMetrics struct {
+	PoolName        string
+	ConfiguredSize  int
+	RunningWorkers  int64
+	WaitingTasks    uint64
+	SubmittedTasks  uint64
+	CompletedTasks  uint64
+	SuccessfulTasks uint64
+	FailedTasks     uint64
+	DroppedTasks    uint64
+}
+
+// workerPoolPreviousMetrics stores the previous counter values for delta calculation.
+// This is needed because pond returns total counts, but we want to export them as counters.
+var workerPoolPreviousMetrics = make(map[string]*WorkerPoolMetrics)
+
+// RecordWorkerPoolConfiguredSize records the configured/calculated pool size.
+// Called once at startup when the pool is created.
+func RecordWorkerPoolConfiguredSize(poolName string, size int) {
+	workerPoolConfiguredSize.WithLabelValues(poolName).Set(float64(size))
+}
+
+// RecordWorkerPoolMetrics records all worker pool metrics.
+// This should be called periodically by a ticker.
+func RecordWorkerPoolMetrics(metrics WorkerPoolMetrics) {
+	poolName := metrics.PoolName
+
+	// Record gauge metrics (current state)
+	workerPoolRunningWorkers.WithLabelValues(poolName).Set(float64(metrics.RunningWorkers))
+	workerPoolWaitingTasks.WithLabelValues(poolName).Set(float64(metrics.WaitingTasks))
+
+	// Get previous values for delta calculation
+	prev, exists := workerPoolPreviousMetrics[poolName]
+	if !exists {
+		prev = &WorkerPoolMetrics{}
+		workerPoolPreviousMetrics[poolName] = prev
+	}
+
+	// Record counter metrics (incremental deltas)
+	// Only add the delta since last collection to avoid double-counting
+	if metrics.SubmittedTasks > prev.SubmittedTasks {
+		delta := metrics.SubmittedTasks - prev.SubmittedTasks
+		workerPoolSubmittedTasksTotal.WithLabelValues(poolName).Add(float64(delta))
+	}
+	if metrics.CompletedTasks > prev.CompletedTasks {
+		delta := metrics.CompletedTasks - prev.CompletedTasks
+		workerPoolCompletedTasksTotal.WithLabelValues(poolName).Add(float64(delta))
+	}
+	if metrics.SuccessfulTasks > prev.SuccessfulTasks {
+		delta := metrics.SuccessfulTasks - prev.SuccessfulTasks
+		workerPoolSuccessfulTasksTotal.WithLabelValues(poolName).Add(float64(delta))
+	}
+	if metrics.FailedTasks > prev.FailedTasks {
+		delta := metrics.FailedTasks - prev.FailedTasks
+		workerPoolFailedTasksTotal.WithLabelValues(poolName).Add(float64(delta))
+	}
+	if metrics.DroppedTasks > prev.DroppedTasks {
+		delta := metrics.DroppedTasks - prev.DroppedTasks
+		workerPoolDroppedTasksTotal.WithLabelValues(poolName).Add(float64(delta))
+	}
+
+	// Update previous values
+	prev.SubmittedTasks = metrics.SubmittedTasks
+	prev.CompletedTasks = metrics.CompletedTasks
+	prev.SuccessfulTasks = metrics.SuccessfulTasks
+	prev.FailedTasks = metrics.FailedTasks
+	prev.DroppedTasks = metrics.DroppedTasks
+}
+
+// StartWorkerPoolMetricsTicker starts a goroutine that periodically collects
+// and records metrics from a pond worker pool.
+// The ticker runs every 5 seconds and stops when the context is cancelled.
+func StartWorkerPoolMetricsTicker(
+	ctx context.Context,
+	logger logging.Logger,
+	pool pond.Pool,
+	poolName string,
+	configuredSize int,
+) {
+	// Record the configured size immediately
+	RecordWorkerPoolConfiguredSize(poolName, configuredSize)
+
+	// Log initial pool creation metrics
+	logger.Info().
+		Str("pool_name", poolName).
+		Int("configured_size", configuredSize).
+		Msg("starting worker pool metrics ticker")
+
+	// Start the ticker goroutine
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				logger.Debug().
+					Str("pool_name", poolName).
+					Msg("worker pool metrics ticker stopped")
+				return
+			case <-ticker.C:
+				// Collect metrics from the pool
+				metrics := WorkerPoolMetrics{
+					PoolName:        poolName,
+					ConfiguredSize:  configuredSize,
+					RunningWorkers:  pool.RunningWorkers(),
+					WaitingTasks:    pool.WaitingTasks(),
+					SubmittedTasks:  pool.SubmittedTasks(),
+					CompletedTasks:  pool.CompletedTasks(),
+					SuccessfulTasks: pool.SuccessfulTasks(),
+					FailedTasks:     pool.FailedTasks(),
+					DroppedTasks:    pool.DroppedTasks(),
+				}
+
+				// Record the metrics
+				RecordWorkerPoolMetrics(metrics)
+
+				// Debug log for high utilization (running workers > 80% of configured)
+				utilizationPct := float64(metrics.RunningWorkers) / float64(configuredSize) * 100
+				if utilizationPct > 80 {
+					logger.Debug().
+						Str("pool_name", poolName).
+						Int64("running_workers", metrics.RunningWorkers).
+						Uint64("waiting_tasks", metrics.WaitingTasks).
+						Float64("utilization_pct", utilizationPct).
+						Msg("worker pool high utilization")
+				}
+			}
+		}
+	}()
 }

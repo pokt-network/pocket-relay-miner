@@ -38,6 +38,7 @@ type SettlementMonitor struct {
 // NewSettlementMonitor creates a new settlement monitor.
 // The masterPool parameter is required for creating settlement processing subpool.
 // The sessionStore parameter is optional - if nil, settlement metadata won't be updated.
+// The settlementWorkers parameter controls the subpool size (default: 2 if <= 0).
 func NewSettlementMonitor(
 	logger logging.Logger,
 	blockSubscriber *haclient.BlockSubscriber,
@@ -45,6 +46,7 @@ func NewSettlementMonitor(
 	suppliers []string,
 	masterPool pond.Pool,
 	sessionStore SessionStore,
+	settlementWorkers int,
 ) *SettlementMonitor {
 	// Build supplier set for fast lookup
 	supplierSet := make(map[string]bool, len(suppliers))
@@ -53,12 +55,17 @@ func NewSettlementMonitor(
 	}
 
 	// Create settlement processing subpool from master pool
-	// Subpool size: 2 workers (settlement events are rare, 1 per session)
+	// Configurable via worker_pools.settlement_workers (default: 2)
 	// Using a subpool ensures settlement processing doesn't lock claim/proof submission
-	settlementSubpool := masterPool.NewSubpool(2)
+	// Uses CreateBoundedSubpool to cap at parent pool max and warn if exceeded
+	if settlementWorkers <= 0 {
+		settlementWorkers = 2 // default
+	}
+	componentLogger := logging.ForComponent(logger, "settlement_monitor")
+	settlementSubpool := CreateBoundedSubpool(componentLogger, masterPool, settlementWorkers, "settlement_subpool")
 
 	return &SettlementMonitor{
-		logger:          logging.ForComponent(logger, "settlement_monitor"),
+		logger:          componentLogger,
 		blockSubscriber: blockSubscriber,
 		rpcClient:       rpcClient,
 		suppliers:       supplierSet,

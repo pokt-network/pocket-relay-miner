@@ -32,6 +32,15 @@ balance_monitor:
 session_lifecycle:
   max_concurrent_transitions: 10
 
+# Worker pool configuration (auto-sizing for localnet)
+# Formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+worker_pools:
+  master_pool_size: 0           # 0 = auto-calculate (recommended)
+  cpu_multiplier: 4             # CPU multiplier for baseline sizing
+  workers_per_supplier: 2       # Workers per supplier (claim + proof parallel)
+  query_workers: 20             # Fixed workers for blockchain queries
+  settlement_workers: 2         # Fixed workers for settlement events
+
 leader_election:
   leader_ttl_seconds: 30
   heartbeat_rate_seconds: 10

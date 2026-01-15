@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/alitto/pond/v2"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
@@ -182,6 +184,10 @@ type LifecycleCallback struct {
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
 	sessionLocksMu sync.Mutex
+
+	// buildPool is used for bounded parallel claim/proof building.
+	// If nil, falls back to unbounded goroutines (legacy behavior).
+	buildPool pond.Pool
 }
 
 // NewLifecycleCallback creates a new lifecycle callback.
@@ -246,6 +252,12 @@ func (lc *LifecycleCallback) SetStreamDeleter(deleter StreamDeleter) {
 // This is optional - if not set, submissions are not tracked.
 func (lc *LifecycleCallback) SetSubmissionTracker(tracker *SubmissionTracker) {
 	lc.submissionTracker = tracker
+}
+
+// SetBuildPool sets the worker pool for bounded parallel claim/proof building.
+// If not set, falls back to unbounded goroutines (legacy behavior).
+func (lc *LifecycleCallback) SetBuildPool(pool pond.Pool) {
+	lc.buildPool = pool
 }
 
 // removeSessionLock removes a per-session lock.
@@ -626,17 +638,15 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		}
 
 		results := make(chan claimBuildResult, len(validSnapshots))
-		var buildWg sync.WaitGroup
+		numTasks := len(validSnapshots)
 
 		for i, snapshot := range validSnapshots {
-			buildWg.Add(1)
 			// Capture loop variables for goroutine
 			index := i
 			snap := snapshot
 
-			go func() {
-				defer buildWg.Done()
-
+			// Submit to bounded build pool if available, otherwise use unbounded goroutine
+			buildFunc := func() {
 				result := claimBuildResult{
 					index:    index,
 					snapshot: snap,
@@ -667,16 +677,19 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				}
 
 				results <- result
-			}()
+			}
+
+			if lc.buildPool != nil {
+				lc.buildPool.Submit(buildFunc)
+			} else {
+				go buildFunc()
+			}
 		}
 
-		// Wait for all parallel builds to complete
-		buildWg.Wait()
-		close(results)
-
-		// Collect results in original order
-		claimResults := make([]claimBuildResult, len(validSnapshots))
-		for result := range results {
+		// Collect all results (blocking until all tasks complete)
+		claimResults := make([]claimBuildResult, numTasks)
+		for i := 0; i < numTasks; i++ {
+			result := <-results
 			if result.err != nil {
 				return nil, result.err
 			}
@@ -1284,17 +1297,15 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		}
 
 		proofResults := make(chan proofBuildResult, len(sessionsNeedingProof))
-		var proofBuildWg sync.WaitGroup
+		numProofTasks := len(sessionsNeedingProof)
 
 		for i, snapshot := range sessionsNeedingProof {
-			proofBuildWg.Add(1)
 			// Capture loop variables for goroutine
 			index := i
 			snap := snapshot
 
-			go func() {
-				defer proofBuildWg.Done()
-
+			// Submit to bounded build pool if available, otherwise use unbounded goroutine
+			buildProofFunc := func() {
 				result := proofBuildResult{
 					index:    index,
 					snapshot: snap,
@@ -1337,16 +1348,19 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				}
 
 				proofResults <- result
-			}()
+			}
+
+			if lc.buildPool != nil {
+				lc.buildPool.Submit(buildProofFunc)
+			} else {
+				go buildProofFunc()
+			}
 		}
 
-		// Wait for all parallel builds to complete
-		proofBuildWg.Wait()
-		close(proofResults)
-
-		// Collect results in original order
-		proofBuildResults := make([]proofBuildResult, len(sessionsNeedingProof))
-		for result := range proofResults {
+		// Collect all results (blocking until all tasks complete)
+		proofBuildResults := make([]proofBuildResult, numProofTasks)
+		for i := 0; i < numProofTasks; i++ {
+			result := <-proofResults
 			if result.err != nil {
 				return result.err
 			}

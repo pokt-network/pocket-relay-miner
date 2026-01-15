@@ -188,6 +188,25 @@ session_lifecycle:
   max_concurrent_transitions: 10  # Limit parallel claim/proof submission batches
 
 # ==============================================================================
+# Worker Pool Configuration
+# ==============================================================================
+# Controls parallelism for claim/proof submission and other background work.
+# Auto-sizing formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+#
+# Example sizing (4 CPU, 78 suppliers):
+#   max(4 × 4, 78 × 2) + 22 = max(16, 156) + 22 = 178 workers
+#
+# For high supplier counts, the pool scales with supplier count to ensure
+# all suppliers can submit claims/proofs in parallel during claim windows.
+#
+# worker_pools:
+#   master_pool_size: 0           # 0 = auto-calculate (recommended)
+#   cpu_multiplier: 4             # CPU multiplier for baseline sizing
+#   workers_per_supplier: 2       # Workers per supplier (claim + proof parallel)
+#   query_workers: 20             # Fixed workers for blockchain queries
+#   settlement_workers: 2         # Fixed workers for settlement events
+
+# ==============================================================================
 # Leader Election Configuration (HA Deployments)
 # ==============================================================================
 leader_election:

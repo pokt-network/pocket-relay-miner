@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"runtime"
 	"time"
 
+	"github.com/alitto/pond/v2"
 	"gopkg.in/yaml.v3"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
@@ -93,6 +95,10 @@ type Config struct {
 	// If a service has an override, it takes precedence over DefaultServiceFactor.
 	ServiceFactors map[string]float64 `yaml:"service_factors,omitempty"`
 
+	// WorkerPools configures worker pool sizing for parallel processing.
+	// Auto-sizing formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+	WorkerPools WorkerPoolConfigYAML `yaml:"worker_pools,omitempty"`
+
 	// Note: Supplier claiming is always enabled with hardcoded timing values.
 	// See miner/supplier_claimer.go for the constants (ClaimTTL, RenewRate, etc.)
 	// These values are NOT user-configurable to ensure production reliability.
@@ -155,6 +161,37 @@ type BlockHealthConfig struct {
 	// If actualTime > configuredTime × threshold, a warning is logged.
 	// Default: 1.5 (50% slower than expected)
 	SlownessThreshold float64 `yaml:"slowness_threshold,omitempty"`
+}
+
+// WorkerPoolConfigYAML contains configuration for worker pool sizing.
+// Worker pools control parallelism for claim/proof submission and background work.
+// Auto-sizing formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+type WorkerPoolConfigYAML struct {
+	// MasterPoolSize is the total master pool size.
+	// Set to 0 for auto-calculation based on CPU and supplier count.
+	// Default: 0 (auto-calculate)
+	MasterPoolSize int `yaml:"master_pool_size,omitempty"`
+
+	// CPUMultiplier is the multiplier for CPU-based sizing baseline.
+	// Used in formula: cpu_count × cpu_multiplier
+	// Default: 4
+	CPUMultiplier int `yaml:"cpu_multiplier,omitempty"`
+
+	// WorkersPerSupplier is the number of workers allocated per supplier.
+	// Allows claim and proof to run in parallel for each supplier.
+	// Used in formula: num_suppliers × workers_per_supplier
+	// Default: 2
+	WorkersPerSupplier int `yaml:"workers_per_supplier,omitempty"`
+
+	// QueryWorkers is the fixed number of workers for blockchain queries.
+	// Used for startup queries, cache refresh, supplier registry.
+	// Default: 20
+	QueryWorkers int `yaml:"query_workers,omitempty"`
+
+	// SettlementWorkers is the fixed number of workers for settlement event processing.
+	// block_results can be 1GB+ on mainnet, needs dedicated workers.
+	// Default: 2
+	SettlementWorkers int `yaml:"settlement_workers,omitempty"`
 }
 
 // RedisConfig embeds shared RedisConfig and adds miner-specific fields.
@@ -461,6 +498,91 @@ func (c *Config) GetSupplierClaimingConfig() SupplierClaimerConfig {
 		InstanceHeartbeatRate: InstanceHeartbeatRate,
 		RebalanceInterval:     RebalanceInterval,
 	}
+}
+
+// GetMasterPoolSize returns the master pool size, auto-calculating if not explicitly set.
+// Formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+// Example (4 CPU, 78 suppliers): max(4×4, 78×2) + 22 = max(16, 156) + 22 = 178
+func (c *Config) GetMasterPoolSize(numSuppliers int) int {
+	if c.WorkerPools.MasterPoolSize > 0 {
+		return c.WorkerPools.MasterPoolSize
+	}
+	// Auto-calculate based on CPU and supplier count
+	// Use getEffectiveCPUCount() which respects GOMAXPROCS for container environments
+	cpuBased := getEffectiveCPUCount() * c.GetCPUMultiplier()
+	supplierBased := numSuppliers * c.GetWorkersPerSupplier()
+	overhead := c.GetQueryWorkers() + c.GetSettlementWorkers()
+
+	baseSize := cpuBased
+	if supplierBased > cpuBased {
+		baseSize = supplierBased
+	}
+	return baseSize + overhead
+}
+
+// getEffectiveCPUCount returns the effective CPU count for the process.
+// Uses runtime.GOMAXPROCS(0) which returns the current value set by automaxprocs
+// (cgroup-aware) or falls back to runtime.NumCPU() if not limited.
+func getEffectiveCPUCount() int {
+	// runtime.GOMAXPROCS(0) returns current value without changing it.
+	// automaxprocs (imported in main.go) sets this based on cgroup limits at init().
+	return runtime.GOMAXPROCS(0)
+}
+
+// CreateBoundedSubpool creates a subpool with size capped to the parent pool's max.
+// If requested size exceeds parent max, it logs a warning and uses the parent max.
+// This prevents panics from misconfiguration while alerting operators.
+func CreateBoundedSubpool(logger logging.Logger, pool pond.Pool, requestedSize int, name string) pond.Pool {
+	parentMax := pool.MaxConcurrency()
+	actualSize := requestedSize
+
+	if requestedSize > parentMax {
+		logger.Warn().
+			Str("subpool", name).
+			Int("requested_size", requestedSize).
+			Int("parent_max", parentMax).
+			Int("actual_size", parentMax).
+			Msg("subpool size exceeds parent pool max, capping to parent max")
+		actualSize = parentMax
+	}
+
+	return pool.NewSubpool(actualSize)
+}
+
+// GetCPUMultiplier returns the CPU multiplier for pool sizing.
+// Default: 4
+func (c *Config) GetCPUMultiplier() int {
+	if c.WorkerPools.CPUMultiplier > 0 {
+		return c.WorkerPools.CPUMultiplier
+	}
+	return 4 // Default
+}
+
+// GetWorkersPerSupplier returns the number of workers per supplier.
+// Default: 2 (allows claim and proof to run in parallel)
+func (c *Config) GetWorkersPerSupplier() int {
+	if c.WorkerPools.WorkersPerSupplier > 0 {
+		return c.WorkerPools.WorkersPerSupplier
+	}
+	return 2 // Default
+}
+
+// GetQueryWorkers returns the fixed number of query workers.
+// Default: 20
+func (c *Config) GetQueryWorkers() int {
+	if c.WorkerPools.QueryWorkers > 0 {
+		return c.WorkerPools.QueryWorkers
+	}
+	return 20 // Default
+}
+
+// GetSettlementWorkers returns the fixed number of settlement workers.
+// Default: 2
+func (c *Config) GetSettlementWorkers() int {
+	if c.WorkerPools.SettlementWorkers > 0 {
+		return c.WorkerPools.SettlementWorkers
+	}
+	return 2 // Default
 }
 
 // DefaultConfig returns a config with sensible defaults.

@@ -75,6 +75,8 @@ spec:
         - containerPort: 6060
           name: pprof
         env:
+        - name: GOMAXPROCS
+          value: "4"  # Match CPU limit - makes runtime.NumCPU() return 4
         - name: LOG_LEVEL
           value: "{}"
         - name: POD_NAME

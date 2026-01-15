@@ -105,10 +105,10 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	w.logger.Info().Msg("starting supplier worker")
 
 	// Create master worker pool
-	// AGGRESSIVE: 32x CPU for high parallelism (claim/proof building + blockchain queries)
-	// With 300 max_concurrent_transitions, we need enough workers in the master pool
-	numCPU := runtime.NumCPU()
-	masterPoolSize := numCPU * 32
+	// Formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+	// This scales with both CPU count and supplier count for optimal parallelism
+	numSuppliers := len(w.config.KeyManager.ListSuppliers())
+	masterPoolSize := w.config.Config.GetMasterPoolSize(numSuppliers)
 	w.masterPool = pond.NewPool(
 		masterPoolSize,
 		pond.WithQueueSize(pond.Unbounded),
@@ -116,8 +116,12 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	)
 	w.logger.Info().
 		Int("max_workers", masterPoolSize).
-		Int("num_cpu", numCPU).
-		Msg("created master worker pool (AGGRESSIVE: 32x CPU for high supplier count)")
+		Int("num_suppliers", numSuppliers).
+		Int("num_cpu", runtime.NumCPU()).
+		Msg("created master worker pool (auto-sized based on supplier count and CPU)")
+
+	// Start worker pool metrics ticker for Prometheus monitoring
+	StartWorkerPoolMetricsTicker(w.ctx, w.logger, w.masterPool, "supplier_worker", masterPoolSize)
 
 	// Create query clients
 	var err error
@@ -343,6 +347,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			ClaimerConfig:        w.config.Config.GetSupplierClaimingConfig(),
 			DisableClaimBatching: w.config.Config.Transaction.DisableClaimBatching,
 			DisableProofBatching: w.config.Config.Transaction.DisableProofBatching,
+			QueryWorkers:         w.config.Config.GetQueryWorkers(),
 		},
 	)
 

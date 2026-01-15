@@ -148,6 +148,10 @@ type SupplierManagerConfig struct {
 	// WORKAROUND: Set to true to avoid cross-contamination where one invalid proof
 	// (e.g., difficulty validation failure) causes the entire batch to fail.
 	DisableProofBatching bool
+
+	// QueryWorkers is the number of workers for bounded supplier queries.
+	// Default: 20 (if 0 or not set)
+	QueryWorkers int
 }
 
 // SupplierManager manages multiple suppliers in the HA Miner.
@@ -186,8 +190,14 @@ func NewSupplierManager(
 	config SupplierManagerConfig,
 ) *SupplierManager {
 	// Create subpool for bounded supplier queries (prevents system overwhelm)
-	// Limit to 20 concurrent queries to avoid spawning 100+ goroutines
-	querySubpool := config.WorkerPool.NewSubpool(20)
+	// Configurable via worker_pools.query_workers (default: 20)
+	// Uses CreateBoundedSubpool to cap at parent pool max and warn if exceeded
+	queryWorkers := config.QueryWorkers
+	if queryWorkers <= 0 {
+		queryWorkers = 20 // default
+	}
+	componentLogger := logging.ForComponent(logger, logging.ComponentSupplierManager)
+	querySubpool := CreateBoundedSubpool(componentLogger, config.WorkerPool, queryWorkers, "query_subpool")
 
 	return &SupplierManager{
 		logger:       logging.ForComponent(logger, logging.ComponentSupplierManager),
@@ -705,6 +715,10 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis
 		submissionTracker := NewSubmissionTracker(m.logger, m.config.RedisClient)
 		lifecycleCallback.SetSubmissionTracker(submissionTracker)
+
+		// Wire build pool for bounded parallel claim/proof building
+		// Uses master pool to avoid unbounded goroutine spawning
+		lifecycleCallback.SetBuildPool(m.config.WorkerPool)
 
 		// Create lifecycle manager for monitoring sessions and triggering claim/proof
 		lifecycleConfig := m.config.SessionLifecycleConfig

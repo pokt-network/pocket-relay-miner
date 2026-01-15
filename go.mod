@@ -26,6 +26,7 @@ require (
 	github.com/rs/zerolog v1.34.0
 	github.com/spf13/cobra v1.9.1
 	github.com/stretchr/testify v1.11.1
+	go.uber.org/automaxprocs v1.6.0
 	golang.org/x/net v0.45.0
 	google.golang.org/grpc v1.72.0
 	google.golang.org/protobuf v1.36.6

@@ -3,7 +3,6 @@ package miner
 import (
 	"context"
 	"fmt"
-	"runtime"
 	"sync"
 	"time"
 
@@ -160,26 +159,19 @@ func NewSessionLifecycleManager(
 	if config.CheckIntervalBlocks <= 0 {
 		config.CheckIntervalBlocks = 1
 	}
-	if config.MaxConcurrentTransitions <= 0 {
-		// Dynamic allocation: 25% of (NumCPU * 2) for mixed workload (crypto + network)
-		// Miner is heavy lift, so we use NumCPU * 2 as base
-		numCPU := runtime.NumCPU()
-		config.MaxConcurrentTransitions = int(float64(numCPU*2) * 0.25)
-		if config.MaxConcurrentTransitions < 2 {
-			config.MaxConcurrentTransitions = 2 // Minimum 2 workers
-		}
-	}
+	// MaxConcurrentTransitions is always set by the config getter (minimum 10)
 
 	// Create transition subpool from master pool
-	transitionSubpool := workerPool.NewSubpool(config.MaxConcurrentTransitions)
+	// Uses CreateBoundedSubpool to cap at parent pool max and warn if exceeded
+	componentLogger := logging.ForSupplierComponent(logger, logging.ComponentSessionLifecycle, config.SupplierAddress)
+	transitionSubpool := CreateBoundedSubpool(componentLogger, workerPool, config.MaxConcurrentTransitions, "transition_subpool")
 
-	logger.Debug().
+	componentLogger.Debug().
 		Int("transition_workers", config.MaxConcurrentTransitions).
-		Int("num_cpu", runtime.NumCPU()).
-		Msg("created transition subpool with dynamic CPU-based allocation")
+		Msg("created transition subpool from master pool")
 
 	return &SessionLifecycleManager{
-		logger:            logging.ForSupplierComponent(logger, logging.ComponentSessionLifecycle, config.SupplierAddress),
+		logger:            componentLogger,
 		config:            config,
 		sessionStore:      sessionStore,
 		sharedClient:      sharedClient,

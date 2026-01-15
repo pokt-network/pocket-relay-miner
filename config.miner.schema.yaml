@@ -302,6 +302,36 @@ properties:
         default: 10
         minimum: 1
 
+  worker_pools:
+    type: object
+    description: Worker pool configuration for parallel processing. Auto-sizing formula - max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+    properties:
+      master_pool_size:
+        type: integer
+        description: Total master pool size (0 = auto-calculate based on CPU and supplier count)
+        default: 0
+        minimum: 0
+      cpu_multiplier:
+        type: integer
+        description: Multiplier for CPU-based sizing baseline (cpu_count × multiplier)
+        default: 4
+        minimum: 1
+      workers_per_supplier:
+        type: integer
+        description: Workers allocated per supplier for claim/proof building
+        default: 2
+        minimum: 1
+      query_workers:
+        type: integer
+        description: Fixed workers for blockchain queries (startup, cache refresh)
+        default: 20
+        minimum: 1
+      settlement_workers:
+        type: integer
+        description: Fixed workers for settlement event processing
+        default: 2
+        minimum: 1
+
   leader_election:
     type: object
     description: Distributed leader election configuration (HA deployments)
