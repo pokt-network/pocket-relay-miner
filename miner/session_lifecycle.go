@@ -526,7 +526,11 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		// Callbacks may have updated state to terminal (e.g., proof_tx_error) which must not be overwritten
 		session, err := m.sessionStore.Get(ctx, sessionID)
 		if err != nil || session == nil {
-			m.logger.Warn().Err(err).Str("session_id", sessionID).Msg("failed to reload session from Redis")
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Int64("current_height", currentHeight).
+				Msg("failed to reload session from Redis")
 			continue
 		}
 
@@ -575,7 +579,9 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateClaiming); err != nil {
 				m.logger.Error().
 					Err(err).
-					Str("session_id", session.SessionID).
+					Str(logging.FieldSessionID, session.SessionID).
+					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+					Str(logging.FieldServiceID, session.ServiceID).
 					Msg("failed to persist claiming state to Redis - skipping to prevent duplicate submission")
 				sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state_claiming").Inc()
 				continue
@@ -589,11 +595,15 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 				if cleanupErr := m.meterCleanupPublisher.PublishMeterCleanup(ctx, session.SessionID); cleanupErr != nil {
 					m.logger.Warn().
 						Err(cleanupErr).
-						Str("session_id", session.SessionID).
+						Str(logging.FieldSessionID, session.SessionID).
+						Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+						Str(logging.FieldServiceID, session.ServiceID).
 						Msg("failed to publish meter cleanup signal")
 				} else {
 					m.logger.Debug().
-						Str("session_id", session.SessionID).
+						Str(logging.FieldSessionID, session.SessionID).
+						Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+						Str(logging.FieldServiceID, session.ServiceID).
 						Msg("published meter cleanup signal for session leaving active state")
 				}
 			}
@@ -619,7 +629,9 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateProving); err != nil {
 				m.logger.Error().
 					Err(err).
-					Str("session_id", session.SessionID).
+					Str(logging.FieldSessionID, session.SessionID).
+					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+					Str(logging.FieldServiceID, session.ServiceID).
 					Msg("failed to persist proving state to Redis - skipping to prevent duplicate submission")
 				sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state_proving").Inc()
 				continue
@@ -667,7 +679,10 @@ func (m *SessionLifecycleManager) determineTransition(
 
 		// DEBUG: Log window calculation details
 		m.logger.Debug().
-			Str("session_id", session.SessionID).
+			Str(logging.FieldSessionID, session.SessionID).
+			Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+			Str(logging.FieldServiceID, session.ServiceID).
+			Str(logging.FieldApplication, session.ApplicationAddress).
 			Str("current_state", string(session.State)).
 			Int64("current_height", currentHeight).
 			Int64("session_start", session.SessionStartHeight).
@@ -742,6 +757,7 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 
 	m.logger.Debug().
 		Int("batch_size", len(sessions)).
+		Str(logging.FieldSupplier, m.config.SupplierAddress).
 		Msg("executing batched claim transition")
 
 	// LATE RELAY DETECTION: Check for pending (unconsumed) relays before claiming
@@ -751,14 +767,18 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 			if checkErr != nil {
 				m.logger.Debug().
 					Err(checkErr).
-					Str("session_id", session.SessionID).
+					Str(logging.FieldSessionID, session.SessionID).
+					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+					Str(logging.FieldServiceID, session.ServiceID).
 					Msg("failed to check pending relays")
 				continue
 			}
 
 			if pendingCount > 0 {
 				m.logger.Warn().
-					Str("session_id", session.SessionID).
+					Str(logging.FieldSessionID, session.SessionID).
+					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+					Str(logging.FieldServiceID, session.ServiceID).
 					Int64("pending_relays", pendingCount).
 					Msg("LATE RELAYS DETECTED: relays arrived but not yet consumed before claim")
 
@@ -778,7 +798,9 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 		if err != nil {
 			m.logger.Warn().
 				Err(err).
-				Str("session_id", session.SessionID).
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, session.ServiceID).
 				Msg("failed to refresh session from Redis, using in-memory data")
 			continue
 		}
@@ -791,7 +813,9 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 			m.activeSessionsMu.Unlock()
 
 			m.logger.Debug().
-				Str("session_id", session.SessionID).
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, session.ServiceID).
 				Int64("relay_count", freshSnapshot.RelayCount).
 				Uint64("compute_units", freshSnapshot.TotalComputeUnits).
 				Msg("refreshed session snapshot from Redis")
@@ -873,7 +897,9 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateProved); err != nil {
 			m.logger.Error().
 				Err(err).
-				Str("session_id", session.SessionID).
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, session.ServiceID).
 				Msg("failed to persist proved state")
 			sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state").Inc()
 			continue
@@ -891,7 +917,9 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		if proveErr := m.callback.OnSessionProved(ctx, session); proveErr != nil {
 			m.logger.Warn().
 				Err(proveErr).
-				Str("session_id", session.SessionID).
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, session.ServiceID).
 				Msg("proved callback failed in batched transition")
 		}
 
@@ -901,7 +929,9 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		m.activeSessionsMu.Unlock()
 
 		m.logger.Info().
-			Str("session_id", session.SessionID).
+			Str(logging.FieldSessionID, session.SessionID).
+			Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+			Str(logging.FieldServiceID, session.ServiceID).
 			Int64("relay_count", session.RelayCount).
 			Msg("session lifecycle complete (batched)")
 	}

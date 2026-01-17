@@ -12,6 +12,7 @@ import (
 
 	"github.com/alitto/pond/v2"
 
+	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
@@ -471,10 +472,25 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 		// Wait for claim window to open and get the block hash for timing spread
 		claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
+		claimWindowCloseHeight := sharedtypes.GetClaimWindowCloseHeight(sharedParams, sessionEndHeight)
+		currentHeight := lc.blockClient.LastBlock(ctx).Height()
+
+		// Build session IDs list for logging (truncate if too many)
+		sessionIDs := make([]string, 0, len(groupSnapshots))
+		for _, s := range groupSnapshots {
+			if len(sessionIDs) < 5 { // Show first 5 session IDs
+				sessionIDs = append(sessionIDs, s.SessionID[:16]+"...")
+			}
+		}
+
 		logger.Debug().
 			Int64("claim_window_open_height", claimWindowOpenHeight).
+			Int64("claim_window_close_height", claimWindowCloseHeight).
 			Int64("session_end_height", sessionEndHeight).
+			Int64("current_height", currentHeight).
 			Int("group_size", len(groupSnapshots)).
+			Str("first_service_id", groupSnapshots[0].ServiceID).
+			Strs("session_ids", sessionIDs).
 			Msg("waiting for claim window to open")
 
 		if _, blockErr := lc.waitForBlock(ctx, claimWindowOpenHeight); blockErr != nil {
@@ -521,7 +537,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
 							Err(err).
-							Str("session_id", snapshot.SessionID).
+							Str(logging.FieldSessionID, snapshot.SessionID).
+							Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+							Str(logging.FieldServiceID, snapshot.ServiceID).
 							Msg("failed to mark session as claim_window_closed in Redis")
 					}
 				}
@@ -730,7 +748,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
 							Err(err).
-							Str("session_id", snapshot.SessionID).
+							Str(logging.FieldSessionID, snapshot.SessionID).
+							Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+							Str(logging.FieldServiceID, snapshot.ServiceID).
 							Msg("failed to mark session as claim_window_closed in Redis")
 					}
 				}
@@ -773,7 +793,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 							if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
 								logger.Warn().
 									Err(err).
-									Str("session_id", snapshot.SessionID).
+									Str(logging.FieldSessionID, snapshot.SessionID).
 									Msg("failed to mark session as claim_window_closed in Redis")
 							}
 						}
@@ -815,7 +835,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 						if updateErr := lc.sessionCoordinator.OnSessionClaimed(ctx, snapshot.SessionID, groupRootHashes[i], claimTxHash); updateErr != nil {
 							logger.Warn().
 								Err(updateErr).
-								Str("session_id", snapshot.SessionID).
+								Str(logging.FieldSessionID, snapshot.SessionID).
 								Str("claim_tx_hash", claimTxHash).
 								Msg("failed to update snapshot after claim")
 						}
@@ -847,7 +867,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 							if checkErr != nil {
 								logger.Warn().
 									Err(checkErr).
-									Str("session_id", snapshot.SessionID).
+									Str(logging.FieldSessionID, snapshot.SessionID).
 									Msg("failed to check proof requirement (will rely on state machine)")
 								continue
 							}
@@ -855,18 +875,18 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 							if !required {
 								// Proof NOT required → immediately transition to probabilistic_proved
 								logger.Info().
-									Str("session_id", snapshot.SessionID).
+									Str(logging.FieldSessionID, snapshot.SessionID).
 									Msg("proof not required - marking as probabilistically proved")
 
 								if probErr := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); probErr != nil {
 									logger.Warn().
 										Err(probErr).
-										Str("session_id", snapshot.SessionID).
+										Str(logging.FieldSessionID, snapshot.SessionID).
 										Msg("failed to mark session as probabilistic_proved")
 								}
 							} else {
 								logger.Info().
-									Str("session_id", snapshot.SessionID).
+									Str(logging.FieldSessionID, snapshot.SessionID).
 									Msg("proof required - session will enter proof phase")
 							}
 						}
@@ -909,7 +929,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 						); trackErr != nil {
 							logger.Warn().
 								Err(trackErr).
-								Str("session_id", snapshot.SessionID).
+								Str(logging.FieldSessionID, snapshot.SessionID).
 								Msg("failed to track claim submission")
 						}
 					}
@@ -935,7 +955,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
 							Err(err).
-							Str("session_id", snapshot.SessionID).
+							Str(logging.FieldSessionID, snapshot.SessionID).
 							Msg("failed to mark session as claim_tx_error in Redis")
 					}
 				}
@@ -966,7 +986,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					); trackErr != nil {
 						logger.Warn().
 							Err(trackErr).
-							Str("session_id", snapshot.SessionID).
+							Str(logging.FieldSessionID, snapshot.SessionID).
 							Msg("failed to track failed claim submission")
 					}
 				}
@@ -1052,10 +1072,25 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 		// Wait for proof window to open
 		proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, sessionEndHeight)
+		proofWindowCloseHeight := sharedtypes.GetProofWindowCloseHeight(sharedParams, sessionEndHeight)
+		currentHeight := lc.blockClient.LastBlock(ctx).Height()
+
+		// Build session IDs list for logging (truncate if too many)
+		proofSessionIDs := make([]string, 0, len(groupSnapshots))
+		for _, s := range groupSnapshots {
+			if len(proofSessionIDs) < 5 { // Show first 5 session IDs
+				proofSessionIDs = append(proofSessionIDs, s.SessionID[:16]+"...")
+			}
+		}
+
 		logger.Debug().
 			Int64("proof_window_open_height", proofWindowOpenHeight).
+			Int64("proof_window_close_height", proofWindowCloseHeight).
 			Int64("session_end_height", sessionEndHeight).
+			Int64("current_height", currentHeight).
 			Int("group_size", len(groupSnapshots)).
+			Str("first_service_id", groupSnapshots[0].ServiceID).
+			Strs("session_ids", proofSessionIDs).
 			Msg("waiting for proof window to open")
 
 		// Wait for proof window to open (we'll use the seed block, not this one)
@@ -1093,7 +1128,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			// CRITICAL: Deduplication check - never submit the same proof twice
 			if snapshot.ProofTxHash != "" {
 				logger.Warn().
-					Str("session_id", snapshot.SessionID).
+					Str(logging.FieldSessionID, snapshot.SessionID).
 					Str("existing_proof_tx_hash", snapshot.ProofTxHash).
 					Msg("skipping proof - already submitted for this session (deduplication)")
 				continue // Skip this session
@@ -1104,17 +1139,17 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				if checkErr != nil {
 					logger.Warn().
 						Err(checkErr).
-						Str("session_id", snapshot.SessionID).
+						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("failed to check proof requirement, submitting proof anyway to avoid potential penalty")
 					sessionsNeedingProof = append(sessionsNeedingProof, snapshot)
 				} else if !required {
 					logger.Info().
-						Str("session_id", snapshot.SessionID).
+						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("proof NOT required for this claim - skipping proof submission")
 					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 				} else {
 					logger.Info().
-						Str("session_id", snapshot.SessionID).
+						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("proof IS required for this claim")
 					sessionsNeedingProof = append(sessionsNeedingProof, snapshot)
 				}
@@ -1199,7 +1234,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
 							Err(err).
-							Str("session_id", snapshot.SessionID).
+							Str(logging.FieldSessionID, snapshot.SessionID).
 							Msg("failed to mark session as proof_window_closed in Redis")
 					}
 				}
@@ -1222,13 +1257,13 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					// Error checking - err on side of caution and submit anyway
 					logger.Warn().
 						Err(recheckErr).
-						Str("session_id", snapshot.SessionID).
+						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("failed to re-check proof requirement before submission, will attempt submission anyway")
 					stillNeedingProof = append(stillNeedingProof, snapshot)
 				} else if !required {
 					// Proof NO LONGER required - blockchain settled claim without proof
 					logger.Info().
-						Str("session_id", snapshot.SessionID).
+						Str(logging.FieldSessionID, snapshot.SessionID).
 						Msg("proof not required (blockchain settled claim without proof)")
 
 					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
@@ -1237,7 +1272,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						if err := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); err != nil {
 							logger.Warn().
 								Err(err).
-								Str("session_id", snapshot.SessionID).
+								Str(logging.FieldSessionID, snapshot.SessionID).
 								Msg("failed to mark session as probabilistic_proved")
 						}
 					}
@@ -1318,7 +1353,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
 
 				lc.logger.Info().
-					Str("session_id", snap.SessionID).
+					Str(logging.FieldSessionID, snap.SessionID).
 					Str("block_hash_from_blockid", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
 					Str("proof_path_computed", fmt.Sprintf("%x", path)).
 					Int64("block_height", proofPathSeedBlockHeight).
@@ -1399,7 +1434,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
 							Err(err).
-							Str("session_id", snapshot.SessionID).
+							Str(logging.FieldSessionID, snapshot.SessionID).
 							Msg("failed to mark session as proof_window_closed in Redis")
 					}
 				}
@@ -1442,7 +1477,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 							if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
 								logger.Warn().
 									Err(err).
-									Str("session_id", snapshot.SessionID).
+									Str(logging.FieldSessionID, snapshot.SessionID).
 									Msg("failed to mark session as proof_window_closed in Redis")
 							}
 						}
@@ -1483,7 +1518,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						if updateErr := lc.sessionCoordinator.OnProofSubmitted(ctx, snapshot.SessionID, proofTxHash); updateErr != nil {
 							logger.Warn().
 								Err(updateErr).
-								Str("session_id", snapshot.SessionID).
+								Str(logging.FieldSessionID, snapshot.SessionID).
 								Str("proof_tx_hash", proofTxHash).
 								Msg("failed to store proof TX hash")
 						}
@@ -1520,7 +1555,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						); trackErr != nil {
 							logger.Warn().
 								Err(trackErr).
-								Str("session_id", snapshot.SessionID).
+								Str(logging.FieldSessionID, snapshot.SessionID).
 								Msg("failed to track proof submission")
 						}
 					}
@@ -1546,7 +1581,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					if err := lc.sessionCoordinator.OnProofTxError(ctx, snapshot.SessionID); err != nil {
 						logger.Warn().
 							Err(err).
-							Str("session_id", snapshot.SessionID).
+							Str(logging.FieldSessionID, snapshot.SessionID).
 							Msg("failed to mark session as proof_tx_error in Redis")
 					}
 				}
@@ -1575,7 +1610,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					); trackErr != nil {
 						logger.Warn().
 							Err(trackErr).
-							Str("session_id", snapshot.SessionID).
+							Str(logging.FieldSessionID, snapshot.SessionID).
 							Msg("failed to track failed proof submission")
 					}
 				}
@@ -1697,11 +1732,53 @@ func (lc *LifecycleCallback) OnProofTxError(_ context.Context, snapshot *Session
 	return nil
 }
 
-// waitForBlock waits for a specific block height to be reached.
-// AGGRESSIVE: 500ms polling to minimize latency when waiting for windows to open.
-// Claims/proofs = money - we want to detect new blocks as fast as possible.
+// waitForBlock waits for a specific block height to be reached using event-driven
+// block notifications. This is more efficient than polling and doesn't block workers.
 func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
-	// Wait until the chain reaches the target height
+	// Check if we're already at or past the target height
+	currentBlock := lc.blockClient.LastBlock(ctx)
+	if currentBlock.Height() >= targetHeight {
+		return lc.getBlockAtHeight(ctx, targetHeight)
+	}
+
+	// Try to use event-driven approach with Subscribe()
+	subscriber, ok := lc.blockClient.(interface {
+		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
+	})
+	if !ok {
+		// Fallback to polling if Subscribe() not available (shouldn't happen in production)
+		lc.logger.Warn().
+			Int64("target_height", targetHeight).
+			Msg("block client does not support Subscribe(), falling back to polling")
+		return lc.waitForBlockPolling(ctx, targetHeight)
+	}
+
+	// Subscribe to block events - use small buffer since we only need to detect one block
+	blockCh := subscriber.Subscribe(ctx, 10)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+
+		case block, ok := <-blockCh:
+			if !ok {
+				// Channel closed, fall back to polling
+				lc.logger.Warn().
+					Int64("target_height", targetHeight).
+					Msg("block subscription channel closed, falling back to polling")
+				return lc.waitForBlockPolling(ctx, targetHeight)
+			}
+
+			if block.Height() >= targetHeight {
+				return lc.getBlockAtHeight(ctx, targetHeight)
+			}
+		}
+	}
+}
+
+// waitForBlockPolling is the fallback polling approach (only used if Subscribe unavailable).
+func (lc *LifecycleCallback) waitForBlockPolling(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
 
@@ -1712,30 +1789,32 @@ func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int6
 		case <-ticker.C:
 			currentBlock := lc.blockClient.LastBlock(ctx)
 			if currentBlock.Height() >= targetHeight {
-				// CRITICAL: Query the SPECIFIC block at targetHeight, not just return LastBlock()
-				// The validator uses the exact block hash at this height for proof validation.
-				// We must query that exact block to get the correct BlockID.Hash.
-				blockSubscriber, ok := lc.blockClient.(interface {
-					GetBlockAtHeight(context.Context, int64) (pocktclient.Block, error)
-				})
-				if !ok {
-					// This should NEVER happen - all BlockClient implementations must support GetBlockAtHeight
-					return nil, fmt.Errorf("BlockClient doesn't support GetBlockAtHeight - proof generation will fail (target_height=%d)", targetHeight)
-				}
-
-				block, err := blockSubscriber.GetBlockAtHeight(ctx, targetHeight)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get block at height %d: %w", targetHeight, err)
-				}
-				return block, nil
+				return lc.getBlockAtHeight(ctx, targetHeight)
 			}
 
 			lc.logger.Debug().
 				Int64("current_height", currentBlock.Height()).
 				Int64("target_height", targetHeight).
-				Msg("waiting for block height")
+				Msg("waiting for block height (polling fallback)")
 		}
 	}
+}
+
+// getBlockAtHeight fetches the specific block at targetHeight.
+// CRITICAL: We must query the exact block to get the correct BlockID.Hash for proof validation.
+func (lc *LifecycleCallback) getBlockAtHeight(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
+	blockSubscriber, ok := lc.blockClient.(interface {
+		GetBlockAtHeight(context.Context, int64) (pocktclient.Block, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("BlockClient doesn't support GetBlockAtHeight - proof generation will fail (target_height=%d)", targetHeight)
+	}
+
+	block, err := blockSubscriber.GetBlockAtHeight(ctx, targetHeight)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get block at height %d: %w", targetHeight, err)
+	}
+	return block, nil
 }
 
 // buildSessionHeader builds a session header from the snapshot.
