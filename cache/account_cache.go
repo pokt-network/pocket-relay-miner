@@ -4,8 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"time"
+
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"

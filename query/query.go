@@ -4,10 +4,11 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"google.golang.org/grpc/backoff"
-	"google.golang.org/grpc/keepalive"
 	"sync"
 	"time"
+
+	"google.golang.org/grpc/backoff"
+	"google.golang.org/grpc/keepalive"
 
 	cometrpctypes "github.com/cometbft/cometbft/rpc/core/types"
 	"github.com/cosmos/cosmos-sdk/codec"

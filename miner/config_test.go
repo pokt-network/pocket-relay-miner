@@ -186,7 +186,7 @@ func TestGetCPUMultiplier(t *testing.T) {
 
 func TestGetWorkersPerSupplier(t *testing.T) {
 	cfg := &Config{}
-	require.Equal(t, 2, cfg.GetWorkersPerSupplier()) // default
+	require.Equal(t, 6, cfg.GetWorkersPerSupplier()) // default: handles unbatched claims
 
 	cfg.WorkerPools.WorkersPerSupplier = 4
 	require.Equal(t, 4, cfg.GetWorkersPerSupplier())
@@ -212,24 +212,24 @@ func TestGetMasterPoolSize(t *testing.T) {
 	cfg := &Config{}
 
 	// Test auto-calculation with small supplier count (CPU-bound)
-	// With default values: cpu_multiplier=4, workers_per_supplier=2, query=20, settlement=2
-	// On a machine with N CPUs: max(N×4, suppliers×2) + 22
-	// For 5 suppliers: max(N×4, 10) + 22
+	// With default values: cpu_multiplier=4, workers_per_supplier=6, query=20, settlement=2
+	// On a machine with N CPUs: max(N×4, suppliers×6) + 22
+	// For 5 suppliers: max(N×4, 30) + 22
 	// This test uses 5 suppliers which should be CPU-bound on most machines
 	size := cfg.GetMasterPoolSize(5)
 	require.Greater(t, size, 22) // At minimum, overhead is 22
 
 	// Test auto-calculation with high supplier count (supplier-bound)
-	// For 78 suppliers: max(N×4, 156) + 22 = 156 + 22 = 178 (on most machines)
+	// For 78 suppliers: max(N×4, 468) + 22 = 468 + 22 = 490 (on most machines)
 	size = cfg.GetMasterPoolSize(78)
-	// 78 × 2 = 156, plus overhead 22 = 178
-	// This should be supplier-bound unless running on 40+ core machine
-	require.GreaterOrEqual(t, size, 178)
+	// 78 × 6 = 468, plus overhead 22 = 490
+	// This should be supplier-bound unless running on 117+ core machine
+	require.GreaterOrEqual(t, size, 490)
 
 	// Test explicit override
-	cfg.WorkerPools.MasterPoolSize = 200
-	require.Equal(t, 200, cfg.GetMasterPoolSize(78))
-	require.Equal(t, 200, cfg.GetMasterPoolSize(5)) // override ignores supplier count
+	cfg.WorkerPools.MasterPoolSize = 500
+	require.Equal(t, 500, cfg.GetMasterPoolSize(78))
+	require.Equal(t, 500, cfg.GetMasterPoolSize(5)) // override ignores supplier count
 }
 
 func TestWorkerPoolConfigYAMLParsing(t *testing.T) {

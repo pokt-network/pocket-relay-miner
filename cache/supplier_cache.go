@@ -4,10 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"strings"
 	"sync"
 	"time"
+
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/redis/go-redis/v9"

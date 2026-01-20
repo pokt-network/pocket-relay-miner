@@ -4,10 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"sync"
 	"sync/atomic"
 	"time"
+
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	"github.com/cosmos/gogoproto/proto"
 	"github.com/redis/go-redis/v9"

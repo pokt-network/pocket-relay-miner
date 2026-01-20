@@ -74,7 +74,7 @@ pprof:
 
 logging:
   level: "info"
-  format: "text"
+  format: "json"
   output: "stdout"
   async: true
   async_buffer_size: 100000

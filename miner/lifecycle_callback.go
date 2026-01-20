@@ -845,53 +845,12 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					validSnapshots[i].ClaimedRootHash = groupRootHashes[i]
 				}
 
-				// Check if proof is required for each session
-				// If NOT required, immediately transition to probabilistic_proved
-				if lc.proofChecker != nil && lc.sessionCoordinator != nil {
-					// Calculate proof requirement seed block height
-					// MUST match validator logic: seed = proof_window_open - 1
-					proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, validSnapshots[0].SessionEndHeight)
-					proofRequirementSeedHeight := proofWindowOpenHeight - 1
-
-					// Wait for the seed block (non-blocking if already available)
-					proofWindowSeedBlock, err := lc.waitForBlock(ctx, proofRequirementSeedHeight)
-					if err != nil {
-						logger.Warn().
-							Err(err).
-							Int64("seed_height", proofRequirementSeedHeight).
-							Int64("proof_window_open_height", proofWindowOpenHeight).
-							Msg("failed to get proof requirement seed block - cannot check proof requirement (will rely on state machine)")
-					} else {
-						for _, snapshot := range validSnapshots {
-							required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofWindowSeedBlock.Hash())
-							if checkErr != nil {
-								logger.Warn().
-									Err(checkErr).
-									Str(logging.FieldSessionID, snapshot.SessionID).
-									Msg("failed to check proof requirement (will rely on state machine)")
-								continue
-							}
-
-							if !required {
-								// Proof NOT required → immediately transition to probabilistic_proved
-								logger.Info().
-									Str(logging.FieldSessionID, snapshot.SessionID).
-									Msg("proof not required - marking as probabilistically proved")
-
-								if probErr := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); probErr != nil {
-									logger.Warn().
-										Err(probErr).
-										Str(logging.FieldSessionID, snapshot.SessionID).
-										Msg("failed to mark session as probabilistic_proved")
-								}
-							} else {
-								logger.Info().
-									Str(logging.FieldSessionID, snapshot.SessionID).
-									Msg("proof required - session will enter proof phase")
-							}
-						}
-					}
-				}
+				// NOTE: Proof requirement check moved to OnSessionsNeedProof.
+				// Previously we blocked here waiting for the proof requirement seed block
+				// (proofWindowOpen - 1), which is ~19 blocks in the future after claim submission.
+				// This caused sequential claim groups to timeout while waiting.
+				// Now sessions stay in 'claimed' state until proof window opens, where
+				// OnSessionsNeedProof properly checks if proof is required.
 
 				// Record metrics for all sessions in the batch
 				for i, snapshot := range validSnapshots {
@@ -1143,10 +1102,21 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						Msg("failed to check proof requirement, submitting proof anyway to avoid potential penalty")
 					sessionsNeedingProof = append(sessionsNeedingProof, snapshot)
 				} else if !required {
+					// Proof NOT required → transition to probabilistic_proved
 					logger.Info().
 						Str(logging.FieldSessionID, snapshot.SessionID).
-						Msg("proof NOT required for this claim - skipping proof submission")
-					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+						Msg("proof NOT required for this claim - marking as probabilistically proved")
+					RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+
+					// CRITICAL: Transition session state to probabilistic_proved
+					if lc.sessionCoordinator != nil {
+						if probErr := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); probErr != nil {
+							logger.Warn().
+								Err(probErr).
+								Str(logging.FieldSessionID, snapshot.SessionID).
+								Msg("failed to mark session as probabilistic_proved")
+						}
+					}
 				} else {
 					logger.Info().
 						Str(logging.FieldSessionID, snapshot.SessionID).
@@ -1735,11 +1705,29 @@ func (lc *LifecycleCallback) OnProofTxError(_ context.Context, snapshot *Session
 // waitForBlock waits for a specific block height to be reached using event-driven
 // block notifications. This is more efficient than polling and doesn't block workers.
 func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int64) (pocktclient.Block, error) {
+	startTime := time.Now()
+
 	// Check if we're already at or past the target height
 	currentBlock := lc.blockClient.LastBlock(ctx)
-	if currentBlock.Height() >= targetHeight {
+	currentHeight := currentBlock.Height()
+
+	if currentHeight >= targetHeight {
+		// Already at target height - no wait needed
+		lc.logger.Debug().
+			Int64("target_height", targetHeight).
+			Int64("current_height", currentHeight).
+			Dur("elapsed_ms", time.Since(startTime)).
+			Msg("waitForBlock: already at target height (no wait)")
 		return lc.getBlockAtHeight(ctx, targetHeight)
 	}
+
+	// BLOCKING WAIT DETECTED - this will block until target height
+	blocksToWait := targetHeight - currentHeight
+	lc.logger.Warn().
+		Int64("target_height", targetHeight).
+		Int64("current_height", currentHeight).
+		Int64("blocks_to_wait", blocksToWait).
+		Msg("BLOCKING: waitForBlock starting - waiting for future block")
 
 	// Try to use event-driven approach with Subscribe()
 	subscriber, ok := lc.blockClient.(interface {
@@ -1759,6 +1747,10 @@ func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int6
 	for {
 		select {
 		case <-ctx.Done():
+			lc.logger.Warn().
+				Int64("target_height", targetHeight).
+				Dur("elapsed_ms", time.Since(startTime)).
+				Msg("waitForBlock: context cancelled while waiting")
 			return nil, ctx.Err()
 
 		case block, ok := <-blockCh:
@@ -1771,6 +1763,13 @@ func (lc *LifecycleCallback) waitForBlock(ctx context.Context, targetHeight int6
 			}
 
 			if block.Height() >= targetHeight {
+				elapsed := time.Since(startTime)
+				lc.logger.Info().
+					Int64("target_height", targetHeight).
+					Int64("reached_height", block.Height()).
+					Int64("blocks_waited", block.Height()-currentHeight).
+					Dur("elapsed_ms", elapsed).
+					Msg("waitForBlock: target height reached")
 				return lc.getBlockAtHeight(ctx, targetHeight)
 			}
 		}

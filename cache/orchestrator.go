@@ -3,10 +3,11 @@ package cache
 import (
 	"context"
 	"fmt"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"runtime"
 	"sync"
 	"time"
+
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	"github.com/alitto/pond/v2"
 	"github.com/puzpuzpuz/xsync/v4"

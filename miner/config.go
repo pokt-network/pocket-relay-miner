@@ -178,9 +178,9 @@ type WorkerPoolConfigYAML struct {
 	CPUMultiplier int `yaml:"cpu_multiplier,omitempty"`
 
 	// WorkersPerSupplier is the number of workers allocated per supplier.
-	// Allows claim and proof to run in parallel for each supplier.
+	// With batching disabled, each session needs its own worker for claim submission.
 	// Used in formula: num_suppliers × workers_per_supplier
-	// Default: 2
+	// Default: 6 (handles ~5-6 sessions per supplier unbatched)
 	WorkersPerSupplier int `yaml:"workers_per_supplier,omitempty"`
 
 	// QueryWorkers is the fixed number of workers for blockchain queries.
@@ -502,7 +502,7 @@ func (c *Config) GetSupplierClaimingConfig() SupplierClaimerConfig {
 
 // GetMasterPoolSize returns the master pool size, auto-calculating if not explicitly set.
 // Formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
-// Example (4 CPU, 78 suppliers): max(4×4, 78×2) + 22 = max(16, 156) + 22 = 178
+// Example (4 CPU, 78 suppliers): max(4×4, 78×6) + 22 = max(16, 468) + 22 = 490
 func (c *Config) GetMasterPoolSize(numSuppliers int) int {
 	if c.WorkerPools.MasterPoolSize > 0 {
 		return c.WorkerPools.MasterPoolSize
@@ -559,12 +559,14 @@ func (c *Config) GetCPUMultiplier() int {
 }
 
 // GetWorkersPerSupplier returns the number of workers per supplier.
-// Default: 2 (allows claim and proof to run in parallel)
+// Default: 6 (handles unbatched claims with up to 6 sessions per supplier)
+// With batching disabled, each session needs its own worker for claim submission.
+// Formula: suppliers × workers_per_supplier should cover max concurrent claims.
 func (c *Config) GetWorkersPerSupplier() int {
 	if c.WorkerPools.WorkersPerSupplier > 0 {
 		return c.WorkerPools.WorkersPerSupplier
 	}
-	return 2 // Default
+	return 6 // Default: handles ~5-6 sessions per supplier unbatched
 }
 
 // GetQueryWorkers returns the fixed number of query workers.

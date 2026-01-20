@@ -316,9 +316,8 @@ pprof:
 
 logging:
   level: "debug"  # trace, debug, info, warn, error (localnet uses debug)
-  format: "text"  # json, text (text is easier to read in development)
+  format: "json"  # json, text (json required for Loki log level detection)
   output: "stdout"  # stdout, stderr, or file path
   async: true  # Enable async logging for better performance
   async_buffer_size: 100000  # Async log buffer size
   # [PRODUCTION] level: "info"
-  # [PRODUCTION] format: "json"

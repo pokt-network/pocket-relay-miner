@@ -106,5 +106,5 @@ cache_warmup:
 
 logging:
   level: "info"
-  format: "text"
+  format: "json"
   output: "stdout"
