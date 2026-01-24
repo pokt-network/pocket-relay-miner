@@ -592,11 +592,14 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		// Callbacks may have updated state to terminal (e.g., proof_tx_error) which must not be overwritten
 		session, err := m.sessionStore.Get(ctx, sessionID)
 		if err != nil || session == nil {
-			m.logger.Warn().
+			// Session expired from Redis (TTL) or was deleted - remove from in-memory tracking
+			// This is expected behavior: sessions complete and expire, this prevents endless reload attempts
+			m.activeSessions.Delete(sessionID)
+			m.logger.Debug().
 				Err(err).
 				Str(logging.FieldSessionID, sessionID).
 				Int64("current_height", currentHeight).
-				Msg("failed to reload session from Redis")
+				Msg("session expired from Redis - removed from active tracking")
 			continue
 		}
 

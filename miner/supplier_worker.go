@@ -324,7 +324,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		SupplierManagerConfig{
 			RedisClient:           w.config.RedisClient,
 			ConsumerName:          w.config.Config.Redis.ConsumerName,
-			SessionTTL:            w.config.Config.SessionTTL,
+			SessionTTL:            w.config.Config.GetSessionTTL(), // Uses CacheTTL if not explicitly set
 			CacheTTL:              w.config.Config.GetCacheTTL(),
 			BatchSize:             w.config.Config.BatchSize,
 			AckBatchSize:          w.config.Config.AckBatchSize,

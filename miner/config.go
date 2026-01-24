@@ -53,8 +53,9 @@ type Config struct {
 	// Default: true
 	HotReloadEnabled bool `yaml:"hot_reload_enabled"`
 
-	// SessionTTL is the TTL for session data.
-	// Default: 24h
+	// SessionTTL is the TTL for session state data in Redis.
+	// Default: CacheTTL (2h) - aligned with SMST tree TTL to prevent orphaned sessions.
+	// Setting SessionTTL != CacheTTL can cause "SMST missing but relay count > 0" warnings.
 	SessionTTL time.Duration `yaml:"session_ttl"`
 
 	// CacheTTL is the TTL for Redis cached data (params, app stakes, service data, SMST trees).
@@ -458,6 +459,16 @@ func (c *Config) GetCacheTTL() time.Duration {
 	return 2 * time.Hour // Default: 2h (covers ~15 session lifecycles at 30s blocks)
 }
 
+// GetSessionTTL returns the session TTL for session state data.
+// Defaults to CacheTTL if not explicitly set, ensuring SMST trees and sessions
+// expire at the same time (prevents orphaned sessions causing false positive warnings).
+func (c *Config) GetSessionTTL() time.Duration {
+	if c.SessionTTL > 0 {
+		return c.SessionTTL
+	}
+	return c.GetCacheTTL() // Default: align with CacheTTL
+}
+
 // GetQueryTimeout returns the blockchain query timeout as a duration.
 func (c *Config) GetQueryTimeout() time.Duration {
 	if c.PocketNode.QueryTimeoutSeconds > 0 {
@@ -619,8 +630,9 @@ func DefaultConfig() *Config {
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
 		AckBatchSize:           50,
 		HotReloadEnabled:       true,
-		SessionTTL:             24 * time.Hour,
-		CacheTTL:               2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
+		// SessionTTL: 0 means use CacheTTL (default 2h) - ensures SMST trees and sessions expire together
+		// This prevents orphaned sessions causing "SMST missing but relay count > 0" warnings
+		CacheTTL: 2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
 		BalanceMonitor: BalanceMonitorConfigYAML{
 			Enabled:                     true,    // Enable by default
 			BalanceThresholdUpokt:       1000000, // 1 POKT = 1,000,000 upokt

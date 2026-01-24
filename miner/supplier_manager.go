@@ -289,6 +289,11 @@ func (m *SupplierManager) startWithDistributedClaiming(ctx context.Context, supp
 	// Check if pool size is sufficient for the number of suppliers
 	m.checkPoolSize(len(stakedSuppliers))
 
+	// Start periodic stream trimming (removes entries older than CacheTTL)
+	// This is safe because relays older than CacheTTL are already invalid
+	// (session/claim windows are closed, so they can't earn rewards anyway)
+	go m.runStreamTrimmer(ctx)
+
 	return nil
 }
 
@@ -1109,4 +1114,106 @@ func (m *SupplierManager) Close() error {
 
 	m.logger.Info().Msg("supplier manager closed")
 	return nil
+}
+
+// runStreamTrimmer periodically trims old entries from supplier streams.
+// Runs every hour (or CacheTTL/2 if shorter) and removes entries older than CacheTTL.
+// This is safe because relays older than CacheTTL are already invalid
+// (session/claim windows are closed, so they can't earn rewards anyway).
+func (m *SupplierManager) runStreamTrimmer(ctx context.Context) {
+	// Calculate trim interval: every hour or CacheTTL/2, whichever is shorter
+	trimInterval := time.Hour
+	if m.config.CacheTTL > 0 && m.config.CacheTTL/2 < trimInterval {
+		trimInterval = m.config.CacheTTL / 2
+	}
+
+	// Use CacheTTL as the max age for entries
+	maxAge := m.config.CacheTTL
+	if maxAge == 0 {
+		maxAge = 2 * time.Hour // Default if not configured
+	}
+
+	m.logger.Info().
+		Dur("trim_interval", trimInterval).
+		Dur("max_age", maxAge).
+		Msg("stream trimmer started - will remove entries older than max_age")
+
+	ticker := time.NewTicker(trimInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			m.logger.Info().Msg("stream trimmer stopped")
+			return
+
+		case <-ticker.C:
+			m.trimAllSupplierStreams(ctx, maxAge)
+		}
+	}
+}
+
+// trimAllSupplierStreams trims old entries from all claimed supplier streams.
+// Submits work to the pool for parallel execution and waits for completion.
+func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge time.Duration) {
+	m.suppliersMu.RLock()
+	suppliers := make([]*SupplierState, 0, len(m.suppliers))
+	for _, state := range m.suppliers {
+		suppliers = append(suppliers, state)
+	}
+	m.suppliersMu.RUnlock()
+
+	if len(suppliers) == 0 {
+		return
+	}
+
+	m.logger.Debug().
+		Int("suppliers", len(suppliers)).
+		Dur("max_age", maxAge).
+		Msg("starting stream trimming for all suppliers")
+
+	// Create a task group to wait for all trim operations
+	group := m.querySubpool.NewGroup()
+	var totalTrimmed int64
+	var trimmedSuppliers int
+	var mu sync.Mutex // Protect counters
+
+	for _, state := range suppliers {
+		// Skip if consumer is nil (shouldn't happen but defensive)
+		if state.Consumer == nil {
+			continue
+		}
+
+		// Submit trimming work to the group
+		supplier := state // capture for closure
+		group.SubmitErr(func() error {
+			trimmed, err := supplier.Consumer.TrimStream(ctx, maxAge)
+			if err != nil {
+				m.logger.Warn().
+					Err(err).
+					Str("supplier", supplier.OperatorAddr).
+					Msg("failed to trim stream")
+				return nil // Don't fail the group for individual stream errors
+			}
+			if trimmed > 0 {
+				mu.Lock()
+				totalTrimmed += trimmed
+				trimmedSuppliers++
+				mu.Unlock()
+			}
+			return nil
+		})
+	}
+
+	// Wait for all trim operations to complete
+	_ = group.Wait()
+
+	if totalTrimmed > 0 {
+		m.logger.Info().
+			Int64("total_trimmed", totalTrimmed).
+			Int("suppliers_trimmed", trimmedSuppliers).
+			Int("total_suppliers", len(suppliers)).
+			Dur("max_age", maxAge).
+			Msg("stream trimming completed")
+	}
 }

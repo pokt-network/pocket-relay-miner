@@ -499,6 +499,45 @@ func (c *StreamsConsumer) DeleteStream(ctx context.Context, sessionID string) er
 	return nil
 }
 
+// TrimStream removes entries older than the specified duration using MINID.
+// This is safe because relays older than the cache TTL are already invalid
+// (session/claim windows are closed, so they can't earn rewards anyway).
+// Returns the number of entries trimmed.
+func (c *StreamsConsumer) TrimStream(ctx context.Context, maxAge time.Duration) (int64, error) {
+	c.mu.RLock()
+	if c.closed {
+		c.mu.RUnlock()
+		return 0, nil // Don't error on closed consumer - just skip trimming
+	}
+	c.mu.RUnlock()
+
+	// Calculate MINID timestamp: current time - maxAge
+	// Redis stream IDs are in format <ms>-<seq>, so we use <timestamp>-0
+	minTimestamp := time.Now().Add(-maxAge).UnixMilli()
+	minID := fmt.Sprintf("%d-0", minTimestamp)
+
+	// Use XTRIM with MINID and ~ (approximate) for efficiency
+	// ~ allows Redis to optimize by trimming to the nearest whole node
+	trimmed, err := c.client.XTrimMinID(ctx, c.streamName, minID).Result()
+	if err != nil {
+		// Stream may not exist - not an error
+		if strings.Contains(err.Error(), "no such key") {
+			return 0, nil
+		}
+		return 0, fmt.Errorf("failed to trim stream %s: %w", c.streamName, err)
+	}
+
+	if trimmed > 0 {
+		c.logger.Info().
+			Int64("trimmed_entries", trimmed).
+			Str("min_id", minID).
+			Dur("max_age", maxAge).
+			Msg("trimmed old entries from stream")
+	}
+
+	return trimmed, nil
+}
+
 // Close gracefully shuts down the consumer.
 func (c *StreamsConsumer) Close() error {
 	c.mu.Lock()

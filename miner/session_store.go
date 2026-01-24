@@ -210,7 +210,9 @@ func NewRedisSessionStore(
 		config.KeyPrefix = "ha:miner:sessions"
 	}
 	if config.SessionTTL == 0 {
-		config.SessionTTL = 3 * time.Hour // Default 3h - sessions complete in ~10 minutes
+		// Default 2h - aligned with CacheTTL to prevent orphaned sessions.
+		// Sessions and SMST trees expire together, avoiding "SMST missing but relay count > 0" warnings.
+		config.SessionTTL = 2 * time.Hour
 	}
 
 	return &RedisSessionStore{

@@ -6,7 +6,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
@@ -80,7 +79,7 @@ Example:
 
 	// Configuration flags (can override config)
 	cmd.Flags().Bool(flagHotReload, true, "Enable hot-reload of keys")
-	cmd.Flags().Duration(flagSessionTTL, 24*time.Hour, "Session data TTL")
+	cmd.Flags().Duration(flagSessionTTL, 0, "Session data TTL (default: same as cache_ttl to prevent orphaned sessions)")
 
 	return cmd
 }
@@ -473,10 +472,7 @@ func validateMinerConfig(config *miner.Config) error {
 		return fmt.Errorf("at least one key source must be configured (keys_file, keys_dir, or keyring)")
 	}
 
-	// Validate timeouts and limits
-	if config.SessionTTL <= 0 {
-		return fmt.Errorf("session_ttl must be positive")
-	}
+	// Note: SessionTTL = 0 means use CacheTTL (default 2h), so it doesn't need validation
 
 	return nil
 }
