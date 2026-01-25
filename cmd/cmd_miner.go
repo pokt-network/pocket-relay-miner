@@ -250,7 +250,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		QueryNodeRPCUrl:  config.PocketNode.QueryNodeRPCUrl,
 		QueryNodeGRPCUrl: config.PocketNode.QueryNodeGRPCUrl,
 		GRPCInsecure:     config.PocketNode.GRPCInsecure,
-		ChainID:          "", // Will be fetched from blockchain or use default
+		ChainID:          config.GetChainID(), // Get from config (defaults to "pocket" if not set)
 	})
 
 	if err = supplierWorker.Start(ctx); err != nil {
@@ -281,6 +281,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		QueryNodeRPCUrl:  config.PocketNode.QueryNodeRPCUrl,
 		QueryNodeGRPCUrl: config.PocketNode.QueryNodeGRPCUrl,
 		GRPCInsecure:     config.PocketNode.GRPCInsecure,
+		ChainID:          config.GetChainID(), // Get from config (defaults to "pocket" if not set)
 	})
 
 	// Register leader election callbacks

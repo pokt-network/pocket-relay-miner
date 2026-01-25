@@ -109,6 +109,13 @@ properties:
         examples:
           - grpc.testnet.pokt.network:443
           - localhost:9090
+      chain_id:
+        type: string
+        description: Blockchain chain ID for transaction signing. MUST match the network. Defaults to "pocket" (mainnet).
+        default: pocket
+        examples:
+          - pocket
+          - pocket-beta
       grpc_insecure:
         type: boolean
         description: Disable TLS for gRPC connections (use for local development only)

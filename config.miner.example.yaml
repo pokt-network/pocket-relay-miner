@@ -68,6 +68,17 @@ pocket_node:
   # [PRODUCTION] query_node_rpc_url: "https://rpc.testnet.pokt.network"
   # [PRODUCTION] query_node_grpc_url: "grpc.testnet.pokt.network:443"
 
+  # Chain ID for transaction signing (CRITICAL for non-mainnet chains)
+  # MUST match the blockchain you're connecting to, otherwise TX signatures will fail!
+  # Examples:
+  #   - "pocket" (mainnet)
+  #   - "pocket-beta" (testnet)
+  #   - "pocket" (localnet)
+  # Default: "pocket" (for backward compatibility)
+  chain_id: "pocket"  # Localnet
+  # [PRODUCTION MAINNET] chain_id: "pocket"
+  # [PRODUCTION TESTNET] chain_id: "pocket-beta"
+
   # gRPC settings
   grpc_insecure: true  # Disable TLS for gRPC (localnet)
   # [PRODUCTION] grpc_insecure: false

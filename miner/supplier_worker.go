@@ -249,14 +249,9 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	}
 
 	// Get chain ID - required for transaction signing
-	// Non-leader miners don't have WebSocket connection to query chain ID,
-	// so we rely on config or a default value
+	// ChainID comes from config (defaults to "pocket" if not explicitly set)
 	chainID := w.config.ChainID
-	if chainID == "" {
-		// Default to "pocket" - this should be overridden in production config
-		chainID = "pocket"
-		w.logger.Info().Str("chain_id", chainID).Msg("using default chain ID")
-	}
+	w.logger.Info().Str("chain_id", chainID).Msg("using chain ID for transaction signing")
 
 	// Create proof checker
 	w.proofChecker = NewProofRequirementChecker(

@@ -598,6 +598,15 @@ func (c *Config) GetSettlementWorkers() int {
 	return 2 // Default
 }
 
+// GetChainID returns the chain ID for transaction signing.
+// Default: "pocket" (mainnet) for backward compatibility
+func (c *Config) GetChainID() string {
+	if c.PocketNode.ChainID != "" {
+		return c.PocketNode.ChainID
+	}
+	return "pocket" // Default: mainnet
+}
+
 // DefaultConfig returns a config with sensible defaults.
 func DefaultConfig() *Config {
 	return &Config{

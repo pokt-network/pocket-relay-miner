@@ -19,4 +19,9 @@ type PocketNodeConfig struct {
 	// QueryTimeoutSeconds is the timeout for blockchain queries in seconds.
 	// Default: 5 seconds
 	QueryTimeoutSeconds int `yaml:"query_timeout_seconds,omitempty"`
+
+	// ChainID is the blockchain chain ID used for transaction signing.
+	// Required for miner (claim/proof submission).
+	// Examples: "pocket" (mainnet), "pocket-beta" (testnet), "pocket" (localnet)
+	ChainID string `yaml:"chain_id,omitempty"`
 }
