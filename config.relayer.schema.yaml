@@ -473,3 +473,25 @@ properties:
           description: Timeout for TLS handshake (seconds)
           minimum: 0
           default: 10
+
+  compression:
+    type: object
+    description: Relay bytes compression configuration. Reduces Redis memory usage and network bandwidth (2-50x compression ratio).
+    properties:
+      enabled:
+        type: boolean
+        description: Enable zstd compression for relay bytes
+        default: true
+      level:
+        type: string
+        description: Compression level (fastest=level 1, default=level 3, best=level 11)
+        enum:
+          - fastest
+          - default
+          - best
+        default: best
+      min_size:
+        type: integer
+        description: Minimum size in bytes to compress (smaller data sent uncompressed)
+        default: 64
+        minimum: 0

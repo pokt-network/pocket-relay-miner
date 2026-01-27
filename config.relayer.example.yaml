@@ -245,6 +245,17 @@ timeout_profiles:
     dial_timeout_seconds: 10  # Allow more time for connection
     tls_handshake_timeout_seconds: 15  # Allow more time for TLS
 
+# ==============================================================================
+# Relay Compression Configuration
+# ==============================================================================
+# Compression reduces Redis memory usage and network bandwidth for relay data.
+# Uses zstd compression which provides excellent compression ratio with low CPU overhead.
+# Typical compression ratios: 2-50x depending on relay content.
+compression:
+  enabled: true  # Enable compression of relay bytes (recommended)
+  level: "best"  # Compression level: "fastest" (level 1), "default" (level 3), "best" (level 11)
+  # min_size: 64  # Minimum size in bytes to compress (smaller data sent uncompressed)
+
 # Cache warmup (optional - preload application data at startup)
 cache_warmup:
   # Enable cache warmup (speeds up first requests)

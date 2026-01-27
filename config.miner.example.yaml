@@ -263,6 +263,12 @@ ack_batch_size: 50  # Acknowledge messages in batches (pipelined Redis XACK)
 hot_reload_enabled: true  # Enable hot-reload of keys on startup
 cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h covers ~15 session lifecycles at 30s blocks. Backup safety net if manual cleanup fails.
 
+# Submission tracking TTL (for debugging claim/proof submissions)
+# Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis.
+# Use `pocket-relay-miner redis submissions` to inspect tracked data.
+submission_tracking_ttl: "24h"  # Default: 24h (covers multiple session windows for debugging)
+# [PRODUCTION] submission_tracking_ttl: "168h"  # 7 days for longer audit trail
+
 # Pre-discovered applications (optional - speeds up startup)
 known_applications:
   - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"  # app1

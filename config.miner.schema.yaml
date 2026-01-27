@@ -389,6 +389,12 @@ properties:
     default: 2h
     pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
+  submission_tracking_ttl:
+    type: string
+    description: TTL for claim/proof submission tracking records. Used for debugging failed submissions and auditing via `pocket-relay-miner redis submissions`.
+    default: 24h
+    pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+
   known_applications:
     type: array
     description: Application addresses to pre-discover at startup
