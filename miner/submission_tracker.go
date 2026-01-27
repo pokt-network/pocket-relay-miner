@@ -11,7 +11,7 @@ import (
 )
 
 // SubmissionTrackingRecord tracks claim/proof submission attempts for debugging.
-// Stored in Redis with 7-day TTL to enable post-mortem analysis of missed proofs.
+// Stored in Redis with configurable TTL (default: 24h) to enable post-mortem analysis.
 type SubmissionTrackingRecord struct {
 	// Session identification
 	Supplier     string `json:"supplier"`
@@ -56,11 +56,15 @@ type SubmissionTracker struct {
 }
 
 // NewSubmissionTracker creates a new submission tracker.
-func NewSubmissionTracker(logger logging.Logger, redisClient *redistransport.Client) *SubmissionTracker {
+// ttl specifies how long submission records are kept in Redis for debugging.
+func NewSubmissionTracker(logger logging.Logger, redisClient *redistransport.Client, ttl time.Duration) *SubmissionTracker {
+	if ttl <= 0 {
+		ttl = 24 * time.Hour // Default: 24 hours
+	}
 	return &SubmissionTracker{
 		logger:      logging.ForComponent(logger, "submission_tracker"),
 		redisClient: redisClient,
-		ttl:         7 * 24 * time.Hour, // 7 days
+		ttl:         ttl,
 	}
 }
 

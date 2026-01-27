@@ -182,6 +182,10 @@ type LifecycleCallback struct {
 	// If nil, submissions are not tracked.
 	submissionTracker *SubmissionTracker
 
+	// deduplicator is used to clean up session deduplication entries after settlement.
+	// If nil, local cache cleanup is skipped (Redis entries still expire via TTL).
+	deduplicator Deduplicator
+
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
 	sessionLocksMu sync.Mutex
@@ -259,6 +263,12 @@ func (lc *LifecycleCallback) SetSubmissionTracker(tracker *SubmissionTracker) {
 // If not set, falls back to unbounded goroutines (legacy behavior).
 func (lc *LifecycleCallback) SetBuildPool(pool pond.Pool) {
 	lc.buildPool = pool
+}
+
+// SetDeduplicator sets the deduplicator for cleaning up session deduplication entries.
+// If not set, local cache cleanup is skipped (Redis entries still expire via TTL).
+func (lc *LifecycleCallback) SetDeduplicator(dedup Deduplicator) {
+	lc.deduplicator = dedup
 }
 
 // removeSessionLock removes a per-session lock.
@@ -1627,6 +1637,14 @@ func (lc *LifecycleCallback) OnSessionProved(ctx context.Context, snapshot *Sess
 		}
 	}
 
+	// Clean up deduplication local cache entries for this session.
+	// This prevents unbounded memory growth in the deduplicator's local cache.
+	if lc.deduplicator != nil {
+		if err := lc.deduplicator.CleanupSession(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to cleanup deduplication entries")
+		}
+	}
+
 	// Remove session lock
 	lc.removeSessionLock(snapshot.SessionID)
 
@@ -1665,6 +1683,14 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 		if err := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); err != nil {
 			logger.Warn().Err(err).Msg("failed to update session coordinator")
 			return err
+		}
+	}
+
+	// Clean up deduplication local cache entries for this session.
+	// This prevents unbounded memory growth in the deduplicator's local cache.
+	if lc.deduplicator != nil {
+		if err := lc.deduplicator.CleanupSession(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to cleanup deduplication entries")
 		}
 	}
 

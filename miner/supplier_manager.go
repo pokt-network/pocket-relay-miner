@@ -149,6 +149,10 @@ type SupplierManagerConfig struct {
 	// (e.g., difficulty validation failure) causes the entire batch to fail.
 	DisableProofBatching bool
 
+	// SubmissionTrackingTTL is the TTL for claim/proof submission tracking records.
+	// Default: 24h
+	SubmissionTrackingTTL time.Duration
+
 	// QueryWorkers is the number of workers for bounded supplier queries.
 	// Default: 20 (if 0 or not set)
 	QueryWorkers int
@@ -718,7 +722,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 		// Wire submission tracker for debugging claim/proof submissions
 		// Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis
-		submissionTracker := NewSubmissionTracker(m.logger, m.config.RedisClient)
+		submissionTracker := NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
 		lifecycleCallback.SetSubmissionTracker(submissionTracker)
 
 		// Wire build pool for bounded parallel claim/proof building

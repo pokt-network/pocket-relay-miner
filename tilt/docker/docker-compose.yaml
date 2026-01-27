@@ -22,8 +22,9 @@ services:
   # =============================================================================
 
   # Redis - Shared state and message broker
+  # NOTE: Redis 8.2+ required for XACKDEL command (stream auto-cleanup)
   redis:
-    image: redis:7-alpine
+    image: redis:8.4-alpine
     container_name: prm-redis
     ports:
       - "6379:6379"

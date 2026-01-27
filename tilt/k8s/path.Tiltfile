@@ -171,11 +171,11 @@ spec:
           mountPath: /config
         resources:
           requests:
-            memory: "256Mi"
-            cpu: "100m"
+            memory: "1Gi"
+            cpu: "1000m"
           limits:
-            memory: "512Mi"
-            cpu: "500m"
+            memory: "2Gi"
+            cpu: "4000m"
         readinessProbe:
           httpGet:
             path: /healthz

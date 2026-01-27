@@ -695,9 +695,12 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 		return
 	}
 
+	// Compress relay bytes for reduced memory/bandwidth
+	compressedRelayBytes := transport.CompressRelayBytes(relayBytes)
+
 	msg := &transport.MinedRelayMessage{
 		RelayHash:               nil, // Not calculated in fallback mode
-		RelayBytes:              relayBytes,
+		RelayBytes:              compressedRelayBytes,
 		ComputeUnitsPerRelay:    1,
 		SessionId:               "",
 		SessionEndHeight:        0,

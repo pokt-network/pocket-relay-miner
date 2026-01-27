@@ -24,6 +24,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/rings"
+	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
@@ -123,6 +124,17 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
+
+	// Initialize compression with config
+	compressionCfg := config.Compression.ToTransportConfig()
+	if err := transport.InitCompression(compressionCfg); err != nil {
+		return fmt.Errorf("failed to initialize compression: %w", err)
+	}
+	logger.Info().
+		Bool("enabled", compressionCfg.Enabled).
+		Str("level", string(compressionCfg.Level)).
+		Int("min_size", compressionCfg.MinSize).
+		Msg("compression initialized")
 
 	// Start observability server (metrics and pprof)
 	if config.Metrics.Enabled || config.Pprof.Enabled {

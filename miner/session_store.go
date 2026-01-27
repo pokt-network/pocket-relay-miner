@@ -497,6 +497,7 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 	// Update state indexes
 	pipe.SRem(ctx, s.stateIndexKey(oldState), sessionID)
 	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)
+	pipe.Expire(ctx, s.stateIndexKey(newState), s.config.SessionTTL)
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {

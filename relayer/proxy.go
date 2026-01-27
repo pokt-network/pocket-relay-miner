@@ -1719,9 +1719,12 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 	logging.WithSessionContext(p.logger.Warn(), sessionCtx).
 		Msg("no relay processor configured, using fallback message construction")
 
+	// Compress relay bytes for reduced memory/bandwidth (even for fallback path)
+	compressedBody := transport.CompressRelayBytes(task.reqBody)
+
 	msg := &transport.MinedRelayMessage{
 		RelayHash:               nil, // Not calculated - fallback mode
-		RelayBytes:              task.reqBody,
+		RelayBytes:              compressedBody,
 		ComputeUnitsPerRelay:    1,
 		SessionId:               task.sessionID,
 		SessionEndHeight:        0,

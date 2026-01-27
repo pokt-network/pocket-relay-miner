@@ -89,11 +89,11 @@ spec:
           mountPath: /keys
         resources:
           requests:
-            cpu: "1000m"
-            memory: "512Mi"
+            cpu: "2000m"
+            memory: "1Gi"
           limits:
-            cpu: "4000m"  # 2 cores - handles relay validation and signing at high RPS
-            memory: "2Gi"
+            cpu: "8000m"  # 8 cores - handles relay validation and signing at high RPS
+            memory: "4Gi"
         readinessProbe:
           httpGet:
             path: /ready

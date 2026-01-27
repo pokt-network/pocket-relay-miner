@@ -140,7 +140,7 @@ maxmemory-policy: "noeviction"
 
 ## Performance Tuning
 
-### Server Config (Redis 6.0+)
+### Server Config (Redis 8.2+)
 
 ```yaml
 # Multi-threading (+50-72% throughput)

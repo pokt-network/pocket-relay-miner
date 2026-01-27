@@ -10,6 +10,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/transport"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -148,6 +149,50 @@ type Config struct {
 	// TimeoutProfiles defines HTTP client timeout profiles.
 	// Auto-populated with "fast" and "streaming" defaults if not specified.
 	TimeoutProfiles map[string]TimeoutProfile `yaml:"timeout_profiles,omitempty"`
+
+	// Compression configuration for relay bytes compression.
+	// Reduces Redis memory usage and network bandwidth.
+	Compression CompressionConfig `yaml:"compression,omitempty"`
+}
+
+// CompressionConfig contains configuration for relay compression.
+// Compression significantly reduces Redis memory usage (2-50x for relay data).
+type CompressionConfig struct {
+	// Enabled enables compression of relay bytes.
+	// Default: true
+	Enabled *bool `yaml:"enabled,omitempty"`
+
+	// Level is the compression level to use.
+	// Possible values:
+	//   - "none"    : No compression (passthrough)
+	//   - "fastest" : zstd level 1, ~315 MB/s, lowest CPU, larger output
+	//   - "default" : zstd level 3, balanced speed/ratio
+	//   - "better"  : zstd level 7, slower, better ratio
+	//   - "best"    : zstd level 11, slowest, best ratio (DEFAULT - memory savings prioritized)
+	// Default: "best"
+	Level string `yaml:"level,omitempty"`
+
+	// MinSize is the minimum size in bytes before compression is applied.
+	// Data smaller than this is sent uncompressed (overhead not worth it).
+	// Default: 64 bytes
+	MinSize int `yaml:"min_size,omitempty"`
+}
+
+// ToTransportConfig converts the YAML config to transport.CompressionConfig.
+func (c CompressionConfig) ToTransportConfig() transport.CompressionConfig {
+	cfg := transport.DefaultCompressionConfig()
+
+	if c.Enabled != nil {
+		cfg.Enabled = *c.Enabled
+	}
+	if c.Level != "" {
+		cfg.Level = transport.CompressionLevel(c.Level)
+	}
+	if c.MinSize > 0 {
+		cfg.MinSize = c.MinSize
+	}
+
+	return cfg
 }
 
 // HTTPTransportConfig contains HTTP transport settings for backend connections.
@@ -502,7 +547,17 @@ func DefaultConfig() Config {
 			WarmupConcurrency:     10,
 			WarmupTimeoutSeconds:  5,
 		},
+		Compression: CompressionConfig{
+			Enabled: boolPtr(true), // Enable compression by default
+			Level:   "best",        // zstd level 11 - best ratio (memory savings prioritized)
+			MinSize: 64,            // Don't compress tiny data
+		},
 	}
+}
+
+// boolPtr returns a pointer to the given bool value.
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 // Validate validates the configuration and returns an error if invalid.

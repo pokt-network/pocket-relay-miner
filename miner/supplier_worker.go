@@ -6,7 +6,6 @@ import (
 	"fmt"
 	stdhttp "net/http"
 	"runtime"
-	"strings"
 	"sync"
 
 	"github.com/alitto/pond/v2"
@@ -339,10 +338,11 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 				CheckInterval:            0, // Event-driven via Redis pub/sub
 				MaxConcurrentTransitions: w.config.Config.GetSessionLifecycleMaxConcurrentTransitions(),
 			},
-			ClaimerConfig:        w.config.Config.GetSupplierClaimingConfig(),
-			DisableClaimBatching: w.config.Config.Transaction.DisableClaimBatching,
-			DisableProofBatching: w.config.Config.Transaction.DisableProofBatching,
-			QueryWorkers:         w.config.Config.GetQueryWorkers(),
+			ClaimerConfig:         w.config.Config.GetSupplierClaimingConfig(),
+			DisableClaimBatching:  w.config.Config.Transaction.DisableClaimBatching,
+			DisableProofBatching:  w.config.Config.Transaction.DisableProofBatching,
+			SubmissionTrackingTTL: w.config.Config.GetSubmissionTrackingTTL(),
+			QueryWorkers:          w.config.Config.GetQueryWorkers(),
 		},
 	)
 
@@ -372,7 +372,14 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 
 	state, ok := w.supplierManager.GetSupplierState(supplierAddr)
 	if !ok {
-		return fmt.Errorf("supplier state not found: %s", supplierAddr)
+		// Supplier state not found - this can happen during shutdown or if supplier was removed.
+		// This is a permanent condition (retrying won't help), so ACK and discard the relay.
+		w.logger.Warn().
+			Str("supplier", supplierAddr).
+			Str("session_id", msg.Message.SessionId).
+			Msg("supplier state not found - discarding relay (supplier may have been removed)")
+		RecordRelayRejected(supplierAddr, "supplier_not_found", msg.Message.ServiceId)
+		return nil // ACK and discard
 	}
 
 	// Track discovered apps and services (if cache orchestrator is available)
@@ -401,29 +408,57 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		}
 	}
 
-	// Update SMST
+	// Decompress RelayBytes if compressed (backwards compatible with uncompressed data)
+	relayBytes, decompErr := transport.DecompressRelayBytes(msg.Message.RelayBytes)
+	if decompErr != nil {
+		w.logger.Warn().
+			Err(decompErr).
+			Str("session_id", msg.Message.SessionId).
+			Str("supplier", supplierAddr).
+			Msg("failed to decompress relay bytes - discarding relay")
+		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "decompression_error")
+		return nil // ACK and discard - corrupted data
+	}
+
+	// Update SMST with decompressed relay bytes
 	if err := state.SMSTManager.UpdateTree(
 		ctx,
 		msg.Message.SessionId,
 		msg.Message.RelayHash,
-		msg.Message.RelayBytes,
+		relayBytes, // Use decompressed bytes
 		msg.Message.ComputeUnitsPerRelay,
 	); err != nil {
-		// Handle sealing or already claimed errors (late relays)
-		errMsg := err.Error()
-		if strings.Contains(errMsg, "already been claimed") || strings.Contains(errMsg, "is sealing") {
+		// Check for permanent SMST errors (late relays, sealed/claimed sessions)
+		if IsPermanentSMSTError(err) {
 			w.logger.Info().
+				Err(err).
 				Str("session_id", msg.Message.SessionId).
 				Str("supplier", supplierAddr).
-				Msg("dropping late relay - session sealed or claimed (SMST check)")
+				Msg("dropping relay - permanent SMST error (session sealed/claimed)")
 			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
 			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "session_sealed")
-			return nil
+			return nil // ACK and discard - no point retrying
 		}
-		// Other SMST errors (e.g., tree full, corruption)
-		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "smst_error")
-		return fmt.Errorf("failed to update SMST: %w", err)
+		// Check for transient errors (Redis connection issues) - allow retry
+		if IsRetryableError(err) {
+			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "transient_error")
+			return fmt.Errorf("transient SMST error (will retry): %w", err)
+		}
+		// Unknown/unexpected errors - log and discard (don't retry forever)
+		w.logger.Warn().
+			Err(err).
+			Str("session_id", msg.Message.SessionId).
+			Str("supplier", supplierAddr).
+			Msg("unexpected SMST error - discarding relay")
+		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "unexpected_error")
+		return nil // ACK and discard - unknown errors shouldn't block processing
 	}
+
+	// MEMORY OPTIMIZATION: Clear RelayBytes and RelayHash after SMST update
+	// The SMST has copied the data to Redis - these fields are no longer needed.
+	// This allows GC to reclaim the memory early instead of holding until message is ACK'd.
+	msg.Message.RelayBytes = nil
+	msg.Message.RelayHash = nil
 
 	// Track relay successfully added to SMST
 	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId)

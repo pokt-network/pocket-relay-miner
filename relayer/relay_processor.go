@@ -214,9 +214,13 @@ func (rp *relayProcessor) ProcessRelay(
 	}
 
 	// Build mined relay message
+	// OPTIMIZATION: Compress RelayBytes using zstd (typically 2-3x compression ratio)
+	// This reduces Redis memory usage and network bandwidth
+	compressedRelayBytes := transport.CompressRelayBytes(relayBz)
+
 	msg := &transport.MinedRelayMessage{
 		RelayHash:               relayHash[:],
-		RelayBytes:              relayBz,
+		RelayBytes:              compressedRelayBytes,
 		ComputeUnitsPerRelay:    rp.getComputeUnits(serviceID),
 		SessionId:               sessionID,
 		SessionStartHeight:      sessionStartHeight,

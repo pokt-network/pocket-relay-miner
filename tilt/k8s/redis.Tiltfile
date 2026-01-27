@@ -26,7 +26,7 @@ def deploy_redis(config):
 
 def install_redis_operator():
     """Install Redis Operator using Helm"""
-    print("Installing Redis Operator via Helm...")
+    print("Installing Redis Operator v0.23.0 via Helm...")
 
     # Add Helm repo
     helm_repo(
@@ -35,23 +35,73 @@ def install_redis_operator():
         labels=["znoop"]
     )
 
-    # Install operator via Helm extension (increased timeout for slow networks)
+    # Install operator via Helm extension
+    # v0.23.0 (Jan 2025) - supports Redis >=6 (including Redis 8.x)
+    # See: https://github.com/OT-CONTAINER-KIT/redis-operator/releases
+    # NOTE: GenerateConfigInInitContainer is needed to load additionalRedisConfig.
+    # Issue #1542 affects maxMemoryPercentOfLimit + additionalRedisConfig combo,
+    # but we only use additionalRedisConfig, so it should work.
     helm_resource(
         "redis-operator",
         "ot-helm/redis-operator",
         flags=[
+            "--version", "0.23.0",  # Pin version for reproducibility
             "--set", "redisOperator.imagePullPolicy=IfNotPresent",
-            "--timeout", "120s",  # Increase helm timeout
+            "--set", "featureGates.GenerateConfigInInitContainer=true",
+            "--timeout", "120s",
         ],
         labels=["redis"]
     )
 
 def deploy_redis_standalone(redis_config):
     """Deploy standalone Redis using operator"""
-    print("Deploying Redis (standalone mode via operator)...")
+    print("Deploying Redis 8.4 (standalone mode via operator) - SPEED OPTIMIZED...")
+
+    # ConfigMap with Redis config
+    # SPEED-OPTIMIZED configuration for pocket-relay-miner:
+    # - RDB snapshots every 60s (acceptable 1-2 min data loss from 40 min sessions)
+    # - AOF disabled (RDB is sufficient, avoids write amplification)
+    # - IO threads enabled for parallel network I/O
+    # - Lazyfree enabled for non-blocking deletions
+    #
+    # NOTE: The operator CRD redisConfig only supports:
+    # - additionalRedisConfig (ConfigMap name)
+    # - dynamicConfig (array of strings)
+    # - maxMemoryPercentOfLimit (integer 1-100)
+    # Inline key-value config is NOT supported per the CRD spec.
+    # See: https://pkg.go.dev/github.com/OT-CONTAINER-KIT/redis-operator/api/common/v1beta2#RedisConfig
+    redis_configmap = """
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-standalone-config
+data:
+  redis-additional.conf: |
+    # === PERSISTENCE: RDB snapshots (1-2 min acceptable loss) ===
+    save 60 1
+    appendonly no
+    rdbcompression yes
+    rdbchecksum no
+    # === MEMORY MANAGEMENT ===
+    maxmemory 1887436800
+    maxmemory-policy allkeys-lru
+    # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
+    io-threads 4
+    io-threads-do-reads yes
+    lazyfree-lazy-eviction yes
+    lazyfree-lazy-expire yes
+    lazyfree-lazy-server-del yes
+    lazyfree-lazy-user-del yes
+    lazyfree-lazy-user-flush yes
+    # === NETWORK TUNING ===
+    tcp-backlog 511
+    timeout 0
+    tcp-keepalive 300
+    activerehashing yes
+    slowlog-log-slower-than -1
+"""
 
     # Redis CR for standalone
-    # Performance-tuned persistence settings - see REDIS.md for details
     redis_cr = """
 apiVersion: redis.redis.opstreelabs.in/v1beta2
 kind: Redis
@@ -59,7 +109,7 @@ metadata:
   name: redis-standalone
 spec:
   kubernetesConfig:
-    image: quay.io/opstree/redis:v7.0.12
+    image: redis:8.4-alpine
     imagePullPolicy: IfNotPresent
     resources:
       requests:
@@ -70,22 +120,7 @@ spec:
         memory: 2Gi
     serviceType: ClusterIP
   redisConfig:
-    # AOF (Append Only File) - Critical for SMST/Streams/Sessions persistence
-    appendonly: "yes"
-    appendfsync: "everysec"              # Sync every 1s (NOT every write) - balances durability vs performance
-    no-appendfsync-on-rewrite: "yes"     # Don't block writes during AOF rewrites
-    auto-aof-rewrite-percentage: "100"   # Rewrite when AOF is 2x base size
-    auto-aof-rewrite-min-size: "64mb"    # Minimum AOF size to trigger rewrite
-    # Disable RDB snapshots (redundant with AOF, adds write amplification)
-    save: ""
-    # Memory management (88% of 2Gi container limit = ~1.76GB for local dev)
-    # Calculated as: 2 * 1024^3 * 0.88 = 1887436800 bytes
-    maxmemory: "1887436800"
-    maxmemory-policy: "allkeys-lru"      # LRU eviction for local dev (avoid write failures)
-    # Performance tuning
-    tcp-backlog: "511"
-    timeout: "0"
-    tcp-keepalive: "300"
+    additionalRedisConfig: redis-standalone-config
   storage:
     volumeClaimTemplate:
       spec:
@@ -96,8 +131,9 @@ spec:
   redisExporter:
     enabled: true
     image: quay.io/opstree/redis-exporter:v1.44.0
-""".format(redis_config["max_memory"])
+"""
 
+    k8s_yaml(blob(redis_configmap))
     k8s_yaml(blob(redis_cr))
 
     # Attach to Redis StatefulSet created by operator using k8s_resource with objects
@@ -116,12 +152,56 @@ def deploy_redis_cluster(redis_config):
     follower_count = cluster_config["redisFollower"]
     total_nodes = leader_count + follower_count
 
-    print("Deploying Redis cluster (via operator with {} leader + {} follower = {} total nodes)...".format(
+    print("Deploying Redis 8.4 cluster (via operator with {} leader + {} follower = {} total nodes) - SPEED OPTIMIZED...".format(
         leader_count, follower_count, total_nodes))
 
-    # RedisCluster CR
-    # Performance-tuned persistence settings - see REDIS.md for details
+    # ConfigMap with Redis cluster config
+    # SPEED-OPTIMIZED configuration for pocket-relay-miner:
+    # - RDB snapshots every 60s (acceptable 1-2 min data loss from 40 min sessions)
+    # - AOF disabled (RDB is sufficient, avoids write amplification)
+    # - IO threads enabled for parallel network I/O
+    # - Lazyfree enabled for non-blocking deletions
     #
+    # NOTE: The operator CRD redisConfig only supports:
+    # - additionalRedisConfig (ConfigMap name)
+    # - dynamicConfig (array of strings)
+    # - maxMemoryPercentOfLimit (integer 1-100)
+    # Inline key-value config is NOT supported per the CRD spec.
+    # See: https://pkg.go.dev/github.com/OT-CONTAINER-KIT/redis-operator/api/common/v1beta2#RedisConfig
+    redis_cluster_configmap = """
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-cluster-config
+data:
+  redis-additional.conf: |
+    # === PERSISTENCE: RDB snapshots (1-2 min acceptable loss) ===
+    save 60 1
+    appendonly no
+    rdbcompression yes
+    rdbchecksum no
+    # === MEMORY MANAGEMENT ===
+    maxmemory 471859200
+    maxmemory-policy allkeys-lru
+    # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
+    io-threads 4
+    io-threads-do-reads yes
+    lazyfree-lazy-eviction yes
+    lazyfree-lazy-expire yes
+    lazyfree-lazy-server-del yes
+    lazyfree-lazy-user-del yes
+    lazyfree-lazy-user-flush yes
+    # === NETWORK TUNING ===
+    tcp-backlog 511
+    timeout 0
+    tcp-keepalive 300
+    activerehashing yes
+    slowlog-log-slower-than -1
+    # === CLUSTER SETTINGS ===
+    cluster-node-timeout 5000
+"""
+
+    # RedisCluster CR
     # IMPORTANT: clusterSize = total nodes (leaders + followers)
     # The operator automatically distributes nodes based on clusterSize
     # For 3 leaders + 3 followers: clusterSize = 6
@@ -135,7 +215,7 @@ spec:
   clusterVersion: v7
   persistenceEnabled: true
   kubernetesConfig:
-    image: quay.io/opstree/redis:v7.0.12
+    image: redis:8.4-alpine
     imagePullPolicy: IfNotPresent
     resources:
       requests:
@@ -144,27 +224,12 @@ spec:
       limits:
         cpu: 1000m
         memory: {max_memory}
-  redisConfig:
-    # AOF (Append Only File) - Critical for SMST/Streams/Sessions persistence
-    appendonly: "yes"
-    appendfsync: "everysec"              # Sync every 1s (NOT every write) - balances durability vs performance
-    no-appendfsync-on-rewrite: "yes"     # Don't block writes during AOF rewrites
-    auto-aof-rewrite-percentage: "100"   # Rewrite when AOF is 2x base size
-    auto-aof-rewrite-min-size: "64mb"    # Minimum AOF size to trigger rewrite
-    # Disable RDB snapshots (redundant with AOF, adds write amplification)
-    save: ""
-    # Memory management (88% of default 512Mi = ~450MB for local dev)
-    # Adjust if using different max_memory in tilt_config.yaml
-    # Calculated as: 512 * 1024^2 * 0.88 = 471859200 bytes
-    maxmemory: "471859200"
-    maxmemory-policy: "allkeys-lru"      # LRU eviction for local dev (avoid write failures)
-    # Performance tuning
-    tcp-backlog: "511"
-    timeout: "0"
-    tcp-keepalive: "300"
-    # Cluster-specific settings
-    cluster-enabled: "yes"
-    cluster-node-timeout: "5000"
+  redisLeader:
+    redisConfig:
+      additionalRedisConfig: redis-cluster-config
+  redisFollower:
+    redisConfig:
+      additionalRedisConfig: redis-cluster-config
   storage:
     volumeClaimTemplate:
       spec:
@@ -175,17 +240,12 @@ spec:
   redisExporter:
     enabled: true
     image: quay.io/opstree/redis-exporter:v1.44.0
-  redisLeader:
-    replicas: {leader_replicas}
-  redisFollower:
-    replicas: {follower_replicas}
 """.format(
         cluster_size=total_nodes,
-        max_memory=redis_config["max_memory"],
-        leader_replicas=leader_count,
-        follower_replicas=follower_count
+        max_memory=redis_config["max_memory"]
     )
 
+    k8s_yaml(blob(redis_cluster_configmap))
     k8s_yaml(blob(redis_cluster_cr))
 
     # Attach to Redis Cluster created by operator using k8s_resource with objects

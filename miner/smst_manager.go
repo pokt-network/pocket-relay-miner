@@ -109,14 +109,14 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	// CRITICAL: Reject updates if session is sealing or already claimed
 	// The sealing flag prevents race conditions during claim window
 	if tree.sealing {
-		return fmt.Errorf("session %s is sealing for claim, cannot update", sessionID)
+		return ErrSessionSealing
 	}
 	if tree.claimedRoot != nil {
-		return fmt.Errorf("session %s has already been claimed, cannot update", sessionID)
+		return ErrSessionClaimed
 	}
 
 	if err := tree.trie.Update(key, value, weight); err != nil {
-		return fmt.Errorf("failed to update SMST: %w", err)
+		return fmt.Errorf("%w: %v", ErrSMSTUpdateFailed, err)
 	}
 
 	// CRITICAL: Log successful SMST update for debugging
@@ -134,13 +134,16 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 
 	// Commit to persist dirty nodes to Redis (critical for HA)
 	if err := tree.trie.Commit(); err != nil {
-		return fmt.Errorf("failed to commit SMST to Redis: %w", err)
+		return fmt.Errorf("%w: %v", ErrSMSTCommitFailed, err)
 	}
 
 	// Flush buffered operations to Redis
+	// NOTE: FlushPipeline errors are Redis errors and should be retryable.
+	// We wrap with ErrSMSTCommitFailed so it's classified as permanent if not a Redis error.
 	if redisStore, ok := tree.store.(*RedisMapStore); ok {
 		if err := redisStore.FlushPipeline(); err != nil {
-			return fmt.Errorf("failed to flush pipeline: %w", err)
+			// Return wrapped error - IsRetryableError will check for net.Error underneath
+			return fmt.Errorf("%w: flush pipeline: %v", ErrSMSTCommitFailed, err)
 		}
 	}
 

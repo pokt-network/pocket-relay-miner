@@ -42,7 +42,7 @@ Production-grade, horizontally scalable relay mining service for Pocket Network.
 ## Requirements
 
 - Go 1.24.3+
-- Redis 6.2+
+- Redis 8.2+ (required for XACKDEL command)
 - Access to Pocket Network Shannon endpoints
 
 ## Quick Start

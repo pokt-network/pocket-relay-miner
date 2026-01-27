@@ -63,6 +63,11 @@ type Config struct {
 	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 
+	// SubmissionTrackingTTL is the TTL for claim/proof submission tracking records.
+	// These records are used for debugging failed submissions and auditing.
+	// Default: 24h (covers multiple session windows for debugging)
+	SubmissionTrackingTTL time.Duration `yaml:"submission_tracking_ttl"`
+
 	// KnownApplications is a list of application addresses to pre-discover at startup.
 	// These apps will be fetched from the network and added to the cache during initialization.
 	KnownApplications []string `yaml:"known_applications,omitempty"`
@@ -459,6 +464,14 @@ func (c *Config) GetCacheTTL() time.Duration {
 	return 2 * time.Hour // Default: 2h (covers ~15 session lifecycles at 30s blocks)
 }
 
+// GetSubmissionTrackingTTL returns the TTL for submission tracking records.
+func (c *Config) GetSubmissionTrackingTTL() time.Duration {
+	if c.SubmissionTrackingTTL > 0 {
+		return c.SubmissionTrackingTTL
+	}
+	return 24 * time.Hour // Default: 24h for debugging
+}
+
 // GetSessionTTL returns the session TTL for session state data.
 // Defaults to CacheTTL if not explicitly set, ensuring SMST trees and sessions
 // expire at the same time (prevents orphaned sessions causing false positive warnings).
@@ -641,7 +654,8 @@ func DefaultConfig() *Config {
 		HotReloadEnabled:       true,
 		// SessionTTL: 0 means use CacheTTL (default 2h) - ensures SMST trees and sessions expire together
 		// This prevents orphaned sessions causing "SMST missing but relay count > 0" warnings
-		CacheTTL: 2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
+		CacheTTL:              2 * time.Hour,  // Covers ~15 session lifecycles at 30s blocks
+		SubmissionTrackingTTL: 24 * time.Hour, // 24h for debugging (was 7 days)
 		BalanceMonitor: BalanceMonitorConfigYAML{
 			Enabled:                     true,    // Enable by default
 			BalanceThresholdUpokt:       1000000, // 1 POKT = 1,000,000 upokt

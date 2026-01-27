@@ -238,8 +238,8 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 					Err(parseErr).
 					Str(logging.FieldMessageID, message.ID).
 					Msg("failed to parse message")
-				// Acknowledge bad message to avoid redelivery
-				_ = c.client.XAck(ctx, c.streamName, c.config.ConsumerGroup, message.ID)
+				// Acknowledge AND delete bad message to avoid redelivery and keep stream clean
+				_ = c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID)
 				continue
 			}
 
@@ -318,8 +318,8 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 		msg, parseErr := c.parseMessage(message, c.streamName)
 		if parseErr != nil {
 			deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
-			// Acknowledge bad message
-			_ = c.client.XAck(ctx, c.streamName, c.config.ConsumerGroup, message.ID)
+			// Acknowledge AND delete bad message to keep stream clean
+			_ = c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID)
 			continue
 		}
 
@@ -391,9 +391,12 @@ func (c *StreamsConsumer) AckMessage(ctx context.Context, msg transport.StreamMe
 		return fmt.Errorf("message missing stream name")
 	}
 
-	err := c.client.XAck(ctx, msg.StreamName, c.config.ConsumerGroup, msg.ID).Err()
+	// Use XAckDel with DELREF to acknowledge AND delete the message from stream.
+	// This prevents streams from growing unbounded - messages are removed after processing.
+	// DELREF removes all references from all consumer groups (we only have one).
+	err := c.client.XAckDel(ctx, msg.StreamName, c.config.ConsumerGroup, "DELREF", msg.ID).Err()
 	if err != nil {
-		return fmt.Errorf("failed to ack message %s: %w", msg.ID, err)
+		return fmt.Errorf("failed to ack+delete message %s: %w", msg.ID, err)
 	}
 
 	ackedTotal.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
@@ -440,15 +443,16 @@ func (c *StreamsConsumer) AckMessageBatch(ctx context.Context, msgs []transport.
 		byStream[msg.StreamName] = append(byStream[msg.StreamName], msg.ID)
 	}
 
-	// Use pipeline to acknowledge all messages
+	// Use pipeline to acknowledge AND delete all messages from streams.
+	// XAckDel with DELREF prevents streams from growing unbounded.
 	pipe := c.client.Pipeline()
 	for streamName, ids := range byStream {
-		pipe.XAck(ctx, streamName, c.config.ConsumerGroup, ids...)
+		pipe.XAckDel(ctx, streamName, c.config.ConsumerGroup, "DELREF", ids...)
 	}
 
 	_, err := pipe.Exec(ctx)
 	if err != nil {
-		return fmt.Errorf("failed to batch ack: %w", err)
+		return fmt.Errorf("failed to batch ack+delete: %w", err)
 	}
 
 	ackedTotal.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(msgs)))
@@ -489,10 +493,11 @@ func (c *StreamsConsumer) GetPendingRelayCount(ctx context.Context, sessionID st
 }
 
 // DeleteStream is a no-op with single stream architecture.
-// Messages are naturally consumed and ACK'd. The single stream per supplier persists.
+// Messages are automatically deleted via XAckDel when acknowledged.
+// The single stream per supplier persists but stays clean.
 func (c *StreamsConsumer) DeleteStream(ctx context.Context, sessionID string) error {
 	// No-op: single stream per supplier persists across all sessions.
-	// Messages are consumed and removed via ACK.
+	// Messages are automatically deleted from stream via XAckDel (DELREF mode).
 	c.logger.Debug().
 		Str("session_id", sessionID).
 		Msg("DeleteStream is no-op with single stream architecture")
@@ -500,8 +505,8 @@ func (c *StreamsConsumer) DeleteStream(ctx context.Context, sessionID string) er
 }
 
 // TrimStream removes entries older than the specified duration using MINID.
-// This is safe because relays older than the cache TTL are already invalid
-// (session/claim windows are closed, so they can't earn rewards anyway).
+// NOTE: With XAckDel, messages are deleted on ack, so this is now a backup safety net
+// for any orphaned messages that weren't properly acknowledged.
 // Returns the number of entries trimmed.
 func (c *StreamsConsumer) TrimStream(ctx context.Context, maxAge time.Duration) (int64, error) {
 	c.mu.RLock()
