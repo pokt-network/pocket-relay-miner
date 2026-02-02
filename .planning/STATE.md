@@ -14,26 +14,25 @@
 
 **Phase:** 2 of 6 (Characterization Tests)
 
-**Plan:** 01 of 04 in Phase 2 - COMPLETE
+**Plan:** 02 of 04 in Phase 2 - COMPLETE
 
 **Status:** In progress
 
-**Last activity:** 2026-02-02 - Completed 02-01-PLAN.md (Test utilities package)
+**Last activity:** 2026-02-02 - Completed 02-02-PLAN.md (Lifecycle callback characterization tests)
 
 **Progress:**
 ```
 [Phase 1: Test Foundation ████████████████████████████████████] 100%
-[Phase 2: Characterization ██████████░░░░░░░░░░░░░░░░░░░░░░░░░]  25%
+[Phase 2: Characterization █████████████████░░░░░░░░░░░░░░░░░░]  50%
 ```
 
 **Next Steps:**
-1. Execute 02-02-PLAN.md (Session lifecycle characterization tests)
-2. Execute 02-03-PLAN.md (SMST operations characterization tests)
-3. Execute 02-04-PLAN.md (Cache behavior characterization tests)
+1. Execute 02-03-PLAN.md (SMST operations characterization tests)
+2. Execute 02-04-PLAN.md (Cache behavior characterization tests)
 
 ## Performance Metrics
 
-**Velocity:** ~4 min per plan (based on 02-01)
+**Velocity:** ~5 min per plan (based on 02-01, 02-02)
 
 **Quality:**
 - Tests passing: All existing tests (50/50 stability validation with race detection)
@@ -42,8 +41,9 @@
 - Vulnerability scanning: govulncheck in CI (01-03)
 - Stability testing: Nightly 100-run workflow (01-03) + 50-run validation complete (01-04)
 - Test quality: Comprehensive audit complete (66 time.Sleep violations documented, 3 races addressed)
-- Coverage: miner/ 14.9%, relayer/ 0.0%, cache/ 0.0% (documented for Phase 2)
+- Coverage: miner/ 14.9% -> improving, relayer/ 0.0%, cache/ 0.0% (documented for Phase 2)
 - testutil package: Complete with 10/10 consecutive test runs passing
+- Lifecycle callback tests: 31 tests (23 state + 8 concurrent), 10/10 stability runs
 
 **Blockers:** None
 
@@ -68,6 +68,9 @@
 | Use math/rand with seed for test data | crypto/rand would make tests non-reproducible | 2026-02-02 |
 | Hardcode test keys in source | Ensures CI runs produce identical results | 2026-02-02 |
 | Single miniredis per suite | Prevents CPU exhaustion from creating thousands of instances | 2026-02-02 |
+| Local mocks over testutil for miner tests | Import cycle prevents testutil usage (testutil imports miner) | 2026-02-02 |
+| Fixed session heights for determinism | Window calculations require predictable heights | 2026-02-02 |
+| Characterize actual behavior | Document CreateClaims called with 0 messages (optimization opportunity) | 2026-02-02 |
 
 ### Key Findings
 
@@ -78,6 +81,8 @@
 - **Test quality baseline established:** No global state dependencies, 1 acceptable crypto/rand usage
 - **Three large files** need refactoring: lifecycle_callback.go (1898 lines), session_lifecycle.go (1207 lines), proxy.go (1842 lines)
 - **testutil package complete:** Builders, keys, RedisTestSuite all verified with 10/10 consecutive runs
+- **Lifecycle callback coverage:** OnSessionsNeedClaim 70.5%, OnSessionsNeedProof 59.9%, terminal callbacks 72-76%
+- **Import cycle:** testutil cannot be used in miner tests due to testutil importing miner
 
 ### TODOs
 
@@ -93,7 +98,7 @@
 
 **Phase 2 (In Progress):**
 - [x] Create testutil package - testutil/ with builders, keys, RedisTestSuite (02-01)
-- [ ] Session lifecycle characterization tests (02-02)
+- [x] Lifecycle callback characterization tests - 31 tests (02-02)
 - [ ] SMST operations characterization tests (02-03)
 - [ ] Cache behavior characterization tests (02-04)
 
@@ -111,11 +116,11 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-02 22:34:51 UTC
+**Last session:** 2026-02-02 23:05:00 UTC
 
-**Stopped at:** Completed 02-01-PLAN.md (Test utilities package)
+**Stopped at:** Completed 02-02-PLAN.md (Lifecycle callback characterization tests)
 
-**Resume file:** None (ready for 02-02)
+**Resume file:** None (ready for 02-03)
 
 **Context to Preserve:**
 
@@ -124,6 +129,8 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 - **Performance Target:** 1000+ RPS per relayer replica must be maintained through refactoring
 - **Coverage Goal:** 80%+ enforcement on critical paths (miner/, relayer/, cache/)
 - **testutil patterns:** SessionBuilder(seed).Build(), RelayBuilder(seed).BuildN(n), embed RedisTestSuite
+- **Lifecycle callback test patterns:** Use local mocks with `lc*`/`conc*` prefixes due to import cycle
+- **Window calculation pattern:** Fixed session heights (100) for deterministic claim (102-106) and proof (106-110) windows
 
 **Open Questions:**
 
