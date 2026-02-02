@@ -77,6 +77,24 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
+  vuln-check:
+    name: Vulnerability Scan
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.3"
+          cache: true
+
+      - name: Run govulncheck
+        uses: golang/govulncheck-action@v1
+        with:
+          go-package: ./...
+
   build:
     name: Build
     runs-on: ubuntu-latest
@@ -101,7 +119,7 @@ jobs:
   docker-build-amd64:
     name: Docker Build (AMD64)
     runs-on: ubuntu-latest
-    needs: [lint, fmt, test]
+    needs: [lint, fmt, test, vuln-check]
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
@@ -138,7 +156,7 @@ jobs:
   docker-build-arm64:
     name: Docker Build (ARM64)
     runs-on: ubuntu-24.04-arm
-    needs: [lint, fmt, test]
+    needs: [lint, fmt, test, vuln-check]
     steps:
       - name: Checkout code
         uses: actions/checkout@v5
