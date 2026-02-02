@@ -1,0 +1,36 @@
+name: Nightly Stability
+
+on:
+  schedule:
+    # Run at 2 AM UTC daily
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    # Allow manual triggering for debugging
+
+permissions:
+  contents: read
+
+jobs:
+  stability:
+    name: 100-Run Stability Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 120  # 2 hours max (100 runs can take a while with race detection)
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.3"
+          cache: true
+
+      - name: Run 100-run stability test
+        run: |
+          chmod +x scripts/test-stability.sh
+          ./scripts/test-stability.sh
+        env:
+          RUNS: 100
+
+      # GitHub Actions sends email notifications on workflow failure by default
+      # No additional notification setup needed per 01-RESEARCH.md open question #2
