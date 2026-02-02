@@ -59,6 +59,15 @@ Plans:
 4. Coverage reports show 80%+ for miner/, relayer/, and cache/ packages
 5. All new tests use miniredis for Redis (no mocks), pass race detector, and run deterministically
 
+**Plans:** 5 plans
+
+Plans:
+- [ ] 02-01-PLAN.md — Create shared test utilities (testutil/ package)
+- [ ] 02-02-PLAN.md — Lifecycle callback state transition tests (CHAR-01)
+- [ ] 02-03-PLAN.md — Session lifecycle state machine tests (CHAR-02)
+- [ ] 02-04-PLAN.md — Proxy and relay processor tests (CHAR-03)
+- [ ] 02-05-PLAN.md — Coverage infrastructure and CI integration (INFRA-04)
+
 ---
 
 ### Phase 3: Test Quality Cleanup
@@ -146,7 +155,7 @@ Plans:
 | Phase | Status | Requirements | Progress |
 |-------|--------|--------------|----------|
 | Phase 1: Test Foundation | ✓ Complete | INFRA-01, INFRA-02, INFRA-03, QUAL-02, QUAL-03 | 100% |
-| Phase 2: Characterization Tests | Pending | CHAR-01, CHAR-02, CHAR-03, INFRA-04 | 0% |
+| Phase 2: Characterization Tests | In Progress | CHAR-01, CHAR-02, CHAR-03, INFRA-04 | 0% |
 | Phase 3: Test Quality Cleanup | Pending | QUAL-01 | 0% |
 | Phase 4: Code Structure Refactoring | Pending | STRUCT-01, STRUCT-02 | 0% |
 | Phase 5: Tech Debt and Bug Fixes | Pending | DEBT-01, DEBT-02, DEBT-03, DEBT-04, DEBT-05, BUG-01, BUG-02 | 0% |
@@ -155,4 +164,4 @@ Plans:
 ---
 
 *Roadmap created: 2026-02-02*
-*Last updated: 2026-02-02 (Phase 1 complete)*
+*Last updated: 2026-02-02 (Phase 2 planned)*
