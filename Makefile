@@ -1,5 +1,5 @@
 .PHONY: build test clean install help docker-build docker-push build-backend proto-backend \
-	tilt-up-docker tilt-down-docker tilt-up-k8s tilt-down-k8s
+	tilt-up-docker tilt-down-docker tilt-up-k8s tilt-down-k8s test-coverage test-coverage-ci
 
 # Binary name
 BINARY_NAME=pocket-relay-miner
@@ -79,15 +79,11 @@ test_miner: ## Run miner tests exclusively with race detection (Rule #1: no flak
 	@echo "Rule #1: No flaky tests, no race conditions, no timeout weird tests, no mocks"
 	@go test -v -tags test -race -count=1 -p 1 -parallel 1 ./miner/...
 
-test-coverage: ## Run tests with coverage (use PKG=package for specific package)
-	@echo "Running tests with coverage..."
-ifdef PKG
-	@go test -v -tags test -p 4 -parallel 4 -coverprofile=coverage.out ./$(PKG)/...
-else
-	@go test -v -tags test -p 4 -parallel 4 -coverprofile=coverage.out ./...
-endif
-	@go tool cover -html=coverage.out -o coverage.html
-	@echo "Coverage report generated: coverage.html"
+test-coverage: ## Run tests with coverage for critical packages (miner/, relayer/, cache/)
+	@./scripts/test-coverage.sh --html
+
+test-coverage-ci: ## Run tests with coverage (CI format)
+	@./scripts/test-coverage.sh --ci
 
 clean: ## Clean build artifacts
 	@echo "Cleaning build artifacts..."
