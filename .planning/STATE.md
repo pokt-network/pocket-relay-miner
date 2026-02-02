@@ -14,25 +14,24 @@
 
 **Phase:** 2 of 6 (Characterization Tests)
 
-**Plan:** 02 of 04 in Phase 2 - COMPLETE
+**Plan:** 03 of 04 in Phase 2 - COMPLETE
 
 **Status:** In progress
 
-**Last activity:** 2026-02-02 - Completed 02-02-PLAN.md (Lifecycle callback characterization tests)
+**Last activity:** 2026-02-02 - Completed 02-03-PLAN.md (Session lifecycle characterization tests)
 
 **Progress:**
 ```
 [Phase 1: Test Foundation ████████████████████████████████████] 100%
-[Phase 2: Characterization █████████████████░░░░░░░░░░░░░░░░░░]  50%
+[Phase 2: Characterization █████████████████████████░░░░░░░░░░]  75%
 ```
 
 **Next Steps:**
-1. Execute 02-03-PLAN.md (SMST operations characterization tests)
-2. Execute 02-04-PLAN.md (Cache behavior characterization tests)
+1. Execute 02-04-PLAN.md (Cache behavior characterization tests)
 
 ## Performance Metrics
 
-**Velocity:** ~5 min per plan (based on 02-01, 02-02)
+**Velocity:** ~15 min per plan (based on 02-03)
 
 **Quality:**
 - Tests passing: All existing tests (50/50 stability validation with race detection)
@@ -41,9 +40,10 @@
 - Vulnerability scanning: govulncheck in CI (01-03)
 - Stability testing: Nightly 100-run workflow (01-03) + 50-run validation complete (01-04)
 - Test quality: Comprehensive audit complete (66 time.Sleep violations documented, 3 races addressed)
-- Coverage: miner/ 14.9% -> improving, relayer/ 0.0%, cache/ 0.0% (documented for Phase 2)
+- Coverage: miner/session_lifecycle.go 81.3% average, miner/ overall improving
 - testutil package: Complete with 10/10 consecutive test runs passing
 - Lifecycle callback tests: 31 tests (23 state + 8 concurrent), 10/10 stability runs
+- Session lifecycle tests: 2103 lines covering state machine + concurrency
 
 **Blockers:** None
 
@@ -71,17 +71,21 @@
 | Local mocks over testutil for miner tests | Import cycle prevents testutil usage (testutil imports miner) | 2026-02-02 |
 | Fixed session heights for determinism | Window calculations require predictable heights | 2026-02-02 |
 | Characterize actual behavior | Document CreateClaims called with 0 messages (optimization opportunity) | 2026-02-02 |
+| Package-local mocks for import cycles | Created slc* types in miner tests to avoid testutil import cycle | 2026-02-02 |
+| 100 goroutines for CI concurrency tests | Sufficient for race detection; nightly can use 1000 | 2026-02-02 |
 
 ### Key Findings
 
 - **66 time.Sleep() violations** documented in audit (not 64 from research) — causes flaky tests, documented for Phase 3 cleanup
-- **3 race conditions identified** during stability validation: 2 fixed in test infrastructure, 3 skipped with TODO comments
-- **Coverage gaps confirmed:** relayer/ 0.0%, cache/ 0.0%, miner/ 14.9% — cache/ is HIGH PRIORITY for Phase 2
+- **4 race conditions identified** during stability validation: 2 fixed in test infrastructure, 2 skipped with TODO comments, 1 new in UpdateSessionRelayCount
+- **Coverage gaps confirmed:** relayer/ 0.0%, cache/ 0.0%, miner/ improving — cache/ is HIGH PRIORITY for Phase 2
 - **50-run stability validation:** 100% pass rate with race detection and shuffle enabled
 - **Test quality baseline established:** No global state dependencies, 1 acceptable crypto/rand usage
 - **Three large files** need refactoring: lifecycle_callback.go (1898 lines), session_lifecycle.go (1207 lines), proxy.go (1842 lines)
 - **testutil package complete:** Builders, keys, RedisTestSuite all verified with 10/10 consecutive runs
 - **Lifecycle callback coverage:** OnSessionsNeedClaim 70.5%, OnSessionsNeedProof 59.9%, terminal callbacks 72-76%
+- **Session lifecycle coverage:** 81.3% average function coverage with state machine and concurrency tests
+- **UpdateSessionRelayCount race:** Discovered in 02-03, uses non-atomic fields without mutex (Phase 3 fix)
 - **Import cycle:** testutil cannot be used in miner tests due to testutil importing miner
 
 ### TODOs
@@ -99,14 +103,14 @@
 **Phase 2 (In Progress):**
 - [x] Create testutil package - testutil/ with builders, keys, RedisTestSuite (02-01)
 - [x] Lifecycle callback characterization tests - 31 tests (02-02)
-- [ ] SMST operations characterization tests (02-03)
+- [x] Session lifecycle characterization tests - 2103 lines, 81.3% coverage (02-03)
 - [ ] Cache behavior characterization tests (02-04)
 
 **Phase 2/3 (Deferred):**
 - [ ] Add cache/ package unit tests (0% coverage - HIGH PRIORITY)
 - [ ] Add relayer/ package unit tests (0% coverage)
 - [ ] Fix 66 time.Sleep violations in tests (causes flaky behavior)
-- [ ] Fix 3 production code races (runtime metrics collector, tx client mock)
+- [ ] Fix 4 production code races (runtime metrics collector, tx client mock, UpdateSessionRelayCount)
 - [ ] Fix 262 lint violations (220 errcheck, 42 gosec)
 - [ ] Improve miner/ coverage from 14.9% to 80%+
 
@@ -116,11 +120,11 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-02 23:05:00 UTC
+**Last session:** 2026-02-02 22:52:00 UTC
 
-**Stopped at:** Completed 02-02-PLAN.md (Lifecycle callback characterization tests)
+**Stopped at:** Completed 02-03-PLAN.md (Session lifecycle characterization tests)
 
-**Resume file:** None (ready for 02-03)
+**Resume file:** None (ready for 02-04)
 
 **Context to Preserve:**
 
@@ -130,6 +134,7 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 - **Coverage Goal:** 80%+ enforcement on critical paths (miner/, relayer/, cache/)
 - **testutil patterns:** SessionBuilder(seed).Build(), RelayBuilder(seed).BuildN(n), embed RedisTestSuite
 - **Lifecycle callback test patterns:** Use local mocks with `lc*`/`conc*` prefixes due to import cycle
+- **Session lifecycle test patterns:** Use slc* prefix for package-local mocks
 - **Window calculation pattern:** Fixed session heights (100) for deterministic claim (102-106) and proof (106-110) windows
 
 **Open Questions:**
