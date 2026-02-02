@@ -48,8 +48,21 @@ install: ## Install the binary to $GOPATH/bin
 	@go install $(LDFLAGS) .
 	@echo "Install complete"
 
-test: ## Run tests (PKG=package_name for specific package, VERBOSE=1 for verbose output)
-	@echo "Running tests..."
+test: ## Run tests with race detection (PKG=package_name for specific package, VERBOSE=1 for verbose output)
+	@echo "Running tests with race detection..."
+	@if [ -n "$(PKG)" ]; then \
+		if [ "$(PKG)" = "cache" ]; then \
+			echo "Running cache tests sequentially (143 tests with shared miniredis)..."; \
+			go test -race $(if $(VERBOSE),-v) -tags test -p 1 -parallel 1 ./$(PKG)/...; \
+		else \
+			go test -race $(if $(VERBOSE),-v) -tags test -p 4 -parallel 4 ./$(PKG)/...; \
+		fi; \
+	else \
+		go test -race $(if $(VERBOSE),-v) -tags test -p 4 -parallel 4 ./...; \
+	fi
+
+test-no-race: ## Run tests without race detection (faster, for quick local iterations)
+	@echo "Running tests without race detection..."
 	@if [ -n "$(PKG)" ]; then \
 		if [ "$(PKG)" = "cache" ]; then \
 			echo "Running cache tests sequentially (143 tests with shared miniredis)..."; \
