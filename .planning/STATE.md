@@ -14,21 +14,21 @@
 
 **Phase:** 1 of 6 (Test Foundation)
 
-**Plan:** 02 of 04 in Phase 1
+**Plan:** 01 of 04 in Phase 1
 
 **Status:** In progress
 
-**Last activity:** 2026-02-02 - Completed 01-02-PLAN.md (Race detection and stability testing)
+**Last activity:** 2026-02-02 - Completed 01-01-PLAN.md (Linting configuration)
 
 **Progress:**
 ```
-[Phase 1: Test Foundation ███████████░░░░░░░░░░░░░░░░░░░░░░░░] 25%
+[Phase 1: Test Foundation ██████░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░] 12.5%
 ```
 
 **Next Steps:**
-1. Execute 01-03-PLAN.md (Coverage baseline measurement)
-2. Execute 01-04-PLAN.md (Flaky test audit)
-3. Execute 01-05-PLAN.md (CI pipeline with race detection)
+1. Execute 01-02-PLAN.md (CI/CD integration)
+2. Execute 01-03-PLAN.md (Vulnerability scanning)
+3. Execute 01-04-PLAN.md (Test quality audit)
 
 ## Performance Metrics
 
@@ -36,7 +36,8 @@
 
 **Quality:**
 - Tests passing: All existing tests (baseline)
-- Race detection: ✅ Enabled for all packages via `make test`
+- Linting: ✅ golangci-lint configured (262 violations inventoried for Phase 2/3)
+- Race detection: Not yet enabled (01-02)
 - Coverage: Unknown (needs baseline measurement in 01-03)
 
 **Blockers:** None
@@ -50,9 +51,9 @@
 | 6-phase approach | Aligns with research guidance for incremental refactoring | 2026-02-02 |
 | Test foundation first | Cannot safely refactor without understanding current behavior | 2026-02-02 |
 | Standard depth (6 phases) | Balances thoroughness with manageable scope | 2026-02-02 |
-| Race detection mandatory | Correctness > speed, 2-20x overhead acceptable per 01-CONTEXT.md | 2026-02-02 |
-| test-no-race escape hatch | Provides quick local iteration when race overhead not needed | 2026-02-02 |
-| Stability script uses -shuffle | Maximizes test variance to expose order dependencies | 2026-02-02 |
+| Lenient complexity thresholds in Phase 1 | funlen:600/220, gocognit:250, gocyclo:80 calibrated to existing code; tighten in Phase 4 | 2026-02-02 |
+| golangci-lint v2 format | Uses linters.settings (nested) not linters-settings (top-level) | 2026-02-02 |
+| Defer 262 violations to Phase 2/3 | Automatic fixes only (41); manual fixes (262) require non-trivial changes beyond Phase 1 scope | 2026-02-02 |
 
 ### Key Findings
 
@@ -63,10 +64,11 @@
 
 ### TODOs
 
-- [ ] Measure baseline coverage for all packages (01-03)
-- [x] Create flaky test reproduction script (run 100x, detect failures) - ✅ scripts/test-stability.sh
-- [ ] Document current test execution time (before optimization)
-- [ ] Identify which tests currently use time.Sleep() (grep audit - 01-04)
+- [x] Create golangci-lint configuration - ✅ .golangci.yml created
+- [ ] Integrate linter into CI (01-02)
+- [ ] Fix 262 remaining lint violations (Phase 2/3: 220 errcheck, 42 gosec)
+- [ ] Add vulnerability scanning (01-03)
+- [ ] Measure baseline test coverage (01-04)
 
 ### Blockers
 
@@ -74,11 +76,11 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-02 20:27:23 UTC
+**Last session:** 2026-02-02 20:35:53 UTC
 
-**Stopped at:** Completed 01-02-PLAN.md
+**Stopped at:** Completed 01-01-PLAN.md
 
-**Resume file:** None (phase in progress, continue with 01-03-PLAN.md)
+**Resume file:** None (phase in progress, continue with 01-02-PLAN.md)
 
 **Context to Preserve:**
 
