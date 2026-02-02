@@ -79,31 +79,31 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INFRA-01 | Phase TBD | Pending |
-| INFRA-02 | Phase TBD | Pending |
-| INFRA-03 | Phase TBD | Pending |
-| INFRA-04 | Phase TBD | Pending |
-| QUAL-01 | Phase TBD | Pending |
-| QUAL-02 | Phase TBD | Pending |
-| QUAL-03 | Phase TBD | Pending |
-| CHAR-01 | Phase TBD | Pending |
-| CHAR-02 | Phase TBD | Pending |
-| CHAR-03 | Phase TBD | Pending |
-| STRUCT-01 | Phase TBD | Pending |
-| STRUCT-02 | Phase TBD | Pending |
-| DEBT-01 | Phase TBD | Pending |
-| DEBT-02 | Phase TBD | Pending |
-| DEBT-03 | Phase TBD | Pending |
-| DEBT-04 | Phase TBD | Pending |
-| DEBT-05 | Phase TBD | Pending |
-| BUG-01 | Phase TBD | Pending |
-| BUG-02 | Phase TBD | Pending |
+| INFRA-01 | Phase 1 - Test Foundation | Pending |
+| INFRA-02 | Phase 1 - Test Foundation | Pending |
+| INFRA-03 | Phase 1 - Test Foundation | Pending |
+| INFRA-04 | Phase 2 - Characterization Tests | Pending |
+| QUAL-01 | Phase 3 - Test Quality Cleanup | Pending |
+| QUAL-02 | Phase 1 - Test Foundation | Pending |
+| QUAL-03 | Phase 1 - Test Foundation | Pending |
+| CHAR-01 | Phase 2 - Characterization Tests | Pending |
+| CHAR-02 | Phase 2 - Characterization Tests | Pending |
+| CHAR-03 | Phase 2 - Characterization Tests | Pending |
+| STRUCT-01 | Phase 4 - Code Structure Refactoring | Pending |
+| STRUCT-02 | Phase 4 - Code Structure Refactoring | Pending |
+| DEBT-01 | Phase 5 - Tech Debt and Bug Fixes | Pending |
+| DEBT-02 | Phase 5 - Tech Debt and Bug Fixes | Pending |
+| DEBT-03 | Phase 5 - Tech Debt and Bug Fixes | Pending |
+| DEBT-04 | Phase 5 - Tech Debt and Bug Fixes | Pending |
+| DEBT-05 | Phase 5 - Tech Debt and Bug Fixes | Pending |
+| BUG-01 | Phase 5 - Tech Debt and Bug Fixes | Pending |
+| BUG-02 | Phase 5 - Tech Debt and Bug Fixes | Pending |
 
 **Coverage:**
 - v1 requirements: 19 total
-- Mapped to phases: 0 (pending roadmap)
-- Unmapped: 19
+- Mapped to phases: 19/19 (100%)
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-02-02*
-*Last updated: 2026-02-02 after initial definition*
+*Last updated: 2026-02-02 after roadmap creation*
