@@ -14,16 +14,16 @@
 
 **Phase:** 2 of 6 (Characterization Tests)
 
-**Plan:** 06 of 11 in Phase 2 - COMPLETE
+**Plan:** 08 of 11 in Phase 2 - COMPLETE
 
 **Status:** Gap closure execution in progress
 
-**Last activity:** 2026-02-03 - Completed 02-06-PLAN.md (Infrastructure gap closure)
+**Last activity:** 2026-02-03 - Completed 02-08-PLAN.md (gRPC transport characterization tests)
 
 **Progress:**
 ```
 [Phase 1: Test Foundation ████████████████████████████████████] 100%
-[Phase 2: Characterization ███████████████████░░░░░░░░░░░░░░░] 55% (6/11 plans)
+[Phase 2: Characterization ████████████████████████░░░░░░░░░░] 73% (8/11 plans)
 ```
 
 **Next Steps:**
@@ -47,7 +47,8 @@
 - testutil package: Complete with 10/10 consecutive test runs passing, import cycle broken (02-06)
 - Lifecycle callback tests: 31 tests (23 state + 8 concurrent), 10/10 stability runs
 - Session lifecycle tests: 2103 lines covering state machine + concurrency
-- Relayer tests: 2518 lines across proxy_test.go, proxy_concurrent_test.go, relay_processor_test.go
+- Relayer tests: 3343 lines across proxy_test.go, proxy_concurrent_test.go, relay_processor_test.go, relay_grpc_service_test.go
+- gRPC transport tests: 825 lines covering unary relay, error handling, metadata forwarding, concurrency (02-08)
 
 **Blockers:** None
 
@@ -83,6 +84,9 @@
 | Per-package coverage tracking | Track miner/, relayer/, cache/ separately for targeted improvement | 2026-02-02 |
 | Remove session_builder.go from testutil | SessionBuilder tightly coupled to miner internal types; miner tests build locally | 2026-02-03 |
 | Coverage script uses -tags test | Reports accurate coverage (32.4% vs 2% for miner) | 2026-02-03 |
+| Use nil relayPipeline for gRPC tests | Validation/metering not needed for transport layer characterization | 2026-02-03 |
+| Document actual gRPC timeout behavior | Context DeadlineExceeded vs wrapped error response (characterization) | 2026-02-03 |
+| Real gRPC client/server for tests | No mocks for gRPC infrastructure - tests actual transport layer | 2026-02-03 |
 
 ### Key Findings
 
@@ -99,6 +103,9 @@
 - **Import cycle resolved:** session_builder.go removed from testutil (02-06), testutil now usable in all test packages
 - **Relayer error handling order:** Supplier cache check happens before service validation, affecting error codes
 - **Coverage accuracy:** -tags test flag essential for accurate coverage (miner: 2% → 32.4%, relayer: 0% → 6.7%)
+- **gRPC 4xx vs 5xx handling:** 4xx wrapped and signed (valid relay), 5xx NOT wrapped (infrastructure failure) - correct behavior
+- **gRPC timeout behavior:** Context timeout returns DeadlineExceeded, backend timeout returns wrapped 500 error
+- **gRPC metadata forwarding:** Config headers override request headers (correct precedence)
 
 ### TODOs
 
@@ -112,7 +119,7 @@
 - [x] Measure baseline test coverage - Documented in audit (01-04)
 - [x] Validate test stability - 50-run validation 100% pass rate (01-04)
 
-**Phase 2 (In Progress - 6/11 complete):**
+**Phase 2 (In Progress - 8/11 complete):**
 - [x] Create testutil package - testutil/ with builders, keys, RedisTestSuite (02-01)
 - [x] Lifecycle callback characterization tests - 31 tests (02-02)
 - [x] Session lifecycle characterization tests - 2103 lines, 81.3% coverage (02-03)
@@ -120,7 +127,7 @@
 - [x] Coverage tracking infrastructure - scripts/test-coverage.sh + CI integration (02-05)
 - [x] Infrastructure gap closure - coverage script fixed, import cycle broken (02-06)
 - [ ] SMST characterization tests - Gap closure plan 02-07
-- [ ] Redis store characterization tests - Gap closure plan 02-08
+- [x] gRPC transport characterization tests - 825 lines, 15 test cases (02-08)
 - [ ] Cache package characterization tests - Gap closure plan 02-09
 - [ ] Session manager integration tests - Gap closure plan 02-10
 - [ ] Transaction client characterization tests - Gap closure plan 02-11
@@ -139,9 +146,9 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-03 12:20:18 UTC
+**Last session:** 2026-02-03 12:32:22 UTC
 
-**Stopped at:** Completed 02-06-PLAN.md (Infrastructure gap closure)
+**Stopped at:** Completed 02-08-PLAN.md (gRPC transport characterization tests)
 
 **Resume file:** None
 
@@ -157,6 +164,7 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 - **Session lifecycle test patterns:** Use slc* prefix for package-local mocks
 - **Window calculation pattern:** Fixed session heights (100) for deterministic claim (102-106) and proof (106-110) windows
 - **Relayer test patterns:** Use local mock implementations, document actual behavior order
+- **gRPC test patterns:** Use real gRPC client/server (net.Listen), nil relayPipeline for most tests, manual stream creation
 
 **Open Questions:**
 
