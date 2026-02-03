@@ -59,14 +59,20 @@ Plans:
 4. Coverage reports show 80%+ for miner/, relayer/, and cache/ packages
 5. All new tests use miniredis for Redis (no mocks), pass race detector, and run deterministically
 
-**Plans:** 5 plans
+**Plans:** 11 plans (5 original + 6 gap closure)
 
 Plans:
-- [ ] 02-01-PLAN.md — Create shared test utilities (testutil/ package)
-- [ ] 02-02-PLAN.md — Lifecycle callback state transition tests (CHAR-01)
-- [ ] 02-03-PLAN.md — Session lifecycle state machine tests (CHAR-02)
-- [ ] 02-04-PLAN.md — Proxy and relay processor tests (CHAR-03)
-- [ ] 02-05-PLAN.md — Coverage infrastructure and CI integration (INFRA-04)
+- [x] 02-01-PLAN.md — Create shared test utilities (testutil/ package)
+- [x] 02-02-PLAN.md — Lifecycle callback state transition tests (CHAR-01)
+- [x] 02-03-PLAN.md — Session lifecycle state machine tests (CHAR-02)
+- [x] 02-04-PLAN.md — Proxy and relay processor tests (CHAR-03)
+- [x] 02-05-PLAN.md — Coverage infrastructure and CI integration (INFRA-04)
+- [ ] 02-06-PLAN.md — Fix coverage script + resolve testutil import cycle (gap closure)
+- [ ] 02-07-PLAN.md — WebSocket transport characterization tests (CHAR-03 gap)
+- [ ] 02-08-PLAN.md — gRPC transport characterization tests (CHAR-03 gap)
+- [ ] 02-09-PLAN.md — Additional miner coverage: deduplicator, session store, coordinator (INFRA-04 gap)
+- [ ] 02-10-PLAN.md — Additional relayer coverage: validator, middleware, relay meter (INFRA-04 gap)
+- [ ] 02-11-PLAN.md — Cache package characterization tests (INFRA-04 gap)
 
 ---
 
