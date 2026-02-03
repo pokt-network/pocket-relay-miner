@@ -43,7 +43,7 @@ echo "Collecting coverage for critical packages..."
 for pkg in "${PACKAGES[@]}"; do
   pkg_name=$(basename "$pkg")
   echo "  Testing $pkg_name..."
-  go test -race -coverprofile="$COVERDIR/${pkg_name}.cover" -covermode=atomic "$pkg/..." 2>/dev/null || true
+  go test -tags test -race -coverprofile="$COVERDIR/${pkg_name}.cover" -covermode=atomic "$pkg/..." 2>/dev/null || true
 done
 
 # Merge coverage files

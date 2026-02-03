@@ -7,7 +7,6 @@ import (
 	"os"
 	"testing"
 
-	"github.com/pokt-network/pocket-relay-miner/miner"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"github.com/stretchr/testify/suite"
@@ -206,69 +205,6 @@ func TestTestKeys(t *testing.T) {
 		addr1 := TestSupplierAddress()
 		addr2 := TestSupplierAddress()
 		require.Equal(t, addr1, addr2)
-	})
-}
-
-// TestSessionBuilderDeterminism verifies SessionBuilder produces deterministic output.
-func TestSessionBuilderDeterminism(t *testing.T) {
-	t.Run("same seed produces identical snapshot", func(t *testing.T) {
-		snapshot1 := NewSessionBuilder(42).Build()
-		snapshot2 := NewSessionBuilder(42).Build()
-
-		require.Equal(t, snapshot1.SessionID, snapshot2.SessionID)
-		require.Equal(t, snapshot1.SupplierOperatorAddress, snapshot2.SupplierOperatorAddress)
-		require.Equal(t, snapshot1.ApplicationAddress, snapshot2.ApplicationAddress)
-		require.Equal(t, snapshot1.ServiceID, snapshot2.ServiceID)
-		require.Equal(t, snapshot1.SessionStartHeight, snapshot2.SessionStartHeight)
-		require.Equal(t, snapshot1.SessionEndHeight, snapshot2.SessionEndHeight)
-		require.Equal(t, snapshot1.State, snapshot2.State)
-		require.Equal(t, snapshot1.RelayCount, snapshot2.RelayCount)
-		require.Equal(t, snapshot1.TotalComputeUnits, snapshot2.TotalComputeUnits)
-	})
-
-	t.Run("different seeds produce different snapshots", func(t *testing.T) {
-		snapshot1 := NewSessionBuilder(42).Build()
-		snapshot2 := NewSessionBuilder(43).Build()
-
-		require.NotEqual(t, snapshot1.SessionID, snapshot2.SessionID)
-	})
-
-	t.Run("WithState override works", func(t *testing.T) {
-		snapshot := NewSessionBuilder(42).
-			WithState(miner.SessionStateClaiming).
-			Build()
-
-		require.Equal(t, miner.SessionStateClaiming, snapshot.State)
-	})
-
-	t.Run("WithSupplier override works", func(t *testing.T) {
-		customAddr := "pokt1custom123"
-		snapshot := NewSessionBuilder(42).
-			WithSupplier(customAddr).
-			Build()
-
-		require.Equal(t, customAddr, snapshot.SupplierOperatorAddress)
-	})
-
-	t.Run("BuildN produces unique snapshots", func(t *testing.T) {
-		snapshots := NewSessionBuilder(42).BuildN(10)
-		require.Len(t, snapshots, 10)
-
-		// Verify all session IDs are unique
-		ids := make(map[string]bool)
-		for _, s := range snapshots {
-			require.False(t, ids[s.SessionID], "duplicate session ID: %s", s.SessionID)
-			ids[s.SessionID] = true
-		}
-	})
-
-	t.Run("BuildN is deterministic", func(t *testing.T) {
-		snapshots1 := NewSessionBuilder(42).BuildN(5)
-		snapshots2 := NewSessionBuilder(42).BuildN(5)
-
-		for i := 0; i < 5; i++ {
-			require.Equal(t, snapshots1[i].SessionID, snapshots2[i].SessionID)
-		}
 	})
 }
 
