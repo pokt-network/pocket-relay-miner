@@ -67,12 +67,12 @@ Plans:
 - [x] 02-03-PLAN.md — Session lifecycle state machine tests (CHAR-02)
 - [x] 02-04-PLAN.md — Proxy and relay processor tests (CHAR-03)
 - [x] 02-05-PLAN.md — Coverage infrastructure and CI integration (INFRA-04)
-- [ ] 02-06-PLAN.md — Fix coverage script + resolve testutil import cycle (gap closure)
-- [ ] 02-07-PLAN.md — WebSocket transport characterization tests (CHAR-03 gap)
-- [ ] 02-08-PLAN.md — gRPC transport characterization tests (CHAR-03 gap)
-- [ ] 02-09-PLAN.md — Additional miner coverage: deduplicator, session store, coordinator (INFRA-04 gap)
-- [ ] 02-10-PLAN.md — Additional relayer coverage: validator, middleware, relay meter (INFRA-04 gap)
-- [ ] 02-11-PLAN.md — Cache package characterization tests (INFRA-04 gap)
+- [x] 02-06-PLAN.md — Fix coverage script + resolve testutil import cycle (gap closure)
+- [x] 02-07-PLAN.md — WebSocket transport characterization tests (CHAR-03 gap)
+- [x] 02-08-PLAN.md — gRPC transport characterization tests (CHAR-03 gap)
+- [x] 02-09-PLAN.md — Additional miner coverage: deduplicator, session store, coordinator (INFRA-04 gap)
+- [x] 02-10-PLAN.md — Additional relayer coverage: validator, middleware, relay meter (INFRA-04 gap)
+- [x] 02-11-PLAN.md — Cache package characterization tests (INFRA-04 gap)
 
 ---
 
@@ -161,7 +161,7 @@ Plans:
 | Phase | Status | Requirements | Progress |
 |-------|--------|--------------|----------|
 | Phase 1: Test Foundation | ✓ Complete | INFRA-01, INFRA-02, INFRA-03, QUAL-02, QUAL-03 | 100% |
-| Phase 2: Characterization Tests | In Progress | CHAR-01, CHAR-02, CHAR-03, INFRA-04 | 0% |
+| Phase 2: Characterization Tests | ✓ Complete | CHAR-01, CHAR-02, CHAR-03, INFRA-04 | 100% |
 | Phase 3: Test Quality Cleanup | Pending | QUAL-01 | 0% |
 | Phase 4: Code Structure Refactoring | Pending | STRUCT-01, STRUCT-02 | 0% |
 | Phase 5: Tech Debt and Bug Fixes | Pending | DEBT-01, DEBT-02, DEBT-03, DEBT-04, DEBT-05, BUG-01, BUG-02 | 0% |
@@ -170,4 +170,4 @@ Plans:
 ---
 
 *Roadmap created: 2026-02-02*
-*Last updated: 2026-02-02 (Phase 2 planned)*
+*Last updated: 2026-02-03 (Phase 2 complete)*

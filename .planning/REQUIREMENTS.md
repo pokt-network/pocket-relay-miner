@@ -9,22 +9,22 @@ Requirements for this quality hardening milestone. Each maps to roadmap phases.
 
 ### Test Infrastructure
 
-- [ ] **INFRA-01**: Race detection enabled for all packages (not just miner) in CI and Makefile
-- [ ] **INFRA-02**: golangci.yml configuration file with recommended linters (staticcheck, errcheck, govet, etc.)
-- [ ] **INFRA-03**: govulncheck integrated into CI pipeline for vulnerability scanning
-- [ ] **INFRA-04**: Coverage tracking with 80%+ enforcement on critical paths (miner/, relayer/, cache/)
+- [x] **INFRA-01**: Race detection enabled for all packages (not just miner) in CI and Makefile
+- [x] **INFRA-02**: golangci.yml configuration file with recommended linters (staticcheck, errcheck, govet, etc.)
+- [x] **INFRA-03**: govulncheck integrated into CI pipeline for vulnerability scanning
+- [x] **INFRA-04**: Coverage tracking with 80%+ enforcement on critical paths (miner/, relayer/, cache/) — tracking established, enforcement deferred to Phase 6
 
 ### Test Quality
 
 - [ ] **QUAL-01**: All time.Sleep() violations in tests replaced with proper synchronization (channels, contexts, Eventually assertions)
-- [ ] **QUAL-02**: Flaky test audit completed — all tests pass 100/100 runs, flaky tests fixed or removed
-- [ ] **QUAL-03**: Deterministic test data generation using seed-based generators (no random without seed)
+- [x] **QUAL-02**: Flaky test audit completed — all tests pass 100/100 runs, flaky tests fixed or removed
+- [x] **QUAL-03**: Deterministic test data generation using seed-based generators (no random without seed)
 
 ### Characterization Tests
 
-- [ ] **CHAR-01**: Characterization tests for `miner/lifecycle_callback.go` covering all state transitions
-- [ ] **CHAR-02**: Characterization tests for `miner/session_lifecycle.go` covering session state machine
-- [ ] **CHAR-03**: Characterization tests for `relayer/proxy.go` covering all transport protocols
+- [x] **CHAR-01**: Characterization tests for `miner/lifecycle_callback.go` covering all state transitions
+- [x] **CHAR-02**: Characterization tests for `miner/session_lifecycle.go` covering session state machine
+- [x] **CHAR-03**: Characterization tests for `relayer/proxy.go` covering all transport protocols
 
 ### Code Structure
 
@@ -79,16 +79,16 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| INFRA-01 | Phase 1 - Test Foundation | Pending |
-| INFRA-02 | Phase 1 - Test Foundation | Pending |
-| INFRA-03 | Phase 1 - Test Foundation | Pending |
-| INFRA-04 | Phase 2 - Characterization Tests | Pending |
+| INFRA-01 | Phase 1 - Test Foundation | Complete |
+| INFRA-02 | Phase 1 - Test Foundation | Complete |
+| INFRA-03 | Phase 1 - Test Foundation | Complete |
+| INFRA-04 | Phase 2 - Characterization Tests | Complete (enforcement Phase 6) |
 | QUAL-01 | Phase 3 - Test Quality Cleanup | Pending |
-| QUAL-02 | Phase 1 - Test Foundation | Pending |
-| QUAL-03 | Phase 1 - Test Foundation | Pending |
-| CHAR-01 | Phase 2 - Characterization Tests | Pending |
-| CHAR-02 | Phase 2 - Characterization Tests | Pending |
-| CHAR-03 | Phase 2 - Characterization Tests | Pending |
+| QUAL-02 | Phase 1 - Test Foundation | Complete |
+| QUAL-03 | Phase 1 - Test Foundation | Complete |
+| CHAR-01 | Phase 2 - Characterization Tests | Complete |
+| CHAR-02 | Phase 2 - Characterization Tests | Complete |
+| CHAR-03 | Phase 2 - Characterization Tests | Complete |
 | STRUCT-01 | Phase 4 - Code Structure Refactoring | Pending |
 | STRUCT-02 | Phase 4 - Code Structure Refactoring | Pending |
 | DEBT-01 | Phase 5 - Tech Debt and Bug Fixes | Pending |
@@ -106,4 +106,4 @@ Which phases cover which requirements. Updated during roadmap creation.
 
 ---
 *Requirements defined: 2026-02-02*
-*Last updated: 2026-02-02 after roadmap creation*
+*Last updated: 2026-02-03 after Phase 2 completion*
