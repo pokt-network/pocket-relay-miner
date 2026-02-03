@@ -1,12 +1,12 @@
 # State: Pocket RelayMiner Quality Hardening
 
-**Last Updated:** 2026-02-02
+**Last Updated:** 2026-02-03
 
 ## Project Reference
 
 **Core Value:** Test confidence — comprehensive coverage that enables safe refactoring and prevents regressions
 
-**Current Focus:** Characterization Tests (Phase 2) - Gap Closure Plans Created
+**Current Focus:** Characterization Tests (Phase 2) - Executing Gap Closure Plans
 
 **Context:** Quality hardening milestone for pocket-relay-miner addressing tech debt from 1-month rebuild. System is production-grade (1000+ RPS), handling real money on Pocket Network. Goal: Enable fearless refactoring via comprehensive test coverage (80%+ on critical paths).
 
@@ -14,20 +14,20 @@
 
 **Phase:** 2 of 6 (Characterization Tests)
 
-**Plan:** 05 of 05 in Phase 2 - COMPLETE (original), 06-11 gap closure plans created
+**Plan:** 06 of 11 in Phase 2 - COMPLETE
 
-**Status:** Gap closure plans ready for execution
+**Status:** Gap closure execution in progress
 
-**Last activity:** 2026-02-03 - Created 6 gap closure plans (02-06 through 02-11)
+**Last activity:** 2026-02-03 - Completed 02-06-PLAN.md (Infrastructure gap closure)
 
 **Progress:**
 ```
 [Phase 1: Test Foundation ████████████████████████████████████] 100%
-[Phase 2: Characterization ████████████████████████████████████] 100%
+[Phase 2: Characterization ███████████████████░░░░░░░░░░░░░░░] 55% (6/11 plans)
 ```
 
 **Next Steps:**
-1. Execute gap closure plans: `/gsd:execute-phase 02`
+1. Continue gap closure: Execute plans 02-07 through 02-11
 2. Re-verify Phase 2 after gap closure
 3. Begin Phase 3 planning (Refactoring)
 
@@ -43,8 +43,8 @@
 - Stability testing: Nightly 100-run workflow (01-03) + 50-run validation complete (01-04)
 - Test quality: Comprehensive audit complete (66 time.Sleep violations documented, 3 races addressed)
 - Coverage tracking: Per-package measurement with CI integration (02-05)
-- Coverage baseline: miner/ 2.0%, relayer/ 0.0%, cache/ 0.0%, total 0.9%
-- testutil package: Complete with 10/10 consecutive test runs passing
+- Coverage baseline: miner/ 32.4%, relayer/ 6.7%, cache/ 0.0%, total 17.0% (accurate with -tags test)
+- testutil package: Complete with 10/10 consecutive test runs passing, import cycle broken (02-06)
 - Lifecycle callback tests: 31 tests (23 state + 8 concurrent), 10/10 stability runs
 - Session lifecycle tests: 2103 lines covering state machine + concurrency
 - Relayer tests: 2518 lines across proxy_test.go, proxy_concurrent_test.go, relay_processor_test.go
@@ -81,6 +81,8 @@
 | Document actual error handling order | Characterization tests capture behavior (500 vs 400) not prescribe expected | 2026-02-02 |
 | Coverage warning-only in CI | Current coverage is low; failures would block all PRs | 2026-02-02 |
 | Per-package coverage tracking | Track miner/, relayer/, cache/ separately for targeted improvement | 2026-02-02 |
+| Remove session_builder.go from testutil | SessionBuilder tightly coupled to miner internal types; miner tests build locally | 2026-02-03 |
+| Coverage script uses -tags test | Reports accurate coverage (32.4% vs 2% for miner) | 2026-02-03 |
 
 ### Key Findings
 
@@ -94,8 +96,9 @@
 - **Lifecycle callback coverage:** OnSessionsNeedClaim 70.5%, OnSessionsNeedProof 59.9%, terminal callbacks 72-76%
 - **Session lifecycle coverage:** 81.3% average function coverage with state machine and concurrency tests
 - **UpdateSessionRelayCount race:** Discovered in 02-03, uses non-atomic fields without mutex (Phase 3 fix)
-- **Import cycle:** testutil cannot be used in miner tests or relayer tests due to import cycles
+- **Import cycle resolved:** session_builder.go removed from testutil (02-06), testutil now usable in all test packages
 - **Relayer error handling order:** Supplier cache check happens before service validation, affecting error codes
+- **Coverage accuracy:** -tags test flag essential for accurate coverage (miner: 2% → 32.4%, relayer: 0% → 6.7%)
 
 ### TODOs
 
@@ -109,20 +112,26 @@
 - [x] Measure baseline test coverage - Documented in audit (01-04)
 - [x] Validate test stability - 50-run validation 100% pass rate (01-04)
 
-**Phase 2 (Complete):**
+**Phase 2 (In Progress - 6/11 complete):**
 - [x] Create testutil package - testutil/ with builders, keys, RedisTestSuite (02-01)
 - [x] Lifecycle callback characterization tests - 31 tests (02-02)
 - [x] Session lifecycle characterization tests - 2103 lines, 81.3% coverage (02-03)
 - [x] Relayer characterization tests - 2518 lines, proxy + relay processor (02-04)
 - [x] Coverage tracking infrastructure - scripts/test-coverage.sh + CI integration (02-05)
+- [x] Infrastructure gap closure - coverage script fixed, import cycle broken (02-06)
+- [ ] SMST characterization tests - Gap closure plan 02-07
+- [ ] Redis store characterization tests - Gap closure plan 02-08
+- [ ] Cache package characterization tests - Gap closure plan 02-09
+- [ ] Session manager integration tests - Gap closure plan 02-10
+- [ ] Transaction client characterization tests - Gap closure plan 02-11
 
 **Phase 3 (Upcoming):**
-- [ ] Add cache/ package unit tests (0% coverage - HIGH PRIORITY)
-- [ ] Add relayer/ package unit tests (improve coverage from 0.0%)
+- [ ] Add cache/ package unit tests (0% coverage - gap closure 02-09)
+- [ ] Add relayer/ package unit tests (improve coverage from 6.7%)
 - [ ] Fix 66 time.Sleep violations in tests (causes flaky behavior)
 - [ ] Fix 4 production code races (runtime metrics collector, tx client mock, UpdateSessionRelayCount)
 - [ ] Fix 262 lint violations (220 errcheck, 42 gosec)
-- [ ] Improve miner/ coverage from 2.0% to 80%+
+- [ ] Improve miner/ coverage from 32.4% to 80%+
 
 ### Blockers
 
@@ -130,11 +139,11 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 
 ## Session Continuity
 
-**Last session:** 2026-02-02 23:02:00 UTC
+**Last session:** 2026-02-03 12:20:18 UTC
 
-**Stopped at:** Completed 02-05-PLAN.md (Coverage tracking infrastructure)
+**Stopped at:** Completed 02-06-PLAN.md (Infrastructure gap closure)
 
-**Resume file:** None (Phase 2 complete)
+**Resume file:** None
 
 **Context to Preserve:**
 
@@ -142,8 +151,8 @@ None currently. External dependencies (WebSocket handshake spec, historical para
 - **Test Quality Standards:** Use miniredis for Redis (not mocks), all tests pass `go test -race`, deterministic data only
 - **Performance Target:** 1000+ RPS per relayer replica must be maintained through refactoring
 - **Coverage Goal:** 80%+ enforcement on critical paths (miner/, relayer/, cache/)
-- **Coverage Baseline:** miner/ 2.0%, relayer/ 0.0%, cache/ 0.0%, total 0.9%
-- **testutil patterns:** SessionBuilder(seed).Build(), RelayBuilder(seed).BuildN(n), embed RedisTestSuite
+- **Coverage Baseline:** miner/ 32.4%, relayer/ 6.7%, cache/ 0.0%, total 17.0% (accurate with -tags test)
+- **testutil patterns:** RelayBuilder(seed).BuildN(n), embed RedisTestSuite, deterministic helpers (NO SessionBuilder - removed)
 - **Lifecycle callback test patterns:** Use local mocks with `lc*`/`conc*` prefixes due to import cycle
 - **Session lifecycle test patterns:** Use slc* prefix for package-local mocks
 - **Window calculation pattern:** Fixed session heights (100) for deterministic claim (102-106) and proof (106-110) windows
