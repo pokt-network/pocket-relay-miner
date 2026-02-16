@@ -236,6 +236,10 @@ properties:
         description: Async log buffer size
         default: 100000
         minimum: 1000
+      enable_caller:
+        type: boolean
+        description: Add caller file:line to log events. Useful for debugging but adds ~14% allocation overhead under high throughput. Disable in production.
+        default: false
 
   block_time_seconds:
     type: integer

@@ -146,7 +146,7 @@ func NewLoggerFromConfig(config Config) Logger {
 	}
 
 	// Create base logger
-	ctx := zerolog.New(output).Level(level).With().Caller().Timestamp()
+	ctx := zerolog.New(output).Level(level).With().Timestamp()
 	if config.EnableCaller {
 		ctx = ctx.Caller()
 	}

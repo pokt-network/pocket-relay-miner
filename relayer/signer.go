@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -475,18 +476,40 @@ func (a *ResponseSignerAdapter) SignRelayResponse(
 // Verify interface compliance.
 var _ RelaySignerKeyring = (*ResponseSignerAdapter)(nil)
 
+// gzipReaderPool is a pool of gzip.Reader instances to reduce allocations
+// when decompressing backend responses in the hot path.
+var gzipReaderPool = sync.Pool{}
+
 // decompressGzip decompresses a gzip-compressed byte slice.
+// Uses sync.Pool to reuse gzip.Reader instances.
 func decompressGzip(data []byte) ([]byte, error) {
-	reader, err := gzip.NewReader(bytes.NewReader(data))
+	br := bytes.NewReader(data)
+
+	// Try to reuse a pooled reader
+	if pooled := gzipReaderPool.Get(); pooled != nil {
+		reader := pooled.(*gzip.Reader)
+		if err := reader.Reset(br); err != nil {
+			return nil, fmt.Errorf("failed to reset gzip reader: %w", err)
+		}
+		decompressed, err := io.ReadAll(reader)
+		_ = reader.Close()
+		gzipReaderPool.Put(reader)
+		if err != nil {
+			return nil, fmt.Errorf("failed to decompress gzip data: %w", err)
+		}
+		return decompressed, nil
+	}
+
+	// No pooled reader available — create new
+	reader, err := gzip.NewReader(br)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gzip reader: %w", err)
 	}
-	defer func() { _ = reader.Close() }()
-
 	decompressed, err := io.ReadAll(reader)
+	_ = reader.Close()
+	gzipReaderPool.Put(reader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to decompress gzip data: %w", err)
 	}
-
 	return decompressed, nil
 }

@@ -95,11 +95,24 @@ const (
 	dropReasonStakeExhausted   = "stake_exhausted"
 )
 
+// gzipMinCompressSize is the minimum response size worth compressing.
+// Below this threshold, gzip overhead (header/trailer/dictionary) makes the
+// output larger than the input. Typical signed relay responses for simple
+// JSON-RPC calls (eth_blockNumber, etc.) are 500-800 bytes.
+const gzipMinCompressSize = 1024
+
 // gzipWriterPool is a pool of gzip.Writer instances to reduce allocations
 // in the hot path when compressing relay responses.
 var gzipWriterPool = sync.Pool{
 	New: func() interface{} {
 		return gzip.NewWriter(nil)
+	},
+}
+
+// gzipBufPool is a pool of bytes.Buffer instances for gzip compression output.
+var gzipBufPool = sync.Pool{
+	New: func() interface{} {
+		return new(bytes.Buffer)
 	},
 }
 
@@ -872,9 +885,10 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", responseContentType)
 
-		// RFC compliance: Compress response if client accepts gzip
+		// RFC compliance: Compress response if client accepts gzip and payload is large enough.
+		// Skip compression for small payloads where gzip overhead makes the output larger.
 		responseData := signedResponseBz
-		if clientAcceptsGzip(r) {
+		if clientAcceptsGzip(r) && len(signedResponseBz) >= gzipMinCompressSize {
 			compressed, compressErr := compressGzip(signedResponseBz)
 			if compressErr != nil {
 				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
@@ -1819,11 +1833,14 @@ func (p *ProxyServer) Close() error {
 
 // compressGzip compresses data using gzip compression.
 // Returns the compressed data or an error if compression fails.
-// Uses sync.Pool to reuse gzip.Writer instances and reduce allocations.
+// Uses sync.Pool for both gzip.Writer and bytes.Buffer to reduce allocations.
 func compressGzip(data []byte) ([]byte, error) {
-	var buf bytes.Buffer
+	buf := gzipBufPool.Get().(*bytes.Buffer)
+	buf.Reset()
+	defer gzipBufPool.Put(buf)
+
 	writer := gzipWriterPool.Get().(*gzip.Writer)
-	writer.Reset(&buf)
+	writer.Reset(buf)
 	defer gzipWriterPool.Put(writer)
 
 	if _, err := writer.Write(data); err != nil {
@@ -1832,7 +1849,11 @@ func compressGzip(data []byte) ([]byte, error) {
 	if err := writer.Close(); err != nil {
 		return nil, fmt.Errorf("failed to close gzip writer: %w", err)
 	}
-	return buf.Bytes(), nil
+
+	// Copy to a new slice — the pooled buffer will be reused.
+	result := make([]byte, buf.Len())
+	copy(result, buf.Bytes())
+	return result, nil
 }
 
 // clientAcceptsGzip checks if the client accepts gzip encoding

@@ -337,4 +337,5 @@ logging:
   output: "stdout"  # stdout, stderr, or file path
   async: true  # Enable async logging for better performance
   async_buffer_size: 100000  # Async log buffer size
-  # [PRODUCTION] level: "info"
+  enable_caller: false  # Add caller file:line to logs (~14% alloc overhead, disable in production)
+  # [PRODUCTION] level: "info", enable_caller: false

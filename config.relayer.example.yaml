@@ -269,4 +269,5 @@ logging:
   level: "debug"  # trace, debug, info, warn, error (localnet uses debug)
   format: "json"  # json, text (json required for Loki log level detection)
   output: "stdout"  # stdout, stderr, or file path
-  # [PRODUCTION] level: "info"
+  enable_caller: false  # Add caller file:line to logs (~14% alloc overhead, disable in production)
+  # [PRODUCTION] level: "info", enable_caller: false
