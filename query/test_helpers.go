@@ -44,9 +44,10 @@ type mockQueryServer struct {
 	proofParams  *prooftypes.Params
 
 	// Service responses
-	getServiceFunc               func(context.Context, *servicetypes.QueryGetServiceRequest) (*servicetypes.QueryGetServiceResponse, error)
-	getRelayMiningDifficultyFunc func(context.Context, *servicetypes.QueryGetRelayMiningDifficultyRequest) (*servicetypes.QueryGetRelayMiningDifficultyResponse, error)
-	serviceParams                *servicetypes.Params
+	getServiceFunc                       func(context.Context, *servicetypes.QueryGetServiceRequest) (*servicetypes.QueryGetServiceResponse, error)
+	getRelayMiningDifficultyFunc         func(context.Context, *servicetypes.QueryGetRelayMiningDifficultyRequest) (*servicetypes.QueryGetRelayMiningDifficultyResponse, error)
+	getRelayMiningDifficultyAtHeightFunc func(context.Context, *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error)
+	serviceParams                        *servicetypes.Params
 }
 
 // Session query server implementation
@@ -164,6 +165,13 @@ func (m *mockServiceQueryServer) RelayMiningDifficulty(ctx context.Context, req 
 		return m.mock.getRelayMiningDifficultyFunc(ctx, req)
 	}
 	return nil, status.Error(codes.NotFound, "difficulty not found")
+}
+
+func (m *mockServiceQueryServer) RelayMiningDifficultyAtHeight(ctx context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
+	if m.mock.getRelayMiningDifficultyAtHeightFunc != nil {
+		return m.mock.getRelayMiningDifficultyAtHeightFunc(ctx, req)
+	}
+	return nil, status.Error(codes.NotFound, "difficulty at height not found")
 }
 
 func (m *mockServiceQueryServer) Params(ctx context.Context, req *servicetypes.QueryParamsRequest) (*servicetypes.QueryParamsResponse, error) {

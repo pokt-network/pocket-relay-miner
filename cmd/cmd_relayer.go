@@ -25,7 +25,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
-	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
 const (
@@ -90,16 +89,16 @@ Example:
 	return cmd
 }
 
-// serviceDifficultyQueryAdapter adapts the client.ServiceQueryClient to the
+// serviceDifficultyQueryAdapter adapts the query.ServiceDifficultyClient to the
 // relayer.ServiceDifficultyQueryClient interface by extracting TargetHash.
+// It uses the height-aware difficulty query to get difficulty at the session start height,
+// ensuring consistency with on-chain proof validation.
 type serviceDifficultyQueryAdapter struct {
-	queryClient interface {
-		GetServiceRelayDifficulty(ctx context.Context, serviceID string) (servicetypes.RelayMiningDifficulty, error)
-	}
+	queryClient query.ServiceDifficultyClient
 }
 
-func (a *serviceDifficultyQueryAdapter) GetServiceRelayDifficulty(ctx context.Context, serviceID string) ([]byte, error) {
-	difficulty, err := a.queryClient.GetServiceRelayDifficulty(ctx, serviceID)
+func (a *serviceDifficultyQueryAdapter) GetServiceRelayDifficulty(ctx context.Context, serviceID string, sessionStartHeight int64) ([]byte, error) {
+	difficulty, err := a.queryClient.GetServiceRelayDifficultyAtHeight(ctx, serviceID, sessionStartHeight)
 	if err != nil {
 		return nil, err
 	}
@@ -634,36 +633,9 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				ringClient, // Enable relay request signature verification
 			)
 			// Wire up the difficulty provider using on-chain service difficulty data
-			difficultyProviderAdapter := &serviceDifficultyQueryAdapter{queryClient: queryClients.Service()}
+			difficultyProviderAdapter := &serviceDifficultyQueryAdapter{queryClient: queryClients.ServiceDifficulty()}
 			difficultyProvider := relayer.NewCachedDifficultyProvider(logger, difficultyProviderAdapter)
 			relayProcessor.SetDifficultyProvider(difficultyProvider)
-
-			// Subscribe to block events to invalidate difficulty cache on every block
-			// This ensures we always use current difficulty (even though blockchain has bug #1789)
-			// Buffer size: 2000 blocks (matches other block subscribers; prevents lag under load)
-			blockEventCh := blockSubscriber.Subscribe(ctx, 2000)
-			go func() {
-				difficultyLogger := logger.With().Str("component", "difficulty_invalidator").Logger()
-				for {
-					select {
-					case <-ctx.Done():
-						difficultyLogger.Debug().Msg("difficulty cache invalidator stopped")
-						return
-					case event, ok := <-blockEventCh:
-						if !ok {
-							difficultyLogger.Warn().Msg("block event channel closed")
-							return
-						}
-						// Invalidate ALL difficulty caches on every block
-						// Difficulty can change any block (when claims settle in EndBlocker)
-						difficultyProvider.InvalidateAllCache()
-						difficultyLogger.Debug().
-							Int64("height", event.Height()).
-							Msg("invalidated difficulty cache on new block")
-					}
-				}
-			}()
-			logger.Info().Msg("difficulty cache invalidator started (invalidates on every block)")
 
 			// Wire up the service compute units provider using on-chain service data
 			computeUnitsProvider := relayer.NewCachedServiceComputeUnitsProvider(logger, queryClients.Service())

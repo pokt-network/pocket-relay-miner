@@ -376,6 +376,106 @@ func TestGetService_Timeout(t *testing.T) {
 	// The important thing is we don't hang
 }
 
+// TestGetServiceRelayDifficultyAtHeight_Success tests height-aware difficulty retrieval
+func TestGetServiceRelayDifficultyAtHeight_Success(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	testDifficulty := generateTestRelayMiningDifficulty("develop")
+	mock.getRelayMiningDifficultyAtHeightFunc = func(ctx context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
+		require.Equal(t, "develop", req.ServiceId)
+		require.Equal(t, int64(100), req.BlockHeight)
+		return &servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse{RelayMiningDifficulty: *testDifficulty}, nil
+	}
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	config := ClientConfig{
+		GRPCEndpoint: address,
+		QueryTimeout: 5 * time.Second,
+	}
+
+	qc, err := NewQueryClients(logger, config)
+	require.NoError(t, err)
+	require.NotNil(t, qc)
+	defer qc.Close()
+
+	ctx := context.Background()
+	difficulty, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
+	require.NoError(t, err)
+	require.Equal(t, "develop", difficulty.ServiceId)
+	require.Equal(t, int64(100), difficulty.BlockHeight)
+}
+
+// TestGetServiceRelayDifficultyAtHeight_Cache tests height-aware difficulty caching
+func TestGetServiceRelayDifficultyAtHeight_Cache(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	queryCount := 0
+	testDifficulty := generateTestRelayMiningDifficulty("develop")
+	mock.getRelayMiningDifficultyAtHeightFunc = func(ctx context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
+		queryCount++
+		return &servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse{RelayMiningDifficulty: *testDifficulty}, nil
+	}
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	config := ClientConfig{
+		GRPCEndpoint: address,
+		QueryTimeout: 5 * time.Second,
+	}
+
+	qc, err := NewQueryClients(logger, config)
+	require.NoError(t, err)
+	require.NotNil(t, qc)
+	defer qc.Close()
+
+	ctx := context.Background()
+
+	// First query — hits server
+	difficulty1, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
+	require.NoError(t, err)
+	require.Equal(t, "develop", difficulty1.ServiceId)
+	require.Equal(t, 1, queryCount)
+
+	// Second query with same height — cache hit
+	difficulty2, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
+	require.NoError(t, err)
+	require.Equal(t, "develop", difficulty2.ServiceId)
+	require.Equal(t, 1, queryCount) // Still 1
+
+	// Third query with different height — cache miss
+	_, err = qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 200)
+	require.NoError(t, err)
+	require.Equal(t, 2, queryCount) // Now 2
+}
+
+// TestGetServiceRelayDifficultyAtHeight_NotFound tests not found error
+func TestGetServiceRelayDifficultyAtHeight_NotFound(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	mock.getRelayMiningDifficultyAtHeightFunc = func(ctx context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
+		return nil, status.Error(codes.NotFound, "difficulty at height not found")
+	}
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	config := ClientConfig{
+		GRPCEndpoint: address,
+		QueryTimeout: 5 * time.Second,
+	}
+
+	qc, err := NewQueryClients(logger, config)
+	require.NoError(t, err)
+	require.NotNil(t, qc)
+	defer qc.Close()
+
+	ctx := context.Background()
+	difficulty, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "nonexistent", 100)
+	require.Error(t, err)
+	require.Empty(t, difficulty.ServiceId)
+	require.Contains(t, err.Error(), "failed to query relay mining difficulty at height")
+}
+
 // TestGetService_MultipleServices tests caching of multiple services
 func TestGetService_MultipleServices(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)

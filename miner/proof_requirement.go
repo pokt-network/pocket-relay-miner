@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/poktroll/pkg/client"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
@@ -20,7 +21,7 @@ type ProofRequirementChecker struct {
 	logger        logging.Logger
 	proofClient   client.ProofQueryClient
 	sharedClient  client.SharedQueryClient
-	serviceClient client.ServiceQueryClient
+	serviceClient query.ServiceDifficultyClient
 }
 
 // NewProofRequirementChecker creates a new proof requirement checker.
@@ -28,7 +29,7 @@ func NewProofRequirementChecker(
 	logger logging.Logger,
 	proofClient client.ProofQueryClient,
 	sharedClient client.SharedQueryClient,
-	serviceClient client.ServiceQueryClient,
+	serviceClient query.ServiceDifficultyClient,
 ) *ProofRequirementChecker {
 	return &ProofRequirementChecker{
 		logger:        logging.ForComponent(logger, logging.ComponentProofChecker),
@@ -69,8 +70,8 @@ func (c *ProofRequirementChecker) IsProofRequired(
 		return false, fmt.Errorf("failed to get shared params: %w", err)
 	}
 
-	// Get relay mining difficulty for the service
-	relayMiningDifficulty, err := c.serviceClient.GetServiceRelayDifficulty(ctx, snapshot.ServiceID)
+	// Get relay mining difficulty for the service at session start height
+	relayMiningDifficulty, err := c.serviceClient.GetServiceRelayDifficultyAtHeight(ctx, snapshot.ServiceID, snapshot.SessionStartHeight)
 	if err != nil {
 		RecordProofRequirementCheckError(snapshot.SupplierOperatorAddress, "get_relay_difficulty")
 		return false, fmt.Errorf("failed to get relay mining difficulty for service %s: %w", snapshot.ServiceID, err)

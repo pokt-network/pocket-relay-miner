@@ -257,7 +257,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.logger,
 		w.queryClients.Proof(),
 		w.queryClients.Shared(),
-		w.queryClients.Service(),
+		w.queryClients.ServiceDifficulty(),
 	)
 
 	// Create tx client

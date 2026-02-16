@@ -201,6 +201,19 @@ func (qc *Clients) Service() client.ServiceQueryClient {
 	return qc.serviceClient
 }
 
+// ServiceDifficultyClient provides height-aware relay mining difficulty queries.
+// This is separate from client.ServiceQueryClient because the poktroll interface
+// may not yet include the height-aware method.
+type ServiceDifficultyClient interface {
+	GetServiceRelayDifficultyAtHeight(ctx context.Context, serviceId string, blockHeight int64) (servicetypes.RelayMiningDifficulty, error)
+}
+
+// ServiceDifficulty returns the service query client with height-aware difficulty queries.
+// Use this when you need GetServiceRelayDifficultyAtHeight (e.g., for proof requirement checks).
+func (qc *Clients) ServiceDifficulty() ServiceDifficultyClient {
+	return qc.serviceClient
+}
+
 // Account returns the account query client.
 func (qc *Clients) Account() client.AccountQueryClient {
 	return qc.accountClient
@@ -870,6 +883,46 @@ func (c *serviceQueryClient) GetServiceRelayDifficulty(ctx context.Context, serv
 	}
 
 	c.difficultyCache[serviceId] = res.RelayMiningDifficulty
+	return res.RelayMiningDifficulty, nil
+}
+
+// GetServiceRelayDifficultyAtHeight queries the chain for the relay mining difficulty
+// of a service at a specific block height. This is used to get the difficulty that was
+// effective at session start, ensuring consistency with on-chain proof validation.
+// Results are cached with a composite key "serviceId@blockHeight" since difficulty
+// at a given height is immutable.
+func (c *serviceQueryClient) GetServiceRelayDifficultyAtHeight(ctx context.Context, serviceId string, blockHeight int64) (servicetypes.RelayMiningDifficulty, error) {
+	cacheKey := fmt.Sprintf("%s@%d", serviceId, blockHeight)
+
+	// Check cache
+	c.difficultyCacheMu.RLock()
+	if difficulty, ok := c.difficultyCache[cacheKey]; ok {
+		c.difficultyCacheMu.RUnlock()
+		return difficulty, nil
+	}
+	c.difficultyCacheMu.RUnlock()
+
+	// Query chain
+	c.difficultyCacheMu.Lock()
+	defer c.difficultyCacheMu.Unlock()
+
+	// Double-check after acquiring lock
+	if difficulty, ok := c.difficultyCache[cacheKey]; ok {
+		return difficulty, nil
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+	defer cancel()
+
+	res, err := c.queryClient.RelayMiningDifficultyAtHeight(queryCtx, &servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest{
+		ServiceId:   serviceId,
+		BlockHeight: blockHeight,
+	})
+	if err != nil {
+		return servicetypes.RelayMiningDifficulty{}, fmt.Errorf("failed to query relay mining difficulty at height %d: %w", blockHeight, err)
+	}
+
+	c.difficultyCache[cacheKey] = res.RelayMiningDifficulty
 	return res.RelayMiningDifficulty, nil
 }
 

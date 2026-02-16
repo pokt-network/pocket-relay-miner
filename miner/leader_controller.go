@@ -313,7 +313,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger,
 		c.queryClients.Proof(),
 		c.queryClients.Shared(),
-		c.queryClients.Service(),
+		c.queryClients.ServiceDifficulty(),
 	)
 	c.logger.Info().Msg("proof requirement checker initialized")
 
