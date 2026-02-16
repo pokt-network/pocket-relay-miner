@@ -45,15 +45,20 @@ func DefaultServerConfig() ServerConfig {
 	}
 }
 
+// ReadinessCheck is a function that returns nil if the service is ready,
+// or an error describing why it is not ready.
+type ReadinessCheck func(ctx context.Context) error
+
 // Server provides observability endpoints (metrics and pprof).
 type Server struct {
-	logger        logging.Logger
-	config        ServerConfig
-	metricsServer *http.Server
-	pprofServer   *http.Server
-	mu            sync.Mutex
-	rm            *RuntimeMetricsCollector
-	running       bool
+	logger         logging.Logger
+	config         ServerConfig
+	metricsServer  *http.Server
+	pprofServer    *http.Server
+	mu             sync.Mutex
+	rm             *RuntimeMetricsCollector
+	running        bool
+	readinessCheck ReadinessCheck
 }
 
 // NewServer creates a new observability server.
@@ -146,6 +151,18 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 		_, _ = w.Write([]byte("OK"))
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		check := s.readinessCheck
+		s.mu.Unlock()
+
+		if check != nil {
+			if err := check(r.Context()); err != nil {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				_, _ = fmt.Fprintf(w, "Not Ready: %s", err.Error())
+				return
+			}
+		}
+
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("Ready"))
 	})
@@ -251,6 +268,16 @@ func (s *Server) Stop() error {
 	s.logger.Info().Msg("observability servers stopped")
 
 	return lastErr
+}
+
+// SetReadinessCheck sets a readiness check function that the /ready endpoint
+// will call. If the check returns an error, /ready returns HTTP 503.
+// This can be called after Start() to set checks that depend on components
+// initialized later (e.g., Redis client).
+func (s *Server) SetReadinessCheck(check ReadinessCheck) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.readinessCheck = check
 }
 
 // IsRunning returns true if the server is running.

@@ -70,7 +70,8 @@ type GlobalLeaderElector struct {
 	metrics     *leaderMetrics
 	leaderKey   string // Redis key for global leader lock (built via KeyBuilder)
 
-	isLeader atomic.Bool
+	isLeader                   atomic.Bool
+	consecutiveAcquireFailures int
 
 	// Lua scripts for atomic operations
 	acquireScript *redis.Script
@@ -221,21 +222,44 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 		).Int()
 
 		if err != nil {
-			e.logger.Debug().
-				Err(err).
-				Str(logging.FieldInstance, e.instanceID).
-				Msg("failed to acquire leadership (Redis error)")
+			e.consecutiveAcquireFailures++
+
+			// Determine if this is an OOM error for targeted alerting
+			if redisutil.IsOOMError(err) {
+				e.logger.Error().
+					Err(err).
+					Str(logging.FieldInstance, e.instanceID).
+					Int("consecutive_failures", e.consecutiveAcquireFailures).
+					Msg("REDIS OOM - cannot acquire leadership, standby miner blocked until memory is freed")
+				e.metrics.acquisitionFailures.WithLabelValues(e.instanceID, "redis_oom").Inc()
+			} else {
+				e.logger.Warn().
+					Err(err).
+					Str(logging.FieldInstance, e.instanceID).
+					Int("consecutive_failures", e.consecutiveAcquireFailures).
+					Msg("failed to acquire leadership (Redis error)")
+				e.metrics.acquisitionFailures.WithLabelValues(e.instanceID, "redis_error").Inc()
+			}
 		} else if result == 1 {
 			// Became leader
-			e.logger.Info().
-				Str(logging.FieldInstance, e.instanceID).
-				Msg("ELECTED as GLOBAL leader")
+			if e.consecutiveAcquireFailures > 0 {
+				e.logger.Info().
+					Str(logging.FieldInstance, e.instanceID).
+					Int("recovered_after_failures", e.consecutiveAcquireFailures).
+					Msg("ELECTED as GLOBAL leader (recovered from previous failures)")
+			} else {
+				e.logger.Info().
+					Str(logging.FieldInstance, e.instanceID).
+					Msg("ELECTED as GLOBAL leader")
+			}
+			e.consecutiveAcquireFailures = 0
 			e.isLeader.Store(true)
 			e.metrics.status.WithLabelValues(e.instanceID).Set(1)
 			e.metrics.elections.WithLabelValues(e.instanceID).Inc()
 			e.invokeOnElectedCallbacks(ctx)
 		} else {
-			// Another instance is leader - always set metric to 0 for standby
+			// Another instance is leader — Redis is healthy, reset failure counter
+			e.consecutiveAcquireFailures = 0
 			e.metrics.status.WithLabelValues(e.instanceID).Set(0)
 			e.logger.Debug().
 				Str(logging.FieldInstance, e.instanceID).
