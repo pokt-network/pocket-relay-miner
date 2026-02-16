@@ -4,7 +4,9 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/grpc/backoff"
@@ -26,6 +28,7 @@ import (
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
+	"github.com/puzpuzpuz/xsync/v4"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
@@ -794,31 +797,55 @@ func (c *proofQueryClient) GetClaim(ctx context.Context, supplierOperatorAddress
 // Service Query Client
 // =============================================================================
 
+// maxHeightDifficultyCacheEntries is the maximum number of height-aware difficulty
+// entries (keyed by serviceID@height) before eviction is triggered. This is a simple
+// size cap — no assumptions about session length or block timing. The data is immutable
+// and cheap to re-query from chain if an evicted entry is needed again.
+// Sized generously: a provider with 28 services across many session heights fits easily.
+const maxHeightDifficultyCacheEntries = 1000
+
 type serviceQueryClient struct {
 	logger       logging.Logger
 	queryClient  servicetypes.QueryClient
 	queryTimeout time.Duration
 
-	// Simple in-memory cache
+	// Simple in-memory cache for services (keyed by serviceID)
 	serviceCache   map[string]sharedtypes.Service
 	serviceCacheMu sync.RWMutex
 
+	// Cache for latest difficulty queries (keyed by serviceID only)
 	difficultyCache   map[string]servicetypes.RelayMiningDifficulty
 	difficultyCacheMu sync.RWMutex
+
+	// Bounded cache for height-aware difficulty queries (keyed by "serviceID@height").
+	// Uses xsync.MapOf for lock-free concurrent reads (project standard).
+	// Difficulty at a given height is immutable — no invalidation needed.
+	heightDifficultyCache *xsync.Map[string, heightDifficultyCacheEntry]
+	// heightDifficultyCacheSize tracks entry count atomically for O(1) threshold checks.
+	heightDifficultyCacheSize atomic.Int64
 
 	paramsCache   *servicetypes.Params
 	paramsCacheMu sync.RWMutex
 }
 
+// heightDifficultyCacheEntry stores difficulty data alongside the block height
+// for efficient eviction sweeps.
+type heightDifficultyCacheEntry struct {
+	difficulty  servicetypes.RelayMiningDifficulty
+	blockHeight int64
+}
+
 var _ client.ServiceQueryClient = (*serviceQueryClient)(nil)
+var _ ServiceDifficultyClient = (*serviceQueryClient)(nil)
 
 func newServiceQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *serviceQueryClient {
 	return &serviceQueryClient{
-		logger:          logger.With().Str("query_client", "service").Logger(),
-		queryClient:     servicetypes.NewQueryClient(conn),
-		queryTimeout:    timeout,
-		serviceCache:    make(map[string]sharedtypes.Service),
-		difficultyCache: make(map[string]servicetypes.RelayMiningDifficulty),
+		logger:                logger.With().Str("query_client", "service").Logger(),
+		queryClient:           servicetypes.NewQueryClient(conn),
+		queryTimeout:          timeout,
+		serviceCache:          make(map[string]sharedtypes.Service),
+		difficultyCache:       make(map[string]servicetypes.RelayMiningDifficulty),
+		heightDifficultyCache: xsync.NewMap[string, heightDifficultyCacheEntry](),
 	}
 }
 
@@ -889,28 +916,17 @@ func (c *serviceQueryClient) GetServiceRelayDifficulty(ctx context.Context, serv
 // GetServiceRelayDifficultyAtHeight queries the chain for the relay mining difficulty
 // of a service at a specific block height. This is used to get the difficulty that was
 // effective at session start, ensuring consistency with on-chain proof validation.
-// Results are cached with a composite key "serviceId@blockHeight" since difficulty
-// at a given height is immutable.
+// Results are cached in a bounded xsync.MapOf with composite key "serviceID@blockHeight".
+// Difficulty at a given height is immutable — no invalidation needed, only eviction of old entries.
 func (c *serviceQueryClient) GetServiceRelayDifficultyAtHeight(ctx context.Context, serviceId string, blockHeight int64) (servicetypes.RelayMiningDifficulty, error) {
 	cacheKey := fmt.Sprintf("%s@%d", serviceId, blockHeight)
 
-	// Check cache
-	c.difficultyCacheMu.RLock()
-	if difficulty, ok := c.difficultyCache[cacheKey]; ok {
-		c.difficultyCacheMu.RUnlock()
-		return difficulty, nil
+	// Check cache (lock-free read via xsync.MapOf)
+	if entry, ok := c.heightDifficultyCache.Load(cacheKey); ok {
+		return entry.difficulty, nil
 	}
-	c.difficultyCacheMu.RUnlock()
 
 	// Query chain
-	c.difficultyCacheMu.Lock()
-	defer c.difficultyCacheMu.Unlock()
-
-	// Double-check after acquiring lock
-	if difficulty, ok := c.difficultyCache[cacheKey]; ok {
-		return difficulty, nil
-	}
-
 	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
 	defer cancel()
 
@@ -922,8 +938,48 @@ func (c *serviceQueryClient) GetServiceRelayDifficultyAtHeight(ctx context.Conte
 		return servicetypes.RelayMiningDifficulty{}, fmt.Errorf("failed to query relay mining difficulty at height %d: %w", blockHeight, err)
 	}
 
-	c.difficultyCache[cacheKey] = res.RelayMiningDifficulty
+	// Store in cache — LoadOrStore avoids duplicate inserts from concurrent queries
+	entry := heightDifficultyCacheEntry{
+		difficulty:  res.RelayMiningDifficulty,
+		blockHeight: blockHeight,
+	}
+	if _, loaded := c.heightDifficultyCache.LoadOrStore(cacheKey, entry); !loaded {
+		c.heightDifficultyCacheSize.Add(1)
+	}
+
+	// Evict oldest entries if cache exceeds size cap
+	if c.heightDifficultyCacheSize.Load() > maxHeightDifficultyCacheEntries {
+		c.evictOldestHeightDifficultyEntries()
+	}
+
 	return res.RelayMiningDifficulty, nil
+}
+
+// evictOldestHeightDifficultyEntries finds the median block height across all
+// cached entries and removes everything at or below it. This evicts roughly
+// half the cache without assuming any particular session length or block timing.
+// The data is immutable — evicted entries are simply re-queried from chain if needed.
+func (c *serviceQueryClient) evictOldestHeightDifficultyEntries() {
+	// Collect all heights to find the median
+	var heights []int64
+	c.heightDifficultyCache.Range(func(_ string, entry heightDifficultyCacheEntry) bool {
+		heights = append(heights, entry.blockHeight)
+		return true
+	})
+	if len(heights) == 0 {
+		return
+	}
+	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+	medianHeight := heights[len(heights)/2]
+
+	// Delete entries at or below the median height
+	c.heightDifficultyCache.Range(func(key string, entry heightDifficultyCacheEntry) bool {
+		if entry.blockHeight <= medianHeight {
+			c.heightDifficultyCache.Delete(key)
+			c.heightDifficultyCacheSize.Add(-1)
+		}
+		return true
+	})
 }
 
 func (c *serviceQueryClient) GetParams(ctx context.Context) (*servicetypes.Params, error) {

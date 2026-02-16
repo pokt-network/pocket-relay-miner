@@ -4,6 +4,8 @@ package query
 
 import (
 	"context"
+	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -516,4 +518,116 @@ func TestGetService_MultipleServices(t *testing.T) {
 	// All should be different
 	require.NotEqual(t, service1.Id, service2.Id)
 	require.NotEqual(t, service2.Id, service3.Id)
+}
+
+// TestGetServiceRelayDifficultyAtHeight_ConcurrentAccess tests thread-safe height-aware
+// difficulty queries across multiple goroutines and service/height combinations.
+// Must pass with `go test -race`.
+func TestGetServiceRelayDifficultyAtHeight_ConcurrentAccess(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	mock.getRelayMiningDifficultyAtHeightFunc = func(ctx context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
+		return &servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse{
+			RelayMiningDifficulty: servicetypes.RelayMiningDifficulty{
+				ServiceId:    req.ServiceId,
+				BlockHeight:  req.BlockHeight,
+				NumRelaysEma: 1000,
+				TargetHash:   make([]byte, 32),
+			},
+		}, nil
+	}
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	config := ClientConfig{
+		GRPCEndpoint: address,
+		QueryTimeout: 5 * time.Second,
+	}
+
+	qc, err := NewQueryClients(logger, config)
+	require.NoError(t, err)
+	require.NotNil(t, qc)
+	defer qc.Close()
+
+	ctx := context.Background()
+	services := []string{"develop", "ethereum", "polygon", "solana", "avax"}
+	heights := []int64{100, 104, 108, 112, 116}
+
+	var wg sync.WaitGroup
+	for _, svc := range services {
+		for _, h := range heights {
+			wg.Add(1)
+			go func(serviceID string, height int64) {
+				defer wg.Done()
+				difficulty, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, serviceID, height)
+				require.NoError(t, err)
+				require.Equal(t, serviceID, difficulty.ServiceId)
+				require.Equal(t, height, difficulty.BlockHeight)
+			}(svc, h)
+		}
+	}
+	wg.Wait()
+}
+
+// TestGetServiceRelayDifficultyAtHeight_CacheEviction verifies that the height-aware
+// difficulty cache stays bounded by evicting the oldest half when the size cap is exceeded.
+// No assumptions about session length, block timing, or network parameters.
+func TestGetServiceRelayDifficultyAtHeight_CacheEviction(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	mock.getRelayMiningDifficultyAtHeightFunc = func(ctx context.Context, req *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error) {
+		return &servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse{
+			RelayMiningDifficulty: servicetypes.RelayMiningDifficulty{
+				ServiceId:    req.ServiceId,
+				BlockHeight:  req.BlockHeight,
+				NumRelaysEma: 1000,
+				TargetHash:   make([]byte, 32),
+			},
+		}, nil
+	}
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	config := ClientConfig{
+		GRPCEndpoint: address,
+		QueryTimeout: 5 * time.Second,
+	}
+
+	qc, err := NewQueryClients(logger, config)
+	require.NoError(t, err)
+	require.NotNil(t, qc)
+	defer qc.Close()
+
+	ctx := context.Background()
+	serviceClient := qc.serviceClient
+
+	// Insert more entries than the cache cap to trigger eviction.
+	// Use 10 services x (maxHeightDifficultyCacheEntries/10 + 10) heights.
+	services := []string{"svc1", "svc2", "svc3", "svc4", "svc5", "svc6", "svc7", "svc8", "svc9", "svc10"}
+	heightsPerService := int64(maxHeightDifficultyCacheEntries/len(services)) + 10
+	for h := int64(1); h <= heightsPerService; h++ {
+		for _, svc := range services {
+			_, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, svc, h)
+			require.NoError(t, err)
+		}
+	}
+
+	// After eviction, cache size should be <= maxHeightDifficultyCacheEntries.
+	cacheSize := serviceClient.heightDifficultyCacheSize.Load()
+	require.LessOrEqual(t, cacheSize, int64(maxHeightDifficultyCacheEntries),
+		"cache size %d exceeds max %d after eviction", cacheSize, maxHeightDifficultyCacheEntries)
+
+	// Recent entries (highest heights) should still be in cache.
+	for _, svc := range services {
+		key := fmt.Sprintf("%s@%d", svc, heightsPerService)
+		_, ok := serviceClient.heightDifficultyCache.Load(key)
+		require.True(t, ok, "recent entry %s should still be cached", key)
+	}
+
+	// Oldest entries (height 1) should have been evicted.
+	for _, svc := range services {
+		key := fmt.Sprintf("%s@%d", svc, 1)
+		_, ok := serviceClient.heightDifficultyCache.Load(key)
+		require.False(t, ok, "old entry %s should have been evicted", key)
+	}
 }

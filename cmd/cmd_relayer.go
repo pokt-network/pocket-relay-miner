@@ -634,7 +634,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			)
 			// Wire up the difficulty provider using on-chain service difficulty data
 			difficultyProviderAdapter := &serviceDifficultyQueryAdapter{queryClient: queryClients.ServiceDifficulty()}
-			difficultyProvider := relayer.NewCachedDifficultyProvider(logger, difficultyProviderAdapter)
+			difficultyProvider := relayer.NewQueryDifficultyProvider(logger, difficultyProviderAdapter)
 			relayProcessor.SetDifficultyProvider(difficultyProvider)
 
 			// Wire up the service compute units provider using on-chain service data

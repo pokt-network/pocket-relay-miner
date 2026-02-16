@@ -320,42 +320,40 @@ func (p *BaseDifficultyProvider) GetTargetHash(ctx context.Context, serviceID st
 	return protocol.BaseRelayDifficultyHashBz, nil
 }
 
-// CachedDifficultyProvider caches difficulty targets per service.
-type CachedDifficultyProvider struct {
-	logger      logging.Logger
-	queryClient ServiceDifficultyQueryClient
-
-	cache sync.Map // map[serviceID][]byte
-}
-
 // ServiceDifficultyQueryClient queries on-chain service difficulty at a specific height.
 type ServiceDifficultyQueryClient interface {
 	// GetServiceRelayDifficulty returns the relay mining difficulty for a service at a given session start height.
 	GetServiceRelayDifficulty(ctx context.Context, serviceID string, sessionStartHeight int64) ([]byte, error)
 }
 
-// NewCachedDifficultyProvider creates a new cached difficulty provider.
-func NewCachedDifficultyProvider(
+// QueryDifficultyProvider is a thin pass-through to the query layer for difficulty lookups.
+// Caching of successful responses is handled by the query layer
+// (serviceQueryClient.heightDifficultyCache) — no duplicate caching here.
+type QueryDifficultyProvider struct {
+	logger      logging.Logger
+	queryClient ServiceDifficultyQueryClient
+}
+
+// NewQueryDifficultyProvider creates a new query-based difficulty provider.
+func NewQueryDifficultyProvider(
 	logger logging.Logger,
 	queryClient ServiceDifficultyQueryClient,
-) *CachedDifficultyProvider {
-	return &CachedDifficultyProvider{
+) *QueryDifficultyProvider {
+	return &QueryDifficultyProvider{
 		logger:      logging.ForComponent(logger, logging.ComponentDifficultyProvider),
 		queryClient: queryClient,
 	}
 }
 
-// GetTargetHash returns the cached difficulty target for a service at the given session start height.
-// Cache key is "serviceID@sessionStartHeight" — immutable, never needs invalidation.
-func (p *CachedDifficultyProvider) GetTargetHash(ctx context.Context, serviceID string, sessionStartHeight int64) ([]byte, error) {
-	cacheKey := fmt.Sprintf("%s@%d", serviceID, sessionStartHeight)
-
-	// Check cache first
-	if cached, ok := p.cache.Load(cacheKey); ok {
-		return cached.([]byte), nil
+// GetTargetHash returns the difficulty target for a service at the given session start height.
+// Returns base difficulty (all relays applicable) if sessionStartHeight <= 0 (e.g., nil sessionHeader).
+func (p *QueryDifficultyProvider) GetTargetHash(ctx context.Context, serviceID string, sessionStartHeight int64) ([]byte, error) {
+	// Guard: invalid height (e.g., nil sessionHeader → height 0) returns base difficulty
+	// to avoid querying with a meaningless height.
+	if sessionStartHeight <= 0 {
+		return protocol.BaseRelayDifficultyHashBz, nil
 	}
 
-	// Query on-chain
 	if p.queryClient == nil {
 		return protocol.BaseRelayDifficultyHashBz, nil
 	}
@@ -369,9 +367,6 @@ func (p *CachedDifficultyProvider) GetTargetHash(ctx context.Context, serviceID 
 			Msg("failed to query service difficulty, using base")
 		return protocol.BaseRelayDifficultyHashBz, nil
 	}
-
-	// Cache the result (immutable — difficulty at a given height never changes)
-	p.cache.Store(cacheKey, target)
 
 	return target, nil
 }
@@ -485,5 +480,5 @@ func (p *CachedServiceComputeUnitsProvider) InvalidateAllCache() {
 // Verify interface compliance.
 var _ RelayProcessor = (*relayProcessor)(nil)
 var _ DifficultyProvider = (*BaseDifficultyProvider)(nil)
-var _ DifficultyProvider = (*CachedDifficultyProvider)(nil)
+var _ DifficultyProvider = (*QueryDifficultyProvider)(nil)
 var _ ServiceComputeUnitsProvider = (*CachedServiceComputeUnitsProvider)(nil)
