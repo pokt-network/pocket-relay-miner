@@ -3,7 +3,6 @@ package leader
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/alicebob/miniredis/v2"
 
@@ -47,15 +46,20 @@ func TestParseMemoryInfo(t *testing.T) {
 			wantMax:  0,
 		},
 		{
-			name: "only comments",
+			name: "only comments - used_memory missing",
 			info: "# Memory\r\n" +
 				"# Some other section\r\n",
-			wantUsed: 0,
-			wantMax:  0,
+			wantErr: true,
 		},
 		{
 			name:    "invalid used_memory value",
 			info:    "used_memory:not_a_number\r\n",
+			wantErr: true,
+		},
+		{
+			name: "invalid maxmemory value",
+			info: "used_memory:1024\r\n" +
+				"maxmemory:not_a_number\r\n",
 			wantErr: true,
 		},
 	}
@@ -107,10 +111,7 @@ func TestRedisHealthMonitorLifecycle(t *testing.T) {
 		t.Fatalf("failed to start monitor: %v", err)
 	}
 
-	// Let it run one cycle
-	time.Sleep(100 * time.Millisecond)
-
-	// Close
+	// Close immediately — validates Start/Close lifecycle without sleeping
 	if err := monitor.Close(); err != nil {
 		t.Fatalf("failed to close monitor: %v", err)
 	}

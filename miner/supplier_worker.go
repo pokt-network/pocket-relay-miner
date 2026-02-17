@@ -416,6 +416,14 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		msg.Message.RelayBytes,
 		msg.Message.ComputeUnitsPerRelay,
 	); err != nil {
+		// IMPORTANT: Check retryable BEFORE permanent. When FlushPipeline fails with
+		// OOM, the error is wrapped with ErrSMSTCommitFailed (permanent sentinel) but
+		// the underlying cause is transient (OOM clears when keys expire). Checking
+		// retryable first ensures transient errors are retried even when wrapped.
+		if IsRetryableError(err) {
+			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "transient_error")
+			return fmt.Errorf("transient SMST error (will retry): %w", err)
+		}
 		// Check for permanent SMST errors (late relays, sealed/claimed sessions)
 		if IsPermanentSMSTError(err) {
 			w.logger.Info().
@@ -426,11 +434,6 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
 			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "session_sealed")
 			return nil // ACK and discard - no point retrying
-		}
-		// Check for transient errors (Redis connection issues) - allow retry
-		if IsRetryableError(err) {
-			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "transient_error")
-			return fmt.Errorf("transient SMST error (will retry): %w", err)
 		}
 		// Unknown/unexpected errors - log and discard (don't retry forever)
 		w.logger.Warn().

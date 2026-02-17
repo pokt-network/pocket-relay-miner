@@ -155,6 +155,8 @@ const (
 	ComponentObservability  = "observability_server"
 	ComponentRuntimeMetrics = "runtime_metrics_collector"
 
+	ComponentRedisHealthMonitor = "redis_health_monitor"
+
 	// Internal adapters and helpers
 	ComponentRelayPipeline           = "relay_pipeline"
 	ComponentRedisBlockClientAdapter = "redis_block_client_adapter"

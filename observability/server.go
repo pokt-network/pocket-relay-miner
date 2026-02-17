@@ -157,8 +157,9 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 
 		if check != nil {
 			if err := check(r.Context()); err != nil {
+				s.logger.Warn().Err(err).Msg("readiness check failed")
 				w.WriteHeader(http.StatusServiceUnavailable)
-				_, _ = fmt.Fprintf(w, "Not Ready: %s", err.Error())
+				_, _ = fmt.Fprint(w, "Not Ready")
 				return
 			}
 		}

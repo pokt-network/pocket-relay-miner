@@ -190,10 +190,19 @@ func (e *GlobalLeaderElector) attemptLeadership(ctx context.Context) {
 		).Int()
 
 		if err != nil {
-			e.logger.Warn().
-				Err(err).
-				Str(logging.FieldInstance, e.instanceID).
-				Msg("failed to renew leadership (Redis error)")
+			// Distinguish OOM errors from generic Redis errors for targeted alerting
+			if redisutil.IsOOMError(err) {
+				e.logger.Error().
+					Err(err).
+					Str(logging.FieldInstance, e.instanceID).
+					Msg("REDIS OOM - failed to renew leadership, leader demoted until memory is freed")
+				e.metrics.acquisitionFailures.WithLabelValues(e.instanceID, "redis_oom_renew").Inc()
+			} else {
+				e.logger.Warn().
+					Err(err).
+					Str(logging.FieldInstance, e.instanceID).
+					Msg("failed to renew leadership (Redis error)")
+			}
 			e.isLeader.Store(false)
 			e.metrics.status.WithLabelValues(e.instanceID).Set(0)
 			e.metrics.losses.WithLabelValues(e.instanceID).Inc()
@@ -331,30 +340,13 @@ func (e *GlobalLeaderElector) IsLeader() bool {
 }
 
 // Close stops the leader election loop and releases leadership if held.
+// Leadership release is handled in leaderLoop's ctx.Done handler (which runs
+// before wg.Done), so Close() only needs to cancel and wait.
 func (e *GlobalLeaderElector) Close() {
 	if e.cancelFn != nil {
 		e.cancelFn()
 	}
 	e.wg.Wait()
-
-	// Release leader lock on shutdown for faster failover
-	if e.isLeader.Load() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-
-		released, err := e.releaseScript.Run(
-			ctx,
-			e.redisClient,
-			[]string{e.leaderKey},
-			e.instanceID,
-		).Int()
-
-		if err != nil {
-			e.logger.Warn().Err(err).Msg("failed to release leader lock on shutdown")
-		} else if released == 1 {
-			e.logger.Info().Msg("released leader lock on shutdown for faster failover")
-		}
-	}
 
 	e.logger.Info().Msg("global leader elector stopped")
 }

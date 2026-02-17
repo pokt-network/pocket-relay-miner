@@ -28,6 +28,11 @@ func TestIsOOMError(t *testing.T) {
 			want: true,
 		},
 		{
+			name: "multi-level wrapped OOM error",
+			err:  fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", errors.New("OOM command not allowed when used memory > 'maxmemory'"))),
+			want: true,
+		},
+		{
 			name: "non-OOM error",
 			err:  errors.New("WRONGTYPE Operation against a key holding the wrong kind of value"),
 			want: false,
@@ -38,9 +43,19 @@ func TestIsOOMError(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "OOM substring in different context",
+			name: "bare OOM without trailing space should not match",
 			err:  errors.New("OOM"),
-			want: true,
+			want: false,
+		},
+		{
+			name: "false positive ZOOM should not match",
+			err:  errors.New("ZOOM level too high"),
+			want: false,
+		},
+		{
+			name: "false positive ROOM should not match",
+			err:  errors.New("ROOM not found"),
+			want: false,
 		},
 	}
 

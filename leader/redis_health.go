@@ -2,6 +2,7 @@ package leader
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,9 +18,6 @@ const (
 
 	// redisMemoryWarningThreshold triggers a WARN log when usage exceeds 90%.
 	redisMemoryWarningThreshold = 0.9
-
-	// ComponentRedisHealth is the logging component name.
-	ComponentRedisHealth = "redis_health_monitor"
 )
 
 // RedisHealthMonitor periodically polls Redis INFO MEMORY and exposes
@@ -43,7 +41,7 @@ func NewRedisHealthMonitor(
 	redisClient *redisutil.Client,
 ) *RedisHealthMonitor {
 	return &RedisHealthMonitor{
-		logger:      logging.ForComponent(logger, ComponentRedisHealth),
+		logger:      logging.ForComponent(logger, logging.ComponentRedisHealthMonitor),
 		redisClient: redisClient,
 	}
 }
@@ -57,9 +55,9 @@ func (m *RedisHealthMonitor) Start(ctx context.Context) error {
 	}
 
 	ctx, m.cancelFn = context.WithCancel(ctx)
+	m.wg.Add(1)
 	m.mu.Unlock()
 
-	m.wg.Add(1)
 	go m.monitorLoop(ctx)
 
 	m.logger.Info().
@@ -127,6 +125,8 @@ func (m *RedisHealthMonitor) checkMemory(ctx context.Context) {
 
 // parseMemoryInfo extracts used_memory and maxmemory from Redis INFO MEMORY output.
 func parseMemoryInfo(info string) (usedMemory, maxMemory int64, err error) {
+	foundUsedMemory := false
+
 	for _, line := range strings.Split(info, "\r\n") {
 		// Skip comments and empty lines
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -145,14 +145,19 @@ func parseMemoryInfo(info string) (usedMemory, maxMemory int64, err error) {
 		case "used_memory":
 			usedMemory, err = strconv.ParseInt(value, 10, 64)
 			if err != nil {
-				return 0, 0, err
+				return 0, 0, fmt.Errorf("invalid used_memory value %q: %w", value, err)
 			}
+			foundUsedMemory = true
 		case "maxmemory":
 			maxMemory, err = strconv.ParseInt(value, 10, 64)
 			if err != nil {
-				return 0, 0, err
+				return 0, 0, fmt.Errorf("invalid maxmemory value %q: %w", value, err)
 			}
 		}
+	}
+
+	if !foundUsedMemory && info != "" {
+		return 0, 0, fmt.Errorf("used_memory not found in Redis INFO MEMORY output")
 	}
 
 	return usedMemory, maxMemory, nil
