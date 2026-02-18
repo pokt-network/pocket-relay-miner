@@ -212,19 +212,27 @@ func TestGetMasterPoolSize(t *testing.T) {
 	cfg := &Config{}
 
 	// Test auto-calculation with small supplier count (CPU-bound)
-	// With default values: cpu_multiplier=4, workers_per_supplier=6, query=20, settlement=2
-	// On a machine with N CPUs: max(N×4, suppliers×6) + 22
-	// For 5 suppliers: max(N×4, 30) + 22
+	// With default values: cpu_multiplier=4, workers_per_supplier=6, query=20
+	// Settlement monitor disabled by default, so overhead = query_workers only (20)
+	// On a machine with N CPUs: max(N×4, suppliers×6) + 20
+	// For 5 suppliers: max(N×4, 30) + 20
 	// This test uses 5 suppliers which should be CPU-bound on most machines
 	size := cfg.GetMasterPoolSize(5)
-	require.Greater(t, size, 22) // At minimum, overhead is 22
+	require.Greater(t, size, 20) // At minimum, overhead is 20 (no settlement workers)
 
 	// Test auto-calculation with high supplier count (supplier-bound)
-	// For 78 suppliers: max(N×4, 468) + 22 = 468 + 22 = 490 (on most machines)
+	// For 78 suppliers: max(N×4, 468) + 20 = 468 + 20 = 488 (on most machines)
 	size = cfg.GetMasterPoolSize(78)
-	// 78 × 6 = 468, plus overhead 22 = 490
+	// 78 × 6 = 468, plus overhead 20 = 488
 	// This should be supplier-bound unless running on 117+ core machine
+	require.GreaterOrEqual(t, size, 488)
+
+	// Test with settlement monitor enabled (adds settlement_workers to overhead)
+	cfg.SettlementMonitor.Enabled = true
+	size = cfg.GetMasterPoolSize(78)
+	// 78 × 6 = 468, plus overhead 22 (20 query + 2 settlement) = 490
 	require.GreaterOrEqual(t, size, 490)
+	cfg.SettlementMonitor.Enabled = false // reset
 
 	// Test explicit override
 	cfg.WorkerPools.MasterPoolSize = 500

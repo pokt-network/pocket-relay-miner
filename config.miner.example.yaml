@@ -189,6 +189,14 @@ balance_monitor:
   stake_critical_proof_threshold: 3    # Critical when < 3 missed proofs remaining
 
 # ==============================================================================
+# Settlement Monitor (On-Chain Claim Settlement Tracking)
+# ==============================================================================
+# Tracks on-chain claim/proof settlement events via block_results.
+# Disabled by default — enable for operators who want on-chain settlement visibility.
+# settlement_monitor:
+#   enabled: false  # Set to true to enable on-chain settlement event tracking
+
+# ==============================================================================
 # Session Lifecycle Configuration
 # ==============================================================================
 # NOTE: Session lifecycle is event-driven (uses block events instead of polling)
