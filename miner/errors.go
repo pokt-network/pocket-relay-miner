@@ -6,6 +6,8 @@ import (
 	"net"
 
 	"github.com/redis/go-redis/v9"
+
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // SMST errors - permanent, should not retry
@@ -45,6 +47,11 @@ func IsRetryableError(err error) bool {
 
 	// Check for Redis transient errors
 	if errors.Is(err, redis.ErrClosed) {
+		return true
+	}
+
+	// Redis OOM is transient — it clears when TTL-bearing keys expire
+	if redisutil.IsOOMError(err) {
 		return true
 	}
 

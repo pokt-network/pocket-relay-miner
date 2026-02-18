@@ -111,6 +111,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	}
 
 	// Start an observability server (metrics and/or pprof)
+	var obsServer *observability.Server
 	if config.Metrics.Enabled || config.PProf.Enabled {
 		// Combine MinerRegistry and SharedRegistry so cache metrics are exposed
 		combinedRegistry := prometheus.Gatherers{
@@ -118,7 +119,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 			observability.SharedRegistry,
 		}
 
-		obsServer := observability.NewServer(logger, observability.ServerConfig{
+		obsServer = observability.NewServer(logger, observability.ServerConfig{
 			MetricsEnabled: config.Metrics.Enabled,
 			MetricsAddr:    config.Metrics.Addr,
 			PprofEnabled:   config.PProf.Enabled,
@@ -165,6 +166,20 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Str("redis_url", config.Redis.URL).
 		Str("consumer_name", config.Redis.ConsumerName).
 		Msg("connected to Redis")
+
+	// Set readiness check to verify Redis connectivity via PING
+	if obsServer != nil {
+		obsServer.SetReadinessCheck(func(ctx context.Context) error {
+			return redisClient.Ping(ctx).Err()
+		})
+	}
+
+	// Start Redis health monitor (runs on ALL replicas for OOM visibility)
+	redisHealthMonitor := leader.NewRedisHealthMonitor(logger, redisClient)
+	if err = redisHealthMonitor.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start Redis health monitor: %w", err)
+	}
+	defer func() { _ = redisHealthMonitor.Close() }()
 
 	// Create key providers from config
 	providers, err := createKeyProviders(logger, config)

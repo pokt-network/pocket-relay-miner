@@ -15,9 +15,10 @@ const (
 
 // leaderMetrics holds the leader election metrics
 type leaderMetrics struct {
-	status    *prometheus.GaugeVec
-	elections *prometheus.CounterVec
-	losses    *prometheus.CounterVec
+	status              *prometheus.GaugeVec
+	elections           *prometheus.CounterVec
+	losses              *prometheus.CounterVec
+	acquisitionFailures *prometheus.CounterVec
 }
 
 var (
@@ -55,6 +56,15 @@ func initMetrics() *leaderMetrics {
 					Help:      "Total number of times this instance lost leadership",
 				},
 				[]string{"instance"},
+			),
+			acquisitionFailures: observability.MinerFactory.NewCounterVec(
+				prometheus.CounterOpts{
+					Namespace: metricsNamespace,
+					Subsystem: metricsSubsystem,
+					Name:      "leader_acquisition_failures_total",
+					Help:      "Total number of failed leadership acquisition attempts due to Redis errors",
+				},
+				[]string{"instance", "reason"},
 			),
 		}
 	})
