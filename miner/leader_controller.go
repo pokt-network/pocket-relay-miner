@@ -397,34 +397,36 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger.Info().Msg("balance monitor started")
 	}
 
-	// Start settlement monitor to track on-chain claim settlements
-	// Get supplier addresses to monitor
-	suppliersMap, err := c.supplierRegistry.GetAllSuppliers(ctx)
-	if err != nil {
-		c.cleanup()
-		return fmt.Errorf("failed to get suppliers for settlement monitor: %w", err)
-	}
-	supplierAddresses := make([]string, 0, len(suppliersMap))
-	for addr := range suppliersMap {
-		supplierAddresses = append(supplierAddresses, addr)
-	}
+	// Start settlement monitor if enabled
+	if c.config.Config.GetSettlementMonitorEnabled() {
+		// Get supplier addresses to monitor
+		suppliersMap, err := c.supplierRegistry.GetAllSuppliers(ctx)
+		if err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to get suppliers for settlement monitor: %w", err)
+		}
+		supplierAddresses := make([]string, 0, len(suppliersMap))
+		for addr := range suppliersMap {
+			supplierAddresses = append(supplierAddresses, addr)
+		}
 
-	c.settlementMonitor = NewSettlementMonitor(
-		c.logger,
-		c.blockSubscriber,
-		c.blockSubscriber.GetRPCClient(),
-		supplierAddresses,
-		c.masterPool,
-		nil, // SessionStore not available in LeaderController (settlement metadata won't be updated)
-		c.config.Config.GetSettlementWorkers(),
-	)
-	if err := c.settlementMonitor.Start(ctx); err != nil {
-		c.cleanup()
-		return fmt.Errorf("failed to start settlement monitor: %w", err)
+		c.settlementMonitor = NewSettlementMonitor(
+			c.logger,
+			c.blockSubscriber,
+			c.blockSubscriber.GetRPCClient(),
+			supplierAddresses,
+			c.masterPool,
+			nil, // SessionStore not available in LeaderController (settlement metadata won't be updated)
+			c.config.Config.GetSettlementWorkers(),
+		)
+		if err := c.settlementMonitor.Start(ctx); err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to start settlement monitor: %w", err)
+		}
+		c.logger.Info().
+			Int("suppliers", len(supplierAddresses)).
+			Msg("settlement monitor started (tracking on-chain claim settlements)")
 	}
-	c.logger.Info().
-		Int("suppliers", len(supplierAddresses)).
-		Msg("settlement monitor started (tracking on-chain claim settlements)")
 
 	c.active = true
 	c.logger.Info().Msg("leader controller started - all resources active")

@@ -89,6 +89,9 @@ type Config struct {
 	// BlockHealthMonitor configures block time health monitoring.
 	BlockHealthMonitor BlockHealthConfig `yaml:"block_health_monitor,omitempty"`
 
+	// SettlementMonitor configures on-chain claim settlement tracking.
+	SettlementMonitor SettlementMonitorConfigYAML `yaml:"settlement_monitor,omitempty"`
+
 	// DefaultServiceFactor is the global serviceFactor applied to all services.
 	// If set, effectiveLimit = appStake × DefaultServiceFactor
 	// If not set (0), use baseLimit formula: (appStake / numSuppliers) / proof_window_close_offset_blocks
@@ -155,6 +158,13 @@ type BalanceMonitorConfigYAML struct {
 	// Critical triggers when: (stake - min_stake) / proof_missing_penalty < threshold
 	// Default: 3 (critical when less than 3 missed proofs away from auto-unstake)
 	StakeCriticalProofThreshold int64 `yaml:"stake_critical_proof_threshold,omitempty"`
+}
+
+// SettlementMonitorConfigYAML contains configuration for on-chain settlement tracking.
+type SettlementMonitorConfigYAML struct {
+	// Enabled enables on-chain claim settlement tracking.
+	// Default: false
+	Enabled bool `yaml:"enabled,omitempty"`
 }
 
 // BlockHealthConfig contains configuration for block time health monitoring.
@@ -456,6 +466,11 @@ func (c *Config) GetBlockHealthSlownessThreshold() float64 {
 	return 1.5 // Default: 50% slower than expected
 }
 
+// GetSettlementMonitorEnabled returns whether on-chain settlement tracking is enabled.
+func (c *Config) GetSettlementMonitorEnabled() bool {
+	return c.SettlementMonitor.Enabled
+}
+
 // GetCacheTTL returns the cache TTL for Redis cached data.
 func (c *Config) GetCacheTTL() time.Duration {
 	if c.CacheTTL > 0 {
@@ -526,7 +541,8 @@ func (c *Config) GetSupplierClaimingConfig() SupplierClaimerConfig {
 
 // GetMasterPoolSize returns the master pool size, auto-calculating if not explicitly set.
 // Formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
-// Example (4 CPU, 78 suppliers): max(4×4, 78×6) + 22 = max(16, 468) + 22 = 490
+// Overhead = query_workers (+ settlement_workers if settlement_monitor enabled)
+// Example (4 CPU, 78 suppliers, settlement enabled): max(4×4, 78×6) + 22 = max(16, 468) + 22 = 490
 func (c *Config) GetMasterPoolSize(numSuppliers int) int {
 	if c.WorkerPools.MasterPoolSize > 0 {
 		return c.WorkerPools.MasterPoolSize
@@ -535,7 +551,10 @@ func (c *Config) GetMasterPoolSize(numSuppliers int) int {
 	// Use getEffectiveCPUCount() which respects GOMAXPROCS for container environments
 	cpuBased := getEffectiveCPUCount() * c.GetCPUMultiplier()
 	supplierBased := numSuppliers * c.GetWorkersPerSupplier()
-	overhead := c.GetQueryWorkers() + c.GetSettlementWorkers()
+	overhead := c.GetQueryWorkers()
+	if c.GetSettlementMonitorEnabled() {
+		overhead += c.GetSettlementWorkers()
+	}
 
 	baseSize := cpuBased
 	if supplierBased > cpuBased {
@@ -656,6 +675,9 @@ func DefaultConfig() *Config {
 		// This prevents orphaned sessions causing "SMST missing but relay count > 0" warnings
 		CacheTTL:              2 * time.Hour,  // Covers ~15 session lifecycles at 30s blocks
 		SubmissionTrackingTTL: 24 * time.Hour, // 24h for debugging (was 7 days)
+		SettlementMonitor: SettlementMonitorConfigYAML{
+			Enabled: false, // Off by default — operators opt-in
+		},
 		BalanceMonitor: BalanceMonitorConfigYAML{
 			Enabled:                     true,    // Enable by default
 			BalanceThresholdUpokt:       1000000, // 1 POKT = 1,000,000 upokt
