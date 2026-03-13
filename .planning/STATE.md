@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: executing
-stopped_at: Completed 01-02-PLAN.md (Phase 01 complete)
-last_updated: "2026-03-13T02:39:14Z"
-last_activity: 2026-03-13 -- Completed 01-02 (Caller migration and multi-backend config)
+status: in-progress
+stopped_at: Completed 02-01-PLAN.md
+last_updated: "2026-03-13T03:35:07Z"
+last_activity: 2026-03-13 -- Completed 02-01 (RoundRobinSelector and strategy wiring)
 progress:
   total_phases: 10
   completed_phases: 1
-  total_plans: 2
-  completed_plans: 2
-  percent: 10
+  total_plans: 3
+  completed_plans: 3
+  percent: 15
 ---
 
 # Project State
@@ -21,33 +21,34 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-12)
 
 **Core value:** When a backend node goes down, relays continue flowing to healthy backends without operator intervention.
-**Current focus:** Phase 1: Backend Pool Foundation
+**Current focus:** Phase 2: Round-Robin HTTP Selection
 
 ## Current Position
 
-Phase: 1 of 10 (Backend Pool Foundation) -- COMPLETE
-Plan: 2 of 2 in current phase
-Status: Phase Complete
-Last activity: 2026-03-13 -- Completed 01-02 (Caller migration and multi-backend config)
+Phase: 2 of 10 (Round-Robin HTTP Selection)
+Plan: 1 of 2 in current phase
+Status: In Progress
+Last activity: 2026-03-13 -- Completed 02-01 (RoundRobinSelector and strategy wiring)
 
-Progress: [██░░░░░░░░] 10%
+Progress: [██░░░░░░░░] 15%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 2
-- Average duration: 6.5min
-- Total execution time: 0.2 hours
+- Total plans completed: 3
+- Average duration: 5.7min
+- Total execution time: 0.3 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 2 | 13min | 6.5min |
+| 02 | 1 | 4min | 4min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (7min), 01-02 (6min)
-- Trend: stable
+- Last 5 plans: 01-01 (7min), 01-02 (6min), 02-01 (4min)
+- Trend: improving
 
 *Updated after each plan completion*
 
@@ -67,6 +68,10 @@ Recent decisions affecting current work:
 - [01-02]: GetBackendConfig() mirrors GetPool() fallback chain for consistent headers/auth resolution
 - [01-02]: Fixed pre-existing URL mutation bug in fallback path by copying parsedBackendURL
 - [01-02]: backend-2 uses same Docker image with separate k8s Service/Deployment
+- [02-01]: Auto-detect picks first_healthy for 1 backend, round_robin for 2+ -- no config required
+- [02-01]: Explicit load_balancing override respected silently without warnings
+- [02-01]: Unknown strategies rejected at config parse time with clear error
+- [02-01]: Strategy label includes (auto)/(explicit) annotation for startup log visibility
 
 ### Pending Todos
 
@@ -80,6 +85,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-13T02:39:14Z
-Stopped at: Completed 01-02-PLAN.md (Phase 01 complete)
-Resume file: .planning/phases/02-round-robin/02-01-PLAN.md
+Last session: 2026-03-13T03:35:07Z
+Stopped at: Completed 02-01-PLAN.md
+Resume file: .planning/phases/02-round-robin-http-selection/02-01-SUMMARY.md

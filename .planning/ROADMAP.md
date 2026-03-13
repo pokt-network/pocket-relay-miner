@@ -172,7 +172,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4/5/6 (5 and 6 can parallel afte
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Backend Pool Foundation | 0/2 | Not started | - |
-| 2. Round-Robin HTTP Selection | 0/2 | Not started | - |
+| 2. Round-Robin HTTP Selection | 1/2 | In Progress|  |
 | 3. Circuit Breaker | 0/1 | Not started | - |
 | 4. Health Check Probes | 0/1 | Not started | - |
 | 5. Fast-Fail and Resilience | 0/1 | Not started | - |

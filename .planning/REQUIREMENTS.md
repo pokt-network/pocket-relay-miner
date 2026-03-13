@@ -14,7 +14,7 @@
 
 ### Load Balancing
 
-- [ ] **LB-01**: Round-robin load balancing across healthy backends (default strategy)
+- [x] **LB-01**: Round-robin load balancing across healthy backends (default strategy)
 - [ ] **LB-02**: Least-connections load balancing (track active connections, select lowest)
 - [ ] **LB-03**: IP/session-hash routing for sticky backend selection (consistent hashing)
 - [ ] **LB-04**: Per-service load balancing strategy selection via config
@@ -40,7 +40,7 @@
 
 ### Transport Support
 
-- [ ] **XPORT-01**: Multi-backend support for JSON-RPC (HTTP) transport (per-request selection)
+- [x] **XPORT-01**: Multi-backend support for JSON-RPC (HTTP) transport (per-request selection)
 - [ ] **XPORT-02**: Multi-backend support for REST/Streaming (SSE) transport (per-connection selection)
 - [ ] **XPORT-03**: Multi-backend support for WebSocket transport (per-connection sticky routing)
 - [ ] **XPORT-04**: Multi-backend support for gRPC transport (per-call selection, integrate with gRPC connection lifecycle)
@@ -81,7 +81,7 @@
 | POOL-02 | Phase 1 | Complete |
 | POOL-03 | Phase 5 | Pending |
 | POOL-04 | Phase 6 | Pending |
-| LB-01 | Phase 2 | Pending |
+| LB-01 | Phase 2 | Complete |
 | LB-02 | Phase 10 | Pending |
 | LB-03 | Phase 10 | Pending |
 | LB-04 | Phase 10 | Pending |
@@ -95,7 +95,7 @@
 | RECV-03 | Phase 5 | Pending |
 | OBS-01 | Phase 6 | Pending |
 | OBS-02 | Phase 6 | Pending |
-| XPORT-01 | Phase 2 | Pending |
+| XPORT-01 | Phase 2 | Complete |
 | XPORT-02 | Phase 8 | Pending |
 | XPORT-03 | Phase 7 | Pending |
 | XPORT-04 | Phase 9 | Pending |
