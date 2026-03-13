@@ -25,6 +25,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
@@ -796,8 +797,17 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Forward request to backend (handles both streaming and non-streaming)
 	// Use the parsed POKTHTTPRequest if available, otherwise fall back to raw body
 	backendStart := time.Now()
-	respBody, respHeaders, respStatus, isStreaming, err := p.forwardToBackendWithStreaming(r.Context(), r, body, serviceID, &svcConfig, rpcType, poktHTTPRequest, w, relayRequest)
+	respBody, respHeaders, respStatus, isStreaming, endpoint, backendPool, err := p.forwardToBackendWithStreaming(r.Context(), r, body, serviceID, &svcConfig, rpcType, poktHTTPRequest, w, relayRequest)
 	backendDuration := time.Since(backendStart)
+
+	// Record result for circuit breaker (covers both success and error paths)
+	if endpoint != nil && backendPool != nil {
+		threshold := p.getCircuitBreakerThreshold(serviceID, rpcType)
+		transition := backendPool.RecordResult(endpoint, respStatus, err, threshold)
+		if transition != nil {
+			p.logCircuitBreakerTransition(transition, serviceID, rpcType)
+		}
+	}
 
 	// Record backend latency asynchronously (no blocking on histogram locks)
 	p.metricRecorder.RecordDuration(backendLatency, []string{serviceID}, backendDuration)
@@ -1193,7 +1203,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	poktHTTPRequest *sdktypes.POKTHTTPRequest,
 	w http.ResponseWriter,
 	relayRequest *servicetypes.RelayRequest,
-) ([]byte, http.Header, int, bool, error) {
+) ([]byte, http.Header, int, bool, *pool.BackendEndpoint, *pool.Pool, error) {
 	// Create session context once for all logging in this function
 	var sessionCtx *logging.SessionContext
 	if relayRequest != nil {
@@ -1206,11 +1216,11 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	// exact match -> default_backend -> jsonrpc -> rest -> any available)
 	backendPool := p.config.GetPool(serviceID, rpcType)
 	if backendPool == nil {
-		return nil, nil, 0, false, fmt.Errorf("no backend pool configured for service %s and RPC type %s", serviceID, rpcType)
+		return nil, nil, 0, false, nil, nil, fmt.Errorf("no backend pool configured for service %s and RPC type %s", serviceID, rpcType)
 	}
 	endpoint := backendPool.Next()
 	if endpoint == nil {
-		return nil, nil, 0, false, fmt.Errorf("no healthy backend available for service %s (pool: %s)", serviceID, backendPool.PoolName())
+		return nil, nil, 0, false, nil, nil, fmt.Errorf("no healthy backend available for service %s (pool: %s)", serviceID, backendPool.PoolName())
 	}
 
 	p.logger.Debug().
@@ -1247,7 +1257,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		var poktURL *url.URL
 		poktURL, err = url.Parse(poktHTTPRequest.Url)
 		if err != nil {
-			return nil, nil, 0, false, fmt.Errorf("failed to parse request URL: %w", err)
+			return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to parse request URL: %w", err)
 		}
 
 		// Update the path by merging backend path with POKT request path
@@ -1271,7 +1281,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		// Create the HTTP request with the payload body
 		req, err = http.NewRequestWithContext(ctx, poktHTTPRequest.Method, requestURL.String(), bytes.NewReader(poktHTTPRequest.BodyBz))
 		if err != nil {
-			return nil, nil, 0, false, fmt.Errorf("failed to create request: %w", err)
+			return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to create request: %w", err)
 		}
 
 		// Copy headers from POKTHTTPRequest
@@ -1301,7 +1311,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 
 		req, err = http.NewRequestWithContext(ctx, originalReq.Method, fullBackendURL, bytes.NewReader(body))
 		if err != nil {
-			return nil, nil, 0, false, fmt.Errorf("failed to create request: %w", err)
+			return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to create request: %w", err)
 		}
 
 		// Copy relevant headers from original request
@@ -1355,14 +1365,14 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		// for proper metrics and logging
 		if originalReq.Context().Err() != nil {
 			// Client disconnected - their context was cancelled
-			return nil, nil, 0, false, fmt.Errorf("%s: %w", rejectReasonClientDisconnected, originalReq.Context().Err())
+			return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("%s: %w", rejectReasonClientDisconnected, originalReq.Context().Err())
 		}
 		if ctx.Err() != nil {
 			// Our internal timeout fired
-			return nil, nil, 0, false, fmt.Errorf("%s (service=%s, timeout=%v): %w", rejectReasonBackendTimeout, serviceID, timeout, ctx.Err())
+			return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("%s (service=%s, timeout=%v): %w", rejectReasonBackendTimeout, serviceID, timeout, ctx.Err())
 		}
 		// Other network/backend error
-		return nil, nil, 0, false, fmt.Errorf("backend request failed: %w", err)
+		return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("backend request failed: %w", err)
 	}
 
 	isStreaming := isStreamingResponse(resp)
@@ -1381,27 +1391,64 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Msg("handling streaming response with batch-based signing (SSE/NDJSON)")
 			respBody, streamErr := p.handleStreamingResponseWithSigning(ctx, resp, w, relayRequest, serviceID, rpcType)
-			return respBody, resp.Header, resp.StatusCode, true, streamErr
+			return respBody, resp.Header, resp.StatusCode, true, endpoint, backendPool, streamErr
 		}
 
 		// Fallback: forward raw stream without signing (backward compatibility / testing)
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("handling streaming response without signing (no relay request or signer)")
 		respBody, streamErr := p.handleStreamingResponse(resp, w)
-		return respBody, resp.Header, resp.StatusCode, true, streamErr
+		return respBody, resp.Header, resp.StatusCode, true, endpoint, backendPool, streamErr
 	}
 
 	// Read response body using buffer pool to avoid RAM exhaustion
 	// Handles responses from 10KB to 200MB+ without allocating unbounded memory
 	respBody, err := p.bufferPool.ReadWithBuffer(resp.Body)
 	if err != nil {
-		return nil, nil, 0, false, fmt.Errorf("failed to read response: %w", err)
+		return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to read response: %w", err)
 	}
 	if closeErr := resp.Body.Close(); closeErr != nil {
 		p.logger.Warn().Err(closeErr).Msg("failed to close response body")
 	}
 
-	return respBody, resp.Header, resp.StatusCode, false, nil
+	return respBody, resp.Header, resp.StatusCode, false, endpoint, backendPool, nil
+}
+
+// getCircuitBreakerThreshold returns the unhealthy threshold for circuit breaker
+// evaluation. Reads from BackendHealthCheckConfig if configured, otherwise uses
+// the pool package default (5).
+func (p *ProxyServer) getCircuitBreakerThreshold(serviceID, rpcType string) int32 {
+	if backendCfg := p.config.GetBackendConfig(serviceID, rpcType); backendCfg != nil {
+		if backendCfg.HealthCheck != nil && backendCfg.HealthCheck.UnhealthyThreshold > 0 {
+			return int32(backendCfg.HealthCheck.UnhealthyThreshold)
+		}
+	}
+	return pool.DefaultUnhealthyThreshold
+}
+
+// logCircuitBreakerTransition logs a circuit breaker state transition.
+// Error level for healthy->unhealthy (circuit broken), Info level for recovery.
+// Silent between transitions (no per-failure logging).
+func (p *ProxyServer) logCircuitBreakerTransition(transition *pool.TransitionEvent, serviceID, rpcType string) {
+	if transition.OldHealthy && !transition.NewHealthy {
+		// Circuit broken: healthy -> unhealthy
+		p.logger.Error().
+			Str("backend", transition.Endpoint.Name).
+			Str("url", transition.Endpoint.RawURL).
+			Str(logging.FieldServiceID, serviceID).
+			Str("rpc_type", rpcType).
+			Int32("failures", transition.Failures).
+			Int("last_status", transition.StatusCode).
+			Msg("backend circuit-broken")
+	} else if !transition.OldHealthy && transition.NewHealthy {
+		// Recovery: unhealthy -> healthy
+		p.logger.Info().
+			Str("backend", transition.Endpoint.Name).
+			Str("url", transition.Endpoint.RawURL).
+			Str(logging.FieldServiceID, serviceID).
+			Str("rpc_type", rpcType).
+			Msg("backend recovered")
+	}
 }
 
 // isStreamingResponse checks if the HTTP response should be handled as a stream.

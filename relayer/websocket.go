@@ -1045,7 +1045,21 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		if err != nil {
 			p.logger.Warn().Err(err).Msg("failed to create websocket bridge")
 			_ = gatewayConn.Close()
+
+			// Record connection error for circuit breaker
+			threshold := p.getCircuitBreakerThreshold(serviceID, "websocket")
+			transition := wsPool.RecordResult(wsEndpoint, 0, err, threshold)
+			if transition != nil {
+				p.logCircuitBreakerTransition(transition, serviceID, "websocket")
+			}
 			return
+		}
+
+		// Record successful backend connection for circuit breaker
+		threshold := p.getCircuitBreakerThreshold(serviceID, "websocket")
+		transition := wsPool.RecordResult(wsEndpoint, 200, nil, threshold)
+		if transition != nil {
+			p.logCircuitBreakerTransition(transition, serviceID, "websocket")
 		}
 
 		// Run bridge (blocking)
