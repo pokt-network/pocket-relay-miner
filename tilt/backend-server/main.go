@@ -38,6 +38,10 @@ type Config struct {
 }
 
 var (
+	// backendID identifies this backend instance in responses.
+	// Set from BACKEND_ID env var at startup; defaults to "unknown".
+	backendID = "unknown"
+
 	// Prometheus metrics
 	requestsTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -63,6 +67,12 @@ func init() {
 }
 
 func main() {
+	// Read backend identity from environment
+	if id := os.Getenv("BACKEND_ID"); id != "" {
+		backendID = id
+	}
+	log.Printf("Backend ID: %s", backendID)
+
 	// Load config
 	cfg := loadConfig()
 
@@ -203,9 +213,10 @@ func handleJSONRPC(cfg *Config) http.HandlerFunc {
 			"jsonrpc": "2.0",
 			"id":      id,
 			"result": map[string]interface{}{
-				"method": method,
-				"params": req["params"],
-				"status": "ok",
+				"method":     method,
+				"params":     req["params"],
+				"status":     "ok",
+				"backend_id": backendID,
 			},
 		}
 
@@ -304,11 +315,12 @@ func handleWebSocket(cfg *Config) http.HandlerFunc {
 							"jsonrpc": "2.0",
 							"id":      id,
 							"result": map[string]interface{}{
-								"method":   method,
-								"params":   jsonMsg["params"],
-								"sequence": i + 1,
-								"total":    repeatCount,
-								"status":   "ok",
+								"method":     method,
+								"params":     jsonMsg["params"],
+								"sequence":   i + 1,
+								"total":      repeatCount,
+								"status":     "ok",
+								"backend_id": backendID,
 							},
 						}
 

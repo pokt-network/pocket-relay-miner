@@ -92,6 +92,9 @@ spec:
           name: grpc
         - containerPort: 9095
           name: metrics
+        env:
+        - name: BACKEND_ID
+          value: "backend-1"
         resources:
           requests:
             cpu: "{}"
@@ -179,6 +182,9 @@ spec:
           name: grpc
         - containerPort: 9095
           name: metrics
+        env:
+        - name: BACKEND_ID
+          value: "backend-2"
         resources:
           requests:
             cpu: "{}"
