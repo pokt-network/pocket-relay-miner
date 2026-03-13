@@ -798,24 +798,44 @@ func (c *Config) ValidateTimeoutProfiles() error {
 	return nil
 }
 
-// GetBackend returns the backend configuration for a service and RPC type.
-// Returns nil if the service or RPC type is not found.
-func (c *Config) GetBackend(serviceID, rpcType string) *BackendConfig {
-	if svc, ok := c.Services[serviceID]; ok {
-		if backend, ok := svc.Backends[rpcType]; ok {
+// GetBackendConfig returns the BackendConfig for a service and RPC type,
+// using the same fallback chain as GetPool (exact -> default_backend -> jsonrpc -> rest -> any).
+// Returns nil if no backend config is found after all fallbacks.
+// Use this to access pool-level shared config (headers, auth) alongside GetPool().
+func (c *Config) GetBackendConfig(serviceID, rpcType string) *BackendConfig {
+	svc, svcExists := c.Services[serviceID]
+	if !svcExists {
+		return nil
+	}
+
+	// Direct lookup
+	if backend, ok := svc.Backends[rpcType]; ok {
+		return &backend
+	}
+
+	// Fallback: default_backend
+	if svc.DefaultBackend != "" {
+		if backend, ok := svc.Backends[svc.DefaultBackend]; ok {
 			return &backend
 		}
 	}
-	return nil
-}
 
-// GetBackendURL returns the backend URL for a service and RPC type.
-// Returns an empty string if not found.
-func (c *Config) GetBackendURL(serviceID, rpcType string) string {
-	if backend := c.GetBackend(serviceID, rpcType); backend != nil {
-		return backend.URL
+	// Fallback: jsonrpc
+	if backend, ok := svc.Backends[BackendTypeJSONRPC]; ok {
+		return &backend
 	}
-	return ""
+
+	// Fallback: rest
+	if backend, ok := svc.Backends[BackendTypeREST]; ok {
+		return &backend
+	}
+
+	// Fallback: any available
+	for _, backend := range svc.Backends {
+		return &backend
+	}
+
+	return nil
 }
 
 // BuildPools creates backend pools from the service configuration.

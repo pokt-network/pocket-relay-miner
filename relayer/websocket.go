@@ -981,15 +981,22 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			return
 		}
 
-		// Get WebSocket backend URL
-		var backendURL string
-		var configHeaders map[string]string
-		if backend, ok := svcConfig.Backends["websocket"]; ok {
-			backendURL = backend.URL
-			configHeaders = backend.Headers
-		} else {
+		// Get WebSocket backend URL via pool-based API
+		wsPool := p.config.GetPool(serviceID, "websocket")
+		if wsPool == nil {
 			http.Error(w, "WebSocket backend not configured for this service", http.StatusServiceUnavailable)
 			return
+		}
+		wsEndpoint := wsPool.Next()
+		if wsEndpoint == nil {
+			http.Error(w, "No healthy WebSocket backend available", http.StatusServiceUnavailable)
+			return
+		}
+		backendURL := wsEndpoint.RawURL
+		// Headers still from BackendConfig (pool-level shared config)
+		var configHeaders map[string]string
+		if backend, ok := svcConfig.Backends["websocket"]; ok {
+			configHeaders = backend.Headers
 		}
 
 		// Build headers

@@ -19,7 +19,6 @@ import (
 
 	"github.com/alitto/pond/v2"
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
-	"github.com/puzpuzpuz/xsync/v4"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
@@ -152,15 +151,6 @@ type ProxyServer struct {
 	// HTTP server
 	server *http.Server
 
-	// Parsed backend URLs (old - deprecated, kept for compatibility)
-	backendURLs map[string]*url.URL
-
-	// Thread-safe cache of pre-parsed backend URLs
-	// Key: "serviceID:rpcType" (e.g., "develop:jsonrpc")
-	// Value: *url.URL
-	// Updated on config hot reload
-	parsedBackendURLs *xsync.Map[string, *url.URL]
-
 	// Current block height (from block subscriber)
 	currentBlockHeight atomic.Int64
 
@@ -205,35 +195,8 @@ func NewProxyServer(
 	publisher transport.MinedRelayPublisher,
 	workerPool pond.Pool,
 ) (*ProxyServer, error) {
-	// Parse backend URLs - use the first available backend for each service
-	backendURLs := make(map[string]*url.URL)
-	for id, svc := range config.Services {
-		// Find the first available backend (prefer "rest" if available)
-		var backendURL string
-		if backend, ok := svc.Backends["rest"]; ok {
-			backendURL = backend.URL
-		} else {
-			// Use the first backend found
-			for _, backend := range svc.Backends {
-				backendURL = backend.URL
-				break
-			}
-		}
-		if backendURL == "" {
-			return nil, fmt.Errorf("no backend configured for service %s", id)
-		}
-		parsed, err := url.Parse(backendURL)
-		if err != nil {
-			return nil, fmt.Errorf("invalid backend URL for service %s: %w", id, err)
-		}
-		backendURLs[id] = parsed
-	}
-
 	// Build HTTP client pool (one client per timeout profile)
 	clientPool := buildClientPool(config, &config.HTTPTransport)
-
-	// Initialize thread-safe parsed URL cache
-	parsedURLCache := xsync.NewMap[string, *url.URL]()
 
 	// Create subpools with dynamic worker allocation based on master pool size
 	// This scales with available hardware
@@ -292,8 +255,6 @@ func NewProxyServer(
 		config:            config,
 		healthChecker:     healthChecker,
 		publisher:         publisher,
-		backendURLs:       backendURLs,
-		parsedBackendURLs: parsedURLCache,
 		clientPool:        clientPool,
 		bufferPool:        bufferPool,
 		workerPool:        workerPool,
@@ -301,6 +262,26 @@ func NewProxyServer(
 		publishSubpool:    publishSubpool,
 		metricsSubpool:    metricsSubpool,
 		metricRecorder:    metricRecorder,
+	}
+
+	// Log pool summary at startup for visibility into backend configuration
+	for serviceID, svc := range config.Services {
+		for rpcType := range svc.Backends {
+			if bp := config.GetPool(serviceID, rpcType); bp != nil {
+				endpoints := bp.All()
+				urls := make([]string, len(endpoints))
+				for i, ep := range endpoints {
+					urls[i] = ep.Name
+				}
+				logger.Info().
+					Str("service", serviceID).
+					Str("transport", rpcType).
+					Int("backends", bp.Len()).
+					Str("strategy", "first_healthy").
+					Strs("endpoints", urls).
+					Msg("backend pool initialized")
+			}
+		}
 	}
 
 	return proxy, nil
@@ -1221,69 +1202,31 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		sessionCtx = &logging.SessionContext{ServiceID: serviceID}
 	}
 
-	// Find the backend configuration
-	var backendURL string
+	// Resolve backend via pool-based API (GetPool implements the fallback chain:
+	// exact match -> default_backend -> jsonrpc -> rest -> any available)
+	backendPool := p.config.GetPool(serviceID, rpcType)
+	if backendPool == nil {
+		return nil, nil, 0, false, fmt.Errorf("no backend pool configured for service %s and RPC type %s", serviceID, rpcType)
+	}
+	endpoint := backendPool.Next()
+	if endpoint == nil {
+		return nil, nil, 0, false, fmt.Errorf("no healthy backend available for service %s (pool: %s)", serviceID, backendPool.PoolName())
+	}
+	backendURL := endpoint.RawURL
+	parsedBackendURL := endpoint.URL
+
+	// Get headers and auth from the BackendConfig (pool-level shared config)
 	var configHeaders map[string]string
 	var auth *AuthenticationConfig
-
-	if backend, ok := svcConfig.Backends[rpcType]; ok {
-		backendURL = backend.URL
-		configHeaders = backend.Headers
-		auth = backend.Authentication
-	} else {
-		// Fallback chain if requested type not found
-		// Try: configured default → DefaultBackendType → rest → any available
-		fallbackTypes := make([]string, 0)
-
-		if svcConfig.DefaultBackend != "" && svcConfig.DefaultBackend != rpcType {
-			fallbackTypes = append(fallbackTypes, svcConfig.DefaultBackend)
-		}
-		if rpcType != DefaultBackendType {
-			fallbackTypes = append(fallbackTypes, DefaultBackendType)
-		}
-		if rpcType != BackendTypeREST {
-			fallbackTypes = append(fallbackTypes, BackendTypeREST)
-		}
-
-		// Try fallback types
-		for _, tryType := range fallbackTypes {
-			if backend, ok := svcConfig.Backends[tryType]; ok {
-				backendURL = backend.URL
-				configHeaders = backend.Headers
-				auth = backend.Authentication
-				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-					Str("requested_type", rpcType).
-					Str("fallback_type", tryType).
-					Msg("using fallback backend type")
-				break
-			}
-		}
-	}
-
-	if backendURL == "" {
-		return nil, nil, 0, false, fmt.Errorf("no backend configured for service %s and RPC type %s", serviceID, rpcType)
+	if backendCfg := p.config.GetBackendConfig(serviceID, rpcType); backendCfg != nil {
+		configHeaders = backendCfg.Headers
+		auth = backendCfg.Authentication
 	}
 
 	// Create backend request
 	timeout := p.config.GetServiceTimeout(serviceID)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-
-	// Get parsed backend URL from cache or parse and cache it
-	// Cache key: "serviceID:rpcType"
-	cacheKey := serviceID + ":" + rpcType
-	parsedBackendURL, _ := p.parsedBackendURLs.LoadOrCompute(cacheKey, func() (*url.URL, bool) {
-		parsed, parseErr := url.Parse(backendURL)
-		if parseErr != nil {
-			// Return nil on error - will be caught below
-			return nil, false
-		}
-		return parsed, false
-	})
-
-	if parsedBackendURL == nil {
-		return nil, nil, 0, false, fmt.Errorf("failed to parse backend URL: %s", backendURL)
-	}
 
 	var req *http.Request
 	var err error
@@ -1339,12 +1282,14 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		// Fallback: forward the raw body for non-relay traffic
 		fullBackendURL := backendURL
 		if originalReq.URL.Path != "" && originalReq.URL.Path != "/" {
-			if parsedBackendURL.Path == "" || parsedBackendURL.Path == "/" {
-				parsedBackendURL.Path = originalReq.URL.Path
+			// Copy parsedBackendURL to avoid mutating the shared pool endpoint URL
+			fallbackURL := *parsedBackendURL
+			if fallbackURL.Path == "" || fallbackURL.Path == "/" {
+				fallbackURL.Path = originalReq.URL.Path
 			} else {
-				parsedBackendURL.Path = strings.TrimSuffix(parsedBackendURL.Path, "/") + originalReq.URL.Path
+				fallbackURL.Path = strings.TrimSuffix(fallbackURL.Path, "/") + originalReq.URL.Path
 			}
-			fullBackendURL = parsedBackendURL.String()
+			fullBackendURL = fallbackURL.String()
 		}
 
 		req, err = http.NewRequestWithContext(ctx, originalReq.Method, fullBackendURL, bytes.NewReader(body))
