@@ -89,10 +89,11 @@ Plans:
   2. A backend that was circuit-broken returns to healthy status after consecutive successful probes (configurable healthy threshold)
   3. Operators can define custom probe request body, expected HTTP status, and response body matching per backend
   4. Health check probe intervals and thresholds are configurable per service
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 04-01: TBD
+- [ ] 04-01-PLAN.md — Config extension (Method, RequestBody, ContentType, ExpectedBody, ExpectedStatus), HealthChecker refactor to per-pool multi-endpoint probing, custom probe building and response validation, registration path updates
+- [ ] 04-02-PLAN.md — Comprehensive unit tests for recovery, custom probes, thresholds, multi-endpoint probing, auth headers
 
 ### Phase 5: Fast-Fail and Resilience
 **Goal**: When all backends are unhealthy the relayer fast-fails immediately, and when some are healthy it retries failed requests on alternates
@@ -187,7 +188,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4/5/6 (5 and 6 can parallel afte
 | 2. Round-Robin HTTP Selection | 2/2 | Complete | 2026-03-13 |
 | 02.1. Fix False Supplier Drains | 2/2 | Complete   | 2026-03-13 |
 | 3. Circuit Breaker | 0/2 | Not started | - |
-| 4. Health Check Probes | 0/1 | Not started | - |
+| 4. Health Check Probes | 0/2 | Not started | - |
 | 5. Fast-Fail and Resilience | 0/1 | Not started | - |
 | 6. Observability | 0/1 | Not started | - |
 | 7. WebSocket Multi-Backend | 0/1 | Not started | - |

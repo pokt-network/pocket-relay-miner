@@ -715,12 +715,20 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Set supplier cache for checking supplier state before accepting relays
 	proxy.SetSupplierCache(supplierCache)
 
-	// Register backends for health checking (per RPC type)
+	// Register backend pools for health checking (per RPC type)
 	for serviceID, svc := range config.Services {
 		for rpcType, backend := range svc.Backends {
 			if backend.HealthCheck != nil && backend.HealthCheck.Enabled {
-				backendID := fmt.Sprintf("%s:%s", serviceID, rpcType)
-				healthChecker.RegisterBackend(backendID, backend.URL, backend.HealthCheck)
+				poolKey := fmt.Sprintf("%s:%s", serviceID, rpcType)
+				p := config.GetPool(serviceID, rpcType)
+				if p == nil {
+					logger.Warn().
+						Str("service_id", serviceID).
+						Str("rpc_type", rpcType).
+						Msg("health check enabled but no pool found, skipping")
+					continue
+				}
+				healthChecker.RegisterPool(poolKey, p.All(), backend.HealthCheck, backend.Headers, backend.Authentication)
 			}
 		}
 	}

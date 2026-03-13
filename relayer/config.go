@@ -380,6 +380,26 @@ type BackendHealthCheckConfig struct {
 
 	// HealthyThreshold is how many successes before marking healthy.
 	HealthyThreshold int `yaml:"healthy_threshold"`
+
+	// Method is the HTTP method for health check probes (default: GET).
+	// Use POST for JSON-RPC backends that require a request body.
+	Method string `yaml:"method,omitempty"`
+
+	// RequestBody is the request body for health check probes (e.g., JSON-RPC request).
+	// When set, the probe sends this as the HTTP body.
+	RequestBody string `yaml:"request_body,omitempty"`
+
+	// ContentType is an explicit Content-Type override for probe requests.
+	// If not set and RequestBody starts with '{' or '[', defaults to "application/json".
+	ContentType string `yaml:"content_type,omitempty"`
+
+	// ExpectedBody is a substring that must be present in the response body.
+	// If not set, response body is not validated (only status code).
+	ExpectedBody string `yaml:"expected_body,omitempty"`
+
+	// ExpectedStatus is a list of acceptable HTTP status codes.
+	// If not set, any 2xx status code (200-299) is considered healthy.
+	ExpectedStatus []int `yaml:"expected_status,omitempty"`
 }
 
 // MetricsConfig contains metrics server configuration.

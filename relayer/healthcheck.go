@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -39,13 +40,13 @@ func (s HealthStatus) String() string {
 	}
 }
 
-// BackendHealth tracks the health of a single backend.
+// BackendHealth tracks the health of a single backend endpoint.
 // When a pool.BackendEndpoint is associated, health state is delegated to it
 // (single source of truth shared with the circuit breaker). Supplementary fields
 // like lastCheck and lastError remain on BackendHealth for active health check
-// diagnostics (Phase 4).
+// diagnostics.
 type BackendHealth struct {
-	// ServiceID is the service this backend belongs to.
+	// ServiceID is the pool key this backend belongs to (e.g., "serviceID:rpcType").
 	ServiceID string
 
 	// BackendURL is the URL of the backend.
@@ -55,6 +56,12 @@ type BackendHealth struct {
 	// When non-nil, IsHealthy() delegates to endpoint.IsHealthy() and
 	// recordFailure/recordSuccess operate on endpoint atomics.
 	endpoint *pool.BackendEndpoint
+
+	// headers are pool-level headers applied to probe requests.
+	headers map[string]string
+
+	// auth is pool-level authentication applied to probe requests.
+	auth *AuthenticationConfig
 
 	// Status is the current health status (used only when endpoint is nil, legacy path).
 	status atomic.Int32
@@ -139,11 +146,11 @@ type HealthChecker struct {
 	logger     logging.Logger
 	httpClient *http.Client
 
-	// backends maps serviceID -> BackendHealth
-	backends   map[string]*BackendHealth
+	// backends maps poolKey -> []*BackendHealth (one entry per endpoint in the pool)
+	backends   map[string][]*BackendHealth
 	backendsMu sync.RWMutex
 
-	// Configuration per backend
+	// Configuration per pool
 	configs   map[string]*BackendHealthCheckConfig
 	configsMu sync.RWMutex
 
@@ -170,86 +177,89 @@ func NewHealthChecker(logger logging.Logger) *HealthChecker {
 				IdleConnTimeout:     90 * time.Second,
 			},
 		},
-		backends:                  make(map[string]*BackendHealth),
+		backends:                  make(map[string][]*BackendHealth),
 		configs:                   make(map[string]*BackendHealthCheckConfig),
 		defaultUnhealthyThreshold: 3,
 		defaultHealthyThreshold:   2,
 	}
 }
 
-// RegisterBackend registers a backend for health checking.
-func (hc *HealthChecker) RegisterBackend(serviceID, backendURL string, config *BackendHealthCheckConfig) {
-	hc.backendsMu.Lock()
-	hc.backends[serviceID] = &BackendHealth{
-		ServiceID:  serviceID,
-		BackendURL: backendURL,
+// RegisterPool registers all endpoints in a pool for health checking.
+// Each endpoint gets its own BackendHealth entry linked to the pool's BackendEndpoint.
+// The config, headers, and auth are shared across all endpoints in the pool.
+func (hc *HealthChecker) RegisterPool(poolKey string, endpoints []*pool.BackendEndpoint, config *BackendHealthCheckConfig, headers map[string]string, auth *AuthenticationConfig) {
+	backends := make([]*BackendHealth, 0, len(endpoints))
+	for _, ep := range endpoints {
+		backends = append(backends, &BackendHealth{
+			ServiceID:  poolKey,
+			BackendURL: ep.RawURL,
+			endpoint:   ep,
+			headers:    headers,
+			auth:       auth,
+		})
 	}
+
+	hc.backendsMu.Lock()
+	hc.backends[poolKey] = backends
 	hc.backendsMu.Unlock()
 
 	if config != nil {
 		hc.configsMu.Lock()
-		hc.configs[serviceID] = config
+		hc.configs[poolKey] = config
 		hc.configsMu.Unlock()
 	}
 
 	hc.logger.Info().
-		Str(logging.FieldServiceID, serviceID).
-		Str("backend_url", backendURL).
+		Str(logging.FieldServiceID, poolKey).
+		Int("endpoint_count", len(endpoints)).
 		Bool("health_check_enabled", config != nil && config.Enabled).
-		Msg("registered backend")
+		Msg("registered pool for health checking")
 }
 
-// RegisterBackendWithEndpoint registers a backend for health checking with a pool endpoint.
-// The pool BackendEndpoint becomes the single source of truth for health state,
-// shared with the circuit breaker (passive failure detection from relay traffic).
-func (hc *HealthChecker) RegisterBackendWithEndpoint(serviceID, backendURL string, config *BackendHealthCheckConfig, endpoint *pool.BackendEndpoint) {
-	hc.backendsMu.Lock()
-	hc.backends[serviceID] = &BackendHealth{
-		ServiceID:  serviceID,
-		BackendURL: backendURL,
-		endpoint:   endpoint,
-	}
-	hc.backendsMu.Unlock()
-
-	if config != nil {
-		hc.configsMu.Lock()
-		hc.configs[serviceID] = config
-		hc.configsMu.Unlock()
-	}
-
-	hc.logger.Info().
-		Str(logging.FieldServiceID, serviceID).
-		Str("backend_url", backendURL).
-		Bool("health_check_enabled", config != nil && config.Enabled).
-		Bool("pool_endpoint_linked", true).
-		Msg("registered backend with pool endpoint")
-}
-
-// GetHealth returns the health status for a service.
-func (hc *HealthChecker) GetHealth(serviceID string) *BackendHealth {
+// GetHealth returns the health status for the first endpoint in a pool.
+// For per-endpoint health, use GetAllHealth.
+func (hc *HealthChecker) GetHealth(poolKey string) *BackendHealth {
 	hc.backendsMu.RLock()
 	defer hc.backendsMu.RUnlock()
-	return hc.backends[serviceID]
+	backends := hc.backends[poolKey]
+	if len(backends) == 0 {
+		return nil
+	}
+	return backends[0]
 }
 
-// IsHealthy returns true if the backend for the given service is healthy.
-func (hc *HealthChecker) IsHealthy(serviceID string) bool {
-	health := hc.GetHealth(serviceID)
-	if health == nil {
-		// Unknown backend - assume healthy
+// IsHealthy returns true if any backend in the pool is healthy.
+func (hc *HealthChecker) IsHealthy(poolKey string) bool {
+	hc.backendsMu.RLock()
+	defer hc.backendsMu.RUnlock()
+	backends := hc.backends[poolKey]
+	if len(backends) == 0 {
+		// Unknown pool - assume healthy
 		return true
 	}
-	return health.IsHealthy()
+	for _, b := range backends {
+		if b.IsHealthy() {
+			return true
+		}
+	}
+	return false
 }
 
-// GetAllHealth returns health status for all backends.
+// GetAllHealth returns health status for all backends across all pools.
 func (hc *HealthChecker) GetAllHealth() map[string]*BackendHealth {
 	hc.backendsMu.RLock()
 	defer hc.backendsMu.RUnlock()
 
-	result := make(map[string]*BackendHealth, len(hc.backends))
-	for k, v := range hc.backends {
-		result[k] = v
+	result := make(map[string]*BackendHealth)
+	for poolKey, backends := range hc.backends {
+		if len(backends) == 1 {
+			result[poolKey] = backends[0]
+		} else {
+			for i, b := range backends {
+				key := fmt.Sprintf("%s#%d", poolKey, i)
+				result[key] = b
+			}
+		}
 	}
 	return result
 }
@@ -265,12 +275,12 @@ func (hc *HealthChecker) Start(ctx context.Context) error {
 	ctx, hc.cancelFn = context.WithCancel(ctx)
 	hc.mu.Unlock()
 
-	// Start health check loops for each configured backend
+	// Start health check loops for each configured pool
 	hc.configsMu.RLock()
-	for serviceID, config := range hc.configs {
+	for poolKey, config := range hc.configs {
 		if config.Enabled {
 			hc.wg.Add(1)
-			go hc.healthCheckLoop(ctx, serviceID, config)
+			go hc.healthCheckLoop(ctx, poolKey, config)
 		}
 	}
 	hc.configsMu.RUnlock()
@@ -279,8 +289,8 @@ func (hc *HealthChecker) Start(ctx context.Context) error {
 	return nil
 }
 
-// healthCheckLoop runs periodic health checks for a single backend.
-func (hc *HealthChecker) healthCheckLoop(ctx context.Context, serviceID string, config *BackendHealthCheckConfig) {
+// healthCheckLoop runs periodic health checks for all endpoints in a pool.
+func (hc *HealthChecker) healthCheckLoop(ctx context.Context, poolKey string, config *BackendHealthCheckConfig) {
 	defer hc.wg.Done()
 
 	interval := time.Duration(config.IntervalSeconds) * time.Second
@@ -288,28 +298,31 @@ func (hc *HealthChecker) healthCheckLoop(ctx context.Context, serviceID string, 
 	defer ticker.Stop()
 
 	// Run initial check immediately
-	hc.checkBackend(ctx, serviceID, config)
+	hc.checkPool(ctx, poolKey, config)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			hc.checkBackend(ctx, serviceID, config)
+			hc.checkPool(ctx, poolKey, config)
 		}
 	}
 }
 
-// checkBackend performs a single health check for a backend.
-func (hc *HealthChecker) checkBackend(ctx context.Context, serviceID string, config *BackendHealthCheckConfig) {
+// checkPool performs health checks for all endpoints in a pool.
+func (hc *HealthChecker) checkPool(ctx context.Context, poolKey string, config *BackendHealthCheckConfig) {
 	hc.backendsMu.RLock()
-	backend, ok := hc.backends[serviceID]
+	backends := hc.backends[poolKey]
 	hc.backendsMu.RUnlock()
 
-	if !ok {
-		return
+	for _, backend := range backends {
+		hc.checkEndpoint(ctx, backend, config)
 	}
+}
 
+// checkEndpoint performs a single health check for a backend endpoint.
+func (hc *HealthChecker) checkEndpoint(ctx context.Context, backend *BackendHealth, config *BackendHealthCheckConfig) {
 	// Build health check URL with proper path joining
 	healthURL, err := joinURLPath(backend.BackendURL, config.Endpoint)
 	if err != nil {
@@ -326,7 +339,7 @@ func (hc *HealthChecker) checkBackend(ctx context.Context, serviceID string, con
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, healthURL, nil)
+	req, err := buildProbeRequest(reqCtx, healthURL, config, backend)
 	if err != nil {
 		hc.recordFailure(backend, config, fmt.Sprintf("failed to create request: %v", err))
 		return
@@ -340,13 +353,101 @@ func (hc *HealthChecker) checkBackend(ctx context.Context, serviceID string, con
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Check response status
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		hc.recordFailure(backend, config, fmt.Sprintf("unhealthy status code: %d", resp.StatusCode))
+	// Always read the full response body to prevent connection leaks
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		hc.recordFailure(backend, config, fmt.Sprintf("failed to read response body: %v", err))
+		return
+	}
+
+	// Validate response
+	if err := validateResponse(resp.StatusCode, body, config); err != nil {
+		hc.recordFailure(backend, config, err.Error())
 		return
 	}
 
 	hc.recordSuccess(backend, config)
+}
+
+// buildProbeRequest creates an HTTP request for a health check probe.
+// Applies custom method, body, content-type, and pool-level auth/headers.
+func buildProbeRequest(ctx context.Context, healthURL string, config *BackendHealthCheckConfig, backend *BackendHealth) (*http.Request, error) {
+	method := http.MethodGet
+	if config.Method != "" {
+		method = strings.ToUpper(config.Method)
+	}
+
+	var bodyReader io.Reader
+	if config.RequestBody != "" {
+		bodyReader = strings.NewReader(config.RequestBody)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, method, healthURL, bodyReader)
+	if err != nil {
+		return nil, err
+	}
+
+	// Set Content-Type
+	if config.ContentType != "" {
+		req.Header.Set("Content-Type", config.ContentType)
+	} else if config.RequestBody != "" {
+		trimmed := strings.TrimSpace(config.RequestBody)
+		if strings.HasPrefix(trimmed, "{") || strings.HasPrefix(trimmed, "[") {
+			req.Header.Set("Content-Type", "application/json")
+		}
+	}
+
+	// Apply pool-level headers
+	if backend.headers != nil {
+		for k, v := range backend.headers {
+			req.Header.Set(k, v)
+		}
+	}
+
+	// Apply pool-level authentication
+	if backend.auth != nil {
+		if backend.auth.BearerToken != "" {
+			req.Header.Set("Authorization", "Bearer "+backend.auth.BearerToken)
+		} else if backend.auth.PlainToken != "" {
+			req.Header.Set("Authorization", backend.auth.PlainToken)
+		} else if backend.auth.Username != "" && backend.auth.Password != "" {
+			req.SetBasicAuth(backend.auth.Username, backend.auth.Password)
+		}
+	}
+
+	return req, nil
+}
+
+// validateResponse checks the HTTP response against the configured expectations.
+// Returns nil if the response is considered healthy, or an error describing the mismatch.
+func validateResponse(statusCode int, body []byte, config *BackendHealthCheckConfig) error {
+	// Check status code
+	if len(config.ExpectedStatus) > 0 {
+		matched := false
+		for _, expected := range config.ExpectedStatus {
+			if statusCode == expected {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("unexpected status code: %d (expected one of %v)", statusCode, config.ExpectedStatus)
+		}
+	} else {
+		// Default: accept any 2xx status
+		if statusCode < 200 || statusCode >= 300 {
+			return fmt.Errorf("unhealthy status code: %d", statusCode)
+		}
+	}
+
+	// Check expected body substring
+	if config.ExpectedBody != "" {
+		if !strings.Contains(string(body), config.ExpectedBody) {
+			return fmt.Errorf("expected body substring %q not found in response", config.ExpectedBody)
+		}
+	}
+
+	return nil
 }
 
 // recordFailure records a health check failure.
@@ -355,6 +456,11 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 	backend.lastCheck.Store(time.Now().UnixNano())
 	backend.lastError.Store(errMsg)
 	backend.consecutiveSuccesses.Store(0)
+
+	endpointLabel := backend.BackendURL
+	if backend.endpoint != nil && backend.endpoint.Name != "" {
+		endpointLabel = backend.endpoint.Name
+	}
 
 	unhealthyThreshold := hc.defaultUnhealthyThreshold
 	if config.UnhealthyThreshold > 0 {
@@ -371,10 +477,11 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 				hc.logger.Warn().
 					Str(logging.FieldServiceID, backend.ServiceID).
 					Str("backend_url", backend.BackendURL).
+					Str("endpoint", endpointLabel).
 					Str("error", errMsg).
 					Int32("consecutive_failures", failures).
 					Msg("backend became unhealthy (active health check)")
-				backendHealthStatus.WithLabelValues(backend.ServiceID).Set(0)
+				backendHealthStatus.WithLabelValues(backend.ServiceID, endpointLabel).Set(0)
 			}
 		}
 	} else {
@@ -387,22 +494,30 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 				hc.logger.Warn().
 					Str(logging.FieldServiceID, backend.ServiceID).
 					Str("backend_url", backend.BackendURL).
+					Str("endpoint", endpointLabel).
 					Str("error", errMsg).
 					Int32("consecutive_failures", failures).
 					Msg("backend became unhealthy")
-				backendHealthStatus.WithLabelValues(backend.ServiceID).Set(0)
+				backendHealthStatus.WithLabelValues(backend.ServiceID, endpointLabel).Set(0)
 			}
 		}
 	}
 
-	healthCheckFailures.WithLabelValues(backend.ServiceID).Inc()
+	healthCheckFailures.WithLabelValues(backend.ServiceID, endpointLabel).Inc()
 }
 
 // recordSuccess records a health check success.
 // When a pool endpoint is associated, uses endpoint atomics for counter reset.
+// On recovery (unhealthy -> healthy transition), performs a full reset of both
+// consecutiveFailures and consecutiveSuccesses for a clean slate.
 func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHealthCheckConfig) {
 	backend.lastCheck.Store(time.Now().UnixNano())
 	backend.lastError.Store("")
+
+	endpointLabel := backend.BackendURL
+	if backend.endpoint != nil && backend.endpoint.Name != "" {
+		endpointLabel = backend.endpoint.Name
+	}
 
 	healthyThreshold := hc.defaultHealthyThreshold
 	if config.HealthyThreshold > 0 {
@@ -417,12 +532,16 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 			wasUnhealthy := !backend.endpoint.IsHealthy()
 			backend.endpoint.SetHealthy()
 			if wasUnhealthy {
+				// Full reset on recovery: clean slate for the backend
+				backend.endpoint.ResetFailures()
+				backend.consecutiveSuccesses.Store(0)
 				hc.logger.Info().
 					Str(logging.FieldServiceID, backend.ServiceID).
 					Str("backend_url", backend.BackendURL).
+					Str("endpoint", endpointLabel).
 					Int32("consecutive_successes", successes).
 					Msg("backend became healthy (active health check)")
-				backendHealthStatus.WithLabelValues(backend.ServiceID).Set(1)
+				backendHealthStatus.WithLabelValues(backend.ServiceID, endpointLabel).Set(1)
 			}
 		}
 	} else {
@@ -433,30 +552,33 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 			oldStatus := backend.GetStatus()
 			backend.SetStatus(HealthStatusHealthy)
 			if oldStatus != HealthStatusHealthy {
+				// Full reset on recovery
+				backend.consecutiveSuccesses.Store(0)
 				hc.logger.Info().
 					Str(logging.FieldServiceID, backend.ServiceID).
 					Str("backend_url", backend.BackendURL).
+					Str("endpoint", endpointLabel).
 					Int32("consecutive_successes", successes).
 					Msg("backend became healthy")
-				backendHealthStatus.WithLabelValues(backend.ServiceID).Set(1)
+				backendHealthStatus.WithLabelValues(backend.ServiceID, endpointLabel).Set(1)
 			}
 		}
 	}
 
-	healthCheckSuccesses.WithLabelValues(backend.ServiceID).Inc()
+	healthCheckSuccesses.WithLabelValues(backend.ServiceID, endpointLabel).Inc()
 }
 
-// CheckNow performs an immediate health check for a service.
-func (hc *HealthChecker) CheckNow(ctx context.Context, serviceID string) error {
+// CheckNow performs an immediate health check for all endpoints in a pool.
+func (hc *HealthChecker) CheckNow(ctx context.Context, poolKey string) error {
 	hc.configsMu.RLock()
-	config, ok := hc.configs[serviceID]
+	config, ok := hc.configs[poolKey]
 	hc.configsMu.RUnlock()
 
 	if !ok {
-		return fmt.Errorf("no health check config for service %s", serviceID)
+		return fmt.Errorf("no health check config for pool %s", poolKey)
 	}
 
-	hc.checkBackend(ctx, serviceID, config)
+	hc.checkPool(ctx, poolKey, config)
 	return nil
 }
 

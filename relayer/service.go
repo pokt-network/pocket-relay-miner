@@ -116,11 +116,17 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 	// Create health checker
 	healthChecker := NewHealthChecker(logger)
 
-	// Register backends for health checking (per RPC type)
+	// Register backend pools for health checking (per RPC type)
 	for serviceID, svcConfig := range config.Services {
 		for rpcType, backend := range svcConfig.Backends {
-			backendID := fmt.Sprintf("%s:%s", serviceID, rpcType)
-			healthChecker.RegisterBackend(backendID, backend.URL, backend.HealthCheck)
+			if backend.HealthCheck != nil && backend.HealthCheck.Enabled {
+				poolKey := fmt.Sprintf("%s:%s", serviceID, rpcType)
+				p := config.GetPool(serviceID, rpcType)
+				if p == nil {
+					continue
+				}
+				healthChecker.RegisterPool(poolKey, p.All(), backend.HealthCheck, backend.Headers, backend.Authentication)
+			}
 		}
 	}
 

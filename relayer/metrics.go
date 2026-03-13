@@ -151,7 +151,7 @@ var (
 		[]string{"service_id"},
 	)
 
-	// Health check metrics
+	// Health check metrics (per-endpoint visibility via "endpoint" label)
 	healthCheckSuccesses = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -159,7 +159,7 @@ var (
 			Name:      "health_check_successes_total",
 			Help:      "Total number of successful health checks",
 		},
-		[]string{"service_id"},
+		[]string{"service_id", "endpoint"},
 	)
 
 	healthCheckFailures = observability.RelayerFactory.NewCounterVec(
@@ -169,7 +169,7 @@ var (
 			Name:      "health_check_failures_total",
 			Help:      "Total number of failed health checks",
 		},
-		[]string{"service_id"},
+		[]string{"service_id", "endpoint"},
 	)
 
 	backendHealthStatus = observability.RelayerFactory.NewGaugeVec(
@@ -179,7 +179,7 @@ var (
 			Name:      "backend_health_status",
 			Help:      "Current health status of backend (1=healthy, 0=unhealthy)",
 		},
-		[]string{"service_id"},
+		[]string{"service_id", "endpoint"},
 	)
 
 	// Request size metrics
