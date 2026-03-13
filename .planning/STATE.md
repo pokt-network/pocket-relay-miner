@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 01-01-PLAN.md
-last_updated: "2026-03-13T02:31:00Z"
-last_activity: 2026-03-13 -- Completed 01-01 (Pool package and multi-URL config)
+stopped_at: Completed 01-02-PLAN.md (Phase 01 complete)
+last_updated: "2026-03-13T02:39:14Z"
+last_activity: 2026-03-13 -- Completed 01-02 (Caller migration and multi-backend config)
 progress:
   total_phases: 10
-  completed_phases: 0
+  completed_phases: 1
   total_plans: 2
-  completed_plans: 1
-  percent: 5
+  completed_plans: 2
+  percent: 10
 ---
 
 # Project State
@@ -25,29 +25,29 @@ See: .planning/PROJECT.md (updated 2026-03-12)
 
 ## Current Position
 
-Phase: 1 of 10 (Backend Pool Foundation)
-Plan: 1 of 2 in current phase
-Status: Executing
-Last activity: 2026-03-13 -- Completed 01-01 (Pool package and multi-URL config)
+Phase: 1 of 10 (Backend Pool Foundation) -- COMPLETE
+Plan: 2 of 2 in current phase
+Status: Phase Complete
+Last activity: 2026-03-13 -- Completed 01-02 (Caller migration and multi-backend config)
 
-Progress: [█░░░░░░░░░] 5%
+Progress: [██░░░░░░░░] 10%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 0
-- Average duration: -
-- Total execution time: 0 hours
+- Total plans completed: 2
+- Average duration: 6.5min
+- Total execution time: 0.2 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
-| 01 | 1 | 7min | 7min |
+| 01 | 2 | 13min | 6.5min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (7min)
-- Trend: n/a (first plan)
+- Last 5 plans: 01-01 (7min), 01-02 (6min)
+- Trend: stable
 
 *Updated after each plan completion*
 
@@ -64,6 +64,9 @@ Recent decisions affecting current work:
 - [01-01]: Pool.PoolName() used instead of Name() to avoid collision risk
 - [01-01]: URL duplicate detection normalizes host+path with trailing slash trimmed
 - [01-01]: GetPool fallback chain: exact -> default_backend -> jsonrpc -> rest -> any
+- [01-02]: GetBackendConfig() mirrors GetPool() fallback chain for consistent headers/auth resolution
+- [01-02]: Fixed pre-existing URL mutation bug in fallback path by copying parsedBackendURL
+- [01-02]: backend-2 uses same Docker image with separate k8s Service/Deployment
 
 ### Pending Todos
 
@@ -77,6 +80,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-13T02:31:00Z
-Stopped at: Completed 01-01-PLAN.md
-Resume file: .planning/phases/01-backend-pool-foundation/01-02-PLAN.md
+Last session: 2026-03-13T02:39:14Z
+Stopped at: Completed 01-02-PLAN.md (Phase 01 complete)
+Resume file: .planning/phases/02-round-robin/02-01-PLAN.md
