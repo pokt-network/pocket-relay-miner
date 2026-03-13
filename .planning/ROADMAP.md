@@ -48,10 +48,11 @@ Plans:
   1. JSON-RPC relays are distributed across configured backends (observable via relay logs showing different backend URLs)
   2. Round-robin selection adds less than 0.1ms to relay latency (verified by benchmark)
   3. A load test against a multi-backend HTTP service shows requests spread across all backends
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 02-01: TBD
+- [ ] 02-01-PLAN.md — RoundRobinSelector implementation, auto-detect strategy wiring in BuildPools, unit tests + benchmark
+- [ ] 02-02-PLAN.md — Backend BACKEND_ID in responses, Tilt env vars, test-round-robin.sh distribution script
 
 ### Phase 3: Circuit Breaker
 **Goal**: Backends that return consecutive errors are automatically removed from rotation without operator intervention
@@ -171,7 +172,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4/5/6 (5 and 6 can parallel afte
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Backend Pool Foundation | 0/2 | Not started | - |
-| 2. Round-Robin HTTP Selection | 0/1 | Not started | - |
+| 2. Round-Robin HTTP Selection | 0/2 | Not started | - |
 | 3. Circuit Breaker | 0/1 | Not started | - |
 | 4. Health Check Probes | 0/1 | Not started | - |
 | 5. Fast-Fail and Resilience | 0/1 | Not started | - |
