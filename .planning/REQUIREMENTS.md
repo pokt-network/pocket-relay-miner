@@ -21,8 +21,8 @@
 
 ### Failure Detection
 
-- [ ] **FAIL-01**: Circuit breaker marks backend unhealthy after configurable consecutive 5xx failures
-- [ ] **FAIL-02**: Passive failure detection from real relay traffic (5xx, timeouts, connection refused)
+- [x] **FAIL-01**: Circuit breaker marks backend unhealthy after configurable consecutive 5xx failures
+- [x] **FAIL-02**: Passive failure detection from real relay traffic (5xx, timeouts, connection refused)
 - [ ] **FAIL-03**: Periodic health check probes of unhealthy backends for recovery detection
 - [ ] **FAIL-04**: Operator-defined custom health check probes (request body, expected status, response matching)
 - [ ] **FAIL-05**: Configurable unhealthy threshold (failures before marking unhealthy) and healthy threshold (successes before marking healthy)
@@ -85,8 +85,8 @@
 | LB-02 | Phase 10 | Pending |
 | LB-03 | Phase 10 | Pending |
 | LB-04 | Phase 10 | Pending |
-| FAIL-01 | Phase 3 | Pending |
-| FAIL-02 | Phase 3 | Pending |
+| FAIL-01 | Phase 3 | Complete |
+| FAIL-02 | Phase 3 | Complete |
 | FAIL-03 | Phase 4 | Pending |
 | FAIL-04 | Phase 4 | Pending |
 | FAIL-05 | Phase 4 | Pending |

@@ -3,15 +3,15 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-stopped_at: Completed 02.1-02-PLAN.md
-last_updated: "2026-03-13T20:21:25Z"
-last_activity: 2026-03-13 -- Completed 02.1-02 (Newest-first release ordering)
+stopped_at: Completed 03-01-PLAN.md
+last_updated: "2026-03-13T21:56:07.843Z"
+last_activity: 2026-03-13 -- Completed 03-01 (Circuit breaker logic)
 progress:
   total_phases: 11
-  completed_phases: 2
-  total_plans: 5
-  completed_plans: 5
-  percent: 22
+  completed_phases: 3
+  total_plans: 8
+  completed_plans: 7
+  percent: 88
 ---
 
 # Project State
@@ -21,16 +21,16 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-12)
 
 **Core value:** When a backend node goes down, relays continue flowing to healthy backends without operator intervention.
-**Current focus:** Phase 02.1: Fix suppliers falsely marked as draining
+**Current focus:** Phase 03: Circuit Breaker
 
 ## Current Position
 
-Phase: 02.1 (Fix suppliers falsely marked as draining)
-Plan: 2 of 2 in current phase (complete)
+Phase: 03-circuit-breaker
+Plan: 1 of 2 in current phase (complete)
 Status: In Progress
-Last activity: 2026-03-13 -- Completed 02.1-02 (Newest-first release ordering)
+Last activity: 2026-03-13 -- Completed 03-01 (Circuit breaker logic)
 
-Progress: [██░░░░░░░░] 22%
+Progress: [█████████░] 88%
 
 ## Performance Metrics
 
@@ -52,6 +52,7 @@ Progress: [██░░░░░░░░] 22%
 - Trend: stable
 
 *Updated after each plan completion*
+| Phase 03 P01 | 3min | 1 tasks | 3 files |
 
 ## Accumulated Context
 
@@ -74,6 +75,9 @@ Recent decisions affecting current work:
 - [02-01]: Unknown strategies rejected at config parse time with clear error
 - [02-01]: Strategy label includes (auto)/(explicit) annotation for startup log visibility
 - [02.1-02]: Deterministic test timestamps via direct map manipulation instead of time.Sleep
+- [Phase 03-01]: CompareAndSwap on atomic.Bool ensures exactly one goroutine detects each state transition
+- [Phase 03-01]: RecordResult returns *TransitionEvent keeping pool package logger-free
+- [Phase 03-01]: Recovery path in RecordResult exists for Phase 4 reuse (no self-recovery in Phase 3)
 
 ### Roadmap Evolution
 
@@ -94,6 +98,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-13T20:21:25Z
-Stopped at: Completed 02.1-02-PLAN.md
-Resume file: .planning/phases/02.1-fix-suppliers-falsely-marked-as-draining-despite-being-staked-on-chain/02.1-02-SUMMARY.md
+Last session: 2026-03-13T21:56:07.840Z
+Stopped at: Completed 03-01-PLAN.md
+Resume file: None
