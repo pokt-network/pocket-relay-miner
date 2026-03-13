@@ -188,7 +188,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4/5/6 (5 and 6 can parallel afte
 | 2. Round-Robin HTTP Selection | 2/2 | Complete | 2026-03-13 |
 | 02.1. Fix False Supplier Drains | 2/2 | Complete   | 2026-03-13 |
 | 3. Circuit Breaker | 0/2 | Not started | - |
-| 4. Health Check Probes | 0/2 | Not started | - |
+| 4. Health Check Probes | 1/2 | In progress | - |
 | 5. Fast-Fail and Resilience | 0/1 | Not started | - |
 | 6. Observability | 0/1 | Not started | - |
 | 7. WebSocket Multi-Backend | 0/1 | Not started | - |
