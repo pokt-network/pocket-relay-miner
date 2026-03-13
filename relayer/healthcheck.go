@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/pool"
 )
 
 // HealthStatus represents the health status of a backend.
@@ -39,6 +40,10 @@ func (s HealthStatus) String() string {
 }
 
 // BackendHealth tracks the health of a single backend.
+// When a pool.BackendEndpoint is associated, health state is delegated to it
+// (single source of truth shared with the circuit breaker). Supplementary fields
+// like lastCheck and lastError remain on BackendHealth for active health check
+// diagnostics (Phase 4).
 type BackendHealth struct {
 	// ServiceID is the service this backend belongs to.
 	ServiceID string
@@ -46,7 +51,12 @@ type BackendHealth struct {
 	// BackendURL is the URL of the backend.
 	BackendURL string
 
-	// Status is the current health status.
+	// endpoint is the pool BackendEndpoint that owns the authoritative health state.
+	// When non-nil, IsHealthy() delegates to endpoint.IsHealthy() and
+	// recordFailure/recordSuccess operate on endpoint atomics.
+	endpoint *pool.BackendEndpoint
+
+	// Status is the current health status (used only when endpoint is nil, legacy path).
 	status atomic.Int32
 
 	// LastCheck is when the last health check was performed.
@@ -55,20 +65,39 @@ type BackendHealth struct {
 	// LastError is the last error encountered (if unhealthy).
 	lastError atomic.Value // stores string
 
-	// ConsecutiveFailures tracks failures for threshold calculation.
+	// ConsecutiveFailures tracks failures (used only when endpoint is nil, legacy path).
 	consecutiveFailures atomic.Int32
 
-	// ConsecutiveSuccesses tracks successes for threshold calculation.
+	// ConsecutiveSuccesses tracks successes for healthy threshold calculation.
 	consecutiveSuccesses atomic.Int32
 }
 
 // GetStatus returns the current health status.
+// When a pool endpoint is associated, derives status from endpoint.IsHealthy().
 func (h *BackendHealth) GetStatus() HealthStatus {
+	if h.endpoint != nil {
+		if h.endpoint.IsHealthy() {
+			return HealthStatusHealthy
+		}
+		return HealthStatusUnhealthy
+	}
 	return HealthStatus(h.status.Load())
 }
 
 // SetStatus sets the health status.
+// When a pool endpoint is associated, delegates to endpoint methods.
 func (h *BackendHealth) SetStatus(status HealthStatus) {
+	if h.endpoint != nil {
+		switch status {
+		case HealthStatusHealthy:
+			h.endpoint.SetHealthy()
+		case HealthStatusUnhealthy:
+			h.endpoint.SetUnhealthy()
+		default:
+			// HealthStatusUnknown: no-op for pool endpoint
+		}
+		return
+	}
 	h.status.Store(int32(status))
 }
 
@@ -86,10 +115,23 @@ func (h *BackendHealth) GetLastError() string {
 }
 
 // IsHealthy returns true if the backend is healthy.
+// Delegates to pool BackendEndpoint when available (single source of truth).
 func (h *BackendHealth) IsHealthy() bool {
+	if h.endpoint != nil {
+		return h.endpoint.IsHealthy()
+	}
 	status := h.GetStatus()
 	// Unknown is treated as healthy to avoid blocking on startup
 	return status == HealthStatusHealthy || status == HealthStatusUnknown
+}
+
+// ConsecutiveFailureCount returns the current consecutive failure count.
+// Delegates to pool BackendEndpoint when available.
+func (h *BackendHealth) ConsecutiveFailureCount() int32 {
+	if h.endpoint != nil {
+		return h.endpoint.ConsecutiveFailures()
+	}
+	return h.consecutiveFailures.Load()
 }
 
 // HealthChecker manages health checks for all backends.
@@ -155,6 +197,32 @@ func (hc *HealthChecker) RegisterBackend(serviceID, backendURL string, config *B
 		Str("backend_url", backendURL).
 		Bool("health_check_enabled", config != nil && config.Enabled).
 		Msg("registered backend")
+}
+
+// RegisterBackendWithEndpoint registers a backend for health checking with a pool endpoint.
+// The pool BackendEndpoint becomes the single source of truth for health state,
+// shared with the circuit breaker (passive failure detection from relay traffic).
+func (hc *HealthChecker) RegisterBackendWithEndpoint(serviceID, backendURL string, config *BackendHealthCheckConfig, endpoint *pool.BackendEndpoint) {
+	hc.backendsMu.Lock()
+	hc.backends[serviceID] = &BackendHealth{
+		ServiceID:  serviceID,
+		BackendURL: backendURL,
+		endpoint:   endpoint,
+	}
+	hc.backendsMu.Unlock()
+
+	if config != nil {
+		hc.configsMu.Lock()
+		hc.configs[serviceID] = config
+		hc.configsMu.Unlock()
+	}
+
+	hc.logger.Info().
+		Str(logging.FieldServiceID, serviceID).
+		Str("backend_url", backendURL).
+		Bool("health_check_enabled", config != nil && config.Enabled).
+		Bool("pool_endpoint_linked", true).
+		Msg("registered backend with pool endpoint")
 }
 
 // GetHealth returns the health status for a service.
@@ -282,31 +350,48 @@ func (hc *HealthChecker) checkBackend(ctx context.Context, serviceID string, con
 }
 
 // recordFailure records a health check failure.
+// When a pool endpoint is associated, uses endpoint atomics for failure tracking.
 func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHealthCheckConfig, errMsg string) {
 	backend.lastCheck.Store(time.Now().UnixNano())
 	backend.lastError.Store(errMsg)
 	backend.consecutiveSuccesses.Store(0)
-
-	failures := backend.consecutiveFailures.Add(1)
 
 	unhealthyThreshold := hc.defaultUnhealthyThreshold
 	if config.UnhealthyThreshold > 0 {
 		unhealthyThreshold = config.UnhealthyThreshold
 	}
 
-	if int(failures) >= unhealthyThreshold {
-		oldStatus := backend.GetStatus()
-		backend.SetStatus(HealthStatusUnhealthy)
-
-		if oldStatus != HealthStatusUnhealthy {
-			hc.logger.Warn().
-				Str(logging.FieldServiceID, backend.ServiceID).
-				Str("backend_url", backend.BackendURL).
-				Str("error", errMsg).
-				Int32("consecutive_failures", failures).
-				Msg("backend became unhealthy")
-
-			backendHealthStatus.WithLabelValues(backend.ServiceID).Set(0)
+	if backend.endpoint != nil {
+		// Delegate to pool endpoint atomics (shared with circuit breaker)
+		failures := backend.endpoint.IncrementFailures()
+		if int(failures) >= unhealthyThreshold {
+			wasHealthy := backend.endpoint.IsHealthy()
+			backend.endpoint.SetUnhealthy()
+			if wasHealthy {
+				hc.logger.Warn().
+					Str(logging.FieldServiceID, backend.ServiceID).
+					Str("backend_url", backend.BackendURL).
+					Str("error", errMsg).
+					Int32("consecutive_failures", failures).
+					Msg("backend became unhealthy (active health check)")
+				backendHealthStatus.WithLabelValues(backend.ServiceID).Set(0)
+			}
+		}
+	} else {
+		// Legacy path: use local atomics
+		failures := backend.consecutiveFailures.Add(1)
+		if int(failures) >= unhealthyThreshold {
+			oldStatus := backend.GetStatus()
+			backend.SetStatus(HealthStatusUnhealthy)
+			if oldStatus != HealthStatusUnhealthy {
+				hc.logger.Warn().
+					Str(logging.FieldServiceID, backend.ServiceID).
+					Str("backend_url", backend.BackendURL).
+					Str("error", errMsg).
+					Int32("consecutive_failures", failures).
+					Msg("backend became unhealthy")
+				backendHealthStatus.WithLabelValues(backend.ServiceID).Set(0)
+			}
 		}
 	}
 
@@ -314,30 +399,47 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 }
 
 // recordSuccess records a health check success.
+// When a pool endpoint is associated, uses endpoint atomics for counter reset.
 func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHealthCheckConfig) {
 	backend.lastCheck.Store(time.Now().UnixNano())
 	backend.lastError.Store("")
-	backend.consecutiveFailures.Store(0)
-
-	successes := backend.consecutiveSuccesses.Add(1)
 
 	healthyThreshold := hc.defaultHealthyThreshold
 	if config.HealthyThreshold > 0 {
 		healthyThreshold = config.HealthyThreshold
 	}
 
-	if int(successes) >= healthyThreshold {
-		oldStatus := backend.GetStatus()
-		backend.SetStatus(HealthStatusHealthy)
-
-		if oldStatus != HealthStatusHealthy {
-			hc.logger.Info().
-				Str(logging.FieldServiceID, backend.ServiceID).
-				Str("backend_url", backend.BackendURL).
-				Int32("consecutive_successes", successes).
-				Msg("backend became healthy")
-
-			backendHealthStatus.WithLabelValues(backend.ServiceID).Set(1)
+	if backend.endpoint != nil {
+		// Delegate to pool endpoint atomics (shared with circuit breaker)
+		backend.endpoint.ResetFailures()
+		successes := backend.consecutiveSuccesses.Add(1)
+		if int(successes) >= healthyThreshold {
+			wasUnhealthy := !backend.endpoint.IsHealthy()
+			backend.endpoint.SetHealthy()
+			if wasUnhealthy {
+				hc.logger.Info().
+					Str(logging.FieldServiceID, backend.ServiceID).
+					Str("backend_url", backend.BackendURL).
+					Int32("consecutive_successes", successes).
+					Msg("backend became healthy (active health check)")
+				backendHealthStatus.WithLabelValues(backend.ServiceID).Set(1)
+			}
+		}
+	} else {
+		// Legacy path: use local atomics
+		backend.consecutiveFailures.Store(0)
+		successes := backend.consecutiveSuccesses.Add(1)
+		if int(successes) >= healthyThreshold {
+			oldStatus := backend.GetStatus()
+			backend.SetStatus(HealthStatusHealthy)
+			if oldStatus != HealthStatusHealthy {
+				hc.logger.Info().
+					Str(logging.FieldServiceID, backend.ServiceID).
+					Str("backend_url", backend.BackendURL).
+					Int32("consecutive_successes", successes).
+					Msg("backend became healthy")
+				backendHealthStatus.WithLabelValues(backend.ServiceID).Set(1)
+			}
 		}
 	}
 

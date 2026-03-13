@@ -1632,6 +1632,8 @@ func (p *ProxyServer) InitGRPCHandler() {
 			BufferPool:         p.bufferPool, // Share buffer pool for efficient memory usage
 			GetHTTPClient:      p.getClientForService,
 			GetServiceTimeout:  p.config.GetServiceTimeout, // Timeout from profile
+			GetPool:            p.config.GetPool,
+			GetBackendConfig:   p.config.GetBackendConfig,
 		},
 	)
 

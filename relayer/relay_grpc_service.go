@@ -19,6 +19,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
@@ -43,6 +44,12 @@ type RelayGRPCService struct {
 
 	// Function to get service timeout (from timeout profile)
 	getServiceTimeout func(serviceID string) time.Duration
+
+	// Function to get pool for circuit breaker integration
+	getPool func(serviceID, rpcType string) *pool.Pool
+
+	// Function to get backend config for circuit breaker threshold
+	getBackendConfig func(serviceID, rpcType string) *BackendConfig
 
 	// Backend gRPC connections for passthrough mode
 	grpcBackends sync.Map // map[string]*grpc.ClientConn
@@ -71,6 +78,10 @@ type RelayGRPCServiceConfig struct {
 	GetHTTPClient func(serviceID string) *http.Client
 	// GetServiceTimeout returns the request timeout for a service (from timeout profile)
 	GetServiceTimeout func(serviceID string) time.Duration
+	// GetPool returns the pool for a service and RPC type (for circuit breaker integration)
+	GetPool func(serviceID, rpcType string) *pool.Pool
+	// GetBackendConfig returns the backend config for a service and RPC type (for circuit breaker threshold)
+	GetBackendConfig func(serviceID, rpcType string) *BackendConfig
 }
 
 // NewRelayGRPCService creates a new gRPC relay service.
@@ -125,6 +136,8 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		bufferPool:         bufferPool,
 		getHTTPClient:      getHTTPClient,
 		getServiceTimeout:  getServiceTimeout,
+		getPool:            config.GetPool,
+		getBackendConfig:   config.GetBackendConfig,
 	}
 }
 
@@ -269,8 +282,38 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		Int("body_size", len(poktHTTPRequest.BodyBz)).
 		Msg("deserialized POKTHTTPRequest from relay payload")
 
+	// Resolve backend via pool-based API for circuit breaker integration.
+	// Determine RPC type for pool lookup (same logic as forwardToBackend).
+	grpcRPCType := "rest"
+	if poktHTTPRequest.Header != nil {
+		if ctHeader, ok := poktHTTPRequest.Header["Content-Type"]; ok && len(ctHeader.Values) > 0 {
+			if strings.HasPrefix(ctHeader.Values[0], "application/grpc") {
+				grpcRPCType = "grpc"
+			}
+		}
+	}
+
+	var grpcEndpoint *pool.BackendEndpoint
+	var grpcPool *pool.Pool
+	if s.getPool != nil {
+		grpcPool = s.getPool(serviceID, grpcRPCType)
+		if grpcPool != nil {
+			grpcEndpoint = grpcPool.Next()
+		}
+	}
+
 	// Forward request to backend and get response
-	respBody, respHeaders, respStatus, err := s.forwardToBackend(ctx, serviceID, &svcConfig, poktHTTPRequest)
+	respBody, respHeaders, respStatus, err := s.forwardToBackend(ctx, serviceID, &svcConfig, poktHTTPRequest, grpcEndpoint)
+
+	// Record result for circuit breaker (covers both success and error paths)
+	if grpcEndpoint != nil && grpcPool != nil {
+		threshold := s.getCircuitBreakerThreshold(serviceID, grpcRPCType)
+		transition := grpcPool.RecordResult(grpcEndpoint, respStatus, err, threshold)
+		if transition != nil {
+			s.logCircuitBreakerTransition(transition, serviceID, grpcRPCType)
+		}
+	}
+
 	if err != nil {
 		grpcRelayErrors.WithLabelValues(serviceID, "backend_error").Inc()
 		logging.WithSessionContext(s.logger.Error(), sessionCtx).
@@ -400,11 +443,14 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 }
 
 // forwardToBackend forwards the request to the appropriate backend service.
+// If endpoint is non-nil, its URL is used for backend selection (pool-based).
+// Otherwise, falls back to config-based URL lookup (legacy path).
 func (s *RelayGRPCService) forwardToBackend(
 	ctx context.Context,
 	serviceID string,
 	svcConfig *ServiceConfig,
 	poktHTTPRequest *sdktypes.POKTHTTPRequest,
+	endpoint *pool.BackendEndpoint,
 ) ([]byte, http.Header, int, error) {
 	// Determine RPC type from content-type or use default
 	rpcType := "rest"
@@ -422,18 +468,30 @@ func (s *RelayGRPCService) forwardToBackend(
 	var configHeaders map[string]string
 	var auth *AuthenticationConfig
 
+	// Use pool endpoint URL if available (circuit breaker integration)
+	if endpoint != nil {
+		backendURL = endpoint.RawURL
+	}
+
+	// Get headers and auth from backend config (always needed regardless of pool usage)
 	if backend, ok := svcConfig.Backends[rpcType]; ok {
-		backendURL = backend.URL
+		if backendURL == "" {
+			backendURL = backend.URL
+		}
 		configHeaders = backend.Headers
 		auth = backend.Authentication
 	} else if backend, ok := svcConfig.Backends["rest"]; ok {
-		backendURL = backend.URL
+		if backendURL == "" {
+			backendURL = backend.URL
+		}
 		configHeaders = backend.Headers
 		auth = backend.Authentication
 	} else {
 		// Use any available backend
 		for _, backend := range svcConfig.Backends {
-			backendURL = backend.URL
+			if backendURL == "" {
+				backendURL = backend.URL
+			}
 			configHeaders = backend.Headers
 			auth = backend.Authentication
 			break
@@ -512,6 +570,39 @@ func (s *RelayGRPCService) forwardToBackend(
 	}
 
 	return respBody, resp.Header, resp.StatusCode, nil
+}
+
+// getCircuitBreakerThreshold returns the unhealthy threshold for circuit breaker evaluation.
+func (s *RelayGRPCService) getCircuitBreakerThreshold(serviceID, rpcType string) int32 {
+	if s.getBackendConfig != nil {
+		if backendCfg := s.getBackendConfig(serviceID, rpcType); backendCfg != nil {
+			if backendCfg.HealthCheck != nil && backendCfg.HealthCheck.UnhealthyThreshold > 0 {
+				return int32(backendCfg.HealthCheck.UnhealthyThreshold)
+			}
+		}
+	}
+	return pool.DefaultUnhealthyThreshold
+}
+
+// logCircuitBreakerTransition logs a circuit breaker state transition.
+func (s *RelayGRPCService) logCircuitBreakerTransition(transition *pool.TransitionEvent, serviceID, rpcType string) {
+	if transition.OldHealthy && !transition.NewHealthy {
+		s.logger.Error().
+			Str("backend", transition.Endpoint.Name).
+			Str("url", transition.Endpoint.RawURL).
+			Str(logging.FieldServiceID, serviceID).
+			Str("rpc_type", rpcType).
+			Int32("failures", transition.Failures).
+			Int("last_status", transition.StatusCode).
+			Msg("backend circuit-broken")
+	} else if !transition.OldHealthy && transition.NewHealthy {
+		s.logger.Info().
+			Str("backend", transition.Endpoint.Name).
+			Str("url", transition.Endpoint.RawURL).
+			Str(logging.FieldServiceID, serviceID).
+			Str("rpc_type", rpcType).
+			Msg("backend recovered")
+	}
 }
 
 // Unused - reserved for future gRPC streaming support
