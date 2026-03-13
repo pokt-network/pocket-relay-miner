@@ -47,6 +47,21 @@ func TestNewBackendEndpoint(t *testing.T) {
 		_, err := NewBackendEndpoint("", "")
 		require.Error(t, err)
 	})
+
+	t.Run("scheme-less host:port URL accepted (gRPC style)", func(t *testing.T) {
+		ep, err := NewBackendEndpoint("", "backend:50051")
+		require.NoError(t, err)
+		require.Equal(t, "backend:50051", ep.URL.Host)
+		require.Equal(t, "backend:50051", ep.Name)
+		require.Equal(t, "backend:50051", ep.RawURL)
+	})
+
+	t.Run("scheme-less host:port with path accepted", func(t *testing.T) {
+		ep, err := NewBackendEndpoint("grpc-backend", "backend:50051/service")
+		require.NoError(t, err)
+		require.Equal(t, "backend:50051", ep.URL.Host)
+		require.Equal(t, "grpc-backend", ep.Name)
+	})
 }
 
 func TestBackendEndpointHealth(t *testing.T) {

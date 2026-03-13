@@ -42,7 +42,18 @@ func NewBackendEndpoint(name, rawURL string) (*BackendEndpoint, error) {
 		return nil, fmt.Errorf("invalid backend endpoint URL %q: %w", rawURL, err)
 	}
 
-	if parsed.Host == "" {
+	// Handle scheme-less URLs like "host:port" (common for gRPC backends).
+	// Go's url.Parse treats "host:port" as scheme="host", opaque="port" with empty Host.
+	// Re-parse with a default scheme so Host is populated correctly.
+	if parsed.Host == "" && !strings.Contains(rawURL, "://") {
+		parsed, err = url.Parse("http://" + rawURL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid backend endpoint URL %q: %w", rawURL, err)
+		}
+		if parsed.Host == "" {
+			return nil, fmt.Errorf("invalid backend endpoint URL %q: missing host", rawURL)
+		}
+	} else if parsed.Host == "" {
 		return nil, fmt.Errorf("invalid backend endpoint URL %q: missing host", rawURL)
 	}
 
