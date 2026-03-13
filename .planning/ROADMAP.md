@@ -59,7 +59,7 @@ Plans:
 **Goal:** Add on-chain verification gates before every supplier drain path, fix filterStakedSuppliers to fail-open on transient errors, and add newest-first release ordering with drain audit metrics
 **Requirements**: DRAIN-01, DRAIN-02, DRAIN-03, DRAIN-04, DRAIN-05, DRAIN-06, DRAIN-07, DRAIN-08
 **Depends on:** Phase 02
-**Plans:** 2 plans
+**Plans:** 2/2 plans complete
 
 Plans:
 - [ ] 02.1-01-PLAN.md — On-chain verification gate (verifySupplierUnstaked), filterStakedSuppliers fail-open fix, drain audit metric, verification gates in onSupplierReleased/onKeyChange, unit tests
@@ -74,10 +74,11 @@ Plans:
   2. Unhealthy backends receive zero new relay requests until recovery
   3. Passive failure detection works inline with real relay traffic (no separate polling needed for detection)
   4. Circuit breaker state transitions are visible in logs with structured context (backend URL, failure count, status code)
-**Plans**: TBD
+**Plans**: 2 plans
 
 Plans:
-- [ ] 03-01: TBD
+- [ ] 03-01-PLAN.md — Circuit breaker logic in pool package (RecordResult, failure classification, TransitionEvent, threshold logic) + comprehensive tests
+- [ ] 03-02-PLAN.md — Wire RecordResult into all transports (HTTP, WebSocket, gRPC, streaming), refactor healthcheck.go to use pool BackendEndpoint
 
 ### Phase 4: Health Check Probes
 **Goal**: Unhealthy backends are automatically restored to rotation when operator-defined health probes succeed
@@ -184,8 +185,8 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4/5/6 (5 and 6 can parallel afte
 |-------|----------------|--------|-----------|
 | 1. Backend Pool Foundation | 0/2 | Not started | - |
 | 2. Round-Robin HTTP Selection | 2/2 | Complete | 2026-03-13 |
-| 02.1. Fix False Supplier Drains | 1/2 | In Progress | - |
-| 3. Circuit Breaker | 0/1 | Not started | - |
+| 02.1. Fix False Supplier Drains | 2/2 | Complete   | 2026-03-13 |
+| 3. Circuit Breaker | 0/2 | Not started | - |
 | 4. Health Check Probes | 0/1 | Not started | - |
 | 5. Fast-Fail and Resilience | 0/1 | Not started | - |
 | 6. Observability | 0/1 | Not started | - |
