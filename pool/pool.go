@@ -58,6 +58,58 @@ func (p *Pool) StrategyLabel() string {
 	return p.strategyLabel
 }
 
+// RecordResult records a backend response for circuit breaker evaluation.
+// It classifies the result as a failure or success, updates atomic counters,
+// and returns a TransitionEvent if the endpoint's health state changed.
+//
+// Returns non-nil only when a state transition occurs (healthy->unhealthy or
+// unhealthy->healthy). Uses CompareAndSwap to ensure exactly one goroutine
+// detects and reports each transition under concurrent load.
+//
+// If threshold <= 0, DefaultUnhealthyThreshold (5) is used.
+func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, threshold int32) *TransitionEvent {
+	if threshold <= 0 {
+		threshold = DefaultUnhealthyThreshold
+	}
+
+	if isFailure(statusCode, err) {
+		failures := ep.IncrementFailures()
+		if failures >= threshold {
+			// Use CompareAndSwap so exactly one goroutine detects the transition.
+			// If another goroutine already flipped healthy->false, CAS returns false
+			// and we return nil (no duplicate transition event).
+			if ep.healthy.CompareAndSwap(true, false) {
+				return &TransitionEvent{
+					Endpoint:   ep,
+					OldHealthy: true,
+					NewHealthy: false,
+					Failures:   failures,
+					StatusCode: statusCode,
+				}
+			}
+		}
+		return nil
+	}
+
+	// Success path: reset failure counter and potentially recover.
+	if ep.ConsecutiveFailures() > 0 {
+		ep.ResetFailures()
+	}
+	// Recovery: if endpoint was unhealthy, CAS false->true.
+	// Only the goroutine that flips the state returns the event.
+	if ep.healthy.CompareAndSwap(false, true) {
+		return &TransitionEvent{
+			Endpoint:   ep,
+			OldHealthy: false,
+			NewHealthy: true,
+			Failures:   0,
+			StatusCode: statusCode,
+		}
+	}
+
+	return nil
+}
+
 // Healthy returns only the currently healthy endpoints (for logging/debug).
 func (p *Pool) Healthy() []*BackendEndpoint {
 	var healthy []*BackendEndpoint

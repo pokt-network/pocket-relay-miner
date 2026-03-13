@@ -1,0 +1,64 @@
+package pool
+
+import (
+	"context"
+	"errors"
+	"net"
+)
+
+// DefaultUnhealthyThreshold is the number of consecutive failures before
+// a backend is marked unhealthy. Used when threshold is 0 (unconfigured).
+const DefaultUnhealthyThreshold int32 = 5
+
+// TransitionEvent is returned by RecordResult when a backend's health state changes.
+// A nil return means no state transition occurred. Callers use this to log
+// transitions at the appropriate level (Error for healthy->unhealthy, Info for recovery).
+type TransitionEvent struct {
+	// Endpoint that transitioned.
+	Endpoint *BackendEndpoint
+	// OldHealthy is the health state before the transition.
+	OldHealthy bool
+	// NewHealthy is the health state after the transition.
+	NewHealthy bool
+	// Failures is the consecutive failure count at the time of transition.
+	Failures int32
+	// StatusCode is the HTTP status code that triggered the transition (0 for connection errors).
+	StatusCode int
+}
+
+// isFailure returns true if the result represents a circuit-breaker-countable failure.
+//
+// Failures are:
+//   - HTTP 5xx status codes (500-599)
+//   - Non-timeout errors (connection refused, DNS resolution, connection reset, etc.)
+//
+// NOT failures:
+//   - HTTP 1xx-4xx status codes
+//   - Timeouts (context.DeadlineExceeded, net.Error with Timeout()=true)
+//   - nil error with status 0 (edge case: no result yet)
+func isFailure(statusCode int, err error) bool {
+	if err != nil {
+		// Timeouts are explicitly NOT failures per design decision.
+		// Slow but healthy backends should not be circuit-broken.
+		if isTimeoutError(err) {
+			return false
+		}
+		// All other errors: connection refused, DNS, reset, etc.
+		return true
+	}
+	// HTTP 5xx status codes
+	return statusCode >= 500
+}
+
+// isTimeoutError returns true if the error represents a timeout.
+// Checks for context.DeadlineExceeded and net.Error with Timeout()=true.
+func isTimeoutError(err error) bool {
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	var netErr net.Error
+	if errors.As(err, &netErr) && netErr.Timeout() {
+		return true
+	}
+	return false
+}
