@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Phase 4 context gathered
-last_updated: "2026-03-13T22:52:13.438Z"
-last_activity: 2026-03-13 -- Completed 03-02 (Transport wiring + healthcheck refactor)
+stopped_at: Completed 04-01-PLAN.md
+last_updated: "2026-03-13T23:14:29.991Z"
+last_activity: 2026-03-13 -- Completed 04-01 (Health check probes refactor)
 progress:
   total_phases: 11
-  completed_phases: 4
-  total_plans: 8
-  completed_plans: 8
+  completed_phases: 5
+  total_plans: 10
+  completed_plans: 10
   percent: 100
 ---
 
@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-12)
 ## Current Position
 
 Phase: 04-health-check-probes
-Plan: 1 of 1 in current phase (complete)
+Plan: 2 of 2 in current phase (complete)
 Status: Phase Complete
-Last activity: 2026-03-13 -- Completed 04-01 (Health check probes refactor)
+Last activity: 2026-03-13 -- Completed 04-02 (Health check unit tests)
 
 Progress: [██████████] 100%
 
@@ -55,6 +55,7 @@ Progress: [██████████] 100%
 | Phase 03 P01 | 3min | 1 tasks | 3 files |
 | Phase 03 P02 | 9min | 2 tasks | 4 files |
 | Phase 04 P01 | 4min | 2 tasks | 5 files |
+| Phase 04 P02 | 2min | 1 tasks | 1 files |
 
 ## Accumulated Context
 
@@ -87,6 +88,8 @@ Recent decisions affecting current work:
 - [Phase 04-01]: RegisterPool replaces RegisterBackend/RegisterBackendWithEndpoint (old methods removed)
 - [Phase 04-01]: IsHealthy at pool level returns true if ANY endpoint is healthy
 - [Phase 04-01]: Full reset (failures=0, successes=0) on recovery transition for clean slate
+- [Phase 04-02]: Direct checkEndpoint/checkPool calls for deterministic tests (no ticker/goroutine timing)
+- [Phase 04-02]: httptest.NewServer for real HTTP backend simulation instead of mocks
 
 ### Roadmap Evolution
 
@@ -107,6 +110,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-13T23:08:34Z
-Stopped at: Completed 04-01-PLAN.md
-Resume file: .planning/phases/04-health-check-probes/04-01-SUMMARY.md
+Last session: 2026-03-13T23:13:35Z
+Stopped at: Completed 04-02-PLAN.md
+Resume file: .planning/phases/04-health-check-probes/04-02-SUMMARY.md
