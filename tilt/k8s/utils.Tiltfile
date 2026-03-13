@@ -104,12 +104,21 @@ def apply_k8s_overrides_relayer(config, redis_host):
     config["health_check"]["addr"] = "0.0.0.0:8081"
 
     # Override backend URLs to use k8s service names
+    # For develop-http: use multi-backend urls array (backend + backend-2)
+    # For other services: keep single url format
     if "services" in config:
         for service_id, service_config in config["services"].items():
             if "backends" in service_config:
                 backends = service_config["backends"]
-                # The example file already has "backend:xxx" which is the k8s service name
-                # No changes needed here
+                if service_id == "develop-http" and "jsonrpc" in backends:
+                    # Multi-backend: use urls array with both backend pods
+                    backends["jsonrpc"]["urls"] = [
+                        "http://backend:8545",
+                        {"name": "backup", "url": "http://backend-2:8545"},
+                    ]
+                    # Remove single url if present (mutually exclusive with urls)
+                    if "url" in backends["jsonrpc"]:
+                        backends["jsonrpc"].pop("url")
 
     return config
 

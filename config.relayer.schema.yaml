@@ -186,13 +186,36 @@ properties:
           minProperties: 1
           additionalProperties:
             type: object
-            description: Configuration for a specific RPC type backend
-            required:
-              - url
+            description: Configuration for a specific RPC type backend. Use either url (single backend) or urls (multi-backend pool) -- they are mutually exclusive.
             properties:
               url:
                 type: string
-                description: Backend URL (http://, https://, ws://, wss://, grpc://, grpcs://)
+                description: Single backend URL (mutually exclusive with urls). Supports http://, https://, ws://, wss://, grpc://, grpcs://
+              urls:
+                type: array
+                description: List of backend endpoints for this RPC type (mutually exclusive with url). Supports mixed entries -- plain strings and objects with optional name.
+                items:
+                  oneOf:
+                    - type: string
+                      description: Plain backend URL string (name derived from hostname:port)
+                    - type: object
+                      description: Backend endpoint with optional name
+                      required:
+                        - url
+                      properties:
+                        name:
+                          type: string
+                          description: Optional display name for this endpoint (used in logs and Prometheus metrics). If not set, derived from URL hostname:port.
+                        url:
+                          type: string
+                          description: Backend endpoint URL
+              load_balancing:
+                type: string
+                enum:
+                  - round_robin
+                  - least_conn
+                  - app_hash
+                description: Load balancing strategy for this backend pool. Phase 1 uses first_healthy (default), round_robin added in Phase 2, others in Phase 10.
               headers:
                 type: object
                 description: Additional headers for backend requests

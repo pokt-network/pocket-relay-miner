@@ -74,23 +74,35 @@ keys:
 # Genesis defines 4 services: develop-http, develop-websocket, develop-stream, develop-grpc
 # Each has 15 suppliers staked for it.
 services:
-  # HTTP/JSON-RPC service (localnet)
+  # HTTP/JSON-RPC service (localnet) - multi-backend example
   develop-http:
     validation_mode: eager
     timeout_profile: fast
     max_body_size_bytes: 10485760  # 10MB
-    default_backend: jsonrpc  # Use jsonrpc for proper protocol labeling (nginx backend still available)
+    default_backend: jsonrpc  # Use jsonrpc for proper protocol labeling
     backends:
-      # Full-featured demo backend - dynamic responses
-      # Use for: Feature testing, WebSocket, gRPC, streaming
+      # Multi-backend pool with load balancing (primary format)
+      # Each backend gets health-checked independently (Phase 4)
       jsonrpc:
-        url: "http://backend:8545"
-        # [PRODUCTION] url: "http://eth-node:8545"
-        # Optional headers/auth:
+        load_balancing: round_robin  # Options: round_robin (Phase 2), least_conn, app_hash (Phase 10)
+        urls:
+          - "http://backend:8545"
+          - name: backup
+            url: "http://backend-2:8545"
+        # Optional headers/auth (shared across all backends in this pool):
         # headers:
         #   X-Custom-Header: "value"
         # authentication:
         #   bearer_token: "your-token"
+        #
+        # Advanced configuration (future phases):
+        # health_check:
+        #   enabled: true
+        #   endpoint: "/health"
+        #   interval_seconds: 10
+        #   timeout_seconds: 5
+        #   unhealthy_threshold: 5
+        #   healthy_threshold: 3
 
   # WebSocket service (localnet)
   develop-websocket:

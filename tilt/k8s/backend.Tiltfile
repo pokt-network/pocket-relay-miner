@@ -130,6 +130,93 @@ spec:
         ]
     )
 
+    # Deploy backend-2 (second backend instance for multi-backend pool testing)
+    backend2_yaml = """
+apiVersion: v1
+kind: Service
+metadata:
+  name: backend-2
+  labels:
+    app: backend-2
+spec:
+  selector:
+    app: backend-2
+  ports:
+  - port: 8545
+    targetPort: 8545
+    name: http
+  - port: 50051
+    targetPort: 50051
+    name: grpc
+  - port: 9095
+    targetPort: 9095
+    name: metrics
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: backend-2
+  labels:
+    app: backend-2
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: backend-2
+  template:
+    metadata:
+      labels:
+        app: backend-2
+    spec:
+      containers:
+      - name: backend-2
+        image: demo-backend
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8545
+          name: http
+        - containerPort: 50051
+          name: grpc
+        - containerPort: 9095
+          name: metrics
+        resources:
+          requests:
+            cpu: "{}"
+            memory: "{}"
+          limits:
+            cpu: "{}"
+            memory: "{}"
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8545
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8545
+          initialDelaySeconds: 10
+          periodSeconds: 10
+""".format(
+        cpu_request,
+        memory_request,
+        cpu_limit,
+        memory_limit
+    )
+
+    k8s_yaml(blob(backend2_yaml))
+
+    k8s_resource(
+        "backend-2",
+        labels=["backends"],
+        port_forwards=[
+            format_port_forward(18545, 8545),
+            format_port_forward(60051, 50051),
+            format_port_forward(19095, 9095),
+        ]
+    )
+
 def format_port_forward(local_port, container_port):
     """Format port forward string"""
     return "{}:{}".format(local_port, container_port)
