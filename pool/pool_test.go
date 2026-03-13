@@ -123,7 +123,7 @@ func TestNewPool(t *testing.T) {
 	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
 	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
 
-	p := NewPool("test-pool", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{})
+	p := NewPool("test-pool", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{}, "first_healthy(test)")
 
 	require.Equal(t, 2, p.Len())
 	require.Equal(t, "test-pool", p.PoolName())
@@ -139,7 +139,7 @@ func TestPoolNext_AllHealthy(t *testing.T) {
 	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
 	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
 
-	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{})
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{}, "first_healthy(test)")
 
 	got := p.Next()
 	require.NotNil(t, got)
@@ -150,7 +150,7 @@ func TestPoolNext_SomeUnhealthy(t *testing.T) {
 	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
 	ep1.SetUnhealthy()
 
-	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{})
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{}, "first_healthy(test)")
 
 	got := p.Next()
 	require.NotNil(t, got)
@@ -163,7 +163,7 @@ func TestPoolNext_AllUnhealthy(t *testing.T) {
 	ep1.SetUnhealthy()
 	ep2.SetUnhealthy()
 
-	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{})
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{}, "first_healthy(test)")
 
 	got := p.Next()
 	require.Nil(t, got)
@@ -172,7 +172,7 @@ func TestPoolNext_AllUnhealthy(t *testing.T) {
 func TestPoolNext_SingleEndpoint(t *testing.T) {
 	ep, _ := NewBackendEndpoint("single", "http://node1:8545")
 
-	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{})
+	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "first_healthy(test)")
 
 	got := p.Next()
 	require.NotNil(t, got)
@@ -184,7 +184,7 @@ func TestPoolHealthy(t *testing.T) {
 	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
 	ep1.SetUnhealthy()
 
-	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{})
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2}, &FirstHealthySelector{}, "first_healthy(test)")
 
 	healthy := p.Healthy()
 	require.Len(t, healthy, 1)
@@ -224,5 +224,126 @@ func TestFirstHealthySelector(t *testing.T) {
 	t.Run("returns -1 for empty slice", func(t *testing.T) {
 		idx := sel.Select(nil)
 		require.Equal(t, -1, idx)
+	})
+}
+
+// --- RoundRobinSelector Tests ---
+
+func TestRoundRobinSelector_EvenDistribution(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+	endpoints := []*BackendEndpoint{ep1, ep2, ep3}
+
+	sel := &RoundRobinSelector{}
+	counts := make(map[int]int)
+
+	for i := 0; i < 300; i++ {
+		idx := sel.Select(endpoints)
+		require.GreaterOrEqual(t, idx, 0)
+		counts[idx]++
+	}
+
+	require.Equal(t, 100, counts[0], "endpoint 0 should get exactly 100 calls")
+	require.Equal(t, 100, counts[1], "endpoint 1 should get exactly 100 calls")
+	require.Equal(t, 100, counts[2], "endpoint 2 should get exactly 100 calls")
+}
+
+func TestRoundRobinSelector_SkipsUnhealthy(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+	ep2.SetUnhealthy() // middle endpoint unhealthy
+	endpoints := []*BackendEndpoint{ep1, ep2, ep3}
+
+	sel := &RoundRobinSelector{}
+	for i := 0; i < 100; i++ {
+		idx := sel.Select(endpoints)
+		require.NotEqual(t, 1, idx, "should never return unhealthy endpoint index 1")
+		require.NotEqual(t, -1, idx, "should always find a healthy endpoint")
+	}
+}
+
+func TestRoundRobinSelector_AllUnhealthy(t *testing.T) {
+	ep, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep.SetUnhealthy()
+
+	sel := &RoundRobinSelector{}
+	idx := sel.Select([]*BackendEndpoint{ep})
+	require.Equal(t, -1, idx)
+}
+
+func TestRoundRobinSelector_EmptyEndpoints(t *testing.T) {
+	sel := &RoundRobinSelector{}
+
+	require.Equal(t, -1, sel.Select(nil))
+	require.Equal(t, -1, sel.Select([]*BackendEndpoint{}))
+}
+
+func TestRoundRobinSelector_SingleEndpoint(t *testing.T) {
+	ep, _ := NewBackendEndpoint("single", "http://node1:8545")
+	endpoints := []*BackendEndpoint{ep}
+
+	sel := &RoundRobinSelector{}
+	for i := 0; i < 10; i++ {
+		idx := sel.Select(endpoints)
+		require.Equal(t, 0, idx)
+	}
+}
+
+func TestRoundRobinSelector_Concurrent(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+	endpoints := []*BackendEndpoint{ep1, ep2, ep3}
+
+	sel := &RoundRobinSelector{}
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 100; j++ {
+				idx := sel.Select(endpoints)
+				if idx < 0 || idx >= len(endpoints) {
+					t.Errorf("invalid index: %d", idx)
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	// No assertion needed beyond race detector - test passes if no race detected
+}
+
+func BenchmarkRoundRobinSelector_Select(b *testing.B) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+	ep4, _ := NewBackendEndpoint("d", "http://node4:8545")
+	ep5, _ := NewBackendEndpoint("e", "http://node5:8545")
+	endpoints := []*BackendEndpoint{ep1, ep2, ep3, ep4, ep5}
+
+	sel := &RoundRobinSelector{}
+	b.ResetTimer()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			sel.Select(endpoints)
+		}
+	})
+}
+
+// --- Pool StrategyLabel Tests ---
+
+func TestPoolStrategyLabel(t *testing.T) {
+	ep, _ := NewBackendEndpoint("a", "http://node1:8545")
+
+	t.Run("returns strategy label", func(t *testing.T) {
+		p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "first_healthy(auto)")
+		require.Equal(t, "first_healthy(auto)", p.StrategyLabel())
+	})
+
+	t.Run("round_robin label", func(t *testing.T) {
+		p := NewPool("test", []*BackendEndpoint{ep}, &RoundRobinSelector{}, "round_robin(explicit)")
+		require.Equal(t, "round_robin(explicit)", p.StrategyLabel())
 	})
 }

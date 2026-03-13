@@ -4,22 +4,24 @@ package pool
 // Once created, the endpoint list cannot be modified. On config reload,
 // a new Pool is built and swapped atomically.
 type Pool struct {
-	endpoints []*BackendEndpoint // Immutable after creation
-	selector  Selector           // Strategy for selecting next endpoint
-	name      string             // Pool identifier for logging (e.g., "serviceID:rpcType")
+	endpoints     []*BackendEndpoint // Immutable after creation
+	selector      Selector           // Strategy for selecting next endpoint
+	name          string             // Pool identifier for logging (e.g., "serviceID:rpcType")
+	strategyLabel string             // Human-readable strategy label (e.g., "round_robin(auto)")
 }
 
 // NewPool creates a new Pool with the given endpoints and selection strategy.
 // The endpoints slice is copied internally to prevent external mutation.
-func NewPool(name string, endpoints []*BackendEndpoint, selector Selector) *Pool {
+func NewPool(name string, endpoints []*BackendEndpoint, selector Selector, strategyLabel string) *Pool {
 	// Copy the slice to guarantee immutability
 	eps := make([]*BackendEndpoint, len(endpoints))
 	copy(eps, endpoints)
 
 	return &Pool{
-		endpoints: eps,
-		selector:  selector,
-		name:      name,
+		endpoints:     eps,
+		selector:      selector,
+		name:          name,
+		strategyLabel: strategyLabel,
 	}
 }
 
@@ -48,6 +50,12 @@ func (p *Pool) Len() int {
 // PoolName returns the pool's identifier (used in logging and metrics).
 func (p *Pool) PoolName() string {
 	return p.name
+}
+
+// StrategyLabel returns the human-readable strategy label for this pool.
+// Includes auto/explicit annotation (e.g., "round_robin(auto)", "first_healthy(explicit)").
+func (p *Pool) StrategyLabel() string {
+	return p.strategyLabel
 }
 
 // Healthy returns only the currently healthy endpoints (for logging/debug).

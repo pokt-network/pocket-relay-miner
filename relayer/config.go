@@ -854,7 +854,7 @@ func (c *Config) BuildPools() error {
 			poolName := serviceID + ":" + rpcType
 			// Phase 1 uses FirstHealthySelector; Phase 2 replaces with round-robin
 			selector := &pool.FirstHealthySelector{}
-			c.pools[poolName] = pool.NewPool(poolName, endpoints, selector)
+			c.pools[poolName] = pool.NewPool(poolName, endpoints, selector, "first_healthy(auto)")
 		}
 	}
 
