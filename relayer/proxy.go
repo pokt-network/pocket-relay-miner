@@ -277,7 +277,7 @@ func NewProxyServer(
 					Str("service", serviceID).
 					Str("transport", rpcType).
 					Int("backends", bp.Len()).
-					Str("strategy", "first_healthy").
+					Str("strategy", bp.StrategyLabel()).
 					Strs("endpoints", urls).
 					Msg("backend pool initialized")
 			}
@@ -1212,6 +1212,13 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	if endpoint == nil {
 		return nil, nil, 0, false, fmt.Errorf("no healthy backend available for service %s (pool: %s)", serviceID, backendPool.PoolName())
 	}
+
+	p.logger.Debug().
+		Str("backend", endpoint.Name).
+		Str("service", serviceID).
+		Str("pool", backendPool.PoolName()).
+		Msg("backend selected")
+
 	backendURL := endpoint.RawURL
 	parsedBackendURL := endpoint.URL
 

@@ -398,6 +398,115 @@ services:
 	require.Contains(t, err.Error(), "duplicate URL")
 }
 
+// --- Strategy Auto-detect and Validation Tests ---
+
+func TestBuildPools_AutoDetect_SingleURL(t *testing.T) {
+	input := `
+services:
+  svc1:
+    backends:
+      jsonrpc:
+        url: "http://node1:8545"
+`
+	cfg := validConfigFromYAML(t, input)
+	require.NoError(t, cfg.BuildPools())
+
+	p := cfg.GetPool("svc1", "jsonrpc")
+	require.NotNil(t, p)
+	require.Equal(t, "first_healthy(auto)", p.StrategyLabel())
+}
+
+func TestBuildPools_AutoDetect_MultiURL(t *testing.T) {
+	input := `
+services:
+  svc1:
+    backends:
+      jsonrpc:
+        urls:
+          - "http://node1:8545"
+          - "http://node2:8545"
+`
+	cfg := validConfigFromYAML(t, input)
+	require.NoError(t, cfg.BuildPools())
+
+	p := cfg.GetPool("svc1", "jsonrpc")
+	require.NotNil(t, p)
+	require.Equal(t, "round_robin(auto)", p.StrategyLabel())
+}
+
+func TestBuildPools_ExplicitRoundRobin(t *testing.T) {
+	input := `
+services:
+  svc1:
+    backends:
+      jsonrpc:
+        urls:
+          - "http://node1:8545"
+          - "http://node2:8545"
+        load_balancing: round_robin
+`
+	cfg := validConfigFromYAML(t, input)
+	require.NoError(t, cfg.BuildPools())
+
+	p := cfg.GetPool("svc1", "jsonrpc")
+	require.NotNil(t, p)
+	require.Equal(t, "round_robin(explicit)", p.StrategyLabel())
+}
+
+func TestBuildPools_ExplicitFirstHealthy(t *testing.T) {
+	input := `
+services:
+  svc1:
+    backends:
+      jsonrpc:
+        urls:
+          - "http://node1:8545"
+          - "http://node2:8545"
+        load_balancing: first_healthy
+`
+	cfg := validConfigFromYAML(t, input)
+	require.NoError(t, cfg.BuildPools())
+
+	p := cfg.GetPool("svc1", "jsonrpc")
+	require.NotNil(t, p)
+	require.Equal(t, "first_healthy(explicit)", p.StrategyLabel())
+}
+
+func TestBuildPools_UnknownStrategy(t *testing.T) {
+	input := `
+services:
+  svc1:
+    backends:
+      jsonrpc:
+        url: "http://node1:8545"
+        load_balancing: least_conn
+`
+	cfg := validConfigFromYAML(t, input)
+	err := cfg.BuildPools()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "unknown load_balancing strategy")
+	require.Contains(t, err.Error(), "least_conn")
+}
+
+func TestBuildPools_EmptyStrategyIsAutoDetect(t *testing.T) {
+	input := `
+services:
+  svc1:
+    backends:
+      jsonrpc:
+        urls:
+          - "http://node1:8545"
+          - "http://node2:8545"
+        load_balancing: ""
+`
+	cfg := validConfigFromYAML(t, input)
+	require.NoError(t, cfg.BuildPools())
+
+	p := cfg.GetPool("svc1", "jsonrpc")
+	require.NotNil(t, p)
+	require.Equal(t, "round_robin(auto)", p.StrategyLabel())
+}
+
 // validConfigFromYAML is a test helper that parses YAML into a Config struct.
 // It only unmarshals; it does NOT call Validate() (caller decides what to test).
 func validConfigFromYAML(t *testing.T, yamlStr string) Config {

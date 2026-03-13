@@ -852,9 +852,31 @@ func (c *Config) BuildPools() error {
 			}
 
 			poolName := serviceID + ":" + rpcType
-			// Phase 1 uses FirstHealthySelector; Phase 2 replaces with round-robin
-			selector := &pool.FirstHealthySelector{}
-			c.pools[poolName] = pool.NewPool(poolName, endpoints, selector, "first_healthy(auto)")
+
+			// Select load balancing strategy
+			var selector pool.Selector
+			var strategyLabel string
+			switch backend.LoadBalancing {
+			case "round_robin":
+				selector = &pool.RoundRobinSelector{}
+				strategyLabel = "round_robin(explicit)"
+			case "first_healthy":
+				selector = &pool.FirstHealthySelector{}
+				strategyLabel = "first_healthy(explicit)"
+			case "":
+				// Auto-detect: round_robin for 2+ endpoints, first_healthy for 1
+				if len(endpoints) > 1 {
+					selector = &pool.RoundRobinSelector{}
+					strategyLabel = "round_robin(auto)"
+				} else {
+					selector = &pool.FirstHealthySelector{}
+					strategyLabel = "first_healthy(auto)"
+				}
+			default:
+				return fmt.Errorf("service[%s].backends[%s]: unknown load_balancing strategy: %q (valid: round_robin, first_healthy)", serviceID, rpcType, backend.LoadBalancing)
+			}
+
+			c.pools[poolName] = pool.NewPool(poolName, endpoints, selector, strategyLabel)
 		}
 	}
 
