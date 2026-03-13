@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"sync"
 	"time"
 
@@ -92,7 +93,9 @@ type SupplierClaimer struct {
 	config      SupplierClaimerConfig
 
 	// Claimed suppliers (this instance owns these)
-	claimed   map[string]struct{}
+	// Maps supplier address to the time it was claimed, enabling newest-first
+	// release ordering during rebalancing to minimize session handoff churn.
+	claimed   map[string]time.Time
 	claimedMu sync.RWMutex
 
 	// All configured suppliers (from KeyManager)
@@ -132,7 +135,7 @@ func NewSupplierClaimer(
 		redisClient: redisClient,
 		instanceID:  instanceID,
 		config:      config,
-		claimed:     make(map[string]struct{}),
+		claimed:     make(map[string]time.Time),
 	}
 }
 
@@ -264,9 +267,9 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 		return false
 	}
 
-	// Successfully claimed
+	// Successfully claimed — record timestamp for newest-first release ordering
 	c.claimedMu.Lock()
-	c.claimed[supplier] = struct{}{}
+	c.claimed[supplier] = time.Now()
 	c.claimedMu.Unlock()
 
 	c.logger.Info().
@@ -650,31 +653,44 @@ func (c *SupplierClaimer) rebalance() {
 }
 
 // releaseExcess releases excess suppliers to allow other miners to claim them.
+// Suppliers are released newest-first (most recently claimed = least established)
+// to minimize session handoff churn during rebalancing.
 func (c *SupplierClaimer) releaseExcess(count int) {
+	type claimEntry struct {
+		supplier  string
+		claimedAt time.Time
+	}
+
 	c.claimedMu.RLock()
-	claimed := make([]string, 0, len(c.claimed))
-	for supplier := range c.claimed {
-		claimed = append(claimed, supplier)
+	entries := make([]claimEntry, 0, len(c.claimed))
+	for supplier, claimedAt := range c.claimed {
+		entries = append(entries, claimEntry{supplier: supplier, claimedAt: claimedAt})
 	}
 	c.claimedMu.RUnlock()
 
+	// Sort newest-first (most recently claimed = least established)
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].claimedAt.After(entries[j].claimedAt)
+	})
+
 	released := 0
-	for _, supplier := range claimed {
+	for _, entry := range entries {
 		if released >= count {
 			break
 		}
 
-		if err := c.Release(c.ctx, supplier); err != nil {
-			c.logger.Warn().Err(err).Str("supplier", supplier).Msg("failed to release excess supplier")
+		if err := c.Release(c.ctx, entry.supplier); err != nil {
+			c.logger.Warn().Err(err).Str("supplier", entry.supplier).Msg("failed to release excess supplier")
 			continue
 		}
 
 		released++
 		c.logger.Info().
-			Str("supplier", supplier).
+			Str("supplier", entry.supplier).
 			Int("released", released).
 			Int("target", count).
-			Msg("released supplier for rebalancing")
+			Time("claimed_at", entry.claimedAt).
+			Msg("released supplier for rebalancing (newest-first)")
 	}
 }
 
