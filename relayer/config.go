@@ -4,12 +4,14 @@ import (
 	"fmt"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 
 	"gopkg.in/yaml.v3"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/pool"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -148,6 +150,10 @@ type Config struct {
 	// TimeoutProfiles defines HTTP client timeout profiles.
 	// Auto-populated with "fast" and "streaming" defaults if not specified.
 	TimeoutProfiles map[string]TimeoutProfile `yaml:"timeout_profiles,omitempty"`
+
+	// pools is the registry of backend pools, keyed by "serviceID:rpcType".
+	// Built by BuildPools() after validation, not serialized to YAML.
+	pools map[string]*pool.Pool `yaml:"-"`
 }
 
 // HTTPTransportConfig contains HTTP transport settings for backend connections.
@@ -279,19 +285,65 @@ type ServiceConfig struct {
 }
 
 // BackendConfig contains configuration for a specific RPC type backend.
+// Supports both single-URL (url field) and multi-URL (urls field) modes.
+// The url and urls fields are mutually exclusive.
 type BackendConfig struct {
-	// URL is the backend URL for this RPC type.
+	// URL is the single backend URL for this RPC type (backward compatible).
 	// Supports http://, https://, ws://, wss://, grpc://, grpcs://
-	URL string `yaml:"url"`
+	// Mutually exclusive with URLs.
+	URL string `yaml:"url,omitempty"`
 
-	// Headers are additional headers for this backend.
+	// URLs is a list of backend endpoints for this RPC type.
+	// Supports mixed entries: plain strings and objects with optional name.
+	// Mutually exclusive with URL.
+	URLs []BackendEndpointConfig `yaml:"urls,omitempty"`
+
+	// LoadBalancing strategy for this backend type.
+	// Defined in Phase 1, used starting Phase 2.
+	// Valid values: "round_robin" (default in Phase 2), others added in Phase 10.
+	LoadBalancing string `yaml:"load_balancing,omitempty"`
+
+	// Headers are additional headers shared across all backends in this pool.
 	Headers map[string]string `yaml:"headers,omitempty"`
 
-	// Authentication for this backend.
+	// Authentication shared across all backends in this pool.
 	Authentication *AuthenticationConfig `yaml:"authentication,omitempty"`
 
-	// HealthCheck configuration for this backend.
+	// HealthCheck configuration shared across all backends in this pool.
 	HealthCheck *BackendHealthCheckConfig `yaml:"health_check,omitempty"`
+}
+
+// BackendEndpointConfig represents a single endpoint in a backend pool.
+// Supports both plain string URLs and objects with name + url.
+type BackendEndpointConfig struct {
+	// Name is an optional display name for this endpoint (used in logs and metrics).
+	Name string `yaml:"name,omitempty"`
+
+	// URL is the backend endpoint URL.
+	URL string `yaml:"url"`
+}
+
+// UnmarshalYAML implements custom unmarshaling to handle mixed YAML entries:
+//   - Plain string: "http://node1:8545"
+//   - Object: {name: "primary", url: "http://node1:8545"}
+func (c *BackendEndpointConfig) UnmarshalYAML(value *yaml.Node) error {
+	if value.Kind == yaml.ScalarNode {
+		url := strings.TrimSpace(value.Value)
+		if url == "" {
+			return fmt.Errorf("backend endpoint URL must not be empty")
+		}
+		c.URL = value.Value
+		return nil
+	}
+	// Object form: decode as struct
+	type plain BackendEndpointConfig
+	if err := value.Decode((*plain)(c)); err != nil {
+		return err
+	}
+	if strings.TrimSpace(c.URL) == "" {
+		return fmt.Errorf("backend endpoint URL must not be empty")
+	}
+	return nil
 }
 
 // AuthenticationConfig contains authentication configuration for a backend.
@@ -579,11 +631,31 @@ func (c *Config) validateServiceConfig(id string, svc ServiceConfig) error {
 
 	// Validate each backend
 	for rpcType, backend := range svc.Backends {
-		if backend.URL == "" {
-			return fmt.Errorf("service[%s].backends[%s].url is required", id, rpcType)
+		hasURL := backend.URL != ""
+		hasURLs := len(backend.URLs) > 0
+
+		// Mutual exclusivity: url and urls cannot both be set
+		if hasURL && hasURLs {
+			return fmt.Errorf("service[%s].backends[%s]: url and urls are mutually exclusive; use one or the other", id, rpcType)
 		}
-		if _, err := url.Parse(backend.URL); err != nil {
-			return fmt.Errorf("service[%s].backends[%s].url is invalid: %w", id, rpcType, err)
+
+		// At least one must be set
+		if !hasURL && !hasURLs {
+			return fmt.Errorf("service[%s].backends[%s]: at least one of url or urls is required", id, rpcType)
+		}
+
+		// Validate single URL mode
+		if hasURL {
+			if _, err := url.Parse(backend.URL); err != nil {
+				return fmt.Errorf("service[%s].backends[%s].url is invalid: %w", id, rpcType, err)
+			}
+		}
+
+		// Validate multi-URL mode
+		if hasURLs {
+			if err := validateBackendEndpoints(id, rpcType, backend.URLs); err != nil {
+				return err
+			}
 		}
 
 		// Validate health check config if present
@@ -746,6 +818,133 @@ func (c *Config) GetBackendURL(serviceID, rpcType string) string {
 	return ""
 }
 
+// BuildPools creates backend pools from the service configuration.
+// Must be called after Validate(). Each service+backend pair gets a Pool
+// keyed as "serviceID:rpcType".
+func (c *Config) BuildPools() error {
+	c.pools = make(map[string]*pool.Pool)
+
+	for serviceID, svc := range c.Services {
+		for rpcType, backend := range svc.Backends {
+			endpoints, err := buildEndpoints(backend)
+			if err != nil {
+				return fmt.Errorf("service[%s].backends[%s]: %w", serviceID, rpcType, err)
+			}
+
+			poolName := serviceID + ":" + rpcType
+			// Phase 1 uses FirstHealthySelector; Phase 2 replaces with round-robin
+			selector := &pool.FirstHealthySelector{}
+			c.pools[poolName] = pool.NewPool(poolName, endpoints, selector)
+		}
+	}
+
+	return nil
+}
+
+// GetPool returns the pool for a service and RPC type, with fallback chain.
+// Fallback order: exact match -> default_backend -> jsonrpc -> rest -> any available.
+// Returns nil if no pool is found after all fallbacks.
+func (c *Config) GetPool(serviceID, rpcType string) *pool.Pool {
+	if c.pools == nil {
+		return nil
+	}
+
+	// Direct lookup
+	key := serviceID + ":" + rpcType
+	if p, ok := c.pools[key]; ok {
+		return p
+	}
+
+	// Fallback: default_backend
+	svc, svcExists := c.Services[serviceID]
+	if !svcExists {
+		return nil
+	}
+
+	if svc.DefaultBackend != "" {
+		if p, ok := c.pools[serviceID+":"+svc.DefaultBackend]; ok {
+			return p
+		}
+	}
+
+	// Fallback: jsonrpc
+	if p, ok := c.pools[serviceID+":"+BackendTypeJSONRPC]; ok {
+		return p
+	}
+
+	// Fallback: rest
+	if p, ok := c.pools[serviceID+":"+BackendTypeREST]; ok {
+		return p
+	}
+
+	// Fallback: any available
+	for backendType := range svc.Backends {
+		if p, ok := c.pools[serviceID+":"+backendType]; ok {
+			return p
+		}
+	}
+
+	return nil
+}
+
+// buildEndpoints converts a BackendConfig into a slice of pool.BackendEndpoint.
+// Handles both single-URL (url field) and multi-URL (urls field) modes.
+func buildEndpoints(backend BackendConfig) ([]*pool.BackendEndpoint, error) {
+	if backend.URL != "" {
+		// Single-URL mode: create 1-endpoint pool
+		ep, err := pool.NewBackendEndpoint("", backend.URL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid url: %w", err)
+		}
+		return []*pool.BackendEndpoint{ep}, nil
+	}
+
+	// Multi-URL mode
+	endpoints := make([]*pool.BackendEndpoint, 0, len(backend.URLs))
+	for _, epCfg := range backend.URLs {
+		ep, err := pool.NewBackendEndpoint(epCfg.Name, epCfg.URL)
+		if err != nil {
+			return nil, fmt.Errorf("invalid endpoint URL %q: %w", epCfg.URL, err)
+		}
+		endpoints = append(endpoints, ep)
+	}
+	return endpoints, nil
+}
+
+// validateBackendEndpoints validates the URLs list for uniqueness and correctness.
+func validateBackendEndpoints(serviceID, rpcType string, endpoints []BackendEndpointConfig) error {
+	seenURLs := make(map[string]bool, len(endpoints))
+	seenNames := make(map[string]bool, len(endpoints))
+
+	for i, ep := range endpoints {
+		if strings.TrimSpace(ep.URL) == "" {
+			return fmt.Errorf("service[%s].backends[%s].urls[%d]: URL must not be empty", serviceID, rpcType, i)
+		}
+
+		parsed, err := url.Parse(ep.URL)
+		if err != nil {
+			return fmt.Errorf("service[%s].backends[%s].urls[%d]: invalid URL %q: %w", serviceID, rpcType, i, ep.URL, err)
+		}
+
+		// Normalize URL for duplicate detection: host + path (trim trailing slash)
+		normalized := parsed.Host + strings.TrimRight(parsed.Path, "/")
+		if seenURLs[normalized] {
+			return fmt.Errorf("service[%s].backends[%s]: duplicate URL detected: %s", serviceID, rpcType, ep.URL)
+		}
+		seenURLs[normalized] = true
+
+		// Check name uniqueness (only when name is explicitly set)
+		if ep.Name != "" {
+			if seenNames[ep.Name] {
+				return fmt.Errorf("service[%s].backends[%s]: duplicate name detected: %s", serviceID, rpcType, ep.Name)
+			}
+			seenNames[ep.Name] = true
+		}
+	}
+
+	return nil
+}
+
 // LoadConfig loads a relayer configuration from a YAML file.
 func LoadConfig(path string) (*Config, error) {
 	data, err := os.ReadFile(path)
@@ -762,6 +961,10 @@ func LoadConfig(path string) (*Config, error) {
 
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
+	}
+
+	if err := config.BuildPools(); err != nil {
+		return nil, fmt.Errorf("failed to build backend pools: %w", err)
 	}
 
 	return &config, nil
