@@ -355,11 +355,12 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 				unstakedCount++
 				continue
 			}
-			// Other errors (network, timeout) - log warning but skip to be safe
+			// Network/timeout error — fail-open: treat as staked to avoid false drains
 			m.logger.Warn().
 				Err(err).
 				Str("address", addr).
-				Msg("failed to query supplier status, skipping")
+				Msg("failed to query supplier status, treating as staked (fail-open)")
+			stakedSuppliers = append(stakedSuppliers, addr)
 			continue
 		}
 
@@ -416,6 +417,38 @@ func (m *SupplierManager) writeSupplierStatusToCache(ctx context.Context, addr s
 	}
 }
 
+// verifySupplierUnstaked queries the chain to confirm a supplier is genuinely unstaked
+// before proceeding with a drain. Returns (shouldDrain, verifyResult).
+// Fail-safe: on network/timeout errors, returns shouldDrain=false to avoid draining
+// a potentially-staked supplier.
+func (m *SupplierManager) verifySupplierUnstaked(ctx context.Context, addr string, drainReason string) (shouldDrain bool, verifyResult string) {
+	if m.config.SupplierQueryClient == nil {
+		return false, "no_query_client"
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	_, err := m.config.SupplierQueryClient.GetSupplier(queryCtx, addr)
+	if err == nil {
+		// Supplier IS staked on-chain — abort drain
+		return false, "staked"
+	}
+
+	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		// Supplier genuinely not staked
+		return true, "not_found"
+	}
+
+	// Network/timeout error — fail-safe: don't drain
+	m.logger.Warn().
+		Err(err).
+		Str("address", addr).
+		Str("drain_reason", drainReason).
+		Msg("failed to verify supplier staking status, aborting drain (fail-safe)")
+	return false, "error"
+}
+
 // onSupplierClaimed is called when a supplier is successfully claimed.
 // It starts the supplier lifecycle (consumer, SMST, claim/proof submission).
 func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string) error {
@@ -444,11 +477,27 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 }
 
 // onSupplierReleased is called when a supplier claim is released.
-// It drains the supplier and stops its lifecycle.
+// It verifies on-chain staking status before draining to prevent false drains.
 func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier string) error {
+	shouldDrain, verifyResult := m.verifySupplierUnstaked(ctx, supplier, "rebalance_release")
+	supplierDrainDecisionTotal.WithLabelValues("rebalance_release", verifyResult).Inc()
+
 	m.logger.Info().
 		Str("supplier", supplier).
-		Msg("released supplier, starting drain")
+		Str("drain_trigger", "rebalance_release").
+		Str("on_chain_result", verifyResult).
+		Bool("drain_aborted", !shouldDrain).
+		Str("instance_id", m.config.MinerID).
+		Msg("drain decision audit")
+
+	if !shouldDrain {
+		m.logger.Warn().
+			Str("supplier", supplier).
+			Str("on_chain_result", verifyResult).
+			Str("instance_id", m.config.MinerID).
+			Msg("DRAIN ABORTED: supplier is staked on-chain, will retry on next rebalance")
+		return nil
+	}
 
 	// Remove the supplier (with drain)
 	m.removeSupplier(supplier)
@@ -558,12 +607,11 @@ func (m *SupplierManager) onKeyChange(operatorAddr string, added bool) {
 						Msg("skipping hot-reloaded key - not staked as supplier on-chain")
 					return
 				}
-				// Other errors - log warning but skip to be safe
+				// Network/timeout error — fail-open: proceed with adding (same principle as filterStakedSuppliers)
 				m.logger.Warn().
 					Err(err).
 					Str("address", operatorAddr).
-					Msg("failed to query supplier status for hot-reloaded key, skipping")
-				return
+					Msg("failed to query supplier status for hot-reloaded key, proceeding (fail-open)")
 			}
 		}
 
@@ -588,9 +636,23 @@ func (m *SupplierManager) onKeyChange(operatorAddr string, added bool) {
 			}
 		}
 	} else {
+		// Key removed — verify on-chain, but per user decision: drain even if staked (operator explicit action)
+		shouldDrain, verifyResult := m.verifySupplierUnstaked(m.ctx, operatorAddr, "key_removal")
+		supplierDrainDecisionTotal.WithLabelValues("key_removal", verifyResult).Inc()
+
 		m.logger.Info().
 			Str(logging.FieldSupplier, operatorAddr).
-			Msg("key removed, draining supplier")
+			Str("drain_trigger", "key_removal").
+			Str("on_chain_result", verifyResult).
+			Str("instance_id", m.config.MinerID).
+			Msg("drain decision audit")
+
+		if !shouldDrain && verifyResult == "staked" {
+			m.logger.Warn().
+				Str(logging.FieldSupplier, operatorAddr).
+				Str("on_chain_result", verifyResult).
+				Msg("CRITICAL: draining staked supplier due to explicit key removal by operator")
+		}
 
 		// Update claimer if in distributed mode
 		if m.claimer != nil {

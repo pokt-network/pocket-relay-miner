@@ -964,6 +964,19 @@ var (
 		[]string{"instance"},
 	)
 
+	// supplierDrainDecisionTotal tracks every drain decision with on-chain verification result.
+	// Labels: drain_reason (rebalance_release, key_removal, claim_expiry),
+	//         on_chain_result (staked, not_found, error, no_query_client)
+	supplierDrainDecisionTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_drain_decision_total",
+			Help:      "Total supplier drain decisions with on-chain verification result",
+		},
+		[]string{"drain_reason", "on_chain_result"},
+	)
+
 	// ====== WORKER POOL METRICS ======
 	// These metrics track the pond worker pool state and performance.
 	// Useful for diagnosing concurrency bottlenecks with many suppliers.
