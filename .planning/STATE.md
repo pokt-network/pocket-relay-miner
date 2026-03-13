@@ -2,16 +2,16 @@
 gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
-status: in-progress
-stopped_at: Completed 02-01-PLAN.md
-last_updated: "2026-03-13T03:35:07Z"
-last_activity: 2026-03-13 -- Completed 02-01 (RoundRobinSelector and strategy wiring)
+status: executing
+stopped_at: Completed 02.1-02-PLAN.md
+last_updated: "2026-03-13T20:21:25Z"
+last_activity: 2026-03-13 -- Completed 02.1-02 (Newest-first release ordering)
 progress:
-  total_phases: 10
-  completed_phases: 1
-  total_plans: 3
-  completed_plans: 3
-  percent: 15
+  total_phases: 11
+  completed_phases: 2
+  total_plans: 5
+  completed_plans: 5
+  percent: 22
 ---
 
 # Project State
@@ -21,34 +21,35 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-12)
 
 **Core value:** When a backend node goes down, relays continue flowing to healthy backends without operator intervention.
-**Current focus:** Phase 2: Round-Robin HTTP Selection
+**Current focus:** Phase 02.1: Fix suppliers falsely marked as draining
 
 ## Current Position
 
-Phase: 2 of 10 (Round-Robin HTTP Selection)
-Plan: 1 of 2 in current phase
+Phase: 02.1 (Fix suppliers falsely marked as draining)
+Plan: 2 of 2 in current phase (complete)
 Status: In Progress
-Last activity: 2026-03-13 -- Completed 02-01 (RoundRobinSelector and strategy wiring)
+Last activity: 2026-03-13 -- Completed 02.1-02 (Newest-first release ordering)
 
-Progress: [██░░░░░░░░] 15%
+Progress: [██░░░░░░░░] 22%
 
 ## Performance Metrics
 
 **Velocity:**
-- Total plans completed: 3
-- Average duration: 5.7min
-- Total execution time: 0.3 hours
+- Total plans completed: 5
+- Average duration: 6.8min
+- Total execution time: 0.6 hours
 
 **By Phase:**
 
 | Phase | Plans | Total | Avg/Plan |
 |-------|-------|-------|----------|
 | 01 | 2 | 13min | 6.5min |
-| 02 | 1 | 4min | 4min |
+| 02 | 2 | 19min | 9.5min |
+| 02.1 | 1 | 4min | 4min |
 
 **Recent Trend:**
-- Last 5 plans: 01-01 (7min), 01-02 (6min), 02-01 (4min)
-- Trend: improving
+- Last 5 plans: 01-02 (6min), 02-01 (4min), 02-02 (15min), 02.1-02 (4min)
+- Trend: stable
 
 *Updated after each plan completion*
 
@@ -72,6 +73,14 @@ Recent decisions affecting current work:
 - [02-01]: Explicit load_balancing override respected silently without warnings
 - [02-01]: Unknown strategies rejected at config parse time with clear error
 - [02-01]: Strategy label includes (auto)/(explicit) annotation for startup log visibility
+- [02.1-02]: Deterministic test timestamps via direct map manipulation instead of time.Sleep
+
+### Roadmap Evolution
+
+- Phase 02.1 inserted after Phase 02: Fix suppliers falsely marked as draining despite being staked on-chain (URGENT)
+- [02-02]: BACKEND_ID read once at startup as package-level var for simplicity
+- [02-02]: Test script is report-only with no pass/fail threshold
+- [02-02]: Scheme-less host:port URLs handled by prepending http:// in NewBackendEndpoint
 
 ### Pending Todos
 
@@ -85,6 +94,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-13T03:35:07Z
-Stopped at: Completed 02-01-PLAN.md
-Resume file: .planning/phases/02-round-robin-http-selection/02-01-SUMMARY.md
+Last session: 2026-03-13T20:21:25Z
+Stopped at: Completed 02.1-02-PLAN.md
+Resume file: .planning/phases/02.1-fix-suppliers-falsely-marked-as-draining-despite-being-staked-on-chain/02.1-02-SUMMARY.md

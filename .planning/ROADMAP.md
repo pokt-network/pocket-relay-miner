@@ -54,6 +54,17 @@ Plans:
 - [ ] 02-01-PLAN.md — RoundRobinSelector implementation, auto-detect strategy wiring in BuildPools, unit tests + benchmark
 - [ ] 02-02-PLAN.md — Backend BACKEND_ID in responses, Tilt env vars, test-round-robin.sh distribution script
 
+### Phase 02.1: Fix suppliers falsely marked as draining despite being staked on-chain (INSERTED)
+
+**Goal:** Add on-chain verification gates before every supplier drain path, fix filterStakedSuppliers to fail-open on transient errors, and add newest-first release ordering with drain audit metrics
+**Requirements**: DRAIN-01, DRAIN-02, DRAIN-03, DRAIN-04, DRAIN-05, DRAIN-06, DRAIN-07, DRAIN-08
+**Depends on:** Phase 02
+**Plans:** 2 plans
+
+Plans:
+- [ ] 02.1-01-PLAN.md — On-chain verification gate (verifySupplierUnstaked), filterStakedSuppliers fail-open fix, drain audit metric, verification gates in onSupplierReleased/onKeyChange, unit tests
+- [ ] 02.1-02-PLAN.md — Claim timestamp tracking, newest-first release ordering in releaseExcess, unit test
+
 ### Phase 3: Circuit Breaker
 **Goal**: Backends that return consecutive errors are automatically removed from rotation without operator intervention
 **Depends on**: Phase 2
@@ -172,7 +183,8 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4/5/6 (5 and 6 can parallel afte
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
 | 1. Backend Pool Foundation | 0/2 | Not started | - |
-| 2. Round-Robin HTTP Selection | 1/2 | In Progress|  |
+| 2. Round-Robin HTTP Selection | 2/2 | Complete | 2026-03-13 |
+| 02.1. Fix False Supplier Drains | 1/2 | In Progress | - |
 | 3. Circuit Breaker | 0/1 | Not started | - |
 | 4. Health Check Probes | 0/1 | Not started | - |
 | 5. Fast-Fail and Resilience | 0/1 | Not started | - |
