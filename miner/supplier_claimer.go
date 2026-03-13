@@ -642,6 +642,11 @@ func (c *SupplierClaimer) rebalance() {
 		needed := fairShare - currentCount
 		c.claimMore(needed)
 	}
+
+	// Always check for orphaned suppliers that no miner instance has claimed.
+	// This catches suppliers that fell through the cracks during initial claiming
+	// or whose claim keys expired without being renewed.
+	c.claimOrphaned()
 }
 
 // releaseExcess releases excess suppliers to allow other miners to claim them.
@@ -698,6 +703,54 @@ func (c *SupplierClaimer) claimMore(count int) {
 				Int("target", count).
 				Msg("claimed additional supplier for rebalancing")
 		}
+	}
+}
+
+// claimOrphaned scans all configured suppliers and claims any that have no active
+// claim key in Redis. This catches suppliers that fell through the cracks — e.g.,
+// when both miners are at fair share but one supplier's claim expired, neither
+// miner's rebalance logic would detect it since both check only their own count.
+func (c *SupplierClaimer) claimOrphaned() {
+	c.allSuppliersMu.RLock()
+	suppliers := make([]string, len(c.allSuppliers))
+	copy(suppliers, c.allSuppliers)
+	c.allSuppliersMu.RUnlock()
+
+	if len(suppliers) == 0 {
+		return
+	}
+
+	orphaned := 0
+	claimed := 0
+	for _, supplier := range suppliers {
+		if c.IsClaimed(supplier) {
+			continue
+		}
+
+		claimKey := c.redisClient.KB().MinerClaimKey(supplier)
+		exists, err := c.redisClient.Exists(c.ctx, claimKey).Result()
+		if err != nil {
+			c.logger.Warn().Err(err).Str("supplier", supplier).
+				Msg("failed to check claim key for orphan detection")
+			continue
+		}
+
+		if exists == 0 {
+			orphaned++
+			c.logger.Warn().Str("supplier", supplier).
+				Msg("detected orphaned supplier (no claim key), attempting to claim")
+			if c.TryClaim(c.ctx, supplier) {
+				claimed++
+			}
+		}
+	}
+
+	if orphaned > 0 {
+		c.logger.Info().
+			Int("orphaned_detected", orphaned).
+			Int("orphaned_claimed", claimed).
+			Int("total_suppliers", len(suppliers)).
+			Msg("orphaned supplier scan complete")
 	}
 }
 

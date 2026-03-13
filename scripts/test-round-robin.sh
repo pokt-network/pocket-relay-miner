@@ -42,10 +42,14 @@ for i in $(seq 1 "$TOTAL"); do
         -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":'"$i"'}' \
         "$GATEWAY")
     backend_id=$(echo "$resp" | jq -r '.result.backend_id // "unknown"')
-    if [ "$backend_id" = "null" ] || [ "$backend_id" = "unknown" ]; then
-        ((errors++))
+    if [ -z "$backend_id" ] || [ "$backend_id" = "null" ] || [ "$backend_id" = "unknown" ]; then
+        errors=$((errors + 1))
     else
-        counts[$backend_id]=$(( ${counts[$backend_id]:-0} + 1 ))
+        if [[ -v "counts[$backend_id]" ]]; then
+            counts["$backend_id"]=$(( counts["$backend_id"] + 1 ))
+        else
+            counts["$backend_id"]=1
+        fi
     fi
     # Print progress every 100 relays
     if [ $((i % 100)) -eq 0 ]; then
@@ -61,7 +65,7 @@ echo "Errors/unknown: $errors"
 echo ""
 echo "Per-backend distribution:"
 for backend in $(echo "${!counts[@]}" | tr ' ' '\n' | sort); do
-    count=${counts[$backend]}
+    count=${counts["$backend"]}
     pct=$(echo "scale=1; $count * 100 / $TOTAL" | bc)
     bar_len=$(echo "$count * 40 / $TOTAL" | bc)
     bar=$(printf '%*s' "$bar_len" '' | tr ' ' '#')

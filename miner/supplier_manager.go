@@ -1032,20 +1032,34 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 
 	delete(m.suppliers, operatorAddr)
 
-	// Publish removal to registry
-	if m.registry != nil {
-		if err := m.registry.PublishSupplierUpdate(m.ctx, SupplierUpdateActionRemove, operatorAddr, nil); err != nil {
-			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("failed to publish removal status")
-		}
-	}
+	// Only remove from registry and cache if no other miner has already claimed
+	// this supplier. During rebalance, miner1 may release a supplier that miner2
+	// has already claimed and registered — deleting here would clobber miner2's entries.
+	claimKey := m.config.RedisClient.KB().MinerClaimKey(operatorAddr)
+	claimOwner, claimErr := m.config.RedisClient.Get(m.ctx, claimKey).Result()
+	reclaimedByOther := claimErr == nil && claimOwner != "" && claimOwner != m.config.MinerID
 
-	// Delete supplier from cache
-	if m.config.SupplierCache != nil {
-		if cacheErr := m.config.SupplierCache.DeleteSupplierState(m.ctx, operatorAddr); cacheErr != nil {
-			m.logger.Warn().
-				Err(cacheErr).
-				Str(logging.FieldSupplier, operatorAddr).
-				Msg("failed to delete supplier state from cache")
+	if reclaimedByOther {
+		m.logger.Info().
+			Str(logging.FieldSupplier, operatorAddr).
+			Str("new_owner", claimOwner).
+			Msg("supplier already reclaimed by another miner, skipping registry/cache cleanup")
+	} else {
+		// Publish removal to registry
+		if m.registry != nil {
+			if err := m.registry.PublishSupplierUpdate(m.ctx, SupplierUpdateActionRemove, operatorAddr, nil); err != nil {
+				m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("failed to publish removal status")
+			}
+		}
+
+		// Delete supplier from cache
+		if m.config.SupplierCache != nil {
+			if cacheErr := m.config.SupplierCache.DeleteSupplierState(m.ctx, operatorAddr); cacheErr != nil {
+				m.logger.Warn().
+					Err(cacheErr).
+					Str(logging.FieldSupplier, operatorAddr).
+					Msg("failed to delete supplier state from cache")
+			}
 		}
 	}
 
