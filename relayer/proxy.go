@@ -777,6 +777,19 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 
+		// Fast-fail pre-check (eager mode): skip expensive ring signature validation
+		// when all backends are unhealthy. Applied after metering but before validation
+		// to avoid wasted ring signature compute per CONTEXT.md decision.
+		{
+			ffPool := p.config.GetPool(serviceID, rpcType)
+			if ffPool == nil || !ffPool.HasHealthy() {
+				p.sendServiceUnavailable(w, serviceID)
+				fastFailsTotal.WithLabelValues(serviceID).Inc()
+				p.logger.Debug().Str("service_id", serviceID).Str("rpc_type", rpcType).Msg("fast-fail: all backends unhealthy (eager pre-validation)")
+				return
+			}
+		}
+
 		eagerStart := time.Now()
 		if validationErr := p.validateRelayRequest(r.Context(), r, body, arrivalBlockHeight); validationErr != nil {
 			p.sendError(w, http.StatusForbidden, validationErr.Error())

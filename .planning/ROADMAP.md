@@ -104,11 +104,12 @@ Plans:
   2. Relay validation and signing are skipped when no healthy backend is available (no wasted compute)
   3. On a single backend failure, the relay is retried on a different healthy backend before returning an error (max 1-2 retries within timeout budget)
   4. Unhealthy backends are gracefully excluded from selection without affecting healthy backend routing
-**Plans**: 2 plans
+**Plans**: 3 plans
 
 Plans:
 - [ ] 05-01-PLAN.md — Pool HasHealthy/NextExcluding methods, max_retries config, fast_fails_total metric, pre-check wired into HTTP/WebSocket/gRPC handlers
 - [ ] 05-02-PLAN.md — HTTP retry-on-alternate with IsRetryable, NextExcluding retry loop, Backend-Retries header
+- [ ] 05-03-PLAN.md — Gap closure: move fast-fail pre-check before eager validation block, handler-level WebSocket fast-fail tests
 
 ### Phase 6: Observability
 **Goal**: Operators have full visibility into backend pool health, failover events, and per-backend performance
@@ -190,7 +191,7 @@ Phases execute in numeric order: 1 -> 2 -> 3 -> 4/5/6 (5 and 6 can parallel afte
 | 02.1. Fix False Supplier Drains | 2/2 | Complete   | 2026-03-13 |
 | 3. Circuit Breaker | 2/2 | Complete | 2026-03-13 |
 | 4. Health Check Probes | 2/2 | Complete | 2026-03-13 |
-| 5. Fast-Fail and Resilience | 1/2 | In progress | - |
+| 5. Fast-Fail and Resilience | 2/3 | In progress | - |
 | 6. Observability | 0/1 | Not started | - |
 | 7. WebSocket Multi-Backend | 0/1 | Not started | - |
 | 8. REST/Streaming Multi-Backend | 0/1 | Not started | - |
