@@ -969,6 +969,16 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			return
 		}
 
+		// Fast-fail pre-check: reject WebSocket upgrade before Accept() when all backends unhealthy.
+		// CRITICAL: This must happen BEFORE Upgrade() to return HTTP 503 (not a WS close frame).
+		wsPool := p.config.GetPool(serviceID, "websocket")
+		if wsPool == nil || !wsPool.HasHealthy() {
+			p.sendServiceUnavailable(w, serviceID)
+			fastFailsTotal.WithLabelValues(serviceID).Inc()
+			p.logger.Debug().Str("service_id", serviceID).Msg("fast-fail: all WebSocket backends unhealthy")
+			return
+		}
+
 		// Validate and log WebSocket handshake (permissive - never rejects)
 		// - PATH v2: Attempts signature verification, logs WARN if fails
 		// - PATH v1: Logs INFO about legacy handshake
@@ -981,12 +991,8 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			return
 		}
 
-		// Get WebSocket backend URL via pool-based API
-		wsPool := p.config.GetPool(serviceID, "websocket")
-		if wsPool == nil {
-			http.Error(w, "WebSocket backend not configured for this service", http.StatusServiceUnavailable)
-			return
-		}
+		// Get WebSocket backend endpoint from pre-checked pool
+		// (wsPool is guaranteed non-nil and HasHealthy() from pre-check above)
 		wsEndpoint := wsPool.Next()
 		if wsEndpoint == nil {
 			http.Error(w, "No healthy WebSocket backend available", http.StatusServiceUnavailable)

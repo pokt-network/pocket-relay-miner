@@ -297,10 +297,17 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	var grpcPool *pool.Pool
 	if s.getPool != nil {
 		grpcPool = s.getPool(serviceID, grpcRPCType)
-		if grpcPool != nil {
-			grpcEndpoint = grpcPool.Next()
-		}
 	}
+
+	// Fast-fail pre-check: return codes.Unavailable when all backends are unhealthy.
+	// Skips expensive forwarding, signing, and publishing.
+	if grpcPool == nil || !grpcPool.HasHealthy() {
+		fastFailsTotal.WithLabelValues(serviceID).Inc()
+		s.logger.Debug().Str("service_id", serviceID).Msg("fast-fail: all gRPC backends unhealthy")
+		return status.Errorf(codes.Unavailable, "all backends unhealthy for service %s", serviceID)
+	}
+
+	grpcEndpoint = grpcPool.Next()
 
 	// Forward request to backend and get response
 	respBody, respHeaders, respStatus, err := s.forwardToBackend(ctx, serviceID, &svcConfig, poktHTTPRequest, grpcEndpoint)

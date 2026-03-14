@@ -794,6 +794,19 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			Msg("eager validation passed (before backend)")
 	}
 
+	// Fast-fail pre-check: skip expensive validation/signing when all backends are unhealthy.
+	// Uses pool.HasHealthy() for O(n) scan with early return, no allocation.
+	// Applied after metering (in eager mode) but before forwarding to backend.
+	{
+		ffPool := p.config.GetPool(serviceID, rpcType)
+		if ffPool == nil || !ffPool.HasHealthy() {
+			p.sendServiceUnavailable(w, serviceID)
+			fastFailsTotal.WithLabelValues(serviceID).Inc()
+			p.logger.Debug().Str("service_id", serviceID).Str("rpc_type", rpcType).Msg("fast-fail: all backends unhealthy")
+			return
+		}
+	}
+
 	// Forward request to backend (handles both streaming and non-streaming)
 	// Use the parsed POKTHTTPRequest if available, otherwise fall back to raw body
 	backendStart := time.Now()
@@ -1775,6 +1788,15 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 	}
 
 	relaysPublished.WithLabelValues(task.serviceID, task.supplierAddr).Inc()
+}
+
+// sendServiceUnavailable sends a 503 fast-fail response when all backends are unhealthy.
+// Returns minimal JSON with service ID for upstream gateway diagnostics.
+// No backend details or Retry-After header per user decision.
+func (p *ProxyServer) sendServiceUnavailable(w http.ResponseWriter, serviceID string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusServiceUnavailable)
+	fmt.Fprintf(w, `{"error":"service temporarily unavailable","service":"%s"}`, serviceID)
 }
 
 // sendError sends an error response.
