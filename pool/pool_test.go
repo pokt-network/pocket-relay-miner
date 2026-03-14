@@ -362,3 +362,96 @@ func TestPoolStrategyLabel(t *testing.T) {
 		require.Equal(t, "round_robin(explicit)", p.StrategyLabel())
 	})
 }
+
+// --- HasHealthy Tests ---
+
+func TestHasHealthy_AllHealthy(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2, ep3}, &FirstHealthySelector{}, "first_healthy(test)")
+	require.True(t, p.HasHealthy())
+}
+
+func TestHasHealthy_SomeUnhealthy(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+	ep1.SetUnhealthy()
+	ep2.SetUnhealthy()
+
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2, ep3}, &FirstHealthySelector{}, "first_healthy(test)")
+	require.True(t, p.HasHealthy())
+}
+
+func TestHasHealthy_AllUnhealthy(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+	ep1.SetUnhealthy()
+	ep2.SetUnhealthy()
+	ep3.SetUnhealthy()
+
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2, ep3}, &FirstHealthySelector{}, "first_healthy(test)")
+	require.False(t, p.HasHealthy())
+}
+
+func TestHasHealthy_SingleEndpoint(t *testing.T) {
+	ep, _ := NewBackendEndpoint("single", "http://node1:8545")
+
+	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "first_healthy(test)")
+	require.True(t, p.HasHealthy())
+
+	ep.SetUnhealthy()
+	require.False(t, p.HasHealthy())
+}
+
+// --- NextExcluding Tests ---
+
+func TestNextExcluding_SkipsExcluded(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2, ep3}, &FirstHealthySelector{}, "first_healthy(test)")
+
+	got := p.NextExcluding(ep1)
+	require.NotNil(t, got)
+	require.NotEqual(t, "a", got.Name, "NextExcluding should never return the excluded endpoint")
+}
+
+func TestNextExcluding_NoAlternate(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+
+	p := NewPool("test", []*BackendEndpoint{ep1}, &FirstHealthySelector{}, "first_healthy(test)")
+
+	got := p.NextExcluding(ep1)
+	require.Nil(t, got, "NextExcluding should return nil when only endpoint is excluded")
+}
+
+func TestNextExcluding_AllOthersUnhealthy(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+	ep2.SetUnhealthy()
+	ep3.SetUnhealthy()
+
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2, ep3}, &FirstHealthySelector{}, "first_healthy(test)")
+
+	got := p.NextExcluding(ep1)
+	require.Nil(t, got, "NextExcluding should return nil when all others are unhealthy")
+}
+
+func TestNextExcluding_SkipsUnhealthy(t *testing.T) {
+	ep1, _ := NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := NewBackendEndpoint("b", "http://node2:8545")
+	ep3, _ := NewBackendEndpoint("c", "http://node3:8545")
+	ep2.SetUnhealthy()
+
+	p := NewPool("test", []*BackendEndpoint{ep1, ep2, ep3}, &FirstHealthySelector{}, "first_healthy(test)")
+
+	got := p.NextExcluding(ep1)
+	require.NotNil(t, got)
+	require.Equal(t, "c", got.Name, "NextExcluding should skip unhealthy ep2 and return ep3")
+}
