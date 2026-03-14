@@ -1796,7 +1796,7 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 func (p *ProxyServer) sendServiceUnavailable(w http.ResponseWriter, serviceID string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusServiceUnavailable)
-	fmt.Fprintf(w, `{"error":"service temporarily unavailable","service":"%s"}`, serviceID)
+	_, _ = fmt.Fprintf(w, `{"error":"service temporarily unavailable","service":"%s"}`, serviceID)
 }
 
 // sendError sends an error response.
