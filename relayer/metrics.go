@@ -182,6 +182,17 @@ var (
 		[]string{"service_id", "endpoint"},
 	)
 
+	// Fast-fail metrics (separate from relaysRejected per user decision)
+	fastFailsTotal = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "fast_fails_total",
+			Help:      "Total number of fast-fail responses when all backends are unhealthy",
+		},
+		[]string{"service_id"},
+	)
+
 	// Request size metrics
 	requestBodySize = observability.RelayerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{

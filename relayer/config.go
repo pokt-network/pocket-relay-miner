@@ -311,6 +311,11 @@ type BackendConfig struct {
 
 	// HealthCheck configuration shared across all backends in this pool.
 	HealthCheck *BackendHealthCheckConfig `yaml:"health_check,omitempty"`
+
+	// MaxRetries is the maximum number of retry attempts when a backend request fails.
+	// Uses a pointer to distinguish "not set" (default 1) from "explicitly 0" (disabled).
+	// Valid range: 0-3.
+	MaxRetries *int `yaml:"max_retries,omitempty"`
 }
 
 // BackendEndpointConfig represents a single endpoint in a backend pool.
@@ -675,6 +680,13 @@ func (c *Config) validateServiceConfig(id string, svc ServiceConfig) error {
 		if hasURLs {
 			if err := validateBackendEndpoints(id, rpcType, backend.URLs); err != nil {
 				return err
+			}
+		}
+
+		// Validate max_retries if present (must be 0-3)
+		if backend.MaxRetries != nil {
+			if *backend.MaxRetries < 0 || *backend.MaxRetries > 3 {
+				return fmt.Errorf("service[%s].backends[%s].max_retries must be 0-3, got %d", id, rpcType, *backend.MaxRetries)
 			}
 		}
 

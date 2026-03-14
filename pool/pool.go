@@ -110,6 +110,33 @@ func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, thre
 	return nil
 }
 
+// HasHealthy returns true if at least one endpoint in the pool is healthy.
+// Uses a linear scan with early return — no allocation.
+// For typical pool sizes (2-5 endpoints) this is <50ns.
+func (p *Pool) HasHealthy() bool {
+	for _, ep := range p.endpoints {
+		if ep.IsHealthy() {
+			return true
+		}
+	}
+	return false
+}
+
+// NextExcluding returns the first healthy endpoint that is not the excluded endpoint.
+// Returns nil if no alternative healthy endpoint exists.
+// This guarantees retry goes to a different backend regardless of selector strategy.
+func (p *Pool) NextExcluding(exclude *BackendEndpoint) *BackendEndpoint {
+	for _, ep := range p.endpoints {
+		if ep == exclude {
+			continue
+		}
+		if ep.IsHealthy() {
+			return ep
+		}
+	}
+	return nil
+}
+
 // Healthy returns only the currently healthy endpoints (for logging/debug).
 func (p *Pool) Healthy() []*BackendEndpoint {
 	var healthy []*BackendEndpoint
