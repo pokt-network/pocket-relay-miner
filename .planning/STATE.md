@@ -3,9 +3,9 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: completed
-stopped_at: Completed 04-01-PLAN.md
-last_updated: "2026-03-13T23:14:29.991Z"
-last_activity: 2026-03-13 -- Completed 04-01 (Health check probes refactor)
+stopped_at: Phase 5 context gathered
+last_updated: "2026-03-13T23:35:31.810Z"
+last_activity: 2026-03-13 -- Completed 04-02 (Health check unit tests)
 progress:
   total_phases: 11
   completed_phases: 5
@@ -21,14 +21,14 @@ progress:
 See: .planning/PROJECT.md (updated 2026-03-12)
 
 **Core value:** When a backend node goes down, relays continue flowing to healthy backends without operator intervention.
-**Current focus:** Phase 03: Circuit Breaker
+**Current focus:** Phase 05: Fast-Fail and Resilience
 
 ## Current Position
 
-Phase: 04-health-check-probes
-Plan: 2 of 2 in current phase (complete)
-Status: Phase Complete
-Last activity: 2026-03-13 -- Completed 04-02 (Health check unit tests)
+Phase: 05-fast-fail-and-resilience
+Plan: 1 of 2 in current phase
+Status: In Progress
+Last activity: 2026-03-14 -- Completed 05-01 (Fast-fail pre-check)
 
 Progress: [██████████] 100%
 
@@ -56,6 +56,7 @@ Progress: [██████████] 100%
 | Phase 03 P02 | 9min | 2 tasks | 4 files |
 | Phase 04 P01 | 4min | 2 tasks | 5 files |
 | Phase 04 P02 | 2min | 1 tasks | 1 files |
+| Phase 05 P01 | 6min | 2 tasks | 7 files |
 
 ## Accumulated Context
 
@@ -90,6 +91,11 @@ Recent decisions affecting current work:
 - [Phase 04-01]: Full reset (failures=0, successes=0) on recovery transition for clean slate
 - [Phase 04-02]: Direct checkEndpoint/checkPool calls for deterministic tests (no ticker/goroutine timing)
 - [Phase 04-02]: httptest.NewServer for real HTTP backend simulation instead of mocks
+- [Phase 05-01]: Fast-fail pre-check after metering, before validation/forwarding in HTTP path
+- [Phase 05-01]: WebSocket pre-check BEFORE Upgrade() returns HTTP 503, not WS close frame
+- [Phase 05-01]: gRPC fast-fail returns codes.Unavailable (14), not HTTP 503
+- [Phase 05-01]: fastFailsTotal metric separate from relaysRejected per user decision
+- [Phase 05-01]: MaxRetries pointer field distinguishes not-set (default 1) from explicitly 0
 
 ### Roadmap Evolution
 
@@ -110,6 +116,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-13T23:13:35Z
-Stopped at: Completed 04-02-PLAN.md
-Resume file: .planning/phases/04-health-check-probes/04-02-SUMMARY.md
+Last session: 2026-03-14T00:06:14Z
+Stopped at: Completed 05-01-PLAN.md
+Resume file: .planning/phases/05-fast-fail-and-resilience/05-01-SUMMARY.md

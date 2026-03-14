@@ -9,7 +9,7 @@
 
 - [x] **POOL-01**: Operator can configure multiple backend URLs per service per transport
 - [x] **POOL-02**: Existing single-URL configs continue to work without changes (backward compatible)
-- [ ] **POOL-03**: When a backend is marked unhealthy, new requests are not routed to it (graceful removal)
+- [x] **POOL-03**: When a backend is marked unhealthy, new requests are not routed to it (graceful removal)
 - [ ] **POOL-04**: Health status API endpoint exposes backend pool state (health, failure counts, last check time)
 
 ### Load Balancing
@@ -29,8 +29,8 @@
 
 ### Recovery & Resilience
 
-- [ ] **RECV-01**: Fast-fail with dedicated 503 "service temporarily unavailable" error when all backends unhealthy
-- [ ] **RECV-02**: Health-aware pre-check before relay processing begins (no wasted compute)
+- [x] **RECV-01**: Fast-fail with dedicated 503 "service temporarily unavailable" error when all backends unhealthy
+- [x] **RECV-02**: Health-aware pre-check before relay processing begins (no wasted compute)
 - [ ] **RECV-03**: On backend failure, retry on a different healthy backend before returning error (max 1-2 retries, respect timeout budget)
 
 ### Observability
@@ -79,7 +79,7 @@
 |-------------|-------|--------|
 | POOL-01 | Phase 1 | Complete |
 | POOL-02 | Phase 1 | Complete |
-| POOL-03 | Phase 5 | Pending |
+| POOL-03 | Phase 5 | Complete |
 | POOL-04 | Phase 6 | Pending |
 | LB-01 | Phase 2 | Complete |
 | LB-02 | Phase 10 | Pending |
@@ -90,8 +90,8 @@
 | FAIL-03 | Phase 4 | Complete |
 | FAIL-04 | Phase 4 | Complete |
 | FAIL-05 | Phase 4 | Complete |
-| RECV-01 | Phase 5 | Pending |
-| RECV-02 | Phase 5 | Pending |
+| RECV-01 | Phase 5 | Complete |
+| RECV-02 | Phase 5 | Complete |
 | RECV-03 | Phase 5 | Pending |
 | OBS-01 | Phase 6 | Pending |
 | OBS-02 | Phase 6 | Pending |
