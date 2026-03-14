@@ -31,7 +31,7 @@
 
 - [x] **RECV-01**: Fast-fail with dedicated 503 "service temporarily unavailable" error when all backends unhealthy
 - [x] **RECV-02**: Health-aware pre-check before relay processing begins (no wasted compute)
-- [ ] **RECV-03**: On backend failure, retry on a different healthy backend before returning error (max 1-2 retries, respect timeout budget)
+- [x] **RECV-03**: On backend failure, retry on a different healthy backend before returning error (max 1-2 retries, respect timeout budget)
 
 ### Observability
 
@@ -92,7 +92,7 @@
 | FAIL-05 | Phase 4 | Complete |
 | RECV-01 | Phase 5 | Complete |
 | RECV-02 | Phase 5 | Complete |
-| RECV-03 | Phase 5 | Pending |
+| RECV-03 | Phase 5 | Complete |
 | OBS-01 | Phase 6 | Pending |
 | OBS-02 | Phase 6 | Pending |
 | XPORT-01 | Phase 2 | Complete |
