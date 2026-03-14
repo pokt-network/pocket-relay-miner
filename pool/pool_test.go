@@ -3,6 +3,9 @@
 package pool
 
 import (
+	"context"
+	"fmt"
+	"net"
 	"sync"
 	"testing"
 	"time"
@@ -441,6 +444,43 @@ func TestNextExcluding_AllOthersUnhealthy(t *testing.T) {
 
 	got := p.NextExcluding(ep1)
 	require.Nil(t, got, "NextExcluding should return nil when all others are unhealthy")
+}
+
+// --- IsRetryable Tests ---
+
+func TestIsRetryable_ConnectionRefused(t *testing.T) {
+	// Connection refused is retryable -- another backend may be available
+	err := &net.OpError{Op: "dial", Err: &net.DNSError{IsNotFound: false}}
+	require.True(t, IsRetryable(0, fmt.Errorf("connection refused: %w", err)))
+}
+
+func TestIsRetryable_5xx(t *testing.T) {
+	// 5xx status codes are retryable (backend errors may be transient)
+	require.True(t, IsRetryable(500, nil), "500 should be retryable")
+	require.True(t, IsRetryable(502, nil), "502 should be retryable")
+	require.True(t, IsRetryable(503, nil), "503 should be retryable")
+}
+
+func TestIsRetryable_Timeout(t *testing.T) {
+	// Timeouts are NOT retryable -- shared timeout budget is likely exhausted
+	require.False(t, IsRetryable(0, context.DeadlineExceeded), "deadline exceeded should not be retryable")
+}
+
+func TestIsRetryable_4xx(t *testing.T) {
+	// Client errors are NOT retryable -- retry won't help
+	require.False(t, IsRetryable(400, nil), "400 should not be retryable")
+	require.False(t, IsRetryable(404, nil), "404 should not be retryable")
+}
+
+func TestIsRetryable_Success(t *testing.T) {
+	// Successful responses are NOT retryable
+	require.False(t, IsRetryable(200, nil), "200 should not be retryable")
+}
+
+func TestIsRetryable_DNSError(t *testing.T) {
+	// DNS resolution failure is retryable -- different backend may resolve
+	dnsErr := &net.DNSError{Err: "no such host", Name: "backend1.example.com", IsNotFound: true}
+	require.True(t, IsRetryable(0, dnsErr), "DNS error should be retryable")
 }
 
 func TestNextExcluding_SkipsUnhealthy(t *testing.T) {
