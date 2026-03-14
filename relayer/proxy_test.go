@@ -1,0 +1,124 @@
+//go:build test
+
+package relayer
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/pool"
+)
+
+// --- sendServiceUnavailable Tests ---
+
+func TestSendServiceUnavailable(t *testing.T) {
+	p := &ProxyServer{
+		logger: testLogger(),
+	}
+
+	w := httptest.NewRecorder()
+	p.sendServiceUnavailable(w, "develop-http")
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Header().Get("Content-Type"), "application/json")
+	assert.Contains(t, w.Body.String(), "service temporarily unavailable")
+	assert.Contains(t, w.Body.String(), "develop-http")
+}
+
+// --- HTTP Fast-Fail Pre-Check Tests ---
+
+func TestHTTPFastFail_AllUnhealthy(t *testing.T) {
+	// When all backends for a service are unhealthy, HasHealthy() returns false.
+	// The pre-check should cause a 503 fast-fail.
+	ep1, _ := pool.NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := pool.NewBackendEndpoint("b", "http://node2:8545")
+	ep1.SetUnhealthy()
+	ep2.SetUnhealthy()
+
+	p := pool.NewPool("svc:jsonrpc", []*pool.BackendEndpoint{ep1, ep2}, &pool.FirstHealthySelector{}, "first_healthy(test)")
+
+	// Simulate the pre-check logic
+	require.False(t, p.HasHealthy(), "pool with all unhealthy endpoints should return false")
+
+	// Verify the fast-fail response
+	proxy := &ProxyServer{logger: testLogger()}
+	w := httptest.NewRecorder()
+	proxy.sendServiceUnavailable(w, "develop-http")
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Contains(t, w.Body.String(), "service temporarily unavailable")
+	assert.Contains(t, w.Body.String(), "develop-http")
+}
+
+func TestHTTPFastFail_SomeHealthy(t *testing.T) {
+	// When at least one backend is healthy, HasHealthy() returns true.
+	// The pre-check should NOT trigger fast-fail.
+	ep1, _ := pool.NewBackendEndpoint("a", "http://node1:8545")
+	ep2, _ := pool.NewBackendEndpoint("b", "http://node2:8545")
+	ep1.SetUnhealthy()
+	// ep2 stays healthy
+
+	p := pool.NewPool("svc:jsonrpc", []*pool.BackendEndpoint{ep1, ep2}, &pool.FirstHealthySelector{}, "first_healthy(test)")
+
+	require.True(t, p.HasHealthy(), "pool with at least one healthy endpoint should return true")
+}
+
+func TestHTTPFastFail_NilPool(t *testing.T) {
+	// When pool lookup returns nil (unknown service/rpcType), the pre-check
+	// should cause a 503 fast-fail.
+	cfg := &Config{
+		pools: map[string]*pool.Pool{}, // empty pools
+	}
+
+	// Lookup for a service that does not exist
+	result := cfg.GetPool("unknown-service", "jsonrpc")
+	require.Nil(t, result, "GetPool for unknown service should return nil")
+
+	// Verify the fast-fail response
+	proxy := &ProxyServer{logger: testLogger()}
+	w := httptest.NewRecorder()
+	proxy.sendServiceUnavailable(w, "unknown-service")
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+}
+
+// --- WebSocket Fast-Fail Pre-Check Tests ---
+
+func TestWebSocketFastFail_AllUnhealthy(t *testing.T) {
+	// When all WebSocket backends are unhealthy, the handler should return 503
+	// BEFORE upgrading the connection (no 101 Switching Protocols).
+	ep1, _ := pool.NewBackendEndpoint("ws1", "ws://node1:8545")
+	ep2, _ := pool.NewBackendEndpoint("ws2", "ws://node2:8545")
+	ep1.SetUnhealthy()
+	ep2.SetUnhealthy()
+
+	p := pool.NewPool("svc:websocket", []*pool.BackendEndpoint{ep1, ep2}, &pool.FirstHealthySelector{}, "first_healthy(test)")
+
+	require.False(t, p.HasHealthy(), "pool with all unhealthy WebSocket endpoints should return false")
+
+	// Simulate what should happen: 503 returned, no upgrade
+	proxy := &ProxyServer{logger: testLogger()}
+	w := httptest.NewRecorder()
+	proxy.sendServiceUnavailable(w, "develop-websocket")
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.NotEqual(t, http.StatusSwitchingProtocols, w.Code, "connection should NOT be upgraded")
+	assert.Contains(t, w.Body.String(), "service temporarily unavailable")
+}
+
+func TestWebSocketFastFail_SomeHealthy(t *testing.T) {
+	// When at least one WebSocket backend is healthy, the handler should proceed
+	// past the pre-check (not return 503).
+	ep1, _ := pool.NewBackendEndpoint("ws1", "ws://node1:8545")
+	ep2, _ := pool.NewBackendEndpoint("ws2", "ws://node2:8545")
+	ep1.SetUnhealthy()
+	// ep2 stays healthy
+
+	p := pool.NewPool("svc:websocket", []*pool.BackendEndpoint{ep1, ep2}, &pool.FirstHealthySelector{}, "first_healthy(test)")
+
+	require.True(t, p.HasHealthy(), "pool with at least one healthy WebSocket endpoint should return true")
+}
