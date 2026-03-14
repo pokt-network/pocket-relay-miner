@@ -9,6 +9,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
@@ -308,6 +309,87 @@ func TestRecordResult_AlreadyHealthySuccessNoTransition(t *testing.T) {
 	// Success on already-healthy endpoint with zero failures
 	event := p.RecordResult(ep, 200, nil, 5)
 	require.Nil(t, event)
+	require.True(t, ep.IsHealthy())
+}
+
+// --- Recovery Timeout Tests ---
+
+func TestRecoveryTimeout_AutoRecoversAfterTimeout(t *testing.T) {
+	ep, _ := NewBackendEndpoint("test", "http://node:8545")
+	ep.SetRecoveryTimeout(50 * time.Millisecond)
+	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "test")
+
+	// Trip circuit breaker
+	for i := 0; i < 5; i++ {
+		p.RecordResult(ep, 500, nil, 5)
+	}
+	require.False(t, ep.IsHealthy())
+	require.False(t, p.HasHealthy())
+
+	// Before timeout: still unhealthy
+	require.False(t, ep.IsHealthy())
+
+	// Wait for recovery timeout
+	time.Sleep(60 * time.Millisecond)
+
+	// After timeout: auto-recovered
+	require.True(t, ep.IsHealthy())
+	require.True(t, p.HasHealthy())
+	require.Equal(t, int32(0), ep.ConsecutiveFailures())
+}
+
+func TestRecoveryTimeout_ZeroDisablesAutoRecovery(t *testing.T) {
+	ep, _ := NewBackendEndpoint("test", "http://node:8545")
+	// No SetRecoveryTimeout call — default is zero (disabled)
+	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "test")
+
+	for i := 0; i < 5; i++ {
+		p.RecordResult(ep, 500, nil, 5)
+	}
+	require.False(t, ep.IsHealthy())
+
+	// Even after waiting, stays unhealthy (no auto-recovery)
+	time.Sleep(10 * time.Millisecond)
+	require.False(t, ep.IsHealthy())
+}
+
+func TestRecoveryTimeout_ReTripsAfterRecoveryIfStillFailing(t *testing.T) {
+	ep, _ := NewBackendEndpoint("test", "http://node:8545")
+	ep.SetRecoveryTimeout(50 * time.Millisecond)
+	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "test")
+
+	// Trip circuit breaker
+	for i := 0; i < 5; i++ {
+		p.RecordResult(ep, 500, nil, 5)
+	}
+	require.False(t, ep.IsHealthy())
+
+	// Wait for auto-recovery
+	time.Sleep(60 * time.Millisecond)
+	require.True(t, ep.IsHealthy())
+
+	// Backend still failing — should re-trip
+	for i := 0; i < 5; i++ {
+		p.RecordResult(ep, 500, nil, 5)
+	}
+	require.False(t, ep.IsHealthy())
+}
+
+func TestRecoveryTimeout_SuccessBeforeTimeoutPreventsRecoveryLoop(t *testing.T) {
+	ep, _ := NewBackendEndpoint("test", "http://node:8545")
+	ep.SetRecoveryTimeout(50 * time.Millisecond)
+	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "test")
+
+	// Trip circuit breaker
+	for i := 0; i < 5; i++ {
+		p.RecordResult(ep, 500, nil, 5)
+	}
+	require.False(t, ep.IsHealthy())
+
+	// Success via RecordResult recovers immediately (before timeout)
+	event := p.RecordResult(ep, 200, nil, 5)
+	require.NotNil(t, event)
+	require.True(t, event.NewHealthy)
 	require.True(t, ep.IsHealthy())
 }
 

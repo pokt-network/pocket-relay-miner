@@ -316,6 +316,11 @@ type BackendConfig struct {
 	// Uses a pointer to distinguish "not set" (default 1) from "explicitly 0" (disabled).
 	// Valid range: 0-3.
 	MaxRetries *int `yaml:"max_retries,omitempty"`
+
+	// RecoveryTimeoutSeconds is the duration (in seconds) after which an unhealthy
+	// endpoint auto-recovers. Prevents the circuit breaker death spiral when no
+	// active health checks are configured. Default: 30 seconds. Set to 0 to disable.
+	RecoveryTimeoutSeconds *int `yaml:"recovery_timeout_seconds,omitempty"`
 }
 
 // BackendEndpointConfig represents a single endpoint in a backend pool.
@@ -906,6 +911,19 @@ func (c *Config) BuildPools() error {
 				}
 			default:
 				return fmt.Errorf("service[%s].backends[%s]: unknown load_balancing strategy: %q (valid: round_robin, first_healthy)", serviceID, rpcType, backend.LoadBalancing)
+			}
+
+			// Set recovery timeout on endpoints to prevent circuit breaker death spiral.
+			// If operator sets recovery_timeout_seconds, use it. Otherwise use default (30s).
+			// Set to 0 explicitly to disable.
+			recoveryTimeout := pool.DefaultRecoveryTimeout
+			if backend.RecoveryTimeoutSeconds != nil {
+				recoveryTimeout = time.Duration(*backend.RecoveryTimeoutSeconds) * time.Second
+			}
+			if recoveryTimeout > 0 {
+				for _, ep := range endpoints {
+					ep.SetRecoveryTimeout(recoveryTimeout)
+				}
 			}
 
 			c.pools[poolName] = pool.NewPool(poolName, endpoints, selector, strategyLabel)

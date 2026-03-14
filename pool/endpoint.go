@@ -26,6 +26,12 @@ type BackendEndpoint struct {
 	healthy             atomic.Bool
 	consecutiveFailures atomic.Int32
 	lastCheckUnixNano   atomic.Int64
+
+	// Recovery timeout: auto-recover unhealthy endpoints after this duration.
+	// Prevents circuit breaker death spiral when no active health checks are configured.
+	// Zero means no auto-recovery (rely on health checks or successful requests).
+	recoveryTimeout    time.Duration
+	unhealthySinceNano atomic.Int64
 }
 
 // NewBackendEndpoint creates a new BackendEndpoint from a name and raw URL string.
@@ -71,17 +77,41 @@ func NewBackendEndpoint(name, rawURL string) (*BackendEndpoint, error) {
 }
 
 // IsHealthy returns whether this endpoint is considered healthy.
+// If the endpoint is unhealthy and a recovery timeout is configured,
+// it auto-recovers after the timeout elapses (half-open circuit breaker).
+// This prevents the death spiral where all backends are unhealthy and
+// no traffic flows to trigger recovery via RecordResult.
 func (ep *BackendEndpoint) IsHealthy() bool {
-	return ep.healthy.Load()
+	if ep.healthy.Load() {
+		return true
+	}
+
+	// Check recovery timeout (half-open state)
+	if ep.recoveryTimeout > 0 {
+		unhealthySince := ep.unhealthySinceNano.Load()
+		if unhealthySince > 0 && time.Since(time.Unix(0, unhealthySince)) >= ep.recoveryTimeout {
+			// Auto-recover: CAS ensures only one goroutine triggers recovery
+			if ep.healthy.CompareAndSwap(false, true) {
+				ep.consecutiveFailures.Store(0)
+				ep.unhealthySinceNano.Store(0)
+			}
+			return ep.healthy.Load()
+		}
+	}
+
+	return false
 }
 
-// SetHealthy marks this endpoint as healthy.
+// SetHealthy marks this endpoint as healthy and clears the unhealthy timestamp.
 func (ep *BackendEndpoint) SetHealthy() {
+	ep.unhealthySinceNano.Store(0)
 	ep.healthy.Store(true)
 }
 
-// SetUnhealthy marks this endpoint as unhealthy.
+// SetUnhealthy marks this endpoint as unhealthy and records the timestamp
+// for recovery timeout tracking.
 func (ep *BackendEndpoint) SetUnhealthy() {
+	ep.unhealthySinceNano.Store(time.Now().UnixNano())
 	ep.healthy.Store(false)
 }
 
@@ -98,6 +128,18 @@ func (ep *BackendEndpoint) ResetFailures() {
 // ConsecutiveFailures returns the current consecutive failure count.
 func (ep *BackendEndpoint) ConsecutiveFailures() int32 {
 	return ep.consecutiveFailures.Load()
+}
+
+// SetRecoveryTimeout configures the auto-recovery timeout for this endpoint.
+// When an endpoint is unhealthy for longer than this duration, IsHealthy()
+// auto-recovers it (half-open circuit breaker). Zero disables auto-recovery.
+func (ep *BackendEndpoint) SetRecoveryTimeout(d time.Duration) {
+	ep.recoveryTimeout = d
+}
+
+// RecoveryTimeout returns the configured recovery timeout.
+func (ep *BackendEndpoint) RecoveryTimeout() time.Duration {
+	return ep.recoveryTimeout
 }
 
 // SetLastCheck records the time of the last health check.

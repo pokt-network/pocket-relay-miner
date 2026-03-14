@@ -4,11 +4,20 @@ import (
 	"context"
 	"errors"
 	"net"
+	"time"
 )
 
 // DefaultUnhealthyThreshold is the number of consecutive failures before
 // a backend is marked unhealthy. Used when threshold is 0 (unconfigured).
 const DefaultUnhealthyThreshold int32 = 5
+
+// DefaultRecoveryTimeout is the duration after which an unhealthy endpoint
+// auto-recovers if no active health checks are configured. This prevents
+// the circuit breaker death spiral where all backends are unhealthy and
+// fast-fail blocks all traffic, preventing recovery via RecordResult.
+// Set to 30 seconds — long enough to avoid hammering a truly down backend,
+// short enough to recover quickly when it comes back.
+const DefaultRecoveryTimeout = 30 * time.Second
 
 // TransitionEvent is returned by RecordResult when a backend's health state changes.
 // A nil return means no state transition occurred. Callers use this to log

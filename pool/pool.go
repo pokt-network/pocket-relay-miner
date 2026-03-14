@@ -1,5 +1,7 @@
 package pool
 
+import "time"
+
 // Pool holds an immutable set of backend endpoints and a selector strategy.
 // Once created, the endpoint list cannot be modified. On config reload,
 // a new Pool is built and swapped atomically.
@@ -79,6 +81,7 @@ func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, thre
 			// If another goroutine already flipped healthy->false, CAS returns false
 			// and we return nil (no duplicate transition event).
 			if ep.healthy.CompareAndSwap(true, false) {
+				ep.unhealthySinceNano.Store(time.Now().UnixNano())
 				return &TransitionEvent{
 					Endpoint:   ep,
 					OldHealthy: true,
@@ -98,6 +101,7 @@ func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, thre
 	// Recovery: if endpoint was unhealthy, CAS false->true.
 	// Only the goroutine that flips the state returns the event.
 	if ep.healthy.CompareAndSwap(false, true) {
+		ep.unhealthySinceNano.Store(0)
 		return &TransitionEvent{
 			Endpoint:   ep,
 			OldHealthy: false,

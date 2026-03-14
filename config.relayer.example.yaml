@@ -95,7 +95,7 @@ services:
         # authentication:
         #   bearer_token: "your-token"
         #
-        # Advanced configuration (future phases):
+        # Active health checks (recommended for production):
         # health_check:
         #   enabled: true
         #   endpoint: "/health"
@@ -103,6 +103,11 @@ services:
         #   timeout_seconds: 5
         #   unhealthy_threshold: 5
         #   healthy_threshold: 3
+        #
+        # Recovery timeout: auto-recover circuit-breaker-tripped backends after N seconds.
+        # Prevents death spiral when all backends are unhealthy and no health checks are configured.
+        # Default: 30 seconds. Set to 0 to disable (requires active health checks for recovery).
+        # recovery_timeout_seconds: 30
 
   # WebSocket service (localnet)
   develop-websocket:
