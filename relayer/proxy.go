@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -807,20 +808,87 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	// Forward request to backend (handles both streaming and non-streaming)
-	// Use the parsed POKTHTTPRequest if available, otherwise fall back to raw body
+	// Forward request to backend with retry-on-alternate-backend for HTTP.
+	// Retry shares the original context timeout (no extra latency budget).
+	// Both original and retry attempts feed the circuit breaker via RecordResult.
 	backendStart := time.Now()
-	respBody, respHeaders, respStatus, isStreaming, endpoint, backendPool, err := p.forwardToBackendWithStreaming(r.Context(), r, body, serviceID, &svcConfig, rpcType, poktHTTPRequest, w, relayRequest)
-	backendDuration := time.Since(backendStart)
+	maxRetries := p.getMaxRetries(serviceID, rpcType)
+	retryPool := p.config.GetPool(serviceID, rpcType)
 
-	// Record result for circuit breaker (covers both success and error paths)
-	if endpoint != nil && backendPool != nil {
-		threshold := p.getCircuitBreakerThreshold(serviceID, rpcType)
-		transition := backendPool.RecordResult(endpoint, respStatus, err, threshold)
-		if transition != nil {
-			p.logCircuitBreakerTransition(transition, serviceID, rpcType)
+	var (
+		respBody    []byte
+		respHeaders http.Header
+		respStatus  int
+		isStreaming bool
+		endpoint    *pool.BackendEndpoint
+		backendPool *pool.Pool
+		attempt     int
+	)
+	var lastEndpoint *pool.BackendEndpoint
+	threshold := p.getCircuitBreakerThreshold(serviceID, rpcType)
+
+	for attempt = 0; attempt <= maxRetries; attempt++ {
+		// Check context before retry (shared timeout budget may be exhausted)
+		if attempt > 0 && r.Context().Err() != nil {
+			break
 		}
+
+		// Endpoint selection: first attempt uses normal selection, retries use NextExcluding
+		var selectedEndpoint *pool.BackendEndpoint
+		var selectedPool *pool.Pool
+		if attempt > 0 && retryPool != nil && lastEndpoint != nil {
+			selectedEndpoint = retryPool.NextExcluding(lastEndpoint)
+			if selectedEndpoint == nil {
+				// No alternate healthy backend available for retry
+				break
+			}
+			selectedPool = retryPool
+			p.logger.Debug().
+				Str("backend", selectedEndpoint.Name).
+				Str("previous", lastEndpoint.Name).
+				Int("attempt", attempt).
+				Str("service_id", serviceID).
+				Msg("retrying on alternate backend")
+		}
+
+		respBody, respHeaders, respStatus, isStreaming, endpoint, backendPool, err = p.forwardToBackendWithStreaming(
+			r.Context(), r, body, serviceID, &svcConfig, rpcType, poktHTTPRequest, w, relayRequest,
+			selectedEndpoint, selectedPool,
+		)
+
+		// Record result for circuit breaker (both success and failure)
+		if endpoint != nil && backendPool != nil {
+			transition := backendPool.RecordResult(endpoint, respStatus, err, threshold)
+			if transition != nil {
+				p.logCircuitBreakerTransition(transition, serviceID, rpcType)
+			}
+		}
+
+		// If success or non-retryable error, stop retrying
+		if err == nil && respStatus < 500 {
+			break
+		}
+		if err != nil && !pool.IsRetryable(respStatus, err) {
+			break
+		}
+		if err == nil && respStatus >= 500 && !pool.IsRetryable(respStatus, nil) {
+			break
+		}
+
+		// If streaming already started, we cannot retry (response partially sent)
+		if isStreaming {
+			break
+		}
+
+		lastEndpoint = endpoint
 	}
+
+	// Set Backend-Retries header on successful retry
+	if attempt > 0 && err == nil && respStatus < 500 {
+		w.Header().Set("Backend-Retries", strconv.Itoa(attempt))
+	}
+
+	backendDuration := time.Since(backendStart)
 
 	// Record backend latency asynchronously (no blocking on histogram locks)
 	p.metricRecorder.RecordDuration(backendLatency, []string{serviceID}, backendDuration)
@@ -1216,6 +1284,8 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	poktHTTPRequest *sdktypes.POKTHTTPRequest,
 	w http.ResponseWriter,
 	relayRequest *servicetypes.RelayRequest,
+	preSelectedEndpoint *pool.BackendEndpoint,
+	preSelectedPool *pool.Pool,
 ) ([]byte, http.Header, int, bool, *pool.BackendEndpoint, *pool.Pool, error) {
 	// Create session context once for all logging in this function
 	var sessionCtx *logging.SessionContext
@@ -1225,15 +1295,24 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		sessionCtx = &logging.SessionContext{ServiceID: serviceID}
 	}
 
-	// Resolve backend via pool-based API (GetPool implements the fallback chain:
-	// exact match -> default_backend -> jsonrpc -> rest -> any available)
-	backendPool := p.config.GetPool(serviceID, rpcType)
-	if backendPool == nil {
-		return nil, nil, 0, false, nil, nil, fmt.Errorf("no backend pool configured for service %s and RPC type %s", serviceID, rpcType)
-	}
-	endpoint := backendPool.Next()
-	if endpoint == nil {
-		return nil, nil, 0, false, nil, nil, fmt.Errorf("no healthy backend available for service %s (pool: %s)", serviceID, backendPool.PoolName())
+	var backendPool *pool.Pool
+	var endpoint *pool.BackendEndpoint
+
+	if preSelectedEndpoint != nil && preSelectedPool != nil {
+		// Use pre-selected endpoint (retry path)
+		backendPool = preSelectedPool
+		endpoint = preSelectedEndpoint
+	} else {
+		// Resolve backend via pool-based API (GetPool implements the fallback chain:
+		// exact match -> default_backend -> jsonrpc -> rest -> any available)
+		backendPool = p.config.GetPool(serviceID, rpcType)
+		if backendPool == nil {
+			return nil, nil, 0, false, nil, nil, fmt.Errorf("no backend pool configured for service %s and RPC type %s", serviceID, rpcType)
+		}
+		endpoint = backendPool.Next()
+		if endpoint == nil {
+			return nil, nil, 0, false, nil, nil, fmt.Errorf("no healthy backend available for service %s (pool: %s)", serviceID, backendPool.PoolName())
+		}
 	}
 
 	p.logger.Debug().
@@ -1430,6 +1509,17 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 // getCircuitBreakerThreshold returns the unhealthy threshold for circuit breaker
 // evaluation. Reads from BackendHealthCheckConfig if configured, otherwise uses
 // the pool package default (5).
+// getMaxRetries returns the maximum number of retry attempts for a service backend.
+// Uses the BackendConfig.MaxRetries pointer field: nil = default 1, explicit 0 = disabled.
+// Capped at 3 per validation in config.go.
+func (p *ProxyServer) getMaxRetries(serviceID, rpcType string) int {
+	cfg := p.config.GetBackendConfig(serviceID, rpcType)
+	if cfg != nil && cfg.MaxRetries != nil {
+		return *cfg.MaxRetries
+	}
+	return 1 // default: 1 retry attempt
+}
+
 func (p *ProxyServer) getCircuitBreakerThreshold(serviceID, rpcType string) int32 {
 	if backendCfg := p.config.GetBackendConfig(serviceID, rpcType); backendCfg != nil {
 		if backendCfg.HealthCheck != nil && backendCfg.HealthCheck.UnhealthyThreshold > 0 {

@@ -50,6 +50,18 @@ func isFailure(statusCode int, err error) bool {
 	return statusCode >= 500
 }
 
+// IsRetryable returns true if the given status code and error indicate that
+// the request should be retried on an alternate backend.
+//
+// Retryable: connection errors (refused, DNS, reset) and HTTP 5xx.
+// NOT retryable: timeouts (shared budget exhausted), HTTP 1xx-4xx, nil error with 2xx.
+//
+// This is an exported wrapper around isFailure for clarity of intent
+// (retry decision vs circuit breaker counting use the same classification).
+func IsRetryable(statusCode int, err error) bool {
+	return isFailure(statusCode, err)
+}
+
 // isTimeoutError returns true if the error represents a timeout.
 // Checks for context.DeadlineExceeded and net.Error with Timeout()=true.
 func isTimeoutError(err error) bool {
