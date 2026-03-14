@@ -26,9 +26,9 @@ See: .planning/PROJECT.md (updated 2026-03-12)
 ## Current Position
 
 Phase: 05-fast-fail-and-resilience
-Plan: 1 of 2 in current phase
-Status: In Progress
-Last activity: 2026-03-14 -- Completed 05-01 (Fast-fail pre-check)
+Plan: 3 of 3 in current phase
+Status: Complete
+Last activity: 2026-03-14 -- Completed 05-03 (Eager-mode fast-fail and WebSocket handler tests)
 
 Progress: [██████████] 100%
 
@@ -58,6 +58,7 @@ Progress: [██████████] 100%
 | Phase 04 P02 | 2min | 1 tasks | 1 files |
 | Phase 05 P01 | 6min | 2 tasks | 7 files |
 | Phase 05 P02 | 4min | 1 tasks | 3 files |
+| Phase 05 P03 | 2min | 2 tasks | 2 files |
 
 ## Accumulated Context
 
@@ -99,6 +100,8 @@ Recent decisions affecting current work:
 - [Phase 05-01]: MaxRetries pointer field distinguishes not-set (default 1) from explicitly 0
 - [Phase 05]: IsRetryable wraps isFailure: same classification for retry and circuit breaker
 - [Phase 05]: forwardToBackendWithStreaming extended with optional pre-selected endpoint+pool for retry control
+- [Phase 05-03]: Eager-mode pre-check is ADDITIONAL to existing fast-fail, not a replacement
+- [Phase 05-03]: WebSocket tests use noopRelayProcessor/noopPublisher stubs for handler-level testing
 
 ### Roadmap Evolution
 
@@ -119,6 +122,6 @@ None yet.
 
 ## Session Continuity
 
-Last session: 2026-03-14T00:14:43.594Z
-Stopped at: Completed 05-02-PLAN.md
+Last session: 2026-03-14T00:59:44Z
+Stopped at: Completed 05-03-PLAN.md
 Resume file: None
