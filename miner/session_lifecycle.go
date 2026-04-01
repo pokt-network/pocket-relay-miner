@@ -876,10 +876,15 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 		}
 	}
 
-	// CRITICAL: Refresh session snapshots from Redis to get latest relay counts.
-	// The in-memory activeSessions may have stale RelayCount values because
-	// SessionCoordinator.OnRelayProcessed() updates Redis directly without
-	// updating the in-memory map. This ensures claim decisions use fresh data.
+	// CRITICAL: Refresh session snapshots from Redis to get latest relay counts
+	// AND claim deduplication state (ClaimTxHash, State).
+	// The in-memory activeSessions may have stale values because:
+	// 1. SessionCoordinator.OnRelayProcessed() updates Redis directly without
+	//    updating the in-memory map (stale RelayCount).
+	// 2. In multi-miner setups, another miner may have already claimed this
+	//    session — refreshing ClaimTxHash and State enables cross-instance
+	//    deduplication in the lifecycle callback.
+	var refreshedSessions []*SessionSnapshot
 	for _, session := range sessions {
 		freshSnapshot, err := m.sessionStore.Get(ctx, session.SessionID)
 		if err != nil {
@@ -889,15 +894,33 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
 				Str(logging.FieldServiceID, session.ServiceID).
 				Msg("failed to refresh session from Redis, using in-memory data")
+			refreshedSessions = append(refreshedSessions, session)
 			continue
 		}
 		if freshSnapshot != nil {
+			// Check if another miner already claimed this session
+			if freshSnapshot.ClaimTxHash != "" || freshSnapshot.State == SessionStateClaimed {
+				m.logger.Warn().
+					Str(logging.FieldSessionID, session.SessionID).
+					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+					Str("redis_state", string(freshSnapshot.State)).
+					Str("claim_tx_hash", freshSnapshot.ClaimTxHash).
+					Msg("skipping claim: session already claimed by another miner (cross-instance dedup)")
+
+				// Update in-memory state to match Redis so we don't retry
+				session.State = freshSnapshot.State
+				session.ClaimTxHash = freshSnapshot.ClaimTxHash
+				session.ClaimedRootHash = freshSnapshot.ClaimedRootHash
+				continue
+			}
+
 			// Update in-memory state with fresh Redis data
 			// Note: Session is a pointer in the map, and each session is processed
 			// by one goroutine at a time, so direct field updates are safe
 			session.RelayCount = freshSnapshot.RelayCount
 			session.TotalComputeUnits = freshSnapshot.TotalComputeUnits
 			session.LastUpdatedAt = freshSnapshot.LastUpdatedAt
+			session.ClaimTxHash = freshSnapshot.ClaimTxHash
 
 			m.logger.Debug().
 				Str(logging.FieldSessionID, session.SessionID).
@@ -907,6 +930,13 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 				Uint64("compute_units", freshSnapshot.TotalComputeUnits).
 				Msg("refreshed session snapshot from Redis")
 		}
+		refreshedSessions = append(refreshedSessions, session)
+	}
+	sessions = refreshedSessions
+
+	if len(sessions) == 0 {
+		m.logger.Debug().Msg("all sessions already claimed by another miner, skipping batch")
+		return
 	}
 
 	// Call the batched claim callback

@@ -341,6 +341,11 @@ func (c *SessionCoordinator) OnClaimWindowClosed(ctx context.Context, sessionID 
 
 // OnClaimTxError marks session as failed due to claim transaction error.
 // Updates state immediately in Redis for HA compatibility.
+//
+// IMPORTANT: This method checks the current Redis state before overwriting.
+// In multi-miner setups, another miner may have already successfully claimed
+// the session. Overwriting SessionStateClaimed with SessionStateClaimTxError
+// would kill the session and prevent proof submission, causing lost rewards.
 func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID string) error {
 	c.mu.Lock()
 	if c.closed {
@@ -349,6 +354,23 @@ func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID strin
 	}
 	terminalCallback := c.onSessionTerminal
 	c.mu.Unlock()
+
+	// Check current state in Redis before overwriting — another miner may have
+	// already claimed this session successfully. Marking a successfully-claimed
+	// session as ClaimTxError would prevent proof submission and lose rewards.
+	current, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to read session state before marking claim_tx_error")
+		// Fall through — better to risk a no-op than to skip the error marking entirely
+	} else if current != nil && (current.State == SessionStateClaimed || current.ClaimTxHash != "") {
+		c.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Str("current_state", string(current.State)).
+			Str("claim_tx_hash", current.ClaimTxHash).
+			Msg("NOT marking claim_tx_error: session already claimed by another miner")
+		return nil
+	}
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimTxError); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
@@ -401,6 +423,11 @@ func (c *SessionCoordinator) OnProofWindowClosed(ctx context.Context, sessionID 
 
 // OnProofTxError marks session as failed due to proof transaction error.
 // Updates state immediately in Redis for HA compatibility.
+//
+// IMPORTANT: This method checks the current Redis state before overwriting.
+// In multi-miner setups, another miner may have already successfully proved
+// the session. Overwriting SessionStateProved with SessionStateProofTxError
+// would incorrectly mark a successful session as failed.
 func (c *SessionCoordinator) OnProofTxError(ctx context.Context, sessionID string) error {
 	c.mu.Lock()
 	if c.closed {
@@ -409,6 +436,21 @@ func (c *SessionCoordinator) OnProofTxError(ctx context.Context, sessionID strin
 	}
 	terminalCallback := c.onSessionTerminal
 	c.mu.Unlock()
+
+	// Check current state in Redis before overwriting — another miner may have
+	// already proved this session successfully.
+	current, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to read session state before marking proof_tx_error")
+	} else if current != nil && (current.State == SessionStateProved || current.State == SessionStateProbabilisticProved || current.ProofTxHash != "") {
+		c.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Str("current_state", string(current.State)).
+			Str("proof_tx_hash", current.ProofTxHash).
+			Msg("NOT marking proof_tx_error: session already proved by another miner")
+		return nil
+	}
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateProofTxError); err != nil {
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
