@@ -108,9 +108,8 @@ type Config struct {
 	// Auto-sizing formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
 	WorkerPools WorkerPoolConfigYAML `yaml:"worker_pools,omitempty"`
 
-	// Note: Supplier claiming is always enabled with hardcoded timing values.
-	// See miner/supplier_claimer.go for the constants (ClaimTTL, RenewRate, etc.)
-	// These values are NOT user-configurable to ensure production reliability.
+	// SupplierClaiming configures distributed supplier claiming for HA multi-miner setups.
+	SupplierClaiming SupplierClaimingConfigYAML `yaml:"supplier_claiming,omitempty"`
 }
 
 // SessionLifecycleConfigYAML contains configuration for session lifecycle management.
@@ -118,6 +117,41 @@ type SessionLifecycleConfigYAML struct {
 	// MaxConcurrentTransitions is the max number of sessions transitioning at once.
 	// Default: 10
 	MaxConcurrentTransitions int `yaml:"max_concurrent_transitions,omitempty"`
+}
+
+// SupplierClaimingConfigYAML contains configuration for distributed supplier claiming.
+// In HA setups, miners distribute suppliers among themselves using Redis-based leases.
+// These values control the lease timing and must be tuned for high supplier counts.
+type SupplierClaimingConfigYAML struct {
+	// ClaimTTLSeconds is how long a supplier claim lease is valid before expiring (in seconds).
+	// If a miner crashes, other miners can reclaim its suppliers after this duration.
+	// Higher values give more headroom for the renewal loop under load but increase
+	// failover time when a miner dies.
+	//
+	// IMPORTANT: With 500+ suppliers, the sequential renewal loop can take several
+	// seconds per cycle. If the renewal can't complete before TTL expires, claims
+	// get orphaned and cause duplicate lifecycle issues. For high supplier counts,
+	// increase this value.
+	//
+	// Guidelines:
+	//   - <100 suppliers: 90s (default) is fine
+	//   - 100-500 suppliers: 90s is fine
+	//   - 500-1000 suppliers: 120s recommended
+	//   - 1000+ suppliers: 180s recommended
+	//
+	// Default: 90s
+	ClaimTTLSeconds int `yaml:"claim_ttl_seconds,omitempty"`
+
+	// RenewRateSeconds is how often to renew all supplier claim leases (in seconds).
+	// Must be significantly less than ClaimTTLSeconds to allow multiple renewal
+	// attempts before expiry.
+	// Default: 10s
+	RenewRateSeconds int `yaml:"renew_rate_seconds,omitempty"`
+
+	// RebalanceIntervalSeconds is how often to check for fair supplier distribution
+	// across miner instances and scan for orphaned suppliers (in seconds).
+	// Default: 30s
+	RebalanceIntervalSeconds int `yaml:"rebalance_interval_seconds,omitempty"`
 }
 
 // LeaderElectionConfig contains configuration for distributed leader election.
@@ -330,6 +364,14 @@ func (c *Config) Validate() error {
 		}
 	}
 
+	// Validate supplier claiming: renew rate must be less than TTL
+	if c.SupplierClaiming.RenewRateSeconds > 0 && c.SupplierClaiming.ClaimTTLSeconds > 0 {
+		if c.SupplierClaiming.RenewRateSeconds >= c.SupplierClaiming.ClaimTTLSeconds {
+			return fmt.Errorf("supplier_claiming.renew_rate_seconds (%d) must be less than claim_ttl_seconds (%d)",
+				c.SupplierClaiming.RenewRateSeconds, c.SupplierClaiming.ClaimTTLSeconds)
+		}
+	}
+
 	// Note: Storage validation removed - all session trees now use Redis
 
 	return nil
@@ -525,17 +567,31 @@ func (c *Config) GetServiceFactor(serviceID string) (float64, bool) {
 }
 
 // GetSupplierClaimingConfig returns the SupplierClaimerConfig for supplier claiming.
-// All timing values are hardcoded constants to ensure production reliability.
-// See supplier_claimer.go for the constant definitions and documentation.
+// Uses YAML config values if set, otherwise falls back to constants defined in supplier_claimer.go.
 func (c *Config) GetSupplierClaimingConfig() SupplierClaimerConfig {
-	// Always return hardcoded constants - these are NOT user-configurable
-	// to prevent operators from accidentally breaking the claiming system.
+	claimTTL := ClaimTTL
+	if c.SupplierClaiming.ClaimTTLSeconds > 0 {
+		claimTTL = time.Duration(c.SupplierClaiming.ClaimTTLSeconds) * time.Second
+	}
+
+	renewRate := RenewRate
+	if c.SupplierClaiming.RenewRateSeconds > 0 {
+		renewRate = time.Duration(c.SupplierClaiming.RenewRateSeconds) * time.Second
+	}
+
+	rebalanceInterval := RebalanceInterval
+	if c.SupplierClaiming.RebalanceIntervalSeconds > 0 {
+		rebalanceInterval = time.Duration(c.SupplierClaiming.RebalanceIntervalSeconds) * time.Second
+	}
+
+	// Instance TTL and heartbeat rate always match claim TTL and renew rate
+	// to keep the timing relationships consistent.
 	return SupplierClaimerConfig{
-		ClaimTTL:              ClaimTTL,
-		RenewRate:             RenewRate,
-		InstanceTTL:           InstanceTTL,
-		InstanceHeartbeatRate: InstanceHeartbeatRate,
-		RebalanceInterval:     RebalanceInterval,
+		ClaimTTL:              claimTTL,
+		RenewRate:             renewRate,
+		InstanceTTL:           claimTTL,
+		InstanceHeartbeatRate: renewRate,
+		RebalanceInterval:     rebalanceInterval,
 	}
 }
 

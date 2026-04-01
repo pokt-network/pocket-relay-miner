@@ -14,37 +14,38 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-// Supplier Claiming Timing Constants
+// Supplier Claiming Default Timing Constants
 //
-// These values are carefully tuned for production reliability and are NOT user-configurable.
-// Modifying these could cause claim conflicts, orphaned suppliers, or failover delays.
+// These defaults are used when no YAML config is provided. They are tuned for
+// production reliability with high supplier counts (500+).
 //
 // Timing relationships:
-//   - ClaimTTL = 30s: Time before a claim expires if not renewed
-//   - RenewRate = 10s: Claims are renewed every 10s (3x before TTL expires)
-//   - InstanceTTL = 30s: Instance registration expires after 30s without heartbeat
+//   - ClaimTTL = 90s: Time before a claim expires if not renewed
+//   - RenewRate = 10s: Claims are renewed 9x before TTL expires (90s / 10s)
+//   - InstanceTTL = 90s: Instance registration expires after 90s without heartbeat
 //   - InstanceHeartbeatRate = 10s: Instance heartbeats every 10s
 //   - RebalanceInterval = 30s: Check for rebalancing every 30s
 //
 // Failover timing:
-//   - If a miner crashes, its claims expire after ClaimTTL (30s)
+//   - If a miner crashes, its claims expire after ClaimTTL (90s)
 //   - Other miners detect orphaned claims in the next rebalance cycle (~30s)
-//   - Maximum failover time: ClaimTTL + RebalanceInterval = ~60s
+//   - Maximum failover time: ClaimTTL + RebalanceInterval = ~120s
 //
-// DO NOT MODIFY THESE VALUES without understanding the full implications.
+// These can be overridden via supplier_claiming config in miner YAML.
 const (
 	// ClaimTTL is how long a supplier claim is valid before it expires.
 	// If a miner crashes, other miners can reclaim after this duration.
-	// Must be > 2 * RenewRate to allow for network delays.
-	ClaimTTL = 30 * time.Second
+	// Set to 90s (up from 30s) to give the sequential renewal loop sufficient
+	// headroom with high supplier counts (500+) where renewal can take 4-8s.
+	ClaimTTL = 90 * time.Second
 
 	// RenewRate is how often to renew claims.
-	// Claims are renewed 3 times before TTL expires (30s / 10s = 3x safety margin).
+	// Claims are renewed 9x before TTL expires (90s / 10s = 9x safety margin).
 	RenewRate = 10 * time.Second
 
 	// InstanceTTL is how long an instance registration is valid.
 	// Matches ClaimTTL for consistency.
-	InstanceTTL = 30 * time.Second
+	InstanceTTL = 90 * time.Second
 
 	// InstanceHeartbeatRate is how often to heartbeat instance registration.
 	// Matches RenewRate for consistency.
@@ -113,28 +114,43 @@ type SupplierClaimer struct {
 }
 
 // NewSupplierClaimer creates a new supplier claimer.
-// The claimer uses hardcoded timing constants (ClaimTTL, RenewRate, etc.)
-// to ensure production reliability. Config values are ignored.
+// Uses the provided config values. Zero values fall back to the package-level
+// constants (ClaimTTL=90s, RenewRate=10s, etc.).
 func NewSupplierClaimer(
 	logger logging.Logger,
 	redisClient *redisutil.Client,
 	instanceID string,
-	_ SupplierClaimerConfig, // Config parameter kept for API compatibility but ignored
+	cfg SupplierClaimerConfig,
 ) *SupplierClaimer {
-	// Always use hardcoded constants for production reliability
-	config := SupplierClaimerConfig{
-		ClaimTTL:              ClaimTTL,
-		RenewRate:             RenewRate,
-		InstanceTTL:           InstanceTTL,
-		InstanceHeartbeatRate: InstanceHeartbeatRate,
-		RebalanceInterval:     RebalanceInterval,
+	// Apply defaults for any zero-value fields
+	if cfg.ClaimTTL <= 0 {
+		cfg.ClaimTTL = ClaimTTL
+	}
+	if cfg.RenewRate <= 0 {
+		cfg.RenewRate = RenewRate
+	}
+	if cfg.InstanceTTL <= 0 {
+		cfg.InstanceTTL = cfg.ClaimTTL // Match ClaimTTL
+	}
+	if cfg.InstanceHeartbeatRate <= 0 {
+		cfg.InstanceHeartbeatRate = cfg.RenewRate // Match RenewRate
+	}
+	if cfg.RebalanceInterval <= 0 {
+		cfg.RebalanceInterval = RebalanceInterval
 	}
 
+	componentLogger := logging.ForComponent(logger, logging.ComponentSupplierClaimer)
+	componentLogger.Info().
+		Dur("claim_ttl", cfg.ClaimTTL).
+		Dur("renew_rate", cfg.RenewRate).
+		Dur("rebalance_interval", cfg.RebalanceInterval).
+		Msg("supplier claimer timing configuration")
+
 	return &SupplierClaimer{
-		logger:      logging.ForComponent(logger, logging.ComponentSupplierClaimer),
+		logger:      componentLogger,
 		redisClient: redisClient,
 		instanceID:  instanceID,
-		config:      config,
+		config:      cfg,
 		claimed:     make(map[string]time.Time),
 	}
 }

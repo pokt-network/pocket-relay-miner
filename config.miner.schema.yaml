@@ -367,6 +367,26 @@ properties:
         default: 10
         minimum: 1
 
+  supplier_claiming:
+    type: object
+    description: Distributed supplier claiming configuration (HA multi-miner). Controls Redis lease timing for distributing suppliers across miner replicas.
+    properties:
+      claim_ttl_seconds:
+        type: integer
+        description: How long a supplier claim lease is valid (seconds). Increase for 500+ suppliers.
+        default: 90
+        minimum: 15
+      renew_rate_seconds:
+        type: integer
+        description: How often to renew all supplier claim leases (seconds). Must be less than claim_ttl_seconds.
+        default: 10
+        minimum: 1
+      rebalance_interval_seconds:
+        type: integer
+        description: How often to check supplier distribution and scan for orphans (seconds).
+        default: 30
+        minimum: 5
+
   deduplication_ttl_blocks:
     type: integer
     description: How many blocks to keep relay hashes for deduplication

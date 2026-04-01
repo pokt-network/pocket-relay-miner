@@ -233,32 +233,35 @@ leader_election:
   heartbeat_rate_seconds: 10  # Attempt acquire/renew every 10s
 
 # ==============================================================================
-# Supplier Claiming (HA Multi-Miner) - Automatic, No Configuration Needed
+# Supplier Claiming (HA Multi-Miner)
 # ==============================================================================
 # Suppliers are automatically distributed across miner replicas using Redis leases.
 # - Single miner: Claims all configured suppliers
 # - Multiple miners: Fair distribution with automatic rebalancing
 #
 # How it works:
-#   1. Each miner claims suppliers via Redis SET NX with TTL (30s)
-#   2. Miners register in an "active" set with heartbeat (every 10s)
+#   1. Each miner claims suppliers via Redis SET NX with TTL
+#   2. Miners register in an "active" set with heartbeat
 #   3. Fair share is calculated: ceil(totalSuppliers / activeMiners)
-#   4. Rebalancing releases excess claims when new miners join (every 30s)
-#   5. If a miner crashes, its claims expire after 30s
+#   4. Rebalancing releases excess claims when new miners join
+#   5. If a miner crashes, its claims expire after claim_ttl_seconds
 #
 # Example with 3 miners and 9 suppliers:
 #   - Fair share = ceil(9/3) = 3 suppliers per miner
 #   - Each miner claims up to 3 suppliers
 #   - If miner-1 crashes, miner-2 and miner-3 claim its 3 suppliers
 #
-# Timing values are HARDCODED (not configurable) to ensure production reliability:
-#   - ClaimTTL: 30s (time before claim expires)
-#   - RenewRate: 10s (claims renewed 3x before expiry)
-#   - InstanceTTL: 30s (miner registration TTL)
-#   - RebalanceInterval: 30s (redistribution check interval)
-#   - Maximum failover time: ~60s (ClaimTTL + RebalanceInterval)
-#
-# See miner/supplier_claimer.go for the constant definitions.
+# IMPORTANT: With 500+ suppliers, the renewal loop runs sequentially and can
+# take several seconds per cycle. If claim_ttl_seconds is too low, claims
+# expire before renewal completes, causing duplicate lifecycles and lost rewards.
+# Increase claim_ttl_seconds for high supplier counts.
+supplier_claiming:
+  claim_ttl_seconds: 90      # Lease duration (default: 90s, increase for 500+ suppliers)
+  renew_rate_seconds: 10     # Renewal frequency (default: 10s)
+  rebalance_interval_seconds: 30  # Redistribution check (default: 30s)
+  # [HIGH LOAD 500-1000 suppliers] claim_ttl_seconds: 120
+  # [HIGH LOAD 1000+ suppliers] claim_ttl_seconds: 180
+  # Maximum failover time: claim_ttl_seconds + rebalance_interval_seconds
 
 # ==============================================================================
 # Processing Configuration
