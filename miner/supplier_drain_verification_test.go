@@ -32,6 +32,10 @@ func (c *testSupplierQueryClient) GetParams(_ context.Context) (*suppliertypes.P
 	return &suppliertypes.Params{}, nil
 }
 
+func (c *testSupplierQueryClient) InvalidateSupplier(_ string) {
+	// no-op for tests — cache invalidation is a production concern
+}
+
 // --- Helper constructors ---
 
 // newStakedQueryClient returns a client that reports the given addresses as staked,
@@ -290,6 +294,49 @@ func TestDrainMetric_NotFound(t *testing.T) {
 	afterNotFound := testutil.ToFloat64(supplierDrainDecisionTotal.WithLabelValues("rebalance_release", "not_found"))
 	assert.Equal(t, beforeNotFound+1, afterNotFound,
 		"drain decision metric should increment for rebalance_release/not_found")
+}
+
+// =============================================================================
+// INVALIDATION: Verify InvalidateSupplier is called before GetSupplier
+// in filterStakedSuppliers and verifySupplierUnstaked, ensuring stale
+// cached data never hides on-chain staking changes.
+// =============================================================================
+
+// trackingSupplierQueryClient wraps a real query client and records
+// InvalidateSupplier calls so tests can assert the wiring.
+type trackingSupplierQueryClient struct {
+	*testSupplierQueryClient
+	invalidated []string
+}
+
+func (c *trackingSupplierQueryClient) InvalidateSupplier(addr string) {
+	c.invalidated = append(c.invalidated, addr)
+}
+
+func TestFilterStakedSuppliers_InvalidatesBeforeQuery(t *testing.T) {
+	inner := newStakedQueryClient("pokt1a", "pokt1b")
+	tracking := &trackingSupplierQueryClient{testSupplierQueryClient: inner}
+	mgr := newTestSupplierManager(t, tracking)
+
+	result := mgr.filterStakedSuppliers(context.Background(), []string{"pokt1a", "pokt1b"})
+	require.Len(t, result, 2)
+
+	// Both suppliers must have been invalidated before querying
+	assert.Equal(t, []string{"pokt1a", "pokt1b"}, tracking.invalidated,
+		"filterStakedSuppliers must call InvalidateSupplier for each address before GetSupplier")
+}
+
+func TestVerifySupplierUnstaked_InvalidatesBeforeQuery(t *testing.T) {
+	inner := newStakedQueryClient("pokt1staked")
+	tracking := &trackingSupplierQueryClient{testSupplierQueryClient: inner}
+	mgr := newTestSupplierManager(t, tracking)
+
+	shouldDrain, result := mgr.verifySupplierUnstaked(context.Background(), "pokt1staked", "test")
+	assert.False(t, shouldDrain)
+	assert.Equal(t, "staked", result)
+
+	assert.Equal(t, []string{"pokt1staked"}, tracking.invalidated,
+		"verifySupplierUnstaked must call InvalidateSupplier before GetSupplier")
 }
 
 // Verify the metric is registered with correct labels using the MinerRegistry

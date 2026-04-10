@@ -190,7 +190,7 @@ func (qc *Clients) Application() client.ApplicationQueryClient {
 }
 
 // Supplier returns the supplier module query client.
-func (qc *Clients) Supplier() client.SupplierQueryClient {
+func (qc *Clients) Supplier() SupplierQueryClient {
 	return qc.supplierClient
 }
 
@@ -619,7 +619,10 @@ type supplierQueryClient struct {
 	queryClient  suppliertypes.QueryClient
 	queryTimeout time.Duration
 
-	// Simple in-memory cache
+	// supplierCache caches supplier data within a session.
+	// Keyed by operatorAddress. Invalidated at session boundaries via
+	// InvalidateSupplier so the miner always re-queries the chain when
+	// checking for staking changes (e.g. new services added mid-operation).
 	supplierCache   map[string]sharedtypes.Supplier
 	supplierCacheMu sync.RWMutex
 
@@ -627,7 +630,16 @@ type supplierQueryClient struct {
 	paramsCacheMu sync.RWMutex
 }
 
-var _ client.SupplierQueryClient = (*supplierQueryClient)(nil)
+// SupplierQueryClient extends the base SupplierQueryClient with cache
+// invalidation. The miner calls InvalidateSupplier at session boundaries
+// so that subsequent GetSupplier calls fetch fresh data from chain,
+// picking up staking changes (e.g. new services added mid-operation).
+type SupplierQueryClient interface {
+	client.SupplierQueryClient
+	InvalidateSupplier(operatorAddress string)
+}
+
+var _ SupplierQueryClient = (*supplierQueryClient)(nil)
 
 func newSupplierQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *supplierQueryClient {
 	return &supplierQueryClient{
@@ -668,6 +680,16 @@ func (c *supplierQueryClient) GetSupplier(ctx context.Context, supplierOperatorA
 
 	c.supplierCache[supplierOperatorAddress] = res.Supplier
 	return res.Supplier, nil
+}
+
+// InvalidateSupplier removes a supplier from the local query cache.
+// Must be called at session boundaries so the next GetSupplier call
+// fetches fresh data from the chain — picking up any staking changes
+// (e.g. new services added) that occurred during the previous session.
+func (c *supplierQueryClient) InvalidateSupplier(operatorAddress string) {
+	c.supplierCacheMu.Lock()
+	defer c.supplierCacheMu.Unlock()
+	delete(c.supplierCache, operatorAddress)
 }
 
 func (c *supplierQueryClient) GetParams(ctx context.Context) (*suppliertypes.Params, error) {

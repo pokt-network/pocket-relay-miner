@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -200,6 +201,112 @@ func TestGetSupplier_Cache(t *testing.T) {
 
 	// Same supplier data
 	require.Equal(t, supplier1.OperatorAddress, supplier2.OperatorAddress)
+}
+
+// TestGetSupplier_InvalidateRefreshesCache reproduces the bug where
+// a supplier stakes for a new service (e.g. "pocket") but the query
+// cache keeps returning stale data with the old service list.
+// InvalidateSupplier must force the next GetSupplier to re-query chain.
+func TestGetSupplier_InvalidateRefreshesCache(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	queryCount := 0
+	// Phase 1: supplier has 1 service ("develop")
+	supplierV1 := generateTestSupplier("pokt1supplier123")
+
+	// Phase 2: supplier stakes for a second service ("pocket")
+	supplierV2 := generateTestSupplier("pokt1supplier123")
+	supplierV2.Services = append(supplierV2.Services, &sharedtypes.SupplierServiceConfig{
+		ServiceId: "pocket",
+	})
+
+	mock.getSupplierFunc = func(ctx context.Context, req *suppliertypes.QueryGetSupplierRequest) (*suppliertypes.QueryGetSupplierResponse, error) {
+		queryCount++
+		if queryCount == 1 {
+			return &suppliertypes.QueryGetSupplierResponse{Supplier: *supplierV1}, nil
+		}
+		// Subsequent queries return updated supplier with new service
+		return &suppliertypes.QueryGetSupplierResponse{Supplier: *supplierV2}, nil
+	}
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	config := ClientConfig{
+		GRPCEndpoint: address,
+		QueryTimeout: 5 * time.Second,
+	}
+
+	qc, err := NewQueryClients(logger, config)
+	require.NoError(t, err)
+	defer qc.Close()
+
+	ctx := context.Background()
+
+	// First query: caches supplier with 1 service
+	s1, err := qc.Supplier().GetSupplier(ctx, "pokt1supplier123")
+	require.NoError(t, err)
+	require.Len(t, s1.Services, 1, "initial query should return 1 service")
+	require.Equal(t, 1, queryCount)
+
+	// Second query without invalidation: returns stale cached data
+	s2, err := qc.Supplier().GetSupplier(ctx, "pokt1supplier123")
+	require.NoError(t, err)
+	require.Len(t, s2.Services, 1, "cached query should still return 1 service")
+	require.Equal(t, 1, queryCount, "cache hit — no new chain query")
+
+	// Invalidate the supplier cache entry
+	qc.Supplier().InvalidateSupplier("pokt1supplier123")
+
+	// Third query after invalidation: must hit chain and return updated data
+	s3, err := qc.Supplier().GetSupplier(ctx, "pokt1supplier123")
+	require.NoError(t, err)
+	require.Equal(t, 2, queryCount, "invalidation should force a new chain query")
+	require.Len(t, s3.Services, 2, "post-invalidation query must return updated services")
+	require.Equal(t, "pocket", s3.Services[1].ServiceId)
+}
+
+// TestGetSupplier_InvalidateOnlyAffectsTargetAddress ensures invalidating
+// one supplier does not evict other cached suppliers.
+func TestGetSupplier_InvalidateOnlyAffectsTargetAddress(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	queryCount := map[string]int{}
+	mock.getSupplierFunc = func(ctx context.Context, req *suppliertypes.QueryGetSupplierRequest) (*suppliertypes.QueryGetSupplierResponse, error) {
+		queryCount[req.OperatorAddress]++
+		s := generateTestSupplier(req.OperatorAddress)
+		return &suppliertypes.QueryGetSupplierResponse{Supplier: *s}, nil
+	}
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	qc, err := NewQueryClients(logger, ClientConfig{
+		GRPCEndpoint: address,
+		QueryTimeout: 5 * time.Second,
+	})
+	require.NoError(t, err)
+	defer qc.Close()
+
+	ctx := context.Background()
+
+	// Cache two suppliers
+	_, err = qc.Supplier().GetSupplier(ctx, "pokt1a")
+	require.NoError(t, err)
+	_, err = qc.Supplier().GetSupplier(ctx, "pokt1b")
+	require.NoError(t, err)
+	require.Equal(t, 1, queryCount["pokt1a"])
+	require.Equal(t, 1, queryCount["pokt1b"])
+
+	// Invalidate only pokt1a
+	qc.Supplier().InvalidateSupplier("pokt1a")
+
+	// Query both again
+	_, err = qc.Supplier().GetSupplier(ctx, "pokt1a")
+	require.NoError(t, err)
+	_, err = qc.Supplier().GetSupplier(ctx, "pokt1b")
+	require.NoError(t, err)
+
+	require.Equal(t, 2, queryCount["pokt1a"], "pokt1a should have been re-queried")
+	require.Equal(t, 1, queryCount["pokt1b"], "pokt1b should still be cached")
 }
 
 // TestGetSupplier_ConcurrentAccess tests thread-safe supplier queries

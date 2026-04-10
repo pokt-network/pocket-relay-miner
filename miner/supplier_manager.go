@@ -25,6 +25,9 @@ import (
 type SupplierQueryClient interface {
 	GetSupplier(ctx context.Context, supplierOperatorAddress string) (sharedtypes.Supplier, error)
 	GetParams(ctx context.Context) (*suppliertypes.Params, error)
+	// InvalidateSupplier removes a supplier from the query cache so
+	// the next GetSupplier call fetches fresh data from the chain.
+	InvalidateSupplier(operatorAddress string)
 }
 
 // SupplierStatus represents the state of a supplier in the miner.
@@ -339,6 +342,11 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 	var unstakedCount int
 
 	for _, addr := range supplierAddrs {
+		// Invalidate cache before querying to ensure fresh chain data.
+		// Without this, staking changes (e.g. new services) are invisible
+		// until the miner restarts (see BUG-SUPPLIER-CACHE-FIX.md).
+		m.config.SupplierQueryClient.InvalidateSupplier(addr)
+
 		queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		supplier, err := m.config.SupplierQueryClient.GetSupplier(queryCtx, addr)
 		cancel()
@@ -426,6 +434,9 @@ func (m *SupplierManager) verifySupplierUnstaked(ctx context.Context, addr strin
 		return false, "no_query_client"
 	}
 
+	// Invalidate cache to get fresh staking status from chain.
+	m.config.SupplierQueryClient.InvalidateSupplier(addr)
+
 	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
@@ -506,6 +517,9 @@ func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier strin
 
 // warmupSingleSupplier queries chain data for a single supplier.
 func (m *SupplierManager) warmupSingleSupplier(ctx context.Context, supplier string) *SupplierWarmupData {
+	// Invalidate cache so warmup always gets the latest on-chain state.
+	m.config.SupplierQueryClient.InvalidateSupplier(supplier)
+
 	chainSupplier, err := m.config.SupplierQueryClient.GetSupplier(ctx, supplier)
 	if err != nil {
 		m.logger.Warn().
