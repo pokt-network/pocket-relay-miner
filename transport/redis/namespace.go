@@ -268,8 +268,17 @@ func (kb *KeyBuilder) MeterCleanupChannel() string {
 // MeterMetaPattern builds the pattern for scanning all session meter meta keys.
 // Format: {base}:{meter}:*:meta
 // Example: "ha:meter:*:meta"
+// DEPRECATED: Prefer MeterActiveSessionsKey + SCARD over SCAN.
 func (kb *KeyBuilder) MeterMetaPattern() string {
 	return fmt.Sprintf("%s:%s:*:meta", kb.ns.BasePrefix, kb.ns.MeterPrefix)
+}
+
+// MeterActiveSessionsKey builds the key for the set tracking active session IDs.
+// Used for O(1) counting via SCARD instead of O(N) SCAN.
+// Format: {base}:{meter}:active_sessions
+// Example: "ha:meter:active_sessions"
+func (kb *KeyBuilder) MeterActiveSessionsKey() string {
+	return fmt.Sprintf("%s:%s:active_sessions", kb.ns.BasePrefix, kb.ns.MeterPrefix)
 }
 
 // SupplierUpdateChannel builds the pub/sub channel for supplier updates.

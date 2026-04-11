@@ -188,8 +188,8 @@ func TestRuntimeMetricsCollector_MultipleCollections(t *testing.T) {
 	// Wait for multiple collection cycles
 	time.Sleep(100 * time.Millisecond)
 
-	// Verify last values are tracked
-	require.Greater(t, collector.lastMallocs, uint64(0), "Mallocs should be tracked")
+	// Verify last values are tracked (use accessor for thread safety)
+	require.Greater(t, collector.LastMallocs(), uint64(0), "Mallocs should be tracked")
 
 	collector.Stop()
 }

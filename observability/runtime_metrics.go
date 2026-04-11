@@ -319,6 +319,10 @@ func (c *RuntimeMetricsCollector) collect() {
 	c.metrics.stackInuse.Set(float64(memStats.StackInuse))
 	c.metrics.stackSys.Set(float64(memStats.StackSys))
 
+	// Lock protects lastXxx delta-tracking fields that are read by tests
+	// and written by this goroutine.
+	c.mu.Lock()
+
 	// Allocation deltas (as counters)
 	if memStats.Mallocs > c.lastMallocs {
 		c.metrics.mallocs.Add(float64(memStats.Mallocs - c.lastMallocs))
@@ -343,6 +347,8 @@ func (c *RuntimeMetricsCollector) collect() {
 		c.lastNumForcedGC = memStats.NumForcedGC
 	}
 
+	c.mu.Unlock()
+
 	c.metrics.lastGC.Set(float64(memStats.LastGC) / 1e9)
 	c.metrics.nextGC.Set(float64(memStats.NextGC))
 	c.metrics.gcCPUFraction.Set(memStats.GCCPUFraction)
@@ -351,4 +357,11 @@ func (c *RuntimeMetricsCollector) collect() {
 // CollectNow triggers an immediate collection of runtime metrics.
 func (c *RuntimeMetricsCollector) CollectNow() {
 	c.collect()
+}
+
+// LastMallocs returns the last tracked malloc count (thread-safe).
+func (c *RuntimeMetricsCollector) LastMallocs() uint64 {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastMallocs
 }

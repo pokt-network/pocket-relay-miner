@@ -594,21 +594,34 @@ func (s *RelayGRPCService) getCircuitBreakerThreshold(serviceID, rpcType string)
 // logCircuitBreakerTransition logs a circuit breaker state transition.
 func (s *RelayGRPCService) logCircuitBreakerTransition(transition *pool.TransitionEvent, serviceID, rpcType string) {
 	if transition.OldHealthy && !transition.NewHealthy {
-		s.logger.Error().
+		event := s.logger.Warn().
 			Str("backend", transition.Endpoint.Name).
 			Str("url", transition.Endpoint.RawURL).
 			Str(logging.FieldServiceID, serviceID).
 			Str("rpc_type", rpcType).
-			Int32("failures", transition.Failures).
-			Int("last_status", transition.StatusCode).
-			Msg("backend circuit-broken")
+			Int32("consecutive_failures", transition.Failures).
+			Int32("threshold", pool.DefaultUnhealthyThreshold)
+
+		if transition.StatusCode > 0 {
+			event = event.Int("trigger_http_status", transition.StatusCode)
+		}
+		if transition.Error != nil {
+			event = event.Str("trigger_error", transition.Error.Error())
+		}
+
+		event.Msg("BACKEND DOWN: circuit breaker tripped, traffic will failover to other backends")
 	} else if !transition.OldHealthy && transition.NewHealthy {
-		s.logger.Info().
+		event := s.logger.Info().
 			Str("backend", transition.Endpoint.Name).
 			Str("url", transition.Endpoint.RawURL).
 			Str(logging.FieldServiceID, serviceID).
-			Str("rpc_type", rpcType).
-			Msg("backend recovered")
+			Str("rpc_type", rpcType)
+
+		if transition.DowntimeDuration > 0 {
+			event = event.Dur("downtime", transition.DowntimeDuration)
+		}
+
+		event.Msg("BACKEND UP: circuit breaker recovered, backend is healthy again")
 	}
 }
 

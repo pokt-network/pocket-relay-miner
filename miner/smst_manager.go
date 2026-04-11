@@ -99,6 +99,18 @@ func (m *RedisSMSTManager) GetOrCreateTree(ctx context.Context, sessionID string
 
 	m.trees[sessionID] = tree
 
+	// Set TTL on the SMST hash key at creation time (not per-relay).
+	// This is a backup safety net; manual deletion happens in OnSessionProved.
+	if m.config.CacheTTL > 0 {
+		hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
+		if err := m.redisClient.Expire(ctx, hashKey, m.config.CacheTTL).Err(); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to set SMST TTL on creation (non-fatal)")
+		}
+	}
+
 	m.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
 		Msg("created new Redis-backed SMST")
@@ -157,18 +169,7 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 		}
 	}
 
-	// Set TTL as backup safety net (auto-expire if manual cleanup fails)
-	// Manual deletion happens in OnSessionSettled/OnSessionExpired
-	if m.config.CacheTTL > 0 {
-		hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
-		if err := m.redisClient.Expire(ctx, hashKey, m.config.CacheTTL).Err(); err != nil {
-			// Log but don't fail - TTL is just a safety net
-			m.logger.Warn().
-				Err(err).
-				Str(logging.FieldSessionID, sessionID).
-				Msg("failed to set SMST TTL (non-fatal)")
-		}
-	}
+	// TTL is set once at tree creation in GetOrCreateTree (not per-relay).
 
 	return nil
 }

@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 	"sort"
@@ -313,7 +314,23 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 }
 
 // Release releases a supplier claim.
+// The release callback is invoked BEFORE the Redis claim key is deleted.
+// If the callback returns an error (e.g., ErrDrainAborted), the claim key
+// is kept and the supplier stays claimed by this instance.
 func (c *SupplierClaimer) Release(ctx context.Context, supplier string) error {
+	// Invoke release callback FIRST — it may veto the release (e.g., supplier
+	// is still staked on-chain). If it returns an error, we abort and keep the
+	// Redis claim key alive to prevent orphan-reclaim thrashing.
+	if c.onReleaseFn != nil {
+		if err := c.onReleaseFn(ctx, supplier); err != nil {
+			c.logger.Info().
+				Err(err).
+				Str("supplier", supplier).
+				Msg("release vetoed by callback, keeping claim")
+			return err
+		}
+	}
+
 	claimKey := c.redisClient.KB().MinerClaimKey(supplier)
 
 	// Only delete if we own it (atomic check-and-delete)
@@ -345,17 +362,6 @@ func (c *SupplierClaimer) Release(ctx context.Context, supplier string) error {
 		Msg("released supplier claim")
 
 	supplierReleasedTotal.WithLabelValues(supplier, c.instanceID).Inc()
-
-	// Invoke release callback
-	if c.onReleaseFn != nil {
-		if err := c.onReleaseFn(ctx, supplier); err != nil {
-			c.logger.Error().
-				Err(err).
-				Str("supplier", supplier).
-				Msg("release callback failed")
-			// Continue anyway - claim is released
-		}
-	}
 
 	return nil
 }
@@ -690,12 +696,19 @@ func (c *SupplierClaimer) releaseExcess(count int) {
 	})
 
 	released := 0
+	vetoed := 0
 	for _, entry := range entries {
 		if released >= count {
 			break
 		}
 
 		if err := c.Release(c.ctx, entry.supplier); err != nil {
+			if errors.Is(err, ErrDrainAborted) {
+				// Release was vetoed (supplier still staked) — not an error,
+				// just means this supplier can't be rebalanced right now.
+				vetoed++
+				continue
+			}
 			c.logger.Warn().Err(err).Str("supplier", entry.supplier).Msg("failed to release excess supplier")
 			continue
 		}
@@ -707,6 +720,14 @@ func (c *SupplierClaimer) releaseExcess(count int) {
 			Int("target", count).
 			Time("claimed_at", entry.claimedAt).
 			Msg("released supplier for rebalancing (newest-first)")
+	}
+
+	if vetoed > 0 {
+		c.logger.Info().
+			Int("vetoed", vetoed).
+			Int("released", released).
+			Int("target", count).
+			Msg("rebalance: some releases vetoed (suppliers still staked)")
 	}
 }
 

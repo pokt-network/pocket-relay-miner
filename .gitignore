@@ -28,5 +28,8 @@ Thumbs.db
 # Research/Reports
 reports
 
+# Log analysis (local only)
+logs-analysis/
+
 # GSD Planning
 .planning

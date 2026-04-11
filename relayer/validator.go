@@ -214,38 +214,45 @@ func (rv *relayValidator) CheckRewardEligibility(
 	// Pipeline: Validate → Redis → Miner → SMST can take 1-2 blocks
 	gracePeriodLastAcceptBlock := sessionEndHeight + gracePeriodEndOffset - 1
 
-	// REJECT: Relay arrived too late (at or after grace period processing buffer)
+	blocksLate := currentHeight - gracePeriodLastAcceptBlock
+	sessionLength := sessionEndHeight - sessionStartHeight
+
+	// REJECT: Relay arrived too late (at or after grace period processing buffer).
+	// This is a gateway/application issue: the relay was sent after the session's
+	// grace period cutoff. Our relayer received it on time, but the session window
+	// has already closed on-chain. The relay is served (200 OK) but NOT rewarded.
 	if currentHeight >= gracePeriodLastAcceptBlock {
 		rv.logger.Warn().
 			Str("application", applicationAddress).
 			Str("service_id", serviceID).
 			Int64("session_start", sessionStartHeight).
 			Int64("session_end", sessionEndHeight).
+			Int64("session_length_blocks", sessionLength).
 			Int64("current_height", currentHeight).
 			Int64("grace_period_last_accept", gracePeriodLastAcceptBlock).
-			Int64("blocks_late", currentHeight-gracePeriodLastAcceptBlock).
-			Msg("LATE RELAY REJECTED: Application sent relay too late - relay arrived at/after grace period processing buffer. Relay will be rejected and NOT REWARDED. Application should send relays during session blocks, not grace period.")
+			Int64("grace_period_end_offset", gracePeriodEndOffset).
+			Int64("blocks_late", blocksLate).
+			Msg("LATE RELAY: gateway/application sent relay after grace period cutoff, relay served but NOT rewarded")
 
 		return fmt.Errorf(
-			"relay too late: session ended at block %d, grace period processing buffer at block %d, current height %d (late by %d blocks) - relay will not be rewarded",
+			"relay too late: session ended at block %d, grace period cutoff at block %d, current height %d (late by %d blocks) - gateway/application must send relays before grace period ends",
 			sessionEndHeight,
 			gracePeriodLastAcceptBlock,
 			currentHeight,
-			currentHeight-gracePeriodLastAcceptBlock,
+			blocksLate,
 		)
 	}
 
-	// WARN: Relay arrived in last block of session (risky - might not process in time)
-	// This helps identify applications that are cutting it too close
-	if currentHeight == sessionEndHeight {
-		rv.logger.Debug().
+	// WARN: Relay arrived in last block before cutoff (risky timing)
+	blocksUntilCutoff := gracePeriodLastAcceptBlock - currentHeight
+	if blocksUntilCutoff <= 1 && currentHeight >= sessionEndHeight {
+		rv.logger.Warn().
 			Str("application", applicationAddress).
 			Str("service_id", serviceID).
-			Int64("session_start", sessionStartHeight).
 			Int64("session_end", sessionEndHeight).
 			Int64("current_height", currentHeight).
-			Int64("grace_period_last_accept", gracePeriodLastAcceptBlock).
-			Msg("RISKY RELAY TIMING: Application sent relay in the LAST BLOCK of session. While this is accepted, could maybe reach the miner too late and get dropped.")
+			Int64("blocks_until_cutoff", blocksUntilCutoff).
+			Msg("TIGHT RELAY TIMING: gateway/application sending relay very close to grace period cutoff")
 	}
 
 	return nil

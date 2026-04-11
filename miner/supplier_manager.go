@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -29,6 +30,11 @@ type SupplierQueryClient interface {
 	// the next GetSupplier call fetches fresh data from the chain.
 	InvalidateSupplier(operatorAddress string)
 }
+
+// ErrDrainAborted is returned by onSupplierReleased when the drain is vetoed
+// because the supplier is still staked on-chain. This tells the claimer to
+// keep the Redis claim key alive instead of releasing it.
+var ErrDrainAborted = errors.New("drain aborted: supplier still staked on-chain")
 
 // SupplierStatus represents the state of a supplier in the miner.
 type SupplierStatus int
@@ -506,8 +512,8 @@ func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier strin
 			Str("supplier", supplier).
 			Str("on_chain_result", verifyResult).
 			Str("instance_id", m.config.MinerID).
-			Msg("DRAIN ABORTED: supplier is staked on-chain, will retry on next rebalance")
-		return nil
+			Msg("DRAIN ABORTED: supplier is staked on-chain, keeping claim")
+		return ErrDrainAborted
 	}
 
 	// Remove the supplier (with drain)
@@ -567,26 +573,43 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 			Int("sessions", len(sessions)).
 			Msg("loaded existing sessions during handoff")
 
-		// Validate each session's SMST exists
+		// Validate each session's SMST exists — but only for sessions that
+		// still need processing. Terminal sessions (claimed, proved, etc.) have
+		// already had their SMST flushed and submitted, so missing SMST is expected.
+		activeCount := 0
+		terminalCount := 0
+		missingSmstCount := 0
 		for _, session := range sessions {
+			// Sessions that have already been claimed/proved don't need SMST anymore.
+			// The SMST was deleted after the root hash was computed and submitted.
+			if session.State.IsTerminal() || session.State == SessionStateClaimed || session.State == SessionStateClaiming {
+				terminalCount++
+				continue
+			}
+
+			activeCount++
 			smstKey := m.config.RedisClient.KB().SMSTNodesKey(session.SessionID)
 			exists, _ := m.config.RedisClient.Exists(ctx, smstKey).Result()
 
-			m.logger.Debug().
-				Str("supplier", supplier).
-				Str("session_id", session.SessionID).
-				Bool("smst_exists", exists > 0).
-				Int64("relay_count", session.RelayCount).
-				Str("state", string(session.State)).
-				Msg("validating session SMST during handoff")
-
 			if exists == 0 && session.RelayCount > 0 {
-				m.logger.Error().
+				missingSmstCount++
+				m.logger.Warn().
 					Str("supplier", supplier).
 					Str("session_id", session.SessionID).
 					Int64("relay_count", session.RelayCount).
-					Msg("HANDOFF WARNING: SMST missing but relay count > 0")
+					Str("state", string(session.State)).
+					Msg("HANDOFF: active session has relays but no SMST tree, relays will be re-consumed from stream")
 			}
+		}
+
+		if len(sessions) > 0 {
+			m.logger.Info().
+				Str("supplier", supplier).
+				Int("total_sessions", len(sessions)).
+				Int("active", activeCount).
+				Int("terminal", terminalCount).
+				Int("missing_smst", missingSmstCount).
+				Msg("handoff session summary")
 		}
 	}
 

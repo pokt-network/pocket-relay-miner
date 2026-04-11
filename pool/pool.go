@@ -88,6 +88,7 @@ func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, thre
 					NewHealthy: false,
 					Failures:   failures,
 					StatusCode: statusCode,
+					Error:      err,
 				}
 			}
 		}
@@ -101,13 +102,20 @@ func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, thre
 	// Recovery: if endpoint was unhealthy, CAS false->true.
 	// Only the goroutine that flips the state returns the event.
 	if ep.healthy.CompareAndSwap(false, true) {
+		// Calculate how long the backend was down
+		var downtime time.Duration
+		unhealthySince := ep.unhealthySinceNano.Load()
+		if unhealthySince > 0 {
+			downtime = time.Since(time.Unix(0, unhealthySince))
+		}
 		ep.unhealthySinceNano.Store(0)
 		return &TransitionEvent{
-			Endpoint:   ep,
-			OldHealthy: false,
-			NewHealthy: true,
-			Failures:   0,
-			StatusCode: statusCode,
+			Endpoint:         ep,
+			OldHealthy:       false,
+			NewHealthy:       true,
+			Failures:         0,
+			StatusCode:       statusCode,
+			DowntimeDuration: downtime,
 		}
 	}
 

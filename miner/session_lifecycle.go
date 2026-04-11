@@ -867,7 +867,8 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
 					Str(logging.FieldServiceID, session.ServiceID).
 					Int64("pending_relays", pendingCount).
-					Msg("LATE RELAYS DETECTED: relays arrived but not yet consumed before claim")
+					Int64("session_end_height", session.SessionEndHeight).
+					Msg("LATE RELAYS: relays still in Redis stream at claim time, likely sent by gateway/app near session end")
 
 				// Update metrics
 				sessionLateRelays.WithLabelValues(m.config.SupplierAddress, session.SessionID).Add(float64(pendingCount))

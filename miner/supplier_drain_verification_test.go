@@ -179,7 +179,7 @@ func TestOnSupplierReleased_AbortsWhenStaked(t *testing.T) {
 	}
 
 	err := mgr.onSupplierReleased(context.Background(), "pokt1staked")
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrDrainAborted, "staked supplier release should return ErrDrainAborted")
 
 	// Supplier should still exist (drain was aborted)
 	mgr.suppliersMu.RLock()

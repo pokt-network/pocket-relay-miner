@@ -24,6 +24,24 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
 - **Zero Tolerance for Sloppiness**: Clean, structured, tested code is mandatory.
 - **Performance Matters**: Every millisecond counts. Benchmark critical paths.
 
+### Behavioral Standards
+
+**Be Critical, Not Complacent**
+- Never say "looks good" without evidence. If code passes, show the proof (test output, build output).
+- Challenge assumptions. If the user or another agent claims something, verify it independently.
+- When reviewing code, actively look for problems. A review that finds nothing is suspicious.
+- If you disagree with an approach, say so with reasoning. Do not silently comply with a bad plan.
+
+**Demand Clarity**
+- If a task is ambiguous, ASK before implementing. Do not guess intent.
+- If you lack context about why a change is needed, ask for the motivation.
+- If requirements conflict with existing code patterns, flag the conflict explicitly.
+
+**Evidence-Based Reporting**
+- When reporting a bug: show the file, line number, and why it's wrong.
+- When reporting a fix: show the before/after and the test that proves it.
+- When reporting "no issues found": explain what you checked and how.
+
 ## CRITICAL DEVELOPMENT WORKFLOW REMINDERS
 
 **READ THIS EVERY TIME BEFORE SUGGESTING COMMANDS:**
@@ -135,21 +153,82 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
      ```
 
 4. **Testing**
-   - Unit tests for all business logic
-   - Benchmarks for critical paths (SMST ops, validation, signing)
-   - Integration tests with miniredis for Redis operations
    - Use `-tags test` build constraint for test-only code
-   - **Rule #1 (CANNOT BE BROKEN)**: No flaky tests, no race conditions, no timeout weird tests, no mock/fake tests
+   - Use real implementations (miniredis for Redis, not mocks)
+   - **Rule #1 (CANNOT BE BROKEN)**: No flaky tests, no race conditions, no exceptions
      - All tests must pass `go test -race` without warnings
-     - All tests must use real implementations (miniredis for Redis, not mocks)
-     - All tests must be deterministic (no `time.Sleep()`, no random ordering dependencies)
+     - All tests must be deterministic (no `time.Sleep()` for synchronization, no random ordering dependencies)
      - Any test that fails once in 1000 runs must be fixed or deleted
+     - "Pre-existing" is not an excuse. If a race exists, fix it.
 
-5. **Performance**
+5. **Logging**
+   - Per-request logs: `Debug` level only (never Info/Warn on hot path)
+   - State changes (failover, config reload, circuit breaker, rebalance): `Info` or `Warn`
+   - Errors: `Error` level only for things that need immediate attention
+   - Never `logger.Fatal` in goroutines -- use error channel propagation
+
+6. **Metrics**
+   - No high-cardinality labels (no URLs, no full session IDs as Prometheus labels)
+   - Delete unused metrics immediately -- no dead declarations
+   - Record metrics asynchronously on hot paths (use MetricRecorder pattern)
+
+7. **Cleanup/Shutdown**
+   - `Stop()` / `Close()` / `Shutdown()` must be idempotent (use `sync.Once` for channel closes)
+   - Always `Close()` replaced connections before overwriting pool entries
+   - Startup errors propagated via error channels, not `os.Exit`
+
+8. **Performance**
    - Profile before optimizing: `go test -bench . -benchmem`
    - Use Redis pipelining for batch operations
    - Pre-allocate slices when size is known
    - Avoid allocations in hot paths
+
+### Test Quality Requirements (NON-NEGOTIABLE)
+
+Tests exist at THREE levels. All three are required for any feature that spans multiple components.
+
+#### Level 1: Unit Tests (per function/method)
+
+Every test file MUST cover all of these categories:
+
+1. **Happy paths**: Every public function's primary use case with realistic data matching production inputs.
+
+2. **Error/wrong paths -- equal priority to happy paths**:
+   - Invalid input (malformed data, empty input, nil values)
+   - Missing data (key not found, empty responses, null fields)
+   - Network failures (connection refused, context canceled, timeout)
+   - gRPC error codes (NotFound, Unavailable, DeadlineExceeded)
+
+3. **Edge cases -- as many as reasonable**:
+   - Zero values, negative values, empty strings, empty collections
+   - Boundary values (max int64, overflow)
+   - Concurrent access with race detector
+
+4. **Field-level verification**: Do NOT just check that a function returns "something". Verify specific field values. If a function returns a struct with 5 fields, check all of them.
+
+5. **Error type verification**: When functions return sentinel errors, use `errors.Is()` to verify the correct error type, not just that an error occurred.
+
+6. **No magic strings in test logic**: Do NOT use `if tt.name == "special case"` in the test loop. Use struct fields to control test behavior.
+
+#### Level 2: Integration Tests (per feature flow)
+
+Unit tests prove each function works. Integration tests prove they work **together**:
+
+1. **Setup matches production wiring**: If the test wiring diverges from production wiring, the test is worthless.
+2. **Test the pipeline, not the parts**: "Relay validated but publish fails" is an integration test. "ValidateRelay rejects bad signature" is a unit test. Both are needed.
+3. **Test state transitions end-to-end**: Session active -> claiming -> claimed -> proved. Test the full lifecycle, not just individual state changes.
+
+#### Level 3: Live Validation (Tilt/localnet)
+
+For system-level validation with real network calls, real configs, real Kubernetes:
+- Test scripts in `scripts/` folder
+- Run after any change that touches startup wiring, config parsing, or relay routing
+
+#### Cross-Cutting Rules (All Levels)
+
+- **Concurrency tests**: Any store or shared state must have a concurrent access test with race detector. The test must do reads and writes simultaneously.
+- **Nil/disabled safety**: Every optional component must be tested as nil. The system must not panic when optional features are absent.
+- **Self-review after writing tests**: Re-read every assertion. Ask: "does this assertion actually prove what I think it proves?" A test that checks `len(result) != 0` when it should check `result[0].Address == expected` passes for the wrong reasons.
 
 ### Code Structure
 
@@ -185,6 +264,28 @@ func ProcessRelay(relay *Relay) {
     process(relay)
 }
 ```
+
+## Quality Gates (Mandatory for Every Change)
+
+Every code change must pass ALL of these before it is considered done:
+
+1. **Build**: `go build ./...` -- zero errors
+2. **Tests**: `go test -tags test ./...` -- all pass
+3. **Race detector**: `go test -tags test -race ./...` -- zero races
+4. **Vet**: `go vet ./...` -- no issues
+5. **Lint**: `make lint` -- no issues
+6. **Format**: `gofmt -l .` -- no files listed
+7. **Self-review**: Re-read the diff. Check for:
+   - Unused imports or variables
+   - Missing error handling
+   - Concurrency issues (shared state without sync)
+   - Log levels (no Info/Warn on hot paths)
+   - Metric cardinality (no unbounded labels)
+   - DRY violations (duplicated logic)
+
+If any gate fails, fix it before reporting completion. Do NOT report "done" with known failures.
+
+**No "pre-existing" excuses.** If a quality gate fails, fix it. Do not dismiss failures as "pre-existing" or "not related to my changes." If something fails now, either your change broke it or it was already broken -- either way, diagnose and fix it.
 
 ## Redis Architecture
 

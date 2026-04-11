@@ -272,7 +272,9 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 
 	key := s.sessionKey(snapshot.SessionID)
 
-	// Use a transaction to update the session and indexes atomically
+	// Use a transaction to update the session, indexes, and clean up old state
+	// index atomically. This prevents orphan index entries if the SREM were to
+	// fail outside the transaction.
 	pipe := s.redisClient.TxPipeline()
 
 	// Store the session data
@@ -282,33 +284,18 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 	pipe.SAdd(ctx, s.supplierSessionsKey(), snapshot.SessionID)
 	pipe.Expire(ctx, s.supplierSessionsKey(), s.config.SessionTTL)
 
-	// Add to new state index first (safe - ensures session is indexed)
+	// Add to new state index
 	pipe.SAdd(ctx, s.stateIndexKey(snapshot.State), snapshot.SessionID)
 	pipe.Expire(ctx, s.stateIndexKey(snapshot.State), s.config.SessionTTL)
+
+	// Remove from old state index if state changed (inside the same transaction)
+	if oldState != "" && oldState != snapshot.State {
+		pipe.SRem(ctx, s.stateIndexKey(oldState), snapshot.SessionID)
+	}
 
 	_, err = pipe.Exec(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to save session snapshot: %w", err)
-	}
-
-	// After successful save, clean up old state index if state changed
-	// This is done outside the transaction - if it fails, session is in both indexes
-	// temporarily (safe), rather than losing the session entirely
-	if oldState != "" && oldState != snapshot.State {
-		if err := s.redisClient.SRem(ctx, s.stateIndexKey(oldState), snapshot.SessionID).Err(); err != nil {
-			s.logger.Warn().
-				Err(err).
-				Str("session_id", snapshot.SessionID).
-				Str("old_state", string(oldState)).
-				Str("new_state", string(snapshot.State)).
-				Msg("failed to remove session from old state index (non-critical)")
-		} else {
-			s.logger.Debug().
-				Str("session_id", snapshot.SessionID).
-				Str("old_state", string(oldState)).
-				Str("new_state", string(snapshot.State)).
-				Msg("cleaned up old state index after state transition")
-		}
 	}
 
 	sessionSnapshotsSaved.WithLabelValues(s.config.SupplierAddress).Inc()
@@ -574,34 +561,75 @@ func (s *RedisSessionStore) UpdateWALPosition(ctx context.Context, sessionID str
 	return s.redisClient.Set(ctx, s.sessionKey(sessionID), data, s.config.SessionTTL).Err()
 }
 
-// IncrementRelayCount atomically increments the relay count and compute units.
-// Returns an error if the session is in a terminal state (claimed, settled, expired).
+// incrementRelayCountScript is a Lua script that atomically increments
+// relay count and compute units in a session snapshot. It reads the JSON,
+// checks terminal state, increments the fields, and writes back — all in
+// a single Redis round-trip with no race window.
+//
+// KEYS[1] = session key
+// ARGV[1] = compute units to add (uint64)
+// ARGV[2] = current unix timestamp (for LastUpdatedAt)
+// ARGV[3] = TTL in seconds
+//
+// Returns:
+//
+//	0 = success
+//	1 = session not found
+//	2 = session in terminal state
+var incrementRelayCountScript = redis.NewScript(`
+local data = redis.call('GET', KEYS[1])
+if not data then
+	return 1
+end
+
+local snapshot = cjson.decode(data)
+local state = snapshot['state']
+
+-- Check terminal states (must match SessionState.IsTerminal in Go)
+if state == 'proved' or state == 'probabilistic_proved'
+	or state == 'claim_window_closed' or state == 'claim_tx_error'
+	or state == 'proof_window_closed' or state == 'proof_tx_error' then
+	return 2
+end
+
+snapshot['relay_count'] = (snapshot['relay_count'] or 0) + 1
+snapshot['total_compute_units'] = (snapshot['total_compute_units'] or 0) + tonumber(ARGV[1])
+snapshot['last_updated_at'] = ARGV[2]
+
+redis.call('SET', KEYS[1], cjson.encode(snapshot), 'EX', tonumber(ARGV[3]))
+return 0
+`)
+
+// IncrementRelayCount atomically increments the relay count and compute units
+// using a Lua script. This is a single Redis round-trip with no race window
+// between concurrent updates for the same session.
 func (s *RedisSessionStore) IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {
-	snapshot, err := s.Get(ctx, sessionID)
+	key := s.sessionKey(sessionID)
+	ttlSeconds := int64(s.config.SessionTTL.Seconds())
+	now := time.Now().Format(time.RFC3339Nano)
+
+	result, err := incrementRelayCountScript.Run(
+		ctx,
+		s.redisClient,
+		[]string{key},
+		computeUnits,
+		now,
+		ttlSeconds,
+	).Int64()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to increment relay count: %w", err)
 	}
-	if snapshot == nil {
+
+	switch result {
+	case 0:
+		return nil
+	case 1:
 		return fmt.Errorf("session not found: %s", sessionID)
+	case 2:
+		return ErrSessionTerminal
+	default:
+		return fmt.Errorf("unexpected result from increment script: %d", result)
 	}
-
-	// CRITICAL: Reject updates for sessions in terminal states.
-	// This is a defense-in-depth check - the handler should also check state,
-	// but this ensures relay counts can never be modified after claim/settlement.
-	if snapshot.State.IsTerminal() {
-		return fmt.Errorf("cannot increment relay count: session %s is in terminal state %s", sessionID, snapshot.State)
-	}
-
-	snapshot.RelayCount++
-	snapshot.TotalComputeUnits += computeUnits
-	snapshot.LastUpdatedAt = time.Now()
-
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("failed to marshal snapshot: %w", err)
-	}
-
-	return s.redisClient.Set(ctx, s.sessionKey(sessionID), data, s.config.SessionTTL).Err()
 }
 
 // Close gracefully shuts down the store.

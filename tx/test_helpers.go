@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"sync"
 	"testing"
 
 	"cosmossdk.io/math"
@@ -33,14 +34,14 @@ import (
 type mockAuthQueryServer struct {
 	authtypes.UnimplementedQueryServer
 	accounts map[string]*authtypes.BaseAccount
-	mu       *testing.T
+	t        *testing.T
 }
 
 func (m *mockAuthQueryServer) Account(
 	ctx context.Context,
 	req *authtypes.QueryAccountRequest,
 ) (*authtypes.QueryAccountResponse, error) {
-	m.mu.Helper()
+	m.t.Helper()
 
 	account, ok := m.accounts[req.Address]
 	if !ok {
@@ -61,7 +62,8 @@ func (m *mockAuthQueryServer) Account(
 // mockTxServiceServer implements txtypes.ServiceServer for testing
 type mockTxServiceServer struct {
 	txtypes.UnimplementedServiceServer
-	mu               *testing.T
+	t                *testing.T
+	rwMu             sync.RWMutex // protects mutable fields below
 	broadcastError   error
 	broadcastCode    uint32
 	broadcastRawLog  string
@@ -73,24 +75,31 @@ func (m *mockTxServiceServer) BroadcastTx(
 	ctx context.Context,
 	req *txtypes.BroadcastTxRequest,
 ) (*txtypes.BroadcastTxResponse, error) {
-	m.mu.Helper()
-	m.broadcastCounter++
+	m.t.Helper()
 
-	if m.broadcastError != nil {
-		return nil, m.broadcastError
+	m.rwMu.Lock()
+	m.broadcastCounter++
+	counter := m.broadcastCounter
+	broadcastErr := m.broadcastError
+	txHash := m.broadcastTxHash
+	code := m.broadcastCode
+	rawLog := m.broadcastRawLog
+	m.rwMu.Unlock()
+
+	if broadcastErr != nil {
+		return nil, broadcastErr
 	}
 
-	txHash := m.broadcastTxHash
 	if txHash == "" {
-		txHash = fmt.Sprintf("test-hash-%d", m.broadcastCounter)
+		txHash = fmt.Sprintf("test-hash-%d", counter)
 	}
 
 	return &txtypes.BroadcastTxResponse{
 		TxResponse: &cosmostypes.TxResponse{
 			Height:    100,
 			TxHash:    txHash,
-			Code:      m.broadcastCode,
-			RawLog:    m.broadcastRawLog,
+			Code:      code,
+			RawLog:    rawLog,
 			Codespace: "sdk",
 		},
 	}, nil
@@ -101,7 +110,12 @@ func (m *mockTxServiceServer) GetTx(
 	ctx context.Context,
 	req *txtypes.GetTxRequest,
 ) (*txtypes.GetTxResponse, error) {
-	m.mu.Helper()
+	m.t.Helper()
+
+	m.rwMu.RLock()
+	code := m.broadcastCode
+	rawLog := m.broadcastRawLog
+	m.rwMu.RUnlock()
 
 	// Return the same response as broadcast - simulates successful TX execution
 	// In production, this would query the blockchain for the TX by hash
@@ -109,8 +123,8 @@ func (m *mockTxServiceServer) GetTx(
 		TxResponse: &cosmostypes.TxResponse{
 			Height:    100,
 			TxHash:    req.Hash,
-			Code:      m.broadcastCode,   // Use same code as broadcast
-			RawLog:    m.broadcastRawLog, // Use same log as broadcast
+			Code:      code,
+			RawLog:    rawLog,
 			Codespace: "sdk",
 		},
 	}, nil
@@ -139,10 +153,10 @@ func setupMockGRPCServer(t *testing.T) *testGRPCServer {
 	// Create mock servers
 	authServer := &mockAuthQueryServer{
 		accounts: make(map[string]*authtypes.BaseAccount),
-		mu:       t,
+		t:        t,
 	}
 	txServer := &mockTxServiceServer{
-		mu: t,
+		t: t,
 	}
 
 	// Register services

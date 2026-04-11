@@ -365,6 +365,13 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) er
 	delete(m.localCache, sessionID)
 	m.localCacheMu.Unlock()
 
+	// Remove from active sessions tracking set
+	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
+	if err := m.redisClient.SRem(ctx, activeKey, sessionID).Err(); err != nil {
+		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to remove session from active tracking set")
+	}
+
 	// Delete from Redis (shared L2 cache)
 	keys := []string{
 		m.metaKey(sessionID),
@@ -454,6 +461,13 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	// Initialize consumed counter
 	consumedKey := m.consumedKey(sessionID)
 	m.redisClient.Set(ctx, consumedKey, 0, m.config.CacheTTL)
+
+	// Track in active sessions set (O(1) counting via SCARD).
+	// Refresh TTL on every SADD so the set self-cleans if a relayer crashes
+	// between SADD and SREM (session IDs expire with the set).
+	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
+	m.redisClient.SAdd(ctx, activeKey, sessionID)
+	m.redisClient.Expire(ctx, activeKey, m.config.CacheTTL)
 
 	// Cache locally
 	m.localCacheMu.Lock()
@@ -869,17 +883,16 @@ func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 	}
 }
 
-// activeSessionsMetricTicker periodically counts active sessions in Redis and updates the gauge.
-// This approach avoids distributed Inc/Dec coordination issues across multiple relayer replicas.
+// activeSessionsMetricTicker periodically counts active sessions and updates gauges.
+// Uses SCARD (O(1)) for total count and local cache for per-supplier/service breakdown.
+// Previous implementation used SCAN which caused 115M+ Redis calls over 7 days.
 func (m *RelayMeter) activeSessionsMetricTicker(ctx context.Context) {
 	defer m.wg.Done()
 
-	// Use 10 second interval - sessions live for minutes, so this is sufficiently accurate
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
 
-	// Get the key pattern for session meter meta keys
-	pattern := m.redisClient.KB().MeterMetaPattern()
+	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
 
 	for {
 		select {
@@ -887,20 +900,21 @@ func (m *RelayMeter) activeSessionsMetricTicker(ctx context.Context) {
 			m.logger.Debug().Msg("active sessions metric ticker stopped")
 			return
 		case <-ticker.C:
-			// Count sessions using SCAN to avoid blocking Redis
-			count, bySupplierService, err := m.countActiveSessions(ctx, pattern)
+			// Total count from Redis SET via SCARD — O(1), no scanning
+			totalCount, err := m.redisClient.SCard(ctx, activeKey).Result()
 			if err != nil {
-				m.logger.Warn().Err(err).Msg("failed to count active sessions for metrics")
+				m.logger.Warn().Err(err).Msg("failed to count active sessions")
 				continue
 			}
 
-			// Update per-supplier/service gauges
+			// Per-supplier/service breakdown from local cache (no Redis calls)
+			bySupplierService := m.countLocalCacheSessions()
 			for key, cnt := range bySupplierService {
 				relayMeterSessionsActive.WithLabelValues(key.supplier, key.serviceID).Set(float64(cnt))
 			}
 
 			m.logger.Debug().
-				Int64("total_active_sessions", count).
+				Int64("total_active_sessions", totalCount).
 				Int("unique_supplier_service_pairs", len(bySupplierService)).
 				Msg("updated active sessions metric")
 		}
@@ -913,49 +927,22 @@ type supplierServiceKey struct {
 	serviceID string
 }
 
-// countActiveSessions counts active session meters in Redis using SCAN.
-// Returns total count and counts grouped by supplier/service.
-func (m *RelayMeter) countActiveSessions(ctx context.Context, pattern string) (int64, map[supplierServiceKey]int64, error) {
-	var cursor uint64
-	var totalCount int64
-	bySupplierService := make(map[supplierServiceKey]int64)
+// countLocalCacheSessions counts sessions per supplier/service from the local L1 cache.
+// No Redis calls — reads from the in-memory map that is populated on session creation
+// and cleared on session cleanup.
+func (m *RelayMeter) countLocalCacheSessions() map[supplierServiceKey]int64 {
+	m.localCacheMu.RLock()
+	defer m.localCacheMu.RUnlock()
 
-	for {
-		// SCAN with count hint of 100 to balance between network calls and Redis blocking
-		keys, nextCursor, err := m.redisClient.Scan(ctx, cursor, pattern, 100).Result()
-		if err != nil {
-			return 0, nil, fmt.Errorf("failed to scan meter keys: %w", err)
+	result := make(map[supplierServiceKey]int64, len(m.localCache)/4)
+	for _, meta := range m.localCache {
+		key := supplierServiceKey{
+			supplier:  meta.SupplierAddress,
+			serviceID: meta.ServiceID,
 		}
-
-		// For each key, fetch metadata to get supplier/service info
-		for _, key := range keys {
-			totalCount++
-
-			// Fetch the meta to get supplier/service (needed for per-label gauges)
-			data, err := m.redisClient.Get(ctx, key).Bytes()
-			if err != nil {
-				continue // Key may have expired between SCAN and GET
-			}
-
-			var meta SessionMeterMeta
-			if err := json.Unmarshal(data, &meta); err != nil {
-				continue
-			}
-
-			ssKey := supplierServiceKey{
-				supplier:  meta.SupplierAddress,
-				serviceID: meta.ServiceID,
-			}
-			bySupplierService[ssKey]++
-		}
-
-		cursor = nextCursor
-		if cursor == 0 {
-			break
-		}
+		result[key]++
 	}
-
-	return totalCount, bySupplierService, nil
+	return result
 }
 
 // Close gracefully shuts down the relay meter.

@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -126,12 +127,17 @@ func (c *SessionCoordinator) OnRelayProcessed(
 		}
 	}
 
-	// Update session relay count (critical for claim submission)
+	// Update session relay count (critical for claim submission).
+	// Terminal state errors are expected for late relays — log and continue.
+	// All other errors (Redis failures) are propagated so the relay is retried.
 	if err := c.sessionStore.IncrementRelayCount(ctx, sessionID, computeUnits); err != nil {
-		c.logger.Warn().
-			Err(err).
-			Str(logging.FieldSessionID, sessionID).
-			Msg("failed to update session relay count")
+		if errors.Is(err, ErrSessionTerminal) {
+			c.logger.Info().
+				Str(logging.FieldSessionID, sessionID).
+				Msg("relay arrived for terminal session, skipping count update")
+			return nil
+		}
+		return fmt.Errorf("failed to update session relay count: %w", err)
 	}
 
 	return nil

@@ -21,7 +21,7 @@ const DefaultRecoveryTimeout = 30 * time.Second
 
 // TransitionEvent is returned by RecordResult when a backend's health state changes.
 // A nil return means no state transition occurred. Callers use this to log
-// transitions at the appropriate level (Error for healthy->unhealthy, Info for recovery).
+// transitions at the appropriate level (Warn for healthy->unhealthy, Info for recovery).
 type TransitionEvent struct {
 	// Endpoint that transitioned.
 	Endpoint *BackendEndpoint
@@ -33,6 +33,10 @@ type TransitionEvent struct {
 	Failures int32
 	// StatusCode is the HTTP status code that triggered the transition (0 for connection errors).
 	StatusCode int
+	// Error is the error that triggered the transition (nil for HTTP status-only failures).
+	Error error
+	// DowntimeDuration is how long the backend was unhealthy (only set on recovery transitions).
+	DowntimeDuration time.Duration
 }
 
 // isFailure returns true if the result represents a circuit-breaker-countable failure.

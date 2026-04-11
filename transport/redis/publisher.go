@@ -25,6 +25,11 @@ type StreamsPublisher struct {
 	// cacheTTL is the TTL for relay stream data (backup safety net)
 	cacheTTL time.Duration
 
+	// ttlSet tracks which stream keys already have TTL set.
+	// Avoids calling EXPIRE on every publish (saves 1 Redis round-trip per relay).
+	// Bounded by supplier count (stream names are ha:relays:{supplierAddr}).
+	ttlSet sync.Map // map[string]struct{}
+
 	// mu protects closed state
 	mu     sync.RWMutex
 	closed bool
@@ -113,15 +118,17 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 		Str("message_id", messageID).
 		Msg("relay published to stream")
 
-	// Set stream expiration (this is idempotent - safe to call multiple times)
-	// TTL is a backup safety net - manual cleanup is primary
-	if ttlErr := p.client.Expire(ctx, streamName, p.cacheTTL).Err(); ttlErr != nil {
-		// Log but don't fail - stream will still work, just won't auto-expire
-		p.logger.Warn().
-			Err(ttlErr).
-			Str(logging.FieldStreamID, streamName).
-			Int64("ttl_seconds", int64(p.cacheTTL.Seconds())).
-			Msg("failed to set stream TTL")
+	// Set stream TTL only once per stream (not on every publish).
+	// Saves 1 Redis round-trip per relay. TTL is a backup safety net.
+	if _, alreadySet := p.ttlSet.LoadOrStore(streamName, struct{}{}); !alreadySet {
+		if ttlErr := p.client.Expire(ctx, streamName, p.cacheTTL).Err(); ttlErr != nil {
+			p.ttlSet.Delete(streamName) // retry next publish
+			p.logger.Warn().
+				Err(ttlErr).
+				Str(logging.FieldStreamID, streamName).
+				Int64("ttl_seconds", int64(p.cacheTTL.Seconds())).
+				Msg("failed to set stream TTL")
+		}
 	}
 
 	// Update metrics
@@ -222,13 +229,25 @@ func (p *StreamsPublisher) PublishBatch(ctx context.Context, msgs []*transport.M
 		}
 	}
 
-	// Set TTLs for all streams (separate pipeline for efficiency)
-	ttlPipe := p.client.Pipeline()
-	for streamName, ttl := range streamTTLs {
-		ttlPipe.Expire(ctx, streamName, ttl)
+	// Set TTLs only for streams that haven't had TTL set yet
+	var needsTTL []string
+	for streamName := range streamTTLs {
+		if _, alreadySet := p.ttlSet.LoadOrStore(streamName, struct{}{}); !alreadySet {
+			needsTTL = append(needsTTL, streamName)
+		}
 	}
-	if _, ttlErr := ttlPipe.Exec(ctx); ttlErr != nil {
-		p.logger.Warn().Err(ttlErr).Msg("failed to set TTLs for some streams")
+	if len(needsTTL) > 0 {
+		ttlPipe := p.client.Pipeline()
+		for _, streamName := range needsTTL {
+			ttlPipe.Expire(ctx, streamName, streamTTLs[streamName])
+		}
+		if _, ttlErr := ttlPipe.Exec(ctx); ttlErr != nil {
+			// Remove from ttlSet so we retry next batch
+			for _, streamName := range needsTTL {
+				p.ttlSet.Delete(streamName)
+			}
+			p.logger.Warn().Err(ttlErr).Msg("failed to set TTLs for some streams")
+		}
 	}
 
 	// Update success metrics
