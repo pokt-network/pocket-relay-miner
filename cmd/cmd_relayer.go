@@ -735,7 +735,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Start health/readiness server
 	if config.HealthCheck.Enabled {
-		healthServer := startHealthServer(ctx, logger, config.HealthCheck.Addr, supplierCache)
+		healthServer := startHealthServer(ctx, logger, config.HealthCheck.Addr, supplierCache, config)
 		defer func() { _ = healthServer.Close() }()
 		logger.Info().Str("addr", config.HealthCheck.Addr).Msg("health/readiness server started")
 	}
@@ -775,7 +775,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 }
 
 // startHealthServer starts a simple HTTP server for health and readiness checks.
-func startHealthServer(ctx context.Context, logger logging.Logger, addr string, supplierCache *cache.SupplierCache) *http.Server {
+func startHealthServer(ctx context.Context, logger logging.Logger, addr string, supplierCache *cache.SupplierCache, config *relayer.Config) *http.Server {
 	mux := http.NewServeMux()
 
 	// /health - liveness probe (always returns OK if server is running)
@@ -786,17 +786,44 @@ func startHealthServer(ctx context.Context, logger logging.Logger, addr string, 
 
 	// /ready - readiness probe (checks if supplier cache has data)
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
-		// Check if supplier cache has loaded any suppliers
-		// This indicates the relayer has connected to Redis and miner has published supplier data
 		if supplierCache == nil {
 			http.Error(w, "supplier cache not initialized", http.StatusServiceUnavailable)
 			return
 		}
-
-		// For now, always return ready after cache is initialized
-		// TODO: Could check if cache has any suppliers loaded
 		w.WriteHeader(http.StatusOK)
 		_, _ = w.Write([]byte("READY"))
+	})
+
+	// /ready/{service} - backend readiness check for a specific service
+	mux.HandleFunc("/ready/", func(w http.ResponseWriter, r *http.Request) {
+		serviceID := strings.TrimPrefix(r.URL.Path, "/ready/")
+		if serviceID == "" {
+			http.Error(w, "service ID required", http.StatusBadRequest)
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+
+		backendPool := config.GetPool(serviceID, "")
+		if backendPool == nil {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = fmt.Fprintf(w, `{"status":"not_found","service":"%s"}`, serviceID)
+			return
+		}
+
+		healthy := backendPool.Healthy()
+		all := backendPool.All()
+
+		if len(healthy) == 0 {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = fmt.Fprintf(w, `{"status":"unavailable","service":"%s","healthy":0,"total":%d}`,
+				serviceID, len(all))
+			return
+		}
+
+		w.WriteHeader(http.StatusOK)
+		_, _ = fmt.Fprintf(w, `{"status":"ready","service":"%s","healthy":%d,"total":%d}`,
+			serviceID, len(healthy), len(all))
 	})
 
 	server := &http.Server{
