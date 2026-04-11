@@ -304,7 +304,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 		Int64("app_stake_upokt", appStakeUpokt).
 		Int64("app_min_stake_upokt", minStakeUpokt).
 		Uint64("num_suppliers_in_session", numSuppliers).
-		Msg("relay rejected: app stake exhausted")
+		Msg("session relay limit reached: this supplier's claimable portion for the session is fully consumed")
 
 	// Revert the increment since we're rejecting
 	m.redisClient.DecrBy(ctx, consumedKey, relayCostUpokt)

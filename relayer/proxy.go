@@ -770,8 +770,8 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				}
 			} else if !allowed {
 				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-					Msg("relay rejected: app stake exhausted (eager mode)")
-				p.sendError(w, http.StatusPaymentRequired, "application stake exhausted for session")
+					Msg("relay rejected: session relay limit reached (eager mode)")
+				p.sendError(w, http.StatusPaymentRequired, "session relay limit reached: claimable portion fully consumed")
 				relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonStakeExhausted).Inc()
 				return
 			}
@@ -1109,7 +1109,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					relaysDropped.WithLabelValues(capturedServiceID, appAddress, dropReasonStakeExhausted).Inc()
 					logging.WithSessionContext(p.logger.Warn(), capturedSessionCtx).
 						Str("validation_mode", "optimistic").
-						Msg("relay served but NOT mined: app stake exhausted, relay dropped after serving")
+						Msg("relay served but NOT mined: session relay limit reached, relay dropped after serving")
 					// Stake exhausted - discard, don't submit to miner
 					// Note: We already served the response, but we won't mine it
 					return
