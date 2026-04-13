@@ -728,7 +728,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 						Msg("health check enabled but no pool found, skipping")
 					continue
 				}
-				healthChecker.RegisterPool(poolKey, p.All(), backend.HealthCheck, backend.Headers, backend.Authentication)
+				healthChecker.RegisterPool(poolKey, p.All(), backend.HealthCheck, backend.Headers, backend.Authentication, backend.BasePath)
 			}
 		}
 	}

@@ -125,7 +125,7 @@ func NewService(config *Config, deps ServiceDependencies) (*Service, error) {
 				if p == nil {
 					continue
 				}
-				healthChecker.RegisterPool(poolKey, p.All(), backend.HealthCheck, backend.Headers, backend.Authentication)
+				healthChecker.RegisterPool(poolKey, p.All(), backend.HealthCheck, backend.Headers, backend.Authentication, backend.BasePath)
 			}
 		}
 	}

@@ -63,6 +63,10 @@ type BackendHealth struct {
 	// auth is pool-level authentication applied to probe requests.
 	auth *AuthenticationConfig
 
+	// basePath is the BackendConfig.BasePath value, used to prepend the
+	// backend's path prefix to probe requests (e.g. /ext/bc/C/rpc).
+	basePath string
+
 	// Status is the current health status (used only when endpoint is nil, legacy path).
 	status atomic.Int32
 
@@ -186,8 +190,10 @@ func NewHealthChecker(logger logging.Logger) *HealthChecker {
 
 // RegisterPool registers all endpoints in a pool for health checking.
 // Each endpoint gets its own BackendHealth entry linked to the pool's BackendEndpoint.
-// The config, headers, and auth are shared across all endpoints in the pool.
-func (hc *HealthChecker) RegisterPool(poolKey string, endpoints []*pool.BackendEndpoint, config *BackendHealthCheckConfig, headers map[string]string, auth *AuthenticationConfig) {
+// The config, headers, auth and basePath are shared across all endpoints in the pool.
+// basePath, when set, is prepended to the probe path via the same mergeBackendPath
+// rules used for real traffic, so probes hit the correct backend endpoint.
+func (hc *HealthChecker) RegisterPool(poolKey string, endpoints []*pool.BackendEndpoint, config *BackendHealthCheckConfig, headers map[string]string, auth *AuthenticationConfig, basePath string) {
 	backends := make([]*BackendHealth, 0, len(endpoints))
 	for _, ep := range endpoints {
 		backends = append(backends, &BackendHealth{
@@ -196,6 +202,7 @@ func (hc *HealthChecker) RegisterPool(poolKey string, endpoints []*pool.BackendE
 			endpoint:   ep,
 			headers:    headers,
 			auth:       auth,
+			basePath:   basePath,
 		})
 	}
 
@@ -323,8 +330,12 @@ func (hc *HealthChecker) checkPool(ctx context.Context, poolKey string, config *
 
 // checkEndpoint performs a single health check for a backend endpoint.
 func (hc *HealthChecker) checkEndpoint(ctx context.Context, backend *BackendHealth, config *BackendHealthCheckConfig) {
-	// Build health check URL with proper path joining
-	healthURL, err := joinURLPath(backend.BackendURL, config.Endpoint)
+	// Build health check URL with proper path joining. When a base_path is
+	// set on the BackendConfig we feed it through the same mergeBackendPath
+	// rules used for real traffic, so probes hit the correct endpoint even
+	// when operators configured the URL without a path component.
+	probePath := mergeBackendPath("", backend.basePath, config.Endpoint)
+	healthURL, err := joinURLPath(backend.BackendURL, probePath)
 	if err != nil {
 		hc.recordFailure(backend, config, fmt.Sprintf("invalid backend URL: %v", err))
 		return

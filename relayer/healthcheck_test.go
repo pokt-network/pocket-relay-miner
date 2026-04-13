@@ -68,7 +68,7 @@ func TestHealthCheck_Recovery(t *testing.T) {
 	ep.SetUnhealthy()
 	require.False(t, ep.IsHealthy())
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 
 	ctx := context.Background()
 
@@ -93,7 +93,7 @@ func TestHealthCheck_HealthyBackendProbe(t *testing.T) {
 	config := defaultConfig()
 	config.UnhealthyThreshold = 3
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	ctx := context.Background()
 
 	// 2 failures: still healthy
@@ -124,7 +124,7 @@ func TestHealthCheck_HealthyBackendProbeReset(t *testing.T) {
 	config := defaultConfig()
 	config.UnhealthyThreshold = 5
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	ctx := context.Background()
 
 	// 2 failures
@@ -162,7 +162,7 @@ func TestHealthCheck_CustomProbe_POST(t *testing.T) {
 	config.Method = "POST"
 	config.RequestBody = `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 	assert.Equal(t, "POST", receivedMethod)
@@ -186,7 +186,7 @@ func TestHealthCheck_CustomProbe_ExplicitContentType(t *testing.T) {
 	config.RequestBody = `{"foo":"bar"}`
 	config.ContentType = "text/plain"
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 	assert.Equal(t, "text/plain", receivedContentType)
@@ -204,7 +204,7 @@ func TestHealthCheck_ExpectedStatus(t *testing.T) {
 		config := defaultConfig()
 		config.ExpectedStatus = []int{200, 204}
 
-		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 		hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 		// 204 is in the expected list, so should remain healthy
@@ -224,7 +224,7 @@ func TestHealthCheck_ExpectedStatus(t *testing.T) {
 		config.ExpectedStatus = []int{200, 204}
 		config.UnhealthyThreshold = 1
 
-		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 		hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 		require.False(t, ep.IsHealthy())
@@ -241,7 +241,7 @@ func TestHealthCheck_ExpectedStatus(t *testing.T) {
 		config := defaultConfig()
 		// ExpectedStatus is nil/empty -> should accept any 2xx
 
-		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 		hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 		require.True(t, ep.IsHealthy())
@@ -258,7 +258,7 @@ func TestHealthCheck_ExpectedStatus(t *testing.T) {
 		config := defaultConfig()
 		config.UnhealthyThreshold = 1
 
-		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 		hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 		require.False(t, ep.IsHealthy())
@@ -278,7 +278,7 @@ func TestHealthCheck_ExpectedBody(t *testing.T) {
 		config := defaultConfig()
 		config.ExpectedBody = "result"
 
-		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 		hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 		require.True(t, ep.IsHealthy())
@@ -297,7 +297,7 @@ func TestHealthCheck_ExpectedBody(t *testing.T) {
 		config.ExpectedBody = "result"
 		config.UnhealthyThreshold = 1
 
-		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+		hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 		hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 		require.False(t, ep.IsHealthy())
@@ -318,7 +318,7 @@ func TestHealthCheck_UnhealthyThreshold(t *testing.T) {
 	config := defaultConfig()
 	config.UnhealthyThreshold = 3
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	ctx := context.Background()
 
 	hc.checkPool(ctx, "svc:jsonrpc", config)
@@ -345,7 +345,7 @@ func TestHealthCheck_HealthyThreshold(t *testing.T) {
 	config.HealthyThreshold = 3
 
 	ep.SetUnhealthy()
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	ctx := context.Background()
 
 	hc.checkPool(ctx, "svc:jsonrpc", config)
@@ -378,7 +378,7 @@ func TestHealthCheck_MultiEndpoint(t *testing.T) {
 
 	hc := newTestHealthChecker()
 	config := defaultConfig()
-	hc.RegisterPool("svc:jsonrpc", endpoints, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", endpoints, config, nil, nil, "")
 
 	hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
@@ -405,7 +405,7 @@ func TestHealthCheck_AuthHeaders(t *testing.T) {
 		BearerToken: "my-secret-token",
 	}
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, auth)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, auth, "")
 	hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 	assert.Equal(t, "Bearer my-secret-token", receivedAuth)
@@ -430,7 +430,7 @@ func TestHealthCheck_PoolHeaders(t *testing.T) {
 		"X-Custom":  "value456",
 	}
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, headers, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, headers, nil, "")
 	hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 	assert.Equal(t, "key123", receivedAPIKey)
@@ -453,7 +453,7 @@ func TestHealthCheck_FullResetOnRecovery(t *testing.T) {
 
 	// Start unhealthy
 	ep.SetUnhealthy()
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	ctx := context.Background()
 
 	// Get the BackendHealth to check internal counters
@@ -485,7 +485,7 @@ func TestHealthCheck_DefaultGET(t *testing.T) {
 	config := defaultConfig()
 	// Method is intentionally left empty
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 	assert.Equal(t, "GET", receivedMethod)
@@ -516,7 +516,7 @@ func TestHealthCheck_ResponseBodyAlwaysRead(t *testing.T) {
 	config := defaultConfig()
 	// No ExpectedBody set
 
-	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil)
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
 	hc.checkPool(context.Background(), "svc:jsonrpc", config)
 
 	// Body should have been fully written (and thus read by client)
