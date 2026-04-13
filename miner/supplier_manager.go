@@ -188,6 +188,10 @@ type SupplierManager struct {
 	// Distributed claiming (optional)
 	claimer *SupplierClaimer
 
+	// Deduplicator (shared across suppliers). Prevents counter drift when Redis
+	// Streams redeliver a relay (consumer reclaim, transient ack failure).
+	deduplicator Deduplicator
+
 	// Lifecycle
 	ctx      context.Context
 	cancelFn context.CancelFunc
@@ -212,7 +216,7 @@ func NewSupplierManager(
 	componentLogger := logging.ForComponent(logger, logging.ComponentSupplierManager)
 	querySubpool := CreateBoundedSubpool(componentLogger, config.WorkerPool, queryWorkers, "query_subpool")
 
-	return &SupplierManager{
+	mgr := &SupplierManager{
 		logger:       logging.ForComponent(logger, logging.ComponentSupplierManager),
 		config:       config,
 		keyManager:   keyManager,
@@ -220,6 +224,24 @@ func NewSupplierManager(
 		suppliers:    make(map[string]*SupplierState),
 		querySubpool: querySubpool,
 	}
+
+	// Construct a shared deduplicator if we have a Redis client. Falls back to
+	// nil if Redis is absent (e.g. tests) — handleRelay treats nil as fail-open.
+	if config.RedisClient != nil {
+		// KeyPrefix empty → defaults to "ha:miner:dedup" (matches KeyBuilder.MinerDedupKey).
+		mgr.deduplicator = NewRedisDeduplicator(
+			componentLogger,
+			config.RedisClient,
+			DeduplicatorConfig{},
+		)
+	}
+
+	return mgr
+}
+
+// Deduplicator returns the shared deduplicator (may be nil).
+func (m *SupplierManager) Deduplicator() Deduplicator {
+	return m.deduplicator
 }
 
 // SetRelayHandler sets the callback for processing incoming relays.

@@ -408,6 +408,27 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		}
 	}
 
+	// Deduplicate: if Redis Streams redelivered this relay (consumer reclaim,
+	// transient ack failure), skip it so counters don't drift above the SMST.
+	// SMST is idempotent, but RelayCount/TotalComputeUnits would double-count.
+	if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
+		isDup, dupErr := dedup.IsDuplicate(ctx, msg.Message.RelayHash, msg.Message.SessionId)
+		if dupErr != nil {
+			// Fail-open: log and continue. Better to risk a double-count than drop a valid relay.
+			w.logger.Debug().
+				Err(dupErr).
+				Str("session_id", msg.Message.SessionId).
+				Msg("deduplicator check failed, proceeding with relay")
+		} else if isDup {
+			w.logger.Debug().
+				Str("session_id", msg.Message.SessionId).
+				Str("supplier", supplierAddr).
+				Msg("dropping redelivered relay (already processed)")
+			RecordRelayRejected(supplierAddr, "duplicate", msg.Message.ServiceId)
+			return nil
+		}
+	}
+
 	// Update SMST with relay bytes
 	if err := state.SMSTManager.UpdateTree(
 		ctx,
@@ -443,6 +464,17 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			Msg("unexpected SMST error - discarding relay")
 		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "unexpected_error")
 		return nil // ACK and discard - unknown errors shouldn't block processing
+	}
+
+	// Mark relay hash as processed in the deduplicator so future redeliveries
+	// of the same message are dropped by the check above. Best-effort.
+	if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
+		if markErr := dedup.MarkProcessed(ctx, msg.Message.RelayHash, msg.Message.SessionId); markErr != nil {
+			w.logger.Debug().
+				Err(markErr).
+				Str("session_id", msg.Message.SessionId).
+				Msg("deduplicator mark_processed failed")
+		}
 	}
 
 	// MEMORY OPTIMIZATION: Clear RelayBytes and RelayHash after SMST update
