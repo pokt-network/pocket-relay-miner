@@ -703,10 +703,12 @@ func (c *Config) validateServiceConfig(id string, svc ServiceConfig) error {
 			}
 		}
 
-		// Validate health check config if present
+		// Validate health check config if present.
+		// endpoint is optional when base_path is set — the probe path defaults
+		// to base_path in that case, which is exactly where the backend lives.
 		if backend.HealthCheck != nil && backend.HealthCheck.Enabled {
-			if backend.HealthCheck.Endpoint == "" {
-				return fmt.Errorf("service[%s].backends[%s].health_check.endpoint is required when enabled", id, rpcType)
+			if backend.HealthCheck.Endpoint == "" && backend.BasePath == "" {
+				return fmt.Errorf("service[%s].backends[%s].health_check.endpoint is required when enabled (or set base_path on the backend)", id, rpcType)
 			}
 			if backend.HealthCheck.IntervalSeconds <= 0 {
 				return fmt.Errorf("service[%s].backends[%s].health_check.interval_seconds must be positive", id, rpcType)
