@@ -82,13 +82,14 @@ func DefaultRelayMeterConfig() RelayMeterConfig {
 
 // SessionMeterMeta contains metadata for a session meter stored in Redis.
 type SessionMeterMeta struct {
-	SessionID        string `json:"session_id"`
-	AppAddress       string `json:"app_address"`
-	ServiceID        string `json:"service_id"`
-	SupplierAddress  string `json:"supplier_address"`
-	SessionEndHeight int64  `json:"session_end_height"`
-	MaxStakeUpokt    int64  `json:"max_stake_upokt"` // Max allowed stake in uPOKT
-	CreatedAt        int64  `json:"created_at"`      // Unix timestamp
+	SessionID         string  `json:"session_id"`
+	AppAddress        string  `json:"app_address"`
+	ServiceID         string  `json:"service_id"`
+	SupplierAddress   string  `json:"supplier_address"`
+	SessionEndHeight  int64   `json:"session_end_height"`
+	MaxStakeUpokt     int64   `json:"max_stake_upokt"`     // Max allowed stake in uPOKT
+	CreatedAt         int64   `json:"created_at"`          // Unix timestamp
+	CreatedWithFactor float64 `json:"created_with_factor"` // serviceFactor snapshot at creation (0 if not set)
 }
 
 // CachedSharedParams contains cached shared parameters.
@@ -406,38 +407,77 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	supplierAddress string,
 	sessionEndHeight int64,
 ) (*SessionMeterMeta, int64, error) {
+	// Snapshot current serviceFactor so cached meta can be invalidated if it
+	// was created under a stale factor (Bug 1 fix).
+	currentFactor := 0.0
+	if m.serviceFactorProvider != nil {
+		if f, ok := m.serviceFactorProvider.GetServiceFactor(ctx, serviceID); ok {
+			currentFactor = f
+		}
+	}
+
 	// Check local cache first (L1)
 	m.localCacheMu.RLock()
 	if meta, exists := m.localCache[sessionID]; exists {
 		m.localCacheMu.RUnlock()
-		return meta, meta.MaxStakeUpokt, nil
+		if meta.CreatedWithFactor == currentFactor {
+			return meta, meta.MaxStakeUpokt, nil
+		}
+		// Stale factor — fall through to recompute.
+	} else {
+		m.localCacheMu.RUnlock()
 	}
-	m.localCacheMu.RUnlock()
 
 	// Check Redis (L2)
 	meta, err := m.getSessionMeta(ctx, sessionID)
 	if err == nil && meta != nil {
-		// Cache locally
+		if meta.CreatedWithFactor == currentFactor {
+			// Cache locally
+			m.localCacheMu.Lock()
+			m.localCache[sessionID] = meta
+			m.localCacheMu.Unlock()
+			return meta, meta.MaxStakeUpokt, nil
+		}
+		// Stale factor — recompute maxStake, update cached meta in place.
+		oldFactor := meta.CreatedWithFactor
+		newMax, newFactor, calcErr := m.calculateMaxStake(ctx, appAddress, serviceID)
+		if calcErr != nil {
+			return nil, 0, fmt.Errorf("failed to recalculate max stake after factor change: %w", calcErr)
+		}
+		meta.MaxStakeUpokt = newMax
+		meta.CreatedWithFactor = newFactor
+		if metaBytes, mErr := json.Marshal(meta); mErr == nil {
+			// Best-effort overwrite; preserve remaining TTL.
+			m.redisClient.Set(ctx, m.metaKey(sessionID), metaBytes, redis.KeepTTL)
+		}
 		m.localCacheMu.Lock()
 		m.localCache[sessionID] = meta
 		m.localCacheMu.Unlock()
-		return meta, meta.MaxStakeUpokt, nil
+		m.logger.Info().
+			Str("session_id", sessionID).
+			Str("service_id", serviceID).
+			Float64("old_factor", oldFactor).
+			Float64("new_factor", newFactor).
+			Int64("new_max_stake_upokt", newMax).
+			Msg("recomputed session meter max stake after serviceFactor change")
+		return meta, newMax, nil
 	}
 
 	// Create new session meter
-	maxStakeUpokt, err := m.calculateMaxStake(ctx, appAddress, serviceID)
+	maxStakeUpokt, factorUsed, err := m.calculateMaxStake(ctx, appAddress, serviceID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to calculate max stake: %w", err)
 	}
 
 	meta = &SessionMeterMeta{
-		SessionID:        sessionID,
-		AppAddress:       appAddress,
-		ServiceID:        serviceID,
-		SupplierAddress:  supplierAddress,
-		SessionEndHeight: sessionEndHeight,
-		MaxStakeUpokt:    maxStakeUpokt,
-		CreatedAt:        time.Now().Unix(),
+		SessionID:         sessionID,
+		AppAddress:        appAddress,
+		ServiceID:         serviceID,
+		SupplierAddress:   supplierAddress,
+		SessionEndHeight:  sessionEndHeight,
+		MaxStakeUpokt:     maxStakeUpokt,
+		CreatedAt:         time.Now().Unix(),
+		CreatedWithFactor: factorUsed,
 	}
 
 	// Store in Redis with session-wide TTL
@@ -504,23 +544,25 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID string) (*Ses
 //
 // The baseLimit formula gives the MOST CONSERVATIVE calculation.
 // The protocol NEVER guarantees any payment amount - baseLimit is an estimate.
-func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string) (int64, error) {
+// Returns (effectiveLimit, serviceFactorUsed, error).
+// serviceFactorUsed is the factor applied (0 if no factor was configured).
+func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string) (int64, float64, error) {
 	// Get app stake (from Redis cache or chain)
 	appStakeUpokt, err := m.getAppStake(ctx, appAddress)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get app stake: %w", err)
+		return 0, 0, fmt.Errorf("failed to get app stake: %w", err)
 	}
 
 	// Get shared params to calculate baseLimit (for comparison/warnings)
 	sharedParams, err := m.sharedParamCache.GetLatestSharedParams(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get shared params: %w", err)
+		return 0, 0, fmt.Errorf("failed to get shared params: %w", err)
 	}
 
 	// Get session params (from Redis cache or chain)
 	sessionParams, err := m.getSessionParams(ctx)
 	if err != nil {
-		return 0, fmt.Errorf("failed to get session params: %w", err)
+		return 0, 0, fmt.Errorf("failed to get session params: %w", err)
 	}
 
 	// Calculate baseLimit = (appStake / numSuppliers) / pendingSessions
@@ -602,7 +644,12 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 			Msg("using baseLimit formula (no serviceFactor configured)")
 	}
 
-	return effectiveLimit, nil
+	// Return factor=0 if no serviceFactor was configured.
+	factorSnapshot := 0.0
+	if hasServiceFactor {
+		factorSnapshot = serviceFactor
+	}
+	return effectiveLimit, factorSnapshot, nil
 }
 
 // getRelayCost calculates the cost of a single relay in uPOKT.
