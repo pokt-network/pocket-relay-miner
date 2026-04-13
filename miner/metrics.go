@@ -896,27 +896,11 @@ var (
 		[]string{"supplier", "error_type"}, // error_type: balance_query, stake_query
 	)
 
-	// Late relay detection metrics - tracks relays that arrived but weren't consumed before claim
-
-	sessionLateRelays = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_late_relays",
-			Help:      "Number of late-arriving relays per session (pending in stream but not consumed before claim)",
-		},
-		[]string{"supplier", "session_id"},
-	)
-
-	sessionLateRelaysTotal = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_late_relays_total",
-			Help:      "Total number of late-arriving relays across all sessions",
-		},
-		[]string{"supplier"},
-	)
+	// Note: late-arriving relays are counted via ha_miner_relays_rejected_total
+	// with reason="session_sealed", emitted by the SMST manager's two-phase
+	// seal in supplier_worker.go. The older session_late_relays metric was
+	// removed because GetPendingRelayCount was a global supplier-stream count,
+	// not per-session, and produced systematic false positives.
 
 	// ====== SUPPLIER CLAIMER METRICS ======
 

@@ -452,15 +452,6 @@ func (c *StreamsConsumer) Pending(ctx context.Context) (int64, error) {
 	return info.Count, nil
 }
 
-// GetPendingRelayCount returns the total pending count for the supplier stream.
-// With single stream per supplier, we can't get per-session pending counts.
-// This returns the total pending for the supplier.
-func (c *StreamsConsumer) GetPendingRelayCount(ctx context.Context, sessionID string) (int64, error) {
-	// With single stream architecture, all sessions share one stream.
-	// Return total pending for the supplier (sessionID is ignored).
-	return c.Pending(ctx)
-}
-
 // DeleteStream is a no-op with single stream architecture.
 // Messages are automatically deleted via XAckDel when acknowledged.
 // The single stream per supplier persists but stays clean.

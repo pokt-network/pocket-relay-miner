@@ -67,14 +67,6 @@ type SessionLifecycleCallback interface {
 	OnProofTxError(ctx context.Context, snapshot *SessionSnapshot) error
 }
 
-// PendingRelayChecker checks for pending (unconsumed) relays in session streams.
-// This is used to detect late-arriving relays before claim submission.
-type PendingRelayChecker interface {
-	// GetPendingRelayCount returns the number of pending relays for a session stream.
-	// Returns 0 if the stream doesn't exist or has no pending messages.
-	GetPendingRelayCount(ctx context.Context, sessionID string) (int64, error)
-}
-
 // MeterCleanupPublisher publishes cleanup signals to relayers when sessions leave active state.
 // This notifies relayers to clear their session meter data and decrement active session metrics.
 type MeterCleanupPublisher interface {
@@ -120,9 +112,6 @@ type SessionLifecycleManager struct {
 	blockClient  client.BlockClient
 	callback     SessionLifecycleCallback
 
-	// Optional pending relay checker for late relay detection
-	pendingChecker PendingRelayChecker
-
 	// Optional meter cleanup publisher for notifying relayers when sessions leave active state
 	meterCleanupPublisher MeterCleanupPublisher
 
@@ -145,7 +134,6 @@ type SessionLifecycleManager struct {
 }
 
 // NewSessionLifecycleManager creates a new session lifecycle manager.
-// The pendingChecker parameter is optional - if provided, it enables late relay detection.
 // The workerPool parameter is required for creating transition subpool.
 func NewSessionLifecycleManager(
 	logger logging.Logger,
@@ -154,7 +142,6 @@ func NewSessionLifecycleManager(
 	blockClient client.BlockClient,
 	callback SessionLifecycleCallback,
 	config SessionLifecycleConfig,
-	pendingChecker PendingRelayChecker,
 	workerPool pond.Pool,
 ) *SessionLifecycleManager {
 	if config.CheckIntervalBlocks <= 0 {
@@ -178,7 +165,6 @@ func NewSessionLifecycleManager(
 		sharedClient:      sharedClient,
 		blockClient:       blockClient,
 		callback:          callback,
-		pendingChecker:    pendingChecker,
 		activeSessions:    xsync.NewMap[string, *SessionSnapshot](),
 		transitionSubpool: transitionSubpool,
 	}
@@ -847,35 +833,17 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 		Str(logging.FieldSupplier, m.config.SupplierAddress).
 		Msg("executing batched claim transition")
 
-	// LATE RELAY DETECTION: Check for pending (unconsumed) relays before claiming
-	if m.pendingChecker != nil {
-		for _, session := range sessions {
-			pendingCount, checkErr := m.pendingChecker.GetPendingRelayCount(ctx, session.SessionID)
-			if checkErr != nil {
-				m.logger.Debug().
-					Err(checkErr).
-					Str(logging.FieldSessionID, session.SessionID).
-					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
-					Str(logging.FieldServiceID, session.ServiceID).
-					Msg("failed to check pending relays")
-				continue
-			}
-
-			if pendingCount > 0 {
-				m.logger.Warn().
-					Str(logging.FieldSessionID, session.SessionID).
-					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
-					Str(logging.FieldServiceID, session.ServiceID).
-					Int64("pending_relays", pendingCount).
-					Int64("session_end_height", session.SessionEndHeight).
-					Msg("LATE RELAYS: relays still in Redis stream at claim time, likely sent by gateway/app near session end")
-
-				// Update metrics
-				sessionLateRelays.WithLabelValues(m.config.SupplierAddress, session.SessionID).Add(float64(pendingCount))
-				sessionLateRelaysTotal.WithLabelValues(m.config.SupplierAddress).Add(float64(pendingCount))
-			}
-		}
-	}
+	// Note: true "late relays" (those that arrive after the SMST tree is sealed
+	// in FlushTree) are already detected and rejected downstream by the SMST
+	// manager's two-phase seal; the supplier worker emits them via
+	// RecordRelayRejected(..., "session_sealed", ...). Any per-session check at
+	// this earlier point would be racy and inaccurate because:
+	//   1. The single-stream-per-supplier architecture makes XPENDING a global
+	//      count, not per-session, so it conflates the closing session with the
+	//      currently-active one.
+	//   2. Relays sent within grace_period_end_offset_blocks are still valid
+	//      for the closing session and should be consumed normally before the
+	//      SMST flush.
 
 	// CRITICAL: Refresh session snapshots from Redis to get latest relay counts
 	// AND claim deduplication state (ClaimTxHash, State).

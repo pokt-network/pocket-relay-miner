@@ -860,7 +860,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			m.config.BlockClient,
 			lifecycleCallback,
 			lifecycleConfig,
-			consumer,            // Pass consumer as PendingRelayChecker for late relay detection
 			m.config.WorkerPool, // Pass master worker pool for transition subpool
 		)
 
