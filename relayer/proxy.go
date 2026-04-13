@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	stdpath "path"
 	"slices"
 	"strconv"
 	"strings"
@@ -1365,13 +1366,12 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 			return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to parse request URL: %w", err)
 		}
 
-		// Update the path by merging backend path with POKT request path
-		if poktURL.Path != "" {
-			if parsedBackendURL.Path != "" && parsedBackendURL.Path != "/" {
-				requestURL.Path = strings.TrimSuffix(parsedBackendURL.Path, "/") + poktURL.Path
-			} else {
-				requestURL.Path = poktURL.Path
-			}
+		// Update the path by merging backend path with POKT request path.
+		// Use stdpath.Join (matches poktroll pkg/relayer/http_request.go) so that
+		// PATH health checks (which send Path="/") don't produce a trailing slash
+		// that breaks backends like AvalancheGo at /ext/bc/C/rpc/.
+		if poktURL.Path != "" || parsedBackendURL.Path != "" {
+			requestURL.Path = stdpath.Join(parsedBackendURL.Path, poktURL.Path)
 		}
 
 		// Merge query parameters from both backend URL and POKT request
@@ -1406,11 +1406,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		if originalReq.URL.Path != "" && originalReq.URL.Path != "/" {
 			// Copy parsedBackendURL to avoid mutating the shared pool endpoint URL
 			fallbackURL := *parsedBackendURL
-			if fallbackURL.Path == "" || fallbackURL.Path == "/" {
-				fallbackURL.Path = originalReq.URL.Path
-			} else {
-				fallbackURL.Path = strings.TrimSuffix(fallbackURL.Path, "/") + originalReq.URL.Path
-			}
+			fallbackURL.Path = stdpath.Join(parsedBackendURL.Path, originalReq.URL.Path)
 			fullBackendURL = fallbackURL.String()
 		}
 
