@@ -1552,14 +1552,16 @@ func (p *ProxyServer) logCircuitBreakerTransition(transition *pool.TransitionEve
 			Int32("consecutive_failures", transition.Failures).
 			Int32("threshold", pool.DefaultUnhealthyThreshold)
 
-		// Include the triggering cause
+		// Classify and include the triggering cause so operators can tell at a
+		// glance *why* the breaker tripped (5xx vs transport error vs DNS vs …).
+		if reason := pool.ClassifyFailure(transition.StatusCode, transition.Error); reason != "" {
+			event = event.Str("trigger_reason", reason)
+		}
 		if transition.StatusCode > 0 {
 			event = event.Int("trigger_http_status", transition.StatusCode)
 		}
 		if transition.Error != nil {
 			event = event.Str("trigger_error", transition.Error.Error())
-		} else if transition.StatusCode >= 500 {
-			event = event.Str("trigger_cause", "backend returned HTTP 5xx")
 		}
 
 		// Include recovery timeout info

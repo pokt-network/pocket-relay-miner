@@ -29,7 +29,7 @@ func TestIsFailure(t *testing.T) {
 		}
 	})
 
-	t.Run("connection refused error is failure", func(t *testing.T) {
+	t.Run("connection refused IS a failure", func(t *testing.T) {
 		connErr := &net.OpError{
 			Op:  "dial",
 			Net: "tcp",
@@ -38,12 +38,18 @@ func TestIsFailure(t *testing.T) {
 		require.True(t, isFailure(0, connErr))
 	})
 
-	t.Run("DNS resolution error is failure", func(t *testing.T) {
+	t.Run("DNS resolution error IS a failure", func(t *testing.T) {
 		dnsErr := &net.DNSError{
 			Err:  "no such host",
 			Name: "unknown-host",
 		}
 		require.True(t, isFailure(0, dnsErr))
+	})
+
+	t.Run("4xx responses are NOT circuit-breaker failures", func(t *testing.T) {
+		for _, code := range []int{400, 401, 403, 404, 429} {
+			require.False(t, isFailure(code, nil), "status %d must not trip the breaker", code)
+		}
 	})
 
 	t.Run("context.DeadlineExceeded is NOT a failure", func(t *testing.T) {
@@ -211,10 +217,22 @@ func TestRecordResult_ConnectionRefusedError(t *testing.T) {
 		Err: errors.New("connection refused"),
 	}
 
-	// Connection error with threshold 1 should trigger
+	// Hard transport errors must trip the breaker at the configured threshold.
 	event := p.RecordResult(ep, 0, connErr, 1)
 	require.NotNil(t, event)
 	require.False(t, ep.IsHealthy())
+}
+
+func TestClassifyFailure(t *testing.T) {
+	require.Equal(t, "", ClassifyFailure(200, nil))
+	require.Equal(t, "", ClassifyFailure(404, nil))
+	require.Equal(t, "", ClassifyFailure(0, context.Canceled))
+	require.Equal(t, "", ClassifyFailure(0, context.DeadlineExceeded))
+	require.Equal(t, "backend_5xx", ClassifyFailure(503, nil))
+	require.Equal(t, "backend_5xx", ClassifyFailure(500, nil))
+
+	connErr := &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")}
+	require.Equal(t, "transport_error", ClassifyFailure(0, connErr))
 }
 
 func TestRecordResult_TimeoutNotCounted(t *testing.T) {

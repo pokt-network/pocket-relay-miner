@@ -39,48 +39,67 @@ type TransitionEvent struct {
 	DowntimeDuration time.Duration
 }
 
-// isFailure returns true if the result represents a circuit-breaker-countable failure.
+// isFailure returns true if the result should increment the circuit breaker's
+// consecutive-failure counter. The breaker trips on symptoms that indicate
+// something genuinely wrong with the *backend*: HTTP 5xx, or hard transport
+// errors (connection refused, DNS failure, reset by peer). Those mean the
+// backend is down, misconfigured, or broken and traffic must fail over.
 //
-// Failures are:
-//   - HTTP 5xx status codes (500-599)
-//   - Backend-side errors: connection refused, DNS resolution, connection reset, etc.
+// What is NOT a failure:
+//   - context.Canceled: the caller cut the request short (client timeout,
+//     PATH disconnect). That's the client's budget, not the backend's fault.
+//   - context.DeadlineExceeded / net.Error with Timeout()=true: slow but
+//     possibly healthy backend; tripping on timeouts blackholes traffic.
+//   - HTTP 1xx-4xx: application-level responses from a working backend.
+//   - nil error with status 0: no result yet.
 //
-// NOT failures:
-//   - HTTP 1xx-4xx status codes
-//   - Timeouts (context.DeadlineExceeded, net.Error with Timeout()=true)
-//   - Client cancellations (context.Canceled) — caller went away, not backend fault
-//   - nil error with status 0 (edge case: no result yet)
+// The active health checker is the second layer of defence — it probes
+// backends independently and can mark them unhealthy through a different
+// path. The breaker here reacts to real traffic.
 func isFailure(statusCode int, err error) bool {
 	if err != nil {
-		// Timeouts are explicitly NOT failures per design decision.
-		// Slow but healthy backends should not be circuit-broken.
-		if isTimeoutError(err) {
-			return false
-		}
-		// Client cancellations are NOT failures: if the caller (PATH, a load
-		// balancer, an aborted request) disconnected, we don't know the
-		// backend's state. Counting these trips the breaker on healthy
-		// backends and blocks traffic for no reason.
+		// Caller went away — unknown backend state, must not trip.
 		if errors.Is(err, context.Canceled) {
 			return false
 		}
-		// All other errors: connection refused, DNS, reset, etc.
+		// Slow but possibly healthy — must not trip.
+		if isTimeoutError(err) {
+			return false
+		}
+		// Hard transport errors: connection refused, DNS, reset, TLS.
 		return true
 	}
-	// HTTP 5xx status codes
-	return statusCode >= 500
+	return statusCode >= 500 && statusCode < 600
 }
 
-// IsRetryable returns true if the given status code and error indicate that
-// the request should be retried on an alternate backend.
-//
-// Retryable: connection errors (refused, DNS, reset) and HTTP 5xx.
-// NOT retryable: timeouts (shared budget exhausted), HTTP 1xx-4xx, nil error with 2xx.
-//
-// This is an exported wrapper around isFailure for clarity of intent
-// (retry decision vs circuit breaker counting use the same classification).
+// IsRetryable returns true if the request should be retried on an alternate
+// backend. Shares the same classification as isFailure: hard transport errors
+// and 5xx are worth failing over to a healthy peer; timeouts and client
+// cancellations are not (budget gone / caller disappeared).
 func IsRetryable(statusCode int, err error) bool {
 	return isFailure(statusCode, err)
+}
+
+// ClassifyFailure returns a short, log-friendly reason describing why a
+// response counted as a failure. Empty string when the result was not a
+// failure. Used by the circuit breaker transition logger so operators can
+// see *what* tripped the breaker without parsing raw errors.
+func ClassifyFailure(statusCode int, err error) string {
+	if !isFailure(statusCode, err) {
+		return ""
+	}
+	if err != nil {
+		var netErr net.Error
+		if errors.As(err, &netErr) {
+			return "transport_error"
+		}
+		var dnsErr *net.DNSError
+		if errors.As(err, &dnsErr) {
+			return "dns_error"
+		}
+		return "backend_error"
+	}
+	return "backend_5xx"
 }
 
 // isTimeoutError returns true if the error represents a timeout.
