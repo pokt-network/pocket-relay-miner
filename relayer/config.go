@@ -298,6 +298,14 @@ type BackendConfig struct {
 	// Mutually exclusive with URL.
 	URLs []BackendEndpointConfig `yaml:"urls,omitempty"`
 
+	// BasePath is an optional path prefix that the backend expects on every
+	// request (e.g. "/ext/bc/C/rpc" for AvalancheGo). When set, the proxy
+	// prepends it to client requests that do not already start with it, so
+	// that callers which already include the prefix (or which send "/") do
+	// not produce a duplicated or broken path. Takes precedence over any
+	// path component present in URL/URLs.
+	BasePath string `yaml:"base_path,omitempty"`
+
 	// LoadBalancing strategy for this backend type.
 	// Defined in Phase 1, used starting Phase 2.
 	// Valid values: "round_robin" (default in Phase 2), others added in Phase 10.

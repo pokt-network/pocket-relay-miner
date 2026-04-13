@@ -122,3 +122,38 @@ func TestWebSocketFastFail_SomeHealthy(t *testing.T) {
 
 	require.True(t, p.HasHealthy(), "pool with at least one healthy WebSocket endpoint should return true")
 }
+
+func TestMergeBackendPath(t *testing.T) {
+	tests := []struct {
+		name       string
+		urlPath    string
+		basePath   string
+		clientPath string
+		want       string
+	}{
+		// base_path precedence over urlPath.
+		{"basePath only, empty client", "", "/ext/bc/C/rpc", "", "/ext/bc/C/rpc"},
+		{"basePath only, slash client", "", "/ext/bc/C/rpc", "/", "/ext/bc/C/rpc"},
+		{"basePath, client already prefixed", "", "/ext/bc/C/rpc", "/ext/bc/C/rpc", "/ext/bc/C/rpc"},
+		{"basePath, client already prefixed with subpath", "", "/ext/bc/C/rpc", "/ext/bc/C/rpc/v1/users", "/ext/bc/C/rpc/v1/users"},
+		{"basePath, client unrelated path gets prefixed", "", "/ext/bc/C/rpc", "/v1/users", "/ext/bc/C/rpc/v1/users"},
+		{"basePath with trailing slash normalises", "", "/ext/bc/C/rpc/", "/", "/ext/bc/C/rpc"},
+		{"basePath does not false-match substring", "", "/ext", "/extra/foo", "/ext/extra/foo"},
+
+		// No basePath, legacy behaviour using urlPath.
+		{"no basePath, urlPath fallback", "/ext/bc/C/rpc", "", "/", "/ext/bc/C/rpc"},
+		{"no basePath, urlPath + subpath", "/ext/bc/C/rpc", "", "/v1/users", "/ext/bc/C/rpc/v1/users"},
+
+		// Neither set.
+		{"neither set, empty client", "", "", "", ""},
+		{"neither set, slash client", "", "", "/", ""},
+		{"neither set, real path", "", "", "/v1/users", "/v1/users"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := mergeBackendPath(tt.urlPath, tt.basePath, tt.clientPath)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}

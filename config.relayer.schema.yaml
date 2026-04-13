@@ -59,35 +59,35 @@ properties:
             default: ha
           cache_prefix:
             type: string
-            description: Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)
+            description: "Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)"
             default: cache
           events_prefix:
             type: string
-            description: Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)
+            description: "Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)"
             default: events
           streams_prefix:
             type: string
-            description: Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)
+            description: "Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)"
             default: relays
           miner_prefix:
             type: string
-            description: Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)
+            description: "Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)"
             default: miner
           supplier_prefix:
             type: string
-            description: Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)
+            description: "Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)"
             default: supplier
           meter_prefix:
             type: string
-            description: Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)
+            description: "Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)"
             default: meter
           params_prefix:
             type: string
-            description: Cached params prefix (full key: {base_prefix}:{params_prefix}:*)
+            description: "Cached params prefix (full key: {base_prefix}:{params_prefix}:*)"
             default: params
           consumer_group_prefix:
             type: string
-            description: Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})
+            description: "Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})"
             default: miners
 
   pocket_node:
@@ -190,14 +190,14 @@ properties:
             properties:
               url:
                 type: string
-                description: Single backend URL (mutually exclusive with urls). Supports http://, https://, ws://, wss://, grpc://, grpcs://
+                description: "Single backend URL (mutually exclusive with urls). Supports http://, https://, ws://, wss://, grpc://, grpcs://"
               urls:
                 type: array
                 description: List of backend endpoints for this RPC type (mutually exclusive with url). Supports mixed entries -- plain strings and objects with optional name.
                 items:
                   oneOf:
                     - type: string
-                      description: Plain backend URL string (name derived from hostname:port)
+                      description: "Plain backend URL string (name derived from hostname:port)"
                     - type: object
                       description: Backend endpoint with optional name
                       required:
@@ -205,10 +205,14 @@ properties:
                       properties:
                         name:
                           type: string
-                          description: Optional display name for this endpoint (used in logs and Prometheus metrics). If not set, derived from URL hostname:port.
+                          description: "Optional display name for this endpoint (used in logs and Prometheus metrics). If not set, derived from URL hostname:port."
                         url:
                           type: string
                           description: Backend endpoint URL
+              base_path:
+                type: string
+                description: "Optional path prefix the backend expects on every request (e.g. /ext/bc/C/rpc for AvalancheGo). The proxy prepends it to client requests that do not already start with it, avoiding duplication when PATH sends either / or the full prefix. Takes precedence over any path component in url/urls."
+                pattern: ^/
               load_balancing:
                 type: string
                 enum:
@@ -233,10 +237,10 @@ properties:
                     description: Password for basic auth
                   bearer_token:
                     type: string
-                    description: Bearer token for token auth (sent as "Authorization: Bearer <token>")
+                    description: "Bearer token for token auth (sent as \"Authorization: Bearer <token>\")"
                   plain_token:
                     type: string
-                    description: Plain token for token auth (sent as "Authorization: <token>" without "Bearer " prefix)
+                    description: "Plain token for token auth (sent as \"Authorization: <token>\" without \"Bearer \" prefix)"
               health_check:
                 type: object
                 description: Health check configuration for this backend
@@ -391,7 +395,7 @@ properties:
         minimum: 1000
       enable_caller:
         type: boolean
-        description: Add caller file:line to log events. Useful for debugging but adds ~14% allocation overhead under high throughput. Disable in production.
+        description: "Add caller file:line to log events. Useful for debugging but adds ~14% allocation overhead under high throughput. Disable in production."
         default: false
 
   relay_meter:

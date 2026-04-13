@@ -1338,12 +1338,14 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	backendURL := endpoint.RawURL
 	parsedBackendURL := endpoint.URL
 
-	// Get headers and auth from the BackendConfig (pool-level shared config)
+	// Get headers, auth, and path config from the BackendConfig (pool-level shared config)
 	var configHeaders map[string]string
 	var auth *AuthenticationConfig
+	var basePath string
 	if backendCfg := p.config.GetBackendConfig(serviceID, rpcType); backendCfg != nil {
 		configHeaders = backendCfg.Headers
 		auth = backendCfg.Authentication
+		basePath = backendCfg.BasePath
 	}
 
 	// Create backend request
@@ -1366,13 +1368,9 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 			return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to parse request URL: %w", err)
 		}
 
-		// Update the path by merging backend path with POKT request path.
-		// Use stdpath.Join (matches poktroll pkg/relayer/http_request.go) so that
-		// PATH health checks (which send Path="/") don't produce a trailing slash
-		// that breaks backends like AvalancheGo at /ext/bc/C/rpc/.
-		if poktURL.Path != "" || parsedBackendURL.Path != "" {
-			requestURL.Path = stdpath.Join(parsedBackendURL.Path, poktURL.Path)
-		}
+		// Merge the backend URL path (or explicit base_path) with the client
+		// request path. See mergeBackendPath for the precedence rules.
+		requestURL.Path = mergeBackendPath(parsedBackendURL.Path, basePath, poktURL.Path)
 
 		// Merge query parameters from both backend URL and POKT request
 		query := requestURL.Query()
@@ -1403,10 +1401,11 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	} else {
 		// Fallback: forward the raw body for non-relay traffic
 		fullBackendURL := backendURL
-		if originalReq.URL.Path != "" && originalReq.URL.Path != "/" {
+		merged := mergeBackendPath(parsedBackendURL.Path, basePath, originalReq.URL.Path)
+		if merged != parsedBackendURL.Path {
 			// Copy parsedBackendURL to avoid mutating the shared pool endpoint URL
 			fallbackURL := *parsedBackendURL
-			fallbackURL.Path = stdpath.Join(parsedBackendURL.Path, originalReq.URL.Path)
+			fallbackURL.Path = merged
 			fullBackendURL = fallbackURL.String()
 		}
 
@@ -2010,4 +2009,41 @@ func compressGzip(data []byte) ([]byte, error) {
 func clientAcceptsGzip(r *http.Request) bool {
 	acceptEncoding := r.Header.Get("Accept-Encoding")
 	return strings.Contains(strings.ToLower(acceptEncoding), "gzip")
+}
+
+// mergeBackendPath computes the final backend request path given:
+//   - urlPath: the path component of the configured backend URL (may be empty)
+//   - basePath: an explicit base_path override from the BackendConfig (may be empty)
+//   - clientPath: the path the client requested (may be empty or "/")
+//
+// Precedence: when basePath is set it wins over urlPath (operators use it to
+// decouple the prefix from the URL and avoid duplication when the caller
+// already includes it). When neither is set, clientPath is returned as-is.
+//
+// The duplication guard: if clientPath already starts with the effective
+// prefix, return clientPath unchanged. Otherwise prepend the prefix via
+// stdpath.Join so the result normalises trailing/multiple slashes.
+func mergeBackendPath(urlPath, basePath, clientPath string) string {
+	prefix := strings.TrimRight(basePath, "/")
+	if prefix == "" {
+		prefix = strings.TrimRight(urlPath, "/")
+	}
+	if clientPath == "/" {
+		clientPath = ""
+	}
+	if prefix == "" {
+		return clientPath
+	}
+	if clientPath == "" {
+		return prefix
+	}
+	// Already-prefixed clientPath (exact or as a path segment) must not be
+	// duplicated. Only treat as prefix if the next char is "/" or end-of-string.
+	if strings.HasPrefix(clientPath, prefix) {
+		rest := clientPath[len(prefix):]
+		if rest == "" || rest[0] == '/' {
+			return stdpath.Join("/", clientPath)
+		}
+	}
+	return stdpath.Join(prefix, clientPath)
 }
