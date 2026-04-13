@@ -43,17 +43,25 @@ type TransitionEvent struct {
 //
 // Failures are:
 //   - HTTP 5xx status codes (500-599)
-//   - Non-timeout errors (connection refused, DNS resolution, connection reset, etc.)
+//   - Backend-side errors: connection refused, DNS resolution, connection reset, etc.
 //
 // NOT failures:
 //   - HTTP 1xx-4xx status codes
 //   - Timeouts (context.DeadlineExceeded, net.Error with Timeout()=true)
+//   - Client cancellations (context.Canceled) — caller went away, not backend fault
 //   - nil error with status 0 (edge case: no result yet)
 func isFailure(statusCode int, err error) bool {
 	if err != nil {
 		// Timeouts are explicitly NOT failures per design decision.
 		// Slow but healthy backends should not be circuit-broken.
 		if isTimeoutError(err) {
+			return false
+		}
+		// Client cancellations are NOT failures: if the caller (PATH, a load
+		// balancer, an aborted request) disconnected, we don't know the
+		// backend's state. Counting these trips the breaker on healthy
+		// backends and blocks traffic for no reason.
+		if errors.Is(err, context.Canceled) {
 			return false
 		}
 		// All other errors: connection refused, DNS, reset, etc.

@@ -228,6 +228,26 @@ func TestRecordResult_TimeoutNotCounted(t *testing.T) {
 	require.Equal(t, int32(0), ep.ConsecutiveFailures())
 }
 
+func TestRecordResult_ClientCancelledNotCounted(t *testing.T) {
+	ep, _ := NewBackendEndpoint("test", "http://node:8545")
+	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "test")
+
+	// context.Canceled (client disconnected) must NOT count as a backend
+	// failure — the caller went away, the backend state is unknown.
+	for i := 0; i < 10; i++ {
+		event := p.RecordResult(ep, 0, context.Canceled, 1)
+		require.Nil(t, event)
+	}
+	require.True(t, ep.IsHealthy())
+	require.Equal(t, int32(0), ep.ConsecutiveFailures())
+
+	// Wrapped context.Canceled must also be excluded.
+	wrapped := fmt.Errorf("client_disconnected: %w", context.Canceled)
+	event := p.RecordResult(ep, 0, wrapped, 1)
+	require.Nil(t, event)
+	require.True(t, ep.IsHealthy())
+}
+
 func TestRecordResult_NetTimeoutNotCounted(t *testing.T) {
 	ep, _ := NewBackendEndpoint("test", "http://node:8545")
 	p := NewPool("test", []*BackendEndpoint{ep}, &FirstHealthySelector{}, "test")
