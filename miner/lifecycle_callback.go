@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"math"
 	"os"
 	"strconv"
 	"strings"
@@ -330,10 +331,18 @@ func (lc *LifecycleCallback) checkClaimCeiling(
 		return
 	}
 
-	// Get proof_window_close_offset_blocks for baseLimit calculation
+	// Get proof_window_close_offset_blocks and num_blocks_per_session for baseLimit calculation
 	proofWindowCloseBlocks := int64(sharedParams.GetProofWindowCloseOffsetBlocks())
 	if proofWindowCloseBlocks <= 0 {
 		proofWindowCloseBlocks = 1 // Avoid division by zero
+	}
+	numBlocksPerSession := int64(sharedParams.GetNumBlocksPerSession())
+	if numBlocksPerSession <= 0 {
+		numBlocksPerSession = 1
+	}
+	granularity := sharedParams.GetComputeUnitCostGranularity()
+	if granularity == 0 {
+		granularity = 1
 	}
 
 	// Query session to get numSuppliersPerSession
@@ -355,9 +364,13 @@ func (lc *LifecycleCallback) checkClaimCeiling(
 		numSuppliers = 1 // Avoid division by zero
 	}
 
-	// Calculate baseLimit: (appStake / numSuppliers) / proof_window_close_offset_blocks
+	// Calculate baseLimit: (appStake / numSuppliers) / pendingSessions
+	// pendingSessions = ceil(proofWindowCloseBlocks / numBlocksPerSession) + 1
+	// Matches relayer/relay_meter.go:calculateMaxStake and poktroll reference.
 	appStakePerSupplier := appStake / numSuppliers
-	baseLimitUpokt := appStakePerSupplier / proofWindowCloseBlocks
+	numClosedSessionsAwaitingSettlement := int64(math.Ceil(float64(proofWindowCloseBlocks) / float64(numBlocksPerSession)))
+	pendingSessions := numClosedSessionsAwaitingSettlement + 1
+	baseLimitUpokt := appStakePerSupplier / pendingSessions
 
 	// Get serviceFactor for this service
 	serviceFactor, hasServiceFactor := lc.serviceFactorProvider.GetServiceFactor(snapshot.ServiceID)
@@ -372,8 +385,11 @@ func (lc *LifecycleCallback) checkClaimCeiling(
 		ceilingUpokt = baseLimitUpokt
 	}
 
-	// Calculate claimed amount in uPOKT
-	claimedUpokt := int64(snapshot.TotalComputeUnits * computeUnitsToTokensMultiplier)
+	// Calculate claimed amount in uPOKT.
+	// Matches chain formula (x/proof/types/claim.go:GetClaimeduPOKT) up to the
+	// relay difficulty multiplier, which is omitted here because this log is
+	// informational. Without granularity the prior log was 1e6x too large.
+	claimedUpokt := int64(float64(snapshot.TotalComputeUnits*computeUnitsToTokensMultiplier) / float64(granularity))
 
 	// Check if claimed exceeds ceiling
 	if claimedUpokt > ceilingUpokt {
