@@ -408,24 +408,30 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		}
 	}
 
-	// Deduplicate: if Redis Streams redelivered this relay (consumer reclaim,
-	// transient ack failure), skip it so counters don't drift above the SMST.
-	// SMST is idempotent, but RelayCount/TotalComputeUnits would double-count.
-	if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
-		isDup, dupErr := dedup.IsDuplicate(ctx, msg.Message.RelayHash, msg.Message.SessionId)
-		if dupErr != nil {
-			// Fail-open: log and continue. Better to risk a double-count than drop a valid relay.
-			w.logger.Debug().
-				Err(dupErr).
-				Str("session_id", msg.Message.SessionId).
-				Msg("deduplicator check failed, proceeding with relay")
-		} else if isDup {
-			w.logger.Debug().
-				Str("session_id", msg.Message.SessionId).
-				Str("supplier", supplierAddr).
-				Msg("dropping redelivered relay (already processed)")
-			RecordRelayRejected(supplierAddr, "duplicate", msg.Message.ServiceId)
-			return nil
+	// Deduplicate only on reclaim: the normal XREADGROUP `>` delivery path
+	// never redelivers a message to the same consumer group, so dedup is
+	// only required for messages recovered from the pending entries list via
+	// XAUTOCLAIM (previous consumer crashed without acking). SMST.Update is
+	// idempotent by construction — the concern protected here is the side
+	// counter `snapshot.TotalComputeUnits` which is incremented
+	// unconditionally by IncrementRelayCount below.
+	if msg.IsReclaim {
+		if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
+			isDup, dupErr := dedup.IsDuplicate(ctx, msg.Message.RelayHash, msg.Message.SessionId)
+			if dupErr != nil {
+				// Fail-open: log and continue. Better to risk a rare double-count than drop a valid relay.
+				w.logger.Debug().
+					Err(dupErr).
+					Str("session_id", msg.Message.SessionId).
+					Msg("deduplicator check failed, proceeding with reclaimed relay")
+			} else if isDup {
+				w.logger.Debug().
+					Str("session_id", msg.Message.SessionId).
+					Str("supplier", supplierAddr).
+					Msg("dropping reclaimed relay (already processed by previous consumer)")
+				RecordRelayRejected(supplierAddr, "duplicate", msg.Message.ServiceId)
+				return nil
+			}
 		}
 	}
 
@@ -466,8 +472,16 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		return nil // ACK and discard - unknown errors shouldn't block processing
 	}
 
-	// Mark relay hash as processed in the deduplicator so future redeliveries
-	// of the same message are dropped by the check above. Best-effort.
+	// Mark relay hash as processed in the deduplicator. This runs on every
+	// relay (not only reclaims) because if the current consumer crashes
+	// after the SMST update but before the stream ACK, the next consumer
+	// will reclaim the message via XAUTOCLAIM and needs the dedup set to
+	// recognize it as already processed. Ordering matters: MarkProcessed
+	// runs BEFORE OnRelayProcessed (IncrementRelayCount) below so that a
+	// crash between them leaves the counter under-counted rather than
+	// over-counted — under-count is the safe direction (economic viability
+	// predicts lower rewards and skips marginal sessions instead of
+	// claiming unprofitable ones).
 	if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
 		if markErr := dedup.MarkProcessed(ctx, msg.Message.RelayHash, msg.Message.SessionId); markErr != nil {
 			w.logger.Debug().

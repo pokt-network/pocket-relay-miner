@@ -157,3 +157,100 @@ func TestMergeBackendPath(t *testing.T) {
 		})
 	}
 }
+
+func TestShouldCompressResponse(t *testing.T) {
+	tests := []struct {
+		name        string
+		cfg         ResponseCompressionConfig
+		acceptsGzip bool
+		payloadSize int
+		want        bool
+	}{
+		{
+			name:        "disabled in config — never compress",
+			cfg:         ResponseCompressionConfig{Enabled: false, MinSizeBytes: 0},
+			acceptsGzip: true,
+			payloadSize: 10_000,
+			want:        false,
+		},
+		{
+			name:        "disabled + client does not accept gzip",
+			cfg:         ResponseCompressionConfig{Enabled: false},
+			acceptsGzip: false,
+			payloadSize: 10_000,
+			want:        false,
+		},
+		{
+			name:        "enabled but client did not advertise gzip",
+			cfg:         ResponseCompressionConfig{Enabled: true, MinSizeBytes: 1024},
+			acceptsGzip: false,
+			payloadSize: 10_000,
+			want:        false,
+		},
+		{
+			name:        "enabled + accepted + size above explicit threshold",
+			cfg:         ResponseCompressionConfig{Enabled: true, MinSizeBytes: 1024},
+			acceptsGzip: true,
+			payloadSize: 2048,
+			want:        true,
+		},
+		{
+			name:        "enabled + accepted + size exactly at threshold",
+			cfg:         ResponseCompressionConfig{Enabled: true, MinSizeBytes: 1024},
+			acceptsGzip: true,
+			payloadSize: 1024,
+			want:        true,
+		},
+		{
+			name:        "enabled + accepted + size below threshold",
+			cfg:         ResponseCompressionConfig{Enabled: true, MinSizeBytes: 1024},
+			acceptsGzip: true,
+			payloadSize: 800,
+			want:        false,
+		},
+		{
+			name:        "enabled with MinSizeBytes=0 uses defaultGzipMinCompressSize (1024)",
+			cfg:         ResponseCompressionConfig{Enabled: true, MinSizeBytes: 0},
+			acceptsGzip: true,
+			payloadSize: 1024,
+			want:        true,
+		},
+		{
+			name:        "enabled with MinSizeBytes=0 — payload below 1 KiB still skipped",
+			cfg:         ResponseCompressionConfig{Enabled: true, MinSizeBytes: 0},
+			acceptsGzip: true,
+			payloadSize: 512,
+			want:        false,
+		},
+		{
+			name:        "enabled with negative MinSizeBytes falls back to default",
+			cfg:         ResponseCompressionConfig{Enabled: true, MinSizeBytes: -1},
+			acceptsGzip: true,
+			payloadSize: 2048,
+			want:        true,
+		},
+		{
+			name:        "enabled with tiny MinSizeBytes — operator opted into small-payload mode",
+			cfg:         ResponseCompressionConfig{Enabled: true, MinSizeBytes: 64},
+			acceptsGzip: true,
+			payloadSize: 100,
+			want:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := shouldCompressResponse(tt.cfg, tt.acceptsGzip, tt.payloadSize)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestDefaultConfig_ResponseCompressionDisabled pins the intentional default.
+// Flipping this default would silently re-enable gzip on operators that never
+// opted in and would erase the ~9 % CPU win documented in BREEZE-FIXES-SUMMARY.
+// Change both the default and the operator communication if this test fails.
+func TestDefaultConfig_ResponseCompressionDisabled(t *testing.T) {
+	cfg := DefaultConfig()
+	assert.False(t, cfg.ResponseCompression.Enabled, "default must be opt-in")
+	assert.Equal(t, 1024, cfg.ResponseCompression.MinSizeBytes, "default min size should be 1 KiB")
+}

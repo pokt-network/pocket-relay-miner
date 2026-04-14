@@ -2,7 +2,6 @@ package miner
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"sync"
 	"time"
@@ -12,57 +11,59 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
-// Deduplicator ensures relays are processed only once across all Miner instances.
-// It uses Redis for distributed coordination with local caching for performance.
+// Deduplicator ensures that reclaimed relays (XAUTOCLAIM redeliveries from
+// a consumer that crashed without acking) are not processed twice. The SMST
+// tree is idempotent on insertions of the same (key, value, weight) tuple,
+// but the side counter `snapshot.TotalComputeUnits` is incremented
+// unconditionally by IncrementRelayCount and must be protected against
+// double-count: over-counting there would inflate the economic-viability
+// prediction and cause unprofitable sessions to be claimed.
+//
+// The deduplicator is only invoked on the reclaim path. Normal XREADGROUP
+// `>` delivery never redelivers a message to the same consumer group, so the
+// hot path is free of dedup overhead.
 type Deduplicator interface {
-	// IsDuplicate checks if a relay has already been processed.
-	// Returns true if this relay hash has been seen before.
+	// IsDuplicate returns true if the relay hash has already been marked as
+	// processed for the given session.
 	IsDuplicate(ctx context.Context, relayHash []byte, sessionID string) (bool, error)
 
-	// MarkProcessed marks a relay hash as processed.
-	// This should be called after successful processing.
+	// MarkProcessed records that a relay hash has been processed. Called
+	// unconditionally by the relay worker after a successful SMST update so
+	// that future reclaims of the same message are detected.
 	MarkProcessed(ctx context.Context, relayHash []byte, sessionID string) error
 
-	// MarkProcessedBatch marks multiple relay hashes as processed.
+	// MarkProcessedBatch records multiple relay hashes in a single pipeline.
 	MarkProcessedBatch(ctx context.Context, relayHashes [][]byte, sessionID string) error
 
-	// CleanupSession removes all deduplication entries for a session.
-	// Call this after a session's claim window has closed.
+	// CleanupSession removes the deduplication set for a session. Called when
+	// a session reaches a terminal state so Redis memory is reclaimed.
 	CleanupSession(ctx context.Context, sessionID string) error
 
-	// Start begins the deduplicator's background processes.
+	// Start is a no-op kept for interface symmetry. The deduplicator holds no
+	// background goroutines; all state lives in Redis.
 	Start(ctx context.Context) error
 
-	// Close gracefully shuts down the deduplicator.
+	// Close is a no-op kept for interface symmetry.
 	Close() error
 }
 
-// RedisDeduplicator implements Deduplicator using Redis Sets.
-// It uses a two-level cache:
-// - L1: Local bloom filter / map for fast duplicate detection
-// - L2: Redis Set for distributed coordination
+// RedisDeduplicator stores relay hashes in per-session Redis sets. Set
+// members are the raw relay hash bytes (stored as strings via Go's
+// bytes-as-string conversion), which avoids the ~2× memory overhead of hex
+// encoding both in the client heap and in Redis storage.
 type RedisDeduplicator struct {
 	logger      logging.Logger
 	redisClient redis.UniversalClient
 	config      DeduplicatorConfig
+	keyPrefix   string
 
-	// L1 local cache (map of sessionID -> set of relay hashes)
-	localCache   map[string]map[string]struct{}
-	localCacheMu sync.RWMutex
-
-	// Key prefix for Redis
-	keyPrefix string
-
-	// Lifecycle
-	mu       sync.Mutex
-	closed   bool
-	cancelFn context.CancelFunc
-	wg       sync.WaitGroup
+	mu     sync.Mutex
+	closed bool
 }
 
-// DeduplicatorConfig contains configuration for the deduplicator.
+// DeduplicatorConfig configures TTL behavior and the Redis key prefix.
 type DeduplicatorConfig struct {
-	// KeyPrefix is the prefix for Redis keys.
+	// KeyPrefix is the prefix for Redis keys. Defaults to "ha:miner:dedup".
 	KeyPrefix string
 
 	// TTLBlocks is how many blocks to keep entries (converted to time).
@@ -70,16 +71,9 @@ type DeduplicatorConfig struct {
 
 	// BlockTimeSeconds is the assumed block time for TTL calculation.
 	BlockTimeSeconds int64
-
-	// LocalCacheSize is the max number of entries in local cache per session.
-	// 0 means no local cache.
-	LocalCacheSize int
-
-	// CleanupIntervalSeconds is how often to run local cache cleanup.
-	CleanupIntervalSeconds int64
 }
 
-// NewRedisDeduplicator creates a new Redis-backed deduplicator.
+// NewRedisDeduplicator constructs a Redis-backed deduplicator.
 func NewRedisDeduplicator(
 	logger logging.Logger,
 	redisClient redis.UniversalClient,
@@ -89,13 +83,10 @@ func NewRedisDeduplicator(
 		config.KeyPrefix = "ha:miner:dedup"
 	}
 	if config.TTLBlocks == 0 {
-		config.TTLBlocks = 10 // Default: session length + grace period + buffer
+		config.TTLBlocks = 10 // session length + grace period + buffer
 	}
 	if config.BlockTimeSeconds == 0 {
 		config.BlockTimeSeconds = 30
-	}
-	if config.CleanupIntervalSeconds == 0 {
-		config.CleanupIntervalSeconds = 60
 	}
 
 	return &RedisDeduplicator{
@@ -103,119 +94,73 @@ func NewRedisDeduplicator(
 		redisClient: redisClient,
 		config:      config,
 		keyPrefix:   config.KeyPrefix,
-		localCache:  make(map[string]map[string]struct{}),
 	}
 }
 
-// Start begins the deduplicator's background processes.
-func (d *RedisDeduplicator) Start(ctx context.Context) error {
+// Start is a no-op. The deduplicator has no background goroutines.
+func (d *RedisDeduplicator) Start(_ context.Context) error {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if d.closed {
-		d.mu.Unlock()
 		return fmt.Errorf("deduplicator is closed")
 	}
-
-	ctx, d.cancelFn = context.WithCancel(ctx)
-	d.mu.Unlock()
-
-	// Start local cache cleanup goroutine
-	d.wg.Add(1)
-	go d.cleanupLoop(ctx)
-
 	d.logger.Info().Msg("deduplicator started")
 	return nil
 }
 
-// cleanupLoop periodically cleans up expired local cache entries.
-func (d *RedisDeduplicator) cleanupLoop(ctx context.Context) {
-	defer d.wg.Done()
-
-	ticker := time.NewTicker(time.Duration(d.config.CleanupIntervalSeconds) * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			d.cleanupLocalCache()
-		}
+// Close is a no-op kept for interface symmetry.
+func (d *RedisDeduplicator) Close() error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if d.closed {
+		return nil
 	}
+	d.closed = true
+	d.logger.Info().Msg("deduplicator closed")
+	return nil
 }
 
-// cleanupLocalCache removes sessions with no active entries.
-func (d *RedisDeduplicator) cleanupLocalCache() {
-	d.localCacheMu.Lock()
-	defer d.localCacheMu.Unlock()
-
-	// For now, just clear sessions that are too large
-	// A more sophisticated implementation would track timestamps
-	for sessionID, hashes := range d.localCache {
-		if d.config.LocalCacheSize > 0 && len(hashes) > d.config.LocalCacheSize*2 {
-			delete(d.localCache, sessionID)
-			d.logger.Debug().
-				Str("session_id", sessionID).
-				Int("entries", len(hashes)).
-				Msg("cleared oversized local cache for session")
-		}
-	}
-}
-
-// IsDuplicate checks if a relay has already been processed.
+// IsDuplicate checks whether relayHash has already been marked as processed
+// for sessionID. Returns false on Redis errors so the caller fails open
+// (better to risk a rare double-count than to drop a valid relay).
 func (d *RedisDeduplicator) IsDuplicate(ctx context.Context, relayHash []byte, sessionID string) (bool, error) {
-	hashKey := hex.EncodeToString(relayHash)
-
-	// Check L1 (local cache) first
-	if d.isInLocalCache(sessionID, hashKey) {
-		dedupLocalCacheHits.WithLabelValues(sessionID).Inc()
-		return true, nil
-	}
-
-	// Check L2 (Redis)
 	key := d.sessionKey(sessionID)
-	exists, err := d.redisClient.SIsMember(ctx, key, hashKey).Result()
+	exists, err := d.redisClient.SIsMember(ctx, key, hashMember(relayHash)).Result()
 	if err != nil {
 		dedupErrors.WithLabelValues(sessionID, "redis_check").Inc()
 		return false, fmt.Errorf("failed to check Redis: %w", err)
 	}
-
 	if exists {
-		// Add to local cache for future checks
-		d.addToLocalCache(sessionID, hashKey)
 		dedupRedisCacheHits.WithLabelValues(sessionID).Inc()
 		return true, nil
 	}
-
 	dedupMisses.WithLabelValues(sessionID).Inc()
 	return false, nil
 }
 
-// MarkProcessed marks a relay hash as processed.
+// MarkProcessed records relayHash in the session's dedup set and refreshes
+// the TTL. Called after a successful SMST update. If the caller crashes
+// between SMST update and this call, the next reclaim will not detect the
+// duplicate and IncrementRelayCount may run again — but that window is far
+// smaller than skipping the SMST update itself, and the SMST is idempotent.
 func (d *RedisDeduplicator) MarkProcessed(ctx context.Context, relayHash []byte, sessionID string) error {
-	hashKey := hex.EncodeToString(relayHash)
-
-	// Add to Redis
 	key := d.sessionKey(sessionID)
 	ttl := d.getTTL()
 
 	pipe := d.redisClient.Pipeline()
-	pipe.SAdd(ctx, key, hashKey)
+	pipe.SAdd(ctx, key, hashMember(relayHash))
 	pipe.Expire(ctx, key, ttl)
 
-	_, err := pipe.Exec(ctx)
-	if err != nil {
+	if _, err := pipe.Exec(ctx); err != nil {
 		dedupErrors.WithLabelValues(sessionID, "redis_mark").Inc()
 		return fmt.Errorf("failed to mark processed: %w", err)
 	}
-
-	// Add to local cache
-	d.addToLocalCache(sessionID, hashKey)
 
 	dedupMarked.WithLabelValues(sessionID).Inc()
 	return nil
 }
 
-// MarkProcessedBatch marks multiple relay hashes as processed.
+// MarkProcessedBatch records multiple relay hashes in a single pipeline.
 func (d *RedisDeduplicator) MarkProcessedBatch(ctx context.Context, relayHashes [][]byte, sessionID string) error {
 	if len(relayHashes) == 0 {
 		return nil
@@ -224,71 +169,35 @@ func (d *RedisDeduplicator) MarkProcessedBatch(ctx context.Context, relayHashes 
 	key := d.sessionKey(sessionID)
 	ttl := d.getTTL()
 
-	// Convert hashes to string keys
-	hashKeys := make([]interface{}, len(relayHashes))
-	for i, hash := range relayHashes {
-		hashKeys[i] = hex.EncodeToString(hash)
+	members := make([]interface{}, len(relayHashes))
+	for i, h := range relayHashes {
+		members[i] = hashMember(h)
 	}
 
-	// Add to Redis in batch
 	pipe := d.redisClient.Pipeline()
-	pipe.SAdd(ctx, key, hashKeys...)
+	pipe.SAdd(ctx, key, members...)
 	pipe.Expire(ctx, key, ttl)
 
-	_, err := pipe.Exec(ctx)
-	if err != nil {
+	if _, err := pipe.Exec(ctx); err != nil {
 		dedupErrors.WithLabelValues(sessionID, "redis_batch_mark").Inc()
 		return fmt.Errorf("failed to mark batch processed: %w", err)
-	}
-
-	// Add to local cache
-	for _, hashKey := range hashKeys {
-		d.addToLocalCache(sessionID, hashKey.(string))
 	}
 
 	dedupMarked.WithLabelValues(sessionID).Add(float64(len(relayHashes)))
 	return nil
 }
 
-// CleanupSession removes all deduplication entries for a session.
+// CleanupSession removes the deduplication set for a terminated session.
 func (d *RedisDeduplicator) CleanupSession(ctx context.Context, sessionID string) error {
-	// Remove from Redis
 	key := d.sessionKey(sessionID)
-	err := d.redisClient.Del(ctx, key).Err()
-	if err != nil {
+	if err := d.redisClient.Del(ctx, key).Err(); err != nil {
 		return fmt.Errorf("failed to cleanup session: %w", err)
 	}
-
-	// Remove from local cache
-	d.localCacheMu.Lock()
-	delete(d.localCache, sessionID)
-	d.localCacheMu.Unlock()
 
 	d.logger.Debug().
 		Str("session_id", sessionID).
 		Msg("cleaned up session deduplication entries")
 
-	return nil
-}
-
-// Close gracefully shuts down the deduplicator.
-func (d *RedisDeduplicator) Close() error {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-
-	if d.closed {
-		return nil
-	}
-
-	d.closed = true
-
-	if d.cancelFn != nil {
-		d.cancelFn()
-	}
-
-	d.wg.Wait()
-
-	d.logger.Info().Msg("deduplicator closed")
 	return nil
 }
 
@@ -302,34 +211,13 @@ func (d *RedisDeduplicator) getTTL() time.Duration {
 	return time.Duration(d.config.TTLBlocks*d.config.BlockTimeSeconds) * time.Second
 }
 
-// isInLocalCache checks if a hash is in the local cache.
-func (d *RedisDeduplicator) isInLocalCache(sessionID, hashKey string) bool {
-	d.localCacheMu.RLock()
-	defer d.localCacheMu.RUnlock()
-
-	if hashes, ok := d.localCache[sessionID]; ok {
-		_, exists := hashes[hashKey]
-		return exists
-	}
-	return false
-}
-
-// addToLocalCache adds a hash to the local cache.
-func (d *RedisDeduplicator) addToLocalCache(sessionID, hashKey string) {
-	d.localCacheMu.Lock()
-	defer d.localCacheMu.Unlock()
-
-	if d.localCache[sessionID] == nil {
-		d.localCache[sessionID] = make(map[string]struct{})
-	}
-
-	// Check size limit
-	if d.config.LocalCacheSize > 0 && len(d.localCache[sessionID]) >= d.config.LocalCacheSize {
-		// Don't add if at capacity (oldest entries stay, prevents thrashing)
-		return
-	}
-
-	d.localCache[sessionID][hashKey] = struct{}{}
+// hashMember converts raw relay hash bytes into the string form go-redis
+// transmits to Redis. Go strings are arbitrary byte sequences and RESP3 SADD
+// / SIsMember treat set members as binary-safe, so no encoding is needed.
+// Passing the raw bytes avoids both client heap overhead (~64 B per hex
+// string vs ~32 B raw) and Redis storage overhead.
+func hashMember(relayHash []byte) string {
+	return string(relayHash)
 }
 
 // Verify interface compliance.

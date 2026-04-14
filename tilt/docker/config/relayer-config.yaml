@@ -86,6 +86,16 @@ http_transport:
   tcp_keep_alive_seconds: 30
   disable_compression: true
 
+# Gzip compression of signed relay responses returned to the gateway.
+# Off by default — gzip accounted for ~9% of relayer CPU at 200 RPS per
+# the Apr 14 2026 pprof profile on breeze. Toggle on to A/B the impact
+# under Tilt load. When enabled, compression still requires the client
+# (PATH) to send `Accept-Encoding: gzip` AND the response to be at least
+# `min_size_bytes` bytes long.
+response_compression:
+  enabled: false
+  min_size_bytes: 1024
+
 timeout_profiles:
   fast:
     request_timeout_seconds: 30

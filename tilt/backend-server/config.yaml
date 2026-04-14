@@ -24,3 +24,8 @@ delay_ms: 0
 # Broken compression mode: Compress responses WITHOUT Content-Encoding header
 # Simulates backends that violate HTTP RFC 7231 (enables testing of auto-fix)
 broken_compression: false
+
+# Pad the HTTP response `result` object with a `filler` string of this size
+# to simulate realistic backend responses (e.g. eth_call, eth_getLogs).
+# Used for A/B testing the relayer's gzip compression path. 0 disables padding.
+fat_payload_bytes: 0

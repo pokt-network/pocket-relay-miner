@@ -434,23 +434,15 @@ var (
 		[]string{"height"},
 	)
 
-	// Deduplication metrics
-	dedupLocalCacheHits = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "dedup_local_cache_hits_total",
-			Help:      "Total number of deduplication local cache hits",
-		},
-		[]string{"session_id"},
-	)
-
+	// Deduplication metrics. The deduplicator only runs on the reclaim path
+	// (XAUTOCLAIM redelivery), so hit volume is expected to be near-zero in
+	// normal operation and non-zero only after consumer crashes.
 	dedupRedisCacheHits = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "dedup_redis_cache_hits_total",
-			Help:      "Total number of deduplication Redis cache hits",
+			Help:      "Total number of reclaimed relays detected as already-processed (prevented double-count)",
 		},
 		[]string{"session_id"},
 	)

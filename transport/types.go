@@ -26,4 +26,11 @@ type StreamMessage struct {
 
 	// Message is the deserialized MinedRelayMessage.
 	Message *MinedRelayMessage
+
+	// IsReclaim is true when this message was recovered from the pending entries
+	// list via XAUTOCLAIM (i.e., a previous consumer crashed without acking).
+	// Consumers downstream use this flag to decide whether duplicate-detection
+	// is required — the normal XREADGROUP `>` delivery path never redelivers,
+	// so dedup is only necessary when IsReclaim is true.
+	IsReclaim bool
 }

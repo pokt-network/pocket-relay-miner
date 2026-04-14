@@ -35,6 +35,7 @@ type Config struct {
 	ErrorCodes        []int   `yaml:"error_codes"`        // List of HTTP error codes to randomly inject
 	DelayMs           int     `yaml:"delay_ms"`           // Delay in milliseconds
 	BrokenCompression bool    `yaml:"broken_compression"` // Compress WITHOUT Content-Encoding header (simulate bug)
+	FatPayloadBytes   int     `yaml:"fat_payload_bytes"`  // When >0, pad the HTTP response with a filler field of approximately this size. Used for A/B testing gzip compression paths against realistic-sized responses.
 }
 
 var (
@@ -209,15 +210,21 @@ func handleJSONRPC(cfg *Config) http.HandlerFunc {
 		requestsTotal.WithLabelValues("http", method).Inc()
 
 		// Generic response - echo back method and params
+		result := map[string]interface{}{
+			"method":     method,
+			"params":     req["params"],
+			"status":     "ok",
+			"backend_id": backendID,
+		}
+		// Optional filler to simulate realistic backend response sizes (e.g. eth_call,
+		// eth_getLogs) for A/B testing the relayer's gzip compression path.
+		if cfg.FatPayloadBytes > 0 {
+			result["filler"] = strings.Repeat("x", cfg.FatPayloadBytes)
+		}
 		resp := map[string]interface{}{
 			"jsonrpc": "2.0",
 			"id":      id,
-			"result": map[string]interface{}{
-				"method":     method,
-				"params":     req["params"],
-				"status":     "ok",
-				"backend_id": backendID,
-			},
+			"result":  result,
 		}
 
 		// Serialize response to JSON

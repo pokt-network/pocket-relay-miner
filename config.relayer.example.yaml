@@ -241,6 +241,24 @@ http_transport:
   disable_compression: true  # Don't modify content encoding (required for relay protocol)
 
 # ==============================================================================
+# Response Compression (gzip of signed relay responses)
+# ==============================================================================
+# Off by default. The relayer does NOT gzip the signed relay responses it
+# returns to the gateway unless this is explicitly enabled. gzip was shown
+# to consume ~9% of relayer CPU at 200 RPS on the Apr 14 2026 pprof profile
+# from breeze, so the default prioritises CPU over bandwidth. The gateway
+# still negotiates compression with downstream clients independently.
+#
+# When enabled, compression only actually runs when both:
+#   - the client sent `Accept-Encoding: gzip`
+#   - the response is at least `min_size_bytes` bytes long
+# Below `min_size_bytes`, gzip overhead (header + dictionary + trailer)
+# makes the output larger than the input for small JSON-RPC responses.
+response_compression:
+  enabled: false
+  min_size_bytes: 1024
+
+# ==============================================================================
 # HTTP Timeout Profiles (Advanced)
 # ==============================================================================
 # Define timeout profiles for different service types.

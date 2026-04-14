@@ -315,7 +315,10 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 		Str("stream", c.streamName).
 		Msg("claimed idle messages")
 
-	// Process claimed messages
+	// Process claimed messages. These are reclaims — mark them so downstream
+	// workers know to run duplicate-detection before inserting into the SMST
+	// and incrementing the per-session counter. Normal XREADGROUP `>` delivery
+	// never redelivers, so only this path needs the dedup check.
 	for _, message := range messages {
 		msg, parseErr := c.parseMessage(message, c.streamName)
 		if parseErr != nil {
@@ -324,6 +327,7 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 			_ = c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID)
 			continue
 		}
+		msg.IsReclaim = true
 
 		select {
 		case c.msgCh <- *msg:

@@ -183,6 +183,7 @@ run_batch() {
         -m POST \
         -H "Content-Type: application/json" \
         -H "Target-Service-Id: $SERVICE_ID" \
+        -H "Accept-Encoding: gzip" \
         -d "$PAYLOAD" \
         "$PATH_URL" > "$output_file" 2>&1
 

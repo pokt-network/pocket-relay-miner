@@ -147,6 +147,10 @@ type Config struct {
 	// HTTPTransport configuration for backend HTTP client connection pooling.
 	HTTPTransport HTTPTransportConfig `yaml:"http_transport,omitempty"`
 
+	// ResponseCompression controls whether the relayer gzip-compresses signed
+	// responses before returning them to the gateway. Default: disabled.
+	ResponseCompression ResponseCompressionConfig `yaml:"response_compression,omitempty"`
+
 	// TimeoutProfiles defines HTTP client timeout profiles.
 	// Auto-populated with "fast" and "streaming" defaults if not specified.
 	TimeoutProfiles map[string]TimeoutProfile `yaml:"timeout_profiles,omitempty"`
@@ -202,6 +206,30 @@ type HTTPTransportConfig struct {
 	// DisableCompression disables automatic gzip compression for requests and responses.
 	// Default: true (don't modify content encoding for relay protocol)
 	DisableCompression bool `yaml:"disable_compression"`
+}
+
+// ResponseCompressionConfig controls gzip compression of signed relay responses
+// returned from the relayer to the gateway (PATH).
+//
+// Historical context: gzip was enabled unconditionally and consumed ~9% of
+// relayer CPU at 200 RPS per the Apr 14 2026 pprof profile (60-67% CPU is
+// ring-signature verify, which is not tunable; gzip was the largest tunable
+// consumer). The gateway already knows how to ask for compression via
+// Accept-Encoding and can also negotiate it with downstream clients, so
+// compressing twice on the relayer side is optional. Default off.
+type ResponseCompressionConfig struct {
+	// Enabled turns gzip compression of signed relay responses on. When
+	// false (default) the relayer returns uncompressed bytes regardless of
+	// the client's Accept-Encoding header. When true, the relayer compresses
+	// responses that satisfy both: (a) client sent `Accept-Encoding: gzip`,
+	// and (b) the response is at least MinSizeBytes in size.
+	Enabled bool `yaml:"enabled"`
+
+	// MinSizeBytes is the minimum uncompressed response size worth
+	// compressing. Below this threshold, gzip overhead (header/trailer/
+	// dictionary) makes the output larger than the input. Default: 1024.
+	// Ignored when Enabled is false.
+	MinSizeBytes int `yaml:"min_size_bytes,omitempty"`
 }
 
 // RedisConfig contains Redis connection configuration.
@@ -591,6 +619,10 @@ func DefaultConfig() Config {
 			PersistDiscoveredApps: true,
 			WarmupConcurrency:     10,
 			WarmupTimeoutSeconds:  5,
+		},
+		ResponseCompression: ResponseCompressionConfig{
+			Enabled:      false, // Off by default — ~9% CPU at 200 RPS per pprof, gateway handles downstream compression.
+			MinSizeBytes: 1024,
 		},
 	}
 }

@@ -97,11 +97,13 @@ const (
 	dropReasonStakeExhausted   = "stake_exhausted"
 )
 
-// gzipMinCompressSize is the minimum response size worth compressing.
-// Below this threshold, gzip overhead (header/trailer/dictionary) makes the
-// output larger than the input. Typical signed relay responses for simple
-// JSON-RPC calls (eth_blockNumber, etc.) are 500-800 bytes.
-const gzipMinCompressSize = 1024
+// defaultGzipMinCompressSize is the fallback minimum response size worth
+// compressing when the operator enables ResponseCompression but leaves
+// MinSizeBytes at zero. Below this threshold, gzip overhead (header/trailer/
+// dictionary) makes the output larger than the input. Typical signed relay
+// responses for simple JSON-RPC calls (eth_blockNumber, etc.) are 500-800
+// bytes, hence the 1 KiB floor.
+const defaultGzipMinCompressSize = 1024
 
 // gzipWriterPool is a pool of gzip.Writer instances to reduce allocations
 // in the hot path when compressing relay responses.
@@ -484,6 +486,15 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 		WriteTimeout: 0,
 		IdleTimeout:  DefaultIdleTimeout,
 	}
+
+	// Log the resolved response-compression state at startup. This prints once
+	// per replica and makes it trivial to verify the YAML was parsed as
+	// expected — if you flip `response_compression.enabled` in the config and
+	// don't see the new value here, the file wasn't reloaded.
+	p.logger.Info().
+		Bool("response_compression_enabled", p.config.ResponseCompression.Enabled).
+		Int("response_compression_min_size_bytes", p.config.ResponseCompression.MinSizeBytes).
+		Msg("response compression config resolved")
 
 	// Start server in goroutine
 	p.wg.Add(1)
@@ -971,10 +982,11 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 		w.Header().Set("Content-Type", responseContentType)
 
-		// RFC compliance: Compress response if client accepts gzip and payload is large enough.
-		// Skip compression for small payloads where gzip overhead makes the output larger.
+		// Optional gzip compression. Off by default because compression accounted
+		// for ~9 % of relayer CPU at 200 RPS per the Apr 14 2026 pprof profile.
+		// See shouldCompressResponse for the opt-in precondition.
 		responseData := signedResponseBz
-		if clientAcceptsGzip(r) && len(signedResponseBz) >= gzipMinCompressSize {
+		if shouldCompressResponse(p.config.ResponseCompression, clientAcceptsGzip(r), len(signedResponseBz)) {
 			compressed, compressErr := compressGzip(signedResponseBz)
 			if compressErr != nil {
 				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
@@ -2009,6 +2021,29 @@ func compressGzip(data []byte) ([]byte, error) {
 func clientAcceptsGzip(r *http.Request) bool {
 	acceptEncoding := r.Header.Get("Accept-Encoding")
 	return strings.Contains(strings.ToLower(acceptEncoding), "gzip")
+}
+
+// shouldCompressResponse returns true only if every precondition is met:
+//
+//   - the operator has opted in via ResponseCompressionConfig.Enabled,
+//   - the client advertised Accept-Encoding: gzip,
+//   - the payload is at least MinSizeBytes (falling back to
+//     defaultGzipMinCompressSize when MinSizeBytes <= 0).
+//
+// Pulled out as a pure helper so the decision is unit-testable without a
+// full proxy/HTTP stack.
+func shouldCompressResponse(cfg ResponseCompressionConfig, acceptsGzip bool, payloadSize int) bool {
+	if !cfg.Enabled {
+		return false
+	}
+	if !acceptsGzip {
+		return false
+	}
+	minSize := cfg.MinSizeBytes
+	if minSize <= 0 {
+		minSize = defaultGzipMinCompressSize
+	}
+	return payloadSize >= minSize
 }
 
 // mergeBackendPath computes the final backend request path given:

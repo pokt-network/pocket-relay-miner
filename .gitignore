@@ -31,5 +31,8 @@ reports
 # Log analysis (local only)
 logs-analysis/
 
+# Local-only scripts (ops, host-specific, monitoring playbooks, secrets)
+scripts/localonly/
+
 # GSD Planning
 .planning
