@@ -615,6 +615,53 @@ func (tc *TxClient) InvalidateAccount(addr string) {
 
 // NOTE: waitForTxCommit() removed - not needed in SYNC mode (doesn't wait for commit)
 
+// queryLastTxFeeUpokt queries the chain for the most recent successful
+// transaction whose body contains a message of the given type, and returns
+// its fee in upokt. Used by the economic-viability check to calibrate fees
+// against observed on-chain reality rather than a hardcoded constant.
+//
+// Returns (fee, nil) on success, (0, err) on query error or no result.
+// Multi-denom fees are collapsed to the upokt component only.
+func (tc *TxClient) queryLastTxFeeUpokt(ctx context.Context, msgTypeURL string) (uint64, error) {
+	req := &txtypes.GetTxsEventRequest{
+		Events:  []string{fmt.Sprintf("message.action='%s'", msgTypeURL)},
+		OrderBy: txtypes.OrderBy_ORDER_BY_DESC,
+		Limit:   1,
+	}
+	resp, err := tc.txClient.GetTxsEvent(ctx, req)
+	if err != nil {
+		return 0, fmt.Errorf("GetTxsEvent for %s: %w", msgTypeURL, err)
+	}
+	if len(resp.Txs) == 0 {
+		return 0, fmt.Errorf("no recent %s txs found", msgTypeURL)
+	}
+	return extractUpoktFeeFromTx(resp.Txs[0], msgTypeURL)
+}
+
+// extractUpoktFeeFromTx extracts the positive upokt fee amount from a cosmos
+// transaction. Returns an error when the tx has no fee info, when no upokt
+// denomination is present, or when the amount is zero/negative. Pure helper —
+// split out of queryLastTxFeeUpokt so it can be unit-tested without a real
+// cosmos Service client.
+func extractUpoktFeeFromTx(tx *txtypes.Tx, msgTypeURL string) (uint64, error) {
+	if tx == nil {
+		return 0, fmt.Errorf("tx %s is nil", msgTypeURL)
+	}
+	fee := tx.GetAuthInfo().GetFee()
+	if fee == nil {
+		return 0, fmt.Errorf("tx %s has no fee info", msgTypeURL)
+	}
+	for _, coin := range fee.Amount {
+		if coin.Denom == "upokt" {
+			if !coin.Amount.IsPositive() {
+				return 0, fmt.Errorf("tx %s fee is zero or negative", msgTypeURL)
+			}
+			return coin.Amount.Uint64(), nil
+		}
+	}
+	return 0, fmt.Errorf("tx %s fee has no upokt component", msgTypeURL)
+}
+
 // simulateTx simulates a transaction to estimate gas usage.
 func (tc *TxClient) simulateTx(
 	ctx context.Context,
@@ -759,7 +806,21 @@ type HASupplierClient struct {
 	// lastProofTxHash stores the TX hash of the last proof submission (for deduplication)
 	lastProofTxHash string
 	lastProofTxMu   sync.RWMutex
+
+	// feeCacheUpokt is the cached sum of the most recently observed claim
+	// tx fee + proof tx fee on chain. It is populated lazily by querying the
+	// chain for the most recent successful MsgCreateClaim and MsgSubmitProof
+	// transactions, and refreshed at most once per feeCacheTTL.
+	feeCacheMu    sync.RWMutex
+	feeCacheUpokt uint64
+	feeCacheTime  time.Time
 }
+
+// feeCacheTTL is how long the observed claim+proof fee pair is reused before
+// re-querying the chain. One minute is long enough to absorb bursty claim
+// windows without hammering the node, and short enough that any network-wide
+// gas_price change is picked up within a session cycle.
+const feeCacheTTL = time.Minute
 
 // NewHASupplierClient creates a new supplier client for a specific operator.
 func NewHASupplierClient(
@@ -785,17 +846,64 @@ func NewHASupplierClient(
 	}
 }
 
-// GetEstimatedFeeUpokt returns the estimated transaction fee in upokt.
-// This is used for economic validation before submitting claims.
-func (c *HASupplierClient) GetEstimatedFeeUpokt() uint64 {
-	// Formula: fee = GasLimit × GasPrice
-	gasLimitDec := math.LegacyNewDec(int64(c.txClient.config.GasLimit))
-	feeAmount := c.txClient.config.GasPrice.Amount.Mul(gasLimitDec)
-	feeInt := feeAmount.TruncateInt()
-	if feeAmount.Sub(math.LegacyNewDecFromInt(feeInt)).IsPositive() {
-		feeInt = feeInt.Add(math.OneInt())
+// minFeePerTxUpokt is the mathematical floor for any single tx fee in this
+// system. Cosmos's fee computation is ceiling(gas_limit × gas_price), and
+// with gas_price = 0.000001 upokt (config default) and any positive gas, the
+// fraction always rounds up to at least 1 upokt. So:
+//
+//	minFeePerTxUpokt = ceiling(anything > 0 × 0.000001) = 1
+//
+// This is a protocol floor, not a hardcoded constant — you literally cannot
+// pay less for a tx that consumes any gas at all.
+const minFeePerTxUpokt uint64 = 1
+
+// minClaimAndProofCostUpokt is the protocol floor for submitting a claim +
+// proof pair: 2 × minFeePerTxUpokt = 2 upokt. The economic-viability check
+// uses this as the lower bound and refines upward with on-chain observations.
+const minClaimAndProofCostUpokt uint64 = 2 * minFeePerTxUpokt
+
+// GetEstimatedFeeUpokt returns the expected combined cost (claim tx + proof
+// tx) in upokt for the economic viability decision.
+//
+// Resolution order:
+//  1. If the local cache is fresh, return it.
+//  2. Otherwise query the chain for the most recent successful
+//     MsgCreateClaim and MsgSubmitProof txs, sum their fees, cache, return.
+//  3. If either query fails or returns zero, return the protocol floor
+//     (2 upokt — the minimum possible fee pair; see minClaimAndProofCostUpokt).
+//
+// The function never returns 0: the floor ensures callers always have a
+// defensible lower bound.
+func (c *HASupplierClient) GetEstimatedFeeUpokt(ctx context.Context) uint64 {
+	c.feeCacheMu.RLock()
+	if c.feeCacheUpokt > 0 && time.Since(c.feeCacheTime) < feeCacheTTL {
+		v := c.feeCacheUpokt
+		c.feeCacheMu.RUnlock()
+		return v
 	}
-	return feeInt.Uint64()
+	c.feeCacheMu.RUnlock()
+
+	claimFee, claimErr := c.txClient.queryLastTxFeeUpokt(ctx, "/pocket.proof.MsgCreateClaim")
+	proofFee, proofErr := c.txClient.queryLastTxFeeUpokt(ctx, "/pocket.proof.MsgSubmitProof")
+
+	// Fall back to the mathematical floor on any query error or zero result.
+	if claimErr != nil || claimFee == 0 {
+		claimFee = minFeePerTxUpokt
+	}
+	if proofErr != nil || proofFee == 0 {
+		proofFee = minFeePerTxUpokt
+	}
+	total := claimFee + proofFee
+	if total < minClaimAndProofCostUpokt {
+		total = minClaimAndProofCostUpokt
+	}
+
+	c.feeCacheMu.Lock()
+	c.feeCacheUpokt = total
+	c.feeCacheTime = time.Now()
+	c.feeCacheMu.Unlock()
+
+	return total
 }
 
 // CreateClaims implements client.SupplierClient.

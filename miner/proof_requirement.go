@@ -39,6 +39,13 @@ func NewProofRequirementChecker(
 	}
 }
 
+// ServiceDifficultyClient exposes the wrapped height-aware difficulty client
+// so other components (e.g. the economic viability check in LifecycleCallback)
+// can reuse it without a second plumbing path.
+func (c *ProofRequirementChecker) ServiceDifficultyClient() query.ServiceDifficultyClient {
+	return c.serviceClient
+}
+
 // IsProofRequired determines if a proof is required for the given session's claim.
 // It uses the on-chain proof parameters to make this determination:
 // - If claimedAmount >= ProofRequirementThreshold → proof required (high-value claim)

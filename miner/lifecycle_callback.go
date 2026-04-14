@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"math/big"
 	"os"
 	"strconv"
 	"strings"
@@ -279,19 +280,99 @@ func (lc *LifecycleCallback) removeSessionLock(sessionID string) {
 	delete(lc.sessionLocks, sessionID)
 }
 
-// isClaimEconomicallyViable checks if submitting a claim is profitable.
-// Returns false if the expected reward is less than the estimated transaction fee.
+// isClaimEconomicallyViable returns true if submitting a claim for the given
+// snapshot is expected to produce more revenue than the fees required to get
+// paid. The decision is made at claim time only — once we submit the claim we
+// are committed to the proof as well, so we compare against claim_fee +
+// proof_fee conservatively (proof may or may not end up being required, but we
+// refuse to submit a claim we cannot afford to prove).
+//
+// Reward is computed using the same formula the chain uses in
+// x/proof/types/claim.go:GetClaimeduPOKT:
+//
+//	reward = (numComputeUnits * difficultyMultiplier * CUTTM) / granularity
+//
+// Everything is done in big.Rat to avoid precision loss before rounding down.
+// The difficulty client is sourced from the proofChecker — if the proofChecker
+// is not wired, or the query fails, the check fails open (returns true) so we
+// never drop a claim due to a missing dependency.
 func (lc *LifecycleCallback) isClaimEconomicallyViable(
+	ctx context.Context,
 	snapshot *SessionSnapshot,
-	computeUnitsToTokensMultiplier uint64,
-	estimatedFeeUpokt uint64,
+	sharedParams *sharedtypes.Params,
+	claimAndProofCostUpokt uint64,
 ) bool {
-	// Calculate expected reward in upokt
-	// Formula: reward = TotalComputeUnits * ComputeUnitsToTokensMultiplier
-	expectedRewardUpokt := snapshot.TotalComputeUnits * computeUnitsToTokensMultiplier
+	if lc.proofChecker == nil {
+		return true
+	}
+	difficultyClient := lc.proofChecker.ServiceDifficultyClient()
+	if difficultyClient == nil {
+		return true
+	}
+	if snapshot.TotalComputeUnits == 0 {
+		return false
+	}
+	if claimAndProofCostUpokt == 0 {
+		return true
+	}
 
-	// Compare reward vs fee
-	return expectedRewardUpokt > estimatedFeeUpokt
+	difficulty, err := difficultyClient.GetServiceRelayDifficultyAtHeight(
+		ctx, snapshot.ServiceID, snapshot.SessionStartHeight,
+	)
+	if err != nil {
+		lc.logger.Debug().
+			Err(err).
+			Str(logging.FieldSessionID, snapshot.SessionID).
+			Msg("economic viability: failed to fetch difficulty, allowing claim")
+		return true
+	}
+
+	rewardRat := computeClaimRewardRat(
+		snapshot.TotalComputeUnits,
+		difficulty.GetTargetHash(),
+		sharedParams.GetComputeUnitsToTokensMultiplier(),
+		sharedParams.GetComputeUnitCostGranularity(),
+	)
+
+	// Compare reward against the combined claim+proof cost constant.
+	costRat := new(big.Rat).SetUint64(claimAndProofCostUpokt)
+
+	viable := rewardRat.Cmp(costRat) > 0
+	if !viable {
+		rewardFloat, _ := rewardRat.Float64()
+		lc.logger.Info().
+			Str(logging.FieldSessionID, snapshot.SessionID).
+			Str(logging.FieldServiceID, snapshot.ServiceID).
+			Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+			Uint64("compute_units", snapshot.TotalComputeUnits).
+			Str("expected_reward_upokt_rat", rewardRat.FloatString(6)).
+			Float64("expected_reward_upokt", rewardFloat).
+			Uint64("claim_and_proof_cost_upokt", claimAndProofCostUpokt).
+			Msg("claim economically unviable: expected reward below claim+proof cost")
+	}
+	return viable
+}
+
+// computeClaimRewardRat computes the expected claim reward in uPOKT as a
+// big.Rat, matching the chain formula in x/proof/types/claim.go:GetClaimeduPOKT:
+//
+//	reward = (numComputeUnits × difficultyMultiplier × CUTTM) / granularity
+//
+// The computation stays in big.Rat end-to-end so sub-uPOKT rewards are not
+// truncated to 0 before comparison with the cost threshold — important on
+// devnet/test configurations where granularity is large relative to a single
+// session's compute units. A zero granularity is treated as 1 to avoid a
+// divide-by-zero; callers should not rely on that behavior in production.
+func computeClaimRewardRat(totalComputeUnits uint64, targetHash []byte, cuttm, granularity uint64) *big.Rat {
+	if granularity == 0 {
+		granularity = 1
+	}
+	difficultyMultiplier := protocol.GetRelayDifficultyMultiplier(targetHash)
+
+	cuRat := new(big.Rat).SetUint64(totalComputeUnits)
+	estimatedCURat := new(big.Rat).Mul(difficultyMultiplier, cuRat)
+	cuttmRat := new(big.Rat).SetFrac64(int64(cuttm), int64(granularity))
+	return new(big.Rat).Mul(estimatedCURat, cuttmRat)
 }
 
 // checkClaimCeiling checks if the claimed amount exceeds the configured ceiling.
@@ -638,26 +719,41 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				continue // Skip this session
 			}
 
-			// CRITICAL: Economic validation - never submit claims where fee > reward
-			// This prevents wasting fees on unprofitable claims
+			// CRITICAL: Economic validation - never submit claims where the
+			// expected reward is less than claim_fee + proof_fee. Once the
+			// claim tx is on chain we are committed to proving it too, so
+			// both fees must be covered up-front. See isClaimEconomicallyViable
+			// for the reward formula (chain-matching, big.Rat precision).
 			if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-				estimatedFeeUpokt := haClient.GetEstimatedFeeUpokt()
+				claimAndProofCostUpokt := haClient.GetEstimatedFeeUpokt(ctx)
 				computeUnitsToTokensMultiplier := sharedParams.GetComputeUnitsToTokensMultiplier()
 
-				if !lc.isClaimEconomicallyViable(snapshot, computeUnitsToTokensMultiplier, estimatedFeeUpokt) {
-					expectedRewardUpokt := snapshot.TotalComputeUnits * computeUnitsToTokensMultiplier
-
+				if !lc.isClaimEconomicallyViable(ctx, snapshot, sharedParams, claimAndProofCostUpokt) {
 					logger.Warn().
 						Str(logging.FieldSessionID, snapshot.SessionID).
+						Str(logging.FieldServiceID, snapshot.ServiceID).
 						Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
-						Uint64("expected_reward_upokt", expectedRewardUpokt).
-						Uint64("estimated_fee_upokt", estimatedFeeUpokt).
+						Uint64("claim_and_proof_cost_upokt", claimAndProofCostUpokt).
 						Int64("relay_count", snapshot.RelayCount).
 						Uint64("total_compute_units", snapshot.TotalComputeUnits).
-						Msg("skipping claim - estimated fee exceeds expected reward (unprofitable)")
+						Msg("SKIP UNPROFITABLE: expected reward < claim+proof cost — session skipped to save fees")
 
-					// Session remains in active state - not a failure, just skipped
-					continue // Skip this session
+					RecordClaimSkipped(
+						snapshot.SupplierOperatorAddress,
+						snapshot.ServiceID,
+						"unprofitable",
+					)
+
+					// Transition session to terminal ClaimSkipped state and
+					// clean up local resources so it doesn't drift into the
+					// proof_window_closed failure path. This is an operator
+					// decision, not a failure.
+					if skipErr := lc.OnClaimSkipped(ctx, snapshot); skipErr != nil {
+						logger.Warn().Err(skipErr).
+							Str(logging.FieldSessionID, snapshot.SessionID).
+							Msg("failed to finalise claim_skipped transition; session will drift to failure path")
+					}
+					continue
 				}
 
 				// Check if claim exceeds configured ceiling (warning only, does not block claim)
@@ -1664,6 +1760,46 @@ func (lc *LifecycleCallback) OnSessionProved(ctx context.Context, snapshot *Sess
 	// Remove session lock
 	lc.removeSessionLock(snapshot.SessionID)
 
+	return nil
+}
+
+// OnClaimSkipped is called when the economic viability check rejected a
+// session at claim time. It transitions the session to the terminal
+// ClaimSkipped state and cleans up local resources (SMST tree, stream,
+// dedup cache) the same way a successful claim path would.
+func (lc *LifecycleCallback) OnClaimSkipped(ctx context.Context, snapshot *SessionSnapshot) error {
+	logger := lc.logger.With().Str(logging.FieldSessionID, snapshot.SessionID).Logger()
+
+	logger.Debug().
+		Int64(logging.FieldCount, snapshot.RelayCount).
+		Msg("claim skipped for economic reasons - cleaning up")
+
+	ClearSessionMetrics(snapshot.SupplierOperatorAddress, snapshot.SessionID, snapshot.ServiceID)
+
+	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
+		logger.Warn().Err(err).Msg("failed to delete SMST tree on claim_skipped")
+	}
+
+	if lc.streamDeleter != nil {
+		if err := lc.streamDeleter.DeleteStream(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to delete session stream on claim_skipped")
+		}
+	}
+
+	if lc.sessionCoordinator != nil {
+		if err := lc.sessionCoordinator.OnClaimSkipped(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to update coordinator on claim_skipped")
+			return err
+		}
+	}
+
+	if lc.deduplicator != nil {
+		if err := lc.deduplicator.CleanupSession(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).Msg("failed to cleanup deduplication on claim_skipped")
+		}
+	}
+
+	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 

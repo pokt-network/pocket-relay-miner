@@ -278,6 +278,23 @@ var (
 		[]string{"supplier", "service_id"},
 	)
 
+	// claimsSkippedTotal tracks claim submissions that were intentionally
+	// dropped before going to the chain. reason values (extend as new skip
+	// paths land):
+	//   - "unprofitable"     → reward < claim_fee + proof_fee
+	//   - "already_submitted" (future) → dedup hit
+	//   - "zero_relays"      (future) → session had nothing to claim
+	//   - "zero_compute"     (future) → relays present but CUs=0
+	claimsSkippedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claims_skipped_total",
+			Help:      "Claims intentionally not submitted. reason carries the cause (e.g. unprofitable, zero_relays).",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
 	// Legacy metric for backward compatibility (deprecated - use compute_units_proved_total)
 	computeUnitsSettledTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
@@ -1245,6 +1262,13 @@ func RecordProofRequirementSkipped(supplier string) {
 // RecordProofRequirementCheckError records an error during proof requirement checking.
 func RecordProofRequirementCheckError(supplier, operation string) {
 	proofRequirementErrors.WithLabelValues(supplier, operation).Inc()
+}
+
+// RecordClaimSkipped records an intentional claim skip with a reason label.
+// Use for decisions we make BEFORE sending the claim tx to the chain
+// (unprofitable, dedup hit, zero-work, etc).
+func RecordClaimSkipped(supplier, serviceID, reason string) {
+	claimsSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
 }
 
 // RecordClaimCeilingExceeded records when a claim exceeds the configured ceiling.
