@@ -65,23 +65,21 @@ States: active, claiming, claimed, proving, settled, expired`,
 func showSession(ctx context.Context, client *DebugRedisClient, supplier, sessionID string, jsonOutput bool) error {
 	key := fmt.Sprintf("ha:miner:sessions:%s:%s", supplier, sessionID)
 
-	data, err := client.Get(ctx, key).Bytes()
-	if err == redis.Nil {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
+	snapshot, err := loadSessionKey(ctx, client, key)
 	if err != nil {
-		return fmt.Errorf("failed to get session: %w", err)
+		return err
+	}
+	if snapshot == nil {
+		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
 	if jsonOutput {
-		fmt.Println(string(data))
+		out, err := json.MarshalIndent(snapshot, "", "  ")
+		if err != nil {
+			return fmt.Errorf("failed to marshal JSON: %w", err)
+		}
+		fmt.Println(string(out))
 		return nil
-	}
-
-	// Parse and display formatted
-	var snapshot map[string]interface{}
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return fmt.Errorf("failed to parse session data: %w", err)
 	}
 
 	fmt.Printf("Session: %s\n", sessionID)
@@ -136,33 +134,57 @@ func listAllSessions(ctx context.Context, client *DebugRedisClient, supplier str
 	return fetchAndDisplaySessions(ctx, client, supplier, sessionIDs, jsonOutput)
 }
 
-func fetchAndDisplaySessions(ctx context.Context, client *DebugRedisClient, supplier string, sessionIDs []string, jsonOutput bool) error {
-	// Fetch all session data
-	pipe := client.Pipeline()
-	cmds := make([]*redis.StringCmd, len(sessionIDs))
-
-	for i, sessionID := range sessionIDs {
-		key := fmt.Sprintf("ha:miner:sessions:%s:%s", supplier, sessionID)
-		cmds[i] = pipe.Get(ctx, key)
+// loadSessionKey fetches a session snapshot from Redis, transparently handling
+// both the Wave-3+ hash layout and the legacy JSON string layout so the debug
+// CLI keeps working across rolling upgrades. Returns (nil, nil) when the key
+// does not exist.
+func loadSessionKey(ctx context.Context, client *DebugRedisClient, key string) (map[string]interface{}, error) {
+	keyType, err := client.Type(ctx, key).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to check session key type: %w", err)
 	}
-
-	_, err := pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		return fmt.Errorf("failed to fetch sessions: %w", err)
-	}
-
-	var sessions []map[string]interface{}
-	for _, cmd := range cmds {
-		data, err := cmd.Bytes()
+	switch keyType {
+	case "none":
+		return nil, nil
+	case "hash":
+		fields, err := client.HGetAll(ctx, key).Result()
+		if err != nil {
+			return nil, fmt.Errorf("failed to hgetall session: %w", err)
+		}
+		if len(fields) == 0 {
+			return nil, nil
+		}
+		out := make(map[string]interface{}, len(fields))
+		for k, v := range fields {
+			out[k] = v
+		}
+		return out, nil
+	case "string":
+		data, err := client.Get(ctx, key).Bytes()
 		if err == redis.Nil {
-			continue
+			return nil, nil
 		}
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("failed to get legacy session: %w", err)
 		}
+		var out map[string]interface{}
+		if err := json.Unmarshal(data, &out); err != nil {
+			return nil, fmt.Errorf("failed to parse legacy session: %w", err)
+		}
+		return out, nil
+	default:
+		return nil, fmt.Errorf("unexpected redis type for %s: %s", key, keyType)
+	}
+}
 
-		var snapshot map[string]interface{}
-		if err := json.Unmarshal(data, &snapshot); err != nil {
+func fetchAndDisplaySessions(ctx context.Context, client *DebugRedisClient, supplier string, sessionIDs []string, jsonOutput bool) error {
+	// Fetch all session data. Each key may be a new-style hash (Wave 3+)
+	// or a legacy JSON string during a rolling upgrade; handle both.
+	var sessions []map[string]interface{}
+	for _, sessionID := range sessionIDs {
+		key := fmt.Sprintf("ha:miner:sessions:%s:%s", supplier, sessionID)
+		snapshot, err := loadSessionKey(ctx, client, key)
+		if err != nil || snapshot == nil {
 			continue
 		}
 		sessions = append(sessions, snapshot)

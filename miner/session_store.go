@@ -3,7 +3,10 @@ package miner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -245,7 +248,160 @@ func (s *RedisSessionStore) stateIndexKey(state SessionState) string {
 	return fmt.Sprintf("%s:%s:state:%s", s.config.KeyPrefix, s.config.SupplierAddress, state)
 }
 
-// Save persists a session snapshot to Redis.
+// --- Hash field codec ---------------------------------------------------------
+
+// Hash field names. These are the authoritative on-wire names for the Redis
+// Hash layout. Keep in sync with the Lua script and the debug CLI decoder
+// in cmd/redis/sessions.go.
+const (
+	hfSessionID          = "session_id"
+	hfSupplierOperator   = "supplier_operator_address"
+	hfServiceID          = "service_id"
+	hfApplicationAddress = "application_address"
+	hfSessionStartHeight = "session_start_height"
+	hfSessionEndHeight   = "session_end_height"
+	hfState              = "state"
+	hfRelayCount         = "relay_count"
+	hfTotalComputeUnits  = "total_compute_units"
+	hfClaimedRootHash    = "claimed_root_hash"
+	hfClaimTxHash        = "claim_tx_hash"
+	hfProofTxHash        = "proof_tx_hash"
+	hfLastWALEntryID     = "last_wal_entry_id"
+	hfCreatedAt          = "created_at"
+	hfLastUpdatedAt      = "last_updated_at"
+	hfSettlementOutcome  = "settlement_outcome"
+	hfSettlementHeight   = "settlement_height"
+	hfSettlementTxHash   = "settlement_tx_hash"
+)
+
+// encodeSnapshot flattens a SessionSnapshot into a slice of alternating
+// field/value pairs suitable for HSET. Optional fields with zero values
+// are omitted so Save (which DELs first) will not leave stale hash fields.
+func encodeSnapshot(snap *SessionSnapshot) []any {
+	pairs := []any{
+		hfSessionID, snap.SessionID,
+		hfSupplierOperator, snap.SupplierOperatorAddress,
+		hfServiceID, snap.ServiceID,
+		hfApplicationAddress, snap.ApplicationAddress,
+		hfSessionStartHeight, strconv.FormatInt(snap.SessionStartHeight, 10),
+		hfSessionEndHeight, strconv.FormatInt(snap.SessionEndHeight, 10),
+		hfState, string(snap.State),
+		hfRelayCount, strconv.FormatInt(snap.RelayCount, 10),
+		hfTotalComputeUnits, strconv.FormatUint(snap.TotalComputeUnits, 10),
+		hfCreatedAt, snap.CreatedAt.Format(time.RFC3339Nano),
+		hfLastUpdatedAt, snap.LastUpdatedAt.Format(time.RFC3339Nano),
+	}
+	if len(snap.ClaimedRootHash) > 0 {
+		pairs = append(pairs, hfClaimedRootHash, string(snap.ClaimedRootHash))
+	}
+	if snap.ClaimTxHash != "" {
+		pairs = append(pairs, hfClaimTxHash, snap.ClaimTxHash)
+	}
+	if snap.ProofTxHash != "" {
+		pairs = append(pairs, hfProofTxHash, snap.ProofTxHash)
+	}
+	if snap.LastWALEntryID != "" {
+		pairs = append(pairs, hfLastWALEntryID, snap.LastWALEntryID)
+	}
+	if snap.SettlementOutcome != nil {
+		pairs = append(pairs, hfSettlementOutcome, *snap.SettlementOutcome)
+	}
+	if snap.SettlementHeight != nil {
+		pairs = append(pairs, hfSettlementHeight, strconv.FormatInt(*snap.SettlementHeight, 10))
+	}
+	if snap.SettlementTxHash != nil {
+		pairs = append(pairs, hfSettlementTxHash, *snap.SettlementTxHash)
+	}
+	return pairs
+}
+
+// decodeSnapshot turns an HGETALL result into a SessionSnapshot. Returns
+// nil, nil when the map is empty (key did not exist).
+func decodeSnapshot(fields map[string]string) (*SessionSnapshot, error) {
+	if len(fields) == 0 {
+		return nil, nil
+	}
+
+	snap := &SessionSnapshot{
+		SessionID:               fields[hfSessionID],
+		SupplierOperatorAddress: fields[hfSupplierOperator],
+		ServiceID:               fields[hfServiceID],
+		ApplicationAddress:      fields[hfApplicationAddress],
+		State:                   SessionState(fields[hfState]),
+		ClaimTxHash:             fields[hfClaimTxHash],
+		ProofTxHash:             fields[hfProofTxHash],
+		LastWALEntryID:          fields[hfLastWALEntryID],
+	}
+
+	if v := fields[hfSessionStartHeight]; v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", hfSessionStartHeight, err)
+		}
+		snap.SessionStartHeight = n
+	}
+	if v := fields[hfSessionEndHeight]; v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", hfSessionEndHeight, err)
+		}
+		snap.SessionEndHeight = n
+	}
+	if v := fields[hfRelayCount]; v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", hfRelayCount, err)
+		}
+		snap.RelayCount = n
+	}
+	if v := fields[hfTotalComputeUnits]; v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", hfTotalComputeUnits, err)
+		}
+		snap.TotalComputeUnits = n
+	}
+	if v := fields[hfCreatedAt]; v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", hfCreatedAt, err)
+		}
+		snap.CreatedAt = t
+	}
+	if v := fields[hfLastUpdatedAt]; v != "" {
+		t, err := time.Parse(time.RFC3339Nano, v)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", hfLastUpdatedAt, err)
+		}
+		snap.LastUpdatedAt = t
+	}
+	if v, ok := fields[hfClaimedRootHash]; ok && v != "" {
+		snap.ClaimedRootHash = []byte(v)
+	}
+	if v, ok := fields[hfSettlementOutcome]; ok {
+		vv := v
+		snap.SettlementOutcome = &vv
+	}
+	if v, ok := fields[hfSettlementHeight]; ok && v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("decode %s: %w", hfSettlementHeight, err)
+		}
+		snap.SettlementHeight = &n
+	}
+	if v, ok := fields[hfSettlementTxHash]; ok {
+		vv := v
+		snap.SettlementTxHash = &vv
+	}
+
+	return snap, nil
+}
+
+// --- Core operations ----------------------------------------------------------
+
+// Save persists a session snapshot to Redis as a Hash. The previous key
+// (whether legacy JSON string or prior hash) is DEL'd atomically before
+// the HSet so optional fields that were cleared do not leak across writes.
 func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot) error {
 	s.mu.Lock()
 	if s.closed {
@@ -254,11 +410,12 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 	}
 	s.mu.Unlock()
 
-	// Get existing session to check for state change (for index cleanup)
+	// Get existing session to check for state change (for index cleanup).
+	// Get() transparently handles legacy JSON keys, so rolling upgrades
+	// still see the old state for index maintenance.
 	var oldState SessionState
 	existingSnapshot, err := s.Get(ctx, snapshot.SessionID)
 	if err != nil {
-		// Log but continue - this is not critical for the save operation
 		s.logger.Warn().
 			Err(err).
 			Str("session_id", snapshot.SessionID).
@@ -273,36 +430,30 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 		snapshot.CreatedAt = snapshot.LastUpdatedAt
 	}
 
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("failed to marshal session snapshot: %w", err)
-	}
-
 	key := s.sessionKey(snapshot.SessionID)
 
-	// Use a transaction to update the session, indexes, and clean up old state
-	// index atomically. This prevents orphan index entries if the SREM were to
-	// fail outside the transaction.
+	// Atomic transaction: drop any legacy/stale key, rewrite as hash,
+	// refresh TTL, update supplier and state indexes in one shot.
 	pipe := s.redisClient.TxPipeline()
 
-	// Store the session data
-	pipe.Set(ctx, key, data, s.config.SessionTTL)
+	pipe.Del(ctx, key)
+	pipe.HSet(ctx, key, encodeSnapshot(snapshot)...)
+	pipe.Expire(ctx, key, s.config.SessionTTL)
 
-	// Add to supplier's session index
+	// Supplier-wide session index
 	pipe.SAdd(ctx, s.supplierSessionsKey(), snapshot.SessionID)
 	pipe.Expire(ctx, s.supplierSessionsKey(), s.config.SessionTTL)
 
-	// Add to new state index
+	// New state index
 	pipe.SAdd(ctx, s.stateIndexKey(snapshot.State), snapshot.SessionID)
 	pipe.Expire(ctx, s.stateIndexKey(snapshot.State), s.config.SessionTTL)
 
-	// Remove from old state index if state changed (inside the same transaction)
+	// Old state index cleanup on state change
 	if oldState != "" && oldState != snapshot.State {
 		pipe.SRem(ctx, s.stateIndexKey(oldState), snapshot.SessionID)
 	}
 
-	_, err = pipe.Exec(ctx)
-	if err != nil {
+	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("failed to save session snapshot: %w", err)
 	}
 
@@ -317,140 +468,122 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 	return nil
 }
 
-// Get retrieves a session snapshot by session ID.
+// getHash performs an HGETALL-based read against the hash layout.
+// Returns (nil, nil) when the key does not exist.
+func (s *RedisSessionStore) getHash(ctx context.Context, key string) (*SessionSnapshot, error) {
+	fields, err := s.redisClient.HGetAll(ctx, key).Result()
+	if err != nil {
+		return nil, fmt.Errorf("failed to hgetall session snapshot: %w", err)
+	}
+	return decodeSnapshot(fields)
+}
+
+// getLegacyJSON reads a legacy JSON string key (pre-Wave-3) and decodes it
+// via encoding/json. Returns (nil, nil) when the key does not exist.
+// Rolling-upgrade fallback only; remove in a follow-up after one full
+// session cycle (~60 min mainnet) — see HANDOFF-WAVE-3-HINCRBY.md.
+func (s *RedisSessionStore) getLegacyJSON(ctx context.Context, key string) (*SessionSnapshot, error) {
+	data, err := s.redisClient.Get(ctx, key).Bytes()
+	if errors.Is(err, redis.Nil) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("failed to get legacy session snapshot: %w", err)
+	}
+	var snapshot SessionSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal legacy session snapshot: %w", err)
+	}
+	return &snapshot, nil
+}
+
+// Get retrieves a session snapshot by session ID. Transparently handles
+// both the new Hash layout and the legacy JSON string layout during rolling
+// upgrade (Option B in HANDOFF-WAVE-3-HINCRBY.md). Remove the legacy branch
+// in a follow-up PR after breeze has cycled through one session window.
 func (s *RedisSessionStore) Get(ctx context.Context, sessionID string) (*SessionSnapshot, error) {
 	key := s.sessionKey(sessionID)
 
-	data, err := s.redisClient.Get(ctx, key).Bytes()
-	if err == redis.Nil {
-		return nil, nil // Not found
-	}
+	keyType, err := s.redisClient.Type(ctx, key).Result()
 	if err != nil {
-		return nil, fmt.Errorf("failed to get session snapshot: %w", err)
+		return nil, fmt.Errorf("failed to check session key type: %w", err)
 	}
 
-	var snapshot SessionSnapshot
-	if err := json.Unmarshal(data, &snapshot); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal session snapshot: %w", err)
+	switch keyType {
+	case "none":
+		return nil, nil
+	case "hash":
+		return s.getHash(ctx, key)
+	case "string":
+		// Legacy JSON blob, written by pre-Wave-3 miners.
+		return s.getLegacyJSON(ctx, key)
+	default:
+		return nil, fmt.Errorf("unexpected redis type for session key %s: %s", key, keyType)
 	}
-
-	return &snapshot, nil
 }
 
 // GetBySupplier retrieves all sessions for a supplier.
 func (s *RedisSessionStore) GetBySupplier(ctx context.Context) ([]*SessionSnapshot, error) {
-	// Get all session IDs from the index
 	sessionIDs, err := s.redisClient.SMembers(ctx, s.supplierSessionsKey()).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session IDs: %w", err)
 	}
-
-	if len(sessionIDs) == 0 {
-		return nil, nil
-	}
-
-	// Get all session data in a pipeline
-	pipe := s.redisClient.Pipeline()
-	cmds := make([]*redis.StringCmd, len(sessionIDs))
-
-	for i, sessionID := range sessionIDs {
-		cmds[i] = pipe.Get(ctx, s.sessionKey(sessionID))
-	}
-
-	_, err = pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("failed to get session data: %w", err)
-	}
-
-	snapshots := make([]*SessionSnapshot, 0, len(sessionIDs))
-	for _, cmd := range cmds {
-		data, err := cmd.Bytes()
-		if err == redis.Nil {
-			continue // Session was deleted
-		}
-		if err != nil {
-			continue // Skip errors
-		}
-
-		var snapshot SessionSnapshot
-		if err := json.Unmarshal(data, &snapshot); err != nil {
-			continue // Skip invalid data
-		}
-
-		snapshots = append(snapshots, &snapshot)
-	}
-
-	return snapshots, nil
+	return s.fetchSessions(ctx, sessionIDs, "")
 }
 
 // GetByState retrieves all sessions in a given state for a supplier.
 func (s *RedisSessionStore) GetByState(ctx context.Context, state SessionState) ([]*SessionSnapshot, error) {
-	// Get session IDs from state index
 	sessionIDs, err := s.redisClient.SMembers(ctx, s.stateIndexKey(state)).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session IDs by state: %w", err)
 	}
+	return s.fetchSessions(ctx, sessionIDs, state)
+}
 
+// fetchSessions loads a batch of session IDs through Get() (which handles
+// both hash and legacy JSON layouts). When filterState is non-empty, only
+// snapshots matching that state are returned (the index may be stale).
+func (s *RedisSessionStore) fetchSessions(
+	ctx context.Context,
+	sessionIDs []string,
+	filterState SessionState,
+) ([]*SessionSnapshot, error) {
 	if len(sessionIDs) == 0 {
 		return nil, nil
 	}
-
-	// Get all session data
-	pipe := s.redisClient.Pipeline()
-	cmds := make([]*redis.StringCmd, len(sessionIDs))
-
-	for i, sessionID := range sessionIDs {
-		cmds[i] = pipe.Get(ctx, s.sessionKey(sessionID))
-	}
-
-	_, err = pipe.Exec(ctx)
-	if err != nil && err != redis.Nil {
-		return nil, fmt.Errorf("failed to get session data: %w", err)
-	}
-
 	snapshots := make([]*SessionSnapshot, 0, len(sessionIDs))
-	for _, cmd := range cmds {
-		data, err := cmd.Bytes()
+	for _, sessionID := range sessionIDs {
+		snap, err := s.Get(ctx, sessionID)
 		if err != nil {
 			continue
 		}
-
-		var snapshot SessionSnapshot
-		if err := json.Unmarshal(data, &snapshot); err != nil {
+		if snap == nil {
 			continue
 		}
-
-		// Verify state matches (index might be stale)
-		if snapshot.State == state {
-			snapshots = append(snapshots, &snapshot)
+		if filterState != "" && snap.State != filterState {
+			continue
 		}
+		snapshots = append(snapshots, snap)
 	}
-
 	return snapshots, nil
 }
 
 // Delete removes a session snapshot.
 func (s *RedisSessionStore) Delete(ctx context.Context, sessionID string) error {
-	// Get the current session to know which indexes to update
 	snapshot, err := s.Get(ctx, sessionID)
 	if err != nil {
 		return err
 	}
 	if snapshot == nil {
-		return nil // Already deleted
+		return nil
 	}
 
 	pipe := s.redisClient.TxPipeline()
-
-	// Delete the session data
 	pipe.Del(ctx, s.sessionKey(sessionID))
-
-	// Remove from indexes
 	pipe.SRem(ctx, s.supplierSessionsKey(), sessionID)
 	pipe.SRem(ctx, s.stateIndexKey(snapshot.State), sessionID)
 
-	_, err = pipe.Exec(ctx)
-	if err != nil {
+	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("failed to delete session snapshot: %w", err)
 	}
 
@@ -461,7 +594,9 @@ func (s *RedisSessionStore) Delete(ctx context.Context, sessionID string) error 
 	return nil
 }
 
-// UpdateState atomically updates the state of a session.
+// UpdateState atomically updates the state of a session. Uses Save() so the
+// write goes through the same DEL+HSET+index transaction, which also
+// migrates any legacy JSON keys seen during a rolling upgrade.
 func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, newState SessionState) error {
 	snapshot, err := s.Get(ctx, sessionID)
 	if err != nil {
@@ -473,29 +608,11 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 
 	oldState := snapshot.State
 	if oldState == newState {
-		return nil // No change
+		return nil
 	}
 
 	snapshot.State = newState
-	snapshot.LastUpdatedAt = time.Now()
-
-	// Update in a transaction
-	pipe := s.redisClient.TxPipeline()
-
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("failed to marshal snapshot: %w", err)
-	}
-
-	pipe.Set(ctx, s.sessionKey(sessionID), data, s.config.SessionTTL)
-
-	// Update state indexes
-	pipe.SRem(ctx, s.stateIndexKey(oldState), sessionID)
-	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)
-	pipe.Expire(ctx, s.stateIndexKey(newState), s.config.SessionTTL)
-
-	_, err = pipe.Exec(ctx)
-	if err != nil {
+	if err := s.Save(ctx, snapshot); err != nil {
 		return fmt.Errorf("failed to update session state: %w", err)
 	}
 
@@ -524,18 +641,10 @@ func (s *RedisSessionStore) UpdateSettlementMetadata(
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
 
-	// Update settlement metadata
 	snapshot.SettlementOutcome = &outcome
 	snapshot.SettlementHeight = &height
-	snapshot.LastUpdatedAt = time.Now()
 
-	// Serialize and save (no state index changes)
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("failed to marshal snapshot: %w", err)
-	}
-
-	if err := s.redisClient.Set(ctx, s.sessionKey(sessionID), data, s.config.SessionTTL).Err(); err != nil {
+	if err := s.Save(ctx, snapshot); err != nil {
 		return fmt.Errorf("failed to update settlement metadata: %w", err)
 	}
 
@@ -557,60 +666,52 @@ func (s *RedisSessionStore) UpdateWALPosition(ctx context.Context, sessionID str
 	if snapshot == nil {
 		return fmt.Errorf("session not found: %s", sessionID)
 	}
-
 	snapshot.LastWALEntryID = walEntryID
-	snapshot.LastUpdatedAt = time.Now()
-
-	data, err := json.Marshal(snapshot)
-	if err != nil {
-		return fmt.Errorf("failed to marshal snapshot: %w", err)
-	}
-
-	return s.redisClient.Set(ctx, s.sessionKey(sessionID), data, s.config.SessionTTL).Err()
+	return s.Save(ctx, snapshot)
 }
 
-// incrementRelayCountScript is a Lua script that atomically increments
-// relay count and compute units in a session snapshot. It reads the JSON,
-// checks terminal state, increments the fields, and writes back — all in
-// a single Redis round-trip with no race window.
+// incrementRelayCountScript atomically increments relay_count and
+// total_compute_units on a session hash key, guarded by the terminal-state
+// check. This is a single Redis round-trip with no cjson parsing.
 //
-// KEYS[1] = session key
+// KEYS[1] = session hash key
 // ARGV[1] = compute units to add (uint64)
-// ARGV[2] = current unix timestamp (for LastUpdatedAt)
-// ARGV[3] = TTL in seconds
+// ARGV[2] = RFC3339Nano timestamp for last_updated_at
+// ARGV[3] = TTL seconds
 //
 // Returns:
 //
 //	0 = success
 //	1 = session not found
 //	2 = session in terminal state
+//
+// Terminal states MUST match SessionState.IsTerminal() in Go. When adding
+// a new terminal state, update both places.
 var incrementRelayCountScript = redis.NewScript(`
-local data = redis.call('GET', KEYS[1])
-if not data then
+if redis.call('EXISTS', KEYS[1]) == 0 then
 	return 1
 end
 
-local snapshot = cjson.decode(data)
-local state = snapshot['state']
-
--- Check terminal states (must match SessionState.IsTerminal in Go)
+local state = redis.call('HGET', KEYS[1], 'state')
 if state == 'proved' or state == 'probabilistic_proved'
 	or state == 'claim_window_closed' or state == 'claim_tx_error'
-	or state == 'proof_window_closed' or state == 'proof_tx_error' then
+	or state == 'proof_window_closed' or state == 'proof_tx_error'
+	or state == 'claim_skipped' then
 	return 2
 end
 
-snapshot['relay_count'] = (snapshot['relay_count'] or 0) + 1
-snapshot['total_compute_units'] = (snapshot['total_compute_units'] or 0) + tonumber(ARGV[1])
-snapshot['last_updated_at'] = ARGV[2]
-
-redis.call('SET', KEYS[1], cjson.encode(snapshot), 'EX', tonumber(ARGV[3]))
+redis.call('HINCRBY', KEYS[1], 'relay_count', 1)
+redis.call('HINCRBY', KEYS[1], 'total_compute_units', tonumber(ARGV[1]))
+redis.call('HSET', KEYS[1], 'last_updated_at', ARGV[2])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 return 0
 `)
 
-// IncrementRelayCount atomically increments the relay count and compute units
-// using a Lua script. This is a single Redis round-trip with no race window
-// between concurrent updates for the same session.
+// IncrementRelayCount atomically increments the relay count and compute
+// units using HINCRBY inside a small Lua script. On a WRONGTYPE error (the
+// key is still a legacy JSON string from a pre-Wave-3 miner), transparently
+// migrate the snapshot to the new hash layout via Get+Save and retry the
+// script once.
 func (s *RedisSessionStore) IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {
 	key := s.sessionKey(sessionID)
 	ttlSeconds := int64(s.config.SessionTTL.Seconds())
@@ -624,6 +725,24 @@ func (s *RedisSessionStore) IncrementRelayCount(ctx context.Context, sessionID s
 		now,
 		ttlSeconds,
 	).Int64()
+
+	if err != nil && isWrongTypeErr(err) {
+		// Legacy JSON string still in place — migrate to hash and retry.
+		// This path only fires during a rolling upgrade and disappears
+		// once all in-flight sessions have been rewritten.
+		if migrateErr := s.migrateLegacyKey(ctx, sessionID); migrateErr != nil {
+			return fmt.Errorf("failed to migrate legacy session key: %w", migrateErr)
+		}
+		result, err = incrementRelayCountScript.Run(
+			ctx,
+			s.redisClient,
+			[]string{key},
+			computeUnits,
+			now,
+			ttlSeconds,
+		).Int64()
+	}
+
 	if err != nil {
 		return fmt.Errorf("failed to increment relay count: %w", err)
 	}
@@ -638,6 +757,26 @@ func (s *RedisSessionStore) IncrementRelayCount(ctx context.Context, sessionID s
 	default:
 		return fmt.Errorf("unexpected result from increment script: %d", result)
 	}
+}
+
+// migrateLegacyKey reads a legacy JSON session key and rewrites it in the
+// new hash format. Used as a one-shot rescue path when IncrementRelayCount
+// hits a WRONGTYPE error during rolling upgrade.
+func (s *RedisSessionStore) migrateLegacyKey(ctx context.Context, sessionID string) error {
+	snap, err := s.getLegacyJSON(ctx, s.sessionKey(sessionID))
+	if err != nil {
+		return err
+	}
+	if snap == nil {
+		return nil // Disappeared between the script run and the migrate read.
+	}
+	return s.Save(ctx, snap)
+}
+
+// isWrongTypeErr reports whether a Redis error is the WRONGTYPE error raised
+// when a hash operation is attempted against a string key (or vice-versa).
+func isWrongTypeErr(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "WRONGTYPE")
 }
 
 // Close gracefully shuts down the store.

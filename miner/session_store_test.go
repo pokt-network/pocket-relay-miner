@@ -4,6 +4,7 @@ package miner
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -104,6 +105,7 @@ func TestIncrementRelayCount_RejectsTerminalState(t *testing.T) {
 		SessionStateProbabilisticProved,
 		SessionStateClaimWindowClosed,
 		SessionStateClaimTxError,
+		SessionStateClaimSkipped,
 		SessionStateProofWindowClosed,
 		SessionStateProofTxError,
 	}
@@ -261,6 +263,338 @@ func TestSave_StateIndexCleanup(t *testing.T) {
 	activeIDs, err = store.GetByState(ctx, SessionStateActive)
 	require.NoError(t, err)
 	assert.Len(t, activeIDs, 0, "session should be removed from old state index")
+}
+
+// --- Wave 3: Redis Hash layout tests ---
+
+// TestSave_HashFieldRoundTrip verifies every SessionSnapshot field
+// round-trips through the hash encode/decode path.
+func TestSave_HashFieldRoundTrip(t *testing.T) {
+	store, mr := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	outcome := "settled_proven"
+	txHash := "0xabc123"
+	height := int64(1234)
+
+	original := &SessionSnapshot{
+		SessionID:               "sess-roundtrip",
+		SupplierOperatorAddress: "pokt1supplier",
+		ServiceID:               "svc-eth",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      500,
+		SessionEndHeight:        510,
+		State:                   SessionStateClaimed,
+		RelayCount:              42,
+		TotalComputeUnits:       4200,
+		ClaimedRootHash:         []byte{0x01, 0x02, 0x03},
+		ClaimTxHash:             "claimtx",
+		ProofTxHash:             "prooftx",
+		LastWALEntryID:          "wal-999",
+		SettlementOutcome:       &outcome,
+		SettlementHeight:        &height,
+		SettlementTxHash:        &txHash,
+	}
+	require.NoError(t, store.Save(ctx, original))
+
+	// Confirm Redis actually stored the key as a hash, not a string.
+	key := fmt.Sprintf("ha:miner:sessions:pokt1test:%s", original.SessionID)
+	keyType := mr.DB(0).Type(key)
+	assert.Equal(t, "hash", keyType, "Wave 3 must store sessions as Redis Hash")
+
+	got, err := store.Get(ctx, original.SessionID)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+
+	assert.Equal(t, original.SessionID, got.SessionID)
+	assert.Equal(t, original.SupplierOperatorAddress, got.SupplierOperatorAddress)
+	assert.Equal(t, original.ServiceID, got.ServiceID)
+	assert.Equal(t, original.ApplicationAddress, got.ApplicationAddress)
+	assert.Equal(t, original.SessionStartHeight, got.SessionStartHeight)
+	assert.Equal(t, original.SessionEndHeight, got.SessionEndHeight)
+	assert.Equal(t, original.State, got.State)
+	assert.Equal(t, original.RelayCount, got.RelayCount)
+	assert.Equal(t, original.TotalComputeUnits, got.TotalComputeUnits)
+	assert.Equal(t, original.ClaimedRootHash, got.ClaimedRootHash)
+	assert.Equal(t, original.ClaimTxHash, got.ClaimTxHash)
+	assert.Equal(t, original.ProofTxHash, got.ProofTxHash)
+	assert.Equal(t, original.LastWALEntryID, got.LastWALEntryID)
+	require.NotNil(t, got.SettlementOutcome)
+	assert.Equal(t, outcome, *got.SettlementOutcome)
+	require.NotNil(t, got.SettlementHeight)
+	assert.Equal(t, height, *got.SettlementHeight)
+	require.NotNil(t, got.SettlementTxHash)
+	assert.Equal(t, txHash, *got.SettlementTxHash)
+	assert.False(t, got.CreatedAt.IsZero())
+	assert.False(t, got.LastUpdatedAt.IsZero())
+}
+
+// TestSave_ClearsStaleOptionalFields ensures that when a subsequent Save
+// omits an optional field, the old value is not leaked across writes.
+func TestSave_ClearsStaleOptionalFields(t *testing.T) {
+	store, _ := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID:               "sess-optional",
+		SupplierOperatorAddress: "pokt1test",
+		ServiceID:               "svc",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      1,
+		SessionEndHeight:        2,
+		State:                   SessionStateActive,
+		ClaimTxHash:             "initial-tx",
+		LastWALEntryID:          "wal-1",
+		ClaimedRootHash:         []byte("roothash"),
+	}))
+
+	// Re-save with optional fields cleared.
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID:               "sess-optional",
+		SupplierOperatorAddress: "pokt1test",
+		ServiceID:               "svc",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      1,
+		SessionEndHeight:        2,
+		State:                   SessionStateActive,
+	}))
+
+	got, err := store.Get(ctx, "sess-optional")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Empty(t, got.ClaimTxHash, "stale optional string field must not leak")
+	assert.Empty(t, got.LastWALEntryID, "stale optional string field must not leak")
+	assert.Empty(t, got.ClaimedRootHash, "stale optional bytes field must not leak")
+	assert.Nil(t, got.SettlementOutcome)
+}
+
+// TestGet_LegacyJSONFallback verifies Get transparently decodes a legacy
+// JSON string key written by a pre-Wave-3 miner during rolling upgrade.
+func TestGet_LegacyJSONFallback(t *testing.T) {
+	store, mr := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	// Write a legacy JSON string directly to Redis, mimicking the old layout.
+	legacy := SessionSnapshot{
+		SessionID:               "sess-legacy",
+		SupplierOperatorAddress: "pokt1test",
+		ServiceID:               "svc",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      1,
+		SessionEndHeight:        2,
+		State:                   SessionStateActive,
+		RelayCount:              7,
+		TotalComputeUnits:       70,
+		CreatedAt:               time.Now(),
+		LastUpdatedAt:           time.Now(),
+	}
+	buf, err := json.Marshal(&legacy)
+	require.NoError(t, err)
+	key := "ha:miner:sessions:pokt1test:sess-legacy"
+	require.NoError(t, mr.Set(key, string(buf)))
+
+	got, err := store.Get(ctx, "sess-legacy")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, int64(7), got.RelayCount)
+	assert.Equal(t, uint64(70), got.TotalComputeUnits)
+	assert.Equal(t, SessionStateActive, got.State)
+}
+
+// TestIncrementRelayCount_MigratesLegacyJSON verifies the WRONGTYPE
+// rescue path: an old JSON string key is migrated to the hash layout and
+// the increment succeeds on retry.
+func TestIncrementRelayCount_MigratesLegacyJSON(t *testing.T) {
+	store, mr := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	legacy := SessionSnapshot{
+		SessionID:               "sess-migrate",
+		SupplierOperatorAddress: "pokt1test",
+		ServiceID:               "svc",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      1,
+		SessionEndHeight:        2,
+		State:                   SessionStateActive,
+		RelayCount:              3,
+		TotalComputeUnits:       30,
+		CreatedAt:               time.Now(),
+		LastUpdatedAt:           time.Now(),
+	}
+	buf, err := json.Marshal(&legacy)
+	require.NoError(t, err)
+	key := "ha:miner:sessions:pokt1test:sess-migrate"
+	require.NoError(t, mr.Set(key, string(buf)))
+
+	// First increment triggers WRONGTYPE → migrate → retry.
+	require.NoError(t, store.IncrementRelayCount(ctx, "sess-migrate", 10))
+
+	// Key should now be a hash.
+	assert.Equal(t, "hash", mr.DB(0).Type(key))
+
+	got, err := store.Get(ctx, "sess-migrate")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, int64(4), got.RelayCount)
+	assert.Equal(t, uint64(40), got.TotalComputeUnits)
+
+	// Subsequent increments take the fast path.
+	require.NoError(t, store.IncrementRelayCount(ctx, "sess-migrate", 10))
+	got, err = store.Get(ctx, "sess-migrate")
+	require.NoError(t, err)
+	assert.Equal(t, int64(5), got.RelayCount)
+}
+
+// writeLegacyJSONKey writes a pre-Wave-3 JSON string directly into miniredis.
+func writeLegacyJSONKey(t *testing.T, mr *miniredis.Miniredis, snap *SessionSnapshot) string {
+	t.Helper()
+	buf, err := json.Marshal(snap)
+	require.NoError(t, err)
+	key := fmt.Sprintf("ha:miner:sessions:pokt1test:%s", snap.SessionID)
+	require.NoError(t, mr.Set(key, string(buf)))
+	// Mimic the old supplier index entry so list paths see the session.
+	_, err = mr.SAdd("ha:miner:sessions:pokt1test:index", snap.SessionID)
+	require.NoError(t, err)
+	_, err = mr.SAdd(fmt.Sprintf("ha:miner:sessions:pokt1test:state:%s", snap.State), snap.SessionID)
+	require.NoError(t, err)
+	return key
+}
+
+// TestSave_MigratesLegacyJSONKey verifies Save() replaces a legacy string
+// key with a hash layout in one transaction, preserving the old state so
+// the state index is updated correctly.
+func TestSave_MigratesLegacyJSONKey(t *testing.T) {
+	store, mr := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	legacy := &SessionSnapshot{
+		SessionID:               "sess-save-migrate",
+		SupplierOperatorAddress: "pokt1test",
+		ServiceID:               "svc",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      1,
+		SessionEndHeight:        2,
+		State:                   SessionStateActive,
+		RelayCount:              11,
+		TotalComputeUnits:       110,
+		CreatedAt:               time.Now(),
+		LastUpdatedAt:           time.Now(),
+	}
+	key := writeLegacyJSONKey(t, mr, legacy)
+	require.Equal(t, "string", mr.DB(0).Type(key))
+
+	// Save with a new state → must DEL the legacy string, write a hash,
+	// and move the session from the active index to the claiming index.
+	require.NoError(t, store.Save(ctx, &SessionSnapshot{
+		SessionID:               "sess-save-migrate",
+		SupplierOperatorAddress: "pokt1test",
+		ServiceID:               "svc",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      1,
+		SessionEndHeight:        2,
+		State:                   SessionStateClaiming,
+		RelayCount:              11,
+		TotalComputeUnits:       110,
+	}))
+
+	assert.Equal(t, "hash", mr.DB(0).Type(key), "legacy key must be rewritten as hash")
+
+	got, err := store.Get(ctx, "sess-save-migrate")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, SessionStateClaiming, got.State)
+	assert.Equal(t, int64(11), got.RelayCount)
+
+	active, err := store.GetByState(ctx, SessionStateActive)
+	require.NoError(t, err)
+	assert.Len(t, active, 0, "old state index entry must be cleaned up")
+
+	claiming, err := store.GetByState(ctx, SessionStateClaiming)
+	require.NoError(t, err)
+	assert.Len(t, claiming, 1)
+}
+
+// TestUpdateState_MigratesLegacyJSONKey verifies UpdateState transparently
+// handles a legacy JSON key during rolling upgrade.
+func TestUpdateState_MigratesLegacyJSONKey(t *testing.T) {
+	store, mr := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	legacy := &SessionSnapshot{
+		SessionID:               "sess-update-migrate",
+		SupplierOperatorAddress: "pokt1test",
+		ServiceID:               "svc",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      1,
+		SessionEndHeight:        2,
+		State:                   SessionStateActive,
+		RelayCount:              4,
+		TotalComputeUnits:       40,
+		CreatedAt:               time.Now(),
+		LastUpdatedAt:           time.Now(),
+	}
+	key := writeLegacyJSONKey(t, mr, legacy)
+
+	require.NoError(t, store.UpdateState(ctx, "sess-update-migrate", SessionStateClaimed))
+
+	assert.Equal(t, "hash", mr.DB(0).Type(key))
+	got, err := store.Get(ctx, "sess-update-migrate")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, SessionStateClaimed, got.State)
+	assert.Equal(t, int64(4), got.RelayCount, "counters must survive migration")
+	assert.Equal(t, uint64(40), got.TotalComputeUnits)
+}
+
+// TestGetBySupplier_MixedFormats verifies the list paths return both legacy
+// JSON sessions and new hash sessions during a rolling upgrade window.
+func TestGetBySupplier_MixedFormats(t *testing.T) {
+	store, mr := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	// New-format session via Save.
+	saveTestSession(t, store, "sess-new", SessionStateActive, 1, 10)
+
+	// Legacy-format session written directly.
+	writeLegacyJSONKey(t, mr, &SessionSnapshot{
+		SessionID:               "sess-old",
+		SupplierOperatorAddress: "pokt1test",
+		ServiceID:               "svc",
+		ApplicationAddress:      "pokt1app",
+		SessionStartHeight:      1,
+		SessionEndHeight:        2,
+		State:                   SessionStateActive,
+		RelayCount:              2,
+		TotalComputeUnits:       20,
+		CreatedAt:               time.Now(),
+		LastUpdatedAt:           time.Now(),
+	})
+
+	all, err := store.GetBySupplier(ctx)
+	require.NoError(t, err)
+	assert.Len(t, all, 2, "both legacy and new sessions must be listed")
+
+	byState, err := store.GetByState(ctx, SessionStateActive)
+	require.NoError(t, err)
+	assert.Len(t, byState, 2, "state index must surface both layouts")
+}
+
+// TestSettlementMetadata_RoundTrip verifies the settlement fields can be
+// set after the session has been written and come back intact.
+func TestSettlementMetadata_RoundTrip(t *testing.T) {
+	store, _ := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	saveTestSession(t, store, "sess-settle", SessionStateProved, 10, 100)
+	require.NoError(t, store.UpdateSettlementMetadata(ctx, "sess-settle", "settled_proven", 9999))
+
+	got, err := store.Get(ctx, "sess-settle")
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.NotNil(t, got.SettlementOutcome)
+	assert.Equal(t, "settled_proven", *got.SettlementOutcome)
+	require.NotNil(t, got.SettlementHeight)
+	assert.Equal(t, int64(9999), *got.SettlementHeight)
 }
 
 // testLogger returns a no-op logger for tests.
