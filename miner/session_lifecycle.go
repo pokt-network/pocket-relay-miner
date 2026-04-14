@@ -924,8 +924,16 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 		return
 	}
 
-	// Update all sessions with their root hashes and transition to claimed
+	// Update all sessions with their root hashes and transition to claimed.
+	// OnSessionsNeedClaim pre-allocates rootHashes with len(sessions) and leaves
+	// nil entries for sessions it decided NOT to claim (economic skip, zero
+	// relays, zero compute units, dedup hit). Those sessions must not be
+	// flipped to Claimed — they have their own terminal state set by the
+	// callback's own cleanup path.
 	for i, session := range sessions {
+		if rootHashes[i] == nil {
+			continue
+		}
 		session.ClaimedRootHash = rootHashes[i]
 
 		// Update session state (pointer update, safe without mutex)

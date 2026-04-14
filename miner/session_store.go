@@ -34,6 +34,13 @@ const (
 	// SessionStateClaimTxError means the claim transaction failed (RPC error, gas, signature, etc).
 	SessionStateClaimTxError SessionState = "claim_tx_error"
 
+	// SessionStateClaimSkipped means we intentionally did NOT submit a claim
+	// for this session because the economic viability check rejected it
+	// (expected reward < claim_fee + proof_fee). This is a terminal, non-
+	// failure state — the session ended cleanly by operator decision, not
+	// because the pipeline broke.
+	SessionStateClaimSkipped SessionState = "claim_skipped"
+
 	// Proof outcomes (only from claimed state)
 	// SessionStateProving means the session is in the proof submission window.
 	SessionStateProving SessionState = "proving"
@@ -58,6 +65,7 @@ func (s SessionState) IsTerminal() bool {
 		SessionStateProbabilisticProved,
 		SessionStateClaimWindowClosed,
 		SessionStateClaimTxError,
+		SessionStateClaimSkipped,
 		SessionStateProofWindowClosed,
 		SessionStateProofTxError:
 		return true

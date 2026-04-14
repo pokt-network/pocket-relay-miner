@@ -507,6 +507,37 @@ func (c *SessionCoordinator) OnProbabilisticProved(ctx context.Context, sessionI
 	return nil
 }
 
+// OnClaimSkipped marks a session as intentionally skipped by the economic
+// viability check (reward would not cover claim_fee + proof_fee). This is a
+// terminal, non-failure state — the miner chose not to spend fees on an
+// unprofitable session.
+func (c *SessionCoordinator) OnClaimSkipped(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	terminalCallback := c.onSessionTerminal
+	c.mu.Unlock()
+
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimSkipped); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to update session state to claim_skipped")
+		return err
+	}
+
+	if terminalCallback != nil {
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSessionState, string(SessionStateClaimSkipped)).
+			Msg("session_coordinator_terminal: invoking terminal callback")
+		terminalCallback(sessionID, SessionStateClaimSkipped)
+	}
+
+	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("claim skipped (economic viability)")
+	return nil
+}
+
 // Close gracefully shuts down the session coordinator.
 func (c *SessionCoordinator) Close() error {
 	c.mu.Lock()
