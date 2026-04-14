@@ -801,25 +801,25 @@
       "relayMiningDifficultyList": [],
       "serviceList": [
         {
-          "compute_units_per_relay": 1000000,
+          "compute_units_per_relay": 1000,
           "id": "develop-http",
           "name": "develop-http",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
         },
         {
-          "compute_units_per_relay": 1000000,
+          "compute_units_per_relay": 1000,
           "id": "develop-websocket",
           "name": "develop-websocket",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
         },
         {
-          "compute_units_per_relay": 1000000,
+          "compute_units_per_relay": 1000,
           "id": "develop-stream",
           "name": "develop-stream",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
         },
         {
-          "compute_units_per_relay": 1000000,
+          "compute_units_per_relay": 1000,
           "id": "develop-grpc",
           "name": "develop-grpc",
           "owner_address": "pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5"
