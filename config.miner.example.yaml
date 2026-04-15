@@ -290,46 +290,142 @@ known_applications:
 # ==============================================================================
 # ServiceFactor Configuration (Economic Policy)
 # ==============================================================================
-# ServiceFactor controls how much of the application's stake the supplier will accept for billing.
-# This is configured on the MINER ONLY and shared with relayers via Redis.
+# ServiceFactor controls the per-session relay cap the meter applies to each
+# (app, supplier) pair. Relays served beyond the cap are dropped from the
+# mining pipeline with reason "stake_exhausted" — the client still gets a
+# response, but the relay never enters a claim.
 #
-# How it works:
-#   - If serviceFactor is SET: effectiveLimit = appStake × serviceFactor
-#   - If serviceFactor is NOT SET: effectiveLimit = (appStake / numSuppliers) / proof_window_close_offset_blocks
+# Configured on the MINER only. Published to Redis on leader election.
 #
-# The baseLimit formula gives the MOST CONSERVATIVE calculation:
-#   baseLimit = (appStake / numSuppliersPerSession) / proof_window_close_offset_blocks
+# CAVEAT: As of today, the relayer's ServiceFactorClient caches values in an
+# L1 map that is NOT invalidated at runtime (no pub/sub, no TTL, no refresh
+# loop). To roll out a new value, restart BOTH the miner (to re-publish)
+# AND all relayers (to reload from Redis). A hot-reload fix is tracked
+# separately; when it lands, a miner restart alone will suffice.
 #
-# IMPORTANT: The protocol NEVER guarantees any payment amount!
-# Due to race conditions, claim ordering, and session dynamics, actual settlement varies.
-# The baseLimit formula is the most conservative estimate, NOT a guarantee.
+# ------------------------------------------------------------------------------
+# Formula (matches canonical poktroll upstream exactly)
+# ------------------------------------------------------------------------------
 #
-# Operator Strategies:
-#   - serviceFactor NOT SET: Use baseLimit formula - most conservative
-#   - serviceFactor < (baseLimit / appStake): Even more conservative
-#   - serviceFactor > (baseLimit / appStake): Aggressive - betting on app stake increases
+#   if service_factor is SET:
+#       effectiveLimit_uPOKT = appStake_uPOKT × service_factor
+#   else (use baseLimit):
+#       appStakePerSupplier   = appStake_uPOKT / numSuppliersPerSession
+#       pendingSessions       = ceil(SessionEndToProofWindowCloseBlocks /
+#                                    numBlocksPerSession) + 1
+#       baseLimit_uPOKT       = appStakePerSupplier / pendingSessions
 #
-# WARNING: If effectiveLimit > baseLimit, you may do UNPAID WORK!
+#   SessionEndToProofWindowCloseBlocks =
+#       ClaimWindowOpenOffsetBlocks +
+#       ClaimWindowCloseOffsetBlocks +
+#       ProofWindowOpenOffsetBlocks +
+#       ProofWindowCloseOffsetBlocks
 #
-# Real-world example (mainnet-like values):
-#   appStake = 1,000,000 upokt
-#   numSuppliers = 50
-#   proof_window_close_offset_blocks = 4
-#   baseLimit = 1,000,000 / 50 / 4 = 5,000 upokt (most conservative)
+# Sources (read these if you need to verify):
+#   - relayer/relay_meter.go::calculateMaxStake
+#   - poktroll/pkg/relayer/proxy/relay_meter.go::getAppStakePortionPayableToSessionSupplier
+#   - poktroll/x/shared/types/session.go::GetSessionEndToProofWindowCloseBlocks
+#   - poktroll/x/tokenomics/keeper/token_logic_modules.go::ensureClaimAmountLimits
+#     (chain settlement cap — what actually gets paid at the end of the session)
 #
-#   Strategy examples:
-#     serviceFactor not set   → effectiveLimit = 5,000 upokt (most conservative)
-#     serviceFactor = 0.003   → effectiveLimit = 3,000 upokt (even more conservative)
-#     serviceFactor = 0.005   → effectiveLimit = 5,000 upokt (same as baseLimit)
-#     serviceFactor = 0.010   → effectiveLimit = 10,000 upokt (aggressive, risk of unpaid work)
+# ------------------------------------------------------------------------------
+# Worked example — mainnet, 2026-04-15, block 714921
+# ------------------------------------------------------------------------------
 #
-# Leave unset to use the most conservative baseLimit formula:
-# default_service_factor: 0.005
+# Chain parameters (from `pocketd q shared params` + `pocketd q session params`):
+#     num_blocks_per_session              = 60
+#     claim_window_open_offset_blocks     = 11
+#     claim_window_close_offset_blocks    = 10
+#     proof_window_open_offset_blocks     = 1
+#     proof_window_close_offset_blocks    = 10
+#     num_suppliers_per_session           = 50
+#
+# Derived:
+#     SessionEndToProofWindowCloseBlocks = 11 + 10 + 1 + 10 = 32
+#     numClosedSessionsAwaitingSettlement = ceil(32 / 60)    = 1
+#     pendingSessions                     = 1 + 1            = 2
+#
+# baseLimit as an implicit factor (valid for ANY app under these params):
+#     baseLimit / appStake = 1 / numSuppliersPerSession / pendingSessions
+#                          = 1 / 50 / 2
+#                          = 0.01
+#
+# Example app (stake = 5,874,696,563 uPOKT = 5,874.70 POKT):
+#     appStakePerSupplier = 5,874,696,563 / 50  = 117,493,931 uPOKT
+#     baseLimit           = 117,493,931 / 2     =  58,746,965 uPOKT
+#                         ≈                        58.75 POKT per session per supplier
+#
+# Any service_factor value applied to the same stake:
+#     factor 0.005 → effectiveLimit = 29,373,482 uPOKT ≈ 29.37 POKT  (low)
+#     factor 0.010 → effectiveLimit = 58,746,965 uPOKT ≈ 58.75 POKT  (mid, = baseLimit)
+#     factor 0.020 → effectiveLimit = 117,493,931 uPOKT ≈ 117.49 POKT (high, = chain cap)
+#     factor 0.030 → effectiveLimit = 176,240,896 uPOKT ≈ 176.24 POKT (gambling, chain trims)
+#
+# ------------------------------------------------------------------------------
+# Reference tuning table
+# ------------------------------------------------------------------------------
+#
+#   Assumes current mainnet params (numSuppliersPerSession=50, pendingSessions=2
+#   from the derivation above). If those params change, recompute from scratch.
+#
+#   +---------------+--------+--------------------------------------------+---------------------------+
+#   | tuning label  | factor | meaning                                    | risk profile              |
+#   +---------------+--------+--------------------------------------------+---------------------------+
+#   | gambling      | 0.030  | Bets that NOT all 50 suppliers in a       | Chain trims anything     |
+#   |               |        | session actually deliver a claim. Needs   | above stake × 0.02 —     |
+#   |               |        | empirical data (last 2-3 settled sessions)| overservice events,      |
+#   |               |        | showing mean claiming suppliers << 50.    | unpaid work.             |
+#   +---------------+--------+--------------------------------------------+---------------------------+
+#   | high opt      | 0.020  | Matches the chain's canonical settlement  | Minor overservice risk   |
+#   |               |        | cap exactly (stake / 50 / 1). Max         | during in-flight session |
+#   |               |        | claimable without chain trim.             | transitions.             |
+#   +---------------+--------+--------------------------------------------+---------------------------+
+#   | mid opt       | 0.010  | Matches the poktroll upstream relay       | Medium rejection of      |
+#   | (default)     |        | meter baseLimit. 50% safety margin below  | stake_exhausted for apps |
+#   |               |        | chain cap. Recommended default when in    | that demand > 1% of      |
+#   |               |        | doubt. No overservice risk.               | stake per session.       |
+#   +---------------+--------+--------------------------------------------+---------------------------+
+#   | low opt       | 0.005  | 75% safety margin. Extremely              | High rejection. Many     |
+#   |               |        | conservative.                             | apps hit stake_exhausted.|
+#   +---------------+--------+--------------------------------------------+---------------------------+
+#
+# When in doubt, use mid (0.01). It matches the upstream library and cannot
+# cause unpaid work.
+#
+# Do NOT raise above 0.02 without empirical data: for each staked service,
+# measure distinct(supplier_operator_address) per session over the last
+# 2-3 fully-settled sessions. If the mean N < 50, the safe ceiling is
+# approximately 1 / N / pendingSessions. Without that data, 0.03 leaves
+# money on the table via chain trim events.
+#
+# ------------------------------------------------------------------------------
+# Notes on the formula
+# ------------------------------------------------------------------------------
+#
+# 1. The chain settlement at x/tokenomics/keeper/token_logic_modules.go uses
+#    a slightly different divisor (GetNumPendingSessions, no +1), but under
+#    current mainnet params both formulas converge on the same number. The
+#    relayer meter is deliberately more conservative by the +1 margin as a
+#    safety against in-flight session transitions.
+#
+# 2. The protocol NEVER guarantees any payment amount. Claims above the
+#    chain's maxClaimableAmt are accepted but TRIMMED to the cap, with an
+#    EventApplicationOverserviced event emitted. Over-servicing is not
+#    penalized, it just means the relayer did work that won't be paid.
+#
+# 3. The relayer logs a warning when effectiveLimit > baseLimit
+#    ("serviceFactor results in limit exceeding protocol guarantee"). Use
+#    that log to detect when your factor is in the gambling zone.
+
+# Global default (applies to all services unless overridden below):
+default_service_factor: 0.01   # mid opt — matches poktroll upstream baseLimit
 
 # Per-service overrides (simple map, NOT full service config)
+# Use when a specific chain's apps have a very different
+# "observed suppliers claiming per session" profile.
 # service_factors:
-#   eth-mainnet: 0.007   # More aggressive for high-value service
-#   polygon: 0.003       # More conservative
+#   eth: 0.020     # high opt — only if you have data backing it
+#   poly: 0.015    # between mid and high
 
 # ==============================================================================
 # Observability Configuration
