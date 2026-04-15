@@ -270,7 +270,7 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 
 			// Send to channel (blocks if channel is full)
 			select {
-			case c.msgCh <- *msg:
+			case c.msgCh <- msg:
 			case <-ctx.Done():
 				return ctx.Err()
 			}
@@ -330,7 +330,7 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 		msg.IsReclaim = true
 
 		select {
-		case c.msgCh <- *msg:
+		case c.msgCh <- msg:
 		case <-ctx.Done():
 			return
 		}
@@ -343,28 +343,37 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 // Memory optimization: Uses protobuf binary deserialization instead of JSON to eliminate
 // JSON decoder memory overhead (literalStore accumulation). With 1000 suppliers consuming
 // continuously, this reduces memory usage by ~67% (1.4GB → ~460MB) and improves throughput.
-func (c *StreamsConsumer) parseMessage(message redis.XMessage, streamName string) (*transport.StreamMessage, error) {
+func (c *StreamsConsumer) parseMessage(message redis.XMessage, streamName string) (transport.StreamMessage, error) {
 	data, ok := message.Values["data"]
 	if !ok {
-		return nil, fmt.Errorf("message missing 'data' field")
+		return transport.StreamMessage{}, fmt.Errorf("message missing 'data' field")
 	}
 
 	dataStr, ok := data.(string)
 	if !ok {
-		return nil, fmt.Errorf("message 'data' field is not a string")
+		return transport.StreamMessage{}, fmt.Errorf("message 'data' field is not a string")
 	}
 
-	// Deserialize from protobuf binary format
-	// Redis stores bytes as strings, so convert back to []byte for protobuf
-	var minedRelay transport.MinedRelayMessage
+	// Deserialize from protobuf binary format into a pooled MinedRelayMessage
+	// so we recycle the struct across relays instead of burning GC cycles on
+	// a fresh heap allocation at 200+ RPS. The caller must Release the
+	// message (see transport.ReleaseMinedRelayMessage) once processing is
+	// complete — the consume loop in miner/supplier_manager.go owns that
+	// responsibility.
+	//
+	// We return StreamMessage by value (not *StreamMessage) so the wrapper
+	// stays on the caller's stack / goes directly into the channel buffer;
+	// only the pooled Message pointer crosses the heap boundary.
+	minedRelay := transport.AcquireMinedRelayMessage()
 	if err := minedRelay.Unmarshal([]byte(dataStr)); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal message: %w", err)
+		transport.ReleaseMinedRelayMessage(minedRelay)
+		return transport.StreamMessage{}, fmt.Errorf("failed to unmarshal message: %w", err)
 	}
 
-	return &transport.StreamMessage{
+	return transport.StreamMessage{
 		ID:         message.ID,
 		StreamName: streamName,
-		Message:    &minedRelay,
+		Message:    minedRelay,
 	}, nil
 }
 

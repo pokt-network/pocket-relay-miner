@@ -1040,22 +1040,39 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 					Msg("processing relay during drain")
 			}
 
-			// Process the relay (adds to SMST tree)
+			// Process the relay (adds to SMST tree). We cache the service/
+			// session identifiers and the start time up-front because
+			// msg.Message lives in transport.minedRelayMessagePool and must
+			// be released the moment onRelay returns — any later access to
+			// msg.Message would race with a future pool user.
+			serviceID := msg.Message.ServiceId
+			sessionID := msg.Message.SessionId
+			var processErr error
 			if m.onRelay != nil {
 				startTime := time.Now()
-				if err := m.onRelay(ctx, state.OperatorAddr, &msg); err != nil {
-					m.logger.Warn().
-						Err(err).
-						Str(logging.FieldSupplier, state.OperatorAddr).
-						Str("session_id", msg.Message.SessionId).
-						Msg("failed to process relay")
-					// Record processing latency even on failure
-					RecordRelayProcessingLatency(state.OperatorAddr, msg.Message.ServiceId, "error", time.Since(startTime).Seconds())
-					// Don't ACK on processing failure - let XAUTOCLAIM retry
-					continue
+				processErr = m.onRelay(ctx, state.OperatorAddr, &msg)
+				status := "success"
+				if processErr != nil {
+					status = "error"
 				}
-				// Record processing latency on success
-				RecordRelayProcessingLatency(state.OperatorAddr, msg.Message.ServiceId, "success", time.Since(startTime).Seconds())
+				RecordRelayProcessingLatency(state.OperatorAddr, serviceID, status, time.Since(startTime).Seconds())
+			}
+
+			// Return the pooled MinedRelayMessage now that the worker is
+			// done reading it. msg.ID and msg.StreamName live on the
+			// StreamMessage wrapper (stack/channel-copy) so AckMessage below
+			// is still safe to call.
+			transport.ReleaseMinedRelayMessage(msg.Message)
+			msg.Message = nil
+
+			if processErr != nil {
+				m.logger.Warn().
+					Err(processErr).
+					Str(logging.FieldSupplier, state.OperatorAddr).
+					Str("session_id", sessionID).
+					Msg("failed to process relay")
+				// Don't ACK on processing failure - let XAUTOCLAIM retry
+				continue
 			}
 
 			// ACK immediately after successful processing

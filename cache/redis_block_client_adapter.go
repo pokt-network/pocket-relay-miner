@@ -233,12 +233,22 @@ func (a *RedisBlockClientAdapter) Subscribe(ctx context.Context, bufferSize int)
 }
 
 // publishToSubscribers fans out a block event to all active subscribers.
+//
+// Short-circuits when there are no subscribers so the SimpleBlock allocation
+// is skipped entirely. The relayer binary wires up BlockEvents() as its only
+// block consumer and never calls adapter.Subscribe(), so on the relayer this
+// fast path is the common case — every block would otherwise allocate a
+// SimpleBlock that nobody reads.
 func (a *RedisBlockClientAdapter) publishToSubscribers(event *BlockEvent) {
-	// Convert to SimpleBlock for subscribers
-	block := localclient.NewSimpleBlock(event.Height, event.Hash, event.Timestamp)
-
 	a.subscribersMu.RLock()
-	defer a.subscribersMu.RUnlock()
+	if len(a.subscribers) == 0 {
+		a.subscribersMu.RUnlock()
+		return
+	}
+
+	// Convert to SimpleBlock for subscribers. Safe to allocate now that we
+	// know at least one subscriber will (try to) receive it.
+	block := localclient.NewSimpleBlock(event.Height, event.Hash, event.Timestamp)
 
 	for _, ch := range a.subscribers {
 		select {
@@ -248,6 +258,7 @@ func (a *RedisBlockClientAdapter) publishToSubscribers(event *BlockEvent) {
 			// Channel full, skip (non-blocking)
 		}
 	}
+	a.subscribersMu.RUnlock()
 }
 
 // removeSubscriber removes a subscriber channel from the list.
