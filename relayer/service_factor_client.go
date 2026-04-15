@@ -9,6 +9,7 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
@@ -52,6 +53,16 @@ func NewServiceFactorClient(
 }
 
 // Start begins the service factor client, subscribing to invalidation events.
+//
+// The client does three things on Start:
+//  1. Preloads the default service_factor from Redis into L1 (per-service
+//     overrides are lazy-loaded on first request in GetServiceFactor).
+//  2. Subscribes to the service_factor pub/sub invalidation channel so
+//     that changes published by the miner are reflected immediately in
+//     this relayer's L1 cache. Without this subscription the L1 cache
+//     would serve stale values until the relayer process restarts.
+//  3. The subscription reconnects automatically (via cache.SubscribeToInvalidations)
+//     if Redis goes down and comes back.
 func (c *ServiceFactorClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	if c.closed {
@@ -65,8 +76,61 @@ func (c *ServiceFactorClient) Start(ctx context.Context) error {
 	// Load initial values from Redis
 	c.refreshAll(c.ctx)
 
+	// Subscribe to miner-published invalidation events so hot updates to
+	// service_factor config are picked up without requiring a relayer
+	// restart. The subscription is handled in a goroutine with automatic
+	// reconnection; errors here are only from the initial setup.
+	if err := cache.SubscribeToInvalidations(
+		c.ctx,
+		c.redisClient,
+		c.logger,
+		cache.ServiceFactorCacheType,
+		c.handleInvalidation,
+	); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Msg("failed to subscribe to service_factor invalidation events — L1 cache will not hot-reload")
+	}
+
 	c.logger.Info().Msg("service factor client started")
 
+	return nil
+}
+
+// handleInvalidation is the pub/sub message handler for the service_factor
+// invalidation channel. Payload format matches
+// cache.ServiceFactorInvalidationPayload:
+//   - empty service_id → invalidate the default L1 entry
+//   - non-empty service_id → invalidate that specific per-service L1 entry
+//
+// After invalidation, the next call to GetServiceFactor for the affected
+// key will miss L1, fall through to Redis, and repopulate L1 with the
+// fresh value.
+func (c *ServiceFactorClient) handleInvalidation(_ context.Context, rawPayload string) error {
+	var payload cache.ServiceFactorInvalidationPayload
+	if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
+		// Unknown payload shape: be defensive and invalidate everything
+		// so we don't serve stale data.
+		c.InvalidateCache()
+		c.logger.Warn().
+			Err(err).
+			Str("payload", rawPayload).
+			Msg("service_factor invalidation payload could not be parsed — invalidated entire L1 cache as a precaution")
+		return nil
+	}
+
+	if payload.ServiceID == "" {
+		c.defaultFactorCache.Clear()
+		c.logger.Info().
+			Str("scope", "default").
+			Msg("service_factor L1 cache invalidated via pub/sub — next GetServiceFactor call will reload from Redis")
+	} else {
+		c.serviceFactorCache.Delete(payload.ServiceID)
+		c.logger.Info().
+			Str("scope", "service").
+			Str("service_id", payload.ServiceID).
+			Msg("service_factor L1 cache invalidated via pub/sub — next GetServiceFactor call will reload from Redis")
+	}
 	return nil
 }
 

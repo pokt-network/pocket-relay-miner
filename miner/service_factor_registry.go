@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"time"
 
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
-
+	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // ServiceFactorData is the data stored in Redis for a service factor.
@@ -60,6 +60,12 @@ func NewServiceFactorRegistry(
 
 // PublishServiceFactors publishes all service factor configuration to Redis.
 // This should be called at miner startup after leader election setup.
+//
+// After writing each value, it also publishes a cache invalidation event on
+// the service_factor pub/sub channel so that any live relayer instances
+// invalidate their L1 cache and pick up the new value on the next call to
+// GetServiceFactor. See cache/service_factor_events.go for the channel
+// contract and payload format.
 func (r *ServiceFactorRegistry) PublishServiceFactors(ctx context.Context) error {
 	// Publish a default service factor if set
 	if r.config.DefaultServiceFactor > 0 {
@@ -75,6 +81,15 @@ func (r *ServiceFactorRegistry) PublishServiceFactors(ctx context.Context) error
 
 		if err = r.redisClient.Set(ctx, key, jsonData, r.config.CacheTTL).Err(); err != nil {
 			return fmt.Errorf("failed to set default service factor: %w", err)
+		}
+
+		if err = r.publishInvalidation(ctx, ""); err != nil {
+			// Non-fatal: relayers will still read the new value on next restart,
+			// and the stale L1 cache has a finite blast radius.
+			r.logger.Warn().
+				Err(err).
+				Str("service_id", "default").
+				Msg("failed to publish service_factor invalidation event (non-fatal)")
 		}
 
 		r.logger.Info().
@@ -109,6 +124,13 @@ func (r *ServiceFactorRegistry) PublishServiceFactors(ctx context.Context) error
 			return fmt.Errorf("failed to set service factor for %s: %w", serviceID, err)
 		}
 
+		if err = r.publishInvalidation(ctx, serviceID); err != nil {
+			r.logger.Warn().
+				Err(err).
+				Str("service_id", serviceID).
+				Msg("failed to publish service_factor invalidation event (non-fatal)")
+		}
+
 		r.logger.Info().
 			Str("service_id", serviceID).
 			Float64("factor", factor).
@@ -116,6 +138,35 @@ func (r *ServiceFactorRegistry) PublishServiceFactors(ctx context.Context) error
 			Msg("published per-service factor to Redis")
 	}
 
+	return nil
+}
+
+// publishInvalidation sends a cache-invalidation event on the service_factor
+// pub/sub channel. ServiceID == "" means "invalidate the default factor
+// entry"; a non-empty serviceID invalidates that specific override.
+func (r *ServiceFactorRegistry) publishInvalidation(ctx context.Context, serviceID string) error {
+	payload := cache.ServiceFactorInvalidationPayload{ServiceID: serviceID}
+	payloadBytes, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("marshal invalidation payload: %w", err)
+	}
+	if err = cache.PublishInvalidation(
+		ctx,
+		r.redisClient,
+		r.logger,
+		cache.ServiceFactorCacheType,
+		string(payloadBytes),
+	); err != nil {
+		return err
+	}
+	scope := serviceID
+	if scope == "" {
+		scope = "default"
+	}
+	r.logger.Info().
+		Str("scope", scope).
+		Str("payload", string(payloadBytes)).
+		Msg("published service_factor invalidation event to pub/sub")
 	return nil
 }
 
