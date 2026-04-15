@@ -5,11 +5,13 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"mime"
 	"net"
 	"net/http"
+	"net/http/httptrace"
 	"net/url"
 	stdpath "path"
 	"slices"
@@ -21,6 +23,8 @@ import (
 
 	"github.com/alitto/pond/v2"
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
+	"github.com/prometheus/client_golang/prometheus"
+	dto "github.com/prometheus/client_model/go"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
@@ -143,11 +147,16 @@ type ProxyServer struct {
 	supplierCache  *cache.SupplierCache
 	relayMeter     *RelayMeter
 
-	// HTTP client pool for backend requests (one client per timeout profile)
-	// Key: timeout profile name (e.g., "fast", "streaming")
-	// Value: *http.Client configured with that profile's timeouts
-	clientPool   map[string]*http.Client
-	clientPoolMu sync.RWMutex
+	// HTTP client pool for backend requests.
+	// Key: service ID. Value: *http.Client configured with that service's
+	// (timeout profile) + (pool profile) pair. Each service gets its own
+	// *http.Transport so MaxConnsPerHost / MaxIdleConnsPerHost budgets are
+	// isolated — a misbehaving backend cannot starve healthy ones.
+	// clientPoolFallback is used when a relay arrives for a service not in
+	// the map (defensive; should not happen after startup registration).
+	clientPool         map[string]*http.Client
+	clientPoolFallback *http.Client
+	clientPoolMu       sync.RWMutex
 
 	// Buffer pool for reading backend responses without blowing up RAM
 	// Reuses buffers across requests to minimize GC pressure
@@ -200,8 +209,8 @@ func NewProxyServer(
 	publisher transport.MinedRelayPublisher,
 	workerPool pond.Pool,
 ) (*ProxyServer, error) {
-	// Build HTTP client pool (one client per timeout profile)
-	clientPool := buildClientPool(config, &config.HTTPTransport)
+	// Build HTTP client pool (one client per service, plus fallback).
+	clientPool, clientPoolFallback := buildClientPool(config, &config.HTTPTransport)
 
 	// Create subpools with dynamic worker allocation based on master pool size
 	// This scales with available hardware
@@ -256,17 +265,18 @@ func NewProxyServer(
 		Msg("initialized buffer pool for backend response reading")
 
 	proxy := &ProxyServer{
-		logger:            logging.ForComponent(logger, logging.ComponentProxyServer),
-		config:            config,
-		healthChecker:     healthChecker,
-		publisher:         publisher,
-		clientPool:        clientPool,
-		bufferPool:        bufferPool,
-		workerPool:        workerPool,
-		validationSubpool: validationSubpool,
-		publishSubpool:    publishSubpool,
-		metricsSubpool:    metricsSubpool,
-		metricRecorder:    metricRecorder,
+		logger:             logging.ForComponent(logger, logging.ComponentProxyServer),
+		config:             config,
+		healthChecker:      healthChecker,
+		publisher:          publisher,
+		clientPool:         clientPool,
+		clientPoolFallback: clientPoolFallback,
+		bufferPool:         bufferPool,
+		workerPool:         workerPool,
+		validationSubpool:  validationSubpool,
+		publishSubpool:     publishSubpool,
+		metricsSubpool:     metricsSubpool,
+		metricRecorder:     metricRecorder,
 	}
 
 	// Log pool summary at startup for visibility into backend configuration
@@ -294,7 +304,11 @@ func NewProxyServer(
 
 // buildHTTPClient creates an optimized HTTP client with configured transport settings.
 // Applies sensible defaults if values are not configured (zero values).
-func buildHTTPClient(cfg *HTTPTransportConfig) *http.Client {
+// If poolOverride is non-nil, its pool knobs (MaxConnsPerHost,
+// MaxIdleConnsPerHost, IdleConnTimeoutSeconds) take precedence over the ones
+// in cfg, letting callers apply a per-service PoolProfile on top of the
+// shared transport defaults.
+func buildHTTPClient(cfg *HTTPTransportConfig, poolOverride *PoolProfile) *http.Client {
 	// Apply defaults for zero values (5x increase for 1000+ RPS with connection reuse)
 	maxIdleConns := cfg.MaxIdleConns
 	if maxIdleConns == 0 {
@@ -314,6 +328,19 @@ func buildHTTPClient(cfg *HTTPTransportConfig) *http.Client {
 	idleConnTimeout := time.Duration(cfg.IdleConnTimeoutSeconds) * time.Second
 	if idleConnTimeout == 0 {
 		idleConnTimeout = 90 * time.Second
+	}
+
+	// Apply per-service pool override on top of the defaults.
+	if poolOverride != nil {
+		if poolOverride.MaxConnsPerHost > 0 {
+			maxConnsPerHost = poolOverride.MaxConnsPerHost
+		}
+		if poolOverride.MaxIdleConnsPerHost > 0 {
+			maxIdleConnsPerHost = poolOverride.MaxIdleConnsPerHost
+		}
+		if poolOverride.IdleConnTimeoutSeconds > 0 {
+			idleConnTimeout = time.Duration(poolOverride.IdleConnTimeoutSeconds) * time.Second
+		}
 	}
 
 	dialTimeout := time.Duration(cfg.DialTimeoutSeconds) * time.Second
@@ -379,46 +406,79 @@ func buildHTTPClient(cfg *HTTPTransportConfig) *http.Client {
 	}
 }
 
-// buildClientPool creates HTTP clients for each timeout profile.
-// Each client is optimized for a specific use case (fast RPCs vs long-running streaming).
+// buildClientPool creates one *http.Client per service, each with its own
+// *http.Transport, so connection pool budgets (MaxConnsPerHost,
+// MaxIdleConnsPerHost, IdleConnTimeout) are isolated per service.
+// Isolation matters because Go keys connection pools by (host, port) at the
+// transport level, and we want per-service budgets rather than per-host —
+// sharing a transport across services would let a slow service hold slots
+// that a healthy one needs.
+//
+// Also returns a fallback client built from the global transport + the
+// default ("fast") timeout profile, used defensively if a relay arrives for
+// an unregistered service. Also exports the pool_max_conns metric per service.
 func buildClientPool(
 	config *Config,
 	transportConfig *HTTPTransportConfig,
-) map[string]*http.Client {
-	pool := make(map[string]*http.Client)
+) (map[string]*http.Client, *http.Client) {
+	clients := make(map[string]*http.Client, len(config.Services))
 
-	for profileName, profile := range config.TimeoutProfiles {
-		// Clone transport config and apply profile-specific timeouts
+	for serviceID, svc := range config.Services {
+		// Resolve timeout profile (falls back to "fast").
+		timeoutProfileName := svc.TimeoutProfile
+		if timeoutProfileName == "" {
+			timeoutProfileName = "fast"
+		}
+		timeoutProfile := config.TimeoutProfiles[timeoutProfileName]
+
+		// Resolve pool profile (falls back to global HTTPTransport defaults).
+		poolProfile := config.ResolvePoolProfile(serviceID)
+
 		profileTransport := *transportConfig
-		profileTransport.ResponseHeaderTimeoutSeconds = profile.ResponseHeaderTimeoutSeconds
-		profileTransport.DialTimeoutSeconds = profile.DialTimeoutSeconds
-		profileTransport.TLSHandshakeTimeoutSeconds = profile.TLSHandshakeTimeoutSeconds
+		profileTransport.ResponseHeaderTimeoutSeconds = timeoutProfile.ResponseHeaderTimeoutSeconds
+		profileTransport.DialTimeoutSeconds = timeoutProfile.DialTimeoutSeconds
+		profileTransport.TLSHandshakeTimeoutSeconds = timeoutProfile.TLSHandshakeTimeoutSeconds
 
-		pool[profileName] = buildHTTPClient(&profileTransport)
+		clients[serviceID] = buildHTTPClient(&profileTransport, poolProfile)
+
+		// Export the resolved pool size so dashboards can compute saturation
+		// as in_flight / max_conns. Use the poolProfile resolved above so we
+		// publish the ACTUAL value that the transport was constructed with.
+		httpPoolMaxConns.WithLabelValues(serviceID).Set(float64(poolProfile.MaxConnsPerHost))
 	}
 
-	return pool
+	// Fallback client uses the "fast" timeout profile and the global
+	// transport pool defaults. If a relay arrives for a service not
+	// registered at startup (should not happen post-validation), we still
+	// get a healthy client instead of nil.
+	fastProfile := config.TimeoutProfiles["fast"]
+	fallbackTransport := *transportConfig
+	fallbackTransport.ResponseHeaderTimeoutSeconds = fastProfile.ResponseHeaderTimeoutSeconds
+	fallbackTransport.DialTimeoutSeconds = fastProfile.DialTimeoutSeconds
+	fallbackTransport.TLSHandshakeTimeoutSeconds = fastProfile.TLSHandshakeTimeoutSeconds
+	fallback := buildHTTPClient(&fallbackTransport, nil)
+
+	return clients, fallback
 }
 
-// getClientForService returns the appropriate HTTP client for a service.
-// Uses the service's timeout_profile, falling back to "fast" profile.
+// getClientForService returns the HTTP client dedicated to this service.
+// Each service has its own client (and therefore its own transport and pool
+// budgets) so one slow backend cannot drain connection slots from healthy
+// ones. Falls back to a shared default client if the service is unknown.
 func (p *ProxyServer) getClientForService(serviceID string) *http.Client {
 	p.clientPoolMu.RLock()
 	defer p.clientPoolMu.RUnlock()
 
-	// Check if service has a custom timeout profile
-	if svc, ok := p.config.Services[serviceID]; ok && svc.TimeoutProfile != "" {
-		if client, ok := p.clientPool[svc.TimeoutProfile]; ok {
-			return client
-		}
-		p.logger.Warn().
-			Str("service_id", serviceID).
-			Str("profile", svc.TimeoutProfile).
-			Msg("timeout profile not found, using default 'fast'")
+	if client, ok := p.clientPool[serviceID]; ok {
+		return client
 	}
-
-	// Default to "fast" profile
-	return p.clientPool["fast"]
+	// Service not registered at startup — defensive fallback.
+	if p.clientPoolFallback != nil {
+		return p.clientPoolFallback
+	}
+	// Should never happen after validation; log loudly.
+	p.logger.Error().Str("service_id", serviceID).Msg("no HTTP client for service and no fallback")
+	return nil
 }
 
 // Start starts the HTTP proxy server.
@@ -522,11 +582,18 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 
 // handleRelay handles incoming relay requests.
 func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
-	// Health check endpoint - bypasses relay validation for load balancers
+	// Health check endpoints - bypass relay validation for load balancers.
+	// /ready/<service> returns per-service pool + backend state so operators
+	// can curl it for debugging without needing Prometheus access.
 	if r.URL.Path == "/health" || r.URL.Path == "/healthz" || r.URL.Path == "/ready" {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		_, _ = fmt.Fprintf(w, `{"status":"healthy","block_height":%d}`, p.currentBlockHeight.Load())
+		return
+	}
+	if strings.HasPrefix(r.URL.Path, "/ready/") {
+		serviceID := strings.TrimPrefix(r.URL.Path, "/ready/")
+		p.handleReadyService(w, serviceID)
 		return
 	}
 
@@ -915,28 +982,25 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	backendDuration := time.Since(backendStart)
 
-	// Record backend latency asynchronously (no blocking on histogram locks)
-	p.metricRecorder.RecordDuration(backendLatency, []string{serviceID}, backendDuration)
+	// Classify the backend call outcome once and use it everywhere.
+	// Keeping this in one place prevents the histogram / counter / reject
+	// reason from disagreeing about what happened.
+	outcome := classifyBackendOutcome(err, respStatus)
+	statusLabel := statusCodeLabel(respStatus, err)
+
+	// Record backend latency asynchronously (no blocking on histogram locks).
+	// The outcome label lets dashboards split p99 by success vs failure.
+	p.metricRecorder.RecordDuration(backendLatency, []string{serviceID, outcome}, backendDuration)
+	// Count every backend call once, tagged with outcome and status_code.
+	backendRequests.WithLabelValues(serviceID, outcome, statusLabel).Inc()
 
 	if err != nil {
 		// Only send error response if we haven't started streaming yet
 		if !isStreaming {
 			p.sendError(w, http.StatusBadGateway, "backend error")
 		}
-
-		// Determine specific rejection reason from error
-		var rejectionReason string
-		errMsg := err.Error()
-		switch {
-		case strings.Contains(errMsg, rejectReasonClientDisconnected):
-			rejectionReason = rejectReasonClientDisconnected
-		case strings.Contains(errMsg, rejectReasonBackendTimeout):
-			rejectionReason = rejectReasonBackendTimeout
-		default:
-			rejectionReason = rejectReasonBackendNetworkError
-		}
-
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectionReason).Inc()
+		// outcome doubles as the rejection reason for error cases.
+		relaysRejected.WithLabelValues(serviceID, rpcType, outcome).Inc()
 		return
 	}
 
@@ -1468,7 +1532,34 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		req.Header.Set(HeaderPocketApplication, applicationAddress)
 	}
 
-	// Execute backend request using service-specific HTTP client
+	// Execute backend request using service-specific HTTP client.
+	//
+	// Track pool saturation via httptrace: GetConn fires when the request
+	// starts asking for a connection, GotConn fires when one is acquired.
+	// The delta is the time we spent waiting for a free slot, which is the
+	// cleanest signal that the pool is too small.
+	//
+	// The in-flight gauge is incremented here and decremented via defer so
+	// it covers the entire request lifetime — headers AND body transfer —
+	// not just until client.Do() returns. client.Do() returns after
+	// response headers are received, but the connection is still in use
+	// while we read the body. Decrementing here would under-report
+	// saturation.
+	httpPoolInFlight.WithLabelValues(serviceID).Inc()
+	defer httpPoolInFlight.WithLabelValues(serviceID).Dec()
+
+	var getConnAt time.Time
+	trace := &httptrace.ClientTrace{
+		GetConn: func(_ string) { getConnAt = time.Now() },
+		GotConn: func(_ httptrace.GotConnInfo) {
+			if !getConnAt.IsZero() {
+				wait := time.Since(getConnAt)
+				p.metricRecorder.RecordDuration(httpPoolWaitSeconds, []string{serviceID}, wait)
+			}
+		},
+	}
+	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))
+
 	client := p.getClientForService(serviceID)
 	resp, err := client.Do(req)
 
@@ -1524,6 +1615,194 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	}
 
 	return respBody, resp.Header, resp.StatusCode, false, endpoint, backendPool, nil
+}
+
+// readyServiceResponse is the shape returned by /ready/{service}.
+// Kept as an explicit struct (not map[string]any) so the JSON shape is
+// stable across refactors and test assertions stay readable.
+type readyServiceResponse struct {
+	ServiceID   string                  `json:"service_id"`
+	Ready       bool                    `json:"ready"`
+	BlockHeight int64                   `json:"block_height"`
+	Pool        readyServicePool        `json:"pool"`
+	Backends    readyServiceBackendList `json:"backends"`
+	Error       string                  `json:"error,omitempty"`
+}
+
+type readyServicePool struct {
+	Profile             string  `json:"profile,omitempty"`
+	MaxConnsPerHost     int     `json:"max_conns_per_host"`
+	MaxIdleConnsPerHost int     `json:"max_idle_conns_per_host"`
+	IdleTimeoutSeconds  int64   `json:"idle_conn_timeout_seconds"`
+	InFlight            int64   `json:"in_flight"`
+	SaturationPct       float64 `json:"saturation_pct"`
+}
+
+type readyServiceBackendList struct {
+	Total    int                       `json:"total"`
+	Healthy  int                       `json:"healthy"`
+	Endpoint []readyServiceBackendItem `json:"endpoints"`
+}
+
+type readyServiceBackendItem struct {
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	Healthy bool   `json:"healthy"`
+}
+
+// ServeReadyService is a public entry point that the standalone health
+// check HTTP server (cmd_relayer.startHealthServer) can mount on its
+// /ready/ route. It shares implementation with the in-proxy router so
+// there is a single source of truth for the JSON shape.
+func (p *ProxyServer) ServeReadyService(w http.ResponseWriter, serviceID string) {
+	p.handleReadyService(w, serviceID)
+}
+
+// handleReadyService renders a per-service readiness snapshot at
+// /ready/{service}. It never blocks on the hot path (pure reads of
+// in-memory state: config, pool endpoints, prometheus gauge).
+//
+// ready=true means: the service is registered AND at least one backend is
+// healthy. Pool saturation is exposed as a number so operators can decide
+// their own thresholds; we don't flip `ready` based on saturation to keep
+// the endpoint useful as a plain observability dump for load balancers
+// that treat it as a liveness gate.
+func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string) {
+	w.Header().Set("Content-Type", "application/json")
+
+	if serviceID == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		_ = json.NewEncoder(w).Encode(readyServiceResponse{
+			Error: "service_id path parameter is required",
+		})
+		return
+	}
+
+	svcCfg, exists := p.config.Services[serviceID]
+	if !exists {
+		w.WriteHeader(http.StatusNotFound)
+		_ = json.NewEncoder(w).Encode(readyServiceResponse{
+			ServiceID: serviceID,
+			Ready:     false,
+			Error:     "unknown service",
+		})
+		return
+	}
+
+	poolProfile := p.config.ResolvePoolProfile(serviceID)
+	inFlight := gaugeValue(httpPoolInFlight.WithLabelValues(serviceID))
+	saturation := 0.0
+	if poolProfile.MaxConnsPerHost > 0 {
+		saturation = (inFlight / float64(poolProfile.MaxConnsPerHost)) * 100
+	}
+
+	// Walk every configured backend type for this service (jsonrpc,
+	// websocket, grpc, rest, cometbft) and collect endpoint health from
+	// each Pool. Using GetPool with the rpcType key avoids the fallback
+	// chain that GetBackendConfig does — we want the actual pool for
+	// each declared backend, not the one jsonrpc falls back to.
+	var items []readyServiceBackendItem
+	total, healthy := 0, 0
+	for rpcType := range svcCfg.Backends {
+		bp := p.config.GetPool(serviceID, rpcType)
+		if bp == nil {
+			continue
+		}
+		for _, ep := range bp.All() {
+			total++
+			isHealthy := ep.IsHealthy()
+			if isHealthy {
+				healthy++
+			}
+			items = append(items, readyServiceBackendItem{
+				Name:    ep.Name,
+				URL:     ep.RawURL,
+				Healthy: isHealthy,
+			})
+		}
+	}
+
+	resp := readyServiceResponse{
+		ServiceID:   serviceID,
+		Ready:       healthy > 0,
+		BlockHeight: p.currentBlockHeight.Load(),
+		Pool: readyServicePool{
+			Profile:             svcCfg.PoolProfile,
+			MaxConnsPerHost:     poolProfile.MaxConnsPerHost,
+			MaxIdleConnsPerHost: poolProfile.MaxIdleConnsPerHost,
+			IdleTimeoutSeconds:  poolProfile.IdleConnTimeoutSeconds,
+			InFlight:            int64(inFlight),
+			SaturationPct:       saturation,
+		},
+		Backends: readyServiceBackendList{
+			Total:    total,
+			Healthy:  healthy,
+			Endpoint: items,
+		},
+	}
+
+	status := http.StatusOK
+	if !resp.Ready {
+		// 503 when no backend is healthy so LBs using the endpoint as a
+		// liveness probe know to route elsewhere.
+		status = http.StatusServiceUnavailable
+	}
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(resp)
+}
+
+// gaugeValue reads the current value of a prometheus Gauge. The prom
+// client's public Gauge interface doesn't expose Get(), so we round-trip
+// through the dto.Metric that Write() populates. Used only by the
+// /ready/{service} endpoint, not on the relay hot path.
+func gaugeValue(g prometheus.Gauge) float64 {
+	var m dto.Metric
+	if err := g.Write(&m); err != nil {
+		return 0
+	}
+	if m.Gauge == nil {
+		return 0
+	}
+	return m.Gauge.GetValue()
+}
+
+// classifyBackendOutcome maps a backend call result to one of a small set
+// of outcome labels. Kept in a single place so every metric
+// (backendLatency, backendRequests, relaysRejected) agrees on what happened.
+//
+// Precedence when err is non-nil:
+//  1. client_disconnected  — the gateway cancelled while we were in-flight
+//  2. backend_timeout      — our internal deadline fired
+//  3. backend_network_error — any other transport error
+//
+// When err is nil, the HTTP status class decides: 5xx -> backend_5xx,
+// anything else -> success (2xx/3xx/4xx are valid relays that PATH gets
+// paid for).
+func classifyBackendOutcome(err error, respStatus int) string {
+	if err != nil {
+		errMsg := err.Error()
+		switch {
+		case strings.Contains(errMsg, rejectReasonClientDisconnected):
+			return rejectReasonClientDisconnected
+		case strings.Contains(errMsg, rejectReasonBackendTimeout):
+			return rejectReasonBackendTimeout
+		default:
+			return rejectReasonBackendNetworkError
+		}
+	}
+	if respStatus >= http.StatusInternalServerError {
+		return rejectReasonBackend5xx
+	}
+	return "success"
+}
+
+// statusCodeLabel renders the HTTP status as a stable low-cardinality
+// Prometheus label. For errors (no response) it returns "none".
+func statusCodeLabel(respStatus int, err error) string {
+	if err != nil || respStatus == 0 {
+		return "none"
+	}
+	return strconv.Itoa(respStatus)
 }
 
 // getCircuitBreakerThreshold returns the unhealthy threshold for circuit breaker

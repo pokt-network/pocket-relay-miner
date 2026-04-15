@@ -77,6 +77,17 @@ var (
 		[]string{"service_id", "rpc_type"},
 	)
 
+	// backendLatency is the total latency of backend requests (upstream
+	// service call). The "outcome" label distinguishes successful calls
+	// from failures so dashboards can split p99 success vs p99 error —
+	// without it, a small number of slow timeouts skew the success p99.
+	//
+	// outcome values:
+	//   - success             : 2xx/3xx/4xx response received and read
+	//   - backend_5xx         : 5xx response (not mined)
+	//   - backend_timeout     : our internal context deadline fired
+	//   - client_disconnected : PATH cancelled the request mid-flight
+	//   - backend_network_error: dial/read/reset/other transport error
 	backendLatency = observability.RelayerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
@@ -84,6 +95,62 @@ var (
 			Name:      "backend_latency_seconds",
 			Help:      "Total latency of backend requests (upstream service call)",
 			Buckets:   observability.FineGrainedLatencyBuckets,
+		},
+		[]string{"service_id", "outcome"},
+	)
+
+	// backendRequests is a per-outcome counter so dashboards can compute
+	// error rate as a ratio (non-success / total) without needing to derive
+	// it from histogram counts. status_code is the HTTP status string for
+	// completed requests, or "none" for errors with no response.
+	backendRequests = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "backend_requests_total",
+			Help:      "Total backend requests by service, outcome, and HTTP status code",
+		},
+		[]string{"service_id", "outcome", "status_code"},
+	)
+
+	// httpPoolInFlight is the current number of in-flight backend requests
+	// per service. Together with httpPoolMaxConns this gives pool
+	// saturation: in_flight / max_conns. If saturation stays near 1.0, the
+	// service is pool-bound and needs a bigger profile (or a faster
+	// backend).
+	httpPoolInFlight = observability.RelayerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "http_pool_in_flight",
+			Help:      "Current number of in-flight backend HTTP requests per service",
+		},
+		[]string{"service_id"},
+	)
+
+	// httpPoolWaitSeconds is the time each request waited for a free pool
+	// slot (GetConn -> GotConn). Non-zero values mean the pool is
+	// saturated and requests are queuing.
+	httpPoolWaitSeconds = observability.RelayerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "http_pool_wait_seconds",
+			Help:      "Time spent waiting for a free HTTP pool connection, per service",
+			Buckets:   observability.FineGrainedLatencyBuckets,
+		},
+		[]string{"service_id"},
+	)
+
+	// httpPoolMaxConns is the configured max_conns_per_host for each
+	// service, exported as a gauge so dashboards can compute saturation
+	// percentage without needing to read the config file.
+	httpPoolMaxConns = observability.RelayerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "http_pool_max_conns",
+			Help:      "Configured max_conns_per_host for the service (from pool_profile)",
 		},
 		[]string{"service_id"},
 	)

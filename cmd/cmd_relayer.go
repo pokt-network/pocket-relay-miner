@@ -735,7 +735,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Start health/readiness server
 	if config.HealthCheck.Enabled {
-		healthServer := startHealthServer(ctx, logger, config.HealthCheck.Addr, supplierCache, config)
+		healthServer := startHealthServer(ctx, logger, config.HealthCheck.Addr, supplierCache, config, proxy)
 		defer func() { _ = healthServer.Close() }()
 		logger.Info().Str("addr", config.HealthCheck.Addr).Msg("health/readiness server started")
 	}
@@ -775,7 +775,17 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 }
 
 // startHealthServer starts a simple HTTP server for health and readiness checks.
-func startHealthServer(ctx context.Context, logger logging.Logger, addr string, supplierCache *cache.SupplierCache, config *relayer.Config) *http.Server {
+// The /ready/{service} route delegates to proxy.ServeReadyService so the
+// JSON shape stays identical whether operators hit the health port or the
+// main relay port.
+func startHealthServer(
+	ctx context.Context,
+	logger logging.Logger,
+	addr string,
+	supplierCache *cache.SupplierCache,
+	config *relayer.Config,
+	proxy *relayer.ProxyServer,
+) *http.Server {
 	mux := http.NewServeMux()
 
 	// /health - liveness probe (always returns OK if server is running)
@@ -794,36 +804,13 @@ func startHealthServer(ctx context.Context, logger logging.Logger, addr string, 
 		_, _ = w.Write([]byte("READY"))
 	})
 
-	// /ready/{service} - backend readiness check for a specific service
+	// /ready/{service} - per-service readiness with pool + backend state.
+	// Implementation lives in the relayer package (proxy.ServeReadyService)
+	// so it can read the in-flight gauge and resolve pool profiles without
+	// duplicating logic here.
 	mux.HandleFunc("/ready/", func(w http.ResponseWriter, r *http.Request) {
 		serviceID := strings.TrimPrefix(r.URL.Path, "/ready/")
-		if serviceID == "" {
-			http.Error(w, "service ID required", http.StatusBadRequest)
-			return
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-
-		backendPool := config.GetPool(serviceID, "")
-		if backendPool == nil {
-			w.WriteHeader(http.StatusNotFound)
-			_, _ = fmt.Fprintf(w, `{"status":"not_found","service":"%s"}`, serviceID)
-			return
-		}
-
-		healthy := backendPool.Healthy()
-		all := backendPool.All()
-
-		if len(healthy) == 0 {
-			w.WriteHeader(http.StatusServiceUnavailable)
-			_, _ = fmt.Fprintf(w, `{"status":"unavailable","service":"%s","healthy":0,"total":%d}`,
-				serviceID, len(all))
-			return
-		}
-
-		w.WriteHeader(http.StatusOK)
-		_, _ = fmt.Fprintf(w, `{"status":"ready","service":"%s","healthy":%d,"total":%d}`,
-			serviceID, len(healthy), len(all))
+		proxy.ServeReadyService(w, serviceID)
 	})
 
 	server := &http.Server{

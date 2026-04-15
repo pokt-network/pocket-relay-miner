@@ -166,6 +166,13 @@ properties:
           examples:
             - fast
             - streaming
+        pool_profile:
+          type: string
+          description: Name of HTTP connection pool profile for this service. Pool profiles define max_conns_per_host, max_idle_conns_per_host, and idle_conn_timeout_seconds. Omit to inherit global http_transport defaults.
+          examples:
+            - low
+            - medium
+            - high
         max_body_size_bytes:
           type: integer
           description: Max request/response body size (bytes)
@@ -504,3 +511,23 @@ properties:
           description: Timeout for TLS handshake (seconds)
           minimum: 0
           default: 10
+
+  pool_profiles:
+    type: object
+    description: Per-service HTTP connection pool profiles. Each profile overrides a subset of http_transport pool knobs. Services reference them via pool_profile. Auto-populated with "low" / "medium" / "high" defaults if not specified. Tier values come from sweep-optimal loadtest; re-run on your own infra to retune.
+    additionalProperties:
+      type: object
+      description: A pool profile defining per-service HTTP connection pool sizing
+      properties:
+        max_conns_per_host:
+          type: integer
+          description: Total concurrent connections per backend host (0 inherits global default)
+          minimum: 0
+        max_idle_conns_per_host:
+          type: integer
+          description: Idle (keep-alive) connections retained per host (0 inherits global default)
+          minimum: 0
+        idle_conn_timeout_seconds:
+          type: integer
+          description: How long an idle connection is retained before being closed (0 inherits global default)
+          minimum: 0

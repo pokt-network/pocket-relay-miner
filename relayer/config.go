@@ -72,6 +72,39 @@ func RPCTypeToBackendType(rpcType string) string {
 	}
 }
 
+// PoolProfile defines per-service HTTP connection pool sizing.
+//
+// Different backends have different throughput/latency characteristics, so one
+// global pool size is a poor fit. Fast backends (sub-5ms p99) saturate a tiny
+// pool and waste slots if given a large one; slow backends (hundreds of ms
+// p99) need more in-flight capacity to sustain RPS. Per-service tuning also
+// isolates a misbehaving backend from starving slots meant for healthy ones.
+//
+// Pool profiles are named templates referenced by ServiceConfig.PoolProfile.
+// Zero-valued fields inherit from the global HTTPTransportConfig defaults.
+type PoolProfile struct {
+	// Name is the profile name (e.g., "low", "medium", "high").
+	Name string `yaml:"name,omitempty"`
+
+	// MaxConnsPerHost caps total concurrent connections to a single backend
+	// host (including active + idle). This is the key knob: it bounds how
+	// many in-flight requests we can send to one backend at once.
+	// 0 inherits from HTTPTransportConfig.MaxConnsPerHost.
+	MaxConnsPerHost int `yaml:"max_conns_per_host"`
+
+	// MaxIdleConnsPerHost caps idle (keep-alive) connections retained per
+	// host between requests. Too high wastes memory and file descriptors;
+	// too low causes extra TCP handshakes on bursts.
+	// 0 inherits from HTTPTransportConfig.MaxIdleConnsPerHost.
+	MaxIdleConnsPerHost int `yaml:"max_idle_conns_per_host"`
+
+	// IdleConnTimeoutSeconds controls how long an idle connection is
+	// retained before being closed. Shorter timeouts release resources
+	// faster but cause more reconnects.
+	// 0 inherits from HTTPTransportConfig.IdleConnTimeoutSeconds.
+	IdleConnTimeoutSeconds int64 `yaml:"idle_conn_timeout_seconds"`
+}
+
 // TimeoutProfile defines a complete set of timeout settings for a service.
 // Multiple profiles can be defined to support different service types (fast RPCs vs streaming).
 type TimeoutProfile struct {
@@ -154,6 +187,11 @@ type Config struct {
 	// TimeoutProfiles defines HTTP client timeout profiles.
 	// Auto-populated with "fast" and "streaming" defaults if not specified.
 	TimeoutProfiles map[string]TimeoutProfile `yaml:"timeout_profiles,omitempty"`
+
+	// PoolProfiles defines HTTP connection pool profiles for per-service
+	// sizing. Auto-populated with "low" / "medium" / "high" defaults if not
+	// specified. Services reference them by name via ServiceConfig.PoolProfile.
+	PoolProfiles map[string]PoolProfile `yaml:"pool_profiles,omitempty"`
 
 	// pools is the registry of backend pools, keyed by "serviceID:rpcType".
 	// Built by BuildPools() after validation, not serialized to YAML.
@@ -296,6 +334,11 @@ type ServiceConfig struct {
 	// Must match a profile name in Config.TimeoutProfiles.
 	// If not specified, uses the "fast" profile.
 	TimeoutProfile string `yaml:"timeout_profile,omitempty"`
+
+	// PoolProfile is the name of the HTTP connection pool profile for this
+	// service. Must match a profile name in Config.PoolProfiles. If unset,
+	// the service uses the global HTTPTransportConfig defaults.
+	PoolProfile string `yaml:"pool_profile,omitempty"`
 
 	// MaxBodySizeBytes overrides the default max body size for this service.
 	MaxBodySizeBytes int64 `yaml:"max_body_size_bytes,omitempty"`
@@ -614,6 +657,7 @@ func DefaultConfig() Config {
 				TLSHandshakeTimeoutSeconds:   15,  // Allow more time for TLS
 			},
 		},
+		PoolProfiles: defaultPoolProfiles(),
 		CacheWarmup: CacheWarmupConfig{
 			Enabled:               true, // Enable by default for faster first requests
 			PersistDiscoveredApps: true,
@@ -679,6 +723,11 @@ func (c *Config) Validate() error {
 
 	// Validate and auto-populate timeout profiles
 	if err := c.ValidateTimeoutProfiles(); err != nil {
+		return err
+	}
+
+	// Validate and auto-populate pool profiles
+	if err := c.ValidatePoolProfiles(); err != nil {
 		return err
 	}
 
@@ -826,6 +875,94 @@ func normalizeTimeoutProfile(profile *TimeoutProfile, transportConfig *HTTPTrans
 	if profile.TLSHandshakeTimeoutSeconds == 0 {
 		profile.TLSHandshakeTimeoutSeconds = transportConfig.TLSHandshakeTimeoutSeconds
 	}
+}
+
+// defaultPoolProfiles returns the three built-in pool profiles tuned from
+// the 2026-04-14 backend sweep-optimal loadtest. Operators can override or
+// add more profiles in the YAML config.
+//
+// Tier definitions:
+//   - low:    fast backends (sub-5ms p99) — 9 of 13 staked chains
+//   - medium: moderately latent backends (opbnb, xrplevm)
+//   - high:   slow backends that need many in-flight (op, fuse)
+func defaultPoolProfiles() map[string]PoolProfile {
+	return map[string]PoolProfile{
+		"low": {
+			Name:                   "low",
+			MaxConnsPerHost:        10,
+			MaxIdleConnsPerHost:    5,
+			IdleConnTimeoutSeconds: 90,
+		},
+		"medium": {
+			Name:                   "medium",
+			MaxConnsPerHost:        100,
+			MaxIdleConnsPerHost:    20,
+			IdleConnTimeoutSeconds: 90,
+		},
+		"high": {
+			Name:                   "high",
+			MaxConnsPerHost:        250,
+			MaxIdleConnsPerHost:    50,
+			IdleConnTimeoutSeconds: 90,
+		},
+	}
+}
+
+// ResolvePoolProfile returns the pool profile that should be used for the
+// given service. Lookup order:
+//  1. If the service references a profile by name, return it (after merging
+//     zero-valued fields with HTTPTransportConfig defaults).
+//  2. Otherwise return a synthetic profile built from HTTPTransportConfig
+//     so the global defaults still apply end-to-end.
+//
+// Never returns nil; callers can dereference safely.
+func (c *Config) ResolvePoolProfile(serviceID string) *PoolProfile {
+	svc, ok := c.Services[serviceID]
+	var profile PoolProfile
+	if ok && svc.PoolProfile != "" {
+		if p, exists := c.PoolProfiles[svc.PoolProfile]; exists {
+			profile = p
+		}
+	}
+	// Merge zero-valued fields with global HTTPTransport defaults so the
+	// resolved profile is always complete.
+	if profile.MaxConnsPerHost == 0 {
+		profile.MaxConnsPerHost = c.HTTPTransport.MaxConnsPerHost
+	}
+	if profile.MaxIdleConnsPerHost == 0 {
+		profile.MaxIdleConnsPerHost = c.HTTPTransport.MaxIdleConnsPerHost
+	}
+	if profile.IdleConnTimeoutSeconds == 0 {
+		profile.IdleConnTimeoutSeconds = c.HTTPTransport.IdleConnTimeoutSeconds
+	}
+	return &profile
+}
+
+// ValidatePoolProfiles validates and auto-populates pool profiles.
+func (c *Config) ValidatePoolProfiles() error {
+	if len(c.PoolProfiles) == 0 {
+		c.PoolProfiles = defaultPoolProfiles()
+	}
+	for name, profile := range c.PoolProfiles {
+		if profile.MaxConnsPerHost < 0 {
+			return fmt.Errorf("pool profile %q: max_conns_per_host must be >= 0", name)
+		}
+		if profile.MaxIdleConnsPerHost < 0 {
+			return fmt.Errorf("pool profile %q: max_idle_conns_per_host must be >= 0", name)
+		}
+		if profile.IdleConnTimeoutSeconds < 0 {
+			return fmt.Errorf("pool profile %q: idle_conn_timeout_seconds must be >= 0", name)
+		}
+	}
+	for svcID, svc := range c.Services {
+		if svc.PoolProfile != "" {
+			if _, ok := c.PoolProfiles[svc.PoolProfile]; !ok {
+				return fmt.Errorf("service %s references undefined pool profile %s",
+					svcID, svc.PoolProfile)
+			}
+		}
+	}
+	return nil
 }
 
 // ValidateTimeoutProfiles validates and auto-populates timeout profiles.
