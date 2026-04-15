@@ -11,6 +11,10 @@ Key requirements:
 - **Development Workflow**: dev → main → vX.Y.Z release pipeline
 - **Code Standards**: See CONTRIBUTING.md for mandatory requirements
 - **Testing**: All tests must pass before committing (`make fmt lint test`)
+- **Commit authorship**: Do NOT add `Co-Authored-By: Claude ...` or any
+  AI attribution footer to commit messages. The repository does not
+  attribute AI work in git history — commits are authored as the
+  developer running the session.
 
 This file (CLAUDE.md) provides AI-specific guidance. For general contribution rules, see [CONTRIBUTING.md](CONTRIBUTING.md).
 
@@ -575,6 +579,46 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats  # Inspect all HA keys
 5. **Benchmark**: Verify improvement with concrete numbers
 6. **Document**: Add comments explaining optimization
 
+### Backend RPS Ceiling Loadtest (per-service pool tuning)
+
+`scripts/loadtest/backends.sh` measures how much each upstream RPC
+backend can sustain, finds the optimal concurrency under a p99
+latency budget, and produces a `service → max_conns` table to drive
+per-service pool tuning in the relayer config.
+
+The script reads operator-specific data (URLs, ssh host) from a conf
+file under `scripts/localonly/loadtest/backends.conf` (gitignored).
+Setup:
+
+```bash
+mkdir -p scripts/localonly/loadtest
+cp scripts/loadtest/backends.conf.example scripts/localonly/loadtest/backends.conf
+$EDITOR scripts/localonly/loadtest/backends.conf
+
+# Verify all backends respond
+scripts/loadtest/backends.sh probe
+
+# Find recommended max_conns per service under p99 ≤ 100 ms
+DEFAULT_REQS=20000 MAX_P99_MS=100 \
+  scripts/loadtest/backends.sh sweep-optimal \
+  > /tmp/optimal.csv 2> /tmp/optimal.log
+tail -25 /tmp/optimal.log
+```
+
+Full reference in `scripts/loadtest/README.md`. Key points:
+
+- **Ceiling = max RPS** (no budget) — what the backend can deliver
+  if you don't care about latency. **Use `sweep`.**
+- **Optimal = max RPS bounded by p99** — what to actually configure,
+  because PATH penalises tail latency. **Use `sweep-optimal`.**
+- **Per-replica tuning.** The script measures one client; production
+  uses one pool per relayer replica. The number it returns is
+  exactly the per-replica `max_conns_per_host` value. Scaling
+  replicas multiplies the ceiling, doesn't divide the per-replica
+  setting.
+- Plan for the per-service pool config feature lives in
+  `scripts/localonly/POOL-CONFIG-PLAN.md` (also gitignored).
+
 ### Debugging Redis Issues
 
 **Use the built-in redis command for all Redis debugging:**
@@ -657,6 +701,36 @@ redis-cli HGETALL "ha:smst:session123:nodes"
 3. **Use constant-time comparison** for sensitive data
 4. **Implement rate limiting** to prevent DoS
 5. **Sanitize error messages** exposed to clients
+
+### Operator infrastructure data — NEVER commit
+
+Operator-specific infrastructure data (backend hostnames, IPs, ssh
+host aliases, supplier addresses, on-prem topology, internal node
+URLs, deploy details) **must never appear in tracked files**. This
+includes scripts, configs, READMEs, examples, and code comments.
+
+The `scripts/localonly/` directory is gitignored and is the **only**
+place this data is allowed to live in the repo. When you write a
+script that needs operator data:
+
+1. Put the script itself somewhere tracked (e.g. `scripts/<area>/`)
+2. Make it read its operator-specific config from a file under
+   `scripts/localonly/<area>/`, with an env var override
+3. Ship a `.example` file next to the tracked script that shows the
+   format using **placeholder** values (`my-host`, `node.internal`)
+4. Document the setup in the script's README without naming a real
+   operator
+
+Example: `scripts/loadtest/backends.sh` is tracked and ships
+`backends.conf.example` next to it. The real conf with operator
+URLs lives at `scripts/localonly/loadtest/backends.conf` (gitignored).
+Operators run `cp scripts/loadtest/backends.conf.example scripts/localonly/loadtest/backends.conf`
+and edit in their own data.
+
+Before creating or editing any tracked file, grep for known
+operator strings (hostnames you've seen in the conversation, ssh
+aliases, etc.) to make sure none leaked in. If you discover leakage
+in already-tracked files, fix it immediately and tell the user.
 
 ## Performance Requirements
 

@@ -1,0 +1,40 @@
+# backends.conf — config for scripts/loadtest/backends.sh
+#
+# Copy this file to scripts/localonly/loadtest/backends.conf and edit
+# in your own endpoints. The localonly/ directory is gitignored so your
+# real URLs never get committed.
+#
+#   mkdir -p scripts/localonly/loadtest
+#   cp scripts/loadtest/backends.conf.example scripts/localonly/loadtest/backends.conf
+#   $EDITOR scripts/localonly/loadtest/backends.conf
+#
+# This file is a bash script that gets sourced by backends.sh. It must
+# define SERVICE_URL (associative array). SSH_HOST and BROKEN_BACKENDS
+# are optional.
+
+# SSH_HOST — alias of the host where backends are reachable.
+# Set to "" if backends are reachable from wherever you run the script.
+# When set, backends.sh runs `hey` over ssh inside a docker container
+# with --network host (so it can reach IP-whitelisted internal nodes).
+SSH_HOST="my-relay-host"
+
+# SERVICE_URL — service id → primary HTTP backend URL.
+# One entry per chain you want to load test. The service id should
+# match what your relayer uses (it's just a label, not validated).
+declare -A SERVICE_URL=(
+  [eth]=http://node-eth.internal:8545
+  [poly]=http://node-poly.internal:8560
+  [bsc]=http://node-bsc.internal:8550
+  [op]=http://node-op.internal:9993
+  [avax]=http://node-avax.internal:9650/ext/bc/C/rpc
+  [sui]=http://node-sui.internal:9000
+  # add as many as you stake into
+)
+
+# BROKEN_BACKENDS (optional) — services known broken at the time of
+# config. They're skipped by `sweep` and `sweep-optimal` unless
+# --include-broken is passed. `test` and `ramp` still run them so you
+# can verify a fix.
+declare -A BROKEN_BACKENDS=(
+  # [bsc]="connection timeout — investigating"
+)
