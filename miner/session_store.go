@@ -275,9 +275,23 @@ const (
 )
 
 // encodeSnapshot flattens a SessionSnapshot into a slice of alternating
-// field/value pairs suitable for HSET. Optional fields with zero values
-// are omitted so Save (which DELs first) will not leave stale hash fields.
+// field/value pairs suitable for HSET. Includes ALL fields including counters.
+// Used only for initial session creation (Save on a new key).
 func encodeSnapshot(snap *SessionSnapshot) []any {
+	pairs := encodeSnapshotMetadata(snap)
+	// Include counters only for initial creation
+	pairs = append(pairs,
+		hfRelayCount, strconv.FormatInt(snap.RelayCount, 10),
+		hfTotalComputeUnits, strconv.FormatUint(snap.TotalComputeUnits, 10),
+	)
+	return pairs
+}
+
+// encodeSnapshotMetadata flattens all non-counter fields of a SessionSnapshot.
+// Counter fields (relay_count, total_compute_units) are EXCLUDED because they
+// are owned exclusively by the IncrementRelayCount Lua script via HINCRBY.
+// Writing them from Go would race with concurrent HINCRBY operations.
+func encodeSnapshotMetadata(snap *SessionSnapshot) []any {
 	pairs := []any{
 		hfSessionID, snap.SessionID,
 		hfSupplierOperator, snap.SupplierOperatorAddress,
@@ -286,8 +300,6 @@ func encodeSnapshot(snap *SessionSnapshot) []any {
 		hfSessionStartHeight, strconv.FormatInt(snap.SessionStartHeight, 10),
 		hfSessionEndHeight, strconv.FormatInt(snap.SessionEndHeight, 10),
 		hfState, string(snap.State),
-		hfRelayCount, strconv.FormatInt(snap.RelayCount, 10),
-		hfTotalComputeUnits, strconv.FormatUint(snap.TotalComputeUnits, 10),
 		hfCreatedAt, snap.CreatedAt.Format(time.RFC3339Nano),
 		hfLastUpdatedAt, snap.LastUpdatedAt.Format(time.RFC3339Nano),
 	}
@@ -399,9 +411,15 @@ func decodeSnapshot(fields map[string]string) (*SessionSnapshot, error) {
 
 // --- Core operations ----------------------------------------------------------
 
-// Save persists a session snapshot to Redis as a Hash. The previous key
-// (whether legacy JSON string or prior hash) is DEL'd atomically before
-// the HSet so optional fields that were cleared do not leak across writes.
+// Save persists a session snapshot to Redis as a Hash. Only metadata fields
+// are written — counter fields (relay_count, total_compute_units) are NEVER
+// touched because they are owned exclusively by IncrementRelayCount's Lua
+// script via HINCRBY. Writing counters here would race with concurrent
+// increments and cause lost relay counts under load.
+//
+// For NEW sessions (key does not exist), counters are initialized to their
+// snapshot values via encodeSnapshot. For EXISTING sessions, only metadata
+// fields are upserted via encodeSnapshotMetadata.
 func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot) error {
 	s.mu.Lock()
 	if s.closed {
@@ -432,12 +450,63 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 
 	key := s.sessionKey(snapshot.SessionID)
 
-	// Atomic transaction: drop any legacy/stale key, rewrite as hash,
-	// refresh TTL, update supplier and state indexes in one shot.
+	// Check if key is a legacy JSON string that needs migration.
+	// Legacy keys must be DEL'd before HSET to avoid WRONGTYPE errors.
+	isLegacyKey := false
+	if existingSnapshot != nil {
+		keyType, typeErr := s.redisClient.Type(ctx, key).Result()
+		if typeErr == nil && keyType == "string" {
+			isLegacyKey = true
+		}
+	}
+
 	pipe := s.redisClient.TxPipeline()
 
-	pipe.Del(ctx, key)
-	pipe.HSet(ctx, key, encodeSnapshot(snapshot)...)
+	if isLegacyKey {
+		// Legacy JSON string: must DEL first to avoid WRONGTYPE on HSET.
+		// Write all fields including counters (migration from JSON blob).
+		pipe.Del(ctx, key)
+		pipe.HSet(ctx, key, encodeSnapshot(snapshot)...)
+	} else if existingSnapshot == nil {
+		// New session: write all fields including counters.
+		// No concurrent IncrementRelayCount can be running because the key
+		// doesn't exist yet (the Lua script checks EXISTS first).
+		pipe.HSet(ctx, key, encodeSnapshot(snapshot)...)
+	} else {
+		// Existing hash: write ONLY metadata fields. Counter fields
+		// (relay_count, total_compute_units) are left untouched — they are
+		// owned by the IncrementRelayCount Lua script.
+		pipe.HSet(ctx, key, encodeSnapshotMetadata(snapshot)...)
+
+		// Clean up optional fields that were cleared. Since we no longer
+		// DEL+HSET, stale optional hash fields would persist unless we
+		// explicitly remove them.
+		var staleFields []string
+		if len(snapshot.ClaimedRootHash) == 0 {
+			staleFields = append(staleFields, hfClaimedRootHash)
+		}
+		if snapshot.ClaimTxHash == "" {
+			staleFields = append(staleFields, hfClaimTxHash)
+		}
+		if snapshot.ProofTxHash == "" {
+			staleFields = append(staleFields, hfProofTxHash)
+		}
+		if snapshot.LastWALEntryID == "" {
+			staleFields = append(staleFields, hfLastWALEntryID)
+		}
+		if snapshot.SettlementOutcome == nil {
+			staleFields = append(staleFields, hfSettlementOutcome)
+		}
+		if snapshot.SettlementHeight == nil {
+			staleFields = append(staleFields, hfSettlementHeight)
+		}
+		if snapshot.SettlementTxHash == nil {
+			staleFields = append(staleFields, hfSettlementTxHash)
+		}
+		if len(staleFields) > 0 {
+			pipe.HDel(ctx, key, staleFields...)
+		}
+	}
 	pipe.Expire(ctx, key, s.config.SessionTTL)
 
 	// Supplier-wide session index
@@ -598,22 +667,56 @@ func (s *RedisSessionStore) Delete(ctx context.Context, sessionID string) error 
 // write goes through the same DEL+HSET+index transaction, which also
 // migrates any legacy JSON keys seen during a rolling upgrade.
 func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, newState SessionState) error {
-	snapshot, err := s.Get(ctx, sessionID)
+	key := s.sessionKey(sessionID)
+	now := time.Now().Format(time.RFC3339Nano)
+
+	// Atomically read old state and set new state in one Lua script.
+	// This avoids the Get→modify→Save round-trip that races with
+	// concurrent IncrementRelayCount HINCRBY operations.
+	oldStateStr, err := updateStateScript.Run(
+		ctx,
+		s.redisClient,
+		[]string{key},
+		string(newState),
+		now,
+		int64(s.config.SessionTTL.Seconds()),
+	).Text()
 	if err != nil {
-		return err
-	}
-	if snapshot == nil {
-		return fmt.Errorf("session not found: %s", sessionID)
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "session not found") {
+			return fmt.Errorf("session not found: %s", sessionID)
+		}
+		if strings.Contains(errMsg, "legacy key") {
+			// Legacy JSON string key — fall back to Get→Save migration path
+			snapshot, getErr := s.Get(ctx, sessionID)
+			if getErr != nil {
+				return getErr
+			}
+			if snapshot == nil {
+				return fmt.Errorf("session not found: %s", sessionID)
+			}
+			snapshot.State = newState
+			return s.Save(ctx, snapshot)
+		}
+		return fmt.Errorf("failed to update session state: %w", err)
 	}
 
-	oldState := snapshot.State
+	oldState := SessionState(oldStateStr)
 	if oldState == newState {
 		return nil
 	}
 
-	snapshot.State = newState
-	if err := s.Save(ctx, snapshot); err != nil {
-		return fmt.Errorf("failed to update session state: %w", err)
+	// Update state indexes (add to new, remove from old)
+	pipe := s.redisClient.TxPipeline()
+	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)
+	pipe.Expire(ctx, s.stateIndexKey(newState), s.config.SessionTTL)
+	if oldState != "" {
+		pipe.SRem(ctx, s.stateIndexKey(oldState), sessionID)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID).
+			Msg("failed to update state indexes after state change")
 	}
 
 	s.logger.Debug().
@@ -633,18 +736,17 @@ func (s *RedisSessionStore) UpdateSettlementMetadata(
 	outcome string,
 	height int64,
 ) error {
-	snapshot, err := s.Get(ctx, sessionID)
-	if err != nil {
-		return fmt.Errorf("failed to get session snapshot: %w", err)
-	}
-	if snapshot == nil {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
+	key := s.sessionKey(sessionID)
+	now := time.Now().Format(time.RFC3339Nano)
 
-	snapshot.SettlementOutcome = &outcome
-	snapshot.SettlementHeight = &height
-
-	if err := s.Save(ctx, snapshot); err != nil {
+	pipe := s.redisClient.TxPipeline()
+	pipe.HSet(ctx, key,
+		hfSettlementOutcome, outcome,
+		hfSettlementHeight, strconv.FormatInt(height, 10),
+		hfLastUpdatedAt, now,
+	)
+	pipe.Expire(ctx, key, s.config.SessionTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
 		return fmt.Errorf("failed to update settlement metadata: %w", err)
 	}
 
@@ -659,16 +761,41 @@ func (s *RedisSessionStore) UpdateSettlementMetadata(
 
 // UpdateWALPosition updates the last WAL entry ID for a session.
 func (s *RedisSessionStore) UpdateWALPosition(ctx context.Context, sessionID string, walEntryID string) error {
-	snapshot, err := s.Get(ctx, sessionID)
-	if err != nil {
-		return err
+	key := s.sessionKey(sessionID)
+	now := time.Now().Format(time.RFC3339Nano)
+
+	pipe := s.redisClient.TxPipeline()
+	pipe.HSet(ctx, key, hfLastWALEntryID, walEntryID, hfLastUpdatedAt, now)
+	pipe.Expire(ctx, key, s.config.SessionTTL)
+	if _, err := pipe.Exec(ctx); err != nil {
+		return fmt.Errorf("failed to update WAL position: %w", err)
 	}
-	if snapshot == nil {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-	snapshot.LastWALEntryID = walEntryID
-	return s.Save(ctx, snapshot)
+	return nil
 }
+
+// updateStateScript atomically reads the old state and sets the new state
+// plus last_updated_at on a session hash key. Returns the old state string.
+// This avoids the Get→modify→Save pattern that races with HINCRBY.
+//
+// KEYS[1] = session hash key
+// ARGV[1] = new state
+// ARGV[2] = RFC3339Nano timestamp for last_updated_at
+// ARGV[3] = TTL seconds
+//
+// Returns: old state string, or error "session not found" / "legacy key"
+var updateStateScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then
+	return redis.error_reply('session not found')
+end
+local ktype = redis.call('TYPE', KEYS[1])['ok']
+if ktype ~= 'hash' then
+	return redis.error_reply('legacy key')
+end
+local old_state = redis.call('HGET', KEYS[1], 'state')
+redis.call('HSET', KEYS[1], 'state', ARGV[1], 'last_updated_at', ARGV[2])
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return old_state
+`)
 
 // incrementRelayCountScript atomically increments relay_count and
 // total_compute_units on a session hash key, guarded by the terminal-state

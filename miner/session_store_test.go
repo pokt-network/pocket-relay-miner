@@ -597,6 +597,210 @@ func TestSettlementMetadata_RoundTrip(t *testing.T) {
 	assert.Equal(t, int64(9999), *got.SettlementHeight)
 }
 
+// --- Race Condition Tests ---
+// These tests verify that counter fields (relay_count, total_compute_units)
+// are never clobbered by concurrent Save/UpdateState operations. This was
+// the root cause of reward drops at scale: Save() used DEL+HSET which
+// would wipe counters that IncrementRelayCount's HINCRBY had updated
+// between the Get() and the pipeline Exec().
+
+// TestIncrementRelayCount_RaceWithUpdateState runs IncrementRelayCount and
+// UpdateState concurrently on the same session. Before the fix, UpdateState
+// called Get→modify→Save which did DEL+HSET, wiping relay counts accumulated
+// by concurrent HINCRBY operations.
+func TestIncrementRelayCount_RaceWithUpdateState(t *testing.T) {
+	store, _ := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	saveTestSession(t, store, "sess-race-state", SessionStateActive, 0, 0)
+
+	const incrementors = 100
+	const computeUnitsPerRelay = uint64(10)
+
+	var wg sync.WaitGroup
+
+	// Start incrementors
+	wg.Add(incrementors)
+	for i := 0; i < incrementors; i++ {
+		go func() {
+			defer wg.Done()
+			err := store.IncrementRelayCount(ctx, "sess-race-state", computeUnitsPerRelay)
+			assert.NoError(t, err)
+		}()
+	}
+
+	// Concurrently do state transitions (these used to clobber counters)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		_ = store.UpdateState(ctx, "sess-race-state", SessionStateClaiming)
+	}()
+	go func() {
+		defer wg.Done()
+		_ = store.UpdateState(ctx, "sess-race-state", SessionStateClaimed)
+	}()
+	go func() {
+		defer wg.Done()
+		_ = store.UpdateState(ctx, "sess-race-state", SessionStateProving)
+	}()
+
+	wg.Wait()
+
+	snapshot, err := store.Get(ctx, "sess-race-state")
+	require.NoError(t, err)
+	assert.Equal(t, int64(incrementors), snapshot.RelayCount,
+		"all %d increments must survive concurrent state transitions", incrementors)
+	assert.Equal(t, uint64(incrementors)*computeUnitsPerRelay, snapshot.TotalComputeUnits,
+		"all compute units must survive concurrent state transitions")
+}
+
+// TestIncrementRelayCount_RaceWithSave runs IncrementRelayCount and Save
+// concurrently. Save on an existing hash key must NOT overwrite counter fields.
+func TestIncrementRelayCount_RaceWithSave(t *testing.T) {
+	store, _ := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	saveTestSession(t, store, "sess-race-save", SessionStateActive, 0, 0)
+
+	const incrementors = 100
+	const computeUnitsPerRelay = uint64(5)
+
+	var wg sync.WaitGroup
+
+	// Start incrementors
+	wg.Add(incrementors)
+	for i := 0; i < incrementors; i++ {
+		go func() {
+			defer wg.Done()
+			err := store.IncrementRelayCount(ctx, "sess-race-save", computeUnitsPerRelay)
+			assert.NoError(t, err)
+		}()
+	}
+
+	// Concurrently save metadata changes (e.g., claim tx hash updates)
+	wg.Add(3)
+	for i := 0; i < 3; i++ {
+		txHash := fmt.Sprintf("tx-hash-%d", i)
+		go func() {
+			defer wg.Done()
+			snap, _ := store.Get(ctx, "sess-race-save")
+			if snap != nil {
+				snap.ClaimTxHash = txHash
+				_ = store.Save(ctx, snap)
+			}
+		}()
+	}
+
+	wg.Wait()
+
+	snapshot, err := store.Get(ctx, "sess-race-save")
+	require.NoError(t, err)
+	assert.Equal(t, int64(incrementors), snapshot.RelayCount,
+		"all %d increments must survive concurrent Save calls", incrementors)
+	assert.Equal(t, uint64(incrementors)*computeUnitsPerRelay, snapshot.TotalComputeUnits,
+		"all compute units must survive concurrent Save calls")
+}
+
+// TestUpdateSettlementMetadata_PreservesCounters verifies that settlement
+// metadata updates don't clobber counters.
+func TestUpdateSettlementMetadata_PreservesCounters(t *testing.T) {
+	store, _ := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	// Create session with initial counters (new key, so counters are written)
+	saveTestSession(t, store, "sess-settle-counters", SessionStateActive, 0, 0)
+
+	// Accumulate relays via HINCRBY
+	for i := 0; i < 42; i++ {
+		require.NoError(t, store.IncrementRelayCount(ctx, "sess-settle-counters", 10))
+	}
+
+	// Transition to proved (required for settlement)
+	require.NoError(t, store.UpdateState(ctx, "sess-settle-counters", SessionStateProved))
+
+	// Settlement metadata update must NOT clobber counters
+	require.NoError(t, store.UpdateSettlementMetadata(ctx, "sess-settle-counters", "settled_proven", 9999))
+
+	snapshot, err := store.Get(ctx, "sess-settle-counters")
+	require.NoError(t, err)
+	assert.Equal(t, int64(42), snapshot.RelayCount,
+		"relay count must survive settlement metadata update")
+	assert.Equal(t, uint64(420), snapshot.TotalComputeUnits,
+		"compute units must survive settlement metadata update")
+	require.NotNil(t, snapshot.SettlementOutcome)
+	assert.Equal(t, "settled_proven", *snapshot.SettlementOutcome)
+}
+
+// TestUpdateState_DoesNotClobberCounters verifies UpdateState preserves
+// counter values that were set by IncrementRelayCount.
+func TestUpdateState_DoesNotClobberCounters(t *testing.T) {
+	store, _ := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	saveTestSession(t, store, "sess-state-counters", SessionStateActive, 0, 0)
+
+	// Simulate relay processing: increment counters
+	for i := 0; i < 100; i++ {
+		require.NoError(t, store.IncrementRelayCount(ctx, "sess-state-counters", 10))
+	}
+
+	// Verify counters before state transition
+	snap, err := store.Get(ctx, "sess-state-counters")
+	require.NoError(t, err)
+	assert.Equal(t, int64(100), snap.RelayCount)
+	assert.Equal(t, uint64(1000), snap.TotalComputeUnits)
+
+	// Transition through states (this is the sequence that triggers claim/proof)
+	require.NoError(t, store.UpdateState(ctx, "sess-state-counters", SessionStateClaiming))
+	require.NoError(t, store.UpdateState(ctx, "sess-state-counters", SessionStateClaimed))
+	require.NoError(t, store.UpdateState(ctx, "sess-state-counters", SessionStateProving))
+	require.NoError(t, store.UpdateState(ctx, "sess-state-counters", SessionStateProved))
+
+	// Counters must be exactly the same after all state transitions
+	snap, err = store.Get(ctx, "sess-state-counters")
+	require.NoError(t, err)
+	assert.Equal(t, int64(100), snap.RelayCount,
+		"relay count must survive all state transitions")
+	assert.Equal(t, uint64(1000), snap.TotalComputeUnits,
+		"compute units must survive all state transitions")
+	assert.Equal(t, SessionStateProved, snap.State)
+}
+
+// TestSave_ExistingKey_PreservesCounters verifies that Save on an existing
+// hash key does NOT overwrite relay_count and total_compute_units.
+func TestSave_ExistingKey_PreservesCounters(t *testing.T) {
+	store, _ := setupTestSessionStore(t)
+	ctx := context.Background()
+
+	// Create session and add relays
+	saveTestSession(t, store, "sess-preserve", SessionStateActive, 0, 0)
+	for i := 0; i < 50; i++ {
+		require.NoError(t, store.IncrementRelayCount(ctx, "sess-preserve", 10))
+	}
+
+	// Re-save with metadata change (e.g., adding claim tx hash)
+	// The snapshot from Get has relay_count=50, but the important thing is
+	// that Save does NOT write these counter fields at all.
+	snap, err := store.Get(ctx, "sess-preserve")
+	require.NoError(t, err)
+	snap.ClaimTxHash = "0xabc123"
+	require.NoError(t, store.Save(ctx, snap))
+
+	// Even more increments after the Save
+	for i := 0; i < 25; i++ {
+		require.NoError(t, store.IncrementRelayCount(ctx, "sess-preserve", 10))
+	}
+
+	// Final check: 50 + 25 = 75 relays
+	snap, err = store.Get(ctx, "sess-preserve")
+	require.NoError(t, err)
+	assert.Equal(t, int64(75), snap.RelayCount,
+		"all increments before and after Save must be preserved")
+	assert.Equal(t, uint64(750), snap.TotalComputeUnits)
+	assert.Equal(t, "0xabc123", snap.ClaimTxHash,
+		"metadata from Save must be persisted")
+}
+
 // testLogger returns a no-op logger for tests.
 func testLogger() logging.Logger {
 	return logging.NewLoggerFromConfig(logging.DefaultConfig())
