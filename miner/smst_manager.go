@@ -87,8 +87,10 @@ func (m *RedisSMSTManager) GetOrCreateTree(ctx context.Context, sessionID string
 		return tree, nil
 	}
 
-	// Create a new Redis-backed tree
-	store := NewRedisMapStore(ctx, m.redisClient, sessionID)
+	// Create a new Redis-backed tree. The store scopes Redis keys to
+	// (supplier, sessionID) so that multiple suppliers participating in the
+	// same session do NOT overwrite each other's SMST nodes.
+	store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
 	trie := smt.NewSparseMerkleSumTrie(store, protocol.NewTrieHasher(), protocol.SMTValueHasher())
 
 	tree := &redisSMST{
@@ -102,7 +104,7 @@ func (m *RedisSMSTManager) GetOrCreateTree(ctx context.Context, sessionID string
 	// Set TTL on the SMST hash key at creation time (not per-relay).
 	// This is a backup safety net; manual deletion happens in OnSessionProved.
 	if m.config.CacheTTL > 0 {
-		hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
+		hashKey := m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID)
 		if err := m.redisClient.Expire(ctx, hashKey, m.config.CacheTTL).Err(); err != nil {
 			m.logger.Warn().
 				Err(err).
@@ -244,7 +246,7 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 	}
 
 	// Store the claimed root in Redis for HA failover recovery
-	rootKey := m.redisClient.KB().SMSTRootKey(sessionID)
+	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 	if err := m.redisClient.Set(ctx, rootKey, tree.claimedRoot, 0).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
@@ -254,7 +256,7 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 	}
 
 	// Store count and sum in Redis for HA warmup
-	statsKey := m.redisClient.KB().SMSTStatsKey(sessionID)
+	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
 	statsValue := fmt.Sprintf("%d:%d", tree.claimedCount, tree.claimedSum)
 	if err := m.redisClient.Set(ctx, statsKey, statsValue, 0).Err(); err != nil {
 		m.logger.Warn().
@@ -280,7 +282,15 @@ func (m *RedisSMSTManager) GetTreeRoot(ctx context.Context, sessionID string) (r
 	m.treesMu.RUnlock()
 
 	if !exists {
-		return nil, fmt.Errorf("session %s not found", sessionID)
+		// HA failover: tree not in memory, try lazy-load from Redis
+		loaded, loadErr := m.loadTreeFromRedis(ctx, sessionID)
+		if loadErr != nil {
+			return nil, fmt.Errorf("session %s not found in memory or Redis: %w", sessionID, loadErr)
+		}
+		tree = loaded
+		m.logger.Info().
+			Str(logging.FieldSessionID, sessionID).
+			Msg("lazy-loaded SMST tree from Redis for GetTreeRoot (HA failover recovery)")
 	}
 
 	tree.mu.Lock()
@@ -301,7 +311,19 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 	m.treesMu.RUnlock()
 
 	if !exists {
-		return nil, fmt.Errorf("session %s not found", sessionID)
+		// HA failover recovery: the tree exists in Redis but is not in local
+		// memory because this miner became leader after the original leader
+		// already flushed the SMST. Lazy-load the tree from Redis so proofs
+		// can be generated after leadership changes.
+		loaded, loadErr := m.loadTreeFromRedis(ctx, sessionID)
+		if loadErr != nil {
+			return nil, fmt.Errorf("session %s not found in memory or Redis: %w", sessionID, loadErr)
+		}
+		tree = loaded
+		m.logger.Info().
+			Str(logging.FieldSessionID, sessionID).
+			Str("claimed_root_hex", fmt.Sprintf("%x", tree.claimedRoot)).
+			Msg("lazy-loaded SMST tree from Redis for proof generation (HA failover recovery)")
 	}
 
 	tree.mu.Lock()
@@ -358,12 +380,74 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 	return proofBz, nil
 }
 
+// loadTreeFromRedis reconstructs an SMST tree from Redis for HA failover.
+// When the leader changes after a session has been flushed but before its
+// proof is submitted, the new leader does not have the tree in local memory.
+// This function lazy-loads the tree from Redis so the new leader can
+// continue processing proofs for in-flight sessions.
+//
+// Returns an error if the required Redis keys (claimed root + stats) are
+// missing, which means the tree was never flushed or has already been
+// cleaned up.
+func (m *RedisSMSTManager) loadTreeFromRedis(ctx context.Context, sessionID string) (*redisSMST, error) {
+	// Check if the claimed root exists in Redis — this is the signal that
+	// the tree was successfully flushed and is ready for proof generation.
+	// Keyed by (supplier, session) so each supplier's tree is isolated.
+	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
+	rootBytes, err := m.redisClient.Get(ctx, rootKey).Bytes()
+	if err != nil || len(rootBytes) == 0 {
+		return nil, fmt.Errorf("claimed root not found in Redis: %w", err)
+	}
+
+	// Create the Redis-backed store (lazy-loads nodes on demand)
+	store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
+	// Import with the known claimed root so the tree knows where to start —
+	// nodes are lazy-loaded from Redis as needed during ProveClosest.
+	// Using NewSparseMerkleSumTrie instead would produce an empty tree with
+	// all-zero root, causing ProveClosest to fail with a "root mismatch" error.
+	trie := smt.ImportSparseMerkleSumTrie(
+		store,
+		protocol.NewTrieHasher(),
+		rootBytes,
+		protocol.SMTValueHasher(),
+	)
+
+	tree := &redisSMST{
+		sessionID:   sessionID,
+		trie:        trie,
+		store:       store,
+		claimedRoot: rootBytes,
+	}
+
+	// Restore count/sum from stats key
+	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
+	if statsValue, statsErr := m.redisClient.Get(ctx, statsKey).Result(); statsErr == nil {
+		var count, sum uint64
+		if _, parseErr := fmt.Sscanf(statsValue, "%d:%d", &count, &sum); parseErr == nil {
+			tree.claimedCount = count
+			tree.claimedSum = sum
+		}
+	}
+
+	// Store in local cache — use double-check pattern to avoid overwriting
+	// if another goroutine loaded it first.
+	m.treesMu.Lock()
+	if existing, ok := m.trees[sessionID]; ok {
+		m.treesMu.Unlock()
+		return existing, nil
+	}
+	m.trees[sessionID] = tree
+	m.treesMu.Unlock()
+
+	return tree, nil
+}
+
 // SetTreeTTL sets a TTL on the Redis SMST hash, root, and stats for a session.
 // This is called after successful settlement to ensure cleanup without losing proof data prematurely.
 func (m *RedisSMSTManager) SetTreeTTL(ctx context.Context, sessionID string, ttl time.Duration) error {
-	hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
-	rootKey := m.redisClient.KB().SMSTRootKey(sessionID)
-	statsKey := m.redisClient.KB().SMSTStatsKey(sessionID)
+	hashKey := m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID)
+	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
+	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
 
 	// Set TTL on nodes hash, root, and stats
 	if err := m.redisClient.Expire(ctx, hashKey, ttl).Err(); err != nil {
@@ -392,10 +476,12 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	// Remove from memory
 	delete(m.trees, sessionID)
 
-	// Remove nodes hash, root, and stats from Redis
-	hashKey := m.redisClient.KB().SMSTNodesKey(sessionID)
-	rootKey := m.redisClient.KB().SMSTRootKey(sessionID)
-	statsKey := m.redisClient.KB().SMSTStatsKey(sessionID)
+	// Remove nodes hash, root, and stats from Redis. Keys are scoped by
+	// (supplier, sessionID), so this delete only affects THIS supplier —
+	// other suppliers participating in the same session are unaffected.
+	hashKey := m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID)
+	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
+	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
 	if err := m.redisClient.Del(ctx, hashKey, rootKey, statsKey).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
@@ -418,12 +504,20 @@ func (m *RedisSMSTManager) GetTreeCount() int {
 	return len(m.trees)
 }
 
-// WarmupFromRedis scans Redis for existing SMST keys and loads them into memory.
-// This is called on startup or leader election to restore state after restart/failover.
+// WarmupFromRedis scans Redis for existing SMST keys and bulk-loads them into memory.
+//
+// NOTE: This function is currently NOT called on startup or leader change —
+// lazy-loading (via GetOrCreateTree for relays, loadTreeFromRedis for proofs)
+// is preferred because it avoids a full Redis SCAN (which can take 10-20 min
+// at scale). It remains available for scenarios where an eager warmup is
+// needed (e.g., operational tooling). If you're debugging missing-session
+// issues after a leader change, check the lazy-load paths in ProveClosest /
+// GetTreeRoot / loadTreeFromRedis first.
 func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 	m.logger.Info().Msg("warming up SMST trees from Redis")
 
-	// Scan for SMST keys matching pattern ha:smst:*:nodes
+	// Scan for SMST keys matching pattern {base}:smst:*:*:nodes and keep
+	// only those belonging to THIS manager's supplier.
 	var cursor uint64
 	var loadedCount int
 	smstPrefix := m.redisClient.KB().SMSTNodesPrefix()
@@ -435,10 +529,23 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 		}
 
 		for _, hashKey := range keys {
-			// Extract session ID from key: {prefix}:smst:{sessionID}:nodes
-			// Remove prefix and suffix ":nodes"
-			sessionID := strings.TrimPrefix(hashKey, smstPrefix)
-			sessionID = strings.TrimSuffix(sessionID, ":nodes")
+			// Parse key as: {prefix}{supplierAddress}:{sessionID}:nodes
+			suffix := strings.TrimPrefix(hashKey, smstPrefix)
+			suffix = strings.TrimSuffix(suffix, ":nodes")
+			// suffix is now "{supplierAddress}:{sessionID}"
+			colonIdx := strings.IndexByte(suffix, ':')
+			if colonIdx <= 0 || colonIdx == len(suffix)-1 {
+				m.logger.Debug().Str("key", hashKey).Msg("skipping malformed SMST key during warmup")
+				continue
+			}
+			keySupplier := suffix[:colonIdx]
+			sessionID := suffix[colonIdx+1:]
+
+			// Only warm up trees for THIS supplier — other suppliers have
+			// their own RedisSMSTManager instance.
+			if keySupplier != m.config.SupplierAddress {
+				continue
+			}
 
 			// Check if tree already exists in memory
 			m.treesMu.RLock()
@@ -450,7 +557,7 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 			}
 
 			// Create RedisMapStore for this session (doesn't load data yet)
-			store := NewRedisMapStore(ctx, m.redisClient, sessionID)
+			store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
 
 			// Create SMST with the Redis store
 			// The SMT library will lazy-load nodes from Redis as needed
@@ -463,7 +570,7 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 			}
 
 			// Restore the claimed root from Redis if it exists
-			rootKey := m.redisClient.KB().SMSTRootKey(sessionID)
+			rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 			rootBytes, err := m.redisClient.Get(ctx, rootKey).Bytes()
 			if err == nil && len(rootBytes) > 0 {
 				tree.claimedRoot = rootBytes
@@ -473,7 +580,7 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 					Msg("restored claimed root from Redis")
 
 				// Restore count and sum from Redis
-				statsKey := m.redisClient.KB().SMSTStatsKey(sessionID)
+				statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
 				statsValue, statsErr := m.redisClient.Get(ctx, statsKey).Result()
 				if statsErr == nil {
 					var count, sum uint64

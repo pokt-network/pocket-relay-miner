@@ -253,6 +253,19 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	logger = logging.ForMinerDynamic(logger, instanceID, globalLeader)
 	logger.Info().Msg("miner context initialized")
 
+	// One-time migration of SMST keys written under the legacy shared-session
+	// schema (pre-per-supplier fix). For any session whose shared root key
+	// matches exactly one supplier's stored `claimed_root_hash`, rename the
+	// three legacy keys under the new per-supplier schema so that supplier's
+	// lazy-load can complete proof generation. Other suppliers in the same
+	// session cannot be rescued — their trees were overwritten by the last
+	// flusher — and their claims will expire once. The migration is a no-op
+	// on clusters that have never run the legacy code, and idempotent on
+	// re-runs (all keys already in the new schema are skipped).
+	if _, migrateErr := miner.MigrateLegacySMSTKeys(ctx, logger, redisClient); migrateErr != nil {
+		logger.Warn().Err(migrateErr).Msg("legacy SMST migration encountered errors (continuing startup)")
+	}
+
 	// Start SupplierWorker for ALL miners
 	// This runs BEFORE leader callbacks - every miner claims and processes its share of suppliers.
 	// If there's only 1 miner, it claims all suppliers.

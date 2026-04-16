@@ -304,38 +304,45 @@ func (kb *KeyBuilder) DiscoveredAppsKey() string {
 }
 
 // SMSTNodesKey builds the key for SMST tree nodes hash.
-// Format: {base}:smst:{sessionID}:nodes
-// Example: "ha:smst:session123:nodes"
-func (kb *KeyBuilder) SMSTNodesKey(sessionID string) string {
-	return fmt.Sprintf("%s:smst:%s:nodes", kb.ns.BasePrefix, sessionID)
+// Format: {base}:smst:{supplierAddress}:{sessionID}:nodes
+// Example: "ha:smst:pokt1abc:session123:nodes"
+//
+// The supplier address MUST be part of the key. Multiple suppliers can
+// participate in the same session, and each has its own distinct SMST
+// tree. Keying only by sessionID caused a last-write-wins collision that
+// drained supplier stake on leader failover (see 2026-04-16 incident).
+func (kb *KeyBuilder) SMSTNodesKey(supplierAddress, sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:%s:nodes", kb.ns.BasePrefix, supplierAddress, sessionID)
 }
 
 // SMSTNodesPattern builds the pattern for scanning all SMST node keys.
-// Format: {base}:smst:*:nodes
-// Example: "ha:smst:*:nodes"
+// Format: {base}:smst:*:*:nodes
+// Example: "ha:smst:*:*:nodes"
 func (kb *KeyBuilder) SMSTNodesPattern() string {
-	return fmt.Sprintf("%s:smst:*:nodes", kb.ns.BasePrefix)
+	return fmt.Sprintf("%s:smst:*:*:nodes", kb.ns.BasePrefix)
 }
 
-// SMSTNodesPrefix builds the prefix for SMST node keys (for extracting sessionID).
+// SMSTNodesPrefix builds the prefix for SMST node keys (for extracting supplier + sessionID).
 // Format: {base}:smst:
 // Example: "ha:smst:"
+//
+// Callers parse the suffix as "{supplierAddress}:{sessionID}:nodes".
 func (kb *KeyBuilder) SMSTNodesPrefix() string {
 	return fmt.Sprintf("%s:smst:", kb.ns.BasePrefix)
 }
 
 // SMSTRootKey builds the key for storing the claimed root hash.
-// Format: {base}:smst:{sessionID}:root
-// Example: "ha:smst:session123:root"
-func (kb *KeyBuilder) SMSTRootKey(sessionID string) string {
-	return fmt.Sprintf("%s:smst:%s:root", kb.ns.BasePrefix, sessionID)
+// Format: {base}:smst:{supplierAddress}:{sessionID}:root
+// Example: "ha:smst:pokt1abc:session123:root"
+func (kb *KeyBuilder) SMSTRootKey(supplierAddress, sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:%s:root", kb.ns.BasePrefix, supplierAddress, sessionID)
 }
 
 // SMSTStatsKey builds the key for storing tree statistics (count and sum).
-// Format: {base}:smst:{sessionID}:stats
-// Example: "ha:smst:session123:stats"
-func (kb *KeyBuilder) SMSTStatsKey(sessionID string) string {
-	return fmt.Sprintf("%s:smst:%s:stats", kb.ns.BasePrefix, sessionID)
+// Format: {base}:smst:{supplierAddress}:{sessionID}:stats
+// Example: "ha:smst:pokt1abc:session123:stats"
+func (kb *KeyBuilder) SMSTStatsKey(supplierAddress, sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:%s:stats", kb.ns.BasePrefix, supplierAddress, sessionID)
 }
 
 // ServiceFactorDefaultKey builds the key for the default service factor.

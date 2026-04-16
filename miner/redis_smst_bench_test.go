@@ -57,7 +57,7 @@ func (s *RedisSMSTBenchSuite) Cleanup() {
 }
 
 func (s *RedisSMSTBenchSuite) createTestRedisStore(sessionID string) *RedisMapStore {
-	store := NewRedisMapStore(s.ctx, s.redisClient, sessionID)
+	store := NewRedisMapStore(s.ctx, s.redisClient, "pokt1bench_mapstore_default", sessionID)
 	redisStore, ok := store.(*RedisMapStore)
 	if !ok {
 		panic("NewRedisMapStore should return *RedisMapStore")

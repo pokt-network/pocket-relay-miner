@@ -191,7 +191,7 @@ func (s *RedisSMSTTestSuite) TestRedisMapStore_HexEncoding() {
 
 	// Verify the key is actually hex-encoded in Redis
 	hexKey := hex.EncodeToString(binaryKey)
-	hashKey := s.redisClient.KB().SMSTNodesKey("test-session-hex-encoding")
+	hashKey := s.redisClient.KB().SMSTNodesKey(testMapStoreSupplier, "test-session-hex-encoding")
 
 	// Get directly from Redis to verify hex encoding
 	redisValue, err := s.redisClient.HGet(s.ctx, hashKey, hexKey).Bytes()
@@ -218,7 +218,7 @@ func (s *RedisSMSTTestSuite) TestRedisMapStore_Pipeline_Buffer() {
 
 	// Values should NOT be in Redis yet (buffered)
 	// Check directly in Redis
-	hashKey := s.redisClient.KB().SMSTNodesKey("test-session-pipeline-buffer")
+	hashKey := s.redisClient.KB().SMSTNodesKey(testMapStoreSupplier, "test-session-pipeline-buffer")
 	exists, err := s.redisClient.HExists(s.ctx, hashKey, hex.EncodeToString([]byte("key1"))).Result()
 	s.Require().NoError(err)
 	s.Require().False(exists, "values should be buffered, not written to Redis yet")

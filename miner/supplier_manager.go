@@ -610,7 +610,7 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 			}
 
 			activeCount++
-			smstKey := m.config.RedisClient.KB().SMSTNodesKey(session.SessionID)
+			smstKey := m.config.RedisClient.KB().SMSTNodesKey(supplier, session.SessionID)
 			exists, _ := m.config.RedisClient.Exists(ctx, smstKey).Result()
 
 			if exists == 0 && session.RelayCount > 0 {
@@ -791,13 +791,15 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		},
 	)
 
-	// NOTE: SMST warmup removed - trees are lazy-loaded on first relay via GetOrCreateTree()
-	// The SMT library lazy-loads nodes from Redis, so warmup only created empty shell objects.
-	// Lazy loading is instant (no SCAN overhead) and reduces startup time by 10-20 minutes.
-	// HA failover works identically: new instance reads SMST data from Redis on first relay.
+	// SMST trees are lazy-loaded from Redis on-demand:
+	//   - UpdateTree (relay path) → GetOrCreateTree creates/loads tree from Redis
+	//   - ProveClosest / GetTreeRoot → loadTreeFromRedis for HA failover recovery
+	//     (when this miner becomes leader AFTER the original leader already flushed
+	//      the SMST and moved to proof submission)
+	// The SMT library itself lazy-loads nodes from Redis as needed.
 	m.logger.Debug().
 		Str(logging.FieldSupplier, operatorAddr).
-		Msg("SMST manager ready (will lazy-load trees on first relay)")
+		Msg("SMST manager ready (lazy-loads trees on first operation: relay, proof, or recovery)")
 
 	// Create supplier client for claim/proof submission
 	var supplierClient *tx.HASupplierClient

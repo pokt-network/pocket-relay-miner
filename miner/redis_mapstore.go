@@ -28,7 +28,7 @@ import (
 //
 // Redis Hash Structure:
 //
-//	Key: Built via KeyBuilder.SMSTNodesKey(sessionID)
+//	Key: Built via KeyBuilder.SMSTNodesKey(supplierAddress, sessionID)
 //	Fields: hex-encoded SMST node keys
 //	Values: raw SMST node data
 type RedisMapStore struct {
@@ -42,12 +42,15 @@ type RedisMapStore struct {
 	pipelineBuffer  map[string][]byte // field -> value buffer
 }
 
-// NewRedisMapStore creates a new Redis-backed MapStore for a session.
+// NewRedisMapStore creates a new Redis-backed MapStore for a (supplier, session) pair.
 // The store uses a Redis hash to persist SMST nodes, enabling shared access across HA instances.
 //
 // Parameters:
 //   - ctx: Context for Redis operations
 //   - redisClient: Redis client (supports standalone, sentinel, and cluster)
+//   - supplierAddress: Supplier operator address — required to namespace the hash per
+//     supplier so distinct suppliers participating in the same session do not
+//     overwrite each other's SMST nodes.
 //   - sessionID: Unique session identifier used to namespace the Redis hash
 //
 // Returns:
@@ -56,11 +59,12 @@ type RedisMapStore struct {
 func NewRedisMapStore(
 	ctx context.Context,
 	redisClient *redisutil.Client,
+	supplierAddress string,
 	sessionID string,
 ) kvstore.MapStore {
 	return &RedisMapStore{
 		redisClient:    redisClient,
-		hashKey:        redisClient.KB().SMSTNodesKey(sessionID),
+		hashKey:        redisClient.KB().SMSTNodesKey(supplierAddress, sessionID),
 		ctx:            ctx,
 		pipelineBuffer: make(map[string][]byte),
 	}

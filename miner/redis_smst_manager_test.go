@@ -155,7 +155,8 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_MaxHeight() {
 // Ported from poktroll's TestSMST_OrphanRemoval.
 // Note: This is more of a verification that operations don't leak memory/Redis keys.
 func (s *RedisSMSTTestSuite) TestRedisSMSTManager_OrphanCleanup() {
-	manager := s.createTestRedisSMSTManager("pokt1test_orphan_cleanup")
+	supplierAddr := "pokt1test_orphan_cleanup"
+	manager := s.createTestRedisSMSTManager(supplierAddr)
 	sessionID := "session_orphan_cleanup"
 
 	// Insert multiple keys
@@ -178,7 +179,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_OrphanCleanup() {
 	s.Require().Equal(0, manager.GetTreeCount())
 
 	// Verify Redis hash is deleted
-	hashKey := s.redisClient.KB().SMSTNodesKey(sessionID)
+	hashKey := s.redisClient.KB().SMSTNodesKey(supplierAddr, sessionID)
 	exists, err := s.redisClient.Exists(s.ctx, hashKey).Result()
 	s.Require().NoError(err)
 	s.Require().Equal(int64(0), exists, "Redis hash should be deleted")
@@ -437,7 +438,8 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_WarmupMultipleTrees() {
 
 // TestRedisSMSTManager_DeleteTree tests deleting from memory and Redis.
 func (s *RedisSMSTTestSuite) TestRedisSMSTManager_DeleteTree() {
-	manager := s.createTestRedisSMSTManager("pokt1test_delete_tree")
+	supplierAddr := "pokt1test_delete_tree"
+	manager := s.createTestRedisSMSTManager(supplierAddr)
 	sessionID := "session_delete_tree"
 
 	// Create tree
@@ -447,7 +449,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_DeleteTree() {
 	// Verify exists
 	s.Require().Equal(1, manager.GetTreeCount())
 
-	hashKey := s.redisClient.KB().SMSTNodesKey(sessionID)
+	hashKey := s.redisClient.KB().SMSTNodesKey(supplierAddr, sessionID)
 	exists, err := s.redisClient.Exists(s.ctx, hashKey).Result()
 	s.Require().NoError(err)
 	s.Require().Equal(int64(1), exists, "Redis hash should exist")
@@ -467,7 +469,8 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_DeleteTree() {
 
 // TestRedisSMSTManager_SetTreeTTL tests TTL expiration logic.
 func (s *RedisSMSTTestSuite) TestRedisSMSTManager_SetTreeTTL() {
-	manager := s.createTestRedisSMSTManager("pokt1test_set_ttl")
+	supplierAddr := "pokt1test_set_ttl"
+	manager := s.createTestRedisSMSTManager(supplierAddr)
 	sessionID := "session_set_ttl"
 
 	// Create tree
@@ -480,7 +483,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_SetTreeTTL() {
 	s.Require().NoError(err)
 
 	// Verify TTL was set in Redis
-	hashKey := s.redisClient.KB().SMSTNodesKey(sessionID)
+	hashKey := s.redisClient.KB().SMSTNodesKey(supplierAddr, sessionID)
 	ttlResult, err := s.redisClient.TTL(s.ctx, hashKey).Result()
 	s.Require().NoError(err)
 	s.Require().Greater(ttlResult.Seconds(), float64(0), "TTL should be set")
@@ -827,4 +830,142 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_Sealing_FlushStability() {
 		s.Require().Equal(uint64(numRelays), count, "count should be stable")
 		s.Require().Equal(uint64((numRelays*(numRelays+1)/2)*100), sum, "sum should be stable")
 	}
+}
+
+// TestRedisSMSTManager_ProveClosest_LazyLoadAfterFailover simulates the HA
+// failover scenario: original leader flushes the tree and crashes, new leader
+// takes over and must generate a proof. With lazy-loading in ProveClosest,
+// the new leader reconstructs the tree from Redis on-demand.
+//
+// This reproduces the bug found during chaos testing where proofs failed with
+// "session X not found" because the new leader did not call WarmupFromRedis.
+func (s *RedisSMSTTestSuite) TestRedisSMSTManager_ProveClosest_LazyLoadAfterFailover() {
+	supplierAddr := "pokt1test_ha_failover"
+	sessionID := "session_ha_failover"
+
+	// Leader 1: populate tree and flush (simulates claim submission)
+	leader1 := s.createTestRedisSMSTManager(supplierAddr)
+	relays := s.generateTestRelays(20, 42)
+	for _, relay := range relays {
+		err := leader1.UpdateTree(s.ctx, sessionID, relay.key, relay.value, relay.weight)
+		s.Require().NoError(err)
+	}
+	root1, err := leader1.FlushTree(s.ctx, sessionID)
+	s.Require().NoError(err)
+	s.Require().NotEmpty(root1, "flush should produce a root hash")
+
+	// Simulate crash: leader1 disappears. Create a fresh manager (leader2)
+	// WITHOUT calling WarmupFromRedis — this mimics the real production code
+	// path where warmup is not invoked on leader change.
+	leader2 := s.createTestRedisSMSTManager(supplierAddr)
+	s.Require().Equal(0, leader2.GetTreeCount(), "leader2 starts empty")
+
+	// Leader2 tries to generate a proof for a session it never saw.
+	// Before fix: fails with "session not found".
+	// After fix: lazy-loads from Redis and succeeds.
+	proofPath := s.generateKnownBitPath("all_zeros") // 32-byte path
+	proof, err := leader2.ProveClosest(s.ctx, sessionID, proofPath)
+	s.Require().NoError(err, "ProveClosest should lazy-load tree from Redis")
+	s.Require().NotEmpty(proof, "proof should be generated")
+
+	// After lazy-load, tree is now in leader2's memory
+	s.Require().Equal(1, leader2.GetTreeCount(), "tree should be loaded into memory")
+
+	// Verify the root hash matches what leader1 had
+	root2, err := leader2.GetTreeRoot(s.ctx, sessionID)
+	s.Require().NoError(err)
+	s.assertRootHashEqual(root1, root2, "lazy-loaded tree should have same root as original")
+}
+
+// TestRedisSMSTManager_ProveClosest_MissingInRedis verifies that lazy-load
+// returns a clear error when the session was never flushed (no claimed root
+// in Redis) — don't silently succeed with a bogus tree.
+func (s *RedisSMSTTestSuite) TestRedisSMSTManager_ProveClosest_MissingInRedis() {
+	manager := s.createTestRedisSMSTManager("pokt1test_missing")
+
+	// Try to prove a session that doesn't exist anywhere
+	_, err := manager.ProveClosest(s.ctx, "nonexistent_session", []byte("any_key"))
+	s.Require().Error(err, "should fail when session not in memory or Redis")
+	s.Require().Contains(err.Error(), "not found", "error should clearly indicate missing session")
+}
+
+// TestRedisSMSTManager_GetTreeRoot_LazyLoadAfterFailover verifies that
+// GetTreeRoot also lazy-loads from Redis for the same HA failover scenario.
+func (s *RedisSMSTTestSuite) TestRedisSMSTManager_GetTreeRoot_LazyLoadAfterFailover() {
+	supplierAddr := "pokt1test_gettreeroot_ha"
+	sessionID := "session_gettreeroot_ha"
+
+	// Leader 1: populate and flush
+	leader1 := s.createTestRedisSMSTManager(supplierAddr)
+	relays := s.generateTestRelays(15, 77)
+	for _, relay := range relays {
+		err := leader1.UpdateTree(s.ctx, sessionID, relay.key, relay.value, relay.weight)
+		s.Require().NoError(err)
+	}
+	root1, err := leader1.FlushTree(s.ctx, sessionID)
+	s.Require().NoError(err)
+
+	// Leader 2: fresh instance, no warmup
+	leader2 := s.createTestRedisSMSTManager(supplierAddr)
+
+	// GetTreeRoot should lazy-load from Redis
+	root2, err := leader2.GetTreeRoot(s.ctx, sessionID)
+	s.Require().NoError(err, "GetTreeRoot should lazy-load on HA failover")
+	s.assertRootHashEqual(root1, root2, "lazy-loaded root should match")
+
+	// Tree should now be in memory
+	s.Require().Equal(1, leader2.GetTreeCount())
+}
+
+// TestRedisSMSTManager_LazyLoad_ConcurrentSafe verifies that concurrent
+// lazy-load calls from multiple goroutines don't create duplicate trees or
+// race. This matters because multiple proofs may be submitted in parallel
+// via the transitionSubpool.
+func (s *RedisSMSTTestSuite) TestRedisSMSTManager_LazyLoad_ConcurrentSafe() {
+	supplierAddr := "pokt1test_concurrent_load"
+	sessionID := "session_concurrent_load"
+
+	// Populate and flush with leader1
+	leader1 := s.createTestRedisSMSTManager(supplierAddr)
+	relays := s.generateTestRelays(10, 55)
+	for _, relay := range relays {
+		err := leader1.UpdateTree(s.ctx, sessionID, relay.key, relay.value, relay.weight)
+		s.Require().NoError(err)
+	}
+	root1, err := leader1.FlushTree(s.ctx, sessionID)
+	s.Require().NoError(err)
+
+	// Fresh leader2, no warmup
+	leader2 := s.createTestRedisSMSTManager(supplierAddr)
+
+	// Spawn N concurrent ProveClosest calls for the same session
+	const numGoroutines = 20
+	type result struct {
+		proof []byte
+		err   error
+	}
+	results := make(chan result, numGoroutines)
+
+	proofPath := s.generateKnownBitPath("alternating") // 32-byte path
+	for i := 0; i < numGoroutines; i++ {
+		go func() {
+			proof, err := leader2.ProveClosest(s.ctx, sessionID, proofPath)
+			results <- result{proof: proof, err: err}
+		}()
+	}
+
+	// Collect all results
+	for i := 0; i < numGoroutines; i++ {
+		r := <-results
+		s.Require().NoError(r.err, "concurrent ProveClosest should all succeed")
+		s.Require().NotEmpty(r.proof)
+	}
+
+	// Exactly ONE tree in memory despite N concurrent loads
+	s.Require().Equal(1, leader2.GetTreeCount(), "concurrent lazy-loads must not create duplicate trees")
+
+	// Root still matches leader1's
+	root2, err := leader2.GetTreeRoot(s.ctx, sessionID)
+	s.Require().NoError(err)
+	s.assertRootHashEqual(root1, root2)
 }

@@ -71,9 +71,15 @@ func (s *RedisSMSTTestSuite) TearDownSuite() {
 
 // Helper Functions
 
+// testMapStoreSupplier is the default supplier address used by the low-level
+// RedisMapStore tests. These tests exercise raw hash operations, not supplier
+// semantics, so they all share one supplier scope. Tests that need to assert
+// supplier-isolation (multi-supplier) set their own addresses explicitly.
+const testMapStoreSupplier = "pokt1test_mapstore_default_supplier"
+
 // createTestRedisStore creates a RedisMapStore for testing.
 func (s *RedisSMSTTestSuite) createTestRedisStore(sessionID string) *RedisMapStore {
-	store := NewRedisMapStore(s.ctx, s.redisClient, sessionID)
+	store := NewRedisMapStore(s.ctx, s.redisClient, testMapStoreSupplier, sessionID)
 	// Type assertion - NewRedisMapStore returns kvstore.MapStore interface
 	redisStore, ok := store.(*RedisMapStore)
 	s.Require().True(ok, "NewRedisMapStore should return *RedisMapStore")
