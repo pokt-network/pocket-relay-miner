@@ -1,7 +1,7 @@
 # Binaries
 bin/
 pocket-relay-miner
-loadtest
+/loadtest
 
 # Tilt
 .tilt-tmp/
