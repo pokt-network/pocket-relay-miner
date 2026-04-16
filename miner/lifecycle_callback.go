@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"math"
-	"math/big"
 	"os"
 	"strconv"
 	"strings"
@@ -13,6 +11,9 @@ import (
 	"time"
 
 	"github.com/alitto/pond/v2"
+
+	sdk "github.com/cosmos/cosmos-sdk/types"
+	"github.com/pokt-network/smt"
 
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -280,227 +281,35 @@ func (lc *LifecycleCallback) removeSessionLock(sessionID string) {
 	delete(lc.sessionLocks, sessionID)
 }
 
-// isClaimEconomicallyViable returns true if submitting a claim for the given
-// snapshot is expected to produce more revenue than the fees required to get
-// paid. The decision is made at claim time only — once we submit the claim we
-// are committed to the proof as well, so we compare against claim_fee +
-// proof_fee conservatively (proof may or may not end up being required, but we
-// refuse to submit a claim we cannot afford to prove).
-//
-// Reward is computed using the same formula the chain uses in
-// x/proof/types/claim.go:GetClaimeduPOKT:
-//
-//	reward = (numComputeUnits * difficultyMultiplier * CUTTM) / granularity
-//
-// Everything is done in big.Rat to avoid precision loss before rounding down.
-// The difficulty client is sourced from the proofChecker — if the proofChecker
-// is not wired, or the query fails, the check fails open (returns true) so we
-// never drop a claim due to a missing dependency.
-func (lc *LifecycleCallback) isClaimEconomicallyViable(
+// getClaimReward calculates the expected reward for a claim using the canonical
+// poktroll formula (prooftypes.Claim.GetClaimeduPOKT). This uses the SMST root
+// hash as the source of truth — not snapshot counters.
+func (lc *LifecycleCallback) getClaimReward(
 	ctx context.Context,
-	snapshot *SessionSnapshot,
-	sharedParams *sharedtypes.Params,
-	claimAndProofCostUpokt uint64,
-) bool {
+	claim *prooftypes.Claim,
+	serviceID string,
+) (sdk.Coin, error) {
 	if lc.proofChecker == nil {
-		return true
+		return sdk.Coin{}, fmt.Errorf("proof checker not available")
 	}
 	difficultyClient := lc.proofChecker.ServiceDifficultyClient()
 	if difficultyClient == nil {
-		return true
-	}
-	if snapshot.TotalComputeUnits == 0 {
-		return false
-	}
-	if claimAndProofCostUpokt == 0 {
-		return true
+		return sdk.Coin{}, fmt.Errorf("difficulty client not available")
 	}
 
 	difficulty, err := difficultyClient.GetServiceRelayDifficultyAtHeight(
-		ctx, snapshot.ServiceID, snapshot.SessionStartHeight,
+		ctx, serviceID, claim.SessionHeader.GetSessionStartBlockHeight(),
 	)
 	if err != nil {
-		lc.logger.Debug().
-			Err(err).
-			Str(logging.FieldSessionID, snapshot.SessionID).
-			Msg("economic viability: failed to fetch difficulty, allowing claim")
-		return true
+		return sdk.Coin{}, fmt.Errorf("failed to fetch relay mining difficulty: %w", err)
 	}
 
-	rewardRat := computeClaimRewardRat(
-		snapshot.TotalComputeUnits,
-		difficulty.GetTargetHash(),
-		sharedParams.GetComputeUnitsToTokensMultiplier(),
-		sharedParams.GetComputeUnitCostGranularity(),
-	)
-
-	// Compare reward against the combined claim+proof cost constant.
-	costRat := new(big.Rat).SetUint64(claimAndProofCostUpokt)
-
-	viable := rewardRat.Cmp(costRat) > 0
-	if !viable {
-		rewardFloat, _ := rewardRat.Float64()
-		lc.logger.Info().
-			Str(logging.FieldSessionID, snapshot.SessionID).
-			Str(logging.FieldServiceID, snapshot.ServiceID).
-			Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
-			Uint64("compute_units", snapshot.TotalComputeUnits).
-			Str("expected_reward_upokt_rat", rewardRat.FloatString(6)).
-			Float64("expected_reward_upokt", rewardFloat).
-			Uint64("claim_and_proof_cost_upokt", claimAndProofCostUpokt).
-			Msg("claim economically unviable: expected reward below claim+proof cost")
-	}
-	return viable
-}
-
-// computeClaimRewardRat computes the expected claim reward in uPOKT as a
-// big.Rat, matching the chain formula in x/proof/types/claim.go:GetClaimeduPOKT:
-//
-//	reward = (numComputeUnits × difficultyMultiplier × CUTTM) / granularity
-//
-// The computation stays in big.Rat end-to-end so sub-uPOKT rewards are not
-// truncated to 0 before comparison with the cost threshold — important on
-// devnet/test configurations where granularity is large relative to a single
-// session's compute units. A zero granularity is treated as 1 to avoid a
-// divide-by-zero; callers should not rely on that behavior in production.
-func computeClaimRewardRat(totalComputeUnits uint64, targetHash []byte, cuttm, granularity uint64) *big.Rat {
-	if granularity == 0 {
-		granularity = 1
-	}
-	difficultyMultiplier := protocol.GetRelayDifficultyMultiplier(targetHash)
-
-	cuRat := new(big.Rat).SetUint64(totalComputeUnits)
-	estimatedCURat := new(big.Rat).Mul(difficultyMultiplier, cuRat)
-	cuttmRat := new(big.Rat).SetFrac64(int64(cuttm), int64(granularity))
-	return new(big.Rat).Mul(estimatedCURat, cuttmRat)
-}
-
-// checkClaimCeiling checks if the claimed amount exceeds the configured ceiling.
-// This is a WARNING ONLY - we do not cap claims, as relays have already been accepted.
-// The warning helps operators understand when they may be doing unpaid work.
-func (lc *LifecycleCallback) checkClaimCeiling(
-	ctx context.Context,
-	snapshot *SessionSnapshot,
-	sharedParams *sharedtypes.Params,
-	computeUnitsToTokensMultiplier uint64,
-) {
-	// Skip if no service factor provider or app client configured
-	if lc.serviceFactorProvider == nil || lc.appClient == nil {
-		return
-	}
-
-	logger := lc.logger.With().
-		Str(logging.FieldSessionID, snapshot.SessionID).
-		Str(logging.FieldServiceID, snapshot.ServiceID).
-		Str(logging.FieldApplication, snapshot.ApplicationAddress).
-		Logger()
-
-	// Get application stake
-	app, err := lc.appClient.GetApplication(ctx, snapshot.ApplicationAddress)
+	sharedParams, err := lc.sharedClient.GetParams(ctx)
 	if err != nil {
-		logger.Debug().
-			Err(err).
-			Msg("failed to get application for claim ceiling check")
-		return
+		return sdk.Coin{}, fmt.Errorf("failed to get shared params: %w", err)
 	}
 
-	appStake := app.Stake.Amount.Int64()
-	if appStake <= 0 {
-		logger.Debug().
-			Int64("app_stake", appStake).
-			Msg("skipping ceiling check - invalid app stake")
-		return
-	}
-
-	// Get proof_window_close_offset_blocks and num_blocks_per_session for baseLimit calculation
-	proofWindowCloseBlocks := int64(sharedParams.GetProofWindowCloseOffsetBlocks())
-	if proofWindowCloseBlocks <= 0 {
-		proofWindowCloseBlocks = 1 // Avoid division by zero
-	}
-	numBlocksPerSession := int64(sharedParams.GetNumBlocksPerSession())
-	if numBlocksPerSession <= 0 {
-		numBlocksPerSession = 1
-	}
-	granularity := sharedParams.GetComputeUnitCostGranularity()
-	if granularity == 0 {
-		granularity = 1
-	}
-
-	// Query session to get numSuppliersPerSession
-	session, err := lc.sessionClient.GetSession(
-		ctx,
-		snapshot.ApplicationAddress,
-		snapshot.ServiceID,
-		snapshot.SessionStartHeight,
-	)
-	if err != nil {
-		logger.Debug().
-			Err(err).
-			Msg("failed to get session for claim ceiling check")
-		return
-	}
-
-	numSuppliers := int64(len(session.Suppliers))
-	if numSuppliers <= 0 {
-		numSuppliers = 1 // Avoid division by zero
-	}
-
-	// Calculate baseLimit: (appStake / numSuppliers) / pendingSessions
-	// pendingSessions = ceil(proofWindowCloseBlocks / numBlocksPerSession) + 1
-	// Matches relayer/relay_meter.go:calculateMaxStake and poktroll reference.
-	appStakePerSupplier := appStake / numSuppliers
-	numClosedSessionsAwaitingSettlement := int64(math.Ceil(float64(proofWindowCloseBlocks) / float64(numBlocksPerSession)))
-	pendingSessions := numClosedSessionsAwaitingSettlement + 1
-	baseLimitUpokt := appStakePerSupplier / pendingSessions
-
-	// Get serviceFactor for this service
-	serviceFactor, hasServiceFactor := lc.serviceFactorProvider.GetServiceFactor(snapshot.ServiceID)
-
-	// Calculate ceiling
-	var ceilingUpokt int64
-	if hasServiceFactor && serviceFactor > 0 {
-		// ServiceFactor provided: apply directly to appStake
-		ceilingUpokt = int64(float64(appStake) * serviceFactor)
-	} else {
-		// No serviceFactor: use baseLimit (protocol match)
-		ceilingUpokt = baseLimitUpokt
-	}
-
-	// Calculate claimed amount in uPOKT.
-	// Matches chain formula (x/proof/types/claim.go:GetClaimeduPOKT) up to the
-	// relay difficulty multiplier, which is omitted here because this log is
-	// informational. Without granularity the prior log was 1e6x too large.
-	claimedUpokt := int64(float64(snapshot.TotalComputeUnits*computeUnitsToTokensMultiplier) / float64(granularity))
-
-	// Check if claimed exceeds ceiling
-	if claimedUpokt > ceilingUpokt {
-		potentiallyUnpaidUpokt := claimedUpokt - ceilingUpokt
-
-		// Record metric for monitoring/alerting
-		RecordClaimCeilingExceeded(snapshot.SupplierOperatorAddress, snapshot.ServiceID, potentiallyUnpaidUpokt)
-
-		logger.Warn().
-			Int64("claimed_upokt", claimedUpokt).
-			Int64("ceiling_upokt", ceilingUpokt).
-			Int64("base_limit_upokt", baseLimitUpokt).
-			Int64("potentially_unpaid_upokt", potentiallyUnpaidUpokt).
-			Int64("app_stake_upokt", appStake).
-			Int64("num_suppliers", numSuppliers).
-			Int64("proof_window_close_blocks", proofWindowCloseBlocks).
-			Bool("has_service_factor", hasServiceFactor).
-			Float64("service_factor", serviceFactor).
-			Uint64("total_compute_units", snapshot.TotalComputeUnits).
-			Int64("relay_count", snapshot.RelayCount).
-			Msg("CLAIM EXCEEDS CEILING - potential unpaid work detected (this is informational, claim will still be submitted)")
-	} else if hasServiceFactor && claimedUpokt < baseLimitUpokt {
-		// Informational: serviceFactor is conservative (below protocol guarantee)
-		logger.Debug().
-			Int64("claimed_upokt", claimedUpokt).
-			Int64("ceiling_upokt", ceilingUpokt).
-			Int64("base_limit_upokt", baseLimitUpokt).
-			Float64("service_factor", serviceFactor).
-			Msg("claim is below configured ceiling (conservative serviceFactor)")
-	}
+	return claim.GetClaimeduPOKT(*sharedParams, difficulty)
 }
 
 // OnSessionActive is called when a new session starts.
@@ -684,115 +493,60 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				Msg("TEST MODE: Delay complete, continuing with claim submission")
 		}
 
-		// Build all claims for this group (PARALLELIZED for performance)
-		// Pre-filter sessions for validation before parallel processing
-		var validSnapshots []*SessionSnapshot
+		// Pre-filter: skip already-claimed sessions (dedup).
+		// This is the only check that uses snapshot data as a gate.
+		var candidateSnapshots []*SessionSnapshot
 		for _, snapshot := range groupSnapshots {
-			// CRITICAL: Deduplication check - never submit the same claim twice
-			// This prevents duplicate claims if we crash and restart between TX broadcast and Redis save
 			if snapshot.ClaimTxHash != "" {
 				logger.Warn().
 					Str(logging.FieldSessionID, snapshot.SessionID).
 					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
 					Str("existing_claim_tx_hash", snapshot.ClaimTxHash).
 					Msg("skipping claim - already submitted for this session (deduplication)")
-				continue // Skip this session
+				continue
 			}
-
-			// CRITICAL: Never submit claims with 0 relays or 0 value - waste of fees
-			if snapshot.RelayCount == 0 {
-				logger.Warn().
-					Str(logging.FieldSessionID, snapshot.SessionID).
-					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
-					Msg("skipping claim - session has 0 relays")
-				// Session remains in active state - not a failure, just skipped
-				continue // Skip this session
-			}
-
-			if snapshot.TotalComputeUnits == 0 {
-				logger.Warn().
-					Str(logging.FieldSessionID, snapshot.SessionID).
-					Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
-					Int64("relay_count", snapshot.RelayCount).
-					Msg("skipping claim - session has 0 compute units despite having relays")
-				// Session remains in active state - not a failure, just skipped
-				continue // Skip this session
-			}
-
-			// CRITICAL: Economic validation - never submit claims where the
-			// expected reward is less than claim_fee + proof_fee. Once the
-			// claim tx is on chain we are committed to proving it too, so
-			// both fees must be covered up-front. See isClaimEconomicallyViable
-			// for the reward formula (chain-matching, big.Rat precision).
-			if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-				claimAndProofCostUpokt := haClient.GetEstimatedFeeUpokt(ctx)
-				computeUnitsToTokensMultiplier := sharedParams.GetComputeUnitsToTokensMultiplier()
-
-				if !lc.isClaimEconomicallyViable(ctx, snapshot, sharedParams, claimAndProofCostUpokt) {
-					logger.Warn().
-						Str(logging.FieldSessionID, snapshot.SessionID).
-						Str(logging.FieldServiceID, snapshot.ServiceID).
-						Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
-						Uint64("claim_and_proof_cost_upokt", claimAndProofCostUpokt).
-						Int64("relay_count", snapshot.RelayCount).
-						Uint64("total_compute_units", snapshot.TotalComputeUnits).
-						Msg("SKIP UNPROFITABLE: expected reward < claim+proof cost — session skipped to save fees")
-
-					RecordClaimSkipped(
-						snapshot.SupplierOperatorAddress,
-						snapshot.ServiceID,
-						"unprofitable",
-					)
-
-					// Transition session to terminal ClaimSkipped state and
-					// clean up local resources so it doesn't drift into the
-					// proof_window_closed failure path. This is an operator
-					// decision, not a failure.
-					if skipErr := lc.OnClaimSkipped(ctx, snapshot); skipErr != nil {
-						logger.Warn().Err(skipErr).
-							Str(logging.FieldSessionID, snapshot.SessionID).
-							Msg("failed to finalise claim_skipped transition; session will drift to failure path")
-					}
-					continue
-				}
-
-				// Check if claim exceeds configured ceiling (warning only, does not block claim)
-				lc.checkClaimCeiling(ctx, snapshot, sharedParams, computeUnitsToTokensMultiplier)
-			}
-
-			// Record the scheduled claim height for operators
-			SetClaimScheduledHeight(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.SessionID, float64(earliestClaimHeight))
-
-			validSnapshots = append(validSnapshots, snapshot)
+			candidateSnapshots = append(candidateSnapshots, snapshot)
 		}
 
-		// PARALLEL CLAIM BUILDING: Flush SMSTs and build claim messages concurrently
-		// Each SMST flush is independent and thread-safe (has its own mutex)
-		// This significantly reduces latency when processing batches of sessions
+		// PARALLEL CLAIM BUILDING: flush SMST first (source of truth), then
+		// use the root hash for economic viability — matching poktroll's
+		// canonical flow (flush → GetClaimeduPOKT → submit).
+		//
+		// Snapshot counters (relay_count, total_compute_units) are NOT used
+		// for claim decisions because they can race with concurrent updates.
+		// The SMST root hash encodes the real count and sum atomically.
 		type claimBuildResult struct {
 			index    int
 			snapshot *SessionSnapshot
 			claimMsg *prooftypes.MsgCreateClaim
 			rootHash []byte
 			err      error
+			skipped  bool   // true if session was skipped (empty tree, unprofitable)
+			skipReason string
 		}
 
-		results := make(chan claimBuildResult, len(validSnapshots))
-		numTasks := len(validSnapshots)
+		results := make(chan claimBuildResult, len(candidateSnapshots))
+		numTasks := len(candidateSnapshots)
 
-		for i, snapshot := range validSnapshots {
-			// Capture loop variables for goroutine
+		// Resolve fee cost once for the entire batch (shared across all sessions)
+		var claimAndProofCostUpokt uint64
+		if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
+			claimAndProofCostUpokt = haClient.GetEstimatedFeeUpokt(ctx)
+		}
+
+		for i, snapshot := range candidateSnapshots {
 			index := i
 			snap := snapshot
 
-			// Submit to bounded build pool if available, otherwise use unbounded goroutine
 			buildFunc := func() {
 				result := claimBuildResult{
 					index:    index,
 					snapshot: snap,
 				}
 
-				// Flush the SMST to get the root hash (CPU-bound, can parallelize)
+				// Phase 1: Flush the SMST to get the root hash (source of truth).
+				// The root hash encodes count (relays) and sum (compute units)
+				// atomically — no race with concurrent relay processing.
 				rootHash, flushErr := lc.smstManager.FlushTree(ctx, snap.SessionID)
 				if flushErr != nil {
 					result.err = fmt.Errorf("failed to flush SMST for session %s: %w", snap.SessionID, flushErr)
@@ -801,7 +555,89 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				}
 				result.rootHash = rootHash
 
-				// Build the session header (network I/O, can parallelize)
+				// Phase 2: Extract count and sum from the SMST root hash.
+				// These are the authoritative values — not the snapshot counters.
+				smstRoot := smt.MerkleSumRoot(rootHash)
+				smstCount, countErr := smstRoot.Count()
+				if countErr != nil {
+					result.err = fmt.Errorf("failed to read count from SMST root for session %s: %w", snap.SessionID, countErr)
+					results <- result
+					return
+				}
+				smstSum, sumErr := smstRoot.Sum()
+				if sumErr != nil {
+					result.err = fmt.Errorf("failed to read sum from SMST root for session %s: %w", snap.SessionID, sumErr)
+					results <- result
+					return
+				}
+
+				// Phase 3: Check if tree is empty (no relays mined).
+				if smstCount == 0 || smstSum == 0 {
+					logger.Warn().
+						Str(logging.FieldSessionID, snap.SessionID).
+						Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+						Uint64("smst_count", smstCount).
+						Uint64("smst_sum", smstSum).
+						Int64("snapshot_relay_count", snap.RelayCount).
+						Msg("skipping claim - SMST tree is empty (0 mined relays)")
+					result.skipped = true
+					result.skipReason = "empty_tree"
+					results <- result
+					return
+				}
+
+				// Phase 4: Economic viability using the SMST root hash.
+				// Build a temporary Claim (like poktroll does) to call GetClaimeduPOKT.
+				if claimAndProofCostUpokt > 0 {
+					sessionHeader, headerErr := lc.buildSessionHeader(ctx, snap)
+					if headerErr != nil {
+						result.err = fmt.Errorf("failed to build session header for %s: %w", snap.SessionID, headerErr)
+						results <- result
+						return
+					}
+
+					tempClaim := prooftypes.Claim{
+						SupplierOperatorAddress: snap.SupplierOperatorAddress,
+						SessionHeader:           sessionHeader,
+						RootHash:                rootHash,
+					}
+
+					rewardCoin, rewardErr := lc.getClaimReward(ctx, &tempClaim, snap.ServiceID)
+					if rewardErr != nil {
+						// Fail open on reward calculation errors — don't skip a
+						// potentially valid claim due to a transient query failure.
+						logger.Debug().Err(rewardErr).
+							Str(logging.FieldSessionID, snap.SessionID).
+							Msg("economic viability: failed to calculate reward, allowing claim")
+					} else if rewardCoin.IsNil() || uint64(rewardCoin.Amount.Int64()) <= claimAndProofCostUpokt {
+						logger.Warn().
+							Str(logging.FieldSessionID, snap.SessionID).
+							Str(logging.FieldServiceID, snap.ServiceID).
+							Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+							Uint64("claim_and_proof_cost_upokt", claimAndProofCostUpokt).
+							Str("expected_reward", rewardCoin.String()).
+							Uint64("smst_compute_units", smstSum).
+							Uint64("smst_relay_count", smstCount).
+							Msg("SKIP UNPROFITABLE: expected reward < claim+proof cost (calculated from SMST root hash)")
+
+						result.skipped = true
+						result.skipReason = "unprofitable"
+						results <- result
+						return
+					}
+
+					// Build claim message (session header already built above)
+					result.claimMsg = &prooftypes.MsgCreateClaim{
+						SupplierOperatorAddress: snap.SupplierOperatorAddress,
+						SessionHeader:           sessionHeader,
+						RootHash:                rootHash,
+					}
+
+					results <- result
+					return
+				}
+
+				// No fee estimation available — build claim without viability check
 				sessionHeader, headerErr := lc.buildSessionHeader(ctx, snap)
 				if headerErr != nil {
 					result.err = fmt.Errorf("failed to build session header for %s: %w", snap.SessionID, headerErr)
@@ -809,7 +645,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					return
 				}
 
-				// Build claim message
 				result.claimMsg = &prooftypes.MsgCreateClaim{
 					SupplierOperatorAddress: snap.SupplierOperatorAddress,
 					SessionHeader:           sessionHeader,
@@ -826,22 +661,44 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			}
 		}
 
-		// Collect all results (blocking until all tasks complete)
-		claimResults := make([]claimBuildResult, numTasks)
+		// Collect all results (blocking until all tasks complete).
+		// Single pass: handle skipped/failed sessions and collect valid claims.
+		var claimMsgs []*prooftypes.MsgCreateClaim
+		var groupRootHashes [][]byte
+		var validSnapshots []*SessionSnapshot
 		for i := 0; i < numTasks; i++ {
 			result := <-results
 			if result.err != nil {
 				return nil, result.err
 			}
-			claimResults[result.index] = result
-		}
 
-		// Extract messages and root hashes in order
-		var claimMsgs []*prooftypes.MsgCreateClaim
-		var groupRootHashes [][]byte
-		for _, result := range claimResults {
+			// Handle skipped sessions (empty tree, unprofitable)
+			if result.skipped {
+				snap := result.snapshot
+				switch result.skipReason {
+				case "unprofitable":
+					RecordClaimSkipped(snap.SupplierOperatorAddress, snap.ServiceID, "unprofitable")
+					if skipErr := lc.OnClaimSkipped(ctx, snap); skipErr != nil {
+						logger.Warn().Err(skipErr).
+							Str(logging.FieldSessionID, snap.SessionID).
+							Msg("failed to finalise claim_skipped transition")
+					}
+				case "empty_tree":
+					// Session had no mined relays — not a failure, just nothing to claim
+				}
+				continue
+			}
+
+			// Valid claim — collect for submission
+			SetClaimScheduledHeight(
+				result.snapshot.SupplierOperatorAddress,
+				result.snapshot.ServiceID,
+				result.snapshot.SessionID,
+				float64(earliestClaimHeight),
+			)
 			claimMsgs = append(claimMsgs, result.claimMsg)
 			groupRootHashes = append(groupRootHashes, result.rootHash)
+			validSnapshots = append(validSnapshots, result.snapshot)
 		}
 
 		// Convert to interface types for variadic call

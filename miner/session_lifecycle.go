@@ -576,6 +576,9 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 	// Terminal sessions stored as alternating (state, session) pairs for individual handling
 	var terminalSessions []interface{}
 
+	// Counters for instrumentation
+	var redisExpired, terminalCleaned, noTransition, stateByType = 0, 0, 0, map[SessionState]int{}
+
 	for _, sessionID := range candidateSessionIDs {
 		// CRITICAL: Reload session from Redis to get latest state (not stale in-memory copy)
 		// Callbacks may have updated state to terminal (e.g., proof_tx_error) which must not be overwritten
@@ -584,6 +587,7 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			// Session expired from Redis (TTL) or was deleted - remove from in-memory tracking
 			// This is expected behavior: sessions complete and expire, this prevents endless reload attempts
 			m.activeSessions.Delete(sessionID)
+			redisExpired++
 			m.logger.Debug().
 				Err(err).
 				Str(logging.FieldSessionID, sessionID).
@@ -592,18 +596,14 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			continue
 		}
 
+		stateByType[session.State]++
+
 		// CRITICAL: Skip sessions already in terminal states - they should NEVER transition again
 		// Terminal states (proved, probabilistic_proved, claim_tx_error, proof_tx_error, etc.)
 		// represent final outcomes and must not be overwritten by window timeout logic
 		if session.State.IsTerminal() {
-			// BUG FIX: Remove terminal sessions from in-memory tracking.
-			// This can happen when:
-			// 1. Callback updated Redis to terminal state (e.g., probabilistic_proved, proof_window_closed)
-			// 2. But callback returned an error before lifecycle manager could delete from activeSessions
-			// 3. Session remains in activeSessions but is terminal in Redis
-			// Without this cleanup, terminal sessions accumulate in activeSessions forever,
-			// causing worker pool exhaustion as each block processes stale sessions.
 			m.activeSessions.Delete(session.SessionID)
+			terminalCleaned++
 
 			m.logger.Debug().
 				Str(logging.FieldSessionID, session.SessionID).
@@ -615,10 +615,22 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		}
 
 		// Check if this session needs a transition
-		newState, _ := m.determineTransition(session, currentHeight, params)
+		newState, reason := m.determineTransition(session, currentHeight, params)
 		if newState == "" || newState == session.State {
+			noTransition++
 			continue
 		}
+
+		m.logger.Info().
+			Str(logging.FieldSessionID, session.SessionID).
+			Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+			Str(logging.FieldServiceID, session.ServiceID).
+			Str("current_state", string(session.State)).
+			Str("target_state", string(newState)).
+			Str("reason", reason).
+			Int64("current_height", currentHeight).
+			Int64("session_end", session.SessionEndHeight).
+			Msg("session transition determined")
 
 		// Group by transition type for batching
 		switch newState {
@@ -634,6 +646,21 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			// Terminal states: store (state, session) pairs
 			terminalSessions = append(terminalSessions, newState, session)
 		}
+	}
+
+	// Log transition batch summary for debugging proof pipeline issues
+	if len(candidateSessionIDs) > 0 {
+		m.logger.Info().
+			Int64("current_height", currentHeight).
+			Int("candidates", len(candidateSessionIDs)).
+			Int("redis_expired", redisExpired).
+			Int("terminal_cleaned", terminalCleaned).
+			Int("no_transition_needed", noTransition).
+			Int("claiming_batch", len(claimingSessions)).
+			Int("proving_batch", len(provingSessions)).
+			Int("terminal_batch", len(terminalSessions)/2).
+			Interface("state_distribution", stateByType).
+			Msg("lifecycle_check: transition batch summary")
 	}
 
 	// Execute batched transitions using pond subpool
@@ -930,10 +957,19 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 	// relays, zero compute units, dedup hit). Those sessions must not be
 	// flipped to Claimed — they have their own terminal state set by the
 	// callback's own cleanup path.
+	claimedCount := 0
+	skippedCount := 0
 	for i, session := range sessions {
 		if rootHashes[i] == nil {
+			skippedCount++
+			m.logger.Info().
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, session.ServiceID).
+				Msg("claim callback returned nil root hash — session was skipped (economic/empty/dedup)")
 			continue
 		}
+		claimedCount++
 		session.ClaimedRootHash = rootHashes[i]
 
 		// Update session state (pointer update, safe without mutex)
@@ -958,6 +994,12 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 			string(SessionStateClaimed),
 		).Inc()
 	}
+
+	m.logger.Info().
+		Int("total_sessions", len(sessions)).
+		Int("claimed_count", claimedCount).
+		Int("skipped_count", skippedCount).
+		Msg("claim batch complete — sessions now in 'claimed' state awaiting proof window")
 }
 
 // executeBatchedProofTransition executes batched proof transitions.
@@ -966,9 +1008,9 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		return
 	}
 
-	m.logger.Debug().
+	m.logger.Info().
 		Int("batch_size", len(sessions)).
-		Msg("executing batched proof transition")
+		Msg("executing batched proof transition — submitting proofs")
 
 	// Call the batched proof callback
 	if proofErr := m.callback.OnSessionsNeedProof(ctx, sessions); proofErr != nil {
