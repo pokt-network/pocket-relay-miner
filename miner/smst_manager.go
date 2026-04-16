@@ -24,6 +24,14 @@ const (
 	// RedisScanBatchSize is the number of keys to scan per Redis SCAN iteration
 	// when warming up SMST trees from Redis.
 	RedisScanBatchSize = 100
+
+	// DefaultLiveRootCheckpointInterval is the number of UpdateTree calls
+	// between writes of the intermediate root to Redis. This is the bound
+	// on relay loss if a leader dies between checkpoints: up to
+	// (interval - 1) relays committed to the nodes hash but not yet
+	// represented in a stored root. Lower is safer; higher is faster.
+	// At 1000 RPS/supplier with interval=10: 100 writes/s instead of 1000.
+	DefaultLiveRootCheckpointInterval = 10
 )
 
 // RedisSMSTManagerConfig contains configuration for the SMST manager.
@@ -33,6 +41,22 @@ type RedisSMSTManagerConfig struct {
 
 	// CacheTTL is how long to keep SMST data in Redis (backup if manual cleanup fails).
 	CacheTTL time.Duration
+
+	// LiveRootCheckpointInterval is the number of UpdateTree calls between
+	// writes of the intermediate root to Redis. See
+	// DefaultLiveRootCheckpointInterval for the trade-off. Zero means use
+	// the default (10). Set to 1 to checkpoint on every relay (safest,
+	// slowest).
+	LiveRootCheckpointInterval int
+}
+
+// liveRootInterval returns the configured checkpoint interval or the
+// default if unset. Always >= 1.
+func (m *RedisSMSTManager) liveRootInterval() int {
+	if m.config.LiveRootCheckpointInterval > 0 {
+		return m.config.LiveRootCheckpointInterval
+	}
+	return DefaultLiveRootCheckpointInterval
 }
 
 // redisSMST holds a Redis-backed sparse merkle sum trie for a session.
@@ -46,7 +70,14 @@ type redisSMST struct {
 	claimedSum     uint64 // Cached sum after flush (for HA warmup)
 	proofPath      []byte
 	compactProofBz []byte
-	mu             sync.Mutex
+
+	// updateCount is the running tally of UpdateTree calls against this
+	// tree instance. It drives live_root checkpointing (first update and
+	// every LiveRootCheckpointInterval updates after) so HA failover can
+	// resume the tree with at most interval-1 relays lost.
+	updateCount uint64
+
+	mu sync.Mutex
 }
 
 // RedisSMSTManager manages Redis-backed SMST trees for sessions.
@@ -77,8 +108,16 @@ func NewRedisSMSTManager(
 	}
 }
 
-// GetOrCreateTree returns the SMST for a session, creating it if it doesn't exist.
-// Trees are backed by Redis for shared storage across HA instances.
+// GetOrCreateTree returns the SMST for a session. If the tree is not in
+// local memory, it first tries to resume from Redis: a claimed_root (if
+// the session was already flushed by some prior leader) or a live_root
+// checkpointed by a previous leader that was processing the same session
+// before dying. Only if neither exists is a brand-new empty tree created.
+//
+// This is the HA-failover-safe entry point for the relay path. Starting
+// an empty tree when Redis has an in-progress state would silently
+// discard the relays the dead leader had already committed (see
+// scripts/test-quantitative-failover.sh KILL_TARGET=leader scenario).
 func (m *RedisSMSTManager) GetOrCreateTree(ctx context.Context, sessionID string) (*redisSMST, error) {
 	m.treesMu.Lock()
 	defer m.treesMu.Unlock()
@@ -87,9 +126,16 @@ func (m *RedisSMSTManager) GetOrCreateTree(ctx context.Context, sessionID string
 		return tree, nil
 	}
 
-	// Create a new Redis-backed tree. The store scopes Redis keys to
-	// (supplier, sessionID) so that multiple suppliers participating in the
-	// same session do NOT overwrite each other's SMST nodes.
+	// Try to resume an existing tree from Redis before creating a fresh one.
+	// Prefer claimed_root (post-flush, sealed) over live_root (mid-session).
+	if resumed := m.resumeTreeFromRedisLocked(ctx, sessionID); resumed != nil {
+		m.trees[sessionID] = resumed
+		return resumed, nil
+	}
+
+	// No Redis state — create a new empty tree. The store scopes Redis keys
+	// to (supplier, sessionID) so that multiple suppliers participating in
+	// the same session do NOT overwrite each other's SMST nodes.
 	store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
 	trie := smt.NewSparseMerkleSumTrie(store, protocol.NewTrieHasher(), protocol.SMTValueHasher())
 
@@ -118,6 +164,64 @@ func (m *RedisSMSTManager) GetOrCreateTree(ctx context.Context, sessionID string
 		Msg("created new Redis-backed SMST")
 
 	return tree, nil
+}
+
+// resumeTreeFromRedisLocked attempts to import a tree from Redis for HA
+// failover recovery. Must be called with m.treesMu held.
+//
+// Lookup order:
+//  1. SMSTRootKey (claimed_root) — tree is post-flush, sealed. Returns a
+//     tree with claimedRoot set so late UpdateTree calls are correctly
+//     rejected with ErrSessionClaimed.
+//  2. SMSTLiveRootKey (live_root) — tree was actively updated by a prior
+//     leader that died mid-session. Import at the checkpoint root so new
+//     relays extend the dead leader's work rather than start from empty.
+//  3. No state — returns nil; caller creates a fresh tree.
+//
+// Returns nil on any Redis error or missing state; callers treat that as
+// "no existing state" and proceed.
+func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessionID string) *redisSMST {
+	// 1) Claimed root (post-flush)
+	claimedKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
+	if claimedRoot, err := m.redisClient.Get(ctx, claimedKey).Bytes(); err == nil && len(claimedRoot) > 0 {
+		store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
+		trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), claimedRoot, protocol.SMTValueHasher())
+		tree := &redisSMST{
+			sessionID:   sessionID,
+			trie:        trie,
+			store:       store,
+			claimedRoot: claimedRoot,
+		}
+		// Restore count/sum from stats for observability; trie itself knows them.
+		if statsVal, statsErr := m.redisClient.Get(ctx,
+			m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)).Result(); statsErr == nil {
+			_, _ = fmt.Sscanf(statsVal, "%d:%d", &tree.claimedCount, &tree.claimedSum)
+		}
+		m.logger.Info().
+			Str(logging.FieldSessionID, sessionID).
+			Str("claimed_root_hex", fmt.Sprintf("%x", claimedRoot)).
+			Msg("resumed SMST from claimed_root (session was already flushed)")
+		return tree
+	}
+
+	// 2) Live root (mid-session checkpoint from previous leader)
+	liveKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
+	if liveRoot, err := m.redisClient.Get(ctx, liveKey).Bytes(); err == nil && len(liveRoot) > 0 {
+		store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
+		trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), liveRoot, protocol.SMTValueHasher())
+		tree := &redisSMST{
+			sessionID: sessionID,
+			trie:      trie,
+			store:     store,
+		}
+		m.logger.Info().
+			Str(logging.FieldSessionID, sessionID).
+			Str("live_root_hex", fmt.Sprintf("%x", liveRoot)).
+			Msg("resumed SMST from live_root (mid-session HA failover)")
+		return tree
+	}
+
+	return nil
 }
 
 // UpdateTree adds a relay to the SMST for a session.
@@ -171,6 +275,39 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 		}
 	}
 
+	// Checkpoint the current intermediate root to Redis so a follower
+	// promoted mid-session can resume the tree at this point via
+	// ImportSparseMerkleSumTrie. Without this checkpoint, the new leader's
+	// GetOrCreateTree would start from an empty root while the dead
+	// leader's relay nodes remain orphaned in the shared nodes hash,
+	// producing claims that undercount by up to ~50% depending on kill
+	// timing (see scripts/test-quantitative-failover.sh).
+	//
+	// Writing on every relay is safe but would add one Redis SET per
+	// relay — a large cost at production RPS. Instead, checkpoint on the
+	// FIRST update (so low-traffic sessions still have a resume point)
+	// and then every LiveRootCheckpointInterval updates. The worst-case
+	// relay loss on a mid-session kill is therefore at most
+	// (interval - 1) relays between the last checkpoint and the kill.
+	//
+	// A failure is non-fatal: the relay is already in the nodes hash, we
+	// just degrade HA recovery for the current checkpoint window.
+	tree.updateCount++
+	interval := uint64(m.liveRootInterval())
+	if tree.updateCount == 1 || tree.updateCount%interval == 0 {
+		liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
+		// Explicit []byte conversion: trie.Root() returns smt.MerkleSumRoot
+		// which go-redis does not know how to marshal directly.
+		rootBytes := []byte(tree.trie.Root())
+		if err := m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err(); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Uint64("update_count", tree.updateCount).
+				Msg("failed to checkpoint live root (HA resume degraded)")
+		}
+	}
+
 	// TTL is set once at tree creation in GetOrCreateTree (not per-relay).
 
 	return nil
@@ -179,13 +316,33 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 // FlushTree flushes the SMST for a session and returns the root hash.
 // After flushing, no more updates can be made to the tree.
 // Uses two-phase sealing to prevent race conditions with late relays.
+//
+// If the tree is not in local memory (HA failover: this miner was just
+// promoted and the previous leader had been handling this session),
+// FlushTree attempts to resume it from Redis via the same lookup used
+// by GetOrCreateTree: claimed_root first, then live_root. This covers
+// the edge case where the session ends exactly when the leader dies
+// and no in-memory tree was ever built on the survivor.
 func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (rootHash []byte, err error) {
 	m.treesMu.RLock()
 	tree, exists := m.trees[sessionID]
 	m.treesMu.RUnlock()
 
 	if !exists {
-		return nil, fmt.Errorf("session %s not found", sessionID)
+		// Lazy-load from Redis for HA failover (session ended during kill window).
+		m.treesMu.Lock()
+		// Re-check under write lock to avoid racing with another goroutine.
+		if existing, ok := m.trees[sessionID]; ok {
+			tree = existing
+		} else if resumed := m.resumeTreeFromRedisLocked(ctx, sessionID); resumed != nil {
+			m.trees[sessionID] = resumed
+			tree = resumed
+		}
+		m.treesMu.Unlock()
+
+		if tree == nil {
+			return nil, fmt.Errorf("session %s not found", sessionID)
+		}
 	}
 
 	tree.mu.Lock()
@@ -448,8 +605,9 @@ func (m *RedisSMSTManager) SetTreeTTL(ctx context.Context, sessionID string, ttl
 	hashKey := m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID)
 	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
+	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
 
-	// Set TTL on nodes hash, root, and stats
+	// Set TTL on nodes hash, root, stats, and live_root
 	if err := m.redisClient.Expire(ctx, hashKey, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set TTL on SMST nodes: %w", err)
 	}
@@ -458,6 +616,12 @@ func (m *RedisSMSTManager) SetTreeTTL(ctx context.Context, sessionID string, ttl
 	}
 	if err := m.redisClient.Expire(ctx, statsKey, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set TTL on SMST stats: %w", err)
+	}
+	// live_root may not exist (if the tree was flushed before any update
+	// could checkpoint it, or already deleted). Redis EXPIRE on a missing
+	// key returns 0 without erroring, so this is safe.
+	if err := m.redisClient.Expire(ctx, liveRootKey, ttl).Err(); err != nil {
+		return fmt.Errorf("failed to set TTL on SMST live_root: %w", err)
 	}
 
 	m.logger.Debug().
@@ -476,13 +640,15 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	// Remove from memory
 	delete(m.trees, sessionID)
 
-	// Remove nodes hash, root, and stats from Redis. Keys are scoped by
-	// (supplier, sessionID), so this delete only affects THIS supplier —
-	// other suppliers participating in the same session are unaffected.
+	// Remove nodes hash, root, stats, and live_root from Redis. Keys are
+	// scoped by (supplier, sessionID), so this delete only affects THIS
+	// supplier — other suppliers participating in the same session are
+	// unaffected.
 	hashKey := m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID)
 	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
-	if err := m.redisClient.Del(ctx, hashKey, rootKey, statsKey).Err(); err != nil {
+	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
+	if err := m.redisClient.Del(ctx, hashKey, rootKey, statsKey, liveRootKey).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).

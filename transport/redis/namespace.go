@@ -345,6 +345,24 @@ func (kb *KeyBuilder) SMSTStatsKey(supplierAddress, sessionID string) string {
 	return fmt.Sprintf("%s:smst:%s:%s:stats", kb.ns.BasePrefix, supplierAddress, sessionID)
 }
 
+// SMSTLiveRootKey builds the key for the intermediate (pre-flush) root of
+// an actively-updating SMST. It is written on every UpdateTree so that,
+// when a leader dies mid-session, the follower promoted to leader can
+// resume the tree at this checkpoint via ImportSparseMerkleSumTrie -
+// preserving every relay the dead leader had committed to the shared nodes
+// hash but not yet flushed.
+//
+// Once FlushTree runs, SMSTRootKey (the stable claimed root) supersedes
+// this value. Callers that reload a tree from Redis must prefer
+// SMSTRootKey and only fall back to SMSTLiveRootKey when no claimed root
+// is present (mid-session resume).
+//
+// Format: {base}:smst:{supplierAddress}:{sessionID}:live_root
+// Example: "ha:smst:pokt1abc:session123:live_root"
+func (kb *KeyBuilder) SMSTLiveRootKey(supplierAddress, sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:%s:live_root", kb.ns.BasePrefix, supplierAddress, sessionID)
+}
+
 // ServiceFactorDefaultKey builds the key for the default service factor.
 // Format: {base}:service_factor:default
 // Example: "ha:service_factor:default"
