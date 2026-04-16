@@ -150,6 +150,13 @@ type WebSocketBridge struct {
 	// Message channel for bridge communication
 	msgChan chan wsMessage
 
+	// Write mutexes for WebSocket connections.
+	// gorilla/websocket supports one concurrent reader and one concurrent writer,
+	// but multiple goroutines write to each connection (messageLoop, pingLoop,
+	// closeWithReason, handleSessionExpiration), so we serialize writes.
+	gatewayWriteMu sync.Mutex
+	backendWriteMu sync.Mutex
+
 	// Track latest request/response for pairing
 	latestRequest  *servicetypes.RelayRequest
 	latestResponse *servicetypes.RelayResponse
@@ -282,10 +289,10 @@ func (b *WebSocketBridge) Run() {
 	// Start ping loops for keep-alive
 	b.wg.Add(2)
 	go logging.RecoverGoRoutine(b.logger, "websocket_ping_gateway", func(ctx context.Context) {
-		b.pingLoop(b.gatewayConn, "gateway")
+		b.pingLoop(b.gatewayConn, &b.gatewayWriteMu, "gateway")
 	})(b.ctx)
 	go logging.RecoverGoRoutine(b.logger, "websocket_ping_backend", func(ctx context.Context) {
-		b.pingLoop(b.backendConn, "backend")
+		b.pingLoop(b.backendConn, &b.backendWriteMu, "backend")
 	})(b.ctx)
 
 	// Note: Session expiration monitoring happens via global SessionMonitor.
@@ -356,7 +363,7 @@ func (b *WebSocketBridge) readLoop(conn *websocket.Conn, source wsMessageSource)
 }
 
 // pingLoop sends periodic ping messages to keep the connection alive.
-func (b *WebSocketBridge) pingLoop(conn *websocket.Conn, name string) {
+func (b *WebSocketBridge) pingLoop(conn *websocket.Conn, writeMu *sync.Mutex, name string) {
 	defer b.wg.Done()
 
 	ticker := time.NewTicker(wsPingPeriod)
@@ -377,7 +384,10 @@ func (b *WebSocketBridge) pingLoop(conn *websocket.Conn, name string) {
 		case <-b.ctx.Done():
 			return
 		case <-ticker.C:
-			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
+			writeMu.Lock()
+			err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait))
+			writeMu.Unlock()
+			if err != nil {
 				b.logger.Debug().
 					Err(err).
 					Str("connection", name).
@@ -523,7 +533,10 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 
 	// Forward payload to backend as BinaryMessage (transport-agnostic opaque bytes)
 	// The relayer doesn't inspect or care about the payload format (JSON, protobuf, etc.)
-	if err := b.backendConn.WriteMessage(websocket.BinaryMessage, relayReq.Payload); err != nil {
+	b.backendWriteMu.Lock()
+	err := b.backendConn.WriteMessage(websocket.BinaryMessage, relayReq.Payload)
+	b.backendWriteMu.Unlock()
+	if err != nil {
 		b.logger.Warn().Err(err).Msg("failed to forward to backend")
 		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
 		return
@@ -549,7 +562,10 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	if latestReq == nil {
 		b.logger.Debug().Msg("no latestRequest - forwarding raw to gateway")
 		// No request yet - just forward raw data
-		if err := b.gatewayConn.WriteMessage(msg.messageType, msg.data); err != nil {
+		b.gatewayWriteMu.Lock()
+		err := b.gatewayConn.WriteMessage(msg.messageType, msg.data)
+		b.gatewayWriteMu.Unlock()
+		if err != nil {
 			b.logger.Warn().Err(err).Msg("failed to forward to client (PATH)")
 			_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		}
@@ -586,8 +602,11 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 
 	// Forward signed RelayResponse to gateway as BinaryMessage (protobuf format)
 	// Always use BinaryMessage for RelayResponse (protobuf is binary data)
-	if err := b.gatewayConn.WriteMessage(websocket.BinaryMessage, respBytes); err != nil {
-		b.logger.Warn().Err(err).Msg("failed to forward signed response to client (PATH)")
+	b.gatewayWriteMu.Lock()
+	writeErr := b.gatewayConn.WriteMessage(websocket.BinaryMessage, respBytes)
+	b.gatewayWriteMu.Unlock()
+	if writeErr != nil {
+		b.logger.Warn().Err(writeErr).Msg("failed to forward signed response to client (PATH)")
 		_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		return
 	}
@@ -606,7 +625,10 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 
 // forwardToBackend forwards a raw message to the backend.
 func (b *WebSocketBridge) forwardToBackend(msg wsMessage) {
-	if err := b.backendConn.WriteMessage(msg.messageType, msg.data); err != nil {
+	b.backendWriteMu.Lock()
+	err := b.backendConn.WriteMessage(msg.messageType, msg.data)
+	b.backendWriteMu.Unlock()
+	if err != nil {
 		b.logger.Warn().Err(err).Msg("failed to forward raw message to backend")
 		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
 	}
@@ -759,7 +781,10 @@ func (b *WebSocketBridge) sendSessionExpirationMessage() error {
 	}
 
 	// Send to gateway as BinaryMessage (protobuf format)
-	if err := b.gatewayConn.WriteMessage(websocket.BinaryMessage, respBytes); err != nil {
+	b.gatewayWriteMu.Lock()
+	err = b.gatewayConn.WriteMessage(websocket.BinaryMessage, respBytes)
+	b.gatewayWriteMu.Unlock()
+	if err != nil {
 		return err
 	}
 
@@ -905,8 +930,11 @@ func (b *WebSocketBridge) closeWithReason(code int, reason string, initiator wsC
 
 	// Send close to gateway (PATH) with original code - PATH understands Pocket codes
 	gatewayCloseMsg := websocket.FormatCloseMessage(code, reason)
-	if err := b.gatewayConn.WriteControl(websocket.CloseMessage, gatewayCloseMsg, deadline); err != nil {
-		b.logger.Debug().Err(err).Msg("failed to send close to client (PATH)")
+	b.gatewayWriteMu.Lock()
+	gwErr := b.gatewayConn.WriteControl(websocket.CloseMessage, gatewayCloseMsg, deadline)
+	b.gatewayWriteMu.Unlock()
+	if gwErr != nil {
+		b.logger.Debug().Err(gwErr).Msg("failed to send close to client (PATH)")
 	}
 
 	// Send close to backend with RFC-compliant code - backends don't understand Pocket codes
@@ -915,8 +943,11 @@ func (b *WebSocketBridge) closeWithReason(code int, reason string, initiator wsC
 		backendReason = reason // Use original reason if no mapping override
 	}
 	backendCloseMsg := websocket.FormatCloseMessage(backendCode, backendReason)
-	if err := b.backendConn.WriteControl(websocket.CloseMessage, backendCloseMsg, deadline); err != nil {
-		b.logger.Debug().Err(err).Msg("failed to send close to backend")
+	b.backendWriteMu.Lock()
+	beErr := b.backendConn.WriteControl(websocket.CloseMessage, backendCloseMsg, deadline)
+	b.backendWriteMu.Unlock()
+	if beErr != nil {
+		b.logger.Debug().Err(beErr).Msg("failed to send close to backend")
 	}
 
 	// Give connections time to receive close message
