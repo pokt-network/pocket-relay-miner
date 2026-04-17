@@ -3,6 +3,7 @@
 package miner
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -287,13 +288,16 @@ func TestSave_HashFieldRoundTrip(t *testing.T) {
 		State:                   SessionStateClaimed,
 		RelayCount:              42,
 		TotalComputeUnits:       4200,
-		ClaimedRootHash:         []byte{0x01, 0x02, 0x03},
-		ClaimTxHash:             "claimtx",
-		ProofTxHash:             "prooftx",
-		LastWALEntryID:          "wal-999",
-		SettlementOutcome:       &outcome,
-		SettlementHeight:        &height,
-		SettlementTxHash:        &txHash,
+		// A real SMST root is exactly 48 bytes (32-byte hash || 8-byte count
+		// || 8-byte sum). decodeSnapshot drops anything else as corrupt, so
+		// the round-trip assertion below only holds for a shape-valid root.
+		ClaimedRootHash:   bytes.Repeat([]byte{0x5a}, SMSTRootLen),
+		ClaimTxHash:       "claimtx",
+		ProofTxHash:       "prooftx",
+		LastWALEntryID:    "wal-999",
+		SettlementOutcome: &outcome,
+		SettlementHeight:  &height,
+		SettlementTxHash:  &txHash,
 	}
 	require.NoError(t, store.Save(ctx, original))
 

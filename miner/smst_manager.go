@@ -184,29 +184,60 @@ func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessio
 	// 1) Claimed root (post-flush)
 	claimedKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 	if claimedRoot, err := m.redisClient.Get(ctx, claimedKey).Bytes(); err == nil && len(claimedRoot) > 0 {
-		store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
-		trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), claimedRoot, protocol.SMTValueHasher())
-		tree := &redisSMST{
-			sessionID:   sessionID,
-			trie:        trie,
-			store:       store,
-			claimedRoot: claimedRoot,
+		if !isValidSMSTRoot(claimedRoot) {
+			m.logger.Warn().
+				Str(logging.FieldSessionID, sessionID).
+				Int("got_len", len(claimedRoot)).
+				Int("want_len", SMSTRootLen).
+				Str("claimed_root_hex", fmt.Sprintf("%x", claimedRoot)).
+				Msg("corrupt claimed_root in Redis (wrong length) - deleting and starting fresh")
+			// Discard the corrupt key so we fall through to live_root or a fresh tree.
+			// Passing a short root to ImportSparseMerkleSumTrie panics inside the smt
+			// library when it tries to split the payload into hash/count/sum segments.
+			if delErr := m.redisClient.Del(ctx, claimedKey).Err(); delErr != nil {
+				m.logger.Warn().Err(delErr).Str(logging.FieldSessionID, sessionID).
+					Msg("failed to delete corrupt claimed_root (non-fatal, continuing)")
+			}
+		} else {
+			store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
+			trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), claimedRoot, protocol.SMTValueHasher())
+			tree := &redisSMST{
+				sessionID:   sessionID,
+				trie:        trie,
+				store:       store,
+				claimedRoot: claimedRoot,
+			}
+			// Restore count/sum from stats for observability; trie itself knows them.
+			if statsVal, statsErr := m.redisClient.Get(ctx,
+				m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)).Result(); statsErr == nil {
+				_, _ = fmt.Sscanf(statsVal, "%d:%d", &tree.claimedCount, &tree.claimedSum)
+			}
+			m.logger.Info().
+				Str(logging.FieldSessionID, sessionID).
+				Str("claimed_root_hex", fmt.Sprintf("%x", claimedRoot)).
+				Msg("resumed SMST from claimed_root (session was already flushed)")
+			return tree
 		}
-		// Restore count/sum from stats for observability; trie itself knows them.
-		if statsVal, statsErr := m.redisClient.Get(ctx,
-			m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)).Result(); statsErr == nil {
-			_, _ = fmt.Sscanf(statsVal, "%d:%d", &tree.claimedCount, &tree.claimedSum)
-		}
-		m.logger.Info().
-			Str(logging.FieldSessionID, sessionID).
-			Str("claimed_root_hex", fmt.Sprintf("%x", claimedRoot)).
-			Msg("resumed SMST from claimed_root (session was already flushed)")
-		return tree
 	}
 
 	// 2) Live root (mid-session checkpoint from previous leader)
 	liveKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
 	if liveRoot, err := m.redisClient.Get(ctx, liveKey).Bytes(); err == nil && len(liveRoot) > 0 {
+		if !isValidSMSTRoot(liveRoot) {
+			m.logger.Warn().
+				Str(logging.FieldSessionID, sessionID).
+				Int("got_len", len(liveRoot)).
+				Int("want_len", SMSTRootLen).
+				Str("live_root_hex", fmt.Sprintf("%x", liveRoot)).
+				Msg("corrupt live_root in Redis (wrong length) - deleting and starting fresh")
+			if delErr := m.redisClient.Del(ctx, liveKey).Err(); delErr != nil {
+				m.logger.Warn().Err(delErr).Str(logging.FieldSessionID, sessionID).
+					Msg("failed to delete corrupt live_root (non-fatal, continuing)")
+			}
+			// Fall through: caller creates a fresh tree. The bounded relay loss
+			// on a fresh start is the same as any mid-session HA failover.
+			return nil
+		}
 		store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
 		trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), liveRoot, protocol.SMTValueHasher())
 		tree := &redisSMST{
@@ -299,7 +330,16 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 		// Explicit []byte conversion: trie.Root() returns smt.MerkleSumRoot
 		// which go-redis does not know how to marshal directly.
 		rootBytes := []byte(tree.trie.Root())
-		if err := m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err(); err != nil {
+		if !isValidSMSTRoot(rootBytes) {
+			// Defensive: never persist a root we wouldn't be willing to read back.
+			// Keeps the Redis invariant "live_root is always SMSTRootLen or absent".
+			m.logger.Warn().
+				Str(logging.FieldSessionID, sessionID).
+				Int("got_len", len(rootBytes)).
+				Int("want_len", SMSTRootLen).
+				Uint64("update_count", tree.updateCount).
+				Msg("trie.Root() returned unexpected length - skipping live_root checkpoint")
+		} else if err := m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err(); err != nil {
 			m.logger.Warn().
 				Err(err).
 				Str(logging.FieldSessionID, sessionID).
@@ -402,8 +442,19 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 		tree.claimedSum = sumAfterWait
 	}
 
-	// Store the claimed root in Redis for HA failover recovery
+	// Store the claimed root in Redis for HA failover recovery.
+	// Only persist if it matches the expected shape — a short root here would
+	// poison future resume attempts and panic inside smt.ImportSparseMerkleSumTrie
+	// on the next leader.
 	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
+	if !isValidSMSTRoot(tree.claimedRoot) {
+		m.logger.Error().
+			Str(logging.FieldSessionID, sessionID).
+			Int("got_len", len(tree.claimedRoot)).
+			Int("want_len", SMSTRootLen).
+			Msg("refusing to persist claimed_root with unexpected length - claim cannot be safely proved")
+		return nil, fmt.Errorf("session %s: claimed_root has invalid length %d, expected %d", sessionID, len(tree.claimedRoot), SMSTRootLen)
+	}
 	if err := m.redisClient.Set(ctx, rootKey, tree.claimedRoot, 0).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
@@ -554,6 +605,22 @@ func (m *RedisSMSTManager) loadTreeFromRedis(ctx context.Context, sessionID stri
 	rootBytes, err := m.redisClient.Get(ctx, rootKey).Bytes()
 	if err != nil || len(rootBytes) == 0 {
 		return nil, fmt.Errorf("claimed root not found in Redis: %w", err)
+	}
+	if !isValidSMSTRoot(rootBytes) {
+		// Corrupt root would panic inside the smt library on import. Delete it
+		// and surface an explicit error so the caller transitions the session
+		// to proof_missing rather than crashing the process.
+		m.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Int("got_len", len(rootBytes)).
+			Int("want_len", SMSTRootLen).
+			Str("root_hex", fmt.Sprintf("%x", rootBytes)).
+			Msg("corrupt claimed_root during loadTreeFromRedis - deleting and failing load")
+		if delErr := m.redisClient.Del(ctx, rootKey).Err(); delErr != nil {
+			m.logger.Warn().Err(delErr).Str(logging.FieldSessionID, sessionID).
+				Msg("failed to delete corrupt claimed_root (non-fatal, continuing)")
+		}
+		return nil, fmt.Errorf("corrupt claimed_root for session %s: len=%d want=%d", sessionID, len(rootBytes), SMSTRootLen)
 	}
 
 	// Create the Redis-backed store (lazy-loads nodes on demand)
@@ -738,6 +805,22 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 			// Restore the claimed root from Redis if it exists
 			rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 			rootBytes, err := m.redisClient.Get(ctx, rootKey).Bytes()
+			if err == nil && len(rootBytes) > 0 && !isValidSMSTRoot(rootBytes) {
+				// Corrupt root — delete and treat as unflushed. The fresh tree
+				// created above will accept new relays; the session effectively
+				// restarts, which is the same outcome as any failover recovery.
+				m.logger.Warn().
+					Str(logging.FieldSessionID, sessionID).
+					Int("got_len", len(rootBytes)).
+					Int("want_len", SMSTRootLen).
+					Str("root_hex", fmt.Sprintf("%x", rootBytes)).
+					Msg("corrupt claimed_root during warmup - deleting")
+				if delErr := m.redisClient.Del(ctx, rootKey).Err(); delErr != nil {
+					m.logger.Warn().Err(delErr).Str(logging.FieldSessionID, sessionID).
+						Msg("failed to delete corrupt claimed_root (non-fatal)")
+				}
+				rootBytes = nil
+			}
 			if err == nil && len(rootBytes) > 0 {
 				tree.claimedRoot = rootBytes
 				m.logger.Debug().

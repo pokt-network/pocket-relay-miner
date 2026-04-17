@@ -553,6 +553,14 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					results <- result
 					return
 				}
+				// Belt-and-suspenders: smt.MerkleSumRoot.Count()/Sum() slice into
+				// the trailing 16 bytes without bounds checking. Refuse to
+				// build a claim from a malformed root rather than panicking.
+				if len(rootHash) != SMSTRootLen {
+					result.err = fmt.Errorf("session %s: flushed root has invalid length %d, expected %d", snap.SessionID, len(rootHash), SMSTRootLen)
+					results <- result
+					return
+				}
 				result.rootHash = rootHash
 
 				// Phase 2: Extract count and sum from the SMST root hash.

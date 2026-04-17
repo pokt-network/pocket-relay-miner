@@ -388,7 +388,16 @@ func decodeSnapshot(fields map[string]string) (*SessionSnapshot, error) {
 		snap.LastUpdatedAt = t
 	}
 	if v, ok := fields[hfClaimedRootHash]; ok && v != "" {
-		snap.ClaimedRootHash = []byte(v)
+		candidate := []byte(v)
+		// A persisted ClaimedRootHash with the wrong length will later panic
+		// the smt library on import and also produces an invalid MsgCreateClaim
+		// payload if it is ever passed through to the chain. Drop it here so
+		// the session looks unclaimed and the normal flush path runs.
+		if len(candidate) != SMSTRootLen {
+			snap.ClaimedRootHash = nil
+		} else {
+			snap.ClaimedRootHash = candidate
+		}
 	}
 	if v, ok := fields[hfSettlementOutcome]; ok {
 		vv := v

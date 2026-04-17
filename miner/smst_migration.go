@@ -131,6 +131,22 @@ func migrateOneLegacySession(
 		return fmt.Errorf("read legacy root: %w", err)
 	}
 
+	// A root with the wrong length cannot represent a valid SMST payload: the
+	// smt library would panic on import (slice bounds out of range). Treat it
+	// as if the session had no rescuable state — delete the triplet and move
+	// on. The one-time loss is the same as any other orphan.
+	if len(rootBytes) != SMSTRootLen {
+		logger.Warn().
+			Str("session_id", sessionID).
+			Int("got_len", len(rootBytes)).
+			Int("want_len", SMSTRootLen).
+			Str("root_hex", fmt.Sprintf("%x", rootBytes)).
+			Msg("legacy SMST root has invalid length - deleting (claim will expire)")
+		deleteLegacyTriplet(ctx, client, legacyRootKey, legacyNodesKey, legacyStatsKey, stats)
+		stats.SessionsOrphaned++
+		return nil
+	}
+
 	owner, err := findSessionOwnerByRoot(ctx, client, sessionID, rootBytes)
 	if err != nil {
 		return fmt.Errorf("scan session metadata for %s: %w", sessionID, err)
