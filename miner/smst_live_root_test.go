@@ -261,6 +261,84 @@ func (s *RedisSMSTTestSuite) TestLiveRoot_CustomIntervalRespected() {
 	}
 }
 
+// TestLiveRoot_FollowerUpdateAfterStaleResume reproduces the Anaski
+// production panic (2026-04-17):
+//
+//	panic: runtime error: slice bounds out of range [:1] with capacity 0
+//	github.com/pokt-network/smt.isLeafNode(...) node_encoders.go:48
+//	github.com/pokt-network/smt.(*SMT).parseSumTrieNode(...) smt.go:631
+//
+// Scenario:
+//  1. Leader processes N updates past the last checkpoint boundary
+//     (e.g. interval=10, updates 1..19). live_root is frozen at R_10.
+//  2. Updates 11..19 each call trie.Commit(), which internally DELETES
+//     the orphaned inner nodes of the previous tree version. After
+//     update 19, many nodes that R_10 transitively references have
+//     been purged from the shared nodes hash.
+//  3. Leader dies. Follower takes over, reads live_root = R_10, imports
+//     the tree, then calls UpdateTree with a new relay.
+//  4. Tree traversal hits a child digest whose node was deleted in step 2.
+//     store.Get() returns (nil, nil) per MapStore contract; the SMT
+//     library passes the zero-length slice to parseSumTrieNode which
+//     panics on data[:1].
+//
+// The existing TestLiveRoot_MidSessionResumePreservesTree test hides
+// this bug because it kills the leader AT an interval boundary, so
+// live_root points to the current root with no deleted orphans.
+// TestLiveRoot_LossBoundedByInterval kills between boundaries but
+// only flushes (no traversal-triggering UpdateTree), also hiding it.
+//
+// This test must PANIC before the atomic-checkpoint fix and PASS after.
+// The fix: orphan HDELs must be deferred and flushed atomically with the
+// next live_root SET, so live_root always references nodes present in Redis.
+func (s *RedisSMSTTestSuite) TestLiveRoot_FollowerUpdateAfterStaleResume() {
+	supplier := "pokt1live_stale_resume"
+	sessionID := "session_live_stale"
+	const interval = 10
+	const leaderUpdates = 19 // past boundary 10, no checkpoint at 19
+	const followerUpdates = 5
+
+	leaderMgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
+	for i := 1; i <= leaderUpdates; i++ {
+		s.Require().NoError(leaderMgr.UpdateTree(s.ctx, sessionID,
+			[]byte(fmt.Sprintf("leader_k%d", i)),
+			[]byte(fmt.Sprintf("leader_v%d", i)),
+			uint64(10)))
+	}
+
+	// Leader dies: drop in-memory state. Redis has the nodes hash (with
+	// orphans from updates 11..19 already deleted) plus live_root = R_10.
+	leaderMgr.treesMu.Lock()
+	delete(leaderMgr.trees, sessionID)
+	leaderMgr.treesMu.Unlock()
+
+	// Follower takes over. UpdateTree must NOT panic: it will traverse
+	// from R_10 to insert the new relay, and every child digest it
+	// resolves must still exist in the nodes hash.
+	followerMgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
+	for i := 1; i <= followerUpdates; i++ {
+		err := followerMgr.UpdateTree(s.ctx, sessionID,
+			[]byte(fmt.Sprintf("follower_k%d", i)),
+			[]byte(fmt.Sprintf("follower_v%d", i)),
+			uint64(10))
+		s.Require().NoErrorf(err,
+			"follower UpdateTree #%d must not panic after resume from stale live_root (R_10)", i)
+	}
+
+	// Verify the follower's tree reflects the last checkpoint + its own
+	// contribution: 10 relays from the leader (at R_10) + followerUpdates.
+	// The 9 in-flight relays (updates 11..19) are the expected loss,
+	// bounded by (interval - 1) as the live_root design promises.
+	_, err := followerMgr.FlushTree(s.ctx, sessionID)
+	s.Require().NoError(err)
+	count, sum, err := followerMgr.GetTreeStats(sessionID)
+	s.Require().NoError(err)
+	s.Require().Equalf(uint64(10+followerUpdates), count,
+		"expected 10 (last checkpoint) + %d (follower) = %d relays after stale resume",
+		followerUpdates, 10+followerUpdates)
+	s.Require().Equal(uint64(10+followerUpdates)*10, sum)
+}
+
 // createTestRedisSMSTManagerWithInterval is a helper that lets tests set
 // the checkpoint interval explicitly.
 func (s *RedisSMSTTestSuite) createTestRedisSMSTManagerWithInterval(

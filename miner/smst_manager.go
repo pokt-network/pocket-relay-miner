@@ -339,12 +339,31 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 				Int("want_len", SMSTRootLen).
 				Uint64("update_count", tree.updateCount).
 				Msg("trie.Root() returned unexpected length - skipping live_root checkpoint")
-		} else if err := m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err(); err != nil {
-			m.logger.Warn().
-				Err(err).
-				Str(logging.FieldSessionID, sessionID).
-				Uint64("update_count", tree.updateCount).
-				Msg("failed to checkpoint live root (HA resume degraded)")
+		} else if redisStore, ok := tree.store.(*RedisMapStore); ok {
+			// Atomic: HDEL accumulated orphans + SET live_root in one
+			// MULTI/EXEC. Before this: live_root points to the previous
+			// checkpoint whose nodes are still in the hash (orphans
+			// deferred). After: live_root points to the new checkpoint
+			// whose nodes were written by the FlushPipeline calls above,
+			// and the orphans are gone. Never a moment where live_root
+			// references a deleted subtree — that race caused the
+			// Anaski 2026-04-17 panic in parseSumTrieNode.
+			if err := redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes); err != nil {
+				m.logger.Warn().
+					Err(err).
+					Str(logging.FieldSessionID, sessionID).
+					Uint64("update_count", tree.updateCount).
+					Msg("failed to atomically flush orphans + live_root (HA resume degraded, orphans retained for next checkpoint)")
+			}
+		} else {
+			// Non-Redis store path (test doubles etc.) — preserve old behaviour.
+			if err := m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err(); err != nil {
+				m.logger.Warn().
+					Err(err).
+					Str(logging.FieldSessionID, sessionID).
+					Uint64("update_count", tree.updateCount).
+					Msg("failed to checkpoint live root (HA resume degraded)")
+			}
 		}
 	}
 
