@@ -516,12 +516,12 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// for claim decisions because they can race with concurrent updates.
 		// The SMST root hash encodes the real count and sum atomically.
 		type claimBuildResult struct {
-			index    int
-			snapshot *SessionSnapshot
-			claimMsg *prooftypes.MsgCreateClaim
-			rootHash []byte
-			err      error
-			skipped  bool   // true if session was skipped (empty tree, unprofitable)
+			index      int
+			snapshot   *SessionSnapshot
+			claimMsg   *prooftypes.MsgCreateClaim
+			rootHash   []byte
+			err        error
+			skipped    bool // true if session was skipped (empty tree, unprofitable)
 			skipReason string
 		}
 

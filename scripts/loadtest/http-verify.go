@@ -6,7 +6,8 @@
 // with the expected shape (for eth_blockNumber: hex-encoded block height).
 //
 // Usage:
-//   go run scripts/loadtest/http-verify.go -rps 1000 -duration 300s
+//
+//	go run scripts/loadtest/http-verify.go -rps 1000 -duration 300s
 package main
 
 import (
@@ -37,16 +38,16 @@ var (
 )
 
 type counters struct {
-	sent           atomic.Int64
-	status200      atomic.Int64
-	status5xx      atomic.Int64
-	statusOther    atomic.Int64
-	bodyValid      atomic.Int64 // 200 OK with valid JSON-RPC result field
-	bodyEmpty      atomic.Int64 // 200 OK with empty body (PATH 503 masked)
-	bodyInvalid    atomic.Int64 // 200 OK but response body is malformed or error
-	bodyRPCError   atomic.Int64 // 200 OK with JSON-RPC error field (backend error)
-	connErrors     atomic.Int64
-	timeouts       atomic.Int64
+	sent         atomic.Int64
+	status200    atomic.Int64
+	status5xx    atomic.Int64
+	statusOther  atomic.Int64
+	bodyValid    atomic.Int64 // 200 OK with valid JSON-RPC result field
+	bodyEmpty    atomic.Int64 // 200 OK with empty body (PATH 503 masked)
+	bodyInvalid  atomic.Int64 // 200 OK but response body is malformed or error
+	bodyRPCError atomic.Int64 // 200 OK with JSON-RPC error field (backend error)
+	connErrors   atomic.Int64
+	timeouts     atomic.Int64
 }
 
 type jsonRPCResponse struct {

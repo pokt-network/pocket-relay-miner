@@ -305,8 +305,8 @@ func TestGetClaimeduPOKT_MatchesCanonicalFormula(t *testing.T) {
 	claim := prooftypes.Claim{
 		SupplierOperatorAddress: "pokt1test",
 		SessionHeader: &sessiontypes.SessionHeader{
-			SessionId:             "test-session",
-			ServiceId:             "svc-test",
+			SessionId:               "test-session",
+			ServiceId:               "svc-test",
 			SessionStartBlockHeight: 100,
 			SessionEndBlockHeight:   110,
 		},
@@ -359,8 +359,8 @@ func TestGetClaimeduPOKT_EmptyTreeReturnsZero(t *testing.T) {
 	claim := prooftypes.Claim{
 		SupplierOperatorAddress: "pokt1test",
 		SessionHeader: &sessiontypes.SessionHeader{
-			SessionId:             "test-session-empty",
-			ServiceId:             "svc-test",
+			SessionId:               "test-session-empty",
+			ServiceId:               "svc-test",
 			SessionStartBlockHeight: 100,
 			SessionEndBlockHeight:   110,
 		},
