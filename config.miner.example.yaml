@@ -274,6 +274,15 @@ ack_batch_size: 50  # Acknowledge messages in batches (pipelined Redis XACK)
 hot_reload_enabled: true  # Enable hot-reload of keys on startup
 cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h covers ~15 session lifecycles at 30s blocks. Backup safety net if manual cleanup fails.
 
+# SMST live_root checkpoint interval (in UpdateTree calls).
+# Bounds the relay loss window on mid-session leader kills: up to (interval - 1)
+# relays can land in the Redis nodes hash without a reachable root pointer,
+# so a follower promoted at that moment would not inherit them. Lower = safer
+# (more checkpoint writes), higher = fewer writes. Default 10 at 1000 RPS/
+# supplier yields 100 writes/s (10x reduction vs checkpointing every relay),
+# at most 9 relays lost per mid-session kill. Set to 1 for zero-loss mode.
+smst_live_root_checkpoint_interval: 10
+
 # Submission tracking TTL (for debugging claim/proof submissions)
 # Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis.
 # Use `pocket-relay-miner redis submissions` to inspect tracked data.

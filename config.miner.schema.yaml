@@ -422,6 +422,17 @@ properties:
     default: 2h
     pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
+  smst_live_root_checkpoint_interval:
+    type: integer
+    description: |
+      How often (in UpdateTree calls) the intermediate SMST root is written to
+      Redis so a follower promoted mid-session can resume the tree. Bounds the
+      relay loss window on a leader kill to (interval - 1) relays. Lower = safer,
+      more Redis writes. Default 10 balances durability vs write amplification.
+      Set to 1 for zero-loss mode. 0 is treated as "use default".
+    default: 10
+    minimum: 0
+
   submission_tracking_ttl:
     type: string
     description: TTL for claim/proof submission tracking records. Used for debugging failed submissions and auditing via `pocket-relay-miner redis submissions`.

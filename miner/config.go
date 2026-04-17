@@ -63,6 +63,17 @@ type Config struct {
 	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
 
+	// SMSTLiveRootCheckpointInterval is how often (in UpdateTree calls) the
+	// intermediate SMST root is written to Redis so a follower promoted
+	// mid-session can resume the tree. Lower = safer (up to interval-1
+	// relays can be lost on a leader kill between checkpoints) but more
+	// Redis writes. Default: 10 (a 10x reduction in Redis SET load versus
+	// checkpointing every relay, with at most 9 relays lost per kill).
+	// Set to 1 for zero-loss mode. Do not set to 0 in production - 0 means
+	// "use default" and is only honored for config upgrades from older
+	// versions.
+	SMSTLiveRootCheckpointInterval int `yaml:"smst_live_root_checkpoint_interval,omitempty"`
+
 	// SubmissionTrackingTTL is the TTL for claim/proof submission tracking records.
 	// These records are used for debugging failed submissions and auditing.
 	// Default: 24h (covers multiple session windows for debugging)
