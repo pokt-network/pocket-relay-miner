@@ -50,8 +50,18 @@ var (
 )
 
 // IsRetryableError returns true if the error is transient and should be retried.
-// Only Redis connection/pool errors are considered retryable.
-// All other errors (SMST logic errors, session state errors) are permanent.
+// Only Redis connection/pool errors and upstream timeouts are considered
+// retryable. All other errors (SMST logic errors, session state errors,
+// shutdown-origin cancellations) are permanent.
+//
+// context.Canceled is deliberately NOT retryable: on graceful shutdown or
+// supplier removal the worker context is cancelled, every in-flight
+// handleRelay sees context.Canceled through Redis call sites, and
+// classifying it as retryable would leave the stream message permanently
+// pending in XPENDING (the consumer is about to exit and will not retry).
+// The same message is re-delivered by XREADGROUP on restart so no relay is
+// lost. Shutdown-origin cancellations should be handled with
+// IsShutdownCancelError at the call site (ACK-and-discard).
 func IsRetryableError(err error) bool {
 	if err == nil {
 		return false
@@ -75,13 +85,35 @@ func IsRetryableError(err error) bool {
 		return true
 	}
 
-	// Check for context errors (timeout, canceled) - these are transient
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	// Upstream timeouts are retryable (a later attempt may succeed).
+	// context.Canceled is NOT retryable — see function doc.
+	if errors.Is(err, context.DeadlineExceeded) {
 		return true
 	}
 
 	// Everything else is considered permanent - don't retry
 	return false
+}
+
+// IsShutdownCancelError returns true when err wraps context.Canceled
+// without also wrapping context.DeadlineExceeded. It is used by the relay
+// hot path to classify shutdown-origin cancellations: the correct action
+// is ACK-and-discard (the same stream message is re-delivered by
+// XREADGROUP to the next consumer after restart), not retry-forever.
+//
+// Callers should ALSO pass the calling goroutine's ctx.Err() through this
+// classifier: when the supplier worker is shutting down, ctx is cancelled
+// and any wrapped error we see is almost certainly shutdown-origin.
+func IsShutdownCancelError(err error) bool {
+	if err == nil {
+		return false
+	}
+	// DeadlineExceeded wins if both are present — treat as a timeout
+	// (retryable) rather than a shutdown cancel.
+	if errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	return errors.Is(err, context.Canceled)
 }
 
 // IsPermanentSMSTError returns true if the error is a permanent SMST error

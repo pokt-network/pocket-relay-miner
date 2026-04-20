@@ -37,18 +37,32 @@ func TestIsRetryableError(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "context.Canceled is retryable",
+			// context.Canceled MUST NOT be retryable: on graceful shutdown
+			// the worker context is cancelled, every in-flight handleRelay
+			// would return an error that never retries (the consumer is
+			// exiting) and the stream message would sit in XPENDING. The
+			// handleRelay call site uses IsShutdownCancelError to ACK-and-
+			// discard instead — the message is re-delivered on restart.
+			name: "context.Canceled is NOT retryable (shutdown classifier handles it)",
 			err:  context.Canceled,
-			want: true,
+			want: false,
 		},
 		{
-			name: "wrapped context.Canceled is retryable",
+			name: "wrapped context.Canceled is NOT retryable",
 			err:  fmt.Errorf("operation failed: %w", context.Canceled),
-			want: true,
+			want: false,
 		},
 		{
+			// DeadlineExceeded stays retryable: it means an upstream call
+			// timed out, and a fresh attempt (by this or a reclaim
+			// consumer) may succeed.
 			name: "context.DeadlineExceeded is retryable",
 			err:  context.DeadlineExceeded,
+			want: true,
+		},
+		{
+			name: "wrapped context.DeadlineExceeded is retryable",
+			err:  fmt.Errorf("op failed: %w", context.DeadlineExceeded),
 			want: true,
 		},
 		{
@@ -156,6 +170,75 @@ func TestIsPermanentSMSTError(t *testing.T) {
 			got := IsPermanentSMSTError(tt.err)
 			if got != tt.want {
 				t.Errorf("IsPermanentSMSTError(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsShutdownCancelError verifies the shutdown classifier used by the
+// relay hot path to distinguish graceful-shutdown cancellations (ACK-and-
+// discard) from upstream timeouts (retry). DeadlineExceeded wrapping
+// context.Canceled should NOT be misclassified as shutdown.
+func TestIsShutdownCancelError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "nil error",
+			err:  nil,
+			want: false,
+		},
+		{
+			name: "context.Canceled is shutdown cancel",
+			err:  context.Canceled,
+			want: true,
+		},
+		{
+			name: "wrapped context.Canceled is shutdown cancel",
+			err:  fmt.Errorf("update tree: %w", context.Canceled),
+			want: true,
+		},
+		{
+			name: "deeply wrapped context.Canceled is shutdown cancel",
+			err:  fmt.Errorf("outer: %w", fmt.Errorf("inner: %w", context.Canceled)),
+			want: true,
+		},
+		{
+			name: "context.DeadlineExceeded is NOT shutdown cancel",
+			err:  context.DeadlineExceeded,
+			want: false,
+		},
+		{
+			name: "wrapped context.DeadlineExceeded is NOT shutdown cancel",
+			err:  fmt.Errorf("timeout: %w", context.DeadlineExceeded),
+			want: false,
+		},
+		{
+			// Both sentinels present: deadline wins (treat as retryable
+			// timeout, not as a shutdown ACK-and-discard).
+			name: "DeadlineExceeded wrapping Canceled is NOT shutdown cancel",
+			err:  fmt.Errorf("deadline: %w: also: %w", context.DeadlineExceeded, context.Canceled),
+			want: false,
+		},
+		{
+			name: "unrelated error is NOT shutdown cancel",
+			err:  errors.New("oom command not allowed"),
+			want: false,
+		},
+		{
+			name: "ErrSMSTCommitFailed wrapping Canceled is shutdown cancel",
+			err:  fmt.Errorf("%w: %w", ErrSMSTCommitFailed, context.Canceled),
+			want: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := IsShutdownCancelError(tt.err)
+			if got != tt.want {
+				t.Errorf("IsShutdownCancelError(%v) = %v, want %v", tt.err, got, tt.want)
 			}
 		})
 	}

@@ -444,6 +444,20 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		msg.Message.RelayBytes,
 		msg.Message.ComputeUnitsPerRelay,
 	); err != nil {
+		// Shutdown-origin cancellations: ACK-and-discard. The worker is
+		// about to exit and will not process a retry; the stream message
+		// is re-delivered by XREADGROUP to the next consumer after
+		// restart, so no relay is lost. Classifying this as retryable
+		// would leave the message permanently pending in XPENDING.
+		if IsShutdownCancelError(err) || IsShutdownCancelError(ctx.Err()) {
+			w.logger.Debug().
+				Err(err).
+				Str("session_id", msg.Message.SessionId).
+				Str("supplier", supplierAddr).
+				Msg("discarding relay on shutdown cancel (message will be redelivered on restart)")
+			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "shutdown_cancel")
+			return nil // ACK and discard
+		}
 		// IMPORTANT: Check retryable BEFORE permanent. When FlushPipeline fails with
 		// OOM, the error is wrapped with ErrSMSTCommitFailed (permanent sentinel) but
 		// the underlying cause is transient (OOM clears when keys expire). Checking
@@ -501,7 +515,18 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Track relay successfully added to SMST
 	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId)
 
-	// Track relay in session coordinator
+	// Track relay in session coordinator.
+	//
+	// ACK-and-log on failure: SMST + dedup are the sources of truth for
+	// the claim; SessionCoordinator (snapshot.TotalComputeUnits) is
+	// derived state used for economic-viability decisions and operator
+	// observability. Returning an error here would leave the stream
+	// message un-ACK'd and XAUTOCLAIM would reclaim it on idle timeout.
+	// On reclaim the dedup set rejects the duplicate SMST update — good —
+	// but OnRelayProcessed is NOT gated by the dedup check and would
+	// run again, double-incrementing TotalComputeUnits if the dedup set
+	// entry had already expired or been cleaned up. Treat the call as
+	// best-effort: log at WARN for operator visibility, then ACK.
 	if err := state.SessionCoordinator.OnRelayProcessed(
 		ctx,
 		msg.Message.SessionId,
@@ -512,7 +537,11 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		msg.Message.SessionStartHeight,
 		msg.Message.SessionEndHeight,
 	); err != nil {
-		return fmt.Errorf("failed to update session coordinator: %w", err)
+		w.logger.Warn().
+			Err(err).
+			Str("session_id", msg.Message.SessionId).
+			Str("supplier", supplierAddr).
+			Msg("session coordinator update failed — ACKing relay (SMST and dedup already committed)")
 	}
 
 	return nil
