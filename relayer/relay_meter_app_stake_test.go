@@ -9,9 +9,9 @@ import (
 	"sync/atomic"
 	"testing"
 
+	sdkmath "cosmossdk.io/math"
 	"github.com/alicebob/miniredis/v2"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
-	sdkmath "cosmossdk.io/math"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -98,10 +98,10 @@ func TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges(t *testi
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		redisClient,
-		app,            // appClient
-		nil,            // sharedClient (unused — cache hits)
-		nil,            // sessionClient (unused — Redis pre-seeded)
-		nil,            // blockClient
+		app, // appClient
+		nil, // sharedClient (unused — cache hits)
+		nil, // sessionClient (unused — Redis pre-seeded)
+		nil, // blockClient
 		&fakeSharedParamCache{params: sharedParams},
 		nil, // serviceCache (unused in getOrCreateSessionMeter path)
 		nil, // serviceFactorProvider → baseLimit path

@@ -9,11 +9,11 @@ import (
 	"testing"
 	"time"
 
+	sdkmath "cosmossdk.io/math"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/alitto/pond/v2"
-	cosmostypes "github.com/cosmos/cosmos-sdk/types"
-	sdkmath "cosmossdk.io/math"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
+	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -31,15 +31,17 @@ import (
 // reconcile path).
 type fakeKeyManager struct{ addrs []string }
 
-func (f *fakeKeyManager) ListSuppliers() []string                             { return f.addrs }
-func (f *fakeKeyManager) OnKeyChange(_ keys.KeyChangeCallback)                {}
-func (f *fakeKeyManager) GetSigner(string) (cryptotypes.PrivKey, error)       { return nil, fmt.Errorf("n/a") }
-func (f *fakeKeyManager) HasKey(string) bool                                  { return false }
-func (f *fakeKeyManager) AddKey(string, cryptotypes.PrivKey) error            { return nil }
-func (f *fakeKeyManager) RemoveKey(string) error                              { return nil }
-func (f *fakeKeyManager) Reload(context.Context) error                        { return nil }
-func (f *fakeKeyManager) Start(context.Context) error                         { return nil }
-func (f *fakeKeyManager) Close() error                                        { return nil }
+func (f *fakeKeyManager) ListSuppliers() []string              { return f.addrs }
+func (f *fakeKeyManager) OnKeyChange(_ keys.KeyChangeCallback) {}
+func (f *fakeKeyManager) GetSigner(string) (cryptotypes.PrivKey, error) {
+	return nil, fmt.Errorf("n/a")
+}
+func (f *fakeKeyManager) HasKey(string) bool                       { return false }
+func (f *fakeKeyManager) AddKey(string, cryptotypes.PrivKey) error { return nil }
+func (f *fakeKeyManager) RemoveKey(string) error                   { return nil }
+func (f *fakeKeyManager) Reload(context.Context) error             { return nil }
+func (f *fakeKeyManager) Start(context.Context) error              { return nil }
+func (f *fakeKeyManager) Close() error                             { return nil }
 
 // toggleableSupplierQueryClient flips between NotFound and staked based on
 // the staked atomic flag, simulating an operator running MsgStakeSupplier

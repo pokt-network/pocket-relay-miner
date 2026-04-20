@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
+	sdkmath "cosmossdk.io/math"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/alitto/pond/v2"
-	sdkmath "cosmossdk.io/math"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/hashicorp/go-version"
 	"github.com/stretchr/testify/require"
@@ -54,7 +54,9 @@ func (h *historySupplierQueryClient) InvalidateSupplier(string) {}
 // fakeBlockClient lets the test control the height observed by the manager.
 type fakeBlockClient struct{ height atomic.Int64 }
 
-func (b *fakeBlockClient) LastBlock(context.Context) client.Block { return fakeBlock{h: b.height.Load()} }
+func (b *fakeBlockClient) LastBlock(context.Context) client.Block {
+	return fakeBlock{h: b.height.Load()}
+}
 
 func (b *fakeBlockClient) CommittedBlocksSequence(context.Context) client.BlockReplayObservable {
 	return nil
@@ -94,9 +96,9 @@ func supplierWithHistory(addr string, entries ...[3]any) *sharedtypes.Supplier {
 		servs = append(servs, u.Service)
 	}
 	return &sharedtypes.Supplier{
-		OperatorAddress: addr,
-		Stake:           &cosmostypes.Coin{Denom: "upokt", Amount: sdkmath.NewInt(1000)},
-		Services:        servs,
+		OperatorAddress:      addr,
+		Stake:                &cosmostypes.Coin{Denom: "upokt", Amount: sdkmath.NewInt(1000)},
+		Services:             servs,
 		ServiceConfigHistory: history,
 	}
 }
