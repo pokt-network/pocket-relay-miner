@@ -52,6 +52,9 @@ deduplication_ttl_blocks: 10
 batch_size: 1000
 hot_reload_enabled: true
 cache_ttl: "2h"
+# Shorter reconcile interval for localnet so live stake/service changes
+# show up quickly during development. Prod default is 60s.
+supplier_reconcile_interval_seconds: 15
 
 # Pre-discovered applications from genesis (all 4 localnet apps)
 known_applications:

@@ -200,7 +200,20 @@ type SupplierManagerConfig struct {
 	// QueryWorkers is the number of workers for bounded supplier queries.
 	// Default: 20 (if 0 or not set)
 	QueryWorkers int
+
+	// SupplierReconcileInterval is how often the manager re-checks on-chain
+	// staking status for every key in the keyring and pushes the result
+	// into the claimer. Closes the window between "operator stakes a
+	// supplier after miner startup" and "miner picks it up" without
+	// requiring a restart or a keyring file edit. A value of 0 disables
+	// the background reconcile loop entirely (tests that drive reconcile
+	// manually rely on this). Default when unset: 60 seconds.
+	SupplierReconcileInterval time.Duration
 }
+
+// DefaultSupplierReconcileInterval is the default polling cadence for the
+// on-chain stake reconciler.
+const DefaultSupplierReconcileInterval = 60 * time.Second
 
 // SupplierManager manages multiple suppliers in the HA Miner.
 // It handles dynamic addition/removal of suppliers based on key changes.
@@ -303,19 +316,33 @@ func (m *SupplierManager) Start(ctx context.Context) error {
 	// Register for key changes
 	m.keyManager.OnKeyChange(m.onKeyChange)
 
-	// Get all supplier addresses from key manager
-	supplierAddrs := m.keyManager.ListSuppliers()
-	if len(supplierAddrs) == 0 {
-		m.logger.Info().Msg("no suppliers to initialize")
-		return nil
+	if err := m.startWithDistributedClaiming(ctx, m.keyManager.ListSuppliers()); err != nil {
+		return err
 	}
 
-	// Start with distributed claiming (ONLY mode - each miner claims fair share via Redis leases)
-	return m.startWithDistributedClaiming(ctx, supplierAddrs)
+	// 0 disables (tests drive reconcile directly); negative picks up the default.
+	interval := m.config.SupplierReconcileInterval
+	if interval < 0 {
+		interval = DefaultSupplierReconcileInterval
+	}
+	if interval > 0 {
+		go m.reconcileLoop(m.ctx, interval)
+		m.logger.Info().
+			Dur("interval", interval).
+			Msg("supplier stake reconcile loop started")
+	}
+
+	return nil
 }
 
 // startWithDistributedClaiming starts the manager with distributed supplier claiming.
 // Suppliers are claimed via Redis leases and distributed fairly across miners.
+//
+// The claimer is created unconditionally — even with zero staked suppliers —
+// so the background reconciler has a target to push into once a key's
+// on-chain stake lands. Before this, an operator who started the miner with
+// a key that was not yet staked on-chain had no way for the miner to pick
+// up the stake without a process restart.
 func (m *SupplierManager) startWithDistributedClaiming(ctx context.Context, supplierAddrs []string) error {
 	m.logger.Debug().
 		Int("total_keys", len(supplierAddrs)).
@@ -330,28 +357,18 @@ func (m *SupplierManager) startWithDistributedClaiming(ctx context.Context, supp
 		Int("skipped_non_staked", len(supplierAddrs)-len(stakedSuppliers)).
 		Msg("filtered suppliers by staking status")
 
-	if len(stakedSuppliers) == 0 {
-		m.logger.Warn().
-			Int("total_keys", len(supplierAddrs)).
-			Msg("no staked suppliers found - nothing to claim")
-		return nil
-	}
-
-	// Create the claimer
+	// Create the claimer (always, even with empty staked set).
 	m.claimer = NewSupplierClaimer(
 		m.logger,
 		m.config.RedisClient,
 		m.config.MinerID,
 		m.config.ClaimerConfig,
 	)
-
-	// Set callbacks for claim/release events
 	m.claimer.SetCallbacks(
 		m.onSupplierClaimed,
 		m.onSupplierReleased,
 	)
 
-	// Start the claimer with only staked suppliers
 	if err := m.claimer.Start(ctx, stakedSuppliers); err != nil {
 		return fmt.Errorf("failed to start supplier claimer: %w", err)
 	}
@@ -359,18 +376,44 @@ func (m *SupplierManager) startWithDistributedClaiming(ctx context.Context, supp
 	m.logger.Info().
 		Int("claimed", m.claimer.ClaimedCount()).
 		Int("staked_suppliers", len(stakedSuppliers)).
+		Int("total_keys", len(supplierAddrs)).
 		Bool("distributed_claiming", true).
 		Msg("supplier manager started with distributed claiming")
 
-	// Check if pool size is sufficient for the number of suppliers
 	m.checkPoolSize(len(stakedSuppliers))
 
-	// Start periodic stream trimming (removes entries older than CacheTTL)
-	// This is safe because relays older than CacheTTL are already invalid
-	// (session/claim windows are closed, so they can't earn rewards anyway)
+	// Start periodic stream trimming (removes entries older than CacheTTL).
+	// Safe because relays older than CacheTTL are already invalid
+	// (session/claim windows are closed, so they can't earn rewards).
 	go m.runStreamTrimmer(ctx)
 
 	return nil
+}
+
+// reconcile re-runs the staking filter over the keyring and pushes the
+// result into the claimer. Called by the background poller in Start and
+// directly by tests that want deterministic behaviour.
+func (m *SupplierManager) reconcile(ctx context.Context) {
+	if m.claimer == nil {
+		return
+	}
+	m.claimer.UpdateSuppliers(m.filterStakedSuppliers(ctx, m.keyManager.ListSuppliers()))
+}
+
+// reconcileLoop runs the background stake poller until ctx is cancelled.
+// Interval is driven by SupplierReconcileInterval; a zero interval means
+// the loop is disabled.
+func (m *SupplierManager) reconcileLoop(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			m.reconcile(ctx)
+		}
+	}
 }
 
 // checkPoolSize validates that the Redis connection pool is large enough for the number of suppliers.
@@ -423,12 +466,34 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 		if err != nil {
 			// Check if it's a NotFound error (not staked)
 			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+				// Write NOT STAKED status to Redis cache for visibility
+				m.writeSupplierStatusToCache(ctx, addr, false, nil)
+
+				// Drain-gated removal: if the supplier still has non-terminal
+				// sessions in Redis (active / claiming / claimed / proving),
+				// keep it in the claimer's list so the per-supplier mining
+				// pipeline (stream consumer, SMST, lifecycle manager) stays
+				// alive until claim+proof settle. Removing it now would tear
+				// down the pipeline and orphan the pending work — the claim
+				// would never be submitted and the relays would be lost.
+				//
+				// Once every session for this supplier is terminal (Proved /
+				// ProbabilisticProved / ClaimSkipped / *WindowClosed /
+				// *TxError), the next reconcile pass will see NotFound + no
+				// pending work and drop the supplier, which triggers the
+				// normal release → verifySupplierUnstaked → removeSupplier
+				// drain path in onSupplierReleased.
+				if m.hasPendingSessions(ctx, addr) {
+					m.logger.Info().
+						Str("address", addr).
+						Msg("supplier unstaked on-chain but still has pending sessions; keeping in claimer until they settle")
+					stakedSuppliers = append(stakedSuppliers, addr)
+					continue
+				}
+
 				m.logger.Debug().
 					Str("address", addr).
 					Msg("skipping non-staked address (not a supplier on-chain)")
-
-				// Write NOT STAKED status to Redis cache for visibility
-				m.writeSupplierStatusToCache(ctx, addr, false, nil)
 				unstakedCount++
 				continue
 			}
@@ -441,10 +506,26 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 			continue
 		}
 
-		// Supplier is staked - write to cache and include in result
-		services := make([]string, 0, len(supplier.Services))
-		for _, svc := range supplier.Services {
-			services = append(services, svc.ServiceId)
+		// Supplier is staked. Resolve services using the ServiceConfigHistory-
+		// aware helper so we respect activation_height / deactivation_height
+		// scheduled by MsgStakeSupplier updates and MsgUnstakeSupplier. The
+		// denormalized supplier.Services field cuts too fast: poktroll
+		// schedules deactivations at the next session_end, not immediately,
+		// so a service removed mid-session must keep serving relays until
+		// its deactivation_height is reached. Same logic in reverse for
+		// services with a future activation_height.
+		var currentHeight int64
+		if m.config.BlockClient != nil {
+			if block := m.config.BlockClient.LastBlock(ctx); block != nil {
+				currentHeight = block.Height()
+			}
+		}
+		activeConfigs := supplier.GetActiveServiceConfigs(currentHeight)
+		services := make([]string, 0, len(activeConfigs))
+		for _, svc := range activeConfigs {
+			if svc != nil {
+				services = append(services, svc.ServiceId)
+			}
 		}
 		m.writeSupplierStatusToCache(ctx, addr, true, services)
 		stakedSuppliers = append(stakedSuppliers, addr)
@@ -457,6 +538,56 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 		Msg("checked staking status for all key addresses")
 
 	return stakedSuppliers
+}
+
+// hasPendingSessions returns true when the given supplier still has at least
+// one session in a non-terminal state persisted in Redis. Used by the
+// reconcile path to defer the removal of a NotFound-on-chain supplier until
+// its in-flight claim+proof work has settled.
+//
+// A session is "pending" while its SessionState is anything other than a
+// terminal state (see SessionState.IsTerminal). Terminal states include
+// SessionStateProved, SessionStateProbabilisticProved, SessionStateClaimSkipped,
+// SessionStateClaimWindowClosed, SessionStateClaimTxError,
+// SessionStateProofWindowClosed, and SessionStateProofTxError.
+//
+// On Redis errors we conservatively return true so the supplier stays in the
+// claimer: losing revenue to a false-drain is worse than carrying a dead
+// supplier for one extra reconcile interval.
+func (m *SupplierManager) hasPendingSessions(ctx context.Context, supplierAddr string) bool {
+	if m.config.RedisClient == nil {
+		return false
+	}
+	store := NewRedisSessionStore(
+		m.logger,
+		m.config.RedisClient,
+		SessionStoreConfig{
+			KeyPrefix:       m.config.RedisClient.KB().MinerSessionsPrefix(),
+			SupplierAddress: supplierAddr,
+			SessionTTL:      m.config.SessionTTL,
+		},
+	)
+	defer func() { _ = store.Close() }()
+
+	queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	sessions, err := store.GetBySupplier(queryCtx)
+	if err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str("address", supplierAddr).
+			Msg("failed to enumerate sessions for drain-gate check; treating as pending (fail-safe)")
+		return true
+	}
+	for _, snap := range sessions {
+		if snap == nil {
+			continue
+		}
+		if !snap.State.IsTerminal() {
+			return true
+		}
+	}
+	return false
 }
 
 // writeSupplierStatusToCache writes a supplier's staking status to Redis cache.
@@ -730,9 +861,14 @@ func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr stri
 			if err != nil {
 				// Check if it's a NotFound error (not staked)
 				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-					m.logger.Debug().
+					// The stake tx may land after the keyring change fires
+					// the hot-reload callback. Return without claiming; the
+					// periodic reconcile loop re-runs filterStakedSuppliers
+					// over every keyring entry at SupplierReconcileInterval
+					// and will pick this key up once the stake is visible.
+					m.logger.Info().
 						Str("address", operatorAddr).
-						Msg("skipping hot-reloaded key - not staked as supplier on-chain")
+						Msg("hot-reloaded key is not yet staked on-chain; will retry at next reconcile tick")
 					return
 				}
 				// Network/timeout error — fail-open: proceed with adding (same principle as filterStakedSuppliers)

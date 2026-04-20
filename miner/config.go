@@ -79,6 +79,14 @@ type Config struct {
 	// Default: 24h (covers multiple session windows for debugging)
 	SubmissionTrackingTTL time.Duration `yaml:"submission_tracking_ttl"`
 
+	// SupplierReconcileIntervalSeconds is how often (in seconds) the miner
+	// re-checks every keyring supplier's on-chain staking status and
+	// service list. Closes the gap between "operator stakes/unstakes/
+	// changes services" and "miner notices" without requiring a restart
+	// or a keyring file edit.
+	// Default: 60. Set to a negative value to disable (tests only).
+	SupplierReconcileIntervalSeconds int64 `yaml:"supplier_reconcile_interval_seconds,omitempty"`
+
 	// KnownApplications is a list of application addresses to pre-discover at startup.
 	// These apps will be fetched from the network and added to the cache during initialization.
 	KnownApplications []string `yaml:"known_applications,omitempty"`
@@ -386,6 +394,17 @@ func (c *Config) Validate() error {
 	// Note: Storage validation removed - all session trees now use Redis
 
 	return nil
+}
+
+// GetSupplierReconcileInterval returns the configured interval, falling back
+// to DefaultSupplierReconcileInterval when unset (zero). Negative values are
+// returned as-is so tests can disable the loop via
+// SupplierReconcileIntervalSeconds: -1.
+func (c *Config) GetSupplierReconcileInterval() time.Duration {
+	if c.SupplierReconcileIntervalSeconds == 0 {
+		return DefaultSupplierReconcileInterval
+	}
+	return time.Duration(c.SupplierReconcileIntervalSeconds) * time.Second
 }
 
 // GetClaimIdleTimeout returns the claim idle timeout as a duration.

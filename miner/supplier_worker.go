@@ -339,11 +339,12 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 				CheckInterval:            0, // Event-driven via Redis pub/sub
 				MaxConcurrentTransitions: w.config.Config.GetSessionLifecycleMaxConcurrentTransitions(),
 			},
-			ClaimerConfig:         w.config.Config.GetSupplierClaimingConfig(),
-			DisableClaimBatching:  w.config.Config.Transaction.DisableClaimBatching,
-			DisableProofBatching:  w.config.Config.Transaction.DisableProofBatching,
-			SubmissionTrackingTTL: w.config.Config.GetSubmissionTrackingTTL(),
-			QueryWorkers:          w.config.Config.GetQueryWorkers(),
+			ClaimerConfig:             w.config.Config.GetSupplierClaimingConfig(),
+			DisableClaimBatching:      w.config.Config.Transaction.DisableClaimBatching,
+			DisableProofBatching:      w.config.Config.Transaction.DisableProofBatching,
+			SubmissionTrackingTTL:     w.config.Config.GetSubmissionTrackingTTL(),
+			QueryWorkers:              w.config.Config.GetQueryWorkers(),
+			SupplierReconcileInterval: w.config.Config.GetSupplierReconcileInterval(),
 		},
 	)
 

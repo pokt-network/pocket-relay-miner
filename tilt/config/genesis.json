@@ -1205,7 +1205,7 @@
         "num_blocks_per_session": 10,
         "proof_window_close_offset_blocks": 8,
         "proof_window_open_offset_blocks": 0,
-        "supplier_unbonding_period_sessions": 1
+        "supplier_unbonding_period_sessions": 20
       }
     },
     "slashing": {

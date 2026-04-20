@@ -289,6 +289,14 @@ smst_live_root_checkpoint_interval: 10
 submission_tracking_ttl: "24h"  # Default: 24h (covers multiple session windows for debugging)
 # [PRODUCTION] submission_tracking_ttl: "168h"  # 7 days for longer audit trail
 
+# Supplier reconcile interval (seconds). How often the miner polls every
+# keyring supplier's on-chain stake + service list, so operator stake /
+# unstake / service-config changes are picked up without a miner restart.
+# Default: 60. Set a negative value to disable (tests only).
+supplier_reconcile_interval_seconds: 60
+# [AGGRESSIVE] supplier_reconcile_interval_seconds: 15   # faster pickup, more chain queries
+# [CONSERVATIVE] supplier_reconcile_interval_seconds: 300  # lower chain load, slower pickup
+
 # Pre-discovered applications (optional - speeds up startup)
 known_applications:
   - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"  # app1

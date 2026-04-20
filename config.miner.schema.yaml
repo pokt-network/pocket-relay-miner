@@ -439,6 +439,16 @@ properties:
     default: 24h
     pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
+  supplier_reconcile_interval_seconds:
+    type: integer
+    description: >-
+      How often (in seconds) the miner polls every keyring supplier's
+      on-chain staking status and active service list. Closes the window
+      between an operator's MsgStakeSupplier / service-config update and
+      the miner picking it up, without needing a process restart. A
+      negative value disables the poll loop and is intended for tests only.
+    default: 60
+
   known_applications:
     type: array
     description: Application addresses to pre-discover at startup
