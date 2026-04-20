@@ -287,3 +287,47 @@ func TestHandleRelay_OnRelayProcessedError_AcksAfterSmstAndDedup(t *testing.T) {
 	assert.Equal(t, int32(1), fakeStore.incCalls.Load(),
 		"OnRelayProcessed must be attempted exactly once per handleRelay call")
 }
+
+// TestHandleRelay_EmptyRelayHash_RecomputedFromBytes verifies the defensive
+// recompute path added so a publisher bug that ships MinedRelayMessage with
+// RelayHash=nil does not collapse every event into a single SMST leaf.
+// Two distinct RelayBytes with nil RelayHash must land as two distinct dedup
+// entries (i.e. recomputed to two different hashes) and two distinct relays
+// in the coordinator.
+//
+// handleRelay clears RelayHash/RelayBytes on its in-memory msg after the
+// SMST update for GC; the observable effects are the dedup set contents and
+// the session coordinator counters, not the message fields post-call.
+func TestHandleRelay_EmptyRelayHash_RecomputedFromBytes(t *testing.T) {
+	f := newHandlerTestFixture(t, "pokt1supplier")
+
+	// First message: nil RelayHash, payload "relay-A".
+	msgA := newStreamMessage(f.supplierAddr, "sess-recompute", "relay-A", 100)
+	msgA.Message.RelayHash = nil
+	require.NoError(t, f.worker.handleRelay(f.ctx, f.supplierAddr, msgA),
+		"first empty-hash relay must be recomputed and ACK'd")
+
+	// Second message: nil RelayHash, DIFFERENT payload "relay-B".
+	msgB := newStreamMessage(f.supplierAddr, "sess-recompute", "relay-B", 100)
+	msgB.Message.RelayHash = nil
+	require.NoError(t, f.worker.handleRelay(f.ctx, f.supplierAddr, msgB))
+
+	// Coordinator must have counted both (not collapsed via nil-key).
+	snap, err := f.sessionStore.Get(f.ctx, "sess-recompute")
+	require.NoError(t, err)
+	require.NotNil(t, snap)
+	assert.Equal(t, int64(2), snap.RelayCount,
+		"two distinct payloads with nil RelayHash must land as two distinct relays")
+	assert.Equal(t, uint64(200), snap.TotalComputeUnits)
+
+	// Dedup must contain both recomputed hashes — proves the recompute
+	// produced two different keys rather than collapsing to a shared empty key.
+	expectedA := sha256.Sum256([]byte("relay-A"))
+	expectedB := sha256.Sum256([]byte("relay-B"))
+	isDupA, dupErrA := f.dedup.IsDuplicate(f.ctx, expectedA[:], "sess-recompute")
+	require.NoError(t, dupErrA)
+	assert.True(t, isDupA, "dedup must have recorded the recomputed hash of RelayBytes A")
+	isDupB, dupErrB := f.dedup.IsDuplicate(f.ctx, expectedB[:], "sess-recompute")
+	require.NoError(t, dupErrB)
+	assert.True(t, isDupB, "dedup must have recorded the recomputed hash of RelayBytes B")
+}

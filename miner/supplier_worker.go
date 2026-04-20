@@ -21,6 +21,7 @@ import (
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 
+	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -408,6 +409,21 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 				return nil
 			}
 		}
+	}
+
+	// Defensive recompute: if the publisher somehow shipped a MinedRelayMessage
+	// with an empty RelayHash (e.g. a bug on any new transport path), recompute
+	// it locally from RelayBytes before inserting into the SMST. An empty key
+	// would otherwise collide with every other empty-keyed leaf and collapse
+	// legitimate events into a single SMST entry, silently losing claims.
+	if len(msg.Message.RelayHash) == 0 && len(msg.Message.RelayBytes) > 0 {
+		recomputed := protocol.GetRelayHashFromBytes(msg.Message.RelayBytes)
+		msg.Message.RelayHash = recomputed[:]
+		w.logger.Warn().
+			Str("session_id", msg.Message.SessionId).
+			Str("supplier", supplierAddr).
+			Str("service_id", msg.Message.ServiceId).
+			Msg("MinedRelayMessage arrived with empty RelayHash; recomputed from RelayBytes (publisher bug upstream)")
 	}
 
 	// Deduplicate only on reclaim: the normal XREADGROUP `>` delivery path
