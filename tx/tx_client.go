@@ -817,10 +817,28 @@ type HASupplierClient struct {
 }
 
 // feeCacheTTL is how long the observed claim+proof fee pair is reused before
-// re-querying the chain. One minute is long enough to absorb bursty claim
-// windows without hammering the node, and short enough that any network-wide
-// gas_price change is picked up within a session cycle.
-const feeCacheTTL = time.Minute
+// re-querying the chain. This is the fallback for the case where a supplier
+// sits idle between claim windows and the cache never gets refreshed by a
+// successful submission — most refreshes come from the post-submit
+// InvalidateFeeCache path rather than from TTL expiry. Kept short (tens of
+// seconds) so that a transient network fee spike auto-expires quickly
+// instead of persisting for the full claim/proof cycle.
+const feeCacheTTL = 30 * time.Second
+
+// InvalidateFeeCache clears the cached claim+proof fee estimate so the next
+// GetEstimatedFeeUpokt call re-queries the chain. Called after a successful
+// claim or proof submission: we just paid the real fee, so any in-memory
+// ceiling from a previous chain observation is now stale and (during a
+// transient spike) can be much higher than reality. Holding on to that
+// over-estimate would cause the economic-viability check to skip sessions
+// whose legitimate reward sits below the stale ceiling but above the real
+// fee — silently dropping claims with healthy relay counts.
+func (c *HASupplierClient) InvalidateFeeCache() {
+	c.feeCacheMu.Lock()
+	defer c.feeCacheMu.Unlock()
+	c.feeCacheUpokt = 0
+	c.feeCacheTime = time.Time{}
+}
 
 // NewHASupplierClient creates a new supplier client for a specific operator.
 func NewHASupplierClient(
@@ -940,6 +958,12 @@ func (c *HASupplierClient) CreateClaims(
 	c.lastClaimTxHash = txHash
 	c.lastClaimTxMu.Unlock()
 
+	// The fee we just paid is now the freshest observation available.
+	// Drop any cached chain-observed estimate so the next economic-viability
+	// check reflects what the network is actually charging rather than a
+	// possibly-stale spike.
+	c.InvalidateFeeCache()
+
 	return nil
 }
 
@@ -976,6 +1000,10 @@ func (c *HASupplierClient) SubmitProofs(
 	c.lastProofTxMu.Lock()
 	c.lastProofTxHash = txHash
 	c.lastProofTxMu.Unlock()
+
+	// Same rationale as CreateClaims — refresh the cached estimate from the
+	// most recent successful submission.
+	c.InvalidateFeeCache()
 
 	return nil
 }

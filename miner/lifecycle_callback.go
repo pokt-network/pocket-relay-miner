@@ -312,6 +312,68 @@ func (lc *LifecycleCallback) getClaimReward(
 	return claim.GetClaimeduPOKT(*sharedParams, difficulty)
 }
 
+// claimBuildResult carries the outcome of building a single session's claim
+// inside OnSessionsNeedClaim's parallel fan-out. It is lifted out of the
+// enclosing method so the collector logic can be unit tested independently
+// of the full claim pipeline (block waits, supplier client, etc.).
+type claimBuildResult struct {
+	index      int
+	snapshot   *SessionSnapshot
+	claimMsg   *prooftypes.MsgCreateClaim
+	rootHash   []byte
+	err        error
+	skipped    bool // true if session was skipped (empty tree, unprofitable)
+	skipReason string
+}
+
+// claimBuildCollection is the partitioned result of draining numTasks
+// claimBuildResult values from the worker channel. The caller uses `built`
+// to populate the batched MsgCreateClaim, iterates `skipped` to run the
+// per-reason finalise paths, and surfaces `failed` via warnings + metrics
+// for operators (and for the next claim-window retry).
+type claimBuildCollection struct {
+	built   []claimBuildResult
+	skipped []claimBuildResult
+	failed  []claimBuildResult
+}
+
+// collectClaimBuildResults drains exactly numTasks values from results and
+// partitions them into (built, skipped, failed).
+//
+// A prior implementation bailed out on the first result.err != nil, which
+// silently abandoned every session whose buildFunc had already completed
+// successfully in the same batch — including sessions whose SMST had
+// already been sealed (claimedRoot set) and so could not be re-built on a
+// subsequent claim-window retry. That produced claims that never made it
+// on-chain even though the supplier had fully mined the relays.
+//
+// This function never returns an error: it collects all results and lets
+// the caller decide per-bucket what to do. Failures are surfaced to the
+// caller verbatim (full err chain preserved) so the caller can log and
+// meter them without losing context.
+//
+// The resultsCh MUST deliver exactly numTasks values; callers that
+// cancel early must drain it themselves to avoid leaking goroutines.
+func collectClaimBuildResults(numTasks int, resultsCh <-chan claimBuildResult) claimBuildCollection {
+	coll := claimBuildCollection{}
+	if numTasks <= 0 {
+		return coll
+	}
+	coll.built = make([]claimBuildResult, 0, numTasks)
+	for i := 0; i < numTasks; i++ {
+		r := <-resultsCh
+		switch {
+		case r.err != nil:
+			coll.failed = append(coll.failed, r)
+		case r.skipped:
+			coll.skipped = append(coll.skipped, r)
+		default:
+			coll.built = append(coll.built, r)
+		}
+	}
+	return coll
+}
+
 // OnSessionActive is called when a new session starts.
 // For HA miner, sessions are created on-demand when relays arrive, so this is mostly informational.
 func (lc *LifecycleCallback) OnSessionActive(_ context.Context, snapshot *SessionSnapshot) error {
@@ -515,16 +577,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// Snapshot counters (relay_count, total_compute_units) are NOT used
 		// for claim decisions because they can race with concurrent updates.
 		// The SMST root hash encodes the real count and sum atomically.
-		type claimBuildResult struct {
-			index      int
-			snapshot   *SessionSnapshot
-			claimMsg   *prooftypes.MsgCreateClaim
-			rootHash   []byte
-			err        error
-			skipped    bool // true if session was skipped (empty tree, unprofitable)
-			skipReason string
-		}
-
 		results := make(chan claimBuildResult, len(candidateSnapshots))
 		numTasks := len(candidateSnapshots)
 
@@ -669,44 +721,68 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			}
 		}
 
-		// Collect all results (blocking until all tasks complete).
-		// Single pass: handle skipped/failed sessions and collect valid claims.
-		var claimMsgs []*prooftypes.MsgCreateClaim
-		var groupRootHashes [][]byte
-		var validSnapshots []*SessionSnapshot
-		for i := 0; i < numTasks; i++ {
-			result := <-results
-			if result.err != nil {
-				return nil, result.err
-			}
+		// Collect all results (blocking until all tasks complete). We
+		// deliberately collect every result even when some buildFuncs
+		// fail: a single-session failure (e.g. a transient
+		// buildSessionHeader query error) must not abandon the other
+		// sessions in the batch, because their SMSTs have already been
+		// sealed (claimedRoot set) and cannot be re-built on a future
+		// retry — leaving them in-limbo silently drops claims that were
+		// otherwise valid and properly mined.
+		partitioned := collectClaimBuildResults(numTasks, results)
 
-			// Handle skipped sessions (empty tree, unprofitable)
-			if result.skipped {
-				snap := result.snapshot
-				switch result.skipReason {
-				case "unprofitable":
-					RecordClaimSkipped(snap.SupplierOperatorAddress, snap.ServiceID, "unprofitable")
-					if skipErr := lc.OnClaimSkipped(ctx, snap); skipErr != nil {
-						logger.Warn().Err(skipErr).
-							Str(logging.FieldSessionID, snap.SessionID).
-							Msg("failed to finalise claim_skipped transition")
-					}
-				case "empty_tree":
-					// Session had no mined relays — not a failure, just nothing to claim
+		// Per-reason finalise paths for skipped sessions.
+		for _, r := range partitioned.skipped {
+			snap := r.snapshot
+			switch r.skipReason {
+			case "unprofitable":
+				RecordClaimSkipped(snap.SupplierOperatorAddress, snap.ServiceID, "unprofitable")
+				if skipErr := lc.OnClaimSkipped(ctx, snap); skipErr != nil {
+					logger.Warn().Err(skipErr).
+						Str(logging.FieldSessionID, snap.SessionID).
+						Msg("failed to finalise claim_skipped transition")
 				}
-				continue
+			case "empty_tree":
+				// Session had no mined relays — not a failure, just nothing to claim
 			}
+		}
 
-			// Valid claim — collect for submission
+		// Failed per-session builds are surfaced as warnings + metrics
+		// for operator visibility and next-window retry inspection.
+		// The batch continues with whatever successfully built.
+		for _, r := range partitioned.failed {
+			snap := r.snapshot
+			sessionID := ""
+			supplier := ""
+			serviceID := ""
+			if snap != nil {
+				sessionID = snap.SessionID
+				supplier = snap.SupplierOperatorAddress
+				serviceID = snap.ServiceID
+			}
+			RecordClaimSkipped(supplier, serviceID, "build_failed")
+			logger.Warn().
+				Err(r.err).
+				Str(logging.FieldSessionID, sessionID).
+				Str(logging.FieldSupplier, supplier).
+				Str(logging.FieldServiceID, serviceID).
+				Msg("session claim build failed - dropping from batch, other sessions continue")
+		}
+
+		// Valid claims — collect for submission.
+		claimMsgs := make([]*prooftypes.MsgCreateClaim, 0, len(partitioned.built))
+		groupRootHashes := make([][]byte, 0, len(partitioned.built))
+		validSnapshots := make([]*SessionSnapshot, 0, len(partitioned.built))
+		for _, r := range partitioned.built {
 			SetClaimScheduledHeight(
-				result.snapshot.SupplierOperatorAddress,
-				result.snapshot.ServiceID,
-				result.snapshot.SessionID,
+				r.snapshot.SupplierOperatorAddress,
+				r.snapshot.ServiceID,
+				r.snapshot.SessionID,
 				float64(earliestClaimHeight),
 			)
-			claimMsgs = append(claimMsgs, result.claimMsg)
-			groupRootHashes = append(groupRootHashes, result.rootHash)
-			validSnapshots = append(validSnapshots, result.snapshot)
+			claimMsgs = append(claimMsgs, r.claimMsg)
+			groupRootHashes = append(groupRootHashes, r.rootHash)
+			validSnapshots = append(validSnapshots, r.snapshot)
 		}
 
 		// Convert to interface types for variadic call

@@ -103,6 +103,15 @@ const (
 	DefaultLiveRootCheckpointInterval = 10
 )
 
+// flushTreeSealWaitHook is a test-only hook that fires during FlushTree's
+// Phase-3 unlock-and-wait window, after rootAfterSeal has been captured and
+// before the lock is re-acquired for rootAfterWait. Production code leaves
+// this nil; tests can install a function to force a mismatch between the
+// two captured roots so the Phase-4 resolution branch can be exercised.
+//
+// Never set this outside of tests.
+var flushTreeSealWaitHook func(sessionID string)
+
 // RedisSMSTManagerConfig contains configuration for the SMST manager.
 type RedisSMSTManagerConfig struct {
 	// SupplierAddress is the supplier this manager is for.
@@ -692,6 +701,9 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 		// Any relay that was already inside UpdateTree (passed sealing check) will finish.
 		// Any new relay will be rejected by the sealing flag.
 		tree.mu.Unlock()
+		if hook := flushTreeSealWaitHook; hook != nil {
+			hook(sessionID)
+		}
 		time.Sleep(FlushPollInterval)
 		tree.mu.Lock()
 
@@ -711,7 +723,33 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 		}
 
 		if !bytes.Equal(rootAfterSeal, rootAfterWait) {
-			m.logger.Error().
+			// The sealing flag is set to true under tree.mu BEFORE
+			// rootAfterSeal is captured, and UpdateTree re-checks it
+			// under the same lock before touching the trie. So a
+			// legitimate in-flight relay cannot land during the wait
+			// window — if the two captured roots disagree, something
+			// else is going on (spurious library internal state read, a
+			// subtle sealing-flag bug elsewhere, or a direct trie
+			// mutation that bypassed the sealing check).
+			//
+			// In every one of those cases the RIGHT thing to do is
+			// trust rootAfterWait: we now hold the lock again, sealing
+			// is true, no further writer can touch the tree, and the
+			// value we read matches what will be the final sealed
+			// state. Returning an error instead — the old behaviour —
+			// would abandon the session entirely: the tree stays in
+			// Redis marked as mid-flush, future leaders see the
+			// claimed_root-less state, the MsgCreateClaim never gets
+			// sent, and the supplier silently loses the relays this
+			// session already committed. That failure mode shows up as
+			// on-chain ComputeUnits dropping while relay RPS is
+			// healthy, which is exactly the regression we are fixing.
+			//
+			// Log at WARN with enough context (both roots plus
+			// count/sum deltas) that any real sealing-flag bug elsewhere
+			// in the stack still surfaces via alerts, but do not block
+			// the claim on it.
+			m.logger.Warn().
 				Str(logging.FieldSessionID, sessionID).
 				Str("root_after_seal_hex", fmt.Sprintf("%x", rootAfterSeal)).
 				Str("root_after_wait_hex", fmt.Sprintf("%x", rootAfterWait)).
@@ -719,17 +757,17 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 				Uint64("count_after_wait", countAfterWait).
 				Uint64("sum_after_seal", sumAfterSeal).
 				Uint64("sum_after_wait", sumAfterWait).
-				Msg("SEAL RACE DETECTED: root changed after seal - in-flight relay completed during wait!")
-			return nil, fmt.Errorf("session %s: root changed after seal (sealed=%x, after_wait=%x) - in-flight relay modified tree",
-				sessionID, rootAfterSeal, rootAfterWait)
+				Msg("seal-wait root mismatch: trusting post-wait reading (see FlushTree docs) - investigate if this fires in production")
+		} else {
+			m.logger.Debug().
+				Str(logging.FieldSessionID, sessionID).
+				Str("verified_root_hex", fmt.Sprintf("%x", rootAfterWait)).
+				Msg("seal verified - root stable after wait, no in-flight relays")
 		}
 
-		m.logger.Debug().
-			Str(logging.FieldSessionID, sessionID).
-			Str("verified_root_hex", fmt.Sprintf("%x", rootAfterWait)).
-			Msg("seal verified - root stable after wait, no in-flight relays")
-
-		// Phase 5: Seal complete - save verified stable root
+		// Phase 5: Seal complete - save verified stable root. Always
+		// use the post-wait reading because it was taken under the
+		// re-acquired lock and reflects the authoritative sealed state.
 		tree.claimedRoot = rootAfterWait
 		tree.claimedCount = countAfterWait
 		tree.claimedSum = sumAfterWait
