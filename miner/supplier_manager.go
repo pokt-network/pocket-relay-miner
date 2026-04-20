@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync"
 	"time"
 
@@ -1025,8 +1026,27 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 // consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
 // Each message is ACK'd immediately after successful processing to prevent race conditions
 // with XAUTOCLAIM reclaiming messages that were already processed but not yet ACK'd.
+//
+// Belt-and-suspenders defense: even though every SMT boundary inside
+// handleRelay is wrapped with runSMSTSafely, any panic from unrelated
+// code paths (nil pointer, map corruption, pool misuse) must not kill
+// this consumer goroutine — losing it stops every relay for the
+// supplier until a restart. We cannot use logging.RecoverGoRoutine
+// directly because this loop must keep running after a single relay
+// panics, not exit. Instead we recover *per iteration* below.
 func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *SupplierState) {
 	defer state.wg.Done()
+
+	defer func() {
+		if r := recover(); r != nil {
+			logging.PanicRecoveriesTotal.WithLabelValues("supplier_consume_loop").Inc()
+			m.logger.Error().
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str("panic_value", fmt.Sprintf("%v", r)).
+				Str("stack_trace", string(debug.Stack())).
+				Msg("PANIC RECOVERED in consumeForSupplier — consumer goroutine would have died")
+		}
+	}()
 
 	msgChan := state.Consumer.Consume(ctx)
 
@@ -1049,30 +1069,47 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 					Msg("processing relay during drain")
 			}
 
-			// Process the relay (adds to SMST tree). We cache the service/
-			// session identifiers and the start time up-front because
-			// msg.Message lives in transport.minedRelayMessagePool and must
-			// be released the moment onRelay returns — any later access to
-			// msg.Message would race with a future pool user.
+			// Per-relay panic guard: if anything below (including code
+			// paths the runSMSTSafely boundary does NOT cover — pool
+			// release, deduplicator, session_store access) panics, we
+			// log, increment a metric, and move on to the next message
+			// rather than dying and leaving the supplier with no
+			// consumer. This is the difference between "a single relay
+			// is lost" (acceptable) and "the supplier stops earning
+			// until a restart" (the Anaski incident shape).
 			serviceID := msg.Message.ServiceId
 			sessionID := msg.Message.SessionId
 			var processErr error
-			if m.onRelay != nil {
-				startTime := time.Now()
-				processErr = m.onRelay(ctx, state.OperatorAddr, &msg)
-				status := "success"
-				if processErr != nil {
-					status = "error"
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						logging.PanicRecoveriesTotal.WithLabelValues("supplier_consume_relay").Inc()
+						m.logger.Error().
+							Str(logging.FieldSupplier, state.OperatorAddr).
+							Str("session_id", sessionID).
+							Str("panic_value", fmt.Sprintf("%v", r)).
+							Str("stack_trace", string(debug.Stack())).
+							Msg("PANIC RECOVERED during relay processing — relay dropped, consumer continuing")
+						processErr = fmt.Errorf("panic recovered in relay processing: %v", r)
+					}
+				}()
+				if m.onRelay != nil {
+					startTime := time.Now()
+					processErr = m.onRelay(ctx, state.OperatorAddr, &msg)
+					status := "success"
+					if processErr != nil {
+						status = "error"
+					}
+					RecordRelayProcessingLatency(state.OperatorAddr, serviceID, status, time.Since(startTime).Seconds())
 				}
-				RecordRelayProcessingLatency(state.OperatorAddr, serviceID, status, time.Since(startTime).Seconds())
-			}
 
-			// Return the pooled MinedRelayMessage now that the worker is
-			// done reading it. msg.ID and msg.StreamName live on the
-			// StreamMessage wrapper (stack/channel-copy) so AckMessage below
-			// is still safe to call.
-			transport.ReleaseMinedRelayMessage(msg.Message)
-			msg.Message = nil
+				// Pool release must run inside the recover scope so that
+				// a panic mid-processing still returns the borrowed
+				// MinedRelayMessage to the pool — otherwise the pool
+				// leaks one slot per panic and eventually starves.
+				transport.ReleaseMinedRelayMessage(msg.Message)
+				msg.Message = nil
+			}()
 
 			if processErr != nil {
 				m.logger.Warn().

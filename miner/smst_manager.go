@@ -1,9 +1,62 @@
+// Package miner, SMST subsystem.
+//
+// # Operator runbook: diagnosing claim/ComputeUnits loss
+//
+// If on-chain ComputeUnits are lower than the supplier's actual RPS
+// would suggest, walk these signals in order:
+//
+//  1. Miner metrics (exposed at the miner's /metrics endpoint):
+//     - ha_smst_panics_recovered_total{supplier,operation}: any
+//     non-zero rate means the SMT library panicked on corrupt state
+//     (missing node, malformed payload) and the defensive boundary
+//     caught it. Root cause is almost always Redis-side data loss.
+//     - ha_smst_corruption_evictions_total{supplier,reason}: a
+//     session was dropped from memory because its tree was deemed
+//     unreliable. The session's relays get undercounted in the
+//     claim (only post-eviction relays make it in).
+//
+//  2. Miner logs (grep these strings):
+//     - "SMT library panic recovered at miner boundary" — full stack
+//     and smt_op field show which call tripped.
+//     - "SMST node missing from store" — ErrSMSTNodeMissing bubbled
+//     up; a Redis hash field that should be present was absent.
+//     - "evicted corrupt SMST session from memory" — emitted on every
+//     eviction with the reason label (update_tree_corruption,
+//     flush_tree_corruption, prove_closest_corruption, ...).
+//
+//  3. Redis server state:
+//     - INFO memory → evicted_keys should be 0. Any non-zero means
+//     Redis ran out of memory and evicted keys; if the nodes hash
+//     is among them, every in-flight session on this supplier
+//     corrupts simultaneously.
+//     - CONFIG GET maxmemory-policy → must be "noeviction". Any
+//     *-lru, *-lfu, or *-random policy will silently evict SMST
+//     data under memory pressure and cause this exact failure mode.
+//     - CONFIG GET maxmemory → size for the supplier footprint:
+//     ~200KB per active session (nodes hash + dedup set +
+//     snapshot) × concurrent sessions × active suppliers, plus
+//     stream backlogs.
+//
+//  4. Miner config (config.miner.yaml):
+//     - cache_ttl: must exceed the longest session lifecycle
+//     (session window + claim window + proof window + buffer).
+//     With sliding-TTL refresh (FlushOrphansWithLiveRoot), this
+//     auto-extends while relays keep coming in, but a session
+//     that idles past cache_ttl will still expire — keep ≥ 2h.
+//     - smst_live_root_checkpoint_interval: defaults to 10. Sized
+//     against the fact that protocol difficulty bounds how many
+//     relays reach the tree, so losing up to 9 per active session
+//     on a restart is proportionally small. Lower to 1 for exact
+//     claim fidelity at the cost of 10× more TxPipeline round-trips
+//     to Redis.
 package miner
 
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +66,7 @@ import (
 	"github.com/pokt-network/smt/kvstore"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 )
 
@@ -25,12 +79,27 @@ const (
 	// when warming up SMST trees from Redis.
 	RedisScanBatchSize = 100
 
-	// DefaultLiveRootCheckpointInterval is the number of UpdateTree calls
-	// between writes of the intermediate root to Redis. This is the bound
-	// on relay loss if a leader dies between checkpoints: up to
-	// (interval - 1) relays committed to the nodes hash but not yet
-	// represented in a stored root. Lower is safer; higher is faster.
-	// At 1000 RPS/supplier with interval=10: 100 writes/s instead of 1000.
+	// DefaultLiveRootCheckpointInterval is the number of UpdateTree
+	// calls between writes of the intermediate root to Redis. This is
+	// the bound on relay loss if the miner dies between checkpoints:
+	// up to (interval - 1) relays that were committed to the nodes
+	// hash but not yet represented in a stored live_root get dropped
+	// on resume.
+	//
+	// Default 10. Rationale: protocol relay-mining difficulty scales
+	// with aggregate network RPS, so the count of relays that actually
+	// meet difficulty and reach UpdateTree stays bounded regardless of
+	// how much raw traffic the relayer signs. Trees tend toward similar
+	// sizes across load levels, which makes a worst-case 9-relay loss
+	// per session per process restart proportionally small — while the
+	// 10× reduction in TxPipeline round-trips (HDEL orphans + SET
+	// live_root + EXPIRE × 2) meaningfully cuts Redis load, which
+	// matters given the larger Redis footprint in recent releases
+	// (HINCRBY session counters, dedup sets, stream backlogs, etc.).
+	//
+	// Operators who value zero-loss-per-restart over Redis throughput
+	// can set smst_live_root_checkpoint_interval: 1 in
+	// config.miner.yaml.
 	DefaultLiveRootCheckpointInterval = 10
 )
 
@@ -42,11 +111,13 @@ type RedisSMSTManagerConfig struct {
 	// CacheTTL is how long to keep SMST data in Redis (backup if manual cleanup fails).
 	CacheTTL time.Duration
 
-	// LiveRootCheckpointInterval is the number of UpdateTree calls between
-	// writes of the intermediate root to Redis. See
-	// DefaultLiveRootCheckpointInterval for the trade-off. Zero means use
-	// the default (10). Set to 1 to checkpoint on every relay (safest,
-	// slowest).
+	// LiveRootCheckpointInterval is the number of UpdateTree calls
+	// between writes of the intermediate root to Redis. See
+	// DefaultLiveRootCheckpointInterval for the trade-off and the
+	// current default value. Zero falls back to the default. Raise
+	// this only if Redis write throughput is the bottleneck — the
+	// loss bound per process restart is (interval - 1) relays per
+	// active session.
 	LiveRootCheckpointInterval int
 }
 
@@ -57,6 +128,109 @@ func (m *RedisSMSTManager) liveRootInterval() int {
 		return m.config.LiveRootCheckpointInterval
 	}
 	return DefaultLiveRootCheckpointInterval
+}
+
+// runSMSTSafely invokes fn at the boundary between the miner and the
+// pokt-network/smt library and converts any panic from the library
+// into ErrSMSTPanicRecovered. This is the defensive barrier that
+// guarantees a corrupt Redis hash (missing inner nodes, truncated
+// payloads, internal library assertion violations) cannot tumble the
+// relay-consumer goroutine — the supplier would stop processing
+// relays entirely until a miner restart, which is what the Anaski
+// 2026-04-17/19 incidents produced.
+//
+// The recovered value is logged with a full stack trace so the
+// corruption is still observable in Loki. A metric
+// smst_panics_recovered_total is incremented per supplier/operation so
+// alerts can fire on any non-zero rate. The returned error is a
+// wrapped ErrSMSTPanicRecovered which IsPermanentSMSTError treats as
+// "drop this relay, keep serving others" (the relay could be retried
+// but the session's in-memory tree is evicted first so subsequent
+// relays start from Redis state).
+func (m *RedisSMSTManager) runSMSTSafely(sessionID, op string, fn func() error) (err error) {
+	defer func() {
+		r := recover()
+		if r == nil {
+			return
+		}
+		stack := debug.Stack()
+		m.logger.Error().
+			Str(logging.FieldSessionID, sessionID).
+			Str("smt_op", op).
+			Str("panic_value", fmt.Sprintf("%v", r)).
+			Bytes("stack", stack).
+			Msg("SMT library panic recovered at miner boundary — treating as data corruption")
+		observability.SMSTPanicsRecovered.
+			WithLabelValues(m.config.SupplierAddress, op).Inc()
+		err = fmt.Errorf("%w: op=%s panic=%v", ErrSMSTPanicRecovered, op, r)
+	}()
+	return fn()
+}
+
+// evictCorruptSessionLocked drops only the session's in-memory cached
+// tree. Redis-backed state (nodes hash, live_root, claimed_root, stats)
+// is deliberately preserved so the next UpdateTree's GetOrCreateTree can
+// attempt resumeTreeFromRedisLocked:
+//
+//   - If live_root's subtree is still intact in Redis (the corruption was
+//     in-memory only, e.g. an spurious library assertion caught by
+//     runSMSTSafely), resume succeeds and the session keeps processing
+//     relays with its full pre-corruption count.
+//   - If Redis state is ALSO corrupt, resumeTreeFromRedisLocked's
+//     runSMSTSafely wrapper on ImportSparseMerkleSumTrie catches the
+//     import panic, deletes the poisonous root key (live_root or
+//     claimed_root), and returns nil. The caller then creates a fresh
+//     empty tree. No data recoverable, but the session unwedges instead
+//     of looping evictions forever.
+//
+// Why not delete the nodes hash eagerly: in the common case the nodes
+// hash is mostly intact and only one node is missing. Wiping all of it
+// guarantees full data loss for the session, which defeats the purpose
+// of having a persistent backing store. The CacheTTL (sliding) will
+// reclaim any abandoned bloat.
+//
+// Operators debugging corruption should correlate these signals:
+//   - Metric smst_corruption_evictions_total{supplier,reason} rate > 0
+//   - Log line "evicted corrupt SMST session" (this function)
+//   - Redis INFO: evicted_keys counter climbing (maxmemory eviction is
+//     the most common root cause)
+//   - Redis CONFIG GET maxmemory-policy — MUST be "noeviction" for
+//     correctness; any *-lru/*-lfu/*-random will silently evict the
+//     nodes hash mid-session and corrupt the SMST.
+//
+// Caller must hold m.treesMu.
+func (m *RedisSMSTManager) evictCorruptSessionLocked(_ context.Context, sessionID, reason string) {
+	delete(m.trees, sessionID)
+
+	observability.SMSTCorruptionEvictions.
+		WithLabelValues(m.config.SupplierAddress, reason).Inc()
+
+	m.logger.Warn().
+		Str(logging.FieldSessionID, sessionID).
+		Str("reason", reason).
+		Msg("evicted corrupt SMST session from memory — next UpdateTree will attempt Redis resume")
+}
+
+// evictCorruptSession is the exported variant that handles its own lock.
+func (m *RedisSMSTManager) evictCorruptSession(ctx context.Context, sessionID, reason string) {
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	m.evictCorruptSessionLocked(ctx, sessionID, reason)
+}
+
+// isSMSTCorruption returns true for every error class the defensive
+// layer treats as "tree state is unreliable — drop in-memory cache and
+// start over". Redis transport errors are explicitly excluded because
+// they are transient and retry-safe.
+func isSMSTCorruption(err error) bool {
+	if err == nil {
+		return false
+	}
+	if IsRetryableError(err) {
+		return false
+	}
+	return errors.Is(err, ErrSMSTNodeMissing) ||
+		errors.Is(err, ErrSMSTPanicRecovered)
 }
 
 // redisSMST holds a Redis-backed sparse merkle sum trie for a session.
@@ -200,7 +374,21 @@ func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessio
 			}
 		} else {
 			store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
-			trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), claimedRoot, protocol.SMTValueHasher())
+			var trie smt.SparseMerkleSumTrie
+			if importErr := m.runSMSTSafely(sessionID, "import_claimed", func() error {
+				trie = smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), claimedRoot, protocol.SMTValueHasher())
+				return nil
+			}); importErr != nil {
+				m.logger.Error().
+					Err(importErr).
+					Str(logging.FieldSessionID, sessionID).
+					Msg("ImportSparseMerkleSumTrie panicked on claimed_root — deleting key and starting fresh")
+				if delErr := m.redisClient.Del(ctx, claimedKey).Err(); delErr != nil {
+					m.logger.Warn().Err(delErr).Str(logging.FieldSessionID, sessionID).
+						Msg("failed to delete poisonous claimed_root (non-fatal)")
+				}
+				return nil
+			}
 			tree := &redisSMST{
 				sessionID:   sessionID,
 				trie:        trie,
@@ -239,7 +427,21 @@ func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessio
 			return nil
 		}
 		store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
-		trie := smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), liveRoot, protocol.SMTValueHasher())
+		var trie smt.SparseMerkleSumTrie
+		if importErr := m.runSMSTSafely(sessionID, "import_live", func() error {
+			trie = smt.ImportSparseMerkleSumTrie(store, protocol.NewTrieHasher(), liveRoot, protocol.SMTValueHasher())
+			return nil
+		}); importErr != nil {
+			m.logger.Error().
+				Err(importErr).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("ImportSparseMerkleSumTrie panicked on live_root — deleting key and starting fresh")
+			if delErr := m.redisClient.Del(ctx, liveKey).Err(); delErr != nil {
+				m.logger.Warn().Err(delErr).Str(logging.FieldSessionID, sessionID).
+					Msg("failed to delete poisonous live_root (non-fatal)")
+			}
+			return nil
+		}
 		tree := &redisSMST{
 			sessionID: sessionID,
 			trie:      trie,
@@ -256,11 +458,20 @@ func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessio
 }
 
 // UpdateTree adds a relay to the SMST for a session.
-func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key, value []byte, weight uint64) error {
+func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key, value []byte, weight uint64) (err error) {
 	tree, err := m.GetOrCreateTree(ctx, sessionID)
 	if err != nil {
 		return err
 	}
+
+	// Ensure any corruption detected inside this call results in the
+	// session being evicted so the next relay starts from a consistent
+	// Redis state instead of the poisoned in-memory tree.
+	defer func() {
+		if isSMSTCorruption(err) {
+			m.evictCorruptSession(ctx, sessionID, "update_tree_corruption")
+		}
+	}()
 
 	tree.mu.Lock()
 	defer tree.mu.Unlock()
@@ -274,8 +485,19 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 		return ErrSessionClaimed
 	}
 
-	if err := tree.trie.Update(key, value, weight); err != nil {
-		return fmt.Errorf("%w: %v", ErrSMSTUpdateFailed, err)
+	// trie.Update traverses the tree via store.Get; a missing inner
+	// node or a malformed payload returns an error from our MapStore
+	// (ErrSMSTNodeMissing) or can still panic inside the library on an
+	// edge case the defensive Get does not catch. runSMSTSafely turns
+	// either outcome into a returned error without crashing the
+	// supplier's consume goroutine.
+	if err := m.runSMSTSafely(sessionID, "update", func() error {
+		return tree.trie.Update(key, value, weight)
+	}); err != nil {
+		// Double %w so errors.Is walks past the outer sentinel into
+		// the inner ErrSMSTNodeMissing / ErrSMSTPanicRecovered chain.
+		// isSMSTCorruption (in the defer above) depends on that.
+		return fmt.Errorf("%w: %w", ErrSMSTUpdateFailed, err)
 	}
 
 	// CRITICAL: Log successful SMST update for debugging
@@ -291,9 +513,13 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 		redisStore.BeginPipeline()
 	}
 
-	// Commit to persist dirty nodes to Redis (critical for HA)
-	if err := tree.trie.Commit(); err != nil {
-		return fmt.Errorf("%w: %v", ErrSMSTCommitFailed, err)
+	// Commit persists dirty nodes to Redis (critical for HA) and is the
+	// other library call that can panic on corrupt state (recursive
+	// traversal of dirty children + store.Set).
+	if err := m.runSMSTSafely(sessionID, "commit", func() error {
+		return tree.trie.Commit()
+	}); err != nil {
+		return fmt.Errorf("%w: %w", ErrSMSTCommitFailed, err)
 	}
 
 	// Flush buffered operations to Redis
@@ -301,8 +527,9 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	// We wrap with ErrSMSTCommitFailed so it's classified as permanent if not a Redis error.
 	if redisStore, ok := tree.store.(*RedisMapStore); ok {
 		if err := redisStore.FlushPipeline(); err != nil {
-			// Return wrapped error - IsRetryableError will check for net.Error underneath
-			return fmt.Errorf("%w: flush pipeline: %v", ErrSMSTCommitFailed, err)
+			// Double %w so IsRetryableError can reach the underlying
+			// net.Error / Redis error through the sentinel wrapper.
+			return fmt.Errorf("%w: flush pipeline: %w", ErrSMSTCommitFailed, err)
 		}
 	}
 
@@ -314,12 +541,13 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	// producing claims that undercount by up to ~50% depending on kill
 	// timing (see scripts/test-quantitative-failover.sh).
 	//
-	// Writing on every relay is safe but would add one Redis SET per
-	// relay — a large cost at production RPS. Instead, checkpoint on the
-	// FIRST update (so low-traffic sessions still have a resume point)
-	// and then every LiveRootCheckpointInterval updates. The worst-case
-	// relay loss on a mid-session kill is therefore at most
-	// (interval - 1) relays between the last checkpoint and the kill.
+	// Default interval is 10 — checkpointing every 10 updates instead
+	// of every update keeps Redis write amplification low. The worst
+	// case relay loss on a mid-session process death is (interval - 1)
+	// relays, which is proportionally small given that protocol
+	// difficulty bounds how many relays reach the tree in the first
+	// place. Operators who need exact claim fidelity can lower it via
+	// smst_live_root_checkpoint_interval.
 	//
 	// A failure is non-fatal: the relay is already in the nodes hash, we
 	// just degrade HA recovery for the current checkpoint window.
@@ -328,8 +556,20 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	if tree.updateCount == 1 || tree.updateCount%interval == 0 {
 		liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
 		// Explicit []byte conversion: trie.Root() returns smt.MerkleSumRoot
-		// which go-redis does not know how to marshal directly.
-		rootBytes := []byte(tree.trie.Root())
+		// which go-redis does not know how to marshal directly. Guarded
+		// with runSMSTSafely because Root() hashes the (possibly
+		// corrupted) dirty-child subtree and can panic on a malformed
+		// encoding just like Update/Commit.
+		var rootBytes []byte
+		if err := m.runSMSTSafely(sessionID, "root", func() error {
+			rootBytes = []byte(tree.trie.Root())
+			return nil
+		}); err != nil {
+			// Corruption at Root() means we cannot safely persist a
+			// live_root. Skip the checkpoint and let the outer deferred
+			// eviction drop the session on return.
+			return err
+		}
 		if !isValidSMSTRoot(rootBytes) {
 			// Defensive: never persist a root we wouldn't be willing to read back.
 			// Keeps the Redis invariant "live_root is always SMSTRootLen or absent".
@@ -340,15 +580,17 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 				Uint64("update_count", tree.updateCount).
 				Msg("trie.Root() returned unexpected length - skipping live_root checkpoint")
 		} else if redisStore, ok := tree.store.(*RedisMapStore); ok {
-			// Atomic: HDEL accumulated orphans + SET live_root in one
-			// MULTI/EXEC. Before this: live_root points to the previous
-			// checkpoint whose nodes are still in the hash (orphans
-			// deferred). After: live_root points to the new checkpoint
-			// whose nodes were written by the FlushPipeline calls above,
-			// and the orphans are gone. Never a moment where live_root
-			// references a deleted subtree — that race caused the
-			// Anaski 2026-04-17 panic in parseSumTrieNode.
-			if err := redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes); err != nil {
+			// Atomic: HDEL accumulated orphans + SET live_root + EXPIRE
+			// on both keys, in one MULTI/EXEC. Before this: live_root
+			// points to the previous checkpoint whose nodes are still
+			// in the hash (orphans deferred). After: live_root points
+			// to the new checkpoint whose nodes were written by the
+			// FlushPipeline calls above, orphans are gone, and the
+			// sliding TTL keeps both keys alive as long as the session
+			// keeps receiving relays — preventing the "nodes hash
+			// expires while live_root and in-memory tree still think
+			// it's valid" corruption shape on long-lived sessions.
+			if err := redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes, m.config.CacheTTL); err != nil {
 				m.logger.Warn().
 					Err(err).
 					Str(logging.FieldSessionID, sessionID).
@@ -382,7 +624,17 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 // by GetOrCreateTree: claimed_root first, then live_root. This covers
 // the edge case where the session ends exactly when the leader dies
 // and no in-memory tree was ever built on the survivor.
+//
+// The defer at the top mirrors UpdateTree: any corruption signal
+// surfaced by the runSMSTSafely-wrapped library calls below triggers
+// eviction of the in-memory session so subsequent attempts start from
+// a consistent Redis state (or fail cleanly without tree rot).
 func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (rootHash []byte, err error) {
+	defer func() {
+		if isSMSTCorruption(err) {
+			m.evictCorruptSession(ctx, sessionID, "flush_tree_corruption")
+		}
+	}()
 	m.treesMu.RLock()
 	tree, exists := m.trees[sessionID]
 	m.treesMu.RUnlock()
@@ -412,10 +664,22 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 		// Phase 1: SEAL FIRST - set flag to block new updates (while holding lock)
 		tree.sealing = true
 
-		// Phase 2: READ initial state (after seal is active)
-		rootAfterSeal := tree.trie.Root()
-		countAfterSeal := tree.trie.MustCount()
-		sumAfterSeal := tree.trie.MustSum()
+		// Phase 2: READ initial state (after seal is active). Root/Count/Sum
+		// all traverse the trie and can panic on corrupt state, so we run
+		// them under runSMSTSafely.
+		var (
+			rootAfterSeal  []byte
+			countAfterSeal uint64
+			sumAfterSeal   uint64
+		)
+		if err := m.runSMSTSafely(sessionID, "seal_read", func() error {
+			rootAfterSeal = tree.trie.Root()
+			countAfterSeal = tree.trie.MustCount()
+			sumAfterSeal = tree.trie.MustSum()
+			return nil
+		}); err != nil {
+			return nil, err
+		}
 
 		m.logger.Debug().
 			Str(logging.FieldSessionID, sessionID).
@@ -432,9 +696,19 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 		tree.mu.Lock()
 
 		// Phase 4: VERIFY - re-read and ensure nothing changed during wait
-		rootAfterWait := tree.trie.Root()
-		countAfterWait := tree.trie.MustCount()
-		sumAfterWait := tree.trie.MustSum()
+		var (
+			rootAfterWait  []byte
+			countAfterWait uint64
+			sumAfterWait   uint64
+		)
+		if err := m.runSMSTSafely(sessionID, "seal_verify", func() error {
+			rootAfterWait = tree.trie.Root()
+			countAfterWait = tree.trie.MustCount()
+			sumAfterWait = tree.trie.MustSum()
+			return nil
+		}); err != nil {
+			return nil, err
+		}
 
 		if !bytes.Equal(rootAfterSeal, rootAfterWait) {
 			m.logger.Error().
@@ -527,12 +801,27 @@ func (m *RedisSMSTManager) GetTreeRoot(ctx context.Context, sessionID string) (r
 		return tree.claimedRoot, nil
 	}
 
-	// Return current root even if not flushed
-	return tree.trie.Root(), nil
+	// Return current root even if not flushed. trie.Root() hashes the
+	// tree's dirty children and can panic on corrupt state — wrap it.
+	var root []byte
+	if err := m.runSMSTSafely(sessionID, "root", func() error {
+		root = tree.trie.Root()
+		return nil
+	}); err != nil {
+		m.evictCorruptSession(ctx, sessionID, "get_tree_root_corruption")
+		return nil, err
+	}
+	return root, nil
 }
 
 // ProveClosest generates a proof for the closest leaf to the given path.
 func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, path []byte) (proofBytes []byte, err error) {
+	defer func() {
+		if isSMSTCorruption(err) {
+			m.evictCorruptSession(ctx, sessionID, "prove_closest_corruption")
+		}
+	}()
+
 	m.treesMu.RLock()
 	tree, exists := m.trees[sessionID]
 	m.treesMu.RUnlock()
@@ -561,9 +850,15 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 		return nil, fmt.Errorf("session %s has not been claimed yet", sessionID)
 	}
 
-	// CRITICAL: Verify current tree root matches claimed root
-	// If they don't match, proof will be invalid
-	currentRoot := tree.trie.Root()
+	// CRITICAL: Verify current tree root matches claimed root. Root()
+	// traverses the tree and can panic on corrupt state, so wrap it.
+	var currentRoot []byte
+	if err := m.runSMSTSafely(sessionID, "root", func() error {
+		currentRoot = tree.trie.Root()
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	if !bytes.Equal(currentRoot, tree.claimedRoot) {
 		m.logger.Error().
 			Str(logging.FieldSessionID, sessionID).
@@ -574,9 +869,18 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 			sessionID, currentRoot, tree.claimedRoot)
 	}
 
-	// Generate the proof
-	proof, err := tree.trie.ProveClosest(path)
-	if err != nil {
+	// Generate the proof. ProveClosest walks from root to leaf through
+	// store.Get on every lazy child — exactly the panic-surface we are
+	// hardening. Wrap it at the boundary.
+	var proof *smt.SparseMerkleClosestProof
+	if err := m.runSMSTSafely(sessionID, "prove_closest", func() error {
+		p, e := tree.trie.ProveClosest(path)
+		if e != nil {
+			return e
+		}
+		proof = p
+		return nil
+	}); err != nil {
 		return nil, fmt.Errorf("failed to prove closest: %w", err)
 	}
 
@@ -648,12 +952,22 @@ func (m *RedisSMSTManager) loadTreeFromRedis(ctx context.Context, sessionID stri
 	// nodes are lazy-loaded from Redis as needed during ProveClosest.
 	// Using NewSparseMerkleSumTrie instead would produce an empty tree with
 	// all-zero root, causing ProveClosest to fail with a "root mismatch" error.
-	trie := smt.ImportSparseMerkleSumTrie(
-		store,
-		protocol.NewTrieHasher(),
-		rootBytes,
-		protocol.SMTValueHasher(),
-	)
+	var trie smt.SparseMerkleSumTrie
+	if importErr := m.runSMSTSafely(sessionID, "import_load", func() error {
+		trie = smt.ImportSparseMerkleSumTrie(
+			store,
+			protocol.NewTrieHasher(),
+			rootBytes,
+			protocol.SMTValueHasher(),
+		)
+		return nil
+	}); importErr != nil {
+		if delErr := m.redisClient.Del(ctx, rootKey).Err(); delErr != nil {
+			m.logger.Warn().Err(delErr).Str(logging.FieldSessionID, sessionID).
+				Msg("failed to delete poisonous claimed_root after import panic")
+		}
+		return nil, fmt.Errorf("loadTreeFromRedis: %w", importErr)
+	}
 
 	tree := &redisSMST{
 		sessionID:   sessionID,
@@ -913,9 +1227,15 @@ func (m *RedisSMSTManager) GetTreeStats(sessionID string) (count uint64, sum uin
 		return tree.claimedCount, tree.claimedSum, nil
 	}
 
-	// Otherwise query the trie directly
-	count = tree.trie.MustCount()
-	sum = tree.trie.MustSum()
+	// MustCount/MustSum traverse the trie and can panic on corrupt
+	// state. Wrap so GetTreeStats never takes down a caller goroutine.
+	if sErr := m.runSMSTSafely(sessionID, "stats", func() error {
+		count = tree.trie.MustCount()
+		sum = tree.trie.MustSum()
+		return nil
+	}); sErr != nil {
+		return 0, 0, sErr
+	}
 
 	return count, sum, nil
 }

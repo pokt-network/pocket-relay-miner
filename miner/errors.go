@@ -23,6 +23,18 @@ var (
 
 	// ErrSMSTCommitFailed indicates the SMST commit to store failed.
 	ErrSMSTCommitFailed = errors.New("SMST commit failed")
+
+	// ErrSMSTNodeMissing indicates a tree node referenced by an inner node
+	// is absent from the backing store. Returned by RedisMapStore.Get instead
+	// of (nil, nil) when corruption is detected, so the smt library
+	// propagates the error up through Update/Commit/ProveClosest rather
+	// than panicking inside parseSumTrieNode on a zero-length slice.
+	ErrSMSTNodeMissing = errors.New("SMST node missing from store")
+
+	// ErrSMSTPanicRecovered is returned when a defer/recover at the miner
+	// boundary intercepts a panic from the smt library. The recovered
+	// panic value is wrapped with %w so callers can still inspect it.
+	ErrSMSTPanicRecovered = errors.New("SMST library panic recovered")
 )
 
 // Supplier errors - permanent, should not retry
@@ -83,5 +95,7 @@ func IsPermanentSMSTError(err error) bool {
 		errors.Is(err, ErrSessionClaimed) ||
 		errors.Is(err, ErrSMSTUpdateFailed) ||
 		errors.Is(err, ErrSMSTCommitFailed) ||
+		errors.Is(err, ErrSMSTNodeMissing) ||
+		errors.Is(err, ErrSMSTPanicRecovered) ||
 		errors.Is(err, ErrSessionTerminal)
 }

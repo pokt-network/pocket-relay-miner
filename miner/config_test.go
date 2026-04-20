@@ -280,8 +280,8 @@ func TestSMSTLiveRootCheckpointInterval_PropagatesToManager(t *testing.T) {
 	}{
 		{"explicit 1 = zero-loss mode", 1, 1},
 		{"explicit 50", 50, 50},
-		{"zero falls back to default", 0, 10},
-		{"negative falls back to default (defensive)", -5, 10},
+		{"zero falls back to default", 0, DefaultLiveRootCheckpointInterval},
+		{"negative falls back to default (defensive)", -5, DefaultLiveRootCheckpointInterval},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -249,4 +249,35 @@ var (
 		},
 		[]string{"operation", "error_type"},
 	)
+
+	// SMSTPanicsRecovered counts panics caught at the miner -> smt
+	// library boundary (UpdateTree, Commit, ProveClosest, Import, etc.).
+	// Any non-zero value is a data-corruption signal (missing node,
+	// malformed payload, unexpected library assertion) that the
+	// defensive wrapper converted into an error instead of tumbling the
+	// relay-consumer goroutine. Alert on rate > 0.
+	SMSTPanicsRecovered = MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "panics_recovered_total",
+			Help:      "SMT library panics caught by miner defer/recover at the trie operation boundary",
+		},
+		[]string{"supplier", "operation"},
+	)
+
+	// SMSTCorruptionEvictions counts sessions whose in-memory tree was
+	// evicted after corruption (panic or ErrSMSTNodeMissing) so the
+	// next relay starts from a consistent Redis state. Relays already
+	// committed to the nodes hash survive; only the session's cached
+	// in-memory pointer is dropped.
+	SMSTCorruptionEvictions = MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "corruption_evictions_total",
+			Help:      "Sessions whose in-memory SMST was evicted after detected corruption",
+		},
+		[]string{"supplier", "reason"},
+	)
 )

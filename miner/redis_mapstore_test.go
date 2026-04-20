@@ -8,14 +8,19 @@ import (
 	"sync"
 )
 
-// TestRedisMapStore_GetEmpty tests getting a non-existent key returns nil.
+// TestRedisMapStore_GetEmpty tests that a missing key surfaces as
+// ErrSMSTNodeMissing. The smt library only calls Get after checking the
+// placeholder digest, so a miss at this level is always corruption —
+// returning an error prevents parseSumTrieNode from panicking on an
+// empty payload.
 func (s *RedisSMSTTestSuite) TestRedisMapStore_GetEmpty() {
 	store := s.createTestRedisStore("test-session-get-empty")
 
-	// Get non-existent key
 	value, err := store.Get([]byte("non-existent-key"))
-	s.Require().NoError(err, "Get should not error for non-existent key")
-	s.Require().Nil(value, "Get should return nil for non-existent key")
+	s.Require().Error(err, "Get on a missing key must error, not return (nil, nil)")
+	s.Require().ErrorIs(err, ErrSMSTNodeMissing,
+		"missing-key error must satisfy errors.Is(ErrSMSTNodeMissing)")
+	s.Require().Nil(value, "Get on a missing key must return no value")
 }
 
 // TestRedisMapStore_SetGet tests basic Set and Get operations.
@@ -82,10 +87,14 @@ func (s *RedisSMSTTestSuite) TestRedisMapStore_Delete() {
 	err = store.Delete(key)
 	s.Require().NoError(err)
 
-	// Verify it's gone
+	// Verify it's gone. Get now surfaces a missing key as
+	// ErrSMSTNodeMissing (see Get docstring) so the smt library cannot
+	// hit the parseSumTrieNode panic on a zero-length slice. The test
+	// asserts the new contract explicitly.
 	gotValue, err = store.Get(key)
-	s.Require().NoError(err)
-	s.Require().Nil(gotValue, "deleted key should return nil")
+	s.Require().ErrorIs(err, ErrSMSTNodeMissing,
+		"Get on a deleted key must return ErrSMSTNodeMissing, not (nil, nil)")
+	s.Require().Nil(gotValue)
 }
 
 // TestRedisMapStore_DeleteNonExistent tests deleting a non-existent key (should be a no-op).
@@ -161,14 +170,16 @@ func (s *RedisSMSTTestSuite) TestRedisMapStore_ClearAll() {
 	s.Require().NoError(err)
 	s.Require().Equal(0, length, "length should be 0 after ClearAll")
 
-	// Verify keys are gone
+	// Verify keys are gone. Post-ClearAll Get must surface
+	// ErrSMSTNodeMissing for the same reason Delete does — the smt
+	// library never asks for a placeholder, so any miss is corruption.
 	value, err := store.Get([]byte("key1"))
-	s.Require().NoError(err)
-	s.Require().Nil(value, "key1 should be deleted")
+	s.Require().ErrorIs(err, ErrSMSTNodeMissing)
+	s.Require().Nil(value)
 
 	value, err = store.Get([]byte("key2"))
-	s.Require().NoError(err)
-	s.Require().Nil(value, "key2 should be deleted")
+	s.Require().ErrorIs(err, ErrSMSTNodeMissing)
+	s.Require().Nil(value)
 }
 
 // TestRedisMapStore_HexEncoding verifies hex encoding of keys.

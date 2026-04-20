@@ -95,7 +95,19 @@ func NewRedisMapStore(
 // The key is hex-encoded before being used as a Redis hash field name,
 // since Redis requires string field names but SMST keys are byte arrays.
 //
-// Returns nil, nil if the key doesn't exist (per MapStore interface contract).
+// Missing-key behavior: returns (nil, ErrSMSTNodeMissing) when the hash
+// field is absent. The smt library's resolveSumNode/resolveNode check
+// the placeholder digest *before* calling Get, so a missing non-
+// placeholder digest is always data corruption (orphan HDEL race,
+// Redis eviction, manual surgery, two-leader window, etc.) — never a
+// normal empty-subtree. Returning an error here stops the library from
+// passing a zero-length slice to parseSumTrieNode / parseTrieNode and
+// panicking in isLeafNode on data[:1]. The error propagates cleanly
+// through resolveSumNode -> update -> Update back to UpdateTree, which
+// logs and returns ErrSMSTNodeMissing without tumbling the goroutine.
+// The official reference implementation (smt/kvstore/simplemap) also
+// returns an error on missing keys (ErrKVStoreKeyNotFound), so this
+// brings us in line with the canonical contract.
 func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	start := time.Now()
 	defer func() {
@@ -108,12 +120,20 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	val, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
 	if err == redis.Nil {
 		observability.SMSTRedisOperations.WithLabelValues("get", "not_found").Inc()
-		return nil, nil // Key not found - return nil, nil per interface contract
+		return nil, fmt.Errorf("%w: field=%s hash=%s", ErrSMSTNodeMissing, field, s.hashKey)
 	}
 	if err != nil {
 		observability.SMSTRedisOperations.WithLabelValues("get", "error").Inc()
 		observability.SMSTRedisErrors.WithLabelValues("get", "redis_error").Inc()
 		return nil, err
+	}
+	// Defense-in-depth: a zero-length payload would also panic the smt
+	// library (data[:1] in isLeafNode). Reject explicitly so we never
+	// hand an empty slice up the stack.
+	if len(val) == 0 {
+		observability.SMSTRedisOperations.WithLabelValues("get", "not_found").Inc()
+		return nil, fmt.Errorf("%w: empty payload for field=%s hash=%s",
+			ErrSMSTNodeMissing, field, s.hashKey)
 	}
 	observability.SMSTRedisOperations.WithLabelValues("get", "success").Inc()
 	return val, nil
@@ -312,25 +332,37 @@ func (s *RedisMapStore) FlushPipeline() error {
 	return nil
 }
 
-// FlushOrphansWithLiveRoot atomically applies all buffered orphan deletions
-// and sets the live_root key in a single Redis MULTI/EXEC transaction.
+// FlushOrphansWithLiveRoot atomically applies all buffered orphan
+// deletions, sets the live_root key, and refreshes the TTL on both the
+// nodes hash and the live_root key in a single Redis MULTI/EXEC
+// transaction.
 //
-// This is the consistency anchor of the live_root checkpoint mechanism:
-// before this transaction runs, live_root points to the previous checkpoint
-// (whose nodes are still in the hash because the orphans are deferred); after
-// it runs, live_root points to the new checkpoint (whose nodes were already
-// written by earlier FlushPipeline calls) and the superseded orphans are
-// gone. At no observable moment does live_root reference a tree whose nodes
-// have been deleted — which is what caused the Anaski 2026-04-17 panic.
+// Consistency anchor: before this transaction runs, live_root points to
+// the previous checkpoint (whose nodes are still in the hash because
+// orphans are deferred); after it runs, live_root points to the new
+// checkpoint (whose nodes were written by earlier FlushPipeline calls)
+// and the superseded orphans are gone.
 //
-// Must be called with pipeline mode OFF (after FlushPipeline). Resets the
-// orphanBuffer on success. On transaction failure the orphanBuffer is
-// preserved so the next checkpoint can retry, and live_root stays at its
-// previous (still-consistent) value.
+// Sliding TTL: the nodes hash TTL is set once at GetOrCreateTree time
+// (smst_manager.go). Without refresh, a session whose relay stream
+// keeps the tree active longer than cacheTTL sees its nodes hash expire
+// in Redis while the in-memory tree still thinks every node is present
+// — the next traversal then hits a missing digest and would panic in
+// parseSumTrieNode (now surfaces as ErrSMSTNodeMissing via our Get).
+// Refreshing both keys here makes the TTL a sliding window as long as
+// the session is active, and cleanly lets them expire together once
+// the session goes silent without a DeleteTree.
+//
+// Must be called with pipeline mode OFF (after FlushPipeline).
+// cacheTTL == 0 disables the TTL refresh (used in tests and for
+// operators who want the nodes hash to persist indefinitely).
+// On transaction failure the orphanBuffer is preserved so the next
+// checkpoint can retry, and live_root stays at its previous value.
 func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 	ctx context.Context,
 	liveRootKey string,
 	liveRoot []byte,
+	cacheTTL time.Duration,
 ) error {
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
@@ -351,10 +383,16 @@ func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 		}
 		pipe.HDel(ctx, s.hashKey, fields...)
 	}
-	// SET live_root with no TTL — TTL on the whole session is managed via
-	// SetTreeTTL on the nodes hash; the live_root key is cleaned up by
-	// DeleteTree (and its own ExpireAt if the manager set one).
 	pipe.Set(ctx, liveRootKey, liveRoot, 0)
+
+	// Sliding TTL on both keys: as long as UpdateTree keeps firing, the
+	// TTL gets pushed out. When the session goes idle without a
+	// DeleteTree (crash, abandoned, etc.) the keys expire together so
+	// live_root never outlives the nodes it references.
+	if cacheTTL > 0 {
+		pipe.Expire(ctx, s.hashKey, cacheTTL)
+		pipe.Expire(ctx, liveRootKey, cacheTTL)
+	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
 		observability.SMSTRedisOperations.
