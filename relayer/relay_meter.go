@@ -51,7 +51,6 @@ const (
 	// Redis key suffixes (combined with RedisKeyPrefix config to form full keys)
 	meterKeySuffix      = "meter"         // Session metering data
 	paramsKeySuffix     = "params"        // Cached on-chain params
-	appStakeKeySuffix   = "app_stake"     // Cached app stakes
 	serviceKeySuffix    = "service"       // Cached service data
 	meterCleanupChannel = "meter:cleanup" // Pub/sub channel for cleanup signals
 )
@@ -81,15 +80,23 @@ func DefaultRelayMeterConfig() RelayMeterConfig {
 }
 
 // SessionMeterMeta contains metadata for a session meter stored in Redis.
+//
+// CreatedWithFactor and CreatedWithAppStake are snapshots of the inputs that
+// produced MaxStakeUpokt. If either diverges from the current observation on
+// a subsequent relay, the session meter is recomputed in place instead of
+// serving a stale budget for the rest of the session. This covers
+// serviceFactor hot-reloads and on-chain MsgStakeApplication transactions
+// respectively.
 type SessionMeterMeta struct {
-	SessionID         string  `json:"session_id"`
-	AppAddress        string  `json:"app_address"`
-	ServiceID         string  `json:"service_id"`
-	SupplierAddress   string  `json:"supplier_address"`
-	SessionEndHeight  int64   `json:"session_end_height"`
-	MaxStakeUpokt     int64   `json:"max_stake_upokt"`     // Max allowed stake in uPOKT
-	CreatedAt         int64   `json:"created_at"`          // Unix timestamp
-	CreatedWithFactor float64 `json:"created_with_factor"` // serviceFactor snapshot at creation (0 if not set)
+	SessionID           string  `json:"session_id"`
+	AppAddress          string  `json:"app_address"`
+	ServiceID           string  `json:"service_id"`
+	SupplierAddress     string  `json:"supplier_address"`
+	SessionEndHeight    int64   `json:"session_end_height"`
+	MaxStakeUpokt       int64   `json:"max_stake_upokt"`        // Max allowed stake in uPOKT
+	CreatedAt           int64   `json:"created_at"`             // Unix timestamp
+	CreatedWithFactor   float64 `json:"created_with_factor"`    // serviceFactor snapshot at creation (0 if not set)
+	CreatedWithAppStake int64   `json:"created_with_app_stake"` // app stake snapshot (uPOKT) at creation
 }
 
 // CachedSharedParams contains cached shared parameters.
@@ -105,12 +112,6 @@ type CachedSharedParams struct {
 type CachedSessionParams struct {
 	NumSuppliersPerSession uint64 `json:"num_suppliers_per_session"`
 	UpdatedAt              int64  `json:"updated_at"`
-}
-
-// CachedAppStake contains cached application stake.
-type CachedAppStake struct {
-	StakeUpokt int64 `json:"stake_upokt"`
-	UpdatedAt  int64 `json:"updated_at"`
 }
 
 // CachedServiceData contains cached service configuration.
@@ -407,23 +408,40 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	supplierAddress string,
 	sessionEndHeight int64,
 ) (*SessionMeterMeta, int64, error) {
-	// Snapshot current serviceFactor so cached meta can be invalidated if it
-	// was created under a stale factor (Bug 1 fix).
+	// Snapshot serviceFactor and app stake so a cached meta whose MaxStake
+	// was computed under either stale input is recomputed on the next
+	// relay. serviceFactor can change via pub/sub hot-reload; app stake
+	// can change via an on-chain MsgStakeApplication observed through the
+	// L1→L2 application cache the relay meter reads.
 	currentFactor := 0.0
 	if m.serviceFactorProvider != nil {
 		if f, ok := m.serviceFactorProvider.GetServiceFactor(ctx, serviceID); ok {
 			currentFactor = f
 		}
 	}
+	currentAppStake, appStakeErr := m.getAppStake(ctx, appAddress)
+	// A transient getAppStake error must not trigger a spurious recompute —
+	// only invalidate on a confirmed observation.
+	appStakeObserved := appStakeErr == nil
+
+	fresh := func(meta *SessionMeterMeta) bool {
+		if meta.CreatedWithFactor != currentFactor {
+			return false
+		}
+		if appStakeObserved && meta.CreatedWithAppStake != currentAppStake {
+			return false
+		}
+		return true
+	}
 
 	// Check local cache first (L1)
 	m.localCacheMu.RLock()
 	if meta, exists := m.localCache[sessionID]; exists {
 		m.localCacheMu.RUnlock()
-		if meta.CreatedWithFactor == currentFactor {
+		if fresh(meta) {
 			return meta, meta.MaxStakeUpokt, nil
 		}
-		// Stale factor — fall through to recompute.
+		// Stale factor or stale app stake — fall through to recompute.
 	} else {
 		m.localCacheMu.RUnlock()
 	}
@@ -431,21 +449,23 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	// Check Redis (L2)
 	meta, err := m.getSessionMeta(ctx, sessionID)
 	if err == nil && meta != nil {
-		if meta.CreatedWithFactor == currentFactor {
+		if fresh(meta) {
 			// Cache locally
 			m.localCacheMu.Lock()
 			m.localCache[sessionID] = meta
 			m.localCacheMu.Unlock()
 			return meta, meta.MaxStakeUpokt, nil
 		}
-		// Stale factor — recompute maxStake, update cached meta in place.
+		// Stale inputs — recompute maxStake, update cached meta in place.
 		oldFactor := meta.CreatedWithFactor
-		newMax, newFactor, calcErr := m.calculateMaxStake(ctx, appAddress, serviceID)
+		oldAppStake := meta.CreatedWithAppStake
+		newMax, newFactor, newAppStake, calcErr := m.calculateMaxStake(ctx, appAddress, serviceID)
 		if calcErr != nil {
-			return nil, 0, fmt.Errorf("failed to recalculate max stake after factor change: %w", calcErr)
+			return nil, 0, fmt.Errorf("failed to recalculate max stake after input change: %w", calcErr)
 		}
 		meta.MaxStakeUpokt = newMax
 		meta.CreatedWithFactor = newFactor
+		meta.CreatedWithAppStake = newAppStake
 		if metaBytes, mErr := json.Marshal(meta); mErr == nil {
 			// Best-effort overwrite; preserve remaining TTL.
 			m.redisClient.Set(ctx, m.metaKey(sessionID), metaBytes, redis.KeepTTL)
@@ -458,26 +478,29 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 			Str("service_id", serviceID).
 			Float64("old_factor", oldFactor).
 			Float64("new_factor", newFactor).
+			Int64("old_app_stake_upokt", oldAppStake).
+			Int64("new_app_stake_upokt", newAppStake).
 			Int64("new_max_stake_upokt", newMax).
-			Msg("recomputed session meter max stake after serviceFactor change")
+			Msg("recomputed session meter max stake after input change")
 		return meta, newMax, nil
 	}
 
 	// Create new session meter
-	maxStakeUpokt, factorUsed, err := m.calculateMaxStake(ctx, appAddress, serviceID)
+	maxStakeUpokt, factorUsed, appStakeUsed, err := m.calculateMaxStake(ctx, appAddress, serviceID)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to calculate max stake: %w", err)
 	}
 
 	meta = &SessionMeterMeta{
-		SessionID:         sessionID,
-		AppAddress:        appAddress,
-		ServiceID:         serviceID,
-		SupplierAddress:   supplierAddress,
-		SessionEndHeight:  sessionEndHeight,
-		MaxStakeUpokt:     maxStakeUpokt,
-		CreatedAt:         time.Now().Unix(),
-		CreatedWithFactor: factorUsed,
+		SessionID:           sessionID,
+		AppAddress:          appAddress,
+		ServiceID:           serviceID,
+		SupplierAddress:     supplierAddress,
+		SessionEndHeight:    sessionEndHeight,
+		MaxStakeUpokt:       maxStakeUpokt,
+		CreatedAt:           time.Now().Unix(),
+		CreatedWithFactor:   factorUsed,
+		CreatedWithAppStake: appStakeUsed,
 	}
 
 	// Store in Redis with session-wide TTL
@@ -546,23 +569,25 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID string) (*Ses
 // The protocol NEVER guarantees any payment amount - baseLimit is an estimate.
 // Returns (effectiveLimit, serviceFactorUsed, error).
 // serviceFactorUsed is the factor applied (0 if no factor was configured).
-func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string) (int64, float64, error) {
-	// Get app stake (from Redis cache or chain)
+func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string) (int64, float64, int64, error) {
+	// Get app stake via the cached application client so operator
+	// top-up/stake-down observed by the orchestrator's refresh loop is
+	// reflected without a sidecar cache going stale.
 	appStakeUpokt, err := m.getAppStake(ctx, appAddress)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get app stake: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to get app stake: %w", err)
 	}
 
 	// Get shared params to calculate baseLimit (for comparison/warnings)
 	sharedParams, err := m.sharedParamCache.GetLatestSharedParams(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get shared params: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to get shared params: %w", err)
 	}
 
 	// Get session params (from Redis cache or chain)
 	sessionParams, err := m.getSessionParams(ctx)
 	if err != nil {
-		return 0, 0, fmt.Errorf("failed to get session params: %w", err)
+		return 0, 0, 0, fmt.Errorf("failed to get session params: %w", err)
 	}
 
 	// Calculate baseLimit = (appStake / numSuppliers) / pendingSessions
@@ -662,7 +687,7 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 	if hasServiceFactor {
 		factorSnapshot = serviceFactor
 	}
-	return effectiveLimit, factorSnapshot, nil
+	return effectiveLimit, factorSnapshot, appStakeUpokt, nil
 }
 
 // getRelayCost calculates the cost of a single relay in uPOKT.
@@ -700,37 +725,17 @@ func (m *RelayMeter) getRelayCost(ctx context.Context, serviceID string) (int64,
 	return estimatedRelayCost.Int64(), nil
 }
 
-// getAppStake gets the app stake from Redis cache or queries the chain.
+// getAppStake returns the app stake in uPOKT via appClient. Callers must
+// wire a cached client (see cmd_relayer.go) so reads resolve through the
+// L1→L2 application cache with pub/sub invalidation. A sidecar cache here
+// is intentionally avoided — it had no invalidation path and left stake
+// changes invisible for its TTL.
 func (m *RelayMeter) getAppStake(ctx context.Context, appAddress string) (int64, error) {
-	cacheKey := m.appStakeKey(appAddress)
-
-	// Check Redis cache
-	data, err := m.redisClient.Get(ctx, cacheKey).Bytes()
-	if err == nil {
-		var cached CachedAppStake
-		if json.Unmarshal(data, &cached) == nil {
-			return cached.StakeUpokt, nil
-		}
-	}
-
-	// Query chain
 	app, err := m.appClient.GetApplication(ctx, appAddress)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get application: %w", err)
 	}
-
-	stakeUpokt := app.GetStake().Amount.Int64()
-
-	// Cache in Redis with session-wide TTL
-	cached := CachedAppStake{
-		StakeUpokt: stakeUpokt,
-		UpdatedAt:  time.Now().Unix(),
-	}
-	if cacheBytes, err := json.Marshal(cached); err == nil {
-		m.redisClient.Set(ctx, cacheKey, cacheBytes, m.config.CacheTTL)
-	}
-
-	return stakeUpokt, nil
+	return app.GetStake().Amount.Int64(), nil
 }
 
 // getSharedParams gets shared params using L1 -> L2 -> L3 cache.
@@ -857,27 +862,6 @@ func (m *RelayMeter) RefreshSessionParams(ctx context.Context) error {
 	}
 
 	return m.redisClient.Set(ctx, m.sessionParamsKey(), cacheBytes, m.config.CacheTTL).Err()
-}
-
-// RefreshAppStake refreshes app stake cache from chain.
-// Called by miners in background process.
-func (m *RelayMeter) RefreshAppStake(ctx context.Context, appAddress string) error {
-	app, err := m.appClient.GetApplication(ctx, appAddress)
-	if err != nil {
-		return fmt.Errorf("failed to get application: %w", err)
-	}
-
-	cached := &CachedAppStake{
-		StakeUpokt: app.GetStake().Amount.Int64(),
-		UpdatedAt:  time.Now().Unix(),
-	}
-
-	cacheBytes, err := json.Marshal(cached)
-	if err != nil {
-		return err
-	}
-
-	return m.redisClient.Set(ctx, m.appStakeKey(appAddress), cacheBytes, m.config.CacheTTL).Err()
 }
 
 // RefreshServiceComputeUnits refreshes service compute units cache.
@@ -1032,10 +1016,6 @@ func (m *RelayMeter) metaKey(sessionID string) string {
 
 func (m *RelayMeter) consumedKey(sessionID string) string {
 	return fmt.Sprintf("%s:%s:%s:consumed", m.config.RedisKeyPrefix, meterKeySuffix, sessionID)
-}
-
-func (m *RelayMeter) appStakeKey(appAddress string) string {
-	return fmt.Sprintf("%s:%s:%s", m.config.RedisKeyPrefix, appStakeKeySuffix, appAddress)
 }
 
 func (m *RelayMeter) sharedParamsKey() string {

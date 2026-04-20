@@ -56,6 +56,9 @@ type applicationCache struct {
 type ApplicationQueryClient interface {
 	// GetApplication queries an application by address from the chain.
 	GetApplication(ctx context.Context, address string) (*apptypes.Application, error)
+	// InvalidateApplication drops any in-process cache for the given address
+	// so the next GetApplication fetches fresh data from chain.
+	InvalidateApplication(address string)
 }
 
 // NewApplicationCache creates a new application cache.
@@ -159,6 +162,10 @@ func (c *applicationCache) Get(ctx context.Context, appAddress string, force ...
 	var err error
 
 	if forceRefresh {
+		// Drop any in-process query cache so the chain query below is not
+		// short-circuited by a stale entry populated during an earlier lazy load.
+		c.queryClient.InvalidateApplication(appAddress)
+
 		// Leader force refresh: Direct query without lock (refreshes serially via pond workers)
 		chainQueries.WithLabelValues("application").Inc()
 		chainStart := time.Now()

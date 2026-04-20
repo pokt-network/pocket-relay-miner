@@ -679,10 +679,14 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				}
 				defer func() { _ = serviceFactorClient.Close() }()
 
+				// Use the cached application client so app stake changes
+				// land within RefreshIntervalBlocks via the orchestrator's
+				// invalidation pub/sub, and the hot path avoids chain
+				// round-trips on every relay.
 				relayMeter := relayer.NewRelayMeter(
 					logger,
 					redisClient,
-					queryClients.Application(),
+					cache.NewCachedApplicationQueryClient(applicationCache),
 					queryClients.Shared(),
 					queryClients.Session(),
 					blockSubscriber,

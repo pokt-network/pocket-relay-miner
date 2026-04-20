@@ -185,7 +185,7 @@ func (qc *Clients) Session() client.SessionQueryClient {
 }
 
 // Application returns the application module query client.
-func (qc *Clients) Application() client.ApplicationQueryClient {
+func (qc *Clients) Application() ApplicationQueryClient {
 	return qc.applicationClient
 }
 
@@ -525,7 +525,16 @@ type applicationQueryClient struct {
 	paramsCacheMu sync.RWMutex
 }
 
-var _ client.ApplicationQueryClient = (*applicationQueryClient)(nil)
+// ApplicationQueryClient extends the base ApplicationQueryClient with cache
+// invalidation. Callers invoke InvalidateApplication so that subsequent
+// GetApplication calls fetch fresh data from chain, picking up delegation
+// or stake changes that occurred since the prior query.
+type ApplicationQueryClient interface {
+	client.ApplicationQueryClient
+	InvalidateApplication(address string)
+}
+
+var _ ApplicationQueryClient = (*applicationQueryClient)(nil)
 
 func newApplicationQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *applicationQueryClient {
 	return &applicationQueryClient{
@@ -566,6 +575,16 @@ func (c *applicationQueryClient) GetApplication(ctx context.Context, appAddress 
 
 	c.appCache[appAddress] = res.Application
 	return res.Application, nil
+}
+
+// InvalidateApplication removes an application from the local query cache.
+// Must be called so the next GetApplication call fetches fresh data from
+// the chain — picking up any delegation or stake changes (e.g. new gateway
+// delegations) that occurred since the application was last queried.
+func (c *applicationQueryClient) InvalidateApplication(address string) {
+	c.appCacheMu.Lock()
+	defer c.appCacheMu.Unlock()
+	delete(c.appCache, address)
 }
 
 func (c *applicationQueryClient) GetAllApplications(ctx context.Context) ([]apptypes.Application, error) {

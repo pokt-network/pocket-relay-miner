@@ -27,6 +27,15 @@ func (a *applicationQueryClientAdapter) GetApplication(ctx context.Context, addr
 	return &app, nil
 }
 
+// InvalidateApplication delegates to the underlying client if it supports
+// cache invalidation (e.g. the in-process query.ApplicationQueryClient).
+// No-op for clients that do not cache, so callers can always invoke it.
+func (a *applicationQueryClientAdapter) InvalidateApplication(address string) {
+	if inv, ok := a.client.(interface{ InvalidateApplication(string) }); ok {
+		inv.InvalidateApplication(address)
+	}
+}
+
 // NewApplicationQueryClientAdapter creates an adapter for client.ApplicationQueryClient.
 func NewApplicationQueryClientAdapter(c client.ApplicationQueryClient) ApplicationQueryClient {
 	return &applicationQueryClientAdapter{client: c}

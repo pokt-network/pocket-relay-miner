@@ -201,6 +201,47 @@ func TestGetApplication_Cache(t *testing.T) {
 	require.Equal(t, app1.Address, app2.Address)
 }
 
+// TestInvalidateApplication_RemovesCachedEntry asserts that InvalidateApplication
+// drops the in-process cache entry so the next GetApplication hits the chain.
+func TestInvalidateApplication_RemovesCachedEntry(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	queryCount := 0
+	testApp := generateTestApplication("pokt1app123")
+	mock.getApplicationFunc = func(ctx context.Context, req *apptypes.QueryGetApplicationRequest) (*apptypes.QueryGetApplicationResponse, error) {
+		queryCount++
+		return &apptypes.QueryGetApplicationResponse{Application: *testApp}, nil
+	}
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	qc, err := NewQueryClients(logger, ClientConfig{
+		GRPCEndpoint: address,
+		QueryTimeout: 5 * time.Second,
+	})
+	require.NoError(t, err)
+	defer qc.Close()
+
+	ctx := context.Background()
+
+	// First query caches the application.
+	_, err = qc.Application().GetApplication(ctx, "pokt1app123")
+	require.NoError(t, err)
+	require.Equal(t, 1, queryCount)
+
+	// Second query hits cache.
+	_, err = qc.Application().GetApplication(ctx, "pokt1app123")
+	require.NoError(t, err)
+	require.Equal(t, 1, queryCount, "cache hit — no new chain query")
+
+	// Invalidate forces a re-query.
+	qc.Application().InvalidateApplication("pokt1app123")
+
+	_, err = qc.Application().GetApplication(ctx, "pokt1app123")
+	require.NoError(t, err)
+	require.Equal(t, 2, queryCount, "invalidation should force a new chain query")
+}
+
 // TestGetApplication_ConcurrentAccess tests thread-safe application queries
 func TestGetApplication_ConcurrentAccess(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
