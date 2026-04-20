@@ -173,10 +173,9 @@ func TestOnSupplierReleased_AbortsWhenStaked(t *testing.T) {
 	mgr := newTestSupplierManager(t, client)
 
 	// Pre-populate supplier in the map
-	mgr.suppliers["pokt1staked"] = &SupplierState{
-		OperatorAddr: "pokt1staked",
-		Status:       SupplierStatusActive,
-	}
+	st := &SupplierState{OperatorAddr: "pokt1staked"}
+	st.StoreStatus(SupplierStatusActive)
+	mgr.suppliers["pokt1staked"] = st
 
 	err := mgr.onSupplierReleased(context.Background(), "pokt1staked")
 	require.ErrorIs(t, err, ErrDrainAborted, "staked supplier release should return ErrDrainAborted")
@@ -245,10 +244,9 @@ func TestDrainMetric_RebalanceRelease(t *testing.T) {
 	mgr := newTestSupplierManager(t, client)
 
 	// Pre-populate supplier
-	mgr.suppliers["pokt1staked"] = &SupplierState{
-		OperatorAddr: "pokt1staked",
-		Status:       SupplierStatusActive,
-	}
+	st := &SupplierState{OperatorAddr: "pokt1staked"}
+	st.StoreStatus(SupplierStatusActive)
+	mgr.suppliers["pokt1staked"] = st
 
 	// Get the counter value before
 	beforeStaked := testutil.ToFloat64(supplierDrainDecisionTotal.WithLabelValues("rebalance_release", "staked"))

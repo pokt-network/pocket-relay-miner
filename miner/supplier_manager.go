@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"runtime/debug"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alitto/pond/v2"
@@ -48,10 +49,17 @@ const (
 )
 
 // SupplierState holds the state for a single supplier in the miner.
+//
+// Status is stored atomically (int32) because consumeForSupplier reads
+// it from the relay hot path while removeSupplier writes it under
+// suppliersMu. Taking suppliersMu in the relay path would serialize
+// every relay through the map mutex; using an atomic gives lock-free
+// reads/writes with sequential consistency. Callers must use
+// LoadStatus / StoreStatus — do not access `status` directly.
 type SupplierState struct {
 	OperatorAddr string
 	Services     []string
-	Status       SupplierStatus
+	status       atomic.Int32
 
 	// Redis stream consumer for this supplier
 	Consumer *redistransport.StreamsConsumer
@@ -76,6 +84,26 @@ type SupplierState struct {
 	// Lifecycle
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
+}
+
+// LoadStatus returns the current supplier status.
+//
+// Uses atomic load so callers on the relay hot path (see
+// consumeForSupplier) can read the draining flag without taking the
+// manager-level suppliersMu mutex.
+func (s *SupplierState) LoadStatus() SupplierStatus {
+	return SupplierStatus(s.status.Load())
+}
+
+// StoreStatus replaces the supplier status atomically.
+//
+// Writers that also mutate other SupplierState fields (e.g.
+// addSupplierWithData initializing the struct, removeSupplier marking
+// a drain) should hold suppliersMu for the composite update but must
+// still use StoreStatus so concurrent LoadStatus readers observe a
+// well-defined transition.
+func (s *SupplierState) StoreStatus(status SupplierStatus) {
+	s.status.Store(int32(status))
 }
 
 // SupplierManagerConfig contains configuration for the SupplierManager.
@@ -200,10 +228,16 @@ type SupplierManager struct {
 	deduplicator Deduplicator
 
 	// Lifecycle
+	//
+	// mu protects ctx / cancelFn / closed. It is an RWMutex so the
+	// key-manager callback (onKeyChange) can capture ctx with a
+	// short RLock window without blocking other concurrent callback
+	// firings. Start() and Close() take Lock for the composite
+	// ctx+closed update. See keyChangeReadCtx.
 	ctx      context.Context
 	cancelFn context.CancelFunc
 	closed   bool
-	mu       sync.Mutex
+	mu       sync.RWMutex
 }
 
 // NewSupplierManager creates a new supplier manager.
@@ -652,8 +686,36 @@ type SupplierWarmupData struct {
 	Services     []string
 }
 
+// keyChangeReadCtx captures m.ctx under a short m.mu.RLock.
+//
+// Start() assigns m.ctx under m.mu.Lock(); onKeyChange can fire on an
+// arbitrary key-manager goroutine concurrently with Start and Close.
+// Capturing into a local with a brief read lock gives the callback a
+// stable context for the rest of its work without holding the mutex
+// across network calls. Mirrors the pattern Close() uses for
+// m.closed.
+func (m *SupplierManager) keyChangeReadCtx() context.Context {
+	m.mu.RLock()
+	ctx := m.ctx
+	m.mu.RUnlock()
+	return ctx
+}
+
 // onKeyChange handles key addition/removal notifications.
+//
+// Runs on the key-manager's callback goroutine. Captures m.ctx once
+// under m.mu.RLock() at entry and uses the local for every downstream
+// call — do NOT read m.ctx directly anywhere below, that is a race
+// against Start() / Close() (which write m.ctx under m.mu).
 func (m *SupplierManager) onKeyChange(operatorAddr string, added bool) {
+	ctx := m.keyChangeReadCtx()
+	m.handleKeyChange(ctx, operatorAddr, added)
+}
+
+// handleKeyChange is the body of onKeyChange with the lifecycle
+// context passed in explicitly. Split out so tests can drive the
+// callback shape without touching m.ctx through the package lock.
+func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr string, added bool) {
 	if added {
 		m.logger.Info().
 			Str(logging.FieldSupplier, operatorAddr).
@@ -661,7 +723,7 @@ func (m *SupplierManager) onKeyChange(operatorAddr string, added bool) {
 
 		// Check if supplier is staked on-chain before processing
 		if m.config.SupplierQueryClient != nil {
-			queryCtx, cancel := context.WithTimeout(m.ctx, 5*time.Second)
+			queryCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			_, err := m.config.SupplierQueryClient.GetSupplier(queryCtx, operatorAddr)
 			cancel()
 
@@ -686,7 +748,7 @@ func (m *SupplierManager) onKeyChange(operatorAddr string, added bool) {
 			// Distributed claiming mode: update claimer's supplier list
 			// The claimer will handle claiming via rebalance
 			allSuppliers := m.keyManager.ListSuppliers()
-			stakedSuppliers := m.filterStakedSuppliers(m.ctx, allSuppliers)
+			stakedSuppliers := m.filterStakedSuppliers(ctx, allSuppliers)
 			m.claimer.UpdateSuppliers(stakedSuppliers)
 			m.logger.Debug().
 				Str(logging.FieldSupplier, operatorAddr).
@@ -694,7 +756,7 @@ func (m *SupplierManager) onKeyChange(operatorAddr string, added bool) {
 				Msg("updated claimer with hot-reloaded staked supplier")
 		} else {
 			// Single-miner mode: add directly
-			if err := m.addSupplierWithData(m.ctx, operatorAddr, nil); err != nil {
+			if err := m.addSupplierWithData(ctx, operatorAddr, nil); err != nil {
 				m.logger.Error().
 					Err(err).
 					Str(logging.FieldSupplier, operatorAddr).
@@ -703,7 +765,7 @@ func (m *SupplierManager) onKeyChange(operatorAddr string, added bool) {
 		}
 	} else {
 		// Key removed — verify on-chain, but per user decision: drain even if staked (operator explicit action)
-		shouldDrain, verifyResult := m.verifySupplierUnstaked(m.ctx, operatorAddr, "key_removal")
+		shouldDrain, verifyResult := m.verifySupplierUnstaked(ctx, operatorAddr, "key_removal")
 		supplierDrainDecisionTotal.WithLabelValues("key_removal", verifyResult).Inc()
 
 		m.logger.Info().
@@ -723,7 +785,7 @@ func (m *SupplierManager) onKeyChange(operatorAddr string, added bool) {
 		// Update claimer if in distributed mode
 		if m.claimer != nil {
 			allSuppliers := m.keyManager.ListSuppliers()
-			stakedSuppliers := m.filterStakedSuppliers(m.ctx, allSuppliers)
+			stakedSuppliers := m.filterStakedSuppliers(ctx, allSuppliers)
 			m.claimer.UpdateSuppliers(stakedSuppliers)
 		}
 
@@ -920,7 +982,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 	state := &SupplierState{
 		OperatorAddr:       operatorAddr,
-		Status:             SupplierStatusActive,
 		Consumer:           consumer,
 		SessionStore:       sessionStore,
 		SessionCoordinator: sessionCoordinator,
@@ -930,6 +991,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		SupplierClient:     supplierClient,
 		cancelFn:           cancelFn,
 	}
+	state.StoreStatus(SupplierStatusActive)
 
 	m.suppliers[operatorAddr] = state
 
@@ -1062,8 +1124,11 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 			RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
 
 			// When draining, we continue processing existing messages
-			// but log that we're in drain mode for visibility
-			if state.Status == SupplierStatusDraining {
+			// but log that we're in drain mode for visibility.
+			// LoadStatus is lock-free — removeSupplier publishes the
+			// draining flag via StoreStatus under suppliersMu, and
+			// this read stays off the map mutex on the hot path.
+			if state.LoadStatus() == SupplierStatusDraining {
 				m.logger.Debug().
 					Str(logging.FieldSupplier, state.OperatorAddr).
 					Msg("processing relay during drain")
@@ -1147,7 +1212,7 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	}
 
 	// Mark as draining and copy services while holding lock
-	state.Status = SupplierStatusDraining
+	state.StoreStatus(SupplierStatusDraining)
 	servicesCopy := make([]string, len(state.Services))
 	copy(servicesCopy, state.Services)
 	m.suppliersMu.Unlock()
