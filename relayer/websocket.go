@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"crypto/tls"
+	"fmt"
 	"net/http"
 	"net/url"
 	"sync"
@@ -211,6 +212,15 @@ func NewWebSocketBridge(
 	computeUnits uint64,
 	dialTimeout time.Duration,
 ) (*WebSocketBridge, error) {
+	// A nil relayProcessor used to drop us into a "fallback" emit path that
+	// published MinedRelayMessage{RelayHash: nil, CU: 1}, which silently
+	// collapsed every websocket event into a single SMST leaf (all empty
+	// keys) and underbilled compute units. Fail loudly instead so a
+	// mis-wired bridge cannot quietly eat revenue.
+	if relayProcessor == nil {
+		return nil, fmt.Errorf("websocket bridge requires a non-nil RelayProcessor (fallback emit path removed to prevent data loss)")
+	}
+
 	ctx, cancelFn := context.WithCancel(context.Background())
 
 	// Connect to backend WebSocket using dial timeout from profile
@@ -674,70 +684,29 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 		return
 	}
 
-	// Use RelayProcessor if available for proper relay construction
-	if b.relayProcessor != nil {
-		msg, procErr := b.relayProcessor.ProcessRelay(
-			b.ctx,
-			reqBytes,
-			respPayload,
-			supplierAddr,
-			b.serviceID,
-			b.arrivalHeight,
-		)
-		if procErr != nil {
-			logging.WithSessionContext(b.logger.Warn(), sessionCtx).
-				Err(procErr).
-				Msg("failed to process websocket relay")
-			return
-		}
-
-		if msg != nil {
-			if pubErr := b.publisher.Publish(b.ctx, msg); pubErr != nil {
-				logging.WithSessionContext(b.logger.Warn(), sessionCtx).
-					Err(pubErr).
-					Msg("failed to publish websocket relay")
-				return
-			}
-			wsRelaysEmitted.WithLabelValues(b.serviceID).Inc()
-			logging.WithSessionContext(b.logger.Debug(), sessionCtx).
-				Uint64("relay_count", count).
-				Msg("websocket relay published")
-		}
-		return
-	}
-
-	// Fallback: Create basic relay message without full processing
-	relay := &servicetypes.Relay{
-		Req: req,
-		Res: resp,
-	}
-	relayBytes, err := relay.Marshal()
-	if err != nil {
+	// NewWebSocketBridge enforces b.relayProcessor != nil, so every event goes
+	// through the full ProcessRelay path: compute RelayHash over {Req, Res},
+	// attach correct CU from service config, and publish with a session ID.
+	msg, procErr := b.relayProcessor.ProcessRelay(
+		b.ctx,
+		reqBytes,
+		respPayload,
+		supplierAddr,
+		b.serviceID,
+		b.arrivalHeight,
+	)
+	if procErr != nil {
 		logging.WithSessionContext(b.logger.Warn(), sessionCtx).
-			Err(err).
-			Msg("failed to marshal relay")
+			Err(procErr).
+			Msg("failed to process websocket relay")
 		return
 	}
 
-	msg := &transport.MinedRelayMessage{
-		RelayHash:               nil, // Not calculated in fallback mode
-		RelayBytes:              relayBytes,
-		ComputeUnitsPerRelay:    1,
-		SessionId:               "",
-		SessionEndHeight:        0,
-		SupplierOperatorAddress: supplierAddr,
-		ServiceId:               b.serviceID,
-		ApplicationAddress:      "",
-		ArrivalBlockHeight:      b.arrivalHeight,
+	if msg == nil {
+		// ProcessRelay returns (nil, nil) when the relay does not meet the
+		// service's mining difficulty. That is an expected outcome, not a bug.
+		return
 	}
-
-	if req.Meta.SessionHeader != nil {
-		msg.SessionId = req.Meta.SessionHeader.SessionId
-		msg.SessionEndHeight = req.Meta.SessionHeader.SessionEndBlockHeight
-		msg.ApplicationAddress = req.Meta.SessionHeader.ApplicationAddress
-	}
-
-	msg.SetPublishedAt()
 
 	if pubErr := b.publisher.Publish(b.ctx, msg); pubErr != nil {
 		logging.WithSessionContext(b.logger.Warn(), sessionCtx).
@@ -745,11 +714,10 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 			Msg("failed to publish websocket relay")
 		return
 	}
-
 	wsRelaysEmitted.WithLabelValues(b.serviceID).Inc()
 	logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 		Uint64("relay_count", count).
-		Msg("websocket relay published (fallback)")
+		Msg("websocket relay published")
 }
 
 // sendSessionExpirationMessage sends a signed error response to the client

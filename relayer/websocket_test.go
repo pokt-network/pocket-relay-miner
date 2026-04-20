@@ -7,7 +7,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/pool"
@@ -137,4 +140,31 @@ func TestWebSocketHandler_FastFail_NilPool(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code)
 	require.NotEqual(t, http.StatusSwitchingProtocols, w.Code)
 	require.Contains(t, w.Body.String(), "service temporarily unavailable")
+}
+
+// TestNewWebSocketBridge_RequiresRelayProcessor locks in the fix for the
+// silent-data-loss fallback that used to kick in when relayProcessor was nil:
+// MinedRelayMessage{RelayHash: nil, CU: 1} collapsed every event to the same
+// empty-key SMST leaf and underbilled CU. The constructor now refuses nil so
+// the error surfaces at wiring time instead of at revenue-reconciliation time.
+func TestNewWebSocketBridge_RequiresRelayProcessor(t *testing.T) {
+	bridge, err := NewWebSocketBridge(
+		zerolog.Nop(),
+		nil, // gatewayConn - not reached because the nil check fires first
+		"ws://backend:8545",
+		"svc-test",
+		"pokt1supplier",
+		0,
+		nil, // relayProcessor - intentionally nil
+		&noopPublisher{},
+		nil,
+		http.Header{},
+		nil,
+		nil,
+		1,
+		time.Second,
+	)
+	require.Error(t, err, "nil relayProcessor must fail fast — the old fallback silently collapsed events")
+	assert.Nil(t, bridge)
+	assert.Contains(t, err.Error(), "RelayProcessor", "error must point at the missing dependency")
 }
