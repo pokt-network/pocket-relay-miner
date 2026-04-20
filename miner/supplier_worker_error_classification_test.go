@@ -203,6 +203,9 @@ type errorOnIncrementStore struct {
 func (s *errorOnIncrementStore) Save(ctx context.Context, snapshot *SessionSnapshot) error {
 	return s.inner.Save(ctx, snapshot)
 }
+func (s *errorOnIncrementStore) CreateIfAbsent(ctx context.Context, snapshot *SessionSnapshot) (bool, error) {
+	return s.inner.CreateIfAbsent(ctx, snapshot)
+}
 func (s *errorOnIncrementStore) Get(ctx context.Context, sessionID string) (*SessionSnapshot, error) {
 	return s.inner.Get(ctx, sessionID)
 }

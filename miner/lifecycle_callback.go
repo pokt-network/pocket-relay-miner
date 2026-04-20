@@ -3,6 +3,7 @@ package miner
 import (
 	"context"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"strconv"
@@ -1159,6 +1160,27 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			if lc.proofChecker != nil {
 				required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofRequirementSeedBlock.Hash())
 				if checkErr != nil {
+					// ErrClaimedRootUnavailable means the session has no
+					// authoritative root to anchor a proof on — falling
+					// open to submission would produce an on-chain invalid
+					// proof. Mark the session as proof_tx_error (terminal
+					// failure) so the pipeline doesn't spend gas on a
+					// guaranteed reject.
+					if errors.Is(checkErr, ErrClaimedRootUnavailable) {
+						logger.Error().
+							Err(checkErr).
+							Str(logging.FieldSessionID, snapshot.SessionID).
+							Msg("cannot submit proof: claimed root unavailable (HA failover with failed OnSessionClaimed write); marking session as proof_tx_error")
+						if lc.sessionCoordinator != nil {
+							if markErr := lc.sessionCoordinator.OnProofTxError(ctx, snapshot.SessionID); markErr != nil {
+								logger.Warn().
+									Err(markErr).
+									Str(logging.FieldSessionID, snapshot.SessionID).
+									Msg("failed to mark session as proof_tx_error after unavailable claimed root")
+							}
+						}
+						continue
+					}
 					logger.Warn().
 						Err(checkErr).
 						Str(logging.FieldSessionID, snapshot.SessionID).
@@ -1287,7 +1309,25 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			for _, snapshot := range sessionsNeedingProof {
 				required, recheckErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofRequirementSeedBlock.Hash())
 				if recheckErr != nil {
-					// Error checking - err on side of caution and submit anyway
+					// Same guard as the initial check — a missing claimed
+					// root means we'd submit a fabricated proof. Surface
+					// as proof_tx_error instead of falling open.
+					if errors.Is(recheckErr, ErrClaimedRootUnavailable) {
+						logger.Error().
+							Err(recheckErr).
+							Str(logging.FieldSessionID, snapshot.SessionID).
+							Msg("cannot submit proof on re-check: claimed root unavailable; marking session as proof_tx_error")
+						if lc.sessionCoordinator != nil {
+							if markErr := lc.sessionCoordinator.OnProofTxError(ctx, snapshot.SessionID); markErr != nil {
+								logger.Warn().
+									Err(markErr).
+									Str(logging.FieldSessionID, snapshot.SessionID).
+									Msg("failed to mark session as proof_tx_error after unavailable claimed root")
+							}
+						}
+						continue
+					}
+					// Other errors - err on side of caution and submit anyway
 					logger.Warn().
 						Err(recheckErr).
 						Str(logging.FieldSessionID, snapshot.SessionID).

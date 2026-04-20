@@ -909,6 +909,15 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			lifecycleCallback.SetAppClient(m.config.AppClient)
 		}
 
+		// Wire the SMST as the claimed-root rehydration source for the
+		// proof-requirement check. Under HA failover the snapshot's
+		// ClaimedRootHash can be nil (OnSessionClaimed's Redis write
+		// failed and was only logged at Warn); without this provider
+		// IsProofRequired would fabricate a proof from a nil root.
+		if m.config.ProofChecker != nil {
+			m.config.ProofChecker.SetClaimedRootProvider(smstManager)
+		}
+
 		// Wire stream deleter for cleanup after session settlement
 		// This stops the consumer from reading stale messages and frees Redis memory
 		lifecycleCallback.SetStreamDeleter(consumer)

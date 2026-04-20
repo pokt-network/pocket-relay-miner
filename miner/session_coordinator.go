@@ -77,6 +77,16 @@ func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTermin
 // OnRelayProcessed should be called when a relay is successfully processed and added to SMST.
 // It ensures the session exists and updates the relay count.
 // If the session doesn't exist, it will be created automatically using the provided metadata.
+//
+// Concurrency contract: N concurrent OnRelayProcessed calls for the same
+// brand-new session result in EXACTLY ONE OnSessionCreated invocation
+// (and therefore exactly one TrackSession / RecordSessionCreated). The
+// first-write-wins gate lives in SessionStore.CreateIfAbsent; OnSessionCreated
+// only fires the registered callback when CreateIfAbsent reports that this
+// caller is the creator. Without this gate the previous Get→nil→Save path
+// was a TOCTOU: concurrent relays all saw snapshot == nil, all called
+// Save, and could race on HSET(full) / HSET(metadata), potentially losing
+// HINCRBY-tracked counters and duplicating lifecycle registration.
 func (c *SessionCoordinator) OnRelayProcessed(
 	ctx context.Context,
 	sessionID string,
@@ -91,7 +101,11 @@ func (c *SessionCoordinator) OnRelayProcessed(
 	}
 	c.mu.Unlock()
 
-	// Check if session exists, create if not
+	// Check if session exists, create if not. The Get call here is an
+	// optimisation to skip the CreateIfAbsent Redis round-trip for the hot
+	// path where the session already exists; correctness does NOT depend on
+	// it because OnSessionCreated delegates to CreateIfAbsent which is the
+	// atomic first-write-wins gate.
 	snapshot, err := c.sessionStore.Get(ctx, sessionID)
 	if err != nil {
 		c.logger.Warn().
@@ -101,28 +115,20 @@ func (c *SessionCoordinator) OnRelayProcessed(
 	}
 
 	if snapshot == nil {
-		// Session doesn't exist, create it
+		// Session doesn't exist (or Get failed); attempt create. The
+		// CreateIfAbsent call inside OnSessionCreated serialises concurrent
+		// creators so only one caller fires the session-created callback
+		// and the RecordSessionCreated metric.
 		if supplierAddress == "" || serviceID == "" {
 			c.logger.Warn().
 				Str(logging.FieldSessionID, sessionID).
 				Msg("session not found and missing metadata to create it")
 		} else {
-			c.logger.Info().
-				Str(logging.FieldSessionID, sessionID).
-				Str(logging.FieldService, serviceID).
-				Str(logging.FieldSupplier, supplierAddress).
-				Int64("start_height", sessionStartHeight).
-				Int64("end_height", sessionEndHeight).
-				Msg("creating new session on first relay")
-
 			if err := c.OnSessionCreated(ctx, sessionID, supplierAddress, serviceID, applicationAddress, sessionStartHeight, sessionEndHeight); err != nil {
 				c.logger.Warn().
 					Err(err).
 					Str(logging.FieldSessionID, sessionID).
 					Msg("failed to create session")
-			} else {
-				// Record session creation metric for operator visibility
-				RecordSessionCreated(supplierAddress, serviceID)
 			}
 		}
 	}
@@ -144,6 +150,13 @@ func (c *SessionCoordinator) OnRelayProcessed(
 }
 
 // OnSessionCreated should be called when a new session is created.
+//
+// This method is the authoritative session-create entry point. It uses
+// SessionStore.CreateIfAbsent as a first-write-wins gate so that N
+// concurrent callers racing on the same fresh sessionID produce EXACTLY
+// ONE callback invocation and EXACTLY ONE RecordSessionCreated metric.
+// Callers that lose the race get (nil error, no callback) and proceed as
+// if the session already existed.
 func (c *SessionCoordinator) OnSessionCreated(
 	ctx context.Context,
 	sessionID string,
@@ -157,7 +170,7 @@ func (c *SessionCoordinator) OnSessionCreated(
 	}
 	c.mu.Unlock()
 
-	// Create session snapshot in Redis
+	// Create session snapshot in Redis — first writer wins.
 	snapshot := &SessionSnapshot{
 		SessionID:               sessionID,
 		SupplierOperatorAddress: supplierAddress,
@@ -171,16 +184,33 @@ func (c *SessionCoordinator) OnSessionCreated(
 		ClaimedRootHash:         nil,
 	}
 
-	if err := c.sessionStore.Save(ctx, snapshot); err != nil {
-		return fmt.Errorf("failed to save session snapshot: %w", err)
+	created, err := c.sessionStore.CreateIfAbsent(ctx, snapshot)
+	if err != nil {
+		return fmt.Errorf("failed to create session snapshot: %w", err)
 	}
 
-	c.logger.Debug().
-		Str(logging.FieldSessionID, sessionID).
-		Str(logging.FieldSupplier, supplierAddress).
-		Msg("session created and snapshot saved")
+	if !created {
+		// Another caller won the race; the session already exists.
+		// Do NOT fire the session-created callback or metric again.
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSupplier, supplierAddress).
+			Msg("session already existed; skipping duplicate create callback")
+		return nil
+	}
 
-	// Invoke callback if registered
+	c.logger.Info().
+		Str(logging.FieldSessionID, sessionID).
+		Str(logging.FieldService, serviceID).
+		Str(logging.FieldSupplier, supplierAddress).
+		Int64("start_height", startHeight).
+		Int64("end_height", endHeight).
+		Msg("session created on first relay")
+
+	// Record session creation metric once, only on the winning path.
+	RecordSessionCreated(supplierAddress, serviceID)
+
+	// Invoke callback if registered (first-write-wins guarantees exactly once).
 	c.mu.Lock()
 	callback := c.onSessionCreated
 	c.mu.Unlock()

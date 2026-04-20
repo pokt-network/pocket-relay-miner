@@ -160,6 +160,17 @@ type SessionStore interface {
 	// Save persists a session snapshot to Redis.
 	Save(ctx context.Context, snapshot *SessionSnapshot) error
 
+	// CreateIfAbsent atomically creates a session snapshot if none exists
+	// for this session ID. Returns (true, nil) when this caller created the
+	// snapshot, (false, nil) when another caller already created it, and
+	// (false, err) on Redis failure.
+	//
+	// This is the first-write-wins gate that protects SessionCoordinator
+	// against the TOCTOU race in OnRelayProcessed, where N concurrent
+	// relays on a brand-new session would otherwise all see snapshot == nil
+	// and all invoke OnSessionCreated → TrackSession.
+	CreateIfAbsent(ctx context.Context, snapshot *SessionSnapshot) (created bool, err error)
+
 	// Get retrieves a session snapshot by session ID.
 	Get(ctx context.Context, sessionID string) (*SessionSnapshot, error)
 
@@ -544,6 +555,100 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 		Msg("saved session snapshot")
 
 	return nil
+}
+
+// createIfAbsentScript atomically creates a session hash key only when no
+// key (hash or legacy string) exists at that slot. This is the Redis-side
+// gate that enforces first-write-wins on the session-creation path.
+//
+// KEYS[1] = session hash key
+// ARGV[1..N] = alternating field/value pairs (encodeSnapshot output)
+// The final ARGV is the TTL in seconds, injected separately by the Go caller
+// via a trailing pair so the layout stays homogeneous.
+//
+// Returns: "1" when this call created the hash, "0" when the key already
+// existed (hash OR legacy string).
+var createIfAbsentScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 1 then
+	return 0
+end
+local ttl = tonumber(ARGV[1])
+local n = #ARGV
+local args = {}
+for i = 2, n do
+	args[#args+1] = ARGV[i]
+end
+redis.call('HSET', KEYS[1], unpack(args))
+redis.call('EXPIRE', KEYS[1], ttl)
+return 1
+`)
+
+// CreateIfAbsent atomically creates a session snapshot iff no prior key
+// exists at the same slot. This is the first-write-wins gate referenced by
+// SessionCoordinator.OnSessionCreated — without it, concurrent
+// OnRelayProcessed goroutines for the same brand-new session would all see
+// snapshot == nil and all invoke the session-created callback, causing
+// duplicate TrackSession/lifecycle registration and (worse) lost relay
+// counters if two goroutines race the Get→HSET(full) path in Save.
+//
+// On success (created == true) the caller is responsible for registering
+// the session in the supplier-wide and per-state indexes; we wire those in
+// the same pipeline so failures roll back together.
+func (s *RedisSessionStore) CreateIfAbsent(ctx context.Context, snapshot *SessionSnapshot) (bool, error) {
+	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return false, fmt.Errorf("session store is closed")
+	}
+	s.mu.Unlock()
+
+	snapshot.LastUpdatedAt = time.Now()
+	if snapshot.CreatedAt.IsZero() {
+		snapshot.CreatedAt = snapshot.LastUpdatedAt
+	}
+
+	key := s.sessionKey(snapshot.SessionID)
+	ttlSeconds := int64(s.config.SessionTTL.Seconds())
+
+	// Build ARGV: [ttl, field1, value1, field2, value2, ...]
+	fieldValues := encodeSnapshot(snapshot)
+	argv := make([]any, 0, 1+len(fieldValues))
+	argv = append(argv, ttlSeconds)
+	argv = append(argv, fieldValues...)
+
+	result, err := createIfAbsentScript.Run(ctx, s.redisClient, []string{key}, argv...).Int64()
+	if err != nil {
+		return false, fmt.Errorf("failed to create-if-absent session snapshot: %w", err)
+	}
+
+	if result != 1 {
+		// Another caller won the race — snapshot already exists.
+		return false, nil
+	}
+
+	// We created the hash; maintain the supplier-wide and per-state indexes
+	// in a best-effort pipeline. If indexing fails the hash still exists and
+	// subsequent Save() calls will rebuild the index entries.
+	pipe := s.redisClient.TxPipeline()
+	pipe.SAdd(ctx, s.supplierSessionsKey(), snapshot.SessionID)
+	pipe.Expire(ctx, s.supplierSessionsKey(), s.config.SessionTTL)
+	pipe.SAdd(ctx, s.stateIndexKey(snapshot.State), snapshot.SessionID)
+	pipe.Expire(ctx, s.stateIndexKey(snapshot.State), s.config.SessionTTL)
+	if _, pipeErr := pipe.Exec(ctx); pipeErr != nil {
+		s.logger.Warn().
+			Err(pipeErr).
+			Str("session_id", snapshot.SessionID).
+			Msg("created session hash but failed to update indexes; Save() will reconcile")
+	}
+
+	sessionSnapshotsSaved.WithLabelValues(s.config.SupplierAddress).Inc()
+
+	s.logger.Debug().
+		Str("session_id", snapshot.SessionID).
+		Str("state", string(snapshot.State)).
+		Msg("created session snapshot (first-write-wins)")
+
+	return true, nil
 }
 
 // getHash performs an HGETALL-based read against the hash layout.
