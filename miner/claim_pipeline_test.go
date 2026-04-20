@@ -23,8 +23,10 @@ type mockSMSTFlusher struct {
 	mu           sync.Mutex
 	flushFunc    func(ctx context.Context, sessionID string) ([]byte, error)
 	getTreeFunc  func(ctx context.Context, sessionID string) ([]byte, error)
+	statsFunc    func(sessionID string) (uint64, uint64, error)
 	flushCalls   int
 	getTreeCalls int
+	statsCalls   int
 }
 
 func (m *mockSMSTFlusher) FlushTree(ctx context.Context, sessionID string) ([]byte, error) {
@@ -45,6 +47,16 @@ func (m *mockSMSTFlusher) GetTreeRoot(ctx context.Context, sessionID string) ([]
 		return m.getTreeFunc(ctx, sessionID)
 	}
 	return []byte("mock-root-hash"), nil
+}
+
+func (m *mockSMSTFlusher) GetTreeStats(sessionID string) (uint64, uint64, error) {
+	m.mu.Lock()
+	m.statsCalls++
+	m.mu.Unlock()
+	if m.statsFunc != nil {
+		return m.statsFunc(sessionID)
+	}
+	return 0, 0, nil
 }
 
 // getFlushCalls safely retrieves the flush call count
@@ -468,6 +480,54 @@ func TestClaimPipeline_BuildClaim_FromSMST(t *testing.T) {
 	require.Equal(t, "pokt1supplier123", req.SupplierOperatorAddress)
 	require.Equal(t, int64(104), req.SessionEndHeight)
 	require.Equal(t, 1, smstFlusher.getFlushCalls())
+}
+
+// TestClaimPipeline_RecordsLeafStats_OnCollapse wires a flusher that reports
+// a leaf count strictly less than snapshot.RelayCount and asserts that
+// CreateClaimFromSession still returns a valid claim and calls GetTreeStats
+// (so the collapse metric fires). This is the observability hook that lets
+// operators distinguish "999 relays processed, 999 leaves" from "999
+// processed, 2 leaves" without tailing logs.
+func TestClaimPipeline_RecordsLeafStats_OnCollapse(t *testing.T) {
+	pipeline, _, smstFlusher, _, _ := setupClaimPipelineTest(t)
+
+	smstFlusher.flushFunc = func(ctx context.Context, sessionID string) ([]byte, error) {
+		return []byte("root-32-byte-hash-placeholder--"), nil
+	}
+	// Simulate an SMST that only admitted 2 distinct leaves even though the
+	// coordinator counted 999 relays (byte-identical traffic from a broken
+	// load generator or a ping/pong subscription).
+	smstFlusher.statsFunc = func(sessionID string) (uint64, uint64, error) {
+		return 2, 2000, nil
+	}
+
+	ctx := context.Background()
+	snapshot := &SessionSnapshot{
+		SessionID:               "session-collapse",
+		SupplierOperatorAddress: "pokt1supplier123",
+		ServiceID:               "ethereum",
+		ApplicationAddress:      "pokt1app123",
+		SessionStartHeight:      100,
+		SessionEndHeight:        104,
+		State:                   SessionStateClaiming,
+		RelayCount:              999,
+	}
+	sessionHeader := &sessiontypes.SessionHeader{
+		SessionId:               "session-collapse",
+		SessionStartBlockHeight: 100,
+		SessionEndBlockHeight:   104,
+		ApplicationAddress:      "pokt1app123",
+		ServiceId:               "ethereum",
+	}
+
+	req, err := pipeline.CreateClaimFromSession(ctx, snapshot, sessionHeader)
+	require.NoError(t, err)
+	require.NotNil(t, req)
+
+	smstFlusher.mu.Lock()
+	defer smstFlusher.mu.Unlock()
+	require.Equal(t, 1, smstFlusher.statsCalls,
+		"CreateClaimFromSession must call GetTreeStats once per flush to feed the leaf-vs-attempts metrics")
 }
 
 func TestClaimPipeline_Concurrent_MultipleSessions(t *testing.T) {

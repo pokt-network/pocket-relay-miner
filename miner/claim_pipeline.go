@@ -88,6 +88,13 @@ type SMSTFlusher interface {
 
 	// GetTreeRoot returns the root hash for an already-flushed session.
 	GetTreeRoot(ctx context.Context, sessionID string) (rootHash []byte, err error)
+
+	// GetTreeStats returns the leaf count and compute-unit sum for a session.
+	// Post-flush, these are the values encoded in the claim the chain will see
+	// (count == num_relays on-chain). The claim pipeline uses them to detect
+	// and surface SMST-level dedup collapses (snapshot counted N relays, but
+	// only M distinct leaves survived) without silently under-billing.
+	GetTreeStats(sessionID string) (count uint64, sum uint64, err error)
 }
 
 // ClaimPipeline manages the claim submission process.
@@ -199,6 +206,31 @@ func (p *ClaimPipeline) CreateClaimFromSession(
 	rootHash, err := p.smstFlusher.FlushTree(ctx, snapshot.SessionID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to flush SMST: %w", err)
+	}
+
+	// Record leaf-vs-attempts observability: compare the number of distinct
+	// SMST leaves in the claim (= on-chain num_relays) against the session
+	// coordinator's RelayCount (= relays the relayer actually mined). A
+	// mismatch means some relays shared a RelayHash and were deduped at the
+	// SMST-key level — expected for byte-identical traffic (replay anti-fraud),
+	// unexpected under normal PATH fan-out.
+	if count, _, statsErr := p.smstFlusher.GetTreeStats(snapshot.SessionID); statsErr == nil {
+		leaves := int64(count)
+		RecordClaimLeafStats(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.SessionID, leaves, snapshot.RelayCount)
+		if leaves < snapshot.RelayCount {
+			p.logger.Warn().
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, snapshot.ServiceID).
+				Int64("coordinator_relay_count", snapshot.RelayCount).
+				Int64("claim_leaf_count", leaves).
+				Msg("SMST leaf collapse at claim time: fewer distinct leaves than relays mined — identical relay bytes shared a key (anti-replay dedup)")
+		}
+	} else {
+		p.logger.Debug().
+			Err(statsErr).
+			Str(logging.FieldSessionID, snapshot.SessionID).
+			Msg("GetTreeStats failed post-flush; claim leaf metrics skipped for this session")
 	}
 
 	req := &ClaimRequest{
