@@ -786,7 +786,20 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 			Msg("refusing to persist claimed_root with unexpected length - claim cannot be safely proved")
 		return nil, fmt.Errorf("session %s: claimed_root has invalid length %d, expected %d", sessionID, len(tree.claimedRoot), SMSTRootLen)
 	}
-	if err := m.redisClient.Set(ctx, rootKey, tree.claimedRoot, 0).Err(); err != nil {
+	// Persist claimed_root with the SAME sliding TTL as the nodes hash.
+	// Using TTL=0 here (the old behaviour) made claimed_root outlive the
+	// nodes hash on any crash between FlushTree and proof submission:
+	// the nodes hash kept getting its TTL refreshed by
+	// FlushOrphansWithLiveRoot during active UpdateTree calls, but once
+	// the session stopped receiving relays the nodes hash aged out while
+	// claimed_root stayed persistent. On leader resume, loadTreeFromRedis
+	// imported at claimed_root, ProveClosest traversed into the missing
+	// nodes via the defensive store.Get (ErrSMSTNodeMissing), the proof
+	// failed, and the session went to proof-missing — slashing stake.
+	// The invariant claimed_root's TTL is always ≥ nodes-hash TTL is
+	// maintained by (a) writing claimed_root with CacheTTL here and (b)
+	// refreshing it on every loadTreeFromRedis.
+	if err := m.redisClient.Set(ctx, rootKey, tree.claimedRoot, m.config.CacheTTL).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
@@ -794,10 +807,11 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 		// Continue anyway - root is in memory
 	}
 
-	// Store count and sum in Redis for HA warmup
+	// Store count and sum in Redis for HA warmup, with the same sliding TTL
+	// so stats cannot outlive the tree they describe.
 	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
 	statsValue := fmt.Sprintf("%d:%d", tree.claimedCount, tree.claimedSum)
-	if err := m.redisClient.Set(ctx, statsKey, statsValue, 0).Err(); err != nil {
+	if err := m.redisClient.Set(ctx, statsKey, statsValue, m.config.CacheTTL).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
@@ -1024,6 +1038,41 @@ func (m *RedisSMSTManager) loadTreeFromRedis(ctx context.Context, sessionID stri
 		}
 	}
 
+	// Refresh the sliding TTL on claimed_root + stats so a long-running
+	// proof-submission retry loop (or a crash-loop that keeps coming back
+	// to this code path) cannot age the keys out mid-flight. The
+	// invariant that claimed_root's TTL is always ≥ nodes-hash TTL is
+	// maintained jointly with FlushTree's write-with-CacheTTL; the nodes
+	// hash's TTL is refreshed separately by UpdateTree +
+	// FlushOrphansWithLiveRoot while the session is still receiving
+	// relays. Once the session is flushed the nodes hash is no longer
+	// refreshed, so this refresh on read is what keeps claimed_root and
+	// its backing nodes hash alive while we retry proof submission.
+	if m.config.CacheTTL > 0 {
+		hashKey := m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID)
+		if err := m.redisClient.Expire(ctx, rootKey, m.config.CacheTTL).Err(); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to refresh claimed_root TTL on resume (non-fatal)")
+		}
+		if err := m.redisClient.Expire(ctx, statsKey, m.config.CacheTTL).Err(); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to refresh stats TTL on resume (non-fatal)")
+		}
+		// Refresh nodes hash too — it may exist even if the sliding-TTL
+		// live_root checkpoint stopped firing (post-flush). EXPIRE on a
+		// missing key returns 0 without erroring, so this is safe.
+		if err := m.redisClient.Expire(ctx, hashKey, m.config.CacheTTL).Err(); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to refresh nodes-hash TTL on resume (non-fatal)")
+		}
+	}
+
 	// Store in local cache — use double-check pattern to avoid overwriting
 	// if another goroutine loaded it first.
 	m.treesMu.Lock()
@@ -1151,85 +1200,53 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 				continue
 			}
 
-			// Check if tree already exists in memory
-			m.treesMu.RLock()
-			_, exists := m.trees[sessionID]
-			m.treesMu.RUnlock()
-
-			if exists {
+			// Mirror GetOrCreateTree's resume semantics: prefer claimed_root
+			// (post-flush, sealed), fall back to live_root (mid-session
+			// checkpoint), and only then create an empty tree. The old
+			// behaviour here was to unconditionally call
+			// NewSparseMerkleSumTrie — that silently reset every in-progress
+			// session to zero relays, so any caller of WarmupFromRedis (an
+			// ops script, a future eager-warmup wiring, a debug tool)
+			// produced total data loss for those sessions.
+			//
+			// We lock the map once per session so that (a) the exists check
+			// and the resume attempt are atomic against concurrent
+			// GetOrCreateTree calls and (b) resumeTreeFromRedisLocked's
+			// precondition ("caller holds m.treesMu") is satisfied.
+			m.treesMu.Lock()
+			if _, exists := m.trees[sessionID]; exists {
+				m.treesMu.Unlock()
 				continue // Skip - already loaded
 			}
 
-			// Create RedisMapStore for this session (doesn't load data yet)
+			if resumed := m.resumeTreeFromRedisLocked(ctx, sessionID); resumed != nil {
+				m.trees[sessionID] = resumed
+				m.treesMu.Unlock()
+				loadedCount++
+				m.logger.Debug().
+					Str(logging.FieldSessionID, sessionID).
+					Msg("warmed up SMST from Redis (resumed)")
+				continue
+			}
+
+			// No usable claimed_root or live_root. Create a fresh empty
+			// tree so the session can accept new relays — the nodes hash
+			// is still in Redis (that's what the scan matched on) but
+			// without a root anchor we cannot reconstruct prior state.
+			// This matches GetOrCreateTree's final branch.
 			store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
-
-			// Create SMST with the Redis store
-			// The SMT library will lazy-load nodes from Redis as needed
 			trie := smt.NewSparseMerkleSumTrie(store, protocol.NewTrieHasher(), protocol.SMTValueHasher())
-
-			tree := &redisSMST{
+			m.trees[sessionID] = &redisSMST{
 				sessionID: sessionID,
 				trie:      trie,
 				store:     store,
 			}
-
-			// Restore the claimed root from Redis if it exists
-			rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
-			rootBytes, err := m.redisClient.Get(ctx, rootKey).Bytes()
-			if err == nil && len(rootBytes) > 0 && !isValidSMSTRoot(rootBytes) {
-				// Corrupt root — delete and treat as unflushed. The fresh tree
-				// created above will accept new relays; the session effectively
-				// restarts, which is the same outcome as any failover recovery.
-				m.logger.Warn().
-					Str(logging.FieldSessionID, sessionID).
-					Int("got_len", len(rootBytes)).
-					Int("want_len", SMSTRootLen).
-					Str("root_hex", fmt.Sprintf("%x", rootBytes)).
-					Msg("corrupt claimed_root during warmup - deleting")
-				if delErr := m.redisClient.Del(ctx, rootKey).Err(); delErr != nil {
-					m.logger.Warn().Err(delErr).Str(logging.FieldSessionID, sessionID).
-						Msg("failed to delete corrupt claimed_root (non-fatal)")
-				}
-				rootBytes = nil
-			}
-			if err == nil && len(rootBytes) > 0 {
-				tree.claimedRoot = rootBytes
-				m.logger.Debug().
-					Str(logging.FieldSessionID, sessionID).
-					Str("root_hash_hex", fmt.Sprintf("%x", rootBytes)).
-					Msg("restored claimed root from Redis")
-
-				// Restore count and sum from Redis
-				statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
-				statsValue, statsErr := m.redisClient.Get(ctx, statsKey).Result()
-				if statsErr == nil {
-					var count, sum uint64
-					if _, parseErr := fmt.Sscanf(statsValue, "%d:%d", &count, &sum); parseErr == nil {
-						tree.claimedCount = count
-						tree.claimedSum = sum
-						m.logger.Debug().
-							Str(logging.FieldSessionID, sessionID).
-							Uint64("count", count).
-							Uint64("sum", sum).
-							Msg("restored tree stats from Redis")
-					}
-				}
-			} else if err != nil {
-				m.logger.Debug().
-					Err(err).
-					Str(logging.FieldSessionID, sessionID).
-					Msg("no claimed root found in Redis (tree not yet flushed)")
-			}
-
-			m.treesMu.Lock()
-			m.trees[sessionID] = tree
 			m.treesMu.Unlock()
 
 			loadedCount++
-
 			m.logger.Debug().
 				Str(logging.FieldSessionID, sessionID).
-				Msg("warmed up SMST from Redis")
+				Msg("warmed up SMST from Redis (empty tree — no root in Redis)")
 		}
 
 		cursor = nextCursor

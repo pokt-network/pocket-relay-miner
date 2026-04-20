@@ -18,6 +18,12 @@ type LegacySMSTMigrationStats struct {
 	SessionsMigrated   int
 	SessionsOrphaned   int // legacy keys with no matching session owner - deleted
 	LegacyKeysDeleted  int
+
+	// LegacyLiveRootOrphans counts legacy sessions that had ONLY a
+	// live_root (no claimed_root) — these cannot be rescued because the
+	// owner-lookup needs a flushed claimed_root_hash to match. They are
+	// deleted so Redis memory does not accumulate across upgrades.
+	LegacyLiveRootOrphans int
 }
 
 // MigrateLegacySMSTKeys scans Redis for SMST keys written under the pre-fix
@@ -93,10 +99,61 @@ func MigrateLegacySMSTKeys(
 		}
 	}
 
+	// Second pass: clean up legacy sessions with ONLY a live_root (no
+	// claimed_root). These are mid-session checkpoints that were never
+	// flushed. The :root-keyed scan above cannot see them, but leaving
+	// the orphans in Redis leaks memory across upgrades. They cannot be
+	// rescued because findSessionOwnerByRoot needs a flushed
+	// claimed_root_hash to match — a mid-session live_root has no such
+	// counterpart in session metadata. Delete the triplet (live_root +
+	// nodes + stats if present) and count them for operator visibility.
+	cursor = 0
+	livePattern := prefix + "*:live_root"
+	for {
+		keys, next, err := client.Scan(ctx, cursor, livePattern, 500).Result()
+		if err != nil {
+			return stats, fmt.Errorf("scan legacy smst live_root keys: %w", err)
+		}
+		for _, liveKey := range keys {
+			rest := strings.TrimPrefix(liveKey, prefix)
+			rest = strings.TrimSuffix(rest, ":live_root")
+			if strings.ContainsRune(rest, ':') {
+				continue // already on new schema, skip
+			}
+			sessionID := rest
+			// If the :root counterpart exists it was already handled in
+			// the first pass (its live_root got renamed alongside the
+			// other three keys). Skip.
+			if ok, _ := client.Exists(ctx, prefix+sessionID+":root").Result(); ok > 0 {
+				continue
+			}
+			stats.LegacyLiveRootOrphans++
+			legacyNodesKey := prefix + sessionID + ":nodes"
+			legacyStatsKey := prefix + sessionID + ":stats"
+			deleted, err := client.Del(ctx, liveKey, legacyNodesKey, legacyStatsKey).Result()
+			if err != nil {
+				logger.Warn().
+					Err(err).
+					Str("session_id", sessionID).
+					Msg("failed to delete orphaned legacy live_root (continuing)")
+				continue
+			}
+			stats.LegacyKeysDeleted += int(deleted)
+			logger.Warn().
+				Str("session_id", sessionID).
+				Msg("deleted orphaned legacy live_root (mid-session checkpoint cannot be rescued - claim will start empty)")
+		}
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+
 	logger.Info().
 		Int("legacy_roots_scanned", stats.LegacyRootsScanned).
 		Int("sessions_migrated", stats.SessionsMigrated).
 		Int("sessions_orphaned", stats.SessionsOrphaned).
+		Int("legacy_live_root_orphans", stats.LegacyLiveRootOrphans).
 		Int("legacy_keys_deleted", stats.LegacyKeysDeleted).
 		Msg("legacy SMST key migration complete")
 
@@ -118,12 +175,14 @@ func migrateOneLegacySession(
 	legacyRootKey := legacyPrefix + sessionID + ":root"
 	legacyNodesKey := legacyPrefix + sessionID + ":nodes"
 	legacyStatsKey := legacyPrefix + sessionID + ":stats"
+	legacyLiveRootKey := legacyPrefix + sessionID + ":live_root"
 
 	rootBytes, err := client.Get(ctx, legacyRootKey).Bytes()
 	if err == redis.Nil || len(rootBytes) == 0 {
 		// Root already gone (e.g. a previous migration pass). Clean any
-		// orphaned nodes/stats so they don't accumulate Redis memory.
-		deleteLegacyTriplet(ctx, client, legacyRootKey, legacyNodesKey, legacyStatsKey, stats)
+		// orphaned nodes/stats/live_root so they don't accumulate Redis memory.
+		deleteLegacyTriplet(ctx, client,
+			legacyRootKey, legacyNodesKey, legacyStatsKey, legacyLiveRootKey, stats)
 		stats.SessionsOrphaned++
 		return nil
 	}
@@ -142,7 +201,8 @@ func migrateOneLegacySession(
 			Int("want_len", SMSTRootLen).
 			Str("root_hex", fmt.Sprintf("%x", rootBytes)).
 			Msg("legacy SMST root has invalid length - deleting (claim will expire)")
-		deleteLegacyTriplet(ctx, client, legacyRootKey, legacyNodesKey, legacyStatsKey, stats)
+		deleteLegacyTriplet(ctx, client,
+			legacyRootKey, legacyNodesKey, legacyStatsKey, legacyLiveRootKey, stats)
 		stats.SessionsOrphaned++
 		return nil
 	}
@@ -160,7 +220,8 @@ func migrateOneLegacySession(
 			Str("session_id", sessionID).
 			Str("root_hex", fmt.Sprintf("%x", rootBytes)).
 			Msg("legacy SMST root has no matching session owner - deleting (claim will expire)")
-		deleteLegacyTriplet(ctx, client, legacyRootKey, legacyNodesKey, legacyStatsKey, stats)
+		deleteLegacyTriplet(ctx, client,
+			legacyRootKey, legacyNodesKey, legacyStatsKey, legacyLiveRootKey, stats)
 		stats.SessionsOrphaned++
 		return nil
 	}
@@ -168,6 +229,7 @@ func migrateOneLegacySession(
 	newRootKey := kb.SMSTRootKey(owner, sessionID)
 	newNodesKey := kb.SMSTNodesKey(owner, sessionID)
 	newStatsKey := kb.SMSTStatsKey(owner, sessionID)
+	newLiveRootKey := kb.SMSTLiveRootKey(owner, sessionID)
 
 	if err := client.Rename(ctx, legacyRootKey, newRootKey).Err(); err != nil {
 		return fmt.Errorf("rename root: %w", err)
@@ -182,6 +244,18 @@ func migrateOneLegacySession(
 		if err := client.Rename(ctx, legacyNodesKey, newNodesKey).Err(); err != nil {
 			logger.Warn().Err(err).Str("session_id", sessionID).
 				Msg("failed to rename legacy nodes key (continuing)")
+		}
+	}
+	// live_root: written on every UpdateTree, can be present even when
+	// the session was flushed (up until DeleteTree clears it). Without
+	// this rename, mid-session checkpoints from before the upgrade were
+	// orphaned under the legacy key — the new code would look for
+	// ha:smst:{supplier}:{sessionID}:live_root, find nothing, and start a
+	// fresh tree on the next relay, dropping all pre-migration relays.
+	if exists, _ := client.Exists(ctx, legacyLiveRootKey).Result(); exists > 0 {
+		if err := client.Rename(ctx, legacyLiveRootKey, newLiveRootKey).Err(); err != nil {
+			logger.Warn().Err(err).Str("session_id", sessionID).
+				Msg("failed to rename legacy live_root key (continuing)")
 		}
 	}
 
@@ -246,13 +320,18 @@ func findSessionOwnerByRoot(
 	}
 }
 
+// deleteLegacyTriplet deletes the four legacy SMST keys (root, nodes,
+// stats, live_root) for a session that cannot be rescued. Named
+// "triplet" for historical reasons; the live_root was added in the
+// 2026-04-19 fix to prevent orphaned mid-session checkpoints from
+// accumulating in Redis across upgrades.
 func deleteLegacyTriplet(
 	ctx context.Context,
 	client *redisutil.Client,
-	rootKey, nodesKey, statsKey string,
+	rootKey, nodesKey, statsKey, liveRootKey string,
 	stats *LegacySMSTMigrationStats,
 ) {
-	deleted, err := client.Del(ctx, rootKey, nodesKey, statsKey).Result()
+	deleted, err := client.Del(ctx, rootKey, nodesKey, statsKey, liveRootKey).Result()
 	if err == nil {
 		stats.LegacyKeysDeleted += int(deleted)
 	}
