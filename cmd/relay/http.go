@@ -17,7 +17,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/client/relay_client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 )
 
 // Shared HTTP client with connection pooling for load tests.
@@ -73,41 +72,37 @@ func runHTTPDiagnostic(ctx context.Context, logger logging.Logger, client *relay
 	return nil
 }
 
-// relayRequestCache holds the current relay request with thread-safe access.
-type relayRequestCache struct {
+// sessionEndTracker holds the current session end height with thread-safe access.
+// Used by the rollover monitor to know when to invalidate the shared session cache
+// so workers get a fresh session on their next BuildRelayRequest call.
+type sessionEndTracker struct {
 	mu               sync.RWMutex
-	relayRequestBz   []byte
-	session          *sessiontypes.Session
 	sessionEndHeight int64
 }
 
-// get safely retrieves the current relay request bytes.
-func (c *relayRequestCache) get() []byte {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.relayRequestBz
+func (t *sessionEndTracker) get() int64 {
+	t.mu.RLock()
+	defer t.mu.RUnlock()
+	return t.sessionEndHeight
 }
 
-// update safely updates the relay request bytes and session info.
-func (c *relayRequestCache) update(relayRequestBz []byte, session *sessiontypes.Session) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.relayRequestBz = relayRequestBz
-	c.session = session
-	c.sessionEndHeight = session.Header.SessionEndBlockHeight
-}
-
-// getSessionEndHeight safely retrieves the session end height.
-func (c *relayRequestCache) getSessionEndHeight() int64 {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
-	return c.sessionEndHeight
+func (t *sessionEndTracker) set(h int64) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.sessionEndHeight = h
 }
 
 // runHTTPLoadTest sends concurrent HTTP relay requests with performance metrics.
-// Handles session rollover by monitoring blocks and rebuilding relay requests when needed.
+//
+// Each worker calls BuildRelayRequest itself so the ring signature is generated
+// fresh per relay (ring sigs are randomized — NewRandomScalar). This matches
+// PATH's production behavior (one sign per incoming request) and guarantees
+// distinct relay bytes even when the payload is identical, so the SMST stores
+// N unique leaves for N concurrent requests instead of collapsing to one.
+// A background goroutine invalidates the shared session cache at session
+// rollover so the next BuildRelayRequest call fetches a fresh session.
 func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
-	// Get initial session to extract session end height
+	// Get initial session to extract session end height (for rollover detection)
 	logger.Info().Msg("fetching initial session")
 	initialSession, err := relayClient.GetCurrentSession(ctx, RelayServiceID)
 	if err != nil {
@@ -120,16 +115,8 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 		Int64("session_end_height", initialSession.Header.SessionEndBlockHeight).
 		Msg("initial session retrieved")
 
-	// Build initial relay request
-	logger.Info().Msg("building initial relay request")
-	_, relayRequestBz, err := relayClient.BuildRelayRequest(ctx, RelayServiceID, RelaySupplierAddr, payloadBz)
-	if err != nil {
-		return fmt.Errorf("failed to build initial relay request: %w", err)
-	}
-
-	// Create thread-safe cache for relay request
-	requestCache := &relayRequestCache{}
-	requestCache.update(relayRequestBz, initialSession)
+	tracker := &sessionEndTracker{}
+	tracker.set(initialSession.Header.SessionEndBlockHeight)
 
 	// Create cancellable context for monitor goroutine
 	monitorCtx, cancelMonitor := context.WithCancel(ctx)
@@ -149,12 +136,13 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 		return fmt.Errorf("failed to start block subscriber: %w", err)
 	}
 
-	// Monitor blocks for session rollover in background
+	// Monitor blocks for session rollover in background: invalidate the session
+	// cache so the next worker BuildRelayRequest call picks up the new session.
 	var monitorWg sync.WaitGroup
 	monitorWg.Add(1)
 	go func() {
 		defer monitorWg.Done()
-		monitorSessionRollover(monitorCtx, logger, relayClient, blockSubscriber, requestCache, payloadBz)
+		invalidateSessionOnRollover(monitorCtx, logger, relayClient, blockSubscriber, tracker)
 	}()
 
 	// Create metrics collector
@@ -190,15 +178,25 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			defer wg.Done()
 			defer func() { <-semaphore }() // Release slot
 
-			// Get current relay request (read lock)
-			currentRelayRequestBz := requestCache.get()
-
 			// Send relay with timeout
 			requestCtx, cancel := context.WithTimeout(ctx, time.Duration(RelayTimeout)*time.Second)
 			defer cancel()
 
+			// Build a FRESH relay request for this worker. Ring signatures use
+			// randomness, so each call produces different bytes even for an
+			// identical payload, matching PATH's per-request sign behaviour.
+			_, relayRequestBz, err := relayClient.BuildRelayRequest(requestCtx, RelayServiceID, RelaySupplierAddr, payloadBz)
+			if err != nil {
+				metrics.RecordError(fmt.Errorf("build relay request: %w", err))
+				logger.Debug().
+					Err(err).
+					Int("request_num", reqNum).
+					Msg("relay request build failed")
+				return
+			}
+
 			start := time.Now()
-			relayResponseBz, err := sendHTTPRelay(requestCtx, currentRelayRequestBz)
+			relayResponseBz, err := sendHTTPRelay(requestCtx, relayRequestBz)
 			latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
 
 			if err != nil {
@@ -260,92 +258,65 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	return nil
 }
 
-// monitorSessionRollover watches blocks and rebuilds relay request when session changes.
-func monitorSessionRollover(
+// invalidateSessionOnRollover watches blocks and clears the shared session
+// cache when the session boundary is crossed. Workers build their own relay
+// requests per call, so all that's needed is to ensure the next getSession()
+// in the client hits chain and returns the new session header.
+func invalidateSessionOnRollover(
 	ctx context.Context,
 	logger logging.Logger,
 	relayClient *relay_client.RelayClient,
 	blockSubscriber *client.BlockSubscriber,
-	requestCache *relayRequestCache,
-	payloadBz []byte,
+	tracker *sessionEndTracker,
 ) {
-	// Track last session refresh
 	var lastRefreshHeight atomic.Int64
-	lastRefreshHeight.Store(0)
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-time.After(1 * time.Second):
-			// Get current block
 			currentBlock := blockSubscriber.LastBlock(ctx)
 			if currentBlock == nil {
 				continue
 			}
 
 			currentHeight := currentBlock.Height()
-			sessionEndHeight := requestCache.getSessionEndHeight()
+			sessionEndHeight := tracker.get()
 
-			// Check if we've crossed session boundary
-			if currentHeight >= sessionEndHeight+1 {
-				// Avoid refreshing multiple times for the same session
-				if lastRefreshHeight.Load() >= currentHeight {
-					continue
-				}
-
-				logger.Warn().
-					Int64("current_height", currentHeight).
-					Int64("session_end_height", sessionEndHeight).
-					Msg("session boundary crossed - refreshing relay request")
-
-				// LOCK: Pause all workers, refresh session, rebuild relay request
-				if err := refreshRelayRequest(ctx, logger, relayClient, requestCache, payloadBz, currentHeight); err != nil {
-					logger.Error().
-						Err(err).
-						Msg("failed to refresh relay request on session rollover")
-					continue
-				}
-
-				lastRefreshHeight.Store(currentHeight)
-
-				logger.Info().
-					Str("new_session_id", requestCache.session.Header.SessionId).
-					Int64("new_session_end_height", requestCache.getSessionEndHeight()).
-					Msg("relay request refreshed with new session")
+			if currentHeight < sessionEndHeight+1 {
+				continue
 			}
+			if lastRefreshHeight.Load() >= currentHeight {
+				continue
+			}
+
+			logger.Warn().
+				Int64("current_height", currentHeight).
+				Int64("session_end_height", sessionEndHeight).
+				Msg("session boundary crossed - invalidating session cache")
+
+			relayClient.ClearSessionCache()
+
+			// Prime tracker with the new session end so we don't re-fire until
+			// the NEXT rollover. We use GetSessionAtHeight to bypass the cache.
+			newSession, err := relayClient.GetSessionAtHeight(ctx, RelayServiceID, currentHeight)
+			if err != nil {
+				logger.Error().
+					Err(err).
+					Int64("current_height", currentHeight).
+					Msg("failed to fetch new session after rollover")
+				continue
+			}
+			tracker.set(newSession.Header.SessionEndBlockHeight)
+			lastRefreshHeight.Store(currentHeight)
+
+			logger.Info().
+				Str("new_session_id", newSession.Header.SessionId).
+				Int64("new_session_end_height", newSession.Header.SessionEndBlockHeight).
+				Msg("session cache invalidated; workers will pick up new session on next BuildRelayRequest")
 		}
 	}
-}
-
-// refreshRelayRequest rebuilds the relay request with a fresh session.
-func refreshRelayRequest(
-	ctx context.Context,
-	logger logging.Logger,
-	relayClient *relay_client.RelayClient,
-	requestCache *relayRequestCache,
-	payloadBz []byte,
-	currentHeight int64,
-) error {
-	// Clear session cache to force fresh lookup
-	relayClient.ClearSessionCache()
-
-	// Get new session at current height (forces session rollover if boundary crossed)
-	newSession, err := relayClient.GetSessionAtHeight(ctx, RelayServiceID, currentHeight)
-	if err != nil {
-		return fmt.Errorf("failed to get new session at height %d: %w", currentHeight, err)
-	}
-
-	// Build new relay request
-	_, newRelayRequestBz, err := relayClient.BuildRelayRequest(ctx, RelayServiceID, RelaySupplierAddr, payloadBz)
-	if err != nil {
-		return fmt.Errorf("failed to build new relay request: %w", err)
-	}
-
-	// Update cache (write lock acquired inside)
-	requestCache.update(newRelayRequestBz, newSession)
-
-	return nil
 }
 
 // sendHTTPRelay sends a relay request via HTTP and returns the raw response bytes.

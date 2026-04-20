@@ -83,14 +83,12 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 }
 
 // runGRPCLoadTest sends concurrent gRPC relay requests with performance metrics.
+//
+// Each worker calls BuildRelayRequest itself so the ring signature is generated
+// fresh per relay (ring sigs are randomized). This matches PATH's production
+// behavior (one sign per incoming request) and guarantees distinct relay bytes
+// per call, so the SMST stores one leaf per request instead of collapsing.
 func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
-	// Build relay request once (reuse across requests)
-	logger.Info().Msg("building relay request template for load test")
-	relayRequest, _, err := relayClient.BuildRelayRequest(ctx, RelayServiceID, RelaySupplierAddr, payloadBz)
-	if err != nil {
-		return fmt.Errorf("failed to build relay request template: %w", err)
-	}
-
 	// Create gRPC connection (reuse across workers)
 	// Parse URL to extract host:port (gRPC doesn't accept http:// prefix)
 	grpcAddr := RelayRelayerURL
@@ -141,6 +139,19 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			// Send relay with timeout
 			requestCtx, cancel := context.WithTimeout(ctx, time.Duration(RelayTimeout)*time.Second)
 			defer cancel()
+
+			// Build a FRESH relay request for this worker. Ring signatures use
+			// randomness, so each call yields distinct bytes even for an
+			// identical payload — matches PATH's per-request sign behaviour.
+			relayRequest, _, err := relayClient.BuildRelayRequest(requestCtx, RelayServiceID, RelaySupplierAddr, payloadBz)
+			if err != nil {
+				metrics.RecordError(fmt.Errorf("build relay request: %w", err))
+				logger.Debug().
+					Err(err).
+					Int("request_num", reqNum).
+					Msg("gRPC relay request build failed")
+				return
+			}
 
 			start := time.Now()
 			relayResponseBz, err := invokeGRPCRelay(requestCtx, conn, relayRequest)
