@@ -15,9 +15,11 @@ package miner
 // ha_smst_corruption_evictions_total samples.
 
 import (
+	"fmt"
 	"io"
 	"net/http/httptest"
 	"strings"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -43,12 +45,19 @@ func (s *RedisSMSTTestSuite) scrapeMinerMetrics() string {
 // TestMetrics_PanicsRecoveredWiring verifies that runSMSTSafely's
 // increment lands in MinerRegistry and becomes scrapeable at /metrics.
 func (s *RedisSMSTTestSuite) TestMetrics_PanicsRecoveredWiring() {
-	supplier := "pokt1wiring_panic"
+	// MinerRegistry is a package-global whose counters survive across
+	// test iterations. Use a unique suffix per invocation so the
+	// expected sample line asserts on a label set this iteration
+	// freshly created, keeping the literal "1" assertion valid under
+	// go test -count=N.
+	unique := fmt.Sprintf("%d", time.Now().UnixNano())
+	supplier := "pokt1wiring_panic_" + unique
+	operation := "test_op_" + unique
 	mgr := s.createTestRedisSMSTManager(supplier)
 
 	// Force the recover path: pass a fn that panics. runSMSTSafely
 	// catches, logs, increments SMSTPanicsRecovered, returns error.
-	err := mgr.runSMSTSafely("session_wiring_panic", "test_op", func() error {
+	err := mgr.runSMSTSafely("session_wiring_panic", operation, func() error {
 		panic("synthetic for metric wiring test")
 	})
 	s.Require().Error(err, "runSMSTSafely must surface the recovered panic as an error")
@@ -56,29 +65,42 @@ func (s *RedisSMSTTestSuite) TestMetrics_PanicsRecoveredWiring() {
 		"returned error must satisfy errors.Is(ErrSMSTPanicRecovered)")
 
 	body := s.scrapeMinerMetrics()
-	s.Require().Contains(body,
-		`ha_smst_panics_recovered_total{operation="test_op",supplier="pokt1wiring_panic"} 1`,
+	expected := fmt.Sprintf(
+		`ha_smst_panics_recovered_total{operation=%q,supplier=%q} 1`,
+		operation, supplier,
+	)
+	s.Require().Contains(body, expected,
 		"panics_recovered metric must be scrapeable with exact labels & value")
 }
 
 // TestMetrics_CorruptionEvictionsWiring verifies that evictCorruptSession's
 // increment lands in MinerRegistry and is scrapeable.
 func (s *RedisSMSTTestSuite) TestMetrics_CorruptionEvictionsWiring() {
-	supplier := "pokt1wiring_evict"
-	sessionID := "session_wiring_evict"
+	// MinerRegistry is a package-global whose counters survive across
+	// test iterations. Use a unique suffix per invocation so the
+	// expected sample line asserts on a label set this iteration
+	// freshly created, keeping the literal "1" assertion valid under
+	// go test -count=N.
+	unique := fmt.Sprintf("%d", time.Now().UnixNano())
+	supplier := "pokt1wiring_evict_" + unique
+	sessionID := "session_wiring_evict_" + unique
+	reason := "wiring_test_reason_" + unique
 	mgr := s.createTestRedisSMSTManager(supplier)
 
 	// Seed one update so the session exists in m.trees.
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 		[]byte("k"), []byte("v"), 10))
 
-	mgr.evictCorruptSession(s.ctx, sessionID, "wiring_test_reason")
+	mgr.evictCorruptSession(s.ctx, sessionID, reason)
 
 	body := s.scrapeMinerMetrics()
 	// The exact sample line proves: registered in MinerRegistry,
 	// exposed with the metrics namespace + subsystem + name, and
 	// labelled with (supplier, reason) in that order.
-	needle := `ha_smst_corruption_evictions_total{reason="wiring_test_reason",supplier="pokt1wiring_evict"} 1`
+	needle := fmt.Sprintf(
+		`ha_smst_corruption_evictions_total{reason=%q,supplier=%q} 1`,
+		reason, supplier,
+	)
 	s.Require().Truef(strings.Contains(body, needle),
 		"corruption_evictions metric missing or mis-labelled in /metrics dump\nwant: %s\ngot metric block containing:\n%s",
 		needle, extractMetric(body, "ha_smst_corruption_evictions_total"))
