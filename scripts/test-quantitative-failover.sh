@@ -30,6 +30,8 @@
 # Usage:
 #   ./scripts/test-quantitative-failover.sh
 #   DURATION=120 HTTP_RPS=300 MAX_LOSS_PCT=2 ./scripts/test-quantitative-failover.sh
+#   KILL_MODE=hard ./scripts/test-quantitative-failover.sh    # SIGKILL path — tests crash-before-checkpoint
+#   KILL_MODE=graceful ./scripts/test-quantitative-failover.sh # default — SIGTERM + drain + final checkpoint
 
 set -uo pipefail
 
@@ -57,6 +59,29 @@ MAX_DRIFT_PCT="${MAX_DRIFT_PCT:-5}"
 #                     force the path the chaos-leader-flush-gap test
 #                     covers qualitatively.
 KILL_TARGET="${KILL_TARGET:-any}"
+
+# KILL_MODE controls how the victim pod is terminated:
+#   graceful (default) - standard SIGTERM with the deployment's
+#                       terminationGracePeriodSeconds. The miner drains
+#                       its in-flight supplier contexts and, crucially,
+#                       runs one last live_root checkpoint which flushes
+#                       the pending orphanBuffer. Exercises the normal
+#                       shutdown path.
+#   hard              - --grace-period=0 (SIGKILL immediately, no drain,
+#                       no final checkpoint). The orphanBuffer at the
+#                       moment of death is lost: any digests pending
+#                       HDEL linger in the nodes hash as bloat and get
+#                       cleaned up by DeleteTree at session end. The
+#                       previously-checkpointed live_root subtree must
+#                       remain intact across restart. This is the path
+#                       a real crash / OOM / node failure would take
+#                       and should be verified in CI.
+KILL_MODE="${KILL_MODE:-graceful}"
+case "$KILL_MODE" in
+    graceful|hard) ;;
+    *) echo "ERROR: KILL_MODE must be 'graceful' or 'hard' (got: $KILL_MODE)"; exit 2 ;;
+esac
+
 # Kept for backward compatibility; MAX_DRIFT_PCT takes precedence if set.
 MAX_LOSS_PCT="${MAX_LOSS_PCT:-$MAX_DRIFT_PCT}"
 
@@ -134,6 +159,7 @@ echo -e "${BOLD}Test parameters:${NC}"
 echo "  HTTP_RPS:           $HTTP_RPS"
 echo "  Duration:           ${DURATION}s (expected ~${TOTAL_EXPECTED} relays sent)"
 echo "  Scale-down at:      T=${KILL_AT}s (deploy/miner --replicas=1)"
+echo "  Kill target/mode:   ${KILL_TARGET} / ${KILL_MODE}"
 echo "  Post-load wait:     ${POST_WAIT}s"
 echo "  Max drift tolerance: ${MAX_DRIFT_PCT}% (bidirectional)"
 echo ""
@@ -161,17 +187,42 @@ PRE_SCALE_LEADER=$(leader_pod)
 log_scale "Pre-scale leader: $PRE_SCALE_LEADER"
 KILL_HEIGHT=$(curl -s http://localhost:26657/status 2>/dev/null | jq -r '.result.sync_info.latest_block_height // "?"')
 
+log_scale "KILL_MODE=$KILL_MODE, KILL_TARGET=$KILL_TARGET"
+
+# Grace period for explicit pod-delete commands. hard = 0 (SIGKILL, no
+# final checkpoint flush); graceful = 5s (enough for a clean shutdown).
+if [ "$KILL_MODE" = "hard" ]; then
+    DELETE_GRACE=0
+else
+    DELETE_GRACE=5
+fi
+
 if [ "$KILL_TARGET" = "leader" ]; then
-    log_scale "KILL_TARGET=leader: deleting leader pod $PRE_SCALE_LEADER at height $KILL_HEIGHT"
-    kubectl --context "$K8S_CONTEXT" delete pod "$PRE_SCALE_LEADER" --grace-period=5 --wait=false 2>&1 | head -1
+    log_scale "KILL_TARGET=leader: deleting leader pod $PRE_SCALE_LEADER at height $KILL_HEIGHT (grace=${DELETE_GRACE}s)"
+    kubectl --context "$K8S_CONTEXT" delete pod "$PRE_SCALE_LEADER" --grace-period="$DELETE_GRACE" --wait=false 2>&1 | head -1
     # Wait a few seconds for k8s to create a replacement (since replicas=2),
     # then scale to 1 so k8s picks the NEWER replacement (default behavior)
     # and leaves the original follower (now elected leader) alive.
     sleep 5
     log_scale "Scaling deploy/miner to 1 replica (k8s will terminate the replacement pod, not the former follower)"
     kubectl --context "$K8S_CONTEXT" scale deploy/miner --replicas=1 2>&1 | head -1
+elif [ "$KILL_MODE" = "hard" ]; then
+    # Hard-kill on KILL_TARGET=any: kubectl scale honours the
+    # deployment's terminationGracePeriodSeconds (the victim gets time
+    # to run its final live_root checkpoint and flush orphanBuffer).
+    # To exercise the "crash before checkpoint" path we pick a victim
+    # explicitly and delete it with grace-period=0, then scale down so
+    # k8s does not recreate it.
+    VICTIM=$(kubectl --context "$K8S_CONTEXT" get pods -l app=miner --no-headers 2>/dev/null | awk 'NR==1 {print $1}')
+    if [ -z "$VICTIM" ]; then
+        log_error "no miner pod found to hard-kill"
+        exit 1
+    fi
+    log_scale "KILL_TARGET=any, KILL_MODE=hard: SIGKILL pod $VICTIM at height $KILL_HEIGHT (no drain, no final checkpoint)"
+    kubectl --context "$K8S_CONTEXT" delete pod "$VICTIM" --grace-period=0 --force --wait=false 2>&1 | head -1
+    kubectl --context "$K8S_CONTEXT" scale deploy/miner --replicas=1 2>&1 | head -1
 else
-    log_scale "KILL_TARGET=any: scaling deploy/miner to 1 replica at height $KILL_HEIGHT (k8s picks)"
+    log_scale "KILL_TARGET=any, KILL_MODE=graceful: scaling deploy/miner to 1 replica at height $KILL_HEIGHT (k8s picks, SIGTERM with default grace)"
     kubectl --context "$K8S_CONTEXT" scale deploy/miner --replicas=1 2>&1 | head -1
 fi
 

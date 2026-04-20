@@ -1212,6 +1212,47 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 }
 
 // removeSupplier gracefully removes a supplier (waits for pending work).
+//
+// Drain-window semantics (post commit 8eb604c):
+//
+//  1. We cancel the supplier's context (state.cancelFn) BEFORE removing
+//     it from m.suppliers. This ordering is deliberate: the cancel
+//     signal must reach every in-flight handleRelay/UpdateTree before
+//     the map delete, otherwise a goroutine that still holds a pointer
+//     to SupplierState could race with cleanup below (Consumer.Close,
+//     SMSTManager.Close, etc.).
+//
+//  2. Between cancelFn() firing and the map delete, a concurrent
+//     handleRelay call may already be mid-way through a Redis write
+//     (UpdateTree, ACK, dedup set insert). Those calls now operate
+//     with a cancelled context. Each such Redis operation returns a
+//     context.Canceled-wrapped error.
+//
+//  3. The shutdown-cancel classifier (IsShutdownCancelError in
+//     errors.go) recognises those wrapped context.Canceled errors and
+//     routes the message through the ACK-and-discard path: the relay
+//     is acknowledged on the stream so the consumer group does not
+//     redeliver it to the survivor (avoiding double-count), and the
+//     SMST write is treated as a no-op. If the miner restarts before
+//     the stream entry's idle-claim timeout, the entry will be
+//     redelivered via XCLAIM and retried cleanly.
+//
+//  4. DeadlineExceeded is intentionally NOT classified as a shutdown
+//     cancel — an UpdateTree that times out on a slow Redis is a real
+//     transient failure and must be retried, not swallowed.
+//
+// Net result: the drain window is safe. An in-flight handleRelay that
+// observes ctx.Canceled during UpdateTree returns a
+// context.Canceled-wrapped error, IsShutdownCancelError returns true,
+// the caller ACKs the message, and the relay is accounted for on
+// restart (if the miner recovers) or accepted as a bounded loss (if
+// the supplier is genuinely being removed).
+//
+// state.wg.Wait() below then blocks until every handleRelay goroutine
+// for this supplier has returned, so the subsequent Close() calls on
+// Consumer/SessionCoordinator/SessionStore run against a fully quiesced
+// supplier — no mid-flight writer can resurrect state after the map
+// delete.
 func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	m.suppliersMu.Lock()
 	state, exists := m.suppliers[operatorAddr]
@@ -1490,7 +1531,15 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 		})
 	}
 
-	// Wait for all trim operations to complete
+	// Wait for all trim operations to complete.
+	//
+	// Every task submitted above absorbs its own error and returns nil
+	// (failures are logged inline per-supplier and the outer loop must not
+	// abort the remaining trims for one bad supplier). As a result
+	// group.Wait() is invariant-nil, and the explicit `_ =` discards the
+	// zero-value interface by design. If you change a submitted task to
+	// propagate an error, replace this with a Warn/Debug log of the Wait
+	// result rather than silently dropping it.
 	_ = group.Wait()
 
 	if totalTrimmed > 0 {

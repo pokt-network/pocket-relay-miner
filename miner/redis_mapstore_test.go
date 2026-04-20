@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sync"
+	"time"
 )
 
 // TestRedisMapStore_GetEmpty tests that a missing key surfaces as
@@ -359,4 +360,106 @@ func (s *RedisSMSTTestSuite) TestRedisMapStore_Concurrency() {
 	length, err := store.Len()
 	s.Require().NoError(err)
 	s.Require().Equal(expectedKeys, length, "should have all keys written concurrently")
+}
+
+// TestRedisMapStore_OrphanBuffer_NonPipelineSetClearsOrphan verifies the
+// cross-mode invariant that a non-pipelined Set() of a field which is
+// pending HDEL in orphanBuffer drops the orphan record. Without this,
+// the next FlushOrphansWithLiveRoot would HDEL the field and wipe the
+// value the direct Set just wrote. The pipelined Set() path already
+// handled this; this test pins the symmetric behavior for the
+// non-pipeline branch.
+func (s *RedisSMSTTestSuite) TestRedisMapStore_OrphanBuffer_NonPipelineSetClearsOrphan() {
+	store := s.createTestRedisStore("test-session-orphan-nonpipeline-set")
+
+	key := []byte("reused-digest")
+	originalValue := []byte("v1-orphaned")
+	rewrittenValue := []byte("v2-after-orphan")
+
+	// Step 1: populate the hash with an initial value and then orphan
+	// the field via the pipeline path — this leaves the field present
+	// in Redis and queued for HDEL in orphanBuffer at the next
+	// checkpoint.
+	s.Require().NoError(store.Set(key, originalValue), "seed value must be written")
+	store.BeginPipeline()
+	s.Require().NoError(store.Delete(key), "pipeline Delete should buffer as orphan")
+	s.Require().NoError(store.FlushPipeline(), "FlushPipeline should leave orphanBuffer untouched")
+
+	// Sanity: orphanBuffer now holds the field; the hash still has the value.
+	hashKey := s.redisClient.KB().SMSTNodesKey(testMapStoreSupplier, "test-session-orphan-nonpipeline-set")
+	field := hex.EncodeToString(key)
+	exists, err := s.redisClient.HExists(s.ctx, hashKey, field).Result()
+	s.Require().NoError(err)
+	s.Require().True(exists, "orphans are deferred — field must still be present in the hash before the checkpoint")
+
+	// Step 2: rewrite the same digest via a non-pipelined Set().
+	// Before the fix this left orphanBuffer stale, so the next
+	// FlushOrphansWithLiveRoot would HDEL the field we just rewrote.
+	s.Require().NoError(store.Set(key, rewrittenValue), "non-pipeline Set should succeed")
+
+	// Step 3: simulate the live_root checkpoint. A non-empty liveRoot
+	// payload is written to a distinct key; only orphanBuffer controls
+	// which hash fields get HDEL'd.
+	liveKey := s.redisClient.KB().SMSTLiveRootKey(testMapStoreSupplier, "test-session-orphan-nonpipeline-set")
+	s.Require().NoError(store.FlushOrphansWithLiveRoot(s.ctx, liveKey, []byte("live-root-bytes"), time.Duration(0)))
+
+	// Step 4: the rewritten value must survive. If orphanBuffer was
+	// stale, the pipeline TxExec above would have issued an HDEL and
+	// this Get would return ErrSMSTNodeMissing.
+	got, err := store.Get(key)
+	s.Require().NoError(err, "rewritten field must survive the checkpoint (orphan must have been cleared by non-pipeline Set)")
+	s.Require().Equal(rewrittenValue, got, "rewritten value must not be overwritten by a stale orphan HDEL")
+}
+
+// TestRedisMapStore_PipelineBuffer_NonPipelineDeleteClearsBuffer verifies
+// the symmetric invariant on the Delete side: a non-pipelined Delete()
+// of a field that is queued for HSET in pipelineBuffer drops the
+// pending write. Without this, the next FlushPipeline would HSET a
+// value that was just deleted — "direct delete wins" is the rule in
+// both modes.
+func (s *RedisSMSTTestSuite) TestRedisMapStore_PipelineBuffer_NonPipelineDeleteClearsBuffer() {
+	store := s.createTestRedisStore("test-session-pipeline-nonpipeline-delete")
+
+	key := []byte("racing-digest")
+	bufferedValue := []byte("v-pending-hset")
+
+	// Step 1: queue an HSET in pipelineBuffer but do not flush.
+	store.BeginPipeline()
+	s.Require().NoError(store.Set(key, bufferedValue), "pipeline Set should buffer without writing")
+
+	hashKey := s.redisClient.KB().SMSTNodesKey(testMapStoreSupplier, "test-session-pipeline-nonpipeline-delete")
+	field := hex.EncodeToString(key)
+	exists, err := s.redisClient.HExists(s.ctx, hashKey, field).Result()
+	s.Require().NoError(err)
+	s.Require().False(exists, "pipelined Set should not touch Redis until FlushPipeline")
+
+	// Step 2: flush pipelineEnabled off without clearing the buffer by
+	// issuing a direct Delete (non-pipeline mode). Before the fix the
+	// pending pipelineBuffer entry would be re-written on the next
+	// FlushPipeline. After the fix, the direct Delete drops it.
+	//
+	// NOTE: FlushPipeline disables pipeline mode and clears the
+	// buffer. To exercise the non-pipeline Delete branch against a
+	// non-empty pipelineBuffer we disable the flag manually.
+	store.pipelineMu.Lock()
+	store.pipelineEnabled = false
+	bufLenBefore := len(store.pipelineBuffer)
+	store.pipelineMu.Unlock()
+	s.Require().Equal(1, bufLenBefore, "pipelineBuffer must still hold the queued HSET")
+
+	s.Require().NoError(store.Delete(key), "non-pipeline Delete should succeed")
+
+	store.pipelineMu.Lock()
+	bufLenAfter := len(store.pipelineBuffer)
+	store.pipelineMu.Unlock()
+	s.Require().Equal(0, bufLenAfter, "non-pipeline Delete must clear the matching pipelineBuffer entry")
+
+	// Step 3: re-enable pipeline and flush — this must be a no-op
+	// because the buffer was drained above. The field must remain
+	// absent from Redis.
+	store.BeginPipeline()
+	s.Require().NoError(store.FlushPipeline())
+	exists, err = s.redisClient.HExists(s.ctx, hashKey, field).Result()
+	s.Require().NoError(err)
+	s.Require().False(exists, "non-pipeline Delete must have dropped the pending HSET — no stale write should resurrect the field")
 }

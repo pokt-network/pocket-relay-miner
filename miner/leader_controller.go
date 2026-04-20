@@ -349,11 +349,15 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		Int("per_service_count", len(c.config.Config.ServiceFactors)).
 		Msg("service factor registry published")
 
-	// Create cached shared query client (used by SupplierWorker)
-	_ = cache.NewCachedSharedQueryClient(c.sharedParamsCache, c.queryClients.Shared())
-
 	// NOTE: Supplier processing is handled by SupplierWorker (distributed across all replicas).
 	// LeaderController only manages shared caches, block publishing, and monitoring.
+	//
+	// Historically this site also constructed a cached SharedQueryClient wrapper
+	// and discarded the result. NewCachedSharedQueryClient is a pure constructor
+	// (no goroutines, no pub/sub subscriptions, no cache warm-up — see
+	// cache/client_adapters.go), so discarding the return value was dead code.
+	// SupplierWorker constructs its own wrapper (supplier_worker.go) and passes
+	// it to SupplierManager; LeaderController has no consumer for it.
 
 	// Start block health monitor if enabled
 	if c.config.Config.BlockHealthMonitor.Enabled {

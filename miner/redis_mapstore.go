@@ -165,6 +165,15 @@ func (s *RedisMapStore) Set(key, value []byte) error {
 		s.pipelineMu.Unlock()
 		return nil
 	}
+	// Non-pipeline mode still has to respect the cross-update orphanBuffer:
+	// if a prior pipelined Update marked this field for deferred HDEL and
+	// the caller now rewrites the same digest via a direct HSET (ClearAll
+	// callers, tests, future direct writers), the pending HDEL at the next
+	// FlushOrphansWithLiveRoot would silently wipe the value we just wrote.
+	// Drop the orphan record under the lock before releasing it so the
+	// invariant (orphanBuffer = digests that are safe to HDEL) holds in
+	// both modes.
+	delete(s.orphanBuffer, field)
 	s.pipelineMu.Unlock()
 
 	// Not in pipeline mode, execute immediately
@@ -208,6 +217,14 @@ func (s *RedisMapStore) Delete(key []byte) error {
 		s.pipelineMu.Unlock()
 		return nil
 	}
+	// Non-pipeline mode symmetry: a direct HDEL for a field that is also
+	// buffered for HSET in pipelineBuffer would be undone by the next
+	// FlushPipeline. Drop any matching pipelined write under the lock so
+	// "direct delete wins" in the same way "direct set wins over orphan"
+	// above. This only matters if someone interleaves direct and pipelined
+	// calls on the same store — today that is hypothetical, but keeping
+	// the two modes symmetric avoids a subtle foot-gun for future callers.
+	delete(s.pipelineBuffer, field)
 	s.pipelineMu.Unlock()
 
 	start := time.Now()
