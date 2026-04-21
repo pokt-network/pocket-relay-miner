@@ -273,12 +273,15 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.logger,
 		w.config.KeyManager,
 		tx.TxClientConfig{
-			GRPCConn:      w.queryClients.GRPCConnection(),
-			ChainID:       chainID,
-			GasLimit:      w.config.Config.GetTxGasLimit(),
-			GasPrice:      gasPrice,
-			GasAdjustment: w.config.Config.GetTxGasAdjustment(),
-			TimeoutBlocks: tx.DefaultTimeoutHeight,
+			GRPCConn:         w.queryClients.GRPCConnection(),
+			ChainID:          chainID,
+			GasLimit:         w.config.Config.GetTxGasLimit(),
+			GasPrice:         gasPrice,
+			GasAdjustment:    w.config.Config.GetTxGasAdjustment(),
+			TimeoutBlocks:    tx.DefaultTimeoutHeight,
+			TxTimeoutMin:     w.config.Config.GetTxTimeoutMin(),
+			TxTimeoutMax:     w.config.Config.GetTxTimeoutMax(),
+			TxTimeoutDefault: w.config.Config.GetTxTimeoutDefault(),
 		},
 	)
 	if err != nil {
@@ -346,6 +349,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			SubmissionTrackingTTL:     w.config.Config.GetSubmissionTrackingTTL(),
 			QueryWorkers:              w.config.Config.GetQueryWorkers(),
 			SupplierReconcileInterval: w.config.Config.GetSupplierReconcileInterval(),
+			BlockTimeSeconds:          w.config.Config.GetBlockTimeSeconds(),
 		},
 	)
 

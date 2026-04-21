@@ -69,6 +69,15 @@ const (
 
 	// DefaultChainID for the pocket network.
 	DefaultChainID = "pocket"
+
+	// DefaultTxTimeoutMin is the minimum TX broadcast deadline.
+	DefaultTxTimeoutMin = 30 * time.Second
+
+	// DefaultTxTimeoutMax is the maximum TX broadcast deadline.
+	DefaultTxTimeoutMax = 10 * time.Minute
+
+	// DefaultTxTimeoutDefault is the fallback TX deadline when no window-based value is injected.
+	DefaultTxTimeoutDefault = 2 * time.Minute
 )
 
 // TxClientConfig contains configuration for the transaction client.
@@ -102,6 +111,21 @@ type TxClientConfig struct {
 
 	// TimeoutBlocks is the number of blocks after which a transaction times out.
 	TimeoutBlocks uint64
+
+	// TxTimeoutMin is the floor for window-based TX broadcast deadlines.
+	// Prevents a near-expired window from producing an unreasonably short deadline.
+	// Default: 30s
+	TxTimeoutMin time.Duration
+
+	// TxTimeoutMax is the cap for window-based TX broadcast deadlines.
+	// Prevents a far-future window from blocking the context indefinitely.
+	// Default: 10min
+	TxTimeoutMax time.Duration
+
+	// TxTimeoutDefault is used when no window-based deadline is injected via context.
+	// Matches the pre-existing hardcoded behaviour.
+	// Default: 2min
+	TxTimeoutDefault time.Duration
 
 	// UseTLS enables TLS for the gRPC connection.
 	// Set to true when connecting to endpoints on port 443 or with TLS enabled.
@@ -161,6 +185,15 @@ func NewTxClient(
 	}
 	if config.GasAdjustment == 0 {
 		config.GasAdjustment = DefaultGasAdjustment
+	}
+	if config.TxTimeoutMin <= 0 {
+		config.TxTimeoutMin = DefaultTxTimeoutMin
+	}
+	if config.TxTimeoutMax <= 0 {
+		config.TxTimeoutMax = DefaultTxTimeoutMax
+	}
+	if config.TxTimeoutDefault <= 0 {
+		config.TxTimeoutDefault = DefaultTxTimeoutDefault
 	}
 
 	var grpcConn *grpc.ClientConn
@@ -327,6 +360,16 @@ func (tc *TxClient) SubmitProofs(
 	return txHash, nil
 }
 
+// txWindowTimeoutKey is the context key used to carry a window-based TX deadline.
+type txWindowTimeoutKey struct{}
+
+// WithTxWindowTimeout injects a raw window-based duration into ctx.
+// signAndBroadcast reads it and clamps it to [TxTimeoutMin, TxTimeoutMax].
+// If not set, signAndBroadcast falls back to TxTimeoutDefault.
+func WithTxWindowTimeout(ctx context.Context, d time.Duration) context.Context {
+	return context.WithValue(ctx, txWindowTimeoutKey{}, d)
+}
+
 // signAndBroadcast signs and broadcasts a transaction.
 // txType should be "claim" or "proof" for proper metrics labeling.
 func (tc *TxClient) signAndBroadcast(
@@ -369,11 +412,25 @@ func (tc *TxClient) signAndBroadcast(
 	// With unordered, TXs don't check sequence numbers and can be included in any order
 	txBuilder.SetUnordered(true)
 
-	// Set timeout timestamp (required for unordered TXs)
-	// Cosmos SDK requires time.Time for unordered TXs
-	// Use 2 minute timeout - sufficient for TX inclusion
-	// The timeoutHeight parameter is ignored for unordered TXs (only used for logging)
-	timeoutDuration := 2 * time.Minute
+	// Set timeout timestamp (required for unordered TXs).
+	// Use the window-based deadline injected by the caller when available,
+	// clamped to [TxTimeoutMin, TxTimeoutMax]. Falls back to TxTimeoutDefault
+	// when no window deadline is in context (e.g. legacy callers, tests).
+	timeoutDuration := tc.config.TxTimeoutDefault
+	timeoutSource := "default"
+	if raw, ok := ctx.Value(txWindowTimeoutKey{}).(time.Duration); ok && raw > 0 {
+		switch {
+		case raw < tc.config.TxTimeoutMin:
+			timeoutDuration = tc.config.TxTimeoutMin
+			timeoutSource = "min_clamp"
+		case raw > tc.config.TxTimeoutMax:
+			timeoutDuration = tc.config.TxTimeoutMax
+			timeoutSource = "max_clamp"
+		default:
+			timeoutDuration = raw
+			timeoutSource = "window"
+		}
+	}
 	timeoutTimestamp := time.Now().Add(timeoutDuration)
 	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
 
@@ -466,6 +523,8 @@ func (tc *TxClient) signAndBroadcast(
 		Str("supplier", signerAddr).
 		Str("tx_type", txType).
 		Str("tx_hash", txHash).
+		Str("timeout_source", timeoutSource).
+		Dur("timeout_duration", timeoutDuration).
 		Time("timeout_timestamp", timeoutTimestamp).
 		Msg("transaction accepted to mempool (unordered)")
 

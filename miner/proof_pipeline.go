@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 	"github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
@@ -47,6 +48,11 @@ type ProofPipelineConfig struct {
 
 	// ProofRetryDelay is the delay between retry attempts.
 	ProofRetryDelay time.Duration
+
+	// BlockTimeSeconds is the expected block time used to convert remaining window
+	// blocks into a raw TX deadline (before TxClient applies min/max clamp).
+	// Default: 30
+	BlockTimeSeconds int64
 }
 
 // DefaultProofPipelineConfig returns sensible defaults.
@@ -360,10 +366,18 @@ func (p *ProofPipeline) submitProofsForHeight(
 		proofMsgs = append(proofMsgs, msg)
 	}
 
+	remaining := proofWindowClose - p.blockClient.LastBlock(ctx).Height()
+	blockTimeSec := p.config.BlockTimeSeconds
+	if blockTimeSec <= 0 {
+		blockTimeSec = 30
+	}
+	ctx = tx.WithTxWindowTimeout(ctx, time.Duration(remaining)*time.Duration(blockTimeSec)*time.Second)
+
 	p.logger.Info().
 		Int("count", len(proofMsgs)).
 		Int64("session_end_height", sessionEndHeight).
 		Int64("timeout_height", proofWindowClose).
+		Int64("blocks_remaining", remaining).
 		Msg("submitting proofs")
 
 	var lastErr error

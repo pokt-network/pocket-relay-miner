@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 	"github.com/pokt-network/poktroll/pkg/client"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
@@ -33,6 +34,11 @@ type ClaimPipelineConfig struct {
 	// ClaimRetryDelay is the delay between retry attempts.
 	// Default: 1 second
 	ClaimRetryDelay time.Duration
+
+	// BlockTimeSeconds is the expected block time used to convert remaining window
+	// blocks into a raw TX deadline (before TxClient applies min/max clamp).
+	// Default: 30
+	BlockTimeSeconds int64
 }
 
 // DefaultClaimPipelineConfig returns sensible defaults.
@@ -373,10 +379,18 @@ func (p *ClaimPipeline) submitClaimsForHeight(
 		claimMsgs = append(claimMsgs, msg)
 	}
 
+	remaining := claimWindowClose - p.blockClient.LastBlock(ctx).Height()
+	blockTimeSec := p.config.BlockTimeSeconds
+	if blockTimeSec <= 0 {
+		blockTimeSec = 30
+	}
+	ctx = tx.WithTxWindowTimeout(ctx, time.Duration(remaining)*time.Duration(blockTimeSec)*time.Second)
+
 	p.logger.Info().
 		Int("count", len(claimMsgs)).
 		Int64("session_end_height", sessionEndHeight).
 		Int64("timeout_height", claimWindowClose).
+		Int64("blocks_remaining", remaining).
 		Msg("submitting claims")
 
 	// Submit with retries

@@ -69,6 +69,10 @@ transaction:
   gas_price: "0.000001upokt"
   # Using 2.5 instead of default 1.7 to verify config is actually loaded
   gas_adjustment: 2.5
+  # Window-based TX deadline (localnet: ~10s blocks, tight windows → short deadline floor useful)
+  tx_timeout_min_seconds: 20      # floor: 20s (localnet blocks ~10s, need at least 2 blocks)
+  tx_timeout_max_seconds: 120     # cap: 2min (localnet windows are short, no need for 10min)
+  tx_timeout_default_seconds: 60  # fallback: 60s (tighter than prod 120s for localnet)
 
 metrics:
   enabled: true

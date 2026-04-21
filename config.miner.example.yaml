@@ -107,8 +107,18 @@ pocket_node:
   # Increase if transactions fail with code 11 (out of gas) despite simulation
   # gas_adjustment: 1.7
 
+  # TX broadcast deadline — window-based dynamic timeout
+  # The miner computes the remaining blocks in the claim/proof window and sets the
+  # TX unordered-TX TTL to (remaining_blocks * block_time_seconds), clamped to
+  # [tx_timeout_min_seconds, tx_timeout_max_seconds].  tx_timeout_default_seconds
+  # is used only when no window information is available (legacy paths / tests).
+  #
+  # tx_timeout_min_seconds: 30     # Floor: minimum TX deadline in seconds (default: 30)
+  # tx_timeout_max_seconds: 600    # Cap: maximum TX deadline in seconds (default: 600 = 10min)
+  # tx_timeout_default_seconds: 120  # Fallback when window info unavailable (default: 120 = 2min)
+
   # NOTE: Unordered transactions with SYNC broadcast mode
-  # We use unordered=true with 2-minute timeout_timestamp to eliminate account
+  # We use unordered=true with dynamic timeout_timestamp to eliminate account
   # sequence mismatch errors. SYNC mode returns immediately after CheckTx (mempool
   # acceptance) without waiting for block inclusion, so no commit polling is needed.
 

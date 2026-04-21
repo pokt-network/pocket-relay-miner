@@ -209,6 +209,10 @@ type SupplierManagerConfig struct {
 	// the background reconcile loop entirely (tests that drive reconcile
 	// manually rely on this). Default when unset: 60 seconds.
 	SupplierReconcileInterval time.Duration
+
+	// BlockTimeSeconds is forwarded to LifecycleCallbackConfig so the TX
+	// deadline can be computed from remaining window blocks. Default: 30.
+	BlockTimeSeconds int64
 }
 
 // DefaultSupplierReconcileInterval is the default polling cadence for the
@@ -1025,6 +1029,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		lifecycleCallbackConfig.SupplierAddress = operatorAddr
 		lifecycleCallbackConfig.DisableClaimBatching = m.config.DisableClaimBatching
 		lifecycleCallbackConfig.DisableProofBatching = m.config.DisableProofBatching
+		lifecycleCallbackConfig.BlockTimeSeconds = m.config.BlockTimeSeconds
 		lifecycleCallback = NewLifecycleCallback(
 			m.logger,
 			supplierClient,

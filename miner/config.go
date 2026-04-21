@@ -313,6 +313,23 @@ type TransactionConfig struct {
 	// or other issues where one invalid proof causes the entire batch to fail.
 	// Default: false (batching enabled for gas efficiency)
 	DisableProofBatching bool `yaml:"disable_proof_batching,omitempty"`
+
+	// TxTimeoutMinSeconds is the floor for window-based TX broadcast deadlines.
+	// Even when the claim/proof window is almost closed the TX still gets at least
+	// this many seconds to land on-chain before the unordered-TX TTL expires.
+	// Default: 30
+	TxTimeoutMinSeconds int64 `yaml:"tx_timeout_min_seconds,omitempty"`
+
+	// TxTimeoutMaxSeconds is the cap for window-based TX broadcast deadlines.
+	// Prevents a far-future window from setting an excessively long deadline.
+	// Default: 600 (10 minutes)
+	TxTimeoutMaxSeconds int64 `yaml:"tx_timeout_max_seconds,omitempty"`
+
+	// TxTimeoutDefaultSeconds is the fallback deadline when no window-based value
+	// can be computed (e.g. block client unavailable, legacy code paths).
+	// Matches the pre-existing hardcoded 2-minute behaviour.
+	// Default: 120
+	TxTimeoutDefaultSeconds int64 `yaml:"tx_timeout_default_seconds,omitempty"`
 }
 
 type SupplierConfig struct {
@@ -453,6 +470,30 @@ func (c *Config) GetTxGasAdjustment() float64 {
 		return c.Transaction.GasAdjustment
 	}
 	return 1.7 // Default: 1.7 (adds 70% safety margin to simulated gas)
+}
+
+// GetTxTimeoutMin returns the minimum TX broadcast deadline with defaults.
+func (c *Config) GetTxTimeoutMin() time.Duration {
+	if c.Transaction.TxTimeoutMinSeconds > 0 {
+		return time.Duration(c.Transaction.TxTimeoutMinSeconds) * time.Second
+	}
+	return 30 * time.Second
+}
+
+// GetTxTimeoutMax returns the maximum TX broadcast deadline with defaults.
+func (c *Config) GetTxTimeoutMax() time.Duration {
+	if c.Transaction.TxTimeoutMaxSeconds > 0 {
+		return time.Duration(c.Transaction.TxTimeoutMaxSeconds) * time.Second
+	}
+	return 10 * time.Minute
+}
+
+// GetTxTimeoutDefault returns the fallback TX broadcast deadline with defaults.
+func (c *Config) GetTxTimeoutDefault() time.Duration {
+	if c.Transaction.TxTimeoutDefaultSeconds > 0 {
+		return time.Duration(c.Transaction.TxTimeoutDefaultSeconds) * time.Second
+	}
+	return 2 * time.Minute
 }
 
 // GetDeduplicationTTL returns the deduplication TTL in blocks.

@@ -99,6 +99,11 @@ type LifecycleCallbackConfig struct {
 	// DisableProofBatching disables batching of proof submissions.
 	// When true, each session's proof is submitted in a separate transaction.
 	DisableProofBatching bool
+
+	// BlockTimeSeconds is the expected block time used to convert remaining window
+	// blocks into a TX broadcast deadline. The TxClient enforces hard min/max bounds
+	// regardless of this value. Default: 30.
+	BlockTimeSeconds int64
 }
 
 // DefaultLifecycleCallbackConfig returns sensible defaults.
@@ -823,18 +828,27 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			return nil, fmt.Errorf("claim window closed while building claims at height %d (current: %d)", claimWindowClose, currentBlock.Height())
 		}
 
-		logger.Debug().
+		claimBlocksLeft := claimWindowClose - currentBlock.Height()
+		claimBlockTimeSec := lc.config.BlockTimeSeconds
+		if claimBlockTimeSec <= 0 {
+			claimBlockTimeSec = 30
+		}
+		rawClaimTimeout := time.Duration(claimBlocksLeft) * time.Duration(claimBlockTimeSec) * time.Second
+		claimCtx := tx.WithTxWindowTimeout(ctx, rawClaimTimeout)
+
+		logger.Info().
 			Int64("current_height", currentBlock.Height()).
 			Int64("claim_window_close", claimWindowClose).
-			Int64("blocks_remaining", claimWindowClose-currentBlock.Height()).
+			Int64("blocks_remaining", claimBlocksLeft).
+			Dur("tx_deadline", rawClaimTimeout).
 			Int("batch_size", len(claimMsgs)).
-			Msg("final window check passed - submitting claims")
+			Msg("submitting claims")
 
 		// Submit all claims in a single transaction with retries
 		var lastErr error
 		var claimTxHash string
 		for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; attempt++ {
-			submitErr := lc.supplierClient.CreateClaims(ctx, claimWindowClose, interfaceClaimMsgs...)
+			submitErr := lc.supplierClient.CreateClaims(claimCtx, claimWindowClose, interfaceClaimMsgs...)
 			if submitErr != nil {
 				lastErr = submitErr
 
@@ -1516,18 +1530,27 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			return fmt.Errorf("proof window closed while building proofs at height %d (current: %d)", proofWindowClose, currentBlock.Height())
 		}
 
-		logger.Debug().
+		proofBlocksRemaining := proofWindowClose - currentBlock.Height()
+		proofBlockTimeSec := lc.config.BlockTimeSeconds
+		if proofBlockTimeSec <= 0 {
+			proofBlockTimeSec = 30
+		}
+		rawProofTimeout := time.Duration(proofBlocksRemaining) * time.Duration(proofBlockTimeSec) * time.Second
+		proofCtx := tx.WithTxWindowTimeout(ctx, rawProofTimeout)
+
+		logger.Info().
 			Int64("current_height", currentBlock.Height()).
 			Int64("proof_window_close", proofWindowClose).
-			Int64("blocks_remaining", proofWindowClose-currentBlock.Height()).
+			Int64("blocks_remaining", proofBlocksRemaining).
+			Dur("tx_deadline", rawProofTimeout).
 			Int("batch_size", len(proofMsgs)).
-			Msg("final window check passed - submitting proofs")
+			Msg("submitting proofs")
 
 		// Submit all proofs in a single transaction with retries
 		var lastErr error
 		var proofTxHash string
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
-			submitErr := lc.supplierClient.SubmitProofs(ctx, proofWindowClose, interfaceProofMsgs...)
+			submitErr := lc.supplierClient.SubmitProofs(proofCtx, proofWindowClose, interfaceProofMsgs...)
 			if submitErr != nil {
 				lastErr = submitErr
 
