@@ -111,37 +111,4 @@ var (
 		},
 		[]string{"supplier"},
 	)
-
-	// txInclusionOutcomeTotal records the real on-chain fate of each tx after
-	// broadcast. Because broadcasts use BROADCAST_MODE_SYNC (mempool-only), the
-	// txBroadcastsTotal "success" label only captures CheckTx acceptance. This
-	// metric captures DeliverTx execution via an async GetTx poll. Outcomes
-	// (bounded enum):
-	//   included_success — tx landed in a block with code==0
-	//   included_failure — tx landed in a block with code!=0 (DeliverTx rejected)
-	//   mempool_timeout  — poll horizon elapsed before inclusion
-	//   poll_error       — GetTx poll itself failed (e.g. RPC offline)
-	txInclusionOutcomeTotal = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "inclusion_outcome_total",
-			Help:      "Post-broadcast on-chain tx inclusion outcome (labeled by supplier, tx_type, outcome)",
-		},
-		[]string{"supplier", "tx_type", "outcome"},
-	)
-
-	// txInclusionPollLatency measures the time from broadcast to poll resolution.
-	// Short latencies with included_success are the normal path; long latencies
-	// with mempool_timeout indicate chain congestion or node issues.
-	txInclusionPollLatency = observability.MinerFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "inclusion_poll_latency_seconds",
-			Help:      "Time from broadcast to poll resolution",
-			Buckets:   []float64{1, 2, 5, 10, 20, 30, 60, 120, 180, 300},
-		},
-		[]string{"supplier", "tx_type", "outcome"},
-	)
 )

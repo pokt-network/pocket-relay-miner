@@ -278,7 +278,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			GasPrice:      gasPrice,
 			GasAdjustment: w.config.Config.GetTxGasAdjustment(),
 			TimeoutBlocks: tx.DefaultTimeoutHeight,
-			InclusionPoll: w.config.Config.Transaction.InclusionPollConfig(),
 		},
 	)
 	if err != nil {
@@ -335,6 +334,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			SessionClient:                  w.queryClients.Session(),
 			ProofChecker:                   w.proofChecker,
 			ProofQueryClient:               w.queryClients.Proof(),
+			InclusionTrackerConfig:         w.config.Config.Transaction.InclusionTrackerConfig(),
 			ServiceFactorProvider:          newServiceFactorClientAdapter(ctx, w.serviceFactorClient),
 			AppClient:                      cache.NewApplicationQueryClientAdapter(w.queryClients.Application()),
 			SessionLifecycleConfig: SessionLifecycleConfig{

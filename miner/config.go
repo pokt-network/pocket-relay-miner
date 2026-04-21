@@ -12,7 +12,6 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	"github.com/pokt-network/pocket-relay-miner/tx"
 )
 
 // Config is the configuration for the HA Miner service.
@@ -317,42 +316,44 @@ type TransactionConfig struct {
 	// (guard enabled — recommended for production).
 	DisablePreProofClaimVerification bool `yaml:"disable_pre_proof_claim_verification,omitempty"`
 
-	// DisableTxInclusionPolling turns off the async post-broadcast inclusion
-	// poller that resolves each tx's real on-chain fate. When enabled (the
-	// default) the miner populates claim_on_chain_outcome /
-	// proof_on_chain_outcome fields in submission tracker records.
+	// DisableClaimInclusionTracking turns off the post-broadcast GetClaim
+	// poller. When enabled (the default) the miner populates
+	// claim_on_chain_outcome fields on submission tracker records and emits
+	// the miner_claim_inclusion_outcome_total metric.
 	//
-	// Requires the configured RPC/gRPC node to have tx_index=kv enabled —
-	// pruned or tx_index=null nodes will mis-classify every tx as
-	// mempool_timeout. Default: false (poller enabled).
-	DisableTxInclusionPolling bool `yaml:"disable_tx_inclusion_polling,omitempty"`
+	// Unlike a tx-indexer-based poller, this one queries the x/proof module
+	// state and works on any node regardless of tx_index configuration.
+	// Default: false (poller enabled).
+	DisableClaimInclusionTracking bool `yaml:"disable_claim_inclusion_tracking,omitempty"`
 
-	// TxInclusionPollIntervalMs is how often the poller calls GetTx, in
-	// milliseconds. Default: 2000 (2s).
-	TxInclusionPollIntervalMs int64 `yaml:"tx_inclusion_poll_interval_ms,omitempty"`
+	// ClaimInclusionPollIntervalMs is how often the poller calls GetClaim,
+	// in milliseconds. Default: 2000 (2s).
+	ClaimInclusionPollIntervalMs int64 `yaml:"claim_inclusion_poll_interval_ms,omitempty"`
 
-	// TxInclusionPollHorizonMs caps how long the poller waits for each tx
-	// before giving up and recording mempool_timeout. Default: 180000 (3m).
-	TxInclusionPollHorizonMs int64 `yaml:"tx_inclusion_poll_horizon_ms,omitempty"`
+	// ClaimInclusionPollerMaxConcurrent caps the size of the poller's
+	// worker pool. Default: 64.
+	ClaimInclusionPollerMaxConcurrent int `yaml:"claim_inclusion_poller_max_concurrent,omitempty"`
 
-	// TxInclusionPollerMaxConcurrent caps the size of the poller's worker
-	// pool. Default: 64.
-	TxInclusionPollerMaxConcurrent int `yaml:"tx_inclusion_poller_max_concurrent,omitempty"`
+	// ClaimInclusionMaxPollDurationMs is a wall-clock safety cap. Polls
+	// normally terminate when the claim window closes; this cap ensures
+	// they also terminate if the local block height feed stalls. Default:
+	// 600000 (10m).
+	ClaimInclusionMaxPollDurationMs int64 `yaml:"claim_inclusion_max_poll_duration_ms,omitempty"`
 }
 
-// InclusionPollConfig translates the YAML-facing fields on TransactionConfig
-// into the tx-package InclusionPollConfig. Callers pass the result to
-// tx.NewTxClient.
-func (c TransactionConfig) InclusionPollConfig() tx.InclusionPollConfig {
-	cfg := tx.InclusionPollConfig{
-		Disabled:      c.DisableTxInclusionPolling,
-		MaxConcurrent: c.TxInclusionPollerMaxConcurrent,
+// InclusionTrackerConfig translates the YAML-facing fields on
+// TransactionConfig into the miner-layer InclusionTrackerConfig. Callers
+// pass the result to NewInclusionTracker.
+func (c TransactionConfig) InclusionTrackerConfig() InclusionTrackerConfig {
+	cfg := InclusionTrackerConfig{
+		Disabled:      c.DisableClaimInclusionTracking,
+		MaxConcurrent: c.ClaimInclusionPollerMaxConcurrent,
 	}
-	if c.TxInclusionPollIntervalMs > 0 {
-		cfg.Interval = time.Duration(c.TxInclusionPollIntervalMs) * time.Millisecond
+	if c.ClaimInclusionPollIntervalMs > 0 {
+		cfg.PollInterval = time.Duration(c.ClaimInclusionPollIntervalMs) * time.Millisecond
 	}
-	if c.TxInclusionPollHorizonMs > 0 {
-		cfg.Horizon = time.Duration(c.TxInclusionPollHorizonMs) * time.Millisecond
+	if c.ClaimInclusionMaxPollDurationMs > 0 {
+		cfg.MaxPollDuration = time.Duration(c.ClaimInclusionMaxPollDurationMs) * time.Millisecond
 	}
 	return cfg
 }

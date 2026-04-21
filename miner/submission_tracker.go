@@ -15,8 +15,8 @@ import (
 //
 // IMPORTANT: ClaimSuccess / ProofSuccess mean ONLY that BroadcastTx (CheckTx)
 // accepted the tx into the mempool. They do NOT indicate on-chain inclusion
-// — for that, consult ClaimOnChainOutcome / ProofOnChainOutcome (populated
-// by the WS-B async inclusion poller).
+// — for that, consult ClaimOnChainOutcome, populated asynchronously by
+// InclusionTracker after polling GetClaim.
 type SubmissionTrackingRecord struct {
 	// Session identification
 	Supplier     string `json:"supplier"`
@@ -36,12 +36,11 @@ type SubmissionTrackingRecord struct {
 	ClaimSubmitTimeUTC   string `json:"claim_submit_time_utc"`  // RFC3339 UTC time
 	ClaimCurrentHeight   int64  `json:"claim_current_height"`   // Current block at submission
 
-	// Claim on-chain outcome (populated by WS-B async inclusion poller).
-	// ClaimOnChainOutcome is one of "", "included_success", "included_failure",
-	// "mempool_timeout", "poll_error". Empty string means the poll hasn't
-	// resolved yet (or the poller was disabled).
+	// Claim on-chain outcome (populated by InclusionTracker after polling
+	// GetClaim). One of: "", "on_chain_found", "on_chain_missing",
+	// "poll_error", "poll_dropped". Empty string = poll hasn't resolved yet
+	// (or the tracker was disabled).
 	ClaimOnChainOutcome  string `json:"claim_on_chain_outcome,omitempty"`
-	ClaimOnChainError    string `json:"claim_on_chain_error,omitempty"` // RawLog on included_failure
 	ClaimInclusionHeight int64  `json:"claim_inclusion_height,omitempty"`
 
 	// Proof tracking
@@ -53,11 +52,6 @@ type SubmissionTrackingRecord struct {
 	ProofSubmitTimestamp int64  `json:"proof_submit_timestamp,omitempty"` // Unix timestamp
 	ProofSubmitTimeUTC   string `json:"proof_submit_time_utc,omitempty"`  // RFC3339 UTC time
 	ProofCurrentHeight   int64  `json:"proof_current_height,omitempty"`   // Current block at submission
-
-	// Proof on-chain outcome (populated by WS-B async inclusion poller).
-	ProofOnChainOutcome  string `json:"proof_on_chain_outcome,omitempty"`
-	ProofOnChainError    string `json:"proof_on_chain_error,omitempty"`
-	ProofInclusionHeight int64  `json:"proof_inclusion_height,omitempty"`
 
 	// Metadata
 	NumRelays            int64  `json:"num_relays"`
@@ -290,13 +284,12 @@ func (t *SubmissionTracker) makeKey(supplier string, sessionEnd int64, sessionID
 }
 
 // ClaimOnChainUpdate is the payload passed to
-// SubmissionTracker.UpdateClaimOnChainOutcome. Populated from the tx-inclusion
-// callback (see tx/tx_client.go TxInclusionResult).
+// SubmissionTracker.UpdateClaimOnChainOutcome, populated by the
+// InclusionTracker after polling GetClaim.
 type ClaimOnChainUpdate struct {
 	Supplier        string
 	TxHash          string
 	Outcome         string
-	ErrMsg          string
 	InclusionHeight int64
 }
 
@@ -323,7 +316,6 @@ func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u Cla
 			continue
 		}
 		record.ClaimOnChainOutcome = u.Outcome
-		record.ClaimOnChainError = u.ErrMsg
 		record.ClaimInclusionHeight = u.InclusionHeight
 
 		key := t.makeKey(record.Supplier, record.SessionEnd, record.SessionID)
@@ -347,60 +339,6 @@ func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u Cla
 		Str("outcome", u.Outcome).
 		Int("records_updated", updated).
 		Msg("applied claim on-chain outcome")
-
-	return nil
-}
-
-// ProofOnChainUpdate mirrors ClaimOnChainUpdate for proof txs.
-type ProofOnChainUpdate struct {
-	Supplier        string
-	TxHash          string
-	Outcome         string
-	ErrMsg          string
-	InclusionHeight int64
-}
-
-// UpdateProofOnChainOutcome is the proof equivalent of
-// UpdateClaimOnChainOutcome.
-func (t *SubmissionTracker) UpdateProofOnChainOutcome(ctx context.Context, u ProofOnChainUpdate) error {
-	if u.TxHash == "" {
-		return nil
-	}
-	records, err := t.ListRecordsForSupplier(ctx, u.Supplier)
-	if err != nil {
-		return err
-	}
-
-	updated := 0
-	for _, record := range records {
-		if record.ProofTxHash != u.TxHash {
-			continue
-		}
-		record.ProofOnChainOutcome = u.Outcome
-		record.ProofOnChainError = u.ErrMsg
-		record.ProofInclusionHeight = u.InclusionHeight
-
-		key := t.makeKey(record.Supplier, record.SessionEnd, record.SessionID)
-		data, marshalErr := json.Marshal(record)
-		if marshalErr != nil {
-			t.logger.Warn().Err(marshalErr).Str("session_id", record.SessionID).
-				Msg("failed to marshal updated proof on-chain outcome record")
-			continue
-		}
-		if setErr := t.redisClient.Set(ctx, key, data, t.ttl).Err(); setErr != nil {
-			t.logger.Warn().Err(setErr).Str("session_id", record.SessionID).
-				Msg("failed to persist updated proof on-chain outcome record")
-			continue
-		}
-		updated++
-	}
-
-	t.logger.Debug().
-		Str("supplier", u.Supplier).
-		Str("tx_hash", u.TxHash).
-		Str("outcome", u.Outcome).
-		Int("records_updated", updated).
-		Msg("applied proof on-chain outcome")
 
 	return nil
 }

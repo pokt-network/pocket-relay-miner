@@ -157,30 +157,30 @@ properties:
           where proof submission attempts run even when the claim never
           landed on-chain, producing FailedPrecondition retry storms.
         default: false
-      disable_tx_inclusion_polling:
+      disable_claim_inclusion_tracking:
         type: boolean
         description: |
-          Disable the async post-broadcast inclusion poller that calls GetTx
-          to resolve each tx's real on-chain fate. When enabled (the
-          default) the miner populates claim_on_chain_outcome and
-          proof_on_chain_outcome fields in submission tracker records.
-          REQUIRES the configured gRPC node to have tx_index=kv.
+          Disable the post-broadcast GetClaim poller that records each claim's
+          real on-chain outcome (on_chain_found | on_chain_missing |
+          poll_error) into submission tracker records. Unlike a tx-indexer-
+          based approach, this poller queries x/proof module state and
+          works on any node regardless of tx_index configuration.
         default: false
-      tx_inclusion_poll_interval_ms:
+      claim_inclusion_poll_interval_ms:
         type: integer
-        description: How often the inclusion poller calls GetTx (milliseconds).
+        description: How often the claim inclusion poller calls GetClaim (milliseconds).
         default: 2000
         minimum: 100
-      tx_inclusion_poll_horizon_ms:
+      claim_inclusion_poller_max_concurrent:
         type: integer
-        description: Max time the poller waits for a tx before recording mempool_timeout (milliseconds).
-        default: 180000
-        minimum: 1000
-      tx_inclusion_poller_max_concurrent:
-        type: integer
-        description: Worker pool size for concurrent inclusion polls.
+        description: Worker pool size for concurrent claim inclusion polls.
         default: 64
         minimum: 1
+      claim_inclusion_max_poll_duration_ms:
+        type: integer
+        description: Wall-clock safety cap on a single poll if block height stalls (milliseconds).
+        default: 600000
+        minimum: 10000
 
   keys:
     type: object

@@ -135,11 +135,16 @@ type SupplierManagerConfig struct {
 	ProofChecker *ProofRequirementChecker
 
 	// ProofQueryClient is used by the pre-proof GetClaim guard to verify each
-	// session's claim exists on-chain before proof submission. If nil, the
-	// guard is skipped (legacy behavior, unsafe in production — sessions whose
-	// claim tx was evicted from mempool will trigger "claim not found"
-	// FailedPrecondition storms).
+	// session's claim exists on-chain before proof submission, and by the
+	// InclusionTracker to record the real on-chain outcome after each claim
+	// broadcast. If nil, the guard is skipped (legacy behavior, unsafe in
+	// production — sessions whose claim tx was evicted from mempool will
+	// trigger "claim not found" FailedPrecondition storms).
 	ProofQueryClient client.ProofQueryClient
+
+	// InclusionTrackerConfig controls the post-broadcast GetClaim poller.
+	// See miner.InclusionTrackerConfig for fields.
+	InclusionTrackerConfig InclusionTrackerConfig
 
 	// ServiceFactorProvider provides service factor configuration for claim ceiling warnings.
 	// If nil, no ceiling warnings are logged.
@@ -209,6 +214,11 @@ type SupplierManager struct {
 	// Deduplicator (shared across suppliers). Prevents counter drift when Redis
 	// Streams redeliver a relay (consumer reclaim, transient ack failure).
 	deduplicator Deduplicator
+
+	// Inclusion tracker polls GetClaim for each broadcast claim to record
+	// the real on-chain outcome. Owned by SupplierManager so Close() drains
+	// its worker pool cleanly on shutdown.
+	inclusionTracker *InclusionTracker
 
 	// Lifecycle
 	ctx      context.Context
@@ -874,48 +884,23 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		submissionTracker := NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
 		lifecycleCallback.SetSubmissionTracker(submissionTracker)
 
-		// WS-B: wire the tx client's async inclusion poller to the submission
-		// tracker so each tx's real on-chain fate (included_success /
-		// included_failure / mempool_timeout / poll_error) lands in the
-		// ha:tx:track:* records operators scan in post-mortems.
-		//
-		// This runs once per SupplierManager start but the callback body only
-		// looks up records for the supplier named in the TxInclusionResult, so
-		// it is correct across a fleet with many suppliers sharing one TxClient.
-		if m.config.TxClient != nil {
-			tracker := submissionTracker
-			logger := m.logger
-			m.config.TxClient.AddInclusionCallback(func(ctx context.Context, result tx.TxInclusionResult) {
-				var err error
-				switch result.TxType {
-				case tx.TxTypeClaim:
-					err = tracker.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
-						Supplier:        result.Supplier,
-						TxHash:          result.TxHash,
-						Outcome:         string(result.Outcome),
-						ErrMsg:          result.ErrMsg,
-						InclusionHeight: result.InclusionHeight,
-					})
-				case tx.TxTypeProof:
-					err = tracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
-						Supplier:        result.Supplier,
-						TxHash:          result.TxHash,
-						Outcome:         string(result.Outcome),
-						ErrMsg:          result.ErrMsg,
-						InclusionHeight: result.InclusionHeight,
-					})
-				default:
-					logger.Debug().Str("tx_type", result.TxType).Str("tx_hash", result.TxHash).
-						Msg("ignoring inclusion result for unknown tx type")
-					return
-				}
-				if err != nil {
-					logger.Warn().Err(err).
-						Str("tx_type", result.TxType).
-						Str("tx_hash", result.TxHash).
-						Msg("failed to update submission tracker with on-chain outcome")
-				}
-			})
+		// Wire the claim inclusion tracker so that after each claim broadcast
+		// the miner polls GetClaim(supplier, sessionID) until the claim is
+		// on-chain or the claim window closes, recording the real outcome
+		// to the submission tracker. GetClaim queries x/proof module state —
+		// independent of the Tendermint tx indexer, so this works against
+		// nodes configured with tx_index=null.
+		if m.config.ProofQueryClient != nil {
+			inclusionTracker := NewInclusionTracker(
+				m.logger,
+				m.config.ProofQueryClient,
+				m.config.SharedClient,
+				m.config.BlockClient,
+				submissionTracker,
+				m.config.InclusionTrackerConfig,
+			)
+			lifecycleCallback.SetInclusionTracker(inclusionTracker)
+			m.inclusionTracker = inclusionTracker
 		}
 
 		// Wire build pool for bounded parallel claim/proof building
@@ -1347,6 +1332,11 @@ func (m *SupplierManager) Close() error {
 	// Stop query subpool gracefully (drains queued tasks)
 	if m.querySubpool != nil {
 		m.querySubpool.StopAndWait()
+	}
+
+	// Drain the claim inclusion tracker so in-flight polls finish cleanly.
+	if m.inclusionTracker != nil {
+		_ = m.inclusionTracker.Close()
 	}
 
 	m.logger.Info().Msg("supplier manager closed")

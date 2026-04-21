@@ -634,6 +634,27 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
+	// claimInclusionOutcomeTotal records the real on-chain fate of each
+	// broadcast claim as observed by the miner-layer InclusionTracker. It
+	// polls GetClaim(supplier, sessionID) until the claim appears or the
+	// claim window closes — independent of the Tendermint tx indexer, so it
+	// works on nodes configured with tx_index=null.
+	//
+	// Outcomes (bounded enum):
+	//   on_chain_found   — claim is on-chain
+	//   on_chain_missing — claim window closed without the claim landing
+	//   poll_error       — GetClaim kept erroring through the poll horizon
+	//   poll_dropped     — inclusion pool queue saturated; no record taken
+	claimInclusionOutcomeTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claim_inclusion_outcome_total",
+			Help:      "Post-broadcast on-chain claim inclusion outcome (labeled by supplier, service_id, outcome)",
+		},
+		[]string{"supplier", "service_id", "outcome"},
+	)
+
 	// Redis consumer metrics (reserved for future instrumentation)
 	_ = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{

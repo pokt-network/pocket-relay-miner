@@ -60,7 +60,7 @@ func seedClaim(t *testing.T, tr *SubmissionTracker, supplier, sessionID, txHash 
 	require.NoError(t, err)
 }
 
-func TestUpdateClaimOnChainOutcome_IncludedSuccess(t *testing.T) {
+func TestUpdateClaimOnChainOutcome_OnChainFound(t *testing.T) {
 	tr, _ := setupSubmissionTracker(t)
 	seedClaim(t, tr, "pokt1test", "sess-1", "txhash-abc")
 
@@ -68,54 +68,35 @@ func TestUpdateClaimOnChainOutcome_IncludedSuccess(t *testing.T) {
 	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
 		Supplier:        "pokt1test",
 		TxHash:          "txhash-abc",
-		Outcome:         "included_success",
+		Outcome:         "on_chain_found",
 		InclusionHeight: 127,
 	}))
 
 	got, err := tr.GetRecord(ctx, "pokt1test", 110, "sess-1")
 	require.NoError(t, err)
-	assert.Equal(t, "included_success", got.ClaimOnChainOutcome)
+	assert.Equal(t, "on_chain_found", got.ClaimOnChainOutcome)
 	assert.Equal(t, int64(127), got.ClaimInclusionHeight)
-	assert.Empty(t, got.ClaimOnChainError)
 	// Existing fields must be preserved.
 	assert.True(t, got.ClaimSuccess)
 	assert.Equal(t, "txhash-abc", got.ClaimTxHash)
 }
 
-func TestUpdateClaimOnChainOutcome_IncludedFailureCapturesRawLog(t *testing.T) {
+func TestUpdateClaimOnChainOutcome_OnChainMissing(t *testing.T) {
+	// The claim window closed without the claim landing — this is the
+	// "lost reward" signal operators need to count.
 	tr, _ := setupSubmissionTracker(t)
-	seedClaim(t, tr, "pokt1test", "sess-2", "txhash-fail")
-
-	ctx := context.Background()
-	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
-		Supplier:        "pokt1test",
-		TxHash:          "txhash-fail",
-		Outcome:         "included_failure",
-		ErrMsg:          "invalid relay difficulty",
-		InclusionHeight: 131,
-	}))
-
-	got, err := tr.GetRecord(ctx, "pokt1test", 110, "sess-2")
-	require.NoError(t, err)
-	assert.Equal(t, "included_failure", got.ClaimOnChainOutcome)
-	assert.Equal(t, "invalid relay difficulty", got.ClaimOnChainError,
-		"DeliverTx RawLog must be captured so operators can diagnose")
-}
-
-func TestUpdateClaimOnChainOutcome_MempoolTimeout(t *testing.T) {
-	tr, _ := setupSubmissionTracker(t)
-	seedClaim(t, tr, "pokt1test", "sess-3", "txhash-timeout")
+	seedClaim(t, tr, "pokt1test", "sess-3", "txhash-missing")
 
 	ctx := context.Background()
 	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
 		Supplier: "pokt1test",
-		TxHash:   "txhash-timeout",
-		Outcome:  "mempool_timeout",
+		TxHash:   "txhash-missing",
+		Outcome:  "on_chain_missing",
 	}))
 
 	got, err := tr.GetRecord(ctx, "pokt1test", 110, "sess-3")
 	require.NoError(t, err)
-	assert.Equal(t, "mempool_timeout", got.ClaimOnChainOutcome)
+	assert.Equal(t, "on_chain_missing", got.ClaimOnChainOutcome)
 	assert.Equal(t, int64(0), got.ClaimInclusionHeight)
 }
 
@@ -131,14 +112,14 @@ func TestUpdateClaimOnChainOutcome_MultipleSessionsSameTxHash(t *testing.T) {
 	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
 		Supplier:        "pokt1test",
 		TxHash:          "txhash-batch",
-		Outcome:         "included_success",
+		Outcome:         "on_chain_found",
 		InclusionHeight: 200,
 	}))
 
 	for _, id := range []string{"sess-a", "sess-b"} {
 		got, err := tr.GetRecord(ctx, "pokt1test", 110, id)
 		require.NoError(t, err)
-		assert.Equal(t, "included_success", got.ClaimOnChainOutcome, id)
+		assert.Equal(t, "on_chain_found", got.ClaimOnChainOutcome, id)
 	}
 
 	// Unrelated session untouched.
@@ -154,32 +135,6 @@ func TestUpdateClaimOnChainOutcome_EmptyTxHashIsNoop(t *testing.T) {
 	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
 		Supplier: "pokt1test",
 		TxHash:   "", // empty — must skip silently
-		Outcome:  "included_success",
+		Outcome:  "on_chain_found",
 	}))
-}
-
-func TestUpdateProofOnChainOutcome_Smoke(t *testing.T) {
-	tr, _ := setupSubmissionTracker(t)
-	ctx := context.Background()
-
-	// Create a record with a proof tx hash.
-	require.NoError(t, tr.TrackClaimSubmission(
-		ctx, "pokt1test", "svc", "pokt1app", "sess-proof", 100, 110,
-		"0xaa", "ctx", true, "", 105, 110, 50, 100, true, "",
-	))
-	require.NoError(t, tr.TrackProofSubmission(
-		ctx, "pokt1test", 110, "sess-proof", "0xbb", "ptx", true, "", 120, 125, true, "",
-	))
-
-	require.NoError(t, tr.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
-		Supplier:        "pokt1test",
-		TxHash:          "ptx",
-		Outcome:         "included_success",
-		InclusionHeight: 130,
-	}))
-
-	got, err := tr.GetRecord(ctx, "pokt1test", 110, "sess-proof")
-	require.NoError(t, err)
-	assert.Equal(t, "included_success", got.ProofOnChainOutcome)
-	assert.Equal(t, int64(130), got.ProofInclusionHeight)
 }

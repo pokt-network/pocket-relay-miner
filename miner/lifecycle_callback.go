@@ -207,6 +207,12 @@ type LifecycleCallback struct {
 	// guard is skipped (legacy behavior).
 	proofQueryClient pocktclient.ProofQueryClient
 
+	// inclusionTracker schedules post-broadcast GetClaim polls that record
+	// the real on-chain outcome of each claim tx. If nil, outcome tracking
+	// is skipped — submissionTracker records still show broadcast-accepted
+	// semantics via ClaimSuccess, but no ClaimOnChainOutcome field will land.
+	inclusionTracker *InclusionTracker
+
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
 	sessionLocksMu sync.Mutex
@@ -298,6 +304,13 @@ func (lc *LifecycleCallback) SetDeduplicator(dedup Deduplicator) {
 // proof pipeline behaves as before the WS-A fix.
 func (lc *LifecycleCallback) SetProofQueryClient(client pocktclient.ProofQueryClient) {
 	lc.proofQueryClient = client
+}
+
+// SetInclusionTracker wires the post-broadcast GetClaim inclusion tracker.
+// Optional — without it, no ClaimOnChainOutcome field is written and no
+// miner_claim_inclusion_outcome_total metric fires.
+func (lc *LifecycleCallback) SetInclusionTracker(tracker *InclusionTracker) {
+	lc.inclusionTracker = tracker
 }
 
 // isClaimNotFoundError returns true when an error from the proof query client
@@ -919,6 +932,23 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 								Str(logging.FieldSessionID, snapshot.SessionID).
 								Msg("failed to track claim submission")
 						}
+					}
+				}
+
+				// Schedule post-broadcast claim inclusion polling. Each session
+				// in the batch gets its own GetClaim poll; the tracker marks
+				// the submission record with on_chain_found / on_chain_missing
+				// / poll_error once the claim window closes. No tx indexer
+				// required — GetClaim reads x/proof module state.
+				if lc.inclusionTracker != nil && claimTxHash != "" {
+					for _, snapshot := range validSnapshots {
+						lc.inclusionTracker.ScheduleClaimCheck(ClaimInclusionCheck{
+							Supplier:         snapshot.SupplierOperatorAddress,
+							ServiceID:        snapshot.ServiceID,
+							SessionID:        snapshot.SessionID,
+							SessionEndHeight: snapshot.SessionEndHeight,
+							ClaimTxHash:      claimTxHash,
+						})
 					}
 				}
 
