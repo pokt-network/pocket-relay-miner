@@ -621,6 +621,19 @@ var (
 		[]string{"supplier", "operation"},
 	)
 
+	// proofSkippedTotal counts proofs NOT submitted because of a pre-submission
+	// condition (not because of proof-requirement probability). Reason enum:
+	//   claim_missing_on_chain — pre-proof GetClaim guard found no on-chain claim
+	proofSkippedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "proof_skipped_total",
+			Help:      "Total number of proofs skipped due to a pre-submission condition (labeled by reason)",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
 	// Redis consumer metrics (reserved for future instrumentation)
 	_ = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -1254,6 +1267,18 @@ func RecordProofRequirementSkipped(supplier string) {
 // RecordProofRequirementCheckError records an error during proof requirement checking.
 func RecordProofRequirementCheckError(supplier, operation string) {
 	proofRequirementErrors.WithLabelValues(supplier, operation).Inc()
+}
+
+// Proof-skip reasons — kept as constants so logs and metrics agree.
+const (
+	ProofSkippedReasonClaimMissingOnChain = "claim_missing_on_chain"
+)
+
+// RecordProofSkipped increments the proof-skipped counter with the given
+// reason. Reason must come from the ProofSkippedReason* constants to keep
+// the label cardinality bounded.
+func RecordProofSkipped(supplier, serviceID, reason string) {
+	proofSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
 }
 
 // RecordClaimSkipped records an intentional claim skip with a reason label.

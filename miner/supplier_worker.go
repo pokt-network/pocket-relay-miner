@@ -278,6 +278,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			GasPrice:      gasPrice,
 			GasAdjustment: w.config.Config.GetTxGasAdjustment(),
 			TimeoutBlocks: tx.DefaultTimeoutHeight,
+			InclusionPoll: w.config.Config.Transaction.InclusionPollConfig(),
 		},
 	)
 	if err != nil {
@@ -333,17 +334,19 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			SharedClient:                   cachedSharedClient,
 			SessionClient:                  w.queryClients.Session(),
 			ProofChecker:                   w.proofChecker,
+			ProofQueryClient:               w.queryClients.Proof(),
 			ServiceFactorProvider:          newServiceFactorClientAdapter(ctx, w.serviceFactorClient),
 			AppClient:                      cache.NewApplicationQueryClientAdapter(w.queryClients.Application()),
 			SessionLifecycleConfig: SessionLifecycleConfig{
 				CheckInterval:            0, // Event-driven via Redis pub/sub
 				MaxConcurrentTransitions: w.config.Config.GetSessionLifecycleMaxConcurrentTransitions(),
 			},
-			ClaimerConfig:         w.config.Config.GetSupplierClaimingConfig(),
-			DisableClaimBatching:  w.config.Config.Transaction.DisableClaimBatching,
-			DisableProofBatching:  w.config.Config.Transaction.DisableProofBatching,
-			SubmissionTrackingTTL: w.config.Config.GetSubmissionTrackingTTL(),
-			QueryWorkers:          w.config.Config.GetQueryWorkers(),
+			ClaimerConfig:                    w.config.Config.GetSupplierClaimingConfig(),
+			DisableClaimBatching:             w.config.Config.Transaction.DisableClaimBatching,
+			DisableProofBatching:             w.config.Config.Transaction.DisableProofBatching,
+			DisablePreProofClaimVerification: w.config.Config.Transaction.DisablePreProofClaimVerification,
+			SubmissionTrackingTTL:            w.config.Config.GetSubmissionTrackingTTL(),
+			QueryWorkers:                     w.config.Config.GetQueryWorkers(),
 		},
 	)
 

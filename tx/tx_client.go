@@ -3,6 +3,7 @@ package tx
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"cosmossdk.io/math"
+	"github.com/alitto/pond/v2"
 	"github.com/cosmos/cosmos-sdk/client"
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -22,8 +24,10 @@ import (
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -69,7 +73,91 @@ const (
 
 	// DefaultChainID for the pocket network.
 	DefaultChainID = "pocket"
+
+	// DefaultInclusionPollInterval is how often the async poller calls GetTx
+	// after a successful broadcast. 2s is short enough to catch normal
+	// inclusion latency (~1 block) without hammering the RPC node.
+	DefaultInclusionPollInterval = 2 * time.Second
+
+	// DefaultInclusionPollHorizon caps how long the poller waits for inclusion
+	// before giving up. Matches the unordered-tx timeoutTimestamp (2m) with a
+	// small safety margin so we resolve "mempool_timeout" shortly after the
+	// chain would have.
+	DefaultInclusionPollHorizon = 3 * time.Minute
+
+	// DefaultInclusionPollerMaxConcurrent caps the number of in-flight polls.
+	// Each poll is a cheap gRPC call every 2s, so a few dozen concurrent
+	// polls is more than enough for steady-state claim/proof volume.
+	DefaultInclusionPollerMaxConcurrent = 64
 )
+
+// TxInclusionOutcome is the result of polling for a transaction's on-chain
+// fate after a successful BroadcastTx (CheckTx acceptance). Values are
+// stable strings; external telemetry (metrics, Grafana panels, Loki
+// queries) depends on them.
+type TxInclusionOutcome string
+
+const (
+	// TxInclusionIncludedSuccess means the tx was included in a block with
+	// DeliverTx code == 0. This is the only outcome that guarantees the tx
+	// landed on-chain successfully.
+	TxInclusionIncludedSuccess TxInclusionOutcome = "included_success"
+
+	// TxInclusionIncludedFailure means the tx was included in a block but
+	// DeliverTx returned code != 0. The claim/proof did not take effect.
+	// RawLog is captured for diagnosis.
+	TxInclusionIncludedFailure TxInclusionOutcome = "included_failure"
+
+	// TxInclusionMempoolTimeout means the poll horizon elapsed without
+	// GetTx ever returning the tx. The tx was almost certainly evicted from
+	// mempool or dropped by a node restart.
+	TxInclusionMempoolTimeout TxInclusionOutcome = "mempool_timeout"
+
+	// TxInclusionPollError means the poller itself failed (e.g. RPC
+	// unavailable). The tx's real fate is unknown; treat as advisory only.
+	TxInclusionPollError TxInclusionOutcome = "poll_error"
+)
+
+// TxTypeClaim / TxTypeProof are the well-known txType labels used in
+// txInclusionOutcomeTotal and inclusion callbacks.
+const (
+	TxTypeClaim = "claim"
+	TxTypeProof = "proof"
+)
+
+// TxInclusionResult is reported to callbacks after a poll resolves.
+type TxInclusionResult struct {
+	Supplier        string
+	TxType          string
+	TxHash          string
+	Outcome         TxInclusionOutcome
+	ErrMsg          string // populated when Outcome is IncludedFailure or PollError
+	InclusionHeight int64  // populated when Outcome is IncludedSuccess or IncludedFailure
+	PolledDuration  time.Duration
+}
+
+// TxInclusionCallback is invoked once per broadcast after the async poll
+// resolves. Callbacks must be non-blocking — they run on the shared
+// inclusion-poll worker pool.
+type TxInclusionCallback func(ctx context.Context, result TxInclusionResult)
+
+// InclusionPollConfig configures the post-broadcast inclusion poller.
+type InclusionPollConfig struct {
+	// Disabled turns the poller off entirely. When true, BroadcastTx returns
+	// immediately after CheckTx (pre-WS-B behavior) and no callbacks fire.
+	Disabled bool
+
+	// Interval is how often to poll GetTx. Default DefaultInclusionPollInterval.
+	Interval time.Duration
+
+	// Horizon caps the total time spent polling a single tx. Default
+	// DefaultInclusionPollHorizon.
+	Horizon time.Duration
+
+	// MaxConcurrent bounds the worker pool size. Default
+	// DefaultInclusionPollerMaxConcurrent.
+	MaxConcurrent int
+}
 
 // TxClientConfig contains configuration for the transaction client.
 type TxClientConfig struct {
@@ -108,6 +196,10 @@ type TxClientConfig struct {
 	// Only used if GRPCConn is nil.
 	// Default: false (insecure connection)
 	UseTLS bool
+
+	// InclusionPoll configures the async post-broadcast inclusion poller. See
+	// InclusionPollConfig.
+	InclusionPoll InclusionPollConfig
 }
 
 // TxClient provides transaction submission capabilities for the HA system.
@@ -128,6 +220,12 @@ type TxClient struct {
 	// Per-supplier account info cache
 	accountCache   map[string]*authtypes.BaseAccount
 	accountCacheMu sync.RWMutex
+
+	// Async inclusion poller state.
+	inclusionPool       pond.Pool
+	inclusionPollCfg    InclusionPollConfig
+	inclusionCallbacks  []TxInclusionCallback
+	inclusionCallbackMu sync.RWMutex
 
 	// Lifecycle
 	closed bool
@@ -161,6 +259,15 @@ func NewTxClient(
 	}
 	if config.GasAdjustment == 0 {
 		config.GasAdjustment = DefaultGasAdjustment
+	}
+	if config.InclusionPoll.Interval <= 0 {
+		config.InclusionPoll.Interval = DefaultInclusionPollInterval
+	}
+	if config.InclusionPoll.Horizon <= 0 {
+		config.InclusionPoll.Horizon = DefaultInclusionPollHorizon
+	}
+	if config.InclusionPoll.MaxConcurrent <= 0 {
+		config.InclusionPoll.MaxConcurrent = DefaultInclusionPollerMaxConcurrent
 	}
 
 	var grpcConn *grpc.ClientConn
@@ -196,16 +303,28 @@ func NewTxClient(
 	cdc, txConfig := createCodecAndTxConfig()
 
 	tc := &TxClient{
-		logger:       logging.ForComponent(logger, logging.ComponentTxClient),
-		config:       config,
-		keyManager:   keyManager,
-		grpcConn:     grpcConn,
-		ownsConn:     ownsConn,
-		codec:        cdc,
-		txConfig:     txConfig,
-		authQuerier:  authtypes.NewQueryClient(grpcConn),
-		txClient:     txtypes.NewServiceClient(grpcConn),
-		accountCache: make(map[string]*authtypes.BaseAccount),
+		logger:           logging.ForComponent(logger, logging.ComponentTxClient),
+		config:           config,
+		keyManager:       keyManager,
+		grpcConn:         grpcConn,
+		ownsConn:         ownsConn,
+		codec:            cdc,
+		txConfig:         txConfig,
+		authQuerier:      authtypes.NewQueryClient(grpcConn),
+		txClient:         txtypes.NewServiceClient(grpcConn),
+		accountCache:     make(map[string]*authtypes.BaseAccount),
+		inclusionPollCfg: config.InclusionPoll,
+	}
+
+	// Build the inclusion poll worker pool unless disabled. Non-blocking so
+	// broadcast never stalls if the pool queue is momentarily saturated;
+	// dropped tasks are logged and counted via txInclusionOutcomeTotal.
+	if !config.InclusionPoll.Disabled {
+		tc.inclusionPool = pond.NewPool(
+			config.InclusionPoll.MaxConcurrent,
+			pond.WithQueueSize(config.InclusionPoll.MaxConcurrent*8),
+			pond.WithNonBlocking(true),
+		)
 	}
 
 	tc.logger.Info().
@@ -472,6 +591,13 @@ func (tc *TxClient) signAndBroadcast(
 	// NOTE: We don't increment sequence for unordered TXs (they don't use sequence numbers)
 
 	txBroadcastsTotal.WithLabelValues(signerAddr, "success").Inc()
+
+	// Kick off the async inclusion poll. CheckTx acceptance is NOT the same as
+	// on-chain inclusion; without this, a claim tx that times out in mempool
+	// or is rejected at DeliverTx would silently disappear and the miner
+	// would attempt a doomed proof submission later. See WS-B.
+	tc.scheduleInclusionPoll(signerAddr, txType, txHash, time.Now())
+
 	return txHash, nil
 }
 
@@ -778,6 +904,13 @@ func (tc *TxClient) Close() error {
 	}
 	tc.closed = true
 
+	// Drain the inclusion poll pool so in-flight polls complete (or their
+	// tx client context errors out) before we drop the gRPC connection.
+	if tc.inclusionPool != nil {
+		tc.inclusionPool.StopAndWait()
+		tc.inclusionPool = nil
+	}
+
 	// Only close the connection if we created it ourselves
 	if tc.ownsConn && tc.grpcConn != nil {
 		if err := tc.grpcConn.Close(); err != nil {
@@ -787,6 +920,145 @@ func (tc *TxClient) Close() error {
 
 	tc.logger.Info().Msg("transaction client closed")
 	return nil
+}
+
+// AddInclusionCallback registers a callback invoked once per successful
+// broadcast after its async inclusion poll resolves. Callbacks run on the
+// inclusion-poll worker pool; they must be non-blocking or bounded.
+// Safe to call concurrently.
+func (tc *TxClient) AddInclusionCallback(cb TxInclusionCallback) {
+	if cb == nil {
+		return
+	}
+	tc.inclusionCallbackMu.Lock()
+	tc.inclusionCallbacks = append(tc.inclusionCallbacks, cb)
+	tc.inclusionCallbackMu.Unlock()
+}
+
+// scheduleInclusionPoll enqueues an async poll task for a just-broadcast tx.
+// Returns true if the task was accepted, false if the pool queue was full
+// (non-blocking drop). Called only on successful broadcast.
+func (tc *TxClient) scheduleInclusionPoll(supplier, txType, txHash string, broadcastTime time.Time) bool {
+	if tc.inclusionPool == nil || tc.inclusionPollCfg.Disabled {
+		return false
+	}
+	_, accepted := tc.inclusionPool.TrySubmit(func() {
+		tc.runInclusionPoll(supplier, txType, txHash, broadcastTime)
+	})
+	if !accepted {
+		tc.logger.Warn().
+			Str("supplier", supplier).
+			Str("tx_type", txType).
+			Str("tx_hash", txHash).
+			Msg("inclusion poll queue saturated; dropping task (no on-chain outcome will be recorded)")
+		txInclusionOutcomeTotal.WithLabelValues(supplier, txType, "poll_dropped").Inc()
+	}
+	return accepted
+}
+
+// runInclusionPoll loops on GetTx until the tx is included, the horizon
+// elapses, or the client is closed. Emits metrics and invokes callbacks.
+func (tc *TxClient) runInclusionPoll(supplier, txType, txHash string, broadcastTime time.Time) {
+	pollCtx, cancel := context.WithTimeout(context.Background(), tc.inclusionPollCfg.Horizon)
+	defer cancel()
+
+	ticker := time.NewTicker(tc.inclusionPollCfg.Interval)
+	defer ticker.Stop()
+
+	// Query immediately, then on the ticker.
+	outcome, errMsg, height := tc.pollOnce(pollCtx, txHash)
+	for outcome == "" {
+		select {
+		case <-pollCtx.Done():
+			outcome = TxInclusionMempoolTimeout
+		case <-ticker.C:
+			outcome, errMsg, height = tc.pollOnce(pollCtx, txHash)
+		}
+	}
+
+	duration := time.Since(broadcastTime)
+	txInclusionOutcomeTotal.WithLabelValues(supplier, txType, string(outcome)).Inc()
+	txInclusionPollLatency.WithLabelValues(supplier, txType, string(outcome)).Observe(duration.Seconds())
+
+	logEvent := tc.logger.Info()
+	if outcome != TxInclusionIncludedSuccess {
+		logEvent = tc.logger.Warn()
+	}
+	logEvent.
+		Str("supplier", supplier).
+		Str("tx_type", txType).
+		Str("tx_hash", txHash).
+		Str("outcome", string(outcome)).
+		Int64("inclusion_height", height).
+		Dur("poll_duration", duration).
+		Str("err", errMsg).
+		Msg("tx inclusion poll resolved")
+
+	tc.invokeInclusionCallbacks(pollCtx, TxInclusionResult{
+		Supplier:        supplier,
+		TxType:          txType,
+		TxHash:          txHash,
+		Outcome:         outcome,
+		ErrMsg:          errMsg,
+		InclusionHeight: height,
+		PolledDuration:  duration,
+	})
+}
+
+// pollOnce queries GetTx once. Returns ("", "", 0) while the tx is not yet
+// seen on-chain (the caller keeps polling). Returns a terminal outcome
+// when the fate is determined.
+func (tc *TxClient) pollOnce(ctx context.Context, txHash string) (TxInclusionOutcome, string, int64) {
+	res, err := tc.txClient.GetTx(ctx, &txtypes.GetTxRequest{Hash: txHash})
+	if err != nil {
+		if st, ok := status.FromError(err); ok {
+			switch st.Code() {
+			case codes.NotFound:
+				// Normal "not yet included" — keep polling.
+				return "", "", 0
+			case codes.DeadlineExceeded, codes.Canceled:
+				// Our horizon elapsed (or the caller cancelled). The tx never
+				// made the chain within the poll window — treat as mempool
+				// timeout.
+				return TxInclusionMempoolTimeout, "", 0
+			}
+		}
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return TxInclusionMempoolTimeout, "", 0
+		}
+		return TxInclusionPollError, err.Error(), 0
+	}
+	if res == nil || res.TxResponse == nil {
+		return "", "", 0
+	}
+	if res.TxResponse.Code == 0 {
+		return TxInclusionIncludedSuccess, "", res.TxResponse.Height
+	}
+	return TxInclusionIncludedFailure, res.TxResponse.RawLog, res.TxResponse.Height
+}
+
+// invokeInclusionCallbacks fans out a poll result to every registered
+// callback. Callbacks are invoked synchronously on the poll goroutine; if
+// any panics the others still run.
+func (tc *TxClient) invokeInclusionCallbacks(ctx context.Context, result TxInclusionResult) {
+	tc.inclusionCallbackMu.RLock()
+	cbs := make([]TxInclusionCallback, len(tc.inclusionCallbacks))
+	copy(cbs, tc.inclusionCallbacks)
+	tc.inclusionCallbackMu.RUnlock()
+
+	for _, cb := range cbs {
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					tc.logger.Error().
+						Interface("panic", r).
+						Str("tx_hash", result.TxHash).
+						Msg("tx inclusion callback panicked")
+				}
+			}()
+			cb(ctx, result)
+		}()
+	}
 }
 
 // =============================================================================

@@ -134,6 +134,13 @@ type SupplierManagerConfig struct {
 	// If nil, proofs are always submitted (legacy behavior).
 	ProofChecker *ProofRequirementChecker
 
+	// ProofQueryClient is used by the pre-proof GetClaim guard to verify each
+	// session's claim exists on-chain before proof submission. If nil, the
+	// guard is skipped (legacy behavior, unsafe in production — sessions whose
+	// claim tx was evicted from mempool will trigger "claim not found"
+	// FailedPrecondition storms).
+	ProofQueryClient client.ProofQueryClient
+
 	// ServiceFactorProvider provides service factor configuration for claim ceiling warnings.
 	// If nil, no ceiling warnings are logged.
 	ServiceFactorProvider ServiceFactorProvider
@@ -158,6 +165,11 @@ type SupplierManagerConfig struct {
 	// WORKAROUND: Set to true to avoid cross-contamination where one invalid claim
 	// causes the entire batch to fail.
 	DisableClaimBatching bool
+
+	// DisablePreProofClaimVerification turns off the pre-proof GetClaim guard.
+	// See LifecycleCallbackConfig.DisablePreProofClaimVerification for details.
+	// Default: false (guard enabled).
+	DisablePreProofClaimVerification bool
 
 	// DisableProofBatching disables batching of proof submissions.
 	// WORKAROUND: Set to true to avoid cross-contamination where one invalid proof
@@ -826,6 +838,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		lifecycleCallbackConfig.SupplierAddress = operatorAddr
 		lifecycleCallbackConfig.DisableClaimBatching = m.config.DisableClaimBatching
 		lifecycleCallbackConfig.DisableProofBatching = m.config.DisableProofBatching
+		lifecycleCallbackConfig.DisablePreProofClaimVerification = m.config.DisablePreProofClaimVerification
 		lifecycleCallback = NewLifecycleCallback(
 			m.logger,
 			supplierClient,
@@ -845,6 +858,12 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		if m.config.AppClient != nil {
 			lifecycleCallback.SetAppClient(m.config.AppClient)
 		}
+		// Pre-proof GetClaim guard (WS-A): skips proof submission for sessions
+		// whose claim is not on-chain, preventing FailedPrecondition retry
+		// storms and wasted gas.
+		if m.config.ProofQueryClient != nil {
+			lifecycleCallback.SetProofQueryClient(m.config.ProofQueryClient)
+		}
 
 		// Wire stream deleter for cleanup after session settlement
 		// This stops the consumer from reading stale messages and frees Redis memory
@@ -854,6 +873,50 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis
 		submissionTracker := NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
 		lifecycleCallback.SetSubmissionTracker(submissionTracker)
+
+		// WS-B: wire the tx client's async inclusion poller to the submission
+		// tracker so each tx's real on-chain fate (included_success /
+		// included_failure / mempool_timeout / poll_error) lands in the
+		// ha:tx:track:* records operators scan in post-mortems.
+		//
+		// This runs once per SupplierManager start but the callback body only
+		// looks up records for the supplier named in the TxInclusionResult, so
+		// it is correct across a fleet with many suppliers sharing one TxClient.
+		if m.config.TxClient != nil {
+			tracker := submissionTracker
+			logger := m.logger
+			m.config.TxClient.AddInclusionCallback(func(ctx context.Context, result tx.TxInclusionResult) {
+				var err error
+				switch result.TxType {
+				case tx.TxTypeClaim:
+					err = tracker.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
+						Supplier:        result.Supplier,
+						TxHash:          result.TxHash,
+						Outcome:         string(result.Outcome),
+						ErrMsg:          result.ErrMsg,
+						InclusionHeight: result.InclusionHeight,
+					})
+				case tx.TxTypeProof:
+					err = tracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
+						Supplier:        result.Supplier,
+						TxHash:          result.TxHash,
+						Outcome:         string(result.Outcome),
+						ErrMsg:          result.ErrMsg,
+						InclusionHeight: result.InclusionHeight,
+					})
+				default:
+					logger.Debug().Str("tx_type", result.TxType).Str("tx_hash", result.TxHash).
+						Msg("ignoring inclusion result for unknown tx type")
+					return
+				}
+				if err != nil {
+					logger.Warn().Err(err).
+						Str("tx_type", result.TxType).
+						Str("tx_hash", result.TxHash).
+						Msg("failed to update submission tracker with on-chain outcome")
+				}
+			})
+		}
 
 		// Wire build pool for bounded parallel claim/proof building
 		// Uses master pool to avoid unbounded goroutine spawning
