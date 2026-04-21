@@ -733,9 +733,25 @@ func (m *SupplierManager) warmupSingleSupplier(ctx context.Context, supplier str
 		return nil
 	}
 
-	services := make([]string, 0, len(chainSupplier.Services))
-	for _, svc := range chainSupplier.Services {
-		services = append(services, svc.ServiceId)
+	// Use the height-aware active set, not the denormalized supplier.Services
+	// field. poktroll schedules service additions/removals via
+	// service_config_history and only applies them at session boundaries —
+	// supplier.Services reflects the immediate view and would include
+	// services that have a deactivation_height already set, which would
+	// then be written into the cache and used for relay routing until the
+	// next warmup. filterStakedSuppliers uses this same pattern.
+	var currentHeight int64
+	if m.config.BlockClient != nil {
+		if block := m.config.BlockClient.LastBlock(ctx); block != nil {
+			currentHeight = block.Height()
+		}
+	}
+	activeConfigs := chainSupplier.GetActiveServiceConfigs(currentHeight)
+	services := make([]string, 0, len(activeConfigs))
+	for _, svc := range activeConfigs {
+		if svc != nil {
+			services = append(services, svc.ServiceId)
+		}
 	}
 
 	return &SupplierWarmupData{
@@ -1395,6 +1411,21 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 // supplier — no mid-flight writer can resurrect state after the map
 // delete.
 func (m *SupplierManager) removeSupplier(operatorAddr string) {
+	// Capture the lifecycle context once under m.mu.RLock. removeSupplier
+	// can run concurrently with Close() (Close() writes m.ctx under m.mu),
+	// so every direct `m.ctx` read inside this function would be a data
+	// race. Close() cancels m.ctx but does not nil it, so the captured
+	// local is always a usable context — cancelled if Close() ran first,
+	// which is fine because every downstream call respects ctx.Done() and
+	// fails fast rather than leaving half-drained state.
+	ctx := m.keyChangeReadCtx()
+	if ctx == nil {
+		// Defensive: keyChangeReadCtx can only return nil before Start()
+		// assigns m.ctx. Fall back to Background so the cleanup still
+		// runs on a best-effort basis rather than panicking downstream.
+		ctx = context.Background()
+	}
+
 	m.suppliersMu.Lock()
 	state, exists := m.suppliers[operatorAddr]
 	if !exists {
@@ -1410,7 +1441,7 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 
 	// Publish draining status to registry
 	if m.registry != nil {
-		if err := m.registry.PublishSupplierUpdate(m.ctx, SupplierUpdateActionDraining, operatorAddr, nil); err != nil {
+		if err := m.registry.PublishSupplierUpdate(ctx, SupplierUpdateActionDraining, operatorAddr, nil); err != nil {
 			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("failed to publish draining status")
 		}
 	}
@@ -1424,7 +1455,7 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 			Services:        servicesCopy,
 			UpdatedBy:       m.config.MinerID,
 		}
-		if cacheErr := m.config.SupplierCache.SetSupplierState(m.ctx, supplierState); cacheErr != nil {
+		if cacheErr := m.config.SupplierCache.SetSupplierState(ctx, supplierState); cacheErr != nil {
 			m.logger.Warn().
 				Err(cacheErr).
 				Str(logging.FieldSupplier, operatorAddr).
@@ -1475,7 +1506,7 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	// this supplier. During rebalance, miner1 may release a supplier that miner2
 	// has already claimed and registered — deleting here would clobber miner2's entries.
 	claimKey := m.config.RedisClient.KB().MinerClaimKey(operatorAddr)
-	claimOwner, claimErr := m.config.RedisClient.Get(m.ctx, claimKey).Result()
+	claimOwner, claimErr := m.config.RedisClient.Get(ctx, claimKey).Result()
 	reclaimedByOther := claimErr == nil && claimOwner != "" && claimOwner != m.config.MinerID
 
 	if reclaimedByOther {
@@ -1486,14 +1517,14 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	} else {
 		// Publish removal to registry
 		if m.registry != nil {
-			if err := m.registry.PublishSupplierUpdate(m.ctx, SupplierUpdateActionRemove, operatorAddr, nil); err != nil {
+			if err := m.registry.PublishSupplierUpdate(ctx, SupplierUpdateActionRemove, operatorAddr, nil); err != nil {
 				m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("failed to publish removal status")
 			}
 		}
 
 		// Delete supplier from cache
 		if m.config.SupplierCache != nil {
-			if cacheErr := m.config.SupplierCache.DeleteSupplierState(m.ctx, operatorAddr); cacheErr != nil {
+			if cacheErr := m.config.SupplierCache.DeleteSupplierState(ctx, operatorAddr); cacheErr != nil {
 				m.logger.Warn().
 					Err(cacheErr).
 					Str(logging.FieldSupplier, operatorAddr).
