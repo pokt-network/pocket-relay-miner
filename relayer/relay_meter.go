@@ -735,7 +735,22 @@ func (m *RelayMeter) getAppStake(ctx context.Context, appAddress string) (int64,
 	if err != nil {
 		return 0, fmt.Errorf("failed to get application: %w", err)
 	}
-	return app.GetStake().Amount.Int64(), nil
+	// Defend the relay hot path (≥1000 RPS per replica) against a proto
+	// that arrives with a nil Stake pointer or a nil inner Amount. Real
+	// causes we've observed: partial unmarshals on cache reload, empty
+	// gRPC response bodies from a flapping full node, stale cache entries
+	// after upstream schema changes. Returning an error instead of
+	// dereffing .Amount.Int64() preserves the fail-closed semantics of
+	// the caller (`getOrCreateSessionMeter` rejects the relay) and keeps
+	// the process alive.
+	stake := app.GetStake()
+	if stake == nil {
+		return 0, fmt.Errorf("application %s has nil stake", appAddress)
+	}
+	if stake.Amount.IsNil() {
+		return 0, fmt.Errorf("application %s has nil stake amount", appAddress)
+	}
+	return stake.Amount.Int64(), nil
 }
 
 // getSharedParams gets shared params using L1 -> L2 -> L3 cache.
