@@ -850,7 +850,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			} else if !allowed {
 				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 					Msg("relay rejected: session relay limit reached (eager mode)")
-				p.sendError(w, http.StatusPaymentRequired, "session relay limit reached: claimable portion fully consumed")
+				p.sendError(w, http.StatusTooManyRequests, "session relay limit reached: claimable portion fully consumed")
 				relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonStakeExhausted).Inc()
 				return
 			}
