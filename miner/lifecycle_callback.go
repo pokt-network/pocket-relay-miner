@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -343,6 +345,58 @@ type claimBuildCollection struct {
 	failed  []claimBuildResult
 }
 
+// proofBuildResult is the output of a single proof-build goroutine
+// inside OnSessionsNeedProof. Declared at package scope so that the
+// collector (collectProofBuildResults) can consume a typed channel
+// without redeclaring the struct inside the function.
+type proofBuildResult struct {
+	index    int
+	snapshot *SessionSnapshot
+	proofMsg *prooftypes.MsgSubmitProof
+	err      error
+}
+
+// proofBuildCollection is the partitioned result of draining numTasks
+// proofBuildResult values from the proof worker channel. Proofs have no
+// skip path (unlike claims, which can bail early on "unprofitable" or
+// "empty_tree"); every attempt either builds or fails.
+type proofBuildCollection struct {
+	built  []proofBuildResult
+	failed []proofBuildResult
+}
+
+// collectProofBuildResults drains exactly numTasks values from resultsCh
+// and partitions them into (built, failed). A prior implementation bailed
+// out on the first result.err != nil, which had two serious consequences:
+//
+//  1. The remaining goroutines were still attempting to write into a
+//     buffered channel of size numTasks that would never be read again,
+//     leaking one goroutine per remaining task until process exit.
+//  2. Proof-builds that had already completed successfully were silently
+//     abandoned — their sessions stayed in SessionStateClaimed forever,
+//     the proof window closed, and the supplier lost the claim even
+//     though the proof was ready to submit.
+//
+// Like collectClaimBuildResults, this function never returns an error:
+// it drains every task and lets the caller decide what to do with each
+// bucket. resultsCh MUST deliver exactly numTasks values.
+func collectProofBuildResults(numTasks int, resultsCh <-chan proofBuildResult) proofBuildCollection {
+	coll := proofBuildCollection{}
+	if numTasks <= 0 {
+		return coll
+	}
+	coll.built = make([]proofBuildResult, 0, numTasks)
+	for i := 0; i < numTasks; i++ {
+		r := <-resultsCh
+		if r.err != nil {
+			coll.failed = append(coll.failed, r)
+			continue
+		}
+		coll.built = append(coll.built, r)
+	}
+	return coll
+}
+
 // collectClaimBuildResults drains exactly numTasks values from results and
 // partitions them into (built, skipped, failed).
 //
@@ -601,6 +655,30 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					index:    index,
 					snapshot: snap,
 				}
+
+				// Panic guard: the collector downstream MUST receive exactly
+				// numTasks values or it leaks a goroutine per missing slot.
+				// If any step below panics (nil snapshot field, SMST boundary
+				// miss, proto zero-value) the deferred recover converts the
+				// panic into a failed result so the collector drains cleanly.
+				// Covers both the pool path (pond also absorbs panics, but
+				// would not write our channel) and the fallback go path.
+				defer func() {
+					if r := recover(); r != nil {
+						logging.PanicRecoveriesTotal.WithLabelValues("claim_build").Inc()
+						lc.logger.Error().
+							Str(logging.FieldSessionID, snap.SessionID).
+							Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+							Str("panic_value", fmt.Sprintf("%v", r)).
+							Str("stack_trace", string(debug.Stack())).
+							Msg("PANIC RECOVERED in claim build goroutine")
+						results <- claimBuildResult{
+							index:    index,
+							snapshot: snap,
+							err:      fmt.Errorf("claim build panic for session %s: %v", snap.SessionID, r),
+						}
+					}
+				}()
 
 				// Phase 1: Flush the SMST to get the root hash (source of truth).
 				// The root hash encodes count (relays) and sum (compute units)
@@ -1408,16 +1486,15 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				Msg("TEST MODE: Delay complete, continuing with proof submission")
 		}
 
-		// PARALLEL PROOF BUILDING: Generate proofs and build messages concurrently
-		// Each proof generation is independent and thread-safe
-		// This significantly reduces latency when processing batches of sessions
-		type proofBuildResult struct {
-			index    int
-			snapshot *SessionSnapshot
-			proofMsg *prooftypes.MsgSubmitProof
-			err      error
-		}
-
+		// PARALLEL PROOF BUILDING: Generate proofs and build messages concurrently.
+		// Each proof generation is independent and thread-safe, so processing
+		// batches of sessions in parallel significantly reduces latency.
+		//
+		// The result channel is exactly len(sessionsNeedingProof) so every
+		// goroutine can write without blocking. The collector below MUST
+		// drain every slot — early-return would (a) leak the remaining
+		// goroutines permanently and (b) silently drop proofs that built
+		// successfully, causing revenue loss when the proof window closes.
 		proofResults := make(chan proofBuildResult, len(sessionsNeedingProof))
 		numProofTasks := len(sessionsNeedingProof)
 
@@ -1432,6 +1509,29 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					index:    index,
 					snapshot: snap,
 				}
+
+				// Panic guard: collectProofBuildResults MUST receive exactly
+				// numProofTasks values or a goroutine leaks per missing slot.
+				// Converts any panic (nil snapshot field, SMST boundary miss,
+				// nil seed hash, etc.) into a failed result so the collector
+				// drains cleanly. Applies to both pool and fallback goroutine
+				// paths because pond absorbs panics without writing our chan.
+				defer func() {
+					if r := recover(); r != nil {
+						logging.PanicRecoveriesTotal.WithLabelValues("proof_build").Inc()
+						lc.logger.Error().
+							Str(logging.FieldSessionID, snap.SessionID).
+							Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+							Str("panic_value", fmt.Sprintf("%v", r)).
+							Str("stack_trace", string(debug.Stack())).
+							Msg("PANIC RECOVERED in proof build goroutine")
+						proofResults <- proofBuildResult{
+							index:    index,
+							snapshot: snap,
+							err:      fmt.Errorf("proof build panic for session %s: %v", snap.SessionID, r),
+						}
+					}
+				}()
 
 				// Record the scheduled proof height for operators
 				SetProofScheduledHeight(snap.SupplierOperatorAddress, snap.ServiceID, snap.SessionID, float64(earliestProofHeight))
@@ -1479,20 +1579,57 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			}
 		}
 
-		// Collect all results (blocking until all tasks complete)
-		proofBuildResults := make([]proofBuildResult, numProofTasks)
-		for i := 0; i < numProofTasks; i++ {
-			result := <-proofResults
-			if result.err != nil {
-				return result.err
+		// Collect every result. Draining ALL numProofTasks values is required
+		// even when some goroutines failed — the alternative is a permanent
+		// goroutine leak (one per undrained slot) plus silent revenue loss
+		// for sessions whose proof built successfully in the same batch.
+		partitionedProofs := collectProofBuildResults(numProofTasks, proofResults)
+
+		// Surface per-session build failures as warnings + metrics and keep
+		// the batch moving with whatever built. Mirrors the claim path:
+		// one bad session does not invalidate the rest of the batch.
+		for _, r := range partitionedProofs.failed {
+			snap := r.snapshot
+			sessionID, supplier, serviceID := "", "", ""
+			if snap != nil {
+				sessionID = snap.SessionID
+				supplier = snap.SupplierOperatorAddress
+				serviceID = snap.ServiceID
 			}
-			proofBuildResults[result.index] = result
+			RecordProofSkipped(supplier, serviceID, "build_failed")
+			logger.Warn().
+				Err(r.err).
+				Str(logging.FieldSessionID, sessionID).
+				Str(logging.FieldSupplier, supplier).
+				Str(logging.FieldServiceID, serviceID).
+				Msg("session proof build failed - dropping from batch, other sessions continue")
 		}
 
-		// Extract messages in order
-		var proofMsgs []*prooftypes.MsgSubmitProof
-		for _, result := range proofBuildResults {
+		// If every proof in the batch failed to build there is nothing to
+		// submit. Surface the first failure (they are already logged above
+		// individually) so the caller can meter / retry on the next cycle.
+		if len(partitionedProofs.built) == 0 {
+			if len(partitionedProofs.failed) > 0 {
+				return fmt.Errorf("all proofs in batch failed to build (batch_size=%d): %w",
+					numProofTasks, partitionedProofs.failed[0].err)
+			}
+			// numProofTasks was zero — nothing to do.
+			return nil
+		}
+
+		// Preserve input ordering so later metric/state iterations and the
+		// submitted tx payload line up with sessionsNeedingProof.
+		proofBuildResultsSorted := make([]proofBuildResult, 0, len(partitionedProofs.built))
+		proofBuildResultsSorted = append(proofBuildResultsSorted, partitionedProofs.built...)
+		sort.SliceStable(proofBuildResultsSorted, func(i, j int) bool {
+			return proofBuildResultsSorted[i].index < proofBuildResultsSorted[j].index
+		})
+
+		proofMsgs := make([]*prooftypes.MsgSubmitProof, 0, len(proofBuildResultsSorted))
+		validProofSnapshots := make([]*SessionSnapshot, 0, len(proofBuildResultsSorted))
+		for _, result := range proofBuildResultsSorted {
 			proofMsgs = append(proofMsgs, result.proofMsg)
+			validProofSnapshots = append(validProofSnapshots, result.snapshot)
 		}
 
 		// Convert to interface types for variadic call
@@ -1512,8 +1649,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				Int("batch_size", len(proofMsgs)).
 				Msg("proof window closed while building proofs - cannot submit")
 
-			// Mark all sessions in this batch as failed (metrics + Redis state for HA)
-			for _, snapshot := range sessionsNeedingProof {
+			// Mark the sessions that actually built (and therefore would
+			// have been submitted) as window-closed. Sessions whose proof
+			// build failed are already accounted for via the per-build
+			// warning + RecordProofSkipped("build_failed") above.
+			for _, snapshot := range validProofSnapshots {
 				RecordProofWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
@@ -1564,8 +1704,10 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						Int("batch_size", len(proofMsgs)).
 						Msg("proof window closed during submission - permanent failure, not retrying")
 
-					// Mark all sessions in this batch as failed (metrics + Redis state for HA)
-					for _, snapshot := range sessionsNeedingProof {
+					// Only mark sessions whose proof actually built (and
+					// therefore entered the submit tx) as window-closed. Build
+					// failures are already metered above.
+					for _, snapshot := range validProofSnapshots {
 						RecordProofWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 						// CRITICAL: Update session state in Redis immediately for HA compatibility
@@ -1608,8 +1750,10 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				blocksAfterWindowOpen := float64(currentBlock.Height() - proofWindowOpenHeight)
 
 				// CRITICAL: Save TX hash to Redis IMMEDIATELY (1 line after broadcast)
-				// This prevents duplicate submissions if we crash after TX broadcast
-				for _, snapshot := range sessionsNeedingProof {
+				// This prevents duplicate submissions if we crash after TX broadcast.
+				// Iterate only the snapshots actually submitted — build-failed
+				// snapshots do not get a proof tx hash.
+				for _, snapshot := range validProofSnapshots {
 					if lc.sessionCoordinator != nil {
 						if updateErr := lc.sessionCoordinator.OnProofSubmitted(ctx, snapshot.SessionID, proofTxHash); updateErr != nil {
 							logger.Warn().
@@ -1621,17 +1765,19 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					}
 				}
 
-				// Record metrics for all sessions in the batch
-				for _, snapshot := range sessionsNeedingProof {
+				// Record metrics for sessions whose proof was actually submitted.
+				for _, snapshot := range validProofSnapshots {
 					RecordProofSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordProofSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
 					RecordRevenueProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 				}
 
-				// Track proof submissions to Redis for debugging
+				// Track proof submissions to Redis for debugging. The index
+				// into proofMsgs must match validProofSnapshots (both are the
+				// built-only ordered set).
 				if lc.submissionTracker != nil {
 					proofRequirementSeed := hex.EncodeToString(proofRequirementSeedBlock.Hash())
-					for i, snapshot := range sessionsNeedingProof {
+					for i, snapshot := range validProofSnapshots {
 						// Get proof hash from proof message
 						proofHash := hex.EncodeToString(proofMsgs[i].Proof)
 
@@ -1668,8 +1814,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		}
 
 		if lastErr != nil {
-			// Mark all sessions as failed due to proof TX error (after exhausting retries)
-			for _, snapshot := range sessionsNeedingProof {
+			// Mark sessions that entered the tx as failed (the ones that did
+			// not build are already counted as build_failed via RecordProofSkipped).
+			for _, snapshot := range validProofSnapshots {
 				RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
@@ -1683,10 +1830,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				}
 			}
 
-			// Track failed proof submissions to Redis for debugging
+			// Track failed proof submissions to Redis for debugging. The index
+			// into proofMsgs corresponds to validProofSnapshots by construction.
 			if lc.submissionTracker != nil {
 				proofRequirementSeed := hex.EncodeToString(proofRequirementSeedBlock.Hash())
-				for i, snapshot := range sessionsNeedingProof {
+				for i, snapshot := range validProofSnapshots {
 					// Get proof hash from proof message (proof was built, but submission failed)
 					proofHash := hex.EncodeToString(proofMsgs[i].Proof)
 

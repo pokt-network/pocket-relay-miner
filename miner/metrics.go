@@ -346,6 +346,22 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
+	// proofsSkippedTotal counts proofs dropped from a batch BEFORE submission.
+	// Typical reason:
+	//   - "build_failed" → ProveClosest or buildSessionHeader returned an error
+	//                      for a single session; the rest of the batch
+	//                      continues so one bad session does not poison the
+	//                      batch.
+	proofsSkippedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "proofs_skipped_total",
+			Help:      "Proofs dropped from a batch before submission. reason carries the cause (e.g. build_failed).",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
 	// Legacy metric for backward compatibility (deprecated - use compute_units_proved_total)
 	computeUnitsSettledTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
@@ -1333,6 +1349,14 @@ func RecordProofRequirementCheckError(supplier, operation string) {
 // (unprofitable, dedup hit, zero-work, etc).
 func RecordClaimSkipped(supplier, serviceID, reason string) {
 	claimsSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
+}
+
+// RecordProofSkipped records a proof that was dropped from a batch before
+// submission. Reason is bounded-cardinality (e.g. "build_failed"). Used to
+// surface per-session proof build failures that would otherwise be hidden
+// by the batch-level RecordProofTxError / RecordProofWindowClosed counters.
+func RecordProofSkipped(supplier, serviceID, reason string) {
+	proofsSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
 }
 
 // RecordClaimCeilingExceeded records when a claim exceeds the configured ceiling.
