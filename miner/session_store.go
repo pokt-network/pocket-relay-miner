@@ -37,6 +37,13 @@ const (
 	// SessionStateClaimTxError means the claim transaction failed (RPC error, gas, signature, etc).
 	SessionStateClaimTxError SessionState = "claim_tx_error"
 
+	// SessionStateClaimMissing means the miner recorded a successful claim broadcast
+	// (CheckTx accepted) but the claim is not present on-chain at proof time.
+	// Causes: mempool timeout, recheck eviction, validator restart, silent DeliverTx
+	// failure. Recorded by the pre-proof GetClaim guard and/or the claim reconciler.
+	// Terminal — no proof can succeed without an on-chain claim.
+	SessionStateClaimMissing SessionState = "claim_missing"
+
 	// SessionStateClaimSkipped means we intentionally did NOT submit a claim
 	// for this session because the economic viability check rejected it
 	// (expected reward < claim_fee + proof_fee). This is a terminal, non-
@@ -68,6 +75,7 @@ func (s SessionState) IsTerminal() bool {
 		SessionStateProbabilisticProved,
 		SessionStateClaimWindowClosed,
 		SessionStateClaimTxError,
+		SessionStateClaimMissing,
 		SessionStateClaimSkipped,
 		SessionStateProofWindowClosed,
 		SessionStateProofTxError:
@@ -91,6 +99,7 @@ func (s SessionState) IsSuccess() bool {
 func (s SessionState) IsFailure() bool {
 	switch s {
 	case SessionStateClaimWindowClosed, SessionStateClaimTxError,
+		SessionStateClaimMissing,
 		SessionStateProofWindowClosed, SessionStateProofTxError:
 		return true
 	default:
@@ -936,6 +945,7 @@ end
 local state = redis.call('HGET', KEYS[1], 'state')
 if state == 'proved' or state == 'probabilistic_proved'
 	or state == 'claim_window_closed' or state == 'claim_tx_error'
+	or state == 'claim_missing'
 	or state == 'proof_window_closed' or state == 'proof_tx_error'
 	or state == 'claim_skipped' then
 	return 2

@@ -346,22 +346,6 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
-	// proofsSkippedTotal counts proofs dropped from a batch BEFORE submission.
-	// Typical reason:
-	//   - "build_failed" → ProveClosest or buildSessionHeader returned an error
-	//                      for a single session; the rest of the batch
-	//                      continues so one bad session does not poison the
-	//                      batch.
-	proofsSkippedTotal = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "proofs_skipped_total",
-			Help:      "Proofs dropped from a batch before submission. reason carries the cause (e.g. build_failed).",
-		},
-		[]string{"supplier", "service_id", "reason"},
-	)
-
 	// Legacy metric for backward compatibility (deprecated - use compute_units_proved_total)
 	computeUnitsSettledTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
@@ -686,6 +670,40 @@ var (
 			Help:      "Total number of errors during proof requirement checking",
 		},
 		[]string{"supplier", "operation"},
+	)
+
+	// proofSkippedTotal counts proofs NOT submitted because of a pre-submission
+	// condition (not because of proof-requirement probability). Reason enum:
+	//   claim_missing_on_chain — pre-proof GetClaim guard found no on-chain claim
+	proofSkippedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "proof_skipped_total",
+			Help:      "Total number of proofs skipped due to a pre-submission condition (labeled by reason)",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
+	// claimInclusionOutcomeTotal records the real on-chain fate of each
+	// broadcast claim as observed by the miner-layer InclusionTracker. It
+	// polls GetClaim(supplier, sessionID) until the claim appears or the
+	// claim window closes — independent of the Tendermint tx indexer, so it
+	// works on nodes configured with tx_index=null.
+	//
+	// Outcomes (bounded enum):
+	//   on_chain_found   — claim is on-chain
+	//   on_chain_missing — claim window closed without the claim landing
+	//   poll_error       — GetClaim kept erroring through the poll horizon
+	//   poll_dropped     — inclusion pool queue saturated; no record taken
+	claimInclusionOutcomeTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claim_inclusion_outcome_total",
+			Help:      "Post-broadcast on-chain claim inclusion outcome (labeled by supplier, service_id, outcome)",
+		},
+		[]string{"supplier", "service_id", "outcome"},
 	)
 
 	// Redis consumer metrics (reserved for future instrumentation)
@@ -1344,19 +1362,34 @@ func RecordProofRequirementCheckError(supplier, operation string) {
 	proofRequirementErrors.WithLabelValues(supplier, operation).Inc()
 }
 
+// Proof-skip reasons — kept as constants so logs and metrics agree.
+// Bounded set prevents label explosion on the proofSkippedTotal counter.
+const (
+	// ProofSkippedReasonClaimMissingOnChain — pre-proof GetClaim guard found
+	// no on-chain claim for the session (tx accepted to mempool but never
+	// included, or DeliverTx rejected). Session transitions to
+	// SessionStateClaimMissing.
+	ProofSkippedReasonClaimMissingOnChain = "claim_missing_on_chain"
+
+	// ProofSkippedReasonBuildFailed — ProveClosest or buildSessionHeader
+	// returned an error for a single session inside the batched build
+	// fan-out. The rest of the batch continues so one bad session does
+	// not poison the submission.
+	ProofSkippedReasonBuildFailed = "build_failed"
+)
+
+// RecordProofSkipped increments the proof-skipped counter with the given
+// reason. Reason must come from the ProofSkippedReason* constants to keep
+// the label cardinality bounded.
+func RecordProofSkipped(supplier, serviceID, reason string) {
+	proofSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
+}
+
 // RecordClaimSkipped records an intentional claim skip with a reason label.
 // Use for decisions we make BEFORE sending the claim tx to the chain
 // (unprofitable, dedup hit, zero-work, etc).
 func RecordClaimSkipped(supplier, serviceID, reason string) {
 	claimsSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
-}
-
-// RecordProofSkipped records a proof that was dropped from a batch before
-// submission. Reason is bounded-cardinality (e.g. "build_failed"). Used to
-// surface per-session proof build failures that would otherwise be hidden
-// by the batch-level RecordProofTxError / RecordProofWindowClosed counters.
-func RecordProofSkipped(supplier, serviceID, reason string) {
-	proofsSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
 }
 
 // RecordClaimCeilingExceeded records when a claim exceeds the configured ceiling.

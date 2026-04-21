@@ -140,6 +140,47 @@ properties:
         description: Gas adjustment multiplier applied to simulated gas (only used when gas_limit=0)
         default: 1.7
         minimum: 1.0
+      disable_claim_batching:
+        type: boolean
+        description: Disable batching of claim submissions (submit each claim in its own tx). Default enabled (batching on) for gas efficiency.
+        default: false
+      disable_proof_batching:
+        type: boolean
+        description: Disable batching of proof submissions (submit each proof in its own tx). Default enabled (batching on) for gas efficiency.
+        default: false
+      disable_pre_proof_claim_verification:
+        type: boolean
+        description: |
+          Disable the pre-proof GetClaim guard that verifies each session's
+          claim is on-chain before proof submission. Default: false (guard
+          enabled — recommended). Enabling this reproduces pre-WS-A behavior
+          where proof submission attempts run even when the claim never
+          landed on-chain, producing FailedPrecondition retry storms.
+        default: false
+      disable_claim_inclusion_tracking:
+        type: boolean
+        description: |
+          Disable the post-broadcast GetClaim poller that records each claim's
+          real on-chain outcome (on_chain_found | on_chain_missing |
+          poll_error) into submission tracker records. Unlike a tx-indexer-
+          based approach, this poller queries x/proof module state and
+          works on any node regardless of tx_index configuration.
+        default: false
+      claim_inclusion_poll_interval_ms:
+        type: integer
+        description: How often the claim inclusion poller calls GetClaim (milliseconds).
+        default: 2000
+        minimum: 100
+      claim_inclusion_poller_max_concurrent:
+        type: integer
+        description: Worker pool size for concurrent claim inclusion polls.
+        default: 64
+        minimum: 1
+      claim_inclusion_max_poll_duration_ms:
+        type: integer
+        description: Wall-clock safety cap on a single poll if block height stalls (milliseconds).
+        default: 600000
+        minimum: 10000
 
   keys:
     type: object

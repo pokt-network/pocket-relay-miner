@@ -427,6 +427,53 @@ func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID strin
 	return nil
 }
 
+// OnClaimMissing marks the session as terminally failed because no on-chain
+// claim exists for it at proof time. Recorded by the pre-proof GetClaim guard
+// (and, once wired, by the claim reconciler).
+//
+// IMPORTANT: This method checks the current Redis state before overwriting.
+// If another miner in the HA set has already transitioned the session to a
+// successful terminal state, do not overwrite — that would hide a success.
+func (c *SessionCoordinator) OnClaimMissing(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	terminalCallback := c.onSessionTerminal
+	c.mu.Unlock()
+
+	current, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to read session state before marking claim_missing")
+	} else if current != nil && current.State.IsSuccess() {
+		c.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Str("current_state", string(current.State)).
+			Msg("NOT marking claim_missing: session already settled successfully by another miner")
+		return nil
+	}
+
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimMissing); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to update session state to claim_missing")
+		return err
+	}
+
+	if terminalCallback != nil {
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSessionState, string(SessionStateClaimMissing)).
+			Msg("session_coordinator_terminal: invoking terminal callback")
+		terminalCallback(sessionID, SessionStateClaimMissing)
+	}
+
+	c.logger.Info().Str(logging.FieldSessionID, sessionID).
+		Msg("claim missing on-chain — proof skipped, session terminal")
+	return nil
+}
+
 // OnProofWindowClosed marks session as failed due to proof window timeout.
 // Updates state immediately in Redis for HA compatibility.
 func (c *SessionCoordinator) OnProofWindowClosed(ctx context.Context, sessionID string) error {

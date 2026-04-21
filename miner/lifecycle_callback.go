@@ -14,6 +14,8 @@ import (
 	"time"
 
 	"github.com/alitto/pond/v2"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/pokt-network/smt"
@@ -106,6 +108,17 @@ type LifecycleCallbackConfig struct {
 	// blocks into a TX broadcast deadline. The TxClient enforces hard min/max bounds
 	// regardless of this value. Default: 30.
 	BlockTimeSeconds int64
+
+	// DisablePreProofClaimVerification turns off the pre-proof GetClaim guard.
+	// When the guard is on (the default — zero value is false), the miner
+	// queries the chain for each session's claim before proof submission and
+	// drops sessions whose claim is missing on-chain, transitioning them to
+	// SessionStateClaimMissing. This prevents the "no claim found for session
+	// ID ..." FailedPrecondition retry storm and the wasted gas that follows
+	// when a claim tx was accepted to mempool but never included in a block.
+	//
+	// Leave this false (guard enabled) in production.
+	DisablePreProofClaimVerification bool
 }
 
 // DefaultLifecycleCallbackConfig returns sensible defaults.
@@ -197,6 +210,17 @@ type LifecycleCallback struct {
 	// If nil, local cache cleanup is skipped (Redis entries still expire via TTL).
 	deduplicator Deduplicator
 
+	// proofQueryClient is used by the pre-proof GetClaim guard to verify each
+	// session's claim exists on-chain before proof submission. If nil, the
+	// guard is skipped (legacy behavior).
+	proofQueryClient pocktclient.ProofQueryClient
+
+	// inclusionTracker schedules post-broadcast GetClaim polls that record
+	// the real on-chain outcome of each claim tx. If nil, outcome tracking
+	// is skipped — submissionTracker records still show broadcast-accepted
+	// semantics via ClaimSuccess, but no ClaimOnChainOutcome field will land.
+	inclusionTracker *InclusionTracker
+
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
 	sessionLocksMu sync.Mutex
@@ -280,6 +304,36 @@ func (lc *LifecycleCallback) SetBuildPool(pool pond.Pool) {
 // If not set, local cache cleanup is skipped (Redis entries still expire via TTL).
 func (lc *LifecycleCallback) SetDeduplicator(dedup Deduplicator) {
 	lc.deduplicator = dedup
+}
+
+// SetProofQueryClient wires the on-chain proof query client used by the
+// pre-proof GetClaim guard. If not set (or if the config flag
+// EnablePreProofClaimVerification is false), the guard is skipped and the
+// proof pipeline behaves as before the WS-A fix.
+func (lc *LifecycleCallback) SetProofQueryClient(client pocktclient.ProofQueryClient) {
+	lc.proofQueryClient = client
+}
+
+// SetInclusionTracker wires the post-broadcast GetClaim inclusion tracker.
+// Optional — without it, no ClaimOnChainOutcome field is written and no
+// miner_claim_inclusion_outcome_total metric fires.
+func (lc *LifecycleCallback) SetInclusionTracker(tracker *InclusionTracker) {
+	lc.inclusionTracker = tracker
+}
+
+// isClaimNotFoundError returns true when an error from the proof query client
+// indicates that a claim does not exist on-chain. The query client wraps the
+// gRPC error via fmt.Errorf(..., %w) (see query/query.go), so we both unwrap
+// with errors.As (via status.FromError) and fall back to a substring check on
+// the rendered message for defensive coverage of older wrappers.
+func isClaimNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		return true
+	}
+	return strings.Contains(err.Error(), "not found")
 }
 
 // removeSessionLock removes a per-session lock.
@@ -1050,6 +1104,23 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					}
 				}
 
+				// Schedule post-broadcast claim inclusion polling. Each session
+				// in the batch gets its own GetClaim poll; the tracker marks
+				// the submission record with on_chain_found / on_chain_missing
+				// / poll_error once the claim window closes. No tx indexer
+				// required — GetClaim reads x/proof module state.
+				if lc.inclusionTracker != nil && claimTxHash != "" {
+					for _, snapshot := range validSnapshots {
+						lc.inclusionTracker.ScheduleClaimCheck(ClaimInclusionCheck{
+							Supplier:         snapshot.SupplierOperatorAddress,
+							ServiceID:        snapshot.ServiceID,
+							SessionID:        snapshot.SessionID,
+							SessionEndHeight: snapshot.SessionEndHeight,
+							ClaimTxHash:      claimTxHash,
+						})
+					}
+				}
+
 				logger.Info().
 					Int("batch_size", len(claimMsgs)).
 					Str("claim_tx_hash", claimTxHash).
@@ -1247,6 +1318,42 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					Str("existing_proof_tx_hash", snapshot.ProofTxHash).
 					Msg("skipping proof - already submitted for this session (deduplication)")
 				continue // Skip this session
+			}
+
+			// Pre-proof GetClaim guard (WS-A).
+			//
+			// The miner records claim_success=true on CheckTx/mempool acceptance, so a
+			// session in SessionStateClaimed does NOT guarantee the claim is on-chain.
+			// Submitting a proof when the claim is missing triggers an unrecoverable
+			// FailedPrecondition ("no claim found for session ID") and burns gas
+			// across three retries. Query GetClaim first; if NotFound, drop the session
+			// from this batch and mark it terminal. Fail-open on other RPC errors so a
+			// flapping chain node does not lose valid proofs.
+			if !lc.config.DisablePreProofClaimVerification && lc.proofQueryClient != nil {
+				_, claimErr := lc.proofQueryClient.GetClaim(ctx, snapshot.SupplierOperatorAddress, snapshot.SessionID)
+				if claimErr != nil && isClaimNotFoundError(claimErr) {
+					logger.Warn().
+						Str(logging.FieldSessionID, snapshot.SessionID).
+						Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+						Str("claim_tx_hash", snapshot.ClaimTxHash).
+						Msg("pre-proof guard: no on-chain claim found for session — skipping proof, marking session claim_missing")
+					RecordProofSkipped(snapshot.SupplierOperatorAddress, snapshot.ServiceID, ProofSkippedReasonClaimMissingOnChain)
+					if lc.sessionCoordinator != nil {
+						if markErr := lc.sessionCoordinator.OnClaimMissing(ctx, snapshot.SessionID); markErr != nil {
+							logger.Warn().
+								Err(markErr).
+								Str(logging.FieldSessionID, snapshot.SessionID).
+								Msg("failed to mark session as claim_missing")
+						}
+					}
+					continue
+				}
+				if claimErr != nil {
+					logger.Warn().
+						Err(claimErr).
+						Str(logging.FieldSessionID, snapshot.SessionID).
+						Msg("pre-proof guard: GetClaim RPC error — fail-open, proceeding with proof submission")
+				}
 			}
 
 			if lc.proofChecker != nil {
@@ -1596,7 +1703,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				supplier = snap.SupplierOperatorAddress
 				serviceID = snap.ServiceID
 			}
-			RecordProofSkipped(supplier, serviceID, "build_failed")
+			RecordProofSkipped(supplier, serviceID, ProofSkippedReasonBuildFailed)
 			logger.Warn().
 				Err(r.err).
 				Str(logging.FieldSessionID, sessionID).

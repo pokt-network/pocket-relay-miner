@@ -330,6 +330,57 @@ type TransactionConfig struct {
 	// Matches the pre-existing hardcoded 2-minute behaviour.
 	// Default: 120
 	TxTimeoutDefaultSeconds int64 `yaml:"tx_timeout_default_seconds,omitempty"`
+
+	// DisablePreProofClaimVerification disables the pre-proof GetClaim guard.
+	// The guard queries the chain for each session's claim before proof
+	// submission; sessions whose claim is not on-chain are dropped from the
+	// proof batch and marked claim_missing. This prevents the
+	// "no claim found for session ID" FailedPrecondition retry storm when a
+	// claim tx was accepted into the mempool but never included in a block.
+	// Leave disabled only to reproduce pre-WS-A behavior. Default: false
+	// (guard enabled — recommended for production).
+	DisablePreProofClaimVerification bool `yaml:"disable_pre_proof_claim_verification,omitempty"`
+
+	// DisableClaimInclusionTracking turns off the post-broadcast GetClaim
+	// poller. When enabled (the default) the miner populates
+	// claim_on_chain_outcome fields on submission tracker records and emits
+	// the miner_claim_inclusion_outcome_total metric.
+	//
+	// Unlike a tx-indexer-based poller, this one queries the x/proof module
+	// state and works on any node regardless of tx_index configuration.
+	// Default: false (poller enabled).
+	DisableClaimInclusionTracking bool `yaml:"disable_claim_inclusion_tracking,omitempty"`
+
+	// ClaimInclusionPollIntervalMs is how often the poller calls GetClaim,
+	// in milliseconds. Default: 2000 (2s).
+	ClaimInclusionPollIntervalMs int64 `yaml:"claim_inclusion_poll_interval_ms,omitempty"`
+
+	// ClaimInclusionPollerMaxConcurrent caps the size of the poller's
+	// worker pool. Default: 64.
+	ClaimInclusionPollerMaxConcurrent int `yaml:"claim_inclusion_poller_max_concurrent,omitempty"`
+
+	// ClaimInclusionMaxPollDurationMs is a wall-clock safety cap. Polls
+	// normally terminate when the claim window closes; this cap ensures
+	// they also terminate if the local block height feed stalls. Default:
+	// 600000 (10m).
+	ClaimInclusionMaxPollDurationMs int64 `yaml:"claim_inclusion_max_poll_duration_ms,omitempty"`
+}
+
+// InclusionTrackerConfig translates the YAML-facing fields on
+// TransactionConfig into the miner-layer InclusionTrackerConfig. Callers
+// pass the result to NewInclusionTracker.
+func (c TransactionConfig) InclusionTrackerConfig() InclusionTrackerConfig {
+	cfg := InclusionTrackerConfig{
+		Disabled:      c.DisableClaimInclusionTracking,
+		MaxConcurrent: c.ClaimInclusionPollerMaxConcurrent,
+	}
+	if c.ClaimInclusionPollIntervalMs > 0 {
+		cfg.PollInterval = time.Duration(c.ClaimInclusionPollIntervalMs) * time.Millisecond
+	}
+	if c.ClaimInclusionMaxPollDurationMs > 0 {
+		cfg.MaxPollDuration = time.Duration(c.ClaimInclusionMaxPollDurationMs) * time.Millisecond
+	}
+	return cfg
 }
 
 type SupplierConfig struct {
