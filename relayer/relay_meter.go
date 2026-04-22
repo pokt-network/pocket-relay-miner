@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 	"sync"
 	"time"
 
@@ -263,8 +264,10 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 		return m.handleRedisError("get session meter")
 	}
 
-	// Atomically increment consumed stake in Redis
-	consumedKey := m.consumedKey(sessionID)
+	// Atomically increment consumed stake in Redis. Key is
+	// per-(session, supplier) so a second supplier serving the same
+	// session does not inherit the first supplier's consumed amount.
+	consumedKey := m.consumedKey(sessionID, supplierAddress)
 	newConsumed, err := m.redisClient.IncrBy(ctx, consumedKey, relayCostUpokt).Result()
 	if err != nil {
 		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
@@ -318,6 +321,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 func (m *RelayMeter) RevertRelayConsumption(
 	ctx context.Context,
 	sessionID string,
+	supplierAddress string,
 	serviceID string,
 ) error {
 	relayCostUpokt, err := m.getRelayCost(ctx, serviceID)
@@ -325,7 +329,7 @@ func (m *RelayMeter) RevertRelayConsumption(
 		return nil // Can't calculate, skip revert
 	}
 
-	consumedKey := m.consumedKey(sessionID)
+	consumedKey := m.consumedKey(sessionID, supplierAddress)
 	newVal, err := m.redisClient.DecrBy(ctx, consumedKey, relayCostUpokt).Result()
 	if err != nil {
 		return fmt.Errorf("failed to revert consumption: %w", err)
@@ -339,14 +343,17 @@ func (m *RelayMeter) RevertRelayConsumption(
 	return nil
 }
 
-// GetSessionMeterState returns the current meter state for a session.
-func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID string) *SessionMeterState {
-	meta, err := m.getSessionMeta(ctx, sessionID)
+// GetSessionMeterState returns the current meter state for a session and
+// supplier. The meter is per-(session, supplier); callers that held a
+// prior "per-session" mental model must now specify which supplier's
+// portion they want.
+func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID, supplierAddress string) *SessionMeterState {
+	meta, err := m.getSessionMeta(ctx, sessionID, supplierAddress)
 	if err != nil || meta == nil {
 		return nil
 	}
 
-	consumed, _ := m.redisClient.Get(ctx, m.consumedKey(sessionID)).Int64()
+	consumed, _ := m.redisClient.Get(ctx, m.consumedKey(sessionID, supplierAddress)).Int64()
 
 	return &SessionMeterState{
 		SessionID:        meta.SessionID,
@@ -359,25 +366,32 @@ func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID string)
 	}
 }
 
-// ClearSessionMeter clears all metering data for a session.
-// Called by miners when claims are processed to free Redis space.
-func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) error {
+// ClearSessionMeter clears all metering data for a (session, supplier)
+// pair. Called by miners when claims for that supplier's portion of the
+// session are processed, to free Redis space. The meter is per-supplier,
+// so a shared session with two suppliers requires two independent
+// cleanup calls (one per supplier).
+func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierAddress string) error {
+	cacheKey := localCacheKey(sessionID, supplierAddress)
+
 	// Clear from local cache (L1)
 	m.localCacheMu.Lock()
-	delete(m.localCache, sessionID)
+	delete(m.localCache, cacheKey)
 	m.localCacheMu.Unlock()
 
 	// Remove from active sessions tracking set
 	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
-	if err := m.redisClient.SRem(ctx, activeKey, sessionID).Err(); err != nil {
-		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+	if err := m.redisClient.SRem(ctx, activeKey, cacheKey).Err(); err != nil {
+		m.logger.Warn().Err(err).
+			Str(logging.FieldSessionID, sessionID).
+			Str(logging.FieldSupplier, supplierAddress).
 			Msg("failed to remove session from active tracking set")
 	}
 
 	// Delete from Redis (shared L2 cache)
 	keys := []string{
-		m.metaKey(sessionID),
-		m.consumedKey(sessionID),
+		m.metaKey(sessionID, supplierAddress),
+		m.consumedKey(sessionID, supplierAddress),
 	}
 
 	if err := m.redisClient.Del(ctx, keys...).Err(); err != nil {
@@ -386,16 +400,21 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID string) er
 
 	m.logger.Debug().
 		Str(logging.FieldSessionID, sessionID).
+		Str(logging.FieldSupplier, supplierAddress).
 		Msg("cleared session meter")
 
 	return nil
 }
 
-// PublishCleanupSignal publishes a cleanup signal for a session.
-// Miners call this after processing claims to notify all relayers.
-func (m *RelayMeter) PublishCleanupSignal(ctx context.Context, sessionID string) error {
+// PublishCleanupSignal publishes a cleanup signal for a (session, supplier)
+// pair. Miners call this after processing claims to notify all relayers
+// that this supplier's portion of the session meter can be released.
+// The payload format is "sessionID|supplierAddress"; subscribers parse on
+// the '|' separator.
+func (m *RelayMeter) PublishCleanupSignal(ctx context.Context, sessionID, supplierAddress string) error {
 	channel := fmt.Sprintf("%s:%s", m.config.RedisKeyPrefix, meterCleanupChannel)
-	return m.redisClient.Publish(ctx, channel, sessionID).Err()
+	payload := sessionID + "|" + supplierAddress
+	return m.redisClient.Publish(ctx, channel, payload).Err()
 }
 
 // getOrCreateSessionMeter gets or creates a session meter in Redis.
@@ -434,9 +453,11 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 		return true
 	}
 
+	cacheKey := localCacheKey(sessionID, supplierAddress)
+
 	// Check local cache first (L1)
 	m.localCacheMu.RLock()
-	if meta, exists := m.localCache[sessionID]; exists {
+	if meta, exists := m.localCache[cacheKey]; exists {
 		m.localCacheMu.RUnlock()
 		if fresh(meta) {
 			return meta, meta.MaxStakeUpokt, nil
@@ -447,12 +468,12 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	}
 
 	// Check Redis (L2)
-	meta, err := m.getSessionMeta(ctx, sessionID)
+	meta, err := m.getSessionMeta(ctx, sessionID, supplierAddress)
 	if err == nil && meta != nil {
 		if fresh(meta) {
 			// Cache locally
 			m.localCacheMu.Lock()
-			m.localCache[sessionID] = meta
+			m.localCache[cacheKey] = meta
 			m.localCacheMu.Unlock()
 			return meta, meta.MaxStakeUpokt, nil
 		}
@@ -468,10 +489,10 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 		meta.CreatedWithAppStake = newAppStake
 		if metaBytes, mErr := json.Marshal(meta); mErr == nil {
 			// Best-effort overwrite; preserve remaining TTL.
-			m.redisClient.Set(ctx, m.metaKey(sessionID), metaBytes, redis.KeepTTL)
+			m.redisClient.Set(ctx, m.metaKey(sessionID, supplierAddress), metaBytes, redis.KeepTTL)
 		}
 		m.localCacheMu.Lock()
-		m.localCache[sessionID] = meta
+		m.localCache[cacheKey] = meta
 		m.localCacheMu.Unlock()
 		m.logger.Info().
 			Str("session_id", sessionID).
@@ -510,7 +531,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	}
 
 	// Use SETNX to handle race conditions
-	metaKey := m.metaKey(sessionID)
+	metaKey := m.metaKey(sessionID, supplierAddress)
 	set, err := m.redisClient.SetNX(ctx, metaKey, metaBytes, m.config.CacheTTL).Result()
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to create session meter: %w", err)
@@ -522,27 +543,32 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	}
 
 	// Initialize consumed counter
-	consumedKey := m.consumedKey(sessionID)
+	consumedKey := m.consumedKey(sessionID, supplierAddress)
 	m.redisClient.Set(ctx, consumedKey, 0, m.config.CacheTTL)
 
-	// Track in active sessions set (O(1) counting via SCARD).
-	// Refresh TTL on every SADD so the set self-cleans if a relayer crashes
-	// between SADD and SREM (session IDs expire with the set).
+	// Track in active sessions set (O(1) counting via SCARD). Use the
+	// per-(session, supplier) cache key so SCARD reflects the number of
+	// active meter instances. Two suppliers serving the same session
+	// contribute two entries; this matches the intent of the gauge
+	// ("active meters") and mirrors how the meter counter is keyed.
+	// Refresh TTL on every SADD so the set self-cleans if a relayer
+	// crashes between SADD and SREM (entries expire with the set).
 	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
-	m.redisClient.SAdd(ctx, activeKey, sessionID)
+	m.redisClient.SAdd(ctx, activeKey, cacheKey)
 	m.redisClient.Expire(ctx, activeKey, m.config.CacheTTL)
 
 	// Cache locally
 	m.localCacheMu.Lock()
-	m.localCache[sessionID] = meta
+	m.localCache[cacheKey] = meta
 	m.localCacheMu.Unlock()
 
 	return meta, maxStakeUpokt, nil
 }
 
-// getSessionMeta retrieves session metadata from Redis.
-func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID string) (*SessionMeterMeta, error) {
-	data, err := m.redisClient.Get(ctx, m.metaKey(sessionID)).Bytes()
+// getSessionMeta retrieves session metadata from Redis for the given
+// (session, supplier) pair.
+func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddress string) (*SessionMeterMeta, error) {
+	data, err := m.redisClient.Get(ctx, m.metaKey(sessionID, supplierAddress)).Bytes()
 	if err != nil {
 		if err == redis.Nil {
 			return nil, nil
@@ -817,6 +843,13 @@ func (m *RelayMeter) getApplicationParams(ctx context.Context) (*apptypes.Params
 
 // getServiceComputeUnits gets compute units per relay for a service using L1 -> L2 -> L3 cache.
 func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID string) (uint64, error) {
+	// Defensive nil-check: the meter is sometimes constructed without a
+	// service cache (tests, minimal bootstraps). Fall back to the same
+	// default (1 CU) the "service not found" branch uses instead of
+	// nil-deref-panicking on the relay hot path.
+	if m.serviceCache == nil {
+		return 1, nil
+	}
 	// Use service cache (L1 -> L2 -> L3)
 	service, err := m.serviceCache.Get(ctx, serviceID)
 	if err != nil {
@@ -930,12 +963,24 @@ func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 			if !ok {
 				return
 			}
-			// Received cleanup signal for a session
-			sessionID := msg.Payload
-			if err := m.ClearSessionMeter(ctx, sessionID); err != nil {
+			// Received cleanup signal. Payload format: "sessionID|supplierAddress".
+			// Payload without a '|' is treated as a legacy per-session cleanup
+			// and ignored — per-supplier meters must be cleared with an
+			// explicit supplier to avoid silently dropping a co-supplier's
+			// active meter that shares the sessionID.
+			parts := strings.SplitN(msg.Payload, "|", 2)
+			if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+				m.logger.Warn().
+					Str("payload", msg.Payload).
+					Msg("cleanup signal ignored: expected 'sessionID|supplierAddress' payload")
+				continue
+			}
+			sessionID, supplierAddress := parts[0], parts[1]
+			if err := m.ClearSessionMeter(ctx, sessionID, supplierAddress); err != nil {
 				m.logger.Warn().
 					Err(err).
 					Str(logging.FieldSessionID, sessionID).
+					Str(logging.FieldSupplier, supplierAddress).
 					Msg("failed to clear session meter on cleanup signal")
 			}
 		}
@@ -1024,13 +1069,26 @@ func (m *RelayMeter) Close() error {
 	return nil
 }
 
-// Redis key helpers
-func (m *RelayMeter) metaKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:%s:meta", m.config.RedisKeyPrefix, meterKeySuffix, sessionID)
+// Redis key helpers.
+//
+// The meter is scoped by (sessionID, supplierAddress). Two suppliers that
+// participate in the same session each get their own cap and their own
+// consumed counter — the canonical poktroll per-supplier model. A previous
+// schema keyed only by sessionID, which caused every supplier after the
+// first to starve because they shared one consumed counter.
+func (m *RelayMeter) metaKey(sessionID, supplierAddress string) string {
+	return fmt.Sprintf("%s:%s:%s:%s:meta", m.config.RedisKeyPrefix, meterKeySuffix, sessionID, supplierAddress)
 }
 
-func (m *RelayMeter) consumedKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:%s:consumed", m.config.RedisKeyPrefix, meterKeySuffix, sessionID)
+func (m *RelayMeter) consumedKey(sessionID, supplierAddress string) string {
+	return fmt.Sprintf("%s:%s:%s:%s:consumed", m.config.RedisKeyPrefix, meterKeySuffix, sessionID, supplierAddress)
+}
+
+// localCacheKey joins sessionID and supplierAddress with a separator that
+// cannot appear inside either (bech32 supplier addrs and protocol
+// sessionIDs don't contain '|'). Used as the key for m.localCache.
+func localCacheKey(sessionID, supplierAddress string) string {
+	return sessionID + "|" + supplierAddress
 }
 
 func (m *RelayMeter) sharedParamsKey() string {

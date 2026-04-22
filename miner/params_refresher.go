@@ -150,11 +150,13 @@ func (r *ParamsRefresher) AddKnownService(serviceID string) {
 	r.knownServicesMu.Unlock()
 }
 
-// PublishMeterCleanup publishes a cleanup signal for a session.
-// Called when a claim is successfully submitted to free Redis space.
-func (r *ParamsRefresher) PublishMeterCleanup(ctx context.Context, sessionID string) error {
+// PublishMeterCleanup publishes a cleanup signal for a (session, supplier)
+// pair. Payload format: "sessionID|supplierAddress". Called when a claim
+// is successfully submitted to free Redis space; the meter is per-
+// supplier, so a co-supplier on the same session keeps its meter intact.
+func (r *ParamsRefresher) PublishMeterCleanup(ctx context.Context, sessionID, supplierAddress string) error {
 	channel := fmt.Sprintf("%s:%s", r.config.RedisKeyPrefix, meterCleanupSuffix)
-	return r.redisClient.Publish(ctx, channel, sessionID).Err()
+	return r.redisClient.Publish(ctx, channel, sessionID+"|"+supplierAddress).Err()
 }
 
 // refreshWorker refreshes params on new blocks instead of time-based polling.

@@ -67,16 +67,19 @@ type SessionLifecycleCallback interface {
 	OnProofTxError(ctx context.Context, snapshot *SessionSnapshot) error
 }
 
-// MeterCleanupPublisher publishes cleanup signals to relayers when sessions leave active state.
-// This notifies relayers to clear their session meter data and decrement active session metrics.
+// MeterCleanupPublisher publishes cleanup signals to relayers when a
+// supplier's portion of a session leaves active state. Each (session,
+// supplier) meter instance is cleaned independently because the relay
+// meter enforces per-supplier caps; a shared session with two suppliers
+// produces two cleanup calls.
 type MeterCleanupPublisher interface {
-	// PublishMeterCleanup publishes a cleanup signal for a session.
-	PublishMeterCleanup(ctx context.Context, sessionID string) error
+	PublishMeterCleanup(ctx context.Context, sessionID, supplierAddress string) error
 }
 
 // RedisMeterCleanupPublisher implements MeterCleanupPublisher using Redis pub/sub.
-// It publishes session IDs to the meter cleanup channel so relayers can clear their
-// session meter data and decrement the active sessions metric.
+// The payload format is "sessionID|supplierAddress"; relayer subscribers
+// parse on the '|' separator and call ClearSessionMeter for that exact
+// (session, supplier) pair.
 type RedisMeterCleanupPublisher struct {
 	logger  logging.Logger
 	publish func(ctx context.Context, channel string, message interface{}) error
@@ -97,9 +100,10 @@ func NewRedisMeterCleanupPublisher(
 	}
 }
 
-// PublishMeterCleanup publishes a cleanup signal for a session via Redis pub/sub.
-func (p *RedisMeterCleanupPublisher) PublishMeterCleanup(ctx context.Context, sessionID string) error {
-	return p.publish(ctx, p.channel, sessionID)
+// PublishMeterCleanup publishes a cleanup signal for a (session, supplier)
+// pair via Redis pub/sub. Payload format: "sessionID|supplierAddress".
+func (p *RedisMeterCleanupPublisher) PublishMeterCleanup(ctx context.Context, sessionID, supplierAddress string) error {
+	return p.publish(ctx, p.channel, sessionID+"|"+supplierAddress)
 }
 
 // SessionLifecycleManager manages the lifecycle of sessions from active to settled.
@@ -688,11 +692,12 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			}
 
 			// Publish meter cleanup signal BEFORE updating in-memory state.
-			// Once a session transitions to claiming, it's no longer "active" from the
-			// relayer's perspective. This notifies relayers to clear their session meter
-			// data and decrement the active sessions metric.
+			// Once a session transitions to claiming, this supplier's portion
+			// of the meter is no longer needed. The signal carries both the
+			// session ID and supplier address so a co-supplier (different
+			// miner, same session) keeps its own meter intact.
 			if m.meterCleanupPublisher != nil {
-				if cleanupErr := m.meterCleanupPublisher.PublishMeterCleanup(ctx, session.SessionID); cleanupErr != nil {
+				if cleanupErr := m.meterCleanupPublisher.PublishMeterCleanup(ctx, session.SessionID, session.SupplierOperatorAddress); cleanupErr != nil {
 					m.logger.Warn().
 						Err(cleanupErr).
 						Str(logging.FieldSessionID, session.SessionID).
