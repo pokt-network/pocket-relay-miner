@@ -181,6 +181,36 @@ properties:
         description: Wall-clock safety cap on a single poll if block height stalls (milliseconds).
         default: 600000
         minimum: 10000
+      tx_timeout_min_seconds:
+        type: integer
+        description: |
+          Floor for the window-based TX broadcast deadline (seconds). Prevents a
+          near-expired window from producing an unreasonably short deadline.
+        default: 120
+        minimum: 1
+      tx_timeout_max_seconds:
+        type: integer
+        description: |
+          Cap for the window-based TX broadcast deadline (seconds). The cosmos-sdk
+          hard-rejects unordered TXs whose timeoutTimestamp is >10 minutes ahead of
+          validator time. Stay strictly below 600; setting exactly 600 will
+          intermittently fail CheckTx due to clock jitter. When unset, the default
+          is 500 ms below the hard limit (sub-second precision, applied in code).
+        maximum: 599
+        minimum: 1
+      tx_timeout_default_seconds:
+        type: integer
+        description: Fallback TX broadcast deadline when no window info is available (seconds).
+        default: 120
+        minimum: 1
+      tx_timeout_clock_skew_buffer_seconds:
+        type: integer
+        description: |
+          Subtracted from the raw window-based TX deadline BEFORE clamping to
+          [min, max]. Tune up on hosts with known NTP drift or VM steal; tune
+          down on tightly synced co-located deployments.
+        default: 60
+        minimum: 0
 
   keys:
     type: object

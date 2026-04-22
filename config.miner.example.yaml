@@ -108,14 +108,23 @@ pocket_node:
   # gas_adjustment: 1.7
 
   # TX broadcast deadline — window-based dynamic timeout
-  # The miner computes the remaining blocks in the claim/proof window and sets the
-  # TX unordered-TX TTL to (remaining_blocks * block_time_seconds), clamped to
-  # [tx_timeout_min_seconds, tx_timeout_max_seconds].  tx_timeout_default_seconds
-  # is used only when no window information is available (legacy paths / tests).
+  # The miner computes the remaining blocks in the claim/proof window as
+  # (remaining_blocks * block_time_seconds), SUBTRACTS tx_timeout_clock_skew_buffer_seconds
+  # to leave headroom for clock drift between miner host and validator, then clamps
+  # to [tx_timeout_min_seconds, tx_timeout_max_seconds]. tx_timeout_default_seconds
+  # is used only when no window info is available (legacy paths / tests).
   #
-  # tx_timeout_min_seconds: 30     # Floor: minimum TX deadline in seconds (default: 30)
-  # tx_timeout_max_seconds: 600    # Cap: maximum TX deadline in seconds (default: 600 = 10min)
-  # tx_timeout_default_seconds: 120  # Fallback when window info unavailable (default: 120 = 2min)
+  # The cosmos-sdk hard-rejects unordered TXs whose timeoutTimestamp is >10 min
+  # ahead of validator time with `unordered tx ttl exceeds 10m0s`. The default
+  # max is internally set 500ms below that ceiling; setting tx_timeout_max_seconds
+  # to 600 here will intermittently fail CheckTx due to clock jitter — stay below.
+  #
+  # tx_timeout_min_seconds: 120               # Floor (default: 120 = 2min)
+  # tx_timeout_max_seconds: 599               # Cap (default: 10min - 500ms when unset)
+  # tx_timeout_default_seconds: 120           # Fallback when window info unavailable (default: 120)
+  # tx_timeout_clock_skew_buffer_seconds: 60  # Subtracted before clamping (default: 60).
+                                              # Raise on hosts with known NTP drift;
+                                              # lower on tightly co-located + synced hosts.
 
   # NOTE: Unordered transactions with SYNC broadcast mode
   # We use unordered=true with dynamic timeout_timestamp to eliminate account

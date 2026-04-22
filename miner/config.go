@@ -317,12 +317,20 @@ type TransactionConfig struct {
 	// TxTimeoutMinSeconds is the floor for window-based TX broadcast deadlines.
 	// Even when the claim/proof window is almost closed the TX still gets at least
 	// this many seconds to land on-chain before the unordered-TX TTL expires.
-	// Default: 30
+	// Default: 120 (2 minutes — restored to the original pre-dynamic-timeout
+	// value; the earlier 30s intermediate default starved claims whose
+	// window was still wide open but per-attempt time was small)
 	TxTimeoutMinSeconds int64 `yaml:"tx_timeout_min_seconds,omitempty"`
 
 	// TxTimeoutMaxSeconds is the cap for window-based TX broadcast deadlines.
-	// Prevents a far-future window from setting an excessively long deadline.
-	// Default: 600 (10 minutes)
+	// Defaults to 500 ms below the cosmos-sdk 10-minute hard limit for
+	// unordered TXs so clock jitter cannot push the TX over the edge and
+	// trigger `unordered tx ttl exceeds 10m0s` CheckTx rejections.
+	// Operators who set this explicitly should stay strictly below 600;
+	// setting exactly 600 will intermittently fail CheckTx. If set to 0
+	// (unset), the default DefaultTxTimeoutMax in tx/tx_client.go is used
+	// (10min - 500ms, sub-second precision).
+	// Default: 600 (and unset falls back to 599.5s internally)
 	TxTimeoutMaxSeconds int64 `yaml:"tx_timeout_max_seconds,omitempty"`
 
 	// TxTimeoutDefaultSeconds is the fallback deadline when no window-based value
@@ -330,6 +338,14 @@ type TransactionConfig struct {
 	// Matches the pre-existing hardcoded 2-minute behaviour.
 	// Default: 120
 	TxTimeoutDefaultSeconds int64 `yaml:"tx_timeout_default_seconds,omitempty"`
+
+	// TxTimeoutClockSkewBufferSeconds is subtracted from the raw
+	// window-based TX deadline BEFORE clamping to [Min, Max]. Tune
+	// higher if the miner host's clock drifts from the validator (NTP
+	// glitches, VM steal, large-region topology), lower if hosts are
+	// tightly co-located and synced. Zero/negative picks up the default.
+	// Default: 60
+	TxTimeoutClockSkewBufferSeconds int64 `yaml:"tx_timeout_clock_skew_buffer_seconds,omitempty"`
 
 	// DisablePreProofClaimVerification disables the pre-proof GetClaim guard.
 	// The guard queries the chain for each session's claim before proof
@@ -524,19 +540,27 @@ func (c *Config) GetTxGasAdjustment() float64 {
 }
 
 // GetTxTimeoutMin returns the minimum TX broadcast deadline with defaults.
+// Unset (<= 0) falls back to the canonical default from tx/tx_client.go
+// (2 minutes). A misconfigured tiny value would starve the TX; 2min is
+// the smallest duration that reliably lets a claim/proof land under
+// normal mempool + network latency.
 func (c *Config) GetTxTimeoutMin() time.Duration {
 	if c.Transaction.TxTimeoutMinSeconds > 0 {
 		return time.Duration(c.Transaction.TxTimeoutMinSeconds) * time.Second
 	}
-	return 30 * time.Second
+	return 2 * time.Minute
 }
 
 // GetTxTimeoutMax returns the maximum TX broadcast deadline with defaults.
+// Unset (<= 0) falls back to 500 ms below the cosmos-sdk unordered-TX
+// hard limit (10 minutes). Operators who set this explicitly in yaml
+// get whole-second precision; leaving it unset gets the tighter
+// sub-second default, which is what we want for safety.
 func (c *Config) GetTxTimeoutMax() time.Duration {
 	if c.Transaction.TxTimeoutMaxSeconds > 0 {
 		return time.Duration(c.Transaction.TxTimeoutMaxSeconds) * time.Second
 	}
-	return 10 * time.Minute
+	return 10*time.Minute - 500*time.Millisecond
 }
 
 // GetTxTimeoutDefault returns the fallback TX broadcast deadline with defaults.
@@ -545,6 +569,16 @@ func (c *Config) GetTxTimeoutDefault() time.Duration {
 		return time.Duration(c.Transaction.TxTimeoutDefaultSeconds) * time.Second
 	}
 	return 2 * time.Minute
+}
+
+// GetTxTimeoutClockSkewBuffer returns the duration to subtract from the
+// raw window-based TX deadline before clamping. Unset (<= 0) returns
+// 60s, which covers typical NTP drift across regions.
+func (c *Config) GetTxTimeoutClockSkewBuffer() time.Duration {
+	if c.Transaction.TxTimeoutClockSkewBufferSeconds > 0 {
+		return time.Duration(c.Transaction.TxTimeoutClockSkewBufferSeconds) * time.Second
+	}
+	return 60 * time.Second
 }
 
 // GetDeduplicationTTL returns the deduplication TTL in blocks.

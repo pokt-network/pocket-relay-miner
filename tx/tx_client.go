@@ -70,14 +70,32 @@ const (
 	// DefaultChainID for the pocket network.
 	DefaultChainID = "pocket"
 
-	// DefaultTxTimeoutMin is the minimum TX broadcast deadline.
-	DefaultTxTimeoutMin = 30 * time.Second
+	// DefaultTxTimeoutMin is the minimum TX broadcast deadline. Reverted
+	// to 2 minutes (the original pre-dynamic-timeout value) because the
+	// intermediate 30s default starved real claims whose submission
+	// window still had 5+ minutes left but small per-attempt time.
+	DefaultTxTimeoutMin = 2 * time.Minute
 
-	// DefaultTxTimeoutMax is the maximum TX broadcast deadline.
-	DefaultTxTimeoutMax = 10 * time.Minute
+	// DefaultTxTimeoutMax is the maximum TX broadcast deadline, pinned
+	// 500 ms BELOW the cosmos-sdk hard limit for unordered TXs (10 min).
+	// The chain rejects any TX whose timeoutTimestamp is >10 min ahead
+	// of validator time with `unordered tx ttl exceeds 10m0s`, and
+	// clock jitter can push a miner-side 10m exactly over that edge.
+	// Operators with known-bad clock skew should widen the margin by
+	// setting TxTimeoutClockSkewBuffer higher via config; this absolute
+	// cap is only the hard ceiling the chain will accept at all.
+	DefaultTxTimeoutMax = 10*time.Minute - 500*time.Millisecond
 
 	// DefaultTxTimeoutDefault is the fallback TX deadline when no window-based value is injected.
 	DefaultTxTimeoutDefault = 2 * time.Minute
+
+	// DefaultTxTimeoutClockSkewBuffer is subtracted from every
+	// window-based raw deadline BEFORE clamping to [min, max]. It is
+	// the single knob operators should tune: widen it if their miner
+	// host clock drifts from the validator (NTP glitches, VM steal,
+	// large-region deployments), narrow it if the hosts are tightly
+	// co-located and synced. Default 60 s handles typical skew.
+	DefaultTxTimeoutClockSkewBuffer = 60 * time.Second
 )
 
 // TxClientConfig contains configuration for the transaction client.
@@ -114,18 +132,26 @@ type TxClientConfig struct {
 
 	// TxTimeoutMin is the floor for window-based TX broadcast deadlines.
 	// Prevents a near-expired window from producing an unreasonably short deadline.
-	// Default: 30s
+	// Default: 2min
 	TxTimeoutMin time.Duration
 
 	// TxTimeoutMax is the cap for window-based TX broadcast deadlines.
-	// Prevents a far-future window from blocking the context indefinitely.
-	// Default: 10min
+	// Defaults to 500 ms below the cosmos-sdk 10-minute hard limit for
+	// unordered TXs so a round-trip of clock jitter can't push us over
+	// and trigger `unordered tx ttl exceeds 10m0s` CheckTx rejections.
+	// Default: 10min - 500ms
 	TxTimeoutMax time.Duration
 
 	// TxTimeoutDefault is used when no window-based deadline is injected via context.
 	// Matches the pre-existing hardcoded behaviour.
 	// Default: 2min
 	TxTimeoutDefault time.Duration
+
+	// TxTimeoutClockSkewBuffer is subtracted from the raw window-based
+	// deadline BEFORE clamping to [TxTimeoutMin, TxTimeoutMax]. Tune
+	// higher if the miner host's clock drifts from the validator,
+	// lower if both hosts are tightly synced. Default: 60s.
+	TxTimeoutClockSkewBuffer time.Duration
 
 	// UseTLS enables TLS for the gRPC connection.
 	// Set to true when connecting to endpoints on port 443 or with TLS enabled.
@@ -194,6 +220,12 @@ func NewTxClient(
 	}
 	if config.TxTimeoutDefault <= 0 {
 		config.TxTimeoutDefault = DefaultTxTimeoutDefault
+	}
+	// Zero means "no buffer" — but operators almost never want 0.
+	// `< 0` is nonsensical (would extend the deadline past the raw window).
+	// Treat zero/negative as "unset" and apply the default.
+	if config.TxTimeoutClockSkewBuffer <= 0 {
+		config.TxTimeoutClockSkewBuffer = DefaultTxTimeoutClockSkewBuffer
 	}
 
 	var grpcConn *grpc.ClientConn
@@ -364,10 +396,44 @@ func (tc *TxClient) SubmitProofs(
 type txWindowTimeoutKey struct{}
 
 // WithTxWindowTimeout injects a raw window-based duration into ctx.
-// signAndBroadcast reads it and clamps it to [TxTimeoutMin, TxTimeoutMax].
-// If not set, signAndBroadcast falls back to TxTimeoutDefault.
+// signAndBroadcast reads it, subtracts TxTimeoutClockSkewBuffer, then
+// clamps to [TxTimeoutMin, TxTimeoutMax]. If not set, signAndBroadcast
+// falls back to TxTimeoutDefault.
 func WithTxWindowTimeout(ctx context.Context, d time.Duration) context.Context {
 	return context.WithValue(ctx, txWindowTimeoutKey{}, d)
+}
+
+// computeEffectiveTxTimeout is the pure math of the deadline decision.
+// Extracted so the skew→clamp pipeline can be tested directly without
+// building a full TxClient. source is one of:
+//
+//	"default"   — no raw window in context; fallbackDefault used
+//	"min_clamp" — raw - skew fell below min
+//	"max_clamp" — raw - skew exceeded max
+//	"window"    — raw - skew fit inside [min, max]
+//
+// skew MUST be subtracted BEFORE clamping: if we clamped first and then
+// subtracted, a raw value close to max would end up between max and
+// max-skew, but a raw value AT max would get clamped to max and then
+// land at max-skew — fine — but then the edge case where raw sits
+// exactly at the cosmos-sdk hard limit (600s) would hand the chain a
+// timeoutTimestamp at (now + max) with zero jitter headroom. Subtract
+// first so max stays an absolute ceiling.
+func computeEffectiveTxTimeout(
+	raw, skewBuffer, min, max, fallbackDefault time.Duration,
+) (timeout time.Duration, source string) {
+	if raw <= 0 {
+		return fallbackDefault, "default"
+	}
+	adjusted := raw - skewBuffer
+	switch {
+	case adjusted < min:
+		return min, "min_clamp"
+	case adjusted > max:
+		return max, "max_clamp"
+	default:
+		return adjusted, "window"
+	}
 }
 
 // signAndBroadcast signs and broadcasts a transaction.
@@ -412,25 +478,18 @@ func (tc *TxClient) signAndBroadcast(
 	// With unordered, TXs don't check sequence numbers and can be included in any order
 	txBuilder.SetUnordered(true)
 
-	// Set timeout timestamp (required for unordered TXs).
-	// Use the window-based deadline injected by the caller when available,
-	// clamped to [TxTimeoutMin, TxTimeoutMax]. Falls back to TxTimeoutDefault
-	// when no window deadline is in context (e.g. legacy callers, tests).
-	timeoutDuration := tc.config.TxTimeoutDefault
-	timeoutSource := "default"
-	if raw, ok := ctx.Value(txWindowTimeoutKey{}).(time.Duration); ok && raw > 0 {
-		switch {
-		case raw < tc.config.TxTimeoutMin:
-			timeoutDuration = tc.config.TxTimeoutMin
-			timeoutSource = "min_clamp"
-		case raw > tc.config.TxTimeoutMax:
-			timeoutDuration = tc.config.TxTimeoutMax
-			timeoutSource = "max_clamp"
-		default:
-			timeoutDuration = raw
-			timeoutSource = "window"
-		}
-	}
+	// Compute the effective deadline via the shared pure helper so the
+	// skew-then-clamp pipeline is testable and consistent across code
+	// paths. See computeEffectiveTxTimeout for the algorithm and
+	// invariants.
+	raw, _ := ctx.Value(txWindowTimeoutKey{}).(time.Duration)
+	timeoutDuration, timeoutSource := computeEffectiveTxTimeout(
+		raw,
+		tc.config.TxTimeoutClockSkewBuffer,
+		tc.config.TxTimeoutMin,
+		tc.config.TxTimeoutMax,
+		tc.config.TxTimeoutDefault,
+	)
 	timeoutTimestamp := time.Now().Add(timeoutDuration)
 	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
 
