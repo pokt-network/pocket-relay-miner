@@ -933,10 +933,10 @@ func (c *serviceQueryClient) GetServiceRelayDifficulty(ctx context.Context, serv
 
 	// Query chain
 	c.difficultyCacheMu.Lock()
-	defer c.difficultyCacheMu.Unlock()
 
 	// Double-check after acquiring lock
 	if difficulty, ok := c.difficultyCache[serviceId]; ok {
+		c.difficultyCacheMu.Unlock()
 		return difficulty, nil
 	}
 
@@ -947,10 +947,18 @@ func (c *serviceQueryClient) GetServiceRelayDifficulty(ctx context.Context, serv
 		ServiceId: serviceId,
 	})
 	if err != nil {
+		c.difficultyCacheMu.Unlock()
 		return servicetypes.RelayMiningDifficulty{}, fmt.Errorf("failed to query relay mining difficulty: %w", err)
 	}
 
 	c.difficultyCache[serviceId] = res.RelayMiningDifficulty
+	targetHash := res.RelayMiningDifficulty.TargetHash
+	c.difficultyCacheMu.Unlock()
+
+	// Metric write outside the cache lock: promauto's Set acquires its
+	// own internal mutex, so doing it under difficultyCacheMu would
+	// serialize every cache writer behind any slow /metrics scrape.
+	recordRelayMiningDifficulty(serviceId, targetHash)
 	return res.RelayMiningDifficulty, nil
 }
 
@@ -987,6 +995,7 @@ func (c *serviceQueryClient) GetServiceRelayDifficultyAtHeight(ctx context.Conte
 	if _, loaded := c.heightDifficultyCache.LoadOrStore(cacheKey, entry); !loaded {
 		c.heightDifficultyCacheSize.Add(1)
 	}
+	recordRelayMiningDifficulty(serviceId, res.RelayMiningDifficulty.TargetHash)
 
 	// Evict oldest entries if cache exceeds size cap
 	if c.heightDifficultyCacheSize.Load() > maxHeightDifficultyCacheEntries {
