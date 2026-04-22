@@ -208,16 +208,62 @@ func (m *RedisSMSTManager) runSMSTSafely(sessionID, op string, fn func() error) 
 //     nodes hash mid-session and corrupt the SMST.
 //
 // Caller must hold m.treesMu.
-func (m *RedisSMSTManager) evictCorruptSessionLocked(_ context.Context, sessionID, reason string) {
+func (m *RedisSMSTManager) evictCorruptSessionLocked(ctx context.Context, sessionID, reason string) {
 	delete(m.trees, sessionID)
 
 	observability.SMSTCorruptionEvictions.
 		WithLabelValues(m.config.SupplierAddress, reason).Inc()
 
-	m.logger.Warn().
+	// Track consecutive evictions; UpdateTree resets this to 0 on success.
+	m.evictionCounts[sessionID]++
+	consecutive := m.evictionCounts[sessionID]
+
+	// Below the threshold: preserve Redis so a transient in-memory failure
+	// can recover from the backing store on the next UpdateTree.
+	if consecutive < persistentCorruptionThreshold {
+		m.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Str("reason", reason).
+			Int("consecutive_evictions", consecutive).
+			Int("purge_threshold", persistentCorruptionThreshold).
+			Msg("evicted corrupt SMST session from memory — next UpdateTree will attempt Redis resume")
+		return
+	}
+
+	// Persistent corruption: Redis state itself is poisoned (e.g. pre-TTL
+	// legacy keys whose nodes hash diverged from live_root, or a mid-write
+	// crash that left dangling references). Preserving it only feeds the
+	// evict→resume→fail loop. Purge the 4 session-scoped keys so the next
+	// UpdateTree creates a fresh tree. Data loss is bounded to the
+	// session's current leaf count — the same loss incurred on any
+	// mid-session HA failover without a live_root, and far cheaper than
+	// the alternative (leaking a hot-loop session indefinitely).
+	supplier := m.config.SupplierAddress
+	keys := []string{
+		m.redisClient.KB().SMSTRootKey(supplier, sessionID),     // claimed_root
+		m.redisClient.KB().SMSTLiveRootKey(supplier, sessionID), // live_root
+		m.redisClient.KB().SMSTStatsKey(supplier, sessionID),    // stats
+		m.redisClient.KB().SMSTNodesKey(supplier, sessionID),    // nodes hash
+	}
+	delCount, delErr := m.redisClient.Del(ctx, keys...).Result()
+
+	observability.SMSTCorruptionPurged.
+		WithLabelValues(supplier, reason).Inc()
+
+	logEvent := m.logger.Warn().
 		Str(logging.FieldSessionID, sessionID).
 		Str("reason", reason).
-		Msg("evicted corrupt SMST session from memory — next UpdateTree will attempt Redis resume")
+		Int("consecutive_evictions", consecutive).
+		Int("purge_threshold", persistentCorruptionThreshold).
+		Int64("keys_deleted", delCount)
+	if delErr != nil {
+		logEvent.Err(delErr)
+	}
+	logEvent.Msg("ESCALATED: purged Redis-backed SMST state after repeated corruption evictions — next UpdateTree will start a fresh tree (bounded session-level data loss)")
+
+	// Reset the counter: future evictions on this session start from 0
+	// since the backing state is now clean.
+	delete(m.evictionCounts, sessionID)
 }
 
 // evictCorruptSession is the exported variant that handles its own lock.
@@ -225,6 +271,17 @@ func (m *RedisSMSTManager) evictCorruptSession(ctx context.Context, sessionID, r
 	m.treesMu.Lock()
 	defer m.treesMu.Unlock()
 	m.evictCorruptSessionLocked(ctx, sessionID, reason)
+}
+
+// resetEvictionCount zeroes the consecutive-corruption counter for a
+// session. Called after any SMST operation that proves the session is
+// healthy end-to-end (UpdateTree success), so a future transient
+// corruption gets the full persistentCorruptionThreshold budget before
+// escalating to a Redis purge.
+func (m *RedisSMSTManager) resetEvictionCount(sessionID string) {
+	m.treesMu.Lock()
+	defer m.treesMu.Unlock()
+	delete(m.evictionCounts, sessionID)
 }
 
 // isSMSTCorruption returns true for every error class the defensive
@@ -263,6 +320,20 @@ type redisSMST struct {
 	mu sync.Mutex
 }
 
+// persistentCorruptionThreshold is the number of consecutive corruption
+// evictions for the same session after which evictCorruptSessionLocked
+// escalates from memory-only eviction to a full Redis purge. The first
+// N-1 attempts preserve Redis so transient in-memory panics can be
+// recovered from the backing store; once the same session has failed
+// N times in a row it means the Redis state itself is poisoned and
+// preserving it only produces an infinite evict→resume→fail loop.
+//
+// Picked as 3 because the designed-for-transient path (a single
+// spurious library assertion caught by runSMSTSafely) resolves on
+// attempt 2 at the latest; any session that's still evicting on
+// attempt 3 is persistently corrupt and needs a fresh start.
+const persistentCorruptionThreshold = 3
+
 // RedisSMSTManager manages Redis-backed SMST trees for sessions.
 // It implements the SMSTManager interface used by LifecycleCallback.
 // This enables shared storage across HA instances for instant failover.
@@ -274,6 +345,11 @@ type RedisSMSTManager struct {
 	// Per-session SMST trees (cached in memory, but backed by Redis)
 	trees   map[string]*redisSMST
 	treesMu sync.RWMutex
+
+	// Consecutive corruption-eviction counter per session. Incremented
+	// by evictCorruptSessionLocked, reset to 0 on every successful
+	// UpdateTree. Protected by treesMu.
+	evictionCounts map[string]int
 }
 
 // NewRedisSMSTManager creates a new Redis-backed SMST manager.
@@ -284,10 +360,11 @@ func NewRedisSMSTManager(
 	config RedisSMSTManagerConfig,
 ) *RedisSMSTManager {
 	return &RedisSMSTManager{
-		logger:      logging.ForSupplierComponent(logger, "smst_manager", config.SupplierAddress),
-		redisClient: redisClient,
-		config:      config,
-		trees:       make(map[string]*redisSMST),
+		logger:         logging.ForSupplierComponent(logger, "smst_manager", config.SupplierAddress),
+		redisClient:    redisClient,
+		config:         config,
+		trees:          make(map[string]*redisSMST),
+		evictionCounts: make(map[string]int),
 	}
 }
 
@@ -541,6 +618,18 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 			return fmt.Errorf("%w: flush pipeline: %w", ErrSMSTCommitFailed, err)
 		}
 	}
+
+	// Full write path (Update + Commit + FlushPipeline) succeeded end-to-
+	// end — the session is proven healthy against both the in-memory trie
+	// and the Redis backing store. Reset the consecutive-eviction counter
+	// so a future corruption event starts at 1 and has the full threshold
+	// budget before escalating to a Redis purge. Placed AFTER Commit/
+	// FlushPipeline (not after Update alone) because corruption shapes
+	// that only manifest in Commit's recursive dirty-child traversal
+	// would otherwise reset the counter on every relay and never
+	// escalate, reproducing the same infinite-loop bug this escalation
+	// was introduced to fix.
+	m.resetEvictionCount(sessionID)
 
 	// Checkpoint the current intermediate root to Redis so a follower
 	// promoted mid-session can resume the tree at this point via
@@ -1126,6 +1215,10 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 
 	// Remove from memory
 	delete(m.trees, sessionID)
+	// Drop any accumulated corruption-eviction counter for this session
+	// so the per-session map does not leak entries across the full
+	// session lifecycle for sessions that had any eviction history.
+	delete(m.evictionCounts, sessionID)
 
 	// Remove nodes hash, root, stats, and live_root from Redis. Keys are
 	// scoped by (supplier, sessionID), so this delete only affects THIS

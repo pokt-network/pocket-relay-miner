@@ -280,4 +280,20 @@ var (
 		},
 		[]string{"supplier", "reason"},
 	)
+
+	// SMSTCorruptionPurged counts eviction escalations: sessions that
+	// hit the consecutive-corruption threshold (persistent corruption
+	// in Redis, not transient memory state) and had their backing keys
+	// purged to break the evict→resume→fail loop. A non-zero rate
+	// means operators on this instance have legacy / diverged state
+	// that the defensive in-memory eviction alone cannot self-heal.
+	SMSTCorruptionPurged = MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "corruption_purged_total",
+			Help:      "Sessions whose Redis-backed SMST state was purged after repeated corruption evictions (escalation past persistentCorruptionThreshold)",
+		},
+		[]string{"supplier", "reason"},
+	)
 )
