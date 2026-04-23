@@ -19,11 +19,27 @@
 # Usage:
 #   scripts/loadtest/backends.sh list
 #   scripts/loadtest/backends.sh probe                          # 1 req per backend, no hey
-#   scripts/loadtest/backends.sh test <service> [--reqs N] [--conns N]
+#   scripts/loadtest/backends.sh test <service> [--reqs N] [--conns N] [--payload-preset light|heavy] [--payload-file PATH]
 #   scripts/loadtest/backends.sh ramp <service>                 # c=10,50,100,250,500,1000
 #   scripts/loadtest/backends.sh optimal <service> [--max-p99-ms N]
 #   scripts/loadtest/backends.sh sweep [--include-broken]
 #   scripts/loadtest/backends.sh sweep-optimal [--max-p99-ms N] # recommended pool sizes
+#
+# Payload selection:
+#   The default `light` preset sends a minimal `eth_blockNumber`-shaped
+#   request (~70 B). That's fine for "does the backend respond?" but it
+#   wildly underestimates real PATH traffic for chains where batch calls
+#   and heavy methods dominate. On breeze, sui/op/poly/bsc all observe
+#   p95 request bodies in the 7-9 KB range — 100x the light payload.
+#
+#   `--payload-preset heavy` switches to a per-chain representative
+#   payload that matches the shape of real p95 traffic (JSON-RPC batch
+#   for EVM, sui_multiGetObjects for sui, etc.). Use this when tuning
+#   pool size for production workloads; the light default is misleading.
+#
+#   `--payload-file PATH` reads a single JSON body from disk. Use this
+#   for operator-specific payloads (e.g. an eth_getLogs with a known
+#   address that you know is hot in your traffic).
 #
 # `optimal` and `sweep-optimal` find the **best** concurrency: the highest
 # RPS where p99 is still ≤ MAX_P99_MS (default 200 ms). That's the value
@@ -38,7 +54,11 @@
 # RPS stops growing.
 #
 # Output: one CSV line per run on stdout —
-#   service,backend,conns,reqs,total_secs,rps,success_pct,p50_ms,p95_ms,p99_ms
+#   service,backend,conns,reqs_target,total_secs,rps,reqs,success_pct,p50_ms,p95_ms,p99_ms,payload_bytes,payload_tag
+#
+# `payload_bytes` is the size of the JSON body sent to each request;
+# `payload_tag` is one of light/heavy/<basename-of-file> so the CSV is
+# self-describing when you compare runs with different payloads.
 
 set -euo pipefail
 
@@ -89,24 +109,83 @@ FAIL_ON_SUCCESS_PCT="${FAIL_ON_SUCCESS_PCT:-98}"
 # extra RPS isn't worth chasing.
 MAX_P99_MS="${MAX_P99_MS:-200}"
 
-# Service → JSON-RPC payload family.
-# Most chains are EVM and accept eth_blockNumber. Cosmos chains use the
-# CometBFT /status method. Sui uses its own RPC. Near uses status.
-EVM_PAYLOAD='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
-SUI_PAYLOAD='{"jsonrpc":"2.0","method":"sui_getLatestCheckpointSequenceNumber","params":[],"id":1}'
-NEAR_PAYLOAD='{"jsonrpc":"2.0","method":"status","params":[],"id":1}'
-COSMOS_PAYLOAD='{"jsonrpc":"2.0","method":"status","params":[],"id":1}'
+# ---------------------------------------------------------------------------
+# Payload catalogue
+# ---------------------------------------------------------------------------
+# LIGHT (~70-130 B): the canonical "is the backend alive" ping. Uses the
+# cheapest read method each chain exposes. All requests in a run use the
+# same body — good for ceiling measurements when you control for request
+# size, misleading when compared against production traffic that batches
+# and passes large parameters.
+LIGHT_EVM='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+LIGHT_SUI='{"jsonrpc":"2.0","method":"sui_getLatestCheckpointSequenceNumber","params":[],"id":1}'
+LIGHT_NEAR='{"jsonrpc":"2.0","method":"status","params":[],"id":1}'
+LIGHT_COSMOS='{"jsonrpc":"2.0","method":"status","params":[],"id":1}'
 
-# Service → JSON-RPC payload selector.
-# 13 of the 14 staked services are EVM and accept eth_blockNumber. sui
-# uses its own RPC. NEAR and the cosmos chains aren't in the staked set
-# so their payloads are unused here — kept for future expansion.
+# HEAVY (~1-10 KB): request shapes closer to real p95 traffic.
+#   EVM: 5-call JSON-RPC batch mixing cheap getters, mirroring how
+#        wallets / indexers actually burst at the relayer. Every
+#        method is state-free (blockNumber / chainId / gasPrice /
+#        getBalance@latest / getBlockByNumber@latest) so the backend
+#        returns real data, not an error, on any chain.
+#   SUI: sui_multiGetObjects with 10 system package object IDs
+#        (0x01..0x0a are the Move stdlib, Sui framework, etc. on every
+#        Sui chain — guaranteed to resolve). Exercises the parse /
+#        object-fetch path, not just a trivial getter.
+#   COSMOS: batch of 5 status calls — cosmos nodes don't accept a
+#        single JSON-RPC batch as a JSON array; the batch here still
+#        serializes a realistic payload size while each call resolves.
+# No operator-specific data: addresses are burn-address placeholders
+# (0x0..01) which always return 0-balance, so every heavy payload is
+# reproducible on any chain without configuration.
+HEAVY_EVM='[{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1},{"jsonrpc":"2.0","method":"eth_chainId","params":[],"id":2},{"jsonrpc":"2.0","method":"eth_gasPrice","params":[],"id":3},{"jsonrpc":"2.0","method":"eth_getBalance","params":["0x0000000000000000000000000000000000000001","latest"],"id":4},{"jsonrpc":"2.0","method":"eth_getBlockByNumber","params":["latest",false],"id":5}]'
+HEAVY_SUI='{"jsonrpc":"2.0","method":"sui_multiGetObjects","params":[["0x0000000000000000000000000000000000000000000000000000000000000001","0x0000000000000000000000000000000000000000000000000000000000000002","0x0000000000000000000000000000000000000000000000000000000000000003","0x0000000000000000000000000000000000000000000000000000000000000004","0x0000000000000000000000000000000000000000000000000000000000000005","0x0000000000000000000000000000000000000000000000000000000000000006","0x0000000000000000000000000000000000000000000000000000000000000007","0x0000000000000000000000000000000000000000000000000000000000000008","0x0000000000000000000000000000000000000000000000000000000000000009","0x000000000000000000000000000000000000000000000000000000000000000a"],{"showType":true,"showOwner":true}],"id":1}'
+HEAVY_NEAR='[{"jsonrpc":"2.0","method":"status","params":[],"id":1},{"jsonrpc":"2.0","method":"status","params":[],"id":2},{"jsonrpc":"2.0","method":"status","params":[],"id":3},{"jsonrpc":"2.0","method":"status","params":[],"id":4},{"jsonrpc":"2.0","method":"status","params":[],"id":5}]'
+HEAVY_COSMOS='[{"jsonrpc":"2.0","method":"status","params":[],"id":1},{"jsonrpc":"2.0","method":"status","params":[],"id":2},{"jsonrpc":"2.0","method":"status","params":[],"id":3},{"jsonrpc":"2.0","method":"status","params":[],"id":4},{"jsonrpc":"2.0","method":"status","params":[],"id":5}]'
+
+# payload_for echoes the JSON body to send for a given (service, preset).
+# Preset is one of light / heavy / file:<path>. For file: the body is the
+# file contents verbatim — no substitution, so operators can drop in a
+# recorded production payload.
 payload_for() {
-  case "$1" in
-    sui)              echo "$SUI_PAYLOAD" ;;
-    near)             echo "$NEAR_PAYLOAD" ;;
-    pocket|sei)       echo "$COSMOS_PAYLOAD" ;;
-    *)                echo "$EVM_PAYLOAD" ;;
+  local svc="$1" preset="${2:-light}"
+  case "$preset" in
+    file:*)
+      local path="${preset#file:}"
+      if [[ ! -f "$path" ]]; then
+        echo "ERROR: --payload-file path does not exist: $path" >&2
+        return 1
+      fi
+      cat "$path"
+      return 0
+      ;;
+    heavy)
+      case "$svc" in
+        sui)         echo "$HEAVY_SUI" ;;
+        near)        echo "$HEAVY_NEAR" ;;
+        pocket|sei)  echo "$HEAVY_COSMOS" ;;
+        *)           echo "$HEAVY_EVM" ;;
+      esac
+      ;;
+    light|*)
+      case "$svc" in
+        sui)         echo "$LIGHT_SUI" ;;
+        near)        echo "$LIGHT_NEAR" ;;
+        pocket|sei)  echo "$LIGHT_COSMOS" ;;
+        *)           echo "$LIGHT_EVM" ;;
+      esac
+      ;;
+  esac
+}
+
+# payload_tag returns a short label used as the CSV payload_tag column.
+# Lets the operator distinguish runs when sweeping with different payloads.
+payload_tag() {
+  local preset="${1:-light}"
+  case "$preset" in
+    file:*) basename "${preset#file:}" .json ;;
+    heavy)  echo "heavy" ;;
+    *)      echo "light" ;;
   esac
 }
 
@@ -191,15 +270,21 @@ parse_hey() {
 # Run one hey burst against a service. Echoes a single CSV line.
 # Model: send N requests with C concurrent workers as fast as possible.
 # Resulting RPS = N / total_secs is the sustained throughput at concurrency C.
+# The 4th arg is the payload preset: light / heavy / file:<path>.
 run_one() {
-  local svc="$1" reqs="$2" conns="$3"
+  local svc="$1" reqs="$2" conns="$3" preset="${4:-light}"
   local url="${SERVICE_URL[$svc]:-}"
   if [[ -z "$url" ]]; then
     echo "ERROR: unknown service '$svc'" >&2
     return 1
   fi
   local payload
-  payload="$(payload_for "$svc")"
+  if ! payload="$(payload_for "$svc" "$preset")"; then
+    return 1
+  fi
+  local bytes="${#payload}"
+  local tag
+  tag="$(payload_tag "$preset")"
 
   local raw
   raw="$(remote_run "docker run --rm --network host '$HEY_IMAGE' \
@@ -209,12 +294,12 @@ run_one() {
 
   local fields
   fields="$(printf '%s\n' "$raw" | parse_hey)"
-  # CSV columns: service,backend,conns,reqs_target,total_secs,rps,reqs,success_pct,p50,p95,p99
-  printf '%s,%s,%d,%d,%s\n' "$svc" "$url" "$conns" "$reqs" "$fields"
+  # CSV columns: service,backend,conns,reqs_target,total_secs,rps,reqs,success_pct,p50,p95,p99,payload_bytes,payload_tag
+  printf '%s,%s,%d,%d,%s,%d,%s\n' "$svc" "$url" "$conns" "$reqs" "$fields" "$bytes" "$tag"
 }
 
 csv_header() {
-  echo "service,backend,conns,reqs_target,total_secs,rps,reqs,success_pct,p50_ms,p95_ms,p99_ms"
+  echo "service,backend,conns,reqs_target,total_secs,rps,reqs,success_pct,p50_ms,p95_ms,p99_ms,payload_bytes,payload_tag"
 }
 
 # Returns 0 (true) if this row is "still healthy" — keep ramping.
@@ -229,28 +314,38 @@ is_healthy() {
 
 cmd_test() {
   local svc="${1:-}"; shift || true
-  local reqs="$DEFAULT_REQS" conns="$DEFAULT_CONNS"
+  local reqs="$DEFAULT_REQS" conns="$DEFAULT_CONNS" preset="light"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --reqs)  reqs="$2"; shift 2 ;;
-      --conns) conns="$2"; shift 2 ;;
+      --reqs)            reqs="$2"; shift 2 ;;
+      --conns)           conns="$2"; shift 2 ;;
+      --payload-preset)  preset="$2"; shift 2 ;;
+      --payload-file)    preset="file:$2"; shift 2 ;;
       *) echo "unknown flag $1" >&2; exit 1 ;;
     esac
   done
   [[ -z "$svc" ]] && { echo "service required" >&2; exit 1; }
   csv_header
-  run_one "$svc" "$reqs" "$conns"
+  run_one "$svc" "$reqs" "$conns" "$preset"
 }
 
 # Ramp concurrency until p99/success degrades, then report the best healthy
 # RPS observed for this service.
 cmd_ramp() {
-  local svc="${1:-}"
+  local svc="${1:-}"; shift || true
+  local preset="light"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --payload-preset)  preset="$2"; shift 2 ;;
+      --payload-file)    preset="file:$2"; shift 2 ;;
+      *) echo "unknown flag $1" >&2; exit 1 ;;
+    esac
+  done
   [[ -z "$svc" ]] && { echo "service required" >&2; exit 1; }
   csv_header
   local best_rps="0" best_line=""
   for c in $RAMP_CONNS; do
-    local line; line="$(run_one "$svc" "$DEFAULT_REQS" "$c")"
+    local line; line="$(run_one "$svc" "$DEFAULT_REQS" "$c" "$preset")"
     echo "$line"
     if is_healthy "$line"; then
       local rps; rps="$(echo "$line" | awk -F, '{print $6}')"
@@ -271,10 +366,10 @@ cmd_ramp() {
 # Find the best concurrency for one service: the highest RPS where p99
 # is still within MAX_P99_MS. Echoes one CSV summary line.
 find_optimal() {
-  local svc="$1" max_p99="$2"
+  local svc="$1" max_p99="$2" preset="${3:-light}"
   local best_rps="0" best_c="0" best_p99="0"
   for c in $RAMP_CONNS; do
-    local line; line="$(run_one "$svc" "$DEFAULT_REQS" "$c")"
+    local line; line="$(run_one "$svc" "$DEFAULT_REQS" "$c" "$preset")"
     echo "$line"
     local success rps p99
     success="$(echo "$line" | awk -F, '{print $8}')"
@@ -296,36 +391,41 @@ find_optimal() {
 
 cmd_optimal() {
   local svc="${1:-}"; shift || true
-  local max_p99="$MAX_P99_MS"
+  local max_p99="$MAX_P99_MS" preset="light"
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --max-p99-ms) max_p99="$2"; shift 2 ;;
+      --max-p99-ms)      max_p99="$2"; shift 2 ;;
+      --payload-preset)  preset="$2"; shift 2 ;;
+      --payload-file)    preset="file:$2"; shift 2 ;;
       *) echo "unknown flag $1" >&2; exit 1 ;;
     esac
   done
   [[ -z "$svc" ]] && { echo "service required" >&2; exit 1; }
   csv_header
-  find_optimal "$svc" "$max_p99"
+  find_optimal "$svc" "$max_p99" "$preset"
 }
 
 cmd_sweep_optimal() {
-  local max_p99="$MAX_P99_MS"
+  local max_p99="$MAX_P99_MS" preset="light"
   local include_broken=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --max-p99-ms)     max_p99="$2"; shift 2 ;;
-      --include-broken) include_broken=1; shift ;;
+      --max-p99-ms)      max_p99="$2"; shift 2 ;;
+      --payload-preset)  preset="$2"; shift 2 ;;
+      --payload-file)    preset="file:$2"; shift 2 ;;
+      --include-broken)  include_broken=1; shift ;;
       *) echo "unknown flag $1" >&2; exit 1 ;;
     esac
   done
   csv_header
+  echo "# payload preset: $preset" >&2
   declare -A SVC_OPT_RPS SVC_OPT_C SVC_OPT_P99
   for svc in $(echo "${!SERVICE_URL[@]}" | tr ' ' '\n' | sort); do
     if [[ -n "${BROKEN_BACKENDS[$svc]:-}" && $include_broken -eq 0 ]]; then
       echo "# === $svc SKIPPED (broken: ${BROKEN_BACKENDS[$svc]}) ===" >&2
       continue
     fi
-    echo "# === $svc (max_p99=${max_p99}ms) ===" >&2
+    echo "# === $svc (max_p99=${max_p99}ms, preset=$preset) ===" >&2
     while IFS= read -r line; do
       if [[ "$line" == OPTIMAL,* ]]; then
         IFS=, read -r _ s c r p <<<"$line"
@@ -333,7 +433,7 @@ cmd_sweep_optimal() {
       else
         echo "$line"
       fi
-    done < <(find_optimal "$svc" "$max_p99")
+    done < <(find_optimal "$svc" "$max_p99" "$preset")
   done
   echo >&2
   echo "# === recommended pool config (max_p99 ≤ ${max_p99}ms) ===" >&2
@@ -345,9 +445,17 @@ cmd_sweep_optimal() {
 }
 
 cmd_sweep() {
-  local include_broken=0
-  [[ "${1:-}" == "--include-broken" ]] && include_broken=1
+  local include_broken=0 preset="light"
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --include-broken)  include_broken=1; shift ;;
+      --payload-preset)  preset="$2"; shift 2 ;;
+      --payload-file)    preset="file:$2"; shift 2 ;;
+      *) echo "unknown flag $1" >&2; exit 1 ;;
+    esac
+  done
   csv_header
+  echo "# payload preset: $preset" >&2
   printf '# sweep summary will be appended at the end\n' >&2
   declare -A SVC_BEST_RPS SVC_BEST_LINE
   for svc in $(echo "${!SERVICE_URL[@]}" | tr ' ' '\n' | sort); do
@@ -355,10 +463,10 @@ cmd_sweep() {
       echo "# === $svc SKIPPED (broken: ${BROKEN_BACKENDS[$svc]}) ===" >&2
       continue
     fi
-    echo "# === $svc ===" >&2
+    echo "# === $svc (preset=$preset) ===" >&2
     local best_rps="0" best_line=""
     for c in $RAMP_CONNS; do
-      local line; line="$(run_one "$svc" "$DEFAULT_REQS" "$c")"
+      local line; line="$(run_one "$svc" "$DEFAULT_REQS" "$c" "$preset")"
       echo "$line"
       if is_healthy "$line"; then
         local rps; rps="$(echo "$line" | awk -F, '{print $6}')"

@@ -91,6 +91,43 @@ tail -20 /tmp/optimal.log   # see the recommended table
 scripts/loadtest/backends.sh sweep --include-broken > /tmp/sweep-all.csv
 ```
 
+## Payload presets (critical for correct pool sizing)
+
+The default `light` preset sends a minimal `eth_blockNumber`-shaped
+request (~70 bytes). That's fine for probe/ceiling but **wildly
+underestimates the cost of real production traffic** — on breeze we
+measured sui/op with p95 request bodies of 7-9 KB, 100x the light
+preset. Pool tuning with light payloads will under-provision pools
+for services whose real traffic is batch-heavy or uses large methods.
+
+```bash
+# Default: light ping (misleading for production tuning)
+scripts/loadtest/backends.sh optimal sui
+
+# Heavy: per-chain representative payload (JSON-RPC batch for EVM,
+# sui_multiGetObjects for sui). Use this when tuning for real traffic.
+scripts/loadtest/backends.sh optimal sui --payload-preset heavy
+
+# Custom: drop in a recorded payload from your production logs.
+# File contents are sent verbatim as the request body.
+scripts/loadtest/backends.sh optimal eth \
+  --payload-file scripts/localonly/loadtest/payloads/eth-getlogs.json
+
+# Sweep with the heavy preset so all services get a representative test
+DEFAULT_REQS=20000 MAX_P99_MS=100 \
+  scripts/loadtest/backends.sh sweep-optimal --payload-preset heavy \
+  > /tmp/optimal-heavy.csv 2> /tmp/optimal-heavy.log
+```
+
+Every CSV row includes `payload_bytes` and `payload_tag` so a run is
+self-describing when you compare light vs heavy sweeps side by side.
+
+Known limits: `--payload-file` passes the body as a docker argv to
+`hey`, so payloads much larger than ~100 KB may hit ARG_MAX. For
+operator-specific payloads keep `scripts/localonly/loadtest/payloads/`
+(gitignored) alongside `backends.conf` so real method parameters never
+get committed.
+
 ## Recipes
 
 ### I'm tuning pools for the first time
