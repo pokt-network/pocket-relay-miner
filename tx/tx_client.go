@@ -76,27 +76,60 @@ const (
 	// window still had 5+ minutes left but small per-attempt time.
 	DefaultTxTimeoutMin = 2 * time.Minute
 
-	// DefaultTxTimeoutMax is the maximum TX broadcast deadline, pinned
-	// 500 ms BELOW the cosmos-sdk hard limit for unordered TXs (10 min).
-	// The chain rejects any TX whose timeoutTimestamp is >10 min ahead
-	// of validator time with `unordered tx ttl exceeds 10m0s`, and
-	// clock jitter can push a miner-side 10m exactly over that edge.
-	// Operators with known-bad clock skew should widen the margin by
-	// setting TxTimeoutClockSkewBuffer higher via config; this absolute
-	// cap is only the hard ceiling the chain will accept at all.
-	DefaultTxTimeoutMax = 10*time.Minute - 500*time.Millisecond
+	// DefaultTxTimeoutMax is the maximum TX broadcast deadline. It is
+	// anchored to the chain's latest_block_time (what the cosmos-sdk
+	// ante handler checks against via ctx.BlockTime), so the relevant
+	// ceiling is the cosmos-sdk hard limit for unordered TXs (10 min)
+	// minus a small safety margin for the worst-case race where a new
+	// block commits between our read of latest_block_time and the
+	// validator processing the tx.
+	//
+	// 10s is ample: block production on pocket targets ~60s intervals,
+	// so a single missed-block slip can't account for more than one
+	// block interval of drift. The previous 500ms margin was chosen
+	// under the wrong anchor (wall clock) and had to absorb arbitrary
+	// chain-lag; once the anchor is block time the margin only has to
+	// cover one-block-worth of in-flight settlement jitter.
+	DefaultTxTimeoutMax = 10*time.Minute - 10*time.Second
 
 	// DefaultTxTimeoutDefault is the fallback TX deadline when no window-based value is injected.
 	DefaultTxTimeoutDefault = 2 * time.Minute
 
 	// DefaultTxTimeoutClockSkewBuffer is subtracted from every
-	// window-based raw deadline BEFORE clamping to [min, max]. It is
-	// the single knob operators should tune: widen it if their miner
-	// host clock drifts from the validator (NTP glitches, VM steal,
-	// large-region deployments), narrow it if the hosts are tightly
-	// co-located and synced. Default 60 s handles typical skew.
+	// window-based raw deadline BEFORE clamping to [min, max]. It only
+	// affects the window path (raw > 0 in computeEffectiveTxTimeout):
+	// it trims a safety margin off a session-window-derived deadline so
+	// that min/max clamping is applied to an already-conservative value.
+	//
+	// It is NOT what saves us from `unordered tx ttl exceeds 10m0s`:
+	// that rejection is driven by the chain's latest_block_time drifting
+	// from wall clock, not by host clock skew. The fix for that is
+	// anchoring timeoutTimestamp on block time (see signAndBroadcast).
+	// This buffer remains useful as a window-path cushion for operators
+	// who want to leave extra headroom above the min clamp.
 	DefaultTxTimeoutClockSkewBuffer = 60 * time.Second
 )
+
+// BlockTimeProvider returns the timestamp of the most recent block the
+// caller has observed. It is used by signAndBroadcast to anchor the
+// unordered-TX timeoutTimestamp on chain time rather than wall clock.
+//
+// Why: cosmos-sdk's x/auth/ante/sigverify.go compares the tx's
+// timeoutTimestamp against ctx.BlockTime() (the latest committed
+// block's header time) and rejects with `unordered tx ttl exceeds
+// 10m0s` if the delta is greater than 10 minutes. When the chain
+// produces blocks slower than target — on breeze we observed 108s of
+// lag between wall clock and latest_block_time while the chain was
+// reporting catching_up:false — a wall-clock-anchored deadline sails
+// silently over the 600s ceiling and CheckTx drops the claim.
+//
+// Returning the zero time.Time is a valid signal of "no block observed
+// yet" (startup race); signAndBroadcast falls back to time.Now() in
+// that case, preserving the pre-fix behaviour for tests and the first
+// few seconds of miner startup.
+type BlockTimeProvider interface {
+	LatestBlockTime() time.Time
+}
 
 // TxClientConfig contains configuration for the transaction client.
 type TxClientConfig struct {
@@ -158,6 +191,16 @@ type TxClientConfig struct {
 	// Only used if GRPCConn is nil.
 	// Default: false (insecure connection)
 	UseTLS bool
+
+	// BlockTimeProvider, when non-nil, supplies the chain's latest
+	// observed block time. signAndBroadcast uses it as the anchor for
+	// timeoutTimestamp (so the 10-minute cosmos-sdk unordered-tx TTL is
+	// measured against the same clock the validator uses). When nil, or
+	// when LatestBlockTime returns the zero time.Time, signAndBroadcast
+	// falls back to time.Now() — this preserves the pre-fix behaviour
+	// for existing tests and the brief startup window before the first
+	// block event lands.
+	BlockTimeProvider BlockTimeProvider
 }
 
 // TxClient provides transaction submission capabilities for the HA system.
@@ -490,7 +533,29 @@ func (tc *TxClient) signAndBroadcast(
 		tc.config.TxTimeoutMax,
 		tc.config.TxTimeoutDefault,
 	)
-	timeoutTimestamp := time.Now().Add(timeoutDuration)
+	// Anchor timeoutTimestamp on the chain's latest_block_time, not
+	// wall clock. cosmos-sdk x/auth/ante/sigverify.go:441 checks
+	// `timeoutTimestamp - ctx.BlockTime() > 10 * time.Minute` and
+	// rejects with `unordered tx ttl exceeds 10m0s`. When the chain
+	// produces blocks slower than target (observed on breeze at 108 s
+	// of block-time-vs-wall-clock lag while catching_up=false),
+	// wall-clock anchoring pushes us silently over the ceiling and
+	// CheckTx drops the claim — permanent economic loss.
+	//
+	// Fallback to time.Now() when the provider is nil (legacy wiring,
+	// tests) or returns the zero time.Time (startup race before the
+	// first block event). The fallback preserves the previous
+	// behaviour so nothing breaks; the new default behaviour kicks in
+	// automatically once the miner wires a provider.
+	anchor := time.Now()
+	anchorSource := "wall_clock"
+	if tc.config.BlockTimeProvider != nil {
+		if bt := tc.config.BlockTimeProvider.LatestBlockTime(); !bt.IsZero() {
+			anchor = bt
+			anchorSource = "block_time"
+		}
+	}
+	timeoutTimestamp := anchor.Add(timeoutDuration)
 	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
 
 	// Determine gas limit and fees
@@ -583,6 +648,8 @@ func (tc *TxClient) signAndBroadcast(
 		Str("tx_type", txType).
 		Str("tx_hash", txHash).
 		Str("timeout_source", timeoutSource).
+		Str("anchor_source", anchorSource).
+		Time("anchor", anchor).
 		Dur("timeout_duration", timeoutDuration).
 		Time("timeout_timestamp", timeoutTimestamp).
 		Msg("transaction accepted to mempool (unordered)")

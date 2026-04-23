@@ -283,6 +283,15 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			TxTimeoutMax:             w.config.Config.GetTxTimeoutMax(),
 			TxTimeoutDefault:         w.config.Config.GetTxTimeoutDefault(),
 			TxTimeoutClockSkewBuffer: w.config.Config.GetTxTimeoutClockSkewBuffer(),
+			// Anchor tx timeoutTimestamp on the chain's latest_block_time.
+			// The RedisBlockSubscriber is already wired and tracking
+			// block events for every replica (leader and standby), so
+			// passing it here gives the tx client the exact clock the
+			// cosmos-sdk ante handler uses to validate unordered-tx
+			// TTLs. Prevents `unordered tx ttl exceeds 10m0s` rejections
+			// when the chain's block time lags wall clock. See
+			// BlockTimeProvider in tx/tx_client.go for the full rationale.
+			BlockTimeProvider: w.redisBlockSubscriber,
 		},
 	)
 	if err != nil {

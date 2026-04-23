@@ -69,6 +69,7 @@ type mockTxServiceServer struct {
 	broadcastRawLog  string
 	broadcastTxHash  string
 	broadcastCounter int
+	lastTxBytes      []byte // captured TxBytes from most recent BroadcastTx
 }
 
 func (m *mockTxServiceServer) BroadcastTx(
@@ -84,6 +85,9 @@ func (m *mockTxServiceServer) BroadcastTx(
 	txHash := m.broadcastTxHash
 	code := m.broadcastCode
 	rawLog := m.broadcastRawLog
+	// Copy so later test assertions don't race with in-flight reuse of
+	// the request buffer by the grpc server.
+	m.lastTxBytes = append([]byte(nil), req.TxBytes...)
 	m.rwMu.Unlock()
 
 	if broadcastErr != nil {
@@ -211,6 +215,15 @@ func (s *testGRPCServer) setBroadcastTxHash(txHash string) {
 // getBroadcastCount returns the number of times BroadcastTx was called
 func (s *testGRPCServer) getBroadcastCount() int {
 	return s.txServer.broadcastCounter
+}
+
+// getLastTxBytes returns a copy of the most recently broadcast TxBytes.
+// Used by tests that need to decode the outgoing tx to verify fields
+// like TimeoutTimestamp that the client sets pre-broadcast.
+func (s *testGRPCServer) getLastTxBytes() []byte {
+	s.txServer.rwMu.RLock()
+	defer s.txServer.rwMu.RUnlock()
+	return append([]byte(nil), s.txServer.lastTxBytes...)
 }
 
 // generateTestKey generates a test private key

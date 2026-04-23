@@ -41,8 +41,12 @@ type RedisBlockSubscriber struct {
 	subscribersMu sync.RWMutex
 	nextSubID     atomic.Uint64
 
-	// Current block height (cached locally)
+	// Current block height and timestamp (cached locally).
+	// heightMu guards both currentHeight and currentTime — they are
+	// updated atomically from the same BlockEvent in handleBlockEvent so
+	// readers get a consistent (height, time) pair.
 	currentHeight int64
+	currentTime   time.Time
 	heightMu      sync.RWMutex
 
 	// Lifecycle
@@ -157,10 +161,14 @@ func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
 
 // handleBlockEvent processes a received block event.
 func (s *RedisBlockSubscriber) handleBlockEvent(event BlockEvent) {
-	// Update the current height
+	// Update the current height and timestamp together. We only advance
+	// on strictly-newer heights so out-of-order events (e.g. duplicate
+	// pub/sub deliveries or a late retry) can't rewind the observed
+	// block time that downstream tx-timeout anchoring depends on.
 	s.heightMu.Lock()
 	if event.Height > s.currentHeight {
 		s.currentHeight = event.Height
+		s.currentTime = event.Timestamp
 		currentBlockHeight.Set(float64(s.currentHeight))
 	}
 	s.heightMu.Unlock()
@@ -285,6 +293,24 @@ func (s *RedisBlockSubscriber) GetCurrentHeight() int64 {
 	s.heightMu.RLock()
 	defer s.heightMu.RUnlock()
 	return s.currentHeight
+}
+
+// LatestBlockTime returns the timestamp of the most recent block this
+// subscriber has observed. Returns the zero time.Time if no block event
+// has been processed yet (startup race).
+//
+// This is the anchor used by tx.TxClient when building unordered TX
+// timeoutTimestamps: cosmos-sdk's ante handler compares timeoutTimestamp
+// against ctx.BlockTime() (the validator's latest committed block time)
+// and rejects with `unordered tx ttl exceeds 10m0s` if the delta exceeds
+// 10 minutes. Anchoring on wall-clock time instead of block time made
+// that delta unpredictable whenever the chain fell behind wall clock
+// (block-time lag, not host clock drift), which is what caused the
+// 2026-session loss on breeze.
+func (s *RedisBlockSubscriber) LatestBlockTime() time.Time {
+	s.heightMu.RLock()
+	defer s.heightMu.RUnlock()
+	return s.currentTime
 }
 
 // Close gracefully shuts down the subscriber.

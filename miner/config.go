@@ -552,15 +552,20 @@ func (c *Config) GetTxTimeoutMin() time.Duration {
 }
 
 // GetTxTimeoutMax returns the maximum TX broadcast deadline with defaults.
-// Unset (<= 0) falls back to 500 ms below the cosmos-sdk unordered-TX
-// hard limit (10 minutes). Operators who set this explicitly in yaml
-// get whole-second precision; leaving it unset gets the tighter
-// sub-second default, which is what we want for safety.
+// Unset (<= 0) falls back to 10s below the cosmos-sdk unordered-TX
+// hard limit (10 minutes). The 10s margin is tuned to the block-time
+// anchor regime: signAndBroadcast anchors timeoutTimestamp on the
+// chain's latest_block_time (see tx.BlockTimeProvider) rather than
+// wall clock, so the only jitter we need to absorb is the race where
+// a new block commits between our anchor read and the validator's
+// CheckTx. See tx.DefaultTxTimeoutMax for the full rationale — this
+// literal duplicates it because importing tx from miner/config would
+// create a cycle.
 func (c *Config) GetTxTimeoutMax() time.Duration {
 	if c.Transaction.TxTimeoutMaxSeconds > 0 {
 		return time.Duration(c.Transaction.TxTimeoutMaxSeconds) * time.Second
 	}
-	return 10*time.Minute - 500*time.Millisecond
+	return 10*time.Minute - 10*time.Second
 }
 
 // GetTxTimeoutDefault returns the fallback TX broadcast deadline with defaults.
