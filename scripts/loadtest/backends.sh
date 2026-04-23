@@ -23,7 +23,19 @@
 #   scripts/loadtest/backends.sh ramp <service>                 # c=10,50,100,250,500,1000
 #   scripts/loadtest/backends.sh optimal <service> [--max-p99-ms N]
 #   scripts/loadtest/backends.sh sweep [--include-broken]
-#   scripts/loadtest/backends.sh sweep-optimal [--max-p99-ms N] # recommended pool sizes
+#   scripts/loadtest/backends.sh sweep-optimal [--max-p99-ms N] [--min-rps N] [--optimize-for min-p99-at-min-rps|max-rps]
+#
+# Optimizer strategies:
+#   min-p99-at-min-rps (default, real-world): among conn levels that
+#       sustain ≥ MIN_RPS (default 250), pick the one with the lowest
+#       p99. This matches the production criterion "I need N RPS of
+#       headroom per replica; of the pools that give me that, which
+#       has the quietest tail?" — and tends to pick the smallest pool
+#       that clears the floor, avoiding the tail-blow-up that happens
+#       when extra concurrency only adds queuing.
+#   max-rps (legacy): pick the conn level with the highest RPS where
+#       p99 ≤ MAX_P99_MS. Reports the ceiling of the backend but
+#       usually over-provisions the pool and hurts p99 at real traffic.
 #
 # Payload selection:
 #   The default `light` preset sends a minimal `eth_blockNumber`-shaped
@@ -108,6 +120,18 @@ FAIL_ON_SUCCESS_PCT="${FAIL_ON_SUCCESS_PCT:-98}"
 # assume PATH's quality router would penalise the supplier and any
 # extra RPS isn't worth chasing.
 MAX_P99_MS="${MAX_P99_MS:-200}"
+
+# Minimum RPS a candidate conn level must sustain to be considered.
+# The default optimizer (`min-p99-at-min-rps`) picks the level with the
+# LOWEST observed p99 among the ones that clear this floor — matching
+# the production reality that you want the quietest tail at the RPS
+# your replica will actually see, not the absolute RPS ceiling.
+MIN_RPS="${MIN_RPS:-250}"
+
+# Optimizer strategy:
+#   min-p99-at-min-rps (default): pick level with min p99 where rps >= MIN_RPS
+#   max-rps:                      pick level with max rps where p99 <= MAX_P99_MS (legacy)
+OPTIMIZE_FOR="${OPTIMIZE_FOR:-min-p99-at-min-rps}"
 
 # ---------------------------------------------------------------------------
 # Payload catalogue
@@ -366,8 +390,10 @@ cmd_ramp() {
 # Find the best concurrency for one service: the highest RPS where p99
 # is still within MAX_P99_MS. Echoes one CSV summary line.
 find_optimal() {
-  local svc="$1" max_p99="$2" preset="${3:-light}"
+  local svc="$1" max_p99="$2" preset="${3:-light}" strategy="${4:-$OPTIMIZE_FOR}" min_rps="${5:-$MIN_RPS}"
+  # For min-p99-at-min-rps we initialize best_p99 high; for max-rps we keep the old behaviour.
   local best_rps="0" best_c="0" best_p99="0"
+  local cand_p99="999999"
   for c in $RAMP_CONNS; do
     local line; line="$(run_one "$svc" "$DEFAULT_REQS" "$c" "$preset")"
     echo "$line"
@@ -375,44 +401,64 @@ find_optimal() {
     success="$(echo "$line" | awk -F, '{print $8}')"
     rps="$(echo "$line" | awk -F, '{print $6}')"
     p99="$(echo "$line" | awk -F, '{print $11}')"
-    # Must be healthy AND under p99 budget AND beat current best.
-    if awk -v s="$success" -v fs="$FAIL_ON_SUCCESS_PCT" \
-            -v p="$p99" -v fp="$max_p99" \
-            -v r="$rps" -v br="$best_rps" \
-            'BEGIN { exit !(s >= fs && p <= fp && r > br) }'; then
-      best_rps="$rps"; best_c="$c"; best_p99="$p99"
-    fi
+    case "$strategy" in
+      min-p99-at-min-rps)
+        # Keep the conn level whose p99 is lowest AMONG those that
+        # sustain at least min_rps with acceptable success. This models
+        # the production criterion: "I need ≥N RPS capacity; of the
+        # pools that give me that, which gives me the quietest tail?"
+        if awk -v s="$success" -v fs="$FAIL_ON_SUCCESS_PCT" \
+                -v r="$rps" -v mr="$min_rps" \
+                -v p="$p99" -v bp="$cand_p99" \
+                'BEGIN { exit !(s >= fs && r >= mr && p < bp) }'; then
+          best_rps="$rps"; best_c="$c"; best_p99="$p99"; cand_p99="$p99"
+        fi
+        ;;
+      max-rps|*)
+        # Legacy: max RPS subject to p99 ≤ max_p99 budget.
+        if awk -v s="$success" -v fs="$FAIL_ON_SUCCESS_PCT" \
+                -v p="$p99" -v fp="$max_p99" \
+                -v r="$rps" -v br="$best_rps" \
+                'BEGIN { exit !(s >= fs && p <= fp && r > br) }'; then
+          best_rps="$rps"; best_c="$c"; best_p99="$p99"
+        fi
+        ;;
+    esac
   done
-  printf '# OPTIMAL %-22s rps=%s conns=%s p99=%sms (budget %sms)\n' \
-    "$svc" "$best_rps" "$best_c" "$best_p99" "$max_p99" >&2
+  printf '# OPTIMAL[%s] %-22s rps=%s conns=%s p99=%sms (min_rps=%s, max_p99=%sms)\n' \
+    "$strategy" "$svc" "$best_rps" "$best_c" "$best_p99" "$min_rps" "$max_p99" >&2
   # Echo a parsable line on stdout for sweep-optimal to aggregate.
   printf 'OPTIMAL,%s,%s,%s,%s\n' "$svc" "$best_c" "$best_rps" "$best_p99"
 }
 
 cmd_optimal() {
   local svc="${1:-}"; shift || true
-  local max_p99="$MAX_P99_MS" preset="light"
+  local max_p99="$MAX_P99_MS" preset="light" strategy="$OPTIMIZE_FOR" min_rps="$MIN_RPS"
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --max-p99-ms)      max_p99="$2"; shift 2 ;;
       --payload-preset)  preset="$2"; shift 2 ;;
       --payload-file)    preset="file:$2"; shift 2 ;;
+      --optimize-for)    strategy="$2"; shift 2 ;;
+      --min-rps)         min_rps="$2"; shift 2 ;;
       *) echo "unknown flag $1" >&2; exit 1 ;;
     esac
   done
   [[ -z "$svc" ]] && { echo "service required" >&2; exit 1; }
   csv_header
-  find_optimal "$svc" "$max_p99" "$preset"
+  find_optimal "$svc" "$max_p99" "$preset" "$strategy" "$min_rps"
 }
 
 cmd_sweep_optimal() {
-  local max_p99="$MAX_P99_MS" preset="light"
+  local max_p99="$MAX_P99_MS" preset="light" strategy="$OPTIMIZE_FOR" min_rps="$MIN_RPS"
   local include_broken=0
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --max-p99-ms)      max_p99="$2"; shift 2 ;;
       --payload-preset)  preset="$2"; shift 2 ;;
       --payload-file)    preset="file:$2"; shift 2 ;;
+      --optimize-for)    strategy="$2"; shift 2 ;;
+      --min-rps)         min_rps="$2"; shift 2 ;;
       --include-broken)  include_broken=1; shift ;;
       *) echo "unknown flag $1" >&2; exit 1 ;;
     esac
@@ -433,7 +479,7 @@ cmd_sweep_optimal() {
       else
         echo "$line"
       fi
-    done < <(find_optimal "$svc" "$max_p99" "$preset")
+    done < <(find_optimal "$svc" "$max_p99" "$preset" "$strategy" "$min_rps")
   done
   echo >&2
   echo "# === recommended pool config (max_p99 ≤ ${max_p99}ms) ===" >&2
