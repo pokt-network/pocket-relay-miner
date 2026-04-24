@@ -877,6 +877,22 @@ var (
 		},
 	)
 
+	// supplierCacheWriteSkipped counts how many times the supplier manager
+	// deliberately skipped a SetSupplierState write because the source data
+	// was unreliable (e.g. chain query failed). Used to detect transient
+	// fullnode outages that would otherwise cause the supplier cache to
+	// drift to Staked:true + Services:[] and break all relays for a
+	// supplier until a full restart.
+	supplierCacheWriteSkipped = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_cache_write_skipped_total",
+			Help:      "Number of times a supplier cache write was skipped to preserve existing state (e.g. chain query error)",
+		},
+		[]string{"reason"}, // reason: chain_query_error
+	)
+
 	// Supplier registry metrics
 	supplierRegistryUpdatesTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{

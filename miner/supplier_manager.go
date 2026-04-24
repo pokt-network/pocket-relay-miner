@@ -1223,30 +1223,74 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		}
 	}
 
-	// Get supplier's staked services - use pre-warmed data if available, otherwise query fresh
-	var services []string
-	var ownerAddr string
+	// Resolve supplier services + owner and publish the resulting state
+	// to the shared cache. Extracted into a helper so we can unit-test the
+	// "don't overwrite with empty services on chain query error" guard rail
+	// without spinning up the full addSupplierWithData pipeline.
+	_, services := m.resolveAndPublishSupplierState(ctx, operatorAddr, prewarmedData)
+	state.Services = services
 
-	if prewarmedData != nil {
-		// Use pre-warmed data from parallel warmup (already fresh from chain)
+	supplierManagerSuppliersActive.Inc()
+
+	m.logger.Debug().
+		Str(logging.FieldSupplier, operatorAddr).
+		Msg("supplier added and consuming")
+
+	return nil
+}
+
+// supplierDataSource describes how we obtained (or failed to obtain)
+// supplier data. It gates whether we may overwrite the shared cache.
+type supplierDataSource int
+
+const (
+	supplierDataSourceNoQueryClient supplierDataSource = iota
+	supplierDataSourcePrewarmed
+	supplierDataSourceChainOK
+	supplierDataSourceChainNotFound
+	supplierDataSourceChainError
+)
+
+// resolveAndPublishSupplierState obtains a supplier's services + owner
+// (from prewarmed data if available, otherwise the chain) and publishes
+// the resulting state to the shared supplier cache.
+//
+// Critical invariant: we must NEVER persist {Staked:true, Services:[]}
+// on the chain-query-error path. A single fullnode glitch during startup
+// would otherwise leave relayers rejecting every relay for that supplier
+// until a full restart, because warmup reloads the poisoned cache entry
+// on every boot (see fix(miner): don't persist empty supplier services
+// on failed chain query).
+//
+// Returns the resolved ownerAddr and services so callers can populate
+// per-supplier state; empty values are returned on any failure path.
+func (m *SupplierManager) resolveAndPublishSupplierState(
+	ctx context.Context,
+	operatorAddr string,
+	prewarmedData *SupplierWarmupData,
+) (ownerAddr string, services []string) {
+	source := supplierDataSourceNoQueryClient
+
+	switch {
+	case prewarmedData != nil:
 		ownerAddr = prewarmedData.OwnerAddress
 		services = prewarmedData.Services
+		source = supplierDataSourcePrewarmed
 		m.logger.Debug().
 			Str(logging.FieldSupplier, operatorAddr).
 			Int("services", len(services)).
 			Msg("using pre-warmed supplier data")
-	} else if m.config.SupplierQueryClient != nil {
-		// No pre-warmed data, query fresh from chain (hot-reload case)
+
+	case m.config.SupplierQueryClient != nil:
 		supplier, queryErr := m.config.SupplierQueryClient.GetSupplier(ctx, operatorAddr)
 		if queryErr != nil {
-			// Distinguish between "not found" (unstaked, expected) vs actual errors
 			if st, ok := status.FromError(queryErr); ok && st.Code() == codes.NotFound {
-				// Expected: supplier key loaded but not yet staked on-chain
+				source = supplierDataSourceChainNotFound
 				m.logger.Debug().
 					Str(logging.FieldSupplier, operatorAddr).
 					Msg("supplier not staked on-chain yet (pre-loaded key)")
 			} else {
-				// Unexpected: network or other errors
+				source = supplierDataSourceChainError
 				m.logger.Warn().
 					Err(queryErr).
 					Str(logging.FieldSupplier, operatorAddr).
@@ -1259,16 +1303,20 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 					services = append(services, svc.ServiceId)
 				}
 			}
+			source = supplierDataSourceChainOK
 			m.logger.Debug().
 				Str(logging.FieldSupplier, operatorAddr).
 				Str("services", fmt.Sprintf("%v", services)).
 				Msg("queried supplier services from blockchain")
 		}
 	}
-	state.Services = services
 
-	// Publish supplier state to cache for relayers to read
-	if m.config.SupplierCache != nil {
+	if m.config.SupplierCache == nil {
+		return ownerAddr, services
+	}
+
+	switch source {
+	case supplierDataSourcePrewarmed, supplierDataSourceChainOK:
 		supplierState := &cache.SupplierState{
 			Status:          cache.SupplierStatusActive,
 			Staked:          true,
@@ -1288,15 +1336,42 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 				Str("services", fmt.Sprintf("%v", services)).
 				Msg("published supplier state to cache")
 		}
+
+	case supplierDataSourceChainNotFound:
+		// Supplier legitimately unstaked — mark as such so any stale
+		// Staked:true entry gets corrected and relayers can skip it.
+		supplierState := &cache.SupplierState{
+			Status:          cache.SupplierStatusNotStaked,
+			Staked:          false,
+			OperatorAddress: operatorAddr,
+			OwnerAddress:    ownerAddr,
+			Services:        nil,
+			UpdatedBy:       m.config.MinerID,
+		}
+		if cacheErr := m.config.SupplierCache.SetSupplierState(ctx, supplierState); cacheErr != nil {
+			m.logger.Warn().
+				Err(cacheErr).
+				Str(logging.FieldSupplier, operatorAddr).
+				Msg("failed to publish not-staked supplier state to cache")
+		} else {
+			m.logger.Debug().
+				Str(logging.FieldSupplier, operatorAddr).
+				Msg("published not-staked supplier state to cache")
+		}
+
+	case supplierDataSourceChainError:
+		// Do NOT overwrite an existing cache entry with empty services.
+		// Let the next refresh on a healthy fullnode repopulate it.
+		supplierCacheWriteSkipped.WithLabelValues("chain_query_error").Inc()
+		m.logger.Warn().
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("skipping cache update: chain query failed, preserving previous state")
+
+	case supplierDataSourceNoQueryClient:
+		// No query client and no prewarmed data — nothing to publish.
 	}
 
-	supplierManagerSuppliersActive.Inc()
-
-	m.logger.Debug().
-		Str(logging.FieldSupplier, operatorAddr).
-		Msg("supplier added and consuming")
-
-	return nil
+	return ownerAddr, services
 }
 
 // consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
