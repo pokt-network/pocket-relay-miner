@@ -1,20 +1,33 @@
 package redis
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
 )
 
+// bulkConfirmThreshold is the number of keys above which `--all` requires
+// an interactive confirmation (can be bypassed with --yes).
+const bulkConfirmThreshold = 100
+
+// bulkProgressInterval controls how often bulk progress is printed.
+const bulkProgressInterval = 25
+
 func CacheCmd() *cobra.Command {
 	var (
 		cacheType  string
 		key        string
+		keyFile    string
 		invalidate bool
 		listAll    bool
+		all        bool
+		dryRun     bool
+		yes        bool
 	)
 
 	cmd := &cobra.Command{
@@ -33,17 +46,75 @@ Cache types:
 Cache tracking sets:
   - ha:cache:known:applications
   - ha:cache:known:services
-  - ha:cache:known:suppliers`,
+  - ha:cache:known:suppliers
+
+Examples:
+  # Inspect a single entry
+  pocket-relay-miner redis cache --type supplier --key pokt1abc...
+
+  # List all entries of a type
+  pocket-relay-miner redis cache --type supplier --list
+
+  # Invalidate a single entry
+  pocket-relay-miner redis cache --type supplier --invalidate --key pokt1abc...
+
+  # Bulk invalidate every entry of a type (SCAN-based, non-blocking)
+  pocket-relay-miner redis cache --type supplier --invalidate --all
+
+  # Preview bulk invalidation without deleting
+  pocket-relay-miner redis cache --type supplier --invalidate --all --dry-run
+
+  # Skip confirmation prompt on large bulk invalidations
+  pocket-relay-miner redis cache --type supplier --invalidate --all --yes
+
+  # Invalidate addresses listed in a file (one per line; '#' comments allowed)
+  pocket-relay-miner redis cache --type supplier --invalidate --key-file addrs.txt`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := context.Background()
+
+			if invalidate {
+				// Count selectors
+				sel := 0
+				if key != "" {
+					sel++
+				}
+				if all {
+					sel++
+				}
+				if keyFile != "" {
+					sel++
+				}
+				if sel == 0 {
+					return fmt.Errorf("--invalidate requires exactly one of --key, --all, or --key-file")
+				}
+				if sel > 1 {
+					return fmt.Errorf("--key, --all, and --key-file are mutually exclusive")
+				}
+				if dryRun && key != "" {
+					return fmt.Errorf("--dry-run is only meaningful with --all or --key-file")
+				}
+			} else {
+				// --dry-run / --all / --key-file / --yes only apply with --invalidate
+				if dryRun || all || keyFile != "" || yes {
+					return fmt.Errorf("--all, --key-file, --dry-run, and --yes require --invalidate")
+				}
+			}
+
 			client, err := CreateRedisClient(ctx)
 			if err != nil {
 				return err
 			}
 			defer func() { _ = client.Close() }()
 
-			if invalidate && key != "" {
-				return invalidateCache(ctx, client, cacheType, key)
+			if invalidate {
+				switch {
+				case key != "":
+					return invalidateCache(ctx, client, cacheType, key)
+				case all:
+					return invalidateAll(ctx, client, cacheType, dryRun, yes)
+				case keyFile != "":
+					return invalidateFromFile(ctx, client, cacheType, keyFile, dryRun)
+				}
 			}
 
 			if listAll {
@@ -54,13 +125,17 @@ Cache tracking sets:
 				return inspectCacheKey(ctx, client, cacheType, key)
 			}
 
-			return fmt.Errorf("specify --key to inspect, --list to list all, or --invalidate with --key")
+			return fmt.Errorf("specify --key to inspect, --list to list all, or --invalidate with --key/--all/--key-file")
 		},
 	}
 
 	cmd.Flags().StringVar(&cacheType, "type", "", "Cache type (application|service|supplier|shared_params|session_params|proof_params)")
 	cmd.Flags().StringVar(&key, "key", "", "Cache key (address, service ID, etc)")
 	cmd.Flags().BoolVar(&invalidate, "invalidate", false, "Invalidate the cache entry")
+	cmd.Flags().BoolVar(&all, "all", false, "With --invalidate, invalidate every entry matching the type's prefix")
+	cmd.Flags().StringVar(&keyFile, "key-file", "", "With --invalidate, path to file with one key per line ('#' comments allowed)")
+	cmd.Flags().BoolVar(&dryRun, "dry-run", false, "With --all or --key-file, print what would be invalidated without deleting")
+	cmd.Flags().BoolVar(&yes, "yes", false, "Skip confirmation prompt for large bulk invalidations")
 	cmd.Flags().BoolVar(&listAll, "list", false, "List all cached entries")
 	_ = cmd.MarkFlagRequired("type")
 
@@ -105,28 +180,48 @@ func inspectCacheKey(ctx context.Context, client *DebugRedisClient, cacheType, k
 	return nil
 }
 
-func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType string) error {
-	var knownSetKey string
-	var pattern string
-
+// cachePattern returns the SCAN pattern and known-set key (if any) for a cache type.
+// For singleton types (shared_params, session_params, proof_params) the pattern
+// matches the single Redis key.
+func cachePattern(cacheType string) (pattern string, knownSet string, err error) {
 	switch cacheType {
 	case "application":
-		knownSetKey = "ha:cache:known:applications"
-		pattern = "ha:cache:application:*"
+		return "ha:cache:application:*", "ha:cache:known:applications", nil
 	case "service":
-		knownSetKey = "ha:cache:known:services"
-		pattern = "ha:cache:service:*"
+		return "ha:cache:service:*", "ha:cache:known:services", nil
 	case "supplier":
-		knownSetKey = "ha:cache:known:suppliers"
-		pattern = "ha:supplier:*"
+		return "ha:supplier:*", "ha:cache:known:suppliers", nil
 	case "shared_params":
-		pattern = "ha:cache:shared_params"
+		return "ha:cache:shared_params", "", nil
 	case "session_params":
-		pattern = "ha:cache:session_params"
+		return "ha:cache:session_params", "", nil
 	case "proof_params":
-		pattern = "ha:cache:proof_params"
+		return "ha:cache:proof_params", "", nil
 	default:
-		return fmt.Errorf("unknown cache type: %s", cacheType)
+		return "", "", fmt.Errorf("unknown cache type: %s", cacheType)
+	}
+}
+
+// keyFromRedisKey extracts the logical key (address / service id) from a full
+// Redis key for a given cache type. Used so pub/sub payloads and known-set
+// SREM arguments match what the single-key path uses.
+func keyFromRedisKey(cacheType, redisKey string) string {
+	switch cacheType {
+	case "application":
+		return strings.TrimPrefix(redisKey, "ha:cache:application:")
+	case "service":
+		return strings.TrimPrefix(redisKey, "ha:cache:service:")
+	case "supplier":
+		return strings.TrimPrefix(redisKey, "ha:supplier:")
+	default:
+		return redisKey
+	}
+}
+
+func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType string) error {
+	pattern, knownSetKey, err := cachePattern(cacheType)
+	if err != nil {
+		return err
 	}
 
 	// Try known set first
@@ -143,22 +238,9 @@ func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType stri
 	}
 
 	// Fall back to SCAN
-	var cursor uint64
-	var keys []string
-
-	for {
-		var scanKeys []string
-		var err error
-		scanKeys, cursor, err = client.Scan(ctx, cursor, pattern, 100).Result()
-		if err != nil {
-			return fmt.Errorf("failed to scan keys: %w", err)
-		}
-
-		keys = append(keys, scanKeys...)
-
-		if cursor == 0 {
-			break
-		}
+	keys, err := scanAllKeys(ctx, client, pattern)
+	if err != nil {
+		return err
 	}
 
 	if len(keys) == 0 {
@@ -170,10 +252,10 @@ func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType stri
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	_, _ = fmt.Fprintf(w, "KEY\tTTL\tSIZE\n")
 
-	for _, key := range keys {
-		ttl, _ := client.TTL(ctx, key).Result()
-		size := client.StrLen(ctx, key).Val()
-		_, _ = fmt.Fprintf(w, "%s\t%v\t%d bytes\n", key, ttl, size)
+	for _, k := range keys {
+		ttl, _ := client.TTL(ctx, k).Result()
+		size := client.StrLen(ctx, k).Val()
+		_, _ = fmt.Fprintf(w, "%s\t%v\t%d bytes\n", k, ttl, size)
 	}
 
 	_ = w.Flush()
@@ -182,12 +264,31 @@ func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType stri
 	return nil
 }
 
+// scanAllKeys uses non-blocking SCAN to enumerate every key matching pattern.
+func scanAllKeys(ctx context.Context, client *DebugRedisClient, pattern string) ([]string, error) {
+	var cursor uint64
+	var keys []string
+	for {
+		scanKeys, next, err := client.Scan(ctx, cursor, pattern, 100).Result()
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan keys with pattern %q: %w", pattern, err)
+		}
+		keys = append(keys, scanKeys...)
+		cursor = next
+		if cursor == 0 {
+			break
+		}
+	}
+	return keys, nil
+}
+
+// invalidateCache is the single-key invalidate path. Output is preserved
+// byte-identical to prior releases for backward compatibility.
 func invalidateCache(ctx context.Context, client *DebugRedisClient, cacheType, key string) error {
 	redisKey := buildCacheKey(cacheType, key)
 
 	// Delete the key
-	err := client.Del(ctx, redisKey).Err()
-	if err != nil {
+	if err := client.Del(ctx, redisKey).Err(); err != nil {
 		return fmt.Errorf("failed to delete cache key: %w", err)
 	}
 
@@ -197,14 +298,151 @@ func invalidateCache(ctx context.Context, client *DebugRedisClient, cacheType, k
 	channel := fmt.Sprintf("ha:events:cache:%s:invalidate", cacheType)
 	payload := fmt.Sprintf(`{"key": "%s"}`, key)
 
-	err = client.Publish(ctx, channel, payload).Err()
-	if err != nil {
+	if err := client.Publish(ctx, channel, payload).Err(); err != nil {
 		fmt.Printf("Warning: failed to publish invalidation event: %v\n", err)
 	} else {
 		fmt.Printf("Published invalidation event to channel: %s\n", channel)
 	}
 
+	// Best-effort SREM from the known tracking set. Silent on both success and
+	// absence so the single-key output stays byte-identical to prior releases.
+	if _, knownSet, err := cachePattern(cacheType); err == nil && knownSet != "" {
+		_ = client.SRem(ctx, knownSet, key).Err()
+	}
+
 	return nil
+}
+
+// invalidateOneQuiet performs the same actions as invalidateCache but emits no
+// stdout. Used by bulk paths which print progress separately.
+func invalidateOneQuiet(ctx context.Context, client *DebugRedisClient, cacheType, key string) error {
+	redisKey := buildCacheKey(cacheType, key)
+	if err := client.Del(ctx, redisKey).Err(); err != nil {
+		return fmt.Errorf("failed to delete cache key %q: %w", redisKey, err)
+	}
+	channel := fmt.Sprintf("ha:events:cache:%s:invalidate", cacheType)
+	payload := fmt.Sprintf(`{"key": "%s"}`, key)
+	// Publish is best-effort; a missing subscriber should not fail the bulk op.
+	_ = client.Publish(ctx, channel, payload).Err()
+	if _, knownSet, err := cachePattern(cacheType); err == nil && knownSet != "" {
+		_ = client.SRem(ctx, knownSet, key).Err()
+	}
+	return nil
+}
+
+func invalidateAll(ctx context.Context, client *DebugRedisClient, cacheType string, dryRun, yes bool) error {
+	pattern, _, err := cachePattern(cacheType)
+	if err != nil {
+		return err
+	}
+
+	redisKeys, err := scanAllKeys(ctx, client, pattern)
+	if err != nil {
+		return err
+	}
+
+	total := len(redisKeys)
+
+	if total == 0 {
+		fmt.Printf("No %s cache entries found (pattern %q)\n", cacheType, pattern)
+		fmt.Printf("invalidated 0 entries total\n")
+		return nil
+	}
+
+	if dryRun {
+		fmt.Printf("[dry-run] would invalidate %d %s entries matching %q:\n", total, cacheType, pattern)
+		for _, k := range redisKeys {
+			fmt.Printf("  - %s\n", k)
+		}
+		fmt.Printf("[dry-run] no keys were deleted\n")
+		return nil
+	}
+
+	if total > bulkConfirmThreshold && !yes {
+		fmt.Printf("About to invalidate %d %s entries (pattern %q).\n", total, cacheType, pattern)
+		fmt.Printf("This publishes pub/sub invalidations and removes known-set membership.\n")
+		fmt.Printf("Type 'y' to proceed (or use --yes to bypass): ")
+		reader := bufio.NewReader(os.Stdin)
+		resp, _ := reader.ReadString('\n')
+		if strings.TrimSpace(resp) != "y" {
+			fmt.Printf("Aborted. No keys were invalidated.\n")
+			return nil
+		}
+	}
+
+	done := 0
+	for _, rk := range redisKeys {
+		logicalKey := keyFromRedisKey(cacheType, rk)
+		if err := invalidateOneQuiet(ctx, client, cacheType, logicalKey); err != nil {
+			return fmt.Errorf("bulk invalidate failed at key %q (completed %d/%d): %w", rk, done, total, err)
+		}
+		done++
+		if done%bulkProgressInterval == 0 {
+			fmt.Printf("invalidated %d/%d...\n", done, total)
+		}
+	}
+	fmt.Printf("invalidated %d entries total\n", done)
+	return nil
+}
+
+func invalidateFromFile(ctx context.Context, client *DebugRedisClient, cacheType, path string, dryRun bool) error {
+	keys, err := readKeyFile(path)
+	if err != nil {
+		return err
+	}
+
+	total := len(keys)
+	if total == 0 {
+		fmt.Printf("key-file %q contained no keys (blank lines and '#' comments are ignored)\n", path)
+		fmt.Printf("invalidated 0 entries total\n")
+		return nil
+	}
+
+	if dryRun {
+		fmt.Printf("[dry-run] would invalidate %d %s entries from %s:\n", total, cacheType, path)
+		for _, k := range keys {
+			fmt.Printf("  - %s\n", buildCacheKey(cacheType, k))
+		}
+		fmt.Printf("[dry-run] no keys were deleted\n")
+		return nil
+	}
+
+	done := 0
+	for _, k := range keys {
+		if err := invalidateOneQuiet(ctx, client, cacheType, k); err != nil {
+			return fmt.Errorf("bulk invalidate from file failed at key %q (completed %d/%d): %w", k, done, total, err)
+		}
+		done++
+		if done%bulkProgressInterval == 0 {
+			fmt.Printf("invalidated %d/%d...\n", done, total)
+		}
+	}
+	fmt.Printf("invalidated %d entries total\n", done)
+	return nil
+}
+
+func readKeyFile(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open key-file %q: %w", path, err)
+	}
+	defer func() { _ = f.Close() }()
+
+	var keys []string
+	scanner := bufio.NewScanner(f)
+	// Allow long lines (cosmos-style addresses + future bech32 variants).
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		keys = append(keys, line)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("failed to read key-file %q: %w", path, err)
+	}
+	return keys, nil
 }
 
 func buildCacheKey(cacheType, key string) string {
