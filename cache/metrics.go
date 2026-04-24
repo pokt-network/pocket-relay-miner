@@ -57,6 +57,21 @@ var (
 		[]string{"cache_type", "source"}, // source: manual, pubsub
 	)
 
+	// supplierContaminated tracks how many contaminated supplier cache entries
+	// (staked+active but with an empty services list) are observed at read
+	// time. These are produced by a separate write-path bug; the read path
+	// treats them as cache misses so that the miner re-hydrates a clean
+	// entry from L3 on the next refresh.
+	supplierContaminated = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_contaminated_total",
+			Help:      "Total number of contaminated supplier cache entries observed (staked+active with empty services)",
+		},
+		[]string{"source"}, // source: l1_read, l2_read, warmup_skip
+	)
+
 	// Chain query metrics
 	chainQueries = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{

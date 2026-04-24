@@ -84,6 +84,19 @@ type SupplierState struct {
 	UpdatedBy string `json:"updated_by,omitempty"`
 }
 
+// isContaminated returns true when the cached state looks like a failed-write
+// artifact: staked+active with an empty services list. This anti-pattern is
+// produced by a separate bug in the write path (miner/supplier_manager.go).
+// Legitimate states that look similar are NOT contaminated:
+//   - Unstaked entries have Staked=false.
+//   - Draining entries have Status=unstaking and preserve their services.
+//
+// Only the exact tuple (Staked && Status==active && len(Services)==0) is
+// treated as contamination.
+func (s *SupplierState) isContaminated() bool {
+	return s.Staked && s.Status == SupplierStatusActive && len(s.Services) == 0
+}
+
 // IsActive returns true if the supplier is active and should accept relays.
 // TODO_IMPROVE: Add session height comparison for proper unstaking grace period.
 // For now, any unstaking supplier is considered inactive.
@@ -177,6 +190,20 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 
 	// L1: Check local cache (xsync)
 	if cached, ok := c.localCache.Load(operatorAddress); ok {
+		// Defensive guard: a pre-fix binary (or a warmup before this guard
+		// existed) may have populated L1 with a contaminated entry. Evict
+		// it and treat as a miss so the caller re-hydrates via L3.
+		if cached != nil && cached.isContaminated() {
+			supplierContaminated.WithLabelValues("l1_read").Inc()
+			c.localCache.Delete(operatorAddress)
+			c.logger.Warn().
+				Str(logging.FieldSupplierOperator, operatorAddress).
+				Msg("supplier cache entry contaminated (staked+active but services empty); ignoring and reporting as cache miss")
+			cacheMisses.WithLabelValues(supplierCacheType, CacheLevelL1).Inc()
+			cacheGetLatency.WithLabelValues(supplierCacheType, CacheLevelL1).Observe(time.Since(start).Seconds())
+			return nil, nil
+		}
+
 		cacheHits.WithLabelValues(supplierCacheType, CacheLevelL1).Inc()
 		cacheGetLatency.WithLabelValues(supplierCacheType, CacheLevelL1).Observe(time.Since(start).Seconds())
 		c.logger.Debug().
@@ -223,6 +250,20 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 	if err := json.Unmarshal(data, &state); err != nil {
 		cacheGetLatency.WithLabelValues(supplierCacheType, "l2_error").Observe(time.Since(start).Seconds())
 		return nil, fmt.Errorf("failed to unmarshal supplier state: %w", err)
+	}
+
+	// Defensive guard: reject contaminated entries (staked+active with empty
+	// services) produced by a separate write-path bug. Treat as a cache miss
+	// so the miner re-hydrates a clean entry from L3 on the next refresh,
+	// and do NOT populate L1 (avoid re-infecting followers).
+	if state.isContaminated() {
+		supplierContaminated.WithLabelValues("l2_read").Inc()
+		c.logger.Warn().
+			Str(logging.FieldSupplierOperator, operatorAddress).
+			Msg("supplier cache entry contaminated (staked+active but services empty); ignoring and reporting as cache miss")
+		cacheMisses.WithLabelValues(supplierCacheType, CacheLevelL2).Inc()
+		cacheGetLatency.WithLabelValues(supplierCacheType, CacheLevelL2).Observe(time.Since(start).Seconds())
+		return nil, nil
 	}
 
 	// Store in L1 for next time
@@ -465,6 +506,16 @@ func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddres
 					Err(err).
 					Str(logging.FieldSupplierOperator, addr).
 					Msg("failed to unmarshal supplier state during warmup")
+				return
+			}
+
+			// Defensive guard: skip contaminated entries during warmup so a
+			// fleet restart doesn't re-infect L1 from stale L2 data.
+			if state.isContaminated() {
+				supplierContaminated.WithLabelValues("warmup_skip").Inc()
+				c.logger.Debug().
+					Str(logging.FieldSupplierOperator, addr).
+					Msg("skipping contaminated entry during warmup")
 				return
 			}
 
