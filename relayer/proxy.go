@@ -601,6 +601,15 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	activeConnections.Inc()
 	defer activeConnections.Dec()
 
+	// Record the inbound protocol so we can detect any migration to h2c.
+	// r.TLS is always nil on this deployment (PATH hits us over plain HTTP),
+	// so the proto label collapses to "http1" or "h2c" based on ProtoMajor.
+	proto := "http1"
+	if r.ProtoMajor == 2 {
+		proto = "h2c"
+	}
+	inboundRequestsByProto.WithLabelValues(proto).Inc()
+
 	// Check for WebSocket upgrade request
 	if IsWebSocketUpgrade(r) {
 		p.WebSocketHandler()(w, r)
@@ -1563,14 +1572,30 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 	httpPoolInFlight.WithLabelValues(serviceID).Inc()
 	defer httpPoolInFlight.WithLabelValues(serviceID).Dec()
 
-	var getConnAt time.Time
+	var getConnAt, dialStart time.Time
 	trace := &httptrace.ClientTrace{
 		GetConn: func(_ string) { getConnAt = time.Now() },
-		GotConn: func(_ httptrace.GotConnInfo) {
+		GotConn: func(info httptrace.GotConnInfo) {
 			if !getConnAt.IsZero() {
 				wait := time.Since(getConnAt)
 				p.metricRecorder.RecordDuration(httpPoolWaitSeconds, []string{serviceID}, wait)
 			}
+			// Pool reuse diagnostic: answer "is upstream keepalive holding?"
+			// per service. Low reuse on a specific service_id pinpoints which
+			// backend closes conns prematurely; low reuse across all services
+			// points to our own transport config or Go runtime contention.
+			reused := "false"
+			if info.Reused {
+				reused = "true"
+			}
+			backendConnReused.WithLabelValues(serviceID, reused).Inc()
+		},
+		ConnectStart: func(_, _ string) { dialStart = time.Now() },
+		ConnectDone: func(_, _ string, err error) {
+			if err != nil || dialStart.IsZero() {
+				return
+			}
+			p.metricRecorder.RecordDuration(backendDialSeconds, []string{serviceID}, time.Since(dialStart))
 		},
 	}
 	req = req.WithContext(httptrace.WithClientTrace(req.Context(), trace))

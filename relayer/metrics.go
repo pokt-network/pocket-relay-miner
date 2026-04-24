@@ -337,6 +337,53 @@ var (
 		},
 	)
 
+	// backendConnReused answers "is upstream keepalive working?" per service.
+	// Incremented in httptrace.GotConn: reused="true" means the pool served an
+	// idle conn (keepalive is working); reused="false" means a fresh TCP dial
+	// was required (upstream closed the conn, or we ran out of idles). Track
+	// the ratio per-service: if a specific backend shows low reuse, THAT
+	// upstream is the one sabotaging keepalive — our own config is fine.
+	backendConnReused = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "backend_conn_reused_total",
+			Help:      "Backend conn acquisitions labelled by reuse status (true=idle pool hit, false=new TCP dial required). Per-service reuse ratio diagnoses upstream keepalive hygiene.",
+		},
+		[]string{"service_id", "reused"},
+	)
+
+	// backendDialSeconds captures pure TCP dial time (ConnectStart ->
+	// ConnectDone). Only fires when a fresh conn is created; reused conns
+	// don't trigger this hook. Combined with http_pool_wait_seconds this
+	// decomposes the "waiting for a conn" latency into dial-vs-queue.
+	backendDialSeconds = observability.RelayerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "backend_dial_seconds",
+			Help:      "Time spent establishing a fresh TCP connection to the upstream backend (from httptrace ConnectStart to ConnectDone). Reused connections are not observed here.",
+			Buckets:   observability.FineGrainedLatencyBuckets,
+		},
+		[]string{"service_id"},
+	)
+
+	// inboundRequestsByProto tracks the wire protocol every inbound request
+	// arrives on. Today PATH ships over HTTP/1.1 exclusively, so http1 will
+	// be ~100% and h2c will be 0. The metric is here to surface any shift
+	// early — if h2c starts ticking, we know the MaxConcurrentStreams=250
+	// ceiling per-conn becomes relevant and inflight analysis has to
+	// account for multi-stream connections.
+	inboundRequestsByProto = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "inbound_requests_by_proto_total",
+			Help:      "Inbound relay requests by wire protocol (http1|h2c). Tracks any migration to HTTP/2 cleartext so per-conn stream caps can be reasoned about.",
+		},
+		[]string{"proto"},
+	)
+
 	// Streaming metrics
 	streamingRelaysServed = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
