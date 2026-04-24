@@ -1090,6 +1090,21 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Record total relay latency asynchronously (no blocking on histogram locks)
 	p.metricRecorder.RecordDuration(relayLatency, []string{serviceID, rpcType}, totalRelayDuration)
 
+	// Split relayer time into pre-backend and post-backend components so we
+	// can answer "is the relayer slow?" directly, per-request, without
+	// subtracting p99s across independent distributions (which is
+	// arithmetically meaningless). preBackend captures validation + meter
+	// + request build + first pool acquisition; postBackend captures
+	// sign + compress + client write + WAL publish. preBackend+backend+
+	// postBackend ≈ totalRelayDuration.
+	preBackendDuration := backendStart.Sub(startTime)
+	postBackendDuration := totalRelayDuration - preBackendDuration - backendDuration
+	if postBackendDuration < 0 {
+		postBackendDuration = 0
+	}
+	p.metricRecorder.RecordDuration(relayPreBackendLatency, []string{serviceID, rpcType}, preBackendDuration)
+	p.metricRecorder.RecordDuration(relayPostBackendLatency, []string{serviceID, rpcType}, postBackendDuration)
+
 	logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 		Dur("total_relay_duration", totalRelayDuration).
 		Str("validation_mode", string(validationMode)).

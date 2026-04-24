@@ -177,6 +177,40 @@ var (
 		[]string{"service_id", "mode"}, // mode: eager, optimistic
 	)
 
+	// relayPreBackendLatency is the time spent by the relayer BEFORE the
+	// upstream backend call starts — i.e. ring signature verification,
+	// session lookup, relay-meter check, request body parsing and the
+	// first HTTP pool acquisition. Everything in this metric is 100%
+	// relayer CPU/IO; none of it is upstream latency. It lets us tell
+	// "are we slow?" from "is the backend slow?" without subtracting
+	// p99s across independent distributions (which is arithmetically
+	// meaningless).
+	relayPreBackendLatency = observability.RelayerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_pre_backend_seconds",
+			Help:      "Per-request relayer time BEFORE backend call (validate + meter + request build + pool wait). Excludes backend.",
+			Buckets:   observability.FineGrainedLatencyBuckets,
+		},
+		[]string{"service_id", "rpc_type"},
+	)
+
+	// relayPostBackendLatency is the time spent by the relayer AFTER
+	// the upstream backend response is received — response signing
+	// (ECDSA), optional gzip compression, client write and WAL publish
+	// to Redis Streams. Same rationale as relayPreBackendLatency.
+	relayPostBackendLatency = observability.RelayerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_post_backend_seconds",
+			Help:      "Per-request relayer time AFTER backend call (sign + compress + write + publish WAL). Excludes backend.",
+			Buckets:   observability.FineGrainedLatencyBuckets,
+		},
+		[]string{"service_id", "rpc_type"},
+	)
+
 	validationFailures = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
