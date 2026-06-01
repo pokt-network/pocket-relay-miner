@@ -180,6 +180,13 @@ func (c *cachedSharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.P
 	return c.cache.Get(ctx)
 }
 
+// GetParamsAtHeight delegates to the direct client. Height-aware params are only
+// needed for window-timing computations (claim/proof submission), not the ring
+// verification hot path, so there is no benefit to caching them here.
+func (c *cachedSharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight int64) (*sharedtypes.Params, error) {
+	return c.directClient.GetParamsAtHeight(ctx, queryHeight)
+}
+
 // Delegate all other methods to the direct client
 func (c *cachedSharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {
 	return c.directClient.GetSessionGracePeriodEndHeight(ctx, queryHeight)

@@ -146,6 +146,10 @@ func (m *mockSharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Par
 	return m.params, nil
 }
 
+func (m *mockSharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight int64) (*sharedtypes.Params, error) {
+	return m.GetParams(ctx)
+}
+
 func (m *mockSharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {
 	params, _ := m.GetParams(ctx)
 	return sharedtypes.GetSessionGracePeriodEndHeight(params, queryHeight), nil

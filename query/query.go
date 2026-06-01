@@ -308,6 +308,41 @@ func (c *sharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Params,
 	return &res.Params, nil
 }
 
+// GetParamsAtHeight returns the shared params that were effective at queryHeight.
+//
+// Window-timing computations must evaluate a session with the num_blocks_per_session
+// that was in effect when that session started, not the live value. After a
+// session-length change (poktroll #543 anchored grid), an old-epoch session computed
+// with live (new-epoch) params would resolve to the wrong session grid and the miner
+// would submit its claim/proof at the wrong window. queryHeight <= 0 falls back to the
+// live params.
+func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight int64) (*sharedtypes.Params, error) {
+	if queryHeight <= 0 {
+		return c.GetParams(ctx)
+	}
+
+	// Fast path: if queryHeight falls within the current (live) params epoch, the live
+	// params ARE the params effective at queryHeight — serve them without an extra RPC.
+	// anchor <= queryHeight means queryHeight belongs to the live epoch; only an
+	// older-epoch height (queryHeight < anchor, i.e. after a recent session-length
+	// change) needs the historical lookup.
+	if liveParams, err := c.GetParams(ctx); err == nil {
+		if int64(liveParams.GetSessionGridAnchorHeight()) <= queryHeight {
+			return liveParams, nil
+		}
+	}
+
+	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+	defer cancel()
+
+	res, err := c.queryClient.ParamsAtHeight(queryCtx, &sharedtypes.QueryParamsAtHeightRequest{Height: queryHeight})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
+	}
+
+	return &res.Params, nil
+}
+
 func (c *sharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {
 	params, err := c.GetParams(ctx)
 	if err != nil {
