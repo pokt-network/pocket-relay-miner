@@ -339,14 +339,6 @@ func (p *ClaimPipeline) submitClaimBatch(ctx context.Context, claims []*ClaimReq
 		return
 	}
 
-	// Get shared params for timeout calculation
-	sharedParams, err := p.sharedClient.GetParams(ctx)
-	if err != nil {
-		p.logger.Error().Err(err).Msg("failed to get shared params for claim submission")
-		p.notifyClaimResults(claims, false, err)
-		return
-	}
-
 	// Group claims by session end height for proper timeout calculation
 	claimsByEndHeight := make(map[int64][]*ClaimRequest)
 	for _, claim := range claims {
@@ -354,6 +346,16 @@ func (p *ClaimPipeline) submitClaimBatch(ctx context.Context, claims []*ClaimReq
 	}
 
 	for sessionEndHeight, heightClaims := range claimsByEndHeight {
+		// Fetch the shared params that were effective at this session's height,
+		// per session end height. A single batch can span a session-length change
+		// (poktroll #543), so live params would compute the wrong window for an
+		// old-epoch group.
+		sharedParams, err := p.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+		if err != nil {
+			p.logger.Error().Err(err).Int64("session_end_height", sessionEndHeight).Msg("failed to get shared params for claim submission")
+			p.notifyClaimResults(heightClaims, false, err)
+			continue
+		}
 		p.submitClaimsForHeight(ctx, heightClaims, sessionEndHeight, sharedParams)
 	}
 }
@@ -461,7 +463,8 @@ func (p *ClaimPipeline) WaitForClaimWindow(
 	ctx context.Context,
 	sessionEndHeight int64,
 ) (claimWindowOpenHeight int64, blockHash []byte, err error) {
-	sharedParams, err := p.sharedClient.GetParams(ctx)
+	// Params effective at the session's height (poktroll #543 anchored grid).
+	sharedParams, err := p.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to get shared params: %w", err)
 	}

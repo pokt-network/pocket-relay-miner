@@ -344,7 +344,7 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 }
 
 func (c *sharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -352,7 +352,7 @@ func (c *sharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, 
 }
 
 func (c *sharedQueryClient) GetClaimWindowOpenHeight(ctx context.Context, queryHeight int64) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -360,7 +360,7 @@ func (c *sharedQueryClient) GetClaimWindowOpenHeight(ctx context.Context, queryH
 }
 
 func (c *sharedQueryClient) GetEarliestSupplierClaimCommitHeight(ctx context.Context, queryHeight int64, supplierOperatorAddr string) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -381,7 +381,7 @@ func (c *sharedQueryClient) GetEarliestSupplierClaimCommitHeight(ctx context.Con
 }
 
 func (c *sharedQueryClient) GetProofWindowOpenHeight(ctx context.Context, queryHeight int64) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -389,7 +389,7 @@ func (c *sharedQueryClient) GetProofWindowOpenHeight(ctx context.Context, queryH
 }
 
 func (c *sharedQueryClient) GetEarliestSupplierProofCommitHeight(ctx context.Context, queryHeight int64, supplierOperatorAddr string) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}

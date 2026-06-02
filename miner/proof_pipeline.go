@@ -329,13 +329,6 @@ func (p *ProofPipeline) submitProofBatch(ctx context.Context, proofs []*ProofReq
 		return
 	}
 
-	sharedParams, err := p.sharedClient.GetParams(ctx)
-	if err != nil {
-		p.logger.Error().Err(err).Msg("failed to get shared params for proof submission")
-		p.notifyProofResults(proofs, false, err)
-		return
-	}
-
 	// Group proofs by session end height
 	proofsByEndHeight := make(map[int64][]*ProofRequest)
 	for _, proof := range proofs {
@@ -343,6 +336,15 @@ func (p *ProofPipeline) submitProofBatch(ctx context.Context, proofs []*ProofReq
 	}
 
 	for sessionEndHeight, heightProofs := range proofsByEndHeight {
+		// Fetch the shared params effective at this session's height, per session
+		// end height. A single batch can span a session-length change (poktroll
+		// #543), so live params would compute the wrong window for an old-epoch group.
+		sharedParams, err := p.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+		if err != nil {
+			p.logger.Error().Err(err).Int64("session_end_height", sessionEndHeight).Msg("failed to get shared params for proof submission")
+			p.notifyProofResults(heightProofs, false, err)
+			continue
+		}
 		p.submitProofsForHeight(ctx, heightProofs, sessionEndHeight, sharedParams)
 	}
 }
@@ -430,7 +432,8 @@ func (p *ProofPipeline) WaitForProofWindow(
 	ctx context.Context,
 	sessionEndHeight int64,
 ) (proofWindowOpenHeight int64, blockHash []byte, err error) {
-	sharedParams, err := p.sharedClient.GetParams(ctx)
+	// Params effective at the session's height (poktroll #543 anchored grid).
+	sharedParams, err := p.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 	if err != nil {
 		return 0, nil, fmt.Errorf("failed to get shared params: %w", err)
 	}
