@@ -489,6 +489,13 @@ type BackendHealthCheckConfig struct {
 	// ExpectedStatus is a list of acceptable HTTP status codes.
 	// If not set, any 2xx status code (200-299) is considered healthy.
 	ExpectedStatus []int `yaml:"expected_status,omitempty"`
+
+	// Headers are additional headers applied only to health check probe requests.
+	// They are merged on top of the pool-level BackendConfig.Headers, so a key
+	// present here overrides the same key from the pool for the probe only.
+	// Use this for probe-specific headers (e.g. a health-check auth token) that
+	// should not be sent on real relay traffic.
+	Headers map[string]string `yaml:"headers,omitempty"`
 }
 
 // MetricsConfig contains metrics server configuration.

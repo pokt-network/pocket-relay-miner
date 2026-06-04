@@ -275,6 +275,16 @@ properties:
                     type: integer
                     description: Successes before marking healthy
                     minimum: 1
+                  headers:
+                    type: object
+                    description: >-
+                      Headers applied only to health check probe requests.
+                      Merged on top of the pool-level backend headers; a key
+                      here overrides the same key from the pool for the probe
+                      only. Use for probe-specific headers (e.g. a health-check
+                      auth token) not sent on real relay traffic.
+                    additionalProperties:
+                      type: string
 
   default_validation_mode:
     type: string

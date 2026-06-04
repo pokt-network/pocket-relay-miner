@@ -437,6 +437,62 @@ func TestHealthCheck_PoolHeaders(t *testing.T) {
 	assert.Equal(t, "value456", receivedCustom)
 }
 
+func TestHealthCheck_ConfigHeaders(t *testing.T) {
+	// Probe request includes headers defined directly on the health check config,
+	// independent of any pool-level headers.
+	var receivedToken string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedToken = r.Header.Get("X-Health-Token")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	hc := newTestHealthChecker()
+	ep := newTestEndpoint(server.URL)
+	config := defaultConfig()
+	config.Headers = map[string]string{
+		"X-Health-Token": "probe-only-secret",
+	}
+
+	// No pool-level headers passed (nil) — header must come from the config alone.
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, nil, nil, "")
+	hc.checkPool(context.Background(), "svc:jsonrpc", config)
+
+	assert.Equal(t, "probe-only-secret", receivedToken)
+}
+
+func TestHealthCheck_ConfigHeadersOverridePoolHeaders(t *testing.T) {
+	// When the same header key is present in both pool headers and health check
+	// config headers, the health check config value wins for the probe.
+	var receivedOverridden string
+	var receivedPoolOnly string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		receivedOverridden = r.Header.Get("X-Shared")
+		receivedPoolOnly = r.Header.Get("X-Pool-Only")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	hc := newTestHealthChecker()
+	ep := newTestEndpoint(server.URL)
+	config := defaultConfig()
+	config.Headers = map[string]string{
+		"X-Shared": "from-health-check",
+	}
+	poolHeaders := map[string]string{
+		"X-Shared":    "from-pool",
+		"X-Pool-Only": "pool-value",
+	}
+
+	hc.RegisterPool("svc:jsonrpc", []*pool.BackendEndpoint{ep}, config, poolHeaders, nil, "")
+	hc.checkPool(context.Background(), "svc:jsonrpc", config)
+
+	// Health check config header wins on conflict.
+	assert.Equal(t, "from-health-check", receivedOverridden)
+	// Non-conflicting pool header is still applied.
+	assert.Equal(t, "pool-value", receivedPoolOnly)
+}
+
 // --- Reset and State Tests ---
 
 func TestHealthCheck_FullResetOnRecovery(t *testing.T) {
