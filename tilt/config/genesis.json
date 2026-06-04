@@ -2364,6 +2364,7 @@
       "params": {
         "dao_reward_address": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
         "global_inflation_per_claim": 0,
+        "mint_ratio": 1,
         "mint_allocation_percentages": {
           "application": 0,
           "dao": 0.1,
