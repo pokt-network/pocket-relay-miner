@@ -114,15 +114,21 @@ func (c *ProofRequirementChecker) IsProofRequired(
 	// Build the claim from the snapshot using the validated root.
 	claim := claimFromSnapshot(snapshot, rootHash)
 
-	// Get proof module parameters
+	// Get proof module parameters. The proof requirement threshold and probability
+	// are read LIVE — matching x/proof/keeper ProofRequirementForClaim, which uses
+	// k.GetParams(ctx) (live) for the proof params.
 	proofParams, err := c.proofClient.GetParams(ctx)
 	if err != nil {
 		RecordProofRequirementCheckError(snapshot.SupplierOperatorAddress, "get_proof_params")
 		return false, fmt.Errorf("failed to get proof params: %w", err)
 	}
 
-	// Get shared parameters
-	sharedParams, err := c.sharedClient.GetParams(ctx)
+	// Get shared parameters effective at the session START height. The chain computes
+	// claimed uPOKT (ComputeUnitsToTokensMultiplier, ComputeUnitCostGranularity) from
+	// the shared params at sessionStartHeight (ProofRequirementForClaim +
+	// msg_server_create_claim), paired with the difficulty at the same height. Live
+	// shared params would diverge from the chain's threshold decision after a param change.
+	sharedParams, err := c.sharedClient.GetParamsAtHeight(ctx, snapshot.SessionStartHeight)
 	if err != nil {
 		RecordProofRequirementCheckError(snapshot.SupplierOperatorAddress, "get_shared_params")
 		return false, fmt.Errorf("failed to get shared params: %w", err)

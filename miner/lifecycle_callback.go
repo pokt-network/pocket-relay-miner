@@ -359,14 +359,22 @@ func (lc *LifecycleCallback) getClaimReward(
 		return sdk.Coin{}, fmt.Errorf("difficulty client not available")
 	}
 
+	// Both the shared params (ComputeUnitsToTokensMultiplier, ComputeUnitCostGranularity)
+	// and the relay mining difficulty must be those effective at the session START
+	// height, to exactly match how the chain computes the claimed uPOKT in
+	// x/proof/keeper/msg_server_create_claim.go (GetParamsAtHeight(sessionStartHeight)
+	// + GetRelayMiningDifficultyAtHeight(sessionStartHeight)). Using live shared params
+	// would diverge from the chain after a session-length / CUTTM param change.
+	sessionStartHeight := claim.SessionHeader.GetSessionStartBlockHeight()
+
 	difficulty, err := difficultyClient.GetServiceRelayDifficultyAtHeight(
-		ctx, serviceID, claim.SessionHeader.GetSessionStartBlockHeight(),
+		ctx, serviceID, sessionStartHeight,
 	)
 	if err != nil {
 		return sdk.Coin{}, fmt.Errorf("failed to fetch relay mining difficulty: %w", err)
 	}
 
-	sharedParams, err := lc.sharedClient.GetParams(ctx)
+	sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionStartHeight)
 	if err != nil {
 		return sdk.Coin{}, fmt.Errorf("failed to get shared params: %w", err)
 	}

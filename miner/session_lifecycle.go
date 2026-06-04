@@ -515,6 +515,13 @@ func (m *SessionLifecycleManager) sessionMightNeedTransition(
 		return true // Return true to trigger cleanup in the main loop
 	}
 
+	// Fail open: if the session's epoch params could not be resolved, do NOT silently
+	// skip it — let it through to the full Redis-backed check so a transient
+	// param-query failure never drops a session that may need to claim/prove.
+	if params == nil {
+		return true
+	}
+
 	switch snapshot.State {
 	case SessionStateActive:
 		// Active sessions only need checking when claim window opens
@@ -544,10 +551,31 @@ func (m *SessionLifecycleManager) sessionMightNeedTransition(
 
 // checkSessionTransitions checks all active sessions for required state transitions.
 func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, currentHeight int64) {
-	params := m.getSharedParams()
-	if params == nil {
-		m.logger.Warn().Msg("shared params not available, skipping transition check")
-		return
+	// Resolve shared params at EACH session's own end height rather than from a single
+	// live snapshot. After a session-length change (poktroll #543 anchored grid), an
+	// old-epoch session's claim/proof windows must be computed with the params that were
+	// effective at that session — otherwise this transition filter would disagree with
+	// the already-height-aware submission path and fire (or time out) at the wrong height.
+	// Memoized per pass; GetParamsAtHeight's fast path returns cached live params with no
+	// RPC for current-epoch sessions, so the steady-state per-block cost is unchanged.
+	paramsByEndHeight := make(map[int64]*sharedtypes.Params)
+	resolveParams := func(sessionEndHeight int64) *sharedtypes.Params {
+		if p, ok := paramsByEndHeight[sessionEndHeight]; ok {
+			return p
+		}
+		p, err := m.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+		if err != nil {
+			// Cache the failure to avoid a retry storm within this pass. Callers fail
+			// open (pre-filter) / fail safe (determineTransition) on a nil result.
+			m.logger.Warn().
+				Err(err).
+				Int64("session_end_height", sessionEndHeight).
+				Msg("failed to resolve shared params at session height; session check will fail open/safe")
+			paramsByEndHeight[sessionEndHeight] = nil
+			return nil
+		}
+		paramsByEndHeight[sessionEndHeight] = p
+		return p
 	}
 
 	// OPTIMIZATION: Pre-filter sessions using in-memory state to avoid unnecessary Redis calls.
@@ -557,7 +585,7 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 	candidateSessionIDs := make([]string, 0)
 	m.activeSessions.Range(func(sessionID string, snapshot *SessionSnapshot) bool {
 		totalSessions++
-		if m.sessionMightNeedTransition(snapshot, currentHeight, params) {
+		if m.sessionMightNeedTransition(snapshot, currentHeight, resolveParams(snapshot.SessionEndHeight)) {
 			candidateSessionIDs = append(candidateSessionIDs, sessionID)
 		}
 		return true // continue iteration
@@ -618,8 +646,9 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			continue
 		}
 
-		// Check if this session needs a transition
-		newState, reason := m.determineTransition(session, currentHeight, params)
+		// Check if this session needs a transition (params resolved at the session's
+		// own end height, see resolveParams above).
+		newState, reason := m.determineTransition(session, currentHeight, resolveParams(session.SessionEndHeight))
 		if newState == "" || newState == session.State {
 			noTransition++
 			continue
@@ -776,6 +805,13 @@ func (m *SessionLifecycleManager) determineTransition(
 	currentHeight int64,
 	params *sharedtypes.Params,
 ) (newState SessionState, action string) {
+	// Fail safe: without the session's epoch params we cannot compute its windows.
+	// Never fire a (possibly wrong) timeout/transition on a transient param-query
+	// failure — leave the session untouched until params resolve on a later pass.
+	if params == nil {
+		return "", ""
+	}
+
 	switch session.State {
 	case SessionStateActive:
 		// Check if session ended and claim window is approaching
