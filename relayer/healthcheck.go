@@ -415,6 +415,14 @@ func buildProbeRequest(ctx context.Context, healthURL string, config *BackendHea
 		}
 	}
 
+	// Apply health-check-specific headers on top of pool headers.
+	// A key present here overrides the same key from the pool for the probe only.
+	if config.Headers != nil {
+		for k, v := range config.Headers {
+			req.Header.Set(k, v)
+		}
+	}
+
 	// Apply pool-level authentication
 	if backend.auth != nil {
 		if backend.auth.BearerToken != "" {

@@ -107,6 +107,10 @@ services:
         #   timeout_seconds: 5
         #   unhealthy_threshold: 5
         #   healthy_threshold: 3
+        #   # Probe-only headers, merged over the pool headers above (probe wins
+        #   # on conflict). Use for a health-check token not sent on real relays:
+        #   headers:
+        #     X-Health-Token: "probe-only-secret"
         #
         # Recovery timeout: auto-recover circuit-breaker-tripped backends after N seconds.
         # Prevents death spiral when all backends are unhealthy and no health checks are configured.
