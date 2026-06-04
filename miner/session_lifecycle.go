@@ -119,10 +119,6 @@ type SessionLifecycleManager struct {
 	// Optional meter cleanup publisher for notifying relayers when sessions leave active state
 	meterCleanupPublisher MeterCleanupPublisher
 
-	// Current shared params (cached)
-	sharedParams   *sharedtypes.Params
-	sharedParamsMu sync.RWMutex
-
 	// Active sessions being monitored (lock-free concurrent map)
 	activeSessions *xsync.Map[string, *SessionSnapshot]
 
@@ -191,8 +187,8 @@ func (m *SessionLifecycleManager) Start(ctx context.Context) error {
 	m.ctx, m.cancelFn = context.WithCancel(ctx)
 	m.mu.Unlock()
 
-	// Load initial shared params
-	if err := m.refreshSharedParams(ctx); err != nil {
+	// Verify chain reachability at startup via a shared-params query.
+	if _, err := m.sharedClient.GetParams(ctx); err != nil {
 		return fmt.Errorf("failed to load shared params: %w", err)
 	}
 
@@ -274,27 +270,6 @@ func (m *SessionLifecycleManager) loadExistingSessions(ctx context.Context) erro
 	}
 
 	return nil
-}
-
-// refreshSharedParams refreshes the cached shared params.
-func (m *SessionLifecycleManager) refreshSharedParams(ctx context.Context) error {
-	params, err := m.sharedClient.GetParams(ctx)
-	if err != nil {
-		return err
-	}
-
-	m.sharedParamsMu.Lock()
-	m.sharedParams = params
-	m.sharedParamsMu.Unlock()
-
-	return nil
-}
-
-// getSharedParams returns the cached shared params.
-func (m *SessionLifecycleManager) getSharedParams() *sharedtypes.Params {
-	m.sharedParamsMu.RLock()
-	defer m.sharedParamsMu.RUnlock()
-	return m.sharedParams
 }
 
 // TrackSession starts tracking a new session.
@@ -397,8 +372,6 @@ func (m *SessionLifecycleManager) UpdateSessionRelayCount(ctx context.Context, s
 func (m *SessionLifecycleManager) lifecycleChecker(ctx context.Context) {
 	defer m.wg.Done()
 
-	_ = m.getSharedParams() // Ensure params are cached
-
 	// Check if block client supports Subscribe() method for fan-out
 	if subscriber, ok := m.blockClient.(interface {
 		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
@@ -442,13 +415,6 @@ func (m *SessionLifecycleManager) lifecycleCheckerEventDriven(ctx context.Contex
 			lastHeight = currentHeight
 			currentBlockHeight.Set(float64(currentHeight))
 
-			// Refresh shared params periodically (every 10 blocks)
-			if currentHeight%10 == 0 {
-				if err := m.refreshSharedParams(ctx); err != nil {
-					m.logger.Warn().Err(err).Msg("failed to refresh shared params")
-				}
-			}
-
 			// Check all sessions for transitions at this block height
 			m.checkSessionTransitions(ctx, currentHeight)
 		}
@@ -485,13 +451,6 @@ func (m *SessionLifecycleManager) lifecycleCheckerPolling(ctx context.Context) {
 			}
 			lastHeight = currentHeight
 			currentBlockHeight.Set(float64(currentHeight))
-
-			// Refresh shared params periodically (every 10 blocks)
-			if currentHeight%10 == 0 {
-				if err := m.refreshSharedParams(ctx); err != nil {
-					m.logger.Warn().Err(err).Msg("failed to refresh shared params")
-				}
-			}
 
 			// Check all sessions for transitions
 			m.checkSessionTransitions(ctx, currentHeight)
