@@ -118,7 +118,11 @@ func (c *SubmissionTimingCalculator) CalculateClaimWindow(
 	supplierOperatorAddr string,
 	windowOpenBlockHash []byte,
 ) (*SubmissionWindow, error) {
-	sharedParams, err := c.sharedClient.GetParams(ctx)
+	// Use the shared params that were effective at the session's height, not the
+	// live params. After a session-length change (poktroll #543 anchored grid),
+	// computing an old-epoch session's window with new-epoch num_blocks_per_session
+	// would resolve the wrong session grid and submit at the wrong window.
+	sharedParams, err := c.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared params: %w", err)
 	}
@@ -163,7 +167,11 @@ func (c *SubmissionTimingCalculator) CalculateProofWindow(
 	supplierOperatorAddr string,
 	windowOpenBlockHash []byte,
 ) (*SubmissionWindow, error) {
-	sharedParams, err := c.sharedClient.GetParams(ctx)
+	// Use the shared params that were effective at the session's height, not the
+	// live params. After a session-length change (poktroll #543 anchored grid),
+	// computing an old-epoch session's window with new-epoch num_blocks_per_session
+	// would resolve the wrong session grid and submit at the wrong window.
+	sharedParams, err := c.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared params: %w", err)
 	}
@@ -207,7 +215,11 @@ func (c *SubmissionTimingCalculator) WaitForClaimWindow(
 	sessionEndHeight int64,
 	supplierOperatorAddr string,
 ) (*SubmissionWindow, error) {
-	sharedParams, err := c.sharedClient.GetParams(ctx)
+	// Use the shared params that were effective at the session's height, not the
+	// live params. After a session-length change (poktroll #543 anchored grid),
+	// computing an old-epoch session's window with new-epoch num_blocks_per_session
+	// would resolve the wrong session grid and submit at the wrong window.
+	sharedParams, err := c.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared params: %w", err)
 	}
@@ -229,7 +241,11 @@ func (c *SubmissionTimingCalculator) WaitForProofWindow(
 	sessionEndHeight int64,
 	supplierOperatorAddr string,
 ) (*SubmissionWindow, error) {
-	sharedParams, err := c.sharedClient.GetParams(ctx)
+	// Use the shared params that were effective at the session's height, not the
+	// live params. After a session-length change (poktroll #543 anchored grid),
+	// computing an old-epoch session's window with new-epoch num_blocks_per_session
+	// would resolve the wrong session grid and submit at the wrong window.
+	sharedParams, err := c.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared params: %w", err)
 	}

@@ -265,15 +265,31 @@ type sharedQueryClient struct {
 	// Simple in-memory cache for params
 	paramsCache   *sharedtypes.Params
 	paramsCacheMu sync.RWMutex
+
+	// paramsAtHeightCache memoizes ParamsAtHeight results keyed by query height.
+	// SAFE because params-at-a-height are immutable for every height our callers query:
+	// poktroll only writes params-history entries at session boundaries (effective_height
+	// = next session start) and never mid-session, and all callers pass a started session's
+	// start/end height (<= the current session end < the next boundary). So no later
+	// param change can alter the entry resolved for such a height — the same immutability
+	// the serviceQueryClient relies on for GetServiceRelayDifficultyAtHeight.
+	paramsAtHeightCache   map[int64]*sharedtypes.Params
+	paramsAtHeightCacheMu sync.RWMutex
 }
+
+// maxParamsAtHeightCacheEntries bounds the height-keyed params cache. Entries are
+// immutable, so eviction is purely to cap memory; the lowest (oldest) heights are
+// dropped first since settled sessions are not re-queried.
+const maxParamsAtHeightCacheEntries = 1024
 
 var _ client.SharedQueryClient = (*sharedQueryClient)(nil)
 
 func newSharedQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *sharedQueryClient {
 	return &sharedQueryClient{
-		logger:       logger.With().Str("query_client", "shared").Logger(),
-		queryClient:  sharedtypes.NewQueryClient(conn),
-		queryTimeout: timeout,
+		logger:              logger.With().Str("query_client", "shared").Logger(),
+		queryClient:         sharedtypes.NewQueryClient(conn),
+		queryTimeout:        timeout,
+		paramsAtHeightCache: make(map[int64]*sharedtypes.Params),
 	}
 }
 
@@ -321,17 +337,23 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 		return c.GetParams(ctx)
 	}
 
-	// Fast path: if queryHeight falls within the current (live) params epoch, the live
-	// params ARE the params effective at queryHeight — serve them without an extra RPC.
-	// anchor <= queryHeight means queryHeight belongs to the live epoch; only an
-	// older-epoch height (queryHeight < anchor, i.e. after a recent session-length
-	// change) needs the historical lookup.
-	if liveParams, err := c.GetParams(ctx); err == nil {
-		if int64(liveParams.GetSessionGridAnchorHeight()) <= queryHeight {
-			return liveParams, nil
-		}
+	// Serve from the height-keyed cache when present (entries are immutable, see field doc).
+	c.paramsAtHeightCacheMu.RLock()
+	if cached, ok := c.paramsAtHeightCache[queryHeight]; ok {
+		c.paramsAtHeightCacheMu.RUnlock()
+		return cached, nil
 	}
+	c.paramsAtHeightCacheMu.RUnlock()
 
+	// Always resolve through the chain's ParamsAtHeight RPC. We deliberately do NOT
+	// short-circuit on c.GetParams(): paramsCache is populated once and never
+	// invalidated in production, so after an on-chain MsgUpdateParam its cached
+	// SessionGridAnchorHeight belongs to the OLD epoch. A fast path keyed on that stale
+	// anchor (anchor <= queryHeight) would be satisfied for current-epoch heights and
+	// return stale params — silently defeating the height-aware semantics this method
+	// exists for. ParamsAtHeight is authoritative: the chain returns the live params for
+	// a current-epoch height (no history entry <= height) and the historical snapshot
+	// for an older-epoch height.
 	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
 	defer cancel()
 
@@ -340,11 +362,40 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
 	}
 
-	return &res.Params, nil
+	params := &res.Params
+	c.storeParamsAtHeight(queryHeight, params)
+	return params, nil
+}
+
+// storeParamsAtHeight caches an immutable params-at-height entry, evicting the lowest
+// heights first when the cache is full. A single write lock guards the whole store so
+// the size check and eviction cannot race.
+func (c *sharedQueryClient) storeParamsAtHeight(height int64, params *sharedtypes.Params) {
+	c.paramsAtHeightCacheMu.Lock()
+	defer c.paramsAtHeightCacheMu.Unlock()
+
+	if c.paramsAtHeightCache == nil {
+		c.paramsAtHeightCache = make(map[int64]*sharedtypes.Params)
+	}
+
+	if _, ok := c.paramsAtHeightCache[height]; !ok && len(c.paramsAtHeightCache) >= maxParamsAtHeightCacheEntries {
+		// Evict the lowest (oldest) heights down to half capacity. Settled sessions are
+		// not re-queried, so dropping the smallest heights is the cheapest useful policy.
+		heights := make([]int64, 0, len(c.paramsAtHeightCache))
+		for h := range c.paramsAtHeightCache {
+			heights = append(heights, h)
+		}
+		sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+		for _, h := range heights[:len(heights)-maxParamsAtHeightCacheEntries/2] {
+			delete(c.paramsAtHeightCache, h)
+		}
+	}
+
+	c.paramsAtHeightCache[height] = params
 }
 
 func (c *sharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -352,7 +403,7 @@ func (c *sharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, 
 }
 
 func (c *sharedQueryClient) GetClaimWindowOpenHeight(ctx context.Context, queryHeight int64) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -360,7 +411,7 @@ func (c *sharedQueryClient) GetClaimWindowOpenHeight(ctx context.Context, queryH
 }
 
 func (c *sharedQueryClient) GetEarliestSupplierClaimCommitHeight(ctx context.Context, queryHeight int64, supplierOperatorAddr string) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -381,7 +432,7 @@ func (c *sharedQueryClient) GetEarliestSupplierClaimCommitHeight(ctx context.Con
 }
 
 func (c *sharedQueryClient) GetProofWindowOpenHeight(ctx context.Context, queryHeight int64) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
@@ -389,7 +440,7 @@ func (c *sharedQueryClient) GetProofWindowOpenHeight(ctx context.Context, queryH
 }
 
 func (c *sharedQueryClient) GetEarliestSupplierProofCommitHeight(ctx context.Context, queryHeight int64, supplierOperatorAddr string) (int64, error) {
-	params, err := c.GetParams(ctx)
+	params, err := c.GetParamsAtHeight(ctx, queryHeight)
 	if err != nil {
 		return 0, err
 	}
