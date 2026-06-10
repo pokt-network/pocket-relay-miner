@@ -703,3 +703,81 @@ func TestParams_ContextCancellation(t *testing.T) {
 	// Either is acceptable behavior
 	_ = err
 }
+
+// TestLiveParams_RefreshAfterTTL is the regression guard for the June 2026
+// PROOF_MISSING incident: live GetParams must NOT be fetch-once. After
+// liveParamsCacheTTL the client must re-query the chain and observe an
+// on-chain param change (e.g. the weekly CUTTM update); a fetch-once cache
+// freezes CUTTM at process start, mis-values claims against the chain's
+// proof-requirement threshold, and silently forfeits rewards until restart.
+func TestLiveParams_RefreshAfterTTL(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	oldParams := generateTestSharedParams()
+	oldParams.ComputeUnitsToTokensMultiplier = 97714
+	mock.sharedParams = oldParams
+
+	prevTTL := liveParamsCacheTTL
+	liveParamsCacheTTL = 50 * time.Millisecond
+	defer func() { liveParamsCacheTTL = prevTTL }()
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	qc, err := NewQueryClients(logger, ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second})
+	require.NoError(t, err)
+	defer qc.Close()
+	ctx := context.Background()
+
+	// Warm the cache with the old epoch.
+	p, err := qc.Shared().GetParams(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(97714), p.ComputeUnitsToTokensMultiplier)
+
+	// On-chain param change (CUTTM bump). Within the TTL the cached value is
+	// served — that staleness window is bounded and accepted.
+	newParams := generateTestSharedParams()
+	newParams.ComputeUnitsToTokensMultiplier = 118569
+	mock.sharedParams = newParams
+
+	p, err = qc.Shared().GetParams(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(97714), p.ComputeUnitsToTokensMultiplier, "within TTL the cached value is expected")
+
+	// After the TTL the refresh must observe the new value.
+	time.Sleep(80 * time.Millisecond)
+	p, err = qc.Shared().GetParams(ctx)
+	require.NoError(t, err)
+	require.Equal(t, uint64(118569), p.ComputeUnitsToTokensMultiplier, "post-TTL read must observe the on-chain change")
+}
+
+// TestLiveParams_ServesStaleOnRefreshFailure verifies the availability side of
+// the TTL refresh: when the post-TTL re-query fails (transient RPC outage), the
+// client serves the last-known value instead of erroring, so the proof path is
+// never broken by a refresh that used to be a cache hit.
+func TestLiveParams_ServesStaleOnRefreshFailure(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	mock.sharedParams = generateTestSharedParams()
+
+	prevTTL := liveParamsCacheTTL
+	liveParamsCacheTTL = 50 * time.Millisecond
+	defer func() { liveParamsCacheTTL = prevTTL }()
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	qc, err := NewQueryClients(logger, ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second})
+	require.NoError(t, err)
+	defer qc.Close()
+	ctx := context.Background()
+
+	p, err := qc.Shared().GetParams(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, p)
+
+	// Break the params RPC, expire the TTL: the stale value must be served.
+	mock.sharedParams = nil
+	time.Sleep(80 * time.Millisecond)
+	p, err = qc.Shared().GetParams(ctx)
+	require.NoError(t, err, "refresh failure must fall back to the stale cache, not error")
+	require.NotNil(t, p)
+}

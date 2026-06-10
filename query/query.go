@@ -262,8 +262,9 @@ type sharedQueryClient struct {
 	queryClient  sharedtypes.QueryClient
 	queryTimeout time.Duration
 
-	// Simple in-memory cache for params
+	// Simple in-memory cache for params, refreshed after liveParamsCacheTTL.
 	paramsCache   *sharedtypes.Params
+	paramsCacheAt time.Time
 	paramsCacheMu sync.RWMutex
 
 	// paramsAtHeightCache memoizes ParamsAtHeight results keyed by query height.
@@ -282,6 +283,17 @@ type sharedQueryClient struct {
 // dropped first since settled sessions are not re-queried.
 const maxParamsAtHeightCacheEntries = 1024
 
+// liveParamsCacheTTL bounds how long live module params (shared/session/proof
+// GetParams) are served from memory before re-querying the chain. Governance
+// params change rarely but DO change (e.g. weekly CUTTM updates on mainnet);
+// a fetch-once cache freezes them at process start, silently diverging the
+// miner's claim valuation from the chain's until restart (June 2026
+// PROOF_MISSING wave). ~1.5 blocks of staleness is the most a "live" read can
+// drift without materially diverging from what the chain reads.
+//
+// A var (not const) so tests can shrink it without sleeping.
+var liveParamsCacheTTL = 90 * time.Second
+
 var _ client.SharedQueryClient = (*sharedQueryClient)(nil)
 
 func newSharedQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *sharedQueryClient {
@@ -294,9 +306,9 @@ func newSharedQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout 
 }
 
 func (c *sharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Params, error) {
-	// Check cache first
+	// Serve from cache while fresh
 	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil {
+	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
 		cached := c.paramsCache
 		c.paramsCacheMu.RUnlock()
 		return cached, nil
@@ -308,7 +320,7 @@ func (c *sharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Params,
 	defer c.paramsCacheMu.Unlock()
 
 	// Double-check after acquiring a lock
-	if c.paramsCache != nil {
+	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
 		return c.paramsCache, nil
 	}
 
@@ -317,10 +329,18 @@ func (c *sharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Params,
 
 	res, err := c.queryClient.Params(queryCtx, &sharedtypes.QueryParamsRequest{})
 	if err != nil {
+		// Serve the stale value on a failed refresh: a transient RPC error must
+		// not break callers (e.g. the proof-requirement path) that previously
+		// had a value. Staleness here is bounded by the outage, not unbounded.
+		if c.paramsCache != nil {
+			c.logger.Warn().Err(err).Msg("shared params refresh failed; serving stale cache")
+			return c.paramsCache, nil
+		}
 		return nil, fmt.Errorf("failed to query shared params: %w", err)
 	}
 
 	c.paramsCache = &res.Params
+	c.paramsCacheAt = time.Now()
 	return &res.Params, nil
 }
 
@@ -481,8 +501,9 @@ type sessionQueryClient struct {
 	sessionCache   map[string]*sessiontypes.Session
 	sessionCacheMu sync.RWMutex
 
-	// Params cache
+	// Params cache, refreshed after liveParamsCacheTTL.
 	paramsCache   *sessiontypes.Params
+	paramsCacheAt time.Time
 	paramsCacheMu sync.RWMutex
 }
 
@@ -553,9 +574,9 @@ func (c *sessionQueryClient) GetSession(
 }
 
 func (c *sessionQueryClient) GetParams(ctx context.Context) (*sessiontypes.Params, error) {
-	// Check cache first
+	// Serve from cache while fresh
 	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil {
+	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
 		cached := c.paramsCache
 		c.paramsCacheMu.RUnlock()
 		return cached, nil
@@ -567,7 +588,7 @@ func (c *sessionQueryClient) GetParams(ctx context.Context) (*sessiontypes.Param
 	defer c.paramsCacheMu.Unlock()
 
 	// Double-check after acquiring lock
-	if c.paramsCache != nil {
+	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
 		return c.paramsCache, nil
 	}
 
@@ -576,10 +597,16 @@ func (c *sessionQueryClient) GetParams(ctx context.Context) (*sessiontypes.Param
 
 	res, err := c.queryClient.Params(queryCtx, &sessiontypes.QueryParamsRequest{})
 	if err != nil {
+		// Serve the stale value on a failed refresh (see sharedQueryClient.GetParams).
+		if c.paramsCache != nil {
+			c.logger.Warn().Err(err).Msg("session params refresh failed; serving stale cache")
+			return c.paramsCache, nil
+		}
 		return nil, fmt.Errorf("failed to query session params: %w", err)
 	}
 
 	c.paramsCache = &res.Params
+	c.paramsCacheAt = time.Now()
 	return &res.Params, nil
 }
 
@@ -840,7 +867,9 @@ type proofQueryClient struct {
 	claimCache   map[string]*prooftypes.Claim
 	claimCacheMu sync.RWMutex
 
+	// Simple in-memory cache for params, refreshed after liveParamsCacheTTL.
 	paramsCache   *prooftypes.Params
+	paramsCacheAt time.Time
 	paramsCacheMu sync.RWMutex
 }
 
@@ -856,9 +885,11 @@ func newProofQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout t
 }
 
 func (c *proofQueryClient) GetParams(ctx context.Context) (client.ProofParams, error) {
-	// Check cache first
+	// Serve from cache while fresh. The proof-requirement threshold and
+	// probability are read "live" to match the chain's ProofRequirementForClaim;
+	// a fetch-once cache would freeze them at process start.
 	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil {
+	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
 		cached := c.paramsCache
 		c.paramsCacheMu.RUnlock()
 		return cached, nil
@@ -869,7 +900,7 @@ func (c *proofQueryClient) GetParams(ctx context.Context) (client.ProofParams, e
 	c.paramsCacheMu.Lock()
 	defer c.paramsCacheMu.Unlock()
 
-	if c.paramsCache != nil {
+	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
 		return c.paramsCache, nil
 	}
 
@@ -878,10 +909,16 @@ func (c *proofQueryClient) GetParams(ctx context.Context) (client.ProofParams, e
 
 	res, err := c.queryClient.Params(queryCtx, &prooftypes.QueryParamsRequest{})
 	if err != nil {
+		// Serve the stale value on a failed refresh (see sharedQueryClient.GetParams).
+		if c.paramsCache != nil {
+			c.logger.Warn().Err(err).Msg("proof params refresh failed; serving stale cache")
+			return c.paramsCache, nil
+		}
 		return nil, fmt.Errorf("failed to query proof params: %w", err)
 	}
 
 	c.paramsCache = &res.Params
+	c.paramsCacheAt = time.Now()
 	return &res.Params, nil
 }
 
