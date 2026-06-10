@@ -123,6 +123,56 @@ func TestTimingCalculator_CalculateClaimWindow(t *testing.T) {
 	require.Equal(t, blockHash, window.WindowOpenBlockHash)
 }
 
+// TestTimingCalculator_CalculateClaimWindow_UsesParamsAtSessionHeight proves the
+// claim window is computed from the shared params that were effective at the
+// session's height (via GetParamsAtHeight), NOT the live params. This guards the
+// poktroll #543 anchored-grid wiring: after a session-length change, an old-epoch
+// session must resolve its window with the old-epoch params.
+func TestTimingCalculator_CalculateClaimWindow_UsesParamsAtSessionHeight(t *testing.T) {
+	calc, sharedClient, _ := setupTimingCalculatorTest(t)
+
+	// Live params (default mock) use ClaimWindowOpenOffsetBlocks=1. Configure the
+	// height-aware lookup to return DIFFERENT params (offset 5) for the old session
+	// and capture the height it was queried with.
+	var gotQueryHeight int64
+	oldEpochParams := &sharedtypes.Params{
+		NumBlocksPerSession:          4,
+		GracePeriodEndOffsetBlocks:   1,
+		ClaimWindowOpenOffsetBlocks:  5,
+		ClaimWindowCloseOffsetBlocks: 4,
+		ProofWindowOpenOffsetBlocks:  0,
+		ProofWindowCloseOffsetBlocks: 4,
+	}
+	sharedClient.paramsAtHeightFn = func(_ context.Context, queryHeight int64) (*sharedtypes.Params, error) {
+		gotQueryHeight = queryHeight
+		return oldEpochParams, nil
+	}
+
+	ctx := context.Background()
+	sessionEndHeight := int64(104) // clean session boundary for numBlocksPerSession=4
+	window, err := calc.CalculateClaimWindow(ctx, sessionEndHeight, "pokt1supplier123", []byte("block-hash"))
+	require.NoError(t, err)
+	require.NotNil(t, window)
+
+	// The calculator must have queried params at the session's end height.
+	require.Equal(t, sessionEndHeight, gotQueryHeight,
+		"CalculateClaimWindow must fetch params at the session end height")
+
+	// Derive expected windows from the protocol formula using each param set, so the
+	// assertion is robust to poktroll's internal grid math. The window must match the
+	// height-aware (old-epoch) params and must differ from what live params produce.
+	liveParams, _ := sharedClient.GetParams(ctx)
+	expectedOpen := sharedtypes.GetClaimWindowOpenHeight(oldEpochParams, sessionEndHeight)
+	expectedClose := sharedtypes.GetClaimWindowCloseHeight(oldEpochParams, sessionEndHeight)
+	liveOpen := sharedtypes.GetClaimWindowOpenHeight(liveParams, sessionEndHeight)
+
+	require.NotEqual(t, liveOpen, expectedOpen,
+		"test sanity: height-aware and live params must yield different windows")
+	require.Equal(t, expectedOpen, window.WindowOpen,
+		"window must use height-aware params, not live params")
+	require.Equal(t, expectedClose, window.WindowClose)
+}
+
 // TestTimingCalculator_CalculateProofWindow removed - timing calculation integration
 // TODO(e2e): Re-implement as e2e test with testcontainers
 

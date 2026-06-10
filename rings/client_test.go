@@ -97,6 +97,10 @@ func (m *mockSharedQuerier) GetParams(ctx context.Context) (*sharedtypes.Params,
 	}, nil
 }
 
+func (m *mockSharedQuerier) GetParamsAtHeight(ctx context.Context, queryHeight int64) (*sharedtypes.Params, error) {
+	return m.GetParams(ctx)
+}
+
 func (m *mockSharedQuerier) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {
 	return 0, errors.New("not implemented in mock")
 }

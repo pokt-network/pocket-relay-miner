@@ -277,7 +277,8 @@ func (t *InclusionTracker) tickOnce(
 // computeClaimWindowCloseHeight returns the block height at which the claim
 // window closes for the given session.
 func (t *InclusionTracker) computeClaimWindowCloseHeight(ctx context.Context, sessionEndHeight int64) (int64, error) {
-	params, err := t.sharedClient.GetParams(ctx)
+	// Params effective at the session's height (poktroll #543 anchored grid).
+	params, err := t.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get shared params: %w", err)
 	}

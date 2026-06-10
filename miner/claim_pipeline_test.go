@@ -129,6 +129,11 @@ func (m *mockTxClient) getProofCalls() int {
 // mockSharedQueryClient implements client.SharedQueryClient for testing
 type mockSharedQueryClient struct {
 	params *sharedtypes.Params
+
+	// paramsAtHeightFn, when set, overrides GetParamsAtHeight so tests can return
+	// height-specific params (simulating params that were effective at an older
+	// session height). When nil, GetParamsAtHeight delegates to GetParams.
+	paramsAtHeightFn func(ctx context.Context, queryHeight int64) (*sharedtypes.Params, error)
 }
 
 func (m *mockSharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Params, error) {
@@ -144,6 +149,13 @@ func (m *mockSharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Par
 		}, nil
 	}
 	return m.params, nil
+}
+
+func (m *mockSharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight int64) (*sharedtypes.Params, error) {
+	if m.paramsAtHeightFn != nil {
+		return m.paramsAtHeightFn(ctx, queryHeight)
+	}
+	return m.GetParams(ctx)
 }
 
 func (m *mockSharedQueryClient) GetSessionGracePeriodEndHeight(ctx context.Context, queryHeight int64) (int64, error) {

@@ -34,6 +34,10 @@ type mockQueryServer struct {
 
 	// Shared responses
 	sharedParams *sharedtypes.Params
+	// sharedParamsAtHeight, when set, is returned by the ParamsAtHeight RPC (the
+	// historical/height-aware lookup), independent of sharedParams (the live Params
+	// RPC). Lets tests simulate a chain whose live cache is stale vs the at-height value.
+	sharedParamsAtHeight *sharedtypes.Params
 
 	// Supplier responses
 	getSupplierFunc func(context.Context, *suppliertypes.QueryGetSupplierRequest) (*suppliertypes.QueryGetSupplierResponse, error)
@@ -105,6 +109,17 @@ func (m *mockSharedQueryServer) Params(ctx context.Context, req *sharedtypes.Que
 		return nil, status.Error(codes.NotFound, "params not found")
 	}
 	return &sharedtypes.QueryParamsResponse{Params: *m.mock.sharedParams}, nil
+}
+
+func (m *mockSharedQueryServer) ParamsAtHeight(ctx context.Context, req *sharedtypes.QueryParamsAtHeightRequest) (*sharedtypes.QueryParamsAtHeightResponse, error) {
+	p := m.mock.sharedParamsAtHeight
+	if p == nil {
+		p = m.mock.sharedParams
+	}
+	if p == nil {
+		return nil, status.Error(codes.NotFound, "params not found")
+	}
+	return &sharedtypes.QueryParamsAtHeightResponse{Params: *p}, nil
 }
 
 // Supplier query server implementation

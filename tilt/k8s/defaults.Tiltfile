@@ -12,7 +12,7 @@ def get_defaults():
         "validator": {
             "enabled": True,
             "image": "ghcr.io/pokt-network/pocketd",
-            "tag": "0.1.30",
+            "tag": "0.1.34",
             "chain_id": "pocket",
             "clean_on_restart": True,
             "ports": {

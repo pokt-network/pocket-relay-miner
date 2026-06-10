@@ -359,14 +359,22 @@ func (lc *LifecycleCallback) getClaimReward(
 		return sdk.Coin{}, fmt.Errorf("difficulty client not available")
 	}
 
+	// Both the shared params (ComputeUnitsToTokensMultiplier, ComputeUnitCostGranularity)
+	// and the relay mining difficulty must be those effective at the session START
+	// height, to exactly match how the chain computes the claimed uPOKT in
+	// x/proof/keeper/msg_server_create_claim.go (GetParamsAtHeight(sessionStartHeight)
+	// + GetRelayMiningDifficultyAtHeight(sessionStartHeight)). Using live shared params
+	// would diverge from the chain after a session-length / CUTTM param change.
+	sessionStartHeight := claim.SessionHeader.GetSessionStartBlockHeight()
+
 	difficulty, err := difficultyClient.GetServiceRelayDifficultyAtHeight(
-		ctx, serviceID, claim.SessionHeader.GetSessionStartBlockHeight(),
+		ctx, serviceID, sessionStartHeight,
 	)
 	if err != nil {
 		return sdk.Coin{}, fmt.Errorf("failed to fetch relay mining difficulty: %w", err)
 	}
 
-	sharedParams, err := lc.sharedClient.GetParams(ctx)
+	sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionStartHeight)
 	if err != nil {
 		return sdk.Coin{}, fmt.Errorf("failed to get shared params: %w", err)
 	}
@@ -516,12 +524,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 	logger.Debug().Msg("batched sessions need claims - starting claim process")
 
-	// Get shared params
-	sharedParams, err := lc.sharedClient.GetParams(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get shared params: %w", err)
-	}
-
 	// Group sessions by session end height (they might have different claim windows)
 	// WORKAROUND: If batching is disabled, create one group per session to avoid
 	// cross-contamination where one invalid claim causes the entire batch to fail.
@@ -561,6 +563,14 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// Get the actual session end height from the first snapshot in the group
 		// (all snapshots in a group have the same end height)
 		sessionEndHeight := groupSnapshots[0].SessionEndHeight
+
+		// Shared params effective at this session's height, not live params. After a
+		// session-length change (poktroll #543 anchored grid), an old-epoch group
+		// computed with new-epoch params would resolve the wrong claim window.
+		sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+		if err != nil {
+			return nil, fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err)
+		}
 
 		// Wait for claim window to open and get the block hash for timing spread
 		claimWindowOpenHeight := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
@@ -1212,12 +1222,6 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 	logger.Debug().Msg("batched sessions need proofs - starting proof process")
 
-	// Get shared params
-	sharedParams, err := lc.sharedClient.GetParams(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get shared params: %w", err)
-	}
-
 	// Group sessions by session end height (they might have different proof windows)
 	// WORKAROUND: If batching is disabled, create one group per session to avoid
 	// cross-contamination where one invalid proof (e.g., difficulty validation failure)
@@ -1255,6 +1259,14 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// Get the actual session end height from the first snapshot in the group
 		// (all snapshots in a group have the same end height)
 		sessionEndHeight := groupSnapshots[0].SessionEndHeight
+
+		// Shared params effective at this session's height, not live params. After a
+		// session-length change (poktroll #543 anchored grid), an old-epoch group
+		// computed with new-epoch params would resolve the wrong proof window.
+		sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+		if err != nil {
+			return fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err)
+		}
 
 		// Wait for proof window to open
 		proofWindowOpenHeight := sharedtypes.GetProofWindowOpenHeight(sharedParams, sessionEndHeight)
