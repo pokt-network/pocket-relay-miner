@@ -131,12 +131,17 @@ func TestProofInclusion_OnChainFound_NoRebroadcast(t *testing.T) {
 	var resubmits atomic.Int32
 	require.True(t, h.tracker.ScheduleProofCheck(ProofInclusionCheck{
 		Supplier: "pokt1test", ServiceID: "svc-a", SessionID: "sess-1", SessionEndHeight: 110,
-		ProofTxHash: "proof-tx-1",
-		Resubmit:    func(context.Context) (string, error) { resubmits.Add(1); return "x", nil },
+		ProofTxHash: "proof-tx-1", SubmitHeight: 115,
+		Resubmit: func(context.Context) (string, error) { resubmits.Add(1); return "x", nil },
 	}))
 
 	assertProofOutcomeEventually(t, h, "pokt1test", 110, "sess-1", string(ProofInclusionFound))
 	require.Equal(t, int32(0), resubmits.Load(), "proof already on-chain — must not rebroadcast")
+
+	rec, err := h.submissions.GetRecord(context.Background(), "pokt1test", 110, "sess-1")
+	require.NoError(t, err)
+	require.Equal(t, int64(116), rec.ProofInclusionHeight,
+		"Found outcome must record the chain height at which the proof was observed on-chain")
 }
 
 // Proof missing while window open → rebroadcast; then it lands → outcome found.
@@ -161,7 +166,7 @@ func TestProofInclusion_RebroadcastThenFound(t *testing.T) {
 	var resubmits atomic.Int32
 	require.True(t, h.tracker.ScheduleProofCheck(ProofInclusionCheck{
 		Supplier: "pokt1test", ServiceID: "svc-a", SessionID: "sess-2", SessionEndHeight: 110,
-		ProofTxHash: "proof-tx-2",
+		ProofTxHash: "proof-tx-2", SubmitHeight: 115,
 		Resubmit: func(context.Context) (string, error) {
 			n := resubmits.Add(1)
 			return fmt.Sprintf("rebroadcast-hash-%d", n), nil
@@ -191,39 +196,85 @@ func TestProofInclusion_MissingWhenWindowCloses(t *testing.T) {
 	var resubmits atomic.Int32
 	require.True(t, h.tracker.ScheduleProofCheck(ProofInclusionCheck{
 		Supplier: "pokt1test", ServiceID: "svc-a", SessionID: "sess-3", SessionEndHeight: 110,
-		ProofTxHash: "proof-tx-3",
-		Resubmit:    func(context.Context) (string, error) { resubmits.Add(1); return "x", nil },
+		ProofTxHash: "proof-tx-3", SubmitHeight: 115,
+		Resubmit: func(context.Context) (string, error) { resubmits.Add(1); return "x", nil },
 	}))
 
 	assertProofOutcomeEventually(t, h, "pokt1test", 110, "sess-3", string(ProofInclusionMissing))
 	require.Equal(t, int32(0), resubmits.Load(), "window already closed — must not rebroadcast")
 }
 
-// Rebroadcast is bounded by MaxRebroadcasts even if the proof stays missing
-// while the window remains open.
-func TestProofInclusion_RebroadcastBounded(t *testing.T) {
+// Rebroadcasts fire at most once per block (cadence fix) and are bounded by
+// MaxRebroadcasts. The Resubmit closure advances the chain one block per call,
+// so the two retries land in two distinct (later, empty) window blocks — never
+// burned together in the original's burst block.
+func TestProofInclusion_RebroadcastOncePerBlock_AndBounded(t *testing.T) {
 	cfg := defaultProofCfg()
 	cfg.MaxRebroadcasts = 2
 	cfg.RebroadcastSafetyBlocks = 1
-	cfg.MaxPollDuration = 250 * time.Millisecond // force a poll_error exit
+	cfg.MaxPollDuration = 400 * time.Millisecond // force a poll_error exit once stuck
 	h := newProofTrackerHarness(t, cfg)
 	seedProofRecord(t, h.submissions, "pokt1test", "sess-4", "proof-tx-4", 110)
 
 	h.proofGetter.getFn = func(int) (*prooftypes.Proof, error) {
 		return nil, status.Error(codes.NotFound, "proof not found")
 	}
-	setBlockHeight(h.blockClient, 116) // window stays open the whole time
+	setBlockHeight(h.blockClient, 116) // submit height 115 → 1-block grace already satisfied
 
+	// Record the height at which each rebroadcast fires, then advance one block.
+	var mu sync.Mutex
+	var attemptHeights []int64
 	var resubmits atomic.Int32
 	require.True(t, h.tracker.ScheduleProofCheck(ProofInclusionCheck{
 		Supplier: "pokt1test", ServiceID: "svc-a", SessionID: "sess-4", SessionEndHeight: 110,
-		ProofTxHash: "proof-tx-4",
-		Resubmit:    func(context.Context) (string, error) { resubmits.Add(1); return "x", nil },
+		ProofTxHash: "proof-tx-4", SubmitHeight: 115,
+		Resubmit: func(context.Context) (string, error) {
+			mu.Lock()
+			attemptHeights = append(attemptHeights, h.blockClient.LastBlock(context.Background()).Height())
+			mu.Unlock()
+			resubmits.Add(1)
+			// Advance the chain one block so the next rebroadcast is allowed.
+			setBlockHeight(h.blockClient, h.blockClient.LastBlock(context.Background()).Height()+1)
+			return "x", nil
+		},
 	}))
 
-	// MaxPollDuration elapses -> poll_error; rebroadcasts capped at MaxRebroadcasts.
 	assertProofOutcomeEventually(t, h, "pokt1test", 110, "sess-4", string(ProofInclusionPollError))
 	require.Equal(t, int32(2), resubmits.Load(), "rebroadcasts must be capped at MaxRebroadcasts")
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, []int64{116, 117}, attemptHeights,
+		"rebroadcasts must be one-per-block (distinct, ascending heights), not burst in one block")
+}
+
+// Grace + same-block spacing: while the chain is still in the original proof's
+// submit block, NO rebroadcast fires — the original gets a fair block to land
+// first. This is the core cadence fix that prevents burning the retry budget in
+// the burst block (the previously-observed failure mode).
+func TestProofInclusion_NoRebroadcastInSubmitBlock(t *testing.T) {
+	cfg := defaultProofCfg()
+	cfg.MaxRebroadcasts = 2
+	cfg.RebroadcastSafetyBlocks = 1
+	cfg.MaxPollDuration = 250 * time.Millisecond
+	h := newProofTrackerHarness(t, cfg)
+	seedProofRecord(t, h.submissions, "pokt1test", "sess-5", "proof-tx-5", 110)
+
+	h.proofGetter.getFn = func(int) (*prooftypes.Proof, error) {
+		return nil, status.Error(codes.NotFound, "proof not found")
+	}
+	// Chain height == submit height for the whole test: still in the burst block.
+	setBlockHeight(h.blockClient, 116)
+
+	var resubmits atomic.Int32
+	require.True(t, h.tracker.ScheduleProofCheck(ProofInclusionCheck{
+		Supplier: "pokt1test", ServiceID: "svc-a", SessionID: "sess-5", SessionEndHeight: 110,
+		ProofTxHash: "proof-tx-5", SubmitHeight: 116, // same block as current height
+		Resubmit: func(context.Context) (string, error) { resubmits.Add(1); return "x", nil },
+	}))
+
+	assertProofOutcomeEventually(t, h, "pokt1test", 110, "sess-5", string(ProofInclusionPollError))
+	require.Equal(t, int32(0), resubmits.Load(),
+		"must not rebroadcast while still in the original proof's submit block")
 }
 
 // Disabled tracker accepts nothing and never polls.

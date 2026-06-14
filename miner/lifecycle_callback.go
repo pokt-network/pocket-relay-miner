@@ -1957,13 +1957,24 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 							if blkTime <= 0 {
 								blkTime = 30
 							}
+							// Clamp to >=1: the chain may have advanced past pwc
+							// between the tracker's window check and this closure
+							// running, which would otherwise yield a non-positive
+							// tx window timeout.
 							remaining := pwc - lc.blockClient.LastBlock(rctx).Height()
+							if remaining < 1 {
+								remaining = 1
+							}
 							rctx = tx.WithTxWindowTimeout(rctx, time.Duration(remaining)*time.Duration(blkTime)*time.Second)
+							// Use the hash-returning variant so concurrent
+							// rebroadcasts of different sessions through the shared
+							// client each get their own tx hash, rather than
+							// racing on lastProofTxHash via GetLastProofTxHash.
+							if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
+								return haClient.SubmitProofsReturningHash(rctx, pwc, proofMsg)
+							}
 							if subErr := lc.supplierClient.SubmitProofs(rctx, pwc, proofMsg); subErr != nil {
 								return "", subErr
-							}
-							if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-								return haClient.GetLastProofTxHash(), nil
 							}
 							return "", nil
 						}
@@ -1973,6 +1984,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 							SessionID:        snap.SessionID,
 							SessionEndHeight: snap.SessionEndHeight,
 							ProofTxHash:      proofTxHash,
+							SubmitHeight:     currentBlock.Height(),
 							Resubmit:         resubmit,
 						})
 					}

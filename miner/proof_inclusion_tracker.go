@@ -89,6 +89,13 @@ type ProofInclusionCheck struct {
 	SessionEndHeight int64
 	ProofTxHash      string
 
+	// SubmitHeight is the block height at which the original proof was broadcast.
+	// Rebroadcasts are gated on the chain advancing past it (then past each
+	// prior attempt), so retries land in LATER, less-congested window blocks
+	// instead of being burned in the same block as the original. Zero disables
+	// the grace/spacing gate (legacy: rebroadcast as soon as missing).
+	SubmitHeight int64
+
 	// Resubmit re-broadcasts THIS session's proof and returns the new tx hash.
 	// It is invoked only while the proof window is open and the proof is still
 	// missing on-chain. If nil, the tracker is observe-only for this check.
@@ -235,8 +242,15 @@ func (t *ProofInclusionTracker) runProofPoll(check ProofInclusionCheck) {
 
 	rebroadcasts := 0
 	lastTxHash := ""
+	// lastAttemptHeight seeds from the original broadcast height: the first
+	// rebroadcast only fires once the chain advances past it (1-block grace for
+	// the original to land), and each subsequent rebroadcast only once height
+	// advances again (≥1 block apart). This is what spreads retries into the
+	// empty later blocks of the proof window instead of burning them in the
+	// burst block alongside the original.
+	lastAttemptHeight := check.SubmitHeight
 
-	outcome, height, exit := t.tickOnce(ctx, &check, proofWindowClose, &rebroadcasts, &lastTxHash)
+	outcome, height, exit := t.tickOnce(ctx, &check, proofWindowClose, &rebroadcasts, &lastTxHash, &lastAttemptHeight)
 	for !exit {
 		select {
 		case <-ctx.Done():
@@ -245,7 +259,7 @@ func (t *ProofInclusionTracker) runProofPoll(check ProofInclusionCheck) {
 			}
 			exit = true
 		case <-ticker.C:
-			outcome, height, exit = t.tickOnce(ctx, &check, proofWindowClose, &rebroadcasts, &lastTxHash)
+			outcome, height, exit = t.tickOnce(ctx, &check, proofWindowClose, &rebroadcasts, &lastTxHash, &lastAttemptHeight)
 		}
 	}
 
@@ -269,10 +283,19 @@ func (t *ProofInclusionTracker) tickOnce(
 	proofWindowClose int64,
 	rebroadcasts *int,
 	lastTxHash *string,
+	lastAttemptHeight *int64,
 ) (ProofInclusionOutcome, int64, bool) {
+	// Read chain height first so a Found outcome can report the height at which
+	// the proof was observed on-chain (poll-granularity, not the exact landing
+	// block).
+	currentHeight := int64(0)
+	if block := t.blockClient.LastBlock(ctx); block != nil {
+		currentHeight = block.Height()
+	}
+
 	proof, err := t.proofClient.GetProof(ctx, check.Supplier, check.SessionID)
 	if err == nil && proof != nil {
-		return ProofInclusionFound, 0, true
+		return ProofInclusionFound, currentHeight, true
 	}
 	if err != nil && !isClaimNotFoundError(err) {
 		// Transient RPC error — keep polling; if never resolved before window
@@ -284,21 +307,25 @@ func (t *ProofInclusionTracker) tickOnce(
 			Msg("proof inclusion poll: transient GetProof error, will retry")
 	}
 
-	currentHeight := int64(0)
-	if block := t.blockClient.LastBlock(ctx); block != nil {
-		currentHeight = block.Height()
-	}
 	if currentHeight > proofWindowClose {
 		return ProofInclusionMissing, 0, true
 	}
 
-	// Proof missing, window still open → rebroadcast if allowed and there is
-	// enough margin before window close for a re-submit to land.
+	// Proof missing, window still open → rebroadcast if allowed.
+	// Gates:
+	//   - budget not exhausted (MaxRebroadcasts)
+	//   - far enough from window close that a resend can still land (safety)
+	//   - chain advanced past the last attempt (grace for the original on the
+	//     first rebroadcast, ≥1-block spacing thereafter) — so retries go into
+	//     the empty later blocks of the window rather than the burst block. A
+	//     zero SubmitHeight disables this gate (legacy immediate behavior).
 	if check.Resubmit != nil &&
 		*rebroadcasts < t.cfg.MaxRebroadcasts &&
-		currentHeight <= proofWindowClose-t.cfg.RebroadcastSafetyBlocks {
+		currentHeight <= proofWindowClose-t.cfg.RebroadcastSafetyBlocks &&
+		currentHeight > *lastAttemptHeight {
 		newHash, resubErr := check.Resubmit(ctx)
 		*rebroadcasts++
+		*lastAttemptHeight = currentHeight
 		if resubErr != nil {
 			proofRebroadcastsTotal.WithLabelValues(check.Supplier, check.ServiceID, "error").Inc()
 			t.logger.Warn().

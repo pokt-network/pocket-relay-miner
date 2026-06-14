@@ -269,6 +269,16 @@ type SupplierManager struct {
 	// SupplierManager so Close() drains its worker pool cleanly on shutdown.
 	proofInclusionTracker *ProofInclusionTracker
 
+	// sharedSubmissionTracker + sharedTrackersOnce make the submission tracker
+	// and the two inclusion trackers process-wide singletons (one worker pool
+	// each) instead of one-per-supplier-key. Operators run hundreds of keys per
+	// miner; per-key trackers meant hundreds of pools and a Close() that drained
+	// only the last key's (the field was overwritten each iteration). The
+	// trackers are stateless across suppliers — identity is passed per check —
+	// so a single shared instance is correct.
+	sharedSubmissionTracker *SubmissionTracker
+	sharedTrackersOnce      sync.Once
+
 	// Lifecycle
 	//
 	// mu protects ctx / cancelFn / closed. It is an RWMutex so the
@@ -1112,50 +1122,21 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// This stops the consumer from reading stale messages and frees Redis memory
 		lifecycleCallback.SetStreamDeleter(consumer)
 
-		// Wire submission tracker for debugging claim/proof submissions
-		// Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis
-		submissionTracker := NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
-		lifecycleCallback.SetSubmissionTracker(submissionTracker)
-
-		// Wire the claim inclusion tracker so that after each claim broadcast
-		// the miner polls GetClaim(supplier, sessionID) until the claim is
-		// on-chain or the claim window closes, recording the real outcome
-		// to the submission tracker. GetClaim queries x/proof module state —
-		// independent of the Tendermint tx indexer, so this works against
-		// nodes configured with tx_index=null.
-		if m.config.ProofQueryClient != nil {
-			inclusionTracker := NewInclusionTracker(
-				m.logger,
-				m.config.ProofQueryClient,
-				m.config.SharedClient,
-				m.config.BlockClient,
-				submissionTracker,
-				m.config.InclusionTrackerConfig,
-			)
-			lifecycleCallback.SetInclusionTracker(inclusionTracker)
-			m.inclusionTracker = inclusionTracker
-
-			// Wire the proof inclusion tracker + rebroadcaster. It polls
-			// GetProof(supplier, sessionID) after each proof broadcast and, while
-			// the proof window is still open, re-submits a proof that was
-			// CheckTx-accepted but never included — the fix for silent
-			// PROOF_MISSING forfeits. Requires a proof query client that exposes
-			// a fresh (uncached) GetProof; the concrete query client does.
-			if proofGetter, ok := m.config.ProofQueryClient.(ProofInclusionQueryClient); ok {
-				proofInclusionTracker := NewProofInclusionTracker(
-					m.logger,
-					proofGetter,
-					m.config.SharedClient,
-					m.config.BlockClient,
-					submissionTracker,
-					m.config.ProofInclusionTrackerConfig,
-				)
-				lifecycleCallback.SetProofInclusionTracker(proofInclusionTracker)
-				m.proofInclusionTracker = proofInclusionTracker
-			} else {
-				m.logger.Warn().
-					Msg("proof query client does not expose GetProof; proof inclusion tracking + rebroadcast disabled")
-			}
+		// Wire the process-wide submission tracker + claim/proof inclusion
+		// trackers (built once; see ensureSharedTrackers and the field docs).
+		// The submission tracker records tx hashes / success / errors / timing;
+		// the inclusion trackers poll x/proof module state (GetClaim / GetProof —
+		// independent of the Tendermint tx indexer, so they work on nodes with
+		// tx_index=null) to record real on-chain outcomes, and the proof tracker
+		// re-broadcasts a CheckTx-accepted-but-not-yet-included proof into the
+		// still-open window (fix for silent PROOF_MISSING forfeits).
+		m.ensureSharedTrackers()
+		lifecycleCallback.SetSubmissionTracker(m.sharedSubmissionTracker)
+		if m.inclusionTracker != nil {
+			lifecycleCallback.SetInclusionTracker(m.inclusionTracker)
+		}
+		if m.proofInclusionTracker != nil {
+			lifecycleCallback.SetProofInclusionTracker(m.proofInclusionTracker)
 		}
 
 		// Wire build pool for bounded parallel claim/proof building
@@ -1882,4 +1863,45 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 			Dur("max_age", maxAge).
 			Msg("stream trimming completed")
 	}
+}
+
+// ensureSharedTrackers lazily constructs the process-wide submission tracker and
+// the claim/proof inclusion trackers exactly once, regardless of how many
+// supplier keys this manager drives. They are stateless across suppliers
+// (supplier/session identity is passed per call), so one shared instance per
+// miner — rather than one per key — is both correct and far cheaper at the
+// hundreds-of-keys scale operators actually run. Safe under concurrent
+// addSupplier* calls via sync.Once.
+func (m *SupplierManager) ensureSharedTrackers() {
+	m.sharedTrackersOnce.Do(func() {
+		m.sharedSubmissionTracker = NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
+
+		if m.config.ProofQueryClient == nil {
+			return
+		}
+
+		m.inclusionTracker = NewInclusionTracker(
+			m.logger,
+			m.config.ProofQueryClient,
+			m.config.SharedClient,
+			m.config.BlockClient,
+			m.sharedSubmissionTracker,
+			m.config.InclusionTrackerConfig,
+		)
+
+		proofGetter, ok := m.config.ProofQueryClient.(ProofInclusionQueryClient)
+		if !ok {
+			m.logger.Warn().
+				Msg("proof query client does not expose GetProof; proof inclusion tracking + rebroadcast disabled")
+			return
+		}
+		m.proofInclusionTracker = NewProofInclusionTracker(
+			m.logger,
+			proofGetter,
+			m.config.SharedClient,
+			m.config.BlockClient,
+			m.sharedSubmissionTracker,
+			m.config.ProofInclusionTrackerConfig,
+		)
+	})
 }
