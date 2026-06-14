@@ -69,6 +69,7 @@ type mockTxServiceServer struct {
 	broadcastRawLog  string
 	broadcastTxHash  string
 	broadcastCounter int
+	getTxCounter     int    // number of GetTx (post-broadcast inclusion) calls
 	lastTxBytes      []byte // captured TxBytes from most recent BroadcastTx
 }
 
@@ -116,10 +117,11 @@ func (m *mockTxServiceServer) GetTx(
 ) (*txtypes.GetTxResponse, error) {
 	m.t.Helper()
 
-	m.rwMu.RLock()
+	m.rwMu.Lock()
+	m.getTxCounter++
 	code := m.broadcastCode
 	rawLog := m.broadcastRawLog
-	m.rwMu.RUnlock()
+	m.rwMu.Unlock()
 
 	// Return the same response as broadcast - simulates successful TX execution
 	// In production, this would query the blockchain for the TX by hash
@@ -215,6 +217,15 @@ func (s *testGRPCServer) setBroadcastTxHash(txHash string) {
 // getBroadcastCount returns the number of times BroadcastTx was called
 func (s *testGRPCServer) getBroadcastCount() int {
 	return s.txServer.broadcastCounter
+}
+
+// getGetTxCount returns the number of times GetTx (post-broadcast inclusion
+// verification) was called. The SYNC submission path performs no such call,
+// so this stays 0 — see TestSubmitProofs_SyncAcceptIsSuccess_NoInclusionCheck.
+func (s *testGRPCServer) getGetTxCount() int {
+	s.txServer.rwMu.RLock()
+	defer s.txServer.rwMu.RUnlock()
+	return s.txServer.getTxCounter
 }
 
 // getLastTxBytes returns a copy of the most recently broadcast TxBytes.

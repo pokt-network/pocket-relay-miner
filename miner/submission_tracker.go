@@ -53,6 +53,16 @@ type SubmissionTrackingRecord struct {
 	ProofSubmitTimeUTC   string `json:"proof_submit_time_utc,omitempty"`  // RFC3339 UTC time
 	ProofCurrentHeight   int64  `json:"proof_current_height,omitempty"`   // Current block at submission
 
+	// Proof on-chain outcome (populated by ProofInclusionTracker after polling
+	// GetProof). One of: "", "on_chain_found", "on_chain_missing",
+	// "poll_error", "poll_dropped". Empty string = poll hasn't resolved yet
+	// (or the tracker was disabled). This is the proof-side analogue of
+	// ClaimOnChainOutcome — without it, a CheckTx-accepted-but-never-included
+	// proof was indistinguishable from a settled one (silent PROOF_MISSING).
+	ProofOnChainOutcome  string `json:"proof_on_chain_outcome,omitempty"`
+	ProofInclusionHeight int64  `json:"proof_inclusion_height,omitempty"`
+	ProofRebroadcasts    int    `json:"proof_rebroadcasts,omitempty"` // # of in-window re-submissions attempted
+
 	// Metadata
 	NumRelays            int64  `json:"num_relays"`
 	ComputeUnits         int64  `json:"compute_units"`
@@ -339,6 +349,60 @@ func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u Cla
 		Str("outcome", u.Outcome).
 		Int("records_updated", updated).
 		Msg("applied claim on-chain outcome")
+
+	return nil
+}
+
+// ProofOnChainUpdate is the payload passed to
+// SubmissionTracker.UpdateProofOnChainOutcome, populated by the
+// ProofInclusionTracker after polling GetProof. Unlike the claim variant it is
+// keyed by full session identity (supplier, sessionEnd, sessionID) rather than
+// tx hash, because a rebroadcast changes the proof tx hash mid-flight.
+type ProofOnChainUpdate struct {
+	Supplier        string
+	SessionEnd      int64
+	SessionID       string
+	Outcome         string
+	InclusionHeight int64
+	NewProofTxHash  string // set when a rebroadcast produced a fresh hash; "" to leave unchanged
+	Rebroadcasts    int
+}
+
+// UpdateProofOnChainOutcome overwrites the proof-on-chain fields of the record
+// identified by (supplier, sessionEnd, sessionID). It is the proof-side
+// analogue of UpdateClaimOnChainOutcome. The TTL is preserved at t.ttl. A
+// missing record is a no-op (the proof was never tracked).
+func (t *SubmissionTracker) UpdateProofOnChainOutcome(ctx context.Context, u ProofOnChainUpdate) error {
+	record, err := t.GetRecord(ctx, u.Supplier, u.SessionEnd, u.SessionID)
+	if err != nil {
+		// No record to annotate — nothing to do.
+		return nil
+	}
+
+	record.ProofOnChainOutcome = u.Outcome
+	record.ProofInclusionHeight = u.InclusionHeight
+	if u.Rebroadcasts > 0 {
+		record.ProofRebroadcasts = u.Rebroadcasts
+	}
+	if u.NewProofTxHash != "" {
+		record.ProofTxHash = u.NewProofTxHash
+	}
+
+	key := t.makeKey(u.Supplier, u.SessionEnd, u.SessionID)
+	data, marshalErr := json.Marshal(record)
+	if marshalErr != nil {
+		return fmt.Errorf("failed to marshal proof on-chain outcome record: %w", marshalErr)
+	}
+	if setErr := t.redisClient.Set(ctx, key, data, t.ttl).Err(); setErr != nil {
+		return fmt.Errorf("failed to persist proof on-chain outcome record: %w", setErr)
+	}
+
+	t.logger.Debug().
+		Str("supplier", u.Supplier).
+		Str("session_id", u.SessionID).
+		Str("outcome", u.Outcome).
+		Int("rebroadcasts", u.Rebroadcasts).
+		Msg("applied proof on-chain outcome")
 
 	return nil
 }

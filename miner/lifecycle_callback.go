@@ -221,6 +221,12 @@ type LifecycleCallback struct {
 	// semantics via ClaimSuccess, but no ClaimOnChainOutcome field will land.
 	inclusionTracker *InclusionTracker
 
+	// proofInclusionTracker schedules post-broadcast GetProof polls and, while
+	// the proof window is still open and the proof is missing on-chain,
+	// re-broadcasts it. If nil, proofs behave as before (fire-once at window
+	// open, no on-chain verification → silent PROOF_MISSING forfeits).
+	proofInclusionTracker *ProofInclusionTracker
+
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
 	sessionLocksMu sync.Mutex
@@ -319,6 +325,13 @@ func (lc *LifecycleCallback) SetProofQueryClient(client pocktclient.ProofQueryCl
 // miner_claim_inclusion_outcome_total metric fires.
 func (lc *LifecycleCallback) SetInclusionTracker(tracker *InclusionTracker) {
 	lc.inclusionTracker = tracker
+}
+
+// SetProofInclusionTracker wires the post-broadcast GetProof inclusion tracker
+// + rebroadcaster. Optional — without it, proofs are fire-once with no on-chain
+// verification (the silent PROOF_MISSING forfeit path).
+func (lc *LifecycleCallback) SetProofInclusionTracker(tracker *ProofInclusionTracker) {
+	lc.proofInclusionTracker = tracker
 }
 
 // isClaimNotFoundError returns true when an error from the proof query client
@@ -1919,6 +1932,49 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 								Str(logging.FieldSessionID, snapshot.SessionID).
 								Msg("failed to track proof submission")
 						}
+					}
+				}
+
+				// Schedule post-broadcast proof inclusion polling + in-window
+				// rebroadcast. A code-0 BroadcastTx only means the proof was
+				// accepted into the mempool; if it misses its block and is never
+				// re-sent it is forfeited at settlement (silent PROOF_MISSING).
+				// The tracker polls GetProof and re-broadcasts while the window
+				// is still open. One check per session; each carries a closure
+				// that re-submits just that session's proof.
+				if lc.proofInclusionTracker != nil {
+					for i, snapshot := range validProofSnapshots {
+						snap := snapshot
+						proofMsg := proofMsgs[i]
+						sessionEnd := snap.SessionEndHeight
+						resubmit := func(rctx context.Context) (string, error) {
+							sp, perr := lc.sharedClient.GetParamsAtHeight(rctx, sessionEnd)
+							if perr != nil {
+								return "", perr
+							}
+							pwc := sharedtypes.GetProofWindowCloseHeight(sp, sessionEnd)
+							blkTime := lc.config.BlockTimeSeconds
+							if blkTime <= 0 {
+								blkTime = 30
+							}
+							remaining := pwc - lc.blockClient.LastBlock(rctx).Height()
+							rctx = tx.WithTxWindowTimeout(rctx, time.Duration(remaining)*time.Duration(blkTime)*time.Second)
+							if subErr := lc.supplierClient.SubmitProofs(rctx, pwc, proofMsg); subErr != nil {
+								return "", subErr
+							}
+							if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
+								return haClient.GetLastProofTxHash(), nil
+							}
+							return "", nil
+						}
+						lc.proofInclusionTracker.ScheduleProofCheck(ProofInclusionCheck{
+							Supplier:         snap.SupplierOperatorAddress,
+							ServiceID:        snap.ServiceID,
+							SessionID:        snap.SessionID,
+							SessionEndHeight: snap.SessionEndHeight,
+							ProofTxHash:      proofTxHash,
+							Resubmit:         resubmit,
+						})
 					}
 				}
 

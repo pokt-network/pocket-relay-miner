@@ -45,6 +45,7 @@ type mockQueryServer struct {
 
 	// Proof responses
 	getClaimFunc func(context.Context, *prooftypes.QueryGetClaimRequest) (*prooftypes.QueryGetClaimResponse, error)
+	getProofFunc func(context.Context, *prooftypes.QueryGetProofRequest) (*prooftypes.QueryGetProofResponse, error)
 	proofParams  *prooftypes.Params
 
 	// Service responses
@@ -153,6 +154,13 @@ func (m *mockProofQueryServer) Claim(ctx context.Context, req *prooftypes.QueryG
 		return m.mock.getClaimFunc(ctx, req)
 	}
 	return nil, status.Error(codes.NotFound, "claim not found")
+}
+
+func (m *mockProofQueryServer) Proof(ctx context.Context, req *prooftypes.QueryGetProofRequest) (*prooftypes.QueryGetProofResponse, error) {
+	if m.mock.getProofFunc != nil {
+		return m.mock.getProofFunc(ctx, req)
+	}
+	return nil, status.Error(codes.NotFound, "proof not found")
 }
 
 func (m *mockProofQueryServer) Params(ctx context.Context, req *prooftypes.QueryParamsRequest) (*prooftypes.QueryParamsResponse, error) {

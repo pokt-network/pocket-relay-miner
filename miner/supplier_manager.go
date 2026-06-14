@@ -261,6 +261,10 @@ type SupplierManager struct {
 	// its worker pool cleanly on shutdown.
 	inclusionTracker *InclusionTracker
 
+	// proofInclusionTracker polls GetProof + rebroadcasts in-window. Owned by
+	// SupplierManager so Close() drains its worker pool cleanly on shutdown.
+	proofInclusionTracker *ProofInclusionTracker
+
 	// Lifecycle
 	//
 	// mu protects ctx / cancelFn / closed. It is an RWMutex so the
@@ -1126,6 +1130,32 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			)
 			lifecycleCallback.SetInclusionTracker(inclusionTracker)
 			m.inclusionTracker = inclusionTracker
+
+			// Wire the proof inclusion tracker + rebroadcaster. It polls
+			// GetProof(supplier, sessionID) after each proof broadcast and, while
+			// the proof window is still open, re-submits a proof that was
+			// CheckTx-accepted but never included — the fix for silent
+			// PROOF_MISSING forfeits. Requires a proof query client that exposes
+			// a fresh (uncached) GetProof; the concrete query client does.
+			if proofGetter, ok := m.config.ProofQueryClient.(ProofInclusionQueryClient); ok {
+				proofInclusionCfg := DefaultProofInclusionTrackerConfig()
+				// Reuse the claim inclusion enable/disable signal so operators
+				// toggle both post-broadcast pollers together.
+				proofInclusionCfg.Disabled = m.config.InclusionTrackerConfig.Disabled
+				proofInclusionTracker := NewProofInclusionTracker(
+					m.logger,
+					proofGetter,
+					m.config.SharedClient,
+					m.config.BlockClient,
+					submissionTracker,
+					proofInclusionCfg,
+				)
+				lifecycleCallback.SetProofInclusionTracker(proofInclusionTracker)
+				m.proofInclusionTracker = proofInclusionTracker
+			} else {
+				m.logger.Warn().
+					Msg("proof query client does not expose GetProof; proof inclusion tracking + rebroadcast disabled")
+			}
 		}
 
 		// Wire build pool for bounded parallel claim/proof building
@@ -1736,6 +1766,9 @@ func (m *SupplierManager) Close() error {
 	// Drain the claim inclusion tracker so in-flight polls finish cleanly.
 	if m.inclusionTracker != nil {
 		_ = m.inclusionTracker.Close()
+	}
+	if m.proofInclusionTracker != nil {
+		_ = m.proofInclusionTracker.Close()
 	}
 
 	m.logger.Info().Msg("supplier manager closed")

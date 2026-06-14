@@ -706,6 +706,39 @@ var (
 		[]string{"supplier", "service_id", "outcome"},
 	)
 
+	// proofInclusionOutcomeTotal records the real on-chain fate of each
+	// broadcast proof as observed by the ProofInclusionTracker. It polls
+	// GetProof(supplier, sessionID) until the proof appears or the proof
+	// window closes — the proof-side analogue of claimInclusionOutcomeTotal.
+	//
+	// Outcomes (bounded enum):
+	//   on_chain_found   — proof is on-chain (possibly after a rebroadcast)
+	//   on_chain_missing — proof window closed without the proof landing
+	//   poll_error       — GetProof kept erroring through the poll horizon
+	//   poll_dropped     — inclusion pool queue saturated; no record taken
+	proofInclusionOutcomeTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "proof_inclusion_outcome_total",
+			Help:      "Post-broadcast on-chain proof inclusion outcome (labeled by supplier, service_id, outcome)",
+		},
+		[]string{"supplier", "service_id", "outcome"},
+	)
+
+	// proofRebroadcastsTotal counts in-window proof re-submissions triggered
+	// by the ProofInclusionTracker when a proof was CheckTx-accepted but not
+	// yet on-chain and the proof window was still open.
+	proofRebroadcastsTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "proof_rebroadcasts_total",
+			Help:      "In-window proof re-submissions attempted by the inclusion tracker (labeled by supplier, service_id, result)",
+		},
+		[]string{"supplier", "service_id", "result"},
+	)
+
 	// Redis consumer metrics (reserved for future instrumentation)
 	_ = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{

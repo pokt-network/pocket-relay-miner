@@ -957,6 +957,27 @@ func (c *proofQueryClient) GetClaim(ctx context.Context, supplierOperatorAddress
 	return &res.Claim, nil
 }
 
+// GetProof queries the chain for the proof associated with (supplier, sessionId).
+//
+// Unlike GetClaim, the result is intentionally NOT cached: the ProofInclusionTracker
+// polls this method repeatedly during the proof window to detect whether a
+// submitted proof has actually been included on-chain, so every call must reflect
+// fresh module state. Returns a gRPC NotFound error (wrapped) when no proof exists yet.
+func (c *proofQueryClient) GetProof(ctx context.Context, supplierOperatorAddress string, sessionId string) (*prooftypes.Proof, error) {
+	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+	defer cancel()
+
+	res, err := c.queryClient.Proof(queryCtx, &prooftypes.QueryGetProofRequest{
+		SupplierOperatorAddress: supplierOperatorAddress,
+		SessionId:               sessionId,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to query proof: %w", err)
+	}
+
+	return &res.Proof, nil
+}
+
 // =============================================================================
 // Service Query Client
 // =============================================================================
