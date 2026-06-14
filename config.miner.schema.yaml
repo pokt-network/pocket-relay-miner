@@ -181,6 +181,47 @@ properties:
         description: Wall-clock safety cap on a single poll if block height stalls (milliseconds).
         default: 600000
         minimum: 10000
+      disable_proof_inclusion_tracking:
+        type: boolean
+        description: |
+          Disable the post-broadcast GetProof poller + in-window rebroadcaster.
+          When enabled (the default) the miner polls GetProof after each proof
+          broadcast, re-submits a still-missing proof while the proof window is
+          open, records proof_on_chain_outcome (on_chain_found | on_chain_missing
+          | poll_error), and emits proof_inclusion_outcome_total. This is the fix
+          for silent PROOF_MISSING forfeits (proof accepted to mempool but never
+          included, with no retry).
+        default: false
+      proof_inclusion_poll_interval_ms:
+        type: integer
+        description: How often the proof inclusion poller calls GetProof (milliseconds).
+        default: 3000
+        minimum: 100
+      proof_inclusion_poller_max_concurrent:
+        type: integer
+        description: Worker pool size for concurrent proof inclusion polls.
+        default: 64
+        minimum: 1
+      proof_inclusion_max_poll_duration_ms:
+        type: integer
+        description: Wall-clock safety cap on a single proof poll if block height stalls (milliseconds).
+        default: 720000
+        minimum: 10000
+      proof_max_rebroadcasts:
+        type: integer
+        description: |
+          Max in-window proof re-submissions when a proof was CheckTx-accepted
+          but is not yet on-chain. Set to 0 for observe-only (record the outcome
+          but never rebroadcast). Omit to use the default.
+        default: 2
+        minimum: 0
+      proof_rebroadcast_safety_blocks:
+        type: integer
+        description: |
+          Stop rebroadcasting once the chain is within this many blocks of
+          proof-window-close, so a re-submit cannot land after the window.
+        default: 1
+        minimum: 0
       tx_timeout_min_seconds:
         type: integer
         description: |

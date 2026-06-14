@@ -349,6 +349,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			ProofChecker:                   w.proofChecker,
 			ProofQueryClient:               w.queryClients.Proof(),
 			InclusionTrackerConfig:         w.config.Config.Transaction.InclusionTrackerConfig(),
+			ProofInclusionTrackerConfig:    w.config.Config.Transaction.ProofInclusionTrackerConfig(),
 			ServiceFactorProvider:          newServiceFactorClientAdapter(ctx, w.serviceFactorClient),
 			AppClient:                      cache.NewApplicationQueryClientAdapter(w.queryClients.Application()),
 			SessionLifecycleConfig: SessionLifecycleConfig{

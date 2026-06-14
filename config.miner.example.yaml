@@ -129,7 +129,24 @@ pocket_node:
   # NOTE: Unordered transactions with SYNC broadcast mode
   # We use unordered=true with dynamic timeout_timestamp to eliminate account
   # sequence mismatch errors. SYNC mode returns immediately after CheckTx (mempool
-  # acceptance) without waiting for block inclusion, so no commit polling is needed.
+  # acceptance) — it does NOT confirm block inclusion. Inclusion is verified
+  # asynchronously by the inclusion pollers below (GetClaim / GetProof).
+
+  # Proof inclusion tracking + in-window rebroadcast (fix for silent PROOF_MISSING)
+  # A code-0 proof BroadcastTx only means the proof entered the mempool. If it
+  # misses its block and is never re-sent, it is forfeited at settlement
+  # (PROOF_MISSING) even though later blocks in the proof window are empty. The
+  # poller calls GetProof after each proof broadcast and, while the window is
+  # still open, re-submits a still-missing proof (bounded). Outcomes land in
+  # submission-tracker records (proof_on_chain_outcome) and the
+  # proof_inclusion_outcome_total / proof_rebroadcasts_total metrics.
+  # All fields are optional; defaults shown.
+  # disable_proof_inclusion_tracking: false      # Master switch (default: enabled)
+  # proof_inclusion_poll_interval_ms: 3000       # GetProof poll cadence (default: 3s)
+  # proof_inclusion_poller_max_concurrent: 64    # Poller worker pool size (default: 64)
+  # proof_inclusion_max_poll_duration_ms: 720000 # Safety cap if block feed stalls (default: 12m)
+  # proof_max_rebroadcasts: 2                     # In-window re-submits; 0 = observe-only (default: 2)
+  # proof_rebroadcast_safety_blocks: 1           # Stop rebroadcasting within N blocks of window close (default: 1)
 
 # ==============================================================================
 # Supplier Keys Configuration (REQUIRED)

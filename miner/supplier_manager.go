@@ -168,6 +168,10 @@ type SupplierManagerConfig struct {
 	// See miner.InclusionTrackerConfig for fields.
 	InclusionTrackerConfig InclusionTrackerConfig
 
+	// ProofInclusionTrackerConfig controls the post-broadcast GetProof poller +
+	// in-window rebroadcaster. See miner.ProofInclusionTrackerConfig for fields.
+	ProofInclusionTrackerConfig ProofInclusionTrackerConfig
+
 	// ServiceFactorProvider provides service factor configuration for claim ceiling warnings.
 	// If nil, no ceiling warnings are logged.
 	ServiceFactorProvider ServiceFactorProvider
@@ -1138,17 +1142,13 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			// PROOF_MISSING forfeits. Requires a proof query client that exposes
 			// a fresh (uncached) GetProof; the concrete query client does.
 			if proofGetter, ok := m.config.ProofQueryClient.(ProofInclusionQueryClient); ok {
-				proofInclusionCfg := DefaultProofInclusionTrackerConfig()
-				// Reuse the claim inclusion enable/disable signal so operators
-				// toggle both post-broadcast pollers together.
-				proofInclusionCfg.Disabled = m.config.InclusionTrackerConfig.Disabled
 				proofInclusionTracker := NewProofInclusionTracker(
 					m.logger,
 					proofGetter,
 					m.config.SharedClient,
 					m.config.BlockClient,
 					submissionTracker,
-					proofInclusionCfg,
+					m.config.ProofInclusionTrackerConfig,
 				)
 				lifecycleCallback.SetProofInclusionTracker(proofInclusionTracker)
 				m.proofInclusionTracker = proofInclusionTracker

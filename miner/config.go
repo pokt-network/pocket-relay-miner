@@ -380,6 +380,38 @@ type TransactionConfig struct {
 	// they also terminate if the local block height feed stalls. Default:
 	// 600000 (10m).
 	ClaimInclusionMaxPollDurationMs int64 `yaml:"claim_inclusion_max_poll_duration_ms,omitempty"`
+
+	// DisableProofInclusionTracking turns off the post-broadcast GetProof
+	// poller + in-window rebroadcaster. When enabled (the default) the miner
+	// polls GetProof after each proof broadcast, re-submits a still-missing
+	// proof while the window is open, populates proof_on_chain_outcome on
+	// submission tracker records, and emits proof_inclusion_outcome_total.
+	// This is the fix for silent PROOF_MISSING forfeits.
+	// Default: false (poller enabled).
+	DisableProofInclusionTracking bool `yaml:"disable_proof_inclusion_tracking,omitempty"`
+
+	// ProofInclusionPollIntervalMs is how often the poller calls GetProof,
+	// in milliseconds. Default: 3000 (3s).
+	ProofInclusionPollIntervalMs int64 `yaml:"proof_inclusion_poll_interval_ms,omitempty"`
+
+	// ProofInclusionPollerMaxConcurrent caps the poller's worker pool size.
+	// Default: 64.
+	ProofInclusionPollerMaxConcurrent int `yaml:"proof_inclusion_poller_max_concurrent,omitempty"`
+
+	// ProofInclusionMaxPollDurationMs is a wall-clock safety cap. Polls
+	// normally terminate when the proof window closes; this cap ensures they
+	// also terminate if the local block height feed stalls. Default: 720000 (12m).
+	ProofInclusionMaxPollDurationMs int64 `yaml:"proof_inclusion_max_poll_duration_ms,omitempty"`
+
+	// ProofMaxRebroadcasts caps in-window proof re-submissions when a proof was
+	// CheckTx-accepted but is not yet on-chain. A pointer so an explicit 0
+	// (observe-only, no rebroadcast) is distinguishable from unset (default 2).
+	ProofMaxRebroadcasts *int `yaml:"proof_max_rebroadcasts,omitempty"`
+
+	// ProofRebroadcastSafetyBlocks stops rebroadcasting once the chain is within
+	// this many blocks of proof-window-close, so a re-submit cannot land after
+	// the window. Default: 1.
+	ProofRebroadcastSafetyBlocks int64 `yaml:"proof_rebroadcast_safety_blocks,omitempty"`
 }
 
 // InclusionTrackerConfig translates the YAML-facing fields on
@@ -395,6 +427,33 @@ func (c TransactionConfig) InclusionTrackerConfig() InclusionTrackerConfig {
 	}
 	if c.ClaimInclusionMaxPollDurationMs > 0 {
 		cfg.MaxPollDuration = time.Duration(c.ClaimInclusionMaxPollDurationMs) * time.Millisecond
+	}
+	return cfg
+}
+
+// ProofInclusionTrackerConfig translates the YAML-facing fields on
+// TransactionConfig into the miner-layer ProofInclusionTrackerConfig, starting
+// from DefaultProofInclusionTrackerConfig and overriding only the fields the
+// operator set. Callers pass the result to NewProofInclusionTracker.
+func (c TransactionConfig) ProofInclusionTrackerConfig() ProofInclusionTrackerConfig {
+	cfg := DefaultProofInclusionTrackerConfig()
+	cfg.Disabled = c.DisableProofInclusionTracking
+	if c.ProofInclusionPollerMaxConcurrent > 0 {
+		cfg.MaxConcurrent = c.ProofInclusionPollerMaxConcurrent
+	}
+	if c.ProofInclusionPollIntervalMs > 0 {
+		cfg.PollInterval = time.Duration(c.ProofInclusionPollIntervalMs) * time.Millisecond
+	}
+	if c.ProofInclusionMaxPollDurationMs > 0 {
+		cfg.MaxPollDuration = time.Duration(c.ProofInclusionMaxPollDurationMs) * time.Millisecond
+	}
+	// Pointer: nil keeps the default (2); an explicit value (including 0 =
+	// observe-only) is honored.
+	if c.ProofMaxRebroadcasts != nil {
+		cfg.MaxRebroadcasts = *c.ProofMaxRebroadcasts
+	}
+	if c.ProofRebroadcastSafetyBlocks > 0 {
+		cfg.RebroadcastSafetyBlocks = c.ProofRebroadcastSafetyBlocks
 	}
 	return cfg
 }
