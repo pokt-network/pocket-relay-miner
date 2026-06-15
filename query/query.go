@@ -1,6 +1,7 @@
 package query
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"fmt"
@@ -18,6 +19,7 @@ import (
 	cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
+	query "github.com/cosmos/cosmos-sdk/types/query"
 	accounttypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -957,25 +959,126 @@ func (c *proofQueryClient) GetClaim(ctx context.Context, supplierOperatorAddress
 	return &res.Claim, nil
 }
 
-// GetProof queries the chain for the proof associated with (supplier, sessionId).
+// supplierInclusionQuerier mirrors the miner-layer InclusionQueryClient
+// interface that the inclusion reconciler type-asserts ProofQueryClient to. The
+// reconciler activates via a runtime assertion (interfaces can't cross the
+// miner→query import boundary the other way); this compile-time check ensures
+// *proofQueryClient keeps the exact method set + signatures, so a signature
+// drift fails the build instead of silently disabling the reconciler at runtime.
+type supplierInclusionQuerier interface {
+	GetSupplierClaimSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
+	GetSupplierProvenSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
+}
+
+var _ supplierInclusionQuerier = (*proofQueryClient)(nil)
+
+// inclusionPageLimit bounds each AllProofs/AllClaims page. A supplier serves at
+// most a few dozen sessions per window (NumSuppliersPerSession-bounded across a
+// handful of services, plus a few not-yet-pruned prior epochs), so one page
+// usually suffices; the loop below follows pagination to completion regardless.
+const inclusionPageLimit = 100
+
+// maxInclusionPages caps the AllProofs/AllClaims pagination loop as a defense
+// against a buggy/malicious node that returns a non-advancing or cyclic NextKey.
+// A supplier's per-window set is a few dozen entries (one page); this ceiling is
+// far above any legitimate response.
+const maxInclusionPages = 10000
+
+// GetSupplierProvenSessions returns the set of session IDs for which the given
+// supplier's claim has been PROVEN — i.e. a proof was submitted and validated
+// on-chain (the claim's ProofValidationStatus == VALIDATED). It is the
+// per-supplier PROOF inclusion signal for the block-driven inclusion reconciler.
 //
-// Unlike GetClaim, the result is intentionally NOT cached: the ProofInclusionTracker
-// polls this method repeatedly during the proof window to detect whether a
-// submitted proof has actually been included on-chain, so every call must reflect
-// fresh module state. Returns a gRPC NotFound error (wrapped) when no proof exists yet.
-func (c *proofQueryClient) GetProof(ctx context.Context, supplierOperatorAddress string, sessionId string) (*prooftypes.Proof, error) {
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Proof(queryCtx, &prooftypes.QueryGetProofRequest{
-		SupplierOperatorAddress: supplierOperatorAddress,
-		SessionId:               sessionId,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query proof: %w", err)
+// Why this reads CLAIMS, not proofs: in poktroll a submitted proof is validated
+// and then DELETED from module state in the EndBlocker of its submission height
+// (x/proof/module/abci.go EndBlocker → ValidateSubmittedProofs → RemoveProof,
+// every block). A proof therefore lives in queryable state for less than one
+// block, so AllProofs/GetProof by supplier almost always returns empty even for
+// a proof that landed and validated successfully — querying proofs to confirm
+// proof inclusion produces a false "missing" for every proof. The durable record
+// of proof inclusion is the CLAIM: the EndBlocker sets ProofValidationStatus to
+// VALIDATED (or INVALID), and the claim persists until settlement. A claim still
+// in PENDING_VALIDATION after the proof window opened means the proof is
+// genuinely missing and should be (re)submitted.
+//
+// Intentionally uncached, index-safe (reads module state via the AllClaims
+// supplier secondary index, NOT the Tendermint tx indexer, so it works on
+// tx_index=null / pruned nodes), and pagination-complete — same properties as
+// GetSupplierClaimSessions.
+func (c *proofQueryClient) GetSupplierProvenSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
+	sessions := make(map[string]struct{})
+	var nextKey []byte
+	for page := 0; page < maxInclusionPages; page++ {
+		queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+		res, err := c.queryClient.AllClaims(queryCtx, &prooftypes.QueryAllClaimsRequest{
+			Filter: &prooftypes.QueryAllClaimsRequest_SupplierOperatorAddress{
+				SupplierOperatorAddress: supplierOperatorAddress,
+			},
+			Pagination: &query.PageRequest{Limit: inclusionPageLimit, Key: nextKey},
+		})
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("failed to query all claims (proven) for supplier %s: %w", supplierOperatorAddress, err)
+		}
+		for i := range res.Claims {
+			// Only a VALIDATED claim confirms the proof landed. PENDING_VALIDATION
+			// (proof not yet submitted/validated) and INVALID (proof rejected) are
+			// both "not proven" — left out so the reconciler treats them as missing.
+			if res.Claims[i].GetProofValidationStatus() != prooftypes.ClaimProofStatus_VALIDATED {
+				continue
+			}
+			if sh := res.Claims[i].GetSessionHeader(); sh != nil {
+				sessions[sh.GetSessionId()] = struct{}{}
+			}
+		}
+		if res.Pagination == nil || len(res.Pagination.NextKey) == 0 {
+			return sessions, nil
+		}
+		// Guard against a node that returns a non-advancing NextKey.
+		if bytes.Equal(res.Pagination.NextKey, nextKey) {
+			break
+		}
+		nextKey = res.Pagination.NextKey
 	}
+	return nil, fmt.Errorf("all claims (proven) pagination for supplier %s did not terminate within %d pages", supplierOperatorAddress, maxInclusionPages)
+}
 
-	return &res.Proof, nil
+// GetSupplierClaimSessions returns the set of session IDs for which a claim
+// exists on-chain for the given supplier, read from x/proof module state via the
+// AllClaims supplier secondary index. Proof-side analogue is
+// GetSupplierProvenSessions (which also reads claims — see that method for why
+// proof inclusion can't be read from proofs); same uncached + index-safe
+// (tx_index=null) + full-pagination semantics. It is the per-supplier inclusion
+// signal for the claim phase of the block-driven inclusion reconciler.
+func (c *proofQueryClient) GetSupplierClaimSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
+	sessions := make(map[string]struct{})
+	var nextKey []byte
+	for page := 0; page < maxInclusionPages; page++ {
+		queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+		res, err := c.queryClient.AllClaims(queryCtx, &prooftypes.QueryAllClaimsRequest{
+			Filter: &prooftypes.QueryAllClaimsRequest_SupplierOperatorAddress{
+				SupplierOperatorAddress: supplierOperatorAddress,
+			},
+			Pagination: &query.PageRequest{Limit: inclusionPageLimit, Key: nextKey},
+		})
+		cancel()
+		if err != nil {
+			return nil, fmt.Errorf("failed to query all claims for supplier %s: %w", supplierOperatorAddress, err)
+		}
+		for i := range res.Claims {
+			if sh := res.Claims[i].GetSessionHeader(); sh != nil {
+				sessions[sh.GetSessionId()] = struct{}{}
+			}
+		}
+		if res.Pagination == nil || len(res.Pagination.NextKey) == 0 {
+			return sessions, nil
+		}
+		if bytes.Equal(res.Pagination.NextKey, nextKey) {
+			break
+		}
+		nextKey = res.Pagination.NextKey
+	}
+	return nil, fmt.Errorf("all claims pagination for supplier %s did not terminate within %d pages", supplierOperatorAddress, maxInclusionPages)
 }
 
 // =============================================================================

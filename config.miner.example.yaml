@@ -130,23 +130,24 @@ pocket_node:
   # We use unordered=true with dynamic timeout_timestamp to eliminate account
   # sequence mismatch errors. SYNC mode returns immediately after CheckTx (mempool
   # acceptance) — it does NOT confirm block inclusion. Inclusion is verified
-  # asynchronously by the inclusion pollers below (GetClaim / GetProof).
+  # asynchronously by the block-driven inclusion reconciler below.
 
-  # Proof inclusion tracking + in-window rebroadcast (fix for silent PROOF_MISSING)
-  # A code-0 proof BroadcastTx only means the proof entered the mempool. If it
-  # misses its block and is never re-sent, it is forfeited at settlement
-  # (PROOF_MISSING) even though later blocks in the proof window are empty. The
-  # poller calls GetProof after each proof broadcast and, while the window is
-  # still open, re-submits a still-missing proof (bounded). Outcomes land in
-  # submission-tracker records (proof_on_chain_outcome) and the
-  # proof_inclusion_outcome_total / proof_rebroadcasts_total metrics.
-  # All fields are optional; defaults shown.
-  # disable_proof_inclusion_tracking: false      # Master switch (default: enabled)
-  # proof_inclusion_poll_interval_ms: 3000       # GetProof poll cadence (default: 3s)
-  # proof_inclusion_poller_max_concurrent: 64    # Poller worker pool size (default: 64)
-  # proof_inclusion_max_poll_duration_ms: 720000 # Safety cap if block feed stalls (default: 12m)
-  # proof_max_rebroadcasts: 2                     # In-window re-submits; 0 = observe-only (default: 2)
-  # proof_rebroadcast_safety_blocks: 1           # Stop rebroadcasting within N blocks of window close (default: 1)
+  # Inclusion reconciler + in-window rebroadcast (fix for silent
+  # CLAIM_MISSING / PROOF_MISSING forfeits)
+  # A code-0 BroadcastTx only means the claim/proof entered the mempool. If it
+  # misses its block and is never re-sent, it is forfeited at settlement even
+  # though later blocks in the window are empty. Once per block the reconciler
+  # verifies inclusion via x/proof module state (AllClaims/AllProofs by supplier —
+  # works on nodes with tx_index=null) and re-broadcasts a still-missing
+  # claim/proof while its window is open. Outcomes land in submission-tracker
+  # records (claim_on_chain_outcome / proof_on_chain_outcome) and the
+  # {claim,proof}_inclusion_outcome_total / {claim,proof}_rebroadcasts_total
+  # metrics. All fields are optional; defaults shown.
+  # disable_inclusion_reconciler: false               # Master switch (default: enabled)
+  # inclusion_reconciler_max_concurrent: 64           # Per-block group-reconcile pool size (default: 64)
+  # max_rebroadcasts: 1                                # In-window re-submits; 0 = observe-only (default: 1)
+  # rebroadcast_safety_blocks: 1                       # Stop rebroadcasting within N blocks of window close (default: 1)
+  # inclusion_reconciler_per_group_timeout_ms: 10000  # Per-supplier reconcile timeout per block (default: 10s)
 
 # ==============================================================================
 # Supplier Keys Configuration (REQUIRED)

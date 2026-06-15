@@ -120,6 +120,11 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		Int("num_cpu", runtime.NumCPU()).
 		Msg("created master worker pool (auto-sized based on supplier count and CPU)")
 
+	// Surface under-provisioning / discouraged config (batching off, too few CPU
+	// for the supplier count, capped pool) as startup warnings — for operators
+	// who deploy fast without reading the docs.
+	w.config.Config.LogStartupCapacityAdvisory(w.logger, numSuppliers)
+
 	// Start worker pool metrics ticker for Prometheus monitoring
 	StartWorkerPoolMetricsTicker(w.ctx, w.logger, w.masterPool, "supplier_worker", masterPoolSize)
 
@@ -348,8 +353,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			SessionClient:                  w.queryClients.Session(),
 			ProofChecker:                   w.proofChecker,
 			ProofQueryClient:               w.queryClients.Proof(),
-			InclusionTrackerConfig:         w.config.Config.Transaction.InclusionTrackerConfig(),
-			ProofInclusionTrackerConfig:    w.config.Config.Transaction.ProofInclusionTrackerConfig(),
+			InclusionReconcilerConfig:      w.config.Config.Transaction.InclusionReconcilerConfig(),
 			ServiceFactorProvider:          newServiceFactorClientAdapter(ctx, w.serviceFactorClient),
 			AppClient:                      cache.NewApplicationQueryClientAdapter(w.queryClients.Application()),
 			SessionLifecycleConfig: SessionLifecycleConfig{

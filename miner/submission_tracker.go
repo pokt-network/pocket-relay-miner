@@ -16,7 +16,7 @@ import (
 // IMPORTANT: ClaimSuccess / ProofSuccess mean ONLY that BroadcastTx (CheckTx)
 // accepted the tx into the mempool. They do NOT indicate on-chain inclusion
 // — for that, consult ClaimOnChainOutcome, populated asynchronously by
-// InclusionTracker after polling GetClaim.
+// the inclusion reconciler after polling AllClaims.
 type SubmissionTrackingRecord struct {
 	// Session identification
 	Supplier     string `json:"supplier"`
@@ -36,7 +36,7 @@ type SubmissionTrackingRecord struct {
 	ClaimSubmitTimeUTC   string `json:"claim_submit_time_utc"`  // RFC3339 UTC time
 	ClaimCurrentHeight   int64  `json:"claim_current_height"`   // Current block at submission
 
-	// Claim on-chain outcome (populated by InclusionTracker after polling
+	// Claim on-chain outcome (populated by the inclusion reconciler after polling
 	// GetClaim). One of: "", "on_chain_found", "on_chain_missing",
 	// "poll_error", "poll_dropped". Empty string = poll hasn't resolved yet
 	// (or the tracker was disabled).
@@ -53,7 +53,7 @@ type SubmissionTrackingRecord struct {
 	ProofSubmitTimeUTC   string `json:"proof_submit_time_utc,omitempty"`  // RFC3339 UTC time
 	ProofCurrentHeight   int64  `json:"proof_current_height,omitempty"`   // Current block at submission
 
-	// Proof on-chain outcome (populated by ProofInclusionTracker after polling
+	// Proof on-chain outcome (populated by the inclusion reconciler after polling
 	// GetProof). One of: "", "on_chain_found", "on_chain_missing",
 	// "poll_error", "poll_dropped". Empty string = poll hasn't resolved yet
 	// (or the tracker was disabled). This is the proof-side analogue of
@@ -295,7 +295,7 @@ func (t *SubmissionTracker) makeKey(supplier string, sessionEnd int64, sessionID
 
 // ClaimOnChainUpdate is the payload passed to
 // SubmissionTracker.UpdateClaimOnChainOutcome, populated by the
-// InclusionTracker after polling GetClaim.
+// the inclusion reconciler after polling AllClaims.
 type ClaimOnChainUpdate struct {
 	Supplier        string
 	TxHash          string
@@ -355,7 +355,7 @@ func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u Cla
 
 // ProofOnChainUpdate is the payload passed to
 // SubmissionTracker.UpdateProofOnChainOutcome, populated by the
-// ProofInclusionTracker after polling GetProof. Unlike the claim variant it is
+// the inclusion reconciler after polling AllProofs. Unlike the claim variant it is
 // keyed by full session identity (supplier, sessionEnd, sessionID) rather than
 // tx hash, because a rebroadcast changes the proof tx hash mid-flight.
 type ProofOnChainUpdate struct {

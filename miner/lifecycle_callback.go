@@ -215,17 +215,13 @@ type LifecycleCallback struct {
 	// guard is skipped (legacy behavior).
 	proofQueryClient pocktclient.ProofQueryClient
 
-	// inclusionTracker schedules post-broadcast GetClaim polls that record
-	// the real on-chain outcome of each claim tx. If nil, outcome tracking
-	// is skipped — submissionTracker records still show broadcast-accepted
-	// semantics via ClaimSuccess, but no ClaimOnChainOutcome field will land.
-	inclusionTracker *InclusionTracker
-
-	// proofInclusionTracker schedules post-broadcast GetProof polls and, while
-	// the proof window is still open and the proof is missing on-chain,
-	// re-broadcasts it. If nil, proofs behave as before (fire-once at window
-	// open, no on-chain verification → silent PROOF_MISSING forfeits).
-	proofInclusionTracker *ProofInclusionTracker
+	// rebroadcastStore persists each built MsgCreateClaim / MsgSubmitProof at
+	// submit so the process-wide InclusionReconciler can verify on-chain
+	// inclusion per block and re-broadcast a still-missing claim/proof while its
+	// window is open (HA-safe: survives leader failover). If nil, the built
+	// messages are not persisted and the reconciler has nothing to verify —
+	// fire-once-at-window-open behavior (silent CLAIM_MISSING/PROOF_MISSING).
+	rebroadcastStore *RebroadcastStore
 
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
@@ -320,18 +316,11 @@ func (lc *LifecycleCallback) SetProofQueryClient(client pocktclient.ProofQueryCl
 	lc.proofQueryClient = client
 }
 
-// SetInclusionTracker wires the post-broadcast GetClaim inclusion tracker.
-// Optional — without it, no ClaimOnChainOutcome field is written and no
-// miner_claim_inclusion_outcome_total metric fires.
-func (lc *LifecycleCallback) SetInclusionTracker(tracker *InclusionTracker) {
-	lc.inclusionTracker = tracker
-}
-
-// SetProofInclusionTracker wires the post-broadcast GetProof inclusion tracker
-// + rebroadcaster. Optional — without it, proofs are fire-once with no on-chain
-// verification (the silent PROOF_MISSING forfeit path).
-func (lc *LifecycleCallback) SetProofInclusionTracker(tracker *ProofInclusionTracker) {
-	lc.proofInclusionTracker = tracker
+// SetRebroadcastStore wires the store that persists built claim/proof messages
+// for the InclusionReconciler. Optional — without it, messages are not persisted
+// and the reconciler has nothing to verify/rebroadcast (fire-once behavior).
+func (lc *LifecycleCallback) SetRebroadcastStore(store *RebroadcastStore) {
+	lc.rebroadcastStore = store
 }
 
 // isClaimNotFoundError returns true when an error from the proof query client
@@ -347,6 +336,50 @@ func isClaimNotFoundError(err error) bool {
 		return true
 	}
 	return strings.Contains(err.Error(), "not found")
+}
+
+// persistRebroadcastEntries stores one rebroadcast entry per built message so
+// the InclusionReconciler can later verify inclusion and re-broadcast. snapshots
+// and marshalAt(i) are indexed identically (the built-only ordered set). A
+// failure to persist one session is logged, not fatal — the worst case is that
+// session falls back to fire-once behavior, identical to pre-reconciler.
+func (lc *LifecycleCallback) persistRebroadcastEntries(
+	ctx context.Context,
+	phase RebroadcastPhase,
+	snapshots []*SessionSnapshot,
+	submitHeight int64,
+	txHash string,
+	marshalAt func(i int) ([]byte, error),
+) {
+	for i, snapshot := range snapshots {
+		msgBytes, mErr := marshalAt(i)
+		if mErr != nil {
+			lc.logger.Warn().Err(mErr).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Str("phase", string(phase)).
+				Msg("failed to marshal message for rebroadcast persistence")
+			continue
+		}
+		entryBytes, eErr := marshalRebroadcastEntry(rebroadcastEntry{
+			MsgBytes:     msgBytes,
+			SubmitHeight: submitHeight,
+			TxHash:       txHash,
+			OrigTxHash:   txHash,
+			ServiceID:    snapshot.ServiceID,
+		})
+		if eErr != nil {
+			lc.logger.Warn().Err(eErr).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Msg("failed to encode rebroadcast entry")
+			continue
+		}
+		if pErr := lc.rebroadcastStore.Put(ctx, phase, snapshot.SupplierOperatorAddress, snapshot.SessionEndHeight, snapshot.SessionID, entryBytes); pErr != nil {
+			lc.logger.Warn().Err(pErr).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Str("phase", string(phase)).
+				Msg("failed to persist rebroadcast entry")
+		}
+	}
 }
 
 // removeSessionLock removes a per-session lock.
@@ -1127,21 +1160,16 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					}
 				}
 
-				// Schedule post-broadcast claim inclusion polling. Each session
-				// in the batch gets its own GetClaim poll; the tracker marks
-				// the submission record with on_chain_found / on_chain_missing
-				// / poll_error once the claim window closes. No tx indexer
-				// required — GetClaim reads x/proof module state.
-				if lc.inclusionTracker != nil && claimTxHash != "" {
-					for _, snapshot := range validSnapshots {
-						lc.inclusionTracker.ScheduleClaimCheck(ClaimInclusionCheck{
-							Supplier:         snapshot.SupplierOperatorAddress,
-							ServiceID:        snapshot.ServiceID,
-							SessionID:        snapshot.SessionID,
-							SessionEndHeight: snapshot.SessionEndHeight,
-							ClaimTxHash:      claimTxHash,
-						})
-					}
+				// Persist each built claim message so the InclusionReconciler can
+				// verify on-chain inclusion per block and re-broadcast a
+				// still-missing claim while the claim window is open. The index
+				// into claimMsgs matches validSnapshots (both the built-only
+				// ordered set). Survives leader failover (state lives in Redis).
+				if lc.rebroadcastStore != nil && claimTxHash != "" {
+					lc.persistRebroadcastEntries(
+						ctx, RebroadcastPhaseClaim, validSnapshots, currentBlock.Height(), claimTxHash,
+						func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
+					)
 				}
 
 				logger.Info().
@@ -1199,6 +1227,20 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 							Msg("failed to track failed claim submission")
 					}
 				}
+			}
+
+			// Self-heal: persist the built claim messages even though submit
+			// FAILED, so the InclusionReconciler can re-send them while the claim
+			// window is open. The session is now in a terminal claim_tx_error
+			// state with no lifecycle retry, so without this a build-OK-but-
+			// submit-failed claim (gap / lazyload-at-submit / transient error) is
+			// silently forfeited. No tx hash — OrigTxHash="" marks "never
+			// broadcast", so the reconciler resends promptly (not at mid-window).
+			if lc.rebroadcastStore != nil {
+				lc.persistRebroadcastEntries(
+					ctx, RebroadcastPhaseClaim, validSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
+					func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
+				)
 			}
 
 			return nil, fmt.Errorf("batched claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr)
@@ -1935,59 +1977,19 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					}
 				}
 
-				// Schedule post-broadcast proof inclusion polling + in-window
-				// rebroadcast. A code-0 BroadcastTx only means the proof was
-				// accepted into the mempool; if it misses its block and is never
-				// re-sent it is forfeited at settlement (silent PROOF_MISSING).
-				// The tracker polls GetProof and re-broadcasts while the window
-				// is still open. One check per session; each carries a closure
-				// that re-submits just that session's proof.
-				if lc.proofInclusionTracker != nil {
-					for i, snapshot := range validProofSnapshots {
-						snap := snapshot
-						proofMsg := proofMsgs[i]
-						sessionEnd := snap.SessionEndHeight
-						resubmit := func(rctx context.Context) (string, error) {
-							sp, perr := lc.sharedClient.GetParamsAtHeight(rctx, sessionEnd)
-							if perr != nil {
-								return "", perr
-							}
-							pwc := sharedtypes.GetProofWindowCloseHeight(sp, sessionEnd)
-							blkTime := lc.config.BlockTimeSeconds
-							if blkTime <= 0 {
-								blkTime = 30
-							}
-							// Clamp to >=1: the chain may have advanced past pwc
-							// between the tracker's window check and this closure
-							// running, which would otherwise yield a non-positive
-							// tx window timeout.
-							remaining := pwc - lc.blockClient.LastBlock(rctx).Height()
-							if remaining < 1 {
-								remaining = 1
-							}
-							rctx = tx.WithTxWindowTimeout(rctx, time.Duration(remaining)*time.Duration(blkTime)*time.Second)
-							// Use the hash-returning variant so concurrent
-							// rebroadcasts of different sessions through the shared
-							// client each get their own tx hash, rather than
-							// racing on lastProofTxHash via GetLastProofTxHash.
-							if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-								return haClient.SubmitProofsReturningHash(rctx, pwc, proofMsg)
-							}
-							if subErr := lc.supplierClient.SubmitProofs(rctx, pwc, proofMsg); subErr != nil {
-								return "", subErr
-							}
-							return "", nil
-						}
-						lc.proofInclusionTracker.ScheduleProofCheck(ProofInclusionCheck{
-							Supplier:         snap.SupplierOperatorAddress,
-							ServiceID:        snap.ServiceID,
-							SessionID:        snap.SessionID,
-							SessionEndHeight: snap.SessionEndHeight,
-							ProofTxHash:      proofTxHash,
-							SubmitHeight:     currentBlock.Height(),
-							Resubmit:         resubmit,
-						})
-					}
+				// Persist each built proof message so the InclusionReconciler can
+				// verify on-chain inclusion per block and re-broadcast a
+				// still-missing proof while the proof window is open. A code-0
+				// BroadcastTx only means mempool acceptance; if the proof misses
+				// its block and is never re-sent it is forfeited at settlement
+				// (the silent PROOF_MISSING failure mode). The index into
+				// proofMsgs matches validProofSnapshots (both the built-only
+				// ordered set). Survives leader failover (state lives in Redis).
+				if lc.rebroadcastStore != nil && proofTxHash != "" {
+					lc.persistRebroadcastEntries(
+						ctx, RebroadcastPhaseProof, validProofSnapshots, currentBlock.Height(), proofTxHash,
+						func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
+					)
 				}
 
 				logger.Info().
@@ -2045,6 +2047,20 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 							Msg("failed to track failed proof submission")
 					}
 				}
+			}
+
+			// Self-heal: persist the built proof messages even though submit
+			// FAILED, so the InclusionReconciler can re-send them while the proof
+			// window is open. The session is now in a terminal proof_tx_error
+			// state with no lifecycle retry, so without this a build-OK-but-
+			// submit-failed proof (gap / lazyload-at-submit / transient error) is
+			// silently forfeited. OrigTxHash="" marks "never broadcast", so the
+			// reconciler resends promptly (not at mid-window).
+			if lc.rebroadcastStore != nil {
+				lc.persistRebroadcastEntries(
+					ctx, RebroadcastPhaseProof, validProofSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
+					func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
+				)
 			}
 
 			return fmt.Errorf("batched proof submission failed after %d attempts: %w", lc.config.ProofRetryAttempts, lastErr)

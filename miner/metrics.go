@@ -686,7 +686,7 @@ var (
 	)
 
 	// claimInclusionOutcomeTotal records the real on-chain fate of each
-	// broadcast claim as observed by the miner-layer InclusionTracker. It
+	// broadcast claim as observed by the inclusion reconciler. It
 	// polls GetClaim(supplier, sessionID) until the claim appears or the
 	// claim window closes — independent of the Tendermint tx indexer, so it
 	// works on nodes configured with tx_index=null.
@@ -707,7 +707,7 @@ var (
 	)
 
 	// proofInclusionOutcomeTotal records the real on-chain fate of each
-	// broadcast proof as observed by the ProofInclusionTracker. It polls
+	// broadcast proof as observed by the inclusion reconciler. It polls
 	// GetProof(supplier, sessionID) until the proof appears or the proof
 	// window closes — the proof-side analogue of claimInclusionOutcomeTotal.
 	//
@@ -727,14 +727,29 @@ var (
 	)
 
 	// proofRebroadcastsTotal counts in-window proof re-submissions triggered
-	// by the ProofInclusionTracker when a proof was CheckTx-accepted but not
+	// by the inclusion reconciler when a proof was CheckTx-accepted but not
 	// yet on-chain and the proof window was still open.
 	proofRebroadcastsTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "proof_rebroadcasts_total",
-			Help:      "In-window proof re-submissions attempted by the inclusion tracker (labeled by supplier, service_id, result)",
+			Help:      "In-window proof re-submissions attempted by the inclusion reconciler (labeled by supplier, service_id, result)",
+		},
+		[]string{"supplier", "service_id", "result"},
+	)
+
+	// claimRebroadcastsTotal counts in-window claim re-submissions triggered
+	// by the inclusion reconciler when a claim was CheckTx-accepted but not
+	// yet on-chain and the claim window was still open. Claim-side analogue of
+	// proofRebroadcastsTotal (claims previously had inclusion observation but
+	// no rebroadcast).
+	claimRebroadcastsTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claim_rebroadcasts_total",
+			Help:      "In-window claim re-submissions attempted by the inclusion reconciler (labeled by supplier, service_id, result)",
 		},
 		[]string{"supplier", "service_id", "result"},
 	)

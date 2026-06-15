@@ -357,103 +357,58 @@ type TransactionConfig struct {
 	// (guard enabled — recommended for production).
 	DisablePreProofClaimVerification bool `yaml:"disable_pre_proof_claim_verification,omitempty"`
 
-	// DisableClaimInclusionTracking turns off the post-broadcast GetClaim
-	// poller. When enabled (the default) the miner populates
-	// claim_on_chain_outcome fields on submission tracker records and emits
-	// the miner_claim_inclusion_outcome_total metric.
-	//
-	// Unlike a tx-indexer-based poller, this one queries the x/proof module
-	// state and works on any node regardless of tx_index configuration.
-	// Default: false (poller enabled).
-	DisableClaimInclusionTracking bool `yaml:"disable_claim_inclusion_tracking,omitempty"`
+	// DisableInclusionReconciler turns off the block-driven inclusion
+	// reconciler (claim + proof on-chain verification + in-window rebroadcast).
+	// When enabled (the default) the miner persists each built claim/proof,
+	// verifies inclusion via x/proof module state once per block (works on
+	// nodes with tx_index=null), records claim/proof_on_chain_outcome on
+	// submission tracker records, emits the inclusion-outcome / rebroadcast
+	// metrics, and re-broadcasts a still-missing claim/proof while its window
+	// is open. This is the fix for silent CLAIM_MISSING / PROOF_MISSING
+	// forfeits. Default: false (reconciler enabled).
+	DisableInclusionReconciler bool `yaml:"disable_inclusion_reconciler,omitempty"`
 
-	// ClaimInclusionPollIntervalMs is how often the poller calls GetClaim,
-	// in milliseconds. Default: 2000 (2s).
-	ClaimInclusionPollIntervalMs int64 `yaml:"claim_inclusion_poll_interval_ms,omitempty"`
+	// InclusionReconcilerMaxConcurrent bounds the per-block group-reconcile
+	// worker pool (one task per owned supplier per block). Default: 64.
+	InclusionReconcilerMaxConcurrent int `yaml:"inclusion_reconciler_max_concurrent,omitempty"`
 
-	// ClaimInclusionPollerMaxConcurrent caps the size of the poller's
-	// worker pool. Default: 64.
-	ClaimInclusionPollerMaxConcurrent int `yaml:"claim_inclusion_poller_max_concurrent,omitempty"`
+	// MaxRebroadcasts caps how many times a still-missing claim/proof is
+	// re-submitted within its window. Pointer so an explicit 0 (observe-only:
+	// verify + record outcomes but never resend) is distinguishable from unset
+	// (default 1: a single mid-window self-try; emergency resends of
+	// never-broadcast messages fire earlier).
+	MaxRebroadcasts *int `yaml:"max_rebroadcasts,omitempty"`
 
-	// ClaimInclusionMaxPollDurationMs is a wall-clock safety cap. Polls
-	// normally terminate when the claim window closes; this cap ensures
-	// they also terminate if the local block height feed stalls. Default:
-	// 600000 (10m).
-	ClaimInclusionMaxPollDurationMs int64 `yaml:"claim_inclusion_max_poll_duration_ms,omitempty"`
+	// RebroadcastSafetyBlocks stops rebroadcasting once the chain is within this
+	// many blocks of window-close (claim or proof), so a re-submit cannot land
+	// after the window. Pointer so an explicit 0 is honored. Default: 1.
+	RebroadcastSafetyBlocks *int64 `yaml:"rebroadcast_safety_blocks,omitempty"`
 
-	// DisableProofInclusionTracking turns off the post-broadcast GetProof
-	// poller + in-window rebroadcaster. When enabled (the default) the miner
-	// polls GetProof after each proof broadcast, re-submits a still-missing
-	// proof while the window is open, populates proof_on_chain_outcome on
-	// submission tracker records, and emits proof_inclusion_outcome_total.
-	// This is the fix for silent PROOF_MISSING forfeits.
-	// Default: false (poller enabled).
-	DisableProofInclusionTracking bool `yaml:"disable_proof_inclusion_tracking,omitempty"`
-
-	// ProofInclusionPollIntervalMs is how often the poller calls GetProof,
-	// in milliseconds. Default: 3000 (3s).
-	ProofInclusionPollIntervalMs int64 `yaml:"proof_inclusion_poll_interval_ms,omitempty"`
-
-	// ProofInclusionPollerMaxConcurrent caps the poller's worker pool size.
-	// Default: 64.
-	ProofInclusionPollerMaxConcurrent int `yaml:"proof_inclusion_poller_max_concurrent,omitempty"`
-
-	// ProofInclusionMaxPollDurationMs is a wall-clock safety cap. Polls
-	// normally terminate when the proof window closes; this cap ensures they
-	// also terminate if the local block height feed stalls. Default: 720000 (12m).
-	ProofInclusionMaxPollDurationMs int64 `yaml:"proof_inclusion_max_poll_duration_ms,omitempty"`
-
-	// ProofMaxRebroadcasts caps in-window proof re-submissions when a proof was
-	// CheckTx-accepted but is not yet on-chain. A pointer so an explicit 0
-	// (observe-only, no rebroadcast) is distinguishable from unset (default 2).
-	ProofMaxRebroadcasts *int `yaml:"proof_max_rebroadcasts,omitempty"`
-
-	// ProofRebroadcastSafetyBlocks stops rebroadcasting once the chain is within
-	// this many blocks of proof-window-close, so a re-submit cannot land after
-	// the window. Default: 1.
-	ProofRebroadcastSafetyBlocks int64 `yaml:"proof_rebroadcast_safety_blocks,omitempty"`
+	// InclusionReconcilerPerGroupTimeoutMs bounds one supplier-group reconcile
+	// per block (the AllProofs/AllClaims query plus any rebroadcasts). Default:
+	// 10000 (10s).
+	InclusionReconcilerPerGroupTimeoutMs int64 `yaml:"inclusion_reconciler_per_group_timeout_ms,omitempty"`
 }
 
-// InclusionTrackerConfig translates the YAML-facing fields on
-// TransactionConfig into the miner-layer InclusionTrackerConfig. Callers
-// pass the result to NewInclusionTracker.
-func (c TransactionConfig) InclusionTrackerConfig() InclusionTrackerConfig {
-	cfg := InclusionTrackerConfig{
-		Disabled:      c.DisableClaimInclusionTracking,
-		MaxConcurrent: c.ClaimInclusionPollerMaxConcurrent,
+// InclusionReconcilerConfig translates the YAML-facing fields on
+// TransactionConfig into the miner-layer InclusionReconcilerConfig, starting
+// from DefaultInclusionReconcilerConfig and overriding only the fields the
+// operator set. Callers pass the result to NewInclusionReconciler.
+func (c TransactionConfig) InclusionReconcilerConfig() InclusionReconcilerConfig {
+	cfg := DefaultInclusionReconcilerConfig()
+	cfg.Disabled = c.DisableInclusionReconciler
+	if c.InclusionReconcilerMaxConcurrent > 0 {
+		cfg.MaxConcurrent = c.InclusionReconcilerMaxConcurrent
 	}
-	if c.ClaimInclusionPollIntervalMs > 0 {
-		cfg.PollInterval = time.Duration(c.ClaimInclusionPollIntervalMs) * time.Millisecond
+	// Pointers: nil keeps the default; an explicit value (including 0) is honored.
+	if c.MaxRebroadcasts != nil {
+		cfg.MaxRebroadcasts = *c.MaxRebroadcasts
 	}
-	if c.ClaimInclusionMaxPollDurationMs > 0 {
-		cfg.MaxPollDuration = time.Duration(c.ClaimInclusionMaxPollDurationMs) * time.Millisecond
+	if c.RebroadcastSafetyBlocks != nil {
+		cfg.RebroadcastSafetyBlocks = *c.RebroadcastSafetyBlocks
 	}
-	return cfg
-}
-
-// ProofInclusionTrackerConfig translates the YAML-facing fields on
-// TransactionConfig into the miner-layer ProofInclusionTrackerConfig, starting
-// from DefaultProofInclusionTrackerConfig and overriding only the fields the
-// operator set. Callers pass the result to NewProofInclusionTracker.
-func (c TransactionConfig) ProofInclusionTrackerConfig() ProofInclusionTrackerConfig {
-	cfg := DefaultProofInclusionTrackerConfig()
-	cfg.Disabled = c.DisableProofInclusionTracking
-	if c.ProofInclusionPollerMaxConcurrent > 0 {
-		cfg.MaxConcurrent = c.ProofInclusionPollerMaxConcurrent
-	}
-	if c.ProofInclusionPollIntervalMs > 0 {
-		cfg.PollInterval = time.Duration(c.ProofInclusionPollIntervalMs) * time.Millisecond
-	}
-	if c.ProofInclusionMaxPollDurationMs > 0 {
-		cfg.MaxPollDuration = time.Duration(c.ProofInclusionMaxPollDurationMs) * time.Millisecond
-	}
-	// Pointer: nil keeps the default (2); an explicit value (including 0 =
-	// observe-only) is honored.
-	if c.ProofMaxRebroadcasts != nil {
-		cfg.MaxRebroadcasts = *c.ProofMaxRebroadcasts
-	}
-	if c.ProofRebroadcastSafetyBlocks > 0 {
-		cfg.RebroadcastSafetyBlocks = c.ProofRebroadcastSafetyBlocks
+	if c.InclusionReconcilerPerGroupTimeoutMs > 0 {
+		cfg.PerGroupTimeout = time.Duration(c.InclusionReconcilerPerGroupTimeoutMs) * time.Millisecond
 	}
 	return cfg
 }
@@ -815,6 +770,69 @@ func (c *Config) GetSupplierClaimingConfig() SupplierClaimerConfig {
 	}
 }
 
+// suppliersPerCPUWarnThreshold is a ROUGH advisory floor, not an SLA. At
+// window-open every owned supplier builds its claim/proof concurrently and SMST
+// proving (ProveClosest) is CPU-bound; well above this ratio an under-provisioned
+// instance can submit too late and forfeit. The real fix is horizontal scaling
+// (the SupplierClaimer distributes suppliers across replicas automatically).
+const suppliersPerCPUWarnThreshold = 50
+
+// LogStartupCapacityAdvisory emits operator-facing warnings when this instance
+// looks under-provisioned for the number of supplier keys it drives, or is
+// configured in a way known to cause CLAIM_MISSING/PROOF_MISSING at scale. It is
+// advisory only (never fatal) and meant to surface in the logs of operators who
+// deploy fast without reading the docs.
+func (c *Config) LogStartupCapacityAdvisory(logger logging.Logger, numSuppliers int) {
+	// Disabling batching is discouraged: at scale, per-session (unbatched)
+	// submission floods the node with thousands of txs per window and is a
+	// primary cause of forfeits. The difficulty-validation bug it once worked
+	// around is resolved.
+	if c.Transaction.DisableClaimBatching || c.Transaction.DisableProofBatching {
+		logger.Warn().
+			Bool("disable_claim_batching", c.Transaction.DisableClaimBatching).
+			Bool("disable_proof_batching", c.Transaction.DisableProofBatching).
+			Int("num_suppliers", numSuppliers).
+			Msg("DISCOURAGED CONFIG: claim/proof batching is DISABLED — at scale this sends one tx per session " +
+				"(hundreds-to-thousands per window) and is a primary cause of CLAIM_MISSING/PROOF_MISSING forfeits. " +
+				"Re-enable batching (remove disable_claim_batching / disable_proof_batching) unless you have a specific reason.")
+	}
+
+	cpu := getEffectiveCPUCount()
+	if cpu > 0 && numSuppliers > cpu*suppliersPerCPUWarnThreshold {
+		logger.Warn().
+			Int("num_suppliers", numSuppliers).
+			Int("effective_cpu", cpu).
+			Int("suppliers_per_cpu", numSuppliers/cpu).
+			Int("rough_recommended_min_cpu", (numSuppliers+suppliersPerCPUWarnThreshold-1)/suppliersPerCPUWarnThreshold).
+			Msg("LIKELY UNDER-PROVISIONED: many supplier keys per CPU on this instance. At proof-window-open all suppliers " +
+				"build+submit proofs concurrently (CPU-bound SMST proving); too little CPU can submit proofs too late and " +
+				"forfeit (PROOF_MISSING). Recommended: scale horizontally (run more miner replicas — suppliers are " +
+				"distributed automatically), and/or give the instance more CPU, and/or run fewer keys per instance.")
+	}
+
+	// Operator explicitly capped the master pool below what the auto formula
+	// would pick for this supplier count.
+	if c.WorkerPools.MasterPoolSize > 0 {
+		autoCalc := maxInt(getEffectiveCPUCount()*c.GetCPUMultiplier(), numSuppliers*c.GetWorkersPerSupplier()) + c.GetQueryWorkers()
+		if c.WorkerPools.MasterPoolSize < autoCalc {
+			logger.Warn().
+				Int("master_pool_size", c.WorkerPools.MasterPoolSize).
+				Int("auto_recommended", autoCalc).
+				Int("num_suppliers", numSuppliers).
+				Msg("DISCOURAGED CONFIG: master_pool_size is set BELOW the auto-sized recommendation for this supplier " +
+					"count — claim/proof building/submission may serialize and miss windows. Remove the override to auto-size, " +
+					"or raise it to at least the recommended value.")
+		}
+	}
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
 // GetMasterPoolSize returns the master pool size, auto-calculating if not explicitly set.
 // Formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
 // Overhead = query_workers (+ settlement_workers if settlement_monitor enabled)
@@ -937,11 +955,17 @@ func DefaultConfig() *Config {
 			AsyncBufferSize: 100000,
 		},
 		Transaction: TransactionConfig{
-			GasLimit:             0,               // 0 = automatic gas estimation via simulation
-			GasPrice:             "0.000001upokt", // Default gas price
-			GasAdjustment:        1.7,             // Default 70% safety margin
-			DisableClaimBatching: true,            // Default: true (WORKAROUND for difficulty validation failures)
-			DisableProofBatching: true,            // Default: true (WORKAROUND for difficulty validation failures)
+			GasLimit:      0,               // 0 = automatic gas estimation via simulation
+			GasPrice:      "0.000001upokt", // Default gas price
+			GasAdjustment: 1.7,             // Default 70% safety margin
+			// Batching is ON by default. It was previously disabled as a workaround
+			// for difficulty-validation failures; that bug is resolved, and at scale
+			// (hundreds of supplier keys) per-session (unbatched) submission floods
+			// the node with thousands of txs per window and is a primary cause of
+			// CLAIM_MISSING/PROOF_MISSING forfeits. Disabling batching is now
+			// discouraged (a startup warning fires if you do).
+			DisableClaimBatching: false,
+			DisableProofBatching: false,
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
