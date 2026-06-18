@@ -2005,18 +2005,25 @@ func (m *SupplierManager) startReconcilerBlockLoop() {
 	m.reconcilerWG.Add(1)
 	go func() {
 		defer m.reconcilerWG.Done()
-		blockCh := subscriber.Subscribe(loopCtx, 2000)
-		for {
-			select {
-			case <-loopCtx.Done():
-				return
-			case block, chOpen := <-blockCh:
-				if !chOpen {
-					m.logger.Warn().Msg("inclusion reconciler block channel closed")
-					return
-				}
-				m.inclusionReconciler.OnBlock(block.Height())
-			}
+		// Decouple ingestion from processing. OnBlock runs a full reconcile pass
+		// and blocks on group.Wait(), so reading the channel inline would stall
+		// block delivery and let the fan-out channel fill — the same failure that
+		// stranded the session lifecycle at high supplier counts. The coalescing
+		// loop's reader drains the channel instantly while a single processor runs
+		// OnBlock against the latest height. Reconciliation is level-triggered (it
+		// checks pending claims/proofs against the current height), so coalescing
+		// redundant ticks never skips work, and the single processor matches
+		// OnBlock's own single-flight guard.
+		blockCh := subscriber.Subscribe(loopCtx, blockEventSubscriberBuffer)
+		runCoalescingBlockLoop(loopCtx, blockCh, m.inclusionReconciler.OnBlock)
+		// A return with the loop context still live means the block channel closed
+		// under us: the reconciler loses its per-block trigger, so the claim/proof
+		// forfeits it exists to recover would go unrecovered. Make it loud; an
+		// expected cancel is Debug.
+		if loopCtx.Err() == nil {
+			m.logger.Warn().Msg("inclusion reconciler block channel closed unexpectedly; reconciler block loop stopped")
+		} else {
+			m.logger.Debug().Msg("inclusion reconciler block loop stopped")
 		}
 	}()
 }

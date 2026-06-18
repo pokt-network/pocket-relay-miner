@@ -401,6 +401,13 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		redisBlockSubscriber,
 		nil, // Relayers only need block events, not specific block queries
 	)
+	// Register this binary as a BlockEvents() consumer BEFORE Start() begins
+	// forwarding. The adapter discards block events on arrival until a consumer
+	// has wired up BlockEvents() (so the miner, which never consumes it, doesn't
+	// buffer/warn); calling it here — rather than lazily inside the consumer
+	// goroutine below — closes the startup window where an early block could be
+	// dropped before the flag flips.
+	blockEventsCh := blockSubscriber.BlockEvents()
 	if err := blockSubscriber.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start block client adapter: %w", err)
 	}
@@ -462,7 +469,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			select {
 			case <-ctx.Done():
 				return
-			case block, ok := <-blockSubscriber.BlockEvents():
+			case block, ok := <-blockEventsCh:
 				if !ok {
 					// Channel closed
 					logger.Warn().Msg("block events channel closed")

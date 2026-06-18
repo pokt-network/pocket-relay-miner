@@ -33,6 +33,16 @@ type RedisBlockClientAdapter struct {
 	cancel          context.CancelFunc
 	wg              sync.WaitGroup
 
+	// blockEventsRequested is set the first time BlockEvents() is called, i.e.
+	// when a component actually wires up the BlockEvents() channel as its block
+	// source (the relayer does; the miner never does). Until then, events are
+	// discarded on arrival rather than buffered into blockEventsCh — otherwise the
+	// 2000-deep buffer slowly fills on the miner (nobody drains it) and emits a
+	// misleading "channel full, dropping event" warning every block. Guarding on
+	// an actual consumer keeps that RAM and that noise off processes that don't use
+	// BlockEvents() at all.
+	blockEventsRequested atomic.Bool
+
 	// Fan-out subscribers for Subscribe() method
 	subscribersMu sync.RWMutex
 	subscribers   []chan *localclient.SimpleBlock
@@ -97,18 +107,27 @@ func (a *RedisBlockClientAdapter) Start(ctx context.Context) error {
 				}
 				a.lastBlock.Store(block)
 
-				// Forward to blockEventsCh for components using BlockEvents()
-				// Non-blocking send to prevent Redis event loop from blocking
-				select {
-				case a.blockEventsCh <- block:
-					// Event forwarded successfully
-				case <-a.ctx.Done():
-					return
-				default:
-					// Drop if full - component is slow
-					a.logger.Warn().
-						Int64("height", event.Height).
-						Msg("block events channel full, dropping event")
+				// Forward to blockEventsCh ONLY if a component has wired up
+				// BlockEvents() as a consumer (relayer yes, miner no). With no
+				// consumer the channel would just fill and emit a misleading "full,
+				// dropping event" warning forever, so discard on arrival instead —
+				// no buffer growth, no noise. See blockEventsRequested.
+				if a.blockEventsRequested.Load() {
+					// Non-blocking send to prevent the Redis event loop from blocking.
+					select {
+					case a.blockEventsCh <- block:
+						// Event forwarded successfully
+					case <-a.ctx.Done():
+						return
+					default:
+						// A consumer is attached but not draining fast enough. This is
+						// a real wedged-consumer signal, so make it loud (metric + warn)
+						// rather than a silent drop.
+						blockEventsDropped.WithLabelValues("block_events").Inc()
+						a.logger.Warn().
+							Int64("height", event.Height).
+							Msg("block events channel full, dropping event (consumer not draining)")
+					}
 				}
 
 				// Fan-out to Subscribe() subscribers
@@ -186,11 +205,18 @@ func (a *RedisBlockClientAdapter) CommittedBlocksSequence(ctx context.Context) c
 }
 
 // BlockEvents returns a channel that receives block events from Redis.
+// Calling it marks BlockEvents() as having a consumer, which switches on
+// forwarding in the Redis event loop (see blockEventsRequested). Until the
+// first call, events are discarded on arrival rather than buffered.
 // This provides backward compatibility for components expecting BlockEvents().
 //
 // NOTE: This channel is populated from Redis pub/sub events, ensuring
 // all relayers see the same block progression as the miner.
 func (a *RedisBlockClientAdapter) BlockEvents() <-chan client.Block {
+	// Mark that a consumer exists so the Redis event loop starts forwarding to
+	// blockEventsCh (idempotent; safe to call repeatedly, e.g. from a consumer
+	// loop's select case).
+	a.blockEventsRequested.Store(true)
 	return a.blockEventsCh
 }
 
@@ -250,15 +276,34 @@ func (a *RedisBlockClientAdapter) publishToSubscribers(event *BlockEvent) {
 	// know at least one subscriber will (try to) receive it.
 	block := localclient.NewSimpleBlock(event.Height, event.Hash, event.Timestamp)
 
+	dropped := 0
 	for _, ch := range a.subscribers {
 		select {
 		case ch <- block:
 			// Sent successfully
 		default:
-			// Channel full, skip (non-blocking)
+			// Channel full. A subscriber that drains on arrival (the coalescing
+			// block loop does) keeps its channel clear, so reaching here means a
+			// subscriber is wedged — the silent stall that stopped claim/proof
+			// windows from firing at high supplier counts. Count it; we still do
+			// not block the producer.
+			dropped++
 		}
 	}
 	a.subscribersMu.RUnlock()
+
+	// Surface drops loudly, but OUTSIDE the RLock and once per block (not once per
+	// wedged subscriber): logging under the lock would hold it across log I/O and
+	// block Subscribe()/removeSubscriber(), and a permanently-wedged consumer would
+	// otherwise flood the log every block. The counter still carries the per-drop
+	// rate.
+	if dropped > 0 {
+		blockEventsDropped.WithLabelValues("fanout").Add(float64(dropped))
+		a.logger.Warn().
+			Int64("height", event.Height).
+			Int("subscribers_dropped", dropped).
+			Msg("block fan-out subscriber channel full, dropping event (subscriber not draining)")
+	}
 }
 
 // removeSubscriber removes a subscriber channel from the list.

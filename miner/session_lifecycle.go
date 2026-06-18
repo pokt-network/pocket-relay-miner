@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/alitto/pond/v2"
@@ -384,39 +385,136 @@ func (m *SessionLifecycleManager) lifecycleChecker(ctx context.Context) {
 	}
 }
 
-// lifecycleCheckerEventDriven uses block events for immediate session transition checks.
+// blockEventSubscriberBuffer is the per-subscriber block-event channel buffer.
+// The decoupled reader drains this channel on arrival and block events arrive
+// one at a time (one publishToSubscribers send per block), so steady-state
+// occupancy is 0–1 and this only needs to cushion transient reader-scheduling
+// jitter. 256 is already a huge cushion (256 blocks of reader starvation) at a
+// negligible per-subscriber cost; it is NOT the backpressure mechanism —
+// backpressure lives in the unbounded transition worker pool, observable as
+// pool-queue growth (session_transition_queue_depth). One channel is allocated
+// per supplier, so this is multiplied by the supplier count — another reason to
+// keep it modest rather than the former 8192 (~32x more memory for cushion the
+// instant-draining reader can never use).
+const blockEventSubscriberBuffer = 256
+
+// lifecycleCheckerEventDriven processes block events to drive session
+// transitions, with INGESTION fully decoupled from PROCESSING so a slow pass can
+// never stall block delivery (the failure mode that, at high supplier counts,
+// filled the old single-loop's channel and silently stopped claim/proof
+// windows from firing).
+//
+// See runCoalescingBlockLoop: a reader drains the channel instantly (never
+// blocking the publisher, never dropping an event), while this goroutine runs
+// checkSessionTransitions against the LATEST height. checkSessionTransitions is
+// level-triggered (acts when currentHeight >= a window boundary), so coalescing
+// redundant ticks never misses a window — and the heavy claim/proof build+submit
+// is dispatched to the unbounded transition pool, not done inline here.
 func (m *SessionLifecycleManager) lifecycleCheckerEventDriven(ctx context.Context, subscriber interface {
 	Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
 }) {
+	blockCh := subscriber.Subscribe(ctx, blockEventSubscriberBuffer)
+	m.logger.Debug().Msg("using Subscribe() for block events (decoupled reader/processor)")
+
 	lastHeight := int64(0)
+	runCoalescingBlockLoop(ctx, blockCh, func(height int64) {
+		if lastHeight > 0 {
+			// Blocks advanced this pass; 1 = keeping up, >1 = coalescing under load.
+			sessionBlockProcessingLag.WithLabelValues(m.config.SupplierAddress).Set(float64(height - lastHeight))
+		}
+		lastHeight = height
+		currentBlockHeight.Set(float64(height))
+		// Sample the transition subpool's queue depth once per pass. Cheap atomic
+		// read (no goroutine); surfaces backpressure before it becomes RAM pressure
+		// or a missed window.
+		m.recordTransitionQueueDepth()
+		m.checkSessionTransitions(ctx, height)
+	})
 
-	// Subscribe to block events with 2000-block buffer
-	blockCh := subscriber.Subscribe(ctx, 2000)
-	m.logger.Debug().Msg("using Subscribe() for block events (fan-out mode)")
+	// The loop only returns on ctx cancel (orderly shutdown) or block-channel
+	// close. A close while the context is still live means the block source went
+	// away under us — the silent-stall failure this component exists to prevent —
+	// so surface it loudly rather than exiting quietly.
+	if ctx.Err() == nil {
+		m.logger.Warn().Msg("block events channel closed unexpectedly; session lifecycle block loop stopped")
+	}
+}
 
+// recordTransitionQueueDepth samples the transition subpool's queue depth into
+// the per-supplier session_transition_queue_depth gauge. The subpool queue is
+// unbounded by design (it absorbs window-open bursts instead of blocking block
+// ingestion), so a growing depth is the backpressure / OOM early-warning signal.
+// Called once per processed block from the lifecycle loop.
+func (m *SessionLifecycleManager) recordTransitionQueueDepth() {
+	sessionTransitionQueueDepth.WithLabelValues(m.config.SupplierAddress).Set(float64(m.transitionSubpool.WaitingTasks()))
+}
+
+// runCoalescingBlockLoop consumes block-height events without ever blocking the
+// producer and without dropping a single event, by fully decoupling ingestion
+// from processing:
+//
+//   - A reader goroutine drains blockCh the instant an event arrives, recording
+//     only the newest height. It does no work, so the channel never backs up and
+//     no block event is ever dropped, no matter how slow onHeight is.
+//   - The processor (this goroutine) runs onHeight against the LATEST height each
+//     time it is free. Block heights are level-triggered by every caller (they
+//     act when current height >= some target), so processing only the latest
+//     never skips work — it merely coalesces redundant ticks. A single processor
+//     also guarantees two heights are never processed concurrently (which would
+//     race on shared state / double-dispatch).
+//
+// onHeight is only ever invoked with strictly increasing heights. The loop
+// returns when ctx is cancelled or blockCh is closed.
+func runCoalescingBlockLoop(ctx context.Context, blockCh <-chan *localclient.SimpleBlock, onHeight func(height int64)) {
+	var latest atomic.Int64
+	wake := make(chan struct{}, 1) // coalesced wake: at most one pending signal
+	readerDone := make(chan struct{})
+
+	go func() {
+		defer close(readerDone)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case block, ok := <-blockCh:
+				if !ok {
+					return
+				}
+				// This goroutine is the sole writer of latest, so a plain
+				// monotonic store suffices — no compare-and-swap race to guard.
+				if h := block.Height(); h > latest.Load() {
+					latest.Store(h)
+				}
+				select {
+				case wake <- struct{}{}:
+				default: // already signalled — the processor reads the latest height
+				}
+			}
+		}
+	}()
+
+	var lastProcessed int64
+	process := func() {
+		if h := latest.Load(); h > lastProcessed {
+			lastProcessed = h
+			onHeight(h)
+		}
+	}
 	for {
 		select {
 		case <-ctx.Done():
 			return
-
-		case block, ok := <-blockCh:
-			if !ok {
-				// Channel closed, block client shut down
-				m.logger.Warn().Msg("block events channel closed")
-				return
+		case <-readerDone:
+			// The block channel closed (source ended, not a ctx cancel): process
+			// any final coalesced height before exiting, so the last block is never
+			// lost to select picking readerDone over a still-pending wake. On a ctx
+			// cancel we stop immediately without a final pass.
+			if ctx.Err() == nil {
+				process()
 			}
-
-			currentHeight := block.Height()
-
-			// Only process if height actually increased
-			if currentHeight <= lastHeight {
-				continue
-			}
-			lastHeight = currentHeight
-			currentBlockHeight.Set(float64(currentHeight))
-
-			// Check all sessions for transitions at this block height
-			m.checkSessionTransitions(ctx, currentHeight)
+			return
+		case <-wake:
+			process()
 		}
 	}
 }

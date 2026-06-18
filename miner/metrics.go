@@ -785,6 +785,43 @@ var (
 		},
 	)
 
+	// sessionBlockProcessingLag is how many blocks the per-supplier session
+	// lifecycle processor advanced in a single pass (latest height minus the
+	// previously processed height). Steady state is 1. A sustained value > 1
+	// means a processing pass is taking longer than block time and the loop is
+	// coalescing block events to stay at the chain head — an early signal that
+	// the supplier's work (or Redis/RPC behind it) can't keep up, before it
+	// shows as missed claim/proof windows.
+	sessionBlockProcessingLag = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "session_block_processing_lag",
+			Help:      "Blocks advanced per session-lifecycle processing pass (1 = keeping up; >1 = coalescing to head under load)",
+		},
+		[]string{"supplier"},
+	)
+
+	// sessionTransitionQueueDepth is the number of tasks waiting in a supplier's
+	// transition worker subpool (claim/proof build+submit work that the lifecycle
+	// dispatched but no worker has picked up yet). The subpool queue is unbounded
+	// by design — it absorbs window-open bursts rather than blocking ingestion —
+	// so this gauge is the backpressure signal: a steadily growing depth means
+	// work is being produced faster than it settles (Redis/RPC/tx throughput
+	// behind it), and is the metric that makes an eventual OOM explainable. Pairs
+	// with session_block_processing_lag (which signals tick-processing falling
+	// behind) to separate "can't keep up reading blocks" from "can't keep up doing
+	// the work".
+	sessionTransitionQueueDepth = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "session_transition_queue_depth",
+			Help:      "Tasks waiting in a supplier's transition worker subpool (unbounded; growth = work outpacing settlement, the OOM early-warning)",
+		},
+		[]string{"supplier"},
+	)
+
 	// Block health metrics
 	configuredBlockTimeSeconds = observability.MinerFactory.NewGauge(
 		prometheus.GaugeOpts{
