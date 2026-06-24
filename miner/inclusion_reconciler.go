@@ -408,18 +408,14 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 		return
 	}
 	newHash, err := r.resubmitter.ResubmitMessage(ctx, rp.phase, g.Supplier, entry.MsgBytes, windowClose)
-	if err != nil {
-		rp.recordRebroadcast(g.Supplier, entry.ServiceID, "error")
-		r.logger.Warn().Err(err).Str("phase", string(rp.phase)).Str("supplier", g.Supplier).Str("session_id", sessionID).Msg("inclusion reconcile: rebroadcast failed")
-		return
-	}
-	rp.recordRebroadcast(g.Supplier, entry.ServiceID, "success")
 
-	// Persist the incremented count (and the new hash) so the cap is enforced on
-	// the next block and after a leader failover. Must persist even on the
-	// count-only path, or the resend would repeat every block.
+	// Count this attempt regardless of outcome and persist it, so MaxRebroadcasts
+	// bounds the total number of resend tries. Without counting failures, a
+	// persistently failing resend (e.g. a CUPR-doomed claim whose gas simulation
+	// always fails) would re-fire — and re-log — on every block until the window
+	// closes. Persisting also keeps the cap across leader failover.
 	entry.Rebroadcasts++
-	if newHash != "" {
+	if err == nil && newHash != "" {
 		entry.TxHash = newHash
 	}
 	if b, mErr := marshalRebroadcastEntry(entry); mErr == nil {
@@ -427,6 +423,23 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 			r.logger.Warn().Err(pErr).Str("session_id", sessionID).Msg("inclusion reconcile: failed to persist resend count/hash")
 		}
 	}
+
+	if err != nil {
+		rp.recordRebroadcast(g.Supplier, entry.ServiceID, "error")
+		// Debug, not Warn: the failure is already captured by the
+		// claimRebroadcastsTotal{result="error"} metric, and the attempt is now
+		// capped above, so this no longer repeats every block. Expected-transient
+		// (mempool reject / doomed claim) — not something needing an operator alert.
+		r.logger.Debug().Err(err).
+			Str("phase", string(rp.phase)).
+			Str("supplier", g.Supplier).
+			Str("session_id", sessionID).
+			Int("attempt", entry.Rebroadcasts).
+			Msg("inclusion reconcile: rebroadcast failed")
+		return
+	}
+
+	rp.recordRebroadcast(g.Supplier, entry.ServiceID, "success")
 	r.logger.Info().
 		Str("phase", string(rp.phase)).
 		Str("supplier", g.Supplier).

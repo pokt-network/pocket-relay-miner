@@ -22,12 +22,14 @@ import (
 type mockResubmitter struct {
 	mu       sync.Mutex
 	calls    []string
+	attempts int
 	failNext bool
 }
 
 func (m *mockResubmitter) ResubmitMessage(_ context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, _ int64) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.attempts++
 	if m.failNext {
 		return "", fmt.Errorf("resubmit boom")
 	}
@@ -39,6 +41,14 @@ func (m *mockResubmitter) count() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return len(m.calls)
+}
+
+// attemptCount returns the total number of ResubmitMessage invocations,
+// including failed ones (count() only tallies successes).
+func (m *mockResubmitter) attemptCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.attempts
 }
 
 type capturedOutcome struct {
@@ -219,6 +229,24 @@ func TestReconciler_SentResendsAtMidWindow(t *testing.T) {
 	// Bounded: a later block does not resend again (MaxRebroadcasts=1).
 	h.r.OnBlock(testMid + 1)
 	require.Equal(t, 1, h.resub.count(), "resend is capped at MaxRebroadcasts (1)")
+}
+
+// A persistently FAILING resend (e.g. a CUPR-doomed claim whose gas simulation
+// always fails) must be bounded by MaxRebroadcasts, NOT retried (and re-logged)
+// on every block until the window closes. The attempt is counted even when the
+// resubmit errors.
+func TestReconciler_FailingResendIsBounded_NoPerBlockStorm(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.resub.failNext = true // every resend fails
+	h.seedNeverSent(t, hSupplier, hEnd, "s1", testSubmit)
+
+	// Drive every block across the whole resend window.
+	for height := testSubmit; height < testWindowClose; height++ {
+		h.r.OnBlock(height)
+	}
+
+	require.LessOrEqual(t, h.resub.attemptCount(), 1,
+		"a persistently failing resend must be capped at MaxRebroadcasts (1), not retried every block")
 }
 
 // A never-broadcast (submit-failed) entry resends EARLY (submit+1), not at mid.
