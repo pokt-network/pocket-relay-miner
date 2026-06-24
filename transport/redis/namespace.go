@@ -45,13 +45,6 @@ func (kb *KeyBuilder) EventChannel(cacheType, event string) string {
 	return fmt.Sprintf("%s:%s:cache:%s:%s", kb.ns.BasePrefix, kb.ns.EventsPrefix, cacheType, event)
 }
 
-// EventChannelPrefix builds a prefix for all event channels.
-// Format: {base}:{events}
-// Example: "ha:events"
-func (kb *KeyBuilder) EventChannelPrefix() string {
-	return fmt.Sprintf("%s:%s", kb.ns.BasePrefix, kb.ns.EventsPrefix)
-}
-
 // StreamPrefix returns the stream namespace prefix.
 // Format: {base}:{streams}
 // Example: "ha:relays"
@@ -66,68 +59,11 @@ func (kb *KeyBuilder) ConsumerGroup() string {
 	return fmt.Sprintf("%s-%s", kb.ns.BasePrefix, kb.ns.ConsumerGroupPrefix)
 }
 
-// StreamKey builds a Redis Stream key for a supplier.
-// Format: {base}:{streams}:{supplier}
-// Example: "ha:relays:pokt1xyz..."
-func (kb *KeyBuilder) StreamKey(supplier string) string {
-	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.StreamsPrefix, supplier)
-}
-
 // MinerSessionKey builds a key for session metadata.
 // Format: {base}:{miner}:sessions:{supplier}:{sessionID}
 // Example: "ha:miner:sessions:pokt1xyz:session123"
 func (kb *KeyBuilder) MinerSessionKey(supplier, sessionID string) string {
 	return fmt.Sprintf("%s:%s:sessions:%s:%s", kb.ns.BasePrefix, kb.ns.MinerPrefix, supplier, sessionID)
-}
-
-// MinerSessionIndexKey builds a key for the session index set.
-// Format: {base}:{miner}:sessions:{supplier}:index
-// Example: "ha:miner:sessions:pokt1xyz:index"
-func (kb *KeyBuilder) MinerSessionIndexKey(supplier string) string {
-	return fmt.Sprintf("%s:%s:sessions:%s:index", kb.ns.BasePrefix, kb.ns.MinerPrefix, supplier)
-}
-
-// MinerSessionStateKey builds a key for sessions by state.
-// Format: {base}:{miner}:sessions:{supplier}:state:{state}
-// Example: "ha:miner:sessions:pokt1xyz:state:active"
-func (kb *KeyBuilder) MinerSessionStateKey(supplier, state string) string {
-	return fmt.Sprintf("%s:%s:sessions:%s:state:%s", kb.ns.BasePrefix, kb.ns.MinerPrefix, supplier, state)
-}
-
-// MinerDedupKey builds a key for relay deduplication.
-// Format: {base}:{miner}:dedup:session:{sessionID}
-// Example: "ha:miner:dedup:session:session123"
-func (kb *KeyBuilder) MinerDedupKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:dedup:session:%s", kb.ns.BasePrefix, kb.ns.MinerPrefix, sessionID)
-}
-
-// MinerLeaderKey builds the global leader election key.
-// Format: {base}:{miner}:global_leader
-// Example: "ha:miner:global_leader"
-func (kb *KeyBuilder) MinerLeaderKey() string {
-	return fmt.Sprintf("%s:%s:global_leader", kb.ns.BasePrefix, kb.ns.MinerPrefix)
-}
-
-// MinerSMSTNodesKey builds a key for SMST nodes.
-// Format: {base}:smst:{sessionID}:nodes
-// Example: "ha:smst:session123:nodes"
-// Note: SMST uses direct base prefix for historical reasons
-func (kb *KeyBuilder) MinerSMSTNodesKey(sessionID string) string {
-	return fmt.Sprintf("%s:smst:%s:nodes", kb.ns.BasePrefix, sessionID)
-}
-
-// SupplierKey builds a key for supplier registry data.
-// Format: {base}:{supplier}:{address}
-// Example: "ha:supplier:pokt1xyz..."
-func (kb *KeyBuilder) SupplierKey(address string) string {
-	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.SupplierPrefix, address)
-}
-
-// SupplierIndexKey builds the global supplier index key.
-// Format: {base}:{supplier}:index
-// Example: "ha:supplier:index"
-func (kb *KeyBuilder) SupplierIndexKey() string {
-	return fmt.Sprintf("%s:%s:index", kb.ns.BasePrefix, kb.ns.SupplierPrefix)
 }
 
 // SupplierKeyPrefix returns the base prefix for supplier keys.
@@ -179,43 +115,6 @@ func (kb *KeyBuilder) GlobalLeaderKey() string {
 	return fmt.Sprintf("%s:%s:global_leader", kb.ns.BasePrefix, kb.ns.MinerPrefix)
 }
 
-// MeterKey builds a key for relay metering data.
-// Format: {base}:{meter}:{sessionID}
-// Example: "ha:meter:session123"
-func (kb *KeyBuilder) MeterKey(sessionID string) string {
-	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.MeterPrefix, sessionID)
-}
-
-// MeterAppStakeKey builds a key for application stake cache.
-// Format: {base}:app_stake:{appAddress}
-// Example: "ha:app_stake:pokt1abc..."
-// Note: Uses direct base prefix for historical reasons
-func (kb *KeyBuilder) MeterAppStakeKey(appAddress string) string {
-	return fmt.Sprintf("%s:app_stake:%s", kb.ns.BasePrefix, appAddress)
-}
-
-// MeterServiceComputeUnitsKey builds a key for service compute units cache.
-// Format: {base}:service:{serviceID}:compute_units
-// Example: "ha:service:eth-mainnet:compute_units"
-// Note: Uses direct base prefix for historical reasons
-func (kb *KeyBuilder) MeterServiceComputeUnitsKey(serviceID string) string {
-	return fmt.Sprintf("%s:service:%s:compute_units", kb.ns.BasePrefix, serviceID)
-}
-
-// ParamsSharedKey builds the key for cached shared params.
-// Format: {base}:{params}:shared
-// Example: "ha:params:shared"
-func (kb *KeyBuilder) ParamsSharedKey() string {
-	return fmt.Sprintf("%s:%s:shared", kb.ns.BasePrefix, kb.ns.ParamsPrefix)
-}
-
-// ParamsSessionKey builds the key for cached session params.
-// Format: {base}:{params}:session
-// Example: "ha:params:session"
-func (kb *KeyBuilder) ParamsSessionKey() string {
-	return fmt.Sprintf("%s:%s:session", kb.ns.BasePrefix, kb.ns.ParamsPrefix)
-}
-
 // ParamsProofKey builds the key for cached proof params.
 // Format: {base}:{cache}:proof_params
 // Example: "ha:cache:proof_params"
@@ -228,20 +127,6 @@ func (kb *KeyBuilder) ParamsProofKey() string {
 // Example: "ha:cache:lock:proof_params"
 func (kb *KeyBuilder) ParamsProofLockKey() string {
 	return fmt.Sprintf("%s:%s:lock:proof_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
-}
-
-// ParamsSessionCacheKey builds the key for cached session params.
-// Format: {base}:{cache}:session_params
-// Example: "ha:cache:session_params"
-func (kb *KeyBuilder) ParamsSessionCacheKey() string {
-	return fmt.Sprintf("%s:%s:session_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
-}
-
-// ParamsSessionLockKey builds the lock key for session params cache population.
-// Format: {base}:{cache}:lock:session_params
-// Example: "ha:cache:lock:session_params"
-func (kb *KeyBuilder) ParamsSessionLockKey() string {
-	return fmt.Sprintf("%s:%s:lock:session_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
 }
 
 // ParamsSharedCacheKey builds the key for cached shared params singleton.
@@ -265,14 +150,6 @@ func (kb *KeyBuilder) MeterCleanupChannel() string {
 	return fmt.Sprintf("%s:%s:cleanup", kb.ns.BasePrefix, kb.ns.MeterPrefix)
 }
 
-// MeterMetaPattern builds the pattern for scanning all session meter meta keys.
-// Format: {base}:{meter}:*:meta
-// Example: "ha:meter:*:meta"
-// DEPRECATED: Prefer MeterActiveSessionsKey + SCARD over SCAN.
-func (kb *KeyBuilder) MeterMetaPattern() string {
-	return fmt.Sprintf("%s:%s:*:meta", kb.ns.BasePrefix, kb.ns.MeterPrefix)
-}
-
 // MeterActiveSessionsKey builds the key for the set tracking active session IDs.
 // Used for O(1) counting via SCARD instead of O(N) SCAN.
 // Format: {base}:{meter}:active_sessions
@@ -293,14 +170,6 @@ func (kb *KeyBuilder) SupplierUpdateChannel() string {
 // Example: "ha:events:blocks"
 func (kb *KeyBuilder) BlockEventChannel() string {
 	return fmt.Sprintf("%s:%s:blocks", kb.ns.BasePrefix, kb.ns.EventsPrefix)
-}
-
-// DiscoveredAppsKey builds the key for discovered applications set.
-// Format: {base}:discovered_apps
-// Example: "ha:discovered_apps"
-// Note: Uses direct base prefix for historical reasons
-func (kb *KeyBuilder) DiscoveredAppsKey() string {
-	return fmt.Sprintf("%s:discovered_apps", kb.ns.BasePrefix)
 }
 
 // SMSTNodesKey builds the key for SMST tree nodes hash.
@@ -375,20 +244,6 @@ func (kb *KeyBuilder) ServiceFactorDefaultKey() string {
 // Example: "ha:service_factor:service:eth-mainnet"
 func (kb *KeyBuilder) ServiceFactorServiceKey(serviceID string) string {
 	return fmt.Sprintf("%s:service_factor:service:%s", kb.ns.BasePrefix, serviceID)
-}
-
-// MeterLimitKey builds the key for cached effective limit data.
-// Format: {base}:{meter}:limit:{appAddress}:{serviceID}:{sessionID}
-// Example: "ha:meter:limit:pokt1abc:eth-mainnet:session123"
-func (kb *KeyBuilder) MeterLimitKey(appAddress, serviceID, sessionID string) string {
-	return fmt.Sprintf("%s:%s:limit:%s:%s:%s", kb.ns.BasePrefix, kb.ns.MeterPrefix, appAddress, serviceID, sessionID)
-}
-
-// MeterLimitInvalidateChannel builds the pub/sub channel for meter limit invalidation.
-// Format: {base}:{events}:meter:limit:invalidate
-// Example: "ha:events:meter:limit:invalidate"
-func (kb *KeyBuilder) MeterLimitInvalidateChannel() string {
-	return fmt.Sprintf("%s:%s:meter:limit:invalidate", kb.ns.BasePrefix, kb.ns.EventsPrefix)
 }
 
 // MinerClaimKey builds the key for supplier claim locks.

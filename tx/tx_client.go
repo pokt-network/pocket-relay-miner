@@ -888,26 +888,6 @@ func (tc *TxClient) simulateTx(
 	return simRes.GasInfo.GasUsed, nil
 }
 
-// calculateFee calculates the transaction fee based on configured gas limit.
-// This is the MAXIMUM fee we're willing to pay (set before broadcast).
-//func (tc *TxClient) calculateFee() cosmostypes.Coins {
-//	return tc.calculateFeeForGas(tc.config.GasLimit)
-//}
-
-// calculateFeeForGas calculates the transaction fee for a given gas limit.
-//func (tc *TxClient) calculateFeeForGas(gasLimit uint64) cosmostypes.Coins {
-//	gasLimitDec := math.LegacyNewDec(int64(gasLimit))
-//	feeAmount := tc.config.GasPrice.Amount.Mul(gasLimitDec)
-//
-//	// Truncate and add 1 if there's a remainder to ensure we don't underpay
-//	feeInt := feeAmount.TruncateInt()
-//	if feeAmount.Sub(math.LegacyNewDecFromInt(feeInt)).IsPositive() {
-//		feeInt = feeInt.Add(math.OneInt())
-//	}
-//
-//	return cosmostypes.NewCoins(cosmostypes.NewCoin(tc.config.GasPrice.Denom, feeInt))
-//}
-
 // NOTE: calculateActualFee() removed - not available in SYNC mode (only CheckTx, no execution result)
 
 // isInsufficientBalanceError checks if the error message indicates insufficient balance.
