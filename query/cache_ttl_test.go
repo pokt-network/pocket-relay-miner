@@ -5,6 +5,7 @@ package query
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -346,4 +347,28 @@ func TestGetParamsAtHeight_RefreshAfterFloor(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, uint64(8), p3.NumBlocksPerSession,
 		"after the TTL floor params-at-height must be re-queried (self-heal)")
+}
+
+// TestSessionCache_BoundedEviction is the regression guard for unbounded session
+// cache growth: evictOldSessionsLocked must drop entries whose session-start
+// height is far below the newest once the map exceeds maxSessionCacheEntries.
+func TestSessionCache_BoundedEviction(t *testing.T) {
+	c := &sessionQueryClient{sessionCache: make(map[string]sessionCacheEntry)}
+
+	// Fill past the cap with one entry per height.
+	newest := int64(maxSessionCacheEntries + 200)
+	for h := int64(1); h <= newest; h++ {
+		c.sessionCache[fmt.Sprintf("app/svc/%d", h)] = sessionCacheEntry{height: h, cachedAt: time.Now()}
+	}
+	require.Greater(t, len(c.sessionCache), maxSessionCacheEntries)
+
+	c.evictOldSessionsLocked(newest)
+
+	require.LessOrEqual(t, len(c.sessionCache), maxSessionCacheEntries,
+		"eviction must bring the map back under the cap")
+	// Heights within the keep window survive; far-older ones are gone.
+	_, recent := c.sessionCache[fmt.Sprintf("app/svc/%d", newest)]
+	require.True(t, recent, "the newest session must be retained")
+	_, old := c.sessionCache[fmt.Sprintf("app/svc/%d", int64(1))]
+	require.False(t, old, "a session far below the keep window must be evicted")
 }

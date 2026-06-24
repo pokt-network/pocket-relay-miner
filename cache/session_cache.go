@@ -31,11 +31,34 @@ var _ SessionCache = (*RedisSessionCache)(nil)
 // const) so tests can shrink it without sleeping.
 var sessionCacheL1TTL = 30 * time.Minute
 
-// sessionCacheL1Entry is an L1-cached session plus the time it was fetched, so
-// the entry can be aged out by sessionCacheL1TTL.
+// sessionCacheL1Entry is an L1-cached session plus the height it was keyed at (for
+// window-bounded eviction) and the time it was fetched (for the TTL floor).
 type sessionCacheL1Entry struct {
 	session  *sessiontypes.Session
+	height   int64
 	cachedAt time.Time
+}
+
+// sessionCacheL1KeepHeights bounds the L1 height window. The sync.Map otherwise
+// grows one entry per distinct session served for the process lifetime; storing
+// prunes entries whose height is more than this many blocks below the newest.
+const sessionCacheL1KeepHeights = 600
+
+// storeSession caches a session in L1 and prunes entries far below the newest
+// height, keeping the sync.Map bounded.
+func (c *RedisSessionCache) storeSession(key string, height int64, session *sessiontypes.Session) {
+	c.sessionCache.Store(key, sessionCacheL1Entry{session: session, height: height, cachedAt: time.Now()})
+
+	cutoff := height - sessionCacheL1KeepHeights
+	if cutoff <= 0 {
+		return
+	}
+	c.sessionCache.Range(func(k, v any) bool {
+		if e, ok := v.(sessionCacheL1Entry); ok && e.height < cutoff {
+			c.sessionCache.Delete(k)
+		}
+		return true
+	})
 }
 
 // RedisSessionCache implements SessionCache using Redis as L2 cache.
@@ -191,7 +214,7 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 		} else {
 			cacheHits.WithLabelValues("session", CacheLevelL2).Inc()
 			cacheGetLatency.WithLabelValues("session", CacheLevelL2).Observe(time.Since(start).Seconds())
-			c.sessionCache.Store(key, sessionCacheL1Entry{session: session, cachedAt: time.Now()})
+			c.storeSession(key, height, session)
 			c.logger.Debug().
 				Str("app_address", appAddress).
 				Str("service_id", serviceId).
@@ -258,7 +281,7 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 	}
 
 	// Cache in L1
-	c.sessionCache.Store(key, sessionCacheL1Entry{session: session, cachedAt: time.Now()})
+	c.storeSession(key, height, session)
 	c.logger.Info().
 		Str("app_address", appAddress).
 		Str("service_id", serviceId).

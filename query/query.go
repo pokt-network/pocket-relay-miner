@@ -541,11 +541,24 @@ type sessionQueryClient struct {
 
 var _ client.SessionQueryClient = (*sessionQueryClient)(nil)
 
-// sessionCacheEntry is a cached session plus its fetch time, for TTL expiry.
+// sessionCacheEntry is a cached session plus its session-start height (for
+// window-bounded eviction) and fetch time (for TTL expiry).
 type sessionCacheEntry struct {
 	session  *sessiontypes.Session
+	height   int64
 	cachedAt time.Time
 }
+
+// maxSessionCacheEntries bounds the in-process session cache. Sessions are keyed
+// by (app, service, sessionStartHeight); only recent sessions are read, so when
+// the map exceeds this it evicts entries whose start height is far below the
+// newest. Without a bound the map grows one entry per distinct session served for
+// the process lifetime.
+const maxSessionCacheEntries = 2048
+
+// sessionCacheKeepHeights is how many blocks below the newest cached session-start
+// height to retain on an eviction sweep.
+const sessionCacheKeepHeights = 600
 
 func newSessionQueryClient(
 	logger logging.Logger,
@@ -607,8 +620,25 @@ func (c *sessionQueryClient) GetSession(
 		return nil, fmt.Errorf("failed to query session: %w", err)
 	}
 
-	c.sessionCache[cacheKey] = sessionCacheEntry{session: res.Session, cachedAt: time.Now()}
+	c.sessionCache[cacheKey] = sessionCacheEntry{session: res.Session, height: sessionStartHeight, cachedAt: time.Now()}
+	c.evictOldSessionsLocked(sessionStartHeight)
 	return res.Session, nil
+}
+
+// evictOldSessionsLocked bounds the session cache. It must be called with
+// sessionCacheMu held for writing. When the map exceeds maxSessionCacheEntries it
+// drops every entry whose session-start height is more than sessionCacheKeepHeights
+// below newestHeight — sessions that old are settled and never re-read.
+func (c *sessionQueryClient) evictOldSessionsLocked(newestHeight int64) {
+	if len(c.sessionCache) <= maxSessionCacheEntries {
+		return
+	}
+	cutoff := newestHeight - sessionCacheKeepHeights
+	for k, e := range c.sessionCache {
+		if e.height < cutoff {
+			delete(c.sessionCache, k)
+		}
+	}
 }
 
 func (c *sessionQueryClient) GetParams(ctx context.Context) (*sessiontypes.Params, error) {
