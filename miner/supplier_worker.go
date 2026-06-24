@@ -356,6 +356,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			InclusionReconcilerConfig:      w.config.Config.Transaction.InclusionReconcilerConfig(),
 			ServiceFactorProvider:          newServiceFactorClientAdapter(ctx, w.serviceFactorClient),
 			AppClient:                      cache.NewApplicationQueryClientAdapter(w.queryClients.Application()),
+			ServiceClient:                  w.queryClients.Service(),
 			SessionLifecycleConfig: SessionLifecycleConfig{
 				CheckInterval:            0, // Event-driven via Redis pub/sub
 				MaxConcurrentTransitions: w.config.Config.GetSessionLifecycleMaxConcurrentTransitions(),

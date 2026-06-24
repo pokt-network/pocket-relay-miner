@@ -178,6 +178,10 @@ type SupplierManagerConfig struct {
 	// If nil, ceiling warnings are skipped.
 	AppClient ApplicationQueryClient
 
+	// ServiceClient queries the current service CUPR for the claim-build
+	// CUPR-mismatch guard. If nil, the guard is skipped.
+	ServiceClient client.ServiceQueryClient
+
 	// SessionLifecycleConfig contains configuration for session lifecycle management.
 	SessionLifecycleConfig SessionLifecycleConfig
 
@@ -1104,6 +1108,9 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		}
 		if m.config.AppClient != nil {
 			lifecycleCallback.SetAppClient(m.config.AppClient)
+		}
+		if m.config.ServiceClient != nil {
+			lifecycleCallback.SetServiceClient(m.config.ServiceClient)
 		}
 		// Pre-proof GetClaim guard (WS-A): skips proof submission for sessions
 		// whose claim is not on-chain, preventing FailedPrecondition retry

@@ -198,6 +198,10 @@ type LifecycleCallback struct {
 	// If nil, ceiling warnings are skipped.
 	appClient ApplicationQueryClient
 
+	// serviceClient queries the current service CUPR for the claim-build
+	// CUPR-mismatch guard. If nil, the guard is skipped.
+	serviceClient pocktclient.ServiceQueryClient
+
 	// streamDeleter deletes session streams after settlement.
 	// If nil, streams are not deleted (will rely on TTL expiration).
 	streamDeleter StreamDeleter
@@ -282,6 +286,12 @@ func (lc *LifecycleCallback) SetServiceFactorProvider(provider ServiceFactorProv
 // This is optional - if not set, ceiling warnings are skipped.
 func (lc *LifecycleCallback) SetAppClient(client ApplicationQueryClient) {
 	lc.appClient = client
+}
+
+// SetServiceClient sets the service query client used by the claim-build
+// CUPR-mismatch guard. Optional — if not set, the guard is skipped.
+func (lc *LifecycleCallback) SetServiceClient(client pocktclient.ServiceQueryClient) {
+	lc.serviceClient = client
 }
 
 // SetStreamDeleter sets the stream deleter for cleanup after session settlement.
@@ -840,6 +850,35 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					return
 				}
 
+				// Phase 3.5: CUPR consistency guard. poktroll validates
+				// num_claimed_compute_units == num_relays * service.ComputeUnitsPerRelay
+				// using the LATEST CUPR (claim-create and settlement). If the service's
+				// CUPR changed while/after this session was mined, the SMST sum no longer
+				// matches and the claim is rejected (and retried every block). Skip it
+				// terminally. Fail OPEN on query error — never drop a claim we cannot
+				// prove is doomed.
+				if lc.serviceClient != nil {
+					if svc, svcErr := lc.serviceClient.GetService(ctx, snap.ServiceID); svcErr != nil {
+						logger.Debug().Err(svcErr).
+							Str(logging.FieldSessionID, snap.SessionID).
+							Msg("CUPR guard: failed to query current service CUPR, allowing claim")
+					} else if cupr := svc.GetComputeUnitsPerRelay(); !isClaimCUPRConsistent(smstSum, smstCount, cupr) {
+						logger.Warn().
+							Str(logging.FieldSessionID, snap.SessionID).
+							Str(logging.FieldServiceID, snap.ServiceID).
+							Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+							Uint64("smst_compute_units", smstSum).
+							Uint64("smst_relay_count", smstCount).
+							Uint64("current_compute_units_per_relay", cupr).
+							Uint64("expected_compute_units", smstCount*cupr).
+							Msg("SKIP CUPR MISMATCH: SMST sum != relays * current CUPR (service CUPR changed); claim would be rejected on-chain")
+						result.skipped = true
+						result.skipReason = "cupr_mismatch"
+						results <- result
+						return
+					}
+				}
+
 				// Phase 4: Economic viability using the SMST root hash.
 				// Build a temporary Claim (like poktroll does) to call GetClaimeduPOKT.
 				if claimAndProofCostUpokt > 0 {
@@ -929,8 +968,8 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		for _, r := range partitioned.skipped {
 			snap := r.snapshot
 			switch r.skipReason {
-			case "unprofitable":
-				RecordClaimSkipped(snap.SupplierOperatorAddress, snap.ServiceID, "unprofitable")
+			case "unprofitable", "cupr_mismatch":
+				RecordClaimSkipped(snap.SupplierOperatorAddress, snap.ServiceID, r.skipReason)
 				if skipErr := lc.OnClaimSkipped(ctx, snap); skipErr != nil {
 					logger.Warn().Err(skipErr).
 						Str(logging.FieldSessionID, snap.SessionID).
