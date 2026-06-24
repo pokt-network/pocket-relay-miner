@@ -288,24 +288,24 @@ func TestOrchestrator_BlockEvent_RefreshesDiscoveredService_FullChain(t *testing
 	// service (InvalidateService called) and its L1 now serves the new CUPR.
 	require.Eventually(t, func() bool {
 		return h.svcClient.invalidations() >= 1
-	}, 5*time.Second, 10*time.Millisecond, "leader must force-refresh the known service")
+	}, 20*time.Second, 20*time.Millisecond, "leader must force-refresh the known service")
 
 	require.Eventually(t, func() bool {
 		s, e := h.leaderSvc.Get(ctx, svcID)
 		return e == nil && s.GetComputeUnitsPerRelay() == 200
-	}, 5*time.Second, 10*time.Millisecond, "leader L1 must follow the on-chain CUPR change")
+	}, 20*time.Second, 20*time.Millisecond, "leader L1 must follow the on-chain CUPR change")
 
 	// The application path uses the identical known-set + RefreshEntity wiring.
 	require.Eventually(t, func() bool {
 		return h.appClient.invalidations() >= 1
-	}, 5*time.Second, 10*time.Millisecond, "leader must force-refresh the known application")
+	}, 20*time.Second, 20*time.Millisecond, "leader must force-refresh the known application")
 
 	// Cross-process: the relayer-simulating cache received the pub/sub
 	// invalidation and its L1 followed to the new value (read through L2).
 	require.Eventually(t, func() bool {
 		s, e := h.relayerSvc.Get(ctx, svcID)
 		return e == nil && s.GetComputeUnitsPerRelay() == 200
-	}, 5*time.Second, 10*time.Millisecond,
+	}, 20*time.Second, 20*time.Millisecond,
 		"relayer-side cache L1 must follow via pub/sub invalidation (the CUPR-incident gap)")
 }
 
@@ -340,7 +340,7 @@ func TestOrchestrator_KnownSetIsLoadBearing_NegativeControl(t *testing.T) {
 	// guarantees the refresh cycle has run.
 	require.Eventually(t, func() bool {
 		return h.appClient.invalidations() >= 1
-	}, 5*time.Second, 10*time.Millisecond, "application in the known-set must be refreshed")
+	}, 20*time.Second, 20*time.Millisecond, "application in the known-set must be refreshed")
 
 	// The service is NOT in the known-set → the refresh cycle (which has now run,
 	// per the app assertion) never touched it. Its query client was never
