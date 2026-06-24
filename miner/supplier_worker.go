@@ -23,9 +23,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/tx"
 
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
-	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
-	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
-	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
 // SupplierWorkerConfig contains configuration for supplier processing.
@@ -62,11 +59,6 @@ type SupplierWorker struct {
 	supplierRegistry        *SupplierRegistry
 	serviceFactorClient     *relayer.ServiceFactorClient
 	masterPool              pond.Pool
-
-	// Caches - these read from Redis L2 (populated by leader) and fall back to network
-	sharedParamsCache  cache.SingletonEntityCache[*sharedtypes.Params]
-	sessionParamsCache cache.SingletonEntityCache[*sessiontypes.Params]
-	proofParamsCache   cache.SingletonEntityCache[*prooftypes.Params]
 
 	// discovered dedups app/service addresses already written to the Redis
 	// known-sets, keeping the per-relay discovery write off the hot path after
@@ -226,43 +218,11 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	}
 	w.logger.Info().Msg("redis block client adapter started")
 
-	// Create caches (read from Redis L2 populated by leader, fall back to network query)
-	blockTimeSeconds := w.config.Config.GetBlockTimeSeconds()
-
-	w.sharedParamsCache = cache.NewSharedParamsCache(
-		w.logger,
-		w.config.RedisClient,
-		w.queryClients.Shared(),
-		blockTimeSeconds,
-	)
-	if err = w.sharedParamsCache.Start(ctx); err != nil {
-		w.cleanup()
-		return fmt.Errorf("failed to start shared params cache: %w", err)
-	}
-
-	w.sessionParamsCache = cache.NewSessionParamsCache(
-		w.logger,
-		w.config.RedisClient,
-		cache.NewSessionQueryClientAdapter(w.queryClients.Session()),
-		w.queryClients.Shared(),
-		blockTimeSeconds,
-	)
-	if err = w.sessionParamsCache.Start(ctx); err != nil {
-		w.cleanup()
-		return fmt.Errorf("failed to start session params cache: %w", err)
-	}
-
-	w.proofParamsCache = cache.NewProofParamsCache(
-		w.logger,
-		w.config.RedisClient,
-		cache.NewProofQueryClientAdapter(w.queryClients.Proof()),
-		w.queryClients.Shared(),
-		blockTimeSeconds,
-	)
-	if err = w.proofParamsCache.Start(ctx); err != nil {
-		w.cleanup()
-		return fmt.Errorf("failed to start proof params cache: %w", err)
-	}
+	// NOTE: The worker does NOT build its own shared/session/proof param caches.
+	// The economic paths read the raw query clients (GetParamsAtHeight for
+	// session-bound reads; live GetParams for proof requirement), and the only
+	// orchestrator-refreshed param caches that need to exist live on the leader
+	// controller. Worker-local copies were dead duplicates.
 
 	// Create supplier cache (for publishing supplier state)
 	w.supplierCache = cache.NewSupplierCache(
@@ -351,9 +311,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start service factor client: %w", err)
 	}
 
-	// Create cached shared client wrapper
-	cachedSharedClient := cache.NewCachedSharedQueryClient(w.sharedParamsCache, w.queryClients.Shared())
-
 	// Create supplier manager with distributed claiming enabled
 	w.supplierManager = NewSupplierManager(
 		w.logger,
@@ -374,7 +331,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			WorkerPool:                     w.masterPool,
 			TxClient:                       w.txClient,
 			BlockClient:                    w.redisBlockClientAdapter, // Use Redis pub/sub for block events
-			SharedClient:                   cachedSharedClient,
+			SharedClient:                   w.queryClients.Shared(),
 			SessionClient:                  w.queryClients.Session(),
 			ProofChecker:                   w.proofChecker,
 			ProofQueryClient:               w.queryClients.Proof(),
@@ -656,27 +613,6 @@ func (w *SupplierWorker) cleanup() {
 			w.logger.Error().Err(err).Msg("failed to close supplier cache")
 		}
 		w.supplierCache = nil
-	}
-
-	if w.proofParamsCache != nil {
-		if err := w.proofParamsCache.Close(); err != nil {
-			w.logger.Error().Err(err).Msg("failed to close proof params cache")
-		}
-		w.proofParamsCache = nil
-	}
-
-	if w.sessionParamsCache != nil {
-		if err := w.sessionParamsCache.Close(); err != nil {
-			w.logger.Error().Err(err).Msg("failed to close session params cache")
-		}
-		w.sessionParamsCache = nil
-	}
-
-	if w.sharedParamsCache != nil {
-		if err := w.sharedParamsCache.Close(); err != nil {
-			w.logger.Error().Err(err).Msg("failed to close shared params cache")
-		}
-		w.sharedParamsCache = nil
 	}
 
 	if w.redisBlockClientAdapter != nil {
