@@ -1101,10 +1101,6 @@ type serviceQueryClient struct {
 	serviceCache   map[string]sharedtypes.Service
 	serviceCacheMu sync.RWMutex
 
-	// Cache for latest difficulty queries (keyed by serviceID only)
-	difficultyCache   map[string]servicetypes.RelayMiningDifficulty
-	difficultyCacheMu sync.RWMutex
-
 	// Bounded cache for height-aware difficulty queries (keyed by "serviceID@height").
 	// Uses xsync.MapOf for lock-free concurrent reads (project standard).
 	// Difficulty at a given height is immutable — no invalidation needed.
@@ -1132,7 +1128,6 @@ func newServiceQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout
 		queryClient:           servicetypes.NewQueryClient(conn),
 		queryTimeout:          timeout,
 		serviceCache:          make(map[string]sharedtypes.Service),
-		difficultyCache:       make(map[string]servicetypes.RelayMiningDifficulty),
 		heightDifficultyCache: xsync.NewMap[string, heightDifficultyCacheEntry](),
 	}
 }
@@ -1180,24 +1175,17 @@ func (c *serviceQueryClient) InvalidateService(serviceId string) {
 	delete(c.serviceCache, serviceId)
 }
 
+// GetServiceRelayDifficulty queries the chain for the LATEST relay mining
+// difficulty of a service. It is required by the poktroll
+// client.ServiceQueryClient interface, but NOT used by any economic path in
+// this repo — claim/proof economics use the height-bound
+// GetServiceRelayDifficultyAtHeight to match on-chain validation.
+//
+// It queries the chain directly with no caching: the previous unkeyed,
+// no-TTL difficultyCache was a frozen-latest foot-gun (a future caller would
+// silently get a stale value). Difficulty changes over time, so a "latest"
+// cache must never be a permanent map.
 func (c *serviceQueryClient) GetServiceRelayDifficulty(ctx context.Context, serviceId string) (servicetypes.RelayMiningDifficulty, error) {
-	// Check cache
-	c.difficultyCacheMu.RLock()
-	if difficulty, ok := c.difficultyCache[serviceId]; ok {
-		c.difficultyCacheMu.RUnlock()
-		return difficulty, nil
-	}
-	c.difficultyCacheMu.RUnlock()
-
-	// Query chain
-	c.difficultyCacheMu.Lock()
-
-	// Double-check after acquiring lock
-	if difficulty, ok := c.difficultyCache[serviceId]; ok {
-		c.difficultyCacheMu.Unlock()
-		return difficulty, nil
-	}
-
 	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
 	defer cancel()
 
@@ -1205,18 +1193,10 @@ func (c *serviceQueryClient) GetServiceRelayDifficulty(ctx context.Context, serv
 		ServiceId: serviceId,
 	})
 	if err != nil {
-		c.difficultyCacheMu.Unlock()
 		return servicetypes.RelayMiningDifficulty{}, fmt.Errorf("failed to query relay mining difficulty: %w", err)
 	}
 
-	c.difficultyCache[serviceId] = res.RelayMiningDifficulty
-	targetHash := res.RelayMiningDifficulty.TargetHash
-	c.difficultyCacheMu.Unlock()
-
-	// Metric write outside the cache lock: promauto's Set acquires its
-	// own internal mutex, so doing it under difficultyCacheMu would
-	// serialize every cache writer behind any slow /metrics scrape.
-	recordRelayMiningDifficulty(serviceId, targetHash)
+	recordRelayMiningDifficulty(serviceId, res.RelayMiningDifficulty.TargetHash)
 	return res.RelayMiningDifficulty, nil
 }
 

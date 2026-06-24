@@ -306,8 +306,11 @@ func TestGetServiceRelayDifficulty_NotFound(t *testing.T) {
 	require.Contains(t, err.Error(), "failed to query relay mining difficulty")
 }
 
-// TestGetServiceRelayDifficulty_Cache tests difficulty caching
-func TestGetServiceRelayDifficulty_Cache(t *testing.T) {
+// TestGetServiceRelayDifficulty_QueriesChainEachCall verifies the latest-difficulty
+// method is NOT cached: it queries the chain on every call. Caching "latest"
+// difficulty in an unkeyed, no-TTL map was a frozen-value foot-gun and was removed
+// (economic paths use the height-bound GetServiceRelayDifficultyAtHeight instead).
+func TestGetServiceRelayDifficulty_QueriesChainEachCall(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()
 
@@ -332,19 +335,18 @@ func TestGetServiceRelayDifficulty_Cache(t *testing.T) {
 
 	ctx := context.Background()
 
-	// First query
+	// First query hits the chain.
 	difficulty1, err := qc.Service().GetServiceRelayDifficulty(ctx, "develop")
 	require.NoError(t, err)
 	require.Equal(t, "develop", difficulty1.ServiceId)
 	require.Equal(t, 1, queryCount)
 
-	// Second query - should use cache
+	// Second query also hits the chain (no caching of the latest value).
 	difficulty2, err := qc.Service().GetServiceRelayDifficulty(ctx, "develop")
 	require.NoError(t, err)
 	require.Equal(t, "develop", difficulty2.ServiceId)
-	require.Equal(t, 1, queryCount) // Still 1
+	require.Equal(t, 2, queryCount)
 
-	// Same data
 	require.Equal(t, difficulty1.ServiceId, difficulty2.ServiceId)
 }
 

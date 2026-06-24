@@ -80,9 +80,9 @@ var (
 	// why ha_relayer_relays_mined_total / relays_served_total varies
 	// across services.
 	//
-	// Updated at cache-miss in GetServiceRelayDifficulty and
-	// GetServiceRelayDifficultyAtHeight — i.e. whenever the chain is
-	// actually consulted. Cache hits are the hot path and don't touch
+	// Updated whenever the chain is consulted: every call to the (uncached)
+	// GetServiceRelayDifficulty and on cache-miss in
+	// GetServiceRelayDifficultyAtHeight. Cache hits are the hot path and don't touch
 	// the gauge; in steady state new session starts produce new
 	// queries that refresh the value.
 	//
