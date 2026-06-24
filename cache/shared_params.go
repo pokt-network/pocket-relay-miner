@@ -16,6 +16,43 @@ import (
 
 var _ SharedParamCache = (*RedisSharedParamCache)(nil)
 
+// sharedParamsLocalTTL is the max-age safety floor for an L1 (in-process) shared
+// params entry. Params at a given height are immutable, but per the cache-TTL
+// mandate no entry may outlive the process; an entry past this floor is treated
+// as a miss and re-read. A var so tests can shrink it.
+var sharedParamsLocalTTL = 30 * time.Minute
+
+// sharedParamsLocalKeepHeights bounds the height window retained in L1. Callers
+// read the latest (and occasionally a recent session-start) height, so entries
+// far below the newest height are dead weight; storing prunes anything older.
+// This caps L1 at ~this many entries instead of growing ~1/block forever.
+const sharedParamsLocalKeepHeights = 64
+
+// sharedParamLocalEntry is an L1-cached shared params value plus its height (for
+// window-bounded pruning) and fetch time (for the TTL floor).
+type sharedParamLocalEntry struct {
+	params   *sharedtypes.Params
+	height   int64
+	cachedAt time.Time
+}
+
+// storeLocal caches params in L1 and prunes entries whose height is far below the
+// newest, keeping the map bounded to ~sharedParamsLocalKeepHeights entries.
+func (c *RedisSharedParamCache) storeLocal(key string, height int64, params *sharedtypes.Params) {
+	c.localCache.Store(key, sharedParamLocalEntry{params: params, height: height, cachedAt: time.Now()})
+
+	cutoff := height - sharedParamsLocalKeepHeights
+	if cutoff <= 0 {
+		return
+	}
+	c.localCache.Range(func(k, v any) bool {
+		if e, ok := v.(sharedParamLocalEntry); ok && e.height < cutoff {
+			c.localCache.Delete(k)
+		}
+		return true
+	})
+}
+
 // RedisSharedParamCache implements SharedParamCache using Redis as L2 cache.
 type RedisSharedParamCache struct {
 	logger       logging.Logger
@@ -24,8 +61,10 @@ type RedisSharedParamCache struct {
 	blockClient  client.BlockClient
 	config       CacheConfig
 
-	// L1 local cache
-	localCache sync.Map // map[string]*sharedtypes.Params
+	// L1 local cache, keyed by height. Values are sharedParamLocalEntry so each
+	// is TTL-floored and the map is pruned to a bounded height window (it used to
+	// grow ~1 entry/block forever — only the latest few heights are ever read).
+	localCache sync.Map // map[string]sharedParamLocalEntry
 
 	// Cache keys helper
 	keys CacheKeys
@@ -128,11 +167,13 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 
 	key := c.keys.SharedParams(height)
 
-	// L1: Check local cache
+	// L1: Check local cache (fresh within the TTL floor only).
 	if cached, ok := c.localCache.Load(key); ok {
-		cacheHits.WithLabelValues("shared_params", CacheLevelL1).Inc()
-		cacheGetLatency.WithLabelValues("shared_params", CacheLevelL1).Observe(time.Since(start).Seconds())
-		return cached.(*sharedtypes.Params), nil
+		if e, ok := cached.(sharedParamLocalEntry); ok && time.Since(e.cachedAt) < sharedParamsLocalTTL {
+			cacheHits.WithLabelValues("shared_params", CacheLevelL1).Inc()
+			cacheGetLatency.WithLabelValues("shared_params", CacheLevelL1).Observe(time.Since(start).Seconds())
+			return e.params, nil
+		}
 	}
 	cacheMisses.WithLabelValues("shared_params", "l1").Inc()
 
@@ -146,7 +187,7 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 			cacheHits.WithLabelValues("shared_params", CacheLevelL2).Inc()
 			cacheGetLatency.WithLabelValues("shared_params", CacheLevelL2).Observe(time.Since(start).Seconds())
 			// Store in L1
-			c.localCache.Store(key, params)
+			c.storeLocal(key, height, params)
 			return params, nil
 		}
 	}
@@ -202,7 +243,7 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 		}
 
 		// Cache in L1
-		c.localCache.Store(key, params)
+		c.storeLocal(key, height, params)
 
 		return params, nil
 	}
@@ -216,7 +257,7 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 		params := &sharedtypes.Params{}
 		if unmarshalErr := json.Unmarshal(retryData, params); unmarshalErr == nil {
 			cacheHits.WithLabelValues("shared_params", CacheLevelL2Retry).Inc()
-			c.localCache.Store(key, params)
+			c.storeLocal(key, height, params)
 			return params, nil
 		}
 	}
@@ -297,7 +338,7 @@ func (c *RedisSharedParamCache) WarmupFromRedis(ctx context.Context) error {
 		return err
 	}
 
-	c.localCache.Store(key, params)
+	c.storeLocal(key, height, params)
 	c.logger.Info().Int64("height", height).Msg("shared params cache warmup complete")
 
 	return nil
