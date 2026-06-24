@@ -335,7 +335,7 @@ func TestGetService_TTLRefreshesCUPR(t *testing.T) {
 		ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second},
 	)
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 	ctx := context.Background()
 
 	// First read hits the chain.
