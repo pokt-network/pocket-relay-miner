@@ -4,7 +4,6 @@ package relayer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -80,13 +79,6 @@ func TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges(t *testi
 	app := &fakeAppClient{addr: appAddr}
 	app.stakeUpokt.Store(10_000_000_000) // 10k POKT
 
-	// Pre-seed session params in Redis so the meter doesn't call the
-	// session client on chain. Same contract the miner's refresher uses.
-	sessionParams := CachedSessionParams{NumSuppliersPerSession: 1, UpdatedAt: 1}
-	spBytes, err := json.Marshal(sessionParams)
-	require.NoError(t, err)
-	require.NoError(t, redisClient.Set(ctx, "ha:params:session", spBytes, 0).Err())
-
 	// Fake shared params cache: minimum fields calculateMaxStake reads.
 	sharedParams := &sharedtypes.Params{
 		NumBlocksPerSession:            10,
@@ -98,10 +90,10 @@ func TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges(t *testi
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		redisClient,
-		app, // appClient
-		nil, // sharedClient (unused — cache hits)
-		nil, // sessionClient (unused — Redis pre-seeded)
-		nil, // blockClient
+		app,                                 // appClient
+		nil,                                 // sharedClient (unused — cache hits)
+		&fakeSessionClient{numSuppliers: 1}, // sessionClient
+		nil,                                 // blockClient
 		&fakeSharedParamCache{params: sharedParams},
 		nil, // serviceCache (unused in getOrCreateSessionMeter path)
 		nil, // serviceFactorProvider → baseLimit path

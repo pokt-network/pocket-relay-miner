@@ -4,7 +4,6 @@ package relayer
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"testing"
 
@@ -62,12 +61,6 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 	app := &fakeAppClient{addr: appAddr}
 	app.stakeUpokt.Store(appStakeUpokt)
 
-	// Pre-seed session params so getSessionParams hits Redis only.
-	sessionParams := CachedSessionParams{NumSuppliersPerSession: 2, UpdatedAt: 1}
-	spBytes, err := json.Marshal(sessionParams)
-	require.NoError(t, err)
-	require.NoError(t, redisClient.Set(ctx, "ha:params:session", spBytes, 0).Err())
-
 	sharedParams := &sharedtypes.Params{
 		NumBlocksPerSession:            10,
 		ComputeUnitsToTokensMultiplier: 1,
@@ -79,7 +72,7 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 		redisClient,
 		app,
 		nil, // sharedClient (unused; fakeSharedParamCache serves)
-		nil, // sessionClient (unused; Redis pre-seeded)
+		&fakeSessionClient{numSuppliers: 2},
 		nil, // blockClient
 		&fakeSharedParamCache{params: sharedParams},
 		nil, // serviceCache (unused — fallback compute_units=1)
@@ -173,16 +166,13 @@ func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
 	app := &fakeAppClient{addr: "pokt1app_shared"}
 	app.stakeUpokt.Store(1000)
 
-	sessionParams := CachedSessionParams{NumSuppliersPerSession: 2, UpdatedAt: 1}
-	spBytes, err := json.Marshal(sessionParams)
-	require.NoError(t, err)
-	require.NoError(t, redisClient.Set(ctx, "ha:params:session", spBytes, 0).Err())
-
 	meter := NewRelayMeter(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		redisClient,
 		app,
-		nil, nil, nil,
+		nil,                                 // sharedClient
+		&fakeSessionClient{numSuppliers: 2}, // sessionClient
+		nil,                                 // blockClient
 		&fakeSharedParamCache{params: &sharedtypes.Params{
 			NumBlocksPerSession:            10,
 			ComputeUnitsToTokensMultiplier: 1,

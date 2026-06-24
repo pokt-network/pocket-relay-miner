@@ -799,36 +799,24 @@ func (m *RelayMeter) getSharedParams(ctx context.Context) (*CachedSharedParams, 
 	return cached, nil
 }
 
-// getSessionParams gets session params from Redis cache or queries the chain.
+// getSessionParams gets session params from the session query client, which has
+// its own short-lived (90s) in-process cache.
+//
+// It deliberately does NOT read the ha:params:session Redis flat key: that key's
+// only proactive writer (the miner ParamsRefresher) is dead code, so once this
+// method lazily populated it the value was frozen for the full CacheTTL (~2h) and
+// a governance change to NumSuppliersPerSession was invisible. Reading the live
+// client mirrors getApplicationParams and bounds staleness to the client's 90s TTL.
 func (m *RelayMeter) getSessionParams(ctx context.Context) (*CachedSessionParams, error) {
-	cacheKey := m.sessionParamsKey()
-
-	// Check Redis cache
-	data, err := m.redisClient.Get(ctx, cacheKey).Bytes()
-	if err == nil {
-		var cached CachedSessionParams
-		if json.Unmarshal(data, &cached) == nil {
-			return &cached, nil
-		}
-	}
-
-	// Query chain
 	params, err := m.sessionClient.GetParams(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session params: %w", err)
 	}
 
-	cached := &CachedSessionParams{
+	return &CachedSessionParams{
 		NumSuppliersPerSession: params.GetNumSuppliersPerSession(),
 		UpdatedAt:              time.Now().Unix(),
-	}
-
-	// Cache in Redis with session-wide TTL
-	if cacheBytes, err := json.Marshal(cached); err == nil {
-		m.redisClient.Set(ctx, cacheKey, cacheBytes, m.config.CacheTTL)
-	}
-
-	return cached, nil
+	}, nil
 }
 
 // getApplicationParams gets application params using L1 cache from appClient.
