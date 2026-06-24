@@ -5,14 +5,12 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"sync"
-	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	"github.com/pokt-network/poktroll/pkg/crypto"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
-	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
 // RelayProcessor handles the processing of relays including:
@@ -371,114 +369,8 @@ func (p *QueryDifficultyProvider) GetTargetHash(ctx context.Context, serviceID s
 	return target, nil
 }
 
-// =============================================================================
-// Cached Service Compute Units Provider
-// =============================================================================
-
-// ServiceQueryClient queries on-chain service data.
-type ServiceQueryClient interface {
-	// GetService returns the service entity for a service ID.
-	GetService(ctx context.Context, serviceID string) (sharedtypes.Service, error)
-}
-
-// CachedServiceComputeUnitsProvider caches compute units per service from on-chain data.
-type CachedServiceComputeUnitsProvider struct {
-	logger      logging.Logger
-	queryClient ServiceQueryClient
-
-	cache sync.Map // map[serviceID]uint64
-}
-
-// NewCachedServiceComputeUnitsProvider creates a new cached compute units provider.
-func NewCachedServiceComputeUnitsProvider(
-	logger logging.Logger,
-	queryClient ServiceQueryClient,
-) *CachedServiceComputeUnitsProvider {
-	return &CachedServiceComputeUnitsProvider{
-		logger:      logging.ForComponent(logger, logging.ComponentRelayProcessor),
-		queryClient: queryClient,
-	}
-}
-
-// GetServiceComputeUnits returns the compute units per relay for a service.
-// If the service is not cached, it queries the chain synchronously.
-func (p *CachedServiceComputeUnitsProvider) GetServiceComputeUnits(serviceID string) uint64 {
-	// Check cache first
-	if cached, ok := p.cache.Load(serviceID); ok {
-		return cached.(uint64)
-	}
-
-	// Query on-chain (synchronously - consider background refresh for production)
-	if p.queryClient == nil {
-		p.logger.Warn().
-			Str(logging.FieldServiceID, serviceID).
-			Msg("no query client available, using default compute units")
-		return 1
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	service, err := p.queryClient.GetService(ctx, serviceID)
-	if err != nil {
-		p.logger.Warn().
-			Err(err).
-			Str(logging.FieldServiceID, serviceID).
-			Msg("failed to query service compute units, using default")
-		return 1
-	}
-
-	computeUnits := service.ComputeUnitsPerRelay
-	p.cache.Store(serviceID, computeUnits)
-
-	p.logger.Debug().
-		Str(logging.FieldServiceID, serviceID).
-		Uint64("compute_units", computeUnits).
-		Msg("cached service compute units from chain")
-
-	return computeUnits
-}
-
-// PreloadServiceComputeUnits preloads compute units for a list of services.
-// Call this at startup to avoid synchronous queries during relay processing.
-func (p *CachedServiceComputeUnitsProvider) PreloadServiceComputeUnits(ctx context.Context, serviceIDs []string) {
-	for _, serviceID := range serviceIDs {
-		if p.queryClient == nil {
-			continue
-		}
-
-		service, err := p.queryClient.GetService(ctx, serviceID)
-		if err != nil {
-			p.logger.Warn().
-				Err(err).
-				Str(logging.FieldServiceID, serviceID).
-				Msg("failed to preload service compute units")
-			continue
-		}
-
-		p.cache.Store(serviceID, service.ComputeUnitsPerRelay)
-		p.logger.Info().
-			Str(logging.FieldServiceID, serviceID).
-			Uint64("compute_units", service.ComputeUnitsPerRelay).
-			Msg("preloaded service compute units")
-	}
-}
-
-// InvalidateCache clears the compute units cache for a service.
-func (p *CachedServiceComputeUnitsProvider) InvalidateCache(serviceID string) {
-	p.cache.Delete(serviceID)
-}
-
-// InvalidateAllCache clears all cached compute units.
-func (p *CachedServiceComputeUnitsProvider) InvalidateAllCache() {
-	p.cache.Range(func(key, value interface{}) bool {
-		p.cache.Delete(key)
-		return true
-	})
-}
-
 // Verify interface compliance.
 var _ RelayProcessor = (*relayProcessor)(nil)
 var _ DifficultyProvider = (*BaseDifficultyProvider)(nil)
 var _ DifficultyProvider = (*QueryDifficultyProvider)(nil)
-var _ ServiceComputeUnitsProvider = (*CachedServiceComputeUnitsProvider)(nil)
+var _ ServiceComputeUnitsProvider = (*serviceCacheComputeUnitsProvider)(nil)

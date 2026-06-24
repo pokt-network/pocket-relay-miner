@@ -1169,6 +1169,17 @@ func (c *serviceQueryClient) GetService(ctx context.Context, serviceId string) (
 	return res.Service, nil
 }
 
+// InvalidateService removes a service from the local query cache so the next
+// GetService fetches fresh data from the chain — picking up an on-chain
+// compute_units_per_relay change. Mirrors InvalidateApplication; called by the
+// service cache's force-refresh path so a CUPR change is not frozen for the
+// process lifetime.
+func (c *serviceQueryClient) InvalidateService(serviceId string) {
+	c.serviceCacheMu.Lock()
+	defer c.serviceCacheMu.Unlock()
+	delete(c.serviceCache, serviceId)
+}
+
 func (c *serviceQueryClient) GetServiceRelayDifficulty(ctx context.Context, serviceId string) (servicetypes.RelayMiningDifficulty, error) {
 	// Check cache
 	c.difficultyCacheMu.RLock()

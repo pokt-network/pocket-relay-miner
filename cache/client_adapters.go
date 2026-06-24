@@ -55,6 +55,15 @@ func (a *serviceQueryClientAdapter) GetService(ctx context.Context, serviceID st
 	return &service, nil
 }
 
+// InvalidateService delegates to the underlying client if it supports
+// invalidation, so the service cache's force-refresh fetches fresh data from
+// chain instead of the query layer's frozen copy.
+func (a *serviceQueryClientAdapter) InvalidateService(serviceID string) {
+	if inv, ok := a.client.(interface{ InvalidateService(string) }); ok {
+		inv.InvalidateService(serviceID)
+	}
+}
+
 // NewServiceQueryClientAdapter creates an adapter for client.ServiceQueryClient.
 func NewServiceQueryClientAdapter(c client.ServiceQueryClient) ServiceQueryClient {
 	return &serviceQueryClientAdapter{client: c}

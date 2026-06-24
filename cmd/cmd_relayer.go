@@ -644,15 +644,13 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			difficultyProvider := relayer.NewQueryDifficultyProvider(logger, difficultyProviderAdapter)
 			relayProcessor.SetDifficultyProvider(difficultyProvider)
 
-			// Wire up the service compute units provider using on-chain service data
-			computeUnitsProvider := relayer.NewCachedServiceComputeUnitsProvider(logger, queryClients.Service())
-			// Preload compute units for configured services
-			serviceIDs := make([]string, 0, len(config.Services))
-			for serviceID := range config.Services {
-				serviceIDs = append(serviceIDs, serviceID)
-			}
-			computeUnitsProvider.PreloadServiceComputeUnits(ctx, serviceIDs)
-			relayProcessor.SetServiceComputeUnitsProvider(computeUnitsProvider)
+			// Wire the service compute units provider to the SAME orchestrator-refreshed
+			// serviceCache the RelayMeter uses (L1->L2->L3 + pub/sub invalidation). The
+			// mined ComputeUnitsPerRelay becomes the SMST leaf weight, so it MUST track
+			// on-chain CUPR changes; the previous sync.Map provider froze it at startup.
+			relayProcessor.SetServiceComputeUnitsProvider(
+				relayer.NewServiceCacheComputeUnitsProvider(logger, serviceCache),
+			)
 
 			// NOTE: App discovery callbacks are no longer needed on the relayer.
 			// Discovery now happens on the miner side via CacheOrchestrator.RecordDiscoveredApp()

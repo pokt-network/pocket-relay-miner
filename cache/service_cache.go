@@ -56,6 +56,9 @@ type serviceCache struct {
 type ServiceQueryClient interface {
 	// GetService queries a service by ID from the chain.
 	GetService(ctx context.Context, serviceID string) (*sharedtypes.Service, error)
+	// InvalidateService drops any in-process cache for the given service so the
+	// next GetService fetches fresh data from chain (picks up CUPR changes).
+	InvalidateService(serviceID string)
 }
 
 // NewServiceCache creates a new service cache.
@@ -159,7 +162,10 @@ func (c *serviceCache) Get(ctx context.Context, serviceID string, force ...bool)
 	var err error
 
 	if forceRefresh {
-		// Leader force refresh: Direct query without lock (refreshes serially via pond workers)
+		// Leader force refresh: Direct query without lock (refreshes serially via pond workers).
+		// Drop the query layer's frozen copy first so GetService actually hits the
+		// chain — otherwise an on-chain CUPR change would never propagate.
+		c.queryClient.InvalidateService(serviceID)
 		chainQueries.WithLabelValues("service").Inc()
 		chainStart := time.Now()
 		svc, err = c.queryClient.GetService(ctx, serviceID)
