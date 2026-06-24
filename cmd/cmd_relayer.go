@@ -261,19 +261,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = sharedParamsCache.Close() }()
 
-	// Create proof params cache with dynamic session-duration TTL
-	proofParamsCache := cache.NewProofParamsCache(
-		logger,
-		redisClient,
-		cache.NewProofQueryClientAdapter(queryClients.Proof()),
-		queryClients.Shared(), // For TTL calculation
-		blockTimeSeconds,
-	)
-	if err := proofParamsCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start proof params cache: %w", err)
-	}
-	defer func() { _ = proofParamsCache.Close() }()
-
 	// Create application cache
 	applicationCache := cache.NewApplicationCache(
 		logger,

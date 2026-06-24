@@ -51,8 +51,6 @@ const (
 
 	// Redis key suffixes (combined with RedisKeyPrefix config to form full keys)
 	meterKeySuffix      = "meter"         // Session metering data
-	paramsKeySuffix     = "params"        // Cached on-chain params
-	serviceKeySuffix    = "service"       // Cached service data
 	meterCleanupChannel = "meter:cleanup" // Pub/sub channel for cleanup signals
 )
 
@@ -113,12 +111,6 @@ type CachedSharedParams struct {
 type CachedSessionParams struct {
 	NumSuppliersPerSession uint64 `json:"num_suppliers_per_session"`
 	UpdatedAt              int64  `json:"updated_at"`
-}
-
-// CachedServiceData contains cached service configuration.
-type CachedServiceData struct {
-	ComputeUnitsPerRelay uint64 `json:"compute_units_per_relay"`
-	UpdatedAt            int64  `json:"updated_at"`
 }
 
 // SessionMeterState represents the metering state for a session.
@@ -855,67 +847,6 @@ func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID strin
 	return computeUnits, nil
 }
 
-// RefreshSharedParams refreshes shared params cache from chain.
-// Called by miners in background process.
-func (m *RelayMeter) RefreshSharedParams(ctx context.Context) error {
-	params, err := m.sharedClient.GetParams(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get shared params: %w", err)
-	}
-
-	cached := &CachedSharedParams{
-		NumBlocksPerSession:                uint64(params.GetNumBlocksPerSession()),
-		ComputeUnitsToTokensMultiplier:     params.GetComputeUnitsToTokensMultiplier(),
-		ComputeUnitCostGranularity:         params.GetComputeUnitCostGranularity(),
-		SessionEndToProofWindowCloseBlocks: sharedtypes.GetSessionEndToProofWindowCloseBlocks(params),
-		UpdatedAt:                          time.Now().Unix(),
-	}
-
-	cacheBytes, err := json.Marshal(cached)
-	if err != nil {
-		return err
-	}
-
-	return m.redisClient.Set(ctx, m.sharedParamsKey(), cacheBytes, m.config.CacheTTL).Err()
-}
-
-// RefreshSessionParams refreshes session params cache from chain.
-// Called by miners in background process.
-func (m *RelayMeter) RefreshSessionParams(ctx context.Context) error {
-	params, err := m.sessionClient.GetParams(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get session params: %w", err)
-	}
-
-	cached := &CachedSessionParams{
-		NumSuppliersPerSession: params.GetNumSuppliersPerSession(),
-		UpdatedAt:              time.Now().Unix(),
-	}
-
-	cacheBytes, err := json.Marshal(cached)
-	if err != nil {
-		return err
-	}
-
-	return m.redisClient.Set(ctx, m.sessionParamsKey(), cacheBytes, m.config.CacheTTL).Err()
-}
-
-// RefreshServiceComputeUnits refreshes service compute units cache.
-// Called by miners in background process.
-func (m *RelayMeter) RefreshServiceComputeUnits(ctx context.Context, serviceID string, computeUnits uint64) error {
-	cached := &CachedServiceData{
-		ComputeUnitsPerRelay: computeUnits,
-		UpdatedAt:            time.Now().Unix(),
-	}
-
-	cacheBytes, err := json.Marshal(cached)
-	if err != nil {
-		return err
-	}
-
-	return m.redisClient.Set(ctx, m.serviceComputeUnitsKey(serviceID), cacheBytes, m.config.CacheTTL).Err()
-}
-
 // handleRedisError handles Redis errors based on fail behavior.
 func (m *RelayMeter) handleRedisError(operation string) (allowed bool, err error) {
 	relayMeterRedisErrors.WithLabelValues(operation).Inc()
@@ -1077,18 +1008,6 @@ func (m *RelayMeter) consumedKey(sessionID, supplierAddress string) string {
 // sessionIDs don't contain '|'). Used as the key for m.localCache.
 func localCacheKey(sessionID, supplierAddress string) string {
 	return sessionID + "|" + supplierAddress
-}
-
-func (m *RelayMeter) sharedParamsKey() string {
-	return fmt.Sprintf("%s:%s:shared", m.config.RedisKeyPrefix, paramsKeySuffix)
-}
-
-func (m *RelayMeter) sessionParamsKey() string {
-	return fmt.Sprintf("%s:%s:session", m.config.RedisKeyPrefix, paramsKeySuffix)
-}
-
-func (m *RelayMeter) serviceComputeUnitsKey(serviceID string) string {
-	return fmt.Sprintf("%s:%s:%s:compute_units", m.config.RedisKeyPrefix, serviceKeySuffix, serviceID)
 }
 
 // RelayMeterSnapshot captures the current state for monitoring/debugging.
