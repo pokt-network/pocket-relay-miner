@@ -242,6 +242,205 @@ func TestWarmupFromRedis_SkipsContaminatedKeepsClean(t *testing.T) {
 	require.True(t, okUnstaked, "legitimate unstaked entry must be loaded into L1")
 }
 
+// TestIsActive covers the IsActive semantics: active→true, unstaking-with-services→true
+// (the key case — an unstaking supplier still serves relays until its service configs
+// deactivate), not_staked→false.
+func TestIsActive(t *testing.T) {
+	cases := []struct {
+		name  string
+		state SupplierState
+		want  bool
+	}{
+		{
+			name: "active supplier is active",
+			state: SupplierState{
+				Staked:                  true,
+				Status:                  SupplierStatusActive,
+				Services:                []string{"eth-mainnet"},
+				UnstakeSessionEndHeight: 0,
+			},
+			want: true,
+		},
+		{
+			name: "unstaking supplier with services is active (key case)",
+			state: SupplierState{
+				Staked:                  true,
+				Status:                  SupplierStatusUnstaking,
+				Services:                []string{"eth-mainnet"},
+				UnstakeSessionEndHeight: 150,
+			},
+			want: true,
+		},
+		{
+			name: "unstaking supplier with empty services is still active (IsActiveForService gates per-service)",
+			state: SupplierState{
+				Staked:                  true,
+				Status:                  SupplierStatusUnstaking,
+				Services:                []string{},
+				UnstakeSessionEndHeight: 150,
+			},
+			want: true,
+		},
+		{
+			name: "not_staked is not active",
+			state: SupplierState{
+				Staked:   false,
+				Status:   SupplierStatusNotStaked,
+				Services: nil,
+			},
+			want: false,
+		},
+		{
+			name: "staked=false with active status is not active (Staked gates first)",
+			state: SupplierState{
+				Staked: false,
+				Status: SupplierStatusActive,
+			},
+			want: false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.state.IsActive()
+			require.Equal(t, tc.want, got,
+				"IsActive() mismatch for state Status=%q Staked=%v UnstakeSessionEndHeight=%d",
+				tc.state.Status, tc.state.Staked, tc.state.UnstakeSessionEndHeight)
+		})
+	}
+}
+
+// TestIsActiveForService verifies that per-service activity is gated by the
+// Services list, not just the status field. An unstaking supplier with the
+// service still in its list is active for that service; one whose service list
+// has been cleared by poktroll's deactivation boundary is not.
+func TestIsActiveForService(t *testing.T) {
+	cases := []struct {
+		name      string
+		state     SupplierState
+		serviceID string
+		want      bool
+	}{
+		{
+			name: "unstaking + service in Services → active for service",
+			state: SupplierState{
+				Staked:                  true,
+				Status:                  SupplierStatusUnstaking,
+				Services:                []string{"eth-mainnet", "polygon"},
+				UnstakeSessionEndHeight: 200,
+			},
+			serviceID: "eth-mainnet",
+			want:      true,
+		},
+		{
+			name: "unstaking + service NOT in Services → not active for service",
+			state: SupplierState{
+				Staked:                  true,
+				Status:                  SupplierStatusUnstaking,
+				Services:                []string{"polygon"},
+				UnstakeSessionEndHeight: 200,
+			},
+			serviceID: "eth-mainnet",
+			want:      false,
+		},
+		{
+			name: "unstaking + empty Services → not active for any service",
+			state: SupplierState{
+				Staked:                  true,
+				Status:                  SupplierStatusUnstaking,
+				Services:                []string{},
+				UnstakeSessionEndHeight: 200,
+			},
+			serviceID: "eth-mainnet",
+			want:      false,
+		},
+		{
+			name: "active + service in Services → active for service",
+			state: SupplierState{
+				Staked:   true,
+				Status:   SupplierStatusActive,
+				Services: []string{"eth-mainnet"},
+			},
+			serviceID: "eth-mainnet",
+			want:      true,
+		},
+		{
+			name: "not_staked → not active for any service",
+			state: SupplierState{
+				Staked:   false,
+				Status:   SupplierStatusNotStaked,
+				Services: []string{"eth-mainnet"},
+			},
+			serviceID: "eth-mainnet",
+			want:      false,
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			got := tc.state.IsActiveForService(tc.serviceID)
+			require.Equal(t, tc.want, got,
+				"IsActiveForService(%q) mismatch for Status=%q Staked=%v Services=%v",
+				tc.serviceID, tc.state.Status, tc.state.Staked, tc.state.Services)
+		})
+	}
+}
+
+// TestWriteAndReadSupplierStatusUnstaking verifies that a SupplierState with
+// UnstakeSessionEndHeight>0 round-trips through the cache with Status=unstaking
+// and the height field preserved. This is the serialisation contract that
+// writeSupplierStatusToCache (miner) and GetSupplierState (relayer) depend on.
+func TestWriteAndReadSupplierStatusUnstaking(t *testing.T) {
+	sc, _, _ := newTestSupplierCache(t)
+	ctx := context.Background()
+
+	const addr = "pokt1unstaking_roundtrip"
+	const wantHeight = uint64(300)
+
+	state := &SupplierState{
+		OperatorAddress:         addr,
+		Status:                  SupplierStatusUnstaking,
+		Staked:                  true,
+		Services:                []string{"eth-mainnet"},
+		UnstakeSessionEndHeight: wantHeight,
+	}
+	require.NoError(t, sc.SetSupplierState(ctx, state))
+
+	// Expire L1 so the read exercises L2 serialisation.
+	sc.localCache.Delete(addr)
+
+	got, err := sc.GetSupplierState(ctx, addr)
+	require.NoError(t, err)
+	require.NotNil(t, got, "unstaking state must be returned (not treated as miss)")
+
+	require.Equal(t, SupplierStatusUnstaking, got.Status, "Status must round-trip as unstaking")
+	require.True(t, got.Staked, "Staked must be true for an unstaking supplier")
+	require.Equal(t, wantHeight, got.UnstakeSessionEndHeight, "UnstakeSessionEndHeight must round-trip correctly")
+	require.Equal(t, []string{"eth-mainnet"}, got.Services, "Services must round-trip correctly")
+	require.True(t, got.IsActive(), "unstaking supplier must be IsActive()==true")
+	require.True(t, got.IsActiveForService("eth-mainnet"), "unstaking supplier must be active for its service")
+}
+
+// TestIsActive_IsContaminated_Boundary verifies that the contamination check
+// (staked+active+empty services) is unaffected by the new IsActive semantics.
+// An unstaking+empty-services entry is NOT contamination — it is a legitimate
+// in-flight deactivation — so isContaminated must return false for it.
+func TestIsActive_IsContaminated_Boundary(t *testing.T) {
+	unstakingEmptyServices := SupplierState{
+		Staked:                  true,
+		Status:                  SupplierStatusUnstaking,
+		Services:                []string{},
+		UnstakeSessionEndHeight: 150,
+	}
+	require.False(t, unstakingEmptyServices.isContaminated(),
+		"unstaking+empty-services is NOT contamination (isContaminated checks active, not unstaking)")
+	// IsActive is still true — per-service gate is IsActiveForService.
+	require.True(t, unstakingEmptyServices.IsActive(),
+		"unstaking supplier is IsActive even with no services (IsActiveForService gates per-service relay acceptance)")
+}
+
 // TestSupplierCache_L1RefreshesAfterTTL is the regression test for the supplier
 // cache-TTL gap. The SupplierCache L1 (in-process xsync map) had NO TTL, so once
 // a relayer cached a supplier its stake status and service list were frozen for

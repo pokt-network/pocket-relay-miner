@@ -72,11 +72,6 @@ type SupplierState struct {
 	LifecycleCallback *LifecycleCallback
 	SupplierClient    *tx.HASupplierClient
 
-	// Pending work tracking
-	ActiveSessions int
-	PendingClaims  int
-	PendingProofs  int
-
 	// Lifecycle
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
@@ -513,7 +508,7 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 			// Check if it's a NotFound error (not staked)
 			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
 				// Write NOT STAKED status to Redis cache for visibility
-				m.writeSupplierStatusToCache(ctx, addr, false, nil)
+				m.writeSupplierStatusToCache(ctx, addr, false, nil, 0)
 
 				// Drain-gated removal: if the supplier still has non-terminal
 				// sessions in Redis (active / claiming / claimed / proving),
@@ -573,7 +568,7 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 				services = append(services, svc.ServiceId)
 			}
 		}
-		m.writeSupplierStatusToCache(ctx, addr, true, services)
+		m.writeSupplierStatusToCache(ctx, addr, true, services, supplier.GetUnstakeSessionEndHeight())
 		stakedSuppliers = append(stakedSuppliers, addr)
 	}
 
@@ -638,22 +633,33 @@ func (m *SupplierManager) hasPendingSessions(ctx context.Context, supplierAddr s
 
 // writeSupplierStatusToCache writes a supplier's staking status to Redis cache.
 // This allows the CLI and other tools to see all configured addresses and their status.
-func (m *SupplierManager) writeSupplierStatusToCache(ctx context.Context, addr string, staked bool, services []string) {
+//
+// unstakeSessionEndHeight should be set to supplier.GetUnstakeSessionEndHeight() for
+// staked suppliers, or 0 for not-staked suppliers. A non-zero value causes the
+// status to be written as SupplierStatusUnstaking instead of SupplierStatusActive,
+// reflecting that the supplier is mid-unstake but still serving relays until its
+// service configs deactivate at the next session boundary.
+func (m *SupplierManager) writeSupplierStatusToCache(ctx context.Context, addr string, staked bool, services []string, unstakeSessionEndHeight uint64) {
 	if m.config.SupplierCache == nil {
 		return
 	}
 
-	status := cache.SupplierStatusNotStaked
-	if staked {
+	var status string
+	if !staked {
+		status = cache.SupplierStatusNotStaked
+	} else if unstakeSessionEndHeight > 0 {
+		status = cache.SupplierStatusUnstaking
+	} else {
 		status = cache.SupplierStatusActive
 	}
 
 	state := &cache.SupplierState{
-		Status:          status,
-		Staked:          staked,
-		OperatorAddress: addr,
-		Services:        services,
-		UpdatedBy:       m.config.MinerID,
+		Status:                  status,
+		Staked:                  staked,
+		OperatorAddress:         addr,
+		Services:                services,
+		UnstakeSessionEndHeight: unstakeSessionEndHeight,
+		UpdatedBy:               m.config.MinerID,
 	}
 
 	if err := m.config.SupplierCache.SetSupplierState(ctx, state); err != nil {
@@ -667,6 +673,7 @@ func (m *SupplierManager) writeSupplierStatusToCache(ctx context.Context, addr s
 			Str("address", addr).
 			Bool("staked", staked).
 			Str("status", status).
+			Uint64("unstake_session_end_height", unstakeSessionEndHeight).
 			Msg("wrote supplier status to cache")
 	}
 }
@@ -1145,6 +1152,15 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		if m.rebroadcastStore != nil {
 			lifecycleCallback.SetRebroadcastStore(m.rebroadcastStore)
 		}
+
+		// Wire the deduplicator so terminal session events
+		// (OnSessionProved/OnClaimSkipped/OnProbabilisticProved) purge the
+		// per-session dedup set (ha:miner:dedup:session:{sessionID}) via
+		// CleanupSession. Without this the callback's lc.deduplicator stays nil
+		// and the cleanup is skipped, leaving dedup state to expire only by Redis
+		// TTL — unbounded interim growth at 1000+ RPS. m.deduplicator is built in
+		// the constructor (always non-nil here); the callback nil-guards anyway.
+		lifecycleCallback.SetDeduplicator(m.deduplicator)
 
 		// Wire build pool for bounded parallel claim/proof building
 		// Uses master pool to avoid unbounded goroutine spawning

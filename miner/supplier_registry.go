@@ -226,46 +226,6 @@ func (r *SupplierRegistry) GetAllSuppliers(ctx context.Context) (map[string]*Sup
 	return result, nil
 }
 
-// SubscribeToUpdates subscribes to supplier update events.
-// Returns a channel that receives update events.
-func (r *SupplierRegistry) SubscribeToUpdates(ctx context.Context) <-chan *SupplierUpdateEvent {
-	eventCh := make(chan *SupplierUpdateEvent, 2000)
-
-	pubsub := r.redisClient.Subscribe(ctx, r.config.EventChannel)
-
-	go func() {
-		defer close(eventCh)
-		defer func() { _ = pubsub.Close() }()
-
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case msg, ok := <-pubsub.Channel():
-				if !ok {
-					return
-				}
-
-				var event SupplierUpdateEvent
-				if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-					r.logger.Warn().
-						Err(err).
-						Msg("failed to unmarshal supplier update event")
-					continue
-				}
-
-				select {
-				case eventCh <- &event:
-				default:
-					r.logger.Warn().Msg("supplier update channel full, dropping event")
-				}
-			}
-		}
-	}()
-
-	return eventCh
-}
-
 // ClearAll removes all supplier data from Redis.
 // Used primarily for testing.
 func (r *SupplierRegistry) ClearAll(ctx context.Context) error {

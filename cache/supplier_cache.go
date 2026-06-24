@@ -117,10 +117,17 @@ func (s *SupplierState) isContaminated() bool {
 }
 
 // IsActive returns true if the supplier is active and should accept relays.
-// TODO_IMPROVE: Add session height comparison for proper unstaking grace period.
-// For now, any unstaking supplier is considered inactive.
+//
+// An unstaking supplier (Status == SupplierStatusUnstaking) is still considered
+// active: poktroll deactivates services at the next session-start boundary, not
+// immediately. The Services list is the precise gate — it empties at the
+// deactivation boundary (x/shared schedules it via activation_height /
+// deactivation_height on each ServiceConfig). proxy.go checks
+// len(Services)==0 and IsActiveForService, so the per-service timing is
+// enforced there. Only SupplierStatusNotStaked — meaning the address is not
+// staked on-chain at all — warrants rejecting relays here.
 func (s *SupplierState) IsActive() bool {
-	return s.Staked && s.Status == SupplierStatusActive && s.UnstakeSessionEndHeight == 0
+	return s.Staked && s.Status != SupplierStatusNotStaked
 }
 
 // IsActiveForService returns true if the supplier is active for the given service.
