@@ -4,7 +4,6 @@ package miner
 
 import (
 	"context"
-	"crypto/rand"
 	"fmt"
 	"testing"
 
@@ -65,7 +64,7 @@ func (s *RedisSMSTTestSuite) TearDownSuite() {
 		s.miniRedis.Close()
 	}
 	if s.redisClient != nil {
-		s.redisClient.Close()
+		_ = s.redisClient.Close()
 	}
 }
 
@@ -134,16 +133,6 @@ func (s *RedisSMSTTestSuite) generateTestRelays(count int, seed byte) []testRela
 		}
 	}
 	return relays
-}
-
-// generateRandomBytes generates cryptographically random bytes.
-// Only use this when testing randomness handling (e.g., edge cases).
-// For normal tests, use generateTestRelays with a seed for determinism.
-func (s *RedisSMSTTestSuite) generateRandomBytes(length int) []byte {
-	b := make([]byte, length)
-	_, err := rand.Read(b)
-	s.Require().NoError(err, "failed to generate random bytes")
-	return b
 }
 
 // generateKnownBitPath generates a key with a known bit path.

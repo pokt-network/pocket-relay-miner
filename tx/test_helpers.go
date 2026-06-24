@@ -4,16 +4,13 @@ package tx
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"net"
 	"sync"
 	"testing"
 
 	"cosmossdk.io/math"
-	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
-	cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
@@ -186,7 +183,7 @@ func setupMockGRPCServer(t *testing.T) *testGRPCServer {
 // cleanup stops the test server
 func (s *testGRPCServer) cleanup() {
 	s.server.Stop()
-	s.listener.Close()
+	_ = s.listener.Close()
 }
 
 // addAccount adds a test account to the mock auth server
@@ -207,11 +204,6 @@ func (s *testGRPCServer) setBroadcastError(err error) {
 func (s *testGRPCServer) setBroadcastFailure(code uint32, rawLog string) {
 	s.txServer.broadcastCode = code
 	s.txServer.broadcastRawLog = rawLog
-}
-
-// setBroadcastTxHash sets a specific tx hash for BroadcastTx response
-func (s *testGRPCServer) setBroadcastTxHash(txHash string) {
-	s.txServer.broadcastTxHash = txHash
 }
 
 // getBroadcastCount returns the number of times BroadcastTx was called
@@ -349,17 +341,6 @@ func generateTestProof(t *testing.T, supplierAddr, sessionID string) *prooftypes
 	}
 }
 
-// generateTestAccount creates a test account
-func generateTestAccount(t *testing.T, address string, accountNumber, sequence uint64) *authtypes.BaseAccount {
-	t.Helper()
-
-	return &authtypes.BaseAccount{
-		Address:       address,
-		AccountNumber: accountNumber,
-		Sequence:      sequence,
-	}
-}
-
 // parseGasPrice parses a gas price string for testing
 func parseGasPrice(t *testing.T, price string) cosmostypes.DecCoin {
 	t.Helper()
@@ -367,18 +348,6 @@ func parseGasPrice(t *testing.T, price string) cosmostypes.DecCoin {
 	gasPrice, err := cosmostypes.ParseDecCoin(price)
 	require.NoError(t, err)
 	return gasPrice
-}
-
-// assertAccountInCache verifies an account is cached with the expected sequence
-func assertAccountInCache(t *testing.T, tc *TxClient, addr string, expectedSequence uint64) {
-	t.Helper()
-
-	tc.accountCacheMu.RLock()
-	defer tc.accountCacheMu.RUnlock()
-
-	account, ok := tc.accountCache[addr]
-	require.True(t, ok, "account should be in cache")
-	require.Equal(t, expectedSequence, account.Sequence)
 }
 
 // assertAccountNotInCache verifies an account is not in cache
@@ -390,31 +359,6 @@ func assertAccountNotInCache(t *testing.T, tc *TxClient, addr string) {
 
 	_, ok := tc.accountCache[addr]
 	require.False(t, ok, "account should not be in cache")
-}
-
-// createTestCodec creates a codec for testing
-func createTestCodec() codec.Codec {
-	registry := codectypes.NewInterfaceRegistry()
-	authtypes.RegisterInterfaces(registry)
-	cryptocodec.RegisterInterfaces(registry)
-	prooftypes.RegisterInterfaces(registry)
-	return codec.NewProtoCodec(registry)
-}
-
-// hexToPrivKey converts a hex string to a private key
-func hexToPrivKey(t *testing.T, hexKey string) cryptotypes.PrivKey {
-	t.Helper()
-
-	// Remove 0x prefix if present
-	if len(hexKey) > 2 && hexKey[:2] == "0x" {
-		hexKey = hexKey[2:]
-	}
-
-	keyBytes, err := hex.DecodeString(hexKey)
-	require.NoError(t, err)
-	require.Equal(t, 32, len(keyBytes), "key must be 32 bytes")
-
-	return &secp256k1.PrivKey{Key: keyBytes}
 }
 
 // calculateExpectedFee calculates the expected fee for a transaction

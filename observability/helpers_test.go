@@ -201,23 +201,6 @@ func TestHelpers_EdgeCases(t *testing.T) {
 	// Ensure no panic
 }
 
-// Helper function to get metric value from registry.
-func getCounterValue(t *testing.T, registry *prometheus.Registry, name string) float64 {
-	metrics, err := registry.Gather()
-	require.NoError(t, err)
-
-	for _, mf := range metrics {
-		if mf.GetName() == name {
-			for _, m := range mf.GetMetric() {
-				if m.GetCounter() != nil {
-					return m.GetCounter().GetValue()
-				}
-			}
-		}
-	}
-	return 0
-}
-
 // Helper function to get gauge value from registry.
 func getGaugeValue(t *testing.T, registry *prometheus.Registry, name string) float64 {
 	metrics, err := registry.Gather()

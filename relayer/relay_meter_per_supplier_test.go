@@ -46,7 +46,7 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	// Deterministic cap. With appStake=1000 uPOKT, serviceFactor=0.5 →
 	// effectiveLimit = 500 uPOKT per supplier. Relay cost = 1 uPOKT
@@ -161,7 +161,7 @@ func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	app := &fakeAppClient{addr: "pokt1app_shared"}
 	app.stakeUpokt.Store(1000)

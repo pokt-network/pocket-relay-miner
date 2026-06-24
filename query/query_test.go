@@ -204,7 +204,7 @@ func TestGRPCConnection_Timeout(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Simulate a slow query by adding delay in mock
 	ctx := context.Background()
@@ -215,7 +215,7 @@ func TestGRPCConnection_Timeout(t *testing.T) {
 	}()
 
 	// Query should timeout (but may succeed depending on timing)
-	_, err = qc.Shared().GetParams(ctx)
+	_, _ = qc.Shared().GetParams(ctx)
 	// Either timeout error or success is acceptable depending on timing
 	// The important thing is that we don't hang indefinitely
 
@@ -282,7 +282,7 @@ func TestQueryClients_AllClients(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Test all accessor methods
 	require.NotNil(t, qc.Shared())
@@ -312,7 +312,7 @@ func TestQueryClients_ConcurrentAccess(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Simulate concurrent access
 	ctx := context.Background()
@@ -354,7 +354,7 @@ func TestQueryClients_NetworkError(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should fail with network error
 	ctx := context.Background()

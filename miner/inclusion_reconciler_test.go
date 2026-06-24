@@ -411,7 +411,7 @@ func TestReconciler_CorruptEntryDropped(t *testing.T) {
 // MaxRebroadcasts=0 → observe-only: never resend, but still record outcomes.
 func TestReconciler_ObserveOnly(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
-	h.r.Close() // rebuild with MaxRebroadcasts=0
+	_ = h.r.Close() // rebuild with MaxRebroadcasts=0
 	cfg := DefaultInclusionReconcilerConfig()
 	cfg.MaxConcurrent = 4
 	cfg.MaxRebroadcasts = 0

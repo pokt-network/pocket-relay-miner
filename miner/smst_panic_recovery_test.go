@@ -52,25 +52,6 @@ func (s *RedisSMSTTestSuite) buildTreeWithInnerNodes(
 	}
 }
 
-// pickInnerNodeField returns the hex field name of any inner node in the
-// session's Redis hash. It intentionally skips leaves and extensions so
-// the corruption target is guaranteed to sit above a leaf in the tree —
-// exactly where the Anaski panic traversal happens.
-func (s *RedisSMSTTestSuite) pickInnerNodeField(supplier, sessionID string) string {
-	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
-	fields, err := s.redisClient.HGetAll(s.ctx, nodesKey).Result()
-	s.Require().NoError(err, "HGetAll on nodes hash must succeed")
-	s.Require().NotEmpty(fields, "nodes hash must have entries after seeding")
-
-	for field, val := range fields {
-		if len(val) > 0 && val[0] == smstInnerNodePrefix {
-			return field
-		}
-	}
-	s.FailNow("no inner node found in hash — tree not deep enough to reproduce panic")
-	return ""
-}
-
 // forceResume drops the in-memory tree so the next UpdateTree call is
 // forced through resumeTreeFromRedisLocked — that is the exact trigger
 // the production Anaski stack hits on a standby-becomes-leader transition.

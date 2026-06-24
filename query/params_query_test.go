@@ -38,7 +38,7 @@ func TestGetParamsAtHeight_DoesNotServeStaleCache(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	qc, err := NewQueryClients(logger, ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 	ctx := context.Background()
 
 	// Warm the in-process cache with the OLD epoch (a miner that booted before the change).
@@ -93,7 +93,7 @@ func TestGetParamsAtHeight_CachesByHeight(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	qc, err := NewQueryClients(logger, ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 	ctx := context.Background()
 
 	// First query at height 100 caches num_blocks=10.
@@ -125,7 +125,7 @@ func TestGetParamsAtHeight_ConcurrentAccess(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	qc, err := NewQueryClients(logger, ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -164,7 +164,7 @@ func TestGetSharedParams_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query params
 	ctx := context.Background()
@@ -194,7 +194,7 @@ func TestGetSessionParams_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query params
 	ctx := context.Background()
@@ -221,7 +221,7 @@ func TestGetProofParams_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query params
 	ctx := context.Background()
@@ -244,7 +244,7 @@ func TestGetParams_NetworkError(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -281,7 +281,7 @@ func TestGetParams_Timeout(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query may timeout or succeed depending on timing
 	ctx := context.Background()
@@ -307,7 +307,7 @@ func TestGetSharedParams_Cache(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -343,7 +343,7 @@ func TestSharedParams_InvalidateCache(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -383,7 +383,7 @@ func TestGetSharedParams_ConcurrentAccess(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Concurrent queries
 	ctx := context.Background()
@@ -424,7 +424,7 @@ func TestGetSessionGracePeriodEndHeight(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -452,7 +452,7 @@ func TestGetClaimWindowOpenHeight(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -480,7 +480,7 @@ func TestGetProofWindowOpenHeight(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -508,7 +508,7 @@ func TestGetEarliestSupplierClaimCommitHeight(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -536,7 +536,7 @@ func TestGetEarliestSupplierProofCommitHeight(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -564,7 +564,7 @@ func TestGetSupplierParams_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query params
 	ctx := context.Background()
@@ -592,7 +592,7 @@ func TestGetServiceParams_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query params
 	ctx := context.Background()
@@ -616,7 +616,7 @@ func TestGetParams_ParamsMissing(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -658,7 +658,7 @@ func TestGetParams_ServerError(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -691,7 +691,7 @@ func TestParams_ContextCancellation(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Create canceled context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -725,7 +725,7 @@ func TestLiveParams_RefreshAfterTTL(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	qc, err := NewQueryClients(logger, ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 	ctx := context.Background()
 
 	// Warm the cache with the old epoch.
@@ -767,7 +767,7 @@ func TestLiveParams_ServesStaleOnRefreshFailure(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	qc, err := NewQueryClients(logger, ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 	ctx := context.Background()
 
 	p, err := qc.Shared().GetParams(ctx)

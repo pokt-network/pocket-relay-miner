@@ -4,9 +4,6 @@ package observability
 
 import (
 	"context"
-	"fmt"
-	"io"
-	"net/http"
 	"testing"
 	"time"
 
@@ -303,28 +300,4 @@ func TestServer_IsRunning(t *testing.T) {
 	err = server.Stop()
 	require.NoError(t, err)
 	require.False(t, server.IsRunning(), "Server should not be running after stop")
-}
-
-// Helper function to make HTTP request with retry
-func makeHTTPRequest(t *testing.T, url string, maxRetries int) (*http.Response, error) {
-	var resp *http.Response
-	var err error
-
-	for i := 0; i < maxRetries; i++ {
-		resp, err = http.Get(url)
-		if err == nil {
-			return resp, nil
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-
-	return nil, fmt.Errorf("failed after %d retries: %w", maxRetries, err)
-}
-
-// Helper function to read response body
-func readResponseBody(t *testing.T, resp *http.Response) string {
-	defer resp.Body.Close()
-	body, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	return string(body)
 }

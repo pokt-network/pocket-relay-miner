@@ -247,7 +247,7 @@ func setupMockQueryServer(t *testing.T) (server *grpc.Server, address string, cl
 
 	cleanup = func() {
 		server.Stop()
-		listener.Close()
+		_ = listener.Close()
 	}
 
 	return server, listener.Addr().String(), cleanup, mock

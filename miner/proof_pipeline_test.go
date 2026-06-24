@@ -55,13 +55,6 @@ func (m *mockSMSTProver) getProveCallCount() int {
 	return m.proveCallCount
 }
 
-// getGetRootCallCount safely retrieves the get root call count
-func (m *mockSMSTProver) getGetRootCallCount() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.getRootCallCount
-}
-
 // mockProofQueryClient implements client.ProofQueryClient for testing
 type mockProofQueryClient struct {
 	params *prooftypes.Params
@@ -109,7 +102,7 @@ func TestProofPipeline_SubmitProof_Required(t *testing.T) {
 	ctx := context.Background()
 	err := pipeline.Start(ctx)
 	require.NoError(t, err)
-	defer pipeline.Close()
+	defer func() { _ = pipeline.Close() }()
 
 	var callbackCalled atomic.Bool
 	req := &ProofRequest{

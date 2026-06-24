@@ -46,7 +46,7 @@ func (s *SupplierClaimerTestSuite) TearDownSuite() {
 		s.miniRedis.Close()
 	}
 	if s.redisClient != nil {
-		s.redisClient.Close()
+		_ = s.redisClient.Close()
 	}
 }
 

@@ -34,7 +34,7 @@ func TestSubmitProofs_SyncAcceptIsSuccess_NoInclusionCheck(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -45,7 +45,7 @@ func TestSubmitProofs_SyncAcceptIsSuccess_NoInclusionCheck(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	proofs := []*prooftypes.MsgSubmitProof{
@@ -83,7 +83,7 @@ func TestSubmitProofs_OnlyCheckTxErrorsAreSurfaced(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -94,7 +94,7 @@ func TestSubmitProofs_OnlyCheckTxErrorsAreSurfaced(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	proofs := []*prooftypes.MsgSubmitProof{

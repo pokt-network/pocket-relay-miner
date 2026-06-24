@@ -989,17 +989,6 @@ var (
 		[]string{"action"},
 	)
 
-	// Params refresher metrics
-	paramsRefreshed = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "params_refreshed_total",
-			Help:      "Total number of on-chain params cache refreshes",
-		},
-		[]string{"param_type"}, // param_type: shared, session, app_stake, service
-	)
-
 	// Balance monitor metrics
 	supplierBalanceUpokt = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{

@@ -66,13 +66,6 @@ func (m *mockSMSTFlusher) getFlushCalls() int {
 	return m.flushCalls
 }
 
-// getGetTreeCalls safely retrieves the get tree call count
-func (m *mockSMSTFlusher) getGetTreeCalls() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.getTreeCalls
-}
-
 // mockTxClient implements client.SupplierClient for testing
 type mockTxClient struct {
 	mu               sync.Mutex
@@ -254,7 +247,7 @@ func TestClaimPipeline_SubmitClaim_WindowOpen(t *testing.T) {
 	ctx := context.Background()
 	err := pipeline.Start(ctx)
 	require.NoError(t, err)
-	defer pipeline.Close()
+	defer func() { _ = pipeline.Close() }()
 
 	// Create a claim request
 	var callbackCalled atomic.Bool
@@ -306,7 +299,7 @@ func TestClaimPipeline_SubmitClaim_WindowClosed(t *testing.T) {
 	ctx := context.Background()
 	err := pipeline.Start(ctx)
 	require.NoError(t, err)
-	defer pipeline.Close()
+	defer func() { _ = pipeline.Close() }()
 
 	var callbackCalled atomic.Bool
 	req := &ClaimRequest{
@@ -343,7 +336,7 @@ func TestClaimPipeline_SubmitClaim_AlreadySubmitted(t *testing.T) {
 	ctx := context.Background()
 	err := pipeline.Start(ctx)
 	require.NoError(t, err)
-	defer pipeline.Close()
+	defer func() { _ = pipeline.Close() }()
 
 	req := &ClaimRequest{
 		SessionID: "session-789",
@@ -388,7 +381,7 @@ func TestClaimPipeline_SubmitClaim_TxFailure_Retry(t *testing.T) {
 	ctx := context.Background()
 	err := pipeline.Start(ctx)
 	require.NoError(t, err)
-	defer pipeline.Close()
+	defer func() { _ = pipeline.Close() }()
 
 	var callbackCalled atomic.Bool
 	var callbackSuccess atomic.Bool
@@ -548,7 +541,7 @@ func TestClaimPipeline_Concurrent_MultipleSessions(t *testing.T) {
 	ctx := context.Background()
 	err := pipeline.Start(ctx)
 	require.NoError(t, err)
-	defer pipeline.Close()
+	defer func() { _ = pipeline.Close() }()
 
 	const numSessions = 20
 	var completedClaims atomic.Int32

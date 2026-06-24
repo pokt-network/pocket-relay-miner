@@ -24,12 +24,12 @@ import (
 // one callback fires no matter how many goroutines race.
 func TestOnRelayProcessed_ConcurrentFirstRelay_ExactlyOneCreateCallback(t *testing.T) {
 	store, _ := setupTestSessionStore(t)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	coord := NewSessionCoordinator(testLogger(), store, SMSTRecoveryConfig{
 		SupplierAddress: "pokt1test",
 	})
-	defer coord.Close()
+	defer func() { _ = coord.Close() }()
 
 	var callbackCount atomic.Int32
 	var callbackSessionIDs sync.Map // sessionID -> count (only one expected)
@@ -122,12 +122,12 @@ func TestOnRelayProcessed_ConcurrentFirstRelay_ExactlyOneCreateCallback(t *testi
 // Lua-script first-write-wins gate must reject the second create.
 func TestOnSessionCreated_IdempotentOnRepeatCall(t *testing.T) {
 	store, _ := setupTestSessionStore(t)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	coord := NewSessionCoordinator(testLogger(), store, SMSTRecoveryConfig{
 		SupplierAddress: "pokt1test",
 	})
-	defer coord.Close()
+	defer func() { _ = coord.Close() }()
 
 	var callbackCount atomic.Int32
 	coord.SetOnSessionCreatedCallback(func(_ context.Context, _ *SessionSnapshot) error {
@@ -153,7 +153,7 @@ func TestOnSessionCreated_IdempotentOnRepeatCall(t *testing.T) {
 // coordinator. This isolates the Lua script's EXISTS guard.
 func TestCreateIfAbsent_RejectsSecondCreate(t *testing.T) {
 	store, _ := setupTestSessionStore(t)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ctx := context.Background()
 	snap := &SessionSnapshot{

@@ -40,7 +40,7 @@ func newTestCacheClient(t *testing.T) (*DebugRedisClient, *miniredis.Miniredis) 
 func seedSuppliers(t *testing.T, mr *miniredis.Miniredis, addrs ...string) {
 	t.Helper()
 	for _, a := range addrs {
-		mr.Set(fmt.Sprintf("ha:supplier:%s", a), "payload")
+		require.NoError(t, mr.Set(fmt.Sprintf("ha:supplier:%s", a), "payload"))
 		if _, err := mr.SAdd("ha:cache:known:suppliers", a); err != nil {
 			t.Fatalf("seed known-set: %v", err)
 		}

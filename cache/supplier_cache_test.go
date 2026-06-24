@@ -48,7 +48,7 @@ func writeSupplierToRedis(t *testing.T, mr *miniredis.Miniredis, state *Supplier
 	t.Helper()
 	data, err := json.Marshal(state)
 	require.NoError(t, err)
-	mr.Set(fmt.Sprintf("%s:%s", DefaultSupplierKeyPrefix, state.OperatorAddress), string(data))
+	require.NoError(t, mr.Set(fmt.Sprintf("%s:%s", DefaultSupplierKeyPrefix, state.OperatorAddress), string(data)))
 }
 
 func TestIsContaminated(t *testing.T) {

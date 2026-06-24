@@ -38,7 +38,7 @@ func TestGetSession_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query session
 	ctx := context.Background()
@@ -70,7 +70,7 @@ func TestGetSession_NotFound(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query non-existent session
 	ctx := context.Background()
@@ -100,7 +100,7 @@ func TestGetSession_InvalidSessionID(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query with invalid data
 	ctx := context.Background()
@@ -129,7 +129,7 @@ func TestGetSession_NetworkError(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should fail with network error
 	ctx := context.Background()
@@ -163,11 +163,11 @@ func TestGetSession_Timeout(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should timeout
 	ctx := context.Background()
-	_, err = qc.Session().GetSession(ctx, "pokt1app", "develop", 100)
+	_, _ = qc.Session().GetSession(ctx, "pokt1app", "develop", 100)
 	// May timeout or succeed depending on timing
 	// The important thing is we don't hang
 }
@@ -192,7 +192,7 @@ func TestGetSession_MalformedResponse(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should succeed but return nil session
 	ctx := context.Background()
@@ -221,7 +221,7 @@ func TestGetSession_EmptyResponse(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should succeed with empty session
 	ctx := context.Background()
@@ -254,7 +254,7 @@ func TestGetSession_Cache(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -297,7 +297,7 @@ func TestGetSession_CacheInvalidation(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -337,7 +337,7 @@ func TestGetSession_ConcurrentAccess(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Concurrent queries
 	ctx := context.Background()

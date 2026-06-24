@@ -210,7 +210,7 @@ func TestSignAndBroadcast_AnchorsOnBlockTime_NotWallClock(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	// Simulate the breeze scenario: chain block time lags wall clock
 	// by 108s while the miner continues to accept traffic.
@@ -229,7 +229,7 @@ func TestSignAndBroadcast_AnchorsOnBlockTime_NotWallClock(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	claims := []*prooftypes.MsgCreateClaim{
@@ -276,7 +276,7 @@ func TestSignAndBroadcast_FallsBackToWallClockWhenProviderNil(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -288,7 +288,7 @@ func TestSignAndBroadcast_FallsBackToWallClockWhenProviderNil(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	before := time.Now()
 	_, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
@@ -319,7 +319,7 @@ func TestSignAndBroadcast_FallsBackToWallClockWhenProviderReturnsZero(t *testing
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	// Provider returns zero time — startup race.
 	provider := &stubBlockTimeProvider{t: time.Time{}}
@@ -334,7 +334,7 @@ func TestSignAndBroadcast_FallsBackToWallClockWhenProviderReturnsZero(t *testing
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	before := time.Now()
 	_, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,

@@ -52,7 +52,7 @@ func (s *RedisSMSTBenchSuite) Cleanup() {
 		s.miniRedis.Close()
 	}
 	if s.redisClient != nil {
-		s.redisClient.Close()
+		_ = s.redisClient.Close()
 	}
 }
 

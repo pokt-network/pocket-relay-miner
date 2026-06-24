@@ -29,7 +29,7 @@ func TestNewTxClient_ValidConfig(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint:  testServer.address,
@@ -43,7 +43,7 @@ func TestNewTxClient_ValidConfig(t *testing.T) {
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
 	require.NotNil(t, tc)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	require.Equal(t, "test-chain", tc.config.ChainID)
 	require.Equal(t, uint64(100000), tc.config.GasLimit)
@@ -57,12 +57,12 @@ func TestNewTxClient_WithSharedConnection(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	// Create a shared connection
 	conn, err := grpc.NewClient(testServer.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	config := TxClientConfig{
 		GRPCConn:      conn,
@@ -75,7 +75,7 @@ func TestNewTxClient_WithSharedConnection(t *testing.T) {
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
 	require.NotNil(t, tc)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	require.False(t, tc.ownsConn, "client should not own shared connection")
 	require.Equal(t, conn, tc.grpcConn)
@@ -84,7 +84,7 @@ func TestNewTxClient_WithSharedConnection(t *testing.T) {
 func TestNewTxClient_InvalidEndpoint(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: "invalid-endpoint-format",
@@ -96,7 +96,7 @@ func TestNewTxClient_InvalidEndpoint(t *testing.T) {
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
 	require.NotNil(t, tc)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	// But operations should fail
 	ctx := context.Background()
@@ -115,7 +115,7 @@ func TestNewTxClient_InvalidEndpoint(t *testing.T) {
 func TestNewTxClient_MissingEndpointAndConn(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		ChainID: "test-chain",
@@ -134,7 +134,7 @@ func TestNewTxClient_MissingChainID(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -144,7 +144,7 @@ func TestNewTxClient_MissingChainID(t *testing.T) {
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
 	require.NotNil(t, tc)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	// Should use default chain ID
 	require.Equal(t, DefaultChainID, tc.config.ChainID)
@@ -156,7 +156,7 @@ func TestNewTxClient_Defaults(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -166,7 +166,7 @@ func TestNewTxClient_Defaults(t *testing.T) {
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
 	require.NotNil(t, tc)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	// Verify defaults were applied
 	require.Equal(t, DefaultChainID, tc.config.ChainID)
@@ -182,7 +182,7 @@ func TestTxClient_Close_Success(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -204,7 +204,7 @@ func TestTxClient_Close_AlreadyClosed(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -230,12 +230,12 @@ func TestTxClient_Close_SharedConnection(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	// Create shared connection
 	conn, err := grpc.NewClient(testServer.address, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	require.NoError(t, err)
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	config := TxClientConfig{
 		GRPCConn: conn,
@@ -260,7 +260,7 @@ func TestTxClient_OperationsAfterClose(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -306,7 +306,7 @@ func TestGetAccount_Success(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -316,7 +316,7 @@ func TestGetAccount_Success(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	account, err := tc.getAccount(ctx, supplierAddr)
@@ -333,7 +333,7 @@ func TestGetAccount_NotFound(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -343,7 +343,7 @@ func TestGetAccount_NotFound(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	account, err := tc.getAccount(ctx, "pokt1nonexistent")
@@ -361,7 +361,7 @@ func TestGetAccount_Cached(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -370,7 +370,7 @@ func TestGetAccount_Cached(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 
@@ -399,7 +399,7 @@ func TestGetAccount_CacheInvalidation(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -409,7 +409,7 @@ func TestGetAccount_CacheInvalidation(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 
@@ -440,7 +440,7 @@ func TestIncrementSequence(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -449,7 +449,7 @@ func TestIncrementSequence(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 
@@ -475,7 +475,7 @@ func TestCreateClaims_Success(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -486,7 +486,7 @@ func TestCreateClaims_Success(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	claims := []*prooftypes.MsgCreateClaim{
@@ -512,7 +512,7 @@ func TestCreateClaims_EmptyList(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -522,7 +522,7 @@ func TestCreateClaims_EmptyList(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, nil)
@@ -541,7 +541,7 @@ func TestSubmitProofs_Success(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -552,7 +552,7 @@ func TestSubmitProofs_Success(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	proofs := []*prooftypes.MsgSubmitProof{
@@ -576,7 +576,7 @@ func TestSubmitProofs_EmptyList(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -586,7 +586,7 @@ func TestSubmitProofs_EmptyList(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	_, err = tc.SubmitProofs(ctx, supplierAddr, 1000, nil)
@@ -605,7 +605,7 @@ func TestSignAndBroadcast_GasEstimation(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	gasLimit := uint64(250000)
 	gasPrice := parseGasPrice(t, "0.000025upokt")
@@ -619,7 +619,7 @@ func TestSignAndBroadcast_GasEstimation(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	// Calculate expected fee
 	expectedFee := calculateExpectedFee(gasLimit, gasPrice)
@@ -654,7 +654,7 @@ func TestSubmitTx_NetworkTimeout(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -664,7 +664,7 @@ func TestSubmitTx_NetworkTimeout(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	claims := []*prooftypes.MsgCreateClaim{
@@ -688,7 +688,7 @@ func TestSubmitTx_InvalidSequence(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -698,7 +698,7 @@ func TestSubmitTx_InvalidSequence(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	claims := []*prooftypes.MsgCreateClaim{
@@ -722,7 +722,7 @@ func TestSubmitTx_InsufficientGas(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -732,7 +732,7 @@ func TestSubmitTx_InsufficientGas(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	claims := []*prooftypes.MsgCreateClaim{
@@ -753,7 +753,7 @@ func TestSubmitTx_AccountNotFound(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -763,7 +763,7 @@ func TestSubmitTx_AccountNotFound(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	claims := []*prooftypes.MsgCreateClaim{
@@ -785,7 +785,7 @@ func TestSubmitTx_KeyNotFound(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	// Create key manager without the required key
 	km := setupTestKeyManager(t, "pokt1other")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -795,7 +795,7 @@ func TestSubmitTx_KeyNotFound(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	claims := []*prooftypes.MsgCreateClaim{
@@ -819,7 +819,7 @@ func TestSubmitTx_BroadcastError(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -829,7 +829,7 @@ func TestSubmitTx_BroadcastError(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	claims := []*prooftypes.MsgCreateClaim{
@@ -854,7 +854,7 @@ func TestConcurrentSubmissions_SameSupplier(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -864,7 +864,7 @@ func TestConcurrentSubmissions_SameSupplier(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	numGoroutines := 10
@@ -923,7 +923,7 @@ func TestConcurrentSubmissions_DifferentSuppliers(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, suppliers...)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -933,7 +933,7 @@ func TestConcurrentSubmissions_DifferentSuppliers(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 
@@ -985,7 +985,7 @@ func TestConcurrentAccountQueries(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -995,7 +995,7 @@ func TestConcurrentAccountQueries(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
 	numGoroutines := 20
@@ -1046,7 +1046,7 @@ func TestHASupplierClient_CreateClaims(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -1056,7 +1056,7 @@ func TestHASupplierClient_CreateClaims(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	// Create wrapper
 	sc := NewHASupplierClient(tc, supplierAddr, logger)
@@ -1080,7 +1080,7 @@ func TestHASupplierClient_SubmitProofs(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -1090,7 +1090,7 @@ func TestHASupplierClient_SubmitProofs(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	// Create wrapper
 	sc := NewHASupplierClient(tc, supplierAddr, logger)
@@ -1113,7 +1113,7 @@ func TestHASupplierClient_OperatorAddress(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -1123,7 +1123,7 @@ func TestHASupplierClient_OperatorAddress(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	sc := NewHASupplierClient(tc, supplierAddr, logger)
 
@@ -1140,7 +1140,7 @@ func TestCalculateFee_RoundingUp(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	// Use values that will result in fractional fee
 	config := TxClientConfig{
@@ -1152,7 +1152,7 @@ func TestCalculateFee_RoundingUp(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 }
 
 func TestCalculateFee_ExactValue(t *testing.T) {
@@ -1161,7 +1161,7 @@ func TestCalculateFee_ExactValue(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	// Use values that result in exact fee
 	config := TxClientConfig{
@@ -1173,7 +1173,7 @@ func TestCalculateFee_ExactValue(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 }
 
 // =============================================================================
@@ -1189,7 +1189,7 @@ func TestCreateClaims_ContextCanceled(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -1199,7 +1199,7 @@ func TestCreateClaims_ContextCanceled(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	// Create canceled context
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1222,7 +1222,7 @@ func TestCreateClaims_ContextTimeout(t *testing.T) {
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
-	defer km.Close()
+	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
 		GRPCEndpoint: testServer.address,
@@ -1232,7 +1232,7 @@ func TestCreateClaims_ContextTimeout(t *testing.T) {
 
 	tc, err := NewTxClient(logger, km, config)
 	require.NoError(t, err)
-	defer tc.Close()
+	defer func() { _ = tc.Close() }()
 
 	// Create context with very short timeout
 	ctx, cancel := context.WithTimeout(context.Background(), 1*time.Nanosecond)

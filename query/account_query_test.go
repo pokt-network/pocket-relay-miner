@@ -31,7 +31,7 @@ func TestGetAccount_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// We'll skip this test as it requires complex protobuf marshaling
 	// The actual functionality is covered by integration tests
@@ -56,7 +56,7 @@ func TestGetAccount_NotFound(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query non-existent account (mock returns NotFound by default)
 	ctx := context.Background()
@@ -79,7 +79,7 @@ func TestGetAccount_InvalidAddress(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query with invalid address
 	ctx := context.Background()
@@ -101,7 +101,7 @@ func TestGetAccount_NetworkError(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should fail (no mock setup)
 	ctx := context.Background()
@@ -123,7 +123,7 @@ func TestGetAccount_Timeout(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query may timeout
 	ctx := context.Background()
@@ -145,7 +145,7 @@ func TestGetPubKeyFromAddress_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Skip this test as it requires proper account setup
 	t.Skip("PubKey query requires complex account setup")
@@ -165,7 +165,7 @@ func TestGetPubKeyFromAddress_NotFound(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should fail
 	ctx := context.Background()
@@ -187,7 +187,7 @@ func TestGetPubKeyFromAddress_NoPubKey(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Skip - requires proper mock setup
 	t.Skip("Account without PubKey requires complex mock setup")
@@ -207,7 +207,7 @@ func TestGetAccount_Cache(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Skip - requires proper account setup for cache testing
 	t.Skip("Account caching test requires complex account setup")
@@ -227,7 +227,7 @@ func TestGetAccount_ConcurrentAccess(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Test concurrent access even if queries fail
 	ctx := context.Background()
@@ -262,7 +262,7 @@ func TestAccountQueryClient_ClientCreation(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Verify account client is accessible
 	accountClient := qc.Account()
@@ -283,7 +283,7 @@ func TestAccountQueryClient_ErrorPropagation(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 

@@ -36,7 +36,7 @@ func TestGetClaim_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query claim
 	ctx := context.Background()
@@ -71,7 +71,7 @@ func TestGetClaim_NotFound(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query non-existent claim
 	ctx := context.Background()
@@ -100,7 +100,7 @@ func TestGetClaim_InvalidSessionID(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query with invalid session ID
 	ctx := context.Background()
@@ -128,7 +128,7 @@ func TestGetClaim_NetworkError(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should fail with network error
 	ctx := context.Background()
@@ -160,7 +160,7 @@ func TestGetClaim_Cache(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -197,7 +197,7 @@ func TestGetClaim_ConcurrentAccess(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Concurrent queries
 	ctx := context.Background()
@@ -241,7 +241,7 @@ func TestGetClaim_Timeout(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query may timeout or succeed depending on timing
 	ctx := context.Background()
@@ -269,7 +269,7 @@ func TestGetClaim_MultipleClaims(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -310,7 +310,7 @@ func TestGetClaim_EmptyResponse(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should succeed with empty claim
 	ctx := context.Background()

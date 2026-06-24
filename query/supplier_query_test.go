@@ -36,7 +36,7 @@ func TestGetSupplier_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query supplier
 	ctx := context.Background()
@@ -66,7 +66,7 @@ func TestGetSupplier_NotFound(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query non-existent supplier
 	ctx := context.Background()
@@ -95,7 +95,7 @@ func TestGetSupplier_InvalidAddress(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query with invalid address
 	ctx := context.Background()
@@ -123,7 +123,7 @@ func TestGetSupplier_NetworkError(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should fail with network error
 	ctx := context.Background()
@@ -152,7 +152,7 @@ func TestGetSupplier_EmptyResponse(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should succeed with empty supplier
 	ctx := context.Background()
@@ -183,7 +183,7 @@ func TestGetSupplier_Cache(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -238,7 +238,7 @@ func TestGetSupplier_InvalidateRefreshesCache(t *testing.T) {
 
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -284,7 +284,7 @@ func TestGetSupplier_InvalidateOnlyAffectsTargetAddress(t *testing.T) {
 		QueryTimeout: 5 * time.Second,
 	})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -329,7 +329,7 @@ func TestGetSupplier_ConcurrentAccess(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Concurrent queries
 	ctx := context.Background()
@@ -373,7 +373,7 @@ func TestGetSupplier_Timeout(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query may timeout or succeed depending on timing
 	ctx := context.Background()
@@ -401,7 +401,7 @@ func TestGetSupplier_MultipleSuppliers(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -443,7 +443,7 @@ func TestGetSupplier_WithServices(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query supplier
 	ctx := context.Background()

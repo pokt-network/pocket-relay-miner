@@ -90,7 +90,7 @@ func TestSupplierManager_Reconcile_PicksUpStakedAfterStart(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	supplierAddr := "pokt1supplier_under_test"
 	km := &fakeKeyManager{addrs: []string{supplierAddr}}
@@ -173,7 +173,7 @@ func TestSupplierManager_Reconcile_DefersRemovalWhilePendingSessions(t *testing.
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	supplierAddr := "pokt1supplier_pending_drain"
 	km := &fakeKeyManager{addrs: []string{supplierAddr}}

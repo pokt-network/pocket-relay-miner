@@ -37,7 +37,7 @@ func TestGetService_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query service
 	ctx := context.Background()
@@ -67,7 +67,7 @@ func TestGetService_NotFound(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query non-existent service
 	ctx := context.Background()
@@ -96,7 +96,7 @@ func TestGetService_InvalidID(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query with invalid ID
 	ctx := context.Background()
@@ -124,7 +124,7 @@ func TestGetService_NetworkError(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should fail with network error
 	ctx := context.Background()
@@ -153,7 +153,7 @@ func TestGetService_EmptyResponse(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query should succeed with empty service
 	ctx := context.Background()
@@ -184,7 +184,7 @@ func TestGetService_Cache(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -224,7 +224,7 @@ func TestGetService_ConcurrentAccess(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Concurrent queries
 	ctx := context.Background()
@@ -267,7 +267,7 @@ func TestGetServiceRelayDifficulty_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query difficulty
 	ctx := context.Background()
@@ -296,7 +296,7 @@ func TestGetServiceRelayDifficulty_NotFound(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query non-existent difficulty
 	ctx := context.Background()
@@ -331,7 +331,7 @@ func TestGetServiceRelayDifficulty_QueriesChainEachCall(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -372,7 +372,7 @@ func TestGetService_Timeout(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	// Query may timeout or succeed depending on timing
 	ctx := context.Background()
@@ -401,7 +401,7 @@ func TestGetServiceRelayDifficultyAtHeight_Success(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 	difficulty, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "develop", 100)
@@ -431,7 +431,7 @@ func TestGetServiceRelayDifficultyAtHeight_Cache(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -471,7 +471,7 @@ func TestGetServiceRelayDifficultyAtHeight_NotFound(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 	difficulty, err := qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(ctx, "nonexistent", 100)
@@ -500,7 +500,7 @@ func TestGetService_MultipleServices(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 
@@ -549,7 +549,7 @@ func TestGetServiceRelayDifficultyAtHeight_ConcurrentAccess(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 	services := []string{"develop", "ethereum", "polygon", "solana", "avax"}
@@ -598,7 +598,7 @@ func TestGetServiceRelayDifficultyAtHeight_CacheEviction(t *testing.T) {
 	qc, err := NewQueryClients(logger, config)
 	require.NoError(t, err)
 	require.NotNil(t, qc)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	ctx := context.Background()
 	serviceClient := qc.serviceClient

@@ -54,7 +54,7 @@ func TestFlushTree_ClaimedRootHonoursCacheTTL(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	supplier := "pokt1claimed_root_ttl"
 	sessionID := "session_claimed_root_ttl"
@@ -101,7 +101,7 @@ func TestLoadTreeFromRedis_RefreshesClaimedRootTTL(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	supplier := "pokt1claimed_root_refresh"
 	sessionID := "session_claimed_root_refresh"
@@ -167,7 +167,7 @@ func TestWarmupFromRedis_ResumesFromLiveRoot(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	supplier := "pokt1warmup_live"
 	sessionID := "session_warmup_live"
@@ -226,7 +226,7 @@ func TestWarmupFromRedis_ResumesFromClaimedRoot(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	supplier := "pokt1warmup_claimed"
 	sessionID := "session_warmup_claimed"
@@ -273,7 +273,7 @@ func TestWarmupFromRedis_HandlesCorruptLiveRoot(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	supplier := "pokt1warmup_corrupt"
 	sessionID := "session_warmup_corrupt"
@@ -318,7 +318,7 @@ func TestMigrateLegacySMSTKeys_RenamesLiveRoot(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	sessionID := "session_live_root_migration"
 	owner := "pokt1live_root_owner"
@@ -404,7 +404,7 @@ func TestMigrateLegacySMSTKeys_DeletesOrphanedLiveRootOnly(t *testing.T) {
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	sessionID := "session_orphan_live_root"
 	legacyPrefix := client.KB().SMSTNodesPrefix()

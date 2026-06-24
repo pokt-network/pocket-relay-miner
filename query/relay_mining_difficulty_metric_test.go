@@ -149,7 +149,7 @@ func TestGetServiceRelayDifficulty_EmitsMetric(t *testing.T) {
 		QueryTimeout: 5 * time.Second,
 	})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	_, err = qc.Service().GetServiceRelayDifficulty(context.Background(), svc)
 	require.NoError(t, err)
@@ -201,7 +201,7 @@ func TestGetServiceRelayDifficultyAtHeight_EmitsMetric(t *testing.T) {
 		QueryTimeout: 5 * time.Second,
 	})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	_, err = qc.ServiceDifficulty().GetServiceRelayDifficultyAtHeight(
 		context.Background(), svc, sessionStartHeight,

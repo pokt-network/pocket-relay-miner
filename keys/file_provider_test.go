@@ -21,7 +21,7 @@ func TestFileKeyProvider_NewWithNonExistentDir(t *testing.T) {
 	provider, err := NewFileKeyProvider(logger, keysDir)
 	require.NoError(t, err)
 	require.NotNil(t, provider)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	// Verify directory was created
 	info, err := os.Stat(keysDir)
@@ -36,7 +36,7 @@ func TestFileKeyProvider_NewWithExistingDir(t *testing.T) {
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
 	require.NotNil(t, provider)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	require.Equal(t, "file:"+tempDir, provider.Name())
 }
@@ -62,7 +62,7 @@ func TestFileKeyProvider_LoadKeys_EmptyDir(t *testing.T) {
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	keys, err := provider.LoadKeys(ctx)
@@ -86,7 +86,7 @@ private_key_hex: 0x0123456789abcdef0123456789abcdef0123456789abcdef0123456789abc
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	keys, err := provider.LoadKeys(ctx)
@@ -113,7 +113,7 @@ operator_address: pokt1test
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	keys, err := provider.LoadKeys(ctx)
@@ -136,7 +136,7 @@ private_key_hex: not_valid_hex
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	keys, err := provider.LoadKeys(ctx)
@@ -159,7 +159,7 @@ private_key_hex: 0123456789abcdef0123456789abcdef
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	keys, err := provider.LoadKeys(ctx)
@@ -181,7 +181,7 @@ func TestFileKeyProvider_LoadKeys_SkipsNonYamlFiles(t *testing.T) {
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	keys, err := provider.LoadKeys(ctx)
@@ -195,7 +195,7 @@ func TestFileKeyProvider_SupportsHotReload(t *testing.T) {
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	require.True(t, provider.SupportsHotReload())
 }
@@ -254,7 +254,7 @@ private_key_hex: ` + k.key + `
 
 	provider, err := NewFileKeyProvider(logger, tempDir)
 	require.NoError(t, err)
-	defer provider.Close()
+	defer func() { _ = provider.Close() }()
 
 	ctx := context.Background()
 	loadedKeys, err := provider.LoadKeys(ctx)

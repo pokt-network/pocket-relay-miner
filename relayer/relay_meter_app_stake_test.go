@@ -73,7 +73,7 @@ func TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges(t *testi
 		URL: fmt.Sprintf("redis://%s", mr.Addr()),
 	})
 	require.NoError(t, err)
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	appAddr := "pokt1app_under_test"
 	app := &fakeAppClient{addr: appAddr}
