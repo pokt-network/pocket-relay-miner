@@ -293,32 +293,20 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if config.CacheWarmup.Enabled {
 		logger.Info().
 			Int("known_apps", len(config.CacheWarmup.KnownApplications)).
-			Bool("persist_discovered", config.CacheWarmup.PersistDiscoveredApps).
 			Int("concurrency", config.CacheWarmup.WarmupConcurrency).
 			Msg("starting cache warmup for faster cold starts")
-
-		// Create ring client first (needed by cache warmer)
-		ringClientForWarmup := rings.NewRingClient(
-			logger,
-			cache.NewCachedApplicationQueryClient(applicationCache),
-			cache.NewCachedAccountQueryClient(accountCache),
-			cache.NewCachedSharedQueryClient(sharedParamsCache, queryClients.Shared()),
-		)
 
 		// Create cache warmer
 		cacheWarmer := cache.NewCacheWarmer(
 			logger,
 			cache.CacheWarmerConfig{
-				KnownApplications:     config.CacheWarmup.KnownApplications,
-				PersistDiscoveredApps: config.CacheWarmup.PersistDiscoveredApps,
-				WarmupConcurrency:     config.CacheWarmup.WarmupConcurrency,
-				WarmupTimeout:         time.Duration(config.CacheWarmup.WarmupTimeoutSeconds) * time.Second,
+				KnownApplications: config.CacheWarmup.KnownApplications,
+				WarmupConcurrency: config.CacheWarmup.WarmupConcurrency,
+				WarmupTimeout:     time.Duration(config.CacheWarmup.WarmupTimeoutSeconds) * time.Second,
 			},
-			redisClient,
 			queryClients.Application(),
 			queryClients.Account(),
 			queryClients.Shared(),
-			ringClientForWarmup,
 		)
 		// Ensure worker pool cleanup
 		defer cacheWarmer.Stop()
@@ -666,11 +654,15 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				// Use the cached application client so app stake changes
 				// land within RefreshIntervalBlocks via the orchestrator's
 				// invalidation pub/sub, and the hot path avoids chain
-				// round-trips on every relay.
+				// round-trips on every relay. GetApplication resolves through
+				// the entity cache; GetParams is routed to the query-layer app
+				// client (90s TTL) so the meter's app_min_stake_upokt reflects
+				// the on-chain application MinStake instead of a frozen 0 — the
+				// plain cached client stubs GetParams to (nil, nil).
 				relayMeter := relayer.NewRelayMeter(
 					logger,
 					redisClient,
-					cache.NewCachedApplicationQueryClient(applicationCache),
+					cache.NewCachedApplicationQueryClientWithParams(applicationCache, queryClients.Application()),
 					queryClients.Shared(),
 					queryClients.Session(),
 					blockSubscriber,

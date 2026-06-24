@@ -108,8 +108,19 @@ func NewProofQueryClientAdapter(c client.ProofQueryClient) ProofQueryClient {
 
 // cachedApplicationQueryClient wraps KeyedEntityCache to implement client.ApplicationQueryClient.
 // This allows the ring client to use the Redis-backed application cache.
+//
+// GetApplication resolves through the entity cache (L1→L2→L3 + pub/sub invalidation)
+// so per-app state (stake, delegations) follows on-chain changes. GetParams is a
+// separate concern — the application MODULE params (e.g. MinStake) are not a
+// per-app entity — so it delegates to an optional params-capable client. Ring
+// usage leaves paramsClient nil (the ring never reads module params); the relay
+// meter wires a real client so app_min_stake_upokt reflects the on-chain value
+// instead of a frozen 0.
 type cachedApplicationQueryClient struct {
 	cache KeyedEntityCache[string, *apptypes.Application]
+	// paramsClient serves GetParams. nil for callers that never read module
+	// params (the ring client), so GetParams returns (nil, nil) for them.
+	paramsClient client.ApplicationQueryClient
 }
 
 func (c *cachedApplicationQueryClient) GetApplication(ctx context.Context, address string) (apptypes.Application, error) {
@@ -126,15 +137,36 @@ func (c *cachedApplicationQueryClient) GetAllApplications(ctx context.Context) (
 }
 
 func (c *cachedApplicationQueryClient) GetParams(ctx context.Context) (*apptypes.Params, error) {
-	// Not implemented - ring client doesn't need params
-	return nil, nil
+	// The entity cache holds per-app state, not module params. Delegate to the
+	// params-capable client when one is wired (relay meter); ring usage passes
+	// nil and never calls this, so preserve the prior no-op behavior for it.
+	if c.paramsClient == nil {
+		return nil, nil
+	}
+	return c.paramsClient.GetParams(ctx)
 }
 
 // NewCachedApplicationQueryClient wraps an application cache to implement client.ApplicationQueryClient.
 // This allows components that expect client.ApplicationQueryClient (like RingClient)
 // to use the Redis-backed L1→L2→L3 cache instead of direct blockchain queries.
+//
+// GetParams is a no-op (returns nil) for this variant — the ring client, the only
+// caller, never reads application module params. Use
+// NewCachedApplicationQueryClientWithParams when the consumer needs GetParams.
 func NewCachedApplicationQueryClient(cache KeyedEntityCache[string, *apptypes.Application]) client.ApplicationQueryClient {
 	return &cachedApplicationQueryClient{cache: cache}
+}
+
+// NewCachedApplicationQueryClientWithParams is like NewCachedApplicationQueryClient
+// but routes GetParams to paramsClient (e.g. the query-layer application client,
+// which carries its own short TTL). The relay meter needs this so the application
+// module's MinStake reaches its exhaustion diagnostics instead of reading the
+// frozen (nil, nil) stub. GetApplication still resolves through the entity cache.
+func NewCachedApplicationQueryClientWithParams(
+	cache KeyedEntityCache[string, *apptypes.Application],
+	paramsClient client.ApplicationQueryClient,
+) client.ApplicationQueryClient {
+	return &cachedApplicationQueryClient{cache: cache, paramsClient: paramsClient}
 }
 
 // cachedAccountQueryClient wraps KeyedEntityCache to implement client.AccountQueryClient.

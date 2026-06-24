@@ -61,9 +61,6 @@ type RelaySignerKeyring interface {
 	) ([]byte, error)
 }
 
-// AppDiscoveryCallback is called when a new application is discovered during relay processing.
-type AppDiscoveryCallback func(ctx context.Context, appAddress string)
-
 // relayProcessor implements RelayProcessor.
 type relayProcessor struct {
 	logger                      logging.Logger
@@ -72,9 +69,6 @@ type relayProcessor struct {
 	difficultyProvider          DifficultyProvider
 	serviceComputeUnitsProvider ServiceComputeUnitsProvider
 	ringClient                  crypto.RingClient
-
-	// Optional callback for discovered apps (e.g., to persist them in CacheWarmer)
-	appDiscoveryCallback AppDiscoveryCallback
 
 	mu sync.RWMutex
 }
@@ -106,14 +100,6 @@ func (rp *relayProcessor) SetServiceComputeUnitsProvider(provider ServiceCompute
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
 	rp.serviceComputeUnitsProvider = provider
-}
-
-// SetAppDiscoveryCallback sets the callback for discovered applications.
-// This is used to persist newly discovered apps for cache warming.
-func (rp *relayProcessor) SetAppDiscoveryCallback(callback AppDiscoveryCallback) {
-	rp.mu.Lock()
-	defer rp.mu.Unlock()
-	rp.appDiscoveryCallback = callback
 }
 
 // ProcessRelay processes a served relay.
@@ -194,22 +180,6 @@ func (rp *relayProcessor) ProcessRelay(
 			Msg("relay does not meet mining difficulty, skipping")
 		relaysSkippedDifficulty.WithLabelValues(serviceID).Inc()
 		return nil, nil
-	}
-
-	if sessionHeader != nil {
-		appAddress = sessionHeader.ApplicationAddress
-
-		// Notify about discovered app for cache warming persistence
-		if appAddress != "" {
-			rp.mu.RLock()
-			callback := rp.appDiscoveryCallback
-			rp.mu.RUnlock()
-
-			if callback != nil {
-				// Call asynchronously to avoid blocking relay processing
-				go callback(ctx, appAddress)
-			}
-		}
 	}
 
 	// Build mined relay message

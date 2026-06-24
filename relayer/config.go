@@ -592,12 +592,6 @@ type CacheWarmupConfig struct {
 	// These are applications the operator knows will send traffic.
 	KnownApplications []string `yaml:"known_applications,omitempty"`
 
-	// PersistDiscoveredApps enables saving discovered application addresses to Redis.
-	// When enabled, apps discovered during runtime are saved to Redis and loaded
-	// on subsequent restarts for faster warmup.
-	// Default: true (when enabled)
-	PersistDiscoveredApps bool `yaml:"persist_discovered_apps"`
-
 	// WarmupConcurrency is the number of parallel warmup operations.
 	// Higher values = faster warmup but more load on the chain.
 	// Default: 10
@@ -666,10 +660,9 @@ func DefaultConfig() Config {
 		},
 		PoolProfiles: defaultPoolProfiles(),
 		CacheWarmup: CacheWarmupConfig{
-			Enabled:               true, // Enable by default for faster first requests
-			PersistDiscoveredApps: true,
-			WarmupConcurrency:     10,
-			WarmupTimeoutSeconds:  5,
+			Enabled:              true, // Enable by default for faster first requests
+			WarmupConcurrency:    10,
+			WarmupTimeoutSeconds: 5,
 		},
 		ResponseCompression: ResponseCompressionConfig{
 			Enabled:      false, // Off by default — ~9% CPU at 200 RPS per pprof, gateway handles downstream compression.

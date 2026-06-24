@@ -363,10 +363,6 @@ properties:
         description: Application addresses to pre-warm
         items:
           type: string
-      persist_discovered_apps:
-        type: boolean
-        description: Save discovered apps for next restart
-        default: true
       warmup_concurrency:
         type: integer
         description: Number of parallel warmup operations

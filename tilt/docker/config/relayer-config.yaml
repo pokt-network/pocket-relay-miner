@@ -110,7 +110,6 @@ timeout_profiles:
 
 cache_warmup:
   enabled: true
-  persist_discovered_apps: true
   warmup_concurrency: 10
   warmup_timeout_seconds: 5
 

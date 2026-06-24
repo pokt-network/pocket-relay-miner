@@ -334,9 +334,6 @@ cache_warmup:
   #   - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
   #   - "pokt1abc..."
 
-  # Persist discovered apps to Redis for faster warmup on restart
-  persist_discovered_apps: true
-
   # Concurrency for warmup operations (higher = faster but more load)
   warmup_concurrency: 10
 
