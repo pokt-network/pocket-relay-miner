@@ -76,28 +76,6 @@ var (
 		[]string{"supplier", "error_type"},
 	)
 
-	// Account query metrics (reserved for future instrumentation)
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "account_queries_total",
-			Help:      "Total number of account queries",
-		},
-		[]string{"supplier", "source"},
-	)
-
-	// Sequence tracking (reserved for future instrumentation)
-	_ = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "sequence_number",
-			Help:      "Current sequence number for each supplier",
-		},
-		[]string{"supplier"},
-	)
-
 	// NOTE: Gas tracking metrics (txGasUsed, txGasWanted, txActualFeeUpokt) removed
 	// because we use SYNC broadcast mode which returns after CheckTx only.
 	// These metrics would require BLOCK mode which waits for TX execution.

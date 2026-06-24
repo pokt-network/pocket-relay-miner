@@ -5,41 +5,9 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 )
 
-// Query metrics (reserved for future instrumentation)
 var (
-	_ = observability.SharedFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "ha",
-			Subsystem: "query",
-			Name:      "queries_total",
-			Help:      "Total number of chain queries",
-		},
-		[]string{"client", "method"},
-	)
-
-	_ = observability.SharedFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "ha",
-			Subsystem: "query",
-			Name:      "query_errors_total",
-			Help:      "Total number of query errors",
-		},
-		[]string{"client", "method"},
-	)
-
-	_ = observability.SharedFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: "ha",
-			Subsystem: "query",
-			Name:      "query_latency_seconds",
-			Help:      "Query latency in seconds",
-			Buckets:   observability.FineGrainedLatencyBuckets,
-		},
-		[]string{"client", "method"},
-	)
-
-	// Cache metrics (reserved for future instrumentation)
-	_ = observability.SharedFactory.NewCounterVec(
+	// Cache metrics — wired at every L1 read/write site in query.go.
+	queryCacheHits = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ha",
 			Subsystem: "query",
@@ -49,7 +17,7 @@ var (
 		[]string{"client", "cache_type"},
 	)
 
-	_ = observability.SharedFactory.NewCounterVec(
+	queryCacheMisses = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: "ha",
 			Subsystem: "query",
@@ -59,7 +27,7 @@ var (
 		[]string{"client", "cache_type"},
 	)
 
-	_ = observability.SharedFactory.NewGaugeVec(
+	queryCacheSize = observability.SharedFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: "ha",
 			Subsystem: "query",

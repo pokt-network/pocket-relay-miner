@@ -221,37 +221,6 @@ var (
 		[]string{"service_id", "reason"},
 	)
 
-	// Late relay metrics (reserved for future instrumentation)
-	_ = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "late_relays_received_total",
-			Help:      "Total number of relays received after session ended",
-		},
-		[]string{"service_id"},
-	)
-
-	_ = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "late_relays_within_grace_total",
-			Help:      "Total number of late relays that were within grace period",
-		},
-		[]string{"service_id"},
-	)
-
-	_ = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "late_relays_rejected_total",
-			Help:      "Total number of late relays rejected (past grace period)",
-		},
-		[]string{"service_id"},
-	)
-
 	// Health check metrics (per-endpoint visibility via "endpoint" label)
 	healthCheckSuccesses = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
@@ -439,30 +408,6 @@ var (
 			Subsystem: metricsSubsystem,
 			Name:      "relays_mined_total",
 			Help:      "Total number of relays that met mining difficulty and were mined",
-		},
-		[]string{"service_id"},
-	)
-
-	// relaySigningLatency reserved for future instrumentation
-	_ = observability.RelayerFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relay_signing_latency_seconds",
-			Help:      "Latency of relay response signing",
-			Buckets:   prometheus.DefBuckets,
-		},
-		[]string{"service_id"},
-	)
-
-	// difficultyLookupLatency reserved for future instrumentation
-	_ = observability.RelayerFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "difficulty_lookup_latency_seconds",
-			Help:      "Latency of difficulty target lookups",
-			Buckets:   prometheus.DefBuckets,
 		},
 		[]string{"service_id"},
 	)

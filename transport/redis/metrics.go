@@ -33,18 +33,6 @@ var (
 		[]string{"supplier_addr", "service_id"},
 	)
 
-	// publishLatency reserved for future instrumentation
-	_ = observability.SharedFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "publish_latency_seconds",
-			Help:      "Latency of publish operations",
-			Buckets:   observability.FineGrainedLatencyBuckets,
-		},
-		[]string{"supplier_addr"},
-	)
-
 	// Consumer metrics
 
 	consumedTotal = observability.SharedFactory.NewCounterVec(
@@ -83,28 +71,6 @@ var (
 			Subsystem: metricsSubsystem,
 			Name:      "pending_messages",
 			Help:      "Current number of pending (unacknowledged) messages",
-		},
-		[]string{"supplier_addr"},
-	)
-
-	// consumerLag reserved for future instrumentation
-	_ = observability.SharedFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "consumer_lag",
-			Help:      "Consumer lag (messages behind head of stream)",
-		},
-		[]string{"supplier_addr"},
-	)
-
-	// streamLength reserved for future instrumentation
-	_ = observability.SharedFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "stream_length",
-			Help:      "Current length of Redis stream",
 		},
 		[]string{"supplier_addr"},
 	)
