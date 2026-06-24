@@ -4,6 +4,7 @@ import (
 	"context"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
@@ -44,6 +45,33 @@ type ringPointsCacheKey struct {
 	sessionEndHeight int64
 }
 
+// ringPointsCacheEntry is a cached ring-points map plus the session end height it
+// was keyed at (for window-bounded eviction) and the time it was computed (for the
+// TTL safety floor).
+type ringPointsCacheEntry struct {
+	points           map[string]ringtypes.Point
+	sessionEndHeight int64
+	cachedAt         time.Time
+}
+
+// ringPointsCacheTTL is the max-age floor on a cached ring-points entry. Ring
+// composition is fixed for a given (app, sessionEndHeight) by the protocol
+// (delegations are session-boundary effective), so this floor is long — it does
+// NOT exist to follow mid-session delegation changes (there are none). It exists
+// so a one-time bad compute (e.g. the entity cache served a stale delegation set
+// that has since self-healed) cannot be frozen for the process lifetime: worst
+// case it lives one TTL, then is recomputed from fresh state. var (not const) so
+// tests can shrink it without sleeping.
+var ringPointsCacheTTL = 30 * time.Minute
+
+// ringPointsCacheKeepHeights bounds the cache's height window. Without it the
+// sync.Map grows one entry per distinct (app, sessionEndHeight) for the process
+// lifetime — a slow but unbounded leak (one entry per app per session, forever).
+// Storing prunes entries whose session end height is more than this many blocks
+// below the newest seen. The window is generous so ring verification during the
+// claim/proof windows of recent sessions still hits cache.
+const ringPointsCacheKeepHeights = 600
+
 // ringClient is an implementation of the RingClient interface that uses the
 // client.ApplicationQueryClient to get application's delegation information
 // needed to construct the ring for signing relay requests.
@@ -68,7 +96,10 @@ type ringClient struct {
 	// ringPointsCache caches ring points by (appAddress, sessionEndHeight).
 	// This ensures expensive DecodeToPoint operations are done once per session,
 	// while allowing new ring points when sessions change (delegations may differ).
-	ringPointsCache sync.Map // map[ringPointsCacheKey]map[string]ringtypes.Point
+	// Bounded by ringPointsCacheKeepHeights (window eviction on store) and
+	// ringPointsCacheTTL (max-age floor on read) so it never grows or freezes
+	// for the process lifetime.
+	ringPointsCache sync.Map // map[ringPointsCacheKey]ringPointsCacheEntry
 }
 
 // NewRingClient creates a new RingClient with the provided query clients.
@@ -270,9 +301,12 @@ func (rc *ringClient) getRingPointsForAddressAtHeight(
 		sessionEndHeight: blockHeight,
 	}
 
-	// Check cache first
+	// Check cache first. Treat an entry past its TTL floor as a miss so a stale
+	// one-time compute self-heals instead of being frozen for the process lifetime.
 	if cached, ok := rc.ringPointsCache.Load(cacheKey); ok {
-		return cached.(map[string]ringtypes.Point), nil
+		if entry, ok := cached.(ringPointsCacheEntry); ok && time.Since(entry.cachedAt) < ringPointsCacheTTL {
+			return entry.points, nil
+		}
 	}
 
 	// Cache miss - compute ring points
@@ -297,9 +331,34 @@ func (rc *ringClient) getRingPointsForAddressAtHeight(
 		ringPoints[keyFromPoint] = point
 	}
 
-	// Cache the ring points (use LoadOrStore to handle concurrent creation)
-	actual, _ := rc.ringPointsCache.LoadOrStore(cacheKey, ringPoints)
-	return actual.(map[string]ringtypes.Point), nil
+	// Cache the ring points and prune entries far below the newest height to
+	// keep the sync.Map bounded. Overwrite (Store, not LoadOrStore) so a TTL
+	// refresh replaces the stale entry; concurrent first-misses recompute the
+	// same deterministic value, so last-write-wins is safe.
+	rc.storeRingPoints(cacheKey, ringPoints)
+	return ringPoints, nil
+}
+
+// storeRingPoints caches a ring-points entry and prunes entries whose session end
+// height is far below the newest, bounding the cache the same way the session
+// cache bounds its L1 (cache/session_cache.go storeSession).
+func (rc *ringClient) storeRingPoints(key ringPointsCacheKey, points map[string]ringtypes.Point) {
+	rc.ringPointsCache.Store(key, ringPointsCacheEntry{
+		points:           points,
+		sessionEndHeight: key.sessionEndHeight,
+		cachedAt:         time.Now(),
+	})
+
+	cutoff := key.sessionEndHeight - ringPointsCacheKeepHeights
+	if cutoff <= 0 {
+		return
+	}
+	rc.ringPointsCache.Range(func(k, v any) bool {
+		if e, ok := v.(ringPointsCacheEntry); ok && e.sessionEndHeight < cutoff {
+			rc.ringPointsCache.Delete(k)
+		}
+		return true
+	})
 }
 
 // GetRingAddressesAtBlock returns the active gateway addresses that need to be
