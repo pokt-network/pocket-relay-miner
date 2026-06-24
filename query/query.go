@@ -1097,8 +1097,10 @@ type serviceQueryClient struct {
 	queryClient  servicetypes.QueryClient
 	queryTimeout time.Duration
 
-	// Simple in-memory cache for services (keyed by serviceID)
-	serviceCache   map[string]sharedtypes.Service
+	// In-memory cache for services (keyed by serviceID), TTL-bounded.
+	// A service's compute_units_per_relay can change on-chain, so this MUST
+	// expire — a frozen CUPR mis-weights claims (see serviceCacheTTL).
+	serviceCache   map[string]serviceCacheEntry
 	serviceCacheMu sync.RWMutex
 
 	// Bounded cache for height-aware difficulty queries (keyed by "serviceID@height").
@@ -1127,17 +1129,29 @@ func newServiceQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout
 		logger:                logger.With().Str("query_client", "service").Logger(),
 		queryClient:           servicetypes.NewQueryClient(conn),
 		queryTimeout:          timeout,
-		serviceCache:          make(map[string]sharedtypes.Service),
+		serviceCache:          make(map[string]serviceCacheEntry),
 		heightDifficultyCache: xsync.NewMap[string, heightDifficultyCacheEntry](),
 	}
 }
 
+// serviceCacheTTL bounds how long a cached service (including its
+// compute_units_per_relay) is served before the chain is re-queried. CUPR can
+// change on-chain; a permanent cache freezes it and mis-weights claims. var (not
+// const) so tests can shrink it. Mirrors liveParamsCacheTTL.
+var serviceCacheTTL = 90 * time.Second
+
+// serviceCacheEntry is a cached service plus the time it was fetched, for TTL.
+type serviceCacheEntry struct {
+	service  sharedtypes.Service
+	cachedAt time.Time
+}
+
 func (c *serviceQueryClient) GetService(ctx context.Context, serviceId string) (sharedtypes.Service, error) {
-	// Check cache
+	// Check cache (fresh within TTL only)
 	c.serviceCacheMu.RLock()
-	if service, ok := c.serviceCache[serviceId]; ok {
+	if e, ok := c.serviceCache[serviceId]; ok && time.Since(e.cachedAt) < serviceCacheTTL {
 		c.serviceCacheMu.RUnlock()
-		return service, nil
+		return e.service, nil
 	}
 	c.serviceCacheMu.RUnlock()
 
@@ -1146,8 +1160,8 @@ func (c *serviceQueryClient) GetService(ctx context.Context, serviceId string) (
 	defer c.serviceCacheMu.Unlock()
 
 	// Double-check after acquiring lock
-	if service, ok := c.serviceCache[serviceId]; ok {
-		return service, nil
+	if e, ok := c.serviceCache[serviceId]; ok && time.Since(e.cachedAt) < serviceCacheTTL {
+		return e.service, nil
 	}
 
 	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
@@ -1160,7 +1174,7 @@ func (c *serviceQueryClient) GetService(ctx context.Context, serviceId string) (
 		return sharedtypes.Service{}, fmt.Errorf("failed to query service: %w", err)
 	}
 
-	c.serviceCache[serviceId] = res.Service
+	c.serviceCache[serviceId] = serviceCacheEntry{service: res.Service, cachedAt: time.Now()}
 	return res.Service, nil
 }
 

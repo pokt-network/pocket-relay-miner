@@ -11,6 +11,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
+	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -304,6 +305,65 @@ func TestGetServiceRelayDifficulty_NotFound(t *testing.T) {
 	require.Error(t, err)
 	require.Empty(t, difficulty.ServiceId)
 	require.Contains(t, err.Error(), "failed to query relay mining difficulty")
+}
+
+// TestGetService_TTLRefreshesCUPR is the regression test for the CUPR-frozen-cache
+// incident: GetService must serve from cache within serviceCacheTTL but re-query
+// the chain (and reflect a changed compute_units_per_relay) once the TTL expires.
+// Before the TTL was added, serviceCache was a permanent map and a CUPR change was
+// invisible for the process lifetime — relayers kept stamping the old CUPR and the
+// miner guard kept reading it, so claims were rejected on-chain.
+func TestGetService_TTLRefreshesCUPR(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	var cupr uint64 = 1000
+	queryCount := 0
+	mock.getServiceFunc = func(_ context.Context, req *servicetypes.QueryGetServiceRequest) (*servicetypes.QueryGetServiceResponse, error) {
+		queryCount++
+		return &servicetypes.QueryGetServiceResponse{
+			Service: sharedtypes.Service{Id: req.Id, ComputeUnitsPerRelay: cupr},
+		}, nil
+	}
+
+	orig := serviceCacheTTL
+	defer func() { serviceCacheTTL = orig }()
+	serviceCacheTTL = time.Hour // large: caching is active
+
+	qc, err := NewQueryClients(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		ClientConfig{GRPCEndpoint: address, QueryTimeout: 5 * time.Second},
+	)
+	require.NoError(t, err)
+	defer qc.Close()
+	ctx := context.Background()
+
+	// First read hits the chain.
+	s1, err := qc.Service().GetService(ctx, "develop")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1000), s1.ComputeUnitsPerRelay)
+	require.Equal(t, 1, queryCount)
+
+	// Within TTL: served from cache, no new query.
+	s2, err := qc.Service().GetService(ctx, "develop")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1000), s2.ComputeUnitsPerRelay)
+	require.Equal(t, 1, queryCount, "within TTL must serve cache")
+
+	// CUPR changes on-chain; still within TTL → cache intentionally stale.
+	cupr = 1500
+	s3, err := qc.Service().GetService(ctx, "develop")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1000), s3.ComputeUnitsPerRelay, "within TTL the cached value is served")
+	require.Equal(t, 1, queryCount)
+
+	// TTL expires → next read MUST re-query and reflect the new CUPR.
+	serviceCacheTTL = 0
+	s4, err := qc.Service().GetService(ctx, "develop")
+	require.NoError(t, err)
+	require.Equal(t, uint64(1500), s4.ComputeUnitsPerRelay,
+		"after TTL expiry GetService must reflect the new on-chain CUPR (regression: frozen cache)")
+	require.Equal(t, 2, queryCount)
 }
 
 // TestGetServiceRelayDifficulty_QueriesChainEachCall verifies the latest-difficulty

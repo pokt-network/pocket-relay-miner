@@ -858,6 +858,13 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// terminally. Fail OPEN on query error — never drop a claim we cannot
 				// prove is doomed.
 				if lc.serviceClient != nil {
+					// Force a fresh read: claim-build is low-frequency and the chain
+					// validates against the LATEST CUPR, so the guard must never trust a
+					// cached value. InvalidateService drops the query layer's entry so the
+					// GetService below hits the chain.
+					if inv, ok := lc.serviceClient.(interface{ InvalidateService(string) }); ok {
+						inv.InvalidateService(snap.ServiceID)
+					}
 					if svc, svcErr := lc.serviceClient.GetService(ctx, snap.ServiceID); svcErr != nil {
 						logger.Debug().Err(svcErr).
 							Str(logging.FieldSessionID, snap.SessionID).
