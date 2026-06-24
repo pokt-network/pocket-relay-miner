@@ -444,14 +444,32 @@ func (o *CacheOrchestrator) refreshSupplierParams(ctx context.Context) error {
 	return o.supplierParamsCache.Refresh(ctx)
 }
 
+// mergeKnownFromRedis unions a Redis known-set (which recordDiscovered populates
+// from relay traffic on ANY replica, leader or not) into the leader's in-memory
+// set, then returns the merged membership. Without this the leader only ever
+// force-refreshes entities it warmed at startup, so an app/service first seen by a
+// non-leader replica is NEVER force-refreshed or pub/sub-invalidated and the
+// relayers follow an on-chain change only via their local cache TTL (minutes)
+// instead of within one block. It also closes the updateKnown*Set Del+SAdd clobber:
+// because we read Redis in first, the subsequent rewrite persists discovered
+// entries instead of wiping them.
+func (o *CacheOrchestrator) mergeKnownFromRedis(known *xsync.Map[string, struct{}], fromRedis []string) []string {
+	for _, id := range fromRedis {
+		known.Store(id, struct{}{})
+	}
+	var merged []string
+	known.Range(func(k string, _ struct{}) bool {
+		merged = append(merged, k)
+		return true
+	})
+	return merged
+}
+
 // refreshApplications refreshes all known applications.
 func (o *CacheOrchestrator) refreshApplications(ctx context.Context) error {
-	// Collect known apps using xsync.MapOf.Range()
-	var knownApps []string
-	o.knownApps.Range(func(addr string, _ struct{}) bool {
-		knownApps = append(knownApps, addr)
-		return true // continue iteration
-	})
+	// Union the Redis known-set (relay-traffic discovery from any replica) into the
+	// in-memory set so discovered apps are force-refreshed + pub/sub invalidated.
+	knownApps := o.mergeKnownFromRedis(o.knownApps, o.getKnownAppsFromRedis(ctx))
 
 	// Type assert to get RefreshEntity method
 	type RefreshableCache interface {
@@ -518,12 +536,12 @@ func (o *CacheOrchestrator) refreshApplications(ctx context.Context) error {
 
 // refreshServices refreshes all known services.
 func (o *CacheOrchestrator) refreshServices(ctx context.Context) error {
-	// Collect known services using xsync.MapOf.Range()
-	var knownServices []string
-	o.knownServices.Range(func(serviceID string, _ struct{}) bool {
-		knownServices = append(knownServices, serviceID)
-		return true // continue iteration
-	})
+	// Union the Redis known-set (relay-traffic discovery from any replica) into the
+	// in-memory set. This is the fix for ha:cache:known:services being effectively
+	// empty: recordDiscovered SAdds services there, but the leader never read them
+	// back, so develop-http was never force-refreshed → L2 stayed empty → no
+	// invalidation → relayers followed CUPR only via their 60s L1 TTL.
+	knownServices := o.mergeKnownFromRedis(o.knownServices, o.getKnownServicesFromRedis(ctx))
 
 	// Type assert to get RefreshEntity method
 	type RefreshableCache interface {
