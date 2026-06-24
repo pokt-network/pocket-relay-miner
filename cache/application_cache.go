@@ -25,6 +25,23 @@ const (
 	applicationCacheTTL = 5 * time.Minute
 )
 
+// applicationCacheL1TTL bounds how long an L1 (in-process) application entry —
+// including its stake and delegatee gateway set — is served before it is treated
+// as a miss and re-read from L2/L3. Application stake/delegations change on-chain;
+// without a TTL the L1 xsync map freezes the first value for the process lifetime
+// (it is only ever cleared by pub/sub invalidation, which never fires when the
+// leader's known-applications set is empty). That would freeze a stale stake /
+// delegation set and mis-validate relays. Latest-semantics floor: 60s. var (not
+// const) so tests can shrink it without sleeping.
+var applicationCacheL1TTL = 60 * time.Second
+
+// applicationCacheL1Entry is an L1-cached application plus the time it was
+// fetched, so the entry can be aged out by applicationCacheL1TTL.
+type applicationCacheL1Entry struct {
+	app      *apptypes.Application
+	cachedAt time.Time
+}
+
 // applicationCache implements KeyedEntityCache[string, *apptypes.Application]
 // for caching application data.
 //
@@ -40,8 +57,10 @@ type applicationCache struct {
 	redisClient *redisutil.Client
 	queryClient ApplicationQueryClient
 
-	// L1: In-memory cache (xsync for lock-free performance)
-	localCache *xsync.Map[string, *apptypes.Application]
+	// L1: In-memory cache (xsync for lock-free performance), TTL-bounded by
+	// applicationCacheL1TTL so an on-chain stake/delegation change is not frozen
+	// forever.
+	localCache *xsync.Map[string, applicationCacheL1Entry]
 
 	// Pub/sub
 	pubsub *redis.PubSub
@@ -74,7 +93,7 @@ func NewApplicationCache(
 		logger:      logging.ForComponent(logger, logging.ComponentQueryApp),
 		redisClient: redisClient,
 		queryClient: queryClient,
-		localCache:  xsync.NewMap[string, *apptypes.Application](),
+		localCache:  xsync.NewMap[string, applicationCacheL1Entry](),
 	}
 }
 
@@ -122,14 +141,16 @@ func (c *applicationCache) Get(ctx context.Context, appAddress string, force ...
 	forceRefresh := len(force) > 0 && force[0]
 
 	if !forceRefresh {
-		// L1: Check local cache (xsync)
-		if cached, ok := c.localCache.Load(appAddress); ok {
+		// L1: Check local cache (xsync). Only a fresh entry (within
+		// applicationCacheL1TTL) is a hit; a stale one falls through to L2/L3 so an
+		// on-chain stake/delegation change propagates instead of being frozen.
+		if entry, ok := c.localCache.Load(appAddress); ok && time.Since(entry.cachedAt) < applicationCacheL1TTL {
 			cacheHits.WithLabelValues(applicationCacheType, CacheLevelL1).Inc()
 			cacheGetLatency.WithLabelValues(applicationCacheType, CacheLevelL1).Observe(time.Since(start).Seconds())
 			c.logger.Debug().
 				Str(logging.FieldAppAddress, appAddress).
 				Msg("application cache hit (L1)")
-			return cached, nil
+			return entry.app, nil
 		}
 
 		// L2: Check Redis cache
@@ -139,7 +160,7 @@ func (c *applicationCache) Get(ctx context.Context, appAddress string, force ...
 			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, app); err == nil {
 				// Store in L1 for next time
-				c.localCache.Store(appAddress, app)
+				c.localCache.Store(appAddress, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
 				cacheHits.WithLabelValues(applicationCacheType, CacheLevelL2).Inc()
 				cacheGetLatency.WithLabelValues(applicationCacheType, CacheLevelL2).Observe(time.Since(start).Seconds())
 
@@ -226,7 +247,7 @@ func (c *applicationCache) Get(ctx context.Context, appAddress string, force ...
 // Set stores an application in both L1 and L2 caches.
 func (c *applicationCache) Set(ctx context.Context, appAddress string, app *apptypes.Application, ttl time.Duration) error {
 	// L1: Store in local cache
-	c.localCache.Store(appAddress, app)
+	c.localCache.Store(appAddress, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
 
 	// L2: Store in Redis (proto marshaling)
 	data, err := proto.Marshal(app)
@@ -358,7 +379,7 @@ func (c *applicationCache) warmupSingleApp(ctx context.Context, addr string) err
 		return err
 	}
 
-	c.localCache.Store(addr, app)
+	c.localCache.Store(addr, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
 	return nil
 }
 
@@ -388,7 +409,7 @@ func (c *applicationCache) queryChainWithLock(ctx context.Context, appAddress st
 		if err == nil {
 			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
 			if err := proto.Unmarshal(data, app); err == nil {
-				c.localCache.Store(appAddress, app)
+				c.localCache.Store(appAddress, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
 				cacheHits.WithLabelValues(applicationCacheType, CacheLevelL2Retry).Inc()
 				return app, nil
 			}
@@ -457,7 +478,7 @@ func (c *applicationCache) handleInvalidation(ctx context.Context, payload strin
 			app := &apptypes.Application{}
 			if err := proto.Unmarshal(data, app); err == nil {
 				// Warm L1 cache immediately
-				c.localCache.Store(event.Address, app)
+				c.localCache.Store(event.Address, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
 				c.logger.Debug().
 					Str(logging.FieldAppAddress, event.Address).
 					Msg("eagerly reloaded application from L2 into L1")

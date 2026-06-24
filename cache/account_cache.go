@@ -24,6 +24,23 @@ const (
 	accountCacheTTL = 0
 )
 
+// accountCacheL1TTL bounds how long an L1 (in-process) account entry is served
+// before it is treated as a miss and re-read from L2/L3. Public keys are
+// immutable on-chain, so this is only a safety floor: without a TTL the L1 xsync
+// map freezes the first value for the process lifetime (it is only ever cleared
+// by pub/sub invalidation, which rarely fires for accounts). Because pubkeys
+// never change the floor can be long — 30 minutes — but it must exist so no L1
+// entry lives for the whole process lifetime. var (not const) so tests can
+// shrink it without sleeping.
+var accountCacheL1TTL = 30 * time.Minute
+
+// accountCacheL1Entry is an L1-cached public key plus the time it was fetched, so
+// the entry can be aged out by accountCacheL1TTL.
+type accountCacheL1Entry struct {
+	account  cryptotypes.PubKey
+	cachedAt time.Time
+}
+
 // AccountQueryClient defines the interface for querying account public keys.
 type AccountQueryClient interface {
 	// GetPubKeyFromAddress queries the public key for a given address.
@@ -48,8 +65,9 @@ type accountCache struct {
 	redisClient *redisutil.Client
 	queryClient AccountQueryClient
 
-	// L1: In-memory cache (xsync for lock-free performance)
-	localCache *xsync.Map[string, cryptotypes.PubKey]
+	// L1: In-memory cache (xsync for lock-free performance), TTL-bounded by
+	// accountCacheL1TTL so no entry lives for the whole process lifetime.
+	localCache *xsync.Map[string, accountCacheL1Entry]
 
 	// Lifecycle
 	ctx      context.Context
@@ -69,7 +87,7 @@ func NewAccountCache(
 		logger:      logging.ForComponent(logger, logging.ComponentQueryAccount),
 		redisClient: redisClient,
 		queryClient: queryClient,
-		localCache:  xsync.NewMap[string, cryptotypes.PubKey](),
+		localCache:  xsync.NewMap[string, accountCacheL1Entry](),
 	}
 }
 
@@ -110,14 +128,16 @@ func (c *accountCache) Close() error {
 func (c *accountCache) Get(ctx context.Context, address string, force ...bool) (cryptotypes.PubKey, error) {
 	start := time.Now()
 
-	// L1: Check local cache (xsync)
-	if pubKey, ok := c.localCache.Load(address); ok {
+	// L1: Check local cache (xsync). Only a fresh entry (within accountCacheL1TTL)
+	// is a hit; a stale one falls through to L2/L3 so no L1 entry lives for the
+	// whole process lifetime.
+	if entry, ok := c.localCache.Load(address); ok && time.Since(entry.cachedAt) < accountCacheL1TTL {
 		cacheHits.WithLabelValues(accountCacheType, CacheLevelL1).Inc()
 		cacheGetLatency.WithLabelValues(accountCacheType, CacheLevelL1).Observe(time.Since(start).Seconds())
 		c.logger.Debug().
 			Str("address", address).
 			Msg("account cache hit (L1)")
-		return pubKey, nil
+		return entry.account, nil
 	}
 
 	// L2: Check Redis cache
@@ -128,7 +148,7 @@ func (c *accountCache) Get(ctx context.Context, address string, force ...bool) (
 		pubKey, err := c.unmarshalPubKey(data)
 		if err == nil {
 			// Store in L1 for next time
-			c.localCache.Store(address, pubKey)
+			c.localCache.Store(address, accountCacheL1Entry{account: pubKey, cachedAt: time.Now()})
 			cacheHits.WithLabelValues(accountCacheType, CacheLevelL2).Inc()
 			cacheGetLatency.WithLabelValues(accountCacheType, CacheLevelL2).Observe(time.Since(start).Seconds())
 
@@ -174,7 +194,7 @@ func (c *accountCache) Get(ctx context.Context, address string, force ...bool) (
 // Set stores an account's public key in both L1 and L2 caches.
 func (c *accountCache) Set(ctx context.Context, address string, pubKey cryptotypes.PubKey, ttl time.Duration) error {
 	// L1: Store in local cache
-	c.localCache.Store(address, pubKey)
+	c.localCache.Store(address, accountCacheL1Entry{account: pubKey, cachedAt: time.Now()})
 
 	// L2: Store in Redis (proto marshaling)
 	data, err := c.marshalPubKey(pubKey)
@@ -296,7 +316,7 @@ func (c *accountCache) WarmupFromRedis(ctx context.Context, knownAddresses []str
 			continue
 		}
 
-		c.localCache.Store(address, pubKey)
+		c.localCache.Store(address, accountCacheL1Entry{account: pubKey, cachedAt: time.Now()})
 		warmedCount++
 	}
 

@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -105,7 +106,7 @@ func TestGetSupplierState_ContaminatedInL1_EvictsAndReportsMiss(t *testing.T) {
 	}
 
 	// Seed L1 directly (simulates a pre-fix binary's L1 population).
-	cache.localCache.Store(addr, contaminated)
+	cache.localCache.Store(addr, supplierCacheL1Entry{supplier: contaminated, cachedAt: time.Now()})
 
 	before := testutil.ToFloat64(supplierContaminated.WithLabelValues("l1_read"))
 
@@ -170,7 +171,7 @@ func TestGetSupplierState_CleanEntry_ServedNormally(t *testing.T) {
 	// L1 populated for the next call.
 	cached, ok := cache.localCache.Load(addr)
 	require.True(t, ok, "clean L2 read must populate L1")
-	require.Equal(t, []string{"svc1", "svc2"}, cached.Services)
+	require.Equal(t, []string{"svc1", "svc2"}, cached.supplier.Services)
 }
 
 func TestGetSupplierState_LegitimateUnstaked_ServedNormally(t *testing.T) {
@@ -239,4 +240,68 @@ func TestWarmupFromRedis_SkipsContaminatedKeepsClean(t *testing.T) {
 
 	_, okUnstaked := cache.localCache.Load(unstakedAddr)
 	require.True(t, okUnstaked, "legitimate unstaked entry must be loaded into L1")
+}
+
+// TestSupplierCache_L1RefreshesAfterTTL is the regression test for the supplier
+// cache-TTL gap. The SupplierCache L1 (in-process xsync map) had NO TTL, so once
+// a relayer cached a supplier its stake status and service list were frozen for
+// the process lifetime: pub/sub invalidation fires on the miner's Set/Delete but
+// a relayer can miss it (restart, dropped event), stranding a stale stake/services
+// view forever. The fix ages L1 entries out after supplierCacheL1TTL so
+// GetSupplierState falls through to L2 (Redis) and follows the on-chain
+// stake/services change WITHOUT a pod restart. This test drives that change
+// against the REAL supplier cache with miniredis.
+//
+// NOTE: unlike the service cache, SupplierCache is L1+L2 only — it has no L3
+// query client (and thus no frozen-query-client stub to reuse). The downstream
+// change is therefore driven at L2 (Redis), the cache's only authoritative
+// source below L1, via the existing writeSupplierToRedis helper.
+func TestSupplierCache_L1RefreshesAfterTTL(t *testing.T) {
+	cache, _, mr := newTestSupplierCache(t)
+	ctx := context.Background()
+
+	// Use a large L1 TTL while we prove caching; restore the package default after.
+	origTTL := supplierCacheL1TTL
+	supplierCacheL1TTL = time.Hour
+	t.Cleanup(func() { supplierCacheL1TTL = origTTL })
+
+	const addr = "pokt1ttl"
+
+	// Seed L2 with the old service set and load it into L1 via a real Get.
+	writeSupplierToRedis(t, mr, &SupplierState{
+		OperatorAddress: addr,
+		Status:          SupplierStatusActive,
+		Staked:          true,
+		Services:        []string{"svcA"},
+	})
+	state, err := cache.GetSupplierState(ctx, addr)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, []string{"svcA"}, state.Services)
+
+	// On-chain services change mid-session: the miner rewrites L2 with a new
+	// service set. The relayer's L1 entry is the stale one.
+	writeSupplierToRedis(t, mr, &SupplierState{
+		OperatorAddress: addr,
+		Status:          SupplierStatusActive,
+		Staked:          true,
+		Services:        []string{"svcA", "svcB"},
+	})
+
+	// Within the (huge) L1 TTL: Get must still serve the cached service set, even
+	// though L2 already changed. Proves L1 actually caches.
+	state, err = cache.GetSupplierState(ctx, addr)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, []string{"svcA"}, state.Services,
+		"L1 must keep serving the cached supplier while the entry is within supplierCacheL1TTL")
+
+	// Expire L1: the next Get must treat L1 as a miss, re-read L2, and pick up the
+	// new service set — the exact regression this test guards.
+	supplierCacheL1TTL = 0
+	state, err = cache.GetSupplierState(ctx, addr)
+	require.NoError(t, err)
+	require.NotNil(t, state)
+	require.Equal(t, []string{"svcA", "svcB"}, state.Services,
+		"after supplierCacheL1TTL elapses, L1 must refresh and follow the L2 supplier state")
 }
