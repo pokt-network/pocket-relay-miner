@@ -18,7 +18,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
-	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -48,7 +47,6 @@ type CacheOrchestrator struct {
 
 	// All entity caches
 	sharedParamsCache   SingletonEntityCache[*sharedtypes.Params]
-	sessionParamsCache  SingletonEntityCache[*sessiontypes.Params]
 	proofParamsCache    SingletonEntityCache[*prooftypes.Params]
 	supplierParamsCache SupplierParamCache // Supplier module params (min_stake, etc.)
 	applicationCache    KeyedEntityCache[string, *apptypes.Application]
@@ -99,7 +97,6 @@ func NewCacheOrchestrator(
 	blockSubscriber BlockHeightSubscriber,
 	redisClient *redisutil.Client,
 	sharedParamsCache SingletonEntityCache[*sharedtypes.Params],
-	sessionParamsCache SingletonEntityCache[*sessiontypes.Params],
 	proofParamsCache SingletonEntityCache[*prooftypes.Params],
 	supplierParamsCache SupplierParamCache,
 	applicationCache KeyedEntityCache[string, *apptypes.Application],
@@ -136,7 +133,6 @@ func NewCacheOrchestrator(
 		blockSubscriber:     blockSubscriber,
 		redisClient:         redisClient,
 		sharedParamsCache:   sharedParamsCache,
-		sessionParamsCache:  sessionParamsCache,
 		proofParamsCache:    proofParamsCache,
 		supplierParamsCache: supplierParamsCache,
 		applicationCache:    applicationCache,
@@ -199,11 +195,6 @@ func (o *CacheOrchestrator) Close() error {
 	if o.sharedParamsCache != nil {
 		if err := o.sharedParamsCache.Close(); err != nil {
 			o.logger.Warn().Err(err).Msg("error closing shared params cache")
-		}
-	}
-	if o.sessionParamsCache != nil {
-		if err := o.sessionParamsCache.Close(); err != nil {
-			o.logger.Warn().Err(err).Msg("error closing session params cache")
 		}
 	}
 	if o.proofParamsCache != nil {
@@ -372,7 +363,6 @@ func (o *CacheOrchestrator) refreshAllCaches(ctx context.Context) error {
 		fn   func(context.Context) error
 	}{
 		{"shared_params", o.refreshSharedParams},
-		{"session_params", o.refreshSessionParams},
 		{"proof_params", o.refreshProofParams},
 		{"supplier_params", o.refreshSupplierParams},
 		{"applications", o.refreshApplications},
@@ -421,11 +411,6 @@ func (o *CacheOrchestrator) refreshAllCaches(ctx context.Context) error {
 // refreshSharedParams refreshes the shared params cache.
 func (o *CacheOrchestrator) refreshSharedParams(ctx context.Context) error {
 	return o.sharedParamsCache.Refresh(ctx)
-}
-
-// refreshSessionParams refreshes the session params cache.
-func (o *CacheOrchestrator) refreshSessionParams(ctx context.Context) error {
-	return o.sessionParamsCache.Refresh(ctx)
 }
 
 // refreshProofParams refreshes the proof params cache.
@@ -694,9 +679,6 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 	// Warmup singleton caches (params)
 	if shared, ok := o.sharedParamsCache.(*sharedParamsCache); ok {
 		_ = shared.WarmupFromRedis(ctx)
-	}
-	if session, ok := o.sessionParamsCache.(*sessionParamsCache); ok {
-		_ = session.WarmupFromRedis(ctx)
 	}
 	if proof, ok := o.proofParamsCache.(*proofParamsCache); ok {
 		_ = proof.WarmupFromRedis(ctx)

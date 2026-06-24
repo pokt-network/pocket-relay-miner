@@ -18,7 +18,6 @@ import (
 
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
-	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -54,7 +53,6 @@ type LeaderController struct {
 	redisBlockSubscriber  *cache.RedisBlockSubscriber
 	blockPublisher        *cache.BlockPublisher
 	sharedParamsCache     cache.SingletonEntityCache[*sharedtypes.Params]
-	sessionParamsCache    cache.SingletonEntityCache[*sessiontypes.Params]
 	proofParamsCache      cache.SingletonEntityCache[*prooftypes.Params]
 	supplierParamsCache   *cache.RedisSupplierParamCache
 	applicationCache      cache.KeyedEntityCache[string, *apptypes.Application]
@@ -165,19 +163,10 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	// Get block time
 	blockTimeSeconds := c.config.Config.GetBlockTimeSeconds()
 
-	// Create caches
-	c.sessionParamsCache = cache.NewSessionParamsCache(
-		c.logger,
-		c.config.RedisClient,
-		cache.NewSessionQueryClientAdapter(c.queryClients.Session()),
-		c.queryClients.Shared(),
-		blockTimeSeconds,
-	)
-	if err := c.sessionParamsCache.Start(ctx); err != nil {
-		c.cleanup()
-		return fmt.Errorf("failed to start session params cache: %w", err)
-	}
-
+	// Create caches.
+	// NOTE: no session-params singleton — nothing reads it. The relay meter reads
+	// session params live via the session query client (90s TTL); the miner only
+	// reads SHARED params at-height for window timing.
 	c.sharedParamsCache = cache.NewSharedParamsCache(
 		c.logger,
 		c.config.RedisClient,
@@ -270,7 +259,6 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		blockSubscriberAdapter,
 		c.config.RedisClient,
 		c.sharedParamsCache,
-		c.sessionParamsCache,
 		c.proofParamsCache,
 		c.supplierParamsCache,
 		c.applicationCache,
@@ -535,13 +523,6 @@ func (c *LeaderController) cleanup() {
 			c.logger.Error().Err(err).Msg("failed to close shared params cache")
 		}
 		c.sharedParamsCache = nil
-	}
-
-	if c.sessionParamsCache != nil {
-		if err := c.sessionParamsCache.Close(); err != nil {
-			c.logger.Error().Err(err).Msg("failed to close session params cache")
-		}
-		c.sessionParamsCache = nil
 	}
 
 	if c.redisBlockSubscriber != nil {

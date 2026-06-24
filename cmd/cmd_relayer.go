@@ -236,18 +236,9 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Relayer uses default 30s block time (production default for mainnet/testnet)
 	blockTimeSeconds := int64(30)
 
-	// Create session params cache with dynamic session-duration TTL
-	sessionParamsCache := cache.NewSessionParamsCache(
-		logger,
-		redisClient,
-		cache.NewSessionQueryClientAdapter(queryClients.Session()),
-		queryClients.Shared(), // For TTL calculation
-		blockTimeSeconds,
-	)
-	if err := sessionParamsCache.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start session params cache: %w", err)
-	}
-	defer func() { _ = sessionParamsCache.Close() }()
+	// NOTE: session params are read live via the session query client (90s TTL) in
+	// RelayMeter.getSessionParams — the relayer does NOT use a session-params
+	// singleton (it ran no orchestrator to refresh it and never read it).
 
 	// Create shared params cache with dynamic 2-session TTL
 	sharedParamsCache := cache.NewSharedParamsCache(

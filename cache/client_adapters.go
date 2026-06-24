@@ -9,7 +9,6 @@ import (
 	"github.com/pokt-network/poktroll/pkg/client"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
-	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -105,22 +104,6 @@ func (a *proofQueryClientAdapter) GetParams(ctx context.Context) (*prooftypes.Pa
 // NewProofQueryClientAdapter creates an adapter for client.ProofQueryClient.
 func NewProofQueryClientAdapter(c client.ProofQueryClient) ProofQueryClient {
 	return &proofQueryClientAdapter{client: c}
-}
-
-// sessionQueryClientAdapter adapts client.SessionQueryClient to SessionQueryClient.
-// Note: client.SessionQueryClient likely already returns *sessiontypes.Params,
-// but we create an adapter for consistency.
-type sessionQueryClientAdapter struct {
-	client client.SessionQueryClient
-}
-
-func (a *sessionQueryClientAdapter) GetParams(ctx context.Context) (*sessiontypes.Params, error) {
-	return a.client.GetParams(ctx)
-}
-
-// NewSessionQueryClientAdapter creates an adapter for client.SessionQueryClient.
-func NewSessionQueryClientAdapter(c client.SessionQueryClient) SessionQueryClient {
-	return &sessionQueryClientAdapter{client: c}
 }
 
 // cachedApplicationQueryClient wraps KeyedEntityCache to implement client.ApplicationQueryClient.
