@@ -640,8 +640,9 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			)
 
 			// NOTE: App discovery callbacks are no longer needed on the relayer.
-			// Discovery now happens on the miner side via CacheOrchestrator.RecordDiscoveredApp()
-			// when processing relays from Redis streams. Relayers only consume from shared caches.
+			// Discovery happens on the miner side: the supplier worker SAdds apps/
+			// services seen in Redis-stream relays to the shared known-sets, which the
+			// leader's CacheOrchestrator refreshes. Relayers only consume shared caches.
 
 			proxy.SetRelayProcessor(relayProcessor)
 			logger.Info().Msg("relay processor initialized")

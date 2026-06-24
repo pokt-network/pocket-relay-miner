@@ -830,18 +830,6 @@ func (o *CacheOrchestrator) updateKnownSuppliersSet(ctx context.Context, knownSu
 	return nil
 }
 
-// RecordDiscoveredApp records an app discovered from relay traffic.
-// This is called by the RelayProcessor when it sees a new app address.
-func (o *CacheOrchestrator) RecordDiscoveredApp(appAddress string) {
-	o.knownApps.Store(appAddress, struct{}{})
-}
-
-// RecordDiscoveredService records a service discovered from relay traffic.
-// This is called by the RelayProcessor when it sees a new service ID.
-func (o *CacheOrchestrator) RecordDiscoveredService(serviceID string) {
-	o.knownServices.Store(serviceID, struct{}{})
-}
-
 // RegisterSupplier registers a supplier from KeyManager when keyring/keyfile is loaded.
 // This is called by the KeyManager when supplier keys are loaded from keyring/keyfile.
 func (o *CacheOrchestrator) RegisterSupplier(supplierAddress string) {

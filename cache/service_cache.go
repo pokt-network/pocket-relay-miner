@@ -280,8 +280,9 @@ func (c *serviceCache) Invalidate(ctx context.Context, serviceID string) error {
 }
 
 // Refresh updates the cache from the chain (called by leader only).
-// NOTE: Services are discovered dynamically via CacheOrchestrator.RecordDiscoveredService()
-// This method is called by the orchestrator with the list of known services.
+// NOTE: Services are discovered from relay traffic by the supplier worker,
+// which SAdds them to the Redis known-set (ha:cache:known:services) the
+// orchestrator reads each refresh.
 func (c *serviceCache) Refresh(ctx context.Context) error {
 	// This method is intentionally empty because services are refreshed
 	// individually by the CacheOrchestrator based on the list of known services.

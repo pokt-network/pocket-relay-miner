@@ -281,8 +281,9 @@ func (c *applicationCache) Invalidate(ctx context.Context, appAddress string) er
 }
 
 // Refresh updates the cache from the chain (called by leader only).
-// NOTE: Applications are discovered dynamically via CacheOrchestrator.RecordDiscoveredApp()
-// This method is called by the orchestrator with the list of known apps.
+// NOTE: Applications are discovered from relay traffic by the supplier worker,
+// which SAdds them to the Redis known-set (ha:cache:known:applications) the
+// orchestrator reads each refresh.
 func (c *applicationCache) Refresh(ctx context.Context) error {
 	// This method is intentionally empty because applications are refreshed
 	// individually by the CacheOrchestrator based on the list of known apps.
