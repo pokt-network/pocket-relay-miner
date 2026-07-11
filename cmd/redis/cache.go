@@ -266,7 +266,7 @@ func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType stri
 	}
 
 	// Fall back to SCAN
-	keys, err := scanAllKeys(ctx, client, pattern)
+	keys, err := clusterAwareScanAllKeys(ctx, client, pattern)
 	if err != nil {
 		return err
 	}
@@ -290,24 +290,6 @@ func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType stri
 	fmt.Printf("\nTotal: %d entries\n", len(keys))
 
 	return nil
-}
-
-// scanAllKeys uses non-blocking SCAN to enumerate every key matching pattern.
-func scanAllKeys(ctx context.Context, client *DebugRedisClient, pattern string) ([]string, error) {
-	var cursor uint64
-	var keys []string
-	for {
-		scanKeys, next, err := client.Scan(ctx, cursor, pattern, 100).Result()
-		if err != nil {
-			return nil, fmt.Errorf("failed to scan keys with pattern %q: %w", pattern, err)
-		}
-		keys = append(keys, scanKeys...)
-		cursor = next
-		if cursor == 0 {
-			break
-		}
-	}
-	return keys, nil
 }
 
 // confirmProceed prints prompt, reads one stdin line, and returns true only
@@ -426,7 +408,7 @@ func invalidateAll(ctx context.Context, client *DebugRedisClient, cacheType stri
 		return err
 	}
 
-	redisKeys, err := scanAllKeys(ctx, client, pattern)
+	redisKeys, err := clusterAwareScanAllKeys(ctx, client, pattern)
 	if err != nil {
 		return err
 	}

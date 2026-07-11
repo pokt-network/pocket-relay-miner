@@ -63,11 +63,11 @@ func NewRebroadcastStore(redisClient *redistransport.Client, ttl time.Duration) 
 // to be valid on a clustered deployment; on standalone Redis the braces are
 // inert. See finding: cross-slot MULTI/EXEC.
 func (s *RebroadcastStore) groupKey(phase RebroadcastPhase, supplier string, sessionEnd int64) string {
-	return fmt.Sprintf("ha:miner:rebroadcast:{%s}:%s:%d", phase, supplier, sessionEnd)
+	return s.redisClient.KB().RebroadcastKey(string(phase), supplier, sessionEnd)
 }
 
 func (s *RebroadcastStore) indexKey(phase RebroadcastPhase) string {
-	return fmt.Sprintf("ha:miner:rebroadcast:{%s}:index", phase)
+	return s.redisClient.KB().RebroadcastIndexKey(string(phase))
 }
 
 func (s *RebroadcastStore) indexMember(supplier string, sessionEnd int64) string {

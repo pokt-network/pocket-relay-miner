@@ -52,7 +52,7 @@ Safety:
 			defer func() { _ = client.Close() }()
 
 			if flushAll {
-				pattern = "ha:*"
+				pattern = client.KB().AllKeysPattern()
 			}
 
 			if pattern == "" {
@@ -111,17 +111,17 @@ func flushKeys(ctx context.Context, client *DebugRedisClient, pattern string, fo
 		fmt.Printf("⚠️  This operation is IRREVERSIBLE!\n\n")
 
 		// Risk assessment
-		if pattern == "ha:*" || pattern == "*" {
+		if pattern == client.KB().AllKeysPattern() || pattern == "*" {
 			fmt.Printf("🚨 CRITICAL: You are about to delete ALL data!\n")
 			fmt.Printf("🚨 This will cause:\n")
 			fmt.Printf("   - Loss of all session state\n")
 			fmt.Printf("   - Loss of all SMST trees\n")
 			fmt.Printf("   - Loss of all cached data\n")
 			fmt.Printf("   - Disruption to all running instances\n\n")
-		} else if strings.HasPrefix(pattern, "ha:smst:") {
+		} else if strings.HasPrefix(pattern, client.KB().SMSTNodesPrefix()) {
 			fmt.Printf("⚠️  This will delete SMST tree data\n")
 			fmt.Printf("⚠️  May cause proof submission failures\n\n")
-		} else if strings.HasPrefix(pattern, "ha:miner:sessions:") {
+		} else if strings.HasPrefix(pattern, fmt.Sprintf("%s:", client.KB().MinerSessionsPrefix())) {
 			fmt.Printf("⚠️  This will delete session metadata\n")
 			fmt.Printf("⚠️  May cause claim/proof tracking issues\n\n")
 		}

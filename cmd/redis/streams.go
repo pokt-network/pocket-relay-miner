@@ -55,7 +55,7 @@ This shows stream length, consumer groups, and pending messages.`,
 }
 
 func listAllStreams(ctx context.Context, client *DebugRedisClient, _ int64) error {
-	pattern := "ha:relays:*"
+	pattern := fmt.Sprintf("%s:*", client.KB().StreamPrefix())
 	var cursor uint64
 	var streams []string
 
@@ -101,7 +101,7 @@ func listAllStreams(ctx context.Context, client *DebugRedisClient, _ int64) erro
 }
 
 func inspectStream(ctx context.Context, client *DebugRedisClient, supplierAddr string, limit int64) error {
-	streamKey := fmt.Sprintf("ha:relays:%s", supplierAddr)
+	streamKey := fmt.Sprintf("%s:%s", client.KB().StreamPrefix(), supplierAddr)
 
 	// Check if stream exists
 	exists, err := client.Exists(ctx, streamKey).Result()

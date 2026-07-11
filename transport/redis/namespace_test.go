@@ -58,6 +58,14 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"MinerSessionsIndexKey":               kb.MinerSessionsIndexKey("sup1"),
 		"TxTrackKey":                          kb.TxTrackKey("sup1", 100, "sess1"),
 		"TxTrackPattern":                      kb.TxTrackPattern("sup1"),
+		"TxTrackAllPattern":                   kb.TxTrackAllPattern(),
+		"AllKeysPattern":                      kb.AllKeysPattern(),
+		"RebroadcastKey":                      kb.RebroadcastKey("claim", "sup1", 100),
+		"RebroadcastIndexKey":                 kb.RebroadcastIndexKey("claim"),
+		"MinerDedupSessionKey":                kb.MinerDedupSessionKey("sess1"),
+		"MeterSessionKey":                     kb.MeterSessionKey("sess1"),
+		"AppStakeKey":                         kb.AppStakeKey("app1"),
+		"ServiceComputeUnitsKey":              kb.ServiceComputeUnitsKey("svc1"),
 	}
 }
 
@@ -123,6 +131,14 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"MinerSessionsIndexKey":               "ha:miner:sessions:sup1:index",
 		"TxTrackKey":                          "ha:tx:track:sup1:100:sess1",
 		"TxTrackPattern":                      "ha:tx:track:sup1:*",
+		"TxTrackAllPattern":                   "ha:tx:track:*",
+		"AllKeysPattern":                      "ha:*",
+		"RebroadcastKey":                      "ha:miner:rebroadcast:{claim}:sup1:100",
+		"RebroadcastIndexKey":                 "ha:miner:rebroadcast:{claim}:index",
+		"MinerDedupSessionKey":                "ha:miner:dedup:session:sess1",
+		"MeterSessionKey":                     "ha:meter:sess1",
+		"AppStakeKey":                         "ha:app_stake:app1",
+		"ServiceComputeUnitsKey":              "ha:service:svc1:compute_units",
 	}
 	outputs := allKeyBuilderOutputs(kb)
 	for method, want := range golden {

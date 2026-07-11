@@ -66,7 +66,7 @@ Meter data locations:
 }
 
 func inspectSessionMeter(ctx context.Context, client *DebugRedisClient, sessionID string) error {
-	key := fmt.Sprintf("ha:meter:%s", sessionID)
+	key := client.KB().MeterSessionKey(sessionID)
 
 	data, err := client.HGetAll(ctx, key).Result()
 	if err != nil {
@@ -93,7 +93,7 @@ func inspectSessionMeter(ctx context.Context, client *DebugRedisClient, sessionI
 }
 
 func inspectAppStake(ctx context.Context, client *DebugRedisClient, appAddr string) error {
-	key := fmt.Sprintf("ha:app_stake:%s", appAddr)
+	key := client.KB().AppStakeKey(appAddr)
 
 	val, err := client.Get(ctx, key).Result()
 	if err == redis.Nil {
@@ -115,7 +115,7 @@ func inspectAppStake(ctx context.Context, client *DebugRedisClient, appAddr stri
 }
 
 func inspectServiceParams(ctx context.Context, client *DebugRedisClient, serviceID string) error {
-	key := fmt.Sprintf("ha:service:%s:compute_units", serviceID)
+	key := client.KB().ServiceComputeUnitsKey(serviceID)
 
 	val, err := client.Get(ctx, key).Result()
 	if err == redis.Nil {

@@ -350,3 +350,69 @@ func (kb *KeyBuilder) TxTrackKey(supplier string, sessionEndHeight int64, sessio
 func (kb *KeyBuilder) TxTrackPattern(supplier string) string {
 	return fmt.Sprintf("%s:tx:track:%s:*", kb.ns.BasePrefix, supplier)
 }
+
+// TxTrackAllPattern builds the SCAN pattern for every supplier's submission
+// tracking (the debug CLI's unfiltered list).
+// Format: {base}:tx:track:*
+// Example: "ha:tx:track:*"
+func (kb *KeyBuilder) TxTrackAllPattern() string {
+	return fmt.Sprintf("%s:tx:track:*", kb.ns.BasePrefix)
+}
+
+// AllKeysPattern builds the SCAN pattern matching every key in the namespace.
+// Used by the debug flush command's "delete everything" path.
+// Format: {base}:*
+// Example: "ha:*"
+func (kb *KeyBuilder) AllKeysPattern() string {
+	return fmt.Sprintf("%s:*", kb.ns.BasePrefix)
+}
+
+// RebroadcastKey builds the per-group payload-hash key for the inclusion
+// reconciler's rebroadcast store. The phase is wrapped in a Redis Cluster
+// hash tag ({phase}) so a phase's group hashes and its index set resolve to
+// the same slot (required for the multi-key MULTI/EXEC and Lua); on
+// standalone Redis the braces are inert.
+// Format: {base}:{miner}:rebroadcast:{'{'}{phase}{'}'}:{supplier}:{sessionEnd}
+// Example: "ha:miner:rebroadcast:{claim}:pokt1abc:100"
+func (kb *KeyBuilder) RebroadcastKey(phase, supplier string, sessionEnd int64) string {
+	return fmt.Sprintf("%s:%s:rebroadcast:{%s}:%s:%d", kb.ns.BasePrefix, kb.ns.MinerPrefix, phase, supplier, sessionEnd)
+}
+
+// RebroadcastIndexKey builds the per-phase group index set key for the
+// rebroadcast store. The phase hash tag matches RebroadcastKey so both live
+// in the same cluster slot.
+// Format: {base}:{miner}:rebroadcast:{'{'}{phase}{'}'}:index
+// Example: "ha:miner:rebroadcast:{claim}:index"
+func (kb *KeyBuilder) RebroadcastIndexKey(phase string) string {
+	return fmt.Sprintf("%s:%s:rebroadcast:{%s}:index", kb.ns.BasePrefix, kb.ns.MinerPrefix, phase)
+}
+
+// MinerDedupSessionKey builds the per-session relay deduplication set key.
+// Format: {base}:{miner}:dedup:session:{sessionID}
+// Example: "ha:miner:dedup:session:sess1"
+func (kb *KeyBuilder) MinerDedupSessionKey(sessionID string) string {
+	return fmt.Sprintf("%s:%s:dedup:session:%s", kb.ns.BasePrefix, kb.ns.MinerPrefix, sessionID)
+}
+
+// MeterSessionKey builds the per-session relay metering hash key.
+// Format: {base}:{meter}:{sessionID}
+// Example: "ha:meter:sess1"
+func (kb *KeyBuilder) MeterSessionKey(sessionID string) string {
+	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.MeterPrefix, sessionID)
+}
+
+// AppStakeKey builds the per-application stake-tracking key used by the meter
+// subsystem. The "app_stake" segment is literal (no configurable sub-prefix).
+// Format: {base}:app_stake:{appAddr}
+// Example: "ha:app_stake:app1"
+func (kb *KeyBuilder) AppStakeKey(appAddr string) string {
+	return fmt.Sprintf("%s:app_stake:%s", kb.ns.BasePrefix, appAddr)
+}
+
+// ServiceComputeUnitsKey builds the per-service compute-units key used by the
+// meter subsystem. The "service"/"compute_units" segments are literal.
+// Format: {base}:service:{serviceID}:compute_units
+// Example: "ha:service:svc1:compute_units"
+func (kb *KeyBuilder) ServiceComputeUnitsKey(serviceID string) string {
+	return fmt.Sprintf("%s:service:%s:compute_units", kb.ns.BasePrefix, serviceID)
+}

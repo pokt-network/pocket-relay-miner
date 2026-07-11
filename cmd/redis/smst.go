@@ -47,26 +47,42 @@ This shows the number of nodes and sample keys.`,
 }
 
 func inspectSMST(ctx context.Context, client *DebugRedisClient, sessionID string, limit int64) error {
-	key := fmt.Sprintf("ha:smst:%s:nodes", sessionID)
-
-	// Check if key exists
-	exists, err := client.Exists(ctx, key).Result()
+	// Production writes per-supplier SMST keys ({base}:smst:{supplier}:{session}:nodes),
+	// so a session can have several trees (one per supplier that served it).
+	// Scan every supplier's tree for this session rather than the legacy
+	// single-arg key ({base}:smst:{session}:nodes) that production no longer
+	// writes — that shape silently reported "No SMST data found" for every
+	// real key.
+	pattern := fmt.Sprintf("%s*:%s:nodes", client.KB().SMSTNodesPrefix(), sessionID)
+	keys, err := clusterAwareScanAllKeys(ctx, client, pattern)
 	if err != nil {
-		return fmt.Errorf("failed to check SMST existence: %w", err)
+		return fmt.Errorf("failed to scan SMST keys: %w", err)
 	}
 
-	if exists == 0 {
+	if len(keys) == 0 {
 		fmt.Printf("No SMST data found for session: %s\n", sessionID)
 		return nil
 	}
 
+	for _, key := range keys {
+		if err := displaySMSTTree(ctx, client, key, limit); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+// displaySMSTTree prints node count and a sample of nodes for one SMST tree key
+// (one supplier's tree for a session).
+func displaySMSTTree(ctx context.Context, client *DebugRedisClient, key string, limit int64) error {
 	// Get total node count
 	count, err := client.HLen(ctx, key).Result()
 	if err != nil {
-		return fmt.Errorf("failed to get SMST node count: %w", err)
+		return fmt.Errorf("failed to get SMST node count for %s: %w", key, err)
 	}
 
-	fmt.Printf("SMST Tree for Session: %s\n", sessionID)
+	fmt.Printf("SMST Tree: %s\n", key)
 	fmt.Printf("Total Nodes: %d\n\n", count)
 
 	if count == 0 {
@@ -79,19 +95,19 @@ func inspectSMST(ctx context.Context, client *DebugRedisClient, sessionID string
 	var sampleValues []string
 
 	for len(sampleKeys) < int(limit) {
-		keys, newCursor, err := client.HScan(ctx, key, cursor, "*", limit).Result()
+		nodes, newCursor, err := client.HScan(ctx, key, cursor, "*", limit).Result()
 		if err != nil {
-			return fmt.Errorf("failed to scan SMST nodes: %w", err)
+			return fmt.Errorf("failed to scan SMST nodes for %s: %w", key, err)
 		}
 
 		// HScan returns alternating key-value pairs
-		for i := 0; i < len(keys); i += 2 {
+		for i := 0; i < len(nodes); i += 2 {
 			if len(sampleKeys) >= int(limit) {
 				break
 			}
-			sampleKeys = append(sampleKeys, keys[i])
-			if i+1 < len(keys) {
-				sampleValues = append(sampleValues, keys[i+1])
+			sampleKeys = append(sampleKeys, nodes[i])
+			if i+1 < len(nodes) {
+				sampleValues = append(sampleValues, nodes[i+1])
 			}
 		}
 
@@ -123,7 +139,7 @@ func inspectSMST(ctx context.Context, client *DebugRedisClient, sessionID string
 	_ = w.Flush()
 
 	// Offer to delete
-	fmt.Printf("\nTo delete this SMST tree, use: redis-debug flush --pattern 'ha:smst:%s:*'\n", sessionID)
+	fmt.Printf("\nTo delete this SMST tree, use: redis-debug flush --pattern '%s'\n\n", key)
 
 	return nil
 }

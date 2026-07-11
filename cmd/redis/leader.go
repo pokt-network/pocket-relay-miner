@@ -36,7 +36,7 @@ The leader must renew every 10 seconds to maintain leadership.`,
 }
 
 func checkLeader(ctx context.Context, client *DebugRedisClient) error {
-	key := "ha:miner:global_leader"
+	key := client.KB().GlobalLeaderKey()
 
 	// Check if leader exists
 	exists, err := client.Exists(ctx, key).Result()

@@ -39,7 +39,7 @@ This prevents processing the same relay multiple times.`,
 }
 
 func inspectDedup(ctx context.Context, client *DebugRedisClient, sessionID string) error {
-	key := fmt.Sprintf("ha:miner:dedup:session:%s", sessionID)
+	key := client.KB().MinerDedupSessionKey(sessionID)
 
 	// Check if set exists
 	exists, err := client.Exists(ctx, key).Result()

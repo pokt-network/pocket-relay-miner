@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
@@ -36,7 +37,7 @@ func newTestSupplierCache(t *testing.T) (*SupplierCache, *redisutil.Client, *min
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	cache := NewSupplierCache(logger, client, SupplierCacheConfig{
-		KeyPrefix: DefaultSupplierKeyPrefix,
+		KeyPrefix: client.KB().SupplierKeyPrefix(),
 		FailOpen:  false,
 	})
 
@@ -49,7 +50,8 @@ func writeSupplierToRedis(t *testing.T, mr *miniredis.Miniredis, state *Supplier
 	t.Helper()
 	data, err := json.Marshal(state)
 	require.NoError(t, err)
-	require.NoError(t, mr.Set(fmt.Sprintf("%s:%s", DefaultSupplierKeyPrefix, state.OperatorAddress), string(data)))
+	kb := redisutil.NewKeyBuilder(config.RedisNamespaceConfig{})
+	require.NoError(t, mr.Set(fmt.Sprintf("%s:%s", kb.SupplierKeyPrefix(), state.OperatorAddress), string(data)))
 }
 
 func TestIsContaminated(t *testing.T) {

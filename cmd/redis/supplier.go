@@ -87,7 +87,7 @@ Examples:
 
 // getSupplierCacheState reads a supplier's state from the cache (ha:supplier:{address})
 func getSupplierCacheState(ctx context.Context, client *DebugRedisClient, address string) (*supplierCacheState, error) {
-	key := fmt.Sprintf("ha:supplier:%s", address)
+	key := fmt.Sprintf("%s:%s", client.KB().SupplierKeyPrefix(), address)
 	data, err := client.Get(ctx, key).Bytes()
 	if err != nil {
 		return nil, err
@@ -103,7 +103,7 @@ func getSupplierCacheState(ctx context.Context, client *DebugRedisClient, addres
 
 // getAllSupplierCacheStates reads all supplier states from cache
 func getAllSupplierCacheStates(ctx context.Context, client *DebugRedisClient) (map[string]*supplierCacheState, error) {
-	pattern := "ha:supplier:*"
+	pattern := fmt.Sprintf("%s:*", client.KB().SupplierKeyPrefix())
 	keys, err := client.Keys(ctx, pattern).Result()
 	if err != nil {
 		return nil, err
@@ -112,7 +112,7 @@ func getAllSupplierCacheStates(ctx context.Context, client *DebugRedisClient) (m
 	states := make(map[string]*supplierCacheState)
 	for _, key := range keys {
 		// Extract address from key (ha:supplier:{address})
-		addr := strings.TrimPrefix(key, "ha:supplier:")
+		addr := strings.TrimPrefix(key, fmt.Sprintf("%s:", client.KB().SupplierKeyPrefix()))
 		if addr == key {
 			continue // Didn't match pattern
 		}

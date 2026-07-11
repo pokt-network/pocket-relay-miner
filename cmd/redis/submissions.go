@@ -95,7 +95,7 @@ Examples:
 }
 
 func showSubmission(ctx context.Context, client *DebugRedisClient, supplier string, sessionEnd int64, sessionID string, jsonOutput bool) error {
-	key := fmt.Sprintf("ha:tx:track:%s:%d:%s", supplier, sessionEnd, sessionID)
+	key := client.KB().TxTrackKey(supplier, sessionEnd, sessionID)
 
 	data, err := client.Get(ctx, key).Bytes()
 	if err == redis.Nil {
@@ -131,9 +131,9 @@ func showSubmission(ctx context.Context, client *DebugRedisClient, supplier stri
 
 func listSubmissions(ctx context.Context, client *DebugRedisClient, supplier, service, app string, failedOnly, successOnly bool, limit int, jsonOutput bool) error {
 	// Build scan pattern based on filters
-	pattern := "ha:tx:track:*"
+	pattern := client.KB().TxTrackAllPattern()
 	if supplier != "" {
-		pattern = fmt.Sprintf("ha:tx:track:%s:*", supplier)
+		pattern = client.KB().TxTrackPattern(supplier)
 	}
 
 	keys, err := client.Keys(ctx, pattern).Result()

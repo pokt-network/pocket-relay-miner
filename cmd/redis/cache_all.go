@@ -139,7 +139,7 @@ func cacheKeyGroup(scope cleanupScope, redisKey string) string {
 func buildCleanupPlan(ctx context.Context, client *DebugRedisClient, scope cleanupScope) (*cleanupPlan, error) {
 	plan := &cleanupPlan{deleteCounts: make(map[string]int)}
 
-	cacheKeys, err := scanAllKeys(ctx, client, scope.cachePattern)
+	cacheKeys, err := clusterAwareScanAllKeys(ctx, client, scope.cachePattern)
 	if err != nil {
 		return nil, err
 	}
@@ -152,7 +152,7 @@ func buildCleanupPlan(ctx context.Context, client *DebugRedisClient, scope clean
 		plan.deleteCounts[cacheKeyGroup(scope, k)]++
 	}
 
-	supplierKeys, err := scanAllKeys(ctx, client, scope.supplierPattern)
+	supplierKeys, err := clusterAwareScanAllKeys(ctx, client, scope.supplierPattern)
 	if err != nil {
 		return nil, err
 	}

@@ -17,9 +17,6 @@ import (
 )
 
 const (
-	// DefaultSupplierKeyPrefix is the default Redis key prefix for supplier state.
-	DefaultSupplierKeyPrefix = "ha:supplier"
-
 	// SupplierStatusActive indicates the supplier is active and accepting relays.
 	SupplierStatusActive = "active"
 
@@ -192,7 +189,7 @@ func NewSupplierCache(
 ) *SupplierCache {
 	keyPrefix := config.KeyPrefix
 	if keyPrefix == "" {
-		keyPrefix = DefaultSupplierKeyPrefix
+		keyPrefix = redisClient.KB().SupplierKeyPrefix()
 	}
 
 	return &SupplierCache{
