@@ -81,7 +81,7 @@ func newCleanupScope(client *DebugRedisClient) cleanupScope {
 	// no TTL — without this publish, running instances would serve the
 	// pre-cleanup supplier params until restart. The handler clears on any
 	// payload.
-	channels = append(channels, kb.EventsCachePrefix()+":invalidate:supplier_params")
+	channels = append(channels, kb.SupplierParamsInvalidateChannel())
 
 	// Deliberately NOT notified: the relayer's height-keyed
 	// RedisSharedParamCache (cache/shared_params.go) subscribes on
@@ -94,7 +94,7 @@ func newCleanupScope(client *DebugRedisClient) cleanupScope {
 		cachePattern:    cachePrefix + ":*",
 		lockPrefix:      cachePrefix + ":lock:",
 		cacheKeyPrefix:  cachePrefix + ":",
-		supplierPattern: kb.SupplierKeyPrefix() + ":*",
+		supplierPattern: kb.SupplierStatePattern(),
 		channels:        channels,
 	}
 }

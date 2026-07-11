@@ -56,20 +56,9 @@ This shows stream length, consumer groups, and pending messages.`,
 
 func listAllStreams(ctx context.Context, client *DebugRedisClient, _ int64) error {
 	pattern := fmt.Sprintf("%s:*", client.KB().StreamPrefix())
-	var cursor uint64
-	var streams []string
-
-	for {
-		keys, newCursor, err := client.Scan(ctx, cursor, pattern, 100).Result()
-		if err != nil {
-			return fmt.Errorf("failed to scan streams: %w", err)
-		}
-
-		streams = append(streams, keys...)
-		cursor = newCursor
-		if cursor == 0 {
-			break
-		}
+	streams, err := clusterAwareScanAllKeys(ctx, client, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to scan streams: %w", err)
 	}
 
 	if len(streams) == 0 {

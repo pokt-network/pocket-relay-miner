@@ -262,9 +262,20 @@ func (t *SubmissionTracker) GetRecord(ctx context.Context, supplier string, sess
 func (t *SubmissionTracker) ListRecordsForSupplier(ctx context.Context, supplier string) ([]*SubmissionTrackingRecord, error) {
 	pattern := t.redisClient.KB().TxTrackPattern(supplier)
 
-	keys, err := t.redisClient.Keys(ctx, pattern).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to list keys: %w", err)
+	// SCAN, not KEYS: KEYS blocks Redis for its full duration and on a
+	// cluster client is routed to a single node.
+	var keys []string
+	var cursor uint64
+	for {
+		batch, next, scanErr := t.redisClient.Scan(ctx, cursor, pattern, 500).Result()
+		if scanErr != nil {
+			return nil, fmt.Errorf("failed to list keys: %w", scanErr)
+		}
+		keys = append(keys, batch...)
+		cursor = next
+		if cursor == 0 {
+			break
+		}
 	}
 
 	var records []*SubmissionTrackingRecord

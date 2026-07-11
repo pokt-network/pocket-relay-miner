@@ -138,8 +138,8 @@ func inspectServiceParams(ctx context.Context, client *DebugRedisClient, service
 
 func inspectGlobalParams(ctx context.Context, client *DebugRedisClient) error {
 	keys := []string{
-		"ha:params:shared",
-		"ha:params:session",
+		client.KB().LegacyParamsKey("shared"),
+		client.KB().LegacyParamsKey("session"),
 	}
 
 	fmt.Printf("Global Parameters\n")
@@ -174,10 +174,10 @@ func inspectGlobalParams(ctx context.Context, client *DebugRedisClient) error {
 
 func showAllMeterKeys(ctx context.Context, client *DebugRedisClient) error {
 	patterns := []string{
-		"ha:meter:*",
-		"ha:params:*",
-		"ha:app_stake:*",
-		"ha:service:*",
+		client.KB().MeterSessionKey("*"),
+		client.KB().LegacyParamsPattern(),
+		client.KB().AppStakeKey("*"),
+		client.KB().ServiceComputeUnitsKey("*"),
 	}
 
 	fmt.Printf("All Metering Keys\n")

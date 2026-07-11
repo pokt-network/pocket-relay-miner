@@ -5,8 +5,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/pokt-network/pocket-relay-miner/config"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
@@ -169,19 +167,6 @@ type CacheConfig struct {
 	// LockTimeout is how long to wait when acquiring distributed locks.
 	// Default: 5s
 	LockTimeout time.Duration
-}
-
-// DefaultCacheConfig returns sensible default cache configuration.
-func DefaultCacheConfig() CacheConfig {
-	return CacheConfig{
-		// Derive from the KeyBuilder default so this can never drift from the
-		// golden-tested "ha:cache" prefix (channels come from KB directly now).
-		CachePrefix:            redisutil.NewKeyBuilder(config.RedisNamespaceConfig{}).CachePrefix(),
-		TTLBlocks:              1,
-		BlockTimeSeconds:       30,
-		ExtraGracePeriodBlocks: 2,
-		LockTimeout:            5 * time.Second,
-	}
 }
 
 // BlocksToTTL converts a number of blocks to a time.Duration.

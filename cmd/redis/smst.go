@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
@@ -22,7 +23,7 @@ func SMSTCmd() *cobra.Command {
 		Long: `Inspect Sparse Merkle Sum Tree (SMST) nodes stored in Redis.
 
 SMST data is stored at:
-  - Key: ha:smst:{sessionID}:nodes (Hash)
+  - Key: {base}:smst:{supplier}:{sessionID}:nodes (Hash)
   - Fields: Hex-encoded SMST node keys
   - Values: Raw SMST node data
 
@@ -53,7 +54,7 @@ func inspectSMST(ctx context.Context, client *DebugRedisClient, sessionID string
 	// single-arg key ({base}:smst:{session}:nodes) that production no longer
 	// writes — that shape silently reported "No SMST data found" for every
 	// real key.
-	pattern := fmt.Sprintf("%s*:%s:nodes", client.KB().SMSTNodesPrefix(), sessionID)
+	pattern := client.KB().SMSTSessionNodesPattern(sessionID)
 	keys, err := clusterAwareScanAllKeys(ctx, client, pattern)
 	if err != nil {
 		return fmt.Errorf("failed to scan SMST keys: %w", err)
@@ -138,8 +139,12 @@ func displaySMSTTree(ctx context.Context, client *DebugRedisClient, key string, 
 
 	_ = w.Flush()
 
-	// Offer to delete
-	fmt.Printf("\nTo delete this SMST tree, use: redis-debug flush --pattern '%s'\n\n", key)
+	// Offer to delete. Suggest the whole per-tree pattern (:nodes, :root,
+	// :stats, :live_root), not just the :nodes hash — deleting only :nodes
+	// would orphan the sibling keys. Derived from the scanned key, which is
+	// KeyBuilder-shaped ({base}:smst:{supplier}:{session}:nodes).
+	treePattern := strings.TrimSuffix(key, ":nodes") + ":*"
+	fmt.Printf("\nTo delete this SMST tree, use: redis-debug flush --pattern '%s'\n\n", treePattern)
 
 	return nil
 }

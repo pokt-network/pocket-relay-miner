@@ -220,7 +220,7 @@ func cachePattern(kb *transportredis.KeyBuilder, cacheType string) (pattern stri
 	case "account":
 		return kb.CacheKey("account", "*"), "", nil
 	case "supplier":
-		return fmt.Sprintf("%s:*", kb.SupplierKeyPrefix()), kb.CacheKnownKey("suppliers"), nil
+		return kb.SupplierStatePattern(), kb.CacheKnownKey("suppliers"), nil
 	case "shared_params":
 		return kb.ParamsSharedCacheKey(), "", nil
 	case "session_params":
@@ -240,7 +240,7 @@ func keyFromRedisKey(kb *transportredis.KeyBuilder, cacheType, redisKey string) 
 	case "application", "service", "account":
 		return strings.TrimPrefix(redisKey, kb.CacheKey(cacheType, ""))
 	case "supplier":
-		return strings.TrimPrefix(redisKey, fmt.Sprintf("%s:", kb.SupplierKeyPrefix()))
+		return strings.TrimPrefix(redisKey, kb.SupplierStateKey(""))
 	default:
 		return redisKey
 	}
@@ -467,14 +467,14 @@ func invalidateFromFile(ctx context.Context, client *DebugRedisClient, cacheType
 	if err != nil {
 		return err
 	}
-	if !dryRun && !confirmSupplierInvalidation(cacheType, len(keys), yes) {
-		return nil
-	}
-
 	total := len(keys)
 	if total == 0 {
 		fmt.Printf("key-file %q contained no keys (blank lines and '#' comments are ignored)\n", path)
 		fmt.Printf("invalidated 0 entries total\n")
+		return nil
+	}
+	// Empty-file check first: prompting to confirm zero deletions is noise.
+	if !dryRun && !confirmSupplierInvalidation(cacheType, total, yes) {
 		return nil
 	}
 
@@ -530,7 +530,7 @@ func buildCacheKey(kb *transportredis.KeyBuilder, cacheType, key string) string 
 	case "application", "service", "account":
 		return kb.CacheKey(cacheType, key)
 	case "supplier":
-		return fmt.Sprintf("%s:%s", kb.SupplierKeyPrefix(), key)
+		return kb.SupplierStateKey(key)
 	case "shared_params":
 		return kb.ParamsSharedCacheKey()
 	case "session_params":

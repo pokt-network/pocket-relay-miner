@@ -66,6 +66,12 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"MeterSessionKey":                     kb.MeterSessionKey("sess1"),
 		"AppStakeKey":                         kb.AppStakeKey("app1"),
 		"ServiceComputeUnitsKey":              kb.ServiceComputeUnitsKey("svc1"),
+		"SupplierStateKey":                    kb.SupplierStateKey("pokt1a"),
+		"SupplierStatePattern":                kb.SupplierStatePattern(),
+		"SMSTSessionNodesPattern":             kb.SMSTSessionNodesPattern("sess1"),
+		"SMSTSessionAllPattern":               kb.SMSTSessionAllPattern("sup1", "sess1"),
+		"LegacyParamsKey":                     kb.LegacyParamsKey("shared"),
+		"LegacyParamsPattern":                 kb.LegacyParamsPattern(),
 	}
 }
 
@@ -139,6 +145,26 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"MeterSessionKey":                     "ha:meter:sess1",
 		"AppStakeKey":                         "ha:app_stake:app1",
 		"ServiceComputeUnitsKey":              "ha:service:svc1:compute_units",
+		"SupplierStateKey":                    "ha:supplier:pokt1a",
+		"SupplierStatePattern":                "ha:supplier:*",
+		"SMSTSessionNodesPattern":             "ha:smst:*:sess1:nodes",
+		"SMSTSessionAllPattern":               "ha:smst:sup1:sess1:*",
+		"LegacyParamsKey":                     "ha:params:shared",
+		"LegacyParamsPattern":                 "ha:params:*",
+
+		// Methods the original golden map omitted (review finding): the SMST
+		// family, service factor, and miner coordination keys.
+		"SMSTNodesKey":            "ha:smst:sup1:sess1:nodes",
+		"SMSTNodesPattern":        "ha:smst:*:*:nodes",
+		"SMSTNodesPrefix":         "ha:smst:",
+		"SMSTRootKey":             "ha:smst:sup1:sess1:root",
+		"SMSTStatsKey":            "ha:smst:sup1:sess1:stats",
+		"SMSTLiveRootKey":         "ha:smst:sup1:sess1:live_root",
+		"ServiceFactorDefaultKey": "ha:service_factor:default",
+		"ServiceFactorServiceKey": "ha:service_factor:service:svc1",
+		"MinerClaimKey":           "ha:miner:claim:sup1",
+		"MinerActiveSetKey":       "ha:miner:active",
+		"MinerInstanceKey":        "ha:miner:instance:inst1",
 	}
 	outputs := allKeyBuilderOutputs(kb)
 	for method, want := range golden {

@@ -136,7 +136,7 @@ func listSubmissions(ctx context.Context, client *DebugRedisClient, supplier, se
 		pattern = client.KB().TxTrackPattern(supplier)
 	}
 
-	keys, err := client.Keys(ctx, pattern).Result()
+	keys, err := clusterAwareScanAllKeys(ctx, client, pattern)
 	if err != nil {
 		return fmt.Errorf("failed to scan keys: %w", err)
 	}

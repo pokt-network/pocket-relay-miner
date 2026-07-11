@@ -106,3 +106,22 @@ are preserved.
    continuous load (~200 RPS) against the relayer, run the cleanup without
    dry-run, assert zero rejected relays during/after, caches repopulate,
    claim/proof pipeline uninterrupted.
+
+## Namespace hardening addendum (2026-07-11)
+
+Branch `fix/redis-namespace-hardening`. Single construction scheme:
+every Redis key and pub/sub channel is built by a KeyBuilder method
+(57 methods, all golden-tested); per-field namespace defaulting makes
+empty segments (`prod::x`) impossible by construction.
+
+**Intentional semantic change**: a config that sets a sub-prefix but
+leaves `base_prefix` empty previously had the sub-prefix silently
+IGNORED (all-or-nothing defaulting replaced the whole namespace).
+Per-field defaulting now honors it. Any deployment relying on the old
+silent-ignore behavior (unlikely — it was a bug) will see its keys move
+on upgrade; operators with partial namespace configs should review them
+before upgrading.
+
+CLI enumeration is cluster-aware (per-master SCAN) and all bulk deletes
+are pipelined single-key DELs; production `ListRecordsForSupplier` no
+longer uses blocking KEYS.

@@ -68,6 +68,10 @@ func scanNode(ctx context.Context, c scanCmdable, pattern string) ([]string, err
 // rejected there). Returns the number of keys deleted; on error, reports how
 // far it got.
 func pipelinedDelete(ctx context.Context, client *DebugRedisClient, keys []string, batchSize int, progress func(deleted, total int)) (int, error) {
+	if batchSize <= 0 {
+		// Defensive: a non-positive batch size would never advance the loop.
+		batchSize = 500
+	}
 	deleted := 0
 	total := len(keys)
 	for start := 0; start < total; start += batchSize {

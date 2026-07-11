@@ -416,3 +416,50 @@ func (kb *KeyBuilder) AppStakeKey(appAddr string) string {
 func (kb *KeyBuilder) ServiceComputeUnitsKey(serviceID string) string {
 	return fmt.Sprintf("%s:service:%s:compute_units", kb.ns.BasePrefix, serviceID)
 }
+
+// SupplierStateKey builds the key for one supplier's shared state entry.
+// Format: {base}:{supplier}:{operatorAddress}
+// Example: "ha:supplier:pokt1abc"
+func (kb *KeyBuilder) SupplierStateKey(operatorAddress string) string {
+	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.SupplierPrefix, operatorAddress)
+}
+
+// SupplierStatePattern builds the SCAN pattern for all supplier state entries.
+// Format: {base}:{supplier}:*
+// Example: "ha:supplier:*"
+func (kb *KeyBuilder) SupplierStatePattern() string {
+	return fmt.Sprintf("%s:%s:*", kb.ns.BasePrefix, kb.ns.SupplierPrefix)
+}
+
+// SMSTSessionNodesPattern builds the SCAN pattern matching a session's SMST
+// nodes hashes across all suppliers.
+// Format: {base}:smst:*:{sessionID}:nodes
+// Example: "ha:smst:*:sess1:nodes"
+func (kb *KeyBuilder) SMSTSessionNodesPattern(sessionID string) string {
+	return fmt.Sprintf("%s:smst:*:%s:nodes", kb.ns.BasePrefix, sessionID)
+}
+
+// SMSTSessionAllPattern builds the SCAN pattern matching EVERY SMST key of
+// one supplier+session tree (:nodes, :root, :stats, :live_root), for
+// operator cleanup suggestions.
+// Format: {base}:smst:{supplier}:{sessionID}:*
+// Example: "ha:smst:pokt1abc:sess1:*"
+func (kb *KeyBuilder) SMSTSessionAllPattern(supplier, sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:%s:*", kb.ns.BasePrefix, supplier, sessionID)
+}
+
+// LegacyParamsKey builds a legacy metering params key. These keys are no
+// longer written by current code but remain inspectable for debugging older
+// deployments.
+// Format: {base}:params:{name}
+// Example: "ha:params:shared"
+func (kb *KeyBuilder) LegacyParamsKey(name string) string {
+	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.ParamsPrefix, name)
+}
+
+// LegacyParamsPattern builds the SCAN pattern for legacy metering params.
+// Format: {base}:params:*
+// Example: "ha:params:*"
+func (kb *KeyBuilder) LegacyParamsPattern() string {
+	return fmt.Sprintf("%s:%s:*", kb.ns.BasePrefix, kb.ns.ParamsPrefix)
+}

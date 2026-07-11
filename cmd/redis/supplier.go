@@ -104,7 +104,7 @@ func getSupplierCacheState(ctx context.Context, client *DebugRedisClient, addres
 // getAllSupplierCacheStates reads all supplier states from cache
 func getAllSupplierCacheStates(ctx context.Context, client *DebugRedisClient) (map[string]*supplierCacheState, error) {
 	pattern := fmt.Sprintf("%s:*", client.KB().SupplierKeyPrefix())
-	keys, err := client.Keys(ctx, pattern).Result()
+	keys, err := clusterAwareScanAllKeys(ctx, client, pattern)
 	if err != nil {
 		return nil, err
 	}
@@ -138,7 +138,7 @@ func listSupplierClaims(ctx context.Context, client *DebugRedisClient) error {
 
 	// Get all claim keys using pattern from KeyBuilder
 	claimPattern := kb.MinerClaimKey("*")
-	claimKeys, err := client.Keys(ctx, claimPattern).Result()
+	claimKeys, err := clusterAwareScanAllKeys(ctx, client, claimPattern)
 	if err != nil {
 		return fmt.Errorf("failed to get claim keys: %w", err)
 	}
