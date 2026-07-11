@@ -38,6 +38,7 @@ func CacheCmd() *cobra.Command {
 Cache types:
   - application: ha:cache:application:{address}
   - service: ha:cache:service:{serviceID}
+  - account: ha:cache:account:{address}
   - supplier: ha:supplier:{address}
   - shared_params: ha:cache:shared_params
   - session_params: ha:cache:session_params
@@ -154,7 +155,7 @@ Examples:
 		},
 	}
 
-	cmd.Flags().StringVar(&cacheType, "type", "", "Cache type (application|service|supplier|shared_params|session_params|proof_params|all)")
+	cmd.Flags().StringVar(&cacheType, "type", "", "Cache type (application|service|account|supplier|shared_params|session_params|proof_params|all)")
 	cmd.Flags().StringVar(&key, "key", "", "Cache key (address, service ID, etc)")
 	cmd.Flags().BoolVar(&invalidate, "invalidate", false, "Invalidate the cache entry")
 	cmd.Flags().BoolVar(&all, "all", false, "With --invalidate, invalidate every entry matching the type's prefix")
@@ -214,6 +215,8 @@ func cachePattern(cacheType string) (pattern string, knownSet string, err error)
 		return "ha:cache:application:*", "ha:cache:known:applications", nil
 	case "service":
 		return "ha:cache:service:*", "ha:cache:known:services", nil
+	case "account":
+		return "ha:cache:account:*", "", nil
 	case "supplier":
 		return "ha:supplier:*", "ha:cache:known:suppliers", nil
 	case "shared_params":
@@ -236,6 +239,8 @@ func keyFromRedisKey(cacheType, redisKey string) string {
 		return strings.TrimPrefix(redisKey, "ha:cache:application:")
 	case "service":
 		return strings.TrimPrefix(redisKey, "ha:cache:service:")
+	case "account":
+		return strings.TrimPrefix(redisKey, "ha:cache:account:")
 	case "supplier":
 		return strings.TrimPrefix(redisKey, "ha:supplier:")
 	default:
@@ -509,6 +514,8 @@ func buildCacheKey(cacheType, key string) string {
 		return fmt.Sprintf("ha:cache:application:%s", key)
 	case "service":
 		return fmt.Sprintf("ha:cache:service:%s", key)
+	case "account":
+		return fmt.Sprintf("ha:cache:account:%s", key)
 	case "supplier":
 		return fmt.Sprintf("ha:supplier:%s", key)
 	case "shared_params":

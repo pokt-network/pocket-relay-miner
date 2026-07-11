@@ -77,13 +77,20 @@ func newCleanupScope(client *DebugRedisClient) cleanupScope {
 	for _, t := range clearAllChannelTypes {
 		channels = append(channels, kb.EventChannel(t, "invalidate"))
 	}
-	// RedisSupplierParamCache subscribes on {base}:{events}:invalidate:supplier_params
-	// (cache/supplier_params.go), not on the EventChannel scheme, and its L1
-	// has no TTL — without this publish, running instances would serve the
-	// pre-cleanup supplier params until restart. Derive {base}:{events} from
-	// an EventChannel result (its trailing segments are literals).
-	eventsPrefix := strings.TrimSuffix(kb.EventChannel("x", "y"), ":cache:x:y")
-	channels = append(channels, eventsPrefix+":invalidate:supplier_params")
+	// RedisSupplierParamCache subscribes on {EventsCachePrefix}:invalidate:supplier_params:
+	// the miner wires its PubSubPrefix to KB().EventsCachePrefix() (see
+	// miner/leader_controller.go), not to the EventChannel scheme. Its L1 has
+	// no TTL — without this publish, running instances would serve the
+	// pre-cleanup supplier params until restart. The handler clears on any
+	// payload.
+	channels = append(channels, kb.EventsCachePrefix()+":invalidate:supplier_params")
+
+	// Deliberately NOT notified: the relayer's height-keyed
+	// RedisSharedParamCache (cache/shared_params.go) subscribes on
+	// {base}:{events}:invalidate:params but only understands numeric
+	// per-height payloads — there is no clear-all it can parse. Safe to skip:
+	// its L2 keys ({cachePrefix}:params:shared:{height}) are height-immutable
+	// and regenerable via L3, and its L1 TTL is one block.
 
 	return cleanupScope{
 		cachePattern:    cachePrefix + ":*",
@@ -277,6 +284,11 @@ func invalidateAllTypes(ctx context.Context, client *DebugRedisClient, dryRun, y
 		fmt.Printf("No regenerable cache keys found\n")
 		printCleanupBreakdown(scope, plan)
 		fmt.Printf("invalidated 0 entries total\n")
+		// Still publish the clear-all: a re-run after a crash between the
+		// delete phase and the publish phase finds zero keys but must still
+		// tell subscribers to drop their (now orphaned) L1 entries.
+		published := publishClearAll(ctx, client, scope)
+		fmt.Printf("Published clear-all to %d/%d invalidation channels\n", published, len(scope.channels))
 		return nil
 	}
 

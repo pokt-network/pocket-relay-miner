@@ -50,11 +50,20 @@ about the 503 window.
    nothing.
 3. Interactive confirmation unless `--yes` (same pattern as `invalidateAll`).
 4. DEL in pipelined batches of 500.
-5. **After** deletion, publish `{}` (clear-all payload) to the six
-   invalidation channels: `application`, `service`, `supplier`, `account`,
-   `shared_params`, `proof_params` — clears L1 fleet-wide immediately.
-   Publishing before deletion would let L1s repopulate from a half-deleted
-   L2.
+5. **After** deletion, publish `{}` (clear-all payload) to seven channels:
+   the six EventChannel types (`application`, `service`, `supplier`,
+   `account`, `shared_params`, `proof_params`) plus the supplier_params
+   cache's nonstandard channel
+   `{EventsCachePrefix}:invalidate:supplier_params` (its L1 has no TTL) —
+   clears L1 fleet-wide immediately. Publishing before deletion would let
+   L1s repopulate from a half-deleted L2. The clear-all is also published on
+   a zero-key run so a re-run after a crash between the delete and publish
+   phases still notifies subscribers.
+
+   Deliberately NOT notified: the relayer's height-keyed
+   `RedisSharedParamCache` only parses numeric per-height payloads (no
+   clear-all exists); its L2 keys are height-immutable, regenerable via L3,
+   and its L1 TTL is one block — safe to skip.
 
    **Bug found and fixed during implementation**: the `{}` clear-all branch
    in the four entity caches (`application`, `service`, `account`,
@@ -65,9 +74,8 @@ about the 503 window.
    were already correct (they clear+reload L1 on any payload).
 6. Print summary: deleted keys per type + channels notified.
 
-`session_params` / `supplier_params` caches don't subscribe to
-invalidations; their L2 keys are deleted via the `ha:cache:*` pattern and
-their L1 ages out via TTL.
+`session_params` has no invalidation subscriber; its L2 key is deleted via
+the cache pattern and its L1 ages out via TTL.
 
 Flag validation: `--type all` requires `--invalidate --all`; `--key` and
 `--key-file` are rejected with a clear error.
