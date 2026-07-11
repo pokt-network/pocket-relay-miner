@@ -978,16 +978,18 @@ var (
 		[]string{"reason"}, // reason: chain_query_error
 	)
 
-	// supplierBootServicesFallback counts supplier-services resolutions that
-	// used the denormalized snapshot because no block height was observed
-	// yet (miner boot). A nonzero rate outside boot windows means block
-	// events are not flowing to this miner.
+	// supplierBootServicesFallback counts supplier-services RESOLUTIONS (one
+	// per supplier per pass, across warmup and reconcile) that used the
+	// denormalized snapshot because no block height was observed yet. A boot
+	// produces one short burst (~number of suppliers); a SUSTAINED rate
+	// afterwards means Redis block events are not reaching this miner.
+	// Deployments without a BlockClient (tooling) never increment it.
 	supplierBootServicesFallback = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "supplier_boot_services_fallback_total",
-			Help:      "Supplier service resolutions that fell back to the denormalized snapshot because block height was unknown (boot)",
+			Help:      "Supplier service resolutions that fell back to the denormalized snapshot because block height was unknown (boot burst expected; sustained rate = block events not flowing)",
 		},
 	)
 

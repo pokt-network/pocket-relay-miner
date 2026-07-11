@@ -548,9 +548,16 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 		}
 
 		// Supplier is staked. Resolve services height-aware, with a boot-time
-		// fallback (see resolveSupplierServices).
-		services := m.resolveSupplierServices(ctx, &supplier, addr)
-		m.writeSupplierStatusToCache(ctx, addr, true, services, supplier.GetUnstakeSessionEndHeight())
+		// fallback (see resolveSupplierServices). An unreliable result (no
+		// height AND empty snapshot) must never be persisted — that is the
+		// contaminated tuple — so the previous cache entry is preserved and
+		// the next reconcile pass (with a real height) writes the truth.
+		services, reliable := m.resolveSupplierServices(ctx, &supplier, addr)
+		if reliable {
+			m.writeSupplierStatusToCache(ctx, addr, true, services, supplier.GetUnstakeSessionEndHeight())
+		} else {
+			supplierCacheWriteSkipped.WithLabelValues("unreliable_boot_snapshot").Inc()
+		}
 		stakedSuppliers = append(stakedSuppliers, addr)
 	}
 
@@ -766,13 +773,35 @@ func (m *SupplierManager) warmupSingleSupplier(ctx context.Context, supplier str
 		return nil
 	}
 
+	services, reliable := m.resolveSupplierServices(ctx, &chainSupplier, supplier)
+	if !reliable {
+		// An empty snapshot with no observed height carries no usable
+		// information; returning nil makes the caller fall back to the
+		// chain-query path, whose own resolve run will skip the cache write
+		// (see resolveAndPublishSupplierState) instead of persisting the
+		// contaminated tuple.
+		return nil
+	}
+
 	return &SupplierWarmupData{
 		OwnerAddress: chainSupplier.OwnerAddress,
-		Services:     m.resolveSupplierServices(ctx, &chainSupplier, supplier),
+		Services:     services,
 	}
 }
 
-// resolveSupplierServices returns the service IDs a supplier should serve.
+// serviceIDs extracts the non-nil service IDs from a config list.
+func serviceIDs(configs []*sharedtypes.SupplierServiceConfig) []string {
+	out := make([]string, 0, len(configs))
+	for _, svc := range configs {
+		if svc != nil {
+			out = append(out, svc.ServiceId)
+		}
+	}
+	return out
+}
+
+// resolveSupplierServices returns the service IDs a supplier should serve,
+// plus whether the result is reliable enough to PERSIST to the shared cache.
 //
 // Preferred source is the height-aware active set from ServiceConfigHistory:
 // poktroll schedules service additions/removals via activation_height /
@@ -790,37 +819,41 @@ func (m *SupplierManager) warmupSingleSupplier(ctx context.Context, supplier str
 // in one second after a restart). When the height is unknown, fall back to
 // the denormalized snapshot — slightly stale on scheduled changes for at
 // most one reconcile interval, never empty for a serving supplier.
-func (m *SupplierManager) resolveSupplierServices(ctx context.Context, supplier *sharedtypes.Supplier, addr string) []string {
+//
+// reliable=false means "do not persist": the height is unknown AND the
+// snapshot is empty, so writing would recreate the contaminated tuple the
+// commit forbids — callers preserve the previous cache entry instead. A
+// legitimately-empty active set at a KNOWN height stays reliable: that is
+// authoritative on-chain state.
+func (m *SupplierManager) resolveSupplierServices(ctx context.Context, supplier *sharedtypes.Supplier, addr string) (services []string, reliable bool) {
+	// A nil BlockClient (tooling/tests) can never observe a height; the
+	// snapshot is permanently the best available source, so it is used
+	// without the boot metric/log (which would otherwise fire forever and
+	// break the metric's "nonzero outside boot windows" alert contract).
+	if m.config.BlockClient == nil {
+		services = serviceIDs(supplier.Services)
+		return services, len(services) > 0
+	}
+
 	var currentHeight int64
-	if m.config.BlockClient != nil {
-		if block := m.config.BlockClient.LastBlock(ctx); block != nil {
-			currentHeight = block.Height()
-		}
+	if block := m.config.BlockClient.LastBlock(ctx); block != nil {
+		currentHeight = block.Height()
 	}
 
 	if currentHeight == 0 {
-		services := make([]string, 0, len(supplier.Services))
-		for _, svc := range supplier.Services {
-			if svc != nil {
-				services = append(services, svc.ServiceId)
-			}
-		}
+		services = serviceIDs(supplier.Services)
 		supplierBootServicesFallback.Inc()
-		m.logger.Info().
+		// Debug, not Info: this fires per supplier and, if block events are
+		// broken after a restart, on every reconcile pass — the sustained
+		// fallback counter rate is the operator signal, not the log line.
+		m.logger.Debug().
 			Str(logging.FieldSupplier, addr).
 			Int("services", len(services)).
 			Msg("no block height observed yet (boot); using denormalized service snapshot until first reconcile")
-		return services
+		return services, len(services) > 0
 	}
 
-	activeConfigs := supplier.GetActiveServiceConfigs(currentHeight)
-	services := make([]string, 0, len(activeConfigs))
-	for _, svc := range activeConfigs {
-		if svc != nil {
-			services = append(services, svc.ServiceId)
-		}
-	}
-	return services
+	return serviceIDs(supplier.GetActiveServiceConfigs(currentHeight)), true
 }
 
 // addSupplierWithHandoff adds a supplier with handoff validation.
@@ -1306,6 +1339,7 @@ const (
 	supplierDataSourceChainOK
 	supplierDataSourceChainNotFound
 	supplierDataSourceChainError
+	supplierDataSourceUnreliableBoot
 )
 
 // resolveAndPublishSupplierState obtains a supplier's services + owner
@@ -1355,12 +1389,18 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 			}
 		} else {
 			ownerAddr = supplier.OwnerAddress
-			for _, svc := range supplier.Services {
-				if svc != nil {
-					services = append(services, svc.ServiceId)
-				}
+			// Height-aware resolve with boot fallback — this was the third
+			// writer path still publishing the raw denormalized snapshot at
+			// ANY height (review finding): with a known height it must
+			// respect activation/deactivation heights like every other
+			// writer, and an unreliable boot result must not be persisted.
+			var reliable bool
+			services, reliable = m.resolveSupplierServices(ctx, &supplier, operatorAddr)
+			if reliable {
+				source = supplierDataSourceChainOK
+			} else {
+				source = supplierDataSourceUnreliableBoot
 			}
-			source = supplierDataSourceChainOK
 			m.logger.Debug().
 				Str(logging.FieldSupplier, operatorAddr).
 				Str("services", fmt.Sprintf("%v", services)).
@@ -1423,6 +1463,15 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 		m.logger.Warn().
 			Str(logging.FieldSupplier, operatorAddr).
 			Msg("skipping cache update: chain query failed, preserving previous state")
+
+	case supplierDataSourceUnreliableBoot:
+		// No observed height AND an empty snapshot: nothing trustworthy to
+		// write. Preserve the previous entry; the first reconcile with a
+		// real height persists the truth.
+		supplierCacheWriteSkipped.WithLabelValues("unreliable_boot_snapshot").Inc()
+		m.logger.Debug().
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("skipping cache update: no block height yet and empty service snapshot, preserving previous state")
 
 	case supplierDataSourceNoQueryClient:
 		// No query client and no prewarmed data — nothing to publish.
