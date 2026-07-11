@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -64,7 +65,7 @@ func (c *RedisSessionCache) storeSession(key string, height int64, session *sess
 // RedisSessionCache implements SessionCache using Redis as L2 cache.
 type RedisSessionCache struct {
 	logger        logging.Logger
-	redisClient   redis.UniversalClient
+	redisClient   *redisutil.Client
 	sessionClient client.SessionQueryClient
 	sharedClient  client.SharedQueryClient
 	blockClient   client.BlockClient
@@ -90,17 +91,14 @@ type RedisSessionCache struct {
 // NewRedisSessionCache creates a new SessionCache backed by Redis.
 func NewRedisSessionCache(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	sessionClient client.SessionQueryClient,
 	sharedClient client.SharedQueryClient,
 	blockClient client.BlockClient,
 	config CacheConfig,
 ) *RedisSessionCache {
 	if config.CachePrefix == "" {
-		config.CachePrefix = "ha:cache"
-	}
-	if config.PubSubPrefix == "" {
-		config.PubSubPrefix = "ha:events"
+		config.CachePrefix = redisClient.KB().CachePrefix()
 	}
 	if config.BlockTimeSeconds == 0 {
 		config.BlockTimeSeconds = 6
@@ -143,7 +141,7 @@ func (c *RedisSessionCache) Start(ctx context.Context) error {
 func (c *RedisSessionCache) subscribeToRewardabilityUpdates(ctx context.Context) {
 	defer c.wg.Done()
 
-	channel := c.config.PubSubPrefix + ":session:rewardable"
+	channel := c.redisClient.KB().SessionRewardableChannel()
 	pubsub := c.redisClient.Subscribe(ctx, channel)
 	defer func() { _ = pubsub.Close() }()
 
@@ -453,7 +451,7 @@ func (c *RedisSessionCache) MarkSessionNonRewardable(ctx context.Context, sessio
 	c.rewardableCache.Store(sessionId, false)
 
 	// Publish to notify other instances
-	channel := c.config.PubSubPrefix + ":session:rewardable"
+	channel := c.redisClient.KB().SessionRewardableChannel()
 	update := SessionRewardableUpdate{
 		SessionID:    sessionId,
 		IsRewardable: false,

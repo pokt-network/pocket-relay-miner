@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 )
@@ -19,7 +20,7 @@ var _ SupplierParamCache = (*RedisSupplierParamCache)(nil)
 // RedisSupplierParamCache implements SupplierParamCache using Redis as L2 cache.
 type RedisSupplierParamCache struct {
 	logger         logging.Logger
-	redisClient    redis.UniversalClient
+	redisClient    *redisutil.Client
 	supplierClient client.SupplierQueryClient
 	config         CacheConfig
 
@@ -41,12 +42,12 @@ type RedisSupplierParamCache struct {
 // NewRedisSupplierParamCache creates a new SupplierParamCache backed by Redis.
 func NewRedisSupplierParamCache(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	supplierClient client.SupplierQueryClient,
 	config CacheConfig,
 ) *RedisSupplierParamCache {
 	if config.CachePrefix == "" {
-		config.CachePrefix = "ha:cache"
+		config.CachePrefix = redisClient.KB().CachePrefix()
 	}
 	if config.TTLBlocks == 0 {
 		config.TTLBlocks = 100 // Supplier params rarely change
@@ -90,7 +91,7 @@ func (c *RedisSupplierParamCache) Start(ctx context.Context) error {
 func (c *RedisSupplierParamCache) subscribeToInvalidations(ctx context.Context) {
 	defer c.wg.Done()
 
-	channel := c.config.PubSubPrefix + ":invalidate:supplier_params"
+	channel := c.redisClient.KB().SupplierParamsInvalidateChannel()
 	pubsub := c.redisClient.Subscribe(ctx, channel)
 	defer func() { _ = pubsub.Close() }()
 
@@ -280,7 +281,7 @@ func (c *RedisSupplierParamCache) Refresh(ctx context.Context) error {
 	}
 
 	// Publish invalidation to other instances so they clear L1 and reload from L2
-	channel := c.config.PubSubPrefix + ":invalidate:supplier_params"
+	channel := c.redisClient.KB().SupplierParamsInvalidateChannel()
 	if err := c.redisClient.Publish(ctx, channel, "refresh").Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("failed to publish supplier params refresh notification")
 	}
@@ -312,7 +313,7 @@ func (c *RedisSupplierParamCache) InvalidateSupplierParams(ctx context.Context) 
 	}
 
 	// Notify other instances
-	channel := c.config.PubSubPrefix + ":invalidate:supplier_params"
+	channel := c.redisClient.KB().SupplierParamsInvalidateChannel()
 	if err := c.redisClient.Publish(ctx, channel, "invalidate").Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("failed to publish invalidation")
 	}

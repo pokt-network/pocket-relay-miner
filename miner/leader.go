@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 const (
@@ -78,7 +79,7 @@ type LeaderCallbacks struct {
 // RedisLeaderElector implements LeaderElector using Redis.
 type RedisLeaderElector struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	config      LeaderElectorConfig
 	callbacks   LeaderCallbacks
 
@@ -96,7 +97,7 @@ type RedisLeaderElector struct {
 // NewRedisLeaderElector creates a new Redis-based leader elector.
 func NewRedisLeaderElector(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	config LeaderElectorConfig,
 	callbacks LeaderCallbacks,
 ) *RedisLeaderElector {
@@ -111,7 +112,7 @@ func NewRedisLeaderElector(
 		config.AcquireRetryInterval = DefaultAcquireRetryInterval
 	}
 	if config.KeyPrefix == "" {
-		config.KeyPrefix = "ha:miner:leader"
+		config.KeyPrefix = redisClient.KB().MinerLeaderPrefix()
 	}
 
 	return &RedisLeaderElector{

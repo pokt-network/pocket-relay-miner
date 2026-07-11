@@ -6,9 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/redis/go-redis/v9"
-
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // Deduplicator ensures that reclaimed relays (XAUTOCLAIM redeliveries from
@@ -53,7 +52,7 @@ type Deduplicator interface {
 // encoding both in the client heap and in Redis storage.
 type RedisDeduplicator struct {
 	logger      logging.Logger
-	redisClient redis.UniversalClient
+	redisClient *redisutil.Client
 	config      DeduplicatorConfig
 	keyPrefix   string
 
@@ -76,11 +75,11 @@ type DeduplicatorConfig struct {
 // NewRedisDeduplicator constructs a Redis-backed deduplicator.
 func NewRedisDeduplicator(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	config DeduplicatorConfig,
 ) *RedisDeduplicator {
 	if config.KeyPrefix == "" {
-		config.KeyPrefix = "ha:miner:dedup"
+		config.KeyPrefix = redisClient.KB().MinerDedupPrefix()
 	}
 	if config.TTLBlocks == 0 {
 		config.TTLBlocks = 10 // session length + grace period + buffer

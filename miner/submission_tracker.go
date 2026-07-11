@@ -260,7 +260,7 @@ func (t *SubmissionTracker) GetRecord(ctx context.Context, supplier string, sess
 
 // ListRecordsForSupplier returns all tracking records for a supplier.
 func (t *SubmissionTracker) ListRecordsForSupplier(ctx context.Context, supplier string) ([]*SubmissionTrackingRecord, error) {
-	pattern := fmt.Sprintf("ha:tx:track:%s:*", supplier)
+	pattern := t.redisClient.KB().TxTrackPattern(supplier)
 
 	keys, err := t.redisClient.Keys(ctx, pattern).Result()
 	if err != nil {
@@ -290,7 +290,7 @@ func (t *SubmissionTracker) ListRecordsForSupplier(ctx context.Context, supplier
 // makeKey generates the Redis key for a tracking record.
 // Format: ha:tx:track:{supplier}:{sessionEndHeight}:{sessionID}
 func (t *SubmissionTracker) makeKey(supplier string, sessionEnd int64, sessionID string) string {
-	return fmt.Sprintf("ha:tx:track:%s:%d:%s", supplier, sessionEnd, sessionID)
+	return t.redisClient.KB().TxTrackKey(supplier, sessionEnd, sessionID)
 }
 
 // ClaimOnChainUpdate is the payload passed to

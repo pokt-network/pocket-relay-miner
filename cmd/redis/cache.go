@@ -9,6 +9,8 @@ import (
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	transportredis "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // bulkConfirmThreshold is the number of keys above which `--all` requires
@@ -169,7 +171,7 @@ Examples:
 }
 
 func inspectCacheKey(ctx context.Context, client *DebugRedisClient, cacheType, key string) error {
-	redisKey := buildCacheKey(cacheType, key)
+	redisKey := buildCacheKey(client.KB(), cacheType, key)
 
 	exists, err := client.Exists(ctx, redisKey).Result()
 	if err != nil {
@@ -209,22 +211,22 @@ func inspectCacheKey(ctx context.Context, client *DebugRedisClient, cacheType, k
 // cachePattern returns the SCAN pattern and known-set key (if any) for a cache type.
 // For singleton types (shared_params, session_params, proof_params) the pattern
 // matches the single Redis key.
-func cachePattern(cacheType string) (pattern string, knownSet string, err error) {
+func cachePattern(kb *transportredis.KeyBuilder, cacheType string) (pattern string, knownSet string, err error) {
 	switch cacheType {
 	case "application":
-		return "ha:cache:application:*", "ha:cache:known:applications", nil
+		return kb.CacheKey("application", "*"), kb.CacheKnownKey("applications"), nil
 	case "service":
-		return "ha:cache:service:*", "ha:cache:known:services", nil
+		return kb.CacheKey("service", "*"), kb.CacheKnownKey("services"), nil
 	case "account":
-		return "ha:cache:account:*", "", nil
+		return kb.CacheKey("account", "*"), "", nil
 	case "supplier":
-		return "ha:supplier:*", "ha:cache:known:suppliers", nil
+		return fmt.Sprintf("%s:*", kb.SupplierKeyPrefix()), kb.CacheKnownKey("suppliers"), nil
 	case "shared_params":
-		return "ha:cache:shared_params", "", nil
+		return kb.ParamsSharedCacheKey(), "", nil
 	case "session_params":
-		return "ha:cache:session_params", "", nil
+		return kb.ParamsSessionKey(), "", nil
 	case "proof_params":
-		return "ha:cache:proof_params", "", nil
+		return kb.ParamsProofKey(), "", nil
 	default:
 		return "", "", fmt.Errorf("unknown cache type: %s", cacheType)
 	}
@@ -233,23 +235,19 @@ func cachePattern(cacheType string) (pattern string, knownSet string, err error)
 // keyFromRedisKey extracts the logical key (address / service id) from a full
 // Redis key for a given cache type. Used so pub/sub payloads and known-set
 // SREM arguments match what the single-key path uses.
-func keyFromRedisKey(cacheType, redisKey string) string {
+func keyFromRedisKey(kb *transportredis.KeyBuilder, cacheType, redisKey string) string {
 	switch cacheType {
-	case "application":
-		return strings.TrimPrefix(redisKey, "ha:cache:application:")
-	case "service":
-		return strings.TrimPrefix(redisKey, "ha:cache:service:")
-	case "account":
-		return strings.TrimPrefix(redisKey, "ha:cache:account:")
+	case "application", "service", "account":
+		return strings.TrimPrefix(redisKey, kb.CacheKey(cacheType, ""))
 	case "supplier":
-		return strings.TrimPrefix(redisKey, "ha:supplier:")
+		return strings.TrimPrefix(redisKey, fmt.Sprintf("%s:", kb.SupplierKeyPrefix()))
 	default:
 		return redisKey
 	}
 }
 
 func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType string) error {
-	pattern, knownSetKey, err := cachePattern(cacheType)
+	pattern, knownSetKey, err := cachePattern(client.KB(), cacheType)
 	if err != nil {
 		return err
 	}
@@ -377,7 +375,7 @@ func invalidateCache(ctx context.Context, client *DebugRedisClient, cacheType, k
 	if !confirmSupplierInvalidation(cacheType, 1, yes) {
 		return nil
 	}
-	redisKey := buildCacheKey(cacheType, key)
+	redisKey := buildCacheKey(client.KB(), cacheType, key)
 
 	// Delete the key
 	if err := client.Del(ctx, redisKey).Err(); err != nil {
@@ -387,7 +385,7 @@ func invalidateCache(ctx context.Context, client *DebugRedisClient, cacheType, k
 	fmt.Printf("Invalidated cache entry: %s\n", redisKey)
 
 	// Publish invalidation event
-	channel := fmt.Sprintf("ha:events:cache:%s:invalidate", cacheType)
+	channel := client.KB().EventChannel(cacheType, "invalidate")
 	payload := invalidationPayload(cacheType, key)
 
 	if err := client.Publish(ctx, channel, payload).Err(); err != nil {
@@ -398,7 +396,7 @@ func invalidateCache(ctx context.Context, client *DebugRedisClient, cacheType, k
 
 	// Best-effort SREM from the known tracking set. Silent on both success and
 	// absence so the single-key output stays byte-identical to prior releases.
-	if _, knownSet, err := cachePattern(cacheType); err == nil && knownSet != "" {
+	if _, knownSet, err := cachePattern(client.KB(), cacheType); err == nil && knownSet != "" {
 		_ = client.SRem(ctx, knownSet, key).Err()
 	}
 
@@ -408,22 +406,22 @@ func invalidateCache(ctx context.Context, client *DebugRedisClient, cacheType, k
 // invalidateOneQuiet performs the same actions as invalidateCache but emits no
 // stdout. Used by bulk paths which print progress separately.
 func invalidateOneQuiet(ctx context.Context, client *DebugRedisClient, cacheType, key string) error {
-	redisKey := buildCacheKey(cacheType, key)
+	redisKey := buildCacheKey(client.KB(), cacheType, key)
 	if err := client.Del(ctx, redisKey).Err(); err != nil {
 		return fmt.Errorf("failed to delete cache key %q: %w", redisKey, err)
 	}
-	channel := fmt.Sprintf("ha:events:cache:%s:invalidate", cacheType)
+	channel := client.KB().EventChannel(cacheType, "invalidate")
 	payload := invalidationPayload(cacheType, key)
 	// Publish is best-effort; a missing subscriber should not fail the bulk op.
 	_ = client.Publish(ctx, channel, payload).Err()
-	if _, knownSet, err := cachePattern(cacheType); err == nil && knownSet != "" {
+	if _, knownSet, err := cachePattern(client.KB(), cacheType); err == nil && knownSet != "" {
 		_ = client.SRem(ctx, knownSet, key).Err()
 	}
 	return nil
 }
 
 func invalidateAll(ctx context.Context, client *DebugRedisClient, cacheType string, dryRun, yes bool) error {
-	pattern, _, err := cachePattern(cacheType)
+	pattern, _, err := cachePattern(client.KB(), cacheType)
 	if err != nil {
 		return err
 	}
@@ -469,7 +467,7 @@ func invalidateAll(ctx context.Context, client *DebugRedisClient, cacheType stri
 
 	done := 0
 	for _, rk := range redisKeys {
-		logicalKey := keyFromRedisKey(cacheType, rk)
+		logicalKey := keyFromRedisKey(client.KB(), cacheType, rk)
 		if err := invalidateOneQuiet(ctx, client, cacheType, logicalKey); err != nil {
 			return fmt.Errorf("bulk invalidate failed at key %q (completed %d/%d): %w", rk, done, total, err)
 		}
@@ -501,7 +499,7 @@ func invalidateFromFile(ctx context.Context, client *DebugRedisClient, cacheType
 	if dryRun {
 		fmt.Printf("[dry-run] would invalidate %d %s entries from %s:\n", total, cacheType, path)
 		for _, k := range keys {
-			fmt.Printf("  - %s\n", buildCacheKey(cacheType, k))
+			fmt.Printf("  - %s\n", buildCacheKey(client.KB(), cacheType, k))
 		}
 		fmt.Printf("[dry-run] no keys were deleted\n")
 		return nil
@@ -545,22 +543,18 @@ func readKeyFile(path string) ([]string, error) {
 	return keys, nil
 }
 
-func buildCacheKey(cacheType, key string) string {
+func buildCacheKey(kb *transportredis.KeyBuilder, cacheType, key string) string {
 	switch cacheType {
-	case "application":
-		return fmt.Sprintf("ha:cache:application:%s", key)
-	case "service":
-		return fmt.Sprintf("ha:cache:service:%s", key)
-	case "account":
-		return fmt.Sprintf("ha:cache:account:%s", key)
+	case "application", "service", "account":
+		return kb.CacheKey(cacheType, key)
 	case "supplier":
-		return fmt.Sprintf("ha:supplier:%s", key)
+		return fmt.Sprintf("%s:%s", kb.SupplierKeyPrefix(), key)
 	case "shared_params":
-		return "ha:cache:shared_params"
+		return kb.ParamsSharedCacheKey()
 	case "session_params":
-		return "ha:cache:session_params"
+		return kb.ParamsSessionKey()
 	case "proof_params":
-		return "ha:cache:proof_params"
+		return kb.ParamsProofKey()
 	default:
 		return key
 	}

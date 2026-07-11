@@ -139,6 +139,13 @@ func (kb *KeyBuilder) ParamsSharedCacheKey() string {
 	return fmt.Sprintf("%s:%s:shared_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
 }
 
+// ParamsSessionKey builds the key for the cached session params singleton.
+// Format: {base}:{cache}:session_params
+// Example: "ha:cache:session_params"
+func (kb *KeyBuilder) ParamsSessionKey() string {
+	return fmt.Sprintf("%s:%s:session_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
+}
+
 // ParamsSharedLockKey builds the lock key for shared params cache population.
 // Format: {base}:{cache}:lock:shared_params
 // Example: "ha:cache:lock:shared_params"
@@ -270,4 +277,76 @@ func (kb *KeyBuilder) MinerActiveSetKey() string {
 // This key has a TTL and acts as a heartbeat for the instance.
 func (kb *KeyBuilder) MinerInstanceKey(instanceID string) string {
 	return fmt.Sprintf("%s:%s:instance:%s", kb.ns.BasePrefix, kb.ns.MinerPrefix, instanceID)
+}
+
+// SupplierParamsInvalidateChannel builds the pub/sub channel for supplier
+// module param invalidations. NONSTANDARD scheme (predates EventChannel):
+// the subscriber (RedisSupplierParamCache, wired by the miner leader) has
+// always listened on {base}:{events}:{cache}:invalidate:supplier_params —
+// the string is frozen for mixed-fleet compatibility.
+// Format: {base}:{events}:{cache}:invalidate:supplier_params
+// Example: "ha:events:cache:invalidate:supplier_params"
+func (kb *KeyBuilder) SupplierParamsInvalidateChannel() string {
+	return fmt.Sprintf("%s:%s:%s:invalidate:supplier_params", kb.ns.BasePrefix, kb.ns.EventsPrefix, kb.ns.CachePrefix)
+}
+
+// SharedParamsHeightInvalidateChannel builds the pub/sub channel for the
+// relayer's height-keyed shared-params cache (RedisSharedParamCache).
+// NONSTANDARD scheme; payload is a numeric height, not JSON. Frozen string.
+// Format: {base}:{events}:invalidate:params
+// Example: "ha:events:invalidate:params"
+func (kb *KeyBuilder) SharedParamsHeightInvalidateChannel() string {
+	return fmt.Sprintf("%s:%s:invalidate:params", kb.ns.BasePrefix, kb.ns.EventsPrefix)
+}
+
+// SessionRewardableChannel builds the pub/sub channel for session
+// rewardable-state updates (RedisSessionCache, relayer). Frozen string.
+// Format: {base}:{events}:session:rewardable
+// Example: "ha:events:session:rewardable"
+func (kb *KeyBuilder) SessionRewardableChannel() string {
+	return fmt.Sprintf("%s:%s:session:rewardable", kb.ns.BasePrefix, kb.ns.EventsPrefix)
+}
+
+// MinerLeaderPrefix builds the key prefix for per-supplier leader election.
+// Format: {base}:{miner}:leader
+// Example: "ha:miner:leader"
+func (kb *KeyBuilder) MinerLeaderPrefix() string {
+	return fmt.Sprintf("%s:%s:leader", kb.ns.BasePrefix, kb.ns.MinerPrefix)
+}
+
+// MinerDedupPrefix builds the key prefix for relay deduplication sets.
+// Format: {base}:{miner}:dedup
+// Example: "ha:miner:dedup"
+func (kb *KeyBuilder) MinerDedupPrefix() string {
+	return fmt.Sprintf("%s:%s:dedup", kb.ns.BasePrefix, kb.ns.MinerPrefix)
+}
+
+// MinerSessionStateIndexKey builds the key for the per-state session index.
+// Format: {base}:{miner}:sessions:{supplier}:state:{state}
+// Example: "ha:miner:sessions:pokt1abc:state:proved"
+func (kb *KeyBuilder) MinerSessionStateIndexKey(supplier, state string) string {
+	return fmt.Sprintf("%s:%s:sessions:%s:state:%s", kb.ns.BasePrefix, kb.ns.MinerPrefix, supplier, state)
+}
+
+// MinerSessionsIndexKey builds the key for a supplier's session-ID index.
+// Format: {base}:{miner}:sessions:{supplier}:index
+// Example: "ha:miner:sessions:pokt1abc:index"
+func (kb *KeyBuilder) MinerSessionsIndexKey(supplier string) string {
+	return fmt.Sprintf("%s:%s:sessions:%s:index", kb.ns.BasePrefix, kb.ns.MinerPrefix, supplier)
+}
+
+// TxTrackKey builds the key for claim/proof submission tracking.
+// The "tx:track" segment is literal (no configurable sub-prefix existed
+// historically); only the base prefix is namespaced.
+// Format: {base}:tx:track:{supplier}:{sessionEndHeight}:{sessionID}
+// Example: "ha:tx:track:pokt1abc:100:sess1"
+func (kb *KeyBuilder) TxTrackKey(supplier string, sessionEndHeight int64, sessionID string) string {
+	return fmt.Sprintf("%s:tx:track:%s:%d:%s", kb.ns.BasePrefix, supplier, sessionEndHeight, sessionID)
+}
+
+// TxTrackPattern builds the SCAN pattern for a supplier's submission tracking.
+// Format: {base}:tx:track:{supplier}:*
+// Example: "ha:tx:track:pokt1abc:*"
+func (kb *KeyBuilder) TxTrackPattern(supplier string) string {
+	return fmt.Sprintf("%s:tx:track:%s:*", kb.ns.BasePrefix, supplier)
 }

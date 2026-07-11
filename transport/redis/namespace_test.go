@@ -32,6 +32,7 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"ParamsProofLockKey":        kb.ParamsProofLockKey(),
 		"ParamsSharedCacheKey":      kb.ParamsSharedCacheKey(),
 		"ParamsSharedLockKey":       kb.ParamsSharedLockKey(),
+		"ParamsSessionKey":          kb.ParamsSessionKey(),
 		"MeterCleanupChannel":       kb.MeterCleanupChannel(),
 		"MeterActiveSessionsKey":    kb.MeterActiveSessionsKey(),
 		"SupplierUpdateChannel":     kb.SupplierUpdateChannel(),
@@ -47,6 +48,16 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"MinerClaimKey":             kb.MinerClaimKey("sup1"),
 		"MinerActiveSetKey":         kb.MinerActiveSetKey(),
 		"MinerInstanceKey":          kb.MinerInstanceKey("inst1"),
+
+		"SupplierParamsInvalidateChannel":     kb.SupplierParamsInvalidateChannel(),
+		"SharedParamsHeightInvalidateChannel": kb.SharedParamsHeightInvalidateChannel(),
+		"SessionRewardableChannel":            kb.SessionRewardableChannel(),
+		"MinerLeaderPrefix":                   kb.MinerLeaderPrefix(),
+		"MinerDedupPrefix":                    kb.MinerDedupPrefix(),
+		"MinerSessionStateIndexKey":           kb.MinerSessionStateIndexKey("sup1", "proved"),
+		"MinerSessionsIndexKey":               kb.MinerSessionsIndexKey("sup1"),
+		"TxTrackKey":                          kb.TxTrackKey("sup1", 100, "sess1"),
+		"TxTrackPattern":                      kb.TxTrackPattern("sup1"),
 	}
 }
 
@@ -95,10 +106,23 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"ParamsProofLockKey":        "ha:cache:lock:proof_params",
 		"ParamsSharedCacheKey":      "ha:cache:shared_params",
 		"ParamsSharedLockKey":       "ha:cache:lock:shared_params",
+		"ParamsSessionKey":          "ha:cache:session_params",
 		"MeterCleanupChannel":       "ha:meter:cleanup",
 		"MeterActiveSessionsKey":    "ha:meter:active_sessions",
 		"SupplierUpdateChannel":     "ha:events:supplier_update",
 		"BlockEventChannel":         "ha:events:blocks",
+
+		// Frozen nonstandard channels (subscriber-side effective strings —
+		// see each method's doc for why the scheme differs):
+		"SupplierParamsInvalidateChannel":     "ha:events:cache:invalidate:supplier_params",
+		"SharedParamsHeightInvalidateChannel": "ha:events:invalidate:params",
+		"SessionRewardableChannel":            "ha:events:session:rewardable",
+		"MinerLeaderPrefix":                   "ha:miner:leader",
+		"MinerDedupPrefix":                    "ha:miner:dedup",
+		"MinerSessionStateIndexKey":           "ha:miner:sessions:sup1:state:proved",
+		"MinerSessionsIndexKey":               "ha:miner:sessions:sup1:index",
+		"TxTrackKey":                          "ha:tx:track:sup1:100:sess1",
+		"TxTrackPattern":                      "ha:tx:track:sup1:*",
 	}
 	outputs := allKeyBuilderOutputs(kb)
 	for method, want := range golden {

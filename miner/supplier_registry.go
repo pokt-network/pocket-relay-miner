@@ -68,13 +68,13 @@ func NewSupplierRegistry(
 	config SupplierRegistryConfig,
 ) *SupplierRegistry {
 	if config.KeyPrefix == "" {
-		config.KeyPrefix = "ha:suppliers"
+		config.KeyPrefix = redisClient.KB().SuppliersRegistryPrefix()
 	}
 	if config.IndexKey == "" {
-		config.IndexKey = "ha:suppliers:index"
+		config.IndexKey = redisClient.KB().SuppliersRegistryIndexKey()
 	}
 	if config.EventChannel == "" {
-		config.EventChannel = "ha:events:supplier_update"
+		config.EventChannel = redisClient.KB().SupplierUpdateChannel()
 	}
 
 	return &SupplierRegistry{

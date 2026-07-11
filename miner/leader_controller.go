@@ -199,7 +199,6 @@ func (c *LeaderController) Start(ctx context.Context) error {
 			TTLBlocks:        100,
 			BlockTimeSeconds: blockTimeSeconds,
 			LockTimeout:      5,
-			PubSubPrefix:     c.config.RedisClient.KB().EventsCachePrefix(),
 		},
 	)
 	if err := c.supplierParamsCache.Start(ctx); err != nil {

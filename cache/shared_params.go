@@ -10,6 +10,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -56,7 +57,7 @@ func (c *RedisSharedParamCache) storeLocal(key string, height int64, params *sha
 // RedisSharedParamCache implements SharedParamCache using Redis as L2 cache.
 type RedisSharedParamCache struct {
 	logger       logging.Logger
-	redisClient  redis.UniversalClient
+	redisClient  *redisutil.Client
 	sharedClient client.SharedQueryClient
 	blockClient  client.BlockClient
 	config       CacheConfig
@@ -79,13 +80,13 @@ type RedisSharedParamCache struct {
 // NewRedisSharedParamCache creates a new SharedParamCache backed by Redis.
 func NewRedisSharedParamCache(
 	logger logging.Logger,
-	redisClient redis.UniversalClient,
+	redisClient *redisutil.Client,
 	sharedClient client.SharedQueryClient,
 	blockClient client.BlockClient,
 	config CacheConfig,
 ) *RedisSharedParamCache {
 	if config.CachePrefix == "" {
-		config.CachePrefix = "ha:cache"
+		config.CachePrefix = redisClient.KB().CachePrefix()
 	}
 	if config.TTLBlocks == 0 {
 		config.TTLBlocks = 1
@@ -130,7 +131,7 @@ func (c *RedisSharedParamCache) Start(ctx context.Context) error {
 func (c *RedisSharedParamCache) subscribeToInvalidations(ctx context.Context) {
 	defer c.wg.Done()
 
-	channel := c.config.PubSubPrefix + ":invalidate:params"
+	channel := c.redisClient.KB().SharedParamsHeightInvalidateChannel()
 	pubsub := c.redisClient.Subscribe(ctx, channel)
 	defer func() { _ = pubsub.Close() }()
 
@@ -299,7 +300,7 @@ func (c *RedisSharedParamCache) InvalidateSharedParams(ctx context.Context, heig
 	}
 
 	// Notify other instances
-	channel := c.config.PubSubPrefix + ":invalidate:params"
+	channel := c.redisClient.KB().SharedParamsHeightInvalidateChannel()
 	if err := c.redisClient.Publish(ctx, channel, fmt.Sprintf("%d", height)).Err(); err != nil {
 		c.logger.Warn().Err(err).Msg("failed to publish invalidation")
 	}

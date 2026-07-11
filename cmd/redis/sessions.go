@@ -63,7 +63,7 @@ States: active, claiming, claimed, proving, settled, expired`,
 }
 
 func showSession(ctx context.Context, client *DebugRedisClient, supplier, sessionID string, jsonOutput bool) error {
-	key := fmt.Sprintf("ha:miner:sessions:%s:%s", supplier, sessionID)
+	key := client.KB().MinerSessionKey(supplier, sessionID)
 
 	snapshot, err := loadSessionKey(ctx, client, key)
 	if err != nil {
@@ -103,7 +103,7 @@ func showSession(ctx context.Context, client *DebugRedisClient, supplier, sessio
 }
 
 func listSessionsByState(ctx context.Context, client *DebugRedisClient, supplier, state string, jsonOutput bool) error {
-	indexKey := fmt.Sprintf("ha:miner:sessions:%s:state:%s", supplier, state)
+	indexKey := client.KB().MinerSessionStateIndexKey(supplier, state)
 
 	sessionIDs, err := client.SMembers(ctx, indexKey).Result()
 	if err != nil {
@@ -119,7 +119,7 @@ func listSessionsByState(ctx context.Context, client *DebugRedisClient, supplier
 }
 
 func listAllSessions(ctx context.Context, client *DebugRedisClient, supplier string, jsonOutput bool) error {
-	indexKey := fmt.Sprintf("ha:miner:sessions:%s:index", supplier)
+	indexKey := client.KB().MinerSessionsIndexKey(supplier)
 
 	sessionIDs, err := client.SMembers(ctx, indexKey).Result()
 	if err != nil {
@@ -182,7 +182,7 @@ func fetchAndDisplaySessions(ctx context.Context, client *DebugRedisClient, supp
 	// or a legacy JSON string during a rolling upgrade; handle both.
 	var sessions []map[string]interface{}
 	for _, sessionID := range sessionIDs {
-		key := fmt.Sprintf("ha:miner:sessions:%s:%s", supplier, sessionID)
+		key := client.KB().MinerSessionKey(supplier, sessionID)
 		snapshot, err := loadSessionKey(ctx, client, key)
 		if err != nil || snapshot == nil {
 			continue

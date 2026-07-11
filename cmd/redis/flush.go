@@ -71,24 +71,13 @@ Safety:
 }
 
 func flushKeys(ctx context.Context, client *DebugRedisClient, pattern string, force bool) error {
-	// First, scan to see what will be deleted
-	var cursor uint64
-	var keys []string
-
+	// First, scan to see what will be deleted (cluster-aware: a plain SCAN
+	// on Redis Cluster hits a single node and silently misses the rest).
 	fmt.Printf("Scanning for keys matching: %s\n", pattern)
 
-	for {
-		scanKeys, newCursor, err := client.Scan(ctx, cursor, pattern, 1000).Result()
-		if err != nil {
-			return fmt.Errorf("failed to scan keys: %w", err)
-		}
-
-		keys = append(keys, scanKeys...)
-		cursor = newCursor
-
-		if cursor == 0 {
-			break
-		}
+	keys, err := clusterAwareScanAllKeys(ctx, client, pattern)
+	if err != nil {
+		return fmt.Errorf("failed to scan keys: %w", err)
 	}
 
 	if len(keys) == 0 {
@@ -148,26 +137,15 @@ func flushKeys(ctx context.Context, client *DebugRedisClient, pattern string, fo
 		}
 	}
 
-	// Perform deletion in batches
+	// Perform deletion: single-key DELs inside pipelines, so Redis Cluster
+	// deployments don't fail with CROSSSLOT on multi-key commands.
 	fmt.Printf("\nDeleting %d keys...\n", len(keys))
 
-	batchSize := 100
-	deleted := 0
-
-	for i := 0; i < len(keys); i += batchSize {
-		end := i + batchSize
-		if end > len(keys) {
-			end = len(keys)
-		}
-
-		batch := keys[i:end]
-		err := client.Del(ctx, batch...).Err()
-		if err != nil {
-			return fmt.Errorf("failed to delete batch: %w", err)
-		}
-
-		deleted += len(batch)
-		fmt.Printf("  Deleted %d / %d keys\n", deleted, len(keys))
+	deleted, err := pipelinedDelete(ctx, client, keys, 100, func(deleted, total int) {
+		fmt.Printf("  Deleted %d / %d keys\n", deleted, total)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to delete keys (deleted %d): %w", deleted, err)
 	}
 
 	fmt.Printf("\n✅ Successfully deleted %d keys\n", deleted)

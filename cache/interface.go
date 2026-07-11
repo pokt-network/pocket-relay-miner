@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/pokt-network/pocket-relay-miner/config"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
@@ -152,10 +154,6 @@ type CacheConfig struct {
 	// Default: "ha:cache"
 	CachePrefix string
 
-	// PubSubPrefix is the prefix for all Redis pub/sub channels.
-	// Default: "ha:events"
-	PubSubPrefix string
-
 	// TTLBlocks is the default TTL in blocks.
 	// Default: 1 (parameters change per block)
 	TTLBlocks int64
@@ -176,8 +174,9 @@ type CacheConfig struct {
 // DefaultCacheConfig returns sensible default cache configuration.
 func DefaultCacheConfig() CacheConfig {
 	return CacheConfig{
-		CachePrefix:            "ha:cache",
-		PubSubPrefix:           "ha:events",
+		// Derive from the KeyBuilder default so this can never drift from the
+		// golden-tested "ha:cache" prefix (channels come from KB directly now).
+		CachePrefix:            redisutil.NewKeyBuilder(config.RedisNamespaceConfig{}).CachePrefix(),
 		TTLBlocks:              1,
 		BlockTimeSeconds:       30,
 		ExtraGracePeriodBlocks: 2,

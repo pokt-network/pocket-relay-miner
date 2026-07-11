@@ -238,7 +238,7 @@ func NewRedisSessionStore(
 	config SessionStoreConfig,
 ) *RedisSessionStore {
 	if config.KeyPrefix == "" {
-		config.KeyPrefix = "ha:miner:sessions"
+		config.KeyPrefix = redisClient.KB().MinerSessionsPrefix()
 	}
 	if config.SessionTTL == 0 {
 		// Default 2h - aligned with CacheTTL to prevent orphaned sessions.

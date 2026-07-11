@@ -542,8 +542,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 			// Create caches for full session validation
 			cacheConfig := cache.CacheConfig{
-				CachePrefix:      "ha:cache",
-				PubSubPrefix:     "ha:events",
+				CachePrefix:      redisClient.KB().CachePrefix(),
 				TTLBlocks:        1,
 				BlockTimeSeconds: 30, // CRITICAL: Must match actual block time (30s for this network, not 6s!)
 			}
