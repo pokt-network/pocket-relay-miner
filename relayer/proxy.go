@@ -25,8 +25,6 @@ import (
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
-	"golang.org/x/net/http2"
-	"golang.org/x/net/http2/h2c"
 	"google.golang.org/grpc"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
@@ -481,6 +479,35 @@ func (p *ProxyServer) getClientForService(serviceID string) *http.Client {
 	return nil
 }
 
+// newRelayerHTTPServer builds the relayer's listener-facing HTTP server.
+//
+// It serves HTTP/1.1 and HTTP/2 cleartext (h2c) on the same port. h2c is
+// required by native gRPC clients, which connect without TLS and open the
+// connection with the HTTP/2 preface directly (prior knowledge).
+//
+// Timeouts:
+//   - ReadTimeout: max service timeout + buffer for request parsing.
+//   - WriteTimeout: 0 (disabled). Per-request write deadlines are set via
+//     http.ResponseController in handleRelay(), so a streaming service can get
+//     600s while a fast service gets 30s on the same server.
+func newRelayerHTTPServer(addr string, handler http.Handler, maxServiceTimeout time.Duration) *http.Server {
+	protocols := new(http.Protocols)
+	protocols.SetHTTP1(true)
+	protocols.SetUnencryptedHTTP2(true)
+
+	return &http.Server{
+		Addr:      addr,
+		Handler:   handler,
+		Protocols: protocols,
+		HTTP2: &http.HTTP2Config{
+			MaxConcurrentStreams: MaxConcurrentStreams,
+		},
+		ReadTimeout:  maxServiceTimeout + ReadTimeoutBuffer,
+		WriteTimeout: 0,
+		IdleTimeout:  DefaultIdleTimeout,
+	}
+}
+
 // Start starts the HTTP proxy server.
 func (p *ProxyServer) Start(ctx context.Context) error {
 	p.mu.Lock()
@@ -515,37 +542,10 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", p.handleRelay)
 
-	// Configure HTTP/2 server for h2c (HTTP/2 without TLS)
-	// This is required for native gRPC clients connecting without TLS
-	h2s := &http2.Server{
-		MaxConcurrentStreams: MaxConcurrentStreams,
-	}
-
-	// Wrap the handler with h2c to support both HTTP/1.1 and HTTP/2 cleartext
-	h2cHandler := h2c.NewHandler(mux, h2s)
-
 	// Wrap with panic recovery middleware to prevent handler panics from crashing the server
-	handler := PanicRecoveryMiddleware(p.logger, h2cHandler)
+	handler := PanicRecoveryMiddleware(p.logger, mux)
 
-	// Server timeout configuration:
-	// - ReadTimeout: max timeout for reading entire request (including body)
-	// - WriteTimeout: set to 0 - we use ResponseController for per-request write deadlines
-	// - IdleTimeout: how long to keep idle keep-alive connections open
-	//
-	// Per-request write deadlines are controlled via http.ResponseController in handleRelay(),
-	// allowing different timeouts per service (e.g., 30s for fast services, 600s for streaming).
-	maxServiceTimeout := p.config.getMaxServiceTimeout()
-
-	p.server = &http.Server{
-		Addr:    p.config.ListenAddr,
-		Handler: handler,
-		// ReadTimeout: max service timeout + buffer for request parsing
-		ReadTimeout: maxServiceTimeout + ReadTimeoutBuffer,
-		// WriteTimeout: 0 (disabled) - we use ResponseController for per-request deadlines
-		// This allows streaming services to have 600s while fast services have 30s
-		WriteTimeout: 0,
-		IdleTimeout:  DefaultIdleTimeout,
-	}
+	p.server = newRelayerHTTPServer(p.config.ListenAddr, handler, p.config.getMaxServiceTimeout())
 
 	// Log the resolved response-compression state at startup. This prints once
 	// per replica and makes it trivial to verify the YAML was parsed as
