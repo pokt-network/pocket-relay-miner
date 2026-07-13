@@ -3,10 +3,21 @@ package cache
 import (
 	"context"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
+
+// subscribeReadyTimeout bounds how long SubscribeToInvalidations waits for the
+// initial SUBSCRIBE to be confirmed by the server. Redis pub/sub has no
+// replay: an invalidation published before the subscription is registered is
+// silently dropped, so callers must not proceed (and start populating L1)
+// until the subscription is live. If Redis is unreachable at startup the wait
+// gives up after this timeout and the reconnection loop keeps retrying in the
+// background — the pre-existing degraded-boot behavior is preserved.
+var subscribeReadyTimeout = 10 * time.Second
 
 // SubscribeToInvalidations subscribes to cache invalidation events for a specific cache type.
 // It spawns a goroutine with automatic reconnection that listens for messages on the
@@ -37,6 +48,11 @@ func SubscribeToInvalidations(
 		Str("channel", channel).
 		Msg("starting cache invalidation subscription with reconnection")
 
+	// Closed once, when the first SUBSCRIBE is confirmed by the server.
+	ready := make(chan struct{})
+	var readyOnce sync.Once
+	signalReady := func() { readyOnce.Do(func() { close(ready) }) }
+
 	// Spawn goroutine with reconnection handling
 	go func() {
 		reconnectLoop := redisutil.NewReconnectionLoop(
@@ -48,12 +64,26 @@ func SubscribeToInvalidations(
 			},
 			// runFn: Subscribe and process messages until disconnect
 			func(ctx context.Context) error {
-				return runPubSubLoop(ctx, redisClient, logger, channel, cacheType, handler)
+				return runPubSubLoop(ctx, redisClient, logger, channel, cacheType, handler, signalReady)
 			},
 		)
 
 		reconnectLoop.Run(ctx)
 	}()
+
+	// Do not return before the subscription is registered on the server:
+	// callers start serving (and populating L1) as soon as Start() returns, and
+	// an invalidation published before SUBSCRIBE lands is dropped forever.
+	select {
+	case <-ready:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(subscribeReadyTimeout):
+		logger.Warn().
+			Str(logging.FieldCacheType, cacheType).
+			Dur("waited", subscribeReadyTimeout).
+			Msg("invalidation subscription not confirmed yet; reconnection loop continues in background")
+	}
 
 	return nil
 }
@@ -67,6 +97,7 @@ func runPubSubLoop(
 	channel string,
 	cacheType string,
 	handler func(ctx context.Context, payload string) error,
+	signalReady func(),
 ) error {
 	pubsub := redisClient.Subscribe(ctx, channel)
 	defer func() { _ = pubsub.Close() }()
@@ -75,6 +106,7 @@ func runPubSubLoop(
 	if _, err := pubsub.Receive(ctx); err != nil {
 		return fmt.Errorf("failed to subscribe to %s: %w", channel, err)
 	}
+	signalReady()
 
 	logger.Info().
 		Str(logging.FieldCacheType, cacheType).
