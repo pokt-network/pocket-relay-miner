@@ -19,6 +19,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // This file is the wiring smoke test the CUPR incident demanded: it wires the
@@ -199,6 +200,18 @@ func newSmokeOrchestrator(t *testing.T, svcCUPR uint64, appDelegatees []string) 
 		}
 	})
 
+	// Start() spawns the invalidation subscription in a goroutine and returns
+	// before SUBSCRIBE reaches the server (see SubscribeToInvalidations in
+	// cache/pubsub.go). Redis pub/sub has no replay: an invalidation published
+	// into that window is dropped and the subscriber never learns of it, so its
+	// L1 stays stale forever. Wait for the subscriptions the tests depend on to
+	// be registered before any test can publish a block event.
+	//
+	// Both service caches (leader + relayer) listen on the service channel; the
+	// application cache is the sole listener on its own.
+	waitForInvalidationSubscribers(t, redisClient, "service", 2)
+	waitForInvalidationSubscribers(t, redisClient, "application", 1)
+
 	subscriber := newControllableBlockSubscriber()
 	elector := leader.NewGlobalLeaderElectorWithConfig(log, redisClient, "smoke-instance",
 		leader.GlobalLeaderElectorConfig{LeaderTTL: 30 * time.Second, HeartbeatRate: time.Second})
@@ -229,6 +242,26 @@ func newSmokeOrchestrator(t *testing.T, svcCUPR uint64, appDelegatees []string) 
 		leaderSvc:  leaderSvc,
 		relayerSvc: relayerSvc,
 	}
+}
+
+// waitForInvalidationSubscribers blocks until at least n subscribers are
+// registered on the server for the given cache type's invalidation channel.
+//
+// This closes the only timing hole in this harness. Without it the tests race
+// the subscription goroutine: they pass whenever it wins (always, on an idle
+// dev box) and fail permanently when it does not, because the missed
+// invalidation is never redelivered. That is how they failed on a loaded
+// 2-core CI runner.
+func waitForInvalidationSubscribers(t *testing.T, redisClient *redisutil.Client, cacheType string, n int64) {
+	t.Helper()
+	ctx := context.Background()
+	channel := redisClient.KB().EventChannel(cacheType, "invalidate")
+
+	require.Eventually(t, func() bool {
+		counts, err := redisClient.PubSubNumSub(ctx, channel).Result()
+		return err == nil && counts[channel] >= n
+	}, 10*time.Second, 5*time.Millisecond,
+		"%d subscriber(s) must be registered on %s before any invalidation is published", n, channel)
 }
 
 // becomeLeaderAndStart starts the orchestrator and deterministically drives it
