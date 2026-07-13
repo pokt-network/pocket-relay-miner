@@ -38,6 +38,11 @@ type mockCometBFTServer struct {
 	stopAutoSend   chan struct{}
 	stopped        atomic.Bool
 
+	// wsWriteMu serializes WebSocket writes. gorilla/websocket permits at most
+	// one concurrent writer per connection, and the event-pump goroutine writes
+	// to the same connection as the read-loop's request handlers.
+	wsWriteMu sync.Mutex
+
 	// Request tracking
 	requestCount   atomic.Int64
 	blockRequests  atomic.Int64
@@ -96,6 +101,14 @@ func (m *mockCometBFTServer) Close() {
 
 	// Close HTTP server
 	m.server.Close()
+}
+
+// writeJSON writes a JSON message to a WebSocket connection, serialized against
+// all other writes to the mock's connections.
+func (m *mockCometBFTServer) writeJSON(conn *websocket.Conn, v interface{}) {
+	m.wsWriteMu.Lock()
+	defer m.wsWriteMu.Unlock()
+	_ = conn.WriteJSON(v)
 }
 
 // handler routes HTTP requests to appropriate handlers.
@@ -170,7 +183,7 @@ func (m *mockCometBFTServer) handleSubscribe(conn *websocket.Conn, req map[strin
 		"id":      req["id"],
 		"result":  map[string]interface{}{},
 	}
-	_ = conn.WriteJSON(response)
+	m.writeJSON(conn, response)
 
 	// Create event channel for this subscription
 	eventCh := make(chan blockEvent, 100)
@@ -203,7 +216,7 @@ func (m *mockCometBFTServer) handleUnsubscribe(conn *websocket.Conn, req map[str
 		"id":      req["id"],
 		"result":  map[string]interface{}{},
 	}
-	_ = conn.WriteJSON(response)
+	m.writeJSON(conn, response)
 }
 
 // handleUnsubscribeAll handles unsubscribe_all requests.
@@ -220,7 +233,7 @@ func (m *mockCometBFTServer) handleUnsubscribeAll(conn *websocket.Conn, req map[
 		"id":      req["id"],
 		"result":  map[string]interface{}{},
 	}
-	_ = conn.WriteJSON(response)
+	m.writeJSON(conn, response)
 }
 
 // sendBlockEvent sends a block event to a WebSocket connection.
@@ -244,7 +257,7 @@ func (m *mockCometBFTServer) sendBlockEvent(conn *websocket.Conn, event blockEve
 		},
 	}
 
-	_ = conn.WriteJSON(message)
+	m.writeJSON(conn, message)
 }
 
 // handleJSONRPC handles JSON-RPC requests over HTTP.
@@ -372,7 +385,7 @@ func (m *mockCometBFTServer) sendError(conn *websocket.Conn, req map[string]inte
 			"message": errMsg,
 		},
 	}
-	_ = conn.WriteJSON(response)
+	m.writeJSON(conn, response)
 }
 
 // sendJSONError sends a JSON-RPC error response.
