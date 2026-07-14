@@ -93,7 +93,7 @@ A successful diagnostic prints `Status: ✅ SUCCESS`, `Signature: ✅ VALID`,
 pocket-relay-miner relay jsonrpc   --localnet --service develop-http
 pocket-relay-miner relay websocket --localnet --service develop-websocket
 pocket-relay-miner relay grpc      --localnet --service develop-grpc
-pocket-relay-miner relay stream    --localnet --service develop-stream -n 3
+pocket-relay-miner relay stream    --localnet --service develop-stream --batches 3
 ```
 
 Notes per protocol:
@@ -103,9 +103,12 @@ Notes per protocol:
   gRPC (h2c) forwarding end to end, and prints the decoded `Block Height`.
   Passing `--payload '<json>'` instead sends a JSON-RPC body, which
   deliberately drives the relayer's REST fallback for gRPC relays.
-- **stream** — the SSE stream is long-lived, so `-n` means **how many batches
-  to collect** before closing (not "number of relays"). It does not use
-  `--load-test`. Each batch is signature-verified individually.
+- **stream** — the SSE stream is long-lived. The CLI collects batches until the
+  server closes the stream (natural end) **or** it has collected `--batches N`
+  (default 1), whichever comes first, then closes. A bound is needed because a
+  subscription-style feed (like the localnet demo endpoint) never ends on its
+  own. It does not use `--load-test`. Each batch is signature-verified
+  individually. (`-n` is still honored as a fallback for `--batches`.)
 
 ## Load testing (`--load-test`)
 

@@ -13,6 +13,7 @@ var (
 	RelayRelayerURL     string
 	RelaySupplierAddr   string
 	RelayCount          int
+	RelayBatches        int
 	RelayLoadTest       bool
 	RelayConcurrency    int
 	RelayRPS            int

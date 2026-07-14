@@ -167,7 +167,8 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().StringVar(&relay.RelayRelayerURL, "relayer-url", "", "Relayer endpoint URL")
 	relayCmd.PersistentFlags().StringVar(&relay.RelaySupplierAddr, "supplier", "", "Supplier operator address")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayAllSuppliers, "all-suppliers", false, "Load test: round-robin relays across every supplier in the current session (avoids exhausting one supplier's per-session claimable budget)")
-	relayCmd.PersistentFlags().IntVarP(&relay.RelayCount, "count", "n", 1, "Number of requests to send")
+	relayCmd.PersistentFlags().IntVarP(&relay.RelayCount, "count", "n", 1, "Number of requests to send (jsonrpc/websocket/grpc load test)")
+	relayCmd.PersistentFlags().IntVar(&relay.RelayBatches, "batches", 0, "stream mode: number of signed SSE batches to collect before closing (defaults to -n)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayLoadTest, "load-test", false, "Enable load test mode with concurrency")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayConcurrency, "concurrency", 10, "Number of concurrent workers (load test mode)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayRPS, "rps", 0, "Target requests per second (0 = unlimited, only for load test mode)")
@@ -306,10 +307,19 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	}
 
 	// Streams are long-lived by design: load test mode does not apply, and
-	// -n/--count means "SSE batches to collect in one stream", not relays.
-	// Fail here, before query clients and keys are initialized.
+	// --batches counts SSE batches to collect in one stream; it only applies to
+	// stream mode.
+	if relay.RelayBatches < 0 {
+		return fmt.Errorf("--batches must be non-negative")
+	}
+	if relay.RelayBatches > 0 && mode != "stream" {
+		return fmt.Errorf("--batches only applies to stream mode (other modes use -n/--count)")
+	}
+	// Streams are long-lived: --load-test does not apply, and --batches (or -n as
+	// a fallback) bounds how many batches to collect. Fail here, before query
+	// clients and keys are initialized.
 	if mode == "stream" && relay.RelayLoadTest {
-		return fmt.Errorf("load test mode is not supported for streaming relays (use -n to bound how many batches to collect)")
+		return fmt.Errorf("load test mode is not supported for streaming relays (use --batches to bound how many SSE batches to collect)")
 	}
 
 	// Warn if load test flags are used without --load-test

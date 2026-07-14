@@ -151,12 +151,21 @@ func sendStreamingRelay(ctx context.Context, relayRequestBz []byte) ([][]byte, e
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	// Read streaming response.
-	// -n/--count is the number of SSE batches to collect before closing the
-	// stream. The endpoint is long-lived and never sends EOF under normal
-	// operation, so termination is by batch count, not by the server closing
-	// the connection.
-	return readStreamingBatches(resp.Body, RelayCount)
+	// Read streaming response. The endpoint is long-lived and never sends EOF
+	// under normal operation, so termination is by batch count, not by the
+	// server closing the connection.
+	return readStreamingBatches(resp.Body, streamBatchCount())
+}
+
+// streamBatchCount is the number of signed SSE batches the stream mode collects
+// before closing. --batches names it explicitly; -n/--count is honored as a
+// back-compat fallback (it used to be the stream flag, which read confusingly
+// as "number of requests"). readStreamingBatches floors the result to 1.
+func streamBatchCount() int {
+	if RelayBatches > 0 {
+		return RelayBatches
+	}
+	return RelayCount
 }
 
 // readStreamingBatches reads up to maxBatches non-empty batches from the response
