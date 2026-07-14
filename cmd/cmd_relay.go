@@ -156,8 +156,15 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayLocalnet, "localnet", false, "Use localnet defaults from tilt/config (auto-selects app for service)")
 
 	// Connection flags
-	relayCmd.PersistentFlags().StringVar(&relay.RelayAppPrivKey, "app-priv-key", "", "Application private key (hex)")
-	relayCmd.PersistentFlags().StringVar(&relay.RelayGatewayPrivKey, "gateway-priv-key", "", "Gateway private key for ring signing (hex, matches PATH approach)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayAppPrivKey, "app-priv-key", "", "Application private key (hex) — testing/localnet only; prefer --app-key or --keys-file to keep hex off the command line")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayGatewayPrivKey, "gateway-priv-key", "", "Gateway private key for ring signing (hex) — testing/localnet only; prefer --gateway-key or --keys-file")
+
+	// Secure key sources (resolved to keys in memory; hex never appears on the CLI)
+	relayCmd.PersistentFlags().StringVar(&relay.RelayKeyringBackend, "keyring-backend", "", "Cosmos keyring backend for --app-key/--gateway-key: file, os, or test")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayKeyringDir, "keyring-dir", "", "Cosmos keyring directory (default: the backend's default location)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayAppKeyName, "app-key", "", "Application key name in the keyring (resolved via --keyring-backend)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayGatewayKeyName, "gateway-key", "", "Gateway key name in the keyring (resolved via --keyring-backend)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayKeysFile, "keys-file", "", "Path to a YAML keys file (applications:[hex] + gateway:[hex]); uses the first of each")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayServiceID, "service", "", "Service ID (e.g., develop-http, develop-websocket, develop-stream, develop-grpc)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayNodeGRPC, "node", "", "gRPC endpoint for chain queries (e.g., localhost:9090)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayNodeRPC, "node-rpc", "", "CometBFT RPC endpoint for block subscription (e.g., http://localhost:26657)")
@@ -183,6 +190,24 @@ func RelayCmd() *cobra.Command {
 // runRelayCommand executes the relay command based on the selected mode.
 func runRelayCommand(cmd *cobra.Command, args []string) error {
 	mode := args[0]
+
+	// Create logger (needed early so key resolution can log through the keyring).
+	logConfig := logging.DefaultConfig()
+	if relay.RelayVerbose {
+		logConfig.Level = "debug"
+		logConfig.Format = "text"
+	} else {
+		logConfig.Level = "info"
+	}
+	logger := logging.NewLoggerFromConfig(logConfig)
+
+	// Resolve keys from a keyring (--app-key/--gateway-key) or a keys file
+	// (--keys-file) into the in-memory hex fields, so raw private keys never have
+	// to be passed on the command line. Runs before the localnet block, which only
+	// fills fields still empty.
+	if err := relay.ResolveKeys(logger); err != nil {
+		return err
+	}
 
 	// Apply localnet defaults if --localnet flag is set
 	if relay.RelayLocalnet {
@@ -333,16 +358,6 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 			return fmt.Errorf("-n/--count > 1 requires --load-test flag (diagnostic mode sends exactly 1 relay, use --load-test for multiple requests)")
 		}
 	}
-
-	// Create logger
-	logConfig := logging.DefaultConfig()
-	if relay.RelayVerbose {
-		logConfig.Level = "debug"
-		logConfig.Format = "text"
-	} else {
-		logConfig.Level = "info"
-	}
-	logger := logging.NewLoggerFromConfig(logConfig)
 
 	// Create query clients for chain interaction
 	queryClients, err := query.NewQueryClients(logger, query.ClientConfig{

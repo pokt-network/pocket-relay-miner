@@ -170,8 +170,8 @@ substitutes, and what to pass instead:
 
 | What `--localnet` sets for you | On beta / mainnet you pass |
 |---|---|
-| app key, auto-selected per service (`--app-priv-key`) | `--app-priv-key <hex>` for YOUR staked app |
-| gateway key (`--gateway-priv-key`) | `--gateway-priv-key <hex>` — only if you sign via a delegated gateway |
+| app key, auto-selected per service | YOUR staked app's key — via `--app-key <name>` (keyring) or `--keys-file` (see below), or `--app-priv-key <hex>` for throwaway testing |
+| gateway key | the gateway's key — `--gateway-key <name>` / `--keys-file`, or `--gateway-priv-key <hex>` — only if you sign via a delegated gateway |
 | `--node localhost:9090` | `--node <host:port>` — a Shannon full node gRPC endpoint |
 | `--node-rpc http://localhost:26657` | `--node-rpc <url>` — that node's CometBFT RPC endpoint |
 | `--chain-id poktroll` | `--chain-id <id>` — the target network's chain id (Shannon mainnet: `pocket`) |
@@ -195,6 +195,37 @@ actually *signs* the relay depends on whether you add a gateway key:
 Either way, the application must be **staked for the `--service`** on the target
 network, or the relay is rejected.
 
+### Providing keys without putting hex on the command line
+
+Raw `--app-priv-key`/`--gateway-priv-key` hex is visible in your shell history
+and to `ps`, so it is for throwaway/localnet testing only. For real keys, use one
+of the two secure sources instead — both resolve the key in memory:
+
+- **Keyring by name** (same keyring the miner/relayer and `pocketd` use):
+
+  ```bash
+  pocket-relay-miner relay jsonrpc --service <svc> \
+    --keyring-backend os --keyring-dir ~/.pocket \
+    --app-key <app-key-name> --gateway-key <gateway-key-name> ...
+  ```
+
+- **Keys file** (YAML; the CLI uses the first application and first gateway):
+
+  ```yaml
+  # keys.yaml
+  applications:
+    - <app-private-key-hex>
+  gateway:
+    - <gateway-private-key-hex>   # omit the section for app-only signing
+  ```
+
+  ```bash
+  pocket-relay-miner relay jsonrpc --service <svc> --keys-file keys.yaml ...
+  ```
+
+Pick **one** source per run — combining `--keys-file`, `--app-key`/`--gateway-key`,
+and `--app-priv-key`/`--gateway-priv-key` is rejected.
+
 ### Choosing a supplier
 
 A relay is addressed to one supplier operator in the (app, service) session:
@@ -210,8 +241,7 @@ A relay is addressed to one supplier operator in the (app, service) session:
 ```bash
 pocket-relay-miner relay jsonrpc \
   --service <your-service-id> \
-  --app-priv-key <app-hex> \
-  --gateway-priv-key <gateway-hex> \
+  --keys-file keys.yaml \
   --node <fullnode-grpc-host:port> \
   --node-rpc <cometbft-rpc-url> \
   --chain-id pocket \
@@ -219,16 +249,18 @@ pocket-relay-miner relay jsonrpc \
   --all-suppliers --load-test -n 100 --concurrency 10
 ```
 
-Only `--service`, `--app-priv-key`, `--node`, and `--chain-id` are strictly
-required (the CLI errors without them). `--relayer-url` and `--node-rpc` default
-to localhost, so set them for a remote target; `--supplier` / `--all-suppliers`
-is needed for the relay to reach a real supplier.
+Here `keys.yaml` carries both the app and gateway keys (see above); swap it for
+`--app-key`/`--gateway-key` if the keys live in a keyring. Only `--service`, a key
+source, `--node`, and `--chain-id` are strictly required (the CLI errors without
+them). `--relayer-url` and `--node-rpc` default to localhost, so set them for a
+remote target; `--supplier` / `--all-suppliers` is needed for the relay to reach a
+real supplier.
 
-> **Handling real keys.** Private keys passed on the command line are visible in
-> your shell history and to `ps`. This CLI is a **testing tool** — for
-> production traffic the PATH gateway is the real client. When testing with
-> mainnet keys, use a dedicated/throwaway app where possible, avoid shared or
-> logged shells, and clear your history afterward.
+> **Handling real keys.** Prefer `--keys-file` or `--app-key`/`--gateway-key`
+> (keyring) so private keys never appear in your shell history or in `ps`; raw
+> `--app-priv-key`/`--gateway-priv-key` hex is for throwaway/localnet testing
+> only. This CLI is a **testing tool** — for production traffic the PATH gateway
+> is the real client. Keep key files `chmod 600` and out of version control.
 
 ## Verifying the relays landed (claims / proofs)
 
