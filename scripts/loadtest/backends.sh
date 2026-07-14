@@ -41,8 +41,9 @@
 #   The default `light` preset sends a minimal `eth_blockNumber`-shaped
 #   request (~70 B). That's fine for "does the backend respond?" but it
 #   wildly underestimates real PATH traffic for chains where batch calls
-#   and heavy methods dominate. On breeze, sui/op/poly/bsc all observe
-#   p95 request bodies in the 7-9 KB range — 100x the light payload.
+#   and heavy methods dominate. In production, batch-heavy chains routinely
+#   observe p95 request bodies in the multi-KB range — orders of magnitude
+#   over the light payload.
 #
 #   `--payload-preset heavy` switches to a per-chain representative
 #   payload that matches the shape of real p95 traffic (JSON-RPC batch
