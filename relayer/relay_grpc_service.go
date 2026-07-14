@@ -390,41 +390,19 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 			return status.Errorf(codes.Internal, "failed to build error response: %v", buildErr)
 		}
 
-		// Send error response (typed proto message)
+		// Send error response (typed proto message) so the client learns the
+		// relay failed. This is a transport/config failure: forwardToBackend
+		// returned err != nil, meaning the backend produced NO real response
+		// (connection refused, timeout, misroute/errBackendMisconfigured). Such a
+		// relay is NOT publishable — mirror the HTTP path (proxy.go), which on a
+		// forward error returns an error to the client and publishes nothing.
+		// Publishing here would mine a supplier-fabricated 500 for a relay the
+		// backend never answered, inflating the WAL with unclaimable garbage and
+		// diverging from HTTP. A backend that DID answer (4xx/5xx with a body)
+		// sets err == nil and is handled by the success/5xx branches below, so
+		// legitimately claimable error relays are unaffected.
 		if sendErr := stream.SendMsg(relayResponse); sendErr != nil {
 			return status.Errorf(codes.Internal, "failed to send error response: %v", sendErr)
-		}
-
-		// Still publish the error relay for tracking (even failed ones)
-		if s.relayProcessor != nil {
-			reqBz, marshalErr := relayRequest.Marshal()
-			if marshalErr == nil {
-				respBz, marshalErr := relayResponse.Marshal()
-				if marshalErr == nil {
-					// Process error relay (still subject to difficulty check) and
-					// publish it — ProcessRelay only builds the message, it does
-					// not publish. Error relays are tracked like the HTTP path's.
-					msg, processErr := s.relayProcessor.ProcessRelay(
-						publishCtx,
-						reqBz,
-						respBz,
-						supplierOperatorAddr,
-						serviceID,
-						arrivalHeight,
-					)
-					if processErr != nil {
-						logging.WithSessionContext(s.logger.Debug(), sessionCtx).
-							Err(processErr).
-							Msg("failed to process error relay")
-					} else if msg != nil && s.publisher != nil {
-						if pubErr := s.publisher.Publish(publishCtx, msg); pubErr != nil {
-							logging.WithSessionContext(s.logger.Debug(), sessionCtx).
-								Err(pubErr).
-								Msg("failed to publish error relay")
-						}
-					}
-				}
-			}
 		}
 
 		return nil
@@ -469,16 +447,21 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				Err(err).
 				Msg("failed to marshal relay request for processing")
 		} else {
-			respBz := relayResponseBz // Already marshaled above
-
-			// Process relay (difficulty check, dedup, message construction) and
-			// hand the mined message to the publisher — ProcessRelay only BUILDS
-			// the message; without the Publish call the relay never reaches the
-			// miner's WAL and no session/claim/proof is ever created for it.
+			// Mine the RAW backend response body, exactly like the HTTP path
+			// (proxy.go executePublish passes task.respBody). ProcessRelay builds
+			// and signs its OWN RelayResponse over this body and derives
+			// PayloadHash = sha256(respBody). Handing it the already-marshaled
+			// relayResponseBz instead would make PayloadHash cover a
+			// RelayResponse-wrapped-in-a-RelayResponse — the wrong bytes — and
+			// diverge from what the HTTP path mines.
+			//
+			// ProcessRelay only BUILDS the message; without the Publish call below
+			// the relay never reaches the miner's WAL and no session/claim/proof is
+			// ever created for it.
 			msg, err := s.relayProcessor.ProcessRelay(
 				publishCtx,
 				reqBz,
-				respBz,
+				respBody,
 				supplierOperatorAddr,
 				serviceID,
 				arrivalHeight,
