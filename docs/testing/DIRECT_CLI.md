@@ -117,6 +117,75 @@ pocket-relay-miner relay jsonrpc --localnet --service develop-http \
   --relayer-url "http://[::1]:8180"
 ```
 
+## Testing against beta or mainnet (beyond localnet)
+
+`--localnet` is a convenience for the Tilt environment: it fills in a set of
+flags so you don't have to. On a real network you supply those flags yourself,
+with **your own staked application**. Here is exactly what `--localnet`
+substitutes, and what to pass instead:
+
+| What `--localnet` sets for you | On beta / mainnet you pass |
+|---|---|
+| app key, auto-selected per service (`--app-priv-key`) | `--app-priv-key <hex>` for YOUR staked app |
+| gateway key (`--gateway-priv-key`) | `--gateway-priv-key <hex>` — only if you sign via a delegated gateway |
+| `--node localhost:9090` | `--node <host:port>` — a Shannon full node gRPC endpoint |
+| `--node-rpc http://localhost:26657` | `--node-rpc <url>` — that node's CometBFT RPC endpoint |
+| `--chain-id poktroll` | `--chain-id <id>` — the target network's chain id (Shannon mainnet: `pocket`) |
+| `--relayer-url http://localhost:8180` | `--relayer-url <url>` — your own relayer deployment |
+| `--supplier <localnet supplier>` | `--supplier <addr>` or `--all-suppliers` (see below) |
+
+### Who signs: app key vs gateway key
+
+`--app-priv-key` always identifies the **application** — the CLI derives the app
+address from it and builds the relay's delegation ring from that app. What
+actually *signs* the relay depends on whether you add a gateway key:
+
+- **App mode** (`--app-priv-key` only): the application signs its own relays.
+  Use this when you hold the app's key directly.
+- **Gateway mode** (`--app-priv-key` + `--gateway-priv-key`): the gateway signs
+  on behalf of the app — the same delegated model PATH uses. The app must have
+  **delegated to that gateway on-chain**, or the ring signature is rejected.
+  Here `--app-priv-key` only names the app (to fetch it and build the ring); the
+  gateway key does the signing.
+
+Either way, the application must be **staked for the `--service`** on the target
+network, or the relay is rejected.
+
+### Choosing a supplier
+
+A relay is addressed to one supplier operator in the (app, service) session:
+
+- `--all-suppliers` queries the current session and round-robins across every
+  supplier in it — the easiest option, and it adapts as sessions roll over.
+- `--supplier <operatorAddr>` pins one supplier. Find valid operators by
+  querying the session for your (app, service), or just start with
+  `--all-suppliers` and read the addresses it logs.
+
+### Example (mainnet, gateway mode)
+
+```bash
+pocket-relay-miner relay jsonrpc \
+  --service <your-service-id> \
+  --app-priv-key <app-hex> \
+  --gateway-priv-key <gateway-hex> \
+  --node <fullnode-grpc-host:port> \
+  --node-rpc <cometbft-rpc-url> \
+  --chain-id pocket \
+  --relayer-url <your-relayer-url> \
+  --all-suppliers --load-test -n 100 --concurrency 10
+```
+
+Only `--service`, `--app-priv-key`, `--node`, and `--chain-id` are strictly
+required (the CLI errors without them). `--relayer-url` and `--node-rpc` default
+to localhost, so set them for a remote target; `--supplier` / `--all-suppliers`
+is needed for the relay to reach a real supplier.
+
+> **Handling real keys.** Private keys passed on the command line are visible in
+> your shell history and to `ps`. This CLI is a **testing tool** — for
+> production traffic the PATH gateway is the real client. When testing with
+> mainnet keys, use a dedicated/throwaway app where possible, avoid shared or
+> logged shells, and clear your history afterward.
+
 ## Verifying the relays landed (claims / proofs)
 
 A successful relay at the CLI only proves the relayer signed and served it. To
