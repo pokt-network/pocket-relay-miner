@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -348,6 +349,40 @@ func handleWebSocket(cfg *Config) http.HandlerFunc {
 	}
 }
 
+// sseBatchInterval is the cadence between SSE events. It is kept comfortably
+// above the relayer's 100ms batch-flush threshold (relayer/http_stream.go) so
+// each backend event is signed as its own batch — a client asking for N batches
+// receives exactly N signed batches, not a coalesced subset.
+const sseBatchInterval = 200 * time.Millisecond
+
+// requestedBatches reads how many SSE batches the caller wants before the stream
+// closes. The relay CLI injects {"batches":N} into the JSON request body (the
+// relayer forwards that body to this backend); a ?batches=N query overrides it
+// for manual curl testing. Real clients send neither and get 0, meaning "stream
+// continuously" — mirroring a production service the client drains until its own
+// timeout.
+func requestedBatches(r *http.Request) int {
+	if q := r.URL.Query().Get("batches"); q != "" {
+		if n, err := strconv.Atoi(q); err == nil && n > 0 {
+			return n
+		}
+	}
+
+	if r.Body == nil {
+		return 0
+	}
+	var body struct {
+		Batches int `json:"batches"`
+	}
+	// Decode leniently: a body without a batches field (or a non-JSON body from a
+	// real client) simply yields 0 and the stream runs continuously.
+	_ = json.NewDecoder(r.Body).Decode(&body)
+	if body.Batches > 0 {
+		return body.Batches
+	}
+	return 0
+}
+
 func handleSSE(cfg *Config) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		requestsTotal.WithLabelValues("sse", "stream").Inc()
@@ -362,20 +397,42 @@ func handleSSE(cfg *Config) http.HandlerFunc {
 			return
 		}
 
-		ticker := time.NewTicker(1 * time.Second)
+		// batches > 0: emit exactly that many events then close the stream (EOF),
+		// which is what lets the CLI terminate promptly with a known count on
+		// localnet. batches == 0: stream continuously, as a real service would.
+		batches := requestedBatches(r)
+
+		ctx := r.Context()
+		ticker := time.NewTicker(sseBatchInterval)
 		defer ticker.Stop()
 
 		sequence := 0
-		for range ticker.C {
-			sequence++
-			event := map[string]interface{}{
-				"type":      "update",
-				"sequence":  sequence,
-				"timestamp": time.Now().Unix(),
+		for {
+			select {
+			case <-ctx.Done():
+				// Client (or relayer) disconnected — stop instead of spinning on a
+				// dead connection.
+				return
+			case <-ticker.C:
+				sequence++
+				event := map[string]interface{}{
+					"type":      "update",
+					"sequence":  sequence,
+					"timestamp": time.Now().Unix(),
+				}
+				data, _ := json.Marshal(event)
+				if _, err := fmt.Fprintf(w, "data: %s\n\n", data); err != nil {
+					// Write failed (connection gone) — nothing more to do.
+					return
+				}
+				flusher.Flush()
+
+				if batches > 0 && sequence >= batches {
+					// Requested count delivered; close the stream so the client sees
+					// a clean EOF instead of waiting for its timeout.
+					return
+				}
 			}
-			data, _ := json.Marshal(event)
-			_, _ = fmt.Fprintf(w, "data: %s\n\n", data)
-			flusher.Flush()
 		}
 	}
 }
