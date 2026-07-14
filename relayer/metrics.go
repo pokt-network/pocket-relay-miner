@@ -43,6 +43,21 @@ var (
 		[]string{"service_id", "rpc_type", "reason"},
 	)
 
+	// relaysServedOptimistically counts relays served during the boot window
+	// for a supplier that is absent from the registry but whose operator key
+	// this relayer holds (so it is ours). See handleRelay: the miner is the
+	// final arbiter and won't claim a non-staked supplier, so this is safe.
+	// A persistently high rate means the registry is not being populated.
+	relaysServedOptimistically = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_served_optimistically_total",
+			Help:      "Relays served for an owned supplier not yet in the registry (boot-window optimistic path)",
+		},
+		[]string{"service_id", "rpc_type"},
+	)
+
 	relaysPublished = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

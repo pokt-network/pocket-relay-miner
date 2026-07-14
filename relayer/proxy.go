@@ -580,6 +580,64 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	return nil
 }
 
+// supplierServeDecision is the outcome of the supplier-registry gate in
+// handleRelay. When serve is false, rejectReason (a relaysRejected metric label)
+// and clientMsg (the 503 message) are set. When optimistic is true, the relay is
+// served despite absent registry state because this relayer owns the key.
+type supplierServeDecision struct {
+	serve        bool
+	optimistic   bool
+	rejectReason string
+	clientMsg    string
+}
+
+// decideSupplierServe applies the supplier-registry gate for an incoming relay.
+//
+// When the registry has no state for the supplier (state == nil) — e.g. during
+// the boot window before the miner has populated ha:supplier:* in Redis — the
+// relay is served OPTIMISTICALLY if this relayer holds the supplier's operator
+// signing key. Holding the key proves the supplier is ours; the miner is the
+// final arbiter and will not claim a relay for a supplier that is not actually
+// staked for the service, so there is no reward hazard — at worst a wasted
+// backend call. A supplier we hold no key for is a genuine unknown supplier and
+// is rejected with 503. When registry state IS present it is authoritative, and
+// the active / has-services / staked-for-service gates apply unchanged.
+//
+// Note: the WebSocket and gRPC transports never gated on the registry at all
+// (they only require the signing key, which is enforced when signing the
+// response), so this aligns the HTTP/stream path with them instead of dropping
+// relays for owned suppliers during startup.
+func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOperatorAddr, serviceID string) supplierServeDecision {
+	if state == nil {
+		if p.responseSigner != nil && p.responseSigner.HasSigner(supplierOperatorAddr) {
+			return supplierServeDecision{serve: true, optimistic: true}
+		}
+		return supplierServeDecision{
+			rejectReason: rejectReasonSupplierNotFound,
+			clientMsg:    fmt.Sprintf("supplier %s not registered with any miner", supplierOperatorAddr),
+		}
+	}
+	if !state.IsActive() {
+		return supplierServeDecision{
+			rejectReason: rejectReasonSupplierInactive,
+			clientMsg:    fmt.Sprintf("supplier %s is %s", supplierOperatorAddr, state.Status),
+		}
+	}
+	if len(state.Services) == 0 {
+		return supplierServeDecision{
+			rejectReason: rejectReasonNoServices,
+			clientMsg:    fmt.Sprintf("supplier %s has no services registered", supplierOperatorAddr),
+		}
+	}
+	if !state.IsActiveForService(serviceID) {
+		return supplierServeDecision{
+			rejectReason: rejectReasonWrongService,
+			clientMsg:    fmt.Sprintf("supplier %s not staked for service %s", supplierOperatorAddr, serviceID),
+		}
+	}
+	return supplierServeDecision{serve: true}
+}
+
 // handleRelay handles incoming relay requests.
 func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Health check endpoints - bypass relay validation for load balancers.
@@ -762,38 +820,26 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonSupplierCacheError).Inc()
 		return
 	}
-	if supplierState == nil {
+	decision := p.decideSupplierServe(supplierState, supplierOperatorAddr, serviceID)
+	if !decision.serve {
 		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Msg("supplier not found in cache")
-		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not registered with any miner", supplierOperatorAddr))
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonSupplierNotFound).Inc()
+			Str("reason", decision.rejectReason).
+			Msg(decision.clientMsg)
+		p.sendError(w, http.StatusServiceUnavailable, decision.clientMsg)
+		relaysRejected.WithLabelValues(serviceID, rpcType, decision.rejectReason).Inc()
 		return
 	}
-	if !supplierState.IsActive() {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Str("status", supplierState.Status).
-			Msg("supplier not active")
-		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s is %s", supplierOperatorAddr, supplierState.Status))
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonSupplierInactive).Inc()
-		return
+	if decision.optimistic {
+		// Boot window: registry not yet populated but we own this supplier's
+		// key. Serve; the miner arbitrates claimability. See decideSupplierServe.
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
+			Str("supplier", supplierOperatorAddr).
+			Msg("supplier absent from registry but its key is loaded; serving optimistically")
+		relaysServedOptimistically.WithLabelValues(serviceID, rpcType).Inc()
+	} else {
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
+			Msg("supplier is active for service")
 	}
-	if len(supplierState.Services) == 0 {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Msg("supplier has no services registered")
-		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s has no services registered", supplierOperatorAddr))
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonNoServices).Inc()
-		return
-	}
-	if !supplierState.IsActiveForService(serviceID) {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
-			Int("num_services", len(supplierState.Services)).
-			Msg("supplier not staked for service")
-		p.sendError(w, http.StatusServiceUnavailable, fmt.Sprintf("supplier %s not staked for service %s", supplierOperatorAddr, serviceID))
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonWrongService).Inc()
-		return
-	}
-	logging.WithSessionContext(p.logger.Debug(), sessionCtx).
-		Msg("supplier is active for service")
 
 	// Check backend health
 	if !p.healthChecker.IsHealthy(serviceID) {
