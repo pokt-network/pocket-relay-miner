@@ -180,7 +180,7 @@ substitutes, and what to pass instead:
 |---|---|
 | app key, auto-selected per service | YOUR staked app's key — via `--app-key <name>` (keyring) or `--keys-file` (see below), or `--app-priv-key <hex>` for throwaway testing |
 | gateway key | the gateway's key — `--gateway-key <name>` / `--keys-file`, or `--gateway-priv-key <hex>` — only if you sign via a delegated gateway |
-| `--node localhost:9090` | `--node <host:port>` — a Shannon full node gRPC endpoint |
+| `--node localhost:9090` | `--node <host:port>` — a Shannon full node gRPC endpoint (add `--grpc-tls` for a TLS endpoint on `:443`, e.g. beta/mainnet) |
 | `--node-rpc http://localhost:26657` | `--node-rpc <url>` — that node's CometBFT RPC endpoint |
 | `--chain-id poktroll` | `--chain-id <id>` — the target network's chain id (Shannon mainnet: `pocket`) |
 | `--relayer-url http://localhost:8180` | `--relayer-url <url>` — your own relayer deployment |
@@ -250,7 +250,7 @@ A relay is addressed to one supplier operator in the (app, service) session:
 pocket-relay-miner relay jsonrpc \
   --service <your-service-id> \
   --keys-file keys.yaml \
-  --node <fullnode-grpc-host:port> \
+  --node <fullnode-grpc-host:port> --grpc-tls \
   --node-rpc <cometbft-rpc-url> \
   --chain-id pocket \
   --relayer-url <your-relayer-url> \

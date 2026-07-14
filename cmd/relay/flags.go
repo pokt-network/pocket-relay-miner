@@ -15,6 +15,7 @@ var (
 	RelayKeysFile       string // path to a YAML keys file (applications:[hex] + gateway:[hex])
 	RelayServiceID      string
 	RelayNodeGRPC       string
+	RelayGRPCTLS        bool // TLS for the --node gRPC connection (beta/mainnet use TLS on :443)
 	RelayNodeRPC        string
 	RelayChainID        string
 	RelayRelayerURL     string

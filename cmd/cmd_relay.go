@@ -171,6 +171,7 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().StringVar(&relay.RelayKeysFile, "keys-file", "", "Path to a YAML keys file (applications:[hex] + gateway:[hex]); uses the first of each")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayServiceID, "service", "", "Service ID (e.g., develop-http, develop-websocket, develop-stream, develop-grpc)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayNodeGRPC, "node", "", "gRPC endpoint for chain queries (e.g., localhost:9090)")
+	relayCmd.PersistentFlags().BoolVar(&relay.RelayGRPCTLS, "grpc-tls", false, "Use TLS for the --node gRPC connection (required for beta/mainnet endpoints on :443)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayNodeRPC, "node-rpc", "", "CometBFT RPC endpoint for block subscription (e.g., http://localhost:26657)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayChainID, "chain-id", "", "Chain ID (e.g., poktroll)")
 
@@ -367,7 +368,7 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	// Create query clients for chain interaction
 	queryClients, err := query.NewQueryClients(logger, query.ClientConfig{
 		GRPCEndpoint: relay.RelayNodeGRPC,
-		UseTLS:       false,
+		UseTLS:       relay.RelayGRPCTLS,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create query clients: %w", err)
