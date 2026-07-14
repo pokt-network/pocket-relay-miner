@@ -2058,6 +2058,16 @@ func (p *ProxyServer) copyHeaders(dst, src *http.Request) {
 	}
 
 	for _, header := range headersToCopy {
+		// The inner POKTHTTPRequest's headers are applied to the backend request
+		// first (CopyToHTTPHeader) and describe what the backend expects — notably
+		// Content-Type: application/json. The wrapper request's Content-Type is the
+		// relay envelope's (application/x-protobuf) and must never leak to the
+		// backend: a strict JSON-RPC backend (e.g. Anvil) rejects a non-json
+		// Content-Type with "-32600 Invalid request". Only fill in headers the
+		// inner request did not already set.
+		if dst.Header.Get(header) != "" {
+			continue
+		}
 		if value := src.Header.Get(header); value != "" {
 			dst.Header.Set(header, value)
 		}

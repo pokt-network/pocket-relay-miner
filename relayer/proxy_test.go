@@ -184,6 +184,36 @@ func TestNormalizeBackendPath(t *testing.T) {
 	}
 }
 
+// TestCopyHeaders_InnerRequestContentTypeWins covers a production relay bug: the
+// backend request is first given the inner POKTHTTPRequest's headers (via
+// CopyToHTTPHeader) — e.g. Content-Type: application/json, which is what the
+// backend actually needs — and copyHeaders then folds in wrapper-request headers.
+// copyHeaders must NOT overwrite a header the inner request already set, because
+// the wrapper's Content-Type is the relay envelope's (application/x-protobuf) and
+// a strict JSON-RPC backend (e.g. Anvil) rejects a non-json Content-Type with
+// "-32600 Invalid request". Headers the inner request did not set are still
+// copied from the wrapper.
+func TestCopyHeaders_InnerRequestContentTypeWins(t *testing.T) {
+	p := &ProxyServer{logger: testLogger()}
+
+	// Backend request already carries the inner request's Content-Type.
+	dst := httptest.NewRequest("POST", "http://backend:8545/", nil)
+	dst.Header.Set("Content-Type", "application/json")
+
+	// Wrapper (outer relay) request carries the relay envelope Content-Type plus
+	// headers a backend may want.
+	src := httptest.NewRequest("POST", "http://relayer/pnf-anvil", nil)
+	src.Header.Set("Content-Type", "application/x-protobuf")
+	src.Header.Set("Accept-Encoding", "gzip")
+
+	p.copyHeaders(dst, src)
+
+	require.Equal(t, "application/json", dst.Header.Get("Content-Type"),
+		"the inner request's backend Content-Type must not be overwritten by the relay envelope's")
+	require.Equal(t, "gzip", dst.Header.Get("Accept-Encoding"),
+		"headers the inner request did not set are still copied from the wrapper")
+}
+
 func TestShouldCompressResponse(t *testing.T) {
 	tests := []struct {
 		name        string
