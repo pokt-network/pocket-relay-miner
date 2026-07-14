@@ -1,8 +1,11 @@
 package relay
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -11,21 +14,41 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	_ "google.golang.org/grpc/encoding/gzip" // Register gzip compressor for grpc-encoding: gzip
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/protobuf/encoding/protowire"
+
+	servicetypes "github.com/pokt-network/poktroll/x/service/types"
+	sdktypes "github.com/pokt-network/shannon-sdk/types"
 
 	"github.com/pokt-network/pocket-relay-miner/client/relay_client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
 const (
 	// RelayServiceMethodPath is the gRPC method path for the relay service.
 	relayServiceMethodPath = "/pocket.service.RelayService/SendRelay"
+
+	// demoGRPCMethodPath is the localnet demo backend's unary gRPC method
+	// (demo.DemoService/GetBlockHeight). It is the default target of `relay grpc`
+	// so the native gRPC forwarding path (CLI -> relayer h2c -> gRPC backend) is
+	// exercised end to end.
+	demoGRPCMethodPath = "/demo.DemoService/GetBlockHeight"
+
+	// grpcFramePrefixLen is the length of a gRPC length-prefixed message frame
+	// header: 1 compression-flag byte + 4 big-endian message-length bytes.
+	grpcFramePrefixLen = 5
 )
 
 // runGRPCMode sends gRPC relay requests to the relayer.
 func RunGRPCMode(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient) error {
-	// Build payload (eth_blockNumber by default)
-	payloadBz, err := buildJSONRPCPayload()
+	// Default gRPC mode drives a REAL gRPC inner request (the demo backend's
+	// unary GetBlockHeight) so the relayer's native gRPC forwarding is exercised
+	// end to end. A custom --payload instead sends a JSON-RPC inner request,
+	// which deliberately drives the relayer's REST fallback for gRPC relays.
+	buildPayload := buildNativeGRPCPayload
+	if RelayPayloadJSON != "" {
+		buildPayload = buildJSONRPCPayload
+	}
+	payloadBz, err := buildPayload()
 	if err != nil {
 		return fmt.Errorf("failed to build payload: %w", err)
 	}
@@ -37,6 +60,36 @@ func RunGRPCMode(ctx context.Context, logger logging.Logger, relayClient *relay_
 
 	// Load test mode: concurrent requests with metrics
 	return runGRPCLoadTest(ctx, logger, relayClient, payloadBz)
+}
+
+// buildNativeGRPCPayload creates a serialized POKTHTTPRequest carrying a real
+// unary gRPC request for the demo backend's GetBlockHeight method. This lets
+// `relay grpc` exercise the relayer's native gRPC (h2c) forwarding path end to
+// end, instead of sending JSON the gRPC backend would reject with HTTP 415.
+//
+// GetBlockHeight takes demo.Empty, which serializes to zero bytes, so the gRPC
+// length-prefixed frame is just its 5-byte header:
+// [compression flag=0][big-endian uint32 length=0].
+func buildNativeGRPCPayload() ([]byte, error) {
+	emptyFrame := []byte{0x00, 0x00, 0x00, 0x00, 0x00}
+
+	httpReq, err := http.NewRequest("POST", demoGRPCMethodPath, bytes.NewReader(emptyFrame))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create gRPC HTTP request: %w", err)
+	}
+
+	// gRPC-over-HTTP/2 conventions: the content type marks the body as a gRPC
+	// frame, and TE: trailers asks the backend to return grpc-status in HTTP
+	// trailers (which the relayer folds back into the response headers).
+	httpReq.Header.Set("Content-Type", "application/grpc")
+	httpReq.Header.Set("TE", "trailers")
+
+	_, poktHTTPRequestBz, err := sdktypes.SerializeHTTPRequest(httpReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize POKTHTTPRequest: %w", err)
+	}
+
+	return poktHTTPRequestBz, nil
 }
 
 // runGRPCDiagnostic sends a single gRPC relay request with detailed output.
@@ -71,12 +124,30 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 	// Use shared build/send/verify logic
 	result := BuildAndSendRelay(ctx, logger, relayClient, payloadBz, sendFunc)
 
+	// Native gRPC e2e check: on top of the shared signature/error verification,
+	// confirm the reply is a well-formed gRPC frame with grpc-status 0. Skipped
+	// when a custom --payload drove the REST fallback instead of a gRPC frame.
+	if result.Success && RelayPayloadJSON == "" {
+		if err := verifyGRPCRelayPayload(result.Response); err != nil {
+			result.Success = false
+			result.Error = fmt.Errorf("gRPC relay verification failed: %w", err)
+		}
+	}
+
 	// Display results using shared formatter
 	DisplayDiagnosticResult(relayClient, result)
 
 	// Return error if relay failed
 	if !result.Success {
 		return result.Error
+	}
+
+	// Surface the demo backend's block height decoded from the gRPC response
+	// frame, proving the native gRPC round trip actually reached the backend.
+	if RelayPayloadJSON == "" {
+		if height, err := decodeGRPCBlockHeight(result.Response); err == nil {
+			fmt.Printf("Block Height: %d\n", height)
+		}
 	}
 
 	return nil
@@ -187,6 +258,20 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 				return
 			}
 
+			// Native gRPC e2e check: reply must be a well-formed gRPC frame with
+			// grpc-status 0. Skipped when a custom --payload drove the REST
+			// fallback instead of a native gRPC frame.
+			if RelayPayloadJSON == "" {
+				if err := verifyGRPCRelayPayload(relayResponse); err != nil {
+					metrics.RecordError(err)
+					logger.Debug().
+						Err(err).
+						Int("request_num", reqNum).
+						Msg("gRPC relay request failed (gRPC payload verification)")
+					return
+				}
+			}
+
 			// Success: valid signature + no JSON-RPC error
 			metrics.RecordSuccess(latencyMs)
 			logger.Debug().
@@ -260,4 +345,112 @@ func invokeGRPCRelay(ctx context.Context, conn *grpc.ClientConn, relayRequest *s
 	}
 
 	return relayResponseBz, nil
+}
+
+// verifyGRPCRelayPayload asserts that a relay response carries a successful
+// native gRPC reply: HTTP 200, a grpc-status of 0 folded in from the backend's
+// trailers, and a well-formed, non-empty gRPC message frame. It runs after the
+// shared signature and error checks so `relay grpc` has a real end-to-end
+// assertion that the relayer forwarded to the gRPC backend (not the REST
+// fallback) and got a valid gRPC reply.
+func verifyGRPCRelayPayload(relayResponse *servicetypes.RelayResponse) error {
+	if relayResponse == nil {
+		return fmt.Errorf("nil relay response")
+	}
+
+	poktResp, err := sdktypes.DeserializeHTTPResponse(relayResponse.Payload)
+	if err != nil {
+		return fmt.Errorf("deserialize POKTHTTPResponse: %w", err)
+	}
+
+	if poktResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("expected HTTP 200, got %d", poktResp.StatusCode)
+	}
+
+	grpcStatus, ok := lookupGRPCHeader(poktResp.Header, "Grpc-Status")
+	if !ok {
+		return fmt.Errorf("missing grpc-status header (backend gRPC trailers not folded into response)")
+	}
+	if grpcStatus != "0" {
+		return fmt.Errorf("grpc-status %q is non-zero (gRPC call failed)", grpcStatus)
+	}
+
+	if err := validateGRPCFrame(poktResp.BodyBz); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateGRPCFrame checks that bodyBz is a single, well-formed gRPC
+// length-prefixed message frame carrying a non-empty message. GetBlockHeight
+// always encodes height>0, so an empty message means the backend answered
+// nothing.
+func validateGRPCFrame(bodyBz []byte) error {
+	if len(bodyBz) < grpcFramePrefixLen {
+		return fmt.Errorf("gRPC frame too short: %d bytes (need at least %d)", len(bodyBz), grpcFramePrefixLen)
+	}
+	if bodyBz[0] != 0x00 {
+		return fmt.Errorf("gRPC frame compression flag %d unsupported (expected 0)", bodyBz[0])
+	}
+	msgLen := binary.BigEndian.Uint32(bodyBz[1:grpcFramePrefixLen])
+	if int(msgLen) != len(bodyBz)-grpcFramePrefixLen {
+		return fmt.Errorf("gRPC frame length %d does not match message size %d", msgLen, len(bodyBz)-grpcFramePrefixLen)
+	}
+	if msgLen == 0 {
+		return fmt.Errorf("gRPC frame carries an empty message")
+	}
+	return nil
+}
+
+// lookupGRPCHeader returns the first value of a header by case-insensitive key.
+// The relayer folds gRPC trailers in under http.Header-canonical keys
+// ("Grpc-Status"), but we compare case-insensitively so a different wire casing
+// cannot silently drop the check.
+func lookupGRPCHeader(headers map[string]*sdktypes.Header, key string) (string, bool) {
+	for headerKey, header := range headers {
+		if strings.EqualFold(headerKey, key) && header != nil && len(header.Values) > 0 {
+			return header.Values[0], true
+		}
+	}
+	return "", false
+}
+
+// decodeGRPCBlockHeight extracts the demo backend's block height from a gRPC
+// response frame. The message after the 5-byte frame header encodes
+// BlockHeightResponse{uint64 height=1}, so we scan its protobuf fields for
+// field 1 (varint).
+func decodeGRPCBlockHeight(relayResponse *servicetypes.RelayResponse) (uint64, error) {
+	poktResp, err := sdktypes.DeserializeHTTPResponse(relayResponse.Payload)
+	if err != nil {
+		return 0, fmt.Errorf("deserialize POKTHTTPResponse: %w", err)
+	}
+	if err := validateGRPCFrame(poktResp.BodyBz); err != nil {
+		return 0, err
+	}
+
+	msg := poktResp.BodyBz[grpcFramePrefixLen:]
+	for len(msg) > 0 {
+		fieldNum, wireType, n := protowire.ConsumeTag(msg)
+		if n < 0 {
+			return 0, protowire.ParseError(n)
+		}
+		msg = msg[n:]
+
+		if fieldNum == 1 && wireType == protowire.VarintType {
+			height, vn := protowire.ConsumeVarint(msg)
+			if vn < 0 {
+				return 0, protowire.ParseError(vn)
+			}
+			return height, nil
+		}
+
+		n = protowire.ConsumeFieldValue(fieldNum, wireType, msg)
+		if n < 0 {
+			return 0, protowire.ParseError(n)
+		}
+		msg = msg[n:]
+	}
+
+	return 0, fmt.Errorf("block height field not found in gRPC response")
 }
