@@ -101,7 +101,12 @@ func loadKeysFile(path string) (appHex, gatewayHex string, err error) {
 
 	var kf relayKeysFile
 	if err := yaml.Unmarshal(data, &kf); err != nil {
-		return "", "", fmt.Errorf("failed to parse keys file as YAML: %w", err)
+		// Do NOT wrap the raw YAML error: yaml.v3 echoes a prefix of the offending
+		// scalar, so a "key as a scalar" typo (applications: <hex> instead of a
+		// list item) would leak private key material to stderr — the exact exposure
+		// --keys-file exists to prevent. Return a structural hint with only the
+		// (safe) path.
+		return "", "", fmt.Errorf("failed to parse keys file %s as YAML (expected lists under 'applications:' and 'gateway:'; check indentation)", path)
 	}
 
 	switch len(kf.Applications) {

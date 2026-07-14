@@ -219,6 +219,23 @@ func TestResolveKeys_KeyringWithoutBackendErrors(t *testing.T) {
 	require.Contains(t, err.Error(), "keyring-backend")
 }
 
+// TestLoadKeysFile_ParseErrorDoesNotLeakKeyMaterial proves a malformed keys file
+// (the key written as a scalar under `applications:` instead of a list item — a
+// natural operator typo, since the value IS the key) is rejected WITHOUT echoing
+// any of the private key into the error. That error is printed to stderr by cobra,
+// and --keys-file exists precisely to keep key material out of terminals and logs;
+// yaml.v3 would otherwise embed the first hex chars of the offending scalar.
+func TestLoadKeysFile_ParseErrorDoesNotLeakKeyMaterial(t *testing.T) {
+	path := writeKeysFile(t, "applications: "+validAppHex+"\n")
+
+	_, _, err := loadKeysFile(path)
+
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), validAppHex[:7],
+		"a parse error must not leak any private key material to stderr")
+	require.NotContains(t, err.Error(), validAppHex[:16])
+}
+
 // TestLoadKeysFile_NotFound proves a missing file surfaces a read error.
 func TestLoadKeysFile_NotFound(t *testing.T) {
 	_, _, err := loadKeysFile(filepath.Join(t.TempDir(), "nope.yaml"))

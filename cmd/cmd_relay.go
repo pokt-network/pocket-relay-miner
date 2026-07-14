@@ -249,7 +249,7 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 
 	// Validate required flags
 	if relay.RelayAppPrivKey == "" {
-		return fmt.Errorf("--app-priv-key is required (or use --localnet)")
+		return fmt.Errorf("an application key is required: --app-key <name> (keyring), --keys-file <path>, or --app-priv-key <hex> (or use --localnet)")
 	}
 	if relay.RelayServiceID == "" {
 		return fmt.Errorf("--service is required")
