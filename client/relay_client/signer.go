@@ -235,6 +235,20 @@ func (s *Signer) SignRelayRequestWithRing(
 	return nil
 }
 
+// PubKeyHexFromPrivKeyHex derives the compressed secp256k1 public key hex for
+// a hex-encoded private key, without retaining a Signer or address. The CLI
+// uses this to default a simulated relay's ring pubkeys
+// (--sim-app-pubkey/--sim-gateway-pubkeys) from the already-resolved
+// --app-priv-key/--gateway-priv-key hex when the operator does not pass an
+// explicit override.
+func PubKeyHexFromPrivKeyHex(privKeyHex string) (string, error) {
+	signer, err := NewSignerFromHex(privKeyHex)
+	if err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(signer.GetPrivKey().PubKey().Bytes()), nil
+}
+
 // deriveAddressFromPubKey derives a Bech32-encoded Pocket address from a public key.
 func deriveAddressFromPubKey(pubKey cryptotypes.PubKey) (string, error) {
 	// Get the address bytes from the public key

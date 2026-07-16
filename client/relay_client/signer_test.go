@@ -142,6 +142,43 @@ func TestScalarConversion(t *testing.T) {
 	require.NotNil(t, scalar, "Scalar should not be nil")
 }
 
+// TestPubKeyHexFromPrivKeyHex_ValidKey tests that the derived pubkey hex
+// matches the pubkey directly derived from the same private key bytes.
+func TestPubKeyHexFromPrivKeyHex_ValidKey(t *testing.T) {
+	pubHex, err := PubKeyHexFromPrivKeyHex(testPrivKeyHex)
+	require.NoError(t, err)
+	require.NotEmpty(t, pubHex)
+
+	keyBytes, err := hex.DecodeString(testPrivKeyHex)
+	require.NoError(t, err)
+	privKey := &secp256k1.PrivKey{Key: keyBytes}
+	require.Equal(t, hex.EncodeToString(privKey.PubKey().Bytes()), pubHex)
+}
+
+// TestPubKeyHexFromPrivKeyHex_EmptyKey tests that an empty key is rejected,
+// mirroring NewSignerFromHex's own validation.
+func TestPubKeyHexFromPrivKeyHex_EmptyKey(t *testing.T) {
+	_, err := PubKeyHexFromPrivKeyHex("")
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "private key hex is empty")
+}
+
+// TestPubKeyHexFromPrivKeyHex_InvalidHex tests that malformed hex is rejected.
+func TestPubKeyHexFromPrivKeyHex_InvalidHex(t *testing.T) {
+	_, err := PubKeyHexFromPrivKeyHex("not-valid-hex")
+	require.Error(t, err)
+}
+
+// TestPubKeyHexFromPrivKeyHex_Deterministic tests that repeated calls with the
+// same key produce the same pubkey hex.
+func TestPubKeyHexFromPrivKeyHex_Deterministic(t *testing.T) {
+	first, err := PubKeyHexFromPrivKeyHex(testPrivKeyHex)
+	require.NoError(t, err)
+	second, err := PubKeyHexFromPrivKeyHex(testPrivKeyHex)
+	require.NoError(t, err)
+	require.Equal(t, first, second)
+}
+
 // TestKeyConsistency tests that same hex always produces same key and address.
 func TestKeyConsistency(t *testing.T) {
 	// Create signer twice with same key
