@@ -2,7 +2,7 @@
 
 Simulated relays let you exercise a running relayer end-to-end — signature
 validation, service routing, the **real backend round-trip**, and response
-signing — **without** minting a chargeable relay and **without** needing any
+signing — **without** minting a claimable relay and **without** needing any
 on-chain application or session state.
 
 A simulated relay is _almost 100% a real relay_. It travels the same
@@ -11,8 +11,9 @@ PATH app/gateway relay). The only differences from a paid relay are:
 
 - it is verified against a ring **pinned in the relayer config** instead of
   read from chain, so it needs no chain access on either side;
-- it is **never charged** (no stake consumed) and **never published** for
-  claim/proof (no reward);
+- it is **never metered** against the application's stake allowance and
+  **never published** to the WAL, so it never becomes part of a claim — and a
+  relay that is never claimed is never settled and never paid for;
 - it is counted in its **own** metrics and never touches the counters that
   measure real traffic.
 
@@ -22,11 +23,19 @@ health check or an infrastructure smoke test needs.
 
 ### Who this is for
 
-- **Igniter / gateway integrators** — wire simulated relays as health checks
-  that prove "this relayer, with supplier X loaded, can serve service Y right
-  now" without paying for relays.
-- **Operators / NodeRunners** — validate your own infrastructure (backends,
-  supplier keys, transports) before or while taking real traffic.
+**Operators / NodeRunners, testing their own infrastructure.** That is the whole
+audience. Simulated relays are an operator-side capability: you enable them on
+your own relayer, against identities whose private keys only you hold. They are
+not a surface exposed to third parties — no gateway, application, or external
+integrator can fire one against your relayer.
+
+Two ways operators use it:
+
+- **By hand** — validate your backends, supplier keys, and transports before or
+  while taking real traffic.
+- **Automated, from tooling you deploy yourself** (e.g. Igniter) — wire
+  simulated relays as health checks that prove "this relayer, with supplier X
+  loaded, can serve service Y right now", without paying for relays.
 
 ### How it works (the three zones)
 
@@ -40,9 +49,14 @@ differ:
    checks.)
 2. **Data path** — decode → route → **backend round-trip** → sign response →
    respond. **Identical** for simulated and real relays.
-3. **Accounting** — a real relay consumes stake and publishes to the WAL for
-   mining. A simulated relay does **neither**; it runs a non-mutating meter
-   health probe and records a simulated-relay metric instead.
+3. **Accounting** — a real relay is **metered** (the relayer tracks it against
+   the application's stake allowance, to decide what it may still serve) and
+   **published to the WAL**, so the miner can fold it into an SMST tree and
+   submit a claim. The actual burn/payment happens later, on-chain, at
+   settlement. A simulated relay does **neither**: it is never metered and
+   never published, so no claim is ever built for it and nothing is ever
+   settled. It runs a non-mutating meter health probe and records a
+   simulated-relay metric instead.
 
 A simulated relay is always **admitted before the backend is called**, even on
 a service configured for `optimistic` validation (which serves real relays
@@ -115,7 +129,7 @@ Provisioning an identity:
 
 ### The header
 
-A simulated relay is signalled by one header/metadata field, carried on each
+A simulated relay is signaled by one header/metadata field, carried on each
 transport's native channel (the same way `Rpc-Type` already is):
 
 - HTTP (jsonrpc, cometbft, rest/stream) and WebSocket handshake:
@@ -177,11 +191,12 @@ pocket-relay-miner relay websocket --localnet --service develop-websocket --supp
 pocket-relay-miner relay stream    --localnet --service develop-stream    --supplier $SUP --simulate --sim-key-id sim-stream --batches 3
 ```
 
-### Verifying it never charges
+### Verifying it is never mined
 
-A simulated relay must produce **no** mining state. To confirm, fire a burst of
-simulated relays and check that no claim/session/WAL state was created — only
-the simulated metric moves:
+A simulated relay must produce **no** mining state — that is what guarantees it
+is never claimed, and therefore never settled or paid for. To confirm, fire a
+burst of simulated relays and check that no claim/session/WAL state was created
+— only the simulated metric moves:
 
 ```bash
 # Fire a burst of simulated relays (above), then inspect Redis:
