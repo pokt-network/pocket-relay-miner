@@ -2307,6 +2307,8 @@ func (p *ProxyServer) InitGRPCHandler() {
 			Publisher:          p.publisher,
 			RelayProcessor:     p.relayProcessor,
 			RelayPipeline:      p.relayPipeline, // Unified relay processing pipeline
+			SimVerifier:        p.simVerifier,
+			RelayMeter:         p.relayMeter,
 			CurrentBlockHeight: &p.currentBlockHeight,
 			MaxBodySize:        p.config.DefaultMaxBodySizeBytes,
 			BufferPool:         p.bufferPool, // Share buffer pool for efficient memory usage

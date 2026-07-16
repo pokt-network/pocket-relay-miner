@@ -55,6 +55,11 @@ type RelayGRPCService struct {
 	relayProcessor RelayProcessor
 	relayPipeline  *RelayPipeline // Unified relay processing pipeline
 
+	// simVerifier owns the simulated-relay Admission zone (optional). relayMeter
+	// is used only for the simulated path's non-mutating meter health probe.
+	simVerifier *SimulationVerifier
+	relayMeter  *RelayMeter
+
 	// Function to get HTTP client for a service (supports per-service timeout profiles)
 	getHTTPClient func(serviceID string) *http.Client
 
@@ -94,6 +99,8 @@ type RelayGRPCServiceConfig struct {
 	Publisher          transport.MinedRelayPublisher
 	RelayProcessor     RelayProcessor
 	RelayPipeline      *RelayPipeline // Unified relay processing pipeline
+	SimVerifier        *SimulationVerifier
+	RelayMeter         *RelayMeter
 	CurrentBlockHeight *atomic.Int64
 	MaxBodySize        int64
 	BufferPool         *BufferPool
@@ -170,6 +177,8 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		publisher:          config.Publisher,
 		relayProcessor:     config.RelayProcessor,
 		relayPipeline:      config.RelayPipeline,
+		simVerifier:        config.SimVerifier,
+		relayMeter:         config.RelayMeter,
 		currentBlockHeight: config.CurrentBlockHeight,
 		maxBodySize:        maxBodySize,
 		bufferPool:         bufferPool,
@@ -268,6 +277,15 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	ctx, cancel := context.WithTimeout(ctx, serviceTimeout)
 	defer cancel()
 
+	// SIMULATION SEAM — the only simulation-aware line on the gRPC normal path.
+	// Admitted eagerly here, before the pipeline validate/meter and before any
+	// publish. Reuses the shared data-path primitives (forwardToBackend +
+	// response signer) inside serveSimulatedGRPC. Header ignored when disabled.
+	md, _ := metadata.FromIncomingContext(ctx)
+	if directive := SimDirectiveFromGRPC(md); directive.KeyID != "" && s.simVerifier != nil && s.simVerifier.Enabled() {
+		return s.serveSimulatedGRPC(stream, ctx, relayRequest, serviceID, svcConfig, supplierOperatorAddr, directive.KeyID, md)
+	}
+
 	// Validate and meter the relay if pipeline is available
 	if s.relayPipeline != nil {
 		// TODO: Get actual compute units from service config
@@ -329,7 +347,6 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	// declares metadata.Pairs("rpc-type","1"); the inner request is still typed
 	// application/json, so the old Content-Type-only logic mislabeled every gRPC
 	// relay as "rest" and misrouted it.
-	md, _ := metadata.FromIncomingContext(ctx)
 	grpcRPCType := resolveGRPCRelayRPCType(md, poktHTTPRequest, &svcConfig)
 
 	var grpcEndpoint *pool.BackendEndpoint
@@ -504,6 +521,106 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		Dur("latency", time.Since(arrivalTime)).
 		Msg("gRPC relay completed successfully")
 
+	return nil
+}
+
+// simGRPCCode maps a simulation admission error to a gRPC status code. The
+// metric result label comes from SimResultForError (transport-agnostic).
+func simGRPCCode(err error) codes.Code {
+	switch {
+	case errors.Is(err, ErrSimReplay):
+		return codes.AlreadyExists
+	case errors.Is(err, ErrSimServiceUnknown):
+		return codes.NotFound
+	case errors.Is(err, ErrSimSupplierMissing), errors.Is(err, ErrSimBadSessionID):
+		return codes.InvalidArgument
+	case errors.Is(err, ErrSimDedupUnavailable):
+		return codes.Unavailable
+	default:
+		return codes.PermissionDenied
+	}
+}
+
+// serveSimulatedGRPC serves a simulated relay over native gRPC. It runs the
+// simulation Admission zone (global slot -> pinned-ring/binding/freshness
+// Verify -> per-key rate), then the SHARED data path (the SAME forwardToBackend
+// and response signer the real gRPC path uses), skipping Accounting entirely
+// (no meter consume, no publish). Always eager-admission.
+func (s *RelayGRPCService) serveSimulatedGRPC(
+	stream grpc.ServerStream,
+	ctx context.Context,
+	relayRequest *servicetypes.RelayRequest,
+	serviceID string,
+	svcConfig ServiceConfig,
+	supplier, keyID string,
+	md metadata.MD,
+) error {
+	const transportLabel = "grpc"
+	record := func(result string) {
+		simulatedRelaysTotal.WithLabelValues(transportLabel, serviceID, supplier, result).Inc()
+	}
+
+	release, ok := s.simVerifier.AcquireGlobal()
+	if !ok {
+		record(SimResultRateLimited)
+		return status.Error(codes.ResourceExhausted, "simulation concurrency limit reached")
+	}
+	defer release()
+
+	if err := s.simVerifier.Verify(ctx, keyID, relayRequest); err != nil {
+		record(SimResultForError(err))
+		return status.Errorf(simGRPCCode(err), "simulation rejected: %v", err)
+	}
+	if !s.simVerifier.AllowKey(keyID) {
+		record(SimResultRateLimited)
+		return status.Error(codes.ResourceExhausted, "simulation rate limit reached")
+	}
+
+	// SHARED DATA PATH — deserialize, resolve backend type, forward.
+	poktHTTPRequest, err := sdktypes.DeserializeHTTPRequest(relayRequest.Payload)
+	if err != nil {
+		record(SimResultVerifyFailed)
+		return status.Errorf(codes.InvalidArgument, "failed to deserialize payload: %v", err)
+	}
+	grpcRPCType := resolveGRPCRelayRPCType(md, poktHTTPRequest, &svcConfig)
+	var grpcEndpoint *pool.BackendEndpoint
+	if s.getPool != nil {
+		grpcPool := s.getPool(serviceID, grpcRPCType)
+		if grpcPool == nil || !grpcPool.HasHealthy() {
+			record(SimResultBackendError)
+			return status.Error(codes.Unavailable, "backend unavailable")
+		}
+		grpcEndpoint = grpcPool.Next()
+	}
+	respBody, respHeaders, respStatus, err := s.forwardToBackend(ctx, serviceID, &svcConfig, poktHTTPRequest, grpcEndpoint, grpcRPCType)
+	if err != nil {
+		record(SimResultBackendError)
+		return status.Errorf(codes.Unavailable, "backend error: %v", err)
+	}
+	if respStatus >= 500 {
+		record(SimResultBackendError)
+		return status.Errorf(codes.Unavailable, "backend service error: HTTP %d", respStatus)
+	}
+
+	// SHARED DATA PATH — same response signer as the real path.
+	relayResponse, _, err := s.responseSigner.BuildAndSignRelayResponseFromBody(relayRequest, respBody, respHeaders, respStatus)
+	if err != nil {
+		record(SimResultSignFailed)
+		return status.Errorf(codes.Internal, "failed to sign response: %v", err)
+	}
+	if err := stream.SendMsg(relayResponse); err != nil {
+		record(SimResultBackendError)
+		return status.Errorf(codes.Internal, "failed to send response: %v", err)
+	}
+
+	// ACCOUNTING gated off: no publish. Dry meter probe feeds the result label.
+	result := SimResultSuccess
+	if s.relayMeter != nil {
+		if healthErr := s.relayMeter.CheckRelayHealth(ctx, serviceID); healthErr != nil {
+			result = SimResultMeterDegraded
+		}
+	}
+	record(result)
 	return nil
 }
 
