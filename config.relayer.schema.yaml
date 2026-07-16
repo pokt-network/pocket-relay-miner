@@ -537,3 +537,72 @@ properties:
           type: integer
           description: How long an idle connection is retained before being closed (0 inherits global default)
           minimum: 0
+
+  simulation:
+    type: object
+    description: >-
+      Simulated-relay configuration. Serves synthetic relays for pinned
+      (application, gateway-ring) identities, verified against
+      config-pinned public keys instead of an on-chain session. Disabled
+      by default. SECURITY: app_pubkey_hex and every gateway_pubkeys_hex
+      entry are rejected at load time if they match the deterministic ring
+      placeholder key, since its private half is publicly derivable.
+    properties:
+      enabled:
+        type: boolean
+        description: Enable the simulated-relay feature
+        default: false
+      max_concurrent:
+        type: integer
+        description: Max simulated relays in flight across all identities
+        default: 32
+        minimum: 1
+      freshness_window_seconds:
+        type: integer
+        description: How old a simulated relay request's timestamp may be before it's rejected as stale (seconds)
+        default: 30
+        minimum: 1
+      identities:
+        type: array
+        description: Pinned simulated-relay identities
+        items:
+          type: object
+          required:
+            - key_id
+            - app_pubkey_hex
+            - gateway_pubkeys_hex
+          properties:
+            key_id:
+              type: string
+              description: Unique identifier for this identity within the simulation config
+            enabled:
+              type: boolean
+              description: >-
+                Activates this identity. An identity is served ONLY when
+                this is explicitly true; omitted/false keeps it inactive
+                (fail-closed). Not defaulted to true.
+              default: false
+            not_after:
+              type: string
+              description: Optional RFC3339 timestamp after which this identity is no longer valid
+            max_rps:
+              type: integer
+              description: Per-identity simulated relay rate
+              default: 5
+              minimum: 1
+            app_pubkey_hex:
+              type: string
+              description: Compressed secp256k1 pubkey (hex, 66 chars) of the simulated application. Must not be the ring placeholder key.
+              pattern: ^[0-9a-fA-F]{66}$
+            gateway_pubkeys_hex:
+              type: array
+              description: Compressed secp256k1 pubkeys (hex) of the simulated gateway ring members. At least one required; none may be the ring placeholder key.
+              minItems: 1
+              items:
+                type: string
+                pattern: ^[0-9a-fA-F]{66}$
+            allowed_services:
+              type: array
+              description: Restricts this identity to the listed service IDs. Empty/omitted means all configured services are allowed.
+              items:
+                type: string

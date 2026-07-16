@@ -359,3 +359,49 @@ logging:
   output: "stdout"  # stdout, stderr, or file path
   enable_caller: false  # Add caller file:line to logs (~14% alloc overhead, disable in production)
   # [PRODUCTION] level: "info", enable_caller: false
+
+# Simulated relays (optional - disabled by default)
+# Serves synthetic relays for pinned (application, gateway-ring) identities,
+# verified against config-pinned public keys instead of an on-chain session.
+# SECURITY: app_pubkey_hex and every entry in gateway_pubkeys_hex are
+# rejected at startup if they match the deterministic ring placeholder key
+# (its private half is publicly derivable from a well-known seed) — pinning
+# it would let anyone forge simulated relays for that identity.
+simulation:
+  # Enable the simulated-relay feature. Default: false.
+  enabled: false
+
+  # Max simulated relays in flight across all identities. Default: 32.
+  max_concurrent: 32
+
+  # How old a simulated relay request's timestamp may be before it's
+  # rejected as stale, in seconds. Default: 30.
+  freshness_window_seconds: 30
+
+  # Pinned simulated-relay identities. Each identity is served ONLY when
+  # its own `enabled: true` is set explicitly (fail-closed) - defaults do
+  # not turn identities on.
+  identities:
+    - key_id: "example-sim-identity"
+      enabled: true
+
+      # Optional RFC3339 expiry; omit for no expiry.
+      # not_after: "2027-01-01T00:00:00Z"
+
+      # Per-identity simulated relay rate. Default: 5.
+      max_rps: 5
+
+      # Compressed secp256k1 pubkey (hex) of the simulated application.
+      # EXAMPLE VALUE ONLY - replace with a real pinned key, never reuse
+      # this placeholder-looking value in a real deployment.
+      app_pubkey_hex: "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+      # Compressed secp256k1 pubkeys (hex) of the simulated gateway ring
+      # members. At least one required. EXAMPLE VALUES ONLY.
+      gateway_pubkeys_hex:
+        - "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+      # Restrict this identity to specific services. Empty/omitted means
+      # all configured services are allowed.
+      # allowed_services:
+      #   - develop-http

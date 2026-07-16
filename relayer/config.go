@@ -193,6 +193,10 @@ type Config struct {
 	// specified. Services reference them by name via ServiceConfig.PoolProfile.
 	PoolProfiles map[string]PoolProfile `yaml:"pool_profiles,omitempty"`
 
+	// Simulation configures the simulated-relay feature: a pinned-pubkey,
+	// config-driven path for serving synthetic relays. Disabled by default.
+	Simulation SimulationConfig `yaml:"simulation,omitempty"`
+
 	// pools is the registry of backend pools, keyed by "serviceID:rpcType".
 	// Built by BuildPools() after validation, not serialized to YAML.
 	pools map[string]*pool.Pool `yaml:"-"`
@@ -604,7 +608,7 @@ type CacheWarmupConfig struct {
 
 // DefaultConfig returns a Config with sensible defaults.
 func DefaultConfig() Config {
-	return Config{
+	cfg := Config{
 		ListenAddr: "0.0.0.0:8080",
 		Redis: RedisConfig{
 			URL: "redis://localhost:6379",
@@ -669,6 +673,15 @@ func DefaultConfig() Config {
 			MinSizeBytes: 1024,
 		},
 	}
+
+	// Simulation defaults to disabled; ApplyDefaults still fills in its
+	// numeric knobs so a config that only sets `simulation.enabled: true`
+	// (with no identities pre-populated at this point) gets sane
+	// top-level defaults immediately. Per-identity defaults are re-applied
+	// in Config.Validate after YAML unmarshalling populates Identities.
+	cfg.Simulation.ApplyDefaults()
+
+	return cfg
 }
 
 // Validate validates the configuration and returns an error if invalid.
@@ -729,6 +742,15 @@ func (c *Config) Validate() error {
 	// Validate and auto-populate pool profiles
 	if err := c.ValidatePoolProfiles(); err != nil {
 		return err
+	}
+
+	// Re-apply simulation defaults now that YAML unmarshalling has
+	// populated Identities (the DefaultConfig-time ApplyDefaults call only
+	// saw an empty identity list), then validate. ApplyDefaults is
+	// idempotent, so this is safe even when defaults were already applied.
+	c.Simulation.ApplyDefaults()
+	if err := c.Simulation.Validate(); err != nil {
+		return fmt.Errorf("invalid simulation config: %w", err)
 	}
 
 	return nil
