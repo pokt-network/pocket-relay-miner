@@ -189,12 +189,30 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().IntVar(&relay.RelayTimeout, "timeout", 120, "Request timeout in seconds (also the max time a stream is read before giving up)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayVerbose, "verbose", false, "Verbose logging")
 
+	// Simulated-relay flags: fire a real, ring-signed relay verified by the
+	// relayer's SimulationVerifier against a config-pinned ring instead of an
+	// on-chain session (served but never charged). See cmd/relay/simulate.go.
+	relayCmd.PersistentFlags().BoolVar(&relay.RelaySimulate, "simulate", false, "Fire a simulated relay: locally ring-signed (no chain query), verified by the relayer's SimulationVerifier against config-pinned keys — served but never charged — instead of a normal chain-backed relay")
+	relayCmd.PersistentFlags().StringVar(&relay.RelaySimKeyID, "sim-key-id", "", "Simulation identity key_id pinned in the relayer's simulation config (required with --simulate)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelaySimAppPubKey, "sim-app-pubkey", "", "Compressed secp256k1 app pubkey (hex) for the simulated ring (default: derived from --app-priv-key/--app-key/--keys-file)")
+	relayCmd.PersistentFlags().StringSliceVar(&relay.RelaySimGatewayPubKeys, "sim-gateway-pubkeys", nil, "Compressed secp256k1 gateway pubkey(s) (hex; comma-separated or repeated) for the simulated ring (default: derived from --gateway-priv-key/--gateway-key/--keys-file)")
+
 	return relayCmd
 }
 
 // runRelayCommand executes the relay command based on the selected mode.
 func runRelayCommand(cmd *cobra.Command, args []string) error {
 	mode := args[0]
+
+	// Initialize Cosmos SDK config with the "pokt" Bech32 prefix, same as
+	// runHARelayer. Without this, cosmostypes.AccAddress(...).String() (used
+	// by BuildSimulatedRelayRequest to derive the simulated session's
+	// ApplicationAddress, matching relayer/simulation.go's own derivation)
+	// would default to the cosmos-sdk's stock "cosmos" prefix in THIS
+	// process, producing an address the relayer's pinned identity would
+	// never match — even though relay_client's other address helpers
+	// (deriveAddressFromPubKey) sidestep this by hardcoding "pokt" directly.
+	initSDKConfig()
 
 	// Create logger (needed early so key resolution can log through the keyring).
 	logConfig := logging.DefaultConfig()
@@ -383,6 +401,14 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	}, logger)
 	if err != nil {
 		return fmt.Errorf("failed to create relay client: %w", err)
+	}
+
+	// Resolve/validate the --simulate flag group now that keys are resolved
+	// (app/gateway priv key hex available for pubkey defaulting), but BEFORE
+	// the placeholder-supplier fallback below — --simulate requires a real
+	// --supplier, and the fallback would otherwise mask a missing one.
+	if err := relay.ResolveSimulationFlags(); err != nil {
+		return err
 	}
 
 	// If supplier address not provided, try to detect from relayer

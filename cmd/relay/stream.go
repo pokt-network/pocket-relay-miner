@@ -44,7 +44,7 @@ func RunStreamMode(ctx context.Context, logger logging.Logger, relayClient *rela
 func runStreamDiagnostic(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
 	// Build and sign relay request
 	buildStart := time.Now()
-	relayRequest, relayRequestBz, err := relayClient.BuildRelayRequest(ctx, RelayServiceID, RelaySupplierAddr, payloadBz)
+	relayRequest, relayRequestBz, err := buildRelayRequest(ctx, relayClient, RelayServiceID, RelaySupplierAddr, payloadBz)
 	if err != nil {
 		return fmt.Errorf("failed to build relay request: %w", err)
 	}
@@ -137,6 +137,12 @@ func sendStreamingRelay(ctx context.Context, relayRequestBz []byte) ([][]byte, e
 	// Reference: poktroll/x/shared/types/service.pb.go RPCType enum
 	// Backend maps REST to http://backend:8545/stream/sse (tilt_config.yaml:156)
 	req.Header.Set("Rpc-Type", "4") // REST = 4
+
+	// Pocket-Simulation-Key-Id: tells the relayer this is a simulated relay.
+	// Absent unless --simulate is set.
+	if key, val, ok := simulationHTTPHeader(); ok {
+		req.Header.Set(key, val)
+	}
 
 	// Send request
 	client := &http.Client{

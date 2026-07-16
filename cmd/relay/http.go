@@ -221,7 +221,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			// randomness, so each call produces different bytes even for an
 			// identical payload, matching PATH's per-request sign behaviour.
 			supplier := supplierAddrs[supplierIdx.Add(1)%uint64(len(supplierAddrs))]
-			_, relayRequestBz, err := relayClient.BuildRelayRequest(requestCtx, RelayServiceID, supplier, payloadBz)
+			_, relayRequestBz, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
 			if err != nil {
 				metrics.RecordError(fmt.Errorf("build relay request: %w", err))
 				logger.Debug().
@@ -398,6 +398,13 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 
 	// Rpc-Type: Backend routing hint (Reference: poktroll/x/shared/types/service.pb.go)
 	req.Header.Set("Rpc-Type", rpcType)
+
+	// Pocket-Simulation-Key-Id: tells the relayer this is a simulated relay
+	// (relayer.SimulationVerifier path — served but never charged) instead of
+	// a normal chain-backed one. Absent unless --simulate is set.
+	if key, val, ok := simulationHTTPHeader(); ok {
+		req.Header.Set(key, val)
+	}
 
 	// === Compression (RFC 7231 compliance) ===
 	// Accept-Encoding is automatically added by Go's http.Client when DisableCompression=false

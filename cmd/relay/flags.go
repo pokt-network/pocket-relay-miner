@@ -31,4 +31,12 @@ var (
 	RelayVerbose        bool
 	RelayLocalnet       bool
 	RelayAllSuppliers   bool
+
+	// Simulated-relay flags: fire a real, ring-signed relay verified by the
+	// relayer's SimulationVerifier against a config-pinned ring instead of an
+	// on-chain session (served but never charged). See simulate.go.
+	RelaySimulate          bool     // --simulate: use the simulated-relay path
+	RelaySimKeyID          string   // --sim-key-id: simulation identity pinned in the relayer's config
+	RelaySimAppPubKey      string   // --sim-app-pubkey: default derived from the resolved app key
+	RelaySimGatewayPubKeys []string // --sim-gateway-pubkeys: default derived from the resolved gateway key
 )

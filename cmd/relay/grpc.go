@@ -232,7 +232,7 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			// randomness, so each call yields distinct bytes even for an
 			// identical payload — matches PATH's per-request sign behaviour.
 			supplier := supplierAddrs[supplierIdx.Add(1)%uint64(len(supplierAddrs))]
-			relayRequest, _, err := relayClient.BuildRelayRequest(requestCtx, RelayServiceID, supplier, payloadBz)
+			relayRequest, _, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
 			if err != nil {
 				metrics.RecordError(fmt.Errorf("build relay request: %w", err))
 				logger.Debug().
@@ -323,7 +323,13 @@ func invokeGRPCRelay(ctx context.Context, conn *grpc.ClientConn, relayRequest *s
 	// === Required Metadata ===
 	// rpc-type: Backend routing hint (Reference: poktroll/x/shared/types/service.pb.go)
 	// Values: 1=GRPC, 2=WEBSOCKET, 3=JSON_RPC, 4=REST
-	md := metadata.Pairs("rpc-type", "1") // GRPC = 1
+	pairs := []string{"rpc-type", "1"} // GRPC = 1
+	// pocket-simulation-key-id: tells the relayer this is a simulated relay.
+	// Absent unless --simulate is set.
+	if key, val, ok := simulationGRPCMetadataPair(); ok {
+		pairs = append(pairs, key, val)
+	}
+	md := metadata.Pairs(pairs...)
 	ctx = metadata.NewOutgoingContext(ctx, md)
 
 	// === Compression (gRPC standard) ===

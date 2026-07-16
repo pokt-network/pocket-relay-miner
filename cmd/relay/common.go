@@ -114,6 +114,35 @@ func truncateForError(bodyBz []byte) string {
 	return string(bodyBz)
 }
 
+// buildRelayRequest builds a relay request for the given service+supplier,
+// routing through the simulated-relay path
+// (relay_client.RelayClient.BuildSimulatedRelayRequest — locally ring-signed,
+// NO chain query) when --simulate is set, or the normal chain-backed path
+// (BuildRelayRequest) otherwise.
+//
+// Every relay-building call site (diagnostic AND load test, across all five
+// transports) goes through this single branch, so --simulate is picked up
+// everywhere without duplicating the check at each call site.
+func buildRelayRequest(
+	ctx context.Context,
+	client *relay_client.RelayClient,
+	serviceID string,
+	supplierAddr string,
+	payloadBz []byte,
+) (*servicetypes.RelayRequest, []byte, error) {
+	if RelaySimulate {
+		return client.BuildSimulatedRelayRequest(
+			RelaySimAppPubKey,
+			RelaySimGatewayPubKeys,
+			serviceID,
+			supplierAddr,
+			payloadBz,
+			time.Now(),
+		)
+	}
+	return client.BuildRelayRequest(ctx, serviceID, supplierAddr, payloadBz)
+}
+
 // BuildAndSendRelay is a helper function that builds, sends, and verifies a relay.
 // This consolidates the common pattern across all relay protocols.
 //
@@ -141,7 +170,7 @@ func BuildAndSendRelay(
 
 	// Step 1: Build and sign relay request
 	buildStart := time.Now()
-	relayRequest, relayRequestBz, err := client.BuildRelayRequest(ctx, RelayServiceID, RelaySupplierAddr, payloadBz)
+	relayRequest, relayRequestBz, err := buildRelayRequest(ctx, client, RelayServiceID, RelaySupplierAddr, payloadBz)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to build relay request: %w", err)
 		result.TotalDuration = time.Since(totalStart)

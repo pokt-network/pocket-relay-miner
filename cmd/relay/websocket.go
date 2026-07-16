@@ -250,7 +250,7 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 			// Build a FRESH relay request for this worker. Ring signatures use
 			// randomness, so each call yields distinct bytes even for an
 			// identical payload — matches PATH's per-request sign behaviour.
-			_, relayRequestBz, err := relayClient.BuildRelayRequest(requestCtx, RelayServiceID, pc.supplier, payloadBz)
+			_, relayRequestBz, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, pc.supplier, payloadBz)
 			if err != nil {
 				metrics.RecordError(fmt.Errorf("build relay request: %w", err))
 				logger.Debug().
@@ -361,6 +361,12 @@ func connectWebSocket(relayerURL, serviceID, supplierAddr string) (*websocket.Co
 	// Rpc-Type: Backend routing hint (Reference: poktroll/x/shared/types/service.pb.go)
 	// Values: 1=GRPC, 2=WEBSOCKET, 3=JSON_RPC, 4=REST
 	headers.Set("Rpc-Type", "2") // WEBSOCKET = 2
+
+	// Pocket-Simulation-Key-Id: tells the relayer this is a simulated relay.
+	// Absent unless --simulate is set.
+	if key, val, ok := simulationHTTPHeader(); ok {
+		headers.Set(key, val)
+	}
 
 	// === Compression (RFC 7692 compliance) ===
 	// EnableCompression in wsDialer negotiates permessage-deflate
