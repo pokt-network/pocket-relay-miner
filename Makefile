@@ -99,6 +99,9 @@ lint: ## Run golangci-lint
 	@golangci-lint run
 	@cd $(BACKEND_DIR) && golangci-lint run
 
+check-tracked-files: ## Verify no local-only files (planning docs, IDE config, secrets) are tracked
+	@./scripts/check-tracked-files.sh
+
 install-hooks: ## Install the git pre-commit hook (gofmt, build, vet, lint checks)
 	@echo "Installing git hooks..."
 	@chmod +x scripts/pre-commit-hook.sh

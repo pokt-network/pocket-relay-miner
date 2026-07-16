@@ -756,6 +756,35 @@ operator strings (hostnames you've seen in the conversation, ssh
 aliases, etc.) to make sure none leaked in. If you discover leakage
 in already-tracked files, fix it immediately and tell the user.
 
+### Planning documents — NEVER commit
+
+**The only documentation this repository tracks is documentation written
+for the people who run this software.** Everything you write to organize
+your own work — plans, specs, brainstorms, design notes, phase summaries,
+handoffs, review reports, task state — is a working artifact. It goes
+stale the moment the work it describes ships, and it is noise to every
+reader who was not in the session that produced it.
+
+- ❌ NEVER `git add` a plan, spec, brainstorm, handoff, or phase summary.
+  Not under `.planning/`, not under `docs/`, not "just this one for
+  context". Tooling that wants to write `.planning/` or `.gsd/` is
+  writing scratch — let it, but never track it.
+- ✅ Working documents live in `scripts/localonly/` (gitignored) or an
+  ignored directory. They stay on disk; they just never reach a commit.
+- ✅ The committed deliverable for a feature is its **usage doc**: what
+  it does and how to run it, in `docs/`, written for an operator who
+  has never read your plan. `docs/simulated-relays.md` is the model.
+- ✅ Code comments state constraints the code cannot show. A comment must
+  never point at a design doc — the doc will move or die, and the reader
+  needs the invariant, not its provenance.
+
+**`.gitignore` is not the guard** — it does nothing for a file that is
+already tracked, which is exactly how `.planning/` and `.idea/` lived in
+this repository for months. The guard is `make check-tracked-files`
+(CI runs it on every PR): it fails on anything tracked-and-ignored, and
+on known working-doc paths. If it fires, untrack with
+`git rm -r --cached <path>` — never `git add -f` past it.
+
 ## Performance Requirements
 
 ### Target Metrics (per replica)

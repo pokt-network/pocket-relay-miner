@@ -10,6 +10,16 @@ permissions:
   contents: read
 
 jobs:
+  tracked-files:
+    name: Tracked Files
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Check no local-only files are tracked
+        run: ./scripts/check-tracked-files.sh
+
   lint:
     name: Lint
     runs-on: ubuntu-latest

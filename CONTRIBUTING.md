@@ -7,6 +7,7 @@ Thank you for your interest in contributing to Pocket RelayMiner! This document 
 - [Development Workflow](#development-workflow)
 - [Commit Message Format](#commit-message-format)
 - [Code Standards](#code-standards)
+- [What Gets Committed](#what-gets-committed)
 - [Testing Requirements](#testing-requirements)
 - [Pull Request Process](#pull-request-process)
 - [Getting Help](#getting-help)
@@ -236,6 +237,43 @@ func ProcessRelay(relay *Relay) {
 }
 ```
 
+## What Gets Committed
+
+**The only documentation this repository tracks is documentation written for
+the people who run this software.** If a reader who was not part of your work
+would not benefit from a file, it does not belong in a commit.
+
+**Tracked:**
+
+- `docs/` — protocol references, Redis architecture, testing guides, and a
+  usage guide per feature (see `docs/simulated-relays.md` for the shape:
+  what it does, how to run it, written for an operator).
+- `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, and the `scripts/` READMEs.
+- Code, tests, configs, and example configs with placeholder values.
+
+**Never tracked — keep these on disk, under `scripts/localonly/`:**
+
+- Plans, specs, brainstorms, design notes, phase summaries, handoffs, and
+  review reports. These are working artifacts; they go stale as soon as the
+  work they describe ships.
+- Editor and IDE configuration (`.idea/`, `.vscode/`).
+- Operator-specific data — hostnames, IPs, ssh aliases, supplier addresses,
+  internal URLs, keys. See the operator-data rules in `CLAUDE.md`.
+
+Note that **`.gitignore` does not protect you here**: it has no effect on a
+file that is already tracked. That is precisely how `.planning/` and `.idea/`
+stayed in this repository long after both were listed in `.gitignore`. The
+enforcement is:
+
+```bash
+make check-tracked-files
+```
+
+CI runs it on every pull request. It fails on any file that is both tracked
+and ignored, and on known working-document paths. When it fires, untrack the
+file — keeping it on disk — with `git rm -r --cached <path>`. Do not reach
+for `git add -f` to get past it.
+
 ## Testing Requirements
 
 ### Before Submitting PR
@@ -257,6 +295,9 @@ make test-coverage
 
 # 5. Build verification
 make build
+
+# 6. No local-only files tracked
+make check-tracked-files
 ```
 
 ### Writing Tests
