@@ -309,6 +309,37 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	return false, nil
 }
 
+// CheckRelayHealth is a non-mutating probe of the metering subsystem, used by
+// the simulated-relay path (which must NOT consume stake). It proves two
+// things without writing any state: (1) the service's relay cost is resolvable
+// (the service is metered/configured), and (2) Redis is reachable. It performs
+// NO IncrBy/DecrBy and does NOT create or touch any session meter, so a
+// simulated relay's synthetic session never leaves meter state behind.
+//
+// Returns an error describing the degradation (unknown service cost or Redis
+// unreachable); the caller treats it as best-effort diagnostic (fail-open for
+// serving) and surfaces it via the simulated-relay metric.
+func (m *RelayMeter) CheckRelayHealth(ctx context.Context, serviceID string) error {
+	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		return fmt.Errorf("relay meter is closed")
+	}
+	m.mu.RUnlock()
+
+	// Proves the service is metered/configured (read-only through the cost path).
+	if _, err := m.getRelayCost(ctx, serviceID); err != nil {
+		return fmt.Errorf("relay cost unresolved for service %s: %w", serviceID, err)
+	}
+
+	// Proves Redis reachability without mutating any key.
+	if err := m.redisClient.Ping(ctx).Err(); err != nil {
+		return fmt.Errorf("redis meter unreachable: %w", err)
+	}
+
+	return nil
+}
+
 // RevertRelayConsumption reverts the stake consumption for a relay that wasn't mined.
 func (m *RelayMeter) RevertRelayConsumption(
 	ctx context.Context,
