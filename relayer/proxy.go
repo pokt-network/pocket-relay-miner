@@ -789,6 +789,21 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rpcType = RPCTypeToBackendType(rpcType)
+
+	// SIMULATION SEAM — the only simulation-aware line on the normal path.
+	// Placed BEFORE relaysReceived (and every other real-relay metric/step) so a
+	// simulated relay never touches a counter that measures real traffic (goal
+	// 8). Admitted eagerly here — before the supplier registry decision, the
+	// ValidationMode split, metering, and publishing — because its Admission
+	// (pinned-ring verify + rate limit + freshness) is its only authorization
+	// and MUST precede the backend. When simulation is disabled the header is
+	// ignored (R7) and the normal path continues. serveSimulatedHTTP reuses the
+	// shared data-path primitives (forwardToBackendWithStreaming, the signer).
+	if directive := SimDirectiveFromHTTP(r.Header); directive.KeyID != "" && p.simVerifier != nil && p.simVerifier.Enabled() {
+		p.serveSimulatedHTTP(w, r, body, relayRequest, serviceID, &svcConfig, rpcType, poktHTTPRequest, directive.KeyID, startTime)
+		return
+	}
+
 	relaysReceived.WithLabelValues(serviceID, rpcType).Inc()
 
 	// Set per-request write deadline using ResponseController.
@@ -812,19 +827,6 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			Msg("missing supplier operator address in relay request")
 		p.sendError(w, http.StatusBadRequest, "missing supplier operator address in relay request")
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonMissingSupplierAddress).Inc()
-		return
-	}
-
-	// SIMULATION SEAM — the only simulation-aware line on the normal path.
-	// A simulated relay is admitted eagerly HERE (before the on-chain supplier
-	// registry decision, the ValidationMode split, metering, and publishing)
-	// because its Admission — pinned-ring verify + rate limit + freshness — is
-	// its only authorization and MUST precede the backend. When simulation is
-	// disabled the header is ignored (R7) and the normal path continues. The
-	// shared data-path primitives (forwardToBackendWithStreaming, the response
-	// signer) are reused inside serveSimulatedHTTP.
-	if directive := SimDirectiveFromHTTP(r.Header); directive.KeyID != "" && p.simVerifier != nil && p.simVerifier.Enabled() {
-		p.serveSimulatedHTTP(w, r, body, relayRequest, serviceID, &svcConfig, rpcType, poktHTTPRequest, directive.KeyID, startTime)
 		return
 	}
 

@@ -198,6 +198,7 @@ func TestServeSimulatedHTTP_SuccessNoPublishNoRealMetrics(t *testing.T) {
 	body := f.buildSignedSimBody(t, f.appAddr, simTestService, FormatSimSessionID(f.clock(), "n1"))
 
 	realBefore := testutil.ToFloat64(relaysServed.WithLabelValues(simTestService, "3", "200"))
+	receivedBefore := testutil.ToFloat64(relaysReceived.WithLabelValues(simTestService, "3"))
 	simBefore := testutil.CollectAndCount(simulatedRelaysTotal)
 
 	w := f.post(t, body, true)
@@ -214,6 +215,8 @@ func TestServeSimulatedHTTP_SuccessNoPublishNoRealMetrics(t *testing.T) {
 	require.Equal(t, int32(0), f.pub.calls.Load(), "simulated relay must NOT publish to the WAL")
 	require.Equal(t, realBefore, testutil.ToFloat64(relaysServed.WithLabelValues(simTestService, "3", "200")),
 		"real relaysServed must be untouched by a simulated relay")
+	require.Equal(t, receivedBefore, testutil.ToFloat64(relaysReceived.WithLabelValues(simTestService, "3")),
+		"real relaysReceived must be untouched by a simulated relay (goal 8)")
 	require.GreaterOrEqual(t, testutil.CollectAndCount(simulatedRelaysTotal), simBefore,
 		"simulated metric family should have at least as many series")
 	require.GreaterOrEqual(t,
