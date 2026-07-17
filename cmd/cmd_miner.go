@@ -81,7 +81,43 @@ Example:
 	cmd.Flags().Bool(flagHotReload, true, "Enable hot-reload of keys")
 	cmd.Flags().Duration(flagSessionTTL, 0, "Session data TTL (default: same as cache_ttl to prevent orphaned sessions)")
 
+	cmd.AddCommand(minerValidateCmd())
+
 	return cmd
+}
+
+// minerValidateCmd runs the exact config checks the miner runs at startup —
+// load + validateMinerConfig — without starting anything, and exits non-zero on
+// the first error. Run it before deploying a config change: a config the miner
+// rejects will not boot.
+func minerValidateCmd() *cobra.Command {
+	c := &cobra.Command{
+		Use:   "validate",
+		Short: "Validate a miner config without starting the miner",
+		Long: `Validate a miner config against the same checks the miner runs at startup.
+
+Exits 0 if the config would boot, non-zero with the first error otherwise.
+Run this before rolling out a config change.
+
+Example:
+  pocket-relay-miner miner validate --config /path/to/miner.yaml`,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			config, err := loadMinerConfig(cmd)
+			if err != nil {
+				return fmt.Errorf("config is INVALID: %w", err)
+			}
+			if err := validateMinerConfig(config); err != nil {
+				return fmt.Errorf("config is INVALID: %w", err)
+			}
+			configPath, _ := cmd.Flags().GetString(flagMinerConfig)
+			fmt.Printf("config OK: %s would start\n", configPath)
+			return nil
+		},
+	}
+	c.Flags().String(flagMinerConfig, "", "Path to miner config YAML file (required)")
+	_ = c.MarkFlagRequired(flagMinerConfig)
+	return c
 }
 
 func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
