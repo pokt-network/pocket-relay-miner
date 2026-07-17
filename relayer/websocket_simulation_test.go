@@ -301,13 +301,32 @@ func TestWebSocketBridge_Simulated_MultiMessageSuccessNoPublishNoMeter(t *testin
 	}
 
 	require.Equal(t, int32(len(nonces)), f.backendHits.Load(), "backend hit once per message")
+
+	// The metric is the one assertion that cannot be read the instant the last
+	// response arrives. The bridge writes the response to the client and only
+	// then calls emitRelay, which increments the counter (websocket.go:
+	// handleBackendMessage). That order is correct -- serve first, account
+	// after -- but it means ReadMessage returning does not imply the increment
+	// has happened yet. Reading immediately is a race the test loses whenever
+	// the runtime is slow enough, which is exactly what CI is: it passed 40/40
+	// locally and failed under `make test-coverage`, where instrumentation
+	// widens the window.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(simulatedRelaysTotal.WithLabelValues(
+			"websocket", simWSTestService, f.supplierAddr, SimResultSuccess)) == before+float64(len(nonces))
+	}, 5*time.Second, 5*time.Millisecond,
+		"simulated success metric must increment once per message (got %v, want %v)",
+		testutil.ToFloat64(simulatedRelaysTotal.WithLabelValues("websocket", simWSTestService, f.supplierAddr, SimResultSuccess)),
+		before+float64(len(nonces)))
+
+	// These four are checked AFTER the metric settles, not before: each asserts
+	// that something never happened, and "not yet" is indistinguishable from
+	// "never" if you look too early. Waiting for the metric proves emitRelay
+	// has run for every message, so the accounting path is done deciding.
 	require.Equal(t, int32(0), f.pub.calls.Load(), "simulated websocket relay must NEVER publish to the WAL")
 	require.Equal(t, int32(0), f.proc.calls.Load(), "simulated websocket relay must NEVER run mining/ProcessRelay")
 	require.Equal(t, int32(0), f.validator.calls.Load(), "ValidateRelay/MeterRelay must NEVER run for a simulated relay")
 	require.Equal(t, metersBefore, countMeterKeys(f.mr), "no meter/stake keys may be created by a simulated relay")
-	require.Equal(t, before+float64(len(nonces)),
-		testutil.ToFloat64(simulatedRelaysTotal.WithLabelValues("websocket", simWSTestService, f.supplierAddr, SimResultSuccess)),
-		"simulated success metric incremented once per message")
 }
 
 // TestWebSocketBridge_Simulated_ForgedRejectedNoBackendHit proves a forged
