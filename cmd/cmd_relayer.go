@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -16,6 +17,8 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/keys"
@@ -91,11 +94,23 @@ Example:
 	return cmd
 }
 
+const (
+	flagCheckStake = "check-stake"
+	flagNode       = "node"
+)
+
 // relayerValidateCmd runs the exact config checks the relayer runs at startup —
 // parse, Validate(), and BuildPools() — without starting anything, and exits
 // non-zero on the first error. Run it before deploying a config change: a
 // config the relayer rejects will not boot, so catching it here beats finding
 // out when the pod fails to come up.
+//
+// With --check-stake it additionally queries the chain for each configured
+// supplier's on-chain service configs and cross-checks the staked
+// (service, transport) pairs against the local backends: a pair you are staked
+// for but have no backend to serve is an ERROR (you earn nothing on it,
+// silently); a backend you configured that no supplier stakes is surplus,
+// reported as info.
 func relayerValidateCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "validate",
@@ -107,22 +122,228 @@ Run this before rolling out a config change — a config the relayer rejects
 (e.g. an unknown backend key like "ws" instead of "websocket", or a websocket
 backend with an http:// url) will not start the process.
 
-Example:
-  pocket-relay-miner relayer validate --config /path/to/relayer.yaml`,
+With --check-stake it also queries the chain (using pocket_node.query_node_grpc_url
+from the config, or --node to override) for each configured supplier's staked
+(service, transport) pairs and reports any you cannot serve — the misconfiguration
+that earns nothing, silently.
+
+Examples:
+  pocket-relay-miner relayer validate --config /path/to/relayer.yaml
+  pocket-relay-miner relayer validate --config /path/to/relayer.yaml --check-stake`,
 		SilenceUsage: true,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			initSDKConfig()
 			configPath, _ := cmd.Flags().GetString(flagRelayerConfig)
-			if _, err := relayer.LoadConfig(configPath); err != nil {
+			config, err := relayer.LoadConfig(configPath)
+			if err != nil {
 				return fmt.Errorf("config is INVALID: %w", err)
 			}
 			fmt.Printf("config OK: %s would start\n", configPath)
-			return nil
+
+			checkStake, _ := cmd.Flags().GetBool(flagCheckStake)
+			if !checkStake {
+				return nil
+			}
+			nodeOverride, _ := cmd.Flags().GetString(flagNode)
+			return runCheckStake(cmd.Context(), config, nodeOverride)
 		},
 	}
 	cmd.Flags().String(flagRelayerConfig, "", "Path to HA relayer config file (required)")
+	cmd.Flags().Bool(flagCheckStake, false, "Cross-check on-chain stake against configured backends (queries the chain)")
+	cmd.Flags().String(flagNode, "", "Override the gRPC query node URL (default: pocket_node.query_node_grpc_url from config)")
 	_ = cmd.MarkFlagRequired(flagRelayerConfig)
 	return cmd
+}
+
+// runCheckStake queries the chain for every configured supplier's staked
+// (service, transport) pairs and cross-checks them against the local relayer
+// backends. It returns a non-nil error (non-zero exit) when any staked pair has
+// no backend to serve it.
+func runCheckStake(ctx context.Context, config *relayer.Config, nodeOverride string) error {
+	logger := logging.NewLoggerFromConfig(config.Logging)
+
+	addresses, err := loadConfiguredSupplierAddresses(ctx, logger, config.Keys)
+	if err != nil {
+		return fmt.Errorf("--check-stake: failed to load supplier keys: %w", err)
+	}
+	if len(addresses) == 0 {
+		return fmt.Errorf("--check-stake: no supplier keys configured (keys_file/keys_dir/keyring); nothing to check")
+	}
+
+	grpcURL := config.PocketNode.QueryNodeGRPCUrl
+	if nodeOverride != "" {
+		grpcURL = nodeOverride
+	}
+	if grpcURL == "" {
+		return fmt.Errorf("--check-stake: no gRPC query node (set pocket_node.query_node_grpc_url or pass --node)")
+	}
+	grpcEndpoint := stripGRPCScheme(grpcURL)
+
+	queryClients, err := query.NewQueryClients(logger, query.ClientConfig{
+		GRPCEndpoint: grpcEndpoint,
+		QueryTimeout: 30 * time.Second,
+		UseTLS:       !config.PocketNode.GRPCInsecure,
+	})
+	if err != nil {
+		return fmt.Errorf("--check-stake: failed to create query clients: %w", err)
+	}
+	defer func() { _ = queryClients.Close() }()
+
+	fmt.Printf("\nchecking on-chain stake for %d supplier(s) via %s (tls=%t)\n",
+		len(addresses), grpcEndpoint, !config.PocketNode.GRPCInsecure)
+
+	var staked []relayer.StakedPair
+	var notStaked []string
+	for _, addr := range addresses {
+		supplier, qErr := queryClients.Supplier().GetSupplier(ctx, addr)
+		if qErr != nil {
+			// A key with no on-chain supplier record is simply not staked yet —
+			// info, not a fault. Only real transport/query errors abort, so a
+			// single missing registration cannot hide the gaps of the suppliers
+			// that ARE staked.
+			if isSupplierNotFoundError(qErr) {
+				notStaked = append(notStaked, addr)
+				continue
+			}
+			return fmt.Errorf("--check-stake: failed to query supplier %s: %w", addr, qErr)
+		}
+		staked = append(staked, relayer.ExtractStakedPairs(addr, supplier.Services)...)
+	}
+
+	report := relayer.CrossCheckStake(config, staked)
+	printStakeReport(report, notStaked)
+
+	if report.HasErrors() {
+		return fmt.Errorf("--check-stake: %d staked (service, transport) pair(s) have no backend — you earn nothing on them", len(report.Missing))
+	}
+	return nil
+}
+
+// isSupplierNotFoundError reports whether a supplier query error means the
+// operator address is not staked on-chain (no supplier record), as opposed to a
+// transport/query failure. The query client wraps the gRPC error via
+// fmt.Errorf(..., %w), so unwrap with status.FromError and fall back to a
+// substring check for defensive coverage — mirrors miner.isClaimNotFoundError.
+func isSupplierNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		return true
+	}
+	return strings.Contains(err.Error(), "not found")
+}
+
+// printStakeReport writes the cross-check outcome to stdout: staked pairs with
+// no backend as errors, surplus backends and unstaked suppliers as info, and
+// unmappable rpc_types as a debug note.
+func printStakeReport(report relayer.StakeCheckReport, notStaked []string) {
+	for _, addr := range notStaked {
+		fmt.Printf("  info   supplier not staked on-chain (nothing to serve): supplier=%s\n", addr)
+	}
+	for _, m := range report.Missing {
+		fmt.Printf("  ERROR  staked but no backend: supplier=%s service=%s transport=%s\n",
+			m.Supplier, m.ServiceID, m.BackendType)
+	}
+	for _, e := range report.Extra {
+		fmt.Printf("  info   backend configured, not staked (surplus): service=%s transport=%s\n",
+			e.ServiceID, e.BackendType)
+	}
+	for _, u := range report.Unknown {
+		fmt.Printf("  debug  on-chain transport this build cannot map (skipped): supplier=%s service=%s rpc_type=%s\n",
+			u.Supplier, u.ServiceID, u.RPCType.String())
+	}
+	if report.HasErrors() {
+		fmt.Printf("stake check FAILED: %d unserved staked pair(s)\n", len(report.Missing))
+	} else {
+		fmt.Printf("stake check OK: every staked (service, transport) pair has a backend\n")
+	}
+}
+
+// loadConfiguredSupplierAddresses builds the configured key providers, loads
+// every key, and returns the sorted unique operator addresses. Providers are
+// closed before returning.
+func loadConfiguredSupplierAddresses(ctx context.Context, logger logging.Logger, kc relayer.KeysConfig) ([]string, error) {
+	providers, err := buildKeyProviders(logger, kc)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		for _, p := range providers {
+			_ = p.Close()
+		}
+	}()
+
+	addrSet := make(map[string]struct{})
+	for _, provider := range providers {
+		loaded, loadErr := provider.LoadKeys(ctx)
+		if loadErr != nil {
+			return nil, fmt.Errorf("provider %s: %w", provider.Name(), loadErr)
+		}
+		for addr := range loaded {
+			addrSet[addr] = struct{}{}
+		}
+	}
+
+	addresses := make([]string, 0, len(addrSet))
+	for addr := range addrSet {
+		addresses = append(addresses, addr)
+	}
+	sort.Strings(addresses)
+	return addresses, nil
+}
+
+// buildKeyProviders constructs the configured key providers (keys_file,
+// keys_dir, keyring) in the same order and with the same logging as the relayer
+// boot path. Callers own closing the returned providers.
+func buildKeyProviders(logger logging.Logger, kc relayer.KeysConfig) ([]keys.KeyProvider, error) {
+	var providers []keys.KeyProvider
+
+	// keys_file first (preferred for HA setup - same as miner)
+	if kc.KeysFile != "" {
+		provider, err := keys.NewSupplierKeysFileProvider(logger, kc.KeysFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create supplier keys file provider: %w", err)
+		}
+		providers = append(providers, provider)
+		logger.Info().Str("file", kc.KeysFile).Msg("added supplier keys file provider")
+	}
+
+	// keys_dir as additional source (directory of individual key files)
+	if kc.KeysDir != "" {
+		provider, err := keys.NewFileKeyProvider(logger, kc.KeysDir)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create keys directory provider: %w", err)
+		}
+		providers = append(providers, provider)
+		logger.Info().Str("dir", kc.KeysDir).Msg("added file key provider")
+	}
+
+	// keyring as additional source (can combine all)
+	if kc.Keyring != nil && kc.Keyring.Backend != "" {
+		provider, err := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{
+			Backend:  kc.Keyring.Backend,
+			Dir:      kc.Keyring.Dir,
+			AppName:  kc.Keyring.AppName,
+			KeyNames: kc.Keyring.KeyNames,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("failed to create keyring provider: %w", err)
+		}
+		providers = append(providers, provider)
+		logger.Info().Str("backend", kc.Keyring.Backend).Msg("added keyring provider")
+	}
+
+	return providers, nil
+}
+
+// stripGRPCScheme removes a URL scheme prefix from a gRPC endpoint, matching the
+// relayer boot path — grpc.NewClient wants host:port, not a scheme.
+func stripGRPCScheme(grpcURL string) string {
+	for _, scheme := range []string{"grpcs://", "grpc://", "https://", "http://"} {
+		grpcURL = strings.TrimPrefix(grpcURL, scheme)
+	}
+	return grpcURL
 }
 
 // serviceDifficultyQueryAdapter adapts the query.ServiceDifficultyClient to the
@@ -485,41 +706,9 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Load keys and create response signer
 	// Support multiple key sources: keys_file, keys_dir, keyring
-	var keyProviders []keys.KeyProvider
-
-	// Try keys_file first (preferred for HA setup - same as miner)
-	if config.Keys.KeysFile != "" {
-		provider, keyErr := keys.NewSupplierKeysFileProvider(logger, config.Keys.KeysFile)
-		if keyErr != nil {
-			return fmt.Errorf("failed to create supplier keys file provider: %w", keyErr)
-		}
-		keyProviders = append(keyProviders, provider)
-		logger.Info().Str("file", config.Keys.KeysFile).Msg("added supplier keys file provider")
-	}
-
-	// Try keys_dir as additional source (directory of individual key files)
-	if config.Keys.KeysDir != "" {
-		provider, keyErr := keys.NewFileKeyProvider(logger, config.Keys.KeysDir)
-		if keyErr != nil {
-			return fmt.Errorf("failed to create keys directory provider: %w", keyErr)
-		}
-		keyProviders = append(keyProviders, provider)
-		logger.Info().Str("dir", config.Keys.KeysDir).Msg("added file key provider")
-	}
-
-	// Try keyring as additional source (can combine all)
-	if config.Keys.Keyring != nil && config.Keys.Keyring.Backend != "" {
-		provider, keyErr := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{
-			Backend:  config.Keys.Keyring.Backend,
-			Dir:      config.Keys.Keyring.Dir,
-			AppName:  config.Keys.Keyring.AppName,
-			KeyNames: config.Keys.Keyring.KeyNames,
-		})
-		if keyErr != nil {
-			return fmt.Errorf("failed to create keyring provider: %w", keyErr)
-		}
-		keyProviders = append(keyProviders, provider)
-		logger.Info().Str("backend", config.Keys.Keyring.Backend).Msg("added keyring provider")
+	keyProviders, err := buildKeyProviders(logger, config.Keys)
+	if err != nil {
+		return err
 	}
 
 	if len(keyProviders) == 0 {
