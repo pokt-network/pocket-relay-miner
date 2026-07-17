@@ -33,18 +33,20 @@
 //! [ring-go]: https://github.com/pokt-network/ring-go
 
 use k256::{
+    AffinePoint, FieldBytes, ProjectivePoint, PublicKey, Scalar, SecretKey, U256,
     elliptic_curve::{
+        Field,
         bigint::{Encoding, NonZero, U512},
         ops::Reduce,
         point::DecompressPoint,
-        rand_core::OsRng,
-        sec1::ToEncodedPoint,
+        sec1::ToSec1Point,
         subtle::Choice,
-        Field,
     },
-    AffinePoint, FieldBytes, ProjectivePoint, PublicKey, Scalar, SecretKey, U256,
 };
+
+use getrandom::{SysRng, rand_core::UnwrapErr};
 use sha3::{Digest, Sha3_256, Sha3_512};
+use thiserror::Error;
 
 /// The secp256k1 group order N, widened to 512 bits so a SHA3-512 digest can be
 /// reduced by it directly (mirroring Go's `big.Int.Mod`).
@@ -64,38 +66,25 @@ const SCALAR_LEN: usize = 32;
 /// Every variant except the index checks is cryptographically unreachable --
 /// they exist so this crate never panics on a caller's behalf, not because you
 /// should expect to see them.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum SignError {
     /// The ring had no members.
+    #[error("ring is empty")]
     EmptyRing,
     /// The ring size does not fit the 4-byte length prefix of the wire format.
+    #[error("ring size {0} exceeds u32")]
     RingTooLarge(usize),
     /// `our_idx` does not point at a ring member.
+    #[error("signer index {our_idx} out of range for ring of {size}")]
     SignerIndexOutOfRange { our_idx: usize, size: usize },
     /// [`hash_to_curve`] failed to find a point in 128 attempts (p ~ 2^-128).
+    #[error("hash_to_curve found no point in 128 attempts")]
     HashToCurve,
     /// A point came out as the identity, which has no 33-byte encoding.
     /// Requires a random scalar to land on exactly zero (p ~ 2^-256).
+    #[error("point is the identity and has no compressed encoding")]
     IdentityPoint,
 }
-
-impl std::fmt::Display for SignError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyRing => write!(f, "ring is empty"),
-            Self::RingTooLarge(size) => write!(f, "ring size {size} exceeds u32"),
-            Self::SignerIndexOutOfRange { our_idx, size } => {
-                write!(f, "signer index {our_idx} out of range for ring of {size}")
-            }
-            Self::HashToCurve => write!(f, "hash_to_curve found no point in 128 attempts"),
-            Self::IdentityPoint => {
-                write!(f, "point is the identity and has no compressed encoding")
-            }
-        }
-    }
-}
-
-impl std::error::Error for SignError {}
 
 // ---------------------------------------------------------------------------
 // Primitive 1: hash_to_scalar  (the quirk lives here)
@@ -132,7 +121,7 @@ impl Reduction {
         // N. (It needs n >= N/256, so p ~ 2^-127; you will not see it. But
         // `reduce` is both correct and free, and matches what Go does, which is
         // to apply `mod N` lazily at every point where the scalar gets used.)
-        <Scalar as Reduce<U256>>::reduce_bytes(&FieldBytes::from(self.encoded))
+        <Scalar as Reduce<U256>>::reduce(&U256::from_be_bytes(self.encoded.into()))
     }
 }
 
@@ -353,7 +342,7 @@ fn sign_inner(
 
     // Seed the chain at our own position with a random u, committing to
     // (u*G, u*H_j) without yet knowing c[j].
-    let u = Scalar::random(&mut OsRng);
+    let u = Scalar::random(&mut UnwrapErr(SysRng));
     c[(our_idx + 1) % size] = challenge(
         m,
         &(ProjectivePoint::GENERATOR * u),
@@ -367,7 +356,7 @@ fn sign_inner(
     // verify without us knowing that member's key.
     for i in 1..size {
         let idx = (our_idx + i) % size;
-        s[idx] = Scalar::random(&mut OsRng);
+        s[idx] = Scalar::random(&mut UnwrapErr(SysRng));
 
         let p_idx = ring_pubkeys[idx].to_projective();
         let h_idx =
@@ -422,7 +411,7 @@ fn challenge(
 
 /// 33-byte compressed SEC1 encoding.
 fn compress(point: &ProjectivePoint) -> Result<[u8; COMPRESSED_POINT_LEN], SignError> {
-    let encoded = point.to_affine().to_encoded_point(true);
+    let encoded = point.to_affine().to_sec1_point(true);
     // The identity encodes to a single 0x00 byte, so this is not a formality --
     // it is the only thing standing between a 2^-256 event and a panic.
     encoded
@@ -479,6 +468,7 @@ pub fn build_relay_signature_canonical(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use k256::elliptic_curve::Generate;
 
     // Pinned against `oracle vectors`. These are the deterministic pieces
     // underneath a (randomised, undiffable) signature: if the harness fails,
@@ -703,7 +693,7 @@ mod tests {
     /// 2-member ring barely exercises it.
     #[test]
     fn supports_larger_rings_from_any_position() {
-        let keys: Vec<SecretKey> = (0..5).map(|_| SecretKey::random(&mut OsRng)).collect();
+        let keys: Vec<SecretKey> = (0..5).map(|_| SecretKey::generate()).collect();
         let ring: Vec<PublicKey> = keys.iter().map(SecretKey::public_key).collect();
 
         for (our_idx, key) in keys.iter().enumerate() {

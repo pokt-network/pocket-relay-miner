@@ -29,8 +29,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-
-use k256::{elliptic_curve::rand_core::OsRng, PublicKey, SecretKey};
+use k256::elliptic_curve::Generate;
+use k256::{PublicKey, SecretKey};
 use pocket_relay_signing::{
     build_relay_signature_canonical, build_relay_signature_with_stats, SignStats,
 };
@@ -177,7 +177,7 @@ fn run_larger_rings(oracle: &Path) -> ExitCode {
     println!("\nsigning larger rings from every position");
 
     for size in [3usize, 5] {
-        let keys: Vec<SecretKey> = (0..size).map(|_| SecretKey::random(&mut OsRng)).collect();
+        let keys: Vec<SecretKey> = (0..size).map(|_| SecretKey::generate()).collect();
         let ring: Vec<PublicKey> = keys.iter().map(SecretKey::public_key).collect();
 
         for (our_idx, key) in keys.iter().enumerate() {

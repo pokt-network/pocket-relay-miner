@@ -6,20 +6,11 @@ publish = false
 description = "bLSAG ring signer for Pocket Network relays, verified against the Go oracle"
 
 [dependencies]
-# RustCrypto secp256k1. `arithmetic` gives Scalar/ProjectivePoint/AffinePoint;
-# `std` transitively enables rand_core's `getrandom`, which is what makes
-# `elliptic_curve::rand_core::OsRng` available.
-#
-# We deliberately do NOT depend on rand_core directly. k256 0.13 pins
-# elliptic-curve 0.13, which pins rand_core 0.6 -- and `OsRng` from a newer
-# rand_core is a DIFFERENT type that does not implement the 0.6 traits k256
-# wants. Reaching through `k256::elliptic_curve::rand_core` cannot drift.
-k256 = { version = "0.13", default-features = false, features = ["arithmetic", "std"] }
-
+k256 = { version = "0.14", default-features = false, features = ["arithmetic", "std"] }
 # FIPS-202 SHA-3. This crate exposes both `Sha3_256`/`Sha3_512` (FIPS-202) and
 # `Keccak256`/`Keccak512` (the original, pre-standardisation padding). This
 # scheme uses the FIPS-202 ones. They are NOT interchangeable -- see lib.rs.
-sha3 = "0.10"
-
-# Only for hex I/O in the harness and tests; not used by the signer itself.
-hex = "0.4"
+sha3 = "0.12.0"
+getrandom = "0.4.3"
+thiserror = "2.0.18"
+hex = "0.4.3"
