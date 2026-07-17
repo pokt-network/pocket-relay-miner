@@ -86,6 +86,42 @@ Example:
 
 	_ = cmd.MarkFlagRequired(flagRelayerConfig)
 
+	cmd.AddCommand(relayerValidateCmd())
+
+	return cmd
+}
+
+// relayerValidateCmd runs the exact config checks the relayer runs at startup —
+// parse, Validate(), and BuildPools() — without starting anything, and exits
+// non-zero on the first error. Run it before deploying a config change: a
+// config the relayer rejects will not boot, so catching it here beats finding
+// out when the pod fails to come up.
+func relayerValidateCmd() *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "validate",
+		Short: "Validate a relayer config without starting the relayer",
+		Long: `Validate a relayer config against the same checks the relayer runs at startup.
+
+Exits 0 if the config would boot, non-zero with the first error otherwise.
+Run this before rolling out a config change — a config the relayer rejects
+(e.g. an unknown backend key like "ws" instead of "websocket", or a websocket
+backend with an http:// url) will not start the process.
+
+Example:
+  pocket-relay-miner relayer validate --config /path/to/relayer.yaml`,
+		SilenceUsage: true,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			initSDKConfig()
+			configPath, _ := cmd.Flags().GetString(flagRelayerConfig)
+			if _, err := relayer.LoadConfig(configPath); err != nil {
+				return fmt.Errorf("config is INVALID: %w", err)
+			}
+			fmt.Printf("config OK: %s would start\n", configPath)
+			return nil
+		},
+	}
+	cmd.Flags().String(flagRelayerConfig, "", "Path to HA relayer config file (required)")
+	_ = cmd.MarkFlagRequired(flagRelayerConfig)
 	return cmd
 }
 
