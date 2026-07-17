@@ -603,10 +603,13 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		Str("payload_preview", string(relayReq.Payload[:min(50, len(relayReq.Payload))])).
 		Msg("forwarding payload to backend")
 
-	// Forward payload to backend as BinaryMessage (transport-agnostic opaque bytes)
-	// The relayer doesn't inspect or care about the payload format (JSON, protobuf, etc.)
+	// Forward payload to backend echoing the frame type the client sent.
+	// No relay protobuf carries a frame type, so the WebSocket envelope is the
+	// only channel for it: hardcoding a type here destroys information nothing
+	// downstream can reconstruct. Text-only JSON-RPC backends reject binary
+	// frames. Matches poktroll, PATH, and the raw forwarding paths below.
 	b.backendWriteMu.Lock()
-	err := b.backendConn.WriteMessage(websocket.BinaryMessage, relayReq.Payload)
+	err := b.backendConn.WriteMessage(msg.messageType, relayReq.Payload)
 	b.backendWriteMu.Unlock()
 	if err != nil {
 		b.logger.Warn().Err(err).Msg("failed to forward to backend")
@@ -672,10 +675,12 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	// Store latest response for relay emission
 	b.setLatestResponse(relayResp)
 
-	// Forward signed RelayResponse to gateway as BinaryMessage (protobuf format)
-	// Always use BinaryMessage for RelayResponse (protobuf is binary data)
+	// Forward signed RelayResponse to gateway echoing the frame type the backend
+	// sent. Backend frames cannot be paired with client frames (one eth_subscribe
+	// yields N pushes), so each hop echoes its own inbound type instead. A browser
+	// doing JSON.parse(e.data) needs text to survive the round trip.
 	b.gatewayWriteMu.Lock()
-	writeErr := b.gatewayConn.WriteMessage(websocket.BinaryMessage, respBytes)
+	writeErr := b.gatewayConn.WriteMessage(msg.messageType, respBytes)
 	b.gatewayWriteMu.Unlock()
 	if writeErr != nil {
 		b.logger.Warn().Err(writeErr).Msg("failed to forward signed response to client (PATH)")
