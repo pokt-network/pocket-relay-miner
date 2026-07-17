@@ -55,11 +55,16 @@ func (v *neverCallValidator) CheckRewardEligibility(context.Context, *servicetyp
 func (v *neverCallValidator) GetCurrentBlockHeight() int64 { return 0 }
 func (v *neverCallValidator) SetCurrentBlockHeight(int64)  {}
 
-// newSimWSBackendServer starts a fake WebSocket backend: every BinaryMessage
-// it receives increments hits and gets a canned JSON-RPC-shaped reply.
-func newSimWSBackendServer(t *testing.T) (wsURL string, hits *atomic.Int32) {
+// newSimWSBackendServer starts a fake WebSocket backend: every message it
+// receives increments hits and gets a canned JSON-RPC-shaped reply, echoed
+// back with the same frame type it arrived on (what a real backend does).
+// Each received frame type is also published on gotTypes so a test can assert
+// which type the bridge forwarded; sends are non-blocking, so a test that
+// ignores gotTypes never stalls the backend.
+func newSimWSBackendServer(t *testing.T) (wsURL string, hits *atomic.Int32, gotTypes chan int) {
 	t.Helper()
 	hits = &atomic.Int32{}
+	gotTypes = make(chan int, 16)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := WebSocketUpgrader.Upgrade(w, r, nil)
 		if err != nil {
@@ -72,6 +77,10 @@ func newSimWSBackendServer(t *testing.T) (wsURL string, hits *atomic.Int32) {
 				return
 			}
 			n := hits.Add(1)
+			select {
+			case gotTypes <- mt:
+			default:
+			}
 			reply := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","result":"0x%d","id":1}`, n))
 			if err := conn.WriteMessage(mt, reply); err != nil {
 				return
@@ -79,7 +88,7 @@ func newSimWSBackendServer(t *testing.T) (wsURL string, hits *atomic.Int32) {
 		}
 	}))
 	t.Cleanup(srv.Close)
-	return "ws" + strings.TrimPrefix(srv.URL, "http"), hits
+	return "ws" + strings.TrimPrefix(srv.URL, "http"), hits, gotTypes
 }
 
 // newGatewaySideHarness stands in for the PATH gateway's side of the
@@ -120,6 +129,7 @@ func newGatewaySideHarness(t *testing.T) (relayerSide, testSide *websocket.Conn)
 type simWSFixture struct {
 	gwClient     *websocket.Conn
 	backendHits  *atomic.Int32
+	backendTypes chan int
 	pub          *recordingPublisher
 	proc         *recordingProcessor
 	validator    *neverCallValidator
@@ -178,7 +188,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 	// dereferenced even if the simulated guard were broken.
 	pipeline := NewRelayPipeline(validator, nil, signer, proc, logger, nil, nil)
 
-	backendURL, backendHits := newSimWSBackendServer(t)
+	backendURL, backendHits, backendTypes := newSimWSBackendServer(t)
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	t.Cleanup(func() { _ = gwClient.Close() })
 
@@ -209,6 +219,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 	return &simWSFixture{
 		gwClient:     gwClient,
 		backendHits:  backendHits,
+		backendTypes: backendTypes,
 		pub:          pub,
 		proc:         proc,
 		validator:    validator,

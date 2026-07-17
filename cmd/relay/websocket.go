@@ -84,13 +84,11 @@ func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayCli
 
 		// Receive relay response
 		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-		messageType, responseData, err := conn.ReadMessage()
+		// The frame type is whatever the relayer echoed back from the backend, so
+		// it carries no information about the response and is deliberately ignored.
+		_, responseData, err := conn.ReadMessage()
 		if err != nil {
 			return nil, fmt.Errorf("failed to read relay response: %w", err)
-		}
-
-		if messageType != websocket.BinaryMessage {
-			return nil, fmt.Errorf("unexpected message type: %d (expected binary)", messageType)
 		}
 
 		return responseData, nil
