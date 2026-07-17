@@ -34,6 +34,29 @@ const (
 	defaultWSDialTimeout = 10 * time.Second
 )
 
+// wsMaxMessageBytes caps a single inbound WebSocket frame on both the gateway
+// and backend connections.
+//
+// gorilla buffers an entire frame in memory before ReadMessage returns and its
+// default limit is unlimited, so one oversized frame OOMs the process. On the
+// gateway side this is reachable pre-auth by anyone: CheckOrigin accepts every
+// origin, validateAndLogWebSocketHandshake is permissive by design and never
+// rejects, and readLoop allocates the frame before handleGatewayMessage checks
+// a ring signature -- so the attacker needs no key, no stake, and no session.
+// The backend side is bounded too, since a compromised or hostile backend can
+// send an abusive frame just as easily.
+//
+// 15MB matches PATH's maxMessageBytes and go-ethereum's wsMessageSizeLimit,
+// which is what the EVM backends behind this relayer enforce on their own
+// output. Matching the rest of the stack is deliberate: a tighter cap here
+// would reject frames PATH already accepted and forwarded, reintroducing the
+// class of cross-component divergence this bridge exists to avoid.
+//
+// When exceeded, gorilla sends a 1009 (message too big) close frame and
+// ReadMessage errors, so readLoop tears the bridge down through its existing
+// close path.
+const wsMaxMessageBytes = 15 * 1024 * 1024
+
 // RFC 6455 WebSocket Close Codes
 // https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1
 const (
@@ -249,6 +272,12 @@ func NewWebSocketBridge(
 		cancelFn()
 		return nil, err
 	}
+
+	// Bound inbound frame size on both connections before either readLoop starts.
+	// Either peer can send an abusive frame, and the gateway side is reachable
+	// pre-auth -- see wsMaxMessageBytes.
+	gatewayConn.SetReadLimit(wsMaxMessageBytes)
+	backendConn.SetReadLimit(wsMaxMessageBytes)
 
 	bridge := &WebSocketBridge{
 		logger:           logger.With().Str(logging.FieldComponent, logging.ComponentWebsocketBridge).Str(logging.FieldServiceID, serviceID).Logger(),
@@ -487,6 +516,45 @@ func (b *WebSocketBridge) messageLoop() {
 	}
 }
 
+// writeDataFrame sets a write deadline and then writes a data frame to conn,
+// serialised on writeMu.
+//
+// gorilla's WriteMessage does not observe a context and blocks indefinitely once
+// the peer stops reading and its TCP receive buffer fills. Every data frame is
+// written from the single messageLoop goroutine and serialised on writeMu, so
+// one stalled peer would wedge the entire bridge: messageLoop can never reach
+// its ctx.Done() select while blocked in a write, which means pingLoop
+// cancelling the context cannot free it, and the connection holds its resources
+// until the OS-level TCP timeout. The deadline bounds that wait so a stalled
+// reader fails fast and the bridge tears down through its normal path.
+//
+// The deadline is set under writeMu because SetWriteDeadline and WriteMessage
+// must apply as a pair -- another writer setting its own deadline in between
+// would write under the wrong one. Control writes (ping/close) pass their own
+// deadline to WriteControl and do not need this.
+//
+// writeWait is a parameter rather than a direct read of wsWriteWait so a test
+// can drive the stalled-peer path in milliseconds instead of ten seconds.
+func writeDataFrame(conn *websocket.Conn, writeMu *sync.Mutex, messageType int, data []byte, writeWait time.Duration) error {
+	writeMu.Lock()
+	defer writeMu.Unlock()
+
+	if err := conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
+		return err
+	}
+	return conn.WriteMessage(messageType, data)
+}
+
+// writeToGateway writes a data frame to the gateway (PATH) connection.
+func (b *WebSocketBridge) writeToGateway(messageType int, data []byte) error {
+	return writeDataFrame(b.gatewayConn, &b.gatewayWriteMu, messageType, data, wsWriteWait)
+}
+
+// writeToBackend writes a data frame to the backend connection.
+func (b *WebSocketBridge) writeToBackend(messageType int, data []byte) error {
+	return writeDataFrame(b.backendConn, &b.backendWriteMu, messageType, data, wsWriteWait)
+}
+
 // handleGatewayMessage handles messages from the gateway.
 func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	wsMessagesForwarded.WithLabelValues(b.serviceID, "gateway_to_backend").Inc()
@@ -608,9 +676,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	// only channel for it: hardcoding a type here destroys information nothing
 	// downstream can reconstruct. Text-only JSON-RPC backends reject binary
 	// frames. Matches poktroll, PATH, and the raw forwarding paths below.
-	b.backendWriteMu.Lock()
-	err := b.backendConn.WriteMessage(msg.messageType, relayReq.Payload)
-	b.backendWriteMu.Unlock()
+	err := b.writeToBackend(msg.messageType, relayReq.Payload)
 	if err != nil {
 		b.logger.Warn().Err(err).Msg("failed to forward to backend")
 		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
@@ -637,9 +703,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	if latestReq == nil {
 		b.logger.Debug().Msg("no latestRequest - forwarding raw to gateway")
 		// No request yet - just forward raw data
-		b.gatewayWriteMu.Lock()
-		err := b.gatewayConn.WriteMessage(msg.messageType, msg.data)
-		b.gatewayWriteMu.Unlock()
+		err := b.writeToGateway(msg.messageType, msg.data)
 		if err != nil {
 			b.logger.Warn().Err(err).Msg("failed to forward to client (PATH)")
 			_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
@@ -679,9 +743,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	// sent. Backend frames cannot be paired with client frames (one eth_subscribe
 	// yields N pushes), so each hop echoes its own inbound type instead. A browser
 	// doing JSON.parse(e.data) needs text to survive the round trip.
-	b.gatewayWriteMu.Lock()
-	writeErr := b.gatewayConn.WriteMessage(msg.messageType, respBytes)
-	b.gatewayWriteMu.Unlock()
+	writeErr := b.writeToGateway(msg.messageType, respBytes)
 	if writeErr != nil {
 		b.logger.Warn().Err(writeErr).Msg("failed to forward signed response to client (PATH)")
 		_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
@@ -702,9 +764,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 
 // forwardToBackend forwards a raw message to the backend.
 func (b *WebSocketBridge) forwardToBackend(msg wsMessage) {
-	b.backendWriteMu.Lock()
-	err := b.backendConn.WriteMessage(msg.messageType, msg.data)
-	b.backendWriteMu.Unlock()
+	err := b.writeToBackend(msg.messageType, msg.data)
 	if err != nil {
 		b.logger.Warn().Err(err).Msg("failed to forward raw message to backend")
 		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
@@ -831,10 +891,10 @@ func (b *WebSocketBridge) sendSessionExpirationMessage() error {
 		return err
 	}
 
-	// Send to gateway as BinaryMessage (protobuf format)
-	b.gatewayWriteMu.Lock()
-	err = b.gatewayConn.WriteMessage(websocket.BinaryMessage, respBytes)
-	b.gatewayWriteMu.Unlock()
+	// Sent as BinaryMessage rather than an echoed type: this frame is initiated
+	// by the relayer on session expiry, not in response to an inbound frame, so
+	// there is no type to echo. See writeToGateway for the deadline rationale.
+	err = b.writeToGateway(websocket.BinaryMessage, respBytes)
 	if err != nil {
 		return err
 	}
