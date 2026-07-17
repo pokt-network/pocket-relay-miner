@@ -26,6 +26,7 @@ import (
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 	"github.com/prometheus/client_golang/prometheus"
 	dto "github.com/prometheus/client_model/go"
+	"github.com/puzpuzpuz/xsync/v4"
 	"google.golang.org/grpc"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
@@ -145,6 +146,12 @@ type ProxyServer struct {
 	responseSigner *ResponseSigner
 	supplierCache  *cache.SupplierCache
 	relayMeter     *RelayMeter
+
+	// warnedUndeclaredTransport dedups the "served a transport the supplier did
+	// not declare on-chain" warning to once per (supplier, service, transport).
+	// The metric counts every occurrence; only the log line is deduped, so the
+	// hot path never spams. Bounded by suppliers × services × 5 transports.
+	warnedUndeclaredTransport *xsync.Map[string, struct{}]
 
 	// simVerifier owns the simulated-relay Admission zone. When nil or disabled,
 	// the simulation header is ignored and every relay takes the normal path.
@@ -280,6 +287,8 @@ func NewProxyServer(
 		publishSubpool:     publishSubpool,
 		metricsSubpool:     metricsSubpool,
 		metricRecorder:     metricRecorder,
+
+		warnedUndeclaredTransport: xsync.NewMap[string, struct{}](),
 	}
 
 	// Log pool summary at startup for visibility into backend configuration
@@ -643,6 +652,37 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 	return supplierServeDecision{serve: true}
 }
 
+// warnUndeclaredTransport emits a visibility signal when a relay is served for a
+// (service, transport) the supplier did NOT declare on-chain. The relay is still
+// served and remains claimable — the chain keys claims by (supplier, session)
+// and never sees the transport — so this is deliberately a WARN, never a reject:
+// the operator should declare the endpoint on-chain so PATH routes it on purpose
+// and the network has an accurate view of what each supplier serves.
+//
+// FAIL-OPEN and mixed-fleet safe: skipped when state is nil (boot/optimistic) or
+// when the supplier's per-transport view is empty (old miner that does not yet
+// publish StakedEndpoints) — see SupplierState.TransportDeclared. The metric
+// counts every occurrence; the log line is deduped to once per tuple so the hot
+// path never spams.
+func (p *ProxyServer) warnUndeclaredTransport(state *cache.SupplierState, supplier, serviceID, backendType string) {
+	if state == nil || state.TransportDeclared(serviceID, backendType) {
+		return
+	}
+
+	undeclaredTransportServed.WithLabelValues(serviceID, backendType).Inc()
+
+	dedupKey := supplier + "\x00" + serviceID + "\x00" + backendType
+	if _, alreadyWarned := p.warnedUndeclaredTransport.LoadOrStore(dedupKey, struct{}{}); alreadyWarned {
+		return
+	}
+	p.logger.Warn().
+		Str("supplier", supplier).
+		Str("service", serviceID).
+		Str("transport", backendType).
+		Msg("serving a relay for a (service, transport) not declared in the supplier's on-chain stake; " +
+			"still served and claimable, but declare this endpoint on-chain so PATH routes it deliberately")
+}
+
 // handleRelay handles incoming relay requests.
 func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Health check endpoints - bypass relay validation for load balancers.
@@ -860,6 +900,10 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("supplier is active for service")
 	}
+
+	// Visibility: warn (never reject) if this transport was not declared on-chain
+	// for this supplier+service. Serving continues — the relay is claimable.
+	p.warnUndeclaredTransport(supplierState, supplierOperatorAddr, serviceID, rpcType)
 
 	// Check backend health
 	if !p.healthChecker.IsHealthy(serviceID) {

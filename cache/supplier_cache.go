@@ -72,6 +72,17 @@ type SupplierState struct {
 	// Empty if not staked (Staked=false).
 	Services []string `json:"services"`
 
+	// StakedEndpoints is the per-transport view of what the supplier declared
+	// on-chain: one entry per (service, rpc_type) endpoint. Services above is the
+	// service-level projection of this; both are kept so an old relayer that does
+	// not know this field still gets Services.
+	//
+	// MIXED-FLEET BACK-COMPAT: an old miner does not publish this field, so a new
+	// relayer reading old state sees it empty. Consumers MUST treat empty as
+	// "unknown, do not act" (fail-open) — see TransportDeclared — never as "no
+	// endpoints declared". Adding a field is safe: old relayers ignore it.
+	StakedEndpoints []StakedEndpoint `json:"staked_endpoints,omitempty"`
+
 	// UnstakeSessionEndHeight is the session end height when unstaking takes effect.
 	// 0 means the supplier is active (not unstaking).
 	// >0 means the supplier is unstaking and will be fully unstaked at this session end height.
@@ -98,6 +109,34 @@ type SupplierState struct {
 
 	// UpdatedBy identifies which miner instance updated this state (for debugging).
 	UpdatedBy string `json:"updated_by,omitempty"`
+}
+
+// StakedEndpoint is one (service, transport) endpoint a supplier declared
+// on-chain. RpcType holds the canonical relayer backend-type string
+// (jsonrpc|rest|websocket|grpc|cometbft), i.e. the same key space as the
+// service config's backend keys, so the relayer can compare directly.
+type StakedEndpoint struct {
+	ServiceID string `json:"service_id"`
+	RpcType   string `json:"rpc_type"`
+}
+
+// TransportDeclared reports whether the supplier declared an on-chain endpoint
+// for (serviceID, backendType).
+//
+// FAIL-OPEN: when StakedEndpoints is empty the transport view is unknown (old
+// miner, or not yet published) — this returns true so callers never act on
+// missing data. It answers "false" only when StakedEndpoints is populated AND
+// the pair is genuinely absent.
+func (s *SupplierState) TransportDeclared(serviceID, backendType string) bool {
+	if len(s.StakedEndpoints) == 0 {
+		return true
+	}
+	for _, e := range s.StakedEndpoints {
+		if e.ServiceID == serviceID && e.RpcType == backendType {
+			return true
+		}
+	}
+	return false
 }
 
 // IsContaminated returns true when the cached state looks like a failed-write

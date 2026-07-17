@@ -48,18 +48,18 @@ func TestRPCTypeToBackendType_AllFive(t *testing.T) {
 		{sharedtypes.RPCType_COMET_BFT, BackendTypeCometBFT},
 	}
 	for _, tc := range cases {
-		got, ok := rpcTypeToBackendType(tc.rt)
+		got, ok := RPCTypeEnumToBackendType(tc.rt)
 		assert.True(t, ok, "rpc type %v should map", tc.rt)
 		assert.Equal(t, tc.want, got)
 	}
 }
 
 func TestRPCTypeToBackendType_Unknown(t *testing.T) {
-	got, ok := rpcTypeToBackendType(sharedtypes.RPCType_UNKNOWN_RPC)
+	got, ok := RPCTypeEnumToBackendType(sharedtypes.RPCType_UNKNOWN_RPC)
 	assert.False(t, ok)
 	assert.Empty(t, got)
 
-	got, ok = rpcTypeToBackendType(sharedtypes.RPCType(99))
+	got, ok = RPCTypeEnumToBackendType(sharedtypes.RPCType(99))
 	assert.False(t, ok)
 	assert.Empty(t, got)
 }

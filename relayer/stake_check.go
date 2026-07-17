@@ -51,13 +51,13 @@ type StakeCheckReport struct {
 // HasErrors reports whether the config would leave staked traffic unserved.
 func (r StakeCheckReport) HasErrors() bool { return len(r.Missing) > 0 }
 
-// rpcTypeToBackendType maps the on-chain RPCType enum to the relayer's canonical
+// RPCTypeEnumToBackendType maps the on-chain RPCType enum to the relayer's canonical
 // backend-type key. ok is false for RPCType_UNKNOWN_RPC and any future/unknown
 // value — callers must treat !ok as "cannot check", never as a specific type.
 //
 // This is the enum counterpart of RPCTypeToBackendType (which maps the numeric
 // STRING form carried on the Rpc-Type request header).
-func rpcTypeToBackendType(t sharedtypes.RPCType) (string, bool) {
+func RPCTypeEnumToBackendType(t sharedtypes.RPCType) (string, bool) {
 	switch t {
 	case sharedtypes.RPCType_GRPC:
 		return BackendTypeGRPC, true
@@ -90,7 +90,7 @@ func ExtractStakedPairs(supplier string, configs []*sharedtypes.SupplierServiceC
 			if ep == nil {
 				continue
 			}
-			backendType, _ := rpcTypeToBackendType(ep.RpcType)
+			backendType, _ := RPCTypeEnumToBackendType(ep.RpcType)
 			// Dedup on (service, rpc_type): a service may declare the same
 			// transport on several endpoint URLs, but the stake is one pair.
 			key := svc.ServiceId + "\x00" + backendType + "\x00" + rpcTypeKey(ep.RpcType)

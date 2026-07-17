@@ -443,6 +443,62 @@ func TestIsActive_IsContaminated_Boundary(t *testing.T) {
 		"unstaking supplier is IsActive even with no services (IsActiveForService gates per-service relay acceptance)")
 }
 
+func TestTransportDeclared(t *testing.T) {
+	state := SupplierState{
+		Staked: true,
+		Status: SupplierStatusActive,
+		StakedEndpoints: []StakedEndpoint{
+			{ServiceID: "eth", RpcType: "jsonrpc"},
+			{ServiceID: "eth", RpcType: "websocket"},
+			{ServiceID: "poly", RpcType: "grpc"},
+		},
+	}
+	// Declared pairs.
+	require.True(t, state.TransportDeclared("eth", "jsonrpc"))
+	require.True(t, state.TransportDeclared("eth", "websocket"))
+	require.True(t, state.TransportDeclared("poly", "grpc"))
+	// Same service, undeclared transport → false (the canonical warn case).
+	require.False(t, state.TransportDeclared("eth", "grpc"))
+	require.False(t, state.TransportDeclared("eth", "rest"))
+	// Service not staked at all → false.
+	require.False(t, state.TransportDeclared("cosmos", "jsonrpc"))
+	// Declared transport but on a different service → false.
+	require.False(t, state.TransportDeclared("poly", "jsonrpc"))
+}
+
+func TestTransportDeclared_FailOpenWhenEmpty(t *testing.T) {
+	// Old miner / not-yet-published: empty StakedEndpoints means "unknown", so
+	// every transport reads as declared (fail-open — never warn on missing data).
+	state := SupplierState{Staked: true, Status: SupplierStatusActive, Services: []string{"eth"}}
+	require.True(t, state.TransportDeclared("eth", "jsonrpc"))
+	require.True(t, state.TransportDeclared("eth", "grpc"))
+	require.True(t, state.TransportDeclared("anything", "rest"))
+}
+
+func TestStakedEndpoints_JSONRoundTripAndBackCompat(t *testing.T) {
+	// New field round-trips.
+	in := SupplierState{
+		Staked:          true,
+		Status:          SupplierStatusActive,
+		Services:        []string{"eth"},
+		StakedEndpoints: []StakedEndpoint{{ServiceID: "eth", RpcType: "grpc"}},
+	}
+	b, err := json.Marshal(in)
+	require.NoError(t, err)
+
+	var out SupplierState
+	require.NoError(t, json.Unmarshal(b, &out))
+	require.Equal(t, in.StakedEndpoints, out.StakedEndpoints)
+
+	// Back-compat: JSON written by an OLD miner (no staked_endpoints key) decodes
+	// with a nil slice → fail-open.
+	const oldJSON = `{"status":"active","staked":true,"services":["eth"],"operator_address":"pokt1x"}`
+	var legacy SupplierState
+	require.NoError(t, json.Unmarshal([]byte(oldJSON), &legacy))
+	require.Nil(t, legacy.StakedEndpoints)
+	require.True(t, legacy.TransportDeclared("eth", "grpc"), "empty endpoints must fail-open")
+}
+
 // TestSupplierCache_L1RefreshesAfterTTL is the regression test for the supplier
 // cache-TTL gap. The SupplierCache L1 (in-process xsync map) had NO TTL, so once
 // a relayer cached a supplier its stake status and service list were frozen for

@@ -17,6 +17,7 @@ import (
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/pocket-relay-miner/tx"
@@ -508,7 +509,7 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 			// Check if it's a NotFound error (not staked)
 			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
 				// Write NOT STAKED status to Redis cache for visibility
-				m.writeSupplierStatusToCache(ctx, addr, false, nil, 0)
+				m.writeSupplierStatusToCache(ctx, addr, false, nil, nil, 0)
 
 				// Drain-gated removal: if the supplier still has non-terminal
 				// sessions in Redis (active / claiming / claimed / proving),
@@ -552,9 +553,9 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 		// height AND empty snapshot) must never be persisted — that is the
 		// contaminated tuple — so the previous cache entry is preserved and
 		// the next reconcile pass (with a real height) writes the truth.
-		services, reliable := m.resolveSupplierServices(ctx, &supplier, addr)
+		services, endpoints, reliable := m.resolveSupplierServices(ctx, &supplier, addr)
 		if reliable {
-			m.writeSupplierStatusToCache(ctx, addr, true, services, supplier.GetUnstakeSessionEndHeight())
+			m.writeSupplierStatusToCache(ctx, addr, true, services, endpoints, supplier.GetUnstakeSessionEndHeight())
 		} else {
 			supplierCacheWriteSkipped.WithLabelValues("unreliable_boot_snapshot").Inc()
 		}
@@ -628,7 +629,7 @@ func (m *SupplierManager) hasPendingSessions(ctx context.Context, supplierAddr s
 // status to be written as SupplierStatusUnstaking instead of SupplierStatusActive,
 // reflecting that the supplier is mid-unstake but still serving relays until its
 // service configs deactivate at the next session boundary.
-func (m *SupplierManager) writeSupplierStatusToCache(ctx context.Context, addr string, staked bool, services []string, unstakeSessionEndHeight uint64) {
+func (m *SupplierManager) writeSupplierStatusToCache(ctx context.Context, addr string, staked bool, services []string, endpoints []cache.StakedEndpoint, unstakeSessionEndHeight uint64) {
 	if m.config.SupplierCache == nil {
 		return
 	}
@@ -647,6 +648,7 @@ func (m *SupplierManager) writeSupplierStatusToCache(ctx context.Context, addr s
 		Staked:                  staked,
 		OperatorAddress:         addr,
 		Services:                services,
+		StakedEndpoints:         endpoints,
 		UnstakeSessionEndHeight: unstakeSessionEndHeight,
 		UpdatedBy:               m.config.MinerID,
 	}
@@ -773,7 +775,7 @@ func (m *SupplierManager) warmupSingleSupplier(ctx context.Context, supplier str
 		return nil
 	}
 
-	services, reliable := m.resolveSupplierServices(ctx, &chainSupplier, supplier)
+	services, endpoints, reliable := m.resolveSupplierServices(ctx, &chainSupplier, supplier)
 	if !reliable {
 		// An empty snapshot with no observed height carries no usable
 		// information; returning nil makes the caller fall back to the
@@ -784,8 +786,9 @@ func (m *SupplierManager) warmupSingleSupplier(ctx context.Context, supplier str
 	}
 
 	return &SupplierWarmupData{
-		OwnerAddress: chainSupplier.OwnerAddress,
-		Services:     services,
+		OwnerAddress:    chainSupplier.OwnerAddress,
+		Services:        services,
+		StakedEndpoints: endpoints,
 	}
 }
 
@@ -825,14 +828,14 @@ func serviceIDs(configs []*sharedtypes.SupplierServiceConfig) []string {
 // commit forbids — callers preserve the previous cache entry instead. A
 // legitimately-empty active set at a KNOWN height stays reliable: that is
 // authoritative on-chain state.
-func (m *SupplierManager) resolveSupplierServices(ctx context.Context, supplier *sharedtypes.Supplier, addr string) (services []string, reliable bool) {
+func (m *SupplierManager) resolveSupplierServices(ctx context.Context, supplier *sharedtypes.Supplier, addr string) (services []string, endpoints []cache.StakedEndpoint, reliable bool) {
 	// A nil BlockClient (tooling/tests) can never observe a height; the
 	// snapshot is permanently the best available source, so it is used
 	// without the boot metric/log (which would otherwise fire forever and
 	// break the metric's "nonzero outside boot windows" alert contract).
 	if m.config.BlockClient == nil {
-		services = serviceIDs(supplier.Services)
-		return services, len(services) > 0
+		configs := supplier.Services
+		return serviceIDs(configs), extractStakedEndpoints(configs), len(configs) > 0
 	}
 
 	var currentHeight int64
@@ -841,7 +844,8 @@ func (m *SupplierManager) resolveSupplierServices(ctx context.Context, supplier 
 	}
 
 	if currentHeight == 0 {
-		services = serviceIDs(supplier.Services)
+		configs := supplier.Services
+		services = serviceIDs(configs)
 		supplierBootServicesFallback.Inc()
 		// Debug, not Info: this fires per supplier and, if block events are
 		// broken after a restart, on every reconcile pass — the sustained
@@ -850,10 +854,45 @@ func (m *SupplierManager) resolveSupplierServices(ctx context.Context, supplier 
 			Str(logging.FieldSupplier, addr).
 			Int("services", len(services)).
 			Msg("no block height observed yet (boot); using denormalized service snapshot until first reconcile")
-		return services, len(services) > 0
+		return services, extractStakedEndpoints(configs), len(services) > 0
 	}
 
-	return serviceIDs(supplier.GetActiveServiceConfigs(currentHeight)), true
+	configs := supplier.GetActiveServiceConfigs(currentHeight)
+	return serviceIDs(configs), extractStakedEndpoints(configs), true
+}
+
+// extractStakedEndpoints flattens a supplier's service configs into per-transport
+// (service, rpc_type) endpoints for the shared registry, so a relayer can tell
+// which transports the supplier actually declared on-chain. The RpcType enum is
+// mapped to the canonical relayer backend-type string; endpoints whose enum this
+// build cannot map are skipped (a future protocol transport). Deduplicated per
+// (service, backend-type) — a service may list the same transport on several
+// endpoint URLs. Derived from the SAME config list as the service projection so
+// the two views never disagree.
+func extractStakedEndpoints(configs []*sharedtypes.SupplierServiceConfig) []cache.StakedEndpoint {
+	seen := make(map[string]struct{})
+	var endpoints []cache.StakedEndpoint
+	for _, svc := range configs {
+		if svc == nil {
+			continue
+		}
+		for _, ep := range svc.Endpoints {
+			if ep == nil {
+				continue
+			}
+			backendType, ok := relayer.RPCTypeEnumToBackendType(ep.RpcType)
+			if !ok {
+				continue
+			}
+			key := svc.ServiceId + "\x00" + backendType
+			if _, dup := seen[key]; dup {
+				continue
+			}
+			seen[key] = struct{}{}
+			endpoints = append(endpoints, cache.StakedEndpoint{ServiceID: svc.ServiceId, RpcType: backendType})
+		}
+	}
+	return endpoints
 }
 
 // addSupplierWithHandoff adds a supplier with handoff validation.
@@ -929,8 +968,9 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 
 // SupplierWarmupData holds pre-fetched supplier data from the chain.
 type SupplierWarmupData struct {
-	OwnerAddress string
-	Services     []string
+	OwnerAddress    string
+	Services        []string
+	StakedEndpoints []cache.StakedEndpoint
 }
 
 // keyChangeReadCtx captures m.ctx under a short m.mu.RLock.
@@ -1361,11 +1401,13 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 	prewarmedData *SupplierWarmupData,
 ) (ownerAddr string, services []string) {
 	source := supplierDataSourceNoQueryClient
+	var endpoints []cache.StakedEndpoint
 
 	switch {
 	case prewarmedData != nil:
 		ownerAddr = prewarmedData.OwnerAddress
 		services = prewarmedData.Services
+		endpoints = prewarmedData.StakedEndpoints
 		source = supplierDataSourcePrewarmed
 		m.logger.Debug().
 			Str(logging.FieldSupplier, operatorAddr).
@@ -1395,7 +1437,7 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 			// respect activation/deactivation heights like every other
 			// writer, and an unreliable boot result must not be persisted.
 			var reliable bool
-			services, reliable = m.resolveSupplierServices(ctx, &supplier, operatorAddr)
+			services, endpoints, reliable = m.resolveSupplierServices(ctx, &supplier, operatorAddr)
 			if reliable {
 				source = supplierDataSourceChainOK
 			} else {
@@ -1420,6 +1462,7 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 			OperatorAddress: operatorAddr,
 			OwnerAddress:    ownerAddr,
 			Services:        services,
+			StakedEndpoints: endpoints,
 			UpdatedBy:       m.config.MinerID,
 		}
 		if cacheErr := m.config.SupplierCache.SetSupplierState(ctx, supplierState); cacheErr != nil {

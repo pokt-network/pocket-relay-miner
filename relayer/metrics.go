@@ -60,6 +60,25 @@ var (
 		[]string{"service_id", "rpc_type", "reason"},
 	)
 
+	// undeclaredTransportServed counts relays served for a (service, transport)
+	// the supplier did NOT declare on-chain (it staked the service but not that
+	// rpc_type endpoint). The relay is still served and is claimable — the chain
+	// keys claims by (supplier, session) and never sees the transport — so this
+	// is a visibility signal, not a rejection: declare the endpoint on-chain so
+	// PATH routes it deliberately. Fires only when the miner has published the
+	// per-transport stake view (StakedEndpoints); silent on an old miner.
+	// Cardinality is service_id × rpc_type (bounded); the supplier is in the
+	// deduped warn log, not a label.
+	undeclaredTransportServed = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "undeclared_transport_served_total",
+			Help:      "Relays served for a (service, transport) the supplier did not declare on-chain (staked the service but not that rpc_type)",
+		},
+		[]string{"service_id", "rpc_type"},
+	)
+
 	// relaysServedOptimistically counts relays served during the boot window
 	// for a supplier that is absent from the registry but whose operator key
 	// this relayer holds (so it is ours). See handleRelay: the miner is the
