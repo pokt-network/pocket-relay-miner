@@ -71,7 +71,9 @@ clock, shared Redis). Nothing depends on the honesty of the caller.
 
 - **Off by default.** `simulation.enabled` defaults to `false`. When off, the
   simulation header is **ignored** (a stray header never turns a real relay
-  into an error).
+  into an error), and the `identities` list is neither validated nor loaded —
+  a leftover or half-filled simulation block cannot affect a relayer that has
+  the feature switched off.
 - **Config allowlist.** Only pinned, enabled, unexpired identities are
   accepted, selected by a `key_id`.
 - **Real ring signature over an operator-controlled ring.** The caller must
@@ -117,7 +119,17 @@ simulation:
 
 Config validation **rejects** a config that pins the ring-padding placeholder
 key, a duplicate `key_id`, a malformed pubkey, or an identity with no gateway
-pubkeys.
+pubkeys. "Malformed" includes a pubkey that is the right length and has a valid
+`02`/`03` compressed prefix but whose x coordinate is **not a point on the
+secp256k1 curve** — the shape you get from pasting a documentation placeholder
+into a real config. The rejection names the identity and the field, e.g.:
+
+```
+simulation.identities[0] (key_id=my-sim-identity): gateway_pubkeys_hex[0]: simulation identity: malformed pubkey hex: pubkey is not a valid secp256k1 curve point: invalid public key: x coordinate bbbb...bbbb is not on the secp256k1 curve
+```
+
+Validation runs only when `simulation.enabled` is `true`; a disabled block is
+skipped wholesale.
 
 Provisioning an identity:
 
@@ -125,8 +137,15 @@ Provisioning an identity:
    keypair for simulation. Keep the private keys in your health-check / operator
    tooling — they never go in the relayer config.
 2. Put the two **public** keys (hex, compressed secp256k1) in `app_pubkey_hex`
-   and `gateway_pubkeys_hex`.
+   and `gateway_pubkeys_hex`. These must be public halves of key pairs you
+   actually generated — the relayer verifies a real ring signature against
+   them, so invented or copied-from-docs values can never produce a servable
+   identity.
 3. Pick a `key_id` and set `enabled: true`.
+
+`config.relayer.example.yaml` ships this block with `enabled: false` and an
+empty `identities: []`, with the field shape shown in comments. Uncomment and
+fill it in with your own keys rather than editing placeholder values in place.
 
 ### The header
 

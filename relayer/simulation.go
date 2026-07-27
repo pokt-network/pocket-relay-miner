@@ -233,7 +233,16 @@ func NewSimulationVerifier(
 // config must already have passed SimulationConfig.Validate (placeholder
 // rejected, pubkeys parse), so parse errors here are unexpected but still
 // surfaced.
+//
+// When the feature is disabled the identity list is skipped entirely, matching
+// SimulationConfig.Validate's contract that a disabled block never blocks
+// startup regardless of what it contains. Nothing reads the map while
+// disabled: every serving path is gated on Enabled().
 func buildSimIdentities(cfg *SimulationConfig, clock func() time.Time) (map[string]*simIdentity, error) {
+	if !cfg.Enabled {
+		return map[string]*simIdentity{}, nil
+	}
+
 	out := make(map[string]*simIdentity, len(cfg.Identities))
 	for _, idc := range cfg.Identities {
 		appPub, err := rings.PubKeyFromHex(idc.AppPubKeyHex)

@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 )
 
@@ -187,6 +188,47 @@ func TestSimulationConfig_Validate_MalformedGatewayPubKey(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+}
+
+// simOffCurvePubKeyHex is 33 bytes of well-formed hex with a valid compressed
+// prefix whose x coordinate is NOT on secp256k1. Hex and length checks accept
+// it; only decoding to a curve point rejects it. This is the exact shape of
+// pubkey an operator ends up with after copying a documentation placeholder
+// into a real config.
+const simOffCurvePubKeyHex = "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+// TestSimulationConfig_Validate_OffCurveAppPubKey verifies an app_pubkey_hex
+// that is well-formed but not a curve point is rejected by config validation,
+// naming the offending identity and field, rather than surviving to fail
+// inside ring-point precompute at verifier construction.
+func TestSimulationConfig_Validate_OffCurveAppPubKey(t *testing.T) {
+	id := validIdentity(t)
+	id.AppPubKeyHex = simOffCurvePubKeyHex
+
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{id}}
+	cfg.ApplyDefaults()
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+	require.Contains(t, err.Error(), "app_pubkey_hex", "error must name the offending field")
+	require.Contains(t, err.Error(), id.KeyID, "error must name the offending identity")
+}
+
+// TestSimulationConfig_Validate_OffCurveGatewayPubKey is the gateway-list
+// counterpart: an off-curve ring member must be rejected at validation, with
+// the failing list index named.
+func TestSimulationConfig_Validate_OffCurveGatewayPubKey(t *testing.T) {
+	id := validIdentity(t)
+	id.GatewayPubKeysHex = []string{hexPubKey(t), simOffCurvePubKeyHex}
+
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{id}}
+	cfg.ApplyDefaults()
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+	require.Contains(t, err.Error(), "gateway_pubkeys_hex[1]", "error must name the offending list index")
 }
 
 func TestSimulationConfig_Validate_NegativeMaxRPS(t *testing.T) {
@@ -454,6 +496,35 @@ simulation:
 		require.Error(t, err)
 		require.True(t, errors.Is(err, ErrSimPlaceholderForbidden), "got: %v", err)
 	})
+}
+
+// TestExampleConfig_SimulationBlockStartsCleanly walks the shipped example
+// config through the exact sequence a relayer performs at startup: load,
+// validate, then build the simulation verifier. An operator who copies
+// config.relayer.example.yaml verbatim must get a relayer that starts.
+//
+// This is a regression test for a shipped example that carried illustrative
+// pubkeys which were not secp256k1 curve points: validation skipped them
+// (feature disabled), verifier construction did not, and the relayer failed to
+// boot on a feature nobody had turned on.
+func TestExampleConfig_SimulationBlockStartsCleanly(t *testing.T) {
+	const examplePath = "../config.relayer.example.yaml"
+
+	cfg, err := LoadConfig(examplePath)
+	require.NoError(t, err, "the shipped example config must load")
+
+	require.False(t, cfg.Simulation.Enabled, "the example must ship with simulation off")
+	require.Empty(t, cfg.Simulation.Identities,
+		"the example must not ship identities: illustrative pubkeys are not real curve points")
+
+	// The startup call that previously failed (cmd/cmd_relayer.go wires this
+	// with the loaded config). nil redis/signer/serviceIDs are sufficient:
+	// construction only parses config and precomputes ring points.
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	v, err := NewSimulationVerifier(logger, &cfg.Simulation, nil, nil, nil, nil)
+	require.NoError(t, err, "the shipped example config must not fail verifier construction")
+	require.NotNil(t, v)
+	require.False(t, v.Enabled())
 }
 
 // writeTempConfig writes yamlDoc to a temp file and returns its path.
