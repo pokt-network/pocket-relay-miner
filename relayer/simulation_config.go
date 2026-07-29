@@ -28,6 +28,13 @@ const (
 // validation failure has its own sentinel so callers (and tests) can assert
 // the exact failure with errors.Is, rather than matching on error strings.
 var (
+	// ErrSimNoIdentities is returned when the feature is enabled but no
+	// identities are pinned. Such a config boots cleanly and then rejects
+	// every simulated relay as an unknown key_id, which is indistinguishable
+	// at the metrics layer from a forged signature — so the empty list is
+	// named here, at the config field that caused it, instead.
+	ErrSimNoIdentities = errors.New("simulation: enabled but no identities are pinned")
+
 	// ErrSimEmptyKeyID is returned when an identity has no key_id set.
 	ErrSimEmptyKeyID = errors.New("simulation identity: key_id is required")
 
@@ -156,6 +163,29 @@ func (c *SimulationConfig) ApplyDefaults() {
 func (c *SimulationConfig) Validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	return c.ValidateAsIfEnabled()
+}
+
+// ValidateAsIfEnabled runs the identity checks unconditionally: it answers
+// "would this config be rejected if the feature were switched on?" for a
+// block that is currently off.
+//
+// Validate deliberately skips a disabled block, which means a typo in an
+// unused identity survives every deploy and only surfaces the day someone
+// flips enabled: true — at which point the relayer refuses to boot and stops
+// serving real, paid traffic. Callers that can afford to look ahead (config
+// validation tooling, startup logging) use this to warn while the mistake is
+// still cheap. It is advisory: it must never be promoted into a hard failure
+// for a disabled block, since that would break the contract that a disabled
+// block never blocks startup regardless of what it contains.
+func (c *SimulationConfig) ValidateAsIfEnabled() error {
+	// Serving with nothing pinned is always an operator mistake: the feature
+	// was switched on because something was meant to be served, and every
+	// simulated relay would instead be rejected as an unknown key_id. Fail
+	// here rather than at the first health-check relay.
+	if len(c.Identities) == 0 {
+		return fmt.Errorf("simulation.identities: %w", ErrSimNoIdentities)
 	}
 
 	seenKeyIDs := make(map[string]struct{}, len(c.Identities))

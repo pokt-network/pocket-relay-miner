@@ -580,7 +580,11 @@ properties:
         minimum: 1
       identities:
         type: array
-        description: Pinned simulated-relay identities
+        description: >-
+          Pinned simulated-relay identities. May be empty (or omitted)
+          only while enabled is false; enabling the feature with nothing
+          pinned is rejected at load, since it would boot cleanly and then
+          reject every simulated relay as an unknown key_id.
         items:
           type: object
           required:

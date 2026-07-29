@@ -6,6 +6,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
@@ -525,6 +527,172 @@ func TestExampleConfig_SimulationBlockStartsCleanly(t *testing.T) {
 	require.NoError(t, err, "the shipped example config must not fail verifier construction")
 	require.NotNil(t, v)
 	require.False(t, v.Enabled())
+}
+
+// uncommentSimTemplate performs, mechanically, the edit docs/simulated-relays.md
+// tells an operator to perform on the example config: find the commented
+// simulated-relay identity template and strip the leading "# " from every one
+// of its lines. It returns the rewritten document.
+//
+// The template block is located by content, not by line number: it starts at
+// the commented `identities:` key and runs for as long as the lines stay
+// comments. Locating it by content is deliberate — a test pinned to line
+// numbers stops testing the template the moment the file above it grows.
+func uncommentSimTemplate(t *testing.T, raw string) string {
+	t.Helper()
+
+	// Strips one leading '#' plus at most one space, preserving indentation.
+	// A line carrying two '#' therefore stays a comment: that is how optional
+	// fields stay inert through the operator's single uncomment pass.
+	stripOne := regexp.MustCompile(`^(\s*)# ?`)
+
+	lines := strings.Split(raw, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "# identities:" {
+			start = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, start,
+		"the example must carry a commented `# identities:` template; "+
+			"an active `identities:` key above a commented block cannot be uncommented as documented")
+
+	end := start
+	for end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end]), "#") {
+		lines[end] = stripOne.ReplaceAllString(lines[end], "$1")
+		end++
+	}
+	require.Greater(t, end-start, 5, "the uncommented template looks truncated")
+
+	return strings.Join(lines, "\n")
+}
+
+// TestExampleConfig_SimulationTemplateUncommentsToInertIdentity is the
+// regression test for the documented "uncomment and fill it in" workflow.
+//
+// Two distinct ways that workflow used to betray the operator, both covered
+// here:
+//
+//  1. An active `identities: []` line sitting above the commented template
+//     made the naive uncomment produce a block sequence under a key that
+//     already held a flow-empty list — unparseable YAML, reported ~20 lines
+//     away from the line that caused it.
+//  2. `not_after` and `allowed_services` sat at the same comment depth as the
+//     required fields, so uncommenting silently pinned an expiry date and a
+//     localnet-only service restriction the operator never chose. The expiry
+//     in particular fails open-endedly and silently, on a date years away.
+//
+// The invariant: one uncomment pass over the template must yield a parseable
+// config whose single identity carries ONLY the fields the operator was asked
+// to fill in.
+func TestExampleConfig_SimulationTemplateUncommentsToInertIdentity(t *testing.T) {
+	raw, err := os.ReadFile("../config.relayer.example.yaml")
+	require.NoError(t, err)
+
+	path := writeTempConfig(t, uncommentSimTemplate(t, string(raw)))
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err, "uncommenting the identity template must yield parseable YAML")
+
+	require.Len(t, cfg.Simulation.Identities, 1, "the template must parse as exactly one identity")
+	id := cfg.Simulation.Identities[0]
+
+	// Fields the operator is explicitly told to set.
+	require.Equal(t, "my-sim-identity", id.KeyID)
+	require.True(t, id.Enabled, "the template's per-identity switch must come through as set")
+	require.NotEmpty(t, id.AppPubKeyHex, "the template must carry an app_pubkey_hex placeholder to replace")
+	require.Len(t, id.GatewayPubKeysHex, 1, "the template must carry one gateway pubkey placeholder to replace")
+
+	// Fields the operator did NOT ask for. These are the regression.
+	require.Empty(t, id.NotAfter,
+		"uncommenting the template must not pin an expiry the operator did not choose")
+	require.Empty(t, id.AllowedServices,
+		"uncommenting the template must not restrict the identity to services the operator did not choose")
+	require.Equal(t, DefaultSimIdentityMaxRPS, id.MaxRPS,
+		"max_rps must come from the default, not from an accidentally-active template value")
+
+	// And the placeholder keys must still be unservable: turning the feature
+	// on without replacing them fails loudly, naming the field.
+	cfg.Simulation.Enabled = true
+	cfg.Simulation.ApplyDefaults()
+	err = cfg.Simulation.Validate()
+	require.Error(t, err, "placeholder pubkeys must never produce a servable identity")
+	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+}
+
+// TestSimulationConfig_Validate_EnabledWithNoIdentities pins the fail-fast
+// behaviour for a simulation block that is switched on but pins nothing.
+//
+// Without this, the misconfiguration is invisible at the point it is made:
+// the relayer boots, logs `identities=0`, and then rejects every simulated
+// relay with ErrSimUnknownKeyID under the metric label `verify_failed` — the
+// same label a forged signature produces. The operator sees a health-check
+// pipeline that fails uniformly, with nothing naming the empty list.
+func TestSimulationConfig_Validate_EnabledWithNoIdentities(t *testing.T) {
+	cfg := SimulationConfig{Enabled: true}
+	cfg.ApplyDefaults()
+
+	err := cfg.Validate()
+	require.Error(t, err, "enabling simulation with no identities pinned must be rejected")
+	require.True(t, errors.Is(err, ErrSimNoIdentities), "got: %v", err)
+}
+
+// A disabled block with no identities is the shipped default and must stay
+// silent — the fail-fast above must not turn the default config into an error.
+func TestSimulationConfig_Validate_DisabledWithNoIdentitiesIsOK(t *testing.T) {
+	cfg := SimulationConfig{Enabled: false}
+	cfg.ApplyDefaults()
+
+	require.NoError(t, cfg.Validate(), "the shipped default (disabled, no identities) must validate")
+}
+
+// --- SimulationConfig.ValidateAsIfEnabled() ---
+
+// ValidateAsIfEnabled is the look-ahead that keeps a disabled-but-broken block
+// from staying silent until the day someone enables it. A typo in an unused
+// identity must be reportable while the feature is still off.
+func TestSimulationConfig_ValidateAsIfEnabled_ReportsDisabledBlockDefect(t *testing.T) {
+	id := validIdentity(t)
+	id.GatewayPubKeysHex = []string{simOffCurvePubKeyHex}
+
+	cfg := SimulationConfig{Enabled: false, Identities: []SimIdentity{id}}
+	cfg.ApplyDefaults()
+
+	// Validate stays silent: a disabled block never blocks startup.
+	require.NoError(t, cfg.Validate(), "a disabled block must not block startup")
+
+	// The look-ahead names the defect anyway.
+	err := cfg.ValidateAsIfEnabled()
+	require.Error(t, err, "the look-ahead must report what enabling this config would do")
+	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+}
+
+// The look-ahead must agree with Validate on a config that is fine, so it
+// never produces a warning for a block that would enable cleanly.
+func TestSimulationConfig_ValidateAsIfEnabled_SilentOnValidDisabledBlock(t *testing.T) {
+	cfg := SimulationConfig{Enabled: false, Identities: []SimIdentity{validIdentity(t)}}
+	cfg.ApplyDefaults()
+
+	require.NoError(t, cfg.ValidateAsIfEnabled(), "a disabled block that would enable cleanly must not warn")
+}
+
+// An enabled config must produce byte-identical results from both entry
+// points — if they ever diverge, one of the two callers is checking something
+// the other is not.
+func TestSimulationConfig_ValidateAsIfEnabled_MatchesValidateWhenEnabled(t *testing.T) {
+	id := validIdentity(t)
+	id.NotAfter = "not-a-timestamp"
+
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{id}}
+	cfg.ApplyDefaults()
+
+	validateErr := cfg.Validate()
+	lookAheadErr := cfg.ValidateAsIfEnabled()
+	require.Error(t, validateErr)
+	require.Error(t, lookAheadErr)
+	require.Equal(t, validateErr.Error(), lookAheadErr.Error(),
+		"Validate and ValidateAsIfEnabled must run the same checks when enabled")
 }
 
 // writeTempConfig writes yamlDoc to a temp file and returns its path.

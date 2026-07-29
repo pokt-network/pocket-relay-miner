@@ -129,7 +129,10 @@ simulation.identities[0] (key_id=my-sim-identity): gateway_pubkeys_hex[0]: simul
 ```
 
 Validation runs only when `simulation.enabled` is `true`; a disabled block is
-skipped wholesale.
+skipped wholesale. Turning the feature on with no identities pinned is itself
+rejected — an enabled block that serves nothing would reject every simulated
+relay as an unknown `key_id`, which looks identical to a forged signature in
+the metrics.
 
 Provisioning an identity:
 
@@ -143,9 +146,18 @@ Provisioning an identity:
    identity.
 3. Pick a `key_id` and set `enabled: true`.
 
-`config.relayer.example.yaml` ships this block with `enabled: false` and an
-empty `identities: []`, with the field shape shown in comments. Uncomment and
-fill it in with your own keys rather than editing placeholder values in place.
+`config.relayer.example.yaml` ships this block with `enabled: false` and the
+whole `identities` key commented out, with the field shape shown as a template.
+To pin an identity, delete the leading `# ` (hash and one space) from every line
+of that template and replace the placeholder keys — do not edit placeholder
+values in place.
+
+Lines that are still comments after that single pass carry a second `#` on
+purpose: those are the optional fields (`max_rps`, `not_after`,
+`allowed_services`), and leaving them commented is what keeps them unset.
+Uncomment only the ones you want. In particular, `not_after` is a scheduled
+stop: on that date the identity stops being served and your simulated traffic
+goes dark, with no other config change and no prior warning.
 
 ### The header
 
