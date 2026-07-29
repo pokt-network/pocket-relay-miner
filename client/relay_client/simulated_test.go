@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -32,20 +33,20 @@ const simCLITestServiceID = "svc-test"
 // in modern grpc-go, so this never performs a network call — matching
 // production, where BuildSimulatedRelayRequest is the only method exercised
 // here and never touches queryClients.
-func newSimTestRelayClient(t *testing.T, appPrivHex, gwPrivHex string) *RelayClient {
-	t.Helper()
+func newSimTestRelayClient(tb testing.TB, appPrivHex, gwPrivHex string) *RelayClient {
+	tb.Helper()
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	qc, err := query.NewQueryClients(logger, query.ClientConfig{GRPCEndpoint: "127.0.0.1:1"})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = qc.Close() })
+	require.NoError(tb, err)
+	tb.Cleanup(func() { _ = qc.Close() })
 
 	rc, err := NewRelayClient(Config{
 		AppPrivateKeyHex:     appPrivHex,
 		GatewayPrivateKeyHex: gwPrivHex,
 		QueryClients:         qc,
 	}, logger)
-	require.NoError(t, err)
+	require.NoError(tb, err)
 	return rc
 }
 
@@ -248,4 +249,171 @@ func TestBuildSimulatedRelayRequest_MultiGatewayRing(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.NoError(t, rr.ValidateBasic())
+}
+
+// --- pinned simulation ring cache ---
+
+// The pinned ring is a pure function of the pubkeys it is built from, and the
+// CLI load generator passes the SAME pubkeys on every one of its N requests.
+// Rebuilding it per call re-runs secp256k1 point decompression for every ring
+// member twice (once in rings.PubKeyFromHex's curve check, once in
+// rings.GetRingFromPubKeys), which at ~48us per key dominates the builder.
+// The ring must therefore be built once and reused.
+func TestSimRingCache_ReusesRingAcrossCalls(t *testing.T) {
+	keys := newSimTestKeys()
+	rc := newSimTestRelayClient(t, keys.appPrivHex, keys.gwPrivHex)
+
+	first, err := rc.simRingFor(keys.appPubHex, []string{keys.gwPubHex})
+	require.NoError(t, err)
+	second, err := rc.simRingFor(keys.appPubHex, []string{keys.gwPubHex})
+	require.NoError(t, err)
+
+	require.Same(t, first, second, "the same pinned pubkeys must yield the cached ring, not a rebuilt one")
+}
+
+// Distinct pinned rings must not collide: a second identity has to get its own
+// ring and its own app address, or relays would be signed against the wrong
+// ring and rejected.
+func TestSimRingCache_DistinctKeysGetDistinctEntries(t *testing.T) {
+	keys := newSimTestKeys()
+	rc := newSimTestRelayClient(t, keys.appPrivHex, keys.gwPrivHex)
+	otherGwPubHex := hex.EncodeToString(secp256k1.GenPrivKey().PubKey().Bytes())
+
+	one, err := rc.simRingFor(keys.appPubHex, []string{keys.gwPubHex})
+	require.NoError(t, err)
+	two, err := rc.simRingFor(keys.appPubHex, []string{otherGwPubHex})
+	require.NoError(t, err)
+
+	require.NotSame(t, one, two, "different gateway sets must not share a cache entry")
+	require.Equal(t, one.appAddress, two.appAddress, "same app pubkey must derive the same app address")
+
+	three, err := rc.simRingFor(otherGwPubHex, []string{keys.gwPubHex})
+	require.NoError(t, err)
+	require.NotEqual(t, one.appAddress, three.appAddress, "a different app pubkey must derive a different address")
+}
+
+// The cache key must not let a different (app, gateways) split collide by
+// concatenation — the classic delimiter bug, where {a, [b,c]} and {a+b, [c]}
+// hash to the same string.
+func TestSimRingCache_KeyIsUnambiguous(t *testing.T) {
+	a := hex.EncodeToString(secp256k1.GenPrivKey().PubKey().Bytes())
+	b := hex.EncodeToString(secp256k1.GenPrivKey().PubKey().Bytes())
+	c := hex.EncodeToString(secp256k1.GenPrivKey().PubKey().Bytes())
+
+	require.NotEqual(t,
+		simRingCacheKey(a, []string{b, c}),
+		simRingCacheKey(a+b, []string{c}),
+		"the cache key must not be ambiguous across the app/gateway boundary")
+	require.NotEqual(t,
+		simRingCacheKey(a, []string{b, c}),
+		simRingCacheKey(a, []string{b + c}),
+		"the cache key must not be ambiguous across the gateway separator")
+}
+
+// A malformed pubkey must keep failing on every call: caching a failure would
+// be indistinguishable from caching a success at the call site, and the error
+// must name the field every time.
+func TestSimRingCache_DoesNotCacheFailures(t *testing.T) {
+	keys := newSimTestKeys()
+	rc := newSimTestRelayClient(t, keys.appPrivHex, keys.gwPrivHex)
+
+	for i := 0; i < 3; i++ {
+		_, err := rc.simRingFor("not-hex", []string{keys.gwPubHex})
+		require.Error(t, err, "call %d must fail", i)
+		require.Contains(t, err.Error(), "app pubkey")
+	}
+
+	// A valid build after failures still works (the failures poisoned nothing).
+	got, err := rc.simRingFor(keys.appPubHex, []string{keys.gwPubHex})
+	require.NoError(t, err)
+	require.NotNil(t, got)
+}
+
+// The load generator drives this from many goroutines at once (-c 200), so the
+// cache must be safe under concurrent first-touch of the same key.
+func TestSimRingCache_ConcurrentAccess(t *testing.T) {
+	keys := newSimTestKeys()
+	rc := newSimTestRelayClient(t, keys.appPrivHex, keys.gwPrivHex)
+
+	const goroutines = 32
+	results := make(chan *simPinnedRing, goroutines)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			got, err := rc.simRingFor(keys.appPubHex, []string{keys.gwPubHex})
+			require.NoError(t, err)
+			results <- got
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	first := <-results
+	require.NotNil(t, first)
+	for got := range results {
+		require.Same(t, first, got, "every goroutine must observe the same cached ring")
+	}
+}
+
+// End-to-end: caching the ring must not freeze anything that has to stay
+// per-request. Two successive builds share an app address but must carry
+// distinct session ids (fresh nonce) and distinct signatures, or the relayer
+// would reject the second as a replay.
+func TestBuildSimulatedRelayRequest_CachedRingKeepsPerRequestFieldsFresh(t *testing.T) {
+	keys := newSimTestKeys()
+	rc := newSimTestRelayClient(t, keys.appPrivHex, keys.gwPrivHex)
+	now := time.Unix(1700000000, 0).UTC()
+
+	first, _, err := rc.BuildSimulatedRelayRequest(
+		keys.appPubHex, []string{keys.gwPubHex}, simCLITestServiceID, keys.supplierAddr, []byte(`{"a":1}`), now,
+	)
+	require.NoError(t, err)
+	second, _, err := rc.BuildSimulatedRelayRequest(
+		keys.appPubHex, []string{keys.gwPubHex}, simCLITestServiceID, keys.supplierAddr, []byte(`{"a":1}`), now,
+	)
+	require.NoError(t, err)
+
+	require.Equal(t,
+		first.GetMeta().SessionHeader.ApplicationAddress,
+		second.GetMeta().SessionHeader.ApplicationAddress,
+		"the app address is derived from the pinned key and must be stable")
+	require.NotEqual(t,
+		first.GetMeta().SessionHeader.SessionId,
+		second.GetMeta().SessionHeader.SessionId,
+		"each call must draw a fresh nonce; a cached ring must not freeze the session id")
+	require.NotEqual(t, first.GetMeta().Signature, second.GetMeta().Signature,
+		"each call must produce a distinct signature, or the relayer dedups the second as a replay")
+	require.NoError(t, first.ValidateBasic())
+	require.NoError(t, second.ValidateBasic())
+}
+
+// BenchmarkBuildSimulatedRelayRequest guards the pinned-ring cache. This is the
+// CLI load generator's per-request path: `relay <transport> --simulate -n N`
+// builds one of these per request, so its cost is subtracted from the RPS the
+// operator reads off the run. Rebuilding the ring per call (decompressing every
+// ring member to a curve point twice, at ~48us/key) measured ~1.35ms/op and 180
+// allocs; reusing it measures ~1.16ms/op and 111 allocs on the same machine.
+//
+// A regression here does not break correctness — it makes a --simulate load
+// test silently under-report the relayer by measuring its own client.
+func BenchmarkBuildSimulatedRelayRequest(b *testing.B) {
+	keys := newSimTestKeys()
+	rc := newSimTestRelayClient(b, keys.appPrivHex, keys.gwPrivHex)
+	now := time.Unix(1700000000, 0).UTC()
+	payload := []byte(`{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`)
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		if _, _, err := rc.BuildSimulatedRelayRequest(
+			keys.appPubHex, []string{keys.gwPubHex}, simCLITestServiceID, keys.supplierAddr, payload, now,
+		); err != nil {
+			b.Fatal(err)
+		}
+	}
 }

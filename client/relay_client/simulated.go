@@ -4,12 +4,14 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"strings"
 	"time"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
+	"github.com/pokt-network/ring-go"
 
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/rings"
@@ -29,6 +31,78 @@ const (
 	simSessionStartHeight = 1
 	simSessionEndHeight   = 2
 )
+
+// simPinnedRing is the per-identity work that is a pure function of the pinned
+// pubkeys: the ring itself, and the application address derived from the app
+// pubkey. Both are identical for every relay built against a given identity.
+type simPinnedRing struct {
+	ring       *ring.Ring
+	appAddress string
+}
+
+// simRingCacheKey builds the cache key for a pinned ring.
+//
+// The separators matter: pubkeys are fixed-width hex here, but the key must not
+// depend on that. Without a delimiter between the app key and the gateway list,
+// {app: a, gateways: [b, c]} and {app: a+b, gateways: [c]} would collide and
+// hand back a ring whose members are not the ones asked for — relays signed
+// against the wrong ring, rejected by the relayer with no useful error.
+func simRingCacheKey(appPubKeyHex string, gatewayPubKeysHex []string) string {
+	return appPubKeyHex + "|" + strings.Join(gatewayPubKeysHex, ",")
+}
+
+// simRingFor returns the ring and app address for a set of pinned pubkeys,
+// building them on first use and reusing them afterwards.
+//
+// Building is expensive and repeated: rings.PubKeyFromHex decompresses each key
+// to a curve point to validate it (~48us/key) and discards the point, and
+// rings.GetRingFromPubKeys then decompresses the very same keys again. The CLI
+// load generator calls BuildSimulatedRelayRequest once per request with the
+// same pinned pubkeys every time, so without this cache a `--simulate` load
+// test burns that cost N times and under-reports the relayer's throughput by
+// measuring its own client.
+//
+// Failures are deliberately not cached: a malformed pubkey must name its field
+// on every call, and a cached error is indistinguishable from a cached success
+// at the call site.
+func (c *RelayClient) simRingFor(appPubKeyHex string, gatewayPubKeysHex []string) (*simPinnedRing, error) {
+	key := simRingCacheKey(appPubKeyHex, gatewayPubKeysHex)
+	if cached, ok := c.simRingCache.Load(key); ok {
+		return cached.(*simPinnedRing), nil
+	}
+
+	appPub, err := rings.PubKeyFromHex(appPubKeyHex)
+	if err != nil {
+		return nil, fmt.Errorf("app pubkey: %w", err)
+	}
+	if len(gatewayPubKeysHex) == 0 {
+		return nil, fmt.Errorf("at least one gateway pubkey is required")
+	}
+
+	ringPubKeys := make([]cryptotypes.PubKey, 0, 1+len(gatewayPubKeysHex))
+	ringPubKeys = append(ringPubKeys, appPub)
+	for i, gwHex := range gatewayPubKeysHex {
+		gwPub, err := rings.PubKeyFromHex(gwHex)
+		if err != nil {
+			return nil, fmt.Errorf("gateway pubkey[%d]: %w", i, err)
+		}
+		ringPubKeys = append(ringPubKeys, gwPub)
+	}
+
+	appRing, err := rings.GetRingFromPubKeys(ringPubKeys)
+	if err != nil {
+		return nil, fmt.Errorf("build ring: %w", err)
+	}
+
+	built := &simPinnedRing{
+		ring:       appRing,
+		appAddress: cosmostypes.AccAddress(appPub.Address()).String(),
+	}
+	// LoadOrStore, not Store: concurrent first-touch of the same key must leave
+	// every caller holding the SAME ring, not one ring each.
+	actual, _ := c.simRingCache.LoadOrStore(key, built)
+	return actual.(*simPinnedRing), nil
+}
 
 // BuildSimulatedRelayRequest builds a real, ring-signed RelayRequest for the
 // relayer's simulated-relay path: a synthetic session carrying a fresh
@@ -67,27 +141,9 @@ func (c *RelayClient) BuildSimulatedRelayRequest(
 	payload []byte,
 	now time.Time,
 ) (*servicetypes.RelayRequest, []byte, error) {
-	appPub, err := rings.PubKeyFromHex(appPubKeyHex)
+	pinned, err := c.simRingFor(appPubKeyHex, gatewayPubKeysHex)
 	if err != nil {
-		return nil, nil, fmt.Errorf("app pubkey: %w", err)
-	}
-	if len(gatewayPubKeysHex) == 0 {
-		return nil, nil, fmt.Errorf("at least one gateway pubkey is required")
-	}
-
-	ringPubKeys := make([]cryptotypes.PubKey, 0, 1+len(gatewayPubKeysHex))
-	ringPubKeys = append(ringPubKeys, appPub)
-	for i, gwHex := range gatewayPubKeysHex {
-		gwPub, err := rings.PubKeyFromHex(gwHex)
-		if err != nil {
-			return nil, nil, fmt.Errorf("gateway pubkey[%d]: %w", i, err)
-		}
-		ringPubKeys = append(ringPubKeys, gwPub)
-	}
-
-	appRing, err := rings.GetRingFromPubKeys(ringPubKeys)
-	if err != nil {
-		return nil, nil, fmt.Errorf("build ring: %w", err)
+		return nil, nil, err
 	}
 
 	nonceHex, err := randomSimNonceHex()
@@ -99,7 +155,7 @@ func (c *RelayClient) BuildSimulatedRelayRequest(
 		Payload: payload,
 		Meta: servicetypes.RelayRequestMetadata{
 			SessionHeader: &sessiontypes.SessionHeader{
-				ApplicationAddress:      cosmostypes.AccAddress(appPub.Address()).String(),
+				ApplicationAddress:      pinned.appAddress,
 				ServiceId:               serviceID,
 				SessionId:               relayer.FormatSimSessionID(now, nonceHex),
 				SessionStartBlockHeight: simSessionStartHeight,
@@ -110,7 +166,7 @@ func (c *RelayClient) BuildSimulatedRelayRequest(
 		},
 	}
 
-	if err := c.signer.SignRelayRequestWithRing(relayRequest, appRing); err != nil {
+	if err := c.signer.SignRelayRequestWithRing(relayRequest, pinned.ring); err != nil {
 		return nil, nil, fmt.Errorf("sign simulated relay request: %w", err)
 	}
 
