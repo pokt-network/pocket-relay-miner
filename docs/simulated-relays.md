@@ -157,7 +157,22 @@ purpose: those are the optional fields (`max_rps`, `not_after`,
 `allowed_services`), and leaving them commented is what keeps them unset.
 Uncomment only the ones you want. In particular, `not_after` is a scheduled
 stop: on that date the identity stops being served and your simulated traffic
-goes dark, with no other config change and no prior warning.
+goes dark, with no other config change.
+
+An identity whose `not_after` has already passed is **not** a startup error —
+it loads, and then rejects every relay aimed at it with `simulation: identity
+expired (not_after)`. Making it fatal would mean the next restart of a healthy
+relayer refuses to boot and takes real, paid traffic down over a dead
+simulation identity. Instead, both `relayer validate` and relayer startup warn
+and name the `key_id`:
+
+```
+warning: simulation identities are past their not_after and will reject every relay: igniter-healthcheck
+```
+
+`relayer validate` reports this whether or not `simulation.enabled` is set — a
+dead identity is worth knowing about *before* the deploy that switches the
+feature on.
 
 ### The header
 

@@ -128,6 +128,40 @@ type SimulationConfig struct {
 	Identities []SimIdentity `yaml:"identities"`
 }
 
+// ExpiredIdentities returns the key_ids of enabled identities whose not_after
+// has already passed at now, in config order. It is the advisory counterpart
+// to Validate: such an identity loads and serves nothing, rejecting every
+// relay aimed at it with ErrSimExpired.
+//
+// This is deliberately NOT part of Validate, and must never become part of it.
+// not_after passes on a wall-clock date nobody redeploys for, so a hard
+// failure would mean the next restart of a healthy relayer — a node reboot, a
+// rescheduled pod — refuses to boot and takes real, paid relay traffic down
+// over a dead simulation identity. The identity going quiet is the intended
+// behaviour of an expiry; the relayer going quiet is not.
+//
+// The boundary matches SimulationVerifier.Verify exactly (now strictly after
+// not_after): an advisory that disagrees with the code that does the rejecting
+// is worse than none. Identities with an unset or unparseable not_after are
+// skipped — an unset one never expires, and a malformed one is Validate's
+// rejection to make.
+func (c *SimulationConfig) ExpiredIdentities(now time.Time) []string {
+	var expired []string
+	for _, id := range c.Identities {
+		if !id.Enabled || id.NotAfter == "" {
+			continue
+		}
+		notAfter, err := time.Parse(time.RFC3339, id.NotAfter)
+		if err != nil {
+			continue
+		}
+		if now.After(notAfter) {
+			expired = append(expired, id.KeyID)
+		}
+	}
+	return expired
+}
+
 // ApplyDefaults fills in zero-value fields with their defaults. It is
 // idempotent (only touches fields still at their zero value) and safe to
 // call multiple times, e.g. once in DefaultConfig() and again after YAML

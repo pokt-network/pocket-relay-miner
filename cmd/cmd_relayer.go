@@ -156,6 +156,17 @@ Examples:
 				}
 			}
 
+			// An expired identity is valid config that serves nothing. Report
+			// it here rather than let a health-check pipeline go quiet with no
+			// explanation. Advisory by design — see ExpiredIdentities. Not
+			// gated on simulation.enabled: this command is a look-ahead, and
+			// an identity that is already dead is worth knowing about before
+			// the deploy that switches the feature on, not after.
+			if expired := config.Simulation.ExpiredIdentities(time.Now()); len(expired) > 0 {
+				fmt.Printf("warning: simulation identities are past their not_after and will reject every relay: %s\n",
+					strings.Join(expired, ", "))
+			}
+
 			checkStake, _ := cmd.Flags().GetBool(flagCheckStake)
 			if !checkStake {
 				return nil
@@ -778,6 +789,14 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				logger.Info().
 					Int("identities", len(config.Simulation.Identities)).
 					Msg("simulated relays ENABLED")
+				// Valid config that serves nothing: the identity loads and
+				// then rejects every relay with ErrSimExpired. Never fatal —
+				// see SimulationConfig.ExpiredIdentities.
+				if expired := config.Simulation.ExpiredIdentities(time.Now()); len(expired) > 0 {
+					logger.Warn().
+						Strs("key_ids", expired).
+						Msg("simulated relay identities are past their not_after: they will reject every relay")
+				}
 			} else if len(config.Simulation.Identities) > 0 {
 				// The block is off, so it cannot affect this process — but it
 				// may still be unbootable, and the next deploy that enables it

@@ -9,6 +9,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	"github.com/stretchr/testify/require"
@@ -326,6 +327,123 @@ func TestSimulationConfig_ApplyDefaults_MultipleIdentitiesEachDefaulted(t *testi
 	require.Equal(t, 5, cfg.Identities[0].MaxRPS)
 	require.Equal(t, 20, cfg.Identities[1].MaxRPS)
 	require.Equal(t, 5, cfg.Identities[2].MaxRPS)
+}
+
+// --- SimulationConfig.ExpiredIdentities() ---
+
+// simNotAfterRef is the reference "now" for expiry tests. Fixed, never
+// time.Now(): an expiry test anchored to the wall clock silently changes
+// meaning as the dates in it recede into the past.
+var simNotAfterRef = time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+
+// simIdentityWithNotAfter returns an enabled, otherwise-valid identity with
+// the given key_id and not_after.
+func simIdentityWithNotAfter(t *testing.T, keyID, notAfter string) SimIdentity {
+	t.Helper()
+	id := validIdentity(t)
+	id.KeyID = keyID
+	id.Enabled = true
+	id.NotAfter = notAfter
+	return id
+}
+
+// An identity whose not_after has already passed is dead weight: it validates,
+// it loads, and then every relay aimed at it is rejected with ErrSimExpired.
+// The operator who fat-fingered the year needs to hear about it at config
+// time, not from a silent health-check pipeline.
+func TestSimulationConfig_ExpiredIdentities_ReportsPastNotAfter(t *testing.T) {
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{
+		simIdentityWithNotAfter(t, "expired", "2020-01-01T00:00:00Z"),
+	}}
+
+	require.Equal(t, []string{"expired"}, cfg.ExpiredIdentities(simNotAfterRef))
+}
+
+// The cases that must stay silent, each for its own reason.
+func TestSimulationConfig_ExpiredIdentities_SilentCases(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity SimIdentity
+		why      string
+	}{
+		{
+			name:     "future not_after",
+			identity: simIdentityWithNotAfter(t, "future", "2030-01-01T00:00:00Z"),
+			why:      "an identity that expires later is the normal rotation case",
+		},
+		{
+			name:     "no not_after",
+			identity: simIdentityWithNotAfter(t, "no-expiry", ""),
+			why:      "an unset not_after means no expiry, not an expiry at the zero time",
+		},
+		{
+			name:     "unparseable not_after",
+			identity: simIdentityWithNotAfter(t, "garbage", "not-a-timestamp"),
+			why:      "a malformed not_after is Validate's rejection to make, not this advisory's",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{tt.identity}}
+			require.Empty(t, cfg.ExpiredIdentities(simNotAfterRef), tt.why)
+		})
+	}
+}
+
+// A per-identity `enabled: false` already means the identity is never served,
+// so its expiry is not a finding — reporting it would train operators to
+// ignore the warning.
+func TestSimulationConfig_ExpiredIdentities_IgnoresDisabledIdentity(t *testing.T) {
+	id := simIdentityWithNotAfter(t, "expired-but-off", "2020-01-01T00:00:00Z")
+	id.Enabled = false
+
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{id}}
+	require.Empty(t, cfg.ExpiredIdentities(simNotAfterRef),
+		"a disabled identity is not served, so its expiry is not a finding")
+}
+
+// The boundary must match SimulationVerifier.Verify, which rejects on
+// now.After(notAfter) — strictly after. At exactly not_after the identity is
+// still served, so it must not be reported as expired.
+func TestSimulationConfig_ExpiredIdentities_BoundaryMatchesVerify(t *testing.T) {
+	exact := simNotAfterRef.Format(time.RFC3339)
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{
+		simIdentityWithNotAfter(t, "on-the-boundary", exact),
+	}}
+
+	require.Empty(t, cfg.ExpiredIdentities(simNotAfterRef),
+		"at exactly not_after the identity is still served; the advisory must not disagree with Verify")
+	require.Equal(t, []string{"on-the-boundary"},
+		cfg.ExpiredIdentities(simNotAfterRef.Add(time.Nanosecond)),
+		"one instant later it is expired, matching Verify's now.After(notAfter)")
+}
+
+// Multiple expired identities are all reported, in config order, so the
+// operator sees every one in a single pass instead of fixing them one restart
+// at a time.
+func TestSimulationConfig_ExpiredIdentities_AllInConfigOrder(t *testing.T) {
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{
+		simIdentityWithNotAfter(t, "dead-1", "2020-01-01T00:00:00Z"),
+		simIdentityWithNotAfter(t, "alive", "2030-01-01T00:00:00Z"),
+		simIdentityWithNotAfter(t, "dead-2", "2021-06-01T00:00:00Z"),
+	}}
+
+	require.Equal(t, []string{"dead-1", "dead-2"}, cfg.ExpiredIdentities(simNotAfterRef))
+}
+
+// Expiry is advisory and must never become a startup failure: a not_after that
+// passes while the relayer is running would otherwise turn the next restart
+// into an outage of real, paid traffic over a dead simulation identity.
+func TestSimulationConfig_Validate_ExpiredIdentityStillValidates(t *testing.T) {
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{
+		simIdentityWithNotAfter(t, "expired", "2020-01-01T00:00:00Z"),
+	}}
+	cfg.ApplyDefaults()
+
+	require.NoError(t, cfg.Validate(),
+		"an expired identity must not block startup: real traffic must not go down over a dead sim identity")
+	require.NoError(t, cfg.ValidateAsIfEnabled(), "the look-ahead must agree with Validate here")
 }
 
 // --- YAML round-trip ---
