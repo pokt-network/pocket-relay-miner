@@ -263,13 +263,24 @@ you should check them on your own deployment before wiring simulated relays into
 anything. The walk-through below is the one used to validate the feature; every
 command and every expected result is real output from a localnet run.
 
-> **Localnet setup gotcha.** `tilt_config.yaml` is user-local and gitignored, and
-> it **wins** over the config Tilt generates. The localnet simulation identities
-> are injected on the *generation* path, so a `tilt_config.yaml` created before
-> simulation existed has no `simulation:` block and every command below will fail
-> with a confusing `403`. If that happens, delete the file and let Tilt rebuild
-> it: `rm tilt_config.yaml && tilt up`. Confirm with
-> `grep -A2 'simulation:' tilt_config.yaml`.
+> **Where the localnet identities come from.** `tilt_config.yaml` is user-local
+> and gitignored. If its `simulation` block has an `identities` key, that key
+> **wins** — it is the file to edit to change an identity's `not_after`,
+> `max_rps` or `allowed_services` for a localnet experiment. If the key is absent
+> (including a file with no `simulation` block at all, e.g. one created before the
+> feature existed), Tilt injects the five `sim-*` localnet defaults listed above,
+> so the commands here work either way. An explicit `identities: []` is respected
+> rather than filled in, so you can reproduce the "enabled but nothing pinned"
+> config error on purpose. Inspect what you ended up with:
+> `kubectl get cm relayer-config -o jsonpath='{.data.config\.yaml}' | grep -A20 'simulation:'`
+>
+> Editing the config **rolls the relayer and miner pods**: their Deployments carry
+> a `pocket-relay-miner/config-hash` annotation over the rendered config. This is
+> load-bearing, not cosmetic — a mounted ConfigMap change does not restart pods on
+> its own, and neither binary re-reads its config after startup (simulation
+> identities in particular are not hot-reloaded), so without the annotation a
+> config edit would update the ConfigMap and leave the running pods on the old
+> config, with no error and no signal.
 
 #### 1. Baseline: is the relayer serving real relays?
 

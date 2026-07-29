@@ -1,7 +1,7 @@
 # relayer.tilt - Relayer deployment (stateless, waits for miners)
 
 load("./ports.Tiltfile", "get_relayer_ports")
-load("./utils.Tiltfile", "deep_merge", "read_relayer_example_config", "get_redis_host", "apply_k8s_overrides_relayer")
+load("./utils.Tiltfile", "deep_merge", "read_relayer_example_config", "get_redis_host", "apply_k8s_overrides_relayer", "config_hash")
 
 def deploy_relayers(config):
     """Deploy relayer as a Deployment with N replicas"""
@@ -11,16 +11,18 @@ def deploy_relayers(config):
 
     print("Deploying relayer Deployment with {} replica(s)...".format(config["relayer"]["count"]))
 
+    # Render the config once: the ConfigMap carries it, and the Deployment
+    # carries its hash so a config edit actually rolls the pods.
+    relayer_config_yaml = str(encode_yaml(generate_relayer_config(config)))
+
     # Create relayer ConfigMap first
-    create_relayer_configmap(config)
+    create_relayer_configmap(relayer_config_yaml)
 
     # Deploy single relayer Deployment with replicas
-    deploy_relayer_deployment(config)
+    deploy_relayer_deployment(config, config_hash(relayer_config_yaml))
 
-def create_relayer_configmap(config):
+def create_relayer_configmap(relayer_config_yaml):
     """Create ConfigMap with relayer configuration"""
-    relayer_config_dict = generate_relayer_config(config)
-    relayer_config_yaml = str(encode_yaml(relayer_config_dict))
     relayer_config_indented = relayer_config_yaml.replace("\n", "\n    ")
 
     relayer_configmap = """
@@ -35,7 +37,7 @@ data:
 
     k8s_yaml(blob(relayer_configmap))
 
-def deploy_relayer_deployment(config):
+def deploy_relayer_deployment(config, relayer_config_hash):
     """Deploy relayer as a single Deployment with N replicas"""
 
     # Relayer Deployment with replicas + Service
@@ -55,6 +57,12 @@ spec:
     metadata:
       labels:
         app: relayer
+      annotations:
+        # Hash of the rendered config. A mounted ConfigMap change does not roll
+        # pods on its own, and the relayer reads its config only at startup, so
+        # without this a config edit would update the ConfigMap and leave the
+        # running relayers on the old one.
+        pocket-relay-miner/config-hash: "{}"
     spec:
       containers:
       - name: relayer
@@ -139,6 +147,7 @@ spec:
     name: pprof
 """.format(
         config["relayer"]["count"],
+        relayer_config_hash,
         config["global"]["image"],
         "debug" if config["global"]["debug"] else "info"
     )

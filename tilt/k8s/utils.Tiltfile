@@ -124,6 +124,23 @@ def apply_k8s_overrides_relayer(config, redis_host):
     # keypairs pinned (one identity per service, since each service uses its own
     # app key). These are PUBLIC localnet dev keys — NEVER enable simulation with
     # them on a real deployment.
+    #
+    # Injected ONLY when the config does not mention identities at all. This
+    # function runs on the deploy path, AFTER tilt_config.yaml has been merged in,
+    # so an unconditional assignment here silently discarded whatever the operator
+    # wrote: editing simulation identities in tilt_config.yaml had no effect, and
+    # the file documented a knob it did not control.
+    #
+    # The test is key PRESENCE, not truthiness, so the two intents stay
+    # distinguishable: an absent `identities` means "I did not configure this,
+    # give me the localnet defaults" (what config.relayer.example.yaml ships),
+    # while an explicit `identities: []` means "I want none" and must reach the
+    # relayer as-is — enabling simulation with nothing pinned is a config error
+    # the relayer is supposed to reject, and injecting defaults would hide it.
+    _sim = config.get("simulation") or {}
+    if "identities" in _sim:
+        return config
+
     _gw1 = "025821a2ac597a034250ac14b772efccf9297aa7c4bea5444564059a7cfb152063"
     config["simulation"] = {
         "enabled": True,
@@ -149,6 +166,25 @@ def apply_k8s_overrides_relayer(config, redis_host):
     }
 
     return config
+
+def config_hash(config_yaml):
+    """Return a short sha256 of a rendered config, for a pod-template annotation.
+
+    Kubernetes does NOT restart pods when a mounted ConfigMap changes: the
+    Deployment's pod template is untouched, so there is nothing to roll. Both the
+    relayer and the miner read their config once at startup — simulation
+    identities in particular are not hot-reloaded — so editing the config used to
+    update the ConfigMap and change nothing that was running, with no error and
+    no signal. Stamping this hash into the pod template turns a config change
+    into a template change, which is what makes Kubernetes roll the pods.
+
+    Truncated to 16 hex chars: this is a change detector, not a security control.
+    """
+    return str(local(
+        "cat << 'PRM_CFG_EOF' | sha256sum | cut -c1-16\n{}\nPRM_CFG_EOF".format(config_yaml),
+        quiet=True,
+        echo_off=True,
+    )).strip()
 
 def dict_get(d, key, default=None):
     """Safe dictionary get with default value"""

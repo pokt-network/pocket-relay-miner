@@ -1,7 +1,7 @@
 # miner.tilt - Miner deployment (HA mode with leader election)
 
 load("./ports.Tiltfile", "get_miner_ports")
-load("./utils.Tiltfile", "deep_merge", "read_miner_example_config", "get_redis_host", "apply_k8s_overrides_miner")
+load("./utils.Tiltfile", "deep_merge", "read_miner_example_config", "get_redis_host", "apply_k8s_overrides_miner", "config_hash")
 
 def deploy_miners(config):
     """Deploy miner as a Deployment with N replicas"""
@@ -11,14 +11,15 @@ def deploy_miners(config):
 
     print("Deploying miner Deployment with {} replica(s)...".format(config["miner"]["count"]))
 
-    # Create miner ConfigMap first
-    create_miner_configmap(config)
+    # Create miner ConfigMap first, and reuse its rendered YAML so the
+    # Deployment can carry the config hash that rolls the pods on a change.
+    miner_config_yaml = create_miner_configmap(config)
 
     # Deploy single miner Deployment with replicas
-    deploy_miner_deployment(config)
+    deploy_miner_deployment(config, config_hash(miner_config_yaml))
 
 def create_miner_configmap(config):
-    """Create ConfigMap with miner configuration"""
+    """Create ConfigMap with miner configuration. Returns the rendered YAML."""
     miner_config_dict = generate_miner_config(config)
 
     # Add known_applications from parent config if available
@@ -40,7 +41,9 @@ data:
 
     k8s_yaml(blob(miner_configmap))
 
-def deploy_miner_deployment(config):
+    return miner_config_yaml
+
+def deploy_miner_deployment(config, miner_config_hash):
     """Deploy miner as a single Deployment with N replicas"""
 
     # Miner Deployment with replicas + Service
@@ -60,6 +63,10 @@ spec:
     metadata:
       labels:
         app: miner
+      annotations:
+        # See config_hash in utils.Tiltfile: a mounted ConfigMap change does not
+        # roll pods by itself, and the miner reads its config only at startup.
+        pocket-relay-miner/config-hash: "{}"
     spec:
       containers:
       - name: miner
@@ -128,6 +135,7 @@ spec:
     name: pprof
 """.format(
         config["miner"]["count"],
+        miner_config_hash,
         config["global"]["image"],
         "debug" if config["global"]["debug"] else "info"
     )
