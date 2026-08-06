@@ -15,7 +15,8 @@
 #   # then point the service at http://fastbackend:8545 in tilt_config.yaml
 #   kubectl delete -f scripts/loadtest/fastbackend.yaml   # when finished
 #
-# tilt_config.yaml is TRACKED. Revert the URL change before pushing.
+# tilt_config.yaml is gitignored, so no diff will remind you to undo the URL
+# change. Restore it by hand when finished.
 ---
 apiVersion: v1
 kind: ConfigMap

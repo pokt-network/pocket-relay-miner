@@ -56,7 +56,8 @@ if [ -z "$REPLICAS" ]; then
 elif [ "$REPLICAS" != "1" ]; then
     fail "relayer has $REPLICAS replicas; the benchmark needs exactly 1.
          Set 'relayer.count: 1' in tilt_config.yaml and let Tilt roll it.
-         tilt_config.yaml is TRACKED — revert the change before pushing."
+         (tilt_config.yaml is gitignored — a local-only edit, but restore it
+         afterwards so the next session does not inherit a 1-replica localnet.)"
 else
     ok "relayer at 1 replica"
     READY="$(kubectl get deploy relayer -o jsonpath='{.status.readyReplicas}' 2>/dev/null)"

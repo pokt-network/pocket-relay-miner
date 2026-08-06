@@ -181,6 +181,7 @@ cat <<EOF
   Report the receipt's share of total CPU as a percentage in each mode,
   comparable to the ~9% gzip cost at 200 RPS recorded in relayer/config.go.
 
-  Finally: tilt_config.yaml is TRACKED. Revert the replica change before
-  pushing — 'git diff --stat tilt_config.yaml' must be empty.
+  Finally: restore tilt_config.yaml. It is gitignored, so nothing will stop
+  you committing a 1-replica localnet into the next session's environment —
+  git will simply never mention it.
 EOF
