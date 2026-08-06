@@ -173,9 +173,9 @@ elif command -v hey >/dev/null 2>&1; then
         if [ "$BE_RPS_INT" -lt $((RPS * 3)) ]; then
             fail "backend sustains only ~$BE_RPS_INT RPS; the target is $RPS.
          The profile would measure the backend, not the receipt. Either lower
-         RPS, or swap in the flat backend:
-             kubectl apply -f scripts/loadtest/fastbackend.yaml
-         and point $SERVICE_ID at http://fastbackend:8545 in tilt_config.yaml.
+         RPS, or point \$SERVICE_ID at the static nginx backend Tilt already
+         deploys for exactly this — http://nginx-backend:80 in tilt_config.yaml
+         (see tilt/k8s/nginx-backend.Tiltfile: static body, ~50k RPS, <1ms).
          A smaller clean number beats a larger dirty one."
         else
             ok "backend has ~$((BE_RPS_INT / RPS))x headroom over the $RPS RPS target"
