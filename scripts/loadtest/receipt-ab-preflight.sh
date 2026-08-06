@@ -75,6 +75,54 @@ else
     ok "pod resources recorded to /tmp/receipt-ab-resources.json"
 fi
 
+# The miner shares the machine. Two miner replicas means two sets of block
+# subscriptions, cache refreshes and claim work competing for the same CPU the
+# relayer profile is measuring — noise that differs run to run.
+MINER_REPLICAS="$(kubectl get deploy miner -o jsonpath='{.spec.replicas}' 2>/dev/null)"
+if [ -z "$MINER_REPLICAS" ]; then
+    warn "miner deployment not found"
+elif [ "$MINER_REPLICAS" != "1" ]; then
+    fail "miner has $MINER_REPLICAS replicas; the benchmark needs exactly 1.
+         Set 'miner.count: 1' in tilt_config.yaml."
+else
+    ok "miner at 1 replica"
+fi
+
+# ---------------------------------------------------------------------------
+say "1b/6  connection pool headroom for $SERVICE_ID"
+# ---------------------------------------------------------------------------
+# The pool caps in-flight requests per backend host. If it binds, both arms
+# queue behind it equally and the receipt's cost disappears into the wait —
+# the failure mode that looks like a clean null result.
+#
+# Little's law: sustaining RPS through N connections needs backend latency
+# <= N/RPS. With the shipped 'low' profile (max_conns_per_host: 10) over the
+# two round-robin backends of develop-http, 400 RPS needs <= 50ms per call.
+POOL_PROFILE="$(awk "/^      $SERVICE_ID:/,/^      [a-z-]+:\$/" tilt_config.yaml 2>/dev/null \
+    | grep -E '^\s*pool_profile:' | head -1 | awk '{print $2}')"
+if [ -n "$POOL_PROFILE" ]; then
+    MAX_CONNS="$(awk "/^      $POOL_PROFILE:/,0" tilt_config.yaml 2>/dev/null \
+        | grep -E '^\s*max_conns_per_host:' | head -1 | grep -oE '[0-9]+')"
+    printf '       %s uses pool_profile=%s (max_conns_per_host=%s per backend host)\n' \
+        "$SERVICE_ID" "$POOL_PROFILE" "${MAX_CONNS:-?}"
+    if [ -n "$MAX_CONNS" ]; then
+        # develop-http round-robins over two hosts.
+        TOTAL_CONNS=$((MAX_CONNS * 2))
+        MAX_LAT_MS=$((TOTAL_CONNS * 1000 / RPS))
+        printf '       %s connections total -> backend latency must stay under ~%sms at %s RPS\n' \
+            "$TOTAL_CONNS" "$MAX_LAT_MS" "$RPS"
+        if [ "$MAX_LAT_MS" -lt 10 ]; then
+            fail "the pool is almost certainly the bottleneck at $RPS RPS.
+         Raise $SERVICE_ID to pool_profile: high in tilt_config.yaml, or lower RPS.
+         A pool-bound run makes both arms queue equally and hides the receipt."
+        else
+            ok "pool headroom plausible — confirm against the measured backend latency below"
+        fi
+    fi
+else
+    warn "could not read pool_profile for $SERVICE_ID from tilt_config.yaml"
+fi
+
 # ---------------------------------------------------------------------------
 say "2/6  endpoints reachable"
 # ---------------------------------------------------------------------------
@@ -102,13 +150,40 @@ say "3/6  backend headroom"
 # ---------------------------------------------------------------------------
 # If the backend saturates before the relayer does, the profile measures
 # waiting, not signing. A smaller clean number beats a larger dirty one.
-if [ -f "$SCRIPT_DIR/../localonly/loadtest/backends.conf" ] || [ -n "${BACKENDS_CONF:-}" ]; then
-    ok "backends.conf present — run 'scripts/loadtest/backends.sh sweep-optimal' and"
-    printf '       confirm %s RPS sits WELL below the optimal figure for %s\n' "$RPS" "$SERVICE_ID"
+# Measure the Tilt backend DIRECTLY, with the relayer out of the path. Without
+# this number there is no way to say whether the profile shows the receipt or
+# shows the backend. backends.sh is for external operator RPC nodes and does not
+# apply here.
+BACKEND_URL="${BACKEND_URL:-http://localhost:8545}"
+BACKEND_PAYLOAD='{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+
+if ! curl -fsS -m 5 -o /dev/null -X POST -H 'Content-Type: application/json' \
+        -d "$BACKEND_PAYLOAD" "$BACKEND_URL" 2>/dev/null; then
+    fail "backend not answering at $BACKEND_URL (Tilt forwards it on 8545)"
+elif command -v hey >/dev/null 2>&1; then
+    ok "backend answering; measuring its ceiling (10s, relayer NOT in the path)"
+    HEY_OUT="$(hey -z 10s -c 50 -m POST -T 'application/json' \
+        -d "$BACKEND_PAYLOAD" "$BACKEND_URL" 2>/dev/null)"
+    BE_RPS="$(printf '%s' "$HEY_OUT" | grep -E '^\s*Requests/sec:' | awk '{print $2}')"
+    BE_P99="$(printf '%s' "$HEY_OUT" | grep -E '99% in' | awk '{print $3}')"
+    printf '       backend: %s RPS, p99 %ss (c=50)\n' "${BE_RPS:-?}" "${BE_P99:-?}"
+    if [ -n "$BE_RPS" ]; then
+        BE_RPS_INT="${BE_RPS%%.*}"
+        if [ "$BE_RPS_INT" -lt $((RPS * 3)) ]; then
+            fail "backend sustains only ~$BE_RPS_INT RPS; the target is $RPS.
+         The profile would measure the backend, not the receipt. Either lower
+         RPS, or swap in the flat backend:
+             kubectl apply -f scripts/loadtest/fastbackend.yaml
+         and point $SERVICE_ID at http://fastbackend:8545 in tilt_config.yaml.
+         A smaller clean number beats a larger dirty one."
+        else
+            ok "backend has ~$((BE_RPS_INT / RPS))x headroom over the $RPS RPS target"
+        fi
+    fi
 else
-    warn "no backends.conf; cannot establish the backend ceiling automatically.
-         The Tilt backend must comfortably exceed $RPS RPS or the profile
-         measures the backend rather than the receipt."
+    warn "hey not installed (go install github.com/rakyll/hey@latest);
+         cannot measure the backend ceiling. It must comfortably exceed $RPS RPS
+         or the profile measures the backend rather than the receipt."
 fi
 
 # ---------------------------------------------------------------------------

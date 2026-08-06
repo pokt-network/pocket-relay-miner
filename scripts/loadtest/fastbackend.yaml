@@ -1,0 +1,98 @@
+# A deliberately dumb backend for relayer benchmarks.
+#
+# When measuring what the RELAYER costs — a signature, a hash, a header — the
+# upstream must not be part of the answer. The Tilt demo-backend does real work
+# per request; if it saturates first, the CPU profile shows waiting rather than
+# whatever is being measured, and the two arms of an A/B become equally slow in
+# a way that hides the difference.
+#
+# This serves one canned JSON-RPC response from memory. No parsing, no routing,
+# no upstream. The body is a lie and that is the point: the relayer hashes and
+# signs whatever bytes come back, so their content is irrelevant to the
+# measurement while their cost is near zero.
+#
+#   kubectl apply -f scripts/loadtest/fastbackend.yaml
+#   # then point the service at http://fastbackend:8545 in tilt_config.yaml
+#   kubectl delete -f scripts/loadtest/fastbackend.yaml   # when finished
+#
+# tilt_config.yaml is TRACKED. Revert the URL change before pushing.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fastbackend-conf
+data:
+  nginx.conf: |
+    worker_processes auto;
+    # Ample headroom: the point of this backend is never to be the limit.
+    events { worker_connections 8192; }
+    http {
+      access_log off;
+      error_log /dev/null crit;
+      keepalive_timeout 300s;
+      keepalive_requests 1000000;
+
+      server {
+        listen 8545 reuseport backlog=4096;
+
+        # Answers any method and any path, including POST, with a fixed body.
+        location / {
+          default_type application/json;
+          return 200 '{"jsonrpc":"2.0","id":1,"result":"0x10f2c"}';
+        }
+      }
+    }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fastbackend
+spec:
+  selector:
+    app: fastbackend
+  ports:
+    - port: 8545
+      targetPort: 8545
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fastbackend
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: fastbackend
+  template:
+    metadata:
+      labels:
+        app: fastbackend
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27-alpine
+          ports:
+            - containerPort: 8545
+          volumeMounts:
+            - name: conf
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+          # Generous, because a throttled backend reintroduces exactly the
+          # problem this exists to remove.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 64Mi
+            limits:
+              cpu: "2"
+              memory: 256Mi
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 8545
+            initialDelaySeconds: 2
+            periodSeconds: 5
+      volumes:
+        - name: conf
+          configMap:
+            name: fastbackend-conf
