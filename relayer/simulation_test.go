@@ -328,3 +328,87 @@ func TestSimDirectiveExtractors(t *testing.T) {
 	md := metadata.New(map[string]string{MetaSimulationKeyID: "kg"})
 	require.Equal(t, "kg", SimDirectiveFromGRPC(md).KeyID)
 }
+
+// --- construction and reload with the feature disabled ---------------------
+
+// unusableSimConfig returns a simulation config whose identity can never be
+// turned into ring points: the gateway pubkey is well-formed hex of the right
+// length whose x coordinate is not on secp256k1. This is the shape of config
+// an operator ends up with after copying an example simulation block verbatim
+// without substituting their own keys.
+func unusableSimConfig(enabled bool) *SimulationConfig {
+	cfg := &SimulationConfig{
+		Enabled: enabled,
+		Identities: []SimIdentity{{
+			KeyID:             "example-identity",
+			Enabled:           true,
+			AppPubKeyHex:      hex.EncodeToString(secp256k1.GenPrivKey().PubKey().Bytes()),
+			GatewayPubKeysHex: []string{simOffCurvePubKeyHex},
+		}},
+	}
+	cfg.ApplyDefaults()
+	return cfg
+}
+
+// TestNewSimulationVerifier_Disabled_SkipsIdentityBuild pins the contract that
+// SimulationConfig.Validate documents: with the feature off, the identity list
+// is never inspected, so an unusable identity cannot block relayer startup.
+// Validate is a no-op when disabled, so construction is the only place this
+// config could fail — it must not.
+func TestNewSimulationVerifier_Disabled_SkipsIdentityBuild(t *testing.T) {
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	cfg := unusableSimConfig(false)
+
+	// Validate agreeing is a precondition: it is what lets this config reach
+	// construction untouched in the first place.
+	require.NoError(t, cfg.Validate(), "disabled config must pass validation")
+
+	v, err := NewSimulationVerifier(logger, cfg, nil, nil, nil, nil)
+	require.NoError(t, err, "a disabled simulation block must not fail startup")
+	require.NotNil(t, v)
+	require.False(t, v.Enabled())
+
+	// No identity was built, so nothing is servable even if a caller reaches
+	// Verify without checking Enabled() first.
+	require.Empty(t, *v.identities.Load())
+	require.ErrorIs(t, v.Verify(context.Background(), "example-identity", nil), ErrSimUnknownKeyID)
+}
+
+// TestNewSimulationVerifier_Enabled_UnusableIdentityErrors is the other half of
+// the contract: turning the feature on must surface the unusable identity
+// rather than starting with a silently empty identity set.
+func TestNewSimulationVerifier_Enabled_UnusableIdentityErrors(t *testing.T) {
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+
+	v, err := NewSimulationVerifier(logger, unusableSimConfig(true), nil, nil, nil, nil)
+	require.Error(t, err)
+	require.Nil(t, v)
+	require.Contains(t, err.Error(), "example-identity", "error must name the offending identity")
+}
+
+// TestSimReload_ToDisabledWithUnusableIdentity verifies the same skip applies
+// on the reload path: switching the feature off with an unusable identity in
+// the new config must succeed and stop serving, not fail the reload.
+func TestSimReload_ToDisabledWithUnusableIdentity(t *testing.T) {
+	f := newSimFixture(t)
+	require.True(t, f.verifier.Enabled())
+	require.NoError(t, f.verifier.Verify(context.Background(), simTestKeyID, f.validRelay(t)))
+
+	require.NoError(t, f.verifier.Reload(unusableSimConfig(false)))
+	require.False(t, f.verifier.Enabled())
+	require.Empty(t, *f.verifier.identities.Load())
+}
+
+// TestSimReload_EnabledUnusableIdentityKeepsPreviousIdentities verifies a
+// failed reload is atomic: a bad new config must leave the previously serving
+// identity map in place rather than half-applying an empty or partial set.
+func TestSimReload_EnabledUnusableIdentityKeepsPreviousIdentities(t *testing.T) {
+	f := newSimFixture(t)
+
+	err := f.verifier.Reload(unusableSimConfig(true))
+	require.Error(t, err)
+
+	require.True(t, f.verifier.Enabled(), "failed reload must not flip the enabled flag")
+	require.NoError(t, f.verifier.Verify(context.Background(), simTestKeyID, f.validRelay(t)),
+		"previously loaded identity must still serve after a failed reload")
+}

@@ -28,6 +28,13 @@ const (
 // validation failure has its own sentinel so callers (and tests) can assert
 // the exact failure with errors.Is, rather than matching on error strings.
 var (
+	// ErrSimNoIdentities is returned when the feature is enabled but no
+	// identities are pinned. Such a config boots cleanly and then rejects
+	// every simulated relay as an unknown key_id, which is indistinguishable
+	// at the metrics layer from a forged signature — so the empty list is
+	// named here, at the config field that caused it, instead.
+	ErrSimNoIdentities = errors.New("simulation: enabled but no identities are pinned")
+
 	// ErrSimEmptyKeyID is returned when an identity has no key_id set.
 	ErrSimEmptyKeyID = errors.New("simulation identity: key_id is required")
 
@@ -121,6 +128,40 @@ type SimulationConfig struct {
 	Identities []SimIdentity `yaml:"identities"`
 }
 
+// ExpiredIdentities returns the key_ids of enabled identities whose not_after
+// has already passed at now, in config order. It is the advisory counterpart
+// to Validate: such an identity loads and serves nothing, rejecting every
+// relay aimed at it with ErrSimExpired.
+//
+// This is deliberately NOT part of Validate, and must never become part of it.
+// not_after passes on a wall-clock date nobody redeploys for, so a hard
+// failure would mean the next restart of a healthy relayer — a node reboot, a
+// rescheduled pod — refuses to boot and takes real, paid relay traffic down
+// over a dead simulation identity. The identity going quiet is the intended
+// behaviour of an expiry; the relayer going quiet is not.
+//
+// The boundary matches SimulationVerifier.Verify exactly (now strictly after
+// not_after): an advisory that disagrees with the code that does the rejecting
+// is worse than none. Identities with an unset or unparseable not_after are
+// skipped — an unset one never expires, and a malformed one is Validate's
+// rejection to make.
+func (c *SimulationConfig) ExpiredIdentities(now time.Time) []string {
+	var expired []string
+	for _, id := range c.Identities {
+		if !id.Enabled || id.NotAfter == "" {
+			continue
+		}
+		notAfter, err := time.Parse(time.RFC3339, id.NotAfter)
+		if err != nil {
+			continue
+		}
+		if now.After(notAfter) {
+			expired = append(expired, id.KeyID)
+		}
+	}
+	return expired
+}
+
 // ApplyDefaults fills in zero-value fields with their defaults. It is
 // idempotent (only touches fields still at their zero value) and safe to
 // call multiple times, e.g. once in DefaultConfig() and again after YAML
@@ -156,6 +197,29 @@ func (c *SimulationConfig) ApplyDefaults() {
 func (c *SimulationConfig) Validate() error {
 	if !c.Enabled {
 		return nil
+	}
+	return c.ValidateAsIfEnabled()
+}
+
+// ValidateAsIfEnabled runs the identity checks unconditionally: it answers
+// "would this config be rejected if the feature were switched on?" for a
+// block that is currently off.
+//
+// Validate deliberately skips a disabled block, which means a typo in an
+// unused identity survives every deploy and only surfaces the day someone
+// flips enabled: true — at which point the relayer refuses to boot and stops
+// serving real, paid traffic. Callers that can afford to look ahead (config
+// validation tooling, startup logging) use this to warn while the mistake is
+// still cheap. It is advisory: it must never be promoted into a hard failure
+// for a disabled block, since that would break the contract that a disabled
+// block never blocks startup regardless of what it contains.
+func (c *SimulationConfig) ValidateAsIfEnabled() error {
+	// Serving with nothing pinned is always an operator mistake: the feature
+	// was switched on because something was meant to be served, and every
+	// simulated relay would instead be rejected as an unknown key_id. Fail
+	// here rather than at the first health-check relay.
+	if len(c.Identities) == 0 {
+		return fmt.Errorf("simulation.identities: %w", ErrSimNoIdentities)
 	}
 
 	seenKeyIDs := make(map[string]struct{}, len(c.Identities))

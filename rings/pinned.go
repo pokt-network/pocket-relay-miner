@@ -14,6 +14,13 @@ import (
 // PubKeyFromHex parses a compressed secp256k1 public key from its hex
 // encoding (33 bytes / 66 hex characters). This is how a pinned ring member
 // public key from config (rather than an on-chain account query) is loaded.
+//
+// The key is decoded all the way to a curve point, not just length-checked:
+// a well-formed 33-byte blob with a valid 0x02/0x03 prefix can still carry an
+// x coordinate that is not on secp256k1. Without this check such a key passes
+// config validation and only fails later at ring-point precompute, surfacing
+// a low-level crypto error at startup instead of a config error at the field
+// that caused it.
 func PubKeyFromHex(hexStr string) (cryptotypes.PubKey, error) {
 	keyBz, err := hex.DecodeString(hexStr)
 	if err != nil {
@@ -27,7 +34,12 @@ func PubKeyFromHex(hexStr string) (cryptotypes.PubKey, error) {
 		)
 	}
 
-	return &secp256k1.PubKey{Key: keyBz}, nil
+	pubKey := &secp256k1.PubKey{Key: keyBz}
+	if _, err := pointsFromPublicKeys(pubKey); err != nil {
+		return nil, fmt.Errorf("pubkey is not a valid secp256k1 curve point: %w", err)
+	}
+
+	return pubKey, nil
 }
 
 // PrecomputeRingPoints converts the given public keys to secp256k1 curve

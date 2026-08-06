@@ -6,12 +6,16 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"regexp"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 )
 
@@ -189,6 +193,47 @@ func TestSimulationConfig_Validate_MalformedGatewayPubKey(t *testing.T) {
 	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
 }
 
+// simOffCurvePubKeyHex is 33 bytes of well-formed hex with a valid compressed
+// prefix whose x coordinate is NOT on secp256k1. Hex and length checks accept
+// it; only decoding to a curve point rejects it. This is the exact shape of
+// pubkey an operator ends up with after copying a documentation placeholder
+// into a real config.
+const simOffCurvePubKeyHex = "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+// TestSimulationConfig_Validate_OffCurveAppPubKey verifies an app_pubkey_hex
+// that is well-formed but not a curve point is rejected by config validation,
+// naming the offending identity and field, rather than surviving to fail
+// inside ring-point precompute at verifier construction.
+func TestSimulationConfig_Validate_OffCurveAppPubKey(t *testing.T) {
+	id := validIdentity(t)
+	id.AppPubKeyHex = simOffCurvePubKeyHex
+
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{id}}
+	cfg.ApplyDefaults()
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+	require.Contains(t, err.Error(), "app_pubkey_hex", "error must name the offending field")
+	require.Contains(t, err.Error(), id.KeyID, "error must name the offending identity")
+}
+
+// TestSimulationConfig_Validate_OffCurveGatewayPubKey is the gateway-list
+// counterpart: an off-curve ring member must be rejected at validation, with
+// the failing list index named.
+func TestSimulationConfig_Validate_OffCurveGatewayPubKey(t *testing.T) {
+	id := validIdentity(t)
+	id.GatewayPubKeysHex = []string{hexPubKey(t), simOffCurvePubKeyHex}
+
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{id}}
+	cfg.ApplyDefaults()
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+	require.Contains(t, err.Error(), "gateway_pubkeys_hex[1]", "error must name the offending list index")
+}
+
 func TestSimulationConfig_Validate_NegativeMaxRPS(t *testing.T) {
 	id := validIdentity(t)
 	id.MaxRPS = -1 // explicit negative survives ApplyDefaults (only 0 is defaulted)
@@ -282,6 +327,123 @@ func TestSimulationConfig_ApplyDefaults_MultipleIdentitiesEachDefaulted(t *testi
 	require.Equal(t, 5, cfg.Identities[0].MaxRPS)
 	require.Equal(t, 20, cfg.Identities[1].MaxRPS)
 	require.Equal(t, 5, cfg.Identities[2].MaxRPS)
+}
+
+// --- SimulationConfig.ExpiredIdentities() ---
+
+// simNotAfterRef is the reference "now" for expiry tests. Fixed, never
+// time.Now(): an expiry test anchored to the wall clock silently changes
+// meaning as the dates in it recede into the past.
+var simNotAfterRef = time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
+
+// simIdentityWithNotAfter returns an enabled, otherwise-valid identity with
+// the given key_id and not_after.
+func simIdentityWithNotAfter(t *testing.T, keyID, notAfter string) SimIdentity {
+	t.Helper()
+	id := validIdentity(t)
+	id.KeyID = keyID
+	id.Enabled = true
+	id.NotAfter = notAfter
+	return id
+}
+
+// An identity whose not_after has already passed is dead weight: it validates,
+// it loads, and then every relay aimed at it is rejected with ErrSimExpired.
+// The operator who fat-fingered the year needs to hear about it at config
+// time, not from a silent health-check pipeline.
+func TestSimulationConfig_ExpiredIdentities_ReportsPastNotAfter(t *testing.T) {
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{
+		simIdentityWithNotAfter(t, "expired", "2020-01-01T00:00:00Z"),
+	}}
+
+	require.Equal(t, []string{"expired"}, cfg.ExpiredIdentities(simNotAfterRef))
+}
+
+// The cases that must stay silent, each for its own reason.
+func TestSimulationConfig_ExpiredIdentities_SilentCases(t *testing.T) {
+	tests := []struct {
+		name     string
+		identity SimIdentity
+		why      string
+	}{
+		{
+			name:     "future not_after",
+			identity: simIdentityWithNotAfter(t, "future", "2030-01-01T00:00:00Z"),
+			why:      "an identity that expires later is the normal rotation case",
+		},
+		{
+			name:     "no not_after",
+			identity: simIdentityWithNotAfter(t, "no-expiry", ""),
+			why:      "an unset not_after means no expiry, not an expiry at the zero time",
+		},
+		{
+			name:     "unparseable not_after",
+			identity: simIdentityWithNotAfter(t, "garbage", "not-a-timestamp"),
+			why:      "a malformed not_after is Validate's rejection to make, not this advisory's",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{tt.identity}}
+			require.Empty(t, cfg.ExpiredIdentities(simNotAfterRef), tt.why)
+		})
+	}
+}
+
+// A per-identity `enabled: false` already means the identity is never served,
+// so its expiry is not a finding — reporting it would train operators to
+// ignore the warning.
+func TestSimulationConfig_ExpiredIdentities_IgnoresDisabledIdentity(t *testing.T) {
+	id := simIdentityWithNotAfter(t, "expired-but-off", "2020-01-01T00:00:00Z")
+	id.Enabled = false
+
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{id}}
+	require.Empty(t, cfg.ExpiredIdentities(simNotAfterRef),
+		"a disabled identity is not served, so its expiry is not a finding")
+}
+
+// The boundary must match SimulationVerifier.Verify, which rejects on
+// now.After(notAfter) — strictly after. At exactly not_after the identity is
+// still served, so it must not be reported as expired.
+func TestSimulationConfig_ExpiredIdentities_BoundaryMatchesVerify(t *testing.T) {
+	exact := simNotAfterRef.Format(time.RFC3339)
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{
+		simIdentityWithNotAfter(t, "on-the-boundary", exact),
+	}}
+
+	require.Empty(t, cfg.ExpiredIdentities(simNotAfterRef),
+		"at exactly not_after the identity is still served; the advisory must not disagree with Verify")
+	require.Equal(t, []string{"on-the-boundary"},
+		cfg.ExpiredIdentities(simNotAfterRef.Add(time.Nanosecond)),
+		"one instant later it is expired, matching Verify's now.After(notAfter)")
+}
+
+// Multiple expired identities are all reported, in config order, so the
+// operator sees every one in a single pass instead of fixing them one restart
+// at a time.
+func TestSimulationConfig_ExpiredIdentities_AllInConfigOrder(t *testing.T) {
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{
+		simIdentityWithNotAfter(t, "dead-1", "2020-01-01T00:00:00Z"),
+		simIdentityWithNotAfter(t, "alive", "2030-01-01T00:00:00Z"),
+		simIdentityWithNotAfter(t, "dead-2", "2021-06-01T00:00:00Z"),
+	}}
+
+	require.Equal(t, []string{"dead-1", "dead-2"}, cfg.ExpiredIdentities(simNotAfterRef))
+}
+
+// Expiry is advisory and must never become a startup failure: a not_after that
+// passes while the relayer is running would otherwise turn the next restart
+// into an outage of real, paid traffic over a dead simulation identity.
+func TestSimulationConfig_Validate_ExpiredIdentityStillValidates(t *testing.T) {
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{
+		simIdentityWithNotAfter(t, "expired", "2020-01-01T00:00:00Z"),
+	}}
+	cfg.ApplyDefaults()
+
+	require.NoError(t, cfg.Validate(),
+		"an expired identity must not block startup: real traffic must not go down over a dead sim identity")
+	require.NoError(t, cfg.ValidateAsIfEnabled(), "the look-ahead must agree with Validate here")
 }
 
 // --- YAML round-trip ---
@@ -454,6 +616,201 @@ simulation:
 		require.Error(t, err)
 		require.True(t, errors.Is(err, ErrSimPlaceholderForbidden), "got: %v", err)
 	})
+}
+
+// TestExampleConfig_SimulationBlockStartsCleanly walks the shipped example
+// config through the exact sequence a relayer performs at startup: load,
+// validate, then build the simulation verifier. An operator who copies
+// config.relayer.example.yaml verbatim must get a relayer that starts.
+//
+// This is a regression test for a shipped example that carried illustrative
+// pubkeys which were not secp256k1 curve points: validation skipped them
+// (feature disabled), verifier construction did not, and the relayer failed to
+// boot on a feature nobody had turned on.
+func TestExampleConfig_SimulationBlockStartsCleanly(t *testing.T) {
+	const examplePath = "../config.relayer.example.yaml"
+
+	cfg, err := LoadConfig(examplePath)
+	require.NoError(t, err, "the shipped example config must load")
+
+	require.False(t, cfg.Simulation.Enabled, "the example must ship with simulation off")
+	require.Empty(t, cfg.Simulation.Identities,
+		"the example must not ship identities: illustrative pubkeys are not real curve points")
+
+	// The startup call that previously failed (cmd/cmd_relayer.go wires this
+	// with the loaded config). nil redis/signer/serviceIDs are sufficient:
+	// construction only parses config and precomputes ring points.
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	v, err := NewSimulationVerifier(logger, &cfg.Simulation, nil, nil, nil, nil)
+	require.NoError(t, err, "the shipped example config must not fail verifier construction")
+	require.NotNil(t, v)
+	require.False(t, v.Enabled())
+}
+
+// uncommentSimTemplate performs, mechanically, the edit docs/simulated-relays.md
+// tells an operator to perform on the example config: find the commented
+// simulated-relay identity template and strip the leading "# " from every one
+// of its lines. It returns the rewritten document.
+//
+// The template block is located by content, not by line number: it starts at
+// the commented `identities:` key and runs for as long as the lines stay
+// comments. Locating it by content is deliberate — a test pinned to line
+// numbers stops testing the template the moment the file above it grows.
+func uncommentSimTemplate(t *testing.T, raw string) string {
+	t.Helper()
+
+	// Strips one leading '#' plus at most one space, preserving indentation.
+	// A line carrying two '#' therefore stays a comment: that is how optional
+	// fields stay inert through the operator's single uncomment pass.
+	stripOne := regexp.MustCompile(`^(\s*)# ?`)
+
+	lines := strings.Split(raw, "\n")
+	start := -1
+	for i, l := range lines {
+		if strings.TrimSpace(l) == "# identities:" {
+			start = i
+			break
+		}
+	}
+	require.NotEqual(t, -1, start,
+		"the example must carry a commented `# identities:` template; "+
+			"an active `identities:` key above a commented block cannot be uncommented as documented")
+
+	end := start
+	for end < len(lines) && strings.HasPrefix(strings.TrimSpace(lines[end]), "#") {
+		lines[end] = stripOne.ReplaceAllString(lines[end], "$1")
+		end++
+	}
+	require.Greater(t, end-start, 5, "the uncommented template looks truncated")
+
+	return strings.Join(lines, "\n")
+}
+
+// TestExampleConfig_SimulationTemplateUncommentsToInertIdentity is the
+// regression test for the documented "uncomment and fill it in" workflow.
+//
+// Two distinct ways that workflow used to betray the operator, both covered
+// here:
+//
+//  1. An active `identities: []` line sitting above the commented template
+//     made the naive uncomment produce a block sequence under a key that
+//     already held a flow-empty list — unparseable YAML, reported ~20 lines
+//     away from the line that caused it.
+//  2. `not_after` and `allowed_services` sat at the same comment depth as the
+//     required fields, so uncommenting silently pinned an expiry date and a
+//     localnet-only service restriction the operator never chose. The expiry
+//     in particular fails open-endedly and silently, on a date years away.
+//
+// The invariant: one uncomment pass over the template must yield a parseable
+// config whose single identity carries ONLY the fields the operator was asked
+// to fill in.
+func TestExampleConfig_SimulationTemplateUncommentsToInertIdentity(t *testing.T) {
+	raw, err := os.ReadFile("../config.relayer.example.yaml")
+	require.NoError(t, err)
+
+	path := writeTempConfig(t, uncommentSimTemplate(t, string(raw)))
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err, "uncommenting the identity template must yield parseable YAML")
+
+	require.Len(t, cfg.Simulation.Identities, 1, "the template must parse as exactly one identity")
+	id := cfg.Simulation.Identities[0]
+
+	// Fields the operator is explicitly told to set.
+	require.Equal(t, "my-sim-identity", id.KeyID)
+	require.True(t, id.Enabled, "the template's per-identity switch must come through as set")
+	require.NotEmpty(t, id.AppPubKeyHex, "the template must carry an app_pubkey_hex placeholder to replace")
+	require.Len(t, id.GatewayPubKeysHex, 1, "the template must carry one gateway pubkey placeholder to replace")
+
+	// Fields the operator did NOT ask for. These are the regression.
+	require.Empty(t, id.NotAfter,
+		"uncommenting the template must not pin an expiry the operator did not choose")
+	require.Empty(t, id.AllowedServices,
+		"uncommenting the template must not restrict the identity to services the operator did not choose")
+	require.Equal(t, DefaultSimIdentityMaxRPS, id.MaxRPS,
+		"max_rps must come from the default, not from an accidentally-active template value")
+
+	// And the placeholder keys must still be unservable: turning the feature
+	// on without replacing them fails loudly, naming the field.
+	cfg.Simulation.Enabled = true
+	cfg.Simulation.ApplyDefaults()
+	err = cfg.Simulation.Validate()
+	require.Error(t, err, "placeholder pubkeys must never produce a servable identity")
+	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+}
+
+// TestSimulationConfig_Validate_EnabledWithNoIdentities pins the fail-fast
+// behaviour for a simulation block that is switched on but pins nothing.
+//
+// Without this, the misconfiguration is invisible at the point it is made:
+// the relayer boots, logs `identities=0`, and then rejects every simulated
+// relay with ErrSimUnknownKeyID under the metric label `verify_failed` — the
+// same label a forged signature produces. The operator sees a health-check
+// pipeline that fails uniformly, with nothing naming the empty list.
+func TestSimulationConfig_Validate_EnabledWithNoIdentities(t *testing.T) {
+	cfg := SimulationConfig{Enabled: true}
+	cfg.ApplyDefaults()
+
+	err := cfg.Validate()
+	require.Error(t, err, "enabling simulation with no identities pinned must be rejected")
+	require.True(t, errors.Is(err, ErrSimNoIdentities), "got: %v", err)
+}
+
+// A disabled block with no identities is the shipped default and must stay
+// silent — the fail-fast above must not turn the default config into an error.
+func TestSimulationConfig_Validate_DisabledWithNoIdentitiesIsOK(t *testing.T) {
+	cfg := SimulationConfig{Enabled: false}
+	cfg.ApplyDefaults()
+
+	require.NoError(t, cfg.Validate(), "the shipped default (disabled, no identities) must validate")
+}
+
+// --- SimulationConfig.ValidateAsIfEnabled() ---
+
+// ValidateAsIfEnabled is the look-ahead that keeps a disabled-but-broken block
+// from staying silent until the day someone enables it. A typo in an unused
+// identity must be reportable while the feature is still off.
+func TestSimulationConfig_ValidateAsIfEnabled_ReportsDisabledBlockDefect(t *testing.T) {
+	id := validIdentity(t)
+	id.GatewayPubKeysHex = []string{simOffCurvePubKeyHex}
+
+	cfg := SimulationConfig{Enabled: false, Identities: []SimIdentity{id}}
+	cfg.ApplyDefaults()
+
+	// Validate stays silent: a disabled block never blocks startup.
+	require.NoError(t, cfg.Validate(), "a disabled block must not block startup")
+
+	// The look-ahead names the defect anyway.
+	err := cfg.ValidateAsIfEnabled()
+	require.Error(t, err, "the look-ahead must report what enabling this config would do")
+	require.True(t, errors.Is(err, ErrSimBadPubKey), "got: %v", err)
+}
+
+// The look-ahead must agree with Validate on a config that is fine, so it
+// never produces a warning for a block that would enable cleanly.
+func TestSimulationConfig_ValidateAsIfEnabled_SilentOnValidDisabledBlock(t *testing.T) {
+	cfg := SimulationConfig{Enabled: false, Identities: []SimIdentity{validIdentity(t)}}
+	cfg.ApplyDefaults()
+
+	require.NoError(t, cfg.ValidateAsIfEnabled(), "a disabled block that would enable cleanly must not warn")
+}
+
+// An enabled config must produce byte-identical results from both entry
+// points — if they ever diverge, one of the two callers is checking something
+// the other is not.
+func TestSimulationConfig_ValidateAsIfEnabled_MatchesValidateWhenEnabled(t *testing.T) {
+	id := validIdentity(t)
+	id.NotAfter = "not-a-timestamp"
+
+	cfg := SimulationConfig{Enabled: true, Identities: []SimIdentity{id}}
+	cfg.ApplyDefaults()
+
+	validateErr := cfg.Validate()
+	lookAheadErr := cfg.ValidateAsIfEnabled()
+	require.Error(t, validateErr)
+	require.Error(t, lookAheadErr)
+	require.Equal(t, validateErr.Error(), lookAheadErr.Error(),
+		"Validate and ValidateAsIfEnabled must run the same checks when enabled")
 }
 
 // writeTempConfig writes yamlDoc to a temp file and returns its path.

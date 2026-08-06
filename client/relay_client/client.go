@@ -53,6 +53,15 @@ type RelayClient struct {
 	// and reused for all requests within that session.
 	// Thread-safe via sync.Map for concurrent load testing.
 	ringCache sync.Map // map[ringCacheKey]*ring.Ring
+
+	// simRingCache stores rings for the simulated-relay path, keyed by the
+	// pinned pubkeys they are built from (simRingCacheKey). Separate from
+	// ringCache because a pinned ring has no session to scope it: it is
+	// valid for as long as the pubkeys are, so it is built once per identity
+	// and reused for every simulated relay. See simRingFor for why building
+	// it per call is expensive.
+	// Thread-safe via sync.Map for concurrent load testing.
+	simRingCache sync.Map // map[string]*simPinnedRing
 }
 
 // Config contains configuration for the relay client.

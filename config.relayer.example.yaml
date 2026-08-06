@@ -385,29 +385,45 @@ simulation:
   freshness_window_seconds: 30
 
   # Pinned simulated-relay identities. Each identity is served ONLY when
-  # its own `enabled: true` is set explicitly (fail-closed) - defaults do
-  # not turn identities on.
-  identities:
-    - key_id: "example-sim-identity"
-      enabled: true
-
-      # Optional RFC3339 expiry; omit for no expiry.
-      # not_after: "2027-01-01T00:00:00Z"
-
-      # Per-identity simulated relay rate. Default: 5.
-      max_rps: 5
-
-      # Compressed secp256k1 pubkey (hex) of the simulated application.
-      # EXAMPLE VALUE ONLY - replace with a real pinned key, never reuse
-      # this placeholder-looking value in a real deployment.
-      app_pubkey_hex: "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-      # Compressed secp256k1 pubkeys (hex) of the simulated gateway ring
-      # members. At least one required. EXAMPLE VALUES ONLY.
-      gateway_pubkeys_hex:
-        - "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
-
-      # Restrict this identity to specific services. Empty/omitted means
-      # all configured services are allowed.
-      # allowed_services:
-      #   - develop-http
+  # BOTH `simulation.enabled: true` above AND its own `enabled: true` are
+  # set explicitly (fail-closed) - defaults do not turn identities on.
+  #
+  # No identities are pinned: the whole `identities` key is commented out
+  # below, so the shipped example needs no edit to stay inert. The keys in
+  # the template are illustrative and are NOT valid secp256k1 public keys -
+  # a config carrying them is rejected at startup once `simulation.enabled`
+  # is true. Generate your own dedicated simulation app and gateway key
+  # pairs and pin their public halves here; see docs/simulated-relays.md
+  # for the provisioning steps.
+  #
+  # TO PIN AN IDENTITY: delete the leading "# " (hash and one space) from
+  # every line of the template below, then replace the placeholder keys.
+  # Lines that are still comments after that single pass carry a second
+  # "#" on purpose: they are OPTIONAL fields, and leaving them commented is
+  # what keeps them unset. Uncomment only the ones you actually want.
+  # identities:
+  #   - key_id: "my-sim-identity"      # sent as the Pocket-Simulation-Key-Id header
+  #     enabled: true                  # per-identity switch (required to activate)
+  #
+  #     # Compressed secp256k1 pubkey (hex, 33 bytes) of the simulated
+  #     # application. Must be a real public key you generated.
+  #     app_pubkey_hex: "02<64 hex chars>"
+  #
+  #     # Compressed secp256k1 pubkeys (hex) of the simulated gateway ring
+  #     # members. At least one required. Keep their private halves in your
+  #     # health-check tooling - never in this file.
+  #     gateway_pubkeys_hex:
+  #       - "03<64 hex chars>"
+  #
+  #     ## OPTIONAL - per-identity simulated relay rate. Default: 5.
+  #     # max_rps: 5
+  #
+  #     ## OPTIONAL - RFC3339 expiry, for key rotation. Unset means the
+  #     ## identity never expires. Setting this is a scheduled outage of
+  #     ## your simulated traffic on that date - pick it deliberately.
+  #     # not_after: "2027-01-01T00:00:00Z"
+  #
+  #     ## OPTIONAL - restrict this identity to specific services. Unset
+  #     ## means every configured service is allowed.
+  #     # allowed_services:
+  #     #   - develop-http

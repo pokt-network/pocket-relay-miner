@@ -71,7 +71,9 @@ clock, shared Redis). Nothing depends on the honesty of the caller.
 
 - **Off by default.** `simulation.enabled` defaults to `false`. When off, the
   simulation header is **ignored** (a stray header never turns a real relay
-  into an error).
+  into an error), and the `identities` list is neither validated nor loaded —
+  a leftover or half-filled simulation block cannot affect a relayer that has
+  the feature switched off.
 - **Config allowlist.** Only pinned, enabled, unexpired identities are
   accepted, selected by a `key_id`.
 - **Real ring signature over an operator-controlled ring.** The caller must
@@ -117,7 +119,20 @@ simulation:
 
 Config validation **rejects** a config that pins the ring-padding placeholder
 key, a duplicate `key_id`, a malformed pubkey, or an identity with no gateway
-pubkeys.
+pubkeys. "Malformed" includes a pubkey that is the right length and has a valid
+`02`/`03` compressed prefix but whose x coordinate is **not a point on the
+secp256k1 curve** — the shape you get from pasting a documentation placeholder
+into a real config. The rejection names the identity and the field, e.g.:
+
+```
+simulation.identities[0] (key_id=my-sim-identity): gateway_pubkeys_hex[0]: simulation identity: malformed pubkey hex: pubkey is not a valid secp256k1 curve point: invalid public key: x coordinate bbbb...bbbb is not on the secp256k1 curve
+```
+
+Validation runs only when `simulation.enabled` is `true`; a disabled block is
+skipped wholesale. Turning the feature on with no identities pinned is itself
+rejected — an enabled block that serves nothing would reject every simulated
+relay as an unknown `key_id`, which looks identical to a forged signature in
+the metrics.
 
 Provisioning an identity:
 
@@ -125,8 +140,39 @@ Provisioning an identity:
    keypair for simulation. Keep the private keys in your health-check / operator
    tooling — they never go in the relayer config.
 2. Put the two **public** keys (hex, compressed secp256k1) in `app_pubkey_hex`
-   and `gateway_pubkeys_hex`.
+   and `gateway_pubkeys_hex`. These must be public halves of key pairs you
+   actually generated — the relayer verifies a real ring signature against
+   them, so invented or copied-from-docs values can never produce a servable
+   identity.
 3. Pick a `key_id` and set `enabled: true`.
+
+`config.relayer.example.yaml` ships this block with `enabled: false` and the
+whole `identities` key commented out, with the field shape shown as a template.
+To pin an identity, delete the leading `# ` (hash and one space) from every line
+of that template and replace the placeholder keys — do not edit placeholder
+values in place.
+
+Lines that are still comments after that single pass carry a second `#` on
+purpose: those are the optional fields (`max_rps`, `not_after`,
+`allowed_services`), and leaving them commented is what keeps them unset.
+Uncomment only the ones you want. In particular, `not_after` is a scheduled
+stop: on that date the identity stops being served and your simulated traffic
+goes dark, with no other config change.
+
+An identity whose `not_after` has already passed is **not** a startup error —
+it loads, and then rejects every relay aimed at it with `simulation: identity
+expired (not_after)`. Making it fatal would mean the next restart of a healthy
+relayer refuses to boot and takes real, paid traffic down over a dead
+simulation identity. Instead, both `relayer validate` and relayer startup warn
+and name the `key_id`:
+
+```
+warning: simulation identities are past their not_after and will reject every relay: igniter-healthcheck
+```
+
+`relayer validate` reports this whether or not `simulation.enabled` is set — a
+dead identity is worth knowing about *before* the deploy that switches the
+feature on.
 
 ### The header
 
@@ -217,13 +263,24 @@ you should check them on your own deployment before wiring simulated relays into
 anything. The walk-through below is the one used to validate the feature; every
 command and every expected result is real output from a localnet run.
 
-> **Localnet setup gotcha.** `tilt_config.yaml` is user-local and gitignored, and
-> it **wins** over the config Tilt generates. The localnet simulation identities
-> are injected on the *generation* path, so a `tilt_config.yaml` created before
-> simulation existed has no `simulation:` block and every command below will fail
-> with a confusing `403`. If that happens, delete the file and let Tilt rebuild
-> it: `rm tilt_config.yaml && tilt up`. Confirm with
-> `grep -A2 'simulation:' tilt_config.yaml`.
+> **Where the localnet identities come from.** `tilt_config.yaml` is user-local
+> and gitignored. If its `simulation` block has an `identities` key, that key
+> **wins** — it is the file to edit to change an identity's `not_after`,
+> `max_rps` or `allowed_services` for a localnet experiment. If the key is absent
+> (including a file with no `simulation` block at all, e.g. one created before the
+> feature existed), Tilt injects the five `sim-*` localnet defaults listed above,
+> so the commands here work either way. An explicit `identities: []` is respected
+> rather than filled in, so you can reproduce the "enabled but nothing pinned"
+> config error on purpose. Inspect what you ended up with:
+> `kubectl get cm relayer-config -o jsonpath='{.data.config\.yaml}' | grep -A20 'simulation:'`
+>
+> Editing the config **rolls the relayer and miner pods**: their Deployments carry
+> a `pocket-relay-miner/config-hash` annotation over the rendered config. This is
+> load-bearing, not cosmetic — a mounted ConfigMap change does not restart pods on
+> its own, and neither binary re-reads its config after startup (simulation
+> identities in particular are not hot-reloaded), so without the annotation a
+> config edit would update the ConfigMap and leave the running pods on the old
+> config, with no error and no signal.
 
 #### 1. Baseline: is the relayer serving real relays?
 

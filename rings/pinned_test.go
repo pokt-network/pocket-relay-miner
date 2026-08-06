@@ -301,3 +301,41 @@ func TestPrecomputeRingPoints_EmptyKeys(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, pts)
 }
+
+// offCurvePubKeyHex is 33 bytes of well-formed hex with a valid compressed
+// prefix whose x coordinate is NOT a point on secp256k1. Length and prefix
+// checks alone accept it; only decoding to a curve point rejects it.
+const offCurvePubKeyHex = "03bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+
+// TestPubKeyFromHex_OffCurve verifies a correctly-sized, correctly-prefixed
+// pubkey whose x coordinate is not on secp256k1 is rejected at parse time.
+// Without this, such a key passes every config-level check and only fails
+// later inside PrecomputeRingPoints, turning an operator config mistake into
+// an opaque crypto error raised far from the field that caused it.
+func TestPubKeyFromHex_OffCurve(t *testing.T) {
+	// Guard the fixture itself: if this ever became a valid point the test
+	// would silently stop covering the off-curve path.
+	rawKey, decodeErr := hex.DecodeString(offCurvePubKeyHex)
+	require.NoError(t, decodeErr)
+	require.Len(t, rawKey, secp256k1.PubKeySize)
+	_, curveErr := ring_secp256k1.NewCurve().DecodeToPoint(rawKey)
+	require.Error(t, curveErr, "fixture must be off-curve for this test to mean anything")
+
+	parsed, err := PubKeyFromHex(offCurvePubKeyHex)
+	require.Error(t, err)
+	require.Nil(t, parsed)
+	require.Contains(t, err.Error(), "not a valid secp256k1 curve point")
+}
+
+// TestPubKeyFromHex_OnCurveNonCanonicalLooking guards against over-correction:
+// an x coordinate that looks like filler but IS on the curve must still parse.
+// The compressed key 0x02 || 0xaa*32 is one such point, so a curve check must
+// not be implemented as a "looks like a placeholder" heuristic.
+func TestPubKeyFromHex_OnCurveNonCanonicalLooking(t *testing.T) {
+	const onCurveHex = "02aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+	parsed, err := PubKeyFromHex(onCurveHex)
+	require.NoError(t, err)
+	require.NotNil(t, parsed)
+	require.Equal(t, onCurveHex, hex.EncodeToString(parsed.Bytes()))
+}

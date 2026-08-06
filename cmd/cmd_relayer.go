@@ -140,6 +140,33 @@ Examples:
 			}
 			fmt.Printf("config OK: %s would start\n", configPath)
 
+			// A disabled simulation block is skipped by Validate, by design.
+			// Report what enabling it would do anyway: otherwise the operator
+			// finds out on the deploy that flips the switch, when the relayer
+			// refuses to boot and stops serving real traffic. Advisory only —
+			// exit status stays 0.
+			//
+			// Only when identities are actually pinned: the shipped default is
+			// disabled with none, and warning about that would fire on every
+			// correct config.
+			if !config.Simulation.Enabled && len(config.Simulation.Identities) > 0 {
+				if simErr := config.Simulation.ValidateAsIfEnabled(); simErr != nil {
+					fmt.Printf("warning: simulation is disabled, so its config was not checked; "+
+						"it would be REJECTED if you set simulation.enabled: true: %v\n", simErr)
+				}
+			}
+
+			// An expired identity is valid config that serves nothing. Report
+			// it here rather than let a health-check pipeline go quiet with no
+			// explanation. Advisory by design — see ExpiredIdentities. Not
+			// gated on simulation.enabled: this command is a look-ahead, and
+			// an identity that is already dead is worth knowing about before
+			// the deploy that switches the feature on, not after.
+			if expired := config.Simulation.ExpiredIdentities(time.Now()); len(expired) > 0 {
+				fmt.Printf("warning: simulation identities are past their not_after and will reject every relay: %s\n",
+					strings.Join(expired, ", "))
+			}
+
 			checkStake, _ := cmd.Flags().GetBool(flagCheckStake)
 			if !checkStake {
 				return nil
@@ -762,6 +789,26 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				logger.Info().
 					Int("identities", len(config.Simulation.Identities)).
 					Msg("simulated relays ENABLED")
+				// Valid config that serves nothing: the identity loads and
+				// then rejects every relay with ErrSimExpired. Never fatal —
+				// see SimulationConfig.ExpiredIdentities.
+				if expired := config.Simulation.ExpiredIdentities(time.Now()); len(expired) > 0 {
+					logger.Warn().
+						Strs("key_ids", expired).
+						Msg("simulated relay identities are past their not_after: they will reject every relay")
+				}
+			} else if len(config.Simulation.Identities) > 0 {
+				// The block is off, so it cannot affect this process — but it
+				// may still be unbootable, and the next deploy that enables it
+				// would crashloop this replica. Say so now, while it is cheap.
+				// Identities must be present: the shipped default is disabled
+				// with none, and warning about that would fire on every
+				// correct config.
+				if simCfgErr := config.Simulation.ValidateAsIfEnabled(); simCfgErr != nil {
+					logger.Warn().
+						Err(simCfgErr).
+						Msg("simulation is disabled and its config is invalid: enabling it would prevent startup")
+				}
 			}
 
 			logger.Info().

@@ -233,7 +233,24 @@ func NewSimulationVerifier(
 // config must already have passed SimulationConfig.Validate (placeholder
 // rejected, pubkeys parse), so parse errors here are unexpected but still
 // surfaced.
+//
+// When the feature is disabled the identity list is skipped entirely, matching
+// SimulationConfig.Validate's contract that a disabled block never blocks
+// startup regardless of what it contains.
+//
+// The empty map is the fail-closed value, not merely an unread one. HTTP and
+// gRPC check Enabled() per request, so they never reach it. WebSocket does
+// NOT: it evaluates Enabled() once at handshake and then calls Verify per
+// message for the life of the connection, so a Reload that switches the
+// feature off makes an already-simulated bridge read this map and close the
+// connection on ErrSimUnknownKeyID. That is the correct outcome — a
+// disabled feature must stop serving — but it is a rejection, not a graceful
+// teardown, so do not "optimise" this into reusing the previous identities.
 func buildSimIdentities(cfg *SimulationConfig, clock func() time.Time) (map[string]*simIdentity, error) {
+	if !cfg.Enabled {
+		return map[string]*simIdentity{}, nil
+	}
+
 	out := make(map[string]*simIdentity, len(cfg.Identities))
 	for _, idc := range cfg.Identities {
 		appPub, err := rings.PubKeyFromHex(idc.AppPubKeyHex)
