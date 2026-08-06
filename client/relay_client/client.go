@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/pokt-network/ring-go"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -449,6 +450,27 @@ func (c *RelayClient) VerifyRelayResponse(
 	}
 
 	return relayResponse, nil
+}
+
+// SupplierPubKey returns a supplier operator's on-chain public key.
+//
+// VerifyRelayResponse fetches this internally to check the response signature
+// but does not expose it. A caller verifying a relay receipt needs the same key
+// to check a signature over a digest that is not a RelayResponse, so it is
+// exposed here rather than fetched a second way.
+func (c *RelayClient) SupplierPubKey(
+	ctx context.Context,
+	supplierAddr string,
+) (cryptotypes.PubKey, error) {
+	pubKey, err := c.queryClients.Account().GetPubKeyFromAddress(ctx, supplierAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch public key for supplier %s: %w", supplierAddr, err)
+	}
+	if pubKey == nil {
+		return nil, fmt.Errorf("supplier %s has no public key on chain "+
+			"(the account has never signed a transaction)", supplierAddr)
+	}
+	return pubKey, nil
 }
 
 // SessionSupplierAddresses returns the operator addresses of every supplier

@@ -221,7 +221,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			// randomness, so each call produces different bytes even for an
 			// identical payload, matching PATH's per-request sign behaviour.
 			supplier := supplierAddrs[supplierIdx.Add(1)%uint64(len(supplierAddrs))]
-			_, relayRequestBz, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
+			relayRequest, relayRequestBz, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
 			if err != nil {
 				metrics.RecordError(fmt.Errorf("build relay request: %w", err))
 				logger.Debug().
@@ -232,7 +232,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			}
 
 			start := time.Now()
-			relayResponseBz, err := sendHTTPRelay(requestCtx, relayRequestBz)
+			relayResponseBz, respHeaders, err := sendHTTPRelay(requestCtx, relayRequestBz)
 			latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
 
 			if err != nil {
@@ -271,6 +271,30 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 					Int("request_num", reqNum).
 					Msg("relay request failed (backend/JSON-RPC error)")
 				return
+			}
+
+			// Optional receipt: proves this response answers THIS request, which
+			// the response signature does not. A missing header is NOT counted
+			// as a failure — the relayer may predate the feature. A header that
+			// is present and does not verify IS a failure.
+			if RelayRequestReceipt {
+				if header := respHeaders.Get(ReceiptResponseHeader); header != "" {
+					supplierPub, pkErr := relayClient.SupplierPubKey(requestCtx, supplier)
+					if pkErr != nil {
+						metrics.RecordError(fmt.Errorf("receipt: supplier pubkey: %w", pkErr))
+						return
+					}
+					if vErr := VerifyRelayReceipt(
+						header, relayRequest.Meta.Signature, relayResponse.PayloadHash, supplierPub,
+					); vErr != nil {
+						metrics.RecordError(fmt.Errorf("receipt verification failed: %w", vErr))
+						logger.Debug().
+							Err(vErr).
+							Int("request_num", reqNum).
+							Msg("relay request failed (invalid receipt)")
+						return
+					}
+				}
 			}
 
 			// Success: HTTP 200 + valid signature + no JSON-RPC error
@@ -366,7 +390,7 @@ const (
 )
 
 // sendHTTPRelay sends a JSON-RPC (Rpc-Type 3) relay request via HTTP.
-func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
+func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, http.Header, error) {
 	return sendRelayOverHTTP(ctx, relayRequestBz, rpcTypeJSONRPC)
 }
 
@@ -382,14 +406,14 @@ func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
 //
 // Note: Go's http.Client automatically handles Accept-Encoding and decompression
 // when DisableCompression is false (the default).
-func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType string) ([]byte, error) {
+func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType string) ([]byte, http.Header, error) {
 	// Build URL: {relayerURL}/{serviceID}
 	url := fmt.Sprintf("%s/%s", RelayRelayerURL, RelayServiceID)
 
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(relayRequestBz))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	// === Required Headers ===
@@ -406,6 +430,13 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 		req.Header.Set(key, val)
 	}
 
+	// Pocket-Sign-Receipt: ask the relayer to bind this request to its response
+	// with a supplier signature. Absent unless --request-receipt is set, and a
+	// relayer that predates the feature simply ignores it.
+	if RelayRequestReceipt {
+		req.Header.Set(ReceiptRequestHeader, "true")
+	}
+
 	// === Compression (RFC 7231 compliance) ===
 	// Accept-Encoding is automatically added by Go's http.Client when DisableCompression=false
 	// The relayer will compress responses when this header is present
@@ -414,14 +445,14 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 	// Send request using shared client with connection pooling
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, resp.Header, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	// Read response body
@@ -429,10 +460,10 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 	// is present in the response (because DisableCompression=false in our Transport)
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, resp.Header, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	return respBody, nil
+	return respBody, resp.Header, nil
 }
 
 // buildJSONRPCPayload creates a serialized POKTHTTPRequest with JSON-RPC payload.

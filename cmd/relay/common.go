@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"strings"
 	"time"
 
@@ -33,6 +34,14 @@ type RelayResult struct {
 	NetworkDuration time.Duration
 	VerifyDuration  time.Duration
 	TotalDuration   time.Duration
+
+	// Receipt outcome, populated only when --request-receipt was set.
+	// ReceiptWarning is non-empty when a receipt was asked for and could not be
+	// checked — most commonly because the relayer predates the feature, which
+	// is a legitimate outcome and not an error.
+	ReceiptHeader   string
+	ReceiptVerified bool
+	ReceiptWarning  string
 
 	// Response metadata
 	ResponseSize int
@@ -160,7 +169,11 @@ func BuildAndSendRelay(
 	logger logging.Logger,
 	client *relay_client.RelayClient,
 	payloadBz []byte,
-	sendFunc func(ctx context.Context, relayRequestBz []byte) ([]byte, error),
+	// sendFunc returns the response bytes plus the transport's response
+	// headers. gRPC and WebSocket have none and return nil; a receipt can only
+	// ride back over HTTP unary, which is why it is a single shared signature
+	// rather than a second send path.
+	sendFunc func(ctx context.Context, relayRequestBz []byte) ([]byte, http.Header, error),
 ) *RelayResult {
 	result := &RelayResult{
 		Success: false,
@@ -186,7 +199,7 @@ func BuildAndSendRelay(
 
 	// Step 2: Send relay request
 	networkStart := time.Now()
-	relayResponseBz, err := sendFunc(ctx, relayRequestBz)
+	relayResponseBz, respHeaders, err := sendFunc(ctx, relayRequestBz)
 	if err != nil {
 		result.Error = fmt.Errorf("failed to send relay: %w", err)
 		result.NetworkDuration = time.Since(networkStart)
@@ -224,6 +237,36 @@ func BuildAndSendRelay(
 		return result
 	}
 
+	// Step 5: optional receipt. The response signature proves the supplier
+	// produced this body in this session; the receipt proves it answers THIS
+	// request, which the response signature does not cover.
+	//
+	// Absence is not an error: the operator may be running a build that
+	// predates the feature, and there is no operator-side switch to inspect.
+	// A receipt that IS returned and does NOT verify is an error.
+	if RelayRequestReceipt {
+		result.ReceiptHeader = respHeaders.Get(ReceiptResponseHeader)
+
+		if result.ReceiptHeader == "" {
+			result.ReceiptWarning = "receipt requested but none returned " +
+				"(relayer may predate the feature)"
+		} else if supplierPub, pkErr := client.SupplierPubKey(ctx, RelaySupplierAddr); pkErr != nil {
+			result.ReceiptWarning = fmt.Sprintf(
+				"receipt returned but the supplier public key could not be fetched: %v", pkErr)
+		} else if vErr := VerifyRelayReceipt(
+			result.ReceiptHeader,
+			relayRequest.Meta.Signature,
+			relayResponse.PayloadHash,
+			supplierPub,
+		); vErr != nil {
+			result.Error = fmt.Errorf("receipt verification failed: %w", vErr)
+			result.TotalDuration = time.Since(totalStart)
+			return result
+		} else {
+			result.ReceiptVerified = true
+		}
+	}
+
 	// Success!
 	result.Success = true
 	result.TotalDuration = time.Since(totalStart)
@@ -258,6 +301,25 @@ func DisplayDiagnosticResult(client *relay_client.RelayClient, result *RelayResu
 		fmt.Printf("Signature: ✅ VALID\n")
 		fmt.Printf("Error Check: ✅ NO ERRORS\n")
 		fmt.Printf("Response Size: %d bytes\n", result.ResponseSize)
+
+		// Show what the receipt actually proved, not just a tick. The two
+		// inputs are printed so a reader can see the binding rather than take
+		// it on trust: they are what an independent verifier recomputes.
+		if RelayRequestReceipt {
+			switch {
+			case result.ReceiptVerified:
+				fmt.Printf("Receipt: ✅ VALID (binds this request to this response)\n")
+				if result.Request != nil {
+					fmt.Printf("  request signature: %d bytes (bLSAG ring)\n",
+						len(result.Request.Meta.Signature))
+				}
+				if result.Response != nil {
+					fmt.Printf("  response payload hash: %x\n", result.Response.PayloadHash)
+				}
+			case result.ReceiptWarning != "":
+				fmt.Printf("Receipt: ⚠️  %s\n", result.ReceiptWarning)
+			}
+		}
 
 		if result.Response != nil && len(result.Response.Payload) > 0 {
 			fmt.Printf("\n=== Response Payload ===\n")

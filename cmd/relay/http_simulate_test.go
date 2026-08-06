@@ -35,7 +35,7 @@ func TestSendRelayOverHTTP_SimulationHeaderInjected(t *testing.T) {
 	RelaySimulate = true
 	RelaySimKeyID = "cli-fixture-key"
 
-	_, err := sendRelayOverHTTP(context.Background(), []byte("payload"), rpcTypeJSONRPC)
+	_, _, err := sendRelayOverHTTP(context.Background(), []byte("payload"), rpcTypeJSONRPC)
 
 	require.NoError(t, err)
 	require.Equal(t, "cli-fixture-key", gotHeader, "the simulation key_id must reach the relayer as an HTTP header")
@@ -61,7 +61,7 @@ func TestSendRelayOverHTTP_NoSimulationHeaderWhenDisabled(t *testing.T) {
 	RelayServiceID = "svc-test"
 	RelaySimulate = false
 
-	_, err := sendRelayOverHTTP(context.Background(), []byte("payload"), rpcTypeJSONRPC)
+	_, _, err := sendRelayOverHTTP(context.Background(), []byte("payload"), rpcTypeJSONRPC)
 
 	require.NoError(t, err)
 	require.False(t, sawHeader, "a normal relay must not carry the simulation header at all")
@@ -88,7 +88,7 @@ func TestSendRelayOverHTTP_CometBFTAlsoCarriesSimulationHeader(t *testing.T) {
 	RelaySimulate = true
 	RelaySimKeyID = "cometbft-key"
 
-	_, err := sendCometBFTRelay(context.Background(), []byte("payload"))
+	_, _, err := sendCometBFTRelay(context.Background(), []byte("payload"))
 
 	require.NoError(t, err)
 	require.Equal(t, "cometbft-key", gotHeader)

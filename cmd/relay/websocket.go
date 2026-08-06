@@ -64,11 +64,14 @@ func buildWebSocketPayload() ([]byte, error) {
 // runWebSocketDiagnostic sends a single WebSocket relay request with detailed output.
 func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
 	// Create sendFunc that connects and sends via WebSocket
-	sendFunc := func(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
+	// WebSocket carries no HTTP response headers per message, so no receipt
+	// can ride back on this transport. Returns a nil header for the shared
+	// signature.
+	sendFunc := func(ctx context.Context, relayRequestBz []byte) ([]byte, http.Header, error) {
 		// Connect to WebSocket
 		conn, err := connectWebSocket(RelayRelayerURL, RelayServiceID, RelaySupplierAddr)
 		if err != nil {
-			return nil, fmt.Errorf("failed to connect to WebSocket: %w", err)
+			return nil, nil, fmt.Errorf("failed to connect to WebSocket: %w", err)
 		}
 		defer func() {
 			// Send close message for graceful shutdown
@@ -79,7 +82,7 @@ func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayCli
 
 		// Send relay request
 		if err := conn.WriteMessage(websocket.BinaryMessage, relayRequestBz); err != nil {
-			return nil, fmt.Errorf("failed to send relay request: %w", err)
+			return nil, nil, fmt.Errorf("failed to send relay request: %w", err)
 		}
 
 		// Receive relay response
@@ -88,10 +91,10 @@ func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayCli
 		// it carries no information about the response and is deliberately ignored.
 		_, responseData, err := conn.ReadMessage()
 		if err != nil {
-			return nil, fmt.Errorf("failed to read relay response: %w", err)
+			return nil, nil, fmt.Errorf("failed to read relay response: %w", err)
 		}
 
-		return responseData, nil
+		return responseData, nil, nil
 	}
 
 	// Use shared build/send/verify logic
