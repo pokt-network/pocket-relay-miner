@@ -196,8 +196,10 @@ printf '       %s RPS x %ss x %s real arms = %s relays through the meter\n' \
     "$RPS" "$DURATION" "$REAL_ARMS" "$TOTAL_REAL"
 printf '       (simulated arms consume no meter and publish nothing)\n'
 
-REJECTED="$(curl -fsS -m 5 "$PROM_URL/api/v1/query?query=sum(ha_relayer_relays_rejected_total)" 2>/dev/null \
-    | grep -o '"value":\[[^]]*\]' | grep -oE '"[0-9.]+"$' | tr -d '"')"
+# jq, not grep: the grep version silently produced nothing on a well-formed
+# response, which reads identically to "the metric does not exist".
+REJECTED="$(curl -fsS -m 5 --data-urlencode 'query=sum(ha_relayer_relays_rejected_total)' \
+    "$PROM_URL/api/v1/query" 2>/dev/null | jq -r '.data.result[0].value[1] // empty' 2>/dev/null)"
 if [ -n "$REJECTED" ]; then
     ok "relays_rejected_total currently $REJECTED — the A/B run must not move it"
 else
