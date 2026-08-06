@@ -39,10 +39,30 @@ PROM_URL="${PROM_URL:-http://localhost:9091}"
 SERVICE_ID="${SERVICE_ID:-develop-http}"
 SIM_KEY_ID="${SIM_KEY_ID:-sim-http}"
 RPS="${RPS:-400}"
-DURATION="${DURATION:-600}"
+# Arm duration must be an integer multiple of the session length, or arms cross
+# different numbers of session rollovers and the work per relay differs between
+# them. Measured on localnet: ~10.5s blocks x 10 blocks = ~105s per session, so
+# 315s is exactly 3 sessions. That leaves 60s of warm-up, a 60s profile from
+# 2:30 with the system in steady state, and 105s of tail.
+DURATION="${DURATION:-315}"
 CONCURRENCY="${CONCURRENCY:-100}"
 PROFILE_SECONDS="${PROFILE_SECONDS:-60}"
-PROFILE_AT="${PROFILE_AT:-$((DURATION / 2))}"
+# Profile from 150s: past warm-up, finishing well before the arm ends.
+PROFILE_AT="${PROFILE_AT:-150}"
+
+# Real-mode arms are bounded by the chain, not by the profile.
+#
+# A localnet session is ~105s (10 blocks x ~10.5s). Two things break a real arm
+# that crosses a session boundary: the CLI keeps using its cached session and
+# the relayer rejects it as expired, and the per-(session, supplier) claimable
+# budget resets mid-arm. Keeping the arm INSIDE one session sidesteps both and
+# gives every real arm exactly zero rollovers — better than equal rollovers.
+#
+# Simulated arms carry a synthetic session and are subject to neither, so they
+# stay long enough for a comfortable 60s profile.
+REAL_DURATION="${REAL_DURATION:-90}"
+REAL_PROFILE_SECONDS="${REAL_PROFILE_SECONDS:-45}"
+REAL_PROFILE_AT="${REAL_PROFILE_AT:-25}"
 OUT_DIR="${OUT_DIR:-$REPO_ROOT/scripts/localonly/receipt-ab}"
 CLI="${CLI:-$REPO_ROOT/bin/pocket-relay-miner}"
 
@@ -101,7 +121,13 @@ record_metrics() {
 #   RECEIPT = yes | no
 run_arm() {
     local arm="$1" mode="$2" receipt="$3"
-    say "arm $arm  (mode=$mode receipt=$receipt, ${RPS} RPS for ${DURATION}s)"
+
+    local duration="$DURATION" prof_secs="$PROFILE_SECONDS" prof_at="$PROFILE_AT"
+    if [ "$mode" = "real" ]; then
+        duration="$REAL_DURATION"; prof_secs="$REAL_PROFILE_SECONDS"; prof_at="$REAL_PROFILE_AT"
+    fi
+
+    say "arm $arm  (mode=$mode receipt=$receipt, ${RPS} RPS for ${duration}s)"
     check_pod_unchanged
 
     local args=(
@@ -109,12 +135,18 @@ run_arm() {
         --service "$SERVICE_ID"
         --relayer-url "$RELAYER_URL"
         --load-test
-        --count "$((RPS * DURATION))"
+        --count "$((RPS * duration))"
         --rps "$RPS"
         --concurrency "$CONCURRENCY"
         --timeout 30
     )
-    [ "$mode" = "sim" ] && args+=(--simulate --sim-key-id "$SIM_KEY_ID")
+    # --all-suppliers spreads real relays across every supplier in the session
+    # so one supplier's claimable budget is not the limit.
+    if [ "$mode" = "sim" ]; then
+        args+=(--simulate --sim-key-id "$SIM_KEY_ID")
+    else
+        args+=(--all-suppliers)
+    fi
     [ "$receipt" = "yes" ] && args+=(--request-receipt)
 
     record_metrics "$arm" before
@@ -124,9 +156,9 @@ run_arm() {
     ok "loader started (pid $load_pid)"
 
     # Profile at steady state, not at ramp-up.
-    ( sleep "$PROFILE_AT"
-      curl -fsS -m $((PROFILE_SECONDS + 30)) \
-          "$PPROF_URL/debug/pprof/profile?seconds=$PROFILE_SECONDS" \
+    ( sleep "$prof_at"
+      curl -fsS -m $((prof_secs + 30)) \
+          "$PPROF_URL/debug/pprof/profile?seconds=$prof_secs" \
           -o "$OUT_DIR/$arm.cpu.pprof" 2>/dev/null
       curl -fsS -m 30 "$PPROF_URL/debug/pprof/heap" \
           -o "$OUT_DIR/$arm.heap.pprof" 2>/dev/null
@@ -148,17 +180,25 @@ run_arm() {
     fi
 }
 
-say "relay receipt A/B — 6 arms, ~$((6 * DURATION / 60)) minutes of load"
+say "relay receipt A/B — 6 arms, ~$(( (3 * DURATION + 3 * REAL_DURATION) / 60 )) minutes of load"
 printf '  results: %s\n' "$OUT_DIR"
 
-# Simulated first: the cheaper mode, so a failure there costs less to redo.
-run_arm S-A1 sim  no
-run_arm S-B  sim  yes
-run_arm S-A2 sim  no
+# MODES lets one mode be re-run without redoing the other — useful when a
+# mode's arms turn out not to be comparable and only that half needs repeating.
+MODES="${MODES:-sim real}"
 
-run_arm R-A1 real no
-run_arm R-B  real yes
-run_arm R-A2 real no
+# Simulated first: the cheaper mode, so a failure there costs less to redo.
+case " $MODES " in *" sim "*)
+    run_arm S-A1 sim  no
+    run_arm S-B  sim  yes
+    run_arm S-A2 sim  no
+;; esac
+
+case " $MODES " in *" real "*)
+    run_arm R-A1 real no
+    run_arm R-B  real yes
+    run_arm R-A2 real no
+;; esac
 
 say "analysis"
 cat <<EOF
