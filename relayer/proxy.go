@@ -1142,7 +1142,8 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 		// Build and sign the RelayResponse
 		// responseSigner is guaranteed to be non-nil (validated early in handleRelay)
-		_, signedResponseBz, signErr := p.responseSigner.BuildAndSignRelayResponseFromBody(
+		// The response object is kept: attachRelayReceipt needs its PayloadHash.
+		relayResponse, signedResponseBz, signErr := p.responseSigner.BuildAndSignRelayResponseFromBody(
 			relayRequest,
 			respBody,
 			respHeaders,
@@ -1184,6 +1185,15 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					Float64("compression_ratio", float64(len(compressed))/float64(len(signedResponseBz))).
 					Msg("gzip compressed response for client")
 			}
+		}
+
+		// Optional caller-requested receipt: a supplier signature binding this
+		// request to this response. Costs one secp256k1 signature and is
+		// produced only when asked for, so a caller that does not know about
+		// receipts pays nothing. Must run before WriteHeader — headers are
+		// frozen after it.
+		if clientWantsReceipt(r) {
+			p.attachRelayReceipt(w, relayRequest, relayResponse, serviceID, sessionCtx)
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -1716,7 +1726,6 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 
 	client := p.getClientForService(serviceID)
 	resp, err := client.Do(req)
-
 	if err != nil {
 		// Distinguish between client disconnection vs internal timeout vs other errors
 		// for proper metrics and logging
@@ -2283,7 +2292,7 @@ func (p *ProxyServer) serveSimulatedHTTP(
 	}
 
 	// SHARED DATA PATH — same response signer as the real path.
-	_, signedResponseBz, signErr := p.responseSigner.BuildAndSignRelayResponseFromBody(
+	relayResponse, signedResponseBz, signErr := p.responseSigner.BuildAndSignRelayResponseFromBody(
 		relayRequest, respBody, respHeaders, respStatus,
 	)
 	if signErr != nil {
@@ -2302,6 +2311,16 @@ func (p *ProxyServer) serveSimulatedHTTP(
 	}
 
 	w.Header().Set("Content-Type", "application/json")
+
+	// Same receipt path as a real relay. The receipt is a DATA-path feature, so
+	// it must not become mode-aware: one helper, two call sites, no mode
+	// parameter. Accounting stays gated off above — no meter consume, no
+	// publish. A receipt is data, not accounting.
+	if clientWantsReceipt(r) {
+		p.attachRelayReceipt(w, relayRequest, relayResponse, serviceID,
+			logging.SessionContextFromRelayRequest(relayRequest))
+	}
+
 	w.WriteHeader(http.StatusOK)
 	if _, werr := w.Write(signedResponseBz); werr != nil {
 		p.logger.Debug().Err(werr).Msg("failed to write simulated response body")
@@ -2598,6 +2617,48 @@ func compressGzip(data []byte) ([]byte, error) {
 func clientAcceptsGzip(r *http.Request) bool {
 	acceptEncoding := r.Header.Get("Accept-Encoding")
 	return strings.Contains(strings.ToLower(acceptEncoding), "gzip")
+}
+
+// attachRelayReceipt signs the request/response binding and sets the response
+// header. It must be called before WriteHeader.
+//
+// Every failure path is silent to the client: the header is simply absent,
+// which is exactly what a caller sees from a relayer that predates this
+// feature. Callers therefore already have to handle absence, and an optional
+// extra must never drop traffic that was already served and paid for.
+func (p *ProxyServer) attachRelayReceipt(
+	w http.ResponseWriter,
+	relayRequest *servicetypes.RelayRequest,
+	relayResponse *servicetypes.RelayResponse,
+	serviceID string,
+	sessionCtx *logging.SessionContext,
+) {
+	if relayRequest == nil || relayResponse == nil {
+		return
+	}
+
+	if len(relayResponse.PayloadHash) == 0 {
+		relayReceiptErrors.WithLabelValues(serviceID, "missing_payload_hash").Inc()
+		return
+	}
+
+	signer := p.responseSigner.signerFor(relayRequest.Meta.SupplierOperatorAddress)
+	if signer == nil {
+		relayReceiptErrors.WithLabelValues(serviceID, "no_signer").Inc()
+		return
+	}
+
+	sig, err := buildReceipt(signer, relayRequest.Meta.Signature, relayResponse.PayloadHash)
+	if err != nil {
+		relayReceiptErrors.WithLabelValues(serviceID, "sign_failed").Inc()
+		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			Err(err).
+			Msg("failed to build relay receipt, serving without one")
+		return
+	}
+
+	w.Header().Set(receiptResponseHeader, formatReceiptHeader(sig))
+	relayReceipts.WithLabelValues(serviceID).Inc()
 }
 
 // shouldCompressResponse returns true only if every precondition is met:

@@ -85,6 +85,14 @@ func (rs *ResponseSigner) HasSigner(operatorAddress string) bool {
 	return ok
 }
 
+// signerFor returns the signer for an operator address, or nil if none is
+// loaded. Callers that sign something which is NOT a RelayResponse — the relay
+// receipt is the only one today — need the raw signer rather than one of the
+// SignRelayResponse helpers.
+func (rs *ResponseSigner) signerFor(operatorAddress string) Signer {
+	return rs.signers[operatorAddress]
+}
+
 // SignRelayResponse signs a relay response for the given supplier operator.
 // It computes the payload hash, then signs and sets the signature on the response.
 func (rs *ResponseSigner) SignRelayResponse(
