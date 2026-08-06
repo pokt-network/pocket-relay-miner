@@ -100,7 +100,9 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
    - Publishes to Redis Streams
    - Routes to backends based on Rpc-Type header (1=gRPC, 2=WebSocket, 3=JSON_RPC, 4=REST, 5=CometBFT)
    - **Performance**:
-     - **Measured**: 1182 RPS local (Docker), 1500-2000 RPS production (dedicated hardware)
+     - **Measured**: 1182 RPS local (Docker), 1500-2000 RPS production (dedicated hardware).
+       The local figure is post-signature-verification in the load-test client
+       (see "Load Test Validation" below); it has not been re-measured recently.
      - **Latency**: p50: 1.33ms, p95: 2.67ms, p99: 26.19ms (full validation)
      - **Validation**: <1ms (ring signature + session verification)
      - **Connection Pool**: 5x defaults (500/100/500) handles 1000 RPS @ 500ms backend latency
@@ -321,7 +323,7 @@ If any gate fails, fix it before reporting completion. Do NOT report "done" with
 
 ### Key Patterns
 
-Reference: See full mapping in `cmd/cmd_redis_debug.go` and subcommands
+Reference: See full mapping in `cmd/cmd_redis.go` and the subcommands under `cmd/redis/`
 
 - **WAL**: `ha:relays:{supplierAddress}` (Redis Streams)
 - **SMST Nodes**: `ha:smst:{sessionID}:nodes` (Redis Hashes)
@@ -395,7 +397,7 @@ Reference: `miner/redis_mapstore_test.go` benchmarks
 - `relayer/config.go` - Updated DefaultConfig() with 5x values
 - `config.relayer.example.yaml` - Documented new defaults
 - `config.relayer.schema.yaml` - Added validation for HTTP transport settings
-- `cmd/relay_http.go` - Load test client now uses shared HTTP client with pooling
+- `cmd/relay/http.go` - Load test client now uses shared HTTP client with pooling
 
 ### 2. Cache Lock Timeout Optimization (20x Faster)
 
@@ -421,16 +423,31 @@ Reference: `miner/redis_mapstore_test.go` benchmarks
 
 **Problem**: Load test only checked HTTP status codes (200 OK), not actual relay validity. Could report success for invalid relays or JSON-RPC errors.
 
-**Solution**: Added full validation in load test mode (`cmd/relay_http.go:247-270`)
-- ✅ HTTP status code verification
-- ✅ **Supplier signature verification** (ECDSA crypto)
-- ✅ **JSON-RPC error field inspection** (catches backend errors)
-- ✅ **Relay protocol compliance** checking
+**Solution**: two independent checks on every load-test response
+(`cmd/relay/http.go:249-275`)
+
+1. **Supplier signature verification** — `RelayClient.VerifyRelayResponse`
+   (`client/relay_client/client.go:432-452`) delegates to
+   `sdk.ValidateRelayResponse` in shannon-sdk, which runs `ValidateBasic()`
+   and `VerifySupplierOperatorSignature` against the supplier's on-chain
+   public key. Round-robin aware: it verifies against the supplier the request
+   actually targeted.
+   **Note for anyone grepping**: `VerifySupplierOperatorSignature` does not
+   appear anywhere in this repository — the check lives in the SDK, which is
+   the correct place for it. Grep for the behaviour, not the symbol.
+2. **Backend and JSON-RPC error inspection** — `CheckRelayResponseError`
+   (`cmd/relay/common.go:68-106`) deserializes the `POKTHTTPResponse` wrapped
+   inside `RelayResponse.Payload` so the real backend status and body are
+   inspected rather than the protobuf envelope; reports HTTP ≥ 400; inspects
+   the JSON-RPC `error` field (catches backend errors returned under HTTP 200);
+   falls back to a best-effort JSON-RPC check when the payload is not a wrapped
+   `POKTHTTPResponse`, e.g. a WebSocket subscription frame.
 
 **Impact**:
-- **28% throughput reduction** (1639 → 1182 RPS) due to signature verification overhead
-- But now **100% accurate** - only counts truly valid relays
-- Catches errors that would have been false positives before
+- **28% throughput reduction** (1639 → 1182 RPS) attributed to signature
+  verification overhead. Not re-measured recently; treat as historical.
+- Only counts relays that are cryptographically valid AND free of backend and
+  JSON-RPC errors, which a bare HTTP-200 check would both miss.
 
 ### 4. Relay Meter Latency Metrics
 
@@ -564,12 +581,12 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats  # Inspect all HA keys
 - `main.go`: CLI entry point (relayer/miner/redis-debug subcommands)
 - `cmd/cmd_relayer.go`: Relayer startup and initialization
 - `cmd/cmd_miner.go`: Miner startup and initialization
-- `cmd/cmd_redis_debug.go`: Redis debug tooling entry point
+- `cmd/cmd_redis.go`: Redis debug tooling entry point (subcommands in `cmd/redis/`)
 
 ### Core Logic
 - `relayer/proxy.go`: HTTP/WebSocket relay handling
 - `relayer/relay_processor.go`: Relay validation and signing
-- `miner/proof_pipeline.go`: Claim/proof submission pipeline
+- `miner/lifecycle_callback.go`: Builds `MsgCreateClaim`/`MsgSubmitProof`; submission is driven from `miner/supplier_manager.go`
 - `miner/smst_manager.go`: SMST tree management
 - `cache/orchestrator.go`: Cache coordination and refresh
 
@@ -580,8 +597,13 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats  # Inspect all HA keys
 
 ### Tests
 - `miner/redis_mapstore_test.go`: SMST storage tests
-- `miner/smst_bench_test.go`: SMST performance benchmarks
-- `miner/smst_ha_test.go`: HA failover tests
+- `miner/redis_smst_bench_test.go`: SMST performance benchmarks
+- `miner/smst_manager_multi_supplier_test.go`: SMST behaviour across multiple suppliers
+- `miner/rebroadcast_store_test.go`: claim/proof rebroadcast tracking
+
+**Note**: there is no single "HA failover" test file. Failover behaviour is
+covered piecemeal across the SMST and rebroadcast test files above. If you are
+looking for one place that proves failover end to end, it does not exist.
 
 ## Common Tasks
 
