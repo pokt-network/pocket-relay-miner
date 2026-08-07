@@ -9,11 +9,13 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	rpcserver "github.com/cometbft/cometbft/rpc/jsonrpc/server"
 	"github.com/stretchr/testify/require"
 )
 
@@ -231,6 +233,28 @@ func TestRPCTransport_SurvivesAConnectionClosedWhileIdle(t *testing.T) {
 		require.NoErrorf(t, postThroughTransport(client, proxyURL), "request %d", i)
 		time.Sleep(gap) //nolint:staticcheck // the behaviour under test only exists after an idle interval
 	}
+}
+
+// TestCometbftServerIdleTimeout_MatchesUpstream is the guard on a copied
+// constant. cometbftServerIdleTimeout restates a value that lives in CometBFT,
+// and a restated value drifts silently — so read the real one and compare.
+//
+// The node never overrides ReadTimeout (cometbft/node/node.go builds the RPC
+// server config from DefaultConfig and replaces only the body/header/batch
+// limits, max connections and, conditionally, WriteTimeout), and config.toml
+// exposes no read_timeout field, so this default is what every node of this
+// version runs with.
+//
+// What this does NOT prove: the node we talk to may be built from a different
+// CometBFT version than the one we compile against. This pins our assumption
+// against our dependency, which is the only side we can check.
+func TestCometbftServerIdleTimeout_MatchesUpstream(t *testing.T) {
+	upstream := rpcserver.DefaultConfig()
+
+	require.Equal(t, upstream.ReadTimeout, cometbftServerIdleTimeout,
+		"CometBFT's RPC ReadTimeout changed; it is the idle deadline our connection reuse is sized against")
+	require.False(t, reflect.ValueOf(*upstream).FieldByName("IdleTimeout").IsValid(),
+		"CometBFT's RPC server config gained an IdleTimeout field; the ReadTimeout inference no longer holds")
 }
 
 // TestRPCIdleConnTimeout_StaysBelowTheServerLimit pins the relationship that
