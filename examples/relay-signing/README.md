@@ -312,7 +312,7 @@ write your own signer, hold it to the same bar.
 |---|---|---|---|
 | Node.js | [`nodejs/`](nodejs/) | `@noble/curves`, `@noble/hashes` | 100% |
 | Python | [`python/`](python/) | none — standard library only | 100% |
-| Rust | [`rust/`](rust/) | `k256`, `sha3` | 100% |
+| Rust | [`rust/`](rust/) | `k256`, `sha3`, `getrandom`, `thiserror`, `hex` | 100% |
 | Go (reference) | [`oracle/`](oracle/) | the real `ring-go` | — |
 
 Each one signs a relay and proves itself against the oracle: every signature it
@@ -388,13 +388,13 @@ just a relayer saying no.
 
 - `sha3::Sha3_512` is FIPS-202; `sha3::Keccak512` is not. The crate ships both.
 - `k256`'s `Scalar::from_repr` is a `CtOption` that rejects a non-canonical
-  value, which the left-shifted challenge can be. Use
-  `<Scalar as Reduce<U256>>::reduce_bytes` on the shifted bytes.
-- **`cargo add rand_core` gives you the wrong version.** `k256` 0.13 pulls
-  `elliptic-curve` 0.13 → `rand_core` **0.6**, while the current release is 0.9,
-  whose `OsRng` is a different type that does not implement the traits `k256`
-  wants. Take it from `k256::elliptic_curve::rand_core::OsRng` and skip the
-  direct dependency.
+  value, which the left-shifted challenge can be. Reduce instead:
+  `<Scalar as Reduce<U256>>::reduce(&U256::from_be_bytes(bytes))`.
+- **Randomness moved out of `rand_core`.** `k256` 0.14 pulls `elliptic-curve`
+  0.14 → `rand_core` 0.10, which no longer has an `OsRng` at all. Take it from
+  `getrandom` instead: `Scalar::random(&mut UnwrapErr(SysRng))`. The
+  `UnwrapErr` wrapper is not decoration — `SysRng` is a `TryRngCore` and
+  `Field::random` wants an infallible `RngCore`.
 - `Reduce` only accepts `U256`, but SHA3-512 produces 64 bytes. Use
   `crypto-bigint`'s `U512 % NonZero(N)` (re-exported at
   `k256::elliptic_curve::bigint`) to mirror Go's `big.Int.Mod` directly.

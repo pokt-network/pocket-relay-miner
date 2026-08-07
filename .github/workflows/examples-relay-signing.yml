@@ -125,5 +125,16 @@ jobs:
         with:
           workspaces: examples/relay-signing/rust
 
+      # The unit tests pin the deterministic primitives underneath a signature.
+      # Without this step they never execute anywhere and rot silently.
+      - name: Unit tests
+        run: cargo test --release
+
       - name: Verify against the Go oracle (1500 signatures + larger rings)
         run: cargo run --release -- /tmp/oracle
+
+      # The harness must be able to FAIL. Node and Python run their negative
+      # control on every PR as part of the default run; Rust's is behind a flag,
+      # so it needs its own step or the teeth never bite.
+      - name: Negative control (the oracle must REJECT a canonical signer)
+        run: cargo run --release -- /tmp/oracle --negative-control
