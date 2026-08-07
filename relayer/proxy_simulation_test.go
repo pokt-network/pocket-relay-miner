@@ -34,6 +34,7 @@ type simHTTPFixture struct {
 	pub          *recordingPublisher
 	appPriv      *secp256k1.PrivKey
 	gwPriv       *secp256k1.PrivKey
+	supplierPriv *secp256k1.PrivKey
 	supplierAddr string
 	appAddr      string
 	clock        func() time.Time
@@ -127,7 +128,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 		simVerifier:        simVerifier,
 	}
 
-	return &simHTTPFixture{proxy: p, pub: pub, appPriv: appPriv, gwPriv: gwPriv, supplierAddr: supplierAddr, appAddr: appAddr, clock: clock}
+	return &simHTTPFixture{proxy: p, pub: pub, appPriv: appPriv, gwPriv: gwPriv, supplierPriv: supplierPriv, supplierAddr: supplierAddr, appAddr: appAddr, clock: clock}
 }
 
 // buildSignedSimBody builds a ring-signed simulated RelayRequest and returns its
@@ -170,10 +171,22 @@ func (f *simHTTPFixture) buildSignedSimBody(t *testing.T, appAddr, serviceID, se
 
 func (f *simHTTPFixture) post(t *testing.T, body []byte, setSimHeader bool) *httptest.ResponseRecorder {
 	t.Helper()
+	return f.postWithHeaders(t, body, setSimHeader, nil)
+}
+
+// postWithHeaders is post with caller-supplied request headers, which the
+// receipt tests need in order to send the Pocket-Sign-Receipt directive.
+func (f *simHTTPFixture) postWithHeaders(
+	t *testing.T, body []byte, setSimHeader bool, hdrs map[string]string,
+) *httptest.ResponseRecorder {
+	t.Helper()
 	req := httptest.NewRequest(http.MethodPost, "/", bytes.NewReader(body))
 	req.Header.Set("Rpc-Type", "3") // JSON_RPC
 	if setSimHeader {
 		req.Header.Set(HeaderSimulationKeyID, simTestKeyID)
+	}
+	for k, v := range hdrs {
+		req.Header.Set(k, v)
 	}
 	w := httptest.NewRecorder()
 	f.proxy.handleRelay(w, req)

@@ -114,6 +114,35 @@ var (
 		[]string{"service_id", "application", "reason"},
 	)
 
+	// relayReceipts counts receipts signed and returned. Only relays whose
+	// caller sent Pocket-Sign-Receipt reach this counter, so it doubles as a
+	// measure of demand for the feature.
+	relayReceipts = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_receipts_total",
+			Help:      "Total number of relay receipts signed and returned",
+		},
+		[]string{"service_id"},
+	)
+
+	// relayReceiptErrors counts receipts a caller asked for and did not get.
+	// The relay itself was served regardless — the receipt is fail-open.
+	// reason ∈ {no_signer, sign_failed, missing_payload_hash}.
+	//
+	// No latency histogram accompanies these on purpose: measuring the receipt
+	// on the hot path would contaminate the A/B run that exists to price it.
+	relayReceiptErrors = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_receipt_errors_total",
+			Help:      "Total number of requested relay receipts that could not be produced",
+		},
+		[]string{"service_id", "reason"},
+	)
+
 	// simulatedRelaysTotal counts SIMULATED relays only. It is deliberately
 	// separate from every real-relay counter above: a simulated relay never
 	// increments relaysReceived/relaysServed/relaysRejected/etc. `key_id` is

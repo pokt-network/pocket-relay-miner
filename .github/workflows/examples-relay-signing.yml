@@ -72,6 +72,12 @@ jobs:
         env:
           ORACLE: /tmp/oracle
 
+      # The command the README puts in front of every reader. It is a separate
+      # entry point from the harness, so nothing else executes it -- rename a
+      # vector field and this breaks while the harness stays green.
+      - name: The documented reader path
+        run: /tmp/oracle response-vectors | node verify.mjs
+
   python:
     name: Python harness
     runs-on: ubuntu-latest
@@ -100,6 +106,12 @@ jobs:
       - name: Verify against the Go oracle (1500 signatures, 100% required)
         run: python3 verify_against_oracle.py --oracle /tmp/oracle
 
+      # The command the README puts in front of every reader. It is a separate
+      # entry point from the harness, so nothing else executes it -- rename a
+      # vector field and this breaks while the harness stays green.
+      - name: The documented reader path
+        run: /tmp/oracle response-vectors | python3 verify.py
+
   rust:
     name: Rust harness
     runs-on: ubuntu-latest
@@ -125,5 +137,24 @@ jobs:
         with:
           workspaces: examples/relay-signing/rust
 
+      # The unit tests pin the deterministic primitives underneath a signature.
+      # Without this step they never execute anywhere and rot silently.
+      - name: Unit tests
+        run: cargo test --release
+
       - name: Verify against the Go oracle (1500 signatures + larger rings)
         run: cargo run --release -- /tmp/oracle
+
+      # The harness must be able to FAIL. Node and Python run their negative
+      # control on every PR as part of the default run; Rust's is behind a flag,
+      # so it needs its own step or the teeth never bite.
+      - name: Negative control (the oracle must REJECT a canonical signer)
+        run: cargo run --release -- /tmp/oracle --negative-control
+
+      # The return trip against a FRESH response and receipt. The unit tests
+      # can only pin one captured run, because the bLSAG signature the receipt
+      # binds is randomised. The Python and Node harnesses do the same thing in
+      # their own jobs -- all three hand their digest back to the real cosmos
+      # verifier, so none of these steps is redundant with the others.
+      - name: Verify a response and receipt (both directions)
+        run: cargo run --release -- /tmp/oracle --response

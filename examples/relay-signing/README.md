@@ -312,7 +312,7 @@ write your own signer, hold it to the same bar.
 |---|---|---|---|
 | Node.js | [`nodejs/`](nodejs/) | `@noble/curves`, `@noble/hashes` | 100% |
 | Python | [`python/`](python/) | none — standard library only | 100% |
-| Rust | [`rust/`](rust/) | `k256`, `sha3` | 100% |
+| Rust | [`rust/`](rust/) | `k256`, `sha3`, `getrandom`, `thiserror`, `hex` | 100% |
 | Go (reference) | [`oracle/`](oracle/) | the real `ring-go` | — |
 
 Each one signs a relay and proves itself against the oracle: every signature it
@@ -388,13 +388,13 @@ just a relayer saying no.
 
 - `sha3::Sha3_512` is FIPS-202; `sha3::Keccak512` is not. The crate ships both.
 - `k256`'s `Scalar::from_repr` is a `CtOption` that rejects a non-canonical
-  value, which the left-shifted challenge can be. Use
-  `<Scalar as Reduce<U256>>::reduce_bytes` on the shifted bytes.
-- **`cargo add rand_core` gives you the wrong version.** `k256` 0.13 pulls
-  `elliptic-curve` 0.13 → `rand_core` **0.6**, while the current release is 0.9,
-  whose `OsRng` is a different type that does not implement the traits `k256`
-  wants. Take it from `k256::elliptic_curve::rand_core::OsRng` and skip the
-  direct dependency.
+  value, which the left-shifted challenge can be. Reduce instead:
+  `<Scalar as Reduce<U256>>::reduce(&U256::from_be_bytes(bytes))`.
+- **Randomness moved out of `rand_core`.** `k256` 0.14 pulls `elliptic-curve`
+  0.14 → `rand_core` 0.10, which no longer has an `OsRng` at all. Take it from
+  `getrandom` instead: `Scalar::random(&mut UnwrapErr(SysRng))`. The
+  `UnwrapErr` wrapper is not decoration — `SysRng` is a `TryRngCore` and
+  `Field::random` wants an infallible `RngCore`.
 - `Reduce` only accepts `U256`, but SHA3-512 produces 64 bytes. Use
   `crypto-bigint`'s `U512 % NonZero(N)` (re-exported at
   `k256::elliptic_curve::bigint`) to mirror Go's `big.Int.Mod` directly.
@@ -428,6 +428,101 @@ once against a few lines of Go rather than reasoning about gogoproto.
 
 `RelayRequest.Payload` is an opaque `bytes` field, hashed verbatim and parsed
 separately by the relayer, so any protobuf library will do.
+
+### Reading the response, and checking it
+
+Signing is half the job. A relayer answers with a `RelayResponse`, and there are
+two things in it worth verifying — plus one layer of wrapping that surprises
+everyone the first time.
+
+**One function does all of it, and it has the same name in all three
+languages**: `open_relay_response` (Python, Rust) / `openRelayResponse`
+(Node.js). It runs the supplier signature, then the payload binding, then the
+receipt, and only then parses the payload — that order is the design, not a
+style choice. Everything else the three files export is a piece of it, published
+so a port can bisect against the oracle one layer at a time; anything named
+`…_only` / `…Only` is a piece and is **not** a verification on its own.
+
+**The answer is two layers down.** `RelayResponse.Payload` is not your JSON-RPC
+result: it is a marshalled `POKTHTTPResponse`, and the result is in its
+`body_bz`. Status code and headers live there too.
+
+**The supplier signature covers filtered bytes, not re-encoded ones.** What is
+signed is the `RelayResponse` with the signature cleared and — when
+`payload_hash` is set — the payload cleared. Get those bytes by *filtering the
+protobuf you received*: walk its top-level records, drop field 2 inside field 1
+(the signature), and — **only if field 4, `payload_hash`, is present** — drop
+top-level field 2 as well. The condition is not decoration: responses from
+before `payload_hash` existed sign the payload itself, and dropping it
+unconditionally makes those fail. Do not decode and re-encode; a field's encoding does not
+depend on the others and gogoproto emits in ascending field order, so filtering
+is byte-exact while re-encoding risks differing on map ordering.
+
+**Cosmos hashes twice, and this is the one that costs an evening.**
+`secp256k1.Sign` and `VerifySignature` hash their argument internally. So the
+message raw ECDSA covers is `sha256(sha256(signable_bytes))` for the response
+and `sha256(digest)` for the receipt. Feed the digest straight to a raw verifier
+and it rejects while Go insists the artifact is valid. The oracle publishes both
+values — `response_ecdsa_message_hash_hex` at the top level and
+`ecdsa_message_hash_hex` inside `receipt` — so you can tell which one you got
+wrong.
+
+**Low-S is not optional.** Cosmos rejects `S > N/2`. A verifier that accepts
+high-S is more permissive than the chain, which is the one direction you must
+never be wrong in.
+
+#### Where the supplier's public key comes from
+
+Every verifier here takes it as a parameter, and getting it from the wrong place
+voids the whole exercise. It is **not** in the response: `RelayResponseMetadata`
+carries a session header and a signature, nothing else. Taking it from a header,
+or from the response body, verifies only that whoever wrote the response also
+wrote the key.
+
+You already know which supplier you sent to — it is the
+`supplier_operator_address` you put in your own `RelayRequest`. Resolve that
+address to a public key with a chain query: the account query returns the
+operator account's public key, which is the key that signs both the response and
+the receipt. That is what the CLI does
+(`client/relay_client/client.go`, `SupplierPubKey`).
+
+One failure mode worth handling: an account that has never signed a transaction
+has no public key on chain yet, and the query comes back empty.
+
+#### The receipt
+
+Ask for one with `Pocket-Sign-Receipt: true` and the response carries
+`Pocket-Relay-Receipt: v1.<128 hex chars>`:
+
+```
+digest  = sha256("POKT-RELAY-RECEIPT-v1\0" || relayRequest.Meta.Signature
+                                            || relayResponse.PayloadHash)
+receipt = supplierOperatorKey.Sign(digest)
+```
+
+It answers what the response signature cannot: *which request does this response
+answer?* The response signature covers a session header that thousands of relays
+share. Absence is normal — a relayer predating the feature returns no header, so
+handle the missing case rather than treating it as an error.
+
+#### Vectors and running it
+
+```bash
+go build -o /tmp/oracle ../oracle/
+
+/tmp/oracle response-vectors                      # ground truth, JSON
+/tmp/oracle response-vectors | python3 verify.py  # Python
+/tmp/oracle response-vectors | node verify.mjs    # Node.js
+cd ../rust && cargo run --release -- /tmp/oracle --response   # Rust
+
+# have cosmos judge YOUR digest, not your own round trip
+echo '{"digest_hex":"..","sig_hex":"..","pub_hex":".."}' | /tmp/oracle verify-receipt
+```
+
+The vectors ship negative controls — a different response's payload hash and a
+different request's signature. Your verifier must **reject** both. A test that
+only ever demonstrates success teaches nothing about what the receipt proves.
+
 
 ### Reference
 

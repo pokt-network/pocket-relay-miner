@@ -39,4 +39,15 @@ var (
 	RelaySimKeyID          string   // --sim-key-id: simulation identity pinned in the relayer's config
 	RelaySimAppPubKey      string   // --sim-app-pubkey: default derived from the resolved app key
 	RelaySimGatewayPubKeys []string // --sim-gateway-pubkeys: default derived from the resolved gateway key
+
+	// RelayRequestReceipt asks the relayer for a Pocket-Relay-Receipt: a
+	// supplier signature binding the request sent to the response received.
+	// The response signature is verified unconditionally on every path already
+	// (see BuildAndSendRelay); this adds the request-to-response binding, which
+	// the response signature does not cover.
+	//
+	// A relayer that predates the feature returns no header. That is reported
+	// as a warning, not an error — absence is a legitimate outcome and callers
+	// must handle it.
+	RelayRequestReceipt bool
 )
