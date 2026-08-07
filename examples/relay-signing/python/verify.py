@@ -7,20 +7,28 @@ you can believe the answer:
 
     1. the supplier's signature over the RelayResponse   -- who produced this
     2. the payload hash binding                          -- ...and this body
-    3. the JSON-RPC answer inside the response payload   -- what you asked for
-    4. the optional Pocket-Relay-Receipt header          -- ...to WHICH request
+    3. the optional Pocket-Relay-Receipt header          -- ...to WHICH request
+    4. the JSON-RPC answer inside the response payload   -- what you asked for
+
+That is the order, and it is not cosmetic: nothing you read out of the payload
+in step 4 is worth anything until steps 1 to 3 have said whose payload it is.
 
 Step 2 is not optional garnish. The signature does NOT cover the payload: it
 covers a SHA-256 of it (field 4, `payload_hash`), and the payload travels
 alongside. Verify the signature without re-hashing the payload and anyone on the
 path can swap the body for another one and your check still says "valid".
-verify_relay_response() does both, and is the function you should call.
 
-Step 4 answers a question steps 1-3 cannot. A session header is shared by
+Step 3 answers a question steps 1 and 2 cannot. A session header is shared by
 thousands of relays, so a valid response signature only says "this supplier
 produced this body somewhere in this session" — it does not say the body answers
 YOUR request. The receipt binds the request's ring signature to this response's
 payload hash, and only the supplier's key can produce it.
+
+THE ENTRY POINT IS open_relay_response(). It runs all four steps in that order
+and hands back the backend's answer, and it is the same function, under the same
+name and with the same scope, in the Node and Rust ports next door. Everything
+else here is a piece of it, exported so a port can bisect against the oracle one
+layer at a time — and a name ending in `_only` is a piece, not a verification.
 
 Nothing here needs a library. Protobuf is a few tag/length records — see
 iter_fields() — and ECDSA over secp256k1 is twenty lines once you have the curve
@@ -502,16 +510,21 @@ def verify_cosmos_signature(pubkey_bz: bytes, signed_bytes: bytes, signature: by
 
 # --------------------------------------------------------------------------
 # The two response checks
+#
+# Both are PIECES. Neither is a verification on its own, which is what the
+# `_only` in the first one's name is there to keep saying. open_relay_response()
+# at the bottom of this file composes them, in an order that is not cosmetic.
 # --------------------------------------------------------------------------
 
 
-def verify_response_signature(relay_response_bz: bytes, supplier_pubkey_bz: bytes) -> bool:
-    """Verify the supplier operator's signature over a RelayResponse.
+def verify_response_signature_only(relay_response_bz: bytes, supplier_pubkey_bz: bytes) -> bool:
+    """Verify the supplier operator's signature over a RelayResponse, and NOTHING else.
 
-    NOT SUFFICIENT ON ITS OWN. This proves the supplier produced a response with
-    this session header and this payload HASH. It says nothing about the payload
-    sitting next to it, because the payload is not what was signed. Pair it with
-    verify_payload_binding(), or just call verify_relay_response().
+    NOT SUFFICIENT ON ITS OWN — hence the name. This proves the supplier produced
+    a response with this session header and this payload HASH. It says nothing
+    about the payload sitting next to it, because the payload is not what was
+    signed. Pair it with verify_payload_binding(), or just call
+    open_relay_response(), which is the function you actually want.
 
     Args:
         relay_response_bz: the marshalled RelayResponse, exactly as received.
@@ -550,38 +563,6 @@ def verify_payload_binding(response: RelayResponse) -> bool:
     if len(response.payload_hash) != SHA256_SIZE:
         return False
     return hashlib.sha256(response.payload).digest() == response.payload_hash
-
-
-def verify_relay_response(relay_response_bz: bytes, supplier_pubkey_bz: bytes) -> Tuple[bool, str]:
-    """Verify a RelayResponse end to end. THIS is the one to call.
-
-    Args:
-        relay_response_bz: the marshalled RelayResponse, exactly as received.
-        supplier_pubkey_bz: the supplier operator's 33-byte compressed public
-            key, read from chain.
-
-    Returns:
-        (ok, reason). `reason` is empty when ok, and otherwise names the step
-        that failed so a rejection is debuggable rather than just a False.
-    """
-    try:
-        response = parse_relay_response(relay_response_bz)
-    except ValueError as exc:
-        return False, f"not a well-formed RelayResponse: {exc}"
-
-    if len(response.supplier_operator_signature) != SIGNATURE_SIZE:
-        return False, (
-            f"supplier operator signature is {len(response.supplier_operator_signature)} "
-            f"bytes, want {SIGNATURE_SIZE}"
-        )
-
-    if not verify_payload_binding(response):
-        return False, "payload does not hash to payload_hash: the body was substituted"
-
-    if not verify_response_signature(relay_response_bz, supplier_pubkey_bz):
-        return False, "supplier operator signature does not verify"
-
-    return True, ""
 
 
 # --------------------------------------------------------------------------
@@ -792,6 +773,78 @@ def verify_receipt(
 
 
 # --------------------------------------------------------------------------
+# The whole return trip
+# --------------------------------------------------------------------------
+
+
+def open_relay_response(
+    relay_response_bz: bytes,
+    supplier_pubkey_bz: bytes,
+    request_signature: bytes = b"",
+    receipt_header: Optional[str] = None,
+) -> Tuple[Optional[HTTPResponse], str]:
+    """Check everything a caller can check, and hand back the backend's answer.
+
+    THIS is the function to copy. The order is not cosmetic:
+
+        1. the supplier operator signature, over the filtered bytes;
+        2. sha256(payload) == payload_hash -- WITHOUT THIS THE SIGNATURE CHECK
+           MEANS NOTHING, because the payload is not in the signed bytes;
+        3. the receipt, if one was asked for and returned, binding this response
+           to the request that produced it;
+        4. only then, parse the payload.
+
+    Args:
+        relay_response_bz: the marshalled RelayResponse, exactly as received.
+        supplier_pubkey_bz: the supplier operator's 33-byte compressed public
+            key, read from chain. Reading it out of the response verifies
+            nothing at all.
+        request_signature: the ring signature YOU put on the request. Only used
+            for the receipt, so it can be left out when there is none.
+        receipt_header: the `Pocket-Relay-Receipt` value, or None. A relayer
+            returns one only when the request carried `Pocket-Sign-Receipt:
+            true`, so None is normal. If you DID ask for one, treat its absence
+            as a failure at the call site: this function cannot tell "not
+            requested" from "dropped in transit".
+
+    Returns:
+        (http, reason). On success, the backend's unwrapped HTTP reply and an
+        empty reason. On failure, None and the step that failed, so a rejection
+        is debuggable rather than just a False. Never raises: every input here
+        comes off the network, so malformed is an answer.
+    """
+    try:
+        response = parse_relay_response(relay_response_bz)
+    except ValueError as exc:
+        return None, f"not a well-formed RelayResponse: {exc}"
+
+    if len(response.supplier_operator_signature) != SIGNATURE_SIZE:
+        return None, (
+            f"supplier operator signature is {len(response.supplier_operator_signature)} "
+            f"bytes, want {SIGNATURE_SIZE}"
+        )
+
+    if not verify_response_signature_only(relay_response_bz, supplier_pubkey_bz):
+        return None, "supplier operator signature does not verify"
+
+    if not verify_payload_binding(response):
+        return None, "payload does not hash to payload_hash: the body was substituted"
+
+    if receipt_header is not None and not verify_receipt(
+        receipt_header, request_signature, response.payload_hash, supplier_pubkey_bz
+    ):
+        return None, "receipt does not bind this response to that request"
+
+    try:
+        return parse_pokt_http_response(response.payload), ""
+    except ValueError as exc:
+        # Not every transport wraps a POKTHTTPResponse -- a WebSocket
+        # subscription frame does not -- so this is a legitimate outcome for a
+        # response whose signature and receipt both checked out.
+        return None, f"payload is not a POKTHTTPResponse: {exc}"
+
+
+# --------------------------------------------------------------------------
 # Demo: run the checks against the oracle's vectors and print what happened
 #
 #     go build -o /tmp/oracle ../oracle/
@@ -851,8 +904,10 @@ def _report(vectors: dict) -> bool:
         ecdsa_message_hash(response_signable_hash(relay_response_bz)).hex()
         == vectors["response_ecdsa_message_hash_hex"],
     )
-    verified, reason = verify_relay_response(relay_response_bz, supplier_pub)
-    check("supplier operator signature verifies", verified, reason)
+    check(
+        "supplier operator signature verifies",
+        verify_response_signature_only(relay_response_bz, supplier_pub),
+    )
 
     # Being unable to fail is the failure mode a signature check hides best. The
     # two ways a response can be altered are caught by two different mechanisms,
@@ -868,12 +923,12 @@ def _report(vectors: dict) -> bool:
 
     check(
         "...and rejects an edited payload (the hash binding catches it)",
-        not verify_relay_response(flip_a_bit(response.payload), supplier_pub)[0],
+        open_relay_response(flip_a_bit(response.payload), supplier_pub)[0] is None,
     )
     if header is not None:
         check(
             "...and rejects an edited session header (the signature catches it)",
-            not verify_relay_response(flip_a_bit(header.service_id.encode()), supplier_pub)[0],
+            open_relay_response(flip_a_bit(header.service_id.encode()), supplier_pub)[0] is None,
         )
 
     print("\nthe backend's answer, two layers down")
@@ -931,6 +986,29 @@ def _report(vectors: dict) -> bool:
     check(
         "...and fails when S is negated (the low-S rule)",
         not verify_cosmos_signature(supplier_pub, digest, high_s),
+    )
+
+    # Everything above took the response apart. This is the one call a caller
+    # actually makes: all four steps, in order, and the backend's answer out the
+    # other side.
+    print("\nthe whole return trip, in one call")
+    opened, reason = open_relay_response(
+        relay_response_bz, supplier_pub, request_signature, receipt["header_value"]
+    )
+    check("open_relay_response accepts response + receipt", opened is not None, reason)
+    check(
+        "...and returns the backend's own body",
+        opened is not None and opened.body.hex() == inner["body_bz_hex"],
+    )
+    check(
+        "...and refuses a receipt from a different relay",
+        open_relay_response(
+            relay_response_bz,
+            supplier_pub,
+            bytes.fromhex(controls["other_request_signature_hex"]),
+            receipt["header_value"],
+        )[0]
+        is None,
     )
 
     return ok

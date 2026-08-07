@@ -435,6 +435,14 @@ Signing is half the job. A relayer answers with a `RelayResponse`, and there are
 two things in it worth verifying — plus one layer of wrapping that surprises
 everyone the first time.
 
+**One function does all of it, and it has the same name in all three
+languages**: `open_relay_response` (Python, Rust) / `openRelayResponse`
+(Node.js). It runs the supplier signature, then the payload binding, then the
+receipt, and only then parses the payload — that order is the design, not a
+style choice. Everything else the three files export is a piece of it, published
+so a port can bisect against the oracle one layer at a time; anything named
+`…_only` / `…Only` is a piece and is **not** a verification on its own.
+
 **The answer is two layers down.** `RelayResponse.Payload` is not your JSON-RPC
 result: it is a marshalled `POKTHTTPResponse`, and the result is in its
 `body_bz`. Status code and headers live there too.

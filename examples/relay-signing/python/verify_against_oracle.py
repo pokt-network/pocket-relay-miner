@@ -517,8 +517,8 @@ def check_response(vectors: dict) -> bool:
         ecdsa_hash != verify.response_signable_hash(relay_response_bz),
     )
 
-    verified, reason = verify.verify_relay_response(relay_response_bz, supplier_pub)
-    step.check("the supplier operator signature verifies", verified, reason)
+    opened, reason = verify.open_relay_response(relay_response_bz, supplier_pub)
+    step.check("the supplier operator signature verifies", opened is not None, reason)
 
     # Two different mechanisms guard two different parts of the response, and a
     # port can easily implement one and quietly skip the other. Break each in
@@ -536,19 +536,20 @@ def check_response(vectors: dict) -> bool:
     assert response.session_header is not None, "the oracle's response has no session header"
     step.check(
         "an edited payload is rejected (the payload_hash binding catches it)",
-        not verify.verify_relay_response(flip_a_bit(response.payload), supplier_pub)[0],
+        verify.open_relay_response(flip_a_bit(response.payload), supplier_pub)[0] is None,
         "the payload is NOT signed, only its hash is -- a verifier that skips\n"
         "            the re-hash accepts any body an intermediary cares to swap in",
     )
     step.check(
         "an edited session header is rejected (the signature catches it)",
-        not verify.verify_relay_response(
+        verify.open_relay_response(
             flip_a_bit(response.session_header.service_id.encode()), supplier_pub
-        )[0],
+        )[0]
+        is None,
     )
     step.check(
         "the wrong public key is rejected",
-        not verify.verify_relay_response(relay_response_bz, RING[0])[0],
+        verify.open_relay_response(relay_response_bz, RING[0])[0] is None,
     )
 
     # Records smuggled in on top of a genuine response. Because the signable
@@ -565,7 +566,7 @@ def check_response(vectors: dict) -> bool:
     for label, extra in appended.items():
         step.check(
             f"{label} appended to the response is rejected",
-            not verify.verify_relay_response(relay_response_bz + extra, supplier_pub)[0],
+            verify.open_relay_response(relay_response_bz + extra, supplier_pub)[0] is None,
         )
 
     # The backwards-compatibility branch in filter_signable_bytes: a relayer

@@ -328,7 +328,7 @@ fn run_response_checks(oracle: &Path) -> ExitCode {
     }
     checks.accepts(
         "supplier operator signature verifies",
-        verify::verify_response_signature(&relay_response, &supplier_pubkey),
+        verify::verify_response_signature_only(&relay_response, &supplier_pubkey),
     );
     match verify::payload_hash(&relay_response) {
         Ok(hash) => checks.equal("payload hash matches the oracle", hash, &want_payload_hash),

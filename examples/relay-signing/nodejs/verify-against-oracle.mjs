@@ -50,12 +50,13 @@ import { buildRelaySignature, encodeScalar, hashToCurve, hashToScalar } from './
 import {
   RECEIPT_DOMAIN_TAG,
   filterSignableBytes,
+  openRelayResponse,
   parsePoktHttpResponse,
   parseRelayResponse,
   parseReceiptHeader,
   receiptDigest,
   verifyReceipt,
-  verifyResponseSignature,
+  verifyResponseSignatureOnly,
 } from './verify.mjs';
 
 const N = secp256k1.Point.Fn.ORDER;
@@ -292,7 +293,7 @@ console.log('\n[5/5] Return trip: response signature and relay receipt');
     : fail('sha256(payload) != payload_hash; the body would be unauthenticated');
 
   // --- the response signature itself ---
-  const respCheck = verifyResponseSignature(relayResponse, supplierPub);
+  const respCheck = verifyResponseSignatureOnly(relayResponse, supplierPub);
   respCheck.valid
     ? pass('the supplier operator signature over the RelayResponse verifies')
     : fail(`response signature rejected: ${respCheck.reason}`);
@@ -465,6 +466,31 @@ console.log('\n[5/5] Return trip: response signature and relay receipt');
   bytesToHex(strippedDigest) === bytesToHex(digest)
     ? fail('dropping the trailing NUL produced the same digest; the tag length is not what this harness assumes')
     : pass('dropping the domain tag\'s trailing NUL changes the digest — the 22nd byte matters');
+
+  // --- the entry point, end to end ---
+  // Everything above checks one layer. openRelayResponse is the function a
+  // reader copies, so the harness has to exercise it at full scope: all four
+  // steps in order, and the backend's answer out the other side.
+  const opened = openRelayResponse({
+    relayResponseBz: relayResponse,
+    supplierPubKey33: supplierPub,
+    requestSignature: reqSig,
+    receiptHeader: rv.receipt.header_value,
+  });
+  opened.valid && bytesToHex(opened.http?.body ?? new Uint8Array(0)) === rv.inner_pokt_http_response.body_bz_hex
+    ? pass('openRelayResponse accepts response + receipt and returns the backend body')
+    : fail(`openRelayResponse rejected the oracle's own response: ${opened.reason}`);
+
+  // ...and refuses the same receipt once the request half is swapped, which is
+  // the one thing the response signature alone could never tell you.
+  openRelayResponse({
+    relayResponseBz: relayResponse,
+    supplierPubKey33: supplierPub,
+    requestSignature: hexToBytes(rv.negative_controls.other_request_signature_hex),
+    receiptHeader: rv.receipt.header_value,
+  }).valid
+    ? fail('openRelayResponse accepted a receipt from a DIFFERENT relay')
+    : pass('openRelayResponse REJECTS a receipt from a different relay');
 }
 
 // ---------------------------------------------------------------------------

@@ -14,6 +14,13 @@
  *      THIS response to THAT request. The response signature alone does not:
  *      it says "a supplier signed this response", not "in reply to you".
  *
+ * THE ENTRY POINT IS openRelayResponse(). It runs all four checks in order —
+ * signature, payload binding, receipt, and only then the payload — and hands
+ * back the backend's answer. It is the same function, under the same name and
+ * with the same scope, in the Python and Rust ports next door. Everything else
+ * exported here is a piece of it, so a port can bisect against the oracle one
+ * layer at a time; a name ending in `Only` is a piece, not a verification.
+ *
  * Four things in here are surprising, and all four are load-bearing:
  *
  *   1. The signed bytes are obtained by FILTERING the protobuf you received,
@@ -74,6 +81,9 @@ const F_PAYLOAD_HASH = 4;
 /** RelayResponseMetadata field numbers. */
 const F_META_SESSION_HEADER = 1;
 const F_META_SUPPLIER_SIGNATURE = 2;
+
+/** SessionHeader field numbers (poktroll x/session/types/types.proto). */
+const F_HDR_SERVICE_ID = 2;
 
 /** POKTHTTPResponse field numbers (shannon-sdk types). */
 const F_HTTP_STATUS = 1;
@@ -402,23 +412,26 @@ export function verifyCosmosSecp256k1(signature, digest32, publicKey33) {
 }
 
 /**
- * Verify the supplier's signature over a RelayResponse.
+ * Verify the supplier's signature over a RelayResponse, and NOTHING else.
  *
- * Also checks sha256(payload) against payload_hash, and that is not a bonus —
- * it is the difference between an authenticated body and an unauthenticated
- * one. The signature covers the HASH; the payload itself travels outside the
- * signed bytes. Skip this comparison and anyone on the path can swap the body
- * for anything they like while the signature still verifies perfectly.
+ * NOT SUFFICIENT ON ITS OWN — hence the name. It proves a supplier produced a
+ * response with this session header and this payload HASH. It says nothing
+ * about the payload sitting next to it, because the payload travels OUTSIDE the
+ * signed bytes: skip the sha256(payload) comparison and anyone on the path can
+ * swap the body for anything they like while this function still says VALID.
+ *
+ * Call openRelayResponse() unless you are deliberately checking one layer at a
+ * time. It does this, then the binding, then the receipt, in that order.
  *
  * @param {Uint8Array} relayResponseBz the RelayResponse protobuf as received
  * @param {Uint8Array} supplierPubKey33 the supplier operator's compressed key
  * @returns {{
  *   valid: boolean, reason?: string,
  *   signableBytes: Uint8Array, signableHash: Uint8Array, ecdsaMessageHash: Uint8Array|null,
- *   payload: Uint8Array|null, payloadHash: Uint8Array|null, payloadHashMatches: boolean|null,
+ *   payload: Uint8Array|null, payloadHash: Uint8Array|null,
  * }}
  */
-export function verifyResponseSignature(relayResponseBz, supplierPubKey33) {
+export function verifyResponseSignatureOnly(relayResponseBz, supplierPubKey33) {
   const fields = parseRelayResponse(relayResponseBz);
   const signableBytes = filterSignableBytes(relayResponseBz);
   const signableHash = sha256(signableBytes);
@@ -429,27 +442,35 @@ export function verifyResponseSignature(relayResponseBz, supplierPubKey33) {
     ecdsaMessageHash: null,
     payload: fields.payload,
     payloadHash: fields.payloadHash,
-    payloadHashMatches: null,
   };
 
   if (!fields.supplierSignature) {
     return { ...base, valid: false, reason: 'response carries no supplier operator signature' };
   }
 
-  // The payload is only committed to through payload_hash, so bind them here.
-  if (fields.payload && fields.payloadHash) {
-    base.payloadHashMatches = bytesToHex(sha256(fields.payload)) === bytesToHex(fields.payloadHash);
-    if (!base.payloadHashMatches) {
-      return {
-        ...base,
-        valid: false,
-        reason: 'sha256(payload) != payload_hash — the body does not belong to this signed response',
-      };
-    }
-  }
-
   const res = verifyCosmosSecp256k1(fields.supplierSignature, signableHash, supplierPubKey33);
   return { ...base, ecdsaMessageHash: res.ecdsaMessageHash, valid: res.valid, reason: res.reason };
+}
+
+/**
+ * Check sha256(payload) against the payload_hash the signature committed to.
+ *
+ * This is the step that connects an authenticated hash to an unauthenticated
+ * body, and it is the whole reason verifyResponseSignatureOnly() is not enough.
+ *
+ * A response with no payload_hash comes from a relayer older than poktroll
+ * v0.1.25, which signed the payload directly — there is nothing to bind, so
+ * this reports a match. filterSignableBytes() keeps the payload in the signed
+ * bytes in exactly that case, so the signature is still covering the body.
+ *
+ * @param {Uint8Array|null} payload RelayResponse.Payload
+ * @param {Uint8Array|null} payloadHash RelayResponse.PayloadHash
+ * @returns {boolean}
+ */
+export function payloadBindingHolds(payload, payloadHash) {
+  if (!payloadHash || payloadHash.length === 0) return true;
+  if (payloadHash.length !== 32) return false;
+  return bytesToHex(sha256(payload ?? new Uint8Array(0))) === bytesToHex(payloadHash);
 }
 
 // ---------------------------------------------------------------------------
@@ -639,24 +660,147 @@ export function verifyReceipt({ headerValue, signature, requestSignature, respon
 }
 
 // ---------------------------------------------------------------------------
+// The whole return trip.
+// ---------------------------------------------------------------------------
+
+/**
+ * Check everything a caller can check, and hand back the backend's answer.
+ *
+ * THIS is the function to copy. The order is not cosmetic:
+ *
+ *   1. the supplier operator signature, over the filtered bytes;
+ *   2. sha256(payload) == payload_hash — WITHOUT THIS THE SIGNATURE CHECK MEANS
+ *      NOTHING, because the payload is not in the signed bytes;
+ *   3. the receipt, if one was asked for and returned, binding this response to
+ *      the request that produced it;
+ *   4. only then, parse the payload.
+ *
+ * Named arguments rather than four positionals on purpose: `requestSignature`
+ * and `receiptHeader` come from opposite ends of the exchange, and swapping
+ * them silently is the kind of mistake this file exists to prevent.
+ *
+ * @param {object} args
+ * @param {Uint8Array} args.relayResponseBz the RelayResponse protobuf as received
+ * @param {Uint8Array} args.supplierPubKey33 the supplier operator's compressed key,
+ *   read FROM CHAIN. Taking it out of the response verifies nothing at all.
+ * @param {Uint8Array} [args.requestSignature] the bLSAG signature you sent. Only
+ *   needed for the receipt.
+ * @param {string} [args.receiptHeader] the `Pocket-Relay-Receipt` value, or
+ *   undefined. A relayer returns one only when the request carried
+ *   `Pocket-Sign-Receipt: true`, so absent is normal. If you DID ask for one,
+ *   treat its absence as a failure at the call site: this function cannot tell
+ *   "not requested" from "dropped in transit".
+ * @returns {{
+ *   valid: boolean, reason?: string,
+ *   http: {status: number, headers: Record<string, string[]>, body: Uint8Array, bodyText: string}|null,
+ *   signableBytes: Uint8Array, signableHash: Uint8Array, ecdsaMessageHash: Uint8Array|null,
+ *   payload: Uint8Array|null, payloadHash: Uint8Array|null, payloadHashMatches: boolean,
+ *   receipt: object|null,
+ * }} Never throws: every input comes off the network, so malformed is an answer.
+ */
+export function openRelayResponse({ relayResponseBz, supplierPubKey33, requestSignature, receiptHeader }) {
+  let sig;
+  try {
+    sig = verifyResponseSignatureOnly(relayResponseBz, supplierPubKey33);
+  } catch (err) {
+    return {
+      valid: false,
+      reason: `not a well-formed RelayResponse: ${err.message}`,
+      http: null,
+      signableBytes: new Uint8Array(0),
+      signableHash: new Uint8Array(0),
+      ecdsaMessageHash: null,
+      payload: null,
+      payloadHash: null,
+      payloadHashMatches: false,
+      receipt: null,
+    };
+  }
+
+  const out = { ...sig, http: null, payloadHashMatches: false, receipt: null };
+
+  // (1)
+  if (!sig.valid) return { ...out, valid: false, reason: sig.reason };
+
+  // (2)
+  out.payloadHashMatches = payloadBindingHolds(sig.payload, sig.payloadHash);
+  if (!out.payloadHashMatches) {
+    return {
+      ...out,
+      valid: false,
+      reason: 'sha256(payload) != payload_hash — the body does not belong to this signed response',
+    };
+  }
+
+  // (3). receiptDigest() throws on YOUR OWN bad inputs — an empty request
+  // signature, or a response with no payload_hash to bind to. Those are call
+  // site bugs rather than hostile input, but a receipt that cannot even be
+  // built is still a receipt that does not check out, so report it as one.
+  if (receiptHeader !== undefined && receiptHeader !== null) {
+    try {
+      out.receipt = verifyReceipt({
+        headerValue: receiptHeader,
+        requestSignature,
+        responsePayloadHash: sig.payloadHash,
+        supplierPubKey33,
+      });
+    } catch (err) {
+      return { ...out, valid: false, reason: `receipt cannot be checked: ${err.message}` };
+    }
+    if (!out.receipt.valid) {
+      return { ...out, valid: false, reason: `receipt does not bind this response to that request: ${out.receipt.reason}` };
+    }
+  }
+
+  // (4)
+  try {
+    out.http = parsePoktHttpResponse(sig.payload ?? new Uint8Array(0));
+  } catch (err) {
+    // Not every transport wraps a POKTHTTPResponse — a WebSocket subscription
+    // frame does not — so this is a legitimate outcome for a response whose
+    // signature and receipt both checked out.
+    return { ...out, valid: false, reason: `payload is not a POKTHTTPResponse: ${err.message}` };
+  }
+
+  return { ...out, valid: true };
+}
+
+// ---------------------------------------------------------------------------
 // Report.
 // ---------------------------------------------------------------------------
 
 /**
  * Check everything in one oracle `response-vectors` document and describe it.
  *
- * Exported so the harness and any port can reuse the same walkthrough; the
- * harness is what turns these lines into assertions.
+ * Every value printed here is also CHECKED, against the oracle's own numbers,
+ * and every check that can be inverted is inverted: an edited payload, an
+ * edited session header, a receipt from another response, a receipt from
+ * another request, and a negated S. A walkthrough that only ever demonstrates
+ * success teaches a reader nothing about what any of it proves — and a verifier
+ * that returned true unconditionally would produce an identical report.
+ *
+ * Exported so the harness and any port can reuse the same walkthrough.
  *
  * @param {object} vectors parsed `oracle response-vectors` JSON
- * @returns {string[]} lines of a human-readable report
+ * @returns {{ok: boolean, lines: string[]}} the verdict, and the human-readable
+ *   report. The verdict is STRUCTURED: never re-derive it by searching these
+ *   lines for a word, or rewording a label silently disables the check.
  */
 export function report(vectors) {
   const lines = [];
   const say = (label, value) => lines.push(`  ${label.padEnd(26)} ${value}`);
 
+  let ok = true;
+  const check = (label, passed, detail = '') => {
+    ok = ok && passed;
+    lines.push(`  [${passed ? 'ok' : 'FAIL'}] ${label}${detail ? `  ${detail}` : ''}`);
+    return passed;
+  };
+
   const pub = hexToBytes(vectors.supplier.pub_hex);
   const relayResponse = hexToBytes(vectors.relay_response_hex);
+  const controls = vectors.negative_controls;
+  const reqSig = hexToBytes(vectors.receipt.request_signature_hex);
 
   lines.push('RelayResponse');
   const fields = parseRelayResponse(relayResponse);
@@ -664,21 +808,66 @@ export function report(vectors) {
   say('payload', `${fields.payload?.length ?? 0} bytes`);
   say('payload_hash', bytesToHex(fields.payloadHash ?? new Uint8Array(0)));
   say('supplier signature', `${fields.supplierSignature?.length ?? 0} bytes`);
+  // A response without one fails the relayer's own ValidateBasic, so a caller
+  // will not meet it -- but the session-header negative control below reads it,
+  // and a control that quietly skips itself is worse than no control.
+  check('carries a session header', fields.sessionHeader !== null);
 
   lines.push('', 'Supplier response signature');
-  const sig = verifyResponseSignature(relayResponse, pub);
+  const sig = verifyResponseSignatureOnly(relayResponse, pub);
   say('signable bytes (filtered)', `${sig.signableBytes.length} bytes  ${bytesToHex(sig.signableBytes).slice(0, 24)}...`);
   say('sha256(signable)', bytesToHex(sig.signableHash));
   say('sha256 of THAT (ECDSA)', bytesToHex(sig.ecdsaMessageHash ?? new Uint8Array(0)));
-  say('sha256(payload) matches', String(sig.payloadHashMatches));
-  say('verdict', sig.valid ? 'VALID' : `INVALID — ${sig.reason}`);
+  check(
+    'filtered signable bytes match the oracle',
+    bytesToHex(sig.signableBytes) === vectors.signable_bytes_hex,
+    `${sig.signableBytes.length} bytes, ${relayResponse.length - sig.signableBytes.length} filtered out`,
+  );
+  // The double hash, pinned against the number the oracle publishes rather than
+  // inferred from the signature happening to verify.
+  check(
+    'the hash raw ECDSA covers is sha256 of that again',
+    bytesToHex(sig.ecdsaMessageHash ?? new Uint8Array(0)) === vectors.response_ecdsa_message_hash_hex,
+  );
+  check('payload hashes to payload_hash', payloadBindingHolds(fields.payload, fields.payloadHash));
+  check('supplier operator signature verifies', sig.valid, sig.reason ?? '');
+
+  // Being unable to fail is the failure mode a signature check hides best. The
+  // two ways a response can be altered are caught by two DIFFERENT mechanisms,
+  // so break each in turn and watch the right one fire.
+  const flipABit = (needle) => {
+    const at = indexOfBytes(relayResponse, needle);
+    if (at < 0) throw new Error('that needle is not in this response');
+    const edited = Uint8Array.from(relayResponse);
+    edited[at] ^= 0x01;
+    return edited;
+  };
+  const open = (bz, extra = {}) => openRelayResponse({ relayResponseBz: bz, supplierPubKey33: pub, ...extra });
+
+  check(
+    '...and rejects an edited payload (the hash binding catches it)',
+    !open(flipABit(fields.payload)).valid,
+  );
+  const serviceId = sessionHeaderServiceId(fields.sessionHeader);
+  check(
+    '...and rejects an edited session header (the signature catches it)',
+    Boolean(serviceId) && !open(flipABit(serviceId)).valid,
+  );
 
   lines.push('', 'Backend answer (inside RelayResponse.Payload)');
   if (fields.payload) {
     const inner = parsePoktHttpResponse(fields.payload);
+    const want = vectors.inner_pokt_http_response;
     say('HTTP status', String(inner.status));
     for (const [k, v] of Object.entries(inner.headers)) say(`header ${k}`, v.join(', '));
     say('body', inner.bodyText);
+    check('status matches the oracle', inner.status === want.status_code);
+    check('body matches the oracle', bytesToHex(inner.body) === want.body_bz_hex);
+    // Keys sorted on both sides: a protobuf map has no wire order, so comparing
+    // the serialisations positionally would be asserting on the oracle's map
+    // iteration rather than on this parser.
+    const canonical = (h) => JSON.stringify(Object.fromEntries(Object.entries(h).sort(([a], [b]) => (a < b ? -1 : 1))));
+    check('headers match the oracle', canonical(inner.headers) === canonical(want.headers));
   } else {
     say('payload', 'absent (an error response, or a claim/proof copy with the payload stripped)');
   }
@@ -690,7 +879,7 @@ export function report(vectors) {
   const receipt = canCheckReceipt
     ? verifyReceipt({
         headerValue: vectors.receipt.header_value,
-        requestSignature: hexToBytes(vectors.receipt.request_signature_hex),
+        requestSignature: reqSig,
         responsePayloadHash: fields.payloadHash,
         supplierPubKey33: pub,
       })
@@ -701,14 +890,88 @@ export function report(vectors) {
     say('preimage', `${receipt.preimage.length} bytes`);
     say('digest', bytesToHex(receipt.digest));
     say('sha256 of THAT (ECDSA)', bytesToHex(receipt.ecdsaMessageHash ?? new Uint8Array(0)));
-    say('verdict', receipt.valid ? 'VALID' : `INVALID — ${receipt.reason}`);
+    check('digest matches the oracle', bytesToHex(receipt.digest) === vectors.receipt.digest_hex);
+    check(
+      'the hash raw ECDSA covers matches the oracle',
+      bytesToHex(receipt.ecdsaMessageHash ?? new Uint8Array(0)) === vectors.receipt.ecdsa_message_hash_hex,
+    );
+    check('receipt verifies against the supplier key', receipt.valid, receipt.reason ?? '');
+
+    // The receipt is only worth something if it fails when either half of the
+    // pair it commits to is swapped. Demonstrated, not asserted in prose.
+    const receiptFor = (requestSignature, responsePayloadHash) =>
+      verifyReceipt({
+        headerValue: vectors.receipt.header_value,
+        requestSignature,
+        responsePayloadHash,
+        supplierPubKey33: pub,
+      }).valid;
+
+    check('...and fails for a different response', !receiptFor(reqSig, hexToBytes(controls.other_payload_hash_hex)));
+    check('...and fails for a different request', !receiptFor(hexToBytes(controls.other_request_signature_hex), fields.payloadHash));
+
+    // (r, N-s) is as valid as (r, s) to the curve arithmetic; cosmos rejects it
+    // on the low-S rule alone, and so does verifyCosmosSecp256k1.
+    const parsed = secp256k1.Signature.fromBytes(parseReceiptHeader(vectors.receipt.header_value).signature);
+    const highS = new secp256k1.Signature(parsed.r, N - parsed.s).toBytes();
+    check(
+      '...and fails when S is negated (the low-S rule)',
+      !verifyReceipt({
+        signature: highS,
+        requestSignature: reqSig,
+        responsePayloadHash: fields.payloadHash,
+        supplierPubKey33: pub,
+      }).valid,
+    );
   } else {
     say('receipt', `absent — send "${RECEIPT_REQUEST_HEADER}: true" with the request to get one`);
   }
 
-  const allValid = sig.valid && (receipt === null || receipt.valid);
-  lines.push('', allValid ? 'Everything present verifies.' : 'AT LEAST ONE SIGNATURE FAILED.');
-  return lines;
+  // Everything above took the response apart. This is the one call a caller
+  // actually makes: all four steps, in order, and the backend's answer out the
+  // other side.
+  lines.push('', 'The whole return trip, in one call');
+  const opened = open(relayResponse, { requestSignature: reqSig, receiptHeader: vectors.receipt?.header_value });
+  check('openRelayResponse accepts response + receipt', opened.valid, opened.reason ?? '');
+  check(
+    '...and returns the backend\'s own body',
+    Boolean(opened.http) && bytesToHex(opened.http.body) === vectors.inner_pokt_http_response.body_bz_hex,
+  );
+  check(
+    '...and refuses a receipt from a different relay',
+    !open(relayResponse, {
+      requestSignature: hexToBytes(controls.other_request_signature_hex),
+      receiptHeader: vectors.receipt?.header_value,
+    }).valid,
+  );
+
+  lines.push('', ok ? 'PASS' : 'FAIL');
+  return { ok, lines };
+}
+
+/** Offset of `needle` in `haystack`, or -1. Uint8Array has no indexOf for this. */
+function indexOfBytes(haystack, needle) {
+  if (!needle || needle.length === 0) return -1;
+  outer: for (let i = 0; i + needle.length <= haystack.length; i++) {
+    for (let j = 0; j < needle.length; j++) if (haystack[i + j] !== needle[j]) continue outer;
+    return i;
+  }
+  return -1;
+}
+
+/**
+ * The `service_id` out of a marshalled SessionHeader, or null.
+ *
+ * Used only by the report, to flip a bit somewhere the message stays a
+ * well-formed protobuf: corrupting a tag byte instead would be caught by the
+ * PARSER, which proves nothing about the signature.
+ */
+function sessionHeaderServiceId(sessionHeader) {
+  if (!sessionHeader) return null;
+  for (const rec of splitProtoFields(sessionHeader)) {
+    if (rec.field === F_HDR_SERVICE_ID) return valueOf(sessionHeader, rec);
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -765,10 +1028,15 @@ if (isMain) {
   }
 
   const vectors = JSON.parse(raw);
-  const lines = report(vectors);
+  const { ok, lines } = report(vectors);
   console.log(`\n${lines.join('\n')}\n`);
 
   // Exit non-zero on a bad verdict: this file is run in pipelines, and a
-  // verifier that prints "INVALID" and exits 0 is a verifier nobody notices.
-  process.exit(lines.some((l) => l.includes('INVALID')) ? 1 : 0);
+  // verifier that prints a failure and exits 0 is a verifier nobody notices.
+  //
+  // The verdict comes from the STRUCTURED result, never from grepping the text
+  // above for a word. It used to search the rendered lines for "INVALID", which
+  // meant that rewording one label silently pinned this exit code to zero
+  // forever — a green pipeline over a verifier that had stopped verifying.
+  process.exit(ok ? 0 : 1);
 }

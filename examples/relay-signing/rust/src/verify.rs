@@ -24,6 +24,15 @@
 //! and, if the request carried `Pocket-Sign-Receipt: true`, a
 //! `Pocket-Relay-Receipt` header.
 //!
+//! # The entry point
+//!
+//! [`open_relay_response`]. It is the composite — signature, payload binding,
+//! receipt, and only then the payload — and it is the same function, under the
+//! same name and with the same scope, in the Python and Node ports next door.
+//! Everything else in this module is a piece of it, exported so a port can
+//! bisect against the oracle one layer at a time; a name ending in `_only` is a
+//! piece and is NOT sufficient on its own.
+//!
 //! # The four traps
 //!
 //! 1. **The payload is NOT signed. Its hash is.** The supplier signs the
@@ -573,13 +582,18 @@ pub fn cosmos_ecdsa_message_hash(message: &[u8]) -> [u8; HASH_LEN] {
     sha256(message)
 }
 
-/// Verifies the supplier operator's signature over the `RelayResponse`.
+/// Verifies the supplier operator's signature over the `RelayResponse`, **and
+/// nothing else**.
 ///
 /// This proves the supplier produced this response in this session. It does
 /// **not** prove the payload you are holding is the one it covers (trap 1), and
 /// it does not say which request the response answers — that is what the
-/// receipt is for. See [`open_relay_response`] for both.
-pub fn verify_response_signature(
+/// receipt is for.
+///
+/// Hence `_only`. Call [`open_relay_response`] unless you are deliberately
+/// checking one layer at a time; on its own this function leaves the body
+/// unauthenticated, which is the exact bug the module header opens with.
+pub fn verify_response_signature_only(
     relay_response: &[u8],
     supplier_pubkey: &[u8],
 ) -> Result<(), VerifyError> {
@@ -797,7 +811,7 @@ pub fn open_relay_response(
     request_signature: &[u8],
     receipt_header: Option<&str>,
 ) -> Result<PoktHttpResponse, VerifyError> {
-    verify_response_signature(relay_response, supplier_pubkey)?;
+    verify_response_signature_only(relay_response, supplier_pubkey)?;
 
     let payload = payload(relay_response)?;
     let signed_hash = payload_hash(relay_response)?;
@@ -1043,7 +1057,7 @@ mod tests {
 
     #[test]
     fn response_signature_verifies() {
-        verify_response_signature(&response(), &pubkey()).expect("the oracle signed this");
+        verify_response_signature_only(&response(), &pubkey()).expect("the oracle signed this");
     }
 
     #[test]
@@ -1051,7 +1065,7 @@ mod tests {
         // The app pubkey from `oracle vectors` — a real key, wrong signer.
         let other = unhex("0397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc5");
         assert_eq!(
-            verify_response_signature(&response(), &other),
+            verify_response_signature_only(&response(), &other),
             Err(VerifyError::BadSignature),
         );
     }
@@ -1064,7 +1078,7 @@ mod tests {
         let last = tampered.len() - 1;
         tampered[last] ^= 0x01;
         assert_eq!(
-            verify_response_signature(&tampered, &pubkey()),
+            verify_response_signature_only(&tampered, &pubkey()),
             Err(VerifyError::BadSignature),
         );
     }
@@ -1081,7 +1095,7 @@ mod tests {
             .expect("the payload is in the response");
         tampered[at + payload.len() - 2] ^= 0x01; // one byte of the JSON body
 
-        verify_response_signature(&tampered, &pubkey())
+        verify_response_signature_only(&tampered, &pubkey())
             .expect("the payload is not covered by the signature");
         assert_eq!(
             open_relay_response(&tampered, &pubkey(), &unhex(REQUEST_SIGNATURE_HEX), None),
