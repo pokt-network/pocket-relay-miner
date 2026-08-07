@@ -6,11 +6,24 @@ publish = false
 description = "bLSAG ring signer for Pocket Network relays, verified against the Go oracle"
 
 [dependencies]
-k256 = { version = "0.14", default-features = false, features = ["arithmetic", "std"] }
+# `arithmetic` is what the ring signer needs (Scalar/ProjectivePoint/AffinePoint).
+#
+# `ecdsa` is what the response verifier needs, and it carries SHA-256 with it:
+# the feature implies k256's `sha256` feature, which enables its `sha2`
+# dependency AND re-exports it as `k256::sha2`. So `src/verify.rs` gets the
+# hash it needs without this manifest naming a crate the signer half did not
+# already pull in. Reach for it as `k256::sha2`, never as a `sha2 = ...` line
+# here -- a second path to the same crate is how two incompatible `digest`
+# majors end up in one build.
+k256 = { version = "0.14", default-features = false, features = ["arithmetic", "ecdsa", "std"] }
 # FIPS-202 SHA-3. This crate exposes both `Sha3_256`/`Sha3_512` (FIPS-202) and
 # `Keccak256`/`Keccak512` (the original, pre-standardisation padding). This
 # scheme uses the FIPS-202 ones. They are NOT interchangeable -- see lib.rs.
 sha3 = "0.12.0"
 getrandom = "0.4.3"
-thiserror = "2.0.18"
+thiserror = "2.0.19"
+# A normal dependency, NOT a dev-dependency, and it has to stay that way:
+# src/main.rs is a bin target in this same package, and dev-dependencies are
+# not in scope for it. Moving this to [dev-dependencies] compiles the library
+# fine and breaks `cargo run`.
 hex = "0.4.3"

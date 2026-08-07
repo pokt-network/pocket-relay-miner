@@ -1,4 +1,5 @@
 # This crate lives inside a Go repo. Keep cargo's build output out of it.
-# The build instructions set CARGO_TARGET_DIR elsewhere; this is the backstop
-# for anyone who just runs `cargo build` here.
+# The documented commands (README, and the `rust` job in
+# .github/workflows/examples-relay-signing.yml) all run cargo from this
+# directory, so `target/` is created right here, next to Go source.
 /target/

@@ -429,6 +429,69 @@ once against a few lines of Go rather than reasoning about gogoproto.
 `RelayRequest.Payload` is an opaque `bytes` field, hashed verbatim and parsed
 separately by the relayer, so any protobuf library will do.
 
+### Reading the response, and checking it
+
+Signing is half the job. A relayer answers with a `RelayResponse`, and there are
+two things in it worth verifying — plus one layer of wrapping that surprises
+everyone the first time.
+
+**The answer is two layers down.** `RelayResponse.Payload` is not your JSON-RPC
+result: it is a marshalled `POKTHTTPResponse`, and the result is in its
+`body_bz`. Status code and headers live there too.
+
+**The supplier signature covers filtered bytes, not re-encoded ones.** What is
+signed is the `RelayResponse` with the signature cleared and — when
+`payload_hash` is set — the payload cleared. Get those bytes by *filtering the
+protobuf you received*: walk its top-level records and drop field 2, and inside
+field 1 drop field 2. Do not decode and re-encode; a field's encoding does not
+depend on the others and gogoproto emits in ascending field order, so filtering
+is byte-exact while re-encoding risks differing on map ordering.
+
+**Cosmos hashes twice, and this is the one that costs an evening.**
+`secp256k1.Sign` and `VerifySignature` hash their argument internally. So the
+message raw ECDSA covers is `sha256(sha256(signable_bytes))` for the response
+and `sha256(digest)` for the receipt. Feed the digest straight to a raw verifier
+and it rejects while Go insists the artifact is valid. The oracle publishes both
+values — `ecdsa_message_hash_hex` — so you can tell which one you got wrong.
+
+**Low-S is not optional.** Cosmos rejects `S > N/2`. A verifier that accepts
+high-S is more permissive than the chain, which is the one direction you must
+never be wrong in.
+
+#### The receipt
+
+Ask for one with `Pocket-Sign-Receipt: true` and the response carries
+`Pocket-Relay-Receipt: v1.<128 hex chars>`:
+
+```
+digest  = sha256("POKT-RELAY-RECEIPT-v1\0" || relayRequest.Meta.Signature
+                                            || relayResponse.PayloadHash)
+receipt = supplierOperatorKey.Sign(digest)
+```
+
+It answers what the response signature cannot: *which request does this response
+answer?* The response signature covers a session header that thousands of relays
+share. Absence is normal — a relayer predating the feature returns no header, so
+handle the missing case rather than treating it as an error.
+
+#### Vectors and running it
+
+```bash
+go build -o /tmp/oracle ../oracle/
+
+/tmp/oracle response-vectors                      # ground truth, JSON
+/tmp/oracle response-vectors | python3 verify.py  # Python
+/tmp/oracle response-vectors | node verify.mjs    # Node.js
+
+# have cosmos judge YOUR digest, not your own round trip
+echo '{"digest_hex":"..","sig_hex":"..","pub_hex":".."}' | /tmp/oracle verify-receipt
+```
+
+The vectors ship negative controls — a different response's payload hash and a
+different request's signature. Your verifier must **reject** both. A test that
+only ever demonstrates success teaches nothing about what the receipt proves.
+
+
 ### Reference
 
 - [`docs/simulated-relays.md`](../../docs/simulated-relays.md) — the simulated relay path, config, and CLI

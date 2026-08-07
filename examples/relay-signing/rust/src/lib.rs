@@ -30,21 +30,29 @@
 //! the time. Do not trust a small sample: `src/main.rs` signs 1500+ messages
 //! and requires the Go oracle to accept every single one.
 //!
+//! # The other half
+//!
+//! Signing a relay is one direction. [`verify`] is the other: checking the
+//! supplier's signature on what comes back, and the optional relay receipt
+//! that binds that response to the request signed here.
+//!
 //! [ring-go]: https://github.com/pokt-network/ring-go
 
+pub mod verify;
+
 use k256::{
-    AffinePoint, FieldBytes, ProjectivePoint, PublicKey, Scalar, SecretKey, U256,
     elliptic_curve::{
-        Field,
         bigint::{Encoding, NonZero, U512},
         ops::Reduce,
         point::DecompressPoint,
         sec1::ToSec1Point,
         subtle::Choice,
+        Field,
     },
+    AffinePoint, FieldBytes, ProjectivePoint, PublicKey, Scalar, SecretKey, U256,
 };
 
-use getrandom::{SysRng, rand_core::UnwrapErr};
+use getrandom::{rand_core::UnwrapErr, SysRng};
 use sha3::{Digest, Sha3_256, Sha3_512};
 use thiserror::Error;
 
@@ -63,20 +71,42 @@ const SCALAR_LEN: usize = 32;
 
 /// Why a signature could not be produced.
 ///
-/// Every variant except the index checks is cryptographically unreachable --
-/// they exist so this crate never panics on a caller's behalf, not because you
-/// should expect to see them.
+/// The caller-error variants -- the two size checks, the index check and
+/// [`SignError::KeyNotInRing`] -- are the ones you will actually see. The rest
+/// are cryptographically unreachable, and exist so this crate never panics on a
+/// caller's behalf.
 #[derive(Error, Debug, Clone, PartialEq, Eq)]
 pub enum SignError {
-    /// The ring had no members.
-    #[error("ring is empty")]
-    EmptyRing,
+    /// Fewer than two ring members.
+    ///
+    /// A one-member ring is not a ring: the "anonymity set" is the signer, so
+    /// the signature identifies them outright. ring-go refuses it too
+    /// (`ring.go:184-186`, "size of ring less than two"), so a signature over
+    /// one key would be rejected on arrival even if the maths closed.
+    #[error("ring needs at least 2 members, got {0}")]
+    RingTooSmall(usize),
     /// The ring size does not fit the 4-byte length prefix of the wire format.
     #[error("ring size {0} exceeds u32")]
     RingTooLarge(usize),
     /// `our_idx` does not point at a ring member.
     #[error("signer index {our_idx} out of range for ring of {size}")]
     SignerIndexOutOfRange { our_idx: usize, size: usize },
+    /// `priv_key` is not the private key for `ring_pubkeys[our_idx]`.
+    ///
+    /// The wiring mistake this whole directory exists to prevent. Without this
+    /// check the maths still runs and still produces a well-formed 199-byte
+    /// signature -- it just closes the chain against the wrong member, so every
+    /// relayer rejects it, forever, with no diagnostic beyond "invalid
+    /// signature". ring-go refuses it up front (`ring.go:197-201`, "secret
+    /// index in ring is not signer") and so does this.
+    ///
+    /// For a Pocket relay the ring is `[app, gateway]` and the gateway signs,
+    /// so `our_idx` is **1**. Passing 0 is the mistake.
+    #[error(
+        "priv_key is not the key for ring_pubkeys[{our_idx}] \
+         (a relay ring is [app, gateway] and the gateway signs, so our_idx is 1)"
+    )]
+    KeyNotInRing { our_idx: usize },
     /// [`hash_to_curve`] failed to find a point in 128 attempts (p ~ 2^-128).
     #[error("hash_to_curve found no point in 128 attempts")]
     HashToCurve,
@@ -312,9 +342,12 @@ fn sign_inner(
     our_idx: usize,
     hash: HashToScalarFn,
 ) -> Result<(Vec<u8>, SignStats), SignError> {
+    // Same three guards as ring-go's Sign, in the same order (ring.go:182-201).
+    // They are cheap, and each one turns a signature that would be rejected
+    // silently by every relayer into an error at the call site.
     let size = ring_pubkeys.len();
-    if size == 0 {
-        return Err(SignError::EmptyRing);
+    if size < 2 {
+        return Err(SignError::RingTooSmall(size));
     }
     if our_idx >= size {
         return Err(SignError::SignerIndexOutOfRange { our_idx, size });
@@ -322,6 +355,16 @@ fn sign_inner(
     let size_prefix = u32::try_from(size).map_err(|_| SignError::RingTooLarge(size))?;
 
     let x = *priv_key.to_nonzero_scalar().as_ref();
+
+    // x*G must BE the ring member we claim to be. Get this wrong -- swap the
+    // app and the gateway, the single most common way to hold this API -- and
+    // everything below still works: the chain closes at the wrong index and
+    // produces 199 perfectly well-formed bytes that no relayer will ever
+    // accept. See [`SignError::KeyNotInRing`].
+    if ProjectivePoint::GENERATOR * x != ring_pubkeys[our_idx].to_projective() {
+        return Err(SignError::KeyNotInRing { our_idx });
+    }
+
     let mut stats = SignStats::default();
 
     // Needed twice each: to hash to the curve, and to serialise.
@@ -680,12 +723,55 @@ mod tests {
     }
 
     #[test]
-    fn rejects_an_empty_ring() {
-        let (_, _, gw_key) = test_ring();
+    fn rejects_a_ring_too_small_to_hide_anyone() {
+        let (app, gw, gw_key) = test_ring();
+
         assert_eq!(
             build_relay_signature(&[0u8; 32], &[], &gw_key, 0),
-            Err(SignError::EmptyRing),
+            Err(SignError::RingTooSmall(0)),
         );
+        // A one-member ring would sign fine and hide nothing -- and ring-go
+        // rejects it, so the relay would be refused anyway.
+        assert_eq!(
+            build_relay_signature(&[0u8; 32], &[gw], &gw_key, 0),
+            Err(SignError::RingTooSmall(1)),
+        );
+        // Two is the real Pocket ring, and must still work.
+        assert!(build_relay_signature(&[0u8; 32], &[app, gw], &gw_key, 1).is_ok());
+    }
+
+    /// The wiring mistake: signing with the gateway key while pointing at the
+    /// app's slot. Before this check it produced 199 valid-looking bytes that
+    /// every relayer rejected, with nothing in the error to say why.
+    #[test]
+    fn rejects_a_key_that_is_not_the_ring_member_at_our_idx() {
+        let (app, gw, gw_key) = test_ring();
+
+        assert_eq!(
+            build_relay_signature(&[0u8; 32], &[app, gw], &gw_key, 0),
+            Err(SignError::KeyNotInRing { our_idx: 0 }),
+        );
+        // The same key at the right index is fine, so the check is discriminating
+        // between positions and not just refusing this key.
+        assert!(build_relay_signature(&[0u8; 32], &[app, gw], &gw_key, 1).is_ok());
+    }
+
+    /// The check must fire for a key that is in no slot at all, not only for a
+    /// key that is in the wrong one.
+    #[test]
+    fn rejects_a_key_that_is_not_in_the_ring_at_all() {
+        let (app, gw, _) = test_ring();
+        let stranger = SecretKey::from_slice(&hex32(
+            "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+        ))
+        .unwrap();
+
+        for our_idx in 0..2 {
+            assert_eq!(
+                build_relay_signature(&[0u8; 32], &[app, gw], &stranger, our_idx),
+                Err(SignError::KeyNotInRing { our_idx }),
+            );
+        }
     }
 
     /// Larger rings must produce `69 + 65n` bytes from any signing position --

@@ -15,6 +15,7 @@
 //!
 //!     cargo run --release -- /tmp/oracle                     # 1500 signatures
 //!     cargo run --release -- /tmp/oracle --negative-control  # prove it can fail
+//!     cargo run --release -- /tmp/oracle --response          # the return trip
 //!
 //! An optional count before the flag overrides the 1500 default, but a smaller
 //! run cannot tell a correct signer from a broken one -- so if the quirk never
@@ -25,12 +26,24 @@
 //! and *requires* the oracle to reject some. It proves this harness can
 //! actually detect the bug it exists to detect -- a test suite that has never
 //! failed is not evidence of anything.
+//!
+//! `--response` checks the other direction with `pocket_relay_signing::verify`:
+//! a freshly generated, Go-signed RelayResponse and receipt from
+//! `oracle response-vectors`. It matters that the vectors are fresh -- the
+//! receipt binds a bLSAG signature, which is randomised, so the unit tests can
+//! only pin one captured run. This exercises whatever the oracle produces
+//! today, and hands our own recomputed digest back to `oracle verify-receipt`
+//! so the real cosmos verifier gets the last word.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
-use k256::elliptic_curve::Generate;
-use k256::{PublicKey, SecretKey};
+
+use k256::elliptic_curve::ops::Reduce;
+use k256::elliptic_curve::scalar::IsHigh;
+use k256::elliptic_curve::{bigint::Encoding, Generate, PrimeField};
+use k256::{PublicKey, Scalar, SecretKey, U256};
+use pocket_relay_signing::verify::{self, VerifyError};
 use pocket_relay_signing::{
     build_relay_signature_canonical, build_relay_signature_with_stats, SignStats,
 };
@@ -49,11 +62,14 @@ fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let Some(oracle) = args.get(1).map(PathBuf::from) else {
         eprintln!(
-            "usage: {} <path-to-oracle> [count] [--negative-control]",
+            "usage: {} <path-to-oracle> [count] [--negative-control | --response]",
             args[0]
         );
         return ExitCode::from(2);
     };
+    if args.iter().any(|a| a == "--response") {
+        return run_response_checks(&oracle);
+    }
     let count: u32 = args
         .get(2)
         .filter(|a| !a.starts_with("--"))
@@ -250,6 +266,292 @@ fn run_negative_control(
     ExitCode::SUCCESS
 }
 
+// ---------------------------------------------------------------------------
+// The return trip: response signature and receipt
+// ---------------------------------------------------------------------------
+
+/// Checks a freshly generated RelayResponse and receipt, in both directions.
+///
+/// Every positive check has a negative twin. The receipt's whole claim is "this
+/// response answers THAT request", and a verifier that accepts a receipt from
+/// another relay -- or another response -- makes exactly the same noise as one
+/// that works.
+fn run_response_checks(oracle: &Path) -> ExitCode {
+    println!("verifying a fresh RelayResponse and receipt from `oracle response-vectors`\n");
+
+    let vectors = run_oracle(oracle, "response-vectors", None);
+    if !vectors.accepted {
+        fatal(&format!(
+            "`oracle response-vectors` failed: {}",
+            vectors.detail
+        ));
+    }
+    let json = &vectors.detail;
+
+    let supplier_pubkey = json_hex(json, "pub_hex");
+    let relay_response = json_hex(json, "relay_response_hex");
+    let want_signable = json_hex(json, "signable_bytes_hex");
+    let want_payload_hash = json_hex(json, "payload_hash_hex");
+    let want_body = json_hex(json, "body_bz_hex");
+    let request_signature = json_hex(json, "request_signature_hex");
+    let want_digest = json_hex(json, "digest_hex");
+    let receipt_header = json_field(json, "header_value");
+    let other_payload_hash = json_hex(json, "other_payload_hash_hex");
+    let other_request_signature = json_hex(json, "other_request_signature_hex");
+
+    let mut checks = Checks::default();
+
+    // -- the response --------------------------------------------------
+    println!("response");
+    match verify::signable_bytes(&relay_response) {
+        Ok(signable) => checks.equal(
+            "filtered signable bytes match the oracle",
+            &signable,
+            &want_signable,
+        ),
+        Err(e) => checks.fail("filtered signable bytes match the oracle", &e.to_string()),
+    }
+    checks.accepts(
+        "supplier operator signature verifies",
+        verify::verify_response_signature(&relay_response, &supplier_pubkey),
+    );
+    match verify::payload_hash(&relay_response) {
+        Ok(hash) => checks.equal("payload hash matches the oracle", hash, &want_payload_hash),
+        Err(e) => checks.fail("payload hash matches the oracle", &e.to_string()),
+    }
+
+    // -- the receipt ---------------------------------------------------
+    println!("\nreceipt");
+    let digest = match verify::receipt_digest(&request_signature, &want_payload_hash) {
+        Ok(digest) => {
+            checks.equal("receipt digest matches the oracle", &digest, &want_digest);
+            digest
+        }
+        Err(e) => {
+            checks.fail("receipt digest matches the oracle", &e.to_string());
+            return checks.finish();
+        }
+    };
+    checks.accepts(
+        "receipt verifies",
+        verify::verify_receipt(
+            &receipt_header,
+            &request_signature,
+            &want_payload_hash,
+            &supplier_pubkey,
+        ),
+    );
+
+    // The reverse direction. Our digest, the oracle's cosmos verifier: this is
+    // the check that our two hashes are the two hashes cosmos expects, rather
+    // than any other pair that happens to agree with itself.
+    let receipt_signature = verify::parse_receipt_header(&receipt_header).unwrap_or_else(|e| {
+        fatal(&format!(
+            "oracle emitted an unparseable receipt header: {e}"
+        ))
+    });
+    checks.oracle(
+        "cosmos accepts OUR recomputed digest",
+        true,
+        ask_oracle_receipt(oracle, &digest, &receipt_signature, &supplier_pubkey),
+    );
+
+    // -- negative controls ---------------------------------------------
+    println!("\nnegative controls");
+    checks.rejects(
+        "receipt is refused against another response's payload hash",
+        verify::verify_receipt(
+            &receipt_header,
+            &request_signature,
+            &other_payload_hash,
+            &supplier_pubkey,
+        ),
+    );
+    checks.rejects(
+        "receipt is refused against another request's signature",
+        verify::verify_receipt(
+            &receipt_header,
+            &other_request_signature,
+            &want_payload_hash,
+            &supplier_pubkey,
+        ),
+    );
+    // ...and cosmos agrees, so the refusal is the contract and not our opinion.
+    if let Ok(wrong) = verify::receipt_digest(&request_signature, &other_payload_hash) {
+        checks.oracle(
+            "cosmos also refuses the wrong-response digest",
+            false,
+            ask_oracle_receipt(oracle, &wrong, &receipt_signature, &supplier_pubkey),
+        );
+    }
+
+    // ECDSA is malleable: (R, N-S) verifies wherever (R, S) does, and cosmos
+    // rejects the high half. A port that leaves low-S to its crate should see
+    // both sides say no here.
+    let high_s = to_high_s(&receipt_signature);
+    checks.rejects(
+        "a high-S receipt is refused",
+        verify::verify_receipt(
+            &format!("v1.{}", hex::encode(&high_s)),
+            &request_signature,
+            &want_payload_hash,
+            &supplier_pubkey,
+        ),
+    );
+    checks.oracle(
+        "cosmos also refuses the high-S receipt",
+        false,
+        ask_oracle_receipt(oracle, &digest, &high_s, &supplier_pubkey),
+    );
+
+    // -- the whole trip ------------------------------------------------
+    println!("\nend to end");
+    match verify::open_relay_response(
+        &relay_response,
+        &supplier_pubkey,
+        &request_signature,
+        Some(&receipt_header),
+    ) {
+        Ok(http) => {
+            checks.equal(
+                "payload decodes to the backend's body",
+                &http.body,
+                &want_body,
+            );
+            if http.status_code == 200 {
+                checks.pass("backend status is 200");
+            } else {
+                checks.fail(
+                    "backend status is 200",
+                    &format!("got {}", http.status_code),
+                );
+            }
+            println!("\n  backend said: {}", String::from_utf8_lossy(&http.body));
+        }
+        Err(e) => checks.fail(
+            "open_relay_response accepts the oracle's response",
+            &e.to_string(),
+        ),
+    }
+
+    checks.finish()
+}
+
+/// Rewrites a signature as its malleable twin `(R, N-S)`, which is
+/// cryptographically just as valid and which cosmos refuses.
+fn to_high_s(signature: &[u8]) -> Vec<u8> {
+    let s_bytes: [u8; 32] = signature[32..64]
+        .try_into()
+        .unwrap_or_else(|_| fatal("signature must be 64 bytes"));
+
+    let s = <Scalar as Reduce<U256>>::reduce(&U256::from_be_bytes(s_bytes.into()));
+    let flipped = -s;
+    if !bool::from(flipped.is_high()) {
+        fatal("N - s must be the high half; the oracle's signature was not low-S");
+    }
+
+    let mut out = signature[..32].to_vec();
+    out.extend_from_slice(&flipped.to_repr());
+    out
+}
+
+/// Running tally, so one failure does not hide the next.
+#[derive(Default)]
+struct Checks {
+    failed: usize,
+}
+
+impl Checks {
+    fn pass(&mut self, label: &str) {
+        println!("  ok    {label}");
+    }
+
+    fn fail(&mut self, label: &str, detail: &str) {
+        self.failed += 1;
+        println!("  FAIL  {label}: {detail}");
+    }
+
+    fn equal(&mut self, label: &str, got: &[u8], want: &[u8]) {
+        if got == want {
+            self.pass(label);
+        } else {
+            self.fail(
+                label,
+                &format!(
+                    "\n          got  {}\n          want {}",
+                    hex::encode(got),
+                    hex::encode(want)
+                ),
+            );
+        }
+    }
+
+    fn accepts<T>(&mut self, label: &str, result: Result<T, VerifyError>) {
+        match result {
+            Ok(_) => self.pass(label),
+            Err(e) => self.fail(label, &e.to_string()),
+        }
+    }
+
+    /// A check that must FAIL. A verifier that has never rejected anything is
+    /// indistinguishable from one that returns Ok unconditionally.
+    fn rejects<T: std::fmt::Debug>(&mut self, label: &str, result: Result<T, VerifyError>) {
+        match result {
+            Err(e) => println!("  ok    {label} ({e})"),
+            Ok(value) => self.fail(label, &format!("ACCEPTED {value:?}")),
+        }
+    }
+
+    fn oracle(&mut self, label: &str, want_accepted: bool, verdict: Verdict) {
+        if verdict.accepted == want_accepted {
+            self.pass(label);
+        } else {
+            self.fail(label, &verdict.detail);
+        }
+    }
+
+    fn finish(&self) -> ExitCode {
+        if self.failed == 0 {
+            println!("\nall checks passed.");
+            return ExitCode::SUCCESS;
+        }
+        println!("\n{} check(s) FAILED.", self.failed);
+        ExitCode::FAILURE
+    }
+}
+
+/// Pulls `"<key>": "<value>"` out of the oracle's JSON.
+///
+/// Not a JSON parser, and not one worth pulling in: every value read here is
+/// hex, or `v1.` followed by hex, in output this repository controls. Two
+/// things make the shortcut safe, and both matter.
+///
+/// The needle includes the OPENING QUOTE. Without it `"request_signature_hex"`
+/// also matches inside `"other_request_signature_hex"` -- and the negative
+/// control would quietly become a second copy of the positive case, passing
+/// while proving nothing.
+///
+/// And nothing read here contains an escape. `body_text` does (it is JSON
+/// inside JSON) and is deliberately not read; `body_bz_hex` carries the same
+/// bytes without the quoting problem.
+fn json_field(json: &str, key: &str) -> String {
+    let needle = format!("\"{key}\": \"");
+    let start = json
+        .find(&needle)
+        .unwrap_or_else(|| fatal(&format!("oracle JSON has no {key}")))
+        + needle.len();
+    let rest = &json[start..];
+    let end = rest
+        .find('"')
+        .unwrap_or_else(|| fatal(&format!("oracle JSON has an unterminated {key}")));
+    rest[..end].to_string()
+}
+
+fn json_hex(json: &str, key: &str) -> Vec<u8> {
+    hex::decode(json_field(json, key))
+        .unwrap_or_else(|e| fatal(&format!("oracle JSON field {key} is not hex: {e}")))
+}
+
 fn report_quirk(stats: &SignStats) {
     let rate = stats.short_reductions as f64 / stats.challenges as f64;
     println!("challenges:       {}", stats.challenges);
@@ -272,8 +574,35 @@ struct Verdict {
 /// Pipes one signature to `oracle verify`, which hands it to the same ring-go
 /// a real relayer runs. Exit code 0 = accepted.
 fn ask_oracle(oracle: &Path, m: &[u8; 32], sig: &[u8]) -> Verdict {
+    // Both fields are hex, so there is nothing to escape and no JSON library to
+    // pull in. Do not copy this shortcut somewhere the values are not hex.
+    let request = format!(
+        r#"{{"msg_hex":"{}","sig_hex":"{}"}}"#,
+        hex::encode(m),
+        hex::encode(sig),
+    );
+    run_oracle(oracle, "verify", Some(&request))
+}
+
+/// Pipes a receipt to `oracle verify-receipt`, which hands it to the same
+/// cosmos `secp256k1` a real supplier signs with. Exit code 0 = accepted.
+///
+/// The digest is OURS: the point is not that the oracle can verify its own
+/// bytes, it is that the digest this crate computes is the one cosmos accepts.
+fn ask_oracle_receipt(oracle: &Path, digest: &[u8; 32], sig: &[u8], pubkey: &[u8]) -> Verdict {
+    let request = format!(
+        r#"{{"digest_hex":"{}","sig_hex":"{}","pub_hex":"{}"}}"#,
+        hex::encode(digest),
+        hex::encode(sig),
+        hex::encode(pubkey),
+    );
+    run_oracle(oracle, "verify-receipt", Some(&request))
+}
+
+/// Runs one oracle subcommand, optionally writing `request` to its stdin.
+fn run_oracle(oracle: &Path, subcommand: &str, request: Option<&str>) -> Verdict {
     let mut child = Command::new(oracle)
-        .arg("verify")
+        .arg(subcommand)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -285,18 +614,12 @@ fn ask_oracle(oracle: &Path, m: &[u8; 32], sig: &[u8]) -> Verdict {
             ))
         });
 
-    // Both fields are hex, so there is nothing to escape and no JSON library to
-    // pull in. Do not copy this shortcut somewhere the values are not hex.
-    let request = format!(
-        r#"{{"msg_hex":"{}","sig_hex":"{}"}}"#,
-        hex::encode(m),
-        hex::encode(sig),
-    );
-
     let mut stdin = child.stdin.take().expect("stdin was piped");
-    stdin
-        .write_all(request.as_bytes())
-        .unwrap_or_else(|e| fatal(&format!("writing to oracle: {e}")));
+    if let Some(request) = request {
+        stdin
+            .write_all(request.as_bytes())
+            .unwrap_or_else(|e| fatal(&format!("writing to oracle: {e}")));
+    }
     drop(stdin); // close the pipe so the oracle's decoder sees EOF
 
     let out = child
