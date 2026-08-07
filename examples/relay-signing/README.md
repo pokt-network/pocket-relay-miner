@@ -442,8 +442,11 @@ result: it is a marshalled `POKTHTTPResponse`, and the result is in its
 **The supplier signature covers filtered bytes, not re-encoded ones.** What is
 signed is the `RelayResponse` with the signature cleared and — when
 `payload_hash` is set — the payload cleared. Get those bytes by *filtering the
-protobuf you received*: walk its top-level records and drop field 2, and inside
-field 1 drop field 2. Do not decode and re-encode; a field's encoding does not
+protobuf you received*: walk its top-level records, drop field 2 inside field 1
+(the signature), and — **only if field 4, `payload_hash`, is present** — drop
+top-level field 2 as well. The condition is not decoration: responses from
+before `payload_hash` existed sign the payload itself, and dropping it
+unconditionally makes those fail. Do not decode and re-encode; a field's encoding does not
 depend on the others and gogoproto emits in ascending field order, so filtering
 is byte-exact while re-encoding risks differing on map ordering.
 
@@ -452,11 +455,31 @@ is byte-exact while re-encoding risks differing on map ordering.
 message raw ECDSA covers is `sha256(sha256(signable_bytes))` for the response
 and `sha256(digest)` for the receipt. Feed the digest straight to a raw verifier
 and it rejects while Go insists the artifact is valid. The oracle publishes both
-values — `ecdsa_message_hash_hex` — so you can tell which one you got wrong.
+values — `response_ecdsa_message_hash_hex` at the top level and
+`ecdsa_message_hash_hex` inside `receipt` — so you can tell which one you got
+wrong.
 
 **Low-S is not optional.** Cosmos rejects `S > N/2`. A verifier that accepts
 high-S is more permissive than the chain, which is the one direction you must
 never be wrong in.
+
+#### Where the supplier's public key comes from
+
+Every verifier here takes it as a parameter, and getting it from the wrong place
+voids the whole exercise. It is **not** in the response: `RelayResponseMetadata`
+carries a session header and a signature, nothing else. Taking it from a header,
+or from the response body, verifies only that whoever wrote the response also
+wrote the key.
+
+You already know which supplier you sent to — it is the
+`supplier_operator_address` you put in your own `RelayRequest`. Resolve that
+address to a public key with a chain query: the account query returns the
+operator account's public key, which is the key that signs both the response and
+the receipt. That is what the CLI does
+(`client/relay_client/client.go`, `SupplierPubKey`).
+
+One failure mode worth handling: an account that has never signed a transaction
+has no public key on chain yet, and the query comes back empty.
 
 #### The receipt
 
@@ -482,6 +505,7 @@ go build -o /tmp/oracle ../oracle/
 /tmp/oracle response-vectors                      # ground truth, JSON
 /tmp/oracle response-vectors | python3 verify.py  # Python
 /tmp/oracle response-vectors | node verify.mjs    # Node.js
+cd ../rust && cargo run --release -- /tmp/oracle --response   # Rust
 
 # have cosmos judge YOUR digest, not your own round trip
 echo '{"digest_hex":"..","sig_hex":"..","pub_hex":".."}' | /tmp/oracle verify-receipt
