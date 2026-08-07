@@ -2,7 +2,7 @@ package relayer
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -101,7 +101,18 @@ func clientWantsReceipt(r *http.Request) bool {
 	return strings.EqualFold(r.Header.Get(receiptRequestHeader), "true")
 }
 
-// formatReceiptHeader renders the response header value: "v1.<sig_base64url>".
+// formatReceiptHeader renders the response header value: "v1.<sig_hex>".
+//
+// An HTTP header cannot carry raw bytes: a signature contains arbitrary byte
+// values, and a 0x0a in one would break header framing. Hex is the encoding
+// this repository already uses for keys, hashes and signatures on the CLI, it
+// has no padding character to explain to a verifier written in another
+// language, and every standard library has it. It costs 128 characters for a
+// 64-byte signature where base64url would cost 88 — the header is not on any
+// budget that makes 40 bytes matter.
+//
+// Lowercase is the emitted form and is pinned by a golden test. Verifiers
+// accept either case.
 func formatReceiptHeader(sig []byte) string {
-	return receiptHeaderVersion + "." + base64.URLEncoding.EncodeToString(sig)
+	return receiptHeaderVersion + "." + hex.EncodeToString(sig)
 }

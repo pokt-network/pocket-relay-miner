@@ -4,7 +4,7 @@ package relayer
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -30,13 +30,13 @@ func backendForReceiptTests(t *testing.T, body string) *httptest.Server {
 	return srv
 }
 
-// parseReceiptHeader decodes "v1.<base64url>" exactly as an external caller
+// parseReceiptHeader decodes "v1.<hex>" exactly as an external caller
 // must. It deliberately does not reach into anything the relayer knows.
 func parseReceiptHeader(t *testing.T, header string) []byte {
 	t.Helper()
 	encoded, ok := strings.CutPrefix(header, "v1.")
 	require.True(t, ok, "receipt header must carry the v1 prefix, got %q", header)
-	sig, err := base64.URLEncoding.DecodeString(encoded)
+	sig, err := hex.DecodeString(encoded)
 	require.NoError(t, err)
 	return sig
 }

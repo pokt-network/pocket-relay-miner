@@ -4,7 +4,8 @@ package relay
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
+	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
@@ -21,7 +22,7 @@ func signTestReceipt(t *testing.T, key *secp256k1.PrivKey, reqSig, payloadHash [
 	h.Write(payloadHash)
 	sig, err := key.Sign(h.Sum(nil))
 	require.NoError(t, err)
-	return "v1." + base64.URLEncoding.EncodeToString(sig)
+	return "v1." + hex.EncodeToString(sig)
 }
 
 func TestVerifyRelayReceipt_GenuinePairVerifies(t *testing.T) {
@@ -31,6 +32,22 @@ func TestVerifyRelayReceipt_GenuinePairVerifies(t *testing.T) {
 
 	header := signTestReceipt(t, key, reqSig, ph[:])
 	require.NoError(t, VerifyRelayReceipt(header, reqSig, ph[:], key.PubKey()))
+}
+
+// TestVerifyRelayReceipt_AcceptsUppercaseHex pins the tolerance deliberately.
+// The relayer always emits lowercase, but a verifier written in another
+// language may well hand back uppercase, and rejecting that would be a trap
+// with no security value.
+func TestVerifyRelayReceipt_AcceptsUppercaseHex(t *testing.T) {
+	key := secp256k1.GenPrivKey()
+	reqSig := []byte("ring-signature-bytes")
+	ph := sha256.Sum256([]byte(`{"result":"0x1"}`))
+
+	header := signTestReceipt(t, key, reqSig, ph[:])
+	upper := "v1." + strings.ToUpper(strings.TrimPrefix(header, "v1."))
+	require.NotEqual(t, header, upper, "the fixture must actually differ in case")
+
+	require.NoError(t, VerifyRelayReceipt(upper, reqSig, ph[:], key.PubKey()))
 }
 
 // TestVerifyRelayReceipt_NegativeControls is the point of the feature: a
@@ -72,8 +89,9 @@ func TestVerifyRelayReceipt_MalformedInput(t *testing.T) {
 		{name: "empty header", header: "", reqSig: reqSig, payloadHash: ph[:]},
 		{name: "unsupported version", header: "v2." + header[3:], reqSig: reqSig, payloadHash: ph[:]},
 		{name: "no version prefix", header: header[3:], reqSig: reqSig, payloadHash: ph[:]},
-		{name: "not base64url", header: "v1.!!!!", reqSig: reqSig, payloadHash: ph[:]},
-		{name: "truncated signature", header: "v1.AAAA", reqSig: reqSig, payloadHash: ph[:]},
+		{name: "not hex", header: "v1.zzzz", reqSig: reqSig, payloadHash: ph[:]},
+		{name: "odd-length hex", header: "v1.abc", reqSig: reqSig, payloadHash: ph[:]},
+		{name: "truncated signature", header: "v1.aabb", reqSig: reqSig, payloadHash: ph[:]},
 		{name: "empty request signature", header: header, reqSig: nil, payloadHash: ph[:]},
 		{name: "empty payload hash", header: header, reqSig: reqSig, payloadHash: nil},
 		{name: "nil public key", header: header, reqSig: reqSig, payloadHash: ph[:], nilPubKey: true},

@@ -2,7 +2,7 @@ package relay
 
 import (
 	"crypto/sha256"
-	"encoding/base64"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -59,9 +59,12 @@ func VerifyRelayReceipt(
 	if !ok {
 		return fmt.Errorf("unsupported receipt version: %q", headerValue)
 	}
-	sig, err := base64.URLEncoding.DecodeString(encoded)
+	// hex.DecodeString accepts either case. The relayer emits lowercase; a
+	// verifier in another language may hand back uppercase, and rejecting that
+	// would be a trap with no security value.
+	sig, err := hex.DecodeString(encoded)
 	if err != nil {
-		return fmt.Errorf("receipt is not valid base64url: %w", err)
+		return fmt.Errorf("receipt is not valid hex: %w", err)
 	}
 
 	h := sha256.New()

@@ -34,12 +34,19 @@ something of your own.
 
 ```
 request  →  Pocket-Sign-Receipt: true
-response ←  Pocket-Relay-Receipt: v1.<signature_base64url>
+response ←  Pocket-Relay-Receipt: v1.<signature_hex>
 ```
 
 `true` is the only accepted value, case-insensitive. Anything else, including
 an absent header, means no — so a caller that does not know about receipts
 costs the relayer nothing.
+
+The signature is 64 bytes, so the header value is `v1.` plus 128 hex
+characters. An HTTP header cannot carry raw bytes — a `0x0a` inside a signature
+would break header framing — so some encoding is mandatory; hex is the one this
+project already uses for keys, hashes and signatures elsewhere, and it has no
+padding character to explain. The relayer emits lowercase; verifiers accept
+either case.
 
 Supported on HTTP unary transports: `jsonrpc`, `rest`, `cometbft`, for both
 real and simulated relays. WebSocket and streaming have no per-message header,

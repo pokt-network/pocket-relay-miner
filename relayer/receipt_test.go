@@ -107,8 +107,48 @@ func TestClientWantsReceipt_NilRequest(t *testing.T) {
 	require.False(t, clientWantsReceipt(nil), "a nil request must not panic")
 }
 
+// TestFormatReceiptHeader pins the header encoding.
+//
+// Lowercase hex, no padding. Like the digest above, this is wire contract:
+// a verifier written against one encoding rejects the other outright.
 func TestFormatReceiptHeader(t *testing.T) {
 	got := formatReceiptHeader([]byte{0x00, 0x01, 0xfe, 0xff})
-	require.Equal(t, "v1.AAH-_w==", got)
+	require.Equal(t, "v1.0001feff", got)
 	require.True(t, strings.HasPrefix(got, "v1."))
+}
+
+// TestFormatReceiptHeader_IsHeaderSafe checks the property the encoding exists
+// for: a raw signature can contain any byte, including 0x0a, which would break
+// header framing. Every byte value must survive as printable ASCII.
+func TestFormatReceiptHeader_IsHeaderSafe(t *testing.T) {
+	all := make([]byte, 256)
+	for i := range all {
+		all[i] = byte(i)
+	}
+
+	got := formatReceiptHeader(all)
+
+	value := strings.TrimPrefix(got, "v1.")
+	require.Len(t, value, 512, "hex is two characters per byte")
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		require.True(t,
+			(c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'),
+			"byte %d encoded to %q, which is not lowercase hex", i, c)
+	}
+
+	decoded, err := hex.DecodeString(value)
+	require.NoError(t, err)
+	require.Equal(t, all, decoded, "the encoding must round-trip every byte value")
+}
+
+// TestFormatReceiptHeader_RealSignatureLength documents what a caller sees: a
+// 64-byte secp256k1 signature becomes 128 hex characters plus the version.
+func TestFormatReceiptHeader_RealSignatureLength(t *testing.T) {
+	priv := secp256k1.GenPrivKey()
+	sig, err := buildReceipt(&privKeySigner{privKey: priv}, []byte("sig"), make([]byte, 32))
+	require.NoError(t, err)
+
+	got := formatReceiptHeader(sig)
+	require.Len(t, got, len("v1.")+128)
 }
