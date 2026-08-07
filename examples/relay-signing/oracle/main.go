@@ -18,6 +18,8 @@
 //	oracle vectors                 # deterministic test vectors, JSON to stdout
 //	echo '{"msg_hex":..,"sig_hex":..}' | oracle verify
 //	oracle sign                    # a known-good Go signature to verify against
+//	oracle response-vectors        # a signed RelayResponse + receipt, JSON to stdout
+//	echo '{"digest_hex":..,"sig_hex":..,"pub_hex":..}' | oracle verify-receipt
 package main
 
 import (
@@ -54,6 +56,10 @@ func main() {
 		verify()
 	case "sign":
 		emitSignature()
+	case "response-vectors":
+		emitResponseVectors()
+	case "verify-receipt":
+		verifyReceiptFromStdin()
 	default:
 		usage()
 	}
@@ -66,7 +72,11 @@ func usage() {
   oracle sign       a known-good Go signature (JSON)
   oracle verify     read {"msg_hex","sig_hex"} on stdin, verify with ring-go
 
-exit code for verify: 0 accepted, 1 rejected
+  oracle response-vectors   a signed RelayResponse and receipt (JSON)
+  oracle verify-receipt     read {"digest_hex","sig_hex","pub_hex"} on stdin,
+                            verify with cosmos secp256k1
+
+exit code for verify and verify-receipt: 0 accepted, 1 rejected
 `)
 	os.Exit(2)
 }
