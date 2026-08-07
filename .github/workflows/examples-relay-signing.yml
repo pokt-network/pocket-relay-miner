@@ -72,6 +72,12 @@ jobs:
         env:
           ORACLE: /tmp/oracle
 
+      # The command the README puts in front of every reader. It is a separate
+      # entry point from the harness, so nothing else executes it -- rename a
+      # vector field and this breaks while the harness stays green.
+      - name: The documented reader path
+        run: /tmp/oracle response-vectors | node verify.mjs
+
   python:
     name: Python harness
     runs-on: ubuntu-latest
@@ -99,6 +105,12 @@ jobs:
 
       - name: Verify against the Go oracle (1500 signatures, 100% required)
         run: python3 verify_against_oracle.py --oracle /tmp/oracle
+
+      # The command the README puts in front of every reader. It is a separate
+      # entry point from the harness, so nothing else executes it -- rename a
+      # vector field and this breaks while the harness stays green.
+      - name: The documented reader path
+        run: /tmp/oracle response-vectors | python3 verify.py
 
   rust:
     name: Rust harness
