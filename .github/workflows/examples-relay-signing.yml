@@ -138,3 +138,10 @@ jobs:
       # so it needs its own step or the teeth never bite.
       - name: Negative control (the oracle must REJECT a canonical signer)
         run: cargo run --release -- /tmp/oracle --negative-control
+
+      # The return trip. The receipt binds a bLSAG signature, which is
+      # randomised, so the unit tests can only pin one captured run -- this step
+      # is the only place a FRESH response and receipt get verified, in both
+      # directions (our digest is handed back to the real cosmos verifier).
+      - name: Verify a response and receipt (both directions)
+        run: cargo run --release -- /tmp/oracle --response

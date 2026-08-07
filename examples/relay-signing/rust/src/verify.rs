@@ -548,9 +548,29 @@ pub fn verify_cosmos_secp256k1(
     let verifying_key = VerifyingKey::from_sec1_bytes(compressed_pubkey)
         .map_err(|_| VerifyError::PublicKeyInvalid)?;
 
+    // `verify_prehash`, not `verify`. `verify` would hash `message` with the
+    // curve's DigestAlgorithm -- which for secp256k1 is also SHA-256, so it
+    // would appear to work while meaning something different: it hashes once,
+    // and cosmos needs the extra layer applied to an already-hashed input. Say
+    // "this IS the ECDSA message hash" and there is nothing left to get wrong.
     verifying_key
-        .verify_prehash(&sha256(message), &signature)
+        .verify_prehash(&cosmos_ecdsa_message_hash(message), &signature)
         .map_err(|_| VerifyError::BadSignature)
+}
+
+/// The bytes raw ECDSA actually covers, given what you handed cosmos.
+///
+/// Cosmos's `secp256k1` hashes its argument internally, so this is `sha256` of
+/// it. Both callers here pass a digest, which is why the response ends up at
+/// `sha256(sha256(signable_bytes))` and the receipt at `sha256(receipt_digest)`.
+///
+/// It is public because the trap is invisible: an implementation missing this
+/// layer fails every signature with no clue as to which of the two hashes is
+/// wrong. `oracle response-vectors` publishes `response_ecdsa_message_hash_hex`
+/// and `receipt.ecdsa_message_hash_hex` so a port can assert against this value
+/// directly and bisect in one step instead of guessing.
+pub fn cosmos_ecdsa_message_hash(message: &[u8]) -> [u8; HASH_LEN] {
+    sha256(message)
 }
 
 /// Verifies the supplier operator's signature over the `RelayResponse`.
@@ -825,34 +845,43 @@ mod tests {
     const SUPPLIER_PUB_HEX: &str =
         "027bab07fac0ca93a67730cb78a32bf5fac835c1e5aed5d1eb42c2e6f22d244c18";
 
-    const RELAY_RESPONSE_HEX: &str = "0ac5010a80010a2b706f6b74316d7271743566377168387578733237636a6d397437763965373461397676646e71356a766134120b6578616d706c652d7376631a40303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030312064286e12403da5c816b726e16b3aa033f67f375b01f0e1f652d3b945eeef1bcc856da85b1c5c5b537296b8a33b33de787a86608c32b4325046d24b3c5023bb30a7938ab9ad126108c80112300a0c436f6e74656e742d5479706512200a0c436f6e74656e742d5479706512106170706c69636174696f6e2f6a736f6e1a2a7b226a736f6e727063223a22322e30222c226964223a312c22726573756c74223a22307831323334227d2220d96c9f7eb71290eecc3bd9c29bcdc862efc31dad3e9aa1f265e6e60b6d2714cd";
+    const RELAY_RESPONSE_HEX: &str = "0ac5010a80010a2b706f6b74316d7271743566377168387578733237636a6d397437763965373461397676646e71356a766134120b6578616d706c652d7376631a40303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030312064286e124028335fe99abfcb3c9a50b4805c4f9a712b87f3a5ef954398744e19bb11d961852dc133b79764dd72615f22ab4642e414c58246db0baa39567624c5a06353e045129b0108c80112300a0c436f6e74656e742d5479706512200a0c436f6e74656e742d5479706512106170706c69636174696f6e2f6a736f6e12380a0e582d4261636b656e642d4e6f646512260a0e582d4261636b656e642d4e6f646512096578616d706c652d3112096578616d706c652d321a2a7b226a736f6e727063223a22322e30222c226964223a312c22726573756c74223a22307831323334227d222017cef5e79a31043ba4e4cf79c0e1d8c183ebee74b01c8371b0c42ed678d3d31c";
 
-    const SIGNABLE_BYTES_HEX: &str = "0a83010a80010a2b706f6b74316d7271743566377168387578733237636a6d397437763965373461397676646e71356a766134120b6578616d706c652d7376631a40303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030312064286e2220d96c9f7eb71290eecc3bd9c29bcdc862efc31dad3e9aa1f265e6e60b6d2714cd";
+    const SIGNABLE_BYTES_HEX: &str = "0a83010a80010a2b706f6b74316d7271743566377168387578733237636a6d397437763965373461397676646e71356a766134120b6578616d706c652d7376631a40303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030303030312064286e222017cef5e79a31043ba4e4cf79c0e1d8c183ebee74b01c8371b0c42ed678d3d31c";
 
-    const RESPONSE_SIGNATURE_HEX: &str = "3da5c816b726e16b3aa033f67f375b01f0e1f652d3b945eeef1bcc856da85b1c5c5b537296b8a33b33de787a86608c32b4325046d24b3c5023bb30a7938ab9ad";
+    const RESPONSE_SIGNATURE_HEX: &str = "28335fe99abfcb3c9a50b4805c4f9a712b87f3a5ef954398744e19bb11d961852dc133b79764dd72615f22ab4642e414c58246db0baa39567624c5a06353e045";
 
-    const PAYLOAD_HEX: &str = "08c80112300a0c436f6e74656e742d5479706512200a0c436f6e74656e742d5479706512106170706c69636174696f6e2f6a736f6e1a2a7b226a736f6e727063223a22322e30222c226964223a312c22726573756c74223a22307831323334227d";
+    const PAYLOAD_HEX: &str = "08c80112300a0c436f6e74656e742d5479706512200a0c436f6e74656e742d5479706512106170706c69636174696f6e2f6a736f6e12380a0e582d4261636b656e642d4e6f646512260a0e582d4261636b656e642d4e6f646512096578616d706c652d3112096578616d706c652d321a2a7b226a736f6e727063223a22322e30222c226964223a312c22726573756c74223a22307831323334227d";
 
     const PAYLOAD_HASH_HEX: &str =
-        "d96c9f7eb71290eecc3bd9c29bcdc862efc31dad3e9aa1f265e6e60b6d2714cd";
+        "17cef5e79a31043ba4e4cf79c0e1d8c183ebee74b01c8371b0c42ed678d3d31c";
 
     const BODY_TEXT: &str = r#"{"jsonrpc":"2.0","id":1,"result":"0x1234"}"#;
 
+    /// `response_ecdsa_message_hash_hex`: `sha256(sha256(signable_bytes))`, the
+    /// value raw ECDSA covers once cosmos has added its own hash.
+    const RESPONSE_ECDSA_MESSAGE_HASH_HEX: &str =
+        "d814b99c260ed805227c22b96be72a3e2df6ca509f35eb1385794b6744369867";
+
     // -- one captured run of the randomised receipt half ------------------
 
-    const REQUEST_SIGNATURE_HEX: &str = "000000029591f75617830ac50fda3f50d108dcd787d6f17144ea05db53d53eec3787537502c82a2efdba0348c63e87377a0fb0d882a4fc696744aec6b6991bcbe1b23645361d60f526ef278d0fe8349a8ec0d7a81f6f71b47c4d76ef7128e7f84f5afbf8540397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc5fdcc8ac10e096a0a13e870c4a1a919dd7710223969368385b1ba09b5b4b7679d02bbbf99abdcddac27350bca272d7146187c091aacfc1c6f90819c9b6daf4fe846";
+    const REQUEST_SIGNATURE_HEX: &str = "0000000226d0aa3b1906d50dd40974e0caf6fcdd48215e93c7caaf364259c5eb7ef6f9bc02c82a2efdba0348c63e87377a0fb0d882a4fc696744aec6b6991bcbe1b2364536322d37bdd9457bc2517ccfaec1b84a99e9a47c9b304d0e3fb9809caeccaaaac10397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc553e6e84566d0b9c8f6a5fcb96e81a5f25bda97396175511a5de90c32b1b0cdb802bbbf99abdcddac27350bca272d7146187c091aacfc1c6f90819c9b6daf4fe846";
+
+    /// `receipt.ecdsa_message_hash_hex`: `sha256(receipt_digest)`.
+    const RECEIPT_ECDSA_MESSAGE_HASH_HEX: &str =
+        "f47a92c799d4b9485a16eb8955f342b9bd1b112352ba3003c2734d31eae4f561";
 
     const RECEIPT_DIGEST_HEX: &str =
-        "6a8d2461f0f928fb12eeec7faa6aeea15bce33eb8bcff4d0840c41ebefac6e0a";
+        "ffd9d89953c6736c02dc7e15a722b336f80893cce654f9d901f7c0d488f249d7";
 
-    const RECEIPT_HEADER_VALUE: &str = "v1.c8041713018ad6dc8fb62ae150c8c7336975a110d85d259758831720b764c5621bb0bf46e77d9949fd057c1f9542c8ebf9ead3a3082f221781837d35d5f4dedb";
+    const RECEIPT_HEADER_VALUE: &str = "v1.f27792ced3cdb8d4dc7ac9ff3b205ad727c2459dd59b071ec13d61b9426abcdb402af1a4b88af41386ab97ff37ac1f87834bb6f3af37ec6220816ff3b2b579cb";
 
     /// A different response's payload hash.
     const OTHER_PAYLOAD_HASH_HEX: &str =
-        "faff3e43f976fe1254d477984ae2fb02bf74429d578310815b232ced64f6280e";
+        "a72784e2e01463f9962740906fb7ef544e1b8979970cf61cf60e52d3c3e69ea6";
 
     /// A different relay's request signature.
-    const OTHER_REQUEST_SIGNATURE_HEX: &str = "000000024799988b8b02ac66d35721a428f7d00780cb9c74c9f785d6fd0a0ce5b1ce31fa02c82a2efdba0348c63e87377a0fb0d882a4fc696744aec6b6991bcbe1b23645363c9fffad48ecc2fd6d06ee1fb39155396df18c219515b65ffd2261eb8aa391eb0397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc59e8f79ce0f1698c004b3ca805dcfb6f19260efa94f7f20900e70363770e9b98202bbbf99abdcddac27350bca272d7146187c091aacfc1c6f90819c9b6daf4fe846";
+    const OTHER_REQUEST_SIGNATURE_HEX: &str = "000000024a192f1d3655fca9d5e6750e69a2184268460eb34c51a1d65df541b00d39c54b02c82a2efdba0348c63e87377a0fb0d882a4fc696744aec6b6991bcbe1b23645368d1ac164c486ed3531f9337333616acab01a60a5a84160a4e22854c584a2d3600397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc537c259678b4e36f03f6fc44ae54e86a262fe5dd242abe75fe118b512a2499a2502bbbf99abdcddac27350bca272d7146187c091aacfc1c6f90819c9b6daf4fe846";
 
     fn unhex(s: &str) -> Vec<u8> {
         hex::decode(s).expect("test vector must be hex")
@@ -922,8 +951,12 @@ mod tests {
         let signable_with_hash = unhex(SIGNABLE_BYTES_HEX);
         let payload = unhex(PAYLOAD_HEX);
         let mut expected = signable_with_hash[..signable_with_hash.len() - (2 + HASH_LEN)].to_vec();
-        expected.push(0x12);
-        expected.push(u8::try_from(payload.len()).unwrap());
+        // Tag 0x12 (field 2, wire type 2) then the length as a varint. 155 does
+        // not fit one byte, which is the point of spelling it out: 0x9b 0x01,
+        // written little-endian in 7-bit groups. Hard-coded rather than built
+        // with `write_varint`, so this test does not lean on the code it checks.
+        assert_eq!(payload.len(), 155);
+        expected.extend_from_slice(&[0x12, 0x9b, 0x01]);
         expected.extend_from_slice(&payload);
 
         assert_eq!(signable_bytes(without_hash).unwrap(), expected);
@@ -972,6 +1005,41 @@ mod tests {
     }
 
     // -- the response signature -------------------------------------------
+
+    /// Trap 3, asserted rather than inferred.
+    ///
+    /// "The signature verifies" is weak evidence for the double hash: it proves
+    /// the two layers agree end to end, not that each layer is the one cosmos
+    /// applies. The oracle publishes both intermediate values, so pin them —
+    /// then a port that has the layers wrong fails at the exact one, instead of
+    /// at "invalid signature" with two candidates and no way to choose.
+    #[test]
+    fn the_two_hash_layers_match_the_oracle() {
+        // Layer 1: what the supplier's key was handed.
+        let signable_hash = signable_bytes_hash(&response()).unwrap();
+
+        // Layer 2: what cosmos adds, and what ECDSA actually signs over.
+        assert_eq!(
+            hex::encode(cosmos_ecdsa_message_hash(&signable_hash)),
+            RESPONSE_ECDSA_MESSAGE_HASH_HEX,
+        );
+        assert_eq!(
+            hex::encode(cosmos_ecdsa_message_hash(&unhex(RECEIPT_DIGEST_HEX))),
+            RECEIPT_ECDSA_MESSAGE_HASH_HEX,
+        );
+
+        // And the layers are genuinely distinct — a port that applies only one
+        // of them would otherwise satisfy the assertions above by accident.
+        assert_ne!(
+            hex::encode(signable_hash),
+            RESPONSE_ECDSA_MESSAGE_HASH_HEX,
+            "one sha256 short",
+        );
+        assert_ne!(
+            RECEIPT_DIGEST_HEX, RECEIPT_ECDSA_MESSAGE_HASH_HEX,
+            "one sha256 short",
+        );
+    }
 
     #[test]
     fn response_signature_verifies() {
@@ -1186,7 +1254,21 @@ mod tests {
             Some(["application/json".to_owned()].as_slice()),
             "header lookup must be case-insensitive",
         );
-        assert_eq!(http.headers.len(), 1);
+        assert_eq!(http.headers.len(), 2, "the fixture carries two header keys");
+    }
+
+    /// A protobuf map entry nests the key twice and the values are `repeated`,
+    /// so a parser that stops at the first string returns `["example-1"]` and
+    /// looks right. The fixture carries a two-valued header precisely so that
+    /// shortcut fails here instead of in someone's production.
+    #[test]
+    fn a_header_with_several_values_keeps_all_of_them_in_order() {
+        let http = parse_pokt_http_response(&unhex(PAYLOAD_HEX)).unwrap();
+
+        assert_eq!(
+            http.header("X-Backend-Node"),
+            Some(["example-1".to_owned(), "example-2".to_owned()].as_slice()),
+        );
     }
 
     #[test]
