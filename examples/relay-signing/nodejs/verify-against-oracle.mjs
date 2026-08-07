@@ -1,11 +1,17 @@
 #!/usr/bin/env node
 /**
- * Test harness: sign with sign.mjs, verify with the real Go verifier.
+ * Test harness: sign with sign.mjs, verify with verify.mjs, judge both with the
+ * real Go implementations.
  *
  * Round-tripping your own sign -> your own verify proves nothing. An
  * implementation can be perfectly self-consistent and still be rejected by the
  * relayer for its entire life. So every signature here is handed to the oracle,
  * which runs the same github.com/pokt-network/ring-go the relayer runs.
+ *
+ * Steps 1-4 cover the outbound half (sign.mjs). Step 5 covers the return trip
+ * (verify.mjs): the supplier's response signature and the relay receipt, both
+ * checked against bytes the oracle produced with the real poktroll and
+ * shannon-sdk types, and both with negative controls that must FAIL.
  *
  * WHY 1500 SIGNATURES, AND WHY YOU MUST NOT LOWER IT
  * --------------------------------------------------
@@ -28,18 +34,29 @@
  *   go build -o ./oracle-bin ../oracle && ORACLE=./oracle-bin node verify-against-oracle.mjs
  *
  * Takes ~1 minute: 3000 signatures, each verified in its own oracle process.
+ * Step 5 is deterministic and adds under a second.
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
 
 import { sha3_256, sha3_512 } from '@noble/hashes/sha3.js';
+import { sha256 } from '@noble/hashes/sha2.js';
 import { secp256k1 } from '@noble/curves/secp256k1.js';
 import { bytesToHex, bytesToNumberBE, hexToBytes, randomBytes } from '@noble/curves/utils.js';
 
 import { buildRelaySignature, encodeScalar, hashToCurve, hashToScalar } from './sign.mjs';
+import {
+  RECEIPT_DOMAIN_TAG,
+  filterSignableBytes,
+  parsePoktHttpResponse,
+  parseRelayResponse,
+  parseReceiptHeader,
+  receiptDigest,
+  verifyReceipt,
+  verifyResponseSignature,
+} from './verify.mjs';
 
 const N = secp256k1.Point.Fn.ORDER;
 const TRIALS = 1500;
@@ -77,7 +94,7 @@ function oracle(args, input) {
 // the wrong one produces a well-formed signature that is always rejected, with
 // no diagnostic anywhere. These are the NIST FIPS-202 known-answer values for
 // the empty input, so this pins the choice independently of the oracle.
-console.log('\n[1/4] SHA-3 is FIPS-202, not Keccak');
+console.log('\n[1/5] SHA-3 is FIPS-202, not Keccak');
 {
   const KAT = {
     sha3_512:
@@ -102,7 +119,7 @@ console.log('\n[1/4] SHA-3 is FIPS-202, not Keccak');
 // ---------------------------------------------------------------------------
 // A signature is randomized and cannot be diffed, so when step 3 fails these
 // are what tell you WHICH primitive drifted.
-console.log('\n[2/4] Deterministic vectors from `oracle vectors`');
+console.log('\n[2/5] Deterministic vectors from `oracle vectors`');
 const vectors = JSON.parse(oracle(['vectors']).stdout);
 {
   // Guard the guard: the SHORT-reduction probe is the only vector that can
@@ -152,7 +169,7 @@ function oracleAccepts(m, sig) {
 // ---------------------------------------------------------------------------
 // Step 3: sign 1500 distinct messages; the Go verifier must accept every one.
 // ---------------------------------------------------------------------------
-console.log(`\n[3/4] ${TRIALS} distinct messages -> ring-go must accept 100%`);
+console.log(`\n[3/5] ${TRIALS} distinct messages -> ring-go must accept 100%`);
 {
   const messages = Array.from({ length: TRIALS }, () => randomBytes(32));
   const distinct = new Set(messages.map(bytesToHex)).size;
@@ -201,7 +218,7 @@ console.log(`\n[3/4] ${TRIALS} distinct messages -> ring-go must accept 100%`);
 // Sign with the canonical (right-aligning) derivation, i.e. the implementation
 // a careful person writes by instinct, and require the oracle to reject some.
 // If this passes 1500/1500 then step 3's green is meaningless.
-console.log(`\n[4/4] Negative control: ${TRIALS} signatures with a CANONICAL hashToScalar`);
+console.log(`\n[4/5] Negative control: ${TRIALS} signatures with a CANONICAL hashToScalar`);
 {
   // The natural, wrong implementation: reduce mod N and stop. No left-align.
   const canonicalHashToScalar = (input) => bytesToNumberBE(sha3_512(input)) % N;
@@ -235,9 +252,226 @@ console.log(`\n[4/4] Negative control: ${TRIALS} signatures with a CANONICAL has
 }
 
 // ---------------------------------------------------------------------------
+// Step 5: the return trip — response signature and relay receipt.
+// ---------------------------------------------------------------------------
+// Everything above proves a relay gets ACCEPTED. This proves the caller can
+// check what comes back. The vectors are built by the oracle with the real
+// poktroll and shannon-sdk types, so a disagreement here is a disagreement with
+// the relayer.
+//
+// The negative controls are half of this step and are not optional. A receipt
+// that verifies is unremarkable; what makes it worth computing is that it FAILS
+// when either input is swapped. Without the four rejections below, a verifier
+// that ignored its inputs entirely and returned true would score a clean green.
+console.log('\n[5/5] Return trip: response signature and relay receipt');
+{
+  const rv = JSON.parse(oracle(['response-vectors']).stdout);
+
+  const supplierPub = hexToBytes(rv.supplier.pub_hex);
+  const relayResponse = hexToBytes(rv.relay_response_hex);
+  const reqSig = hexToBytes(rv.receipt.request_signature_hex);
+
+  // --- the signable bytes are obtained by filtering, and must be byte-exact ---
+  const filtered = filterSignableBytes(relayResponse);
+  bytesToHex(filtered) === rv.signable_bytes_hex
+    ? pass(`filtered signable bytes are byte-exact (${filtered.length} B from ${relayResponse.length} B received)`)
+    : fail(
+        `filterSignableBytes disagrees with the oracle.\n` +
+          `        got  ${bytesToHex(filtered)}\n        want ${rv.signable_bytes_hex}\n` +
+          '        A verifier that re-encodes instead of filtering fails exactly here.',
+      );
+
+  // --- the payload is committed to only through payload_hash ---
+  const fields = parseRelayResponse(relayResponse);
+  bytesToHex(fields.payloadHash ?? new Uint8Array(0)) === rv.payload_hash_hex
+    ? pass('payload_hash read out of the received protobuf matches the oracle')
+    : fail(`payload_hash mismatch: got ${bytesToHex(fields.payloadHash ?? new Uint8Array(0))}, want ${rv.payload_hash_hex}`);
+
+  bytesToHex(sha256(fields.payload ?? new Uint8Array(0))) === rv.payload_hash_hex
+    ? pass('sha256(payload) == payload_hash — the body is bound to the signed bytes')
+    : fail('sha256(payload) != payload_hash; the body would be unauthenticated');
+
+  // --- the response signature itself ---
+  const respCheck = verifyResponseSignature(relayResponse, supplierPub);
+  respCheck.valid
+    ? pass('the supplier operator signature over the RelayResponse verifies')
+    : fail(`response signature rejected: ${respCheck.reason}`);
+
+  // Prove the double hash is doing something, rather than being an accident of
+  // a library default. cosmos signs sha256(signable_hash); verifying against
+  // the single hash must fail, and if it does not, the vectors are not what
+  // this harness thinks they are.
+  secp256k1.verify(hexToBytes(rv.response_signature_hex), respCheck.signableHash, supplierPub, {
+    prehash: false,
+    lowS: true,
+  })
+    ? fail('the response signature verified against a SINGLE sha256 — the cosmos double hash is not being exercised')
+    : pass('the same signature is rejected against a single sha256 (the cosmos double hash is real)');
+
+  // "It verified" only tells you the pair matched; it does not tell you WHICH
+  // hash you fed the curve. The oracle publishes the exact value raw ECDSA
+  // covers, so pin it. A port that had prehash and the cosmos double hash wrong
+  // in compensating directions would pass every check above and fail here.
+  bytesToHex(respCheck.ecdsaMessageHash) === rv.response_ecdsa_message_hash_hex
+    ? pass('sha256(sha256(signable_bytes)) equals the oracle\'s response_ecdsa_message_hash_hex')
+    : fail(
+        `the value we hand raw ECDSA is not the oracle's.\n` +
+          `        got  ${bytesToHex(respCheck.ecdsaMessageHash)}\n        want ${rv.response_ecdsa_message_hash_hex}`,
+      );
+
+  // --- the inner POKTHTTPResponse: the answer is two layers down ---
+  const inner = parsePoktHttpResponse(fields.payload);
+  inner.status === rv.inner_pokt_http_response.status_code
+    ? pass(`inner POKTHTTPResponse status ${inner.status}`)
+    : fail(`inner status ${inner.status}, want ${rv.inner_pokt_http_response.status_code}`);
+
+  bytesToHex(inner.body) === rv.inner_pokt_http_response.body_bz_hex
+    ? pass(`inner body_bz is the JSON-RPC answer: ${inner.bodyText}`)
+    : fail(`inner body_bz ${bytesToHex(inner.body)}, want ${rv.inner_pokt_http_response.body_bz_hex}`);
+
+  // Compare with the keys SORTED. A protobuf map has no wire order — Go emits
+  // entries in random map order unless the encoder sets Deterministic — so
+  // comparing JSON.stringify output directly would be asserting on the oracle's
+  // map iteration, and would flake the day it stops sorting.
+  const canonical = (h) =>
+    JSON.stringify(Object.fromEntries(Object.entries(h).sort(([a], [b]) => (a < b ? -1 : 1))));
+  const wantHeaders = canonical(rv.inner_pokt_http_response.headers);
+  canonical(inner.headers) === wantHeaders
+    ? pass(`inner header map decoded from ${Object.keys(inner.headers).length} protobuf map entries`)
+    : fail(`inner headers ${canonical(inner.headers)}, want ${wantHeaders}`);
+
+  // A repeated-value header is ONE map entry with a repeated `values` field,
+  // not two entries. Until the fixture carried one, a parser that kept only the
+  // last value per key passed everything. Assert it explicitly so the coverage
+  // cannot quietly disappear if the fixture is simplified again.
+  const multi = Object.entries(inner.headers).filter(([, v]) => v.length > 1);
+  multi.length > 0
+    ? pass(`repeated-value header exercised: ${multi.map(([k, v]) => `${k}=[${v.join(', ')}]`).join(' ')}`)
+    : fail(
+        'no header in the fixture carries more than one value, so multi-value parsing is untested — ' +
+          'a parser that keeps only the last value would pass this whole step',
+      );
+
+  // --- the receipt ---
+  bytesToHex(RECEIPT_DOMAIN_TAG) === rv.receipt.domain_tag_hex
+    ? pass(`domain tag is the ${RECEIPT_DOMAIN_TAG.length} bytes of "POKT-RELAY-RECEIPT-v1\\0", trailing NUL included`)
+    : fail(`domain tag ${bytesToHex(RECEIPT_DOMAIN_TAG)}, want ${rv.receipt.domain_tag_hex}`);
+
+  const { digest, preimage } = receiptDigest(reqSig, fields.payloadHash);
+  bytesToHex(preimage) === rv.receipt.preimage_hex
+    ? pass(`receipt preimage is byte-exact (${preimage.length} B: 22 tag + ${reqSig.length} sig + 32 hash)`)
+    : fail(`receipt preimage mismatch\n        got  ${bytesToHex(preimage)}\n        want ${rv.receipt.preimage_hex}`);
+
+  bytesToHex(digest) === rv.receipt.digest_hex
+    ? pass('receipt digest matches the oracle')
+    : fail(`receipt digest ${bytesToHex(digest)}, want ${rv.receipt.digest_hex}`);
+
+  const headerSig = parseReceiptHeader(rv.receipt.header_value).signature;
+  bytesToHex(headerSig) === rv.receipt.signature_hex
+    ? pass(`parsed the "${rv.receipt.header_value.slice(0, 3)}" header into 64 signature bytes`)
+    : fail(`parsed header signature ${bytesToHex(headerSig)}, want ${rv.receipt.signature_hex}`);
+
+  const good = verifyReceipt({
+    headerValue: rv.receipt.header_value,
+    requestSignature: reqSig,
+    responsePayloadHash: fields.payloadHash,
+    supplierPubKey33: supplierPub,
+  });
+  good.valid ? pass('the receipt verifies') : fail(`receipt rejected: ${good.reason}`);
+
+  // Same pin as the response side: the digest is NOT what raw ECDSA covers.
+  // Feed a bare ECDSA verifier `digest_hex` and it fails while Go swears the
+  // receipt is valid — the single most expensive way to lose a day here.
+  bytesToHex(good.ecdsaMessageHash) === rv.receipt.ecdsa_message_hash_hex
+    ? pass('sha256(receipt digest) equals the oracle\'s receipt.ecdsa_message_hash_hex')
+    : fail(
+        `the value we hand raw ECDSA for the receipt is not the oracle's.\n` +
+          `        got  ${bytesToHex(good.ecdsaMessageHash)}\n        want ${rv.receipt.ecdsa_message_hash_hex}`,
+      );
+
+  // And prove the two are genuinely different values, so the check above cannot
+  // be satisfied by a verifier that confused one for the other.
+  bytesToHex(good.digest) === rv.receipt.ecdsa_message_hash_hex
+    ? fail('digest_hex and ecdsa_message_hash_hex are the same value; the double hash is not in these vectors')
+    : pass('digest and ECDSA message hash are distinct values — feeding the wrong one WILL fail');
+
+  // --- cross-check our digest against the real cosmos verifier ---
+  // Our verifier and our digest could be wrong together and still agree. The Go
+  // side takes the digest WE computed and judges it with cosmos secp256k1.
+  const crossOk =
+    oracle(['verify-receipt'], JSON.stringify({
+      digest_hex: bytesToHex(digest),
+      sig_hex: rv.receipt.signature_hex,
+      pub_hex: rv.supplier.pub_hex,
+    })).status === 0;
+  crossOk
+    ? pass('cosmos secp256k1 (via `oracle verify-receipt`) accepts the digest WE computed')
+    : fail('the Go verifier rejected our digest — our receiptDigest disagrees with relayer/receipt.go');
+
+  // --- negative control 1: a different response ---
+  const wrongHash = verifyReceipt({
+    headerValue: rv.receipt.header_value,
+    requestSignature: reqSig,
+    responsePayloadHash: hexToBytes(rv.negative_controls.other_payload_hash_hex),
+    supplierPubKey33: supplierPub,
+  });
+  wrongHash.valid
+    ? fail('the receipt verified against a DIFFERENT response payload hash — it proves nothing about which response you got')
+    : pass('receipt REJECTED against a different response payload hash');
+
+  // --- negative control 2: a different request ---
+  const wrongReq = verifyReceipt({
+    headerValue: rv.receipt.header_value,
+    requestSignature: hexToBytes(rv.negative_controls.other_request_signature_hex),
+    responsePayloadHash: fields.payloadHash,
+    supplierPubKey33: supplierPub,
+  });
+  wrongReq.valid
+    ? fail('the receipt verified against a DIFFERENT request signature — it is not bound to your request')
+    : pass('receipt REJECTED against a different request signature');
+
+  // --- negative control 3: low-S is enforced, here and in Go ---
+  // Every (r, s) has an equally valid twin (r, N-s). Cosmos rejects the high
+  // one; a verifier that does not lets an attacker mint a second byte-string
+  // for the same authorised receipt.
+  const parsed = secp256k1.Signature.fromBytes(hexToBytes(rv.receipt.signature_hex));
+  const highS = new secp256k1.Signature(parsed.r, N - parsed.s).toBytes();
+
+  const highLocal = verifyReceipt({
+    signature: highS,
+    requestSignature: reqSig,
+    responsePayloadHash: fields.payloadHash,
+    supplierPubKey33: supplierPub,
+  });
+  highLocal.valid
+    ? fail('verify.mjs accepted a HIGH-S receipt signature; cosmos would reject it')
+    : pass(`high-S receipt REJECTED locally (${highLocal.reason})`);
+
+  const highGo =
+    oracle(['verify-receipt'], JSON.stringify({
+      digest_hex: bytesToHex(digest),
+      sig_hex: bytesToHex(highS),
+      pub_hex: rv.supplier.pub_hex,
+    })).status === 0;
+  highGo
+    ? fail('cosmos accepted the high-S signature — the malleability assumption in verify.mjs is wrong')
+    : pass('high-S receipt REJECTED by cosmos too, so verify.mjs matches the chain');
+
+  // --- negative control 4: the domain tag's trailing NUL is load-bearing ---
+  const noNul = new TextEncoder().encode('POKT-RELAY-RECEIPT-v1');
+  const strippedDigest = sha256(
+    Uint8Array.from([...noNul, ...reqSig, ...fields.payloadHash]),
+  );
+  bytesToHex(strippedDigest) === bytesToHex(digest)
+    ? fail('dropping the trailing NUL produced the same digest; the tag length is not what this harness assumes')
+    : pass('dropping the domain tag\'s trailing NUL changes the digest — the 22nd byte matters');
+}
+
+// ---------------------------------------------------------------------------
 console.log(
   failures === 0
-    ? `\nPASS — ${TRIALS} signatures accepted by ring-go, 100%. The quirk is replicated.\n`
+    ? `\nPASS — ${TRIALS} signatures accepted by ring-go, 100%. The quirk is replicated, ` +
+        'and the return trip verifies with its negative controls rejected.\n'
     : `\nFAIL — ${failures} check(s) failed.\n`,
 );
 process.exit(failures === 0 ? 0 : 1);
