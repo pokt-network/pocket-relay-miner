@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	poktclient "github.com/pokt-network/poktroll/pkg/client"
+	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 
 	"github.com/pokt-network/pocket-relay-miner/client"
@@ -159,7 +161,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	monitorWg.Add(1)
 	go func() {
 		defer monitorWg.Done()
-		invalidateSessionOnRollover(monitorCtx, logger, relayClient, blockSubscriber, tracker)
+		renewSessionOnRollover(monitorCtx, logger, relayClient, blockSubscriber, tracker, sessionRolloverTick)
 	}()
 
 	// Create metrics collector
@@ -322,25 +324,61 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	return nil
 }
 
-// invalidateSessionOnRollover watches blocks and clears the shared session
-// cache when the session boundary is crossed. Workers build their own relay
-// requests per call, so all that's needed is to ensure the next getSession()
-// in the client hits chain and returns the new session header.
-func invalidateSessionOnRollover(
+// sessionRolloverTick is how often the monitor compares the chain height
+// against the end of the session the workers are relaying against. Blocks are
+// ~10s apart, so a second is far finer than the event it watches for.
+const sessionRolloverTick = 1 * time.Second
+
+// blockHeightSource reports the most recent block seen on chain.
+// *client.BlockSubscriber satisfies it.
+type blockHeightSource interface {
+	LastBlock(ctx context.Context) poktclient.Block
+}
+
+// sessionRenewer is the slice of the relay client the rollover monitor needs.
+// *relay_client.RelayClient satisfies it.
+type sessionRenewer interface {
+	GetSessionAtHeight(ctx context.Context, serviceID string, height int64) (*sessiontypes.Session, error)
+	ReplaceCachedSession(session *sessiontypes.Session)
+}
+
+// renewSessionOnRollover watches blocks and installs the new session when the
+// chain crosses the boundary of the one the workers are relaying against.
+//
+// Sessions sit on a deterministic grid, so the session in hand already carries
+// the height at which it stops being valid: the per-block check is an integer
+// comparison and costs no query. Crossing it costs exactly one.
+//
+// It REPLACES the cached session rather than clearing it. Clearing looks
+// equivalent — the next relay would re-fetch — but it is not: that re-fetch
+// asks for the session at the current height, and the query layer serves those
+// from an entry keyed by session start height that outlives the boundary. The
+// cleared cache is refilled with the session that just expired and every
+// subsequent relay is rejected with "session expired ... (grace period
+// elapsed)". Measured: 28,455 of 36,000 relays in one 90s run.
+//
+// A failed fetch leaves the old session in place and retries on the next tick.
+// Relays against an expired session are rejected one by one; relays with no
+// session at all cannot even be built.
+func renewSessionOnRollover(
 	ctx context.Context,
 	logger logging.Logger,
-	relayClient *relay_client.RelayClient,
-	blockSubscriber *client.BlockSubscriber,
+	sessions sessionRenewer,
+	blocks blockHeightSource,
 	tracker *sessionEndTracker,
+	tick time.Duration,
 ) {
-	var lastRefreshHeight atomic.Int64
+	var lastRenewedHeight atomic.Int64
+
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(1 * time.Second):
-			currentBlock := blockSubscriber.LastBlock(ctx)
+		case <-ticker.C:
+			currentBlock := blocks.LastBlock(ctx)
 			if currentBlock == nil {
 				continue
 			}
@@ -348,37 +386,37 @@ func invalidateSessionOnRollover(
 			currentHeight := currentBlock.Height()
 			sessionEndHeight := tracker.get()
 
-			if currentHeight < sessionEndHeight+1 {
+			if currentHeight <= sessionEndHeight {
 				continue
 			}
-			if lastRefreshHeight.Load() >= currentHeight {
+			if lastRenewedHeight.Load() >= currentHeight {
 				continue
 			}
 
 			logger.Warn().
 				Int64("current_height", currentHeight).
 				Int64("session_end_height", sessionEndHeight).
-				Msg("session boundary crossed - invalidating session cache")
+				Msg("session boundary crossed - renewing session")
 
-			relayClient.ClearSessionCache()
-
-			// Prime tracker with the new session end so we don't re-fire until
-			// the NEXT rollover. We use GetSessionAtHeight to bypass the cache.
-			newSession, err := relayClient.GetSessionAtHeight(ctx, RelayServiceID, currentHeight)
+			// Fetch at an explicit height: a height-0 query is the one the
+			// query layer answers from its own cache, which is what went stale.
+			newSession, err := sessions.GetSessionAtHeight(ctx, RelayServiceID, currentHeight)
 			if err != nil {
 				logger.Error().
 					Err(err).
 					Int64("current_height", currentHeight).
-					Msg("failed to fetch new session after rollover")
+					Msg("failed to fetch new session after rollover; keeping the old one and retrying")
 				continue
 			}
+
+			sessions.ReplaceCachedSession(newSession)
 			tracker.set(newSession.Header.SessionEndBlockHeight)
-			lastRefreshHeight.Store(currentHeight)
+			lastRenewedHeight.Store(currentHeight)
 
 			logger.Info().
 				Str("new_session_id", newSession.Header.SessionId).
 				Int64("new_session_end_height", newSession.Header.SessionEndBlockHeight).
-				Msg("session cache invalidated; workers will pick up new session on next BuildRelayRequest")
+				Msg("session renewed; workers build against it from the next relay")
 		}
 	}
 }
