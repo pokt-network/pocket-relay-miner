@@ -17,6 +17,7 @@ import (
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	dleqsecp "github.com/pokt-network/go-dleq/secp256k1"
+	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	ring "github.com/pokt-network/ring-go"
@@ -39,6 +40,7 @@ type responseVectors struct {
 	RelayResponseHex string           `json:"relay_response_hex"`
 	SignableBytesHex string           `json:"signable_bytes_hex"`
 	ResponseSigHex   string           `json:"response_signature_hex"`
+	ResponseEcdsaMsg string           `json:"response_ecdsa_message_hash_hex"`
 	PayloadHex       string           `json:"payload_hex"`
 	PayloadHashHex   string           `json:"payload_hash_hex"`
 	Inner            innerResponse    `json:"inner_pokt_http_response"`
@@ -66,6 +68,7 @@ type receiptVectors struct {
 	DomainTagHex        string `json:"domain_tag_hex"`
 	PreimageHex         string `json:"preimage_hex"`
 	DigestHex           string `json:"digest_hex"`
+	EcdsaMessageHashHex string `json:"ecdsa_message_hash_hex"`
 	SignatureHex        string `json:"signature_hex"`
 	HeaderValue         string `json:"header_value"`
 }
@@ -91,8 +94,13 @@ func buildResponseVectors() responseVectors {
 	body := []byte(`{"jsonrpc":"2.0","id":1,"result":"0x1234"}`)
 	inner := &sdktypes.POKTHTTPResponse{
 		StatusCode: 200,
+		// TWO headers on purpose. With one, deterministic and non-deterministic
+		// protobuf map marshalling produce identical bytes, so a port using a
+		// non-deterministic encoder would match this vector and then diverge in
+		// production the moment a backend returns a second header.
 		Header: map[string]*sdktypes.Header{
-			"Content-Type": {Key: "Content-Type", Values: []string{"application/json"}},
+			"Content-Type":   {Key: "Content-Type", Values: []string{"application/json"}},
+			"X-Backend-Node": {Key: "X-Backend-Node", Values: []string{"example-1", "example-2"}},
 		},
 		BodyBz: body,
 	}
@@ -134,12 +142,20 @@ func buildResponseVectors() responseVectors {
 		fatal("marshal relay response: %v", err)
 	}
 
-	// The bytes the signature covers: signature cleared, and payload cleared
-	// because PayloadHash is set. A caller rebuilds this by FILTERING the
+	// The bytes the signature covers. A caller rebuilds these by FILTERING the
 	// protobuf it received, never by re-encoding it.
+	//
+	// The payload is cleared ONLY when PayloadHash is set, which is the rule
+	// poktroll applies (x/service/types/relay.go). PayloadHash exists as of
+	// v0.1.25; before it, the payload stayed in the signable bytes, and the
+	// guard is deliberate backward compatibility. Clearing unconditionally
+	// happens to give the same answer here and is wrong for a response without
+	// a payload hash.
 	signable := *resp
 	signable.Meta.SupplierOperatorSignature = nil
-	signable.Payload = nil
+	if signable.PayloadHash != nil {
+		signable.Payload = nil
+	}
 	signableBz, err := signable.Marshal()
 	if err != nil {
 		fatal("marshal signable: %v", err)
@@ -167,7 +183,10 @@ func buildResponseVectors() responseVectors {
 	if err != nil {
 		fatal("marshal other response: %v", err)
 	}
-	otherHash := sha256.Sum256(otherPayload)
+	// protocol.GetRelayHashFromBytes, not a hardcoded sha256: identical today,
+	// but the field is documented as "a different response's payload hash", and
+	// that must stay true if poktroll ever swaps the relay hasher.
+	otherHash := protocol.GetRelayHashFromBytes(otherPayload)
 
 	headers := make(map[string][]string, len(inner.Header))
 	for k, h := range inner.Header {
@@ -177,7 +196,9 @@ func buildResponseVectors() responseVectors {
 	return responseVectors{
 		Note: "What a caller receives from a relayer, and everything needed to check it. " +
 			"Built with the real poktroll and shannon-sdk types — if your port disagrees " +
-			"with these bytes it disagrees with the relayer.",
+			"with these bytes it disagrees with the relayer. Note the double hash: cosmos " +
+			"secp256k1 hashes its argument internally, so raw ECDSA covers " +
+			"sha256(sha256(signable_bytes)), published as response_ecdsa_message_hash_hex.",
 		Supplier: supplierKey{
 			PrivHex: supplierPrivHex,
 			PubHex:  hex.EncodeToString(pub.Bytes()),
@@ -186,6 +207,7 @@ func buildResponseVectors() responseVectors {
 		RelayResponseHex: hex.EncodeToString(respBz),
 		SignableBytesHex: hex.EncodeToString(signableBz),
 		ResponseSigHex:   hex.EncodeToString(respSig),
+		ResponseEcdsaMsg: hex.EncodeToString(sha256Of(signableHash[:])),
 		PayloadHex:       hex.EncodeToString(payload),
 		PayloadHashHex:   hex.EncodeToString(resp.PayloadHash),
 		Inner: innerResponse{
@@ -197,13 +219,18 @@ func buildResponseVectors() responseVectors {
 			Headers:    headers,
 		},
 		Receipt: receiptVectors{
-			Note: "digest = sha256(domain tag || request signature || response payload hash), " +
-				"signed by the supplier operator key. Returned as the Pocket-Relay-Receipt header " +
-				"when the request carried Pocket-Sign-Receipt: true.",
+			Note: "digest = sha256(domain tag || request signature || response payload hash). " +
+				"READ THIS BEFORE PORTING: cosmos secp256k1 hashes its argument again inside " +
+				"Sign and VerifySignature, so the message ECDSA actually covers is " +
+				"sha256(digest), given here as ecdsa_message_hash_hex. Feed THAT to a raw " +
+				"ECDSA verifier; feeding digest_hex fails while Go insists the receipt is valid. " +
+				"Returned as the Pocket-Relay-Receipt header when the request carried " +
+				"Pocket-Sign-Receipt: true.",
 			RequestSignatureHex: hex.EncodeToString(reqSig),
 			DomainTagHex:        hex.EncodeToString([]byte(receiptDomainTag)),
 			PreimageHex:         hex.EncodeToString(preimage),
 			DigestHex:           hex.EncodeToString(digest[:]),
+			EcdsaMessageHashHex: hex.EncodeToString(sha256Of(digest[:])),
 			SignatureHex:        hex.EncodeToString(receiptSig),
 			HeaderValue:         "v1." + hex.EncodeToString(receiptSig),
 		},
@@ -321,4 +348,12 @@ func genuineRequestSignature() []byte {
 	}
 
 	return sigBz
+}
+
+// sha256Of is the second hash cosmos applies inside Sign and VerifySignature.
+// Publishing its output is the difference between a port that verifies and a
+// port whose author spends an evening looking in the wrong place.
+func sha256Of(b []byte) []byte {
+	sum := sha256.Sum256(b)
+	return sum[:]
 }

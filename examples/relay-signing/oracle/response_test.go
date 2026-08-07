@@ -3,6 +3,7 @@ package main
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"reflect"
 	"testing"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
@@ -83,6 +84,74 @@ func TestResponseVectors_SelfConsistent(t *testing.T) {
 	if hex.EncodeToString(inner.BodyBz) != v.Inner.BodyBzHex {
 		t.Fatal("body_bz_hex does not match the inner response body")
 	}
+	if v.Inner.BodyText != string(inner.BodyBz) {
+		t.Fatal("body_text does not match the inner response body")
+	}
+
+	// response_signature_hex is published as ground truth on its own. Verifying
+	// the signature EMBEDDED in relay_response_hex does not check that the
+	// separately emitted hex is the same bytes — and a port with a correct
+	// implementation would "fix" itself to match a wrong vector.
+	if hex.EncodeToString(resp.Meta.SupplierOperatorSignature) != v.ResponseSigHex {
+		t.Fatal("response_signature_hex is not the signature inside relay_response_hex")
+	}
+
+	// The headers a caller reads back must be the headers that were signed over.
+	gotHeaders := make(map[string][]string, len(inner.Header))
+	for k, h := range inner.Header {
+		gotHeaders[k] = h.Values
+	}
+	if !reflect.DeepEqual(gotHeaders, v.Inner.Headers) {
+		t.Fatalf("headers do not match: %v != %v", v.Inner.Headers, gotHeaders)
+	}
+	if len(gotHeaders) < 2 {
+		t.Fatal("the fixture needs at least two headers or it never exercises " +
+			"deterministic protobuf map marshalling, which is the thing that " +
+			"diverges in production")
+	}
+
+	// The value raw ECDSA actually covers. Cosmos hashes its argument again
+	// inside Sign, so this second hash is what a non-Go verifier must use.
+	outer := sha256.Sum256(signableHashOf(t, &resp))
+	if hex.EncodeToString(outer[:]) != v.ResponseEcdsaMsg {
+		t.Fatal("response_ecdsa_message_hash_hex is not sha256(signable hash)")
+	}
+}
+
+// signableHashOf returns sha256 of the bytes the response signature covers.
+func signableHashOf(t *testing.T, resp *servicetypes.RelayResponse) []byte {
+	t.Helper()
+	h, err := resp.GetSignableBytesHash()
+	if err != nil {
+		t.Fatalf("signable bytes hash: %v", err)
+	}
+	return h[:]
+}
+
+// TestReceiptDomainTag_Golden pins the tag literal.
+//
+// The tag is restated here rather than imported from relayer/receipt.go, so a
+// verifier cannot inherit a producer's mistake — but restating without pinning
+// is the worst of both: the relayer could change it, this oracle would keep
+// emitting the old one, every language port would be validated against a tag
+// the relayer does not use, and CI would stay green the whole way.
+func TestReceiptDomainTag_Golden(t *testing.T) {
+	// Must track relayer/receipt.go. Changing either without the other is a
+	// breaking wire change for every external verifier.
+	const want = "POKT-RELAY-RECEIPT-v1\x00"
+
+	if receiptDomainTag != want {
+		t.Fatalf("domain tag drifted from relayer/receipt.go: %q != %q", receiptDomainTag, want)
+	}
+	if len(receiptDomainTag) != 22 {
+		t.Fatalf("domain tag must be 22 bytes, got %d", len(receiptDomainTag))
+	}
+	if receiptDomainTag[len(receiptDomainTag)-1] != 0x00 {
+		t.Fatal("domain tag must end in a NUL, which is what separates it from a marshalled protobuf")
+	}
+	if receiptDomainTag[0] != 0x50 {
+		t.Fatal("domain tag must not start with 0x0a, the first byte of a marshalled protobuf")
+	}
 }
 
 // TestReceiptVectors_VerifyAndFailControls is the point of the receipt: it must
@@ -121,6 +190,14 @@ func TestReceiptVectors_VerifyAndFailControls(t *testing.T) {
 
 	if !pub.VerifySignature(digest[:], sig) {
 		t.Fatal("the receipt does not verify against the supplier key")
+	}
+
+	// What raw ECDSA covers, which is NOT digest_hex. A port that feeds
+	// digest_hex to its verifier gets a rejection while Go says the receipt is
+	// valid, and goes looking in the wrong place.
+	outer := sha256.Sum256(digest[:])
+	if hex.EncodeToString(outer[:]) != v.Receipt.EcdsaMessageHashHex {
+		t.Fatal("ecdsa_message_hash_hex is not sha256(digest)")
 	}
 
 	// Negative controls. Without these the vectors only ever demonstrate
