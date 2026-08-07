@@ -80,6 +80,57 @@ type subscriberInfo struct {
 	callerLine int    // Line that created the subscriber
 }
 
+// cometbftServerIdleTimeout is how long a CometBFT RPC server keeps an idle
+// keep-alive connection before closing it.
+//
+// It is not configured as an idle timeout anywhere — it falls out of two
+// defaults meeting. CometBFT's RPC server sets ReadTimeout: 10s and never sets
+// IdleTimeout (cometbft/rpc/jsonrpc/server/http_server.go, DefaultConfig), and
+// net/http documents that a zero IdleTimeout means ReadTimeout is used instead
+// (net/http/server.go, Server.IdleTimeout). So 10s of silence closes the
+// connection, and the client is not told.
+const cometbftServerIdleTimeout = 10 * time.Second
+
+// rpcIdleConnTimeout is how long WE keep an idle connection to that server.
+//
+// It must stay below cometbftServerIdleTimeout, and the reason is a bug this
+// cost us. Blocks arrive slower than 10s on every network we run against
+// (~10.1s on localnet, ~60s on mainnet), so by the time a block event triggers
+// the canonical-hash query, the pooled connection has always been idle past
+// the server's limit. The server closed it; the client did not know; the POST
+// went into a dead socket and came back EOF.
+//
+// Go does not retry it, either: net/http retries a request that fails on a
+// reused connection only when the request is replayable, and a POST is
+// replayable only if it carries an Idempotency-Key header
+// (net/http/request.go, isReplayable). The CometBFT JSON-RPC client sends
+// plain POSTs. So the error surfaced, handleBlockEvent returned early, and the
+// block event was dropped for every subscriber — including the miner's cache
+// orchestrator. Then the failure emptied the pool, the next block opened a
+// fresh connection and succeeded, and that one went stale in turn: exactly
+// every other block lost, measured at 15 of 15 even-numbered heights in a
+// five-minute run on 2026-08-06.
+//
+// Retiring the connection first makes the next request dial a new one. That
+// costs one TCP handshake per block, against one dropped block event in two.
+//
+// Derived from the server's limit rather than written as a number, so the two
+// cannot drift apart silently. Half leaves room for scheduling delay and clock
+// skew between the two processes.
+const rpcIdleConnTimeout = cometbftServerIdleTimeout / 2
+
+// newRPCTransport builds the transport used for CometBFT RPC calls.
+// A nil tlsConfig leaves the default (plaintext) behaviour.
+func newRPCTransport(idleConnTimeout time.Duration, tlsConfig *tls.Config) *stdhttp.Transport {
+	transport := stdhttp.DefaultTransport.(*stdhttp.Transport).Clone()
+	transport.IdleConnTimeout = idleConnTimeout
+	if tlsConfig != nil {
+		transport.TLSClientConfig = tlsConfig
+	}
+
+	return transport
+}
+
 // BlockSubscriberConfig contains configuration for the block subscriber.
 type BlockSubscriberConfig struct {
 	// RPCEndpoint is the CometBFT RPC endpoint (e.g., "http://localhost:26657")
@@ -155,28 +206,18 @@ func NewBlockSubscriber(
 		config.QueryTimeout = defaultQueryTimeout
 	}
 
-	// Create CometBFT HTTP client with WebSocket support
-	var cometClient *http.HTTP
-	var err error
-
+	// Create the CometBFT HTTP client. Both branches go through NewWithClient
+	// so the RPC calls use our transport; the WebSocket subscription is built
+	// separately inside the CometBFT client and is unaffected by it.
+	var tlsConfig *tls.Config
 	if config.UseTLS {
-		// Create a custom HTTP client with TLS configuration for secure connections
-		// This is required for connecting to instances behind TLS
-		tlsConfig := &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		}
-
-		httpClient := &stdhttp.Client{
-			Transport: &stdhttp.Transport{
-				TLSClientConfig: tlsConfig,
-			},
-		}
-
-		// Use NewWithClient to pass a custom HTTP client with TLS support
-		cometClient, err = http.NewWithClient(config.RPCEndpoint, "/websocket", httpClient)
-	} else {
-		cometClient, err = http.New(config.RPCEndpoint, "/websocket")
+		// Required for nodes behind TLS.
+		tlsConfig = &tls.Config{MinVersion: tls.VersionTLS12}
 	}
+
+	httpClient := &stdhttp.Client{Transport: newRPCTransport(rpcIdleConnTimeout, tlsConfig)}
+
+	cometClient, err := http.NewWithClient(config.RPCEndpoint, "/websocket", httpClient)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create CometBFT client: %w", err)
 	}
