@@ -293,8 +293,12 @@ fn run_response_checks(oracle: &Path) -> ExitCode {
     let want_signable = json_hex(json, "signable_bytes_hex");
     let want_payload_hash = json_hex(json, "payload_hash_hex");
     let want_body = json_hex(json, "body_bz_hex");
+    let want_response_ecdsa_hash = json_hex(json, "response_ecdsa_message_hash_hex");
     let request_signature = json_hex(json, "request_signature_hex");
     let want_digest = json_hex(json, "digest_hex");
+    // Note the leading quote in the needle earns its keep twice over: this key
+    // is a suffix of `response_ecdsa_message_hash_hex` read just above.
+    let want_receipt_ecdsa_hash = json_hex(json, "ecdsa_message_hash_hex");
     let receipt_header = json_field(json, "header_value");
     let other_payload_hash = json_hex(json, "other_payload_hash_hex");
     let other_request_signature = json_hex(json, "other_request_signature_hex");
@@ -310,6 +314,17 @@ fn run_response_checks(oracle: &Path) -> ExitCode {
             &want_signable,
         ),
         Err(e) => checks.fail("filtered signable bytes match the oracle", &e.to_string()),
+    }
+    // Both hash layers, separately. "The signature verifies" only proves they
+    // agree end to end; these pin each one, so a port with the layers wrong
+    // learns WHICH is wrong instead of just "invalid signature".
+    match verify::signable_bytes_hash(&relay_response) {
+        Ok(hash) => checks.equal(
+            "the ECDSA message hash matches the oracle (sha256 of sha256)",
+            &verify::cosmos_ecdsa_message_hash(&hash),
+            &want_response_ecdsa_hash,
+        ),
+        Err(e) => checks.fail("the ECDSA message hash matches the oracle", &e.to_string()),
     }
     checks.accepts(
         "supplier operator signature verifies",
@@ -332,6 +347,11 @@ fn run_response_checks(oracle: &Path) -> ExitCode {
             return checks.finish();
         }
     };
+    checks.equal(
+        "the receipt's ECDSA message hash matches the oracle",
+        &verify::cosmos_ecdsa_message_hash(&digest),
+        &want_receipt_ecdsa_hash,
+    );
     checks.accepts(
         "receipt verifies",
         verify::verify_receipt(
