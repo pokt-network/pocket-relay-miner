@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -1361,8 +1362,21 @@ type cuprAtHeightCacheEntry struct {
 // var (not const) so tests can shrink it.
 var cuprAtHeightUnsupportedCooldown = time.Minute
 
-var _ client.ServiceQueryClient = (*serviceQueryClient)(nil)
-var _ ServiceDifficultyClient = (*serviceQueryClient)(nil)
+// ErrCUPRAtHeightUnavailable is returned by GetServiceComputeUnitsPerRelayAtHeight
+// while the codes.Unimplemented cooldown is armed — the at-height CUPR cannot be
+// resolved (a pre-v0.1.35 node, or an ingress/LB blip). It is deliberately an
+// ERROR, not a silently-substituted live value: each caller must decide its own
+// fallback. The relayer's compute-units provider falls back to its live service
+// cache (keep serving); the miner's claim guard fails OPEN (never terminally skip
+// a claim it cannot prove is doomed). Returning the live value with a nil error
+// would defeat both — the guard would compare a mined-at-session-start tree
+// against the LIVE cupr and skip a payable claim.
+var ErrCUPRAtHeightUnavailable = errors.New("compute units per relay at height unavailable: node does not implement the at-height query (degraded)")
+
+var (
+	_ client.ServiceQueryClient = (*serviceQueryClient)(nil)
+	_ ServiceDifficultyClient   = (*serviceQueryClient)(nil)
+)
 
 func newServiceQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *serviceQueryClient {
 	return &serviceQueryClient{
@@ -1567,15 +1581,11 @@ func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.
 		return existing.computeUnitsPerRelay, nil
 	}
 
-	// Skip the query while a previous codes.Unimplemented cooldown is still running.
-	//
-	// This check MUST stay outside serviceCacheMu: the fallback path calls
-	// GetService, which takes that same non-reentrant mutex. Holding it here would
-	// deadlock the goroutine against itself and, because every service and CUPR
-	// lookup queues behind that mutex, hang serving and mining together — strictly
-	// worse than the node outage this fallback exists to survive.
+	// Skip the query while a previous codes.Unimplemented cooldown is still running,
+	// and surface the sentinel error so each caller applies its own fallback (the
+	// relayer keeps serving from its live service cache; the miner guard fails open).
 	if time.Now().UnixNano() < c.cuprAtHeightUnsupportedUntilUnixNano.Load() {
-		return c.liveComputeUnitsPerRelay(ctx, serviceId)
+		return 0, ErrCUPRAtHeightUnavailable
 	}
 
 	queryCacheMisses.WithLabelValues("service", "cupr_at_height").Inc()
@@ -1600,9 +1610,9 @@ func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.
 				c.logger.Warn().
 					Str("service_id", serviceId).
 					Dur("retry_after", cuprAtHeightUnsupportedCooldown).
-					Msg("node does not implement ComputeUnitsPerRelayAtHeight (pre-v0.1.35); falling back to the LIVE compute units per relay. Session-start CUPR pricing is INACTIVE until the full node is upgraded; recovery will be logged")
+					Msg("node does not implement ComputeUnitsPerRelayAtHeight (pre-v0.1.35); at-height CUPR is unavailable. Callers fall back per their own policy (relayer serves live, miner guard fails open). Session-start CUPR pricing is INACTIVE until the full node is upgraded; recovery will be logged")
 			})
-			return c.liveComputeUnitsPerRelay(ctx, serviceId)
+			return 0, ErrCUPRAtHeightUnavailable
 		}
 		return 0, fmt.Errorf("failed to query compute units per relay at height %d: %w", blockHeight, err)
 	}
@@ -1633,23 +1643,6 @@ func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.
 	}
 
 	return res.ComputeUnitsPerRelay, nil
-}
-
-// liveComputeUnitsPerRelay reads the service's CURRENT compute_units_per_relay.
-// It is the degraded path for GetServiceComputeUnitsPerRelayAtHeight against a
-// node that cannot answer the at-height query, and reproduces exactly what this
-// call site read before v0.1.35 — so behaviour matches the old binary until the
-// node catches up.
-//
-// The result is deliberately NOT written to cuprAtHeightCache: it is not the
-// value at the requested height, and caching it would outlive the cooldown and
-// silently defeat the recovery path.
-func (c *serviceQueryClient) liveComputeUnitsPerRelay(ctx context.Context, serviceId string) (uint64, error) {
-	svc, err := c.GetService(ctx, serviceId)
-	if err != nil {
-		return 0, fmt.Errorf("failed to query live compute units per relay: %w", err)
-	}
-	return svc.ComputeUnitsPerRelay, nil
 }
 
 // evictOldestCUPRAtHeightEntries removes every entry at or below the median

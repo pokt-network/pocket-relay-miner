@@ -143,35 +143,39 @@ func TestGetServiceComputeUnitsPerRelayAtHeight_CacheKeyIsUnambiguous(t *testing
 	require.NotEqual(t, a, b, "distinct (service, height) pairs must not share a cache key")
 }
 
-// TestGetServiceComputeUnitsPerRelayAtHeight_UnimplementedFallsBackToLive covers a
-// pre-v0.1.35 node: the call degrades to the LIVE cupr instead of failing.
-func TestGetServiceComputeUnitsPerRelayAtHeight_UnimplementedFallsBackToLive(t *testing.T) {
+// TestGetServiceComputeUnitsPerRelayAtHeight_UnimplementedReturnsSentinel is the
+// F2 regression: while degraded, the method must return ErrCUPRAtHeightUnavailable
+// — NOT a live value with a nil error. Returning live+nil defeats the miner claim
+// guard, which then compares a mined-at-session-start tree against the live cupr
+// and terminally skips a payable claim. The degrade cooldown must still arm.
+func TestGetServiceComputeUnitsPerRelayAtHeight_UnimplementedReturnsSentinel(t *testing.T) {
 	qc, mock := newCUPRTestClients(t)
 
 	// Hook left nil -> mock server answers codes.Unimplemented (pre-v0.1.35 node).
+	// A live service IS available — the test proves it is NOT silently returned.
 	serveLiveService(mock, "develop", 99)
 
 	cupr, err := qc.Service().GetServiceComputeUnitsPerRelayAtHeight(context.Background(), "develop", 100)
-	require.NoError(t, err)
-	require.Equal(t, uint64(99), cupr, "must serve the live cupr while degraded")
+	require.ErrorIs(t, err, ErrCUPRAtHeightUnavailable, "degraded at-height query must surface the sentinel error")
+	require.Zero(t, cupr, "no live value may be returned while degraded")
 
 	require.True(t, qc.serviceClient.cuprAtHeightDegraded.Load())
 	require.Greater(t, qc.serviceClient.cuprAtHeightUnsupportedUntilUnixNano.Load(), time.Now().UnixNano(),
 		"a cooldown deadline in the future must be armed")
 }
 
-// TestGetServiceComputeUnitsPerRelayAtHeight_FallbackIsNotCached asserts the live
-// value is never written into the at-height cache. Caching it would outlive the
+// TestGetServiceComputeUnitsPerRelayAtHeight_DegradedIsNotCached asserts nothing is
+// written into the at-height cache while degraded. A cached entry would outlive the
 // cooldown and permanently defeat recovery.
-func TestGetServiceComputeUnitsPerRelayAtHeight_FallbackIsNotCached(t *testing.T) {
+func TestGetServiceComputeUnitsPerRelayAtHeight_DegradedIsNotCached(t *testing.T) {
 	qc, mock := newCUPRTestClients(t)
 	serveLiveService(mock, "develop", 99)
 
 	_, err := qc.Service().GetServiceComputeUnitsPerRelayAtHeight(context.Background(), "develop", 100)
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrCUPRAtHeightUnavailable)
 
 	_, cached := qc.serviceClient.cuprAtHeightCache.Load("develop@100")
-	require.False(t, cached, "the live fallback value must not be cached under the at-height key")
+	require.False(t, cached, "no value may be cached under the at-height key while degraded")
 	require.Zero(t, qc.serviceClient.cuprAtHeightCacheSize.Load())
 }
 
@@ -190,8 +194,8 @@ func TestGetServiceComputeUnitsPerRelayAtHeight_CooldownSkipsQuery(t *testing.T)
 	ctx := context.Background()
 	for i := 0; i < 5; i++ {
 		cupr, err := qc.Service().GetServiceComputeUnitsPerRelayAtHeight(ctx, "develop", int64(100+i))
-		require.NoError(t, err)
-		require.Equal(t, uint64(99), cupr)
+		require.ErrorIs(t, err, ErrCUPRAtHeightUnavailable)
+		require.Zero(t, cupr)
 	}
 
 	require.Equal(t, int64(1), atHeightCalls.Load(),
@@ -222,10 +226,10 @@ func TestGetServiceComputeUnitsPerRelayAtHeight_CooldownExpiresAndRecovers(t *te
 
 	ctx := context.Background()
 
-	// Degrade.
+	// Degrade: the sentinel error is surfaced, not a live value.
 	cupr, err := qc.Service().GetServiceComputeUnitsPerRelayAtHeight(ctx, "develop", 100)
-	require.NoError(t, err)
-	require.Equal(t, uint64(99), cupr)
+	require.ErrorIs(t, err, ErrCUPRAtHeightUnavailable)
+	require.Zero(t, cupr)
 	require.True(t, qc.serviceClient.cuprAtHeightDegraded.Load())
 
 	// Node is upgraded, cooldown lapses.
@@ -281,23 +285,26 @@ func TestGetServiceComputeUnitsPerRelayAtHeight_NonUnimplementedErrorPropagates(
 	}
 }
 
-// TestGetServiceComputeUnitsPerRelayAtHeight_FallbackErrorSurfaces covers the
-// double failure: the node cannot answer at-height AND the live service query
-// also fails. The caller must get an error, never a bogus zero.
-func TestGetServiceComputeUnitsPerRelayAtHeight_FallbackErrorSurfaces(t *testing.T) {
+// TestGetServiceComputeUnitsPerRelayAtHeight_DegradeDoesNotConsultLive proves the
+// degrade path no longer performs an internal live fallback: it surfaces the
+// sentinel error WITHOUT calling GetService. The live fallback now belongs to each
+// caller, not the query layer.
+func TestGetServiceComputeUnitsPerRelayAtHeight_DegradeDoesNotConsultLive(t *testing.T) {
 	qc, mock := newCUPRTestClients(t)
 
 	mock.getCUPRAtHeightFunc = func(_ context.Context, _ *servicetypes.QueryComputeUnitsPerRelayAtHeightRequest) (*servicetypes.QueryComputeUnitsPerRelayAtHeightResponse, error) {
 		return nil, status.Error(codes.Unimplemented, "unknown method")
 	}
+	var liveCalls atomic.Int64
 	mock.getServiceFunc = func(_ context.Context, _ *servicetypes.QueryGetServiceRequest) (*servicetypes.QueryGetServiceResponse, error) {
+		liveCalls.Add(1)
 		return nil, status.Error(codes.NotFound, "service not found")
 	}
 
 	cupr, err := qc.Service().GetServiceComputeUnitsPerRelayAtHeight(context.Background(), "develop", 100)
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrCUPRAtHeightUnavailable)
 	require.Zero(t, cupr)
-	require.Contains(t, err.Error(), "live compute units per relay")
+	require.Zero(t, liveCalls.Load(), "the query layer must not consult the live service during degrade")
 }
 
 // TestGetServiceComputeUnitsPerRelayAtHeight_CacheEviction asserts the cache stays

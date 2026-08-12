@@ -8,6 +8,7 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/stretchr/testify/require"
 )
 
@@ -69,6 +70,35 @@ func TestEvaluateClaimCUPRGuard_PostSessionCUPRChangeStillAllowsClaim(t *testing
 	require.Equal(t, cuprAtSessionStart, cupr)
 	require.Equal(t, sessionStartHeight, client.gotHeight, "guard must query at session START height")
 	require.Equal(t, 1, client.calls, "guard must not cache-bust; one query per claim")
+}
+
+// TestEvaluateClaimCUPRGuard_DegradedQueryFailsOpen is the F2 regression at the
+// guard boundary. While the query layer's codes.Unimplemented cooldown is armed
+// (pre-v0.1.35 node, or an ingress/LB blip), GetServiceComputeUnitsPerRelayAtHeight
+// returns ErrCUPRAtHeightUnavailable instead of a live value. The guard MUST fail
+// open on it: it cannot resolve the session-start CUPR, so it cannot prove a
+// mismatch, and terminally skipping (result.skipped has no retry) would forfeit a
+// payable session. A prior bug returned the LIVE cupr with a nil error here, which
+// the guard could not distinguish from a real at-height answer — so a session mined
+// at the old CUPR, compared against the changed live CUPR, was wrongly skipped.
+func TestEvaluateClaimCUPRGuard_DegradedQueryFailsOpen(t *testing.T) {
+	const (
+		sessionStartHeight = int64(100)
+		relays             = uint64(1783)
+		cuprAtSessionStart = uint64(100)
+	)
+
+	// Session mined entirely at the old CUPR; the at-height query is degraded.
+	client := &fakeCUPRAtHeightClient{err: query.ErrCUPRAtHeightUnavailable}
+	smstSum := relays * cuprAtSessionStart
+
+	allowed, cupr, err := evaluateClaimCUPRGuard(
+		context.Background(), client, "seda", sessionStartHeight, smstSum, relays,
+	)
+
+	require.ErrorIs(t, err, query.ErrCUPRAtHeightUnavailable)
+	require.True(t, allowed, "a degraded at-height query must fail OPEN, never skip a payable claim")
+	require.Zero(t, cupr)
 }
 
 // TestEvaluateClaimCUPRGuard_MidSessionChangeStillSkips proves the guard has not
