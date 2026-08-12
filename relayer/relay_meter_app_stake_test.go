@@ -5,6 +5,7 @@ package relayer
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"testing"
 
@@ -47,10 +48,36 @@ func (f *fakeAppClient) GetParams(_ context.Context) (*apptypes.Params, error) {
 	return nil, nil
 }
 
-type fakeSharedParamCache struct{ params *sharedtypes.Params }
+// fakeSharedParamCache serves shared params. params is the live/latest value;
+// byHeight optionally models a params epoch change so a test can prove a
+// session is evaluated under the epoch it belongs to rather than the live one.
+// gotHeights records every at-height lookup.
+type fakeSharedParamCache struct {
+	mu         sync.Mutex
+	params     *sharedtypes.Params
+	byHeight   map[int64]*sharedtypes.Params
+	gotHeights []int64
+}
 
 func (f *fakeSharedParamCache) GetLatestSharedParams(_ context.Context) (*sharedtypes.Params, error) {
 	return f.params, nil
+}
+
+func (f *fakeSharedParamCache) GetSharedParams(_ context.Context, height int64) (*sharedtypes.Params, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.gotHeights = append(f.gotHeights, height)
+	if p, ok := f.byHeight[height]; ok {
+		return p, nil
+	}
+	return f.params, nil
+}
+
+// heightsQueried returns a copy of the recorded at-height lookups.
+func (f *fakeSharedParamCache) heightsQueried() []int64 {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]int64(nil), f.gotHeights...)
 }
 
 // TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges is the

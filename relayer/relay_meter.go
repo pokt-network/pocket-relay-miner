@@ -24,6 +24,13 @@ import (
 // SharedParamCache defines the interface for accessing shared params with L1->L2->L3 caching.
 type SharedParamCache interface {
 	GetLatestSharedParams(ctx context.Context) (*sharedtypes.Params, error)
+	// GetSharedParams returns the shared params that were effective at height.
+	//
+	// Session window and pricing arithmetic must use this, not the live params: the
+	// chain evaluates a session against the params epoch it belongs to, so measuring
+	// an old-epoch session with live offsets rejects relays the chain would still
+	// have rewarded, or accepts relays past the real cutoff and serves them unpaid.
+	GetSharedParams(ctx context.Context, height int64) (*sharedtypes.Params, error)
 }
 
 // ServiceCache defines the interface for accessing service data with L1->L2->L3 caching.
@@ -141,6 +148,12 @@ type RelayMeter struct {
 	serviceCache          ServiceCache
 	serviceFactorProvider ServiceFactorProvider
 
+	// computeUnitsProvider resolves a service's CUPR at a session's start height —
+	// the same value the relay is mined with and the chain prices the claim with.
+	// Optional: when nil the meter falls back to serviceCache's live value.
+	computeUnitsProvider ServiceComputeUnitsProvider
+	computeUnitsMu       sync.RWMutex
+
 	// Local L1 cache for hot path performance
 	// This is a read-through cache; writes go to Redis first
 	localCache   map[string]*SessionMeterMeta
@@ -192,6 +205,16 @@ func NewRelayMeter(
 	}
 }
 
+// SetServiceComputeUnitsProvider wires the session-start CUPR provider so the
+// meter prices a relay with the SAME compute units the relay is mined with and
+// the chain settles it at. Without it the meter falls back to the live value,
+// which drifts from the mined weight after a mid-session CUPR change.
+func (m *RelayMeter) SetServiceComputeUnitsProvider(provider ServiceComputeUnitsProvider) {
+	m.computeUnitsMu.Lock()
+	defer m.computeUnitsMu.Unlock()
+	m.computeUnitsProvider = provider
+}
+
 // Start begins the relay meter background processes.
 func (m *RelayMeter) Start(ctx context.Context) error {
 	m.mu.Lock()
@@ -231,6 +254,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	appAddress string,
 	serviceID string,
 	supplierAddress string,
+	sessionStartHeight int64,
 	sessionEndHeight int64,
 ) (allowed bool, err error) {
 	m.mu.RLock()
@@ -241,7 +265,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	m.mu.RUnlock()
 
 	// Get relay cost first
-	relayCostUpokt, err := m.getRelayCost(ctx, serviceID)
+	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
 	if err != nil {
 		m.logger.Warn().Err(err).Str(logging.FieldServiceID, serviceID).
 			Msg("failed to get relay cost")
@@ -328,7 +352,9 @@ func (m *RelayMeter) CheckRelayHealth(ctx context.Context, serviceID string) err
 	m.mu.RUnlock()
 
 	// Proves the service is metered/configured (read-only through the cost path).
-	if _, err := m.getRelayCost(ctx, serviceID); err != nil {
+	// Height 0 = live params: this probe has no session, and it only checks that a
+	// cost is resolvable — the value is discarded and never charged.
+	if _, err := m.getRelayCost(ctx, serviceID, 0); err != nil {
 		return fmt.Errorf("relay cost unresolved for service %s: %w", serviceID, err)
 	}
 
@@ -341,13 +367,19 @@ func (m *RelayMeter) CheckRelayHealth(ctx context.Context, serviceID string) err
 }
 
 // RevertRelayConsumption reverts the stake consumption for a relay that wasn't mined.
+//
+// sessionStartHeight MUST be the same value passed to the CheckAndConsumeRelay
+// being reverted. The refund is recomputed rather than remembered, so pricing the
+// revert at a different height refunds a different amount than was charged and
+// permanently desynchronises the session's consumed counter.
 func (m *RelayMeter) RevertRelayConsumption(
 	ctx context.Context,
 	sessionID string,
 	supplierAddress string,
 	serviceID string,
+	sessionStartHeight int64,
 ) error {
-	relayCostUpokt, err := m.getRelayCost(ctx, serviceID)
+	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
 	if err != nil {
 		return nil // Can't calculate, skip revert
 	}
@@ -503,7 +535,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 		// Stale inputs — recompute maxStake, update cached meta in place.
 		oldFactor := meta.CreatedWithFactor
 		oldAppStake := meta.CreatedWithAppStake
-		newMax, newFactor, newAppStake, calcErr := m.calculateMaxStake(ctx, appAddress, serviceID)
+		newMax, newFactor, newAppStake, calcErr := m.calculateMaxStake(ctx, appAddress, serviceID, sessionEndHeight)
 		if calcErr != nil {
 			return nil, 0, fmt.Errorf("failed to recalculate max stake after input change: %w", calcErr)
 		}
@@ -530,7 +562,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	}
 
 	// Create new session meter
-	maxStakeUpokt, factorUsed, appStakeUsed, err := m.calculateMaxStake(ctx, appAddress, serviceID)
+	maxStakeUpokt, factorUsed, appStakeUsed, err := m.calculateMaxStake(ctx, appAddress, serviceID, sessionEndHeight)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to calculate max stake: %w", err)
 	}
@@ -618,7 +650,12 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddr
 // The protocol NEVER guarantees any payment amount - baseLimit is an estimate.
 // Returns (effectiveLimit, serviceFactorUsed, error).
 // serviceFactorUsed is the factor applied (0 if no factor was configured).
-func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string) (int64, float64, int64, error) {
+//
+// The window offsets driving the num_pending_sessions divisor resolve at
+// sessionEndHeight, matching poktroll's ensureRequestSessionRelayMeter: the
+// budget for a session must be computed under the params epoch that session
+// belongs to, not whatever governance moved to mid-flight.
+func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string, sessionEndHeight int64) (int64, float64, int64, error) {
 	// Get app stake via the cached application client so operator
 	// top-up/stake-down observed by the orchestrator's refresh loop is
 	// reflected without a sidecar cache going stale.
@@ -628,7 +665,7 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 	}
 
 	// Get shared params to calculate baseLimit (for comparison/warnings)
-	sharedParams, err := m.sharedParamCache.GetLatestSharedParams(ctx)
+	sharedParams, err := m.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("failed to get shared params: %w", err)
 	}
@@ -740,16 +777,26 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 }
 
 // getRelayCost calculates the cost of a single relay in uPOKT.
-// Uses cached params from Redis when available.
-func (m *RelayMeter) getRelayCost(ctx context.Context, serviceID string) (int64, error) {
+//
+// Both pricing inputs — compute_units_to_tokens_multiplier / granularity, and the
+// service's compute_units_per_relay — resolve at sessionStartHeight, matching how
+// the chain values the claim at settlement. Pricing an already-open session with
+// live params means: after a decrease, the meter under-charges and the supplier
+// serves past what the app's stake covers at the settlement rate (delivered
+// unpaid); after an increase, it over-charges and drops revenue-earning relays.
+// Both are silent.
+//
+// sessionStartHeight <= 0 falls back to live params — used only by the
+// non-mutating CheckRelayHealth probe, which has no session.
+func (m *RelayMeter) getRelayCost(ctx context.Context, serviceID string, sessionStartHeight int64) (int64, error) {
 	// Get shared params
-	sharedParams, err := m.getSharedParams(ctx)
+	sharedParams, err := m.getSharedParams(ctx, sessionStartHeight)
 	if err != nil {
 		return 0, err
 	}
 
 	// Get compute units per relay for this service
-	computeUnitsPerRelay, err := m.getServiceComputeUnits(ctx, serviceID)
+	computeUnitsPerRelay, err := m.getServiceComputeUnits(ctx, serviceID, sessionStartHeight)
 	if err != nil {
 		// Default to 1 if service not found
 		computeUnitsPerRelay = 1
@@ -802,10 +849,18 @@ func (m *RelayMeter) getAppStake(ctx context.Context, appAddress string) (int64,
 	return stake.Amount.Int64(), nil
 }
 
-// getSharedParams gets shared params using L1 -> L2 -> L3 cache.
-func (m *RelayMeter) getSharedParams(ctx context.Context) (*CachedSharedParams, error) {
-	// Use shared param cache (L1 -> L2 -> L3)
-	params, err := m.sharedParamCache.GetLatestSharedParams(ctx)
+// getSharedParams gets the shared params effective at height, using the
+// L1 -> L2 -> L3 cache. height <= 0 resolves the latest params.
+func (m *RelayMeter) getSharedParams(ctx context.Context, height int64) (*CachedSharedParams, error) {
+	var (
+		params *sharedtypes.Params
+		err    error
+	)
+	if height > 0 {
+		params, err = m.sharedParamCache.GetSharedParams(ctx, height)
+	} else {
+		params, err = m.sharedParamCache.GetLatestSharedParams(ctx)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("failed to get shared params: %w", err)
 	}
@@ -852,8 +907,20 @@ func (m *RelayMeter) getApplicationParams(ctx context.Context) (*apptypes.Params
 	return params, nil
 }
 
-// getServiceComputeUnits gets compute units per relay for a service using L1 -> L2 -> L3 cache.
-func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID string) (uint64, error) {
+// getServiceComputeUnits gets the compute units per relay effective at
+// sessionStartHeight, so the meter charges what the relay is actually mined and
+// settled at. Falls back to the live L1 -> L2 -> L3 service cache when no
+// provider is wired or no session height is available.
+func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID string, sessionStartHeight int64) (uint64, error) {
+	m.computeUnitsMu.RLock()
+	provider := m.computeUnitsProvider
+	m.computeUnitsMu.RUnlock()
+
+	if provider != nil && sessionStartHeight > 0 {
+		// The provider already floors to 1 and degrades to the live value on error.
+		return provider.GetServiceComputeUnits(ctx, serviceID, sessionStartHeight), nil
+	}
+
 	// Defensive nil-check: the meter is sometimes constructed without a
 	// service cache (tests, minimal bootstraps). Fall back to the same
 	// default (1 CU) the "service not found" branch uses instead of

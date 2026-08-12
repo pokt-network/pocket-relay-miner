@@ -86,18 +86,19 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 	supplierA := "pokt1supplier_a"
 	supplierB := "pokt1supplier_b"
 	serviceID := "svc-x"
+	sessionStartHeight := int64(91)
 	sessionEndHeight := int64(100)
 
 	// Supplier A consumes up to its cap. Every call within the cap must
 	// return allowed=true.
 	for i := int64(0); i < perSupplierCap; i++ {
-		allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierA, sessionEndHeight)
+		allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierA, sessionStartHeight, sessionEndHeight)
 		require.NoError(t, err, "unexpected error at supplier A relay #%d", i+1)
 		require.True(t, allowed, "supplier A relay #%d must be within cap (cap=%d)", i+1, perSupplierCap)
 	}
 
 	// One more relay on A MUST be rejected — cap exhausted.
-	allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierA, sessionEndHeight)
+	allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierA, sessionStartHeight, sessionEndHeight)
 	require.NoError(t, err)
 	require.False(t, allowed, "supplier A must be rejected after %d relays (at cap)", perSupplierCap)
 
@@ -119,7 +120,7 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 	// must be allowed. With the pre-fix shared-counter schema, this call
 	// would see consumed=perSupplierCap and return false. With the
 	// per-(session, supplier) schema, B starts at zero.
-	allowed, err = meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierB, sessionEndHeight)
+	allowed, err = meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierB, sessionStartHeight, sessionEndHeight)
 	require.NoError(t, err)
 	require.True(t, allowed,
 		"supplier B's first relay on the shared session must be allowed — "+
@@ -128,13 +129,13 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 	// B must be allowed up to ITS OWN cap (perSupplierCap - 1 more after
 	// the first call above).
 	for i := int64(1); i < perSupplierCap; i++ {
-		allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierB, sessionEndHeight)
+		allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierB, sessionStartHeight, sessionEndHeight)
 		require.NoError(t, err)
 		require.True(t, allowed, "supplier B relay #%d must be within its own cap", i+1)
 	}
 
 	// B's (cap+1)th call must be rejected — B hit its own cap, NOT A's.
-	allowed, err = meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierB, sessionEndHeight)
+	allowed, err = meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierB, sessionStartHeight, sessionEndHeight)
 	require.NoError(t, err)
 	require.False(t, allowed, "supplier B must be rejected after consuming its own per-supplier cap")
 
@@ -191,7 +192,7 @@ func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
 
 	// Prime both meters with a relay each so both keys exist in Redis.
 	for _, sup := range []string{supplierA, supplierB} {
-		allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, "pokt1app_shared", serviceID, sup, 100)
+		allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, "pokt1app_shared", serviceID, sup, 91, 100)
 		require.NoError(t, err)
 		require.True(t, allowed)
 	}

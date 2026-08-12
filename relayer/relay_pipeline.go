@@ -150,6 +150,7 @@ func (p *RelayPipeline) MeterRelay(
 	sessionID := sessionHeader.SessionId
 	appAddress := sessionHeader.ApplicationAddress
 	supplierAddress := relayCtx.SupplierAddress
+	sessionStartHeight := sessionHeader.SessionStartBlockHeight
 	sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 	// Check and consume relay stake
@@ -159,6 +160,7 @@ func (p *RelayPipeline) MeterRelay(
 		appAddress,
 		relayCtx.ServiceID,
 		supplierAddress,
+		sessionStartHeight,
 		sessionEndHeight,
 	)
 

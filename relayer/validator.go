@@ -10,6 +10,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/poktroll/pkg/crypto"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
+	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -140,13 +141,24 @@ func (rv *relayValidator) ValidateRelayRequest(
 		Str(logging.FieldSessionID, sessionHeader.GetSessionId()).
 		Msg("validation timing breakdown")
 
-	// Verify session ID matches
-	if session.SessionId != sessionHeader.GetSessionId() {
-		return fmt.Errorf(
-			"session ID mismatch, expected: %s, got: %s",
-			session.SessionId,
-			sessionHeader.GetSessionId(),
-		)
+	// Verify the client-supplied session header matches the on-chain one FIELD BY
+	// FIELD, not just by session ID.
+	//
+	// service_id and application_address drive the lookup above, but
+	// session_start_block_height and session_end_block_height are client-supplied and
+	// were previously unverified. Because getTargetSessionBlockHeight returns the
+	// CLAIMED start height for an active session, a client could supply any height
+	// inside the real session's range, pass the ID check, and have the forged height
+	// flow into the difficulty target and MinedRelayMessage.SessionStartHeight — and,
+	// from v0.1.35, into the CUPR the chain prices the claim with.
+	//
+	// At proof time the chain re-compares the sampled relay's header against the
+	// claim's (x/proof compareSessionHeaders). A forged relay sampled from the tree
+	// yields ErrProofInvalidRelay -> invalid proof -> the supplier is SLASHED.
+	//
+	// Costs no extra query: the on-chain session is already fetched above.
+	if err := compareSessionHeaders(session.GetHeader(), sessionHeader); err != nil {
+		return err
 	}
 
 	// Verify supplier is in session
@@ -182,6 +194,63 @@ func (rv *relayValidator) ValidateRelayRequest(
 	return nil
 }
 
+// compareSessionHeaders verifies every field of a client-supplied session header
+// against the on-chain session's header. Ported from poktroll's
+// pkg/relayer/relay_authenticator/relay_verifier.go so this relayer rejects a
+// forged header at ingest rather than mining it into the tree, where it becomes a
+// slashable invalid relay at proof time.
+//
+// The session ID is compared last: it has a dedicated check upstream carrying an
+// operator-facing "is your full node in sync" hint, so a mismatch there is
+// expected to be caught before reaching this function.
+func compareSessionHeaders(onchainSessionHeader, requestSessionHeader *sessiontypes.SessionHeader) error {
+	if onchainSessionHeader == nil {
+		return fmt.Errorf("onchain session header is nil")
+	}
+
+	if requestSessionHeader.GetApplicationAddress() != onchainSessionHeader.GetApplicationAddress() {
+		return fmt.Errorf(
+			"session header application address mismatch, expecting: %q, got: %q",
+			onchainSessionHeader.GetApplicationAddress(),
+			requestSessionHeader.GetApplicationAddress(),
+		)
+	}
+
+	if requestSessionHeader.GetServiceId() != onchainSessionHeader.GetServiceId() {
+		return fmt.Errorf(
+			"session header service ID mismatch, expecting: %q, got: %q",
+			onchainSessionHeader.GetServiceId(),
+			requestSessionHeader.GetServiceId(),
+		)
+	}
+
+	if requestSessionHeader.GetSessionStartBlockHeight() != onchainSessionHeader.GetSessionStartBlockHeight() {
+		return fmt.Errorf(
+			"session header session start height mismatch, expecting: %d, got: %d",
+			onchainSessionHeader.GetSessionStartBlockHeight(),
+			requestSessionHeader.GetSessionStartBlockHeight(),
+		)
+	}
+
+	if requestSessionHeader.GetSessionEndBlockHeight() != onchainSessionHeader.GetSessionEndBlockHeight() {
+		return fmt.Errorf(
+			"session header session end height mismatch, expecting: %d, got: %d",
+			onchainSessionHeader.GetSessionEndBlockHeight(),
+			requestSessionHeader.GetSessionEndBlockHeight(),
+		)
+	}
+
+	if requestSessionHeader.GetSessionId() != onchainSessionHeader.GetSessionId() {
+		return fmt.Errorf(
+			"session ID mismatch, expected: %s, got: %s",
+			onchainSessionHeader.GetSessionId(),
+			requestSessionHeader.GetSessionId(),
+		)
+	}
+
+	return nil
+}
+
 // CheckRewardEligibility checks if a relay is still eligible for rewards.
 // Returns nil if eligible, or an error if the relay is past the acceptance deadline.
 //
@@ -198,15 +267,21 @@ func (rv *relayValidator) CheckRewardEligibility(
 		return nil
 	}
 
-	sharedParams, err := rv.sharedParamCache.GetLatestSharedParams(ctx)
-	if err != nil {
-		return fmt.Errorf("failed to get shared params: %w", err)
-	}
-
 	sessionStartHeight := relayRequest.Meta.SessionHeader.GetSessionStartBlockHeight()
 	sessionEndHeight := relayRequest.Meta.SessionHeader.GetSessionEndBlockHeight()
 	serviceID := relayRequest.Meta.SessionHeader.GetServiceId()
 	applicationAddress := relayRequest.Meta.SessionHeader.GetApplicationAddress()
+
+	// Resolve the window under the params epoch effective at THIS session's end
+	// height, matching x/proof's claim-window validation. Measuring an old-epoch
+	// session against live offsets rejects relays the chain would still have
+	// rewarded after governance shortens grace_period_end_offset_blocks, and
+	// accepts relays past the chain's real cutoff — served unpaid — after it
+	// lengthens. Mirrors poktroll's CheckRelayRewardEligibility.
+	sharedParams, err := rv.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
+	if err != nil {
+		return fmt.Errorf("failed to get shared params: %w", err)
+	}
 
 	gracePeriodEndOffset := int64(sharedParams.GetGracePeriodEndOffsetBlocks())
 
@@ -291,8 +366,14 @@ func (rv *relayValidator) getTargetSessionBlockHeight(
 		return sessionStartHeight, nil
 	}
 
-	// Session has ended, check grace period
-	sharedParams, err := rv.sharedParamCache.GetLatestSharedParams(ctx)
+	// Session has ended, check grace period.
+	//
+	// grace_period_end_offset_blocks is session TIMING, so it resolves at the
+	// session END height, mirroring the chain (x/session's hydrator and x/proof
+	// both resolve it at-height) and poktroll's getTargetSessionBlockHeight.
+	// Reading live params here disagrees with CheckRewardEligibility above the
+	// moment governance moves the offset.
+	sharedParams, err := rv.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get shared params: %w", err)
 	}

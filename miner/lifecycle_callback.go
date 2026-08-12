@@ -852,38 +852,40 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 				// Phase 3.5: CUPR consistency guard. poktroll validates
 				// num_claimed_compute_units == num_relays * service.ComputeUnitsPerRelay
-				// using the LATEST CUPR (claim-create and settlement). If the service's
-				// CUPR changed while/after this session was mined, the SMST sum no longer
-				// matches and the claim is rejected (and retried every block). Skip it
-				// terminally. Fail OPEN on query error — never drop a claim we cannot
-				// prove is doomed.
-				if lc.serviceClient != nil {
-					// Force a fresh read: claim-build is low-frequency and the chain
-					// validates against the LATEST CUPR, so the guard must never trust a
-					// cached value. InvalidateService drops the query layer's entry so the
-					// GetService below hits the chain.
-					if inv, ok := lc.serviceClient.(interface{ InvalidateService(string) }); ok {
-						inv.InvalidateService(snap.ServiceID)
-					}
-					if svc, svcErr := lc.serviceClient.GetService(ctx, snap.ServiceID); svcErr != nil {
-						logger.Debug().Err(svcErr).
-							Str(logging.FieldSessionID, snap.SessionID).
-							Msg("CUPR guard: failed to query current service CUPR, allowing claim")
-					} else if cupr := svc.GetComputeUnitsPerRelay(); !isClaimCUPRConsistent(smstSum, smstCount, cupr) {
-						logger.Warn().
-							Str(logging.FieldSessionID, snap.SessionID).
-							Str(logging.FieldServiceID, snap.ServiceID).
-							Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
-							Uint64("smst_compute_units", smstSum).
-							Uint64("smst_relay_count", smstCount).
-							Uint64("current_compute_units_per_relay", cupr).
-							Uint64("expected_compute_units", smstCount*cupr).
-							Msg("SKIP CUPR MISMATCH: SMST sum != relays * current CUPR (service CUPR changed); claim would be rejected on-chain")
-						result.skipped = true
-						result.skipReason = "cupr_mismatch"
-						results <- result
-						return
-					}
+				// at claim-create (x/proof) and again at settlement (x/tokenomics),
+				// resolving CUPR at the session's START height. Compare against that
+				// same height: a service owner who changes CUPR after this session
+				// ended does not affect what the chain will accept, so reading the
+				// LIVE value here would terminally skip a claim the chain would have
+				// paid. Skip only on a real mismatch, and fail OPEN on query error —
+				// never drop a claim we cannot prove is doomed.
+				//
+				// No cache-busting: CUPR at a past height is immutable, so the query
+				// layer's per-(service, height) entry is always correct.
+				cuprAllowed, guardCUPR, guardErr := evaluateClaimCUPRGuard(
+					ctx, lc.serviceClient, snap.ServiceID, snap.SessionStartHeight, smstSum, smstCount,
+				)
+				switch {
+				case guardErr != nil:
+					logger.Debug().Err(guardErr).
+						Str(logging.FieldSessionID, snap.SessionID).
+						Int64("session_start_height", snap.SessionStartHeight).
+						Msg("CUPR guard: failed to query session-start service CUPR, allowing claim")
+				case !cuprAllowed:
+					logger.Warn().
+						Str(logging.FieldSessionID, snap.SessionID).
+						Str(logging.FieldServiceID, snap.ServiceID).
+						Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+						Int64("session_start_height", snap.SessionStartHeight).
+						Uint64("smst_compute_units", smstSum).
+						Uint64("smst_relay_count", smstCount).
+						Uint64("session_start_compute_units_per_relay", guardCUPR).
+						Uint64("expected_compute_units", smstCount*guardCUPR).
+						Msg("SKIP CUPR MISMATCH: SMST sum != relays * session-start CUPR (relays mined at a different CUPR); claim would be rejected on-chain")
+					result.skipped = true
+					result.skipReason = "cupr_mismatch"
+					results <- result
+					return
 				}
 
 				// Phase 4: Economic viability using the SMST root hash.

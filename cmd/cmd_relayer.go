@@ -904,13 +904,16 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			difficultyProvider := relayer.NewQueryDifficultyProvider(logger, difficultyProviderAdapter)
 			relayProcessor.SetDifficultyProvider(difficultyProvider)
 
-			// Wire the service compute units provider to the SAME orchestrator-refreshed
-			// serviceCache the RelayMeter uses (L1->L2->L3 + pub/sub invalidation). The
-			// mined ComputeUnitsPerRelay becomes the SMST leaf weight, so it MUST track
-			// on-chain CUPR changes; the previous sync.Map provider froze it at startup.
-			relayProcessor.SetServiceComputeUnitsProvider(
-				relayer.NewServiceCacheComputeUnitsProvider(logger, serviceCache),
-			)
+			// Wire the service compute units provider to the height-aware query client:
+			// the mined ComputeUnitsPerRelay becomes the SMST leaf weight, and the chain
+			// resolves CUPR at SESSION START when validating the claim and settling it.
+			// The orchestrator-refreshed serviceCache stays wired as the fallback for
+			// relays that carry no session start height.
+			// Shared with the relay meter below: the meter MUST price a relay with the
+			// same compute units the relay is mined with, or the supplier is billed
+			// against one number and paid against another.
+			computeUnitsProvider := relayer.NewServiceCacheComputeUnitsProvider(logger, serviceCache, queryClients.Service())
+			relayProcessor.SetServiceComputeUnitsProvider(computeUnitsProvider)
 
 			// NOTE: App discovery callbacks are no longer needed on the relayer.
 			// Discovery happens on the miner side: the supplier worker SAdds apps/
@@ -965,6 +968,10 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 					serviceFactorClient, // Reads service factors from Redis (published by miner)
 					relayMeterConfig,
 				)
+
+				// Price relays at the session-start CUPR, matching what the relay
+				// processor stamps into the SMST and what the chain settles against.
+				relayMeter.SetServiceComputeUnitsProvider(computeUnitsProvider)
 
 				if err := relayMeter.Start(ctx); err != nil {
 					return fmt.Errorf("failed to start relay meter: %w", err)

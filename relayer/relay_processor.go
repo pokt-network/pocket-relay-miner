@@ -47,8 +47,16 @@ type DifficultyProvider interface {
 
 // ServiceComputeUnitsProvider provides compute units per relay for services.
 type ServiceComputeUnitsProvider interface {
-	// GetServiceComputeUnits returns the compute units per relay for a service.
-	GetServiceComputeUnits(serviceID string) uint64
+	// GetServiceComputeUnits returns the compute units per relay that was effective
+	// for a service at sessionStartHeight.
+	//
+	// The height is NOT optional. This value becomes the SMST leaf weight, and from
+	// poktroll v0.1.35 the chain resolves CUPR at session start when it validates the
+	// claim (x/proof) and again at settlement (x/tokenomics). Reading the LIVE value
+	// instead lets a mid-session CUPR change split one session's tree into two
+	// weights, so smstSum != numRelays * cupr and MsgCreateClaim is rejected with
+	// ErrProofComputeUnitsMismatch — forfeiting the session.
+	GetServiceComputeUnits(ctx context.Context, serviceID string, sessionStartHeight int64) uint64
 }
 
 // RelaySignerKeyring provides relay signing capabilities.
@@ -186,7 +194,7 @@ func (rp *relayProcessor) ProcessRelay(
 	msg := &transport.MinedRelayMessage{
 		RelayHash:               relayHash[:],
 		RelayBytes:              relayBz,
-		ComputeUnitsPerRelay:    rp.getComputeUnits(serviceID),
+		ComputeUnitsPerRelay:    rp.getComputeUnits(ctx, serviceID, sessionStartHeight),
 		SessionId:               sessionID,
 		SessionStartHeight:      sessionStartHeight,
 		SessionEndHeight:        sessionEndHeight,
@@ -264,9 +272,10 @@ func (rp *relayProcessor) GetServiceDifficulty(ctx context.Context, serviceID st
 	return provider.GetTargetHash(ctx, serviceID, sessionStartHeight)
 }
 
-// getComputeUnits returns the compute units per relay for a service.
+// getComputeUnits returns the compute units per relay that was effective for a
+// service at sessionStartHeight — the value the chain validates the claim against.
 // Uses the configured provider, or falls back to 1 if not available.
-func (rp *relayProcessor) getComputeUnits(serviceID string) uint64 {
+func (rp *relayProcessor) getComputeUnits(ctx context.Context, serviceID string, sessionStartHeight int64) uint64 {
 	rp.mu.RLock()
 	provider := rp.serviceComputeUnitsProvider
 	rp.mu.RUnlock()
@@ -276,7 +285,7 @@ func (rp *relayProcessor) getComputeUnits(serviceID string) uint64 {
 		return 1
 	}
 
-	return provider.GetServiceComputeUnits(serviceID)
+	return provider.GetServiceComputeUnits(ctx, serviceID, sessionStartHeight)
 }
 
 // BaseDifficultyProvider always returns the base difficulty (all relays applicable).
