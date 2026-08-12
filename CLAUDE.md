@@ -86,7 +86,7 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
 
 **Pocket RelayMiner (HA)** is a production-grade, horizontally scalable relay mining service for Pocket Network with full multi-transport support.
 
-- **Language**: Go 1.26.4 (see `go.mod`; CI builds with the same)
+- **Language**: Go 1.26.5 (see `go.mod`; CI builds with the same)
 - **Architecture**: Distributed microservices with Redis-backed state
 - **Transports**: JSON-RPC (HTTP), WebSocket, gRPC, REST/Streaming (SSE)
 - **Performance Target**: 1000+ RPS per relayer replica
