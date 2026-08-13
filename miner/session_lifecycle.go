@@ -620,7 +620,22 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		if p, ok := paramsByEndHeight[sessionEndHeight]; ok {
 			return p
 		}
-		p, err := m.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+		// An ACTIVE session's end height is in the FUTURE. An at-height read there
+		// resolves against the live grid anyway (poktroll GetParamsAtHeight walks
+		// back to the newest entry <= the height), so it returns today's value —
+		// but caches it under a future-height key, where the query layer treats it
+		// as immutable and masks a later governance change until the TTL lapses.
+		// Read live while the session is still running; switch to the immutable
+		// at-height read once its end height is in the past.
+		var (
+			p   *sharedtypes.Params
+			err error
+		)
+		if currentHeight <= 0 || sessionEndHeight >= currentHeight {
+			p, err = m.sharedClient.GetParams(ctx)
+		} else {
+			p, err = m.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+		}
 		if err != nil {
 			// Cache the failure to avoid a retry storm within this pass. Callers fail
 			// open (pre-filter) / fail safe (determineTransition) on a nil result.

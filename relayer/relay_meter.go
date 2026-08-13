@@ -674,8 +674,12 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 	// an at-height query there would only pin today's value under a future cache
 	// key. Read live params directly for active sessions; use the immutable
 	// at-height value once the session has ended (a past height).
+	//
+	// currentHeight <= 0 means no block has been observed yet (boot window): the
+	// session cannot be PROVEN to have ended, so read live — the same choice
+	// CheckRewardEligibility makes, and the two must not disagree.
 	var sharedParams *sharedtypes.Params
-	if currentHeight > 0 && sessionEndHeight >= currentHeight {
+	if currentHeight <= 0 || sessionEndHeight >= currentHeight {
 		sharedParams, err = m.sharedParamCache.GetLatestSharedParams(ctx)
 	} else {
 		sharedParams, err = m.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
