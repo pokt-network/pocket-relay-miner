@@ -81,8 +81,10 @@ func (p *serviceCacheComputeUnitsProvider) GetServiceComputeUnits(
 	if err != nil {
 		// Hot path: keep this at Debug. Fall back to the refreshed cache rather than
 		// dropping the relay — a wrong weight costs one session, a dropped relay is
-		// certain loss. The query layer already degrades a pre-v0.1.35 node to the
-		// live value internally, so reaching here means a real query failure.
+		// certain loss. This branch covers BOTH a real query failure and
+		// query.ErrCUPRAtHeightUnavailable (the pre-v0.1.35 / degraded-node cooldown,
+		// which surfaces as an error precisely so each caller picks its own fallback:
+		// serve live here, fail open in the miner's claim guard).
 		p.logger.Debug().
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
