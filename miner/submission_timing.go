@@ -280,11 +280,12 @@ func (c *SubmissionTimingCalculator) WaitForEarliestSubmit(
 // no diagnostic. blockClient here exposes only LastBlock, so the correct hash is
 // not obtainable at all on this path.
 //
-// Callers therefore pass a nil window-open hash, which is exactly what the chain
-// now expects: as of poktroll v0.1.35 both GetEarliestSupplierClaimCommitHeight
-// and GetEarliestSupplierProofCommitHeight ignore the hash and return the plain
-// window-open height (x/shared/types/session.go — the seeding is commented out).
-// query/query.go:487,516 already pass nil for the same reason.
+// Callers therefore pass a nil window-open hash, which is what the chain expects:
+// both GetEarliestSupplierClaimCommitHeight and GetEarliestSupplierProofCommitHeight
+// ignore the hash and return the plain window-open height — the hash seeding is
+// commented out in x/shared/types/session.go (verified identical in poktroll v0.1.34
+// and v0.1.35, so this is not a v0.1.35 change). query/query.go:487,516 already pass
+// nil for the same reason.
 func (c *SubmissionTimingCalculator) waitForBlockHeight(
 	ctx context.Context,
 	targetHeight int64,

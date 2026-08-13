@@ -200,9 +200,10 @@ func (rv *relayValidator) ValidateRelayRequest(
 // forged header at ingest rather than mining it into the tree, where it becomes a
 // slashable invalid relay at proof time.
 //
-// The session ID is compared last: it has a dedicated check upstream carrying an
-// operator-facing "is your full node in sync" hint, so a mismatch there is
-// expected to be caught before reaching this function.
+// The session ID is compared last, and it is the ONLY session-ID equality check
+// in this relayer — unlike poktroll's relay_authenticator (the source of this
+// port), there is no separate upstream "is your full node in sync" check here, so
+// this comparison must not be removed on the assumption that one exists.
 func compareSessionHeaders(onchainSessionHeader, requestSessionHeader *sessiontypes.SessionHeader) error {
 	if onchainSessionHeader == nil {
 		return fmt.Errorf("onchain session header is nil")
