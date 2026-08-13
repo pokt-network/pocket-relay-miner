@@ -107,6 +107,35 @@ func (rv *relayValidator) ValidateRelayRequest(
 		return fmt.Errorf("supplier %s is not allowed by this relayer", supplierAddr)
 	}
 
+	// Cheap, query-free bound on the client-supplied session heights BEFORE the
+	// first at-height chain read.
+	//
+	// getTargetSessionBlockHeight (immediately below) resolves shared params at the
+	// client's session END height on the grace-period branch, and that happens
+	// BEFORE the ring signature is verified further down. Every transport reaches
+	// this function — HTTP re-checks earlier still, ahead of its eager meter
+	// (proxy.go handleRelay), but gRPC (relay_grpc_service.go) and WebSocket
+	// (websocket.go) only pass through here — so the bound belongs here too, or
+	// those two transports keep the pre-signature amplification surface.
+	//
+	// rv.GetCurrentBlockHeight() rather than a caller-supplied arrival height: the
+	// WebSocket bridge pins its arrival height at connection setup and never
+	// refreshes it, so a long-lived connection would drift out of the band.
+	if sessionHeader != nil {
+		if !sessionHeightsPlausible(
+			sessionHeader.GetSessionStartBlockHeight(),
+			sessionHeader.GetSessionEndBlockHeight(),
+			rv.GetCurrentBlockHeight(),
+		) {
+			return fmt.Errorf(
+				"implausible session heights: start %d, end %d (current height %d)",
+				sessionHeader.GetSessionStartBlockHeight(),
+				sessionHeader.GetSessionEndBlockHeight(),
+				rv.GetCurrentBlockHeight(),
+			)
+		}
+	}
+
 	// Get target session block height
 	step2 := time.Now()
 	sessionBlockHeight, err := rv.getTargetSessionBlockHeight(ctx, relayRequest)

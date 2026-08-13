@@ -36,6 +36,12 @@ const (
 func sessionHeightsPlausible(startHeight, endHeight, arrivalHeight int64) bool {
 	// Basic structural sanity (also enforced by ValidateBasic, but that runs
 	// AFTER the eager meter, so re-check it here on the pre-meter path).
+	//
+	// Both comparisons mirror poktroll's SessionHeader.ValidateBasic
+	// (x/session/types/session_header.go): start must be >= 1 and end must be
+	// STRICTLY greater than start. Keep them identical — a header this function
+	// admits but ValidateBasic rejects is served and then thrown away, and one it
+	// rejects that ValidateBasic admits is lost revenue.
 	if startHeight <= 0 || endHeight <= startHeight {
 		return false
 	}
