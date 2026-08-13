@@ -278,7 +278,19 @@ func (rv *relayValidator) CheckRewardEligibility(
 	// rewarded after governance shortens grace_period_end_offset_blocks, and
 	// accepts relays past the chain's real cutoff — served unpaid — after it
 	// lengthens. Mirrors poktroll's CheckRelayRewardEligibility.
-	sharedParams, err := rv.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
+	//
+	// For an ACTIVE session the end height is in the FUTURE. poktroll resolves a
+	// future projection against the LIVE grid (settlement_context.go GetSharedParamsAtHeight
+	// godoc), and an at-height query there would only pin today's live value under a
+	// future cache key. Read the live params directly for active sessions; use the
+	// immutable at-height value only once the session has ended (a past height).
+	var sharedParams *sharedtypes.Params
+	var err error
+	if sessionEndHeight >= currentHeight {
+		sharedParams, err = rv.sharedParamCache.GetLatestSharedParams(ctx)
+	} else {
+		sharedParams, err = rv.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
+	}
 	if err != nil {
 		return fmt.Errorf("failed to get shared params: %w", err)
 	}

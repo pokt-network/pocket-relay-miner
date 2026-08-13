@@ -132,7 +132,7 @@ func TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges(t *testi
 	sessionID := "sess-stake-change"
 
 	// First call: creates meter with stake = 10k POKT.
-	meta1, maxStake1, err := meter.getOrCreateSessionMeter(ctx, sessionID, appAddr, "svc-a", "pokt1sup", 100)
+	meta1, maxStake1, err := meter.getOrCreateSessionMeter(ctx, sessionID, appAddr, "svc-a", "pokt1sup", 100, 0)
 	require.NoError(t, err)
 	require.NotNil(t, meta1)
 	require.Greater(t, maxStake1, int64(0), "initial max stake must be non-zero")
@@ -147,7 +147,7 @@ func TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges(t *testi
 
 	// Second call on the SAME session: must recompute, not serve the stale
 	// snapshot. This is the invariant the pre-fix code violated.
-	meta2, maxStake2, err := meter.getOrCreateSessionMeter(ctx, sessionID, appAddr, "svc-a", "pokt1sup", 100)
+	meta2, maxStake2, err := meter.getOrCreateSessionMeter(ctx, sessionID, appAddr, "svc-a", "pokt1sup", 100, 0)
 	require.NoError(t, err)
 	require.NotNil(t, meta2)
 	require.Equal(t, int64(50_000_000_000), meta2.CreatedWithAppStake,

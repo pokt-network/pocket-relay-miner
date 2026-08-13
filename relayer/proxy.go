@@ -973,6 +973,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				supplierAddress,
 				sessionStartHeight,
 				sessionEndHeight,
+				arrivalBlockHeight,
 			)
 			meterDuration := time.Since(meterStart)
 
@@ -1324,6 +1325,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					supplierAddress,
 					sessionStartHeight,
 					sessionEndHeight,
+					capturedBlockHeight,
 				)
 				meterDuration := time.Since(meterStart)
 

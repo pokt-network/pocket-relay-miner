@@ -217,7 +217,9 @@ func TestCalculateMaxStake_UsesParamsAtSessionEnd(t *testing.T) {
 	ctx := context.Background()
 	meter := newScopedTestMeter(t, ctx, paramCache, nil)
 
-	maxStake, factor, stakeUsed, err := meter.calculateMaxStake(ctx, "pokt1app_scoped", "seda", sessionEnd)
+	// currentHeight past the session end -> ended session -> at-height resolution.
+	const currentHeight = int64(110)
+	maxStake, factor, stakeUsed, err := meter.calculateMaxStake(ctx, "pokt1app_scoped", "seda", sessionEnd, currentHeight)
 	require.NoError(t, err)
 	require.Equal(t, appStake, stakeUsed)
 	require.Zero(t, factor, "no service factor configured")
@@ -229,4 +231,39 @@ func TestCalculateMaxStake_UsesParamsAtSessionEnd(t *testing.T) {
 
 	require.Contains(t, paramCache.heightsQueried(), sessionEnd,
 		"window offsets must be resolved at the session END height")
+}
+
+// TestCalculateMaxStake_ActiveSessionUsesLiveParams is the F1 meter regression: for
+// an ACTIVE session the end height is in the future, so the budget must resolve the
+// live params directly rather than querying at the future end height (which pins
+// today's value under a future cache key and leans on pocketd answering futures).
+func TestCalculateMaxStake_ActiveSessionUsesLiveParams(t *testing.T) {
+	const (
+		sessionEnd    = int64(100)
+		currentHeight = int64(95) // still inside the session -> end is in the future
+		appStake      = int64(1_000_000)
+	)
+
+	liveParams := &sharedtypes.Params{
+		NumBlocksPerSession:            10,
+		ComputeUnitsToTokensMultiplier: 1,
+		ComputeUnitCostGranularity:     1,
+		ClaimWindowOpenOffsetBlocks:    2,
+		ClaimWindowCloseOffsetBlocks:   2,
+		ProofWindowOpenOffsetBlocks:    3,
+		ProofWindowCloseOffsetBlocks:   3,
+	}
+	// byHeight is deliberately EMPTY: an at-height query would fall back to params
+	// but would also record the future height in heightsQueried, which we forbid.
+	paramCache := &fakeSharedParamCache{params: liveParams}
+
+	ctx := context.Background()
+	meter := newScopedTestMeter(t, ctx, paramCache, nil)
+
+	_, _, stakeUsed, err := meter.calculateMaxStake(ctx, "pokt1app_scoped", "seda", sessionEnd, currentHeight)
+	require.NoError(t, err)
+	require.Equal(t, appStake, stakeUsed)
+
+	require.NotContains(t, paramCache.heightsQueried(), sessionEnd,
+		"an active session must NOT query params at the future end height")
 }

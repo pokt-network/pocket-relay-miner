@@ -256,6 +256,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	supplierAddress string,
 	sessionStartHeight int64,
 	sessionEndHeight int64,
+	currentHeight int64,
 ) (allowed bool, err error) {
 	m.mu.RLock()
 	if m.closed {
@@ -273,7 +274,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	}
 
 	// Get or create session meter
-	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight)
+	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight, currentHeight)
 	if err != nil {
 		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
@@ -481,6 +482,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	serviceID string,
 	supplierAddress string,
 	sessionEndHeight int64,
+	currentHeight int64,
 ) (*SessionMeterMeta, int64, error) {
 	// Snapshot serviceFactor and app stake so a cached meta whose MaxStake
 	// was computed under either stale input is recomputed on the next
@@ -535,7 +537,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 		// Stale inputs — recompute maxStake, update cached meta in place.
 		oldFactor := meta.CreatedWithFactor
 		oldAppStake := meta.CreatedWithAppStake
-		newMax, newFactor, newAppStake, calcErr := m.calculateMaxStake(ctx, appAddress, serviceID, sessionEndHeight)
+		newMax, newFactor, newAppStake, calcErr := m.calculateMaxStake(ctx, appAddress, serviceID, sessionEndHeight, currentHeight)
 		if calcErr != nil {
 			return nil, 0, fmt.Errorf("failed to recalculate max stake after input change: %w", calcErr)
 		}
@@ -562,7 +564,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	}
 
 	// Create new session meter
-	maxStakeUpokt, factorUsed, appStakeUsed, err := m.calculateMaxStake(ctx, appAddress, serviceID, sessionEndHeight)
+	maxStakeUpokt, factorUsed, appStakeUsed, err := m.calculateMaxStake(ctx, appAddress, serviceID, sessionEndHeight, currentHeight)
 	if err != nil {
 		return nil, 0, fmt.Errorf("failed to calculate max stake: %w", err)
 	}
@@ -594,7 +596,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 
 	if !set {
 		// Another replica created it first, fetch their version
-		return m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight)
+		return m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight, currentHeight)
 	}
 
 	// Initialize consumed counter
@@ -655,7 +657,7 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddr
 // sessionEndHeight, matching poktroll's ensureRequestSessionRelayMeter: the
 // budget for a session must be computed under the params epoch that session
 // belongs to, not whatever governance moved to mid-flight.
-func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string, sessionEndHeight int64) (int64, float64, int64, error) {
+func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, serviceID string, sessionEndHeight int64, currentHeight int64) (int64, float64, int64, error) {
 	// Get app stake via the cached application client so operator
 	// top-up/stake-down observed by the orchestrator's refresh loop is
 	// reflected without a sidecar cache going stale.
@@ -664,8 +666,20 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 		return 0, 0, 0, fmt.Errorf("failed to get app stake: %w", err)
 	}
 
-	// Get shared params to calculate baseLimit (for comparison/warnings)
-	sharedParams, err := m.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
+	// Get shared params to calculate baseLimit (for comparison/warnings).
+	//
+	// The budget divisor is resolved at the session END height (poktroll's
+	// ensureRequestSessionRelayMeter). For an ACTIVE session that end height is in
+	// the FUTURE; poktroll resolves a future projection against the LIVE grid, and
+	// an at-height query there would only pin today's value under a future cache
+	// key. Read live params directly for active sessions; use the immutable
+	// at-height value once the session has ended (a past height).
+	var sharedParams *sharedtypes.Params
+	if currentHeight > 0 && sessionEndHeight >= currentHeight {
+		sharedParams, err = m.sharedParamCache.GetLatestSharedParams(ctx)
+	} else {
+		sharedParams, err = m.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
+	}
 	if err != nil {
 		return 0, 0, 0, fmt.Errorf("failed to get shared params: %w", err)
 	}

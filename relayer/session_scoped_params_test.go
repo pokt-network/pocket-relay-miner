@@ -130,6 +130,31 @@ func TestCheckRewardEligibility_UsesParamsAtSessionEnd(t *testing.T) {
 	require.Zero(t, latestCalls, "the live params must not be consulted")
 }
 
+// TestCheckRewardEligibility_ActiveSessionUsesLiveParams is the F1 regression.
+//
+// For an ACTIVE session the end height is in the FUTURE. Querying shared params at
+// that future height pins today's live value under a future cache key (poisoning it
+// against a later governance change) and leans on pocketd answering future heights.
+// poktroll resolves a future projection against the LIVE grid, so an active session
+// must read the live params directly — never at the future end height.
+func TestCheckRewardEligibility_ActiveSessionUsesLiveParams(t *testing.T) {
+	const (
+		sessionStart = int64(91)
+		sessionEnd   = int64(100)
+		currentH     = int64(95) // still inside the session -> end height is in the future
+	)
+
+	v, paramCache := newEpochValidator(10, 10, sessionEnd)
+	v.SetCurrentBlockHeight(currentH)
+
+	err := v.CheckRewardEligibility(context.Background(), relayWithSession(sessionStart, sessionEnd))
+	require.NoError(t, err, "an active session's relay is well inside its window and must be eligible")
+
+	heights, latestCalls := paramCache.snapshot()
+	require.NotContains(t, heights, sessionEnd, "an active session must NOT query params at the future end height")
+	require.Positive(t, latestCalls, "an active session must resolve the live params")
+}
+
 // TestCheckRewardEligibility_StillRejectsGenuinelyLateRelay proves the fix did not
 // defang the check: past its own epoch's cutoff, the relay is still rejected.
 func TestCheckRewardEligibility_StillRejectsGenuinelyLateRelay(t *testing.T) {

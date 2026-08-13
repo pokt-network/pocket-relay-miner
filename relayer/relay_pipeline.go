@@ -162,8 +162,8 @@ func (p *RelayPipeline) MeterRelay(
 		supplierAddress,
 		sessionStartHeight,
 		sessionEndHeight,
+		relayCtx.ArrivalBlockHeight,
 	)
-
 	if err != nil {
 		p.logger.Warn().
 			Err(err).
