@@ -1232,7 +1232,7 @@
     },
     "shared": {
       "params": {
-        "application_unbonding_period_sessions": 1,
+        "application_unbonding_period_sessions": 2,
         "claim_window_close_offset_blocks": 8,
         "claim_window_open_offset_blocks": 1,
         "compute_unit_cost_granularity": 1,

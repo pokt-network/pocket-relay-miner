@@ -163,6 +163,16 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		Str("grpc_endpoint", w.config.QueryNodeGRPCUrl).
 		Msg("query clients initialized")
 
+	// Advisory: warn once if the chain runs shared params that poktroll's own
+	// validation would reject (genesis skips it, MsgUpdateParams does not). A failure
+	// to read them is not worth blocking startup for — the params are re-read on every
+	// claim/proof path anyway.
+	if sharedParams, sharedErr := w.queryClients.Shared().GetParams(w.ctx); sharedErr != nil {
+		w.logger.Debug().Err(sharedErr).Msg("could not read shared params for the startup advisory")
+	} else {
+		LogSharedParamsAdvisory(w.logger, sharedParams)
+	}
+
 	// Create RPC client for querying specific block heights (needed for proof generation)
 	// This is CRITICAL - proof generation needs to query the exact block at a specific height
 	// to get the canonical BlockID.Hash that matches what the validator stores
