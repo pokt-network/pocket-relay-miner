@@ -17,8 +17,6 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/keys"
@@ -248,17 +246,13 @@ func runCheckStake(ctx context.Context, config *relayer.Config, nodeOverride str
 
 // isSupplierNotFoundError reports whether a supplier query error means the
 // operator address is not staked on-chain (no supplier record), as opposed to a
-// transport/query failure. The query client wraps the gRPC error via
-// fmt.Errorf(..., %w), so unwrap with status.FromError and fall back to a
-// substring check for defensive coverage — mirrors miner.isClaimNotFoundError.
+// transport/query failure that could not answer either way.
+//
+// Follows query.IsEntityNotFound's policy (explicit gRPC NotFound only) so this
+// report never downgrades an unreachable node into "not staked, nothing to serve"
+// — which would hide a real unserved stake behind an info line.
 func isSupplierNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-		return true
-	}
-	return strings.Contains(err.Error(), "not found")
+	return query.IsEntityNotFound(err)
 }
 
 // printStakeReport writes the cross-check outcome to stdout: staked pairs with

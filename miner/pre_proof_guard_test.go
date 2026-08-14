@@ -35,10 +35,31 @@ func TestIsClaimNotFoundError_WrappedGrpcNotFound(t *testing.T) {
 	require.True(t, isClaimNotFoundError(wrapped), "guard must unwrap fmt.Errorf-wrapped gRPC NotFound")
 }
 
-func TestIsClaimNotFoundError_SubstringFallback(t *testing.T) {
-	// No gRPC status code, only a message — the substring fallback must fire.
-	err := errors.New("something: claim not found for session X")
-	require.True(t, isClaimNotFoundError(err))
+// TestIsClaimNotFoundError_TransientCarryingNotFoundFailsOpen covers the errors that
+// the previous substring fallback misclassified. Skipping a proof is TERMINAL
+// (claim_missing) and ends in a ProofMissingPenalty, so only an explicit gRPC
+// NotFound may reach that decision; anything else must fail open.
+//
+// Note the third case: a bare error whose text merely says "claim not found" no
+// longer counts. poktroll answers a missing claim with status.Error(codes.NotFound)
+// (x/proof/keeper/query_claim.go), so nothing legitimate is lost — while messages
+// like "header not found" (CometBFT, height unavailable/pruned) stop being able to
+// cost a supplier a slash.
+func TestIsClaimNotFoundError_TransientCarryingNotFoundFailsOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+	}{
+		{"CometBFT header not found", status.Error(codes.Unknown, "rpc error: header not found")},
+		{"peer not found", status.Error(codes.Unavailable, "no connection: peer not found")},
+		{"bare message without a status code", errors.New("something: claim not found for session X")},
+		{"transport error", errors.New("dial tcp: route not found")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.False(t, isClaimNotFoundError(tc.err),
+				"a failure to reach the chain must never skip a proof")
+		})
+	}
 }
 
 func TestIsClaimNotFoundError_UnavailableIsFailOpen(t *testing.T) {

@@ -14,14 +14,13 @@ import (
 	"time"
 
 	"github.com/alitto/pond/v2"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/pokt-network/smt"
 
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
@@ -333,19 +332,17 @@ func (lc *LifecycleCallback) SetRebroadcastStore(store *RebroadcastStore) {
 	lc.rebroadcastStore = store
 }
 
-// isClaimNotFoundError returns true when an error from the proof query client
-// indicates that a claim does not exist on-chain. The query client wraps the
-// gRPC error via fmt.Errorf(..., %w) (see query/query.go), so we both unwrap
-// with errors.As (via status.FromError) and fall back to a substring check on
-// the rendered message for defensive coverage of older wrappers.
+// isClaimNotFoundError returns true only when the chain has definitively answered
+// that no claim exists for this (supplier, session).
+//
+// The decision this feeds is terminal and costs money — see the pre-proof guard in
+// OnSessionsNeedProof — so it follows query.IsEntityNotFound's policy: an explicit
+// gRPC NotFound and nothing else. Any other error means we failed to get an answer,
+// and the caller must fail OPEN rather than skip a proof we cannot prove is
+// unnecessary. This mirrors the claim-side CUPR guard, which already fails open on
+// query errors so it never drops a claim it cannot prove is doomed.
 func isClaimNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-		return true
-	}
-	return strings.Contains(err.Error(), "not found")
+	return query.IsEntityNotFound(err)
 }
 
 // persistRebroadcastEntries stores one rebroadcast entry per built message so
