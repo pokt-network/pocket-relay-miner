@@ -1397,12 +1397,26 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			return fmt.Errorf("failed to wait for proof window open: %w", blockErr)
 		}
 
-		// Calculate proof requirement seed block height
-		// CRITICAL: This MUST match the validator's logic in x/proof/keeper/msg_server_submit_proof.go:328
-		// The validator uses BlockHash(earliestSupplierProofCommitHeight - 1) as the seed.
-		// Since earliestSupplierProofCommitHeight = proofWindowOpenHeight (distribution disabled in poktroll),
-		// the seed block height = proofWindowOpenHeight - 1
-		proofRequirementSeedHeight := proofWindowOpenHeight - 1
+		// Proof requirement seed block height.
+		//
+		// CRITICAL: the probabilistic proof decision is only valid if this seed is the
+		// same block the validator uses. poktroll seeds it with
+		// BlockHash(GetEarliestSupplierProofCommitHeight(...) - 1)
+		// (x/proof/keeper/msg_server_submit_proof.go getProofRequirementSeedBlockHash),
+		// so call that same protocol function rather than restating what it currently
+		// returns. It resolves to proofWindowOpenHeight today because proof distribution
+		// is disabled upstream; deriving it keeps us correct if that is ever re-enabled,
+		// instead of diverging silently on every probabilistic decision.
+		//
+		// The nil block hash mirrors poktroll: the argument is unused while distribution
+		// is disabled, and it deliberately does not read one (consensus hardening).
+		earliestProofCommitHeight := sharedtypes.GetEarliestSupplierProofCommitHeight(
+			sharedParams,
+			sessionEndHeight,
+			nil,
+			firstSnapshot.SupplierOperatorAddress,
+		)
+		proofRequirementSeedHeight := earliestProofCommitHeight - 1
 
 		// Wait for the seed block to be available
 		proofRequirementSeedBlock, seedErr := lc.waitForBlock(ctx, proofRequirementSeedHeight)
@@ -1532,11 +1546,18 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			continue
 		}
 
-		// NOTE: Timing spread DISABLED - submit proofs immediately when window opens
-		// The protocol's GetEarliestSupplierProofCommitHeight() spreads suppliers across the window,
-		// but this can cause proofs to be submitted too close to window close, resulting in failures.
-		// We now submit immediately when the proof window opens to maximize success rate.
-		earliestProofHeight := proofWindowOpenHeight // Use window open, not spread height
+		// Submit as early as the window allows: the protocol's per-supplier spread can
+		// push submission close to window close, where it fails. Deliberate choice.
+		//
+		// Bounded below by the protocol's earliest commit height so we can never submit
+		// before the chain would accept it. Both are proofWindowOpenHeight while proof
+		// distribution is disabled upstream, so this is a no-op today; it stops being one
+		// if that spread is re-enabled, and TestProofDistributionStillDisabled fails loudly
+		// when that happens.
+		earliestProofHeight := proofWindowOpenHeight
+		if earliestProofCommitHeight > earliestProofHeight {
+			earliestProofHeight = earliestProofCommitHeight
+		}
 
 		logger.Info().
 			Int64("proof_window_open", proofWindowOpenHeight).
