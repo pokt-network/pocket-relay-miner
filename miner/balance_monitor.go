@@ -6,11 +6,9 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
-
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/poktroll/pkg/client"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
@@ -167,7 +165,7 @@ func (m *BalanceMonitor) checkSupplier(ctx context.Context, supplierAddr string)
 	isStaked := false
 	if err != nil {
 		// Check if it's a NotFound error (supplier not staked)
-		if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+		if query.IsEntityNotFound(err) {
 			m.logger.Debug().
 				Str("supplier", supplierAddr).
 				Msg("supplier not staked (skipping balance/stake monitoring)")

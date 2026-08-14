@@ -24,55 +24,20 @@ import (
 // isClaimNotFoundError — unit tests
 // -----------------------------------------------------------------------------
 
-func TestIsClaimNotFoundError_GrpcNotFound(t *testing.T) {
-	err := status.Error(codes.NotFound, "claim not found")
-	require.True(t, isClaimNotFoundError(err))
-}
+// isClaimNotFoundError delegates to query.IsEntityNotFound, whose own table in
+// query/errors_test.go pins the full policy (explicit gRPC NotFound only, bare and
+// wrapped; every transient failure fails open). Only the delegation is asserted here
+// so one behaviour change does not have to be edited into three test tables in
+// lockstep — the guard's decision tree is covered by runGuard below.
+func TestIsClaimNotFoundError_DelegatesToTheSharedPolicy(t *testing.T) {
+	require.True(t, isClaimNotFoundError(
+		fmt.Errorf("failed to query claim: %w", status.Error(codes.NotFound, "claim not found"))),
+		"an explicit NotFound, wrapped as query.GetClaim wraps it, means the claim is absent")
 
-func TestIsClaimNotFoundError_WrappedGrpcNotFound(t *testing.T) {
-	inner := status.Error(codes.NotFound, "claim not found")
-	wrapped := fmt.Errorf("failed to query claim: %w", inner)
-	require.True(t, isClaimNotFoundError(wrapped), "guard must unwrap fmt.Errorf-wrapped gRPC NotFound")
-}
+	require.False(t, isClaimNotFoundError(status.Error(codes.Unknown, "rpc error: header not found")),
+		"a transient failure carrying \"not found\" must never skip a proof")
 
-// TestIsClaimNotFoundError_TransientCarryingNotFoundFailsOpen covers the errors that
-// the previous substring fallback misclassified. Skipping a proof is TERMINAL
-// (claim_missing) and ends in a ProofMissingPenalty, so only an explicit gRPC
-// NotFound may reach that decision; anything else must fail open.
-//
-// Note the third case: a bare error whose text merely says "claim not found" no
-// longer counts. poktroll answers a missing claim with status.Error(codes.NotFound)
-// (x/proof/keeper/query_claim.go), so nothing legitimate is lost — while messages
-// like "header not found" (CometBFT, height unavailable/pruned) stop being able to
-// cost a supplier a slash.
-func TestIsClaimNotFoundError_TransientCarryingNotFoundFailsOpen(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		err  error
-	}{
-		{"CometBFT header not found", status.Error(codes.Unknown, "rpc error: header not found")},
-		{"peer not found", status.Error(codes.Unavailable, "no connection: peer not found")},
-		{"bare message without a status code", errors.New("something: claim not found for session X")},
-		{"transport error", errors.New("dial tcp: route not found")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			require.False(t, isClaimNotFoundError(tc.err),
-				"a failure to reach the chain must never skip a proof")
-		})
-	}
-}
-
-func TestIsClaimNotFoundError_UnavailableIsFailOpen(t *testing.T) {
-	err := status.Error(codes.Unavailable, "chain RPC down")
-	require.False(t, isClaimNotFoundError(err), "Unavailable must NOT be treated as NotFound so the guard fails open")
-}
-
-func TestIsClaimNotFoundError_NilIsFalse(t *testing.T) {
 	require.False(t, isClaimNotFoundError(nil))
-}
-
-func TestIsClaimNotFoundError_ArbitraryErrorIsFalse(t *testing.T) {
-	require.False(t, isClaimNotFoundError(errors.New("connection refused")))
 }
 
 // -----------------------------------------------------------------------------

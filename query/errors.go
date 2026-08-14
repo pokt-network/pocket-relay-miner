@@ -8,7 +8,10 @@ import (
 // IsEntityNotFound reports whether err is the chain's DEFINITIVE answer that the
 // queried entity does not exist, as opposed to a failure to obtain an answer at all.
 //
-// POLICY — a gRPC NotFound status is the only signal that qualifies.
+// POLICY — a gRPC NotFound status is the only signal that qualifies. Every caller in
+// the miner, the relayer command and this package uses it. The two equivalent inline
+// checks left in cache/ are deliberate: that package does not depend on query today,
+// and a new package edge is not worth removing two lines of duplication.
 //
 // Callers use this to decide whether an entity is absent on-chain, and several of
 // those decisions are terminal and cost money (see the pre-proof guard in
