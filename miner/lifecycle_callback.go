@@ -1410,11 +1410,15 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		//
 		// The nil block hash mirrors poktroll: the argument is unused while distribution
 		// is disabled, and it deliberately does not read one (consensus hardening).
+		// Supplier address comes from this group, like every other value in the loop
+		// (sessionEndHeight above): it is the seeding input for the per-supplier spread,
+		// so it must belong to the sessions being scheduled rather than rely on the
+		// batch-wide "one supplier per call" invariant holding forever.
 		earliestProofCommitHeight := sharedtypes.GetEarliestSupplierProofCommitHeight(
 			sharedParams,
 			sessionEndHeight,
 			nil,
-			firstSnapshot.SupplierOperatorAddress,
+			groupSnapshots[0].SupplierOperatorAddress,
 		)
 		proofRequirementSeedHeight := earliestProofCommitHeight - 1
 
@@ -1546,58 +1550,38 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			continue
 		}
 
-		// Submit as early as the window allows: the protocol's per-supplier spread can
+		// Submit as early as the chain will accept: the protocol's per-supplier spread can
 		// push submission close to window close, where it fails. Deliberate choice.
 		//
-		// Bounded below by the protocol's earliest commit height so we can never submit
-		// before the chain would accept it. Both are proofWindowOpenHeight while proof
-		// distribution is disabled upstream, so this is a no-op today; it stops being one
-		// if that spread is re-enabled, and TestProofDistributionStillDisabled fails loudly
-		// when that happens.
-		earliestProofHeight := proofWindowOpenHeight
-		if earliestProofCommitHeight > earliestProofHeight {
-			earliestProofHeight = earliestProofCommitHeight
+		// earliestProofCommitHeight is what the chain enforces — validateProofWindow
+		// rejects anything committed before it — and it is >= proofWindowOpenHeight by
+		// construction (poktroll adds a non-negative offset to the window open height).
+		// It equals the window open height while proof distribution is disabled upstream,
+		// so waiting on it is a no-op today and becomes load-bearing the moment that
+		// spread is re-enabled; TestProofDistributionStillDisabled fails loudly then.
+		earliestProofHeight := earliestProofCommitHeight
+		if _, earliestErr := lc.waitForBlock(ctx, earliestProofHeight); earliestErr != nil {
+			return fmt.Errorf("failed to wait for earliest proof commit height: %w", earliestErr)
 		}
 
 		logger.Info().
 			Int64("proof_window_open", proofWindowOpenHeight).
+			Int64("earliest_proof_commit_height", earliestProofHeight).
 			Int64("session_end_height", sessionEndHeight).
 			Int("proofs_to_submit", len(sessionsNeedingProof)).
 			Msg("proof window open - submitting immediately (timing spread disabled)")
 
-		// Calculate proof path seed block height (one before earliest proof height)
-		// Since we're using proofWindowOpenHeight, this equals proofRequirementSeedHeight
-		proofPathSeedBlockHeight := earliestProofHeight - 1
-
-		// Optimization: Reuse the seed block we already fetched for proof requirement check
-		// if the heights match (they should, since distribution is disabled in poktroll)
-		var proofPathSeedBlock pocktclient.Block
-		if proofPathSeedBlockHeight == proofRequirementSeedHeight {
-			// Heights match - reuse the block we already fetched
-			proofPathSeedBlock = proofRequirementSeedBlock
-			logger.Debug().
-				Int64("proof_path_seed_block_height", proofPathSeedBlockHeight).
-				Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
-				Msg("reusing proof requirement seed block for proof path (heights match)")
-		} else {
-			// Heights don't match - this shouldn't happen with current poktroll (distribution disabled),
-			// but if it ever gets re-enabled, we need to fetch the correct block
-			logger.Warn().
-				Int64("proof_path_seed_height", proofPathSeedBlockHeight).
-				Int64("proof_requirement_seed_height", proofRequirementSeedHeight).
-				Msg("seed block heights don't match - possible distribution enabled in future, re-fetching")
-
-			var seedErr error
-			proofPathSeedBlock, seedErr = lc.waitForBlock(ctx, proofPathSeedBlockHeight)
-			if seedErr != nil {
-				return fmt.Errorf("failed to wait for proof path seed block: %w", seedErr)
-			}
-
-			logger.Debug().
-				Int64("proof_path_seed_block_height", proofPathSeedBlockHeight).
-				Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
-				Msg("obtained proof path seed block hash (re-fetched)")
-		}
+		// The closest-path seed and the proof-requirement seed are the SAME block, by
+		// protocol: validateClosestPath hashes GetBlockHash(earliestSupplierProofCommitHeight-1)
+		// (x/proof/keeper/proof_validation.go) and getProofRequirementSeedBlockHash uses the
+		// same height (x/proof/keeper/msg_server_submit_proof.go). That holds whether or not
+		// the distribution spread is enabled, since both read the same function — so there is
+		// one seed block here, not two that happen to coincide.
+		proofPathSeedBlock := proofRequirementSeedBlock
+		logger.Debug().
+			Int64("proof_path_seed_block_height", proofRequirementSeedHeight).
+			Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
+			Msg("proof path seed block is the proof requirement seed block (same height by protocol)")
 
 		// CRITICAL: Verify proof window is still open before proceeding
 		// This prevents wasting fees on proofs that will be rejected
@@ -1783,7 +1767,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					Str(logging.FieldSessionID, snap.SessionID).
 					Str("block_hash_from_blockid", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
 					Str("proof_path_computed", fmt.Sprintf("%x", path)).
-					Int64("block_height", proofPathSeedBlockHeight).
+					Int64("block_height", proofRequirementSeedHeight).
 					Msg("DEBUG: proof path computation (using BlockID.Hash)")
 
 				// Generate the proof (CPU-bound cryptographic operation, can parallelize)

@@ -52,7 +52,6 @@ func TestProofDistributionStillDisabled(t *testing.T) {
 	}
 
 	for i, params := range paramSets {
-		params := params
 		for _, supplier := range suppliers {
 			for _, sessionEndHeight := range []int64{20, 100, 1_000, 883_667} {
 				name := fmt.Sprintf("params%d/end%d/%s", i, sessionEndHeight, supplier[:10])
@@ -83,13 +82,17 @@ func TestClaimDistributionStillDisabled(t *testing.T) {
 		"pokt1garffmur6cyv040x52sa2k90rvzcn52huypp8s",
 	} {
 		for _, sessionEndHeight := range []int64{20, 1_000, 883_667} {
-			windowOpen := sharedtypes.GetClaimWindowOpenHeight(&params, sessionEndHeight)
-			earliest := sharedtypes.GetEarliestSupplierClaimCommitHeight(
-				&params, sessionEndHeight, nil, supplier,
-			)
-			require.Equal(t, windowOpen, earliest,
-				"poktroll's earliest claim commit height diverged from the claim window open "+
-					"height: claim distribution appears to be re-enabled upstream")
+			// Subtests so a divergence names the supplier and height that produced it,
+			// and so one failing combination does not hide the rest of the pattern.
+			t.Run(fmt.Sprintf("end%d/%s", sessionEndHeight, supplier[:10]), func(t *testing.T) {
+				windowOpen := sharedtypes.GetClaimWindowOpenHeight(&params, sessionEndHeight)
+				earliest := sharedtypes.GetEarliestSupplierClaimCommitHeight(
+					&params, sessionEndHeight, nil, supplier,
+				)
+				require.Equal(t, windowOpen, earliest,
+					"poktroll's earliest claim commit height diverged from the claim window open "+
+						"height: claim distribution appears to be re-enabled upstream")
+			})
 		}
 	}
 }
