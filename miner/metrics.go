@@ -326,17 +326,6 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
-	// Legacy metric for backward compatibility (deprecated - use compute_units_proved_total)
-	computeUnitsSettledTotal = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "compute_units_settled_total",
-			Help:      "DEPRECATED: Use compute_units_proved_total instead. Total compute units settled (proven) across all sessions",
-		},
-		[]string{"supplier", "service_id"},
-	)
-
 	// ====== ON-CHAIN SETTLEMENT TRACKING METRICS ======
 	// These metrics track actual on-chain settlement results from EventClaimSettled events
 
@@ -1286,7 +1275,6 @@ func recordRevenueProved(supplier, serviceID string, computeUnits uint64, relayC
 
 	// Compute Units view (in pPOKT from service config)
 	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
-	computeUnitsSettledTotal.WithLabelValues(supplier, serviceID).Add(cu) // Legacy metric
 
 	// uPOKT view (convert pPOKT to uPOKT by dividing by 1e6)
 	upoktProvedTotal.WithLabelValues(supplier, serviceID).Add(cu / 1e6)
