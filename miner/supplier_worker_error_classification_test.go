@@ -225,9 +225,6 @@ func (s *errorOnIncrementStore) UpdateState(ctx context.Context, sessionID strin
 func (s *errorOnIncrementStore) UpdateSettlementMetadata(ctx context.Context, sessionID string, outcome string, height int64) error {
 	return s.inner.UpdateSettlementMetadata(ctx, sessionID, outcome, height)
 }
-func (s *errorOnIncrementStore) UpdateWALPosition(ctx context.Context, sessionID string, walEntryID string) error {
-	return s.inner.UpdateWALPosition(ctx, sessionID, walEntryID)
-}
 func (s *errorOnIncrementStore) IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {
 	s.incCalls.Add(1)
 	if s.delegateOK {

@@ -146,10 +146,6 @@ type SessionSnapshot struct {
 	// ProofTxHash is the transaction hash of the submitted proof (for deduplication).
 	ProofTxHash string `json:"proof_tx_hash,omitempty"`
 
-	// LastWALEntryID is the last WAL entry ID that was processed.
-	// Used for recovery to know where to start replaying from.
-	LastWALEntryID string `json:"last_wal_entry_id,omitempty"`
-
 	// LastUpdatedAt is when the snapshot was last updated.
 	LastUpdatedAt time.Time `json:"last_updated_at"`
 
@@ -198,9 +194,6 @@ type SessionStore interface {
 	// UpdateSettlementMetadata updates the optional settlement metadata fields.
 	// This is a non-critical update - session may already be cleaned up.
 	UpdateSettlementMetadata(ctx context.Context, sessionID string, outcome string, height int64) error
-
-	// UpdateWALPosition updates the last WAL entry ID for a session.
-	UpdateWALPosition(ctx context.Context, sessionID string, walEntryID string) error
 
 	// IncrementRelayCount atomically increments the relay count and compute units.
 	IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error
@@ -286,7 +279,6 @@ const (
 	hfClaimedRootHash    = "claimed_root_hash"
 	hfClaimTxHash        = "claim_tx_hash"
 	hfProofTxHash        = "proof_tx_hash"
-	hfLastWALEntryID     = "last_wal_entry_id"
 	hfCreatedAt          = "created_at"
 	hfLastUpdatedAt      = "last_updated_at"
 	hfSettlementOutcome  = "settlement_outcome"
@@ -332,9 +324,6 @@ func encodeSnapshotMetadata(snap *SessionSnapshot) []any {
 	if snap.ProofTxHash != "" {
 		pairs = append(pairs, hfProofTxHash, snap.ProofTxHash)
 	}
-	if snap.LastWALEntryID != "" {
-		pairs = append(pairs, hfLastWALEntryID, snap.LastWALEntryID)
-	}
 	if snap.SettlementOutcome != nil {
 		pairs = append(pairs, hfSettlementOutcome, *snap.SettlementOutcome)
 	}
@@ -362,7 +351,6 @@ func decodeSnapshot(fields map[string]string) (*SessionSnapshot, error) {
 		State:                   SessionState(fields[hfState]),
 		ClaimTxHash:             fields[hfClaimTxHash],
 		ProofTxHash:             fields[hfProofTxHash],
-		LastWALEntryID:          fields[hfLastWALEntryID],
 	}
 
 	if v := fields[hfSessionStartHeight]; v != "" {
@@ -519,9 +507,6 @@ func (s *RedisSessionStore) Save(ctx context.Context, snapshot *SessionSnapshot)
 		}
 		if snapshot.ProofTxHash == "" {
 			staleFields = append(staleFields, hfProofTxHash)
-		}
-		if snapshot.LastWALEntryID == "" {
-			staleFields = append(staleFields, hfLastWALEntryID)
 		}
 		if snapshot.SettlementOutcome == nil {
 			staleFields = append(staleFields, hfSettlementOutcome)
@@ -879,20 +864,6 @@ func (s *RedisSessionStore) UpdateSettlementMetadata(
 		Int64("settlement_height", height).
 		Msg("updated settlement metadata")
 
-	return nil
-}
-
-// UpdateWALPosition updates the last WAL entry ID for a session.
-func (s *RedisSessionStore) UpdateWALPosition(ctx context.Context, sessionID string, walEntryID string) error {
-	key := s.sessionKey(sessionID)
-	now := time.Now().Format(time.RFC3339Nano)
-
-	pipe := s.redisClient.TxPipeline()
-	pipe.HSet(ctx, key, hfLastWALEntryID, walEntryID, hfLastUpdatedAt, now)
-	pipe.Expire(ctx, key, s.config.SessionTTL)
-	if _, err := pipe.Exec(ctx); err != nil {
-		return fmt.Errorf("failed to update WAL position: %w", err)
-	}
 	return nil
 }
 
