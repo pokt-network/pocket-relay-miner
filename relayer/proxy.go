@@ -1290,7 +1290,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			optimisticStart := time.Now()
 			if err := p.validateRelayRequest(context.Background(), capturedHTTPReq, capturedReqBody, capturedBlockHeight); err != nil {
 				validationFailures.WithLabelValues(capturedServiceID, "signature").Inc()
-				relaysDropped.WithLabelValues(capturedServiceID, appAddress, dropReasonValidationFailed).Inc()
+				relaysDropped.WithLabelValues(capturedServiceID, dropReasonValidationFailed).Inc()
 				logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 					Err(err).
 					Str("validation_mode", "optimistic").
@@ -1333,7 +1333,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				p.metricRecorder.RecordDuration(relayMeterLatency, []string{capturedServiceID, "optimistic"}, meterDuration)
 
 				if meterErr != nil {
-					relaysDropped.WithLabelValues(capturedServiceID, appAddress, dropReasonMeterError).Inc()
+					relaysDropped.WithLabelValues(capturedServiceID, dropReasonMeterError).Inc()
 					logging.WithSessionContext(p.logger.Warn(), capturedSessionCtx).
 						Err(meterErr).
 						Str("validation_mode", "optimistic").
@@ -1343,7 +1343,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				} else if !allowed {
-					relaysDropped.WithLabelValues(capturedServiceID, appAddress, dropReasonStakeExhausted).Inc()
+					relaysDropped.WithLabelValues(capturedServiceID, dropReasonStakeExhausted).Inc()
 					logging.WithSessionContext(p.logger.Warn(), capturedSessionCtx).
 						Str("validation_mode", "optimistic").
 						Msg("relay served but NOT mined: session relay limit reached, relay dropped after serving")

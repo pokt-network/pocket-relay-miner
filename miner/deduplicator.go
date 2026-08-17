@@ -126,14 +126,14 @@ func (d *RedisDeduplicator) IsDuplicate(ctx context.Context, relayHash []byte, s
 	key := d.sessionKey(sessionID)
 	exists, err := d.redisClient.SIsMember(ctx, key, hashMember(relayHash)).Result()
 	if err != nil {
-		dedupErrors.WithLabelValues(sessionID, "redis_check").Inc()
+		dedupErrors.WithLabelValues("redis_check").Inc()
 		return false, fmt.Errorf("failed to check Redis: %w", err)
 	}
 	if exists {
-		dedupRedisCacheHits.WithLabelValues(sessionID).Inc()
+		dedupRedisCacheHits.Inc()
 		return true, nil
 	}
-	dedupMisses.WithLabelValues(sessionID).Inc()
+	dedupMisses.Inc()
 	return false, nil
 }
 
@@ -151,11 +151,11 @@ func (d *RedisDeduplicator) MarkProcessed(ctx context.Context, relayHash []byte,
 	pipe.Expire(ctx, key, ttl)
 
 	if _, err := pipe.Exec(ctx); err != nil {
-		dedupErrors.WithLabelValues(sessionID, "redis_mark").Inc()
+		dedupErrors.WithLabelValues("redis_mark").Inc()
 		return fmt.Errorf("failed to mark processed: %w", err)
 	}
 
-	dedupMarked.WithLabelValues(sessionID).Inc()
+	dedupMarked.Inc()
 	return nil
 }
 
@@ -178,11 +178,11 @@ func (d *RedisDeduplicator) MarkProcessedBatch(ctx context.Context, relayHashes 
 	pipe.Expire(ctx, key, ttl)
 
 	if _, err := pipe.Exec(ctx); err != nil {
-		dedupErrors.WithLabelValues(sessionID, "redis_batch_mark").Inc()
+		dedupErrors.WithLabelValues("redis_batch_mark").Inc()
 		return fmt.Errorf("failed to mark batch processed: %w", err)
 	}
 
-	dedupMarked.WithLabelValues(sessionID).Add(float64(len(relayHashes)))
+	dedupMarked.Add(float64(len(relayHashes)))
 	return nil
 }
 

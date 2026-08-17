@@ -502,7 +502,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 				Str("session_id", msg.Message.SessionId).
 				Str("supplier", supplierAddr).
 				Msg("discarding relay on shutdown cancel (message will be redelivered on restart)")
-			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "shutdown_cancel")
+			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, "shutdown_cancel")
 			return nil // ACK and discard
 		}
 		// IMPORTANT: Check retryable BEFORE permanent. When FlushPipeline fails with
@@ -510,7 +510,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		// the underlying cause is transient (OOM clears when keys expire). Checking
 		// retryable first ensures transient errors are retried even when wrapped.
 		if IsRetryableError(err) {
-			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "transient_error")
+			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, "transient_error")
 			return fmt.Errorf("transient SMST error (will retry): %w", err)
 		}
 		// Check for permanent SMST errors (late relays, sealed/claimed sessions)
@@ -521,7 +521,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 				Str("supplier", supplierAddr).
 				Msg("dropping relay - permanent SMST error (session sealed/claimed)")
 			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
-			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "session_sealed")
+			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, "session_sealed")
 			return nil // ACK and discard - no point retrying
 		}
 		// Unknown/unexpected errors - log and discard (don't retry forever)
@@ -530,7 +530,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			Str("session_id", msg.Message.SessionId).
 			Str("supplier", supplierAddr).
 			Msg("unexpected SMST error - discarding relay")
-		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId, "unexpected_error")
+		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, "unexpected_error")
 		return nil // ACK and discard - unknown errors shouldn't block processing
 	}
 
@@ -560,7 +560,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	msg.Message.RelayHash = nil
 
 	// Track relay successfully added to SMST
-	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId, msg.Message.SessionId)
+	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId)
 
 	// Track relay in session coordinator.
 	//
