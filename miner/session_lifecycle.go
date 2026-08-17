@@ -297,12 +297,6 @@ func (m *SessionLifecycleManager) TrackSession(ctx context.Context, snapshot *Se
 	return nil
 }
 
-// GetSession returns a tracked session by ID.
-func (m *SessionLifecycleManager) GetSession(sessionID string) *SessionSnapshot {
-	session, _ := m.activeSessions.Load(sessionID)
-	return session
-}
-
 // RemoveSession removes a session from in-memory tracking.
 // This is called by the terminal state callback to update in-memory state
 // atomically with Redis updates, preventing session leak.
@@ -315,57 +309,6 @@ func (m *SessionLifecycleManager) RemoveSession(sessionID string) {
 			Int("remaining_sessions", m.activeSessions.Size()).
 			Msg("session_lifecycle_atomic_remove: session removed via terminal callback")
 	}
-}
-
-// GetActiveSessions returns all sessions in the active state.
-func (m *SessionLifecycleManager) GetActiveSessions() []*SessionSnapshot {
-	result := make([]*SessionSnapshot, 0)
-	m.activeSessions.Range(func(sessionID string, session *SessionSnapshot) bool {
-		if session.State == SessionStateActive {
-			result = append(result, session)
-		}
-		return true // continue iteration
-	})
-	return result
-}
-
-// GetSessionsByState returns all sessions in a given state.
-func (m *SessionLifecycleManager) GetSessionsByState(state SessionState) []*SessionSnapshot {
-	result := make([]*SessionSnapshot, 0)
-	m.activeSessions.Range(func(sessionID string, session *SessionSnapshot) bool {
-		if session.State == state {
-			result = append(result, session)
-		}
-		return true // continue iteration
-	})
-	return result
-}
-
-// UpdateSessionRelayCount updates the relay count for a session.
-func (m *SessionLifecycleManager) UpdateSessionRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {
-	session, exists := m.activeSessions.Load(sessionID)
-	if !exists {
-		return fmt.Errorf("session not found: %s", sessionID)
-	}
-
-	// Note: xsync.Map provides atomic Load/Store, but the session fields are still being
-	// modified. Since each session is only modified by one goroutine at a time
-	// (relay processing is serialized per session), this is safe.
-	session.RelayCount++
-	session.TotalComputeUnits += computeUnits
-	session.LastUpdatedAt = time.Now()
-
-	// Persist update asynchronously using bounded worker pool.
-	// This prevents unbounded goroutine creation at high RPS (300+ RPS would spawn
-	// 300+ goroutines/sec with raw go func(), causing memory leaks).
-	// The pool queues tasks if workers are busy, providing backpressure.
-	m.transitionSubpool.Submit(func() {
-		if err := m.sessionStore.IncrementRelayCount(ctx, sessionID, computeUnits); err != nil {
-			m.logger.Warn().Err(err).Str("session_id", sessionID).Msg("failed to persist relay count")
-		}
-	})
-
-	return nil
 }
 
 // lifecycleChecker monitors blocks and checks sessions for state transitions.
@@ -1261,37 +1204,6 @@ func (m *SessionLifecycleManager) executeTransition(
 			Str(logging.FieldNewState, string(newState)).
 			Int64(logging.FieldCount, session.RelayCount).
 			Msg("session lifecycle complete")
-	}
-}
-
-// HasPendingSessions returns true if there are sessions not yet settled.
-func (m *SessionLifecycleManager) HasPendingSessions() bool {
-	return m.activeSessions.Size() > 0
-}
-
-// GetPendingSessionCount returns the count of sessions pending settlement.
-func (m *SessionLifecycleManager) GetPendingSessionCount() int {
-	return m.activeSessions.Size()
-}
-
-// WaitForSettlement waits for all pending sessions to settle.
-func (m *SessionLifecycleManager) WaitForSettlement(ctx context.Context) error {
-	ticker := time.NewTicker(1 * time.Second)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-ticker.C:
-			if !m.HasPendingSessions() {
-				return nil
-			}
-
-			m.logger.Debug().
-				Int("pending", m.GetPendingSessionCount()).
-				Msg("waiting for sessions to settle")
-		}
 	}
 }
 
