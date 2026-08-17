@@ -50,7 +50,19 @@ level 3 exercises the path that does.
 | `tests.sh` | `go test -tags test`. The `test` tag is not optional: test-only helpers live behind it. |
 | `race.sh` | `go test -race -count=1`. `-count=1` defeats the result cache, which would otherwise satisfy the command with a PASS from a run without `-race`. |
 | `coverage.sh` | the coverage profile — what CI rejects on. |
+| `live.sh` | the money path on the Tilt localnet: load through the relay CLI at `:8180`, then claim and proof inclusion asserted **on-chain**. `--preflight-only` checks readiness and stops. |
 | `all.sh` | runs the above up to a level. Fail-fast; `--keep-going` for the full picture. |
+
+`live.sh` **never starts or stops anything.** If the localnet is not up it prints
+the `tilt up` command and exits non-zero, because bringing the cluster up claims
+ports and containers another session on the same machine may be using. Run
+`--preflight-only` first: it reads state and touches nothing.
+
+It asserts `claim_on_chain_outcome` and `proof_on_chain_outcome`, not
+`claim_success` — the latter means the transaction was accepted for broadcast,
+which is not the same as landing in a block. A run where no claim required a
+proof reports a SKIP for the proof path rather than a pass, because that path
+was not exercised.
 
 `cache` and `miner` run sequentially when targeted on their own: their tests
 share a single miniredis fixture, so parallelism races the fixture instead of
