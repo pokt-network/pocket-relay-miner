@@ -293,54 +293,32 @@ func (c *accountCache) InvalidateAll(ctx context.Context) error {
 }
 
 // queryChainWithLock queries the chain with distributed locking to prevent
-// duplicate queries from multiple instances.
+// duplicate queries from multiple instances. The lock/sleep/retry/chain skeleton
+// lives in queryKeyedChainWithLock; account differs from the application/service
+// caches only in that it does NOT warm L1 on a retry hit (hence the no-op
+// onRetryHit) and decodes via unmarshalPubKey rather than proto.Unmarshal.
 func (c *accountCache) queryChainWithLock(ctx context.Context, address string) (cryptotypes.PubKey, error) {
-	lockKey := c.redisClient.KB().CacheLockKey(accountCacheType, address)
-
-	// Try to acquire distributed lock
-	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire lock: %w", err)
-	}
-	defer c.redisClient.Del(ctx, lockKey)
-
-	if !locked {
-		// Another instance is querying, wait and retry L2
-		lockAcquisitions.WithLabelValues(accountCacheType, "contended").Inc()
-		c.logger.Debug().
-			Str("address", address).
-			Msg("another instance is querying account, waiting")
-		time.Sleep(5 * time.Millisecond)
-
-		// Retry L2 after waiting
-		redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
-		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
-		if err == nil {
-			pubKey, err := c.unmarshalPubKey(data)
-			if err == nil {
-				cacheHits.WithLabelValues(accountCacheType, CacheLevelL2Retry).Inc()
-				return pubKey, nil
+	return queryKeyedChainWithLock(ctx, c.redisClient, c.logger, address, keyedQueryLockSpec[cryptotypes.PubKey]{
+		cacheType:   accountCacheType,
+		chainLabel:  "account",
+		logKeyField: "address",
+		waitingMsg:  "another instance is querying account, waiting",
+		loadFromRedis: func(ctx context.Context, address string) (cryptotypes.PubKey, bool) {
+			redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
+			data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+			if err != nil {
+				return nil, false
 			}
-		}
-
-		// If still not in Redis, query chain anyway
-	} else {
-		lockAcquisitions.WithLabelValues(accountCacheType, "acquired").Inc()
-	}
-
-	// Query chain
-	chainQueries.WithLabelValues("account").Inc()
-	chainStart := time.Now()
-
-	pubKey, err := c.queryClient.GetPubKeyFromAddress(ctx, address)
-	chainQueryLatency.WithLabelValues("account").Observe(time.Since(chainStart).Seconds())
-
-	if err != nil {
-		chainQueryErrors.WithLabelValues("account").Inc()
-		return nil, err
-	}
-
-	return pubKey, nil
+			pubKey, err := c.unmarshalPubKey(data)
+			if err != nil {
+				return nil, false
+			}
+			return pubKey, true
+		},
+		// account historically did NOT store L1 on a retry hit — keep that.
+		onRetryHit: func(address string, pubKey cryptotypes.PubKey) {},
+		queryChain: c.queryClient.GetPubKeyFromAddress,
+	})
 }
 
 // handleInvalidation handles cache invalidation events from pub/sub.

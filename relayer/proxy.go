@@ -1658,21 +1658,8 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		p.copyHeaders(req, originalReq)
 	}
 
-	// Apply service-specific configuration headers (override any matching headers)
-	for key, value := range configHeaders {
-		req.Header.Set(key, value)
-	}
-
-	// Apply authentication
-	if auth != nil {
-		if auth.Username != "" && auth.Password != "" {
-			req.SetBasicAuth(auth.Username, auth.Password)
-		} else if auth.BearerToken != "" {
-			req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
-		} else if auth.PlainToken != "" {
-			req.Header.Set("Authorization", auth.PlainToken)
-		}
-	}
+	// Apply backend config headers + authentication (shared with gRPC path).
+	applyBackendAuthAndHeaders(req, configHeaders, auth)
 
 	// Explicitly prevent compression from backend
 	// We'll compress the final RelayResponse ourselves if the client supports it
@@ -1996,6 +1983,29 @@ func (p *ProxyServer) getMaxRetries(serviceID, rpcType string) int {
 		return *cfg.MaxRetries
 	}
 	return 1 // default: 1 retry attempt
+}
+
+// applyBackendAuthAndHeaders applies the service-specific configuration headers
+// (overriding any matching headers already on the request) and then applies the
+// configured backend authentication (basic auth, bearer token, or plain token).
+// It is a package-level helper shared by the HTTP and gRPC relay paths so both
+// apply backend auth/headers identically.
+func applyBackendAuthAndHeaders(req *http.Request, configHeaders map[string]string, auth *AuthenticationConfig) {
+	// Apply service-specific configuration headers (override any matching headers)
+	for key, value := range configHeaders {
+		req.Header.Set(key, value)
+	}
+
+	// Apply authentication if configured
+	if auth != nil {
+		if auth.Username != "" && auth.Password != "" {
+			req.SetBasicAuth(auth.Username, auth.Password)
+		} else if auth.BearerToken != "" {
+			req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
+		} else if auth.PlainToken != "" {
+			req.Header.Set("Authorization", auth.PlainToken)
+		}
+	}
 }
 
 func (p *ProxyServer) getCircuitBreakerThreshold(serviceID, rpcType string) int32 {

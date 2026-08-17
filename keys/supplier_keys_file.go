@@ -235,32 +235,9 @@ func (p *SupplierKeysFileProvider) SupportsHotReload() bool {
 
 // WatchForChanges returns a channel that signals when keys may have changed.
 func (p *SupplierKeysFileProvider) WatchForChanges(ctx context.Context) <-chan struct{} {
-	// Start watching goroutine
-	go func() {
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case event, ok := <-p.watcher.Events:
-				if !ok {
-					return
-				}
-				// Trigger on Write or Create (file replacement)
-				if event.Op&(fsnotify.Write|fsnotify.Create) != 0 {
-					// Non-blocking send
-					select {
-					case p.changeCh <- struct{}{}:
-					default:
-					}
-				}
-			case err, ok := <-p.watcher.Errors:
-				if !ok {
-					return
-				}
-				p.logger.Warn().Err(err).Msg("file watcher error")
-			}
-		}
-	}()
+	// Trigger on Write or Create (file replacement).
+	go watchFileEvents(ctx, p.logger, p.watcher, p.changeCh, &p.mu, &p.closed,
+		fsnotify.Write|fsnotify.Create)
 
 	return p.changeCh
 }

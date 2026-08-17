@@ -362,77 +362,52 @@ func (c *applicationCache) InvalidateAll(ctx context.Context) error {
 // warmupSingleApp loads a single application from Redis (L2) into L1 cache.
 // This is called by the orchestrator's pond worker pool for parallel warmup.
 func (c *applicationCache) warmupSingleApp(ctx context.Context, addr string) error {
-	// Load from Redis (L2) into local cache (L1)
-	redisKey := c.redisClient.KB().CacheKey(applicationCacheType, addr)
-	data, err := c.redisClient.Get(ctx, redisKey).Bytes()
-	if err != nil {
-		// Key doesn't exist in Redis, skip
-		return nil
-	}
-
-	app := &apptypes.Application{}
-	if err := proto.Unmarshal(data, app); err != nil {
-		c.logger.Warn().
-			Err(err).
-			Str(logging.FieldAppAddress, addr).
-			Msg("failed to unmarshal application during warmup")
-		return err
-	}
-
-	c.localCache.Store(addr, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
-	return nil
+	return warmupKeyedFromRedis(
+		ctx, c.redisClient, c.logger,
+		applicationCacheType,
+		logging.FieldAppAddress,
+		"failed to unmarshal application during warmup",
+		addr,
+		func(data []byte) (*apptypes.Application, error) {
+			app := &apptypes.Application{}
+			if err := proto.Unmarshal(data, app); err != nil {
+				return nil, err
+			}
+			return app, nil
+		},
+		func(addr string, app *apptypes.Application) {
+			c.localCache.Store(addr, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
+		},
+	)
 }
 
 // queryChainWithLock queries the chain with distributed locking to prevent
-// duplicate queries from multiple instances.
+// duplicate queries from multiple instances. The lock/sleep/retry/chain skeleton
+// lives in queryKeyedChainWithLock; only the application-specific decode, L1
+// warm and chain call are supplied here.
 func (c *applicationCache) queryChainWithLock(ctx context.Context, appAddress string) (*apptypes.Application, error) {
-	lockKey := c.redisClient.KB().CacheLockKey(applicationCacheType, appAddress)
-
-	// Try to acquire distributed lock
-	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire lock: %w", err)
-	}
-	defer c.redisClient.Del(ctx, lockKey)
-
-	if !locked {
-		// Another instance is querying, wait and retry L2
-		lockAcquisitions.WithLabelValues(applicationCacheType, "contended").Inc()
-		c.logger.Debug().
-			Str(logging.FieldAppAddress, appAddress).
-			Msg("another instance is querying application, waiting")
-		time.Sleep(5 * time.Millisecond)
-
-		// Retry L2 after waiting
-		redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
-		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
-		if err == nil {
-			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
-			if err := proto.Unmarshal(data, app); err == nil {
-				c.localCache.Store(appAddress, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
-				cacheHits.WithLabelValues(applicationCacheType, CacheLevelL2Retry).Inc()
-				return app, nil
+	return queryKeyedChainWithLock(ctx, c.redisClient, c.logger, appAddress, keyedQueryLockSpec[*apptypes.Application]{
+		cacheType:   applicationCacheType,
+		chainLabel:  "application",
+		logKeyField: logging.FieldAppAddress,
+		waitingMsg:  "another instance is querying application, waiting",
+		loadFromRedis: func(ctx context.Context, appAddress string) (*apptypes.Application, bool) {
+			redisKey := c.redisClient.KB().CacheKey(applicationCacheType, appAddress)
+			data, err := c.redisClient.Get(ctx, redisKey).Bytes()
+			if err != nil {
+				return nil, false
 			}
-		}
-
-		// If still not in Redis, query chain anyway
-	} else {
-		lockAcquisitions.WithLabelValues(applicationCacheType, "acquired").Inc()
-	}
-
-	// Query chain
-	chainQueries.WithLabelValues("application").Inc()
-	chainStart := time.Now()
-
-	app, err := c.queryClient.GetApplication(ctx, appAddress)
-	chainQueryLatency.WithLabelValues("application").Observe(time.Since(chainStart).Seconds())
-
-	if err != nil {
-		chainQueryErrors.WithLabelValues("application").Inc()
-		return nil, err
-	}
-
-	return app, nil
+			app := &apptypes.Application{} // CRITICAL FIX: Allocate on heap, not stack
+			if err := proto.Unmarshal(data, app); err != nil {
+				return nil, false
+			}
+			return app, true
+		},
+		onRetryHit: func(appAddress string, app *apptypes.Application) {
+			c.localCache.Store(appAddress, applicationCacheL1Entry{app: app, cachedAt: time.Now()})
+		},
+		queryChain: c.queryClient.GetApplication,
+	})
 }
 
 // handleInvalidation handles cache invalidation events from pub/sub.

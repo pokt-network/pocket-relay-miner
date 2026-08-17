@@ -30,6 +30,7 @@ import (
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/puzpuzpuz/xsync/v4"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
@@ -323,6 +324,121 @@ var liveEntityCacheTTL = 90 * time.Second
 // tests can shrink it without sleeping.
 var immutableCacheTTLFloor = 30 * time.Minute
 
+// cachedGet is the shared double-checked-lock body for the query-client L1 entity
+// caches (GetApplication / GetSupplier / GetClaim / GetService). It collapses the
+// identical RLock→TTL-check→hit / Lock→double-check→miss→fetch→store boilerplate to
+// one place while leaving each call site in control of how it reads (get) and writes
+// (set) its own cache.
+//
+//   - get  : reads the cache under the read-or-write lock the helper already holds and
+//     returns (value, fetchedAt, found). The helper applies the TTL itself, so get
+//     must NOT pre-filter on age — it returns the raw entry and its cachedAt.
+//   - set  : stores the freshly fetched value (and updates the size gauge). Called once,
+//     under the write lock.
+//   - fetch: performs the chain query. Called only on a true miss, under the write lock.
+//
+// hits/misses are incremented exactly as the original inline code did: hits on either
+// the RLock fast path or the post-lock double-check; misses once per chain query.
+func cachedGet[V any](
+	mu *sync.RWMutex,
+	get func() (V, time.Time, bool),
+	set func(V),
+	ttl time.Duration,
+	hits, misses prometheus.Counter,
+	fetch func() (V, error),
+) (V, error) {
+	// Serve from cache while fresh (read lock).
+	mu.RLock()
+	if v, at, ok := get(); ok && time.Since(at) < ttl {
+		mu.RUnlock()
+		hits.Inc()
+		return v, nil
+	}
+	mu.RUnlock()
+
+	// Query chain (write lock).
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Double-check after acquiring the lock.
+	if v, at, ok := get(); ok && time.Since(at) < ttl {
+		hits.Inc()
+		return v, nil
+	}
+
+	misses.Inc()
+
+	v, err := fetch()
+	if err != nil {
+		var zero V
+		return zero, err
+	}
+
+	set(v)
+	return v, nil
+}
+
+// cachedParamsGet is cachedGet specialized for the six single-slot module-params
+// caches (shared/session/application/supplier/proof/service GetParams). It is the
+// same double-checked-lock body but adds the serve-stale-on-refresh-failure
+// fallback every params client shares: a transient RPC error on a post-TTL refresh
+// must serve the last-known value rather than break callers that previously had one
+// (the proof-requirement path, the leader's stake-health monitor, etc.). Staleness
+// is bounded by the outage, not unbounded.
+//
+//   - get   : returns (value, fetchedAt, found) under the held lock; the helper
+//     applies the TTL.
+//   - set   : stores the freshly fetched value and sets the size gauge to 1.
+//   - stale : returns the last-known cached value and whether one exists; called only
+//     when fetch fails, under the write lock.
+//   - onStale: logs the serve-stale warning (kept at the call site so each client emits
+//     its own message). Called only when a stale value is actually served.
+func cachedParamsGet[V any](
+	mu *sync.RWMutex,
+	get func() (V, time.Time, bool),
+	set func(V),
+	ttl time.Duration,
+	hits, misses prometheus.Counter,
+	fetch func() (V, error),
+	stale func() (V, bool),
+	onStale func(err error),
+) (V, error) {
+	// Serve from cache while fresh (read lock).
+	mu.RLock()
+	if v, at, ok := get(); ok && time.Since(at) < ttl {
+		mu.RUnlock()
+		hits.Inc()
+		return v, nil
+	}
+	mu.RUnlock()
+
+	// Query chain (write lock).
+	mu.Lock()
+	defer mu.Unlock()
+
+	// Double-check after acquiring the lock.
+	if v, at, ok := get(); ok && time.Since(at) < ttl {
+		hits.Inc()
+		return v, nil
+	}
+
+	misses.Inc()
+
+	v, err := fetch()
+	if err != nil {
+		// Serve the stale value on a failed refresh; bounded by the outage.
+		if sv, ok := stale(); ok {
+			onStale(err)
+			return sv, nil
+		}
+		var zero V
+		return zero, err
+	}
+
+	set(v)
+	return v, nil
+}
+
 var _ client.SharedQueryClient = (*sharedQueryClient)(nil)
 
 func newSharedQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *sharedQueryClient {
@@ -335,47 +451,34 @@ func newSharedQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout 
 }
 
 func (c *sharedQueryClient) GetParams(ctx context.Context) (*sharedtypes.Params, error) {
-	// Serve from cache while fresh
-	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		cached := c.paramsCache
-		c.paramsCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("shared", "params").Inc()
-		return cached, nil
-	}
-	c.paramsCacheMu.RUnlock()
-
-	// Query chain
-	c.paramsCacheMu.Lock()
-	defer c.paramsCacheMu.Unlock()
-
-	// Double-check after acquiring a lock
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		queryCacheHits.WithLabelValues("shared", "params").Inc()
-		return c.paramsCache, nil
-	}
-
-	queryCacheMisses.WithLabelValues("shared", "params").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Params(queryCtx, &sharedtypes.QueryParamsRequest{})
-	if err != nil {
-		// Serve the stale value on a failed refresh: a transient RPC error must
-		// not break callers (e.g. the proof-requirement path) that previously
-		// had a value. Staleness here is bounded by the outage, not unbounded.
-		if c.paramsCache != nil {
-			c.logger.Warn().Err(err).Msg("shared params refresh failed; serving stale cache")
-			return c.paramsCache, nil
-		}
-		return nil, fmt.Errorf("failed to query shared params: %w", err)
-	}
-
-	c.paramsCache = &res.Params
-	c.paramsCacheAt = time.Now()
-	queryCacheSize.WithLabelValues("shared", "params").Set(1)
-	return &res.Params, nil
+	// Serve-stale-on-refresh-failure params cache: a transient RPC error must not
+	// break callers (e.g. the proof-requirement path) that previously had a value.
+	// Staleness here is bounded by the outage, not unbounded.
+	return cachedParamsGet(
+		&c.paramsCacheMu,
+		func() (*sharedtypes.Params, time.Time, bool) {
+			return c.paramsCache, c.paramsCacheAt, c.paramsCache != nil
+		},
+		func(p *sharedtypes.Params) {
+			c.paramsCache = p
+			c.paramsCacheAt = time.Now()
+			queryCacheSize.WithLabelValues("shared", "params").Set(1)
+		},
+		liveParamsCacheTTL,
+		queryCacheHits.WithLabelValues("shared", "params"),
+		queryCacheMisses.WithLabelValues("shared", "params"),
+		func() (*sharedtypes.Params, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Params(queryCtx, &sharedtypes.QueryParamsRequest{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to query shared params: %w", err)
+			}
+			return &res.Params, nil
+		},
+		func() (*sharedtypes.Params, bool) { return c.paramsCache, c.paramsCache != nil },
+		func(err error) { c.logger.Warn().Err(err).Msg("shared params refresh failed; serving stale cache") },
+	)
 }
 
 // GetParamsAtHeight returns the shared params that were effective at queryHeight.
@@ -622,43 +725,34 @@ func (c *sessionQueryClient) GetSession(
 	sessionStartHeight := sharedtypes.GetSessionStartHeight(sharedParams, blockHeight)
 	cacheKey := fmt.Sprintf("%s/%s/%d", appAddress, serviceId, sessionStartHeight)
 
-	// Serve from cache while fresh
-	c.sessionCacheMu.RLock()
-	if e, ok := c.sessionCache[cacheKey]; ok && time.Since(e.cachedAt) < immutableCacheTTLFloor {
-		c.sessionCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("session", "session").Inc()
-		return e.session, nil
-	}
-	c.sessionCacheMu.RUnlock()
-
-	// Query chain
-	c.sessionCacheMu.Lock()
-	defer c.sessionCacheMu.Unlock()
-
-	// Double-check after acquiring lock
-	if e, ok := c.sessionCache[cacheKey]; ok && time.Since(e.cachedAt) < immutableCacheTTLFloor {
-		queryCacheHits.WithLabelValues("session", "session").Inc()
-		return e.session, nil
-	}
-
-	queryCacheMisses.WithLabelValues("session", "session").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.GetSession(queryCtx, &sessiontypes.QueryGetSessionRequest{
-		ApplicationAddress: appAddress,
-		ServiceId:          serviceId,
-		BlockHeight:        blockHeight,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query session: %w", err)
-	}
-
-	c.sessionCache[cacheKey] = sessionCacheEntry{session: res.Session, height: sessionStartHeight, cachedAt: time.Now()}
-	c.evictOldSessionsLocked(sessionStartHeight)
-	queryCacheSize.WithLabelValues("session", "session").Set(float64(len(c.sessionCache)))
-	return res.Session, nil
+	return cachedGet(
+		&c.sessionCacheMu,
+		func() (*sessiontypes.Session, time.Time, bool) {
+			e, ok := c.sessionCache[cacheKey]
+			return e.session, e.cachedAt, ok
+		},
+		func(s *sessiontypes.Session) {
+			c.sessionCache[cacheKey] = sessionCacheEntry{session: s, height: sessionStartHeight, cachedAt: time.Now()}
+			c.evictOldSessionsLocked(sessionStartHeight)
+			queryCacheSize.WithLabelValues("session", "session").Set(float64(len(c.sessionCache)))
+		},
+		immutableCacheTTLFloor,
+		queryCacheHits.WithLabelValues("session", "session"),
+		queryCacheMisses.WithLabelValues("session", "session"),
+		func() (*sessiontypes.Session, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.GetSession(queryCtx, &sessiontypes.QueryGetSessionRequest{
+				ApplicationAddress: appAddress,
+				ServiceId:          serviceId,
+				BlockHeight:        blockHeight,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to query session: %w", err)
+			}
+			return res.Session, nil
+		},
+	)
 }
 
 // evictOldSessionsLocked bounds the session cache. It must be called with
@@ -678,45 +772,32 @@ func (c *sessionQueryClient) evictOldSessionsLocked(newestHeight int64) {
 }
 
 func (c *sessionQueryClient) GetParams(ctx context.Context) (*sessiontypes.Params, error) {
-	// Serve from cache while fresh
-	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		cached := c.paramsCache
-		c.paramsCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("session", "params").Inc()
-		return cached, nil
-	}
-	c.paramsCacheMu.RUnlock()
-
-	// Query chain
-	c.paramsCacheMu.Lock()
-	defer c.paramsCacheMu.Unlock()
-
-	// Double-check after acquiring lock
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		queryCacheHits.WithLabelValues("session", "params").Inc()
-		return c.paramsCache, nil
-	}
-
-	queryCacheMisses.WithLabelValues("session", "params").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Params(queryCtx, &sessiontypes.QueryParamsRequest{})
-	if err != nil {
-		// Serve the stale value on a failed refresh (see sharedQueryClient.GetParams).
-		if c.paramsCache != nil {
-			c.logger.Warn().Err(err).Msg("session params refresh failed; serving stale cache")
-			return c.paramsCache, nil
-		}
-		return nil, fmt.Errorf("failed to query session params: %w", err)
-	}
-
-	c.paramsCache = &res.Params
-	c.paramsCacheAt = time.Now()
-	queryCacheSize.WithLabelValues("session", "params").Set(1)
-	return &res.Params, nil
+	// Serve-stale-on-refresh-failure params cache (see sharedQueryClient.GetParams).
+	return cachedParamsGet(
+		&c.paramsCacheMu,
+		func() (*sessiontypes.Params, time.Time, bool) {
+			return c.paramsCache, c.paramsCacheAt, c.paramsCache != nil
+		},
+		func(p *sessiontypes.Params) {
+			c.paramsCache = p
+			c.paramsCacheAt = time.Now()
+			queryCacheSize.WithLabelValues("session", "params").Set(1)
+		},
+		liveParamsCacheTTL,
+		queryCacheHits.WithLabelValues("session", "params"),
+		queryCacheMisses.WithLabelValues("session", "params"),
+		func() (*sessiontypes.Params, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Params(queryCtx, &sessiontypes.QueryParamsRequest{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to query session params: %w", err)
+			}
+			return &res.Params, nil
+		},
+		func() (*sessiontypes.Params, bool) { return c.paramsCache, c.paramsCache != nil },
+		func(err error) { c.logger.Warn().Err(err).Msg("session params refresh failed; serving stale cache") },
+	)
 }
 
 // =============================================================================
@@ -766,40 +847,31 @@ func newApplicationQueryClient(logger logging.Logger, conn *grpc.ClientConn, tim
 }
 
 func (c *applicationQueryClient) GetApplication(ctx context.Context, appAddress string) (apptypes.Application, error) {
-	// Serve from cache while fresh
-	c.appCacheMu.RLock()
-	if e, ok := c.appCache[appAddress]; ok && time.Since(e.cachedAt) < liveEntityCacheTTL {
-		c.appCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("application", "entity").Inc()
-		return e.app, nil
-	}
-	c.appCacheMu.RUnlock()
-
-	// Query chain
-	c.appCacheMu.Lock()
-	defer c.appCacheMu.Unlock()
-
-	// Double-check after acquiring lock
-	if e, ok := c.appCache[appAddress]; ok && time.Since(e.cachedAt) < liveEntityCacheTTL {
-		queryCacheHits.WithLabelValues("application", "entity").Inc()
-		return e.app, nil
-	}
-
-	queryCacheMisses.WithLabelValues("application", "entity").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Application(queryCtx, &apptypes.QueryGetApplicationRequest{
-		Address: appAddress,
-	})
-	if err != nil {
-		return apptypes.Application{}, fmt.Errorf("failed to query application: %w", err)
-	}
-
-	c.appCache[appAddress] = appCacheEntry{app: res.Application, cachedAt: time.Now()}
-	queryCacheSize.WithLabelValues("application", "entity").Set(float64(len(c.appCache)))
-	return res.Application, nil
+	return cachedGet(
+		&c.appCacheMu,
+		func() (apptypes.Application, time.Time, bool) {
+			e, ok := c.appCache[appAddress]
+			return e.app, e.cachedAt, ok
+		},
+		func(app apptypes.Application) {
+			c.appCache[appAddress] = appCacheEntry{app: app, cachedAt: time.Now()}
+			queryCacheSize.WithLabelValues("application", "entity").Set(float64(len(c.appCache)))
+		},
+		liveEntityCacheTTL,
+		queryCacheHits.WithLabelValues("application", "entity"),
+		queryCacheMisses.WithLabelValues("application", "entity"),
+		func() (apptypes.Application, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Application(queryCtx, &apptypes.QueryGetApplicationRequest{
+				Address: appAddress,
+			})
+			if err != nil {
+				return apptypes.Application{}, fmt.Errorf("failed to query application: %w", err)
+			}
+			return res.Application, nil
+		},
+	)
 }
 
 // InvalidateApplication removes an application from the local query cache.
@@ -826,44 +898,34 @@ func (c *applicationQueryClient) GetAllApplications(ctx context.Context) ([]appt
 }
 
 func (c *applicationQueryClient) GetParams(ctx context.Context) (*apptypes.Params, error) {
-	// Serve from cache while fresh
-	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		cached := c.paramsCache
-		c.paramsCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("application", "params").Inc()
-		return cached, nil
-	}
-	c.paramsCacheMu.RUnlock()
-
-	// Query chain
-	c.paramsCacheMu.Lock()
-	defer c.paramsCacheMu.Unlock()
-
-	// Double-check after acquiring a lock
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		queryCacheHits.WithLabelValues("application", "params").Inc()
-		return c.paramsCache, nil
-	}
-
-	queryCacheMisses.WithLabelValues("application", "params").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Params(queryCtx, &apptypes.QueryParamsRequest{})
-	if err != nil {
-		if c.paramsCache != nil {
+	// Serve-stale-on-refresh-failure params cache (see sharedQueryClient.GetParams).
+	return cachedParamsGet(
+		&c.paramsCacheMu,
+		func() (*apptypes.Params, time.Time, bool) {
+			return c.paramsCache, c.paramsCacheAt, c.paramsCache != nil
+		},
+		func(p *apptypes.Params) {
+			c.paramsCache = p
+			c.paramsCacheAt = time.Now()
+			queryCacheSize.WithLabelValues("application", "params").Set(1)
+		},
+		liveParamsCacheTTL,
+		queryCacheHits.WithLabelValues("application", "params"),
+		queryCacheMisses.WithLabelValues("application", "params"),
+		func() (*apptypes.Params, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Params(queryCtx, &apptypes.QueryParamsRequest{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to query application params: %w", err)
+			}
+			return &res.Params, nil
+		},
+		func() (*apptypes.Params, bool) { return c.paramsCache, c.paramsCache != nil },
+		func(err error) {
 			c.logger.Warn().Err(err).Msg("application params refresh failed; serving stale cache")
-			return c.paramsCache, nil
-		}
-		return nil, fmt.Errorf("failed to query application params: %w", err)
-	}
-
-	c.paramsCache = &res.Params
-	c.paramsCacheAt = time.Now()
-	queryCacheSize.WithLabelValues("application", "params").Set(1)
-	return &res.Params, nil
+		},
+	)
 }
 
 // =============================================================================
@@ -922,40 +984,31 @@ func newSupplierQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeou
 }
 
 func (c *supplierQueryClient) GetSupplier(ctx context.Context, supplierOperatorAddress string) (sharedtypes.Supplier, error) {
-	// Serve from cache while fresh
-	c.supplierCacheMu.RLock()
-	if e, ok := c.supplierCache[supplierOperatorAddress]; ok && time.Since(e.cachedAt) < liveEntityCacheTTL {
-		c.supplierCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("supplier", "entity").Inc()
-		return e.supplier, nil
-	}
-	c.supplierCacheMu.RUnlock()
-
-	// Query chain
-	c.supplierCacheMu.Lock()
-	defer c.supplierCacheMu.Unlock()
-
-	// Double-check after acquiring lock
-	if e, ok := c.supplierCache[supplierOperatorAddress]; ok && time.Since(e.cachedAt) < liveEntityCacheTTL {
-		queryCacheHits.WithLabelValues("supplier", "entity").Inc()
-		return e.supplier, nil
-	}
-
-	queryCacheMisses.WithLabelValues("supplier", "entity").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Supplier(queryCtx, &suppliertypes.QueryGetSupplierRequest{
-		OperatorAddress: supplierOperatorAddress,
-	})
-	if err != nil {
-		return sharedtypes.Supplier{}, fmt.Errorf("failed to query supplier: %w", err)
-	}
-
-	c.supplierCache[supplierOperatorAddress] = supplierCacheEntry{supplier: res.Supplier, cachedAt: time.Now()}
-	queryCacheSize.WithLabelValues("supplier", "entity").Set(float64(len(c.supplierCache)))
-	return res.Supplier, nil
+	return cachedGet(
+		&c.supplierCacheMu,
+		func() (sharedtypes.Supplier, time.Time, bool) {
+			e, ok := c.supplierCache[supplierOperatorAddress]
+			return e.supplier, e.cachedAt, ok
+		},
+		func(s sharedtypes.Supplier) {
+			c.supplierCache[supplierOperatorAddress] = supplierCacheEntry{supplier: s, cachedAt: time.Now()}
+			queryCacheSize.WithLabelValues("supplier", "entity").Set(float64(len(c.supplierCache)))
+		},
+		liveEntityCacheTTL,
+		queryCacheHits.WithLabelValues("supplier", "entity"),
+		queryCacheMisses.WithLabelValues("supplier", "entity"),
+		func() (sharedtypes.Supplier, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Supplier(queryCtx, &suppliertypes.QueryGetSupplierRequest{
+				OperatorAddress: supplierOperatorAddress,
+			})
+			if err != nil {
+				return sharedtypes.Supplier{}, fmt.Errorf("failed to query supplier: %w", err)
+			}
+			return res.Supplier, nil
+		},
+	)
 }
 
 // InvalidateSupplier removes a supplier from the local query cache.
@@ -969,46 +1022,33 @@ func (c *supplierQueryClient) InvalidateSupplier(operatorAddress string) {
 }
 
 func (c *supplierQueryClient) GetParams(ctx context.Context) (*suppliertypes.Params, error) {
-	// Serve from cache while fresh
-	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		cached := c.paramsCache
-		c.paramsCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("supplier", "params").Inc()
-		return cached, nil
-	}
-	c.paramsCacheMu.RUnlock()
-
-	// Query chain
-	c.paramsCacheMu.Lock()
-	defer c.paramsCacheMu.Unlock()
-
-	// Double-check after acquiring a lock
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		queryCacheHits.WithLabelValues("supplier", "params").Inc()
-		return c.paramsCache, nil
-	}
-
-	queryCacheMisses.WithLabelValues("supplier", "params").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Params(queryCtx, &suppliertypes.QueryParamsRequest{})
-	if err != nil {
-		// Serve the stale value on a failed refresh: a transient RPC error must not
-		// break the leader's stake-health monitor. Staleness is bounded by the outage.
-		if c.paramsCache != nil {
-			c.logger.Warn().Err(err).Msg("supplier params refresh failed; serving stale cache")
-			return c.paramsCache, nil
-		}
-		return nil, fmt.Errorf("failed to query supplier params: %w", err)
-	}
-
-	c.paramsCache = &res.Params
-	c.paramsCacheAt = time.Now()
-	queryCacheSize.WithLabelValues("supplier", "params").Set(1)
-	return &res.Params, nil
+	// Serve-stale-on-refresh-failure params cache: a transient RPC error must not
+	// break the leader's stake-health monitor. Staleness is bounded by the outage.
+	return cachedParamsGet(
+		&c.paramsCacheMu,
+		func() (*suppliertypes.Params, time.Time, bool) {
+			return c.paramsCache, c.paramsCacheAt, c.paramsCache != nil
+		},
+		func(p *suppliertypes.Params) {
+			c.paramsCache = p
+			c.paramsCacheAt = time.Now()
+			queryCacheSize.WithLabelValues("supplier", "params").Set(1)
+		},
+		liveParamsCacheTTL,
+		queryCacheHits.WithLabelValues("supplier", "params"),
+		queryCacheMisses.WithLabelValues("supplier", "params"),
+		func() (*suppliertypes.Params, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Params(queryCtx, &suppliertypes.QueryParamsRequest{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to query supplier params: %w", err)
+			}
+			return &res.Params, nil
+		},
+		func() (*suppliertypes.Params, bool) { return c.paramsCache, c.paramsCache != nil },
+		func(err error) { c.logger.Warn().Err(err).Msg("supplier params refresh failed; serving stale cache") },
+	)
 }
 
 // =============================================================================
@@ -1050,86 +1090,77 @@ func newProofQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout t
 }
 
 func (c *proofQueryClient) GetParams(ctx context.Context) (client.ProofParams, error) {
-	// Serve from cache while fresh. The proof-requirement threshold and
-	// probability are read "live" to match the chain's ProofRequirementForClaim;
-	// a fetch-once cache would freeze them at process start.
-	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		cached := c.paramsCache
-		c.paramsCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("proof", "params").Inc()
-		return cached, nil
-	}
-	c.paramsCacheMu.RUnlock()
-
-	// Query chain
-	c.paramsCacheMu.Lock()
-	defer c.paramsCacheMu.Unlock()
-
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		queryCacheHits.WithLabelValues("proof", "params").Inc()
-		return c.paramsCache, nil
-	}
-
-	queryCacheMisses.WithLabelValues("proof", "params").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Params(queryCtx, &prooftypes.QueryParamsRequest{})
+	// Serve-stale-on-refresh-failure params cache (see sharedQueryClient.GetParams).
+	// The proof-requirement threshold and probability are read "live" to match the
+	// chain's ProofRequirementForClaim; a fetch-once cache would freeze them at
+	// process start. *prooftypes.Params implements client.ProofParams, so the
+	// helper is instantiated on the concrete type and returned through the interface.
+	p, err := cachedParamsGet(
+		&c.paramsCacheMu,
+		func() (*prooftypes.Params, time.Time, bool) {
+			return c.paramsCache, c.paramsCacheAt, c.paramsCache != nil
+		},
+		func(p *prooftypes.Params) {
+			c.paramsCache = p
+			c.paramsCacheAt = time.Now()
+			queryCacheSize.WithLabelValues("proof", "params").Set(1)
+		},
+		liveParamsCacheTTL,
+		queryCacheHits.WithLabelValues("proof", "params"),
+		queryCacheMisses.WithLabelValues("proof", "params"),
+		func() (*prooftypes.Params, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Params(queryCtx, &prooftypes.QueryParamsRequest{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to query proof params: %w", err)
+			}
+			return &res.Params, nil
+		},
+		func() (*prooftypes.Params, bool) { return c.paramsCache, c.paramsCache != nil },
+		func(err error) { c.logger.Warn().Err(err).Msg("proof params refresh failed; serving stale cache") },
+	)
 	if err != nil {
-		// Serve the stale value on a failed refresh (see sharedQueryClient.GetParams).
-		if c.paramsCache != nil {
-			c.logger.Warn().Err(err).Msg("proof params refresh failed; serving stale cache")
-			return c.paramsCache, nil
-		}
-		return nil, fmt.Errorf("failed to query proof params: %w", err)
+		return nil, err
 	}
-
-	c.paramsCache = &res.Params
-	c.paramsCacheAt = time.Now()
-	queryCacheSize.WithLabelValues("proof", "params").Set(1)
-	return &res.Params, nil
+	return p, nil
 }
 
 func (c *proofQueryClient) GetClaim(ctx context.Context, supplierOperatorAddress string, sessionId string) (client.Claim, error) {
 	cacheKey := fmt.Sprintf("%s/%s", supplierOperatorAddress, sessionId)
 
-	// Serve from cache while fresh
-	c.claimCacheMu.RLock()
-	if e, ok := c.claimCache[cacheKey]; ok && time.Since(e.cachedAt) < liveEntityCacheTTL {
-		c.claimCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("proof", "entity").Inc()
-		return e.claim, nil
-	}
-	c.claimCacheMu.RUnlock()
-
-	// Query chain
-	c.claimCacheMu.Lock()
-	defer c.claimCacheMu.Unlock()
-
-	// Double-check after acquiring lock
-	if e, ok := c.claimCache[cacheKey]; ok && time.Since(e.cachedAt) < liveEntityCacheTTL {
-		queryCacheHits.WithLabelValues("proof", "entity").Inc()
-		return e.claim, nil
-	}
-
-	queryCacheMisses.WithLabelValues("proof", "entity").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Claim(queryCtx, &prooftypes.QueryGetClaimRequest{
-		SupplierOperatorAddress: supplierOperatorAddress,
-		SessionId:               sessionId,
-	})
+	// *prooftypes.Claim implements client.Claim, so the helper is instantiated on the
+	// concrete pointer type and returned through the interface.
+	claim, err := cachedGet(
+		&c.claimCacheMu,
+		func() (*prooftypes.Claim, time.Time, bool) {
+			e, ok := c.claimCache[cacheKey]
+			return e.claim, e.cachedAt, ok
+		},
+		func(cl *prooftypes.Claim) {
+			c.claimCache[cacheKey] = claimCacheEntry{claim: cl, cachedAt: time.Now()}
+			queryCacheSize.WithLabelValues("proof", "entity").Set(float64(len(c.claimCache)))
+		},
+		liveEntityCacheTTL,
+		queryCacheHits.WithLabelValues("proof", "entity"),
+		queryCacheMisses.WithLabelValues("proof", "entity"),
+		func() (*prooftypes.Claim, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Claim(queryCtx, &prooftypes.QueryGetClaimRequest{
+				SupplierOperatorAddress: supplierOperatorAddress,
+				SessionId:               sessionId,
+			})
+			if err != nil {
+				return nil, fmt.Errorf("failed to query claim: %w", err)
+			}
+			return &res.Claim, nil
+		},
+	)
 	if err != nil {
-		return nil, fmt.Errorf("failed to query claim: %w", err)
+		return nil, err
 	}
-
-	c.claimCache[cacheKey] = claimCacheEntry{claim: &res.Claim, cachedAt: time.Now()}
-	queryCacheSize.WithLabelValues("proof", "entity").Set(float64(len(c.claimCache)))
-	return &res.Claim, nil
+	return claim, nil
 }
 
 // supplierInclusionQuerier mirrors the miner-layer InclusionQueryClient
@@ -1179,6 +1210,48 @@ const maxInclusionPages = 10000
 // tx_index=null / pruned nodes), and pagination-complete — same properties as
 // GetSupplierClaimSessions.
 func (c *proofQueryClient) GetSupplierProvenSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
+	// Only a VALIDATED claim confirms the proof landed. PENDING_VALIDATION (proof not
+	// yet submitted/validated) and INVALID (proof rejected) are both "not proven" —
+	// the accept predicate rejects them so the reconciler treats them as missing.
+	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims (proven)",
+		func(claim *prooftypes.Claim) bool {
+			return claim.GetProofValidationStatus() == prooftypes.ClaimProofStatus_VALIDATED
+		})
+}
+
+// GetSupplierClaimSessions returns the set of session IDs for which a claim
+// exists on-chain for the given supplier, read from x/proof module state via the
+// AllClaims supplier secondary index. Proof-side analogue is
+// GetSupplierProvenSessions (which also reads claims — see that method for why
+// proof inclusion can't be read from proofs); same uncached + index-safe
+// (tx_index=null) + full-pagination semantics. It is the per-supplier inclusion
+// signal for the claim phase of the block-driven inclusion reconciler.
+func (c *proofQueryClient) GetSupplierClaimSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
+	// Every claim counts for the claim-inclusion signal (no status filter).
+	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims",
+		func(*prooftypes.Claim) bool { return true })
+}
+
+// paginateSupplierClaims walks the AllClaims supplier secondary index to completion
+// and returns the set of session IDs whose claim satisfies accept. It is the shared
+// pagination body for GetSupplierProvenSessions and GetSupplierClaimSessions, which
+// differ ONLY in their accept predicate (and the human-readable desc used in errors).
+//
+// CRITICAL: the VALIDATED-only proof-inclusion filter lives entirely in the caller's
+// accept predicate — paginateSupplierClaims itself applies no status filter and only
+// skips nil SessionHeaders, exactly as both original loops did. A claim is included
+// iff accept(claim) is true AND it carries a non-nil SessionHeader; the proof-inclusion
+// reconciler depends on the proven variant passing accept = (status == VALIDATED).
+//
+// Index-safe (reads module state via the AllClaims supplier index, NOT the Tendermint
+// tx indexer, so it works on tx_index=null / pruned nodes), pagination-complete, and
+// guarded against a non-advancing/cyclic NextKey.
+func (c *proofQueryClient) paginateSupplierClaims(
+	ctx context.Context,
+	supplierOperatorAddress string,
+	desc string,
+	accept func(claim *prooftypes.Claim) bool,
+) (map[string]struct{}, error) {
 	sessions := make(map[string]struct{})
 	var nextKey []byte
 	for page := 0; page < maxInclusionPages; page++ {
@@ -1191,13 +1264,10 @@ func (c *proofQueryClient) GetSupplierProvenSessions(ctx context.Context, suppli
 		})
 		cancel()
 		if err != nil {
-			return nil, fmt.Errorf("failed to query all claims (proven) for supplier %s: %w", supplierOperatorAddress, err)
+			return nil, fmt.Errorf("failed to query %s for supplier %s: %w", desc, supplierOperatorAddress, err)
 		}
 		for i := range res.Claims {
-			// Only a VALIDATED claim confirms the proof landed. PENDING_VALIDATION
-			// (proof not yet submitted/validated) and INVALID (proof rejected) are
-			// both "not proven" — left out so the reconciler treats them as missing.
-			if res.Claims[i].GetProofValidationStatus() != prooftypes.ClaimProofStatus_VALIDATED {
+			if !accept(&res.Claims[i]) {
 				continue
 			}
 			if sh := res.Claims[i].GetSessionHeader(); sh != nil {
@@ -1213,45 +1283,7 @@ func (c *proofQueryClient) GetSupplierProvenSessions(ctx context.Context, suppli
 		}
 		nextKey = res.Pagination.NextKey
 	}
-	return nil, fmt.Errorf("all claims (proven) pagination for supplier %s did not terminate within %d pages", supplierOperatorAddress, maxInclusionPages)
-}
-
-// GetSupplierClaimSessions returns the set of session IDs for which a claim
-// exists on-chain for the given supplier, read from x/proof module state via the
-// AllClaims supplier secondary index. Proof-side analogue is
-// GetSupplierProvenSessions (which also reads claims — see that method for why
-// proof inclusion can't be read from proofs); same uncached + index-safe
-// (tx_index=null) + full-pagination semantics. It is the per-supplier inclusion
-// signal for the claim phase of the block-driven inclusion reconciler.
-func (c *proofQueryClient) GetSupplierClaimSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
-	sessions := make(map[string]struct{})
-	var nextKey []byte
-	for page := 0; page < maxInclusionPages; page++ {
-		queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-		res, err := c.queryClient.AllClaims(queryCtx, &prooftypes.QueryAllClaimsRequest{
-			Filter: &prooftypes.QueryAllClaimsRequest_SupplierOperatorAddress{
-				SupplierOperatorAddress: supplierOperatorAddress,
-			},
-			Pagination: &query.PageRequest{Limit: inclusionPageLimit, Key: nextKey},
-		})
-		cancel()
-		if err != nil {
-			return nil, fmt.Errorf("failed to query all claims for supplier %s: %w", supplierOperatorAddress, err)
-		}
-		for i := range res.Claims {
-			if sh := res.Claims[i].GetSessionHeader(); sh != nil {
-				sessions[sh.GetSessionId()] = struct{}{}
-			}
-		}
-		if res.Pagination == nil || len(res.Pagination.NextKey) == 0 {
-			return sessions, nil
-		}
-		if bytes.Equal(res.Pagination.NextKey, nextKey) {
-			break
-		}
-		nextKey = res.Pagination.NextKey
-	}
-	return nil, fmt.Errorf("all claims pagination for supplier %s did not terminate within %d pages", supplierOperatorAddress, maxInclusionPages)
+	return nil, fmt.Errorf("%s pagination for supplier %s did not terminate within %d pages", desc, supplierOperatorAddress, maxInclusionPages)
 }
 
 // =============================================================================
@@ -1383,40 +1415,31 @@ type serviceCacheEntry struct {
 }
 
 func (c *serviceQueryClient) GetService(ctx context.Context, serviceId string) (sharedtypes.Service, error) {
-	// Check cache (fresh within TTL only)
-	c.serviceCacheMu.RLock()
-	if e, ok := c.serviceCache[serviceId]; ok && time.Since(e.cachedAt) < serviceCacheTTL {
-		c.serviceCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("service", "entity").Inc()
-		return e.service, nil
-	}
-	c.serviceCacheMu.RUnlock()
-
-	// Query chain
-	c.serviceCacheMu.Lock()
-	defer c.serviceCacheMu.Unlock()
-
-	// Double-check after acquiring lock
-	if e, ok := c.serviceCache[serviceId]; ok && time.Since(e.cachedAt) < serviceCacheTTL {
-		queryCacheHits.WithLabelValues("service", "entity").Inc()
-		return e.service, nil
-	}
-
-	queryCacheMisses.WithLabelValues("service", "entity").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Service(queryCtx, &servicetypes.QueryGetServiceRequest{
-		Id: serviceId,
-	})
-	if err != nil {
-		return sharedtypes.Service{}, fmt.Errorf("failed to query service: %w", err)
-	}
-
-	c.serviceCache[serviceId] = serviceCacheEntry{service: res.Service, cachedAt: time.Now()}
-	queryCacheSize.WithLabelValues("service", "entity").Set(float64(len(c.serviceCache)))
-	return res.Service, nil
+	return cachedGet(
+		&c.serviceCacheMu,
+		func() (sharedtypes.Service, time.Time, bool) {
+			e, ok := c.serviceCache[serviceId]
+			return e.service, e.cachedAt, ok
+		},
+		func(s sharedtypes.Service) {
+			c.serviceCache[serviceId] = serviceCacheEntry{service: s, cachedAt: time.Now()}
+			queryCacheSize.WithLabelValues("service", "entity").Set(float64(len(c.serviceCache)))
+		},
+		serviceCacheTTL,
+		queryCacheHits.WithLabelValues("service", "entity"),
+		queryCacheMisses.WithLabelValues("service", "entity"),
+		func() (sharedtypes.Service, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Service(queryCtx, &servicetypes.QueryGetServiceRequest{
+				Id: serviceId,
+			})
+			if err != nil {
+				return sharedtypes.Service{}, fmt.Errorf("failed to query service: %w", err)
+			}
+			return res.Service, nil
+		},
+	)
 }
 
 // InvalidateService removes a service from the local query cache so the next
@@ -1652,44 +1675,32 @@ func (c *serviceQueryClient) evictOldestCUPRAtHeightEntries() {
 }
 
 func (c *serviceQueryClient) GetParams(ctx context.Context) (*servicetypes.Params, error) {
-	// Serve from cache while fresh
-	c.paramsCacheMu.RLock()
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		cached := c.paramsCache
-		c.paramsCacheMu.RUnlock()
-		queryCacheHits.WithLabelValues("service", "params").Inc()
-		return cached, nil
-	}
-	c.paramsCacheMu.RUnlock()
-
-	// Query chain
-	c.paramsCacheMu.Lock()
-	defer c.paramsCacheMu.Unlock()
-
-	// Double-check after acquiring a lock
-	if c.paramsCache != nil && time.Since(c.paramsCacheAt) < liveParamsCacheTTL {
-		queryCacheHits.WithLabelValues("service", "params").Inc()
-		return c.paramsCache, nil
-	}
-
-	queryCacheMisses.WithLabelValues("service", "params").Inc()
-
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
-
-	res, err := c.queryClient.Params(queryCtx, &servicetypes.QueryParamsRequest{})
-	if err != nil {
-		if c.paramsCache != nil {
-			c.logger.Warn().Err(err).Msg("service params refresh failed; serving stale cache")
-			return c.paramsCache, nil
-		}
-		return nil, fmt.Errorf("failed to query service params: %w", err)
-	}
-
-	c.paramsCache = &res.Params
-	c.paramsCacheAt = time.Now()
-	queryCacheSize.WithLabelValues("service", "params").Set(1)
-	return &res.Params, nil
+	// Serve-stale-on-refresh-failure params cache (see sharedQueryClient.GetParams).
+	return cachedParamsGet(
+		&c.paramsCacheMu,
+		func() (*servicetypes.Params, time.Time, bool) {
+			return c.paramsCache, c.paramsCacheAt, c.paramsCache != nil
+		},
+		func(p *servicetypes.Params) {
+			c.paramsCache = p
+			c.paramsCacheAt = time.Now()
+			queryCacheSize.WithLabelValues("service", "params").Set(1)
+		},
+		liveParamsCacheTTL,
+		queryCacheHits.WithLabelValues("service", "params"),
+		queryCacheMisses.WithLabelValues("service", "params"),
+		func() (*servicetypes.Params, error) {
+			queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+			defer cancel()
+			res, err := c.queryClient.Params(queryCtx, &servicetypes.QueryParamsRequest{})
+			if err != nil {
+				return nil, fmt.Errorf("failed to query service params: %w", err)
+			}
+			return &res.Params, nil
+		},
+		func() (*servicetypes.Params, bool) { return c.paramsCache, c.paramsCache != nil },
+		func(err error) { c.logger.Warn().Err(err).Msg("service params refresh failed; serving stale cache") },
+	)
 }
 
 // =============================================================================
