@@ -616,19 +616,6 @@ type KeyringConfig struct {
 	KeyNames []string `yaml:"key_names,omitempty"`
 }
 
-// SupplierCacheConfig contains configuration for the shared supplier state cache.
-type SupplierCacheConfig struct {
-	// KeyPrefix is the Redis key prefix for supplier state.
-	// Default: "ha:supplier"
-	KeyPrefix string `yaml:"key_prefix"`
-
-	// FailOpen determines behavior when Redis is unavailable.
-	// If true, accept relays when cache unavailable (safer for traffic).
-	// If false, reject relays when cache unavailable (safer for validation).
-	// Default: true (fail open - prioritize serving traffic)
-	FailOpen bool `yaml:"fail_open"`
-}
-
 // RelayMeterYAMLConfig contains YAML configuration for the relay meter.
 // This is converted to relayer.RelayMeterConfig when instantiating the RelayMeter.
 type RelayMeterYAMLConfig struct {
