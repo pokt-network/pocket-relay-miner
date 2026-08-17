@@ -14,7 +14,6 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/keepalive"
 
-	cometrpctypes "github.com/cometbft/cometbft/rpc/core/types"
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
@@ -521,13 +520,6 @@ func (c *sharedQueryClient) GetEarliestSupplierProofCommitHeight(ctx context.Con
 	), nil
 }
 
-// InvalidateCache clears the cached params.
-func (c *sharedQueryClient) InvalidateCache() {
-	c.paramsCacheMu.Lock()
-	c.paramsCache = nil
-	c.paramsCacheMu.Unlock()
-}
-
 // =============================================================================
 // Session Query Client
 // =============================================================================
@@ -725,17 +717,6 @@ func (c *sessionQueryClient) GetParams(ctx context.Context) (*sessiontypes.Param
 	c.paramsCacheAt = time.Now()
 	queryCacheSize.WithLabelValues("session", "params").Set(1)
 	return &res.Params, nil
-}
-
-// InvalidateCache clears all cached data.
-func (c *sessionQueryClient) InvalidateCache() {
-	c.sessionCacheMu.Lock()
-	c.sessionCache = make(map[string]sessionCacheEntry)
-	c.sessionCacheMu.Unlock()
-
-	c.paramsCacheMu.Lock()
-	c.paramsCache = nil
-	c.paramsCacheMu.Unlock()
 }
 
 // =============================================================================
@@ -1808,49 +1789,6 @@ func (c *accountQueryClient) GetPubKeyFromAddress(ctx context.Context, address s
 	}
 
 	return pubKey, nil
-}
-
-// =============================================================================
-// Block Query Client (using CometBFT RPC)
-// =============================================================================
-
-// BlockQueryClient provides block queries using CometBFT RPC.
-type BlockQueryClient interface {
-	client.BlockQueryClient
-	Close() error
-}
-
-type blockQueryClient struct {
-	logger       logging.Logger
-	rpcEndpoint  string
-	queryTimeout time.Duration
-}
-
-// NewBlockQueryClient creates a new block query client.
-// Note: This requires a CometBFT RPC endpoint, not gRPC.
-func NewBlockQueryClient(
-	logger logging.Logger,
-	rpcEndpoint string,
-	queryTimeout time.Duration,
-) BlockQueryClient {
-	if queryTimeout == 0 {
-		queryTimeout = defaultQueryTimeout
-	}
-	return &blockQueryClient{
-		logger:       logger.With().Str("query_client", "block").Logger(),
-		rpcEndpoint:  rpcEndpoint,
-		queryTimeout: queryTimeout,
-	}
-}
-
-func (c *blockQueryClient) Block(ctx context.Context, height *int64) (*cometrpctypes.ResultBlock, error) {
-	// This is a simplified implementation
-	// For full functionality, use the cometbft/rpc/client package
-	return nil, fmt.Errorf("block query requires CometBFT RPC client - use pkg/client/block for full implementation")
-}
-
-func (c *blockQueryClient) Close() error {
-	return nil
 }
 
 // =============================================================================
