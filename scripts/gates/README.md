@@ -46,7 +46,7 @@ level 3 exercises the path that does.
 | script | what it runs |
 |---|---|
 | `lib.sh` | shared output helpers and the verdict. Sourced, not executed. |
-| `static.sh` | gofmt · go build · go vet · golangci-lint · tracked-file guard, across **both** Go modules (root and `tilt/backend-server`). `--staged` judges formatting on staged files only — that is how the pre-commit hook calls it. |
+| `static.sh` | gofmt · go build · go vet (twice: plain and `-tags test`) · golangci-lint · tracked-file guard, across **both** Go modules (root and `tilt/backend-server`). `--staged` judges formatting on staged files only — that is how the pre-commit hook calls it. |
 | `tests.sh` | `go test -tags test`. The `test` tag is not optional: test-only helpers live behind it. |
 | `race.sh` | `go test -race -count=1`. `-count=1` defeats the result cache, which would otherwise satisfy the command with a PASS from a run without `-race`. |
 | `coverage.sh` | the coverage profile — what CI rejects on. |
@@ -67,6 +67,10 @@ testing the code.
 - **A stray `.go` file under `scripts/localonly/` joins the build.** git ignores
   the directory; the Go toolchain walks the filesystem and does not. Keep saved
   code under a `_`-prefixed directory — Go ignores `_` and `.` prefixes.
+- **`go build` and a plain `go vet` do not compile test code.** Test-only helpers
+  live behind `//go:build test`, so deleting a symbol that only tests use passes
+  both and fails minutes later in the test gate. That is why `static.sh` vets
+  twice, the second time with `-tags test`.
 
 ## Adding a gate
 

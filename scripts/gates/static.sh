@@ -108,6 +108,19 @@ else
     gate_detail "$vet_out"
 fi
 
+# Again under the `test` tag, which is NOT a formality: this repository puts
+# test-only helpers behind //go:build test, so a plain vet never compiles them.
+# Without this pass a change can delete a symbol that only test code uses and
+# reach a green level 1 while the suite does not build -- observed, not
+# theoretical. Cheap enough to always run, and it fails minutes earlier than the
+# test gate would.
+if vet_out="$(go vet -tags test "$pkg" 2>&1)"; then
+    gate_pass "root module vet clean (-tags test)"
+else
+    gate_fail "go vet -tags test (root module):"
+    gate_detail "$vet_out"
+fi
+
 if [ -f "$BACKEND_DIR/go.mod" ]; then
     if vet_out="$(cd "$BACKEND_DIR" && go vet ./... 2>&1)"; then
         gate_pass "$BACKEND_DIR vet clean"
