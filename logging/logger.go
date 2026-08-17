@@ -196,19 +196,9 @@ func WithComponent(logger Logger, component string) Logger {
 	return logger.With().Str(FieldComponent, component).Logger()
 }
 
-// WithSupplier returns a child logger with the supplier field set.
-func WithSupplier(logger Logger, supplierAddr string) Logger {
-	return logger.With().Str(FieldSupplier, supplierAddr).Logger()
-}
-
 // WithSession returns a child logger with the session_id field set.
 func WithSession(logger Logger, sessionID string) Logger {
 	return logger.With().Str(FieldSessionID, sessionID).Logger()
-}
-
-// WithService returns a child logger with the service_id field set.
-func WithService(logger Logger, serviceID string) Logger {
-	return logger.With().Str(FieldServiceID, serviceID).Logger()
 }
 
 // ForComponent returns a logger configured for a specific component.
@@ -222,40 +212,6 @@ func ForSupplierComponent(logger Logger, component, supplierAddr string) Logger 
 	return logger.With().
 		Str(FieldComponent, component).
 		Str(FieldSupplier, supplierAddr).
-		Logger()
-}
-
-// ForServiceComponent returns a logger configured for a service-specific component.
-func ForServiceComponent(logger Logger, component, serviceID string) Logger {
-	return logger.With().
-		Str(FieldComponent, component).
-		Str(FieldServiceID, serviceID).
-		Logger()
-}
-
-// ForSessionOperation returns a logger configured for session-specific operations.
-func ForSessionOperation(logger Logger, sessionID string) Logger {
-	return WithSession(logger, sessionID)
-}
-
-// WithMinerID returns a logger with the miner_id field set.
-// This should be called early in miner startup to set the context for all logs.
-func WithMinerID(logger Logger, minerID string) Logger {
-	return logger.With().Str(FieldMinerID, minerID).Logger()
-}
-
-// WithReplica returns a logger with the replica role field set.
-// Use ReplicaLeader or ReplicaStandby constants.
-func WithReplica(logger Logger, role string) Logger {
-	return logger.With().Str(FieldReplica, role).Logger()
-}
-
-// ForMiner returns a logger configured with miner_id and replica role.
-// This is the preferred way to create the top-level miner logger.
-func ForMiner(logger Logger, minerID, replica string) Logger {
-	return logger.With().
-		Str(FieldMinerID, minerID).
-		Str(FieldReplica, replica).
 		Logger()
 }
 

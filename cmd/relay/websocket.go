@@ -379,8 +379,6 @@ func connectWebSocket(relayerURL, serviceID, supplierAddr string) (*websocket.Co
 	return conn, nil
 }
 
-// sendWebSocketRelay sends a relay request via WebSocket and returns the response.
-
 // sendWebSocketRelayOnConnection sends a relay request via an existing WebSocket connection.
 // This is used by the load test to reuse connections from the connection pool.
 // Returns raw response bytes for signature verification.
