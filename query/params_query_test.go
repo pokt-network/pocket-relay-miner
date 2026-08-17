@@ -352,9 +352,14 @@ func TestSharedParams_InvalidateCache(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, params1)
 
-	// Invalidate cache
+	// Expire the cache by aging the cached params past the TTL. The query
+	// clients no longer expose an InvalidateCache method; freshness is driven
+	// solely by the params TTL (liveParamsCacheTTL), so simulate elapsed time by
+	// backdating paramsCacheAt beyond it.
 	sharedClient := qc.sharedClient
-	sharedClient.InvalidateCache()
+	sharedClient.paramsCacheMu.Lock()
+	sharedClient.paramsCacheAt = time.Now().Add(-2 * liveParamsCacheTTL)
+	sharedClient.paramsCacheMu.Unlock()
 
 	// Next query should fetch again
 	params2, err := qc.Shared().GetParams(ctx)
