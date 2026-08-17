@@ -233,8 +233,6 @@ relay_meter:
   # Enable metering and rate limiting
   enabled: true
 
-  # Redis key prefix for metering data
-  redis_key_prefix: "ha"
 
   # Fail behavior when Redis is unavailable
   # - "open": Allow relays when Redis down (prioritize availability)

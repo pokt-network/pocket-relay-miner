@@ -623,10 +623,6 @@ type RelayMeterYAMLConfig struct {
 	// Default: true
 	Enabled bool `yaml:"enabled"`
 
-	// RedisKeyPrefix is the prefix for Redis keys used by the relay meter.
-	// Default: "ha"
-	RedisKeyPrefix string `yaml:"redis_key_prefix"`
-
 	// FailBehavior determines behavior when Redis is unavailable.
 	// "open" - Allow relays when Redis down (prioritize availability)
 	// "closed" - Reject relays when Redis down (prioritize safety)
@@ -683,10 +679,9 @@ func DefaultConfig() Config {
 			Addr:    "0.0.0.0:8081",
 		},
 		RelayMeter: RelayMeterYAMLConfig{
-			Enabled:        true,
-			RedisKeyPrefix: "ha",
-			FailBehavior:   "open",
-			CacheTTL:       2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
+			Enabled:      true,
+			FailBehavior: "open",
+			CacheTTL:     2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
 		},
 		HTTPTransport: HTTPTransportConfig{
 			MaxIdleConns:                 500,  // Total idle connections across all hosts (5x for 1000+ RPS)
