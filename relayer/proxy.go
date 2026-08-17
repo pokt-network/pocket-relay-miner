@@ -1094,7 +1094,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		if endpoint != nil && backendPool != nil {
 			transition := backendPool.RecordResult(endpoint, respStatus, err, threshold)
 			if transition != nil {
-				p.logCircuitBreakerTransition(transition, serviceID, rpcType)
+				logCircuitBreakerTransition(p.logger, transition, serviceID, rpcType, threshold)
 			}
 		}
 
@@ -2015,59 +2015,6 @@ func (p *ProxyServer) getCircuitBreakerThreshold(serviceID, rpcType string) int3
 		}
 	}
 	return pool.DefaultUnhealthyThreshold
-}
-
-// logCircuitBreakerTransition logs a circuit breaker state transition.
-// Warn level for healthy->unhealthy (circuit broken), Info level for recovery.
-// Always visible — operators rely on these logs to diagnose backend issues.
-func (p *ProxyServer) logCircuitBreakerTransition(transition *pool.TransitionEvent, serviceID, rpcType string) {
-	if transition.OldHealthy && !transition.NewHealthy {
-		// Circuit broken: healthy -> unhealthy
-		event := p.logger.Warn().
-			Str("backend", transition.Endpoint.Name).
-			Str("url", transition.Endpoint.RawURL).
-			Str(logging.FieldServiceID, serviceID).
-			Str("rpc_type", rpcType).
-			Int32("consecutive_failures", transition.Failures).
-			Int32("threshold", pool.DefaultUnhealthyThreshold)
-
-		// Classify and include the triggering cause so operators can tell at a
-		// glance *why* the breaker tripped (5xx vs transport error vs DNS vs …).
-		if reason := pool.ClassifyFailure(transition.StatusCode, transition.Error); reason != "" {
-			event = event.Str("trigger_reason", reason)
-		}
-		if transition.StatusCode > 0 {
-			event = event.Int("trigger_http_status", transition.StatusCode)
-		}
-		if transition.Error != nil {
-			event = event.Str("trigger_error", transition.Error.Error())
-		}
-
-		// Include recovery timeout info
-		recoveryTimeout := transition.Endpoint.RecoveryTimeout()
-		if recoveryTimeout > 0 {
-			event = event.Dur("auto_recovery_in", recoveryTimeout)
-		}
-
-		event.Msg("BACKEND DOWN: circuit breaker tripped, traffic will failover to other backends")
-	} else if !transition.OldHealthy && transition.NewHealthy {
-		// Recovery: unhealthy -> healthy
-		event := p.logger.Info().
-			Str("backend", transition.Endpoint.Name).
-			Str("url", transition.Endpoint.RawURL).
-			Str(logging.FieldServiceID, serviceID).
-			Str("rpc_type", rpcType)
-
-		if transition.DowntimeDuration > 0 {
-			event = event.Dur("downtime", transition.DowntimeDuration)
-		}
-
-		if transition.StatusCode > 0 {
-			event = event.Int("recovery_http_status", transition.StatusCode)
-		}
-
-		event.Msg("BACKEND UP: circuit breaker recovered, backend is healthy again")
-	}
 }
 
 // isStreamingResponse checks if the HTTP response should be handled as a stream.
