@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"time"
 
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
@@ -279,129 +278,6 @@ func DisplayDiagnosticResult(client *relay_client.RelayClient, result *RelayResu
 	}
 
 	fmt.Printf("\n")
-}
-
-// LoadTestStats tracks statistics for load testing.
-type LoadTestStats struct {
-	TotalRequests    int64
-	SuccessCount     int64
-	FailureCount     int64
-	ValidationFailed int64 // Failed signature verification
-	ErrorResponses   int64 // RelayResponse contained error
-	NetworkErrors    int64 // Network/transport errors
-
-	TotalLatency   time.Duration
-	MinLatency     time.Duration
-	MaxLatency     time.Duration
-	LatencyBuckets map[string]int64 // e.g., "0-10ms", "10-50ms", etc.
-}
-
-// NewLoadTestStats creates a new load test statistics tracker.
-func NewLoadTestStats() *LoadTestStats {
-	return &LoadTestStats{
-		MinLatency: time.Hour, // Start with very high value
-		LatencyBuckets: map[string]int64{
-			"0-10ms":     0,
-			"10-50ms":    0,
-			"50-100ms":   0,
-			"100-500ms":  0,
-			"500-1000ms": 0,
-			"1000ms+":    0,
-		},
-	}
-}
-
-// RecordResult records a relay result in the statistics.
-func (s *LoadTestStats) RecordResult(result *RelayResult) {
-	s.TotalRequests++
-
-	if result.Success {
-		s.SuccessCount++
-	} else {
-		s.FailureCount++
-
-		// Categorize failure type
-		if result.Error != nil {
-			errMsg := result.Error.Error()
-			if contains(errMsg, "signature verification") {
-				s.ValidationFailed++
-			} else if contains(errMsg, "relay response contains error") || contains(errMsg, "JSON-RPC error") {
-				s.ErrorResponses++
-			} else {
-				s.NetworkErrors++
-			}
-		}
-	}
-
-	// Track latency
-	latency := result.TotalDuration
-	s.TotalLatency += latency
-
-	if latency < s.MinLatency {
-		s.MinLatency = latency
-	}
-	if latency > s.MaxLatency {
-		s.MaxLatency = latency
-	}
-
-	// Update latency buckets
-	ms := latency.Milliseconds()
-	switch {
-	case ms < 10:
-		s.LatencyBuckets["0-10ms"]++
-	case ms < 50:
-		s.LatencyBuckets["10-50ms"]++
-	case ms < 100:
-		s.LatencyBuckets["50-100ms"]++
-	case ms < 500:
-		s.LatencyBuckets["100-500ms"]++
-	case ms < 1000:
-		s.LatencyBuckets["500-1000ms"]++
-	default:
-		s.LatencyBuckets["1000ms+"]++
-	}
-}
-
-// DisplayLoadTestSummary prints a formatted summary of load test results.
-func (s *LoadTestStats) DisplayLoadTestSummary(duration time.Duration) {
-	fmt.Printf("\n=== Load Test Summary ===\n")
-	fmt.Printf("Total Requests: %d\n", s.TotalRequests)
-	fmt.Printf("Successful: %d (%.2f%%)\n", s.SuccessCount, float64(s.SuccessCount)/float64(s.TotalRequests)*100)
-	fmt.Printf("Failed: %d (%.2f%%)\n", s.FailureCount, float64(s.FailureCount)/float64(s.TotalRequests)*100)
-
-	if s.FailureCount > 0 {
-		fmt.Printf("\n=== Failure Breakdown ===\n")
-		fmt.Printf("Validation Failed: %d\n", s.ValidationFailed)
-		fmt.Printf("Error Responses: %d\n", s.ErrorResponses)
-		fmt.Printf("Network Errors: %d\n", s.NetworkErrors)
-	}
-
-	fmt.Printf("\n=== Latency ===\n")
-	if s.TotalRequests > 0 {
-		avgLatency := s.TotalLatency / time.Duration(s.TotalRequests)
-		fmt.Printf("Min: %v\n", s.MinLatency)
-		fmt.Printf("Avg: %v\n", avgLatency)
-		fmt.Printf("Max: %v\n", s.MaxLatency)
-	}
-
-	fmt.Printf("\n=== Latency Distribution ===\n")
-	for _, bucket := range []string{"0-10ms", "10-50ms", "50-100ms", "100-500ms", "500-1000ms", "1000ms+"} {
-		count := s.LatencyBuckets[bucket]
-		pct := float64(count) / float64(s.TotalRequests) * 100
-		fmt.Printf("%12s: %6d (%.1f%%)\n", bucket, count, pct)
-	}
-
-	fmt.Printf("\n=== Performance ===\n")
-	rps := float64(s.TotalRequests) / duration.Seconds()
-	fmt.Printf("Duration: %v\n", duration)
-	fmt.Printf("Throughput: %.2f RPS\n", rps)
-
-	fmt.Printf("\n")
-}
-
-// contains is a helper function to check if a string contains a substring.
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
 }
 
 // NewRateLimiter creates a rate limiter for RPS targeting.
