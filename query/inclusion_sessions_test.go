@@ -204,3 +204,54 @@ func TestGetSupplierClaimSessions_Success(t *testing.T) {
 	_, hasA := got["csess-a"]
 	require.True(t, hasA)
 }
+
+// TestPaginateSupplierClaims_AcceptPredicateFiltering is the DRY-refactor guard for
+// the shared paginateSupplierClaims helper: it must apply ONLY the caller's accept
+// predicate (plus the nil-SessionHeader skip), so the VALIDATED-only proof-inclusion
+// filter the reconciler depends on still excludes PENDING_VALIDATION and INVALID
+// claims. It drives the helper directly with the same mixed-status page over two
+// predicates to prove the filter lives in the predicate, not the loop.
+func TestPaginateSupplierClaims_AcceptPredicateFiltering(t *testing.T) {
+	_, address, cleanup, mock := setupMockQueryServer(t)
+	defer cleanup()
+
+	const supplier = "pokt1supplier"
+	mixedPage := func(_ context.Context, req *prooftypes.QueryAllClaimsRequest) (*prooftypes.QueryAllClaimsResponse, error) {
+		require.Equal(t, supplier, req.GetSupplierOperatorAddress())
+		return &prooftypes.QueryAllClaimsResponse{
+			Claims: []prooftypes.Claim{
+				claimWithStatus(supplier, "sess-validated", prooftypes.ClaimProofStatus_VALIDATED),
+				claimWithStatus(supplier, "sess-pending", prooftypes.ClaimProofStatus_PENDING_VALIDATION),
+				claimWithStatus(supplier, "sess-invalid", prooftypes.ClaimProofStatus_INVALID),
+			},
+		}, nil
+	}
+
+	pc := newProofClientForTest(t, address)
+
+	// VALIDATED-only predicate (the proven-sessions accept): PENDING/INVALID excluded.
+	mock.allClaimsFunc = mixedPage
+	validatedOnly, err := pc.paginateSupplierClaims(context.Background(), supplier, "all claims (proven)",
+		func(c *prooftypes.Claim) bool {
+			return c.GetProofValidationStatus() == prooftypes.ClaimProofStatus_VALIDATED
+		})
+	require.NoError(t, err)
+	require.Len(t, validatedOnly, 1, "VALIDATED-only predicate must exclude non-validated claims")
+	_, hasValidated := validatedOnly["sess-validated"]
+	require.True(t, hasValidated, "VALIDATED claim must pass the filter")
+	_, hasPending := validatedOnly["sess-pending"]
+	require.False(t, hasPending, "PENDING_VALIDATION must be filtered out by the accept predicate")
+	_, hasInvalid := validatedOnly["sess-invalid"]
+	require.False(t, hasInvalid, "INVALID must be filtered out by the accept predicate")
+
+	// Accept-all predicate (the claim-sessions accept): every claim with a header is kept.
+	mock.allClaimsFunc = mixedPage
+	all, err := pc.paginateSupplierClaims(context.Background(), supplier, "all claims",
+		func(*prooftypes.Claim) bool { return true })
+	require.NoError(t, err)
+	require.Len(t, all, 3, "accept-all predicate must keep every claim with a session header")
+	for _, id := range []string{"sess-validated", "sess-pending", "sess-invalid"} {
+		_, ok := all[id]
+		require.True(t, ok, "accept-all must include %s", id)
+	}
+}

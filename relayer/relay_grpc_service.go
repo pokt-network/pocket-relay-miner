@@ -717,21 +717,8 @@ func (s *RelayGRPCService) forwardToBackend(
 		}
 	}
 
-	// Add config headers (override any matching keys)
-	for key, value := range configHeaders {
-		req.Header.Set(key, value)
-	}
-
-	// Add authentication if configured
-	if auth != nil {
-		if auth.Username != "" && auth.Password != "" {
-			req.SetBasicAuth(auth.Username, auth.Password)
-		} else if auth.BearerToken != "" {
-			req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
-		} else if auth.PlainToken != "" {
-			req.Header.Set("Authorization", auth.PlainToken)
-		}
-	}
+	// Apply backend config headers + authentication (shared with HTTP path).
+	applyBackendAuthAndHeaders(req, configHeaders, auth)
 
 	// Set host header
 	req.Host = backendParsed.Host

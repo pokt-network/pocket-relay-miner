@@ -15,6 +15,18 @@ import (
 
 var _ transport.MinedRelayConsumer = (*StreamsConsumer)(nil)
 
+// isStreamNotFoundError reports whether a Redis error indicates the stream (or
+// its consumer group) does not exist yet. Redis surfaces this as a "no such
+// key" error for missing keys and a "NOGROUP" error when the stream/group is
+// absent for group operations (XAUTOCLAIM, XPENDING, etc.).
+func isStreamNotFoundError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "no such key") || strings.Contains(msg, "NOGROUP")
+}
+
 // StreamsConsumer implements MinedRelayConsumer using Redis Streams with consumer groups.
 // It provides exactly-once delivery semantics within the consumer group.
 // TRUE PUSH architecture: BLOCK 0 means zero latency when data arrives.
@@ -294,8 +306,7 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 
 	if err != nil {
 		// Stream may not exist yet - skip
-		if strings.Contains(err.Error(), "no such key") ||
-			strings.Contains(err.Error(), "NOGROUP") {
+		if isStreamNotFoundError(err) {
 			return
 		}
 		if ctx.Err() == nil {
@@ -454,8 +465,7 @@ func (c *StreamsConsumer) Pending(ctx context.Context) (int64, error) {
 	info, err := c.client.XPending(ctx, c.streamName, c.config.ConsumerGroup).Result()
 	if err != nil {
 		// Stream may not exist yet
-		if strings.Contains(err.Error(), "no such key") ||
-			strings.Contains(err.Error(), "NOGROUP") {
+		if isStreamNotFoundError(err) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("failed to get pending info: %w", err)
@@ -499,7 +509,7 @@ func (c *StreamsConsumer) TrimStream(ctx context.Context, maxAge time.Duration) 
 	trimmed, err := c.client.XTrimMinID(ctx, c.streamName, minID).Result()
 	if err != nil {
 		// Stream may not exist - not an error
-		if strings.Contains(err.Error(), "no such key") {
+		if isStreamNotFoundError(err) {
 			return 0, nil
 		}
 		return 0, fmt.Errorf("failed to trim stream %s: %w", c.streamName, err)

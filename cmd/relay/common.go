@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
@@ -278,6 +279,64 @@ func DisplayDiagnosticResult(client *relay_client.RelayClient, result *RelayResu
 	}
 
 	fmt.Printf("\n")
+}
+
+// runLoadTest runs the shared worker-pool load-test scaffold used by the HTTP,
+// gRPC, and WebSocket load tests. It owns the bounded worker pool (semaphore +
+// WaitGroup), optional RPS pacing, the metrics lifecycle, and result output.
+//
+// Protocol-specific concerns (connection setup/teardown, building/sending/
+// verifying a single relay, and per-protocol log fields) are provided by the
+// caller:
+//   - startLog: invoked once, just before workers spawn, to emit the
+//     protocol-specific "starting ..." log line.
+//   - workerFn: invoked once per request inside an acquired worker slot; it is
+//     responsible for sending one relay and recording the outcome on metrics.
+//
+// Workers run with at most `concurrency` in flight. When `rps > 0`, request
+// launches are paced by a ticker so the aggregate launch rate approaches rps.
+func runLoadTest(
+	count, concurrency, rps int,
+	metrics *RelayMetrics,
+	startLog func(),
+	workerFn func(reqNum int),
+) {
+	// Worker pool pattern with semaphore
+	semaphore := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	// Create rate limiter if RPS targeting is enabled
+	rateLimiter := NewRateLimiter(rps)
+	if rateLimiter != nil {
+		defer rateLimiter.Stop()
+	}
+
+	startLog()
+
+	metrics.Start()
+
+	// Spawn workers
+	for i := 0; i < count; i++ {
+		// Wait for rate limiter if enabled (pace request launches)
+		WaitForRateLimit(rateLimiter)
+
+		wg.Add(1)
+		semaphore <- struct{}{} // Acquire slot
+
+		go func(reqNum int) {
+			defer wg.Done()
+			defer func() { <-semaphore }() // Release slot
+
+			workerFn(reqNum)
+		}(i)
+	}
+
+	// Wait for all workers to finish
+	wg.Wait()
+	metrics.End()
+
+	// Display results
+	fmt.Println(metrics.GetSummary())
 }
 
 // NewRateLimiter creates a rate limiter for RPS targeting.
