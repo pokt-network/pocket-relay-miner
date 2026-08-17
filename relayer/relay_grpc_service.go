@@ -9,7 +9,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -78,9 +77,6 @@ type RelayGRPCService struct {
 
 	// Function to get backend config for circuit breaker threshold
 	getBackendConfig func(serviceID, rpcType string) *BackendConfig
-
-	// Backend gRPC connections for passthrough mode
-	grpcBackends sync.Map // map[string]*grpc.ClientConn
 
 	// Block height tracking
 	currentBlockHeight *atomic.Int64
@@ -188,14 +184,6 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		getPool:            config.GetPool,
 		getBackendConfig:   config.GetBackendConfig,
 	}
-}
-
-// RegisterWithServer registers the relay service handler with a gRPC server.
-// This uses the UnknownServiceHandler pattern to intercept calls to our method path.
-func (s *RelayGRPCService) RegisterWithServer(server *grpc.Server) {
-	// Note: We use UnknownServiceHandler in the server options instead of registering here.
-	// This is because we're handling a dynamically defined service.
-	s.logger.Info().Msg("relay gRPC service registered")
 }
 
 // HandleUnknownService is a gRPC stream handler that processes relay requests.
@@ -894,54 +882,9 @@ func (s *RelayGRPCService) logCircuitBreakerTransition(transition *pool.Transiti
 	}
 }
 
-// Unused - reserved for future gRPC streaming support
-// connectToGRPCBackend establishes a gRPC connection to a backend (for future streaming support).
-// func (s *RelayGRPCService) connectToGRPCBackend(backendURL string) (*grpc.ClientConn, error) {
-// 	// Check cache
-// 	if conn, ok := s.grpcBackends.Load(backendURL); ok {
-// 		return conn.(*grpc.ClientConn), nil
-// 	}
-//
-// 	// Parse URL to determine TLS
-// 	useTLS := strings.HasPrefix(backendURL, "grpcs://") || strings.HasPrefix(backendURL, "https://")
-//
-// 	// Strip scheme
-// 	address := backendURL
-// 	address = strings.TrimPrefix(address, "grpcs://")
-// 	address = strings.TrimPrefix(address, "grpc://")
-// 	address = strings.TrimPrefix(address, "https://")
-// 	address = strings.TrimPrefix(address, "http://")
-//
-// 	var opts []grpc.DialOption
-// 	if useTLS {
-// 		opts = append(opts, grpc.WithTransportCredentials(credentials.NewTLS(&tls.Config{
-// 			MinVersion: tls.VersionTLS12,
-// 		})))
-// 	} else {
-// 		opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
-// 	}
-//
-// 	conn, err := grpc.NewClient(address, opts...)
-// 	if err != nil {
-// 		return nil, err
-// 	}
-//
-// 	s.grpcBackends.Store(backendURL, conn)
-// 	return conn, nil
-// }
-
-// Close closes all backend connections.
+// Close releases resources held by the relay gRPC service.
 func (s *RelayGRPCService) Close() error {
-	var lastErr error
-	s.grpcBackends.Range(func(key, value interface{}) bool {
-		if conn, ok := value.(*grpc.ClientConn); ok {
-			if err := conn.Close(); err != nil {
-				lastErr = err
-			}
-		}
-		return true
-	})
-	return lastErr
+	return nil
 }
 
 // NewGRPCServerForRelayService creates a gRPC server configured for the relay service.
