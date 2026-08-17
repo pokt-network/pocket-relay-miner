@@ -2,7 +2,6 @@ package miner
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/alitto/pond/v2"
@@ -42,7 +41,10 @@ var (
 			Name:      "relays_added_to_smst_total",
 			Help:      "SMST UpdateTree successes (NOT unique leaves — see claim_num_leaves for billable count)",
 		},
-		[]string{"supplier", "service_id", "session_id"},
+		// session_id deliberately excluded: it is an unbounded value on a
+		// Counter (never DeleteLabelValues'd) → TSDB OOM. Per-session detail
+		// lives in logs and the claim_num_leaves gauges (which DO clean up).
+		[]string{"supplier", "service_id"},
 	)
 
 	// claimNumLeaves is the number of distinct SMST leaves in the claim
@@ -97,7 +99,8 @@ var (
 			Name:      "relays_failed_smst_total",
 			Help:      "Total number of relays that failed to add to SMST tree",
 		},
-		[]string{"supplier", "service_id", "session_id", "reason"},
+		// session_id excluded (unbounded on a Counter); reason is bounded.
+		[]string{"supplier", "service_id", "reason"},
 	)
 
 	// Relay consumption metrics
@@ -475,47 +478,50 @@ var (
 	)
 
 	// Settlement monitor operational metrics
-	blockResultsRetriesTotal = observability.MinerFactory.NewCounterVec(
+	// height deliberately excluded: it is monotonic (~1/block) → a new
+	// series forever on a Counter → TSDB OOM. The retried height is logged
+	// at the call site (settlement_monitor) for incident diagnosis.
+	blockResultsRetriesTotal = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "block_results_retries_total",
 			Help:      "Total number of block_results query retries due to ABCI indexing delays",
 		},
-		[]string{"height"},
 	)
 
 	// Deduplication metrics. The deduplicator only runs on the reclaim path
 	// (XAUTOCLAIM redelivery), so hit volume is expected to be near-zero in
 	// normal operation and non-zero only after consumer crashes.
-	dedupRedisCacheHits = observability.MinerFactory.NewCounterVec(
+	// session_id deliberately excluded from all dedup counters: it is an
+	// unbounded value on Counters (never DeleteLabelValues'd) and
+	// dedupMisses/dedupMarked fire on every new relay (hot path) → TSDB OOM.
+	// Aggregate rates are the actionable signal; per-session goes to logs.
+	dedupRedisCacheHits = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "dedup_redis_cache_hits_total",
 			Help:      "Total number of reclaimed relays detected as already-processed (prevented double-count)",
 		},
-		[]string{"session_id"},
 	)
 
-	dedupMisses = observability.MinerFactory.NewCounterVec(
+	dedupMisses = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "dedup_misses_total",
 			Help:      "Total number of deduplication cache misses (new relays)",
 		},
-		[]string{"session_id"},
 	)
 
-	dedupMarked = observability.MinerFactory.NewCounterVec(
+	dedupMarked = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "dedup_marked_total",
 			Help:      "Total number of relays marked as processed",
 		},
-		[]string{"session_id"},
 	)
 
 	dedupErrors = observability.MinerFactory.NewCounterVec(
@@ -525,7 +531,8 @@ var (
 			Name:      "dedup_errors_total",
 			Help:      "Total number of deduplication errors",
 		},
-		[]string{"session_id", "operation"},
+		// session_id excluded; operation is bounded (redis_check/redis_mark/redis_batch_mark).
+		[]string{"operation"},
 	)
 
 	// Session tree metrics (reserved for future instrumentation)
@@ -1263,8 +1270,8 @@ func RecordRelayConsumedFromStream(supplier, serviceID string) {
 }
 
 // RecordRelayAddedToSMST records a relay successfully added to SMST tree.
-func RecordRelayAddedToSMST(supplier, serviceID, sessionID string) {
-	relaysAddedToSMST.WithLabelValues(supplier, serviceID, sessionID).Inc()
+func RecordRelayAddedToSMST(supplier, serviceID string) {
+	relaysAddedToSMST.WithLabelValues(supplier, serviceID).Inc()
 }
 
 // RecordClaimLeafStats pins the two gauges that let operators compare the
@@ -1288,8 +1295,8 @@ func ClearClaimLeafStats(supplier, serviceID, sessionID string) {
 }
 
 // RecordRelayFailedSMST records a relay that failed to add to SMST tree.
-func RecordRelayFailedSMST(supplier, serviceID, sessionID, reason string) {
-	relaysFailedSMST.WithLabelValues(supplier, serviceID, sessionID, reason).Inc()
+func RecordRelayFailedSMST(supplier, serviceID, reason string) {
+	relaysFailedSMST.WithLabelValues(supplier, serviceID, reason).Inc()
 }
 
 // RecordRelayRejected records a relay that was rejected.
@@ -1583,9 +1590,11 @@ func RecordClaimDiscarded(supplier, serviceID, _ string, _, _ int64) {
 }
 
 // RecordBlockResultsRetry records a retry attempt for block_results query.
-func RecordBlockResultsRetry(height int64, _ int) {
+// The retried height/attempt are logged by the caller; not metric labels
+// (height is unbounded, see blockResultsRetriesTotal).
+func RecordBlockResultsRetry() {
 	// Track retry attempts (helps identify ABCI indexing lag)
-	blockResultsRetriesTotal.WithLabelValues(fmt.Sprintf("%d", height)).Inc()
+	blockResultsRetriesTotal.Inc()
 }
 
 // ====== WORKER POOL METRICS HELPERS ======
