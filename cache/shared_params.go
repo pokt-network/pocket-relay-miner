@@ -288,35 +288,6 @@ func (c *RedisSharedParamCache) GetLatestSharedParams(ctx context.Context) (*sha
 	return c.GetSharedParams(ctx, latestBlock.Height())
 }
 
-// InvalidateSharedParams invalidates the cached shared params for a specific height.
-func (c *RedisSharedParamCache) InvalidateSharedParams(ctx context.Context, height int64) error {
-	c.mu.RLock()
-	if c.closed {
-		c.mu.RUnlock()
-		return fmt.Errorf("cache is closed")
-	}
-	c.mu.RUnlock()
-
-	key := c.keys.SharedParams(height)
-
-	// Clear L1
-	c.localCache.Delete(key)
-
-	// Clear L2
-	if err := c.redisClient.Del(ctx, key).Err(); err != nil {
-		return fmt.Errorf("failed to delete from Redis: %w", err)
-	}
-
-	// Notify other instances
-	channel := c.redisClient.KB().SharedParamsHeightInvalidateChannel()
-	if err := c.redisClient.Publish(ctx, channel, fmt.Sprintf("%d", height)).Err(); err != nil {
-		c.logger.Warn().Err(err).Msg("failed to publish invalidation")
-	}
-
-	cacheInvalidations.WithLabelValues("shared_params", "manual").Inc()
-	return nil
-}
-
 // WarmupFromRedis populates L1 cache from Redis for the latest block height.
 // Since shared params are indexed by height, we warm up the most recent params
 // which are most likely to be queried on startup.

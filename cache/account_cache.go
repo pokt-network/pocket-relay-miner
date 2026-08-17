@@ -292,42 +292,6 @@ func (c *accountCache) InvalidateAll(ctx context.Context) error {
 	return nil
 }
 
-// WarmupFromRedis populates L1 cache from Redis on startup.
-func (c *accountCache) WarmupFromRedis(ctx context.Context, knownAddresses []string) error {
-	c.logger.Info().
-		Int("count", len(knownAddresses)).
-		Msg("warming up account cache from Redis")
-
-	warmedCount := 0
-	for _, address := range knownAddresses {
-		redisKey := c.redisClient.KB().CacheKey(accountCacheType, address)
-		data, err := c.redisClient.Get(ctx, redisKey).Bytes()
-		if err != nil {
-			// Key doesn't exist in Redis, skip
-			continue
-		}
-
-		pubKey, err := c.unmarshalPubKey(data)
-		if err != nil {
-			c.logger.Warn().
-				Err(err).
-				Str("address", address).
-				Msg("failed to unmarshal public key during warmup")
-			continue
-		}
-
-		c.localCache.Store(address, accountCacheL1Entry{account: pubKey, cachedAt: time.Now()})
-		warmedCount++
-	}
-
-	c.logger.Info().
-		Int("warmed", warmedCount).
-		Int("total", len(knownAddresses)).
-		Msg("account cache warmup complete")
-
-	return nil
-}
-
 // queryChainWithLock queries the chain with distributed locking to prevent
 // duplicate queries from multiple instances.
 func (c *accountCache) queryChainWithLock(ctx context.Context, address string) (cryptotypes.PubKey, error) {
