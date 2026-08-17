@@ -722,25 +722,6 @@ func (c *Config) GetQueryTimeout() time.Duration {
 	return 5 * time.Second // Default: 5s
 }
 
-// GetServiceFactor returns the serviceFactor for a specific service.
-// Returns (factor, hasServiceFactor):
-// - If a service has an override in ServiceFactors, returns (override, true)
-// - If DefaultServiceFactor is set (>0), returns (default, true)
-// - Otherwise returns (0, false) meaning use baseLimit formula
-func (c *Config) GetServiceFactor(serviceID string) (float64, bool) {
-	// Check per-service override first
-	if factor, exists := c.ServiceFactors[serviceID]; exists && factor > 0 {
-		return factor, true
-	}
-
-	// Fall back to default
-	if c.DefaultServiceFactor > 0 {
-		return c.DefaultServiceFactor, true
-	}
-
-	return 0, false
-}
-
 // GetSupplierClaimingConfig returns the SupplierClaimerConfig for supplier claiming.
 // Uses YAML config values if set, otherwise falls back to constants defined in supplier_claimer.go.
 func (c *Config) GetSupplierClaimingConfig() SupplierClaimerConfig {
