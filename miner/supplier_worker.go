@@ -17,7 +17,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
-	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/pocket-relay-miner/tx"
@@ -57,7 +56,6 @@ type SupplierWorker struct {
 	proofChecker            *ProofRequirementChecker
 	supplierManager         *SupplierManager
 	supplierRegistry        *SupplierRegistry
-	serviceFactorClient     *relayer.ServiceFactorClient
 	masterPool              pond.Pool
 
 	// discovered dedups app/service addresses already written to the Redis
@@ -331,16 +329,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		},
 	)
 
-	// Create service factor client (reads from Redis, published by leader)
-	w.serviceFactorClient = relayer.NewServiceFactorClient(
-		w.logger,
-		w.config.RedisClient,
-	)
-	if err = w.serviceFactorClient.Start(ctx); err != nil {
-		w.cleanup()
-		return fmt.Errorf("failed to start service factor client: %w", err)
-	}
-
 	// Create supplier manager with distributed claiming enabled
 	w.supplierManager = NewSupplierManager(
 		w.logger,
@@ -366,8 +354,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			ProofChecker:                   w.proofChecker,
 			ProofQueryClient:               w.queryClients.Proof(),
 			InclusionReconcilerConfig:      w.config.Config.Transaction.InclusionReconcilerConfig(),
-			ServiceFactorProvider:          newServiceFactorClientAdapter(ctx, w.serviceFactorClient),
-			AppClient:                      cache.NewApplicationQueryClientAdapter(w.queryClients.Application()),
 			ServiceClient:                  w.queryClients.Service(),
 			SessionLifecycleConfig: SessionLifecycleConfig{
 				CheckInterval:            0, // Event-driven via Redis pub/sub
@@ -624,13 +610,6 @@ func (w *SupplierWorker) cleanup() {
 		w.supplierManager = nil
 	}
 
-	if w.serviceFactorClient != nil {
-		if err := w.serviceFactorClient.Close(); err != nil {
-			w.logger.Error().Err(err).Msg("failed to close service factor client")
-		}
-		w.serviceFactorClient = nil
-	}
-
 	if w.txClient != nil {
 		if err := w.txClient.Close(); err != nil {
 			w.logger.Error().Err(err).Msg("failed to close tx client")
@@ -675,23 +654,4 @@ func (w *SupplierWorker) cleanup() {
 // GetSupplierManager returns the supplier manager for external access.
 func (w *SupplierWorker) GetSupplierManager() *SupplierManager {
 	return w.supplierManager
-}
-
-// serviceFactorClientAdapter wraps the relayer's ServiceFactorClient to implement
-// the miner's ServiceFactorProvider interface (which doesn't take a context).
-type serviceFactorClientAdapter struct {
-	client *relayer.ServiceFactorClient
-	ctx    context.Context
-}
-
-func newServiceFactorClientAdapter(ctx context.Context, client *relayer.ServiceFactorClient) *serviceFactorClientAdapter {
-	return &serviceFactorClientAdapter{
-		client: client,
-		ctx:    ctx,
-	}
-}
-
-// GetServiceFactor implements miner.ServiceFactorProvider.
-func (a *serviceFactorClientAdapter) GetServiceFactor(serviceID string) (float64, bool) {
-	return a.client.GetServiceFactor(a.ctx, serviceID)
 }
