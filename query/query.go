@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -32,8 +33,10 @@ import (
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 	"github.com/puzpuzpuz/xsync/v4"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/status"
 )
 
 // queryCodec is a codec used to unmarshal the account interface returned by the
@@ -594,6 +597,33 @@ func (c *sessionQueryClient) GetSession(
 	sharedParams, err := c.sharedClient.GetParams(ctx)
 	if err != nil {
 		return nil, err
+	}
+
+	// Below the live session_grid_anchor_height the LIVE params describe a grid this
+	// height never belonged to: GetSessionStartHeight silently falls back to the
+	// GENESIS grid, so the derived start height belongs to no real session — and two
+	// heights in two DIFFERENT real sessions can collapse onto one cache key. The
+	// lookup then returns the WRONG cached session, which surfaces as a session ID
+	// mismatch and rejects legitimate relays. The exposure is the grace-period window
+	// right after a num_blocks_per_session change.
+	//
+	// Anchoring the check on the anchor height is sound here (unlike the fast path
+	// GetParamsAtHeight deliberately refuses, see its comment): this call uses params
+	// for GRID math only — GetSessionStartHeight reads num_blocks_per_session and the
+	// anchor and nothing else — and the anchor advances exactly when
+	// num_blocks_per_session changes. At or above the live anchor, the live grid IS
+	// the grid in effect.
+	//
+	// The common path deliberately stays on live params: this method is called with
+	// the CURRENT block height on the relay hot path, so querying at-height
+	// unconditionally would add a paramsAtHeightCache entry per block and thrash that
+	// memo for every other at-height caller.
+	if blockHeight < int64(sharedParams.GetSessionGridAnchorHeight()) {
+		paramsAtHeight, paramsErr := c.sharedClient.GetParamsAtHeight(ctx, blockHeight)
+		if paramsErr != nil {
+			return nil, paramsErr
+		}
+		sharedParams = paramsAtHeight
 	}
 
 	// Calculate session start height for consistent caching
@@ -1254,6 +1284,11 @@ func (c *proofQueryClient) GetSupplierClaimSessions(ctx context.Context, supplie
 // Sized generously: a provider with 28 services across many session heights fits easily.
 const maxHeightDifficultyCacheEntries = 1000
 
+// maxCUPRAtHeightCacheEntries bounds the height-keyed compute-units-per-relay cache.
+// Same reasoning and sizing as maxHeightDifficultyCacheEntries: one entry per
+// (service, session-start height), immutable, cheap to re-query if evicted.
+const maxCUPRAtHeightCacheEntries = 1000
+
 type serviceQueryClient struct {
 	logger       logging.Logger
 	queryClient  servicetypes.QueryClient
@@ -1272,6 +1307,31 @@ type serviceQueryClient struct {
 	// heightDifficultyCacheSize tracks entry count atomically for O(1) threshold checks.
 	heightDifficultyCacheSize atomic.Int64
 
+	// Bounded cache for height-aware compute-units-per-relay queries (keyed by
+	// "serviceID@height"). Same shape as heightDifficultyCache: cupr at a past
+	// height is immutable, so entries only need eviction, never invalidation.
+	cuprAtHeightCache *xsync.Map[string, cuprAtHeightCacheEntry]
+	// cuprAtHeightCacheSize tracks entry count atomically for O(1) threshold checks.
+	cuprAtHeightCacheSize atomic.Int64
+
+	// cuprAtHeightUnsupportedUntilUnixNano holds the deadline of the cooldown
+	// entered when the node answers ComputeUnitsPerRelayAtHeight with
+	// codes.Unimplemented (a pre-v0.1.35 node, or an ingress 404 that grpc-go maps
+	// to the same code). While it is in the future the at-height query is skipped
+	// and the LIVE cupr is served instead.
+	//
+	// The cooldown EXPIRES rather than latching permanently. A permanent latch
+	// would price every relay with live cupr for the rest of the process lifetime
+	// while the chain validates at session start — the exact mismatch that
+	// forfeits claims with ErrProofComputeUnitsMismatch — recoverable only by a
+	// restart.
+	cuprAtHeightUnsupportedUntilUnixNano atomic.Int64
+	// cuprAtHeightDegraded is true while the fallback above is active, so recovery
+	// can be logged exactly once per degrade/recover cycle.
+	cuprAtHeightDegraded atomic.Bool
+	// cuprUnsupportedWarnOnce emits the degrade warning a single time per process.
+	cuprUnsupportedWarnOnce sync.Once
+
 	paramsCache   *servicetypes.Params
 	paramsCacheAt time.Time
 	paramsCacheMu sync.RWMutex
@@ -1285,8 +1345,38 @@ type heightDifficultyCacheEntry struct {
 	cachedAt    time.Time
 }
 
-var _ client.ServiceQueryClient = (*serviceQueryClient)(nil)
-var _ ServiceDifficultyClient = (*serviceQueryClient)(nil)
+// cuprAtHeightCacheEntry stores a service's compute_units_per_relay at a block
+// height, alongside that height for eviction sweeps and the fetch time for the
+// TTL safety floor.
+type cuprAtHeightCacheEntry struct {
+	computeUnitsPerRelay uint64
+	blockHeight          int64
+	cachedAt             time.Time
+}
+
+// cuprAtHeightUnsupportedCooldown is how long the miner serves the LIVE cupr
+// after a node answers ComputeUnitsPerRelayAtHeight with codes.Unimplemented,
+// before probing the RPC again. Sized for a cosmovisor binary swap: short enough
+// that session-start pricing resumes within a session of the node upgrading,
+// long enough not to spend a query per relay against a node that cannot answer.
+// var (not const) so tests can shrink it.
+var cuprAtHeightUnsupportedCooldown = time.Minute
+
+// ErrCUPRAtHeightUnavailable is returned by GetServiceComputeUnitsPerRelayAtHeight
+// while the codes.Unimplemented cooldown is armed — the at-height CUPR cannot be
+// resolved (a pre-v0.1.35 node, or an ingress/LB blip). It is deliberately an
+// ERROR, not a silently-substituted live value: each caller must decide its own
+// fallback. The relayer's compute-units provider falls back to its live service
+// cache (keep serving); the miner's claim guard fails OPEN (never terminally skip
+// a claim it cannot prove is doomed). Returning the live value with a nil error
+// would defeat both — the guard would compare a mined-at-session-start tree
+// against the LIVE cupr and skip a payable claim.
+var ErrCUPRAtHeightUnavailable = errors.New("compute units per relay at height unavailable: node does not implement the at-height query (degraded)")
+
+var (
+	_ client.ServiceQueryClient = (*serviceQueryClient)(nil)
+	_ ServiceDifficultyClient   = (*serviceQueryClient)(nil)
+)
 
 func newServiceQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout time.Duration) *serviceQueryClient {
 	return &serviceQueryClient{
@@ -1295,6 +1385,7 @@ func newServiceQueryClient(logger logging.Logger, conn *grpc.ClientConn, timeout
 		queryTimeout:          timeout,
 		serviceCache:          make(map[string]serviceCacheEntry),
 		heightDifficultyCache: xsync.NewMap[string, heightDifficultyCacheEntry](),
+		cuprAtHeightCache:     xsync.NewMap[string, cuprAtHeightCacheEntry](),
 	}
 }
 
@@ -1459,6 +1550,121 @@ func (c *serviceQueryClient) evictOldestHeightDifficultyEntries() {
 		if entry.blockHeight <= medianHeight {
 			c.heightDifficultyCache.Delete(key)
 			c.heightDifficultyCacheSize.Add(-1)
+		}
+		return true
+	})
+}
+
+// GetServiceComputeUnitsPerRelayAtHeight queries the chain for the
+// compute_units_per_relay (cupr) that was effective for a service at a specific
+// block height.
+//
+// Callers MUST pass a session's START height. From poktroll v0.1.35 the chain
+// resolves cupr at session start in both x/proof claim validation
+// (x/proof/keeper/service.go) and x/tokenomics settlement
+// (x/tokenomics/keeper/settlement_context.go). Weighting relays with the LIVE
+// cupr instead lets a mid-session cupr change produce a mixed-weight SMST whose
+// sum no longer equals numRelays * cupr, and the claim is rejected with
+// ErrProofComputeUnitsMismatch — forfeiting the whole session.
+//
+// Results are cached in a bounded xsync.Map keyed "serviceID@blockHeight". cupr
+// at a past height is immutable, so entries are only evicted, never invalidated.
+func (c *serviceQueryClient) GetServiceComputeUnitsPerRelayAtHeight(ctx context.Context, serviceId string, blockHeight int64) (uint64, error) {
+	cacheKey := fmt.Sprintf("%s@%d", serviceId, blockHeight)
+
+	// Check cache (lock-free read via xsync.Map). The value is immutable, but per
+	// the cache-TTL mandate an entry older than immutableCacheTTLFloor is treated
+	// as a miss and re-queried (self-heal floor).
+	existing, existed := c.cuprAtHeightCache.Load(cacheKey)
+	if existed && time.Since(existing.cachedAt) < immutableCacheTTLFloor {
+		queryCacheHits.WithLabelValues("service", "cupr_at_height").Inc()
+		return existing.computeUnitsPerRelay, nil
+	}
+
+	// Skip the query while a previous codes.Unimplemented cooldown is still running,
+	// and surface the sentinel error so each caller applies its own fallback (the
+	// relayer keeps serving from its live service cache; the miner guard fails open).
+	if time.Now().UnixNano() < c.cuprAtHeightUnsupportedUntilUnixNano.Load() {
+		return 0, ErrCUPRAtHeightUnavailable
+	}
+
+	queryCacheMisses.WithLabelValues("service", "cupr_at_height").Inc()
+
+	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
+	defer cancel()
+
+	res, err := c.queryClient.ComputeUnitsPerRelayAtHeight(queryCtx, &servicetypes.QueryComputeUnitsPerRelayAtHeightRequest{
+		ServiceId:   serviceId,
+		BlockHeight: blockHeight,
+	})
+	if err != nil {
+		// A pre-v0.1.35 node does not serve this RPC. grpc-go also maps an ingress
+		// 404 to Unimplemented, so a load-balancer hiccup lands here too — which is
+		// precisely why the cooldown expires instead of latching.
+		if status.Code(err) == codes.Unimplemented {
+			c.cuprAtHeightUnsupportedUntilUnixNano.Store(
+				time.Now().Add(cuprAtHeightUnsupportedCooldown).UnixNano(),
+			)
+			c.cuprAtHeightDegraded.Store(true)
+			c.cuprUnsupportedWarnOnce.Do(func() {
+				c.logger.Warn().
+					Str("service_id", serviceId).
+					Dur("retry_after", cuprAtHeightUnsupportedCooldown).
+					Msg("node does not implement ComputeUnitsPerRelayAtHeight (pre-v0.1.35); at-height CUPR is unavailable. Callers fall back per their own policy (relayer serves live, miner guard fails open). Session-start CUPR pricing is INACTIVE until the full node is upgraded; recovery will be logged")
+			})
+			return 0, ErrCUPRAtHeightUnavailable
+		}
+		return 0, fmt.Errorf("failed to query compute units per relay at height %d: %w", blockHeight, err)
+	}
+
+	// A successful query means the node implements the RPC. Clear the cooldown so
+	// the fast path resumes immediately, and say so: the degrade warning fires once
+	// per process and may have rotated out of the logs, leaving an operator no way
+	// to tell whether pricing is pinned or not.
+	c.cuprAtHeightUnsupportedUntilUnixNano.Store(0)
+	if c.cuprAtHeightDegraded.CompareAndSwap(true, false) {
+		c.logger.Info().Msg("node now implements ComputeUnitsPerRelayAtHeight; session-start CUPR pricing is ACTIVE again")
+	}
+
+	// Store (not LoadOrStore) so a past-floor refresh actually replaces the old
+	// value; the size counter only grows for a brand-new key.
+	c.cuprAtHeightCache.Store(cacheKey, cuprAtHeightCacheEntry{
+		computeUnitsPerRelay: res.ComputeUnitsPerRelay,
+		blockHeight:          blockHeight,
+		cachedAt:             time.Now(),
+	})
+	if !existed {
+		c.cuprAtHeightCacheSize.Add(1)
+	}
+	queryCacheSize.WithLabelValues("service", "cupr_at_height").Set(float64(c.cuprAtHeightCacheSize.Load()))
+
+	if c.cuprAtHeightCacheSize.Load() > maxCUPRAtHeightCacheEntries {
+		c.evictOldestCUPRAtHeightEntries()
+	}
+
+	return res.ComputeUnitsPerRelay, nil
+}
+
+// evictOldestCUPRAtHeightEntries removes every entry at or below the median
+// cached block height, shedding roughly half the cache without assuming a
+// session length or block time. Mirrors evictOldestHeightDifficultyEntries; the
+// data is immutable, so an evicted entry is simply re-queried if needed again.
+func (c *serviceQueryClient) evictOldestCUPRAtHeightEntries() {
+	var heights []int64
+	c.cuprAtHeightCache.Range(func(_ string, entry cuprAtHeightCacheEntry) bool {
+		heights = append(heights, entry.blockHeight)
+		return true
+	})
+	if len(heights) == 0 {
+		return
+	}
+	sort.Slice(heights, func(i, j int) bool { return heights[i] < heights[j] })
+	medianHeight := heights[len(heights)/2]
+
+	c.cuprAtHeightCache.Range(func(key string, entry cuprAtHeightCacheEntry) bool {
+		if entry.blockHeight <= medianHeight {
+			c.cuprAtHeightCache.Delete(key)
+			c.cuprAtHeightCacheSize.Add(-1)
 		}
 		return true
 	})

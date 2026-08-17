@@ -14,14 +14,13 @@ import (
 	"time"
 
 	"github.com/alitto/pond/v2"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/pokt-network/smt"
 
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
@@ -333,19 +332,17 @@ func (lc *LifecycleCallback) SetRebroadcastStore(store *RebroadcastStore) {
 	lc.rebroadcastStore = store
 }
 
-// isClaimNotFoundError returns true when an error from the proof query client
-// indicates that a claim does not exist on-chain. The query client wraps the
-// gRPC error via fmt.Errorf(..., %w) (see query/query.go), so we both unwrap
-// with errors.As (via status.FromError) and fall back to a substring check on
-// the rendered message for defensive coverage of older wrappers.
+// isClaimNotFoundError returns true only when the chain has definitively answered
+// that no claim exists for this (supplier, session).
+//
+// The decision this feeds is terminal and costs money — see the pre-proof guard in
+// OnSessionsNeedProof — so it follows query.IsEntityNotFound's policy: an explicit
+// gRPC NotFound and nothing else. Any other error means we failed to get an answer,
+// and the caller must fail OPEN rather than skip a proof we cannot prove is
+// unnecessary. This mirrors the claim-side CUPR guard, which already fails open on
+// query errors so it never drops a claim it cannot prove is doomed.
 func isClaimNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-		return true
-	}
-	return strings.Contains(err.Error(), "not found")
+	return query.IsEntityNotFound(err)
 }
 
 // persistRebroadcastEntries stores one rebroadcast entry per built message so
@@ -852,38 +849,40 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 				// Phase 3.5: CUPR consistency guard. poktroll validates
 				// num_claimed_compute_units == num_relays * service.ComputeUnitsPerRelay
-				// using the LATEST CUPR (claim-create and settlement). If the service's
-				// CUPR changed while/after this session was mined, the SMST sum no longer
-				// matches and the claim is rejected (and retried every block). Skip it
-				// terminally. Fail OPEN on query error — never drop a claim we cannot
-				// prove is doomed.
-				if lc.serviceClient != nil {
-					// Force a fresh read: claim-build is low-frequency and the chain
-					// validates against the LATEST CUPR, so the guard must never trust a
-					// cached value. InvalidateService drops the query layer's entry so the
-					// GetService below hits the chain.
-					if inv, ok := lc.serviceClient.(interface{ InvalidateService(string) }); ok {
-						inv.InvalidateService(snap.ServiceID)
-					}
-					if svc, svcErr := lc.serviceClient.GetService(ctx, snap.ServiceID); svcErr != nil {
-						logger.Debug().Err(svcErr).
-							Str(logging.FieldSessionID, snap.SessionID).
-							Msg("CUPR guard: failed to query current service CUPR, allowing claim")
-					} else if cupr := svc.GetComputeUnitsPerRelay(); !isClaimCUPRConsistent(smstSum, smstCount, cupr) {
-						logger.Warn().
-							Str(logging.FieldSessionID, snap.SessionID).
-							Str(logging.FieldServiceID, snap.ServiceID).
-							Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
-							Uint64("smst_compute_units", smstSum).
-							Uint64("smst_relay_count", smstCount).
-							Uint64("current_compute_units_per_relay", cupr).
-							Uint64("expected_compute_units", smstCount*cupr).
-							Msg("SKIP CUPR MISMATCH: SMST sum != relays * current CUPR (service CUPR changed); claim would be rejected on-chain")
-						result.skipped = true
-						result.skipReason = "cupr_mismatch"
-						results <- result
-						return
-					}
+				// at claim-create (x/proof) and again at settlement (x/tokenomics),
+				// resolving CUPR at the session's START height. Compare against that
+				// same height: a service owner who changes CUPR after this session
+				// ended does not affect what the chain will accept, so reading the
+				// LIVE value here would terminally skip a claim the chain would have
+				// paid. Skip only on a real mismatch, and fail OPEN on query error —
+				// never drop a claim we cannot prove is doomed.
+				//
+				// No cache-busting: CUPR at a past height is immutable, so the query
+				// layer's per-(service, height) entry is always correct.
+				cuprAllowed, guardCUPR, guardErr := evaluateClaimCUPRGuard(
+					ctx, lc.serviceClient, snap.ServiceID, snap.SessionStartHeight, smstSum, smstCount,
+				)
+				switch {
+				case guardErr != nil:
+					logger.Debug().Err(guardErr).
+						Str(logging.FieldSessionID, snap.SessionID).
+						Int64("session_start_height", snap.SessionStartHeight).
+						Msg("CUPR guard: failed to query session-start service CUPR, allowing claim")
+				case !cuprAllowed:
+					logger.Warn().
+						Str(logging.FieldSessionID, snap.SessionID).
+						Str(logging.FieldServiceID, snap.ServiceID).
+						Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+						Int64("session_start_height", snap.SessionStartHeight).
+						Uint64("smst_compute_units", smstSum).
+						Uint64("smst_relay_count", smstCount).
+						Uint64("session_start_compute_units_per_relay", guardCUPR).
+						Uint64("expected_compute_units", smstCount*guardCUPR).
+						Msg("SKIP CUPR MISMATCH: SMST sum != relays * session-start CUPR (relays mined at a different CUPR); claim would be rejected on-chain")
+					result.skipped = true
+					result.skipReason = "cupr_mismatch"
+					results <- result
+					return
 				}
 
 				// Phase 4: Economic viability using the SMST root hash.
@@ -1398,12 +1397,30 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			return fmt.Errorf("failed to wait for proof window open: %w", blockErr)
 		}
 
-		// Calculate proof requirement seed block height
-		// CRITICAL: This MUST match the validator's logic in x/proof/keeper/msg_server_submit_proof.go:328
-		// The validator uses BlockHash(earliestSupplierProofCommitHeight - 1) as the seed.
-		// Since earliestSupplierProofCommitHeight = proofWindowOpenHeight (distribution disabled in poktroll),
-		// the seed block height = proofWindowOpenHeight - 1
-		proofRequirementSeedHeight := proofWindowOpenHeight - 1
+		// Proof requirement seed block height.
+		//
+		// CRITICAL: the probabilistic proof decision is only valid if this seed is the
+		// same block the validator uses. poktroll seeds it with
+		// BlockHash(GetEarliestSupplierProofCommitHeight(...) - 1)
+		// (x/proof/keeper/msg_server_submit_proof.go getProofRequirementSeedBlockHash),
+		// so call that same protocol function rather than restating what it currently
+		// returns. It resolves to proofWindowOpenHeight today because proof distribution
+		// is disabled upstream; deriving it keeps us correct if that is ever re-enabled,
+		// instead of diverging silently on every probabilistic decision.
+		//
+		// The nil block hash mirrors poktroll: the argument is unused while distribution
+		// is disabled, and it deliberately does not read one (consensus hardening).
+		// Supplier address comes from this group, like every other value in the loop
+		// (sessionEndHeight above): it is the seeding input for the per-supplier spread,
+		// so it must belong to the sessions being scheduled rather than rely on the
+		// batch-wide "one supplier per call" invariant holding forever.
+		earliestProofCommitHeight := sharedtypes.GetEarliestSupplierProofCommitHeight(
+			sharedParams,
+			sessionEndHeight,
+			nil,
+			groupSnapshots[0].SupplierOperatorAddress,
+		)
+		proofRequirementSeedHeight := earliestProofCommitHeight - 1
 
 		// Wait for the seed block to be available
 		proofRequirementSeedBlock, seedErr := lc.waitForBlock(ctx, proofRequirementSeedHeight)
@@ -1533,51 +1550,38 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			continue
 		}
 
-		// NOTE: Timing spread DISABLED - submit proofs immediately when window opens
-		// The protocol's GetEarliestSupplierProofCommitHeight() spreads suppliers across the window,
-		// but this can cause proofs to be submitted too close to window close, resulting in failures.
-		// We now submit immediately when the proof window opens to maximize success rate.
-		earliestProofHeight := proofWindowOpenHeight // Use window open, not spread height
+		// Submit as early as the chain will accept: the protocol's per-supplier spread can
+		// push submission close to window close, where it fails. Deliberate choice.
+		//
+		// earliestProofCommitHeight is what the chain enforces — validateProofWindow
+		// rejects anything committed before it — and it is >= proofWindowOpenHeight by
+		// construction (poktroll adds a non-negative offset to the window open height).
+		// It equals the window open height while proof distribution is disabled upstream,
+		// so waiting on it is a no-op today and becomes load-bearing the moment that
+		// spread is re-enabled; TestProofDistributionStillDisabled fails loudly then.
+		earliestProofHeight := earliestProofCommitHeight
+		if _, earliestErr := lc.waitForBlock(ctx, earliestProofHeight); earliestErr != nil {
+			return fmt.Errorf("failed to wait for earliest proof commit height: %w", earliestErr)
+		}
 
 		logger.Info().
 			Int64("proof_window_open", proofWindowOpenHeight).
+			Int64("earliest_proof_commit_height", earliestProofHeight).
 			Int64("session_end_height", sessionEndHeight).
 			Int("proofs_to_submit", len(sessionsNeedingProof)).
 			Msg("proof window open - submitting immediately (timing spread disabled)")
 
-		// Calculate proof path seed block height (one before earliest proof height)
-		// Since we're using proofWindowOpenHeight, this equals proofRequirementSeedHeight
-		proofPathSeedBlockHeight := earliestProofHeight - 1
-
-		// Optimization: Reuse the seed block we already fetched for proof requirement check
-		// if the heights match (they should, since distribution is disabled in poktroll)
-		var proofPathSeedBlock pocktclient.Block
-		if proofPathSeedBlockHeight == proofRequirementSeedHeight {
-			// Heights match - reuse the block we already fetched
-			proofPathSeedBlock = proofRequirementSeedBlock
-			logger.Debug().
-				Int64("proof_path_seed_block_height", proofPathSeedBlockHeight).
-				Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
-				Msg("reusing proof requirement seed block for proof path (heights match)")
-		} else {
-			// Heights don't match - this shouldn't happen with current poktroll (distribution disabled),
-			// but if it ever gets re-enabled, we need to fetch the correct block
-			logger.Warn().
-				Int64("proof_path_seed_height", proofPathSeedBlockHeight).
-				Int64("proof_requirement_seed_height", proofRequirementSeedHeight).
-				Msg("seed block heights don't match - possible distribution enabled in future, re-fetching")
-
-			var seedErr error
-			proofPathSeedBlock, seedErr = lc.waitForBlock(ctx, proofPathSeedBlockHeight)
-			if seedErr != nil {
-				return fmt.Errorf("failed to wait for proof path seed block: %w", seedErr)
-			}
-
-			logger.Debug().
-				Int64("proof_path_seed_block_height", proofPathSeedBlockHeight).
-				Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
-				Msg("obtained proof path seed block hash (re-fetched)")
-		}
+		// The closest-path seed and the proof-requirement seed are the SAME block, by
+		// protocol: validateClosestPath hashes GetBlockHash(earliestSupplierProofCommitHeight-1)
+		// (x/proof/keeper/proof_validation.go) and getProofRequirementSeedBlockHash uses the
+		// same height (x/proof/keeper/msg_server_submit_proof.go). That holds whether or not
+		// the distribution spread is enabled, since both read the same function — so there is
+		// one seed block here, not two that happen to coincide.
+		proofPathSeedBlock := proofRequirementSeedBlock
+		logger.Debug().
+			Int64("proof_path_seed_block_height", proofRequirementSeedHeight).
+			Str("proof_path_seed_block_hash", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
+			Msg("proof path seed block is the proof requirement seed block (same height by protocol)")
 
 		// CRITICAL: Verify proof window is still open before proceeding
 		// This prevents wasting fees on proofs that will be rejected
@@ -1763,7 +1767,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					Str(logging.FieldSessionID, snap.SessionID).
 					Str("block_hash_from_blockid", fmt.Sprintf("%x", proofPathSeedBlock.Hash())).
 					Str("proof_path_computed", fmt.Sprintf("%x", path)).
-					Int64("block_height", proofPathSeedBlockHeight).
+					Int64("block_height", proofRequirementSeedHeight).
 					Msg("DEBUG: proof path computation (using BlockID.Hash)")
 
 				// Generate the proof (CPU-bound cryptographic operation, can parallelize)

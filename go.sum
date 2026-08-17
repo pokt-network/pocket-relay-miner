@@ -303,6 +303,8 @@ github.com/dgryski/go-farm v0.0.0-20200201041132-a6ae2369ad13 h1:fAjc9m62+UWV/WA
 github.com/dgryski/go-farm v0.0.0-20200201041132-a6ae2369ad13/go.mod h1:SqUrOPUnsFjfmXRMNPybcSiG0BgUW2AuFH8PAnS2iTw=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f h1:lO4WD4F/rVNCu3HqELle0jiPLLBs70cWOduZpkS1E78=
 github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f/go.mod h1:cuUVRXasLTGF7a8hSLbxyZXjz+1KgoB3wDUb6vlszIc=
+github.com/dlclark/regexp2 v1.11.0 h1:G/nrcoOa7ZXlpoa/91N3X7mM3r8eIlMBBJZvsz/mxKI=
+github.com/dlclark/regexp2 v1.11.0/go.mod h1:DHkYz0B9wPfa6wondMfaivmHpzrQ3v9q8cnmRbL6yW8=
 github.com/docker/go-connections v0.6.0 h1:LlMG9azAe1TqfR7sO+NJttz1gy6KO7VJBh+pMmjSD94=
 github.com/docker/go-connections v0.6.0/go.mod h1:AahvXYshr6JgfUJGdDCs2b5EZG/vmaMAntpSFH5BFKE=
 github.com/docker/go-units v0.5.0 h1:69rxXcBk27SvSaaxTtLh/8llcHD8vYHT7WSdRZ/jvr4=
@@ -747,12 +749,12 @@ github.com/pokt-network/cometbft v0.38.19-0.20260515210023-5831282cdcbf h1:ZnjJa
 github.com/pokt-network/cometbft v0.38.19-0.20260515210023-5831282cdcbf/go.mod h1:jtH//cs5e2U5dNiaYIPMBwWXZsedXJfIie77gVhuRaA=
 github.com/pokt-network/go-dleq v0.0.0-20250925202155-488f42ad642a h1:zgSFcOX8m9dmriiqPiRbGJJpR3sJCFxLskxQ7/ofS0o=
 github.com/pokt-network/go-dleq v0.0.0-20250925202155-488f42ad642a/go.mod h1:KVsT8HO2EXHwMY1wnyYhR/lSZFNFIit8dJ+aDb1dSkA=
-github.com/pokt-network/poktroll v0.1.34 h1:QlcUOyLgpNuEXIyukECPDWZQROUXUZD+nCTpQWmq5xw=
-github.com/pokt-network/poktroll v0.1.34/go.mod h1:K7v1yjw6ZQFGBOd31LiTjPjIUBSzKTlOIckFaKC8PUg=
+github.com/pokt-network/poktroll v0.1.35 h1:JdJYY9y5Uotko5IFBdptOegntXY+ez79zzJBlhMqvh8=
+github.com/pokt-network/poktroll v0.1.35/go.mod h1:cH4r4HaR1treTgNaFR1gJVRrODkFID9RM78NT7W3G/Y=
 github.com/pokt-network/ring-go v0.2.0 h1:jXF/SOS8DgRfCCJBKXket5dBkTTqMDxplX+EnE4+aNU=
 github.com/pokt-network/ring-go v0.2.0/go.mod h1:B6wWq+Pj19jNyV93Hyr1TD26gDsrIYV9tYGiaJR89RE=
-github.com/pokt-network/shannon-sdk v0.0.0-20260702172744-c2af5007ed72 h1:wynFx7tJRHC8XSHaWCkcvkQs26x6yulgWmaFyGX4c2M=
-github.com/pokt-network/shannon-sdk v0.0.0-20260702172744-c2af5007ed72/go.mod h1:vZ40ZUGGOTkKW+J2WgMrT8TISoyUXFyfiaqlYcntXpQ=
+github.com/pokt-network/shannon-sdk v0.0.0-20260812141256-a508808fbbe0 h1:++QTUCRbK0l8yc8ZVWaZZ5Un40yoZBLrATRwvUforMY=
+github.com/pokt-network/shannon-sdk v0.0.0-20260812141256-a508808fbbe0/go.mod h1:YoFQsznZEk/ofl+sQt68jjGpUrkkAkFVSpINBNAyUVo=
 github.com/pokt-network/smt v0.14.1 h1:q8pZCo01RY+kzGurRcHArSGGEV3UhBywUZnbVn9nDM8=
 github.com/pokt-network/smt v0.14.1/go.mod h1:TehzlxITd3EqLzo428VY0QID7Ajdn7QJP4ZzdPiYbZE=
 github.com/pokt-network/smt/kvstore/pebble v0.0.0-20240822175047-21ea8639c188 h1:QK1WmFKQ/OzNVob/br55Brh+EFbWhcdq41WGC8UMihM=
@@ -821,6 +823,8 @@ github.com/ryanuber/columnize v0.0.0-20160712163229-9b3edd62028f/go.mod h1:sm1tb
 github.com/sagikazarmark/locafero v0.11.0 h1:1iurJgmM9G3PA/I+wWYIOw/5SyBtxapeHDcg+AAIFXc=
 github.com/sagikazarmark/locafero v0.11.0/go.mod h1:nVIGvgyzw595SUSUE6tvCp3YYTeHs15MvlmU87WwIik=
 github.com/samuel/go-zookeeper v0.0.0-20190923202752-2cc03de413da/go.mod h1:gi+0XIa01GRL2eRQVjQkKGqKF3SF9vZR/HnPullcV2E=
+github.com/santhosh-tekuri/jsonschema/v6 v6.0.1 h1:PKK9DyHxif4LZo+uQSgXNqs0jj5+xZwwfKHgph2lxBw=
+github.com/santhosh-tekuri/jsonschema/v6 v6.0.1/go.mod h1:JXeL+ps8p7/KNMjDQk3TCwPpBy0wYklyWTfbkIzdIFU=
 github.com/sasha-s/go-deadlock v0.3.9 h1:fiaT9rB7g5sr5ddNZvlwheclN9IP86eFW9WgqlEQV+w=
 github.com/sasha-s/go-deadlock v0.3.9/go.mod h1:KuZj51ZFmx42q/mPaYbRk0P1xcwe697zsJKE03vD4/Y=
 github.com/sean-/seed v0.0.0-20170313163322-e2103e2c3529/go.mod h1:DxrIzT+xaE7yg65j358z/aeFdxmN0P9QXhEzd20vsDc=
@@ -1178,8 +1182,8 @@ google.golang.org/grpc v1.33.2/go.mod h1:JMHMWHQWaTccqQQlmk3MJZS+GWXOdAesneDmEnv
 google.golang.org/grpc v1.36.0/go.mod h1:qjiiYl8FncCW8feJPdyg3v6XW24KsRHe+dy9BAGRRjU=
 google.golang.org/grpc v1.45.0/go.mod h1:lN7owxKUQEqMfSyQikvvk5tf/6zMPsrK+ONuO11+0rQ=
 google.golang.org/grpc v1.49.0/go.mod h1:ZgQEeidpAuNRZ8iRrlBKXZQP1ghovWIVhdJRyCDK+GI=
-google.golang.org/grpc v1.82.0 h1:vguDnZUPjE26w09A63VoxZPnvPjB5Riyc0mkXPFmAIU=
-google.golang.org/grpc v1.82.0/go.mod h1:yzTZ1TB1Z3SG+LIYaI+WiE8D5+PZ3ArnrSp8zF3+/ZA=
+google.golang.org/grpc v1.82.1 h1:NnAxzGRA0677vCa4BUkOAnO5+FfQqVl9iUXeD0IqcGE=
+google.golang.org/grpc v1.82.1/go.mod h1:yzTZ1TB1Z3SG+LIYaI+WiE8D5+PZ3ArnrSp8zF3+/ZA=
 google.golang.org/protobuf v0.0.0-20200109180630-ec00e32a8dfd/go.mod h1:DFci5gLYBciE7Vtevhsrf46CRTquxDuWsQurQQe4oz8=
 google.golang.org/protobuf v0.0.0-20200221191635-4d8936d0db64/go.mod h1:kwYJMbMJ01Woi6D6+Kah6886xMZcty6N08ah7+eCXa0=
 google.golang.org/protobuf v0.0.0-20200228230310-ab0ca4ff8a60/go.mod h1:cfTl7dwQJ+fmap5saPgwCLgHXTUD7jkjRqWcaiX5VyM=

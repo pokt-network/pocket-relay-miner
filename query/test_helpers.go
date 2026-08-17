@@ -38,6 +38,10 @@ type mockQueryServer struct {
 	// historical/height-aware lookup), independent of sharedParams (the live Params
 	// RPC). Lets tests simulate a chain whose live cache is stale vs the at-height value.
 	sharedParamsAtHeight *sharedtypes.Params
+	// onParamsAtHeight, when set, is invoked with every height the ParamsAtHeight RPC
+	// is called with. Lets a test assert that the at-height lookup was (or was NOT)
+	// taken, which is otherwise invisible when both param sets agree.
+	onParamsAtHeight func(height int64)
 
 	// Supplier responses
 	getSupplierFunc func(context.Context, *suppliertypes.QueryGetSupplierRequest) (*suppliertypes.QueryGetSupplierResponse, error)
@@ -54,6 +58,7 @@ type mockQueryServer struct {
 	getServiceFunc                       func(context.Context, *servicetypes.QueryGetServiceRequest) (*servicetypes.QueryGetServiceResponse, error)
 	getRelayMiningDifficultyFunc         func(context.Context, *servicetypes.QueryGetRelayMiningDifficultyRequest) (*servicetypes.QueryGetRelayMiningDifficultyResponse, error)
 	getRelayMiningDifficultyAtHeightFunc func(context.Context, *servicetypes.QueryGetRelayMiningDifficultyAtHeightRequest) (*servicetypes.QueryGetRelayMiningDifficultyAtHeightResponse, error)
+	getCUPRAtHeightFunc                  func(context.Context, *servicetypes.QueryComputeUnitsPerRelayAtHeightRequest) (*servicetypes.QueryComputeUnitsPerRelayAtHeightResponse, error)
 	serviceParams                        *servicetypes.Params
 }
 
@@ -115,6 +120,9 @@ func (m *mockSharedQueryServer) Params(ctx context.Context, req *sharedtypes.Que
 }
 
 func (m *mockSharedQueryServer) ParamsAtHeight(ctx context.Context, req *sharedtypes.QueryParamsAtHeightRequest) (*sharedtypes.QueryParamsAtHeightResponse, error) {
+	if m.mock.onParamsAtHeight != nil {
+		m.mock.onParamsAtHeight(req.Height)
+	}
 	p := m.mock.sharedParamsAtHeight
 	if p == nil {
 		p = m.mock.sharedParams
@@ -211,6 +219,16 @@ func (m *mockServiceQueryServer) RelayMiningDifficultyAtHeight(ctx context.Conte
 		return m.mock.getRelayMiningDifficultyAtHeightFunc(ctx, req)
 	}
 	return nil, status.Error(codes.NotFound, "difficulty at height not found")
+}
+
+// ComputeUnitsPerRelayAtHeight defaults to codes.Unimplemented rather than
+// NotFound: that is exactly what a pre-v0.1.35 node returns, so a test that
+// leaves the hook nil exercises the live-CUPR fallback path.
+func (m *mockServiceQueryServer) ComputeUnitsPerRelayAtHeight(ctx context.Context, req *servicetypes.QueryComputeUnitsPerRelayAtHeightRequest) (*servicetypes.QueryComputeUnitsPerRelayAtHeightResponse, error) {
+	if m.mock.getCUPRAtHeightFunc != nil {
+		return m.mock.getCUPRAtHeightFunc(ctx, req)
+	}
+	return nil, status.Error(codes.Unimplemented, "unknown method ComputeUnitsPerRelayAtHeight")
 }
 
 func (m *mockServiceQueryServer) Params(ctx context.Context, req *servicetypes.QueryParamsRequest) (*servicetypes.QueryParamsResponse, error) {

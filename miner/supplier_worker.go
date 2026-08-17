@@ -163,6 +163,36 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		Str("grpc_endpoint", w.config.QueryNodeGRPCUrl).
 		Msg("query clients initialized")
 
+	// Advisory: warn once if the chain runs shared params that poktroll's own validation
+	// would reject (genesis skips it, MsgUpdateParams does not).
+	//
+	// Runs on the master pool rather than inline: Start() holds w.mu and still has to
+	// build the RPC client, block client and session pipeline, and this is a blocking
+	// gRPC round trip bounded only by the operator-configurable query timeout. Nothing
+	// downstream reads its result — it only logs — so an unreachable node must not
+	// lengthen every miner start.
+	sharedForAdvisory := w.queryClients.Shared()
+	if advisoryErr := w.masterPool.Go(func() {
+		advisoryCtx, cancelAdvisory := context.WithTimeout(w.ctx, sharedParamsAdvisoryTimeout)
+		defer cancelAdvisory()
+
+		sharedParams, sharedErr := sharedForAdvisory.GetParams(advisoryCtx)
+		if sharedErr != nil {
+			// Warn, not Debug: "the params are fine" and "we never looked" must not
+			// produce the same silence, and an unreachable node is exactly the case
+			// this advisory exists to surface.
+			w.logger.Warn().Err(sharedErr).
+				Msg("shared params advisory skipped: could not read shared params from the chain")
+			return
+		}
+		LogSharedParamsAdvisory(w.logger, sharedParams)
+	}); advisoryErr != nil {
+		// The pool refused the task (already stopped). Advisory only — never a reason
+		// to fail startup, but say so rather than letting it vanish.
+		w.logger.Warn().Err(advisoryErr).
+			Msg("shared params advisory skipped: worker pool would not accept the task")
+	}
+
 	// Create RPC client for querying specific block heights (needed for proof generation)
 	// This is CRITICAL - proof generation needs to query the exact block at a specific height
 	// to get the canonical BlockID.Hash that matches what the validator stores

@@ -17,8 +17,6 @@ import (
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/keys"
@@ -248,17 +246,13 @@ func runCheckStake(ctx context.Context, config *relayer.Config, nodeOverride str
 
 // isSupplierNotFoundError reports whether a supplier query error means the
 // operator address is not staked on-chain (no supplier record), as opposed to a
-// transport/query failure. The query client wraps the gRPC error via
-// fmt.Errorf(..., %w), so unwrap with status.FromError and fall back to a
-// substring check for defensive coverage — mirrors miner.isClaimNotFoundError.
+// transport/query failure that could not answer either way.
+//
+// Follows query.IsEntityNotFound's policy (explicit gRPC NotFound only) so this
+// report never downgrades an unreachable node into "not staked, nothing to serve"
+// — which would hide a real unserved stake behind an info line.
 func isSupplierNotFoundError(err error) bool {
-	if err == nil {
-		return false
-	}
-	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
-		return true
-	}
-	return strings.Contains(err.Error(), "not found")
+	return query.IsEntityNotFound(err)
 }
 
 // printStakeReport writes the cross-check outcome to stdout: staked pairs with
@@ -904,13 +898,16 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			difficultyProvider := relayer.NewQueryDifficultyProvider(logger, difficultyProviderAdapter)
 			relayProcessor.SetDifficultyProvider(difficultyProvider)
 
-			// Wire the service compute units provider to the SAME orchestrator-refreshed
-			// serviceCache the RelayMeter uses (L1->L2->L3 + pub/sub invalidation). The
-			// mined ComputeUnitsPerRelay becomes the SMST leaf weight, so it MUST track
-			// on-chain CUPR changes; the previous sync.Map provider froze it at startup.
-			relayProcessor.SetServiceComputeUnitsProvider(
-				relayer.NewServiceCacheComputeUnitsProvider(logger, serviceCache),
-			)
+			// Wire the service compute units provider to the height-aware query client:
+			// the mined ComputeUnitsPerRelay becomes the SMST leaf weight, and the chain
+			// resolves CUPR at SESSION START when validating the claim and settling it.
+			// The orchestrator-refreshed serviceCache stays wired as the fallback for
+			// relays that carry no session start height.
+			// Shared with the relay meter below: the meter MUST price a relay with the
+			// same compute units the relay is mined with, or the supplier is billed
+			// against one number and paid against another.
+			computeUnitsProvider := relayer.NewServiceCacheComputeUnitsProvider(logger, serviceCache, queryClients.Service())
+			relayProcessor.SetServiceComputeUnitsProvider(computeUnitsProvider)
 
 			// NOTE: App discovery callbacks are no longer needed on the relayer.
 			// Discovery happens on the miner side: the supplier worker SAdds apps/
@@ -965,6 +962,10 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 					serviceFactorClient, // Reads service factors from Redis (published by miner)
 					relayMeterConfig,
 				)
+
+				// Price relays at the session-start CUPR, matching what the relay
+				// processor stamps into the SMST and what the chain settles against.
+				relayMeter.SetServiceComputeUnitsProvider(computeUnitsProvider)
 
 				if err := relayMeter.Start(ctx); err != nil {
 					return fmt.Errorf("failed to start relay meter: %w", err)

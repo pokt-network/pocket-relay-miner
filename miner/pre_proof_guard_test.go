@@ -24,34 +24,20 @@ import (
 // isClaimNotFoundError — unit tests
 // -----------------------------------------------------------------------------
 
-func TestIsClaimNotFoundError_GrpcNotFound(t *testing.T) {
-	err := status.Error(codes.NotFound, "claim not found")
-	require.True(t, isClaimNotFoundError(err))
-}
+// isClaimNotFoundError delegates to query.IsEntityNotFound, whose own table in
+// query/errors_test.go pins the full policy (explicit gRPC NotFound only, bare and
+// wrapped; every transient failure fails open). Only the delegation is asserted here
+// so one behaviour change does not have to be edited into three test tables in
+// lockstep — the guard's decision tree is covered by runGuard below.
+func TestIsClaimNotFoundError_DelegatesToTheSharedPolicy(t *testing.T) {
+	require.True(t, isClaimNotFoundError(
+		fmt.Errorf("failed to query claim: %w", status.Error(codes.NotFound, "claim not found"))),
+		"an explicit NotFound, wrapped as query.GetClaim wraps it, means the claim is absent")
 
-func TestIsClaimNotFoundError_WrappedGrpcNotFound(t *testing.T) {
-	inner := status.Error(codes.NotFound, "claim not found")
-	wrapped := fmt.Errorf("failed to query claim: %w", inner)
-	require.True(t, isClaimNotFoundError(wrapped), "guard must unwrap fmt.Errorf-wrapped gRPC NotFound")
-}
+	require.False(t, isClaimNotFoundError(status.Error(codes.Unknown, "rpc error: header not found")),
+		"a transient failure carrying \"not found\" must never skip a proof")
 
-func TestIsClaimNotFoundError_SubstringFallback(t *testing.T) {
-	// No gRPC status code, only a message — the substring fallback must fire.
-	err := errors.New("something: claim not found for session X")
-	require.True(t, isClaimNotFoundError(err))
-}
-
-func TestIsClaimNotFoundError_UnavailableIsFailOpen(t *testing.T) {
-	err := status.Error(codes.Unavailable, "chain RPC down")
-	require.False(t, isClaimNotFoundError(err), "Unavailable must NOT be treated as NotFound so the guard fails open")
-}
-
-func TestIsClaimNotFoundError_NilIsFalse(t *testing.T) {
 	require.False(t, isClaimNotFoundError(nil))
-}
-
-func TestIsClaimNotFoundError_ArbitraryErrorIsFalse(t *testing.T) {
-	require.False(t, isClaimNotFoundError(errors.New("connection refused")))
 }
 
 // -----------------------------------------------------------------------------

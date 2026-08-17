@@ -10,13 +10,12 @@ import (
 
 	"github.com/alitto/pond/v2"
 	"github.com/puzpuzpuz/xsync/v4"
-	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -507,7 +506,7 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 
 		if err != nil {
 			// Check if it's a NotFound error (not staked)
-			if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+			if query.IsEntityNotFound(err) {
 				// Write NOT STAKED status to Redis cache for visibility
 				m.writeSupplierStatusToCache(ctx, addr, false, nil, nil, 0)
 
@@ -690,7 +689,7 @@ func (m *SupplierManager) verifySupplierUnstaked(ctx context.Context, addr strin
 		return false, "staked"
 	}
 
-	if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+	if query.IsEntityNotFound(err) {
 		// Supplier genuinely not staked
 		return true, "not_found"
 	}
@@ -1016,7 +1015,7 @@ func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr stri
 
 			if err != nil {
 				// Check if it's a NotFound error (not staked)
-				if st, ok := status.FromError(err); ok && st.Code() == codes.NotFound {
+				if query.IsEntityNotFound(err) {
 					// The stake tx may land after the keyring change fires
 					// the hot-reload callback. Return without claiming; the
 					// periodic reconcile loop re-runs filterStakedSuppliers
@@ -1417,7 +1416,7 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 	case m.config.SupplierQueryClient != nil:
 		supplier, queryErr := m.config.SupplierQueryClient.GetSupplier(ctx, operatorAddr)
 		if queryErr != nil {
-			if st, ok := status.FromError(queryErr); ok && st.Code() == codes.NotFound {
+			if query.IsEntityNotFound(queryErr) {
 				source = supplierDataSourceChainNotFound
 				m.logger.Debug().
 					Str(logging.FieldSupplier, operatorAddr).

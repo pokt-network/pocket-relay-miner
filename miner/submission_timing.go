@@ -226,13 +226,13 @@ func (c *SubmissionTimingCalculator) WaitForClaimWindow(
 
 	windowOpen := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
 
-	// Wait for window open block
-	blockHash, err := c.waitForBlockHeight(ctx, windowOpen)
-	if err != nil {
+	// Wait for the window to open. No block hash is captured — see
+	// waitForBlockHeight for why passing nil is both correct and required here.
+	if err := c.waitForBlockHeight(ctx, windowOpen); err != nil {
 		return nil, fmt.Errorf("failed to wait for claim window: %w", err)
 	}
 
-	return c.CalculateClaimWindow(ctx, sessionEndHeight, supplierOperatorAddr, blockHash)
+	return c.CalculateClaimWindow(ctx, sessionEndHeight, supplierOperatorAddr, nil)
 }
 
 // WaitForProofWindow waits for the proof window to open and returns the window info.
@@ -252,13 +252,13 @@ func (c *SubmissionTimingCalculator) WaitForProofWindow(
 
 	windowOpen := sharedtypes.GetProofWindowOpenHeight(sharedParams, sessionEndHeight)
 
-	// Wait for window open block
-	blockHash, err := c.waitForBlockHeight(ctx, windowOpen)
-	if err != nil {
+	// Wait for the window to open. No block hash is captured — see
+	// waitForBlockHeight for why passing nil is both correct and required here.
+	if err := c.waitForBlockHeight(ctx, windowOpen); err != nil {
 		return nil, fmt.Errorf("failed to wait for proof window: %w", err)
 	}
 
-	return c.CalculateProofWindow(ctx, sessionEndHeight, supplierOperatorAddr, blockHash)
+	return c.CalculateProofWindow(ctx, sessionEndHeight, supplierOperatorAddr, nil)
 }
 
 // WaitForEarliestSubmit waits until the supplier can submit.
@@ -266,27 +266,41 @@ func (c *SubmissionTimingCalculator) WaitForEarliestSubmit(
 	ctx context.Context,
 	window *SubmissionWindow,
 ) error {
-	_, err := c.waitForBlockHeight(ctx, window.EarliestSubmit)
-	return err
+	return c.waitForBlockHeight(ctx, window.EarliestSubmit)
 }
 
-// waitForBlockHeight waits for a specific block height and returns its hash.
+// waitForBlockHeight blocks until the chain has reached targetHeight.
+//
+// It deliberately returns NO block hash. The obvious-looking
+// `if block.Height() >= targetHeight { return block.Hash() }` returns whatever
+// block happens to be current, not the block AT targetHeight — the two differ
+// whenever the poll lands late or several blocks arrive between ticks. That hash
+// is the seed for the claim/proof distribution offset, so returning the wrong one
+// silently places submissions in the wrong window and gets suppliers slashed with
+// no diagnostic. blockClient here exposes only LastBlock, so the correct hash is
+// not obtainable at all on this path.
+//
+// Callers therefore pass a nil window-open hash, which is what the chain expects:
+// both GetEarliestSupplierClaimCommitHeight and GetEarliestSupplierProofCommitHeight
+// ignore the hash and return the plain window-open height — the hash seeding is
+// commented out in x/shared/types/session.go (verified identical in poktroll v0.1.34
+// and v0.1.35, so this is not a v0.1.35 change). query/query.go:487,516 already pass
+// nil for the same reason.
 func (c *SubmissionTimingCalculator) waitForBlockHeight(
 	ctx context.Context,
 	targetHeight int64,
-) ([]byte, error) {
+) error {
 	ticker := time.NewTicker(time.Duration(c.config.BlockTimeSeconds) * time.Second)
 	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 
 		case <-ticker.C:
-			block := c.blockClient.LastBlock(ctx)
-			if block.Height() >= targetHeight {
-				return block.Hash(), nil
+			if c.blockClient.LastBlock(ctx).Height() >= targetHeight {
+				return nil
 			}
 		}
 	}

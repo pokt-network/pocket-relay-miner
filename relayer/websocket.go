@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -52,10 +53,16 @@ const (
 // would reject frames PATH already accepted and forwarded, reintroducing the
 // class of cross-component divergence this bridge exists to avoid.
 //
-// When exceeded, gorilla sends a 1009 (message too big) close frame and
-// ReadMessage errors, so readLoop tears the bridge down through its existing
-// close path.
-const wsMaxMessageBytes = 15 * 1024 * 1024
+// When exceeded, ReadMessage returns websocket.ErrReadLimit and readLoop tears
+// the bridge down through its existing close path, reporting 1009. gorilla also
+// emits its own 1009 from inside advanceFrame, but only as a documented BEST
+// EFFORT (it discards the WriteControl error), so the close code the peer
+// actually observes has to come from our own close path -- see readLoop.
+//
+// var (not const) so tests can shrink it: exercising the limit at 15MB makes the
+// test depend on pushing 15MB through loopback inside a deadline, which is a
+// timing race, not a behaviour check.
+var wsMaxMessageBytes int64 = 15 * 1024 * 1024
 
 // RFC 6455 WebSocket Close Codes
 // https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1
@@ -392,14 +399,7 @@ func (b *WebSocketBridge) readLoop(conn *websocket.Conn, source wsMessageSource)
 				// Parse and log close error details
 				b.logCloseError(err, source)
 			}
-			// Extract close code from peer and propagate it to the other side
-			// This enables proper session rollover signaling (e.g., 4000 SessionExpired from PATH → backend)
-			closeCode, closeText := extractCloseInfo(err)
-			if closeCode == 0 {
-				// Not a close frame - use GoingAway as default
-				closeCode = CloseGoingAway
-				closeText = "peer disconnected"
-			}
+			closeCode, closeText := closeInfoForReadError(err)
 			_ = b.closeWithReason(closeCode, closeText, wsCloseInitiator(source))
 			return
 		}
@@ -975,6 +975,29 @@ func (b *WebSocketBridge) logCloseError(err error, source wsMessageSource) {
 // extractCloseInfo extracts close code and text from a WebSocket close error.
 // Returns 0 and empty string if the error is not a close error.
 // This is used to propagate close codes bidirectionally through the bridge.
+// closeInfoForReadError decides the close code and reason the bridge reports when
+// a readLoop read fails.
+//
+// A peer-sent close frame wins: propagating its code is what carries session
+// rollover signalling (e.g. 4000 SessionExpired from PATH) through to the backend.
+//
+// websocket.ErrReadLimit is called out explicitly because it is NOT a close frame,
+// so it would otherwise fall through to the generic "peer disconnected" default and
+// report a wsMaxMessageBytes breach as 1001. gorilla does write its own 1009 from
+// advanceFrame, but only as a documented BEST EFFORT — it discards the WriteControl
+// error, and that write races an oversized frame still in flight from the peer, so
+// it cannot be relied on to arrive. The peer must learn it breached a policy it has
+// to fix, not that the far side went away and it should reconnect.
+func closeInfoForReadError(err error) (code int, text string) {
+	if code, text := extractCloseInfo(err); code != 0 {
+		return code, text
+	}
+	if errors.Is(err, websocket.ErrReadLimit) {
+		return CloseMessageTooBig, "message too big"
+	}
+	return CloseGoingAway, "peer disconnected"
+}
+
 func extractCloseInfo(err error) (int, string) {
 	closeErr, ok := err.(*websocket.CloseError)
 	if ok {

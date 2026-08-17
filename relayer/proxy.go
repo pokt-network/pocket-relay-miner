@@ -89,6 +89,7 @@ const (
 	rejectReasonMeterError                  = "meter_error"
 	rejectReasonStakeExhausted              = "stake_exhausted"
 	rejectReasonValidationFailed            = "validation_failed"
+	rejectReasonImplausibleSession          = "implausible_session_heights"
 	rejectReasonClientDisconnected          = "client_disconnected"
 	rejectReasonBackendTimeout              = "backend_timeout"
 	rejectReasonBackendNetworkError         = "backend_network_error"
@@ -926,6 +927,25 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Pin block height at arrival time (for grace period calculation)
 	arrivalBlockHeight := p.currentBlockHeight.Load()
 
+	// Cheap, query-free reject of obviously-bogus session heights BEFORE any
+	// at-height chain read (the eager meter and getTargetSessionBlockHeight both
+	// query at client-supplied heights before the ring signature is verified). An
+	// unauthenticated caller could otherwise drive one full-node query per distinct
+	// height; this collapses the usable height space to a band around the current
+	// height. Legitimate active/grace-period relays always pass.
+	if sh := relayRequest.Meta.SessionHeader; sh != nil {
+		if !sessionHeightsPlausible(sh.SessionStartBlockHeight, sh.SessionEndBlockHeight, arrivalBlockHeight) {
+			p.sendError(w, http.StatusBadRequest, "implausible session heights")
+			relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonImplausibleSession).Inc()
+			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
+				Int64("session_start", sh.SessionStartBlockHeight).
+				Int64("session_end", sh.SessionEndBlockHeight).
+				Int64("arrival_height", arrivalBlockHeight).
+				Msg("relay rejected: implausible session heights (pre-meter bound)")
+			return
+		}
+	}
+
 	// Get validation mode
 	validationMode := p.config.GetServiceValidationMode(serviceID)
 
@@ -941,6 +961,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			sessionID := sessionHeader.SessionId
 			appAddress := sessionHeader.ApplicationAddress
 			supplierAddress := relayRequest.Meta.SupplierOperatorAddress
+			sessionStartHeight := sessionHeader.SessionStartBlockHeight
 			sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 			meterStart := time.Now()
@@ -950,7 +971,9 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				appAddress,
 				serviceID,
 				supplierAddress,
+				sessionStartHeight,
 				sessionEndHeight,
+				arrivalBlockHeight,
 			)
 			meterDuration := time.Since(meterStart)
 
@@ -1290,6 +1313,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				sessionHeader := capturedRequest.Meta.SessionHeader
 				sessionID := sessionHeader.SessionId
 				supplierAddress := capturedRequest.Meta.SupplierOperatorAddress
+				sessionStartHeight := sessionHeader.SessionStartBlockHeight
 				sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 				meterStart := time.Now()
@@ -1299,7 +1323,9 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					appAddress,
 					capturedServiceID,
 					supplierAddress,
+					sessionStartHeight,
 					sessionEndHeight,
+					capturedBlockHeight,
 				)
 				meterDuration := time.Since(meterStart)
 
@@ -1716,7 +1742,6 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 
 	client := p.getClientForService(serviceID)
 	resp, err := client.Do(req)
-
 	if err != nil {
 		// Distinguish between client disconnection vs internal timeout vs other errors
 		// for proper metrics and logging

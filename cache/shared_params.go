@@ -209,6 +209,13 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 
 // queryAndCacheParams queries the chain and caches the result.
 // Uses distributed locking to prevent thundering herd.
+//
+// The chain read MUST be GetParamsAtHeight(height), not GetParams(): the cache is
+// keyed by height and the entry is shared over Redis with every other replica.
+// Reading live params and storing them under a past height's key both returns the
+// wrong answer to the caller AND poisons that key fleet-wide until its TTL lapses.
+// (For the latest height the two are equivalent, which is why this was invisible
+// while GetLatestSharedParams was the only caller.)
 func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height int64, key string) (*sharedtypes.Params, error) {
 	lockKey := c.keys.SharedParamsLock(height)
 
@@ -226,7 +233,7 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 		chainQueries.WithLabelValues("shared_params").Inc()
 		chainStart := time.Now()
 
-		params, queryErr := c.sharedClient.GetParams(ctx)
+		params, queryErr := c.sharedClient.GetParamsAtHeight(ctx, height)
 		chainQueryLatency.WithLabelValues("shared_params").Observe(time.Since(chainStart).Seconds())
 
 		if queryErr != nil {
@@ -263,8 +270,9 @@ func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height 
 		}
 	}
 
-	// Still not available - query chain directly
-	params, fallbackErr := c.sharedClient.GetParams(ctx)
+	// Still not available - query chain directly at the requested height.
+	// Deliberately not cached: the lock holder owns populating this key.
+	params, fallbackErr := c.sharedClient.GetParamsAtHeight(ctx, height)
 	if fallbackErr != nil {
 		chainQueryErrors.WithLabelValues("shared_params").Inc()
 		return nil, fmt.Errorf("failed to query chain: %w", fallbackErr)
