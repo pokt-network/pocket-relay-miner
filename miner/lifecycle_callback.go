@@ -24,7 +24,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
-	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -143,19 +142,6 @@ type SessionQueryClient interface {
 	GetSession(ctx context.Context, appAddr, serviceID string, blockHeight int64) (*sessiontypes.Session, error)
 }
 
-// ApplicationQueryClient queries application information from the blockchain.
-type ApplicationQueryClient interface {
-	GetApplication(ctx context.Context, appAddress string) (*apptypes.Application, error)
-}
-
-// ServiceFactorProvider provides service factor configuration.
-// This allows the lifecycle callback to check claim amounts against configured ceilings.
-type ServiceFactorProvider interface {
-	// GetServiceFactor returns the service factor for a service.
-	// Returns (factor, true) if configured, (0, false) if not.
-	GetServiceFactor(serviceID string) (float64, bool)
-}
-
 // StreamDeleter deletes session streams after settlement.
 // This stops late relays from being consumed and frees Redis memory.
 type StreamDeleter interface {
@@ -179,14 +165,6 @@ type LifecycleCallback struct {
 	// proofChecker determines if a proof is required for a claimed session.
 	// If nil, proofs are always submitted (legacy behavior).
 	proofChecker *ProofRequirementChecker
-
-	// serviceFactorProvider provides service factor configuration for claim ceiling warnings.
-	// If nil, no ceiling warnings are logged.
-	serviceFactorProvider ServiceFactorProvider
-
-	// appClient queries application data for claim ceiling calculations.
-	// If nil, ceiling warnings are skipped.
-	appClient ApplicationQueryClient
 
 	// serviceClient queries the current service CUPR for the claim-build
 	// CUPR-mismatch guard. If nil, the guard is skipped.
@@ -264,18 +242,6 @@ func NewLifecycleCallback(
 		proofChecker:       proofChecker,
 		sessionLocks:       make(map[string]*sync.Mutex),
 	}
-}
-
-// SetServiceFactorProvider sets the service factor provider for claim ceiling warnings.
-// This is optional - if not set, no ceiling warnings are logged.
-func (lc *LifecycleCallback) SetServiceFactorProvider(provider ServiceFactorProvider) {
-	lc.serviceFactorProvider = provider
-}
-
-// SetAppClient sets the application query client for claim ceiling calculations.
-// This is optional - if not set, ceiling warnings are skipped.
-func (lc *LifecycleCallback) SetAppClient(client ApplicationQueryClient) {
-	lc.appClient = client
 }
 
 // SetServiceClient sets the service query client used by the claim-build

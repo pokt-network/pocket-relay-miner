@@ -309,29 +309,6 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
-	// ====== SERVICE FACTOR METRICS ======
-	// These metrics track claim ceiling events when claims exceed configured limits
-
-	claimCeilingExceededTotal = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "claim_ceiling_exceeded_total",
-			Help:      "Total number of claims that exceeded the configured ceiling (potential unpaid work)",
-		},
-		[]string{"supplier", "service_id"},
-	)
-
-	claimCeilingExceededUpokt = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "claim_ceiling_exceeded_upokt",
-			Help:      "Total uPOKT claimed above the configured ceiling (potential unpaid amount)",
-		},
-		[]string{"supplier", "service_id"},
-	)
-
 	// claimsSkippedTotal tracks claim submissions that were intentionally
 	// dropped before going to the chain. reason values (extend as new skip
 	// paths land):
@@ -1407,13 +1384,6 @@ func RecordProofSkipped(supplier, serviceID, reason string) {
 // (unprofitable, dedup hit, zero-work, etc).
 func RecordClaimSkipped(supplier, serviceID, reason string) {
 	claimsSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
-}
-
-// RecordClaimCeilingExceeded records when a claim exceeds the configured ceiling.
-// excessUpokt is the amount of uPOKT claimed above the ceiling.
-func RecordClaimCeilingExceeded(supplier, serviceID string, excessUpokt int64) {
-	claimCeilingExceededTotal.WithLabelValues(supplier, serviceID).Inc()
-	claimCeilingExceededUpokt.WithLabelValues(supplier, serviceID).Add(float64(excessUpokt))
 }
 
 // ====== ON-CHAIN SETTLEMENT TRACKING ======
