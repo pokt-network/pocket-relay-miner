@@ -250,6 +250,10 @@ would not benefit from a file, it does not belong in a commit.
   what it does, how to run it, written for an operator).
 - `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, and the `scripts/` READMEs.
 - Code, tests, configs, and example configs with placeholder values.
+- `.claude/skills/` — this repository's agent instructions. **Reviewed as
+  code**: written in English like the rest of the repository, no personal
+  paths, no operator data, no machine-specific assumptions. A skill states how
+  work is done here, so it is as much a contract as the code it describes.
 
 **Never tracked — keep these on disk, under `scripts/localonly/`:**
 
@@ -257,8 +261,16 @@ would not benefit from a file, it does not belong in a commit.
   review reports. These are working artifacts; they go stale as soon as the
   work they describe ships.
 - Editor and IDE configuration (`.idea/`, `.vscode/`).
+- The rest of `.claude/` — `settings.local.json` is a per-machine permission
+  allowlist that accumulates operator hostnames and personal paths, and
+  `worktrees/` is agent scratch. Only `skills/` is shared.
 - Operator-specific data — hostnames, IPs, ssh aliases, supplier addresses,
   internal URLs, keys. See the operator-data rules in `CLAUDE.md`.
+
+**A stray `.go` file under `scripts/localonly/` compiles into the build**, even
+though git ignores it — `go test ./...` walks the filesystem, not the index.
+Keep saved code under a `_`-prefixed directory such as
+`scripts/localonly/_rescued/`; the Go toolchain ignores `_` and `.` prefixes.
 
 Note that **`.gitignore` does not protect you here**: it has no effect on a
 file that is already tracked. That is precisely how `.planning/` and `.idea/`
@@ -278,27 +290,39 @@ for `git add -f` to get past it.
 
 ### Before Submitting PR
 
-All of the following must pass:
+One command runs every gate CI will run:
 
 ```bash
-# 1. Format check
-make fmt
-
-# 2. Linters
-make lint
-
-# 3. Unit tests
-make test
-
-# 4. Test coverage
-make test-coverage
-
-# 5. Build verification
-make build
-
-# 6. No local-only files tracked
-make check-tracked-files
+make gate            # level 2: static + tests + race + coverage
 ```
+
+The gates live in `scripts/gates/` as plain scripts, so a human, CI and an
+agent all run the same implementation. They report, they never fix; each exits
+non-zero on failure and prints its verdict on the last line.
+
+| level | command | cost | covers |
+|---|---|---|---|
+| 1 | `make gate LEVEL=1` | seconds | gofmt, build, vet, golangci-lint, tracked files — both Go modules |
+| 2 | `make gate` | minutes | the above, plus the test suite, the race detector, and the coverage run |
+| 3 | `make gate LEVEL=3` | tens of minutes | the above, plus live validation on Tilt with claim and proof verified on-chain |
+
+Narrow any level to one package with `PKG=miner make gate`. The pre-commit hook
+(`make install-hooks`) runs level 1 on every commit.
+
+Three points worth knowing:
+
+- **`make fmt` rewrites your files; it is not a check.** The gate reports which
+  files are unformatted and leaves them alone, because a check that rewrites
+  the tree after git has snapshotted the index puts the unformatted version in
+  your commit.
+- **The coverage run is not the same run as the test suite.** Instrumentation
+  widens timing and surfaces flakes a plain `go test` hides, and it is what CI
+  rejects on. Passing `tests` and failing `coverage` is a real result.
+- **A skipped gate is not a passed gate.** If a tool is missing the gate says
+  so and the summary names it as NOT RUN. Do not read that as green.
+
+**Anything touching relay, claim, proof, settlement or metering needs level 3.**
+Unit tests do not prove a relay was mined and paid.
 
 ### Writing Tests
 
