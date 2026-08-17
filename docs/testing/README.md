@@ -1,27 +1,28 @@
 # Testing the RelayMiner
 
 How to exercise the relayer and miner on the local Tilt environment. There are
-three ways to test, each with its own guide:
+two guides:
 
 | Guide | What it's for |
 |---|---|
 | **[TILT.md](TILT.md)** | Bring the localnet up in kind, confirm it's healthy, the port map, and the HA/chaos suite. **Start here.** |
-| **[PATH_HEY.md](PATH_HEY.md)** | Load and full-lifecycle testing **through the PATH gateway** with `hey`, the way production traffic flows. |
-| **[DIRECT_CLI.md](DIRECT_CLI.md)** | Signed relays sent **straight to the relayer** (`:8180`) with the `relay` CLI — per-transport correctness and error paths. |
+| **[DIRECT_CLI.md](DIRECT_CLI.md)** | Signed relays sent **straight to the relayer** (`:8180`) with the `relay` CLI — correctness, error paths, and load. |
 
 ## Which one do I want?
 
 - **First time / nothing running** → [TILT.md](TILT.md) to bring it up.
-- **"How many RPS does the whole path carry?" / lifecycle → claims → proofs** →
-  [PATH_HEY.md](PATH_HEY.md).
-- **"Does protocol X actually work? Does the relayer reject bad input?"** →
-  [DIRECT_CLI.md](DIRECT_CLI.md). Use this for the five transports
-  (JSON-RPC, WebSocket, gRPC, streaming, CometBFT) and for anything
-  error-related.
+- **Everything else** — throughput, lifecycle → claims → proofs, per-transport
+  correctness, error paths → [DIRECT_CLI.md](DIRECT_CLI.md). It covers the five
+  transports (JSON-RPC, WebSocket, gRPC, streaming, CometBFT) and carries
+  sustained load with `--load-test`.
 
-> **Key gotcha:** PATH masks relayer `503`s as `200` + empty body. So the PATH +
-> `hey` path is throughput/lifecycle only — for error-path and negative testing,
-> go direct with the CLI ([DIRECT_CLI.md](DIRECT_CLI.md)).
+> **Do not measure relays through the PATH gateway.** PATH answers a relayer
+> `503` with `200` and an empty body, so any tool that reads status codes counts
+> relays that were never mined: a real run reported `20000/20000 OK` with the
+> WAL at `XLEN 0`. This is not confined to error paths — it invalidates
+> throughput and lifecycle numbers too. Send relays with the `relay` CLI at
+> `:8180`, which verifies the supplier signature and the backend's own error
+> field, so a failure reads as a failure.
 
 ## Reference material
 
