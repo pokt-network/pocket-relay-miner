@@ -217,78 +217,135 @@ else
     gate_verdict "live"
 fi
 
-# ---------------------------------------------------------------------------
-gate_step "settle: waiting for claim and proof inclusion (up to ${SETTLE_TIMEOUT_MIN} min)"
 
-# Poll rather than sleep a computed window. The inclusion reconciler resolves
-# the on-chain outcome asynchronously, so the only honest signal is the record
-# itself changing -- and polling adapts if the chain is slow.
+# ---------------------------------------------------------------------------
+gate_step "settle: waiting for a FINAL on-chain outcome (up to ${SETTLE_TIMEOUT_MIN} min)"
+
+# What counts as proof that a relay earned money is the SETTLEMENT, not the
+# inclusion of the claim. A claim can land on-chain and still expire without its
+# proof, be discarded, or get its supplier slashed -- all after inclusion. So
+# this reads the terminal events the chain emits in its EndBlocker:
+#
+#   EventClaimSettled  claim_proof_status_int 1=PROVEN (paid), 3=EXPIRED
+#   EventClaimExpired  expiration_reason PROOF_MISSING / PROOF_INVALID
+#   EventSupplierSlashed   stake burned -- the worst outcome there is
+#   EventClaimDiscarded    dropped without settling
+#
+# These come from block_results (FinalizeBlockEvents), queried directly against
+# the validator. Deliberately NOT read from the miner's settlement metrics: the
+# settlement monitor is disabled by default (config.miner.example.yaml leaves the
+# whole block commented, and Tilt renders its config from that file), so those
+# series are empty on a stock localnet and asserting on them would assert on
+# nothing.
+scan_settlement_events() {
+    local from="$1" to="$2"
+    local h
+    for ((h = from; h <= to; h++)); do
+        curl -fsS --max-time 10 "${VALIDATOR_RPC}/block_results?height=${h}" 2>/dev/null |
+            jq -c --arg h "$h" '
+                (.result.finalize_block_events // [])[]
+                | select(.type | startswith("pocket.tokenomics.Event"))
+                | {height: $h, type: .type,
+                   attrs: (.attributes // [] | map({(.key): .value}) | add // {})}
+            ' 2>/dev/null || true
+    done
+}
+
+# Filter to the suppliers this run drove; another session's traffic on a shared
+# localnet must not turn this green.
+supplier_filter="$(printf '%s\n' "$suppliers" | paste -sd'|' -)"
+
 deadline=$(( $(date +%s) + SETTLE_TIMEOUT_MIN * 60 ))
-claims_found=0
-proofs_found=0
-proofs_required=0
+events_file="${BIN_DIR}/settlement_events.jsonl"
+: >"$events_file"
 resolved=0
 
 while [ "$(date +%s)" -lt "$deadline" ]; do
-    claims_found=0
-    proofs_found=0
-    proofs_required=0
-    pending=0
+    height_now="$(curl -fsS --max-time 5 "${VALIDATOR_RPC}/status" 2>/dev/null |
+        jq -r '.result.sync_info.latest_block_height // empty')"
+    [ -z "$height_now" ] && { sleep "$POLL_INTERVAL_S"; continue; }
 
-    for supplier in $suppliers; do
-        records="$("$BIN" redis submissions --supplier "$supplier" --service "$SERVICE_ID" --limit 0 --json 2>/dev/null || true)"
-        [ -z "$records" ] && continue
+    scan_settlement_events "$height_before" "$height_now" \
+        | grep -E "$supplier_filter" >"$events_file" || true
 
-        # claim_success means the transaction was ACCEPTED FOR BROADCAST, not
-        # that it landed. Only claim_on_chain_outcome, which the inclusion
-        # reconciler writes after polling the chain, proves inclusion.
-        claims_found=$(( claims_found + $(printf '%s' "$records" |
-            jq '[.[]? | select(.claim_on_chain_outcome == "on_chain_found")] | length' 2>/dev/null || echo 0) ))
-        proofs_required=$(( proofs_required + $(printf '%s' "$records" |
-            jq '[.[]? | select(.proof_required == true)] | length' 2>/dev/null || echo 0) ))
-        proofs_found=$(( proofs_found + $(printf '%s' "$records" |
-            jq '[.[]? | select(.proof_on_chain_outcome == "on_chain_found")] | length' 2>/dev/null || echo 0) ))
-        pending=$(( pending + $(printf '%s' "$records" |
-            jq '[.[]? | select(.claim_on_chain_outcome == "" or .claim_on_chain_outcome == null)] | length' 2>/dev/null || echo 0) ))
-    done
+    settled_count="$(grep -c 'EventClaimSettled' "$events_file" || true)"
+    expired_count="$(grep -cE 'EventClaimExpired' "$events_file" || true)"
 
-    if [ "$claims_found" -gt 0 ] && [ "$pending" -eq 0 ] &&
-        { [ "$proofs_required" -eq 0 ] || [ "$proofs_found" -ge "$proofs_required" ]; }; then
+    if [ "$(( settled_count + expired_count ))" -gt 0 ]; then
         resolved=1
         break
     fi
 
-    printf '           claims on-chain: %d, proofs %d/%d, unresolved: %d\n' \
-        "$claims_found" "$proofs_found" "$proofs_required" "$pending"
+    printf '           height %s, no terminal settlement event yet\n' "$height_now"
     sleep "$POLL_INTERVAL_S"
 done
 
 # ---------------------------------------------------------------------------
-gate_step "assert: on-chain outcome"
+gate_step "assert: final settlement outcome"
 
-if [ "$claims_found" -gt 0 ]; then
-    gate_pass "${claims_found} claim(s) found on-chain"
+count_events() { grep -c "$1" "$events_file" 2>/dev/null || true; }
+
+proven="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
+                        | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?1\"?$"))] | length' \
+    "$events_file" 2>/dev/null || echo 0)"
+settled_expired="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
+                        | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?3\"?$"))] | length' \
+    "$events_file" 2>/dev/null || echo 0)"
+expired="$(count_events 'EventClaimExpired')"
+slashed="$(count_events 'EventSupplierSlashed')"
+discarded="$(count_events 'EventClaimDiscarded')"
+
+if [ "${proven:-0}" -gt 0 ]; then
+    gate_pass "${proven} claim(s) SETTLED AS PROVEN -- relays were paid"
 else
-    gate_fail "no claim reached the chain"
-    printf '         inspect with: %spocket-relay-miner redis submissions --supplier <addr>%s\n' \
-        "$GATE_BOLD" "$GATE_RESET"
+    gate_fail "no claim settled as proven: nothing earned"
 fi
 
-if [ "$proofs_required" -eq 0 ]; then
-    # Not a pass: proof requirement is probabilistic, so a run where no claim
-    # needed one has simply not exercised the proof path.
-    gate_skip "no claim required a proof -- the proof path was NOT exercised"
-elif [ "$proofs_found" -ge "$proofs_required" ]; then
-    gate_pass "${proofs_found}/${proofs_required} required proof(s) found on-chain"
+# An expiry is the expensive failure: the work was done, claimed, and then lost.
+total_expired=$(( ${settled_expired:-0} + ${expired:-0} ))
+if [ "$total_expired" -eq 0 ]; then
+    gate_pass "no claim expired"
 else
-    gate_fail "only ${proofs_found} of ${proofs_required} required proof(s) reached the chain"
-    printf '         a claim that expires without its proof is slashed\n'
+    gate_fail "${total_expired} claim(s) EXPIRED -- relays served and never paid"
+    jq -rs '.[] | select(.type == "pocket.tokenomics.EventClaimExpired")
+            | "           reason=\(.attrs.expiration_reason // "?") relays=\(.attrs.num_relays // "?") height=\(.height)"' \
+        "$events_file" 2>/dev/null | head -10
 fi
+
+if [ "${slashed:-0}" -eq 0 ]; then
+    gate_pass "no supplier slashed"
+else
+    gate_fail "${slashed} SLASHING event(s) -- staked funds burned"
+    jq -rs '.[] | select(.type == "pocket.tokenomics.EventSupplierSlashed")
+            | "           \(.attrs)"' "$events_file" 2>/dev/null | head -5
+fi
+
+if [ "${discarded:-0}" -ne 0 ]; then
+    gate_fail "${discarded} claim(s) discarded without settling"
+fi
+
+# Earning zero while settling as proven means the reward arithmetic is wrong,
+# which a status check alone would not catch.
+earned="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
+                       | .attrs.reward_distribution // ""] | length' "$events_file" 2>/dev/null || echo 0)"
+if [ "${proven:-0}" -gt 0 ] && [ "${earned:-0}" -eq 0 ]; then
+    gate_fail "claims settled as proven but no reward distribution was emitted"
+fi
+
+# The miner's own terminal states, as corroboration: they should agree with the
+# chain, and a disagreement is itself the finding.
+for state in claim_missing claim_tx_error proof_tx_error proof_window_closed claim_window_closed; do
+    n=0
+    for supplier in $suppliers; do
+        n=$(( n + $("$BIN" redis sessions --supplier "$supplier" --state "$state" 2>/dev/null |
+            grep -c '^session' || true) ))
+    done
+    [ "$n" -gt 0 ] && gate_fail "miner reports ${n} session(s) in failure state '${state}'"
+done
 
 if [ "$resolved" -eq 0 ]; then
-    gate_fail "timed out after ${SETTLE_TIMEOUT_MIN} min with outcomes unresolved"
-    printf '         an unresolved record is not a pass: the reconciler never\n'
-    printf '         reported whether those claims landed\n'
+    gate_fail "timed out after ${SETTLE_TIMEOUT_MIN} min with no terminal settlement event"
+    printf '         nothing settled is NOT a pass: the run proved nothing about payment\n'
 fi
 
 gate_verdict "live"

@@ -58,11 +58,28 @@ the `tilt up` command and exits non-zero, because bringing the cluster up claims
 ports and containers another session on the same machine may be using. Run
 `--preflight-only` first: it reads state and touches nothing.
 
-It asserts `claim_on_chain_outcome` and `proof_on_chain_outcome`, not
-`claim_success` — the latter means the transaction was accepted for broadcast,
-which is not the same as landing in a block. A run where no claim required a
-proof reports a SKIP for the proof path rather than a pass, because that path
-was not exercised.
+**It asserts the FINAL settlement outcome, not inclusion.** A claim can land
+on-chain and still expire without its proof, be discarded, or get its supplier
+slashed — every one of those happens *after* inclusion, so "the claim is
+on-chain" says nothing about whether the relays were paid. The gate reads the
+terminal events the chain emits in its EndBlocker, from `block_results`:
+
+| event | meaning |
+|---|---|
+| `EventClaimSettled`, status `1` | PROVEN — the relays were paid |
+| `EventClaimSettled`, status `3`, or `EventClaimExpired` | expired: served, claimed, never paid |
+| `EventSupplierSlashed` | staked funds burned |
+| `EventClaimDiscarded` | dropped without settling |
+
+Passing requires at least one claim settled as proven, zero expiries, zero
+slashing and zero discards. Nothing settling at all is a failure, not a pass:
+the run proved nothing about payment.
+
+These come from the validator directly and **not** from the miner's settlement
+metrics, because `settlement_monitor.enabled` defaults to false — the block is
+commented out in `config.miner.example.yaml`, which is the file Tilt renders its
+config from, so on a stock localnet those series are empty and asserting on them
+would be asserting on nothing.
 
 `cache` and `miner` run sequentially when targeted on their own: their tests
 share a single miniredis fixture, so parallelism races the fixture instead of
