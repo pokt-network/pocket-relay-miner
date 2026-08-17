@@ -866,48 +866,6 @@ var (
 		},
 	)
 
-	// Leader election metrics (legacy - from old per-supplier leader elector)
-	// These are kept for backwards compatibility with miner/leader.go but not actively used
-	leaderStatus = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "leader_status_legacy",
-			Help:      "LEGACY: Whether this instance is the leader (1=leader, 0=standby) - per supplier",
-		},
-		[]string{"supplier", "instance"},
-	)
-
-	leaderAcquisitions = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "leader_acquisitions_total",
-			Help:      "LEGACY: Total number of times this instance acquired leadership",
-		},
-		[]string{"supplier"},
-	)
-
-	leaderLosses = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "leader_losses_total_legacy",
-			Help:      "LEGACY: Total number of times this instance lost leadership",
-		},
-		[]string{"supplier"},
-	)
-
-	leaderHeartbeats = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "leader_heartbeats_total",
-			Help:      "Total number of successful leader heartbeats",
-		},
-		[]string{"supplier"},
-	)
-
 	// Session store metrics
 	sessionSnapshotsSaved = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
