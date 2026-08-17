@@ -406,27 +406,46 @@ func (kb *KeyBuilder) MinerDedupSessionKey(sessionID string) string {
 	return fmt.Sprintf("%s:%s:dedup:session:%s", kb.ns.BasePrefix, kb.ns.MinerPrefix, sessionID)
 }
 
-// MeterSessionKey builds the per-session relay metering hash key.
+// MeterSessionKey builds the per-session relay metering key PREFIX.
+//
+// Metering is stored per (session, supplier), not per session: one session is
+// served by many suppliers and each meters its own stake independently. This
+// method therefore addresses no key on its own -- it is the prefix the
+// per-supplier keys hang off, useful for SCAN patterns. Read a supplier's
+// metering through MeterMetaKey and MeterConsumedKey.
+//
 // Format: {base}:{meter}:{sessionID}
 // Example: "ha:meter:sess1"
 func (kb *KeyBuilder) MeterSessionKey(sessionID string) string {
 	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.MeterPrefix, sessionID)
 }
 
-// AppStakeKey builds the per-application stake-tracking key used by the meter
-// subsystem. The "app_stake" segment is literal (no configurable sub-prefix).
-// Format: {base}:app_stake:{appAddr}
-// Example: "ha:app_stake:app1"
-func (kb *KeyBuilder) AppStakeKey(appAddr string) string {
-	return fmt.Sprintf("%s:app_stake:%s", kb.ns.BasePrefix, appAddr)
+// MeterMetaKey builds the per-(session, supplier) metering metadata hash key
+// written by the relayer's relay meter.
+// Format: {base}:{meter}:{sessionID}:{supplier}:meta
+// Example: "ha:meter:sess1:pokt1abc:meta"
+func (kb *KeyBuilder) MeterMetaKey(sessionID, supplierAddress string) string {
+	return fmt.Sprintf("%s:%s:%s:%s:meta",
+		kb.ns.BasePrefix, kb.ns.MeterPrefix, sessionID, supplierAddress)
 }
 
-// ServiceComputeUnitsKey builds the per-service compute-units key used by the
-// meter subsystem. The "service"/"compute_units" segments are literal.
-// Format: {base}:service:{serviceID}:compute_units
-// Example: "ha:service:svc1:compute_units"
-func (kb *KeyBuilder) ServiceComputeUnitsKey(serviceID string) string {
-	return fmt.Sprintf("%s:service:%s:compute_units", kb.ns.BasePrefix, serviceID)
+// MeterConsumedKey builds the per-(session, supplier) consumed-stake key
+// written by the relayer's relay meter.
+// Format: {base}:{meter}:{sessionID}:{supplier}:consumed
+// Example: "ha:meter:sess1:pokt1abc:consumed"
+func (kb *KeyBuilder) MeterConsumedKey(sessionID, supplierAddress string) string {
+	return fmt.Sprintf("%s:%s:%s:%s:consumed",
+		kb.ns.BasePrefix, kb.ns.MeterPrefix, sessionID, supplierAddress)
+}
+
+// MeterSessionMetaPattern builds the SCAN pattern matching every supplier's
+// metering metadata for one session. A session is served by several suppliers
+// and each meters separately, so inspection has to discover them rather than
+// address a single key.
+// Format: {base}:{meter}:{sessionID}:*:meta
+// Example: "ha:meter:sess1:*:meta"
+func (kb *KeyBuilder) MeterSessionMetaPattern(sessionID string) string {
+	return fmt.Sprintf("%s:%s:%s:*:meta", kb.ns.BasePrefix, kb.ns.MeterPrefix, sessionID)
 }
 
 // SupplierStateKey builds the key for one supplier's shared state entry.

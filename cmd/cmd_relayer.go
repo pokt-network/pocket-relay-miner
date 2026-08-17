@@ -926,9 +926,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				}
 
 				relayMeterConfig := relayer.RelayMeterConfig{
-					RedisKeyPrefix: config.RelayMeter.RedisKeyPrefix,
-					FailBehavior:   failBehavior,
-					CacheTTL:       config.RelayMeter.CacheTTL,
+					FailBehavior: failBehavior,
+					CacheTTL:     config.RelayMeter.CacheTTL,
 				}
 
 				// Create service factor client for reading service factors from Redis

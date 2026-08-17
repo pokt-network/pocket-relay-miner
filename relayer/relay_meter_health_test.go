@@ -45,7 +45,7 @@ func newHealthTestMeter(t *testing.T, ctx context.Context) (*RelayMeter, *minire
 		}},
 		nil,
 		staticServiceFactor{f: 0.5},
-		RelayMeterConfig{RedisKeyPrefix: "ha"},
+		RelayMeterConfig{},
 	)
 	require.NoError(t, meter.Start(ctx))
 	return meter, mr, redisClient
