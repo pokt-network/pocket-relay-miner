@@ -33,12 +33,6 @@ import (
 // TestConfig holds test mode flags read once at initialization.
 // These environment variables are only for testing and should not be set in production.
 type TestConfig struct {
-	// ForceClaimTxError forces claim transaction submission to fail (for testing claim error path)
-	ForceClaimTxError bool
-
-	// ForceProofTxError forces proof transaction submission to fail (for testing proof error path)
-	ForceProofTxError bool
-
 	// ClaimDelaySeconds delays claim submission by N seconds (for testing claim window timeout)
 	ClaimDelaySeconds int
 
@@ -54,9 +48,6 @@ var (
 // getTestConfig returns the test configuration, reading environment variables once.
 func getTestConfig() TestConfig {
 	cachedTestConfigOnce.Do(func() {
-		cachedTestConfig.ForceClaimTxError = os.Getenv("TEST_FORCE_CLAIM_TX_ERROR") == "true"
-		cachedTestConfig.ForceProofTxError = os.Getenv("TEST_FORCE_PROOF_TX_ERROR") == "true"
-
 		if delayStr := os.Getenv("TEST_CLAIM_DELAY_SECONDS"); delayStr != "" {
 			if delay, err := strconv.Atoi(delayStr); err == nil && delay > 0 {
 				cachedTestConfig.ClaimDelaySeconds = delay
@@ -1077,6 +1068,11 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			Int("batch_size", len(claimMsgs)).
 			Msg("submitting claims")
 
+		// Count each claim built into this batch (attempts; submitted/errors tracked separately).
+		for _, snapshot := range validSnapshots {
+			RecordClaimCreated(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
+		}
+
 		// Submit all claims in a single transaction with retries
 		var lastErr error
 		var claimTxHash string
@@ -1909,6 +1905,11 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			Dur("tx_deadline", rawProofTimeout).
 			Int("batch_size", len(proofMsgs)).
 			Msg("submitting proofs")
+
+		// Count each proof built into this batch (attempts; submitted tracked separately).
+		for _, snapshot := range validProofSnapshots {
+			RecordProofCreated(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
+		}
 
 		// Submit all proofs in a single transaction with retries
 		var lastErr error

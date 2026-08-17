@@ -126,6 +126,22 @@ func TestBlockResultsRetries_NoHeightLabel(t *testing.T) {
 		"block_results_retries must be a single series, got %d:\n%s", got, fam)
 }
 
+// TestClaimsProofsCreated_BoundedLabels proves the pre-submit attempt counters
+// (claims_created_total / proofs_created_total) are bounded by (supplier,
+// service_id) and carry no session_id label.
+func TestClaimsProofsCreated_BoundedLabels(t *testing.T) {
+	sup := "pokt1created_" + fmt.Sprintf("%d", time.Now().UnixNano())
+	RecordClaimCreated(sup, "svc-c")
+	RecordClaimCreated(sup, "svc-c") // same labels -> still 1 series
+	RecordProofCreated(sup, "svc-p")
+	body := scrapeMinerRegistry(t)
+	for _, m := range []string{"ha_miner_claims_created_total", "ha_miner_proofs_created_total"} {
+		fam := extractMetric(body, m)
+		require.NotContainsf(t, fam, "session_id=", "%s must not carry session_id:\n%s", m, fam)
+	}
+	require.Equal(t, 1, countSampleSeries(body, "ha_miner_claims_created_total", fmt.Sprintf("supplier=%q", sup)))
+}
+
 // TestDedupMetrics_NoSessionIDLabel drives the real deduplicator consumer
 // path for two sessions and proves the dedup counters carry no session_id.
 func TestDedupMetrics_NoSessionIDLabel(t *testing.T) {

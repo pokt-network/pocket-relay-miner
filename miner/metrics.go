@@ -535,56 +535,15 @@ var (
 		[]string{"operation"},
 	)
 
-	// Session tree metrics (reserved for future instrumentation)
-	_ = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_trees_active",
-			Help:      "Number of active session trees",
-		},
-		[]string{"supplier"},
-	)
-
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_tree_updates_total",
-			Help:      "Total number of session tree updates",
-		},
-		[]string{"supplier", "session_id"},
-	)
-
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_tree_flushes_total",
-			Help:      "Total number of session tree flushes",
-		},
-		[]string{"supplier"},
-	)
-
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_tree_errors_total",
-			Help:      "Total number of session tree errors",
-		},
-		[]string{"supplier", "operation"},
-	)
-
-	// Claim and proof metrics (claimsCreated reserved for future instrumentation)
-	_ = observability.MinerFactory.NewCounterVec(
+	// Claim and proof metrics
+	claimsCreated = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "claims_created_total",
-			Help:      "Total number of claims created",
+			Help:      "Total claims built into a submission batch (attempts; see claims_submitted_total / claim_errors_total)",
 		},
-		[]string{"supplier"},
+		[]string{"supplier", "service_id"},
 	)
 
 	claimsSubmitted = observability.MinerFactory.NewCounterVec(
@@ -607,15 +566,14 @@ var (
 		[]string{"supplier", "reason"},
 	)
 
-	// proofsCreated reserved for future instrumentation
-	_ = observability.MinerFactory.NewCounterVec(
+	proofsCreated = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "proofs_created_total",
-			Help:      "Total number of proofs created",
+			Help:      "Total proofs built into a submission batch (attempts; see proofs_submitted_total)",
 		},
-		[]string{"supplier"},
+		[]string{"supplier", "service_id"},
 	)
 
 	proofsSubmitted = observability.MinerFactory.NewCounterVec(
@@ -759,27 +717,6 @@ var (
 			Help:      "In-window claim re-submissions attempted by the inclusion reconciler (labeled by supplier, service_id, result)",
 		},
 		[]string{"supplier", "service_id", "result"},
-	)
-
-	// Redis consumer metrics (reserved for future instrumentation)
-	_ = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "consumer_lag",
-			Help:      "Number of messages pending in the consumer group",
-		},
-		[]string{"supplier"},
-	)
-
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "messages_acknowledged_total",
-			Help:      "Total number of Redis messages acknowledged",
-		},
-		[]string{"supplier"},
 	)
 
 	// Block height
@@ -1395,6 +1332,16 @@ func RecordRevenueProved(supplier, serviceID string, computeUnits uint64, relayC
 // Uses same metrics as explicit proof since both are successful outcomes.
 func RecordRevenueProbabilisticProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
 	recordRevenueProved(supplier, serviceID, computeUnits, relayCount)
+}
+
+// RecordClaimCreated records a claim built into a submission batch (pre-submit attempt).
+func RecordClaimCreated(supplier, serviceID string) {
+	claimsCreated.WithLabelValues(supplier, serviceID).Inc()
+}
+
+// RecordProofCreated records a proof built into a submission batch (pre-submit attempt).
+func RecordProofCreated(supplier, serviceID string) {
+	proofsCreated.WithLabelValues(supplier, serviceID).Inc()
 }
 
 // RecordClaimSubmitted increments the claims submitted counter.
