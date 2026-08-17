@@ -20,7 +20,14 @@ tilt/backend-server/pb/*.pb.go
 # IDE
 .idea/
 .vscode/
-.claude/
+
+# Agent state is machine-local: settings.local.json is a permission allowlist
+# that ends up holding operator hostnames and personal paths, and worktrees/ is
+# scratch. The one exception is skills/ -- this repository's own agent
+# instructions, reviewed as code like any other file. scripts/check-tracked-files.sh
+# enforces the exception so it cannot widen by accident.
+.claude/*
+!.claude/skills/
 
 # OS
 .DS_Store

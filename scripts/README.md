@@ -2,6 +2,10 @@
 
 Integration and load-test scripts that run against a live Tilt localnet.
 
+**Checking a change is good is [`gates/`](gates/README.md)** — `make gate` runs
+the same checks CI runs, in cost tiers. The scripts below are scenarios you
+reach for deliberately; the gates are what every change passes.
+
 **How to test is documented in [`../docs/testing/`](../docs/testing/README.md):**
 
 - [`TILT.md`](../docs/testing/TILT.md) — bring the localnet up, port map, and the HA/chaos suite.
