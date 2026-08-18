@@ -283,7 +283,7 @@ transport_success_count() {
 }
 
 # mode:service pairs. Override with MATRIX="jsonrpc:develop-http ..." to narrow.
-MATRIX="${MATRIX:-jsonrpc:develop-http websocket:develop-websocket grpc:develop-grpc stream:develop-stream cometbft:develop-cometbft}"
+MATRIX="${MATRIX:-jsonrpc:develop-http jsonrpc:develop-http-eager websocket:develop-websocket websocket:develop-websocket-optimistic grpc:develop-grpc grpc:develop-grpc-optimistic stream:develop-stream stream:develop-stream-optimistic cometbft:develop-cometbft cometbft:develop-cometbft-optimistic}"
 RELAYS_PER_TRANSPORT="${RELAYS_PER_TRANSPORT:-60}"
 
 # Issue #25: single-relay-per-supplier claims can vanish between the WAL and

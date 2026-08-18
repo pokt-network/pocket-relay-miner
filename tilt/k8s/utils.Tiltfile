@@ -149,7 +149,39 @@ def apply_k8s_overrides_relayer(config, redis_host):
     # the relayer is supposed to reject, and injecting defaults would hide it.
     _sim = config.get("simulation") or {}
     if "identities" in _sim:
-        return config
+        # Mode-matrix services: every develop-X service gets a sibling with the
+    # OPPOSITE validation_mode, staked in genesis with its own application, so
+    # one gate run measures each (rpc_type, validation_mode) cell. Cloned here
+    # instead of the example config: the example documents production shapes,
+    # and these cells are a localnet test fixture. NOTE: gRPC and WebSocket
+    # currently ignore validation_mode (issue #24) -- their -optimistic cells
+    # behave eager until the protocol work lands, and exist so the matrix is
+    # already wired when it does.
+    # (base_mode, clone_id, clone_mode) per service: the BASE mode is forced
+    # explicitly too, so the matrix cannot drift with the example config (it
+    # shipped every service as eager, which silently made the "optimistic"
+    # column of earlier runs a lie). A fresh regeneration of tilt_config.yaml
+    # from a clean checkout yields exactly this truth table.
+    mode_matrix = {
+        "develop-http": ("optimistic", "develop-http-eager", "eager"),
+        "develop-websocket": ("eager", "develop-websocket-optimistic", "optimistic"),
+        "develop-grpc": ("eager", "develop-grpc-optimistic", "optimistic"),
+        "develop-stream": ("eager", "develop-stream-optimistic", "optimistic"),
+        "develop-cometbft": ("eager", "develop-cometbft-optimistic", "optimistic"),
+    }
+    services = config.get("services", {})
+    for base, triple in mode_matrix.items():
+        base_mode, clone_id, clone_mode = triple
+        if base in services:
+            services[base] = dict(services[base])
+            services[base]["validation_mode"] = base_mode
+            if clone_id not in services:
+                clone = dict(services[base])
+                clone["validation_mode"] = clone_mode
+                services[clone_id] = clone
+    config["services"] = services
+
+    return config
 
     _gw1 = "025821a2ac597a034250ac14b772efccf9297aa7c4bea5444564059a7cfb152063"
     config["simulation"] = {

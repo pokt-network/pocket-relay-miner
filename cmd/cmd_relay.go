@@ -53,11 +53,16 @@ Examples:
 // All apps delegate to gateway1 (pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4)
 const (
 	// App private keys (each app is staked for one service)
-	localnetApp1PrivKey = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a" // develop-http
-	localnetApp2PrivKey = "7e7571a8c61b0887ff8a9017bb4ad83c016b193234f9dc8b6a8ce10c7c483600" // develop-websocket
-	localnetApp3PrivKey = "7cbbaa043b9b63baa7d6bb087483b0a6a9f82596c19dce4c5028eb43e5b63674" // develop-stream
-	localnetApp4PrivKey = "84e4f2257f24d9e1517d414b834bbbfa317e0d53fef21c1528a07a5fa8c70d57" // develop-grpc
-	localnetApp5PrivKey = "50058b14b956cd3071aad111f3f2a0d9a00b7028edde6c713e838b7522a626de" // develop-cometbft
+	localnetApp1PrivKey  = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a" // develop-http
+	localnetApp2PrivKey  = "7e7571a8c61b0887ff8a9017bb4ad83c016b193234f9dc8b6a8ce10c7c483600" // develop-websocket
+	localnetApp3PrivKey  = "7cbbaa043b9b63baa7d6bb087483b0a6a9f82596c19dce4c5028eb43e5b63674" // develop-stream
+	localnetApp4PrivKey  = "84e4f2257f24d9e1517d414b834bbbfa317e0d53fef21c1528a07a5fa8c70d57" // develop-grpc
+	localnetApp5PrivKey  = "50058b14b956cd3071aad111f3f2a0d9a00b7028edde6c713e838b7522a626de" // develop-cometbft
+	localnetApp6PrivKey  = "ba6603975b80a409bd52f9cb662855430a354aaa801eaf0a025360d893d02cb6" // develop-http-eager (mode-matrix cell)
+	localnetApp7PrivKey  = "8ddd54f70b3e0e486d6eae1d83af5cfa7131868f25ba106275dab37d78ccf804" // develop-websocket-optimistic (mode-matrix cell)
+	localnetApp8PrivKey  = "f98650408e97fb56760238ff6f8d02bc2259eaa7dba20f928bf95e4fd8ea50a7" // develop-grpc-optimistic (mode-matrix cell)
+	localnetApp9PrivKey  = "36254136682eeddd1047358dd907afea8de19fb9c2e4da20d4ed4e3a403ea108" // develop-stream-optimistic (mode-matrix cell)
+	localnetApp10PrivKey = "0c9e344ee14f70d097b0c99c8dc20367e48fb3ca283dd1dfd6c4974656508c5c" // develop-cometbft-optimistic (mode-matrix cell)
 
 	// Gateway private key (all apps delegate to this gateway)
 	// When --gateway-priv-key is provided, relays are signed with this key on behalf of the app
@@ -77,11 +82,16 @@ const (
 // localnetAppKeys maps service IDs to their corresponding app private keys.
 // This allows automatic selection of the correct app when --localnet and --service are used together.
 var localnetAppKeys = map[string]string{
-	"develop-http":      localnetApp1PrivKey,
-	"develop-websocket": localnetApp2PrivKey,
-	"develop-stream":    localnetApp3PrivKey,
-	"develop-grpc":      localnetApp4PrivKey,
-	"develop-cometbft":  localnetApp5PrivKey,
+	"develop-http":                 localnetApp1PrivKey,
+	"develop-websocket":            localnetApp2PrivKey,
+	"develop-stream":               localnetApp3PrivKey,
+	"develop-grpc":                 localnetApp4PrivKey,
+	"develop-cometbft":             localnetApp5PrivKey,
+	"develop-http-eager":           localnetApp6PrivKey,
+	"develop-websocket-optimistic": localnetApp7PrivKey,
+	"develop-grpc-optimistic":      localnetApp8PrivKey,
+	"develop-stream-optimistic":    localnetApp9PrivKey,
+	"develop-cometbft-optimistic":  localnetApp10PrivKey,
 }
 
 // validateURL validates a URL and ensures it uses an allowed scheme.
