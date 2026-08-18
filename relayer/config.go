@@ -633,6 +633,17 @@ type RelayMeterYAMLConfig struct {
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	// Default: 2h (covers ~15 session lifecycles at 30s blocks)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
+
+	// RemovedRedisKeyPrefix is the tombstone for the retired redis_key_prefix
+	// setting. Meter keys and the cleanup channel are now built by the shared
+	// KeyBuilder from redis.namespace, so this field configures nothing -- but
+	// the YAML decoder is lenient (unknown fields are silently dropped), and a
+	// config still carrying a non-default value here would otherwise upgrade
+	// into a silent key migration: meter meta/consumed keys move namespaces
+	// mid-session, in-flight consumed counters reset to a fresh budget, and a
+	// rolling deploy meters one session under two different keys. Validate()
+	// turns that case into a hard, explicit error instead.
+	RemovedRedisKeyPrefix string `yaml:"redis_key_prefix,omitempty"`
 }
 
 // CacheWarmupConfig contains configuration for cache pre-warming at startup.
@@ -745,6 +756,23 @@ func (c *Config) Validate() error {
 
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
+	}
+
+	// The retired relay_meter.redis_key_prefix: harmless when it matches the
+	// effective namespace base prefix (the keys do not move), a hard error when
+	// it differs -- upgrading would silently migrate meter keys mid-session.
+	if c.RelayMeter.RemovedRedisKeyPrefix != "" {
+		effectiveBase := c.Redis.Namespace.WithDefaults().BasePrefix
+		if c.RelayMeter.RemovedRedisKeyPrefix != effectiveBase {
+			return fmt.Errorf(
+				"relay_meter.redis_key_prefix is no longer supported: meter keys now derive from redis.namespace (effective base prefix %q). "+
+					"Your config sets it to %q, which would silently move meter meta/consumed keys and the cleanup channel to a different namespace, "+
+					"resetting in-flight session budgets. Set redis.namespace.base_prefix to %q instead, then remove relay_meter.redis_key_prefix",
+				effectiveBase, c.RelayMeter.RemovedRedisKeyPrefix, c.RelayMeter.RemovedRedisKeyPrefix,
+			)
+		}
+		// Equal to the effective base: nothing moves. Accepted so that configs
+		// shipped with the old default ("ha") upgrade without editing.
 	}
 
 	// Validate Redis pool settings (all are optional, 0 = use defaults)
