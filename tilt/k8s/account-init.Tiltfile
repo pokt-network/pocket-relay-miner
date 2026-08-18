@@ -65,7 +65,7 @@ spec:
           cd /keys
 
           # All accounts that need pubkey initialization
-          ACCOUNTS="app1 app2 app3 app4 app5 app6 app7 app8 app9 app10 supplier1 supplier2 supplier3 supplier4 supplier5 supplier6 supplier7 supplier8 supplier9 supplier10 supplier11 supplier12 supplier13 supplier14 supplier15 gateway1"
+          ACCOUNTS="app1 app2 app3 app4 app5 app_develop-http-eager app_develop-websocket-optimistic app_develop-grpc-optimistic app_develop-stream-optimistic app_develop-cometbft-optimistic supplier1 supplier2 supplier3 supplier4 supplier5 supplier6 supplier7 supplier8 supplier9 supplier10 supplier11 supplier12 supplier13 supplier14 supplier15 gateway1"
 
           echo "================================================"
           echo "PHASE 1: Importing all accounts to keyring"
