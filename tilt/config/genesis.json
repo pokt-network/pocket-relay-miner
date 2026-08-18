@@ -1233,15 +1233,15 @@
     "shared": {
       "params": {
         "application_unbonding_period_sessions": 2,
-        "claim_window_close_offset_blocks": 8,
-        "claim_window_open_offset_blocks": 1,
+        "claim_window_close_offset_blocks": 10,
+        "claim_window_open_offset_blocks": 11,
         "compute_unit_cost_granularity": 1,
         "compute_units_to_tokens_multiplier": 100,
         "gateway_unbonding_period_sessions": 1,
-        "grace_period_end_offset_blocks": 1,
-        "num_blocks_per_session": 10,
-        "proof_window_close_offset_blocks": 8,
-        "proof_window_open_offset_blocks": 0,
+        "grace_period_end_offset_blocks": 10,
+        "num_blocks_per_session": 20,
+        "proof_window_close_offset_blocks": 10,
+        "proof_window_open_offset_blocks": 1,
         "supplier_unbonding_period_sessions": 20
       }
     },

@@ -62,6 +62,16 @@ def apply_k8s_overrides_miner(config, redis_host):
     config["pprof"]["enabled"] = True
     config["pprof"]["addr"] = "0.0.0.0:6065"
 
+    # Localnet supplier-lease override. The example default (90s) is sized for
+    # production fleets; on the localnet, whose claim window is 100s (10 blocks
+    # of 10s, mainnet-proportional), a crashed miner's lease must expire and be
+    # taken over well inside that window or the dead pod's relays miss their
+    # claim. 30s keeps crash takeover at ~30-90s. Rollouts are unaffected
+    # (graceful shutdown releases leases immediately).
+    if "supplier_claiming" not in config:
+        config["supplier_claiming"] = {}
+    config["supplier_claiming"]["claim_ttl_seconds"] = 30
+
     return config
 
 def apply_k8s_overrides_relayer(config, redis_host):

@@ -45,10 +45,11 @@ CONCURRENCY="${CONCURRENCY:-10}"
 SERVICE_ID="${SERVICE_ID:-develop-http}"
 RELAYER_PORT="${RELAYER_PORT:-8180}"
 VALIDATOR_RPC="${VALIDATOR_RPC:-http://localhost:26657}"
-# How long to wait for the claim and proof windows to close and the inclusion
-# reconciler to resolve. Localnet sessions are 10 blocks with 8-block claim and
-# proof windows; polling rather than sleeping means this is an upper bound, not
-# a fixed cost.
+# How long to wait for the claim and proof windows to close and the settlement
+# to land. The localnet mirrors mainnet block proportions (20-block sessions,
+# grace 10, claim +11..+21, proof +22..+32) at 10s blocks, so a session settles
+# ~5.5 minutes after it ends; polling rather than sleeping means this is an
+# upper bound, not a fixed cost.
 SETTLE_TIMEOUT_MIN="${SETTLE_TIMEOUT_MIN:-25}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-15}"
 
