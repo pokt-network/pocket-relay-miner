@@ -11,6 +11,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
+
+	"github.com/pokt-network/pocket-relay-miner/relayer"
 )
 
 func MeterCmd() *cobra.Command {
@@ -83,10 +85,17 @@ func inspectSessionMeter(ctx context.Context, client *DebugRedisClient, sessionI
 	fmt.Printf("Session Metering Data: %s (%d supplier(s))\n\n", sessionID, len(keys))
 
 	for _, metaKey := range keys {
-		// The meta key is a plain string holding the SessionMeterMeta JSON
-		// (the relay meter writes it with SetNX over marshalled bytes), not a
-		// hash -- HGETALL here fails with WRONGTYPE against real data.
+		// The meta key is a plain string holding the relayer.SessionMeterMeta
+		// JSON (the relay meter writes it with SetNX over marshalled bytes),
+		// not a hash -- HGETALL here fails with WRONGTYPE against real data.
+		//
+		// A key expiring between the SCAN and this GET (they carry a TTL and a
+		// cleanup subscriber deletes them at session end) is not an error: skip
+		// it and keep listing the suppliers that still exist.
 		raw, err := client.Get(ctx, metaKey).Result()
+		if errors.Is(err, redis.Nil) {
+			continue
+		}
 		if err != nil {
 			return fmt.Errorf("failed to get meter meta %s: %w", metaKey, err)
 		}
@@ -99,18 +108,25 @@ func inspectSessionMeter(ctx context.Context, client *DebugRedisClient, sessionI
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		_, _ = fmt.Fprintf(w, "FIELD\tVALUE\n")
 
-		// UseNumber keeps upokt amounts as written: plain Unmarshal turns
-		// every number into float64 and prints stakes as "1e+08".
-		dec := json.NewDecoder(strings.NewReader(raw))
-		dec.UseNumber()
-		var meta map[string]any
-		if err := dec.Decode(&meta); err != nil {
+		// Decode into the writer's own exported type. This contract broke the
+		// command twice (wrong key shape, then wrong value type) while reader
+		// and writer shared only prose; sharing the struct turns the next
+		// format change into a compile error instead of operator-visible
+		// garble.
+		var meta relayer.SessionMeterMeta
+		if err := json.Unmarshal([]byte(raw), &meta); err != nil {
 			// Unparseable is still shown: raw truth beats a silent skip.
 			_, _ = fmt.Fprintf(w, "raw\t%s\n", raw)
 		} else {
-			for field, value := range meta {
-				_, _ = fmt.Fprintf(w, "%s\t%v\n", field, value)
-			}
+			_, _ = fmt.Fprintf(w, "session_id\t%s\n", meta.SessionID)
+			_, _ = fmt.Fprintf(w, "app_address\t%s\n", meta.AppAddress)
+			_, _ = fmt.Fprintf(w, "service_id\t%s\n", meta.ServiceID)
+			_, _ = fmt.Fprintf(w, "supplier_address\t%s\n", meta.SupplierAddress)
+			_, _ = fmt.Fprintf(w, "session_end_height\t%d\n", meta.SessionEndHeight)
+			_, _ = fmt.Fprintf(w, "max_stake_upokt\t%d\n", meta.MaxStakeUpokt)
+			_, _ = fmt.Fprintf(w, "created_at\t%d\n", meta.CreatedAt)
+			_, _ = fmt.Fprintf(w, "created_with_factor\t%g\n", meta.CreatedWithFactor)
+			_, _ = fmt.Fprintf(w, "created_with_app_stake\t%d\n", meta.CreatedWithAppStake)
 		}
 
 		// The consumed counter is a sibling key, not a field of the meta hash;
