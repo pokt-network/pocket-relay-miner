@@ -78,7 +78,13 @@ func queryKeyedChainWithLock[V any](
 	if err != nil {
 		return zero, fmt.Errorf("failed to acquire lock: %w", err)
 	}
-	defer redisClient.Del(ctx, lockKey)
+	// Release only a lock we hold. A contended loser that falls through to its
+	// own chain query must NOT delete the winner's still-held lock on the way
+	// out -- that lets a third instance acquire immediately and fire another
+	// duplicate query, defeating the dedup this lock exists for.
+	if locked {
+		defer redisClient.Del(ctx, lockKey)
+	}
 
 	if !locked {
 		// Another instance is querying, wait and retry L2
