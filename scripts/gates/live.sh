@@ -121,6 +121,21 @@ if [ -z "$pods" ]; then
     gate_verdict "live"
 fi
 
+# The fleet must be SETTLED before load: a rollout in progress (Tilt rebuild,
+# manual restart) means relays land while consumers are being replaced, and the
+# short localnet claim/proof windows turn ordinary handover latency into
+# missed windows. The rule: live validation runs if and only if no more
+# changes are in flight and every pod is on the current ReplicaSet.
+for dep in relayer miner; do
+    if rollout_out="$(kubectl rollout status "deployment/${dep}" --timeout=5s 2>&1)"; then
+        gate_pass "${dep}: rollout settled"
+    else
+        gate_fail "${dep}: rollout in progress -- run the gate only once the fleet is settled"
+        gate_detail "$rollout_out" 3
+    fi
+done
+[ "$gate_failed" -ne 0 ] && gate_verdict "live"
+
 for app in relayer miner validator; do
     running="$(printf '%s\n' "$pods" | awk -v a="$app" '$1 ~ a && $3 == "Running" {n++} END {print n+0}')"
     if [ "$running" -gt 0 ]; then
