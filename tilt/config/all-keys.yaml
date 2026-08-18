@@ -108,4 +108,23 @@ accounts:
   - name: source_owner_develop
     address: pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5
     private_key: 8f4fc67c3bcdf7fcc1c14442a7529f42eb10b45637494acac3acbf3a8dfa282b
-    mnemonic: "burden effort glue note honey erupt fiscal vote gold addict toy flag spare wrap chest table bomb sort arena phone sadness sustain urge wink"
+    mnemonic: "burden effort glue note honey erupt fiscal vote gold addict toy flag spare wrap chest table bomb sort arena phone sadness sustain urge wink"  - name: app6
+    address: pokt135udjq8t665vnq4emzdmxz2awm99ae0hckc7sw
+    private_key: ba6603975b80a409bd52f9cb662855430a354aaa801eaf0a025360d893d02cb6
+    mnemonic: "vendor ostrich front oblige kiss observe inherit scrub jar jaguar where pluck file prosper spy win pill duck hurry wide ribbon dilemma slight build"
+  - name: app7
+    address: pokt1mcs2ugzqtefy2nw9t7hhn8089t4mettryedgv8
+    private_key: 8ddd54f70b3e0e486d6eae1d83af5cfa7131868f25ba106275dab37d78ccf804
+    mnemonic: "desk garbage area exotic monster puppy sad inject device eternal tool menu badge define allow aware fragile junk element orphan shallow shy drop police"
+  - name: app8
+    address: pokt1t02uc434darm3d7uuf785jhekvs970885mwxxr
+    private_key: f98650408e97fb56760238ff6f8d02bc2259eaa7dba20f928bf95e4fd8ea50a7
+    mnemonic: "bring lounge indoor balance letter foil problem tortoise tilt sweet pudding maple item label diesel fault popular eager ranch book industry maze mutual kingdom"
+  - name: app9
+    address: pokt1ftyauk249vqx9ph3602sx3xqt5zfhyyjlch5tg
+    private_key: 36254136682eeddd1047358dd907afea8de19fb9c2e4da20d4ed4e3a403ea108
+    mnemonic: "card merge south ladder skill inmate divide world adapt source frozen scrub dolphin zoo ability olive shaft nature surge tent mansion favorite brother scene"
+  - name: app10
+    address: pokt1lzl42krd9p9g3p74jtlxtyk0shxjpspha7gda0
+    private_key: 0c9e344ee14f70d097b0c99c8dc20367e48fb3ca283dd1dfd6c4974656508c5c
+    mnemonic: "sustain come vibrant umbrella foster lava task language super hard invite page ordinary fame exhibit coil juice hen hungry faculty material daring control inhale"
