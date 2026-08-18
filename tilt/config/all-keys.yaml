@@ -108,7 +108,8 @@ accounts:
   - name: source_owner_develop
     address: pokt1cwnu460557x0z78jv3hhc7356hhkrgc86c87q5
     private_key: 8f4fc67c3bcdf7fcc1c14442a7529f42eb10b45637494acac3acbf3a8dfa282b
-    mnemonic: "burden effort glue note honey erupt fiscal vote gold addict toy flag spare wrap chest table bomb sort arena phone sadness sustain urge wink"  - name: app6
+    mnemonic: "burden effort glue note honey erupt fiscal vote gold addict toy flag spare wrap chest table bomb sort arena phone sadness sustain urge wink"
+  - name: app6
     address: pokt135udjq8t665vnq4emzdmxz2awm99ae0hckc7sw
     private_key: ba6603975b80a409bd52f9cb662855430a354aaa801eaf0a025360d893d02cb6
     mnemonic: "vendor ostrich front oblige kiss observe inherit scrub jar jaguar where pluck file prosper spy win pill duck hurry wide ribbon dilemma slight build"
