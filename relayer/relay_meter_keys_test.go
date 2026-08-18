@@ -4,6 +4,7 @@ package relayer
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"testing"
@@ -99,6 +100,20 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 	consumedKey := kb.MeterConsumedKey(sessionID, supplier)
 	require.Equal(t, "prod:metering:"+sessionID+":"+supplier+":consumed", consumedKey)
 	require.True(t, mr.Exists(consumedKey), "consumed counter missing at %s", consumedKey)
+
+	// The CLI contract: both keys are plain STRINGS -- the meta a JSON blob,
+	// the consumed a counter. The first version of `redis meter` read the meta
+	// with HGETALL and failed with WRONGTYPE against real data, which no
+	// existence check catches. Pin the readable shape, not just the address.
+	rawMeta, err := mr.Get(metaKey)
+	require.NoError(t, err, "the meta key must be readable as a string (GET)")
+	var meta map[string]any
+	require.NoError(t, json.Unmarshal([]byte(rawMeta), &meta),
+		"the meta value must be the SessionMeterMeta JSON")
+	require.Equal(t, supplier, meta["supplier_address"])
+	rawConsumed, err := mr.Get(consumedKey)
+	require.NoError(t, err, "the consumed key must be readable as a string (GET)")
+	require.Regexp(t, `^[0-9]+$`, rawConsumed, "consumed must be a plain integer counter")
 
 	// 2. Nothing was written under the old, self-prefixed shape. A pass here
 	//    with "ha:..." present would mean the component prefix survived.

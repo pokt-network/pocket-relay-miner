@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -82,11 +83,14 @@ func inspectSessionMeter(ctx context.Context, client *DebugRedisClient, sessionI
 	fmt.Printf("Session Metering Data: %s (%d supplier(s))\n\n", sessionID, len(keys))
 
 	for _, metaKey := range keys {
-		data, err := client.HGetAll(ctx, metaKey).Result()
+		// The meta key is a plain string holding the SessionMeterMeta JSON
+		// (the relay meter writes it with SetNX over marshalled bytes), not a
+		// hash -- HGETALL here fails with WRONGTYPE against real data.
+		raw, err := client.Get(ctx, metaKey).Result()
 		if err != nil {
 			return fmt.Errorf("failed to get meter meta %s: %w", metaKey, err)
 		}
-		if len(data) == 0 {
+		if raw == "" {
 			continue
 		}
 
@@ -94,8 +98,19 @@ func inspectSessionMeter(ctx context.Context, client *DebugRedisClient, sessionI
 
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		_, _ = fmt.Fprintf(w, "FIELD\tVALUE\n")
-		for field, value := range data {
-			_, _ = fmt.Fprintf(w, "%s\t%s\n", field, value)
+
+		// UseNumber keeps upokt amounts as written: plain Unmarshal turns
+		// every number into float64 and prints stakes as "1e+08".
+		dec := json.NewDecoder(strings.NewReader(raw))
+		dec.UseNumber()
+		var meta map[string]any
+		if err := dec.Decode(&meta); err != nil {
+			// Unparseable is still shown: raw truth beats a silent skip.
+			_, _ = fmt.Fprintf(w, "raw\t%s\n", raw)
+		} else {
+			for field, value := range meta {
+				_, _ = fmt.Fprintf(w, "%s\t%v\n", field, value)
+			}
 		}
 
 		// The consumed counter is a sibling key, not a field of the meta hash;
