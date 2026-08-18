@@ -50,13 +50,37 @@ level 3 exercises the path that does.
 | `tests.sh` | `go test -tags test`. The `test` tag is not optional: test-only helpers live behind it. |
 | `race.sh` | `go test -race -count=1`. `-count=1` defeats the result cache, which would otherwise satisfy the command with a PASS from a run without `-race`. |
 | `coverage.sh` | the coverage profile — what CI rejects on. |
-| `live.sh` | the money path on the Tilt localnet: load through the relay CLI at `:8180`, then claim and proof inclusion asserted **on-chain**. `--preflight-only` checks readiness and stops. |
+| `live.sh` | the money path on the Tilt localnet, per transport: serial load over every protocol through the relay CLI at `:8180`, then the settlement asserted **on-chain, per service, with exact accounting**. `--preflight-only` checks readiness and stops. |
 | `all.sh` | runs the above up to a level. Fail-fast; `--keep-going` for the full picture. |
 
 `live.sh` **never starts or stops anything.** If the localnet is not up it prints
 the `tilt up` command and exits non-zero, because bringing the cluster up claims
 ports and containers another session on the same machine may be using. Run
 `--preflight-only` first: it reads state and touches nothing.
+
+**It loads every transport, serially, and bills each one exactly.** A change can
+break one routing path while the others stay green, or serve a transport's
+relays without ever publishing them to the WAL — so each protocol gets its own
+load and its own settlement assertion:
+
+| transport | service | mode covered | assertion |
+|---|---|---|---|
+| jsonrpc | develop-http | optimistic | served == billed, exactly |
+| websocket | develop-websocket | eager | served == billed, exactly |
+| grpc | develop-grpc | eager | served == billed, exactly |
+| stream | develop-stream | eager | served == billed (one request = one relay; batches do not multiply billing — pinned live) |
+| cometbft | develop-cometbft | eager | served == billed |
+
+The exact equality is the point: `served 60, billed 40` is silent partial loss —
+relays answered to clients that never reached a claim — and a `billed > 0`
+assertion would wave it through. Billing from earlier runs on a shared localnet
+is excluded by session-end height, so the ledger only counts this run's
+sessions. Narrow with `MATRIX="jsonrpc:develop-http"` and size with
+`RELAYS_PER_TRANSPORT`.
+
+Because develop-http runs optimistic validation and every other service runs
+eager, the matrix also covers both validation modes — a mode-specific
+regression fails exactly one column.
 
 **It asserts the FINAL settlement outcome, not inclusion.** A claim can land
 on-chain and still expire without its proof, be discarded, or get its supplier

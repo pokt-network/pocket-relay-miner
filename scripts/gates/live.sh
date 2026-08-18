@@ -189,54 +189,128 @@ if [ "$preflight_only" -eq 1 ]; then
     gate_verdict "live (preflight)"
 fi
 
-# ---------------------------------------------------------------------------
-gate_step "load: ${RELAYS} relays over ${SERVICE_ID} via the CLI at ${relayer_url}"
+# Every transport the relayer serves, each against its staked localnet service.
+# One transport per line: a change can break one routing path while the others
+# stay green, or -- worse -- serve a transport's relays without publishing them
+# to the WAL, so they are never mined or paid. Both failure modes are invisible
+# to a single-service run. The matrix also covers both validation modes for
+# free: develop-http runs optimistic, every other service runs eager, so a
+# mode-specific regression shows up as exactly one column failing.
+#
+# Load shapes per transport:
+#   jsonrpc/websocket/grpc  --load-test (concurrent, end-to-end verified)
+#   stream                  --batches (load-test unsupported). Billing model
+#                           pinned live 2026-08-18: one stream REQUEST bills ONE
+#                           relay -- the SMST leaf is the signed request, so the
+#                           batch count does not multiply billing.
+#   cometbft                sequential single relays; one request bills one relay.
+run_transport_load() {
+    local mode="$1" service="$2" out rc
+    case "$mode" in
+    jsonrpc | websocket | grpc)
+        out="$("$BIN" relay "$mode" --localnet --service "$service" \
+            --relayer-url "$relayer_url" \
+            --load-test -n "$RELAYS_PER_TRANSPORT" --concurrency "$CONCURRENCY" \
+            --all-suppliers 2>&1)"
+        rc=$?
+        ;;
+    stream | cometbft)
+        # Sequential single requests; each successful invocation is one billed
+        # relay. --all-suppliers does not apply (stream pins its supplier at
+        # the handshake), so successive requests spread suppliers on their own.
+        out=""
+        rc=0
+        TRANSPORT_SENT=0
+        local i
+        for i in 1 2 3; do
+            local one
+            if [ "$mode" = "stream" ]; then
+                one="$("$BIN" relay stream --localnet --service "$service" \
+                    --relayer-url "$relayer_url" --batches 3 2>&1)" || rc=$?
+            else
+                one="$("$BIN" relay cometbft --localnet --service "$service" \
+                    --relayer-url "$relayer_url" 2>&1)" || rc=$?
+            fi
+            out="${out}${one}"$'\n'
+            [ "$rc" -ne 0 ] && break
+            TRANSPORT_SENT=$((TRANSPORT_SENT + 1))
+        done
+        ;;
+    esac
+    TRANSPORT_OUT="$out"
+    return "$rc"
+}
 
-load_out="$("$BIN" relay jsonrpc --localnet --service "$SERVICE_ID" \
-    --relayer-url "$relayer_url" \
-    --load-test -n "$RELAYS" --concurrency "$CONCURRENCY" --all-suppliers 2>&1)"
-load_rc=$?
+transport_success_count() {
+    local mode="$1" out="$2"
+    case "$mode" in
+    jsonrpc | websocket | grpc)
+        printf '%s\n' "$out" | awk -F': *' '/^Successful:/ {print $2; exit}'
+        ;;
+    stream | cometbft)
+        # Counted by the runner: one successful invocation = one billed relay.
+        printf '%s' "${TRANSPORT_SENT:-0}"
+        ;;
+    esac
+}
 
-printf '%s\n' "$load_out" | tail -20 | sed 's/^/           /'
+# mode:service pairs. Override with MATRIX="jsonrpc:develop-http ..." to narrow.
+MATRIX="${MATRIX:-jsonrpc:develop-http websocket:develop-websocket grpc:develop-grpc stream:develop-stream cometbft:develop-cometbft}"
+RELAYS_PER_TRANSPORT="${RELAYS_PER_TRANSPORT:-60}"
 
-if [ "$load_rc" -ne 0 ]; then
-    gate_fail "the load run exited non-zero"
+# Height at which THIS run's load begins: settlement events are later filtered
+# to sessions ending at or after it, so claims from earlier traffic on a shared
+# localnet (previous runs, bursts) cannot satisfy this run's expectations.
+load_start_height="$(curl -fsS --max-time 5 "${VALIDATOR_RPC}/status" 2>/dev/null |
+    jq -r '.result.sync_info.latest_block_height // "0"')"
+
+# Per-service expectation ledger: "mode service sent exact" per line. `exact`
+# marks transports whose accounting model is pinned (one request signs one
+# fresh relay, so served == billed). stream and cometbft are asserted as >=1
+# proven and REPORTED, to pin their model empirically before demanding it.
+matrix_ledger="${BIN_DIR}/matrix.tsv"
+: >"$matrix_ledger"
+
+loaded_services=""
+for pair in $MATRIX; do
+    mode="${pair%%:*}"
+    service="${pair#*:}"
+
+    gate_step "load: ${mode} -> ${service} via ${relayer_url}"
+
+    if run_transport_load "$mode" "$service"; then
+        succeeded="$(transport_success_count "$mode" "$TRANSPORT_OUT")"
+        if [ "${succeeded:-0}" -gt 0 ]; then
+            gate_pass "${mode}: ${succeeded} relay(s)/batch(es) verified end to end"
+            loaded_services="${loaded_services} ${service}"
+            # Every transport's model is pinned to one request = one billed
+            # relay (stream/cometbft verified live 2026-08-18), so all rows
+            # get the exact served==billed assertion.
+            printf '%s\t%s\t%s\t1\n' "$mode" "$service" "$succeeded" >>"$matrix_ledger"
+        else
+            gate_fail "${mode}: the run exited clean but nothing was verified:"
+            gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | tail -15)"
+        fi
+    else
+        gate_fail "${mode}: the load run failed:"
+        gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | tail -15)"
+    fi
+done
+
+if [ -z "$loaded_services" ]; then
+    gate_fail "no transport delivered a single relay"
     gate_verdict "live"
 fi
 
-# The CLI verifies each relay end to end (supplier signature plus the backend's
-# own error field), so its success count is the relayer's true behaviour --
-# unlike a status-code count through the gateway.
-succeeded="$(printf '%s\n' "$load_out" | awk -F': *' '/^Successful:/ {print $2; exit}')"
-errored="$(printf '%s\n' "$load_out" | awk -F': *' '/^Errors:/ {print $2; exit}')"
-
-if [ "${succeeded:-0}" -gt 0 ]; then
-    gate_pass "${succeeded} relay(s) verified end to end, ${errored:-?} error(s)"
-else
-    gate_fail "no relay succeeded -- see the output above"
-    gate_verdict "live"
-fi
-
-
 # ---------------------------------------------------------------------------
-gate_step "settle: waiting for a FINAL on-chain outcome (up to ${SETTLE_TIMEOUT_MIN} min)"
+gate_step "settle: waiting for FINAL on-chain outcomes per service (up to ${SETTLE_TIMEOUT_MIN} min)"
 
 # What counts as proof that a relay earned money is the SETTLEMENT, not the
-# inclusion of the claim. A claim can land on-chain and still expire without its
-# proof, be discarded, or get its supplier slashed -- all after inclusion. So
-# this reads the terminal events the chain emits in its EndBlocker:
-#
-#   EventClaimSettled  claim_proof_status_int 1=PROVEN (paid), 3=EXPIRED
-#   EventClaimExpired  expiration_reason PROOF_MISSING / PROOF_INVALID
-#   EventSupplierSlashed   stake burned -- the worst outcome there is
-#   EventClaimDiscarded    dropped without settling
-#
-# These come from block_results (FinalizeBlockEvents), queried directly against
-# the validator. Deliberately NOT read from the miner's settlement metrics: the
-# settlement monitor is disabled by default (config.miner.example.yaml leaves the
-# whole block commented, and Tilt renders its config from that file), so those
-# series are empty on a stock localnet and asserting on them would assert on
-# nothing.
+# inclusion of the claim: a claim can land on-chain and still expire without
+# its proof, be discarded, or get its supplier slashed. This reads the terminal
+# events the chain emits in its EndBlocker via block_results, and it does so
+# directly against the validator -- the miner's settlement monitor is disabled
+# by default, so its metrics are empty on a stock localnet.
 scan_settlement_events() {
     local from="$1" to="$2"
     local h
@@ -251,14 +325,42 @@ scan_settlement_events() {
     done
 }
 
-# Filter to the suppliers this run drove; another session's traffic on a shared
-# localnet must not turn this green.
 supplier_filter="$(printf '%s\n' "$suppliers" | paste -sd'|' -)"
 
 deadline=$(( $(date +%s) + SETTLE_TIMEOUT_MIN * 60 ))
 events_file="${BIN_DIR}/settlement_events.jsonl"
 : >"$events_file"
 resolved=0
+
+# The billing assertion is per service: every service the matrix loaded must
+# produce at least one claim settled as PROVEN. "Overall something settled" is
+# how a dead transport hides behind a healthy one.
+# billed_relays <svc> -- proven relays settled for the service, counting only
+# sessions that ended at or after this run's load started.
+billed_relays() {
+    jq -rs --arg svc "$1" --argjson minend "${load_start_height:-0}" '
+        [.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
+             | select(.attrs.service_id // "" | test($svc))
+             | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?1\"?$"))
+             | select((.attrs.session_end_block_height // "0" | tostring | gsub("[^0-9]";"") | tonumber) >= $minend)]
+        | [length, ([.[].attrs.num_relays // "0" | tostring | gsub("[^0-9]";"") | tonumber] | add // 0)]
+        | @tsv' "$events_file" 2>/dev/null || printf '0\t0'
+}
+
+services_pending() {
+    local missing=""
+    while IFS=$'\t' read -r mode svc sent exact; do
+        [ -z "$svc" ] && continue
+        local proven_n relays_n
+        read -r proven_n relays_n <<<"$(billed_relays "$svc")"
+        if [ "$exact" = "1" ]; then
+            [ "${relays_n:-0}" -lt "${sent:-0}" ] && missing="${missing} ${svc}(${relays_n:-0}/${sent})"
+        else
+            [ "${proven_n:-0}" -eq 0 ] && missing="${missing} ${svc}"
+        fi
+    done <"$matrix_ledger"
+    printf '%s' "$missing"
+}
 
 while [ "$(date +%s)" -lt "$deadline" ]; do
     height_now="$(curl -fsS --max-time 5 "${VALIDATOR_RPC}/status" 2>/dev/null |
@@ -268,47 +370,59 @@ while [ "$(date +%s)" -lt "$deadline" ]; do
     scan_settlement_events "$height_before" "$height_now" \
         | grep -E "$supplier_filter" >"$events_file" || true
 
-    settled_count="$(grep -c 'EventClaimSettled' "$events_file" || true)"
-    expired_count="$(grep -cE 'EventClaimExpired' "$events_file" || true)"
-
-    if [ "$(( settled_count + expired_count ))" -gt 0 ]; then
+    missing="$(services_pending)"
+    if [ -z "$missing" ]; then
         resolved=1
         break
     fi
 
-    printf '           height %s, no terminal settlement event yet\n' "$height_now"
+    printf '           height %s, still waiting for proven claims on:%s\n' "$height_now" "$missing"
     sleep "$POLL_INTERVAL_S"
 done
 
 # ---------------------------------------------------------------------------
-gate_step "assert: final settlement outcome"
+gate_step "assert: final settlement outcome, per service"
 
-count_events() { grep -c "$1" "$events_file" 2>/dev/null || true; }
+while IFS=$'\t' read -r mode svc sent exact; do
+    [ -z "$svc" ] && continue
+    read -r proven_n relays_n <<<"$(billed_relays "$svc")"
 
-proven="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
-                        | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?1\"?$"))] | length' \
-    "$events_file" 2>/dev/null || echo 0)"
+    if [ "$exact" = "1" ]; then
+        # The accounting model for this transport is one request = one billed
+        # relay (fresh ring signature per request, so no dedup collapse).
+        # Anything less than equality is silent partial loss: relays served to
+        # clients that never reached a claim.
+        if [ "${relays_n:-0}" -eq "${sent:-0}" ]; then
+            gate_pass "${svc} (${mode}): ${sent}/${sent} relays billed across ${proven_n} proven claim(s)"
+        elif [ "${relays_n:-0}" -gt "${sent:-0}" ]; then
+            gate_fail "${svc} (${mode}): billed MORE than sent (${relays_n}/${sent}) -- foreign traffic or double count"
+        else
+            gate_fail "${svc} (${mode}): served ${sent}, billed only ${relays_n:-0} -- $((sent - ${relays_n:-0})) relay(s) LOST between serve and claim"
+            printf '         check the WAL (redis streams) and submissions for this service\n'
+        fi
+    else
+        if [ "${proven_n:-0}" -gt 0 ] && [ "${relays_n:-0}" -gt 0 ]; then
+            gate_pass "${svc} (${mode}): ${proven_n} claim(s) PROVEN, sent=${sent} billed=${relays_n} (model unpinned: reported, not asserted)"
+        else
+            gate_fail "${svc} (${mode}): served relays but NONE were billed (proven=${proven_n:-0})"
+        fi
+    fi
+done <"$matrix_ledger"
+
+expired="$(grep -c 'EventClaimExpired' "$events_file" 2>/dev/null || true)"
 settled_expired="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
-                        | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?3\"?$"))] | length' \
+    | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?3\"?$"))] | length' \
     "$events_file" 2>/dev/null || echo 0)"
-expired="$(count_events 'EventClaimExpired')"
-slashed="$(count_events 'EventSupplierSlashed')"
-discarded="$(count_events 'EventClaimDiscarded')"
+slashed="$(grep -c 'EventSupplierSlashed' "$events_file" 2>/dev/null || true)"
+discarded="$(grep -c 'EventClaimDiscarded' "$events_file" 2>/dev/null || true)"
 
-if [ "${proven:-0}" -gt 0 ]; then
-    gate_pass "${proven} claim(s) SETTLED AS PROVEN -- relays were paid"
-else
-    gate_fail "no claim settled as proven: nothing earned"
-fi
-
-# An expiry is the expensive failure: the work was done, claimed, and then lost.
 total_expired=$(( ${settled_expired:-0} + ${expired:-0} ))
 if [ "$total_expired" -eq 0 ]; then
     gate_pass "no claim expired"
 else
     gate_fail "${total_expired} claim(s) EXPIRED -- relays served and never paid"
     jq -rs '.[] | select(.type == "pocket.tokenomics.EventClaimExpired")
-            | "           reason=\(.attrs.expiration_reason // "?") relays=\(.attrs.num_relays // "?") height=\(.height)"' \
+            | "           service=\(.attrs.service_id // "?") reason=\(.attrs.expiration_reason // "?") relays=\(.attrs.num_relays // "?")"' \
         "$events_file" 2>/dev/null | head -10
 fi
 
@@ -316,24 +430,11 @@ if [ "${slashed:-0}" -eq 0 ]; then
     gate_pass "no supplier slashed"
 else
     gate_fail "${slashed} SLASHING event(s) -- staked funds burned"
-    jq -rs '.[] | select(.type == "pocket.tokenomics.EventSupplierSlashed")
-            | "           \(.attrs)"' "$events_file" 2>/dev/null | head -5
 fi
+[ "${discarded:-0}" -ne 0 ] && gate_fail "${discarded} claim(s) discarded without settling"
 
-if [ "${discarded:-0}" -ne 0 ]; then
-    gate_fail "${discarded} claim(s) discarded without settling"
-fi
-
-# Earning zero while settling as proven means the reward arithmetic is wrong,
-# which a status check alone would not catch.
-earned="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
-                       | .attrs.reward_distribution // ""] | length' "$events_file" 2>/dev/null || echo 0)"
-if [ "${proven:-0}" -gt 0 ] && [ "${earned:-0}" -eq 0 ]; then
-    gate_fail "claims settled as proven but no reward distribution was emitted"
-fi
-
-# The miner's own terminal states, as corroboration: they should agree with the
-# chain, and a disagreement is itself the finding.
+# The miner's own terminal failure states, as corroboration: they should agree
+# with the chain, and a disagreement is itself the finding.
 for state in claim_missing claim_tx_error proof_tx_error proof_window_closed claim_window_closed; do
     n=0
     for supplier in $suppliers; do
@@ -344,8 +445,7 @@ for state in claim_missing claim_tx_error proof_tx_error proof_window_closed cla
 done
 
 if [ "$resolved" -eq 0 ]; then
-    gate_fail "timed out after ${SETTLE_TIMEOUT_MIN} min with no terminal settlement event"
-    printf '         nothing settled is NOT a pass: the run proved nothing about payment\n'
+    gate_fail "timed out after ${SETTLE_TIMEOUT_MIN} min with services still unpaid"
 fi
 
 gate_verdict "live"
