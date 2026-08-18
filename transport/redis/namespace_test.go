@@ -51,7 +51,6 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 
 		"SupplierParamsInvalidateChannel":     kb.SupplierParamsInvalidateChannel(),
 		"SharedParamsHeightInvalidateChannel": kb.SharedParamsHeightInvalidateChannel(),
-		"SessionRewardableChannel":            kb.SessionRewardableChannel(),
 		"MinerLeaderPrefix":                   kb.MinerLeaderPrefix(),
 		"MinerDedupPrefix":                    kb.MinerDedupPrefix(),
 		"MinerSessionStateIndexKey":           kb.MinerSessionStateIndexKey("sup1", "proved"),
@@ -132,7 +131,6 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		// see each method's doc for why the scheme differs):
 		"SupplierParamsInvalidateChannel":     "ha:events:cache:invalidate:supplier_params",
 		"SharedParamsHeightInvalidateChannel": "ha:events:invalidate:params",
-		"SessionRewardableChannel":            "ha:events:session:rewardable",
 		"MinerLeaderPrefix":                   "ha:miner:leader",
 		"MinerDedupPrefix":                    "ha:miner:dedup",
 		"MinerSessionStateIndexKey":           "ha:miner:sessions:sup1:state:proved",

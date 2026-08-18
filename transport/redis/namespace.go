@@ -311,14 +311,6 @@ func (kb *KeyBuilder) SharedParamsHeightInvalidateChannel() string {
 	return fmt.Sprintf("%s:%s:invalidate:params", kb.ns.BasePrefix, kb.ns.EventsPrefix)
 }
 
-// SessionRewardableChannel builds the pub/sub channel for session
-// rewardable-state updates (RedisSessionCache, relayer). Frozen string.
-// Format: {base}:{events}:session:rewardable
-// Example: "ha:events:session:rewardable"
-func (kb *KeyBuilder) SessionRewardableChannel() string {
-	return fmt.Sprintf("%s:%s:session:rewardable", kb.ns.BasePrefix, kb.ns.EventsPrefix)
-}
-
 // MinerLeaderPrefix builds the key prefix for per-supplier leader election.
 // Format: {base}:{miner}:leader
 // Example: "ha:miner:leader"
