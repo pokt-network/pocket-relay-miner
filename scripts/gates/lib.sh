@@ -103,9 +103,22 @@ gate_repo_root() {
 
 # gate_pkg_target -- the package pattern a gate should act on, honouring PKG.
 # PKG=miner narrows to ./miner/...; unset means the whole tree.
+# gate_pkg_normalized -- PKG with the shapes shell completion produces
+# stripped (trailing slash, leading ./), so every dispatch below sees the same
+# name. Without this, PKG=cache/ targeted ./cache/... but missed the
+# sequential-parallelism branch and raced the shared miniredis fixture.
+gate_pkg_normalized() {
+    local p="${PKG:-}"
+    p="${p%/}"
+    p="${p#./}"
+    printf '%s' "$p"
+}
+
 gate_pkg_target() {
-    if [ -n "${PKG:-}" ]; then
-        printf './%s/...' "${PKG%/}"
+    local p
+    p="$(gate_pkg_normalized)"
+    if [ -n "$p" ]; then
+        printf './%s/...' "$p"
     else
         printf './...'
     fi
@@ -124,7 +137,7 @@ gate_pkg_target() {
 # Keep this list in one place: it used to live inline in the Makefile's `test`
 # and `test_miner` targets with different values in each.
 gate_parallelism() {
-    case "${PKG:-}" in
+    case "$(gate_pkg_normalized)" in
     cache | miner) printf -- '-p 1 -parallel 1' ;;
     *) printf -- '-p 4 -parallel 4' ;;
     esac

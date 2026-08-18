@@ -36,7 +36,11 @@ keep_going=0
 while [ $# -gt 0 ]; do
     case "$1" in
     --level)
-        level="${2:-}"
+        if [ $# -lt 2 ]; then
+            printf -- '--level requires a value (1, 2 or 3)\n' >&2
+            exit 2
+        fi
+        level="$2"
         shift 2
         ;;
     --level=*)

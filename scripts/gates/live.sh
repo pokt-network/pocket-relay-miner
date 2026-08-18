@@ -56,10 +56,22 @@ preflight_only=0
 while [ $# -gt 0 ]; do
     case "$1" in
     --preflight-only) preflight_only=1; shift ;;
-    --relays) RELAYS="${2:-}"; shift 2 ;;
-    --concurrency) CONCURRENCY="${2:-}"; shift 2 ;;
-    --service) SERVICE_ID="${2:-}"; shift 2 ;;
-    --timeout-min) SETTLE_TIMEOUT_MIN="${2:-}"; shift 2 ;;
+    --relays | --concurrency | --service | --timeout-min)
+        # Guard the shift: with a missing value, `shift 2` on one remaining
+        # argument fails silently under `set -u` without -e and the loop
+        # re-reads the same flag forever at 100% CPU.
+        if [ $# -lt 2 ]; then
+            printf '%s requires a value\n' "$1" >&2
+            exit 2
+        fi
+        case "$1" in
+        --relays) RELAYS="$2" ;;
+        --concurrency) CONCURRENCY="$2" ;;
+        --service) SERVICE_ID="$2" ;;
+        --timeout-min) SETTLE_TIMEOUT_MIN="$2" ;;
+        esac
+        shift 2
+        ;;
     -h | --help)
         sed -n '2,32p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
         exit 0
@@ -338,10 +350,14 @@ resolved=0
 # billed_relays <svc> -- proven relays settled for the service, counting only
 # sessions that ended at or after this run's load started.
 billed_relays() {
+    # A settled claim is PAID with status 0 (PENDING_VALIDATION: the protocol
+    # did not require a proof for this claim) as well as 1 (VALIDATED). Only
+    # 2 (INVALID) is a bad settlement. Verified against poktroll v0.1.35
+    # x/proof/types: the enum has exactly those three values -- there is no 3.
     jq -rs --arg svc "$1" --argjson minend "${load_start_height:-0}" '
         [.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
-             | select(.attrs.service_id // "" | test($svc))
-             | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?1\"?$"))
+             | select((.attrs.service_id // "" | gsub("\"";"")) == $svc)
+             | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?[01]\"?$"))
              | select((.attrs.session_end_block_height // "0" | tostring | gsub("[^0-9]";"") | tonumber) >= $minend)]
         | [length, ([.[].attrs.num_relays // "0" | tostring | gsub("[^0-9]";"") | tonumber] | add // 0)]
         | @tsv' "$events_file" 2>/dev/null || printf '0\t0'
@@ -410,13 +426,13 @@ while IFS=$'\t' read -r mode svc sent exact; do
 done <"$matrix_ledger"
 
 expired="$(grep -c 'EventClaimExpired' "$events_file" 2>/dev/null || true)"
-settled_expired="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
-    | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?3\"?$"))] | length' \
+settled_invalid="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
+    | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?2\"?$"))] | length' \
     "$events_file" 2>/dev/null || echo 0)"
 slashed="$(grep -c 'EventSupplierSlashed' "$events_file" 2>/dev/null || true)"
 discarded="$(grep -c 'EventClaimDiscarded' "$events_file" 2>/dev/null || true)"
 
-total_expired=$(( ${settled_expired:-0} + ${expired:-0} ))
+total_expired=$(( ${settled_invalid:-0} + ${expired:-0} ))
 if [ "$total_expired" -eq 0 ]; then
     gate_pass "no claim expired"
 else
