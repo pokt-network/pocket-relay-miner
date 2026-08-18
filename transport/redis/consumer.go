@@ -123,6 +123,38 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 	c.wg.Add(1)
 	go c.consumeLoop(ctx)
 
+	// Reclaim on a timer of its own. The blocking read above uses BLOCK 0, so
+	// XReadGroup never returns redis.Nil on a real server -- which was the ONLY
+	// trigger for claimPendingMessages, making it unreachable: a relay
+	// delivered to a consumer whose pod died before acking sat in that dead
+	// consumer's PEL forever, and its supplier's whole claim silently vanished
+	// (issue #25). The ticker runs regardless of what the read loop is doing;
+	// the lastClaimTime guard inside claimPendingMessages' caller path keeps
+	// the two triggers from stacking.
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		interval := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				c.claimMu.Lock()
+				due := time.Since(c.lastClaimTime) >= interval
+				if due {
+					c.lastClaimTime = time.Now()
+				}
+				c.claimMu.Unlock()
+				if due {
+					c.claimPendingMessages(ctx)
+				}
+			}
+		}
+	}()
+
 	c.logger.Info().
 		Str("stream", c.streamName).
 		Str("consumer_group", c.config.ConsumerGroup).
