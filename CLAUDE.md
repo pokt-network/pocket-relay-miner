@@ -171,17 +171,24 @@ newest by date.
    - Never log sensitive data (private keys, credentials)
 
 3. **Concurrency**
-   - ✅ USE: Worker pools (`github.com/sourcegraph/conc/pool`) for bounded concurrency
-   - ❌ NEVER: Unbounded `go func()` - ALWAYS use worker pools to limit goroutines
-   - Use `xsync.MapOf` for lock-free concurrent maps
+   - ✅ USE: Worker pools (`github.com/alitto/pond/v2`) for bounded concurrency
+     — the library this repo actually uses (13 production files); the
+     previously documented `sourcegraph/conc` has zero imports here
+   - ❌ NEVER: Unbounded `go func()` - use a pond pool, or wrap a genuinely
+     long-lived goroutine in `go logging.RecoverGoRoutine(logger, "name", fn)(ctx)`
+     so a panic is counted and logged instead of crashing the process.
+     `internal/conventions` freezes the existing bare `go` statements and
+     fails on new ones.
+   - Use `xsync.Map` (puzpuzpuz/xsync/v4) for lock-free concurrent maps —
+     never `sync.Map` (enforced by `internal/conventions`)
    - Protect shared state with `sync.RWMutex` when necessary
    - Use `context.Context` for cancellation and timeouts
    - ALWAYS defer `Close()` or cleanup functions
    - **Worker Pool Pattern**:
      ```go
-     pool := pool.New().WithMaxGoroutines(10)
-     pool.Go(func() { /* work */ })
-     pool.Wait() // Wait for all tasks to complete
+     pool := pond.NewPool(10) // bounded concurrency
+     pool.Submit(func() { /* work */ })
+     pool.StopAndWait() // Wait for all tasks to complete
      ```
 
 4. **Testing**
@@ -362,7 +369,7 @@ If any gate fails, fix it before reporting completion. Do NOT report "done" with
 
 ### Key Patterns
 
-Reference: See full mapping in `cmd/cmd_redis_debug.go` and subcommands
+Reference: See full mapping in `cmd/cmd_redis.go` and the subcommands under `cmd/redis/`
 
 - **WAL**: `ha:relays:{supplierAddress}` (Redis Streams)
 - **SMST Nodes**: `ha:smst:{sessionID}:nodes` (Redis Hashes)
@@ -599,10 +606,10 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats  # Inspect all HA keys
 ## Critical Files
 
 ### Entry Points
-- `main.go`: CLI entry point (relayer/miner/redis-debug subcommands)
+- `main.go`: CLI entry point (relayer/miner/redis subcommands)
 - `cmd/cmd_relayer.go`: Relayer startup and initialization
 - `cmd/cmd_miner.go`: Miner startup and initialization
-- `cmd/cmd_redis_debug.go`: Redis debug tooling entry point
+- `cmd/cmd_redis.go`: Redis debug tooling entry point (subcommands in `cmd/redis/`)
 
 ### Core Logic
 - `relayer/proxy.go`: HTTP/WebSocket relay handling
