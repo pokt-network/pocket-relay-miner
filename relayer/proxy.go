@@ -85,7 +85,6 @@ const (
 	rejectReasonSupplierInactive            = "supplier_inactive"
 	rejectReasonNoServices                  = "no_services"
 	rejectReasonWrongService                = "wrong_service"
-	rejectReasonBackendUnhealthy            = "backend_unhealthy"
 	rejectReasonMeterError                  = "meter_error"
 	rejectReasonStakeExhausted              = "stake_exhausted"
 	rejectReasonValidationFailed            = "validation_failed"
@@ -144,7 +143,6 @@ type publishTask struct {
 type ProxyServer struct {
 	logger         logging.Logger
 	config         *Config
-	healthChecker  *HealthChecker
 	publisher      transport.MinedRelayPublisher
 	validator      RelayValidator
 	relayProcessor RelayProcessor
@@ -220,7 +218,6 @@ type ProxyServer struct {
 func NewProxyServer(
 	logger logging.Logger,
 	config *Config,
-	healthChecker *HealthChecker,
 	publisher transport.MinedRelayPublisher,
 	workerPool pond.Pool,
 ) (*ProxyServer, error) {
@@ -282,7 +279,6 @@ func NewProxyServer(
 	proxy := &ProxyServer{
 		logger:             logging.ForComponent(logger, logging.ComponentProxyServer),
 		config:             config,
-		healthChecker:      healthChecker,
 		publisher:          publisher,
 		clientPool:         clientPool,
 		clientPoolFallback: clientPoolFallback,
@@ -920,13 +916,12 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// for this supplier+service. Serving continues — the relay is claimable.
 	p.warnUndeclaredTransport(supplierState, supplierOperatorAddr, serviceID, rpcType)
 
-	// Check backend health
-	if !p.healthChecker.IsHealthy(serviceID) {
-		// NOTE: this will return true always until is properly implemented.
-		p.sendError(w, http.StatusServiceUnavailable, "backend unhealthy")
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonBackendUnhealthy).Inc()
-		return
-	}
+	// Backend health is enforced further down by the per-rpc-type fast-fail
+	// (pool.HasHealthy on the resolved pool). A gate lived here that called
+	// healthChecker.IsHealthy(serviceID), but health-check pools are
+	// registered under "{serviceID}:{rpcType}" — the lookup never matched, so
+	// it returned "unknown pool, assume healthy" on every relay and its
+	// rejection reason could not be emitted. Its own NOTE said as much.
 
 	// Check service-specific body size limit
 	serviceMaxBodySize := p.config.GetServiceMaxBodySize(serviceID)
