@@ -52,8 +52,8 @@ func strandInPEL(t *testing.T, rdb *goredis.Client, stream, group, deadConsumer 
 }
 
 // TestClaimPendingMessages_DrainsWholePEL pins that ONE reclaim invocation
-// recovers the ENTIRE eligible PEL, not just the first XAUTOCLAIM page
-// (Count=50). A dead consumer can strand thousands of deliveries (a full
+// recovers the ENTIRE eligible PEL, not just the first pending page
+// (XPENDING Count=50). A dead consumer can strand thousands of deliveries (a full
 // read batch plus the channel buffer); recovering them at one page per tick
 // would drain slower than the claim window closes, silently losing the tail
 // — the exact issue-#25 loss the reclaim exists to prevent.
@@ -69,7 +69,7 @@ func TestClaimPendingMessages_DrainsWholePEL(t *testing.T) {
 		supplier = "pokt1drain_test"
 		group    = "ha-miners"
 		stream   = "ha:relays:" + supplier
-		stranded = 120 // needs 3 XAUTOCLAIM pages at Count=50
+		stranded = 120 // needs 3 pending pages at XPENDING Count=50
 	)
 
 	strandInPEL(t, rdb, stream, group, "dead-pod-consumer", stranded)
