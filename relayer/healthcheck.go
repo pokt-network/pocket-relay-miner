@@ -497,7 +497,7 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 			if wasHealthy {
 				hc.logger.Warn().
 					Str(logging.FieldServiceID, backend.ServiceID).
-					Str("backend_url", backend.BackendURL).
+					Str("backend_url", logging.RedactURL(backend.BackendURL)).
 					Str("endpoint", endpointLabel).
 					Str("error", errMsg).
 					Int32("consecutive_failures", failures).
@@ -514,7 +514,7 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 			if oldStatus != HealthStatusUnhealthy {
 				hc.logger.Warn().
 					Str(logging.FieldServiceID, backend.ServiceID).
-					Str("backend_url", backend.BackendURL).
+					Str("backend_url", logging.RedactURL(backend.BackendURL)).
 					Str("endpoint", endpointLabel).
 					Str("error", errMsg).
 					Int32("consecutive_failures", failures).
@@ -561,7 +561,7 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 				backend.consecutiveSuccesses.Store(0)
 				hc.logger.Info().
 					Str(logging.FieldServiceID, backend.ServiceID).
-					Str("backend_url", backend.BackendURL).
+					Str("backend_url", logging.RedactURL(backend.BackendURL)).
 					Str("endpoint", endpointLabel).
 					Int32("consecutive_successes", successes).
 					Msg("backend became healthy (active health check)")
@@ -580,7 +580,7 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 				backend.consecutiveSuccesses.Store(0)
 				hc.logger.Info().
 					Str(logging.FieldServiceID, backend.ServiceID).
-					Str("backend_url", backend.BackendURL).
+					Str("backend_url", logging.RedactURL(backend.BackendURL)).
 					Str("endpoint", endpointLabel).
 					Int32("consecutive_successes", successes).
 					Msg("backend became healthy")

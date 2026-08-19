@@ -321,7 +321,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 	logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 		Str("method", poktHTTPRequest.Method).
-		Str("url", poktHTTPRequest.Url).
+		Str("url", logging.RedactURL(poktHTTPRequest.Url)).
 		Int("body_size", len(poktHTTPRequest.BodyBz)).
 		Msg("deserialized POKTHTTPRequest from relay payload")
 
