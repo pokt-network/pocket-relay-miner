@@ -3,6 +3,7 @@ package redis
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -358,19 +359,101 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 // batch plus the delivery channel buffer). Stopping after one page would
 // recover them at Count-per-tick — far slower than the claim window this
 // reclaim exists to beat.
+// claimIdleFromOtherConsumers returns one page of pending entries that belong
+// to OTHER consumers and have been idle past ClaimIdleTimeout, reassigned to
+// this consumer, plus the cursor to continue from ("0-0" when the scan is
+// done).
+//
+// It replaces a plain XAUTOCLAIM, which filters on idle time ALONE and never
+// on whether the owning consumer is alive — verified against a live Redis: a
+// consumer running XAUTOCLAIM reclaims its OWN pending entries. This reclaim
+// exists to rescue deliveries stranded in a DEAD pod's PEL, so re-claiming
+// our own in-flight work is never the goal: under a backlog, anything sitting
+// in the delivery buffer longer than the timeout got re-delivered to us as a
+// duplicate, and the deeper the lag the more duplicates it produced. Dedup
+// kept the accounting right; the wasted work compounded.
+func (c *StreamsConsumer) claimIdleFromOtherConsumers(
+	ctx context.Context,
+	start string,
+) (msgs []redis.XMessage, next string, err error) {
+	minIdle := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
+	if start == "0-0" {
+		start = "-"
+	}
+
+	// No Idle filter here on purpose: the age check belongs to XCLAIM below,
+	// which Redis applies authoritatively (entries younger than MinIdle are
+	// simply not handed over). XPENDING is used only to learn WHO owns each
+	// entry, which XAUTOCLAIM never reveals.
+	pending, err := c.client.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: c.streamName,
+		Group:  c.config.ConsumerGroup,
+		Start:  start,
+		End:    "+",
+		Count:  50, // page size; claimPendingMessages loops until drained
+	}).Result()
+	if err != nil {
+		return nil, "0-0", err
+	}
+	if len(pending) == 0 {
+		return nil, "0-0", nil
+	}
+
+	ids := make([]string, 0, len(pending))
+	for _, entry := range pending {
+		if entry.Consumer == c.config.ConsumerName {
+			continue // our own in-flight delivery, not a stranded one
+		}
+		ids = append(ids, entry.ID)
+	}
+
+	// Advance past the last entry EXAMINED, not the last one claimed: a
+	// reclaimed entry stays in the PEL (owned by us now), so restarting from
+	// the same point would return the same page forever. The successor of
+	// "<ms>-<seq>" is "<ms>-<seq+1>"; computing it avoids the exclusive-range
+	// syntax "(", which not every Redis implementation accepts.
+	next = nextStreamID(pending[len(pending)-1].ID)
+	if len(pending) < 50 {
+		next = "0-0" // last page
+	}
+
+	if len(ids) == 0 {
+		return nil, next, nil // this page was all ours; keep scanning
+	}
+
+	msgs, err = c.client.XClaim(ctx, &redis.XClaimArgs{
+		Stream:   c.streamName,
+		Group:    c.config.ConsumerGroup,
+		Consumer: c.config.ConsumerName,
+		MinIdle:  minIdle,
+		Messages: ids,
+	}).Result()
+	if err != nil {
+		return nil, "0-0", err
+	}
+	return msgs, next, nil
+}
+
+// nextStreamID returns the smallest stream ID greater than id, so a scan can
+// continue without the exclusive-range syntax.
+func nextStreamID(id string) string {
+	ms, seq, found := strings.Cut(id, "-")
+	if !found {
+		return id
+	}
+	n, err := strconv.ParseUint(seq, 10, 64)
+	if err != nil {
+		return id
+	}
+	return ms + "-" + strconv.FormatUint(n+1, 10)
+}
+
 func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 	start := "0-0"
 	totalClaimed := 0
 
 	for {
-		messages, next, err := c.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
-			Stream:   c.streamName,
-			Group:    c.config.ConsumerGroup,
-			Consumer: c.config.ConsumerName,
-			MinIdle:  time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond,
-			Start:    start,
-			Count:    50, // Page size per XAUTOCLAIM call; the loop drains all pages
-		}).Result()
+		messages, next, err := c.claimIdleFromOtherConsumers(ctx, start)
 		if err != nil {
 			// Stream may not exist yet - skip
 			if isStreamNotFoundError(err) {
