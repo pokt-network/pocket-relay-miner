@@ -1182,6 +1182,30 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			lifecycleCallbackConfig,
 		)
 
+		// Teach the coordinator when a claim window has already closed, so a
+		// relay for an unknown session past its window is dropped instead of
+		// creating a session nothing can ever claim. Wired only here, where the
+		// block and shared-params clients are known to exist; without them the
+		// predicate stays nil and the check answers false.
+		sessionCoordinator.SetClaimWindowClosedFn(func(sessionEndHeight int64) bool {
+			block := m.config.BlockClient.LastBlock(ctx)
+			if block == nil {
+				return false // no observed height: cannot tell, do not drop
+			}
+			currentHeight := block.Height()
+			// The end height is in the PAST by definition of this question, so
+			// the at-height read is the immutable one; fall back to live params
+			// rather than answering on a query failure.
+			params, err := m.config.SharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+			if err != nil || params == nil {
+				params, err = m.config.SharedClient.GetParams(ctx)
+			}
+			if err != nil || params == nil {
+				return false
+			}
+			return currentHeight >= sharedtypes.GetClaimWindowCloseHeight(params, sessionEndHeight)
+		})
+
 		if m.config.ServiceClient != nil {
 			lifecycleCallback.SetServiceClient(m.config.ServiceClient)
 		}

@@ -408,19 +408,39 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// after first sight).
 	w.recordDiscovered(ctx, msg.Message.ApplicationAddress, msg.Message.ServiceId)
 
-	// Check session state BEFORE updating SMST
+	// Check session state BEFORE updating SMST. A store error falls through on
+	// purpose: it says nothing about the session, and dropping a relay on a
+	// Redis hiccup is the expensive direction.
 	if state.SessionStore != nil {
 		snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
-		if storeErr == nil && snapshot != nil {
-			if snapshot.State.IsTerminal() {
-				w.logger.Debug().
-					Str("session_id", msg.Message.SessionId).
-					Str("supplier", supplierAddr).
-					Str("session_state", string(snapshot.State)).
-					Msg("LATE_RELAY: dropping relay - session already in terminal state")
-				RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
-				return nil
-			}
+		switch {
+		case storeErr != nil:
+			// fall through and process the relay
+
+		case snapshot != nil && snapshot.State.IsTerminal():
+			w.logger.Debug().
+				Str("session_id", msg.Message.SessionId).
+				Str("supplier", supplierAddr).
+				Str("session_state", string(snapshot.State)).
+				Msg("LATE_RELAY: dropping relay - session already in terminal state")
+			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
+			return nil
+
+		case snapshot == nil && state.SessionCoordinator != nil &&
+			state.SessionCoordinator.ClaimWindowClosed(msg.Message.SessionEndHeight):
+			// No session and its claim window has already closed. Processing on
+			// would build an SMST tree and CREATE a session that can never be
+			// claimed: the lifecycle sweep would carry it to claim_window_closed
+			// and delete it again, having done the work for nothing. This is the
+			// reclaim-lands-late case -- the relay is genuinely unpayable, so it
+			// is counted and dropped here instead.
+			w.logger.Debug().
+				Str("session_id", msg.Message.SessionId).
+				Str("supplier", supplierAddr).
+				Int64("session_end_height", msg.Message.SessionEndHeight).
+				Msg("LATE_RELAY: dropping relay - claim window closed for an unknown session")
+			RecordRelayRejected(supplierAddr, "claim_window_closed", msg.Message.ServiceId)
+			return nil
 		}
 	}
 

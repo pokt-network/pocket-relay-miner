@@ -42,6 +42,13 @@ type SessionCoordinator struct {
 	// This allows in-memory state to be updated atomically with Redis.
 	onSessionTerminal SessionTerminalCallback
 
+	// claimWindowClosedFn reports whether the claim window for a session ending
+	// at the given height has already closed. Injected rather than built from a
+	// block and a params client so this type keeps its two dependencies; nil
+	// where the miner runs without chain clients (tooling, tests), in which
+	// case ClaimWindowClosed answers false and nothing is dropped.
+	claimWindowClosedFn func(sessionEndHeight int64) bool
+
 	mu     sync.Mutex
 	closed bool
 }
@@ -64,6 +71,31 @@ func (c *SessionCoordinator) SetOnSessionCreatedCallback(callback SessionCreated
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.onSessionCreated = callback
+}
+
+// SetClaimWindowClosedFn installs the predicate behind ClaimWindowClosed.
+func (c *SessionCoordinator) SetClaimWindowClosedFn(fn func(sessionEndHeight int64) bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.claimWindowClosedFn = fn
+}
+
+// ClaimWindowClosed reports whether a session ending at sessionEndHeight can
+// still be claimed. It answers FALSE whenever it cannot tell -- no predicate
+// wired, or a height that carries no information -- because the only caller
+// uses it to discard a relay, and discarding on an unknown is how served work
+// stops being paid for.
+func (c *SessionCoordinator) ClaimWindowClosed(sessionEndHeight int64) bool {
+	if sessionEndHeight <= 0 {
+		return false
+	}
+	c.mu.Lock()
+	fn := c.claimWindowClosedFn
+	c.mu.Unlock()
+	if fn == nil {
+		return false
+	}
+	return fn(sessionEndHeight)
 }
 
 // SetOnSessionTerminalCallback sets the callback to be invoked when a session transitions to terminal state.
