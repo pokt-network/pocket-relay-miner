@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -111,15 +112,22 @@ func NewSupplierKeysFileProvider(logger logging.Logger, filePath string) (*Suppl
 		return nil, fmt.Errorf("failed to stat supplier keys file: %w", err)
 	}
 
-	// Create fsnotify watcher for the file
+	// Watch the PARENT DIRECTORY, not the file itself (same technique as
+	// FileKeyProvider): fsnotify drops a file watch when the watched inode is
+	// deleted or renamed, and Rename/Remove never re-arm it — so any atomic
+	// replace (vim/sed's write-temp-then-rename, a k8s projected-volume
+	// symlink swap) would silently kill hot reload, leaving the relayer
+	// signing with stale keys and no log evidence. The directory watch
+	// survives file replacement; Write|Create on the directory covers both
+	// in-place writes and the rename/symlink-swap arrival of new content.
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file watcher: %w", err)
 	}
 
-	if err := watcher.Add(filePath); err != nil {
+	if err := watcher.Add(filepath.Dir(filePath)); err != nil {
 		_ = watcher.Close()
-		return nil, fmt.Errorf("failed to watch supplier keys file: %w", err)
+		return nil, fmt.Errorf("failed to watch supplier keys directory: %w", err)
 	}
 
 	return &SupplierKeysFileProvider{
