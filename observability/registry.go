@@ -36,6 +36,9 @@ func init() {
 	// shared registry so the panic signal is actually served — it previously
 	// lived in the prometheus default registry, which no binary exposes.
 	SharedRegistry.MustRegister(logging.PanicRecoveriesTotal)
+	// Same constraint: the async-writer drop counter lives in logging and
+	// must be served, or log loss under load stays invisible to alerting.
+	SharedRegistry.MustRegister(logging.LogMessagesDroppedTotal)
 }
 
 func init() {
