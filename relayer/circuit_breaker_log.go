@@ -28,7 +28,7 @@ func logCircuitBreakerTransition(
 		// Circuit broken: healthy -> unhealthy.
 		event := logger.Warn().
 			Str("backend", transition.Endpoint.Name).
-			Str("url", transition.Endpoint.RawURL).
+			Str("url", logging.RedactURL(transition.Endpoint.RawURL)).
 			Str(logging.FieldServiceID, serviceID).
 			Str("rpc_type", rpcType).
 			Int32("consecutive_failures", transition.Failures).
@@ -55,7 +55,7 @@ func logCircuitBreakerTransition(
 		// Recovery: unhealthy -> healthy.
 		event := logger.Info().
 			Str("backend", transition.Endpoint.Name).
-			Str("url", transition.Endpoint.RawURL).
+			Str("url", logging.RedactURL(transition.Endpoint.RawURL)).
 			Str(logging.FieldServiceID, serviceID).
 			Str("rpc_type", rpcType)
 

@@ -665,7 +665,6 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 
 	b.logger.Debug().
 		Int("payload_size", len(relayReq.Payload)).
-		Str("payload_preview", string(relayReq.Payload[:min(50, len(relayReq.Payload))])).
 		Msg("forwarding payload to backend")
 
 	// Forward payload to backend echoing the frame type the client sent.
@@ -682,7 +681,6 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 
 	b.logger.Debug().
 		Int("bytes_sent", len(relayReq.Payload)).
-		Str("sent_to_backend", string(relayReq.Payload[:min(50, len(relayReq.Payload))])).
 		Msg("successfully forwarded payload to backend")
 }
 

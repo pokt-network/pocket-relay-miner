@@ -1470,7 +1470,7 @@ func (p *ProxyServer) parseRelayRequest(body []byte) (*servicetypes.RelayRequest
 
 	logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 		Str("method", poktHTTPRequest.Method).
-		Str("url", poktHTTPRequest.Url).
+		Str("url", logging.RedactURL(poktHTTPRequest.Url)).
 		Msg("deserialized POKTHTTPRequest from relay payload")
 
 	return relayRequest, serviceID, poktHTTPRequest, nil
@@ -1635,7 +1635,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Str("method", poktHTTPRequest.Method).
-			Str("url", requestURL.String()).
+			Str("url", logging.RedactURL(requestURL.String())).
 			Int("body_size", len(poktHTTPRequest.BodyBz)).
 			Msg("built backend request from POKTHTTPRequest")
 	} else {
