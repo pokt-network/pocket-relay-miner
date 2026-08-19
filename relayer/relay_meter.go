@@ -263,7 +263,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	// Get relay cost first
 	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
 	if err != nil {
-		m.logger.Warn().Err(err).Str(logging.FieldServiceID, serviceID).
+		m.logger.Debug().Err(err).Str(logging.FieldServiceID, serviceID).
 			Msg("failed to get relay cost")
 		return m.handleRedisError("get relay cost")
 	}
@@ -271,7 +271,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	// Get or create session meter
 	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight, currentHeight)
 	if err != nil {
-		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
 		return m.handleRedisError("get session meter")
 	}
@@ -282,7 +282,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	consumedKey := m.consumedKey(sessionID, supplierAddress)
 	newConsumed, err := m.redisClient.IncrBy(ctx, consumedKey, relayCostUpokt).Result()
 	if err != nil {
-		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to increment consumed stake")
 		return m.handleRedisError("increment consumed")
 	}
@@ -311,7 +311,10 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 		numSuppliers = sessionParams.NumSuppliersPerSession
 	}
 
-	m.logger.Warn().
+	// Fires on EVERY relay once the app is over the limit — per-request by
+	// construction; the operator signal is relay_meter_consumptions_total
+	// {result="over_limit"}.
+	m.logger.Debug().
 		Str("application", appAddress).
 		Str(logging.FieldServiceID, serviceID).
 		Str(logging.FieldSessionID, sessionID).
@@ -962,14 +965,17 @@ func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID strin
 func (m *RelayMeter) handleRedisError(operation string) (allowed bool, err error) {
 	relayMeterRedisErrors.WithLabelValues(operation).Inc()
 
+	// Per-relay under a Redis outage (one line per relay per instance); the
+	// outage itself is logged by the transport reconnect loop, and
+	// relay_meter_redis_errors_total carries the alertable rate.
 	if m.config.FailBehavior == FailOpen {
-		m.logger.Warn().
+		m.logger.Debug().
 			Str("operation", operation).
 			Msg("Redis error, fail-open: allowing relay")
 		return true, nil
 	}
 
-	m.logger.Warn().
+	m.logger.Debug().
 		Str("operation", operation).
 		Msg("Redis error, fail-closed: rejecting relay")
 	return false, fmt.Errorf("redis unavailable and fail-closed configured")
