@@ -687,7 +687,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	proxy, err := relayer.NewProxyServer(
 		logger,
 		config,
-		healthChecker,
 		publisher,
 		masterPool, // Pass master worker pool
 	)
