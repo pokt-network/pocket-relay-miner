@@ -38,19 +38,26 @@ func repoRoot(t *testing.T) string {
 	return root
 }
 
-// skipDirs are directories the walks never enter. tilt/ holds a separate Go
-// module (tilt/backend-server) plus deploy manifests; scripts/ holds shell and
-// localonly scratch; internal/ is this package itself (its synthetic sources
-// in self-tests must not trip the real checks).
+// skipDirs are top-level directories the walks never enter. tilt/ holds a
+// separate Go module (tilt/backend-server) plus deploy manifests; scripts/
+// holds shell and localonly scratch; docs/ and examples/ hold no Go.
+//
+// internal/ is deliberately NOT here: skipping it wholesale would make any
+// future production package under internal/ invisible to every check — a
+// false negative built into the walk. Only this package is skipped, by path.
 var skipDirs = map[string]bool{
 	".git":     true,
 	".claude":  true,
 	"tilt":     true,
 	"scripts":  true,
-	"internal": true,
 	"docs":     true,
 	"examples": true,
 }
+
+// selfPackage is the one path the walks skip: this package's own files, whose
+// synthetic hostile sources exist to be matched by the self-tests and must
+// never be read as real violations.
+const selfPackage = "internal/conventions"
 
 // prodGoFileFloor is the number of production (non-test) .go files the root
 // module held when this floor was set. Measured 2026-08-19: 163. If a walk
@@ -79,6 +86,9 @@ func goFiles(t *testing.T, testFiles bool) (map[string]*ast.File, *token.FileSet
 				return fs.SkipDir
 			}
 			if d.Name() == "localonly" || d.Name() == "node_modules" {
+				return fs.SkipDir
+			}
+			if rel, rerr := filepath.Rel(root, path); rerr == nil && filepath.ToSlash(rel) == selfPackage {
 				return fs.SkipDir
 			}
 			return nil
