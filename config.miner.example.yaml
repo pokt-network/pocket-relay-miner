@@ -116,7 +116,7 @@ pocket_node:
   #
   # The cosmos-sdk hard-rejects unordered TXs whose timeoutTimestamp is >10 min
   # ahead of validator time with `unordered tx ttl exceeds 10m0s`. The default
-  # max is internally set 500ms below that ceiling; setting tx_timeout_max_seconds
+  # max is internally set 10s below that ceiling; setting tx_timeout_max_seconds
   # to 600 here will intermittently fail CheckTx due to clock jitter — stay below.
   #
   # tx_timeout_min_seconds: 120               # Floor (default: 120 = 2min)

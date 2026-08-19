@@ -397,7 +397,6 @@ properties:
       level:
         type: string
         enum:
-          - trace
           - debug
           - info
           - warn
@@ -409,10 +408,6 @@ properties:
           - json
           - text
         default: json
-      output:
-        type: string
-        description: Log output destination
-        default: stdout
       async:
         type: boolean
         description: Enable async logging for better performance

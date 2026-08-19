@@ -51,12 +51,12 @@ type ReadinessCheck func(ctx context.Context) error
 
 // Server provides observability endpoints (metrics and pprof).
 type Server struct {
-	logger         logging.Logger
-	config         ServerConfig
-	metricsServer  *http.Server
-	pprofServer    *http.Server
-	mu             sync.Mutex
-	rm             *RuntimeMetricsCollector
+	logger        logging.Logger
+	config        ServerConfig
+	metricsServer *http.Server
+	pprofServer   *http.Server
+	mu            sync.Mutex
+
 	running        bool
 	readinessCheck ReadinessCheck
 }
@@ -83,8 +83,6 @@ func (s *Server) Start(ctx context.Context) error {
 		return nil
 	}
 
-	startTime := time.Now()
-
 	if s.config.MetricsEnabled {
 		// Start runtime metrics collector
 		if err := s.startMetricsServer(ctx); err != nil {
@@ -99,7 +97,6 @@ func (s *Server) Start(ctx context.Context) error {
 	}
 
 	s.running = true
-	StartupDurationSeconds.WithLabelValues("observability_server").Set(time.Since(startTime).Seconds())
 
 	return nil
 }
@@ -122,29 +119,15 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 		}
 	}()
 
-	// Start runtime metrics collector using MinerFactory (metrics go to MinerRegistry).
-	// Only start when using default registry - skip for custom registries (tests) to avoid
-	// duplicate registration errors since MinerFactory uses the global MinerRegistry.
-	if s.config.Registry == nil {
-		s.rm = NewRuntimeMetricsCollector(
-			s.logger,
-			DefaultRuntimeMetricsCollectorConfig(),
-			MinerFactory,
-		)
-		if err := s.rm.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start runtime metrics collector: %w", err)
-		}
-		s.logger.Info().Msg("runtime metrics collector started")
-	}
-
 	mux := http.NewServeMux()
-	// Use custom registry if provided, otherwise use default
-	var metricsHandler http.Handler
-	if s.config.Registry != nil {
-		metricsHandler = promhttp.HandlerFor(s.config.Registry, promhttp.HandlerOpts{})
-	} else {
-		metricsHandler = promhttp.Handler()
+	// Registry is required: both binaries pass their combined registry and
+	// start their own runtime metrics collector. The old nil branch (default
+	// promhttp handler + a second collector) was unreachable in production
+	// and would have double-registered runtime metrics if it ever ran.
+	if s.config.Registry == nil {
+		return fmt.Errorf("observability server requires a Registry")
 	}
+	metricsHandler := promhttp.HandlerFor(s.config.Registry, promhttp.HandlerOpts{})
 	mux.Handle("/metrics", metricsHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -185,9 +168,6 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = s.metricsServer.Shutdown(shutdownCtx)
-		if s.rm != nil {
-			s.rm.Stop()
-		}
 	}()
 
 	return nil
@@ -252,10 +232,6 @@ func (s *Server) Stop() error {
 			s.logger.Error().Err(err).Msg("failed to shutdown metrics server")
 			lastErr = err
 		}
-	}
-
-	if s.rm != nil {
-		s.rm.Stop()
 	}
 
 	if s.pprofServer != nil {

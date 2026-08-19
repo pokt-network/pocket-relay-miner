@@ -45,7 +45,7 @@ const (
 )
 
 // SimpleBlock implements client.Block interface with timestamp support.
-// This is a lightweight implementation used by both BlockPoller (deprecated)
+// This is a lightweight implementation used by
 // and BlockSubscriber for representing blockchain blocks.
 type SimpleBlock struct {
 	height    int64
