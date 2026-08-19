@@ -61,17 +61,13 @@ type RedisDeduplicator struct {
 	logger      logging.Logger
 	redisClient *redisutil.Client
 	config      DeduplicatorConfig
-	keyPrefix   string
 
 	mu     sync.Mutex
 	closed bool
 }
 
-// DeduplicatorConfig configures TTL behavior and the Redis key prefix.
+// DeduplicatorConfig configures TTL behavior.
 type DeduplicatorConfig struct {
-	// KeyPrefix is the prefix for Redis keys. Defaults to "ha:miner:dedup".
-	KeyPrefix string
-
 	// TTLBlocks is how many blocks to keep entries (converted to time).
 	TTLBlocks int64
 
@@ -85,9 +81,6 @@ func NewRedisDeduplicator(
 	redisClient *redisutil.Client,
 	config DeduplicatorConfig,
 ) *RedisDeduplicator {
-	if config.KeyPrefix == "" {
-		config.KeyPrefix = redisClient.KB().MinerDedupPrefix()
-	}
 	if config.TTLBlocks == 0 {
 		config.TTLBlocks = 10 // session length + grace period + buffer
 	}
@@ -99,7 +92,6 @@ func NewRedisDeduplicator(
 		logger:      logging.ForComponent(logger, logging.ComponentDeduplicator),
 		redisClient: redisClient,
 		config:      config,
-		keyPrefix:   config.KeyPrefix,
 	}
 }
 
@@ -211,8 +203,10 @@ func (d *RedisDeduplicator) CleanupSession(ctx context.Context, sessionID string
 }
 
 // sessionKey returns the Redis key for a session's deduplication set.
+// Built through the KeyBuilder so the writer and the CLI reader can never
+// drift apart under a custom namespace.
 func (d *RedisDeduplicator) sessionKey(sessionID string) string {
-	return d.keyPrefix + ":session:" + sessionID
+	return d.redisClient.KB().MinerDedupSessionKey(sessionID)
 }
 
 // getTTL returns the TTL for deduplication entries.

@@ -68,7 +68,6 @@ type RedisSharedParamCache struct {
 	localCache sync.Map // map[string]sharedParamLocalEntry
 
 	// Cache keys helper
-	keys CacheKeys
 
 	// Lifecycle
 	mu     sync.RWMutex
@@ -83,9 +82,6 @@ func NewRedisSharedParamCache(
 	blockClient client.BlockClient,
 	config CacheConfig,
 ) *RedisSharedParamCache {
-	if config.CachePrefix == "" {
-		config.CachePrefix = redisClient.KB().CachePrefix()
-	}
 	if config.TTLBlocks == 0 {
 		config.TTLBlocks = 1
 	}
@@ -102,7 +98,6 @@ func NewRedisSharedParamCache(
 		sharedClient: sharedClient,
 		blockClient:  blockClient,
 		config:       config,
-		keys:         CacheKeys{Prefix: config.CachePrefix},
 	}
 }
 
@@ -134,7 +129,7 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 	}
 	c.mu.RUnlock()
 
-	key := c.keys.SharedParams(height)
+	key := c.redisClient.KB().ParamsSharedAtHeightKey(height)
 
 	// L1: Check local cache (fresh within the TTL floor only).
 	if cached, ok := c.localCache.Load(key); ok {
@@ -185,7 +180,7 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 // (For the latest height the two are equivalent, which is why this was invisible
 // while GetLatestSharedParams was the only caller.)
 func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height int64, key string) (*sharedtypes.Params, error) {
-	lockKey := c.keys.SharedParamsLock(height)
+	lockKey := c.redisClient.KB().ParamsSharedAtHeightLockKey(height)
 
 	// Try to acquire lock
 	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", c.config.LockTimeout).Result()
@@ -267,7 +262,7 @@ func (c *RedisSharedParamCache) WarmupFromRedis(ctx context.Context) error {
 	height := latestBlock.Height()
 
 	// Try to load from Redis into L1
-	key := c.keys.SharedParams(height)
+	key := c.redisClient.KB().ParamsSharedAtHeightKey(height)
 	data, err := c.redisClient.Get(ctx, key).Bytes()
 	if err != nil {
 		if err == redis.Nil {

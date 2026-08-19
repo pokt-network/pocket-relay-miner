@@ -15,7 +15,7 @@ import (
 // newest so the sync.Map stays bounded instead of growing one entry per distinct
 // session served for the process lifetime.
 func TestSessionCacheL1_BoundedGrowth(t *testing.T) {
-	c := &RedisSessionCache{keys: CacheKeys{Prefix: "ha:cache"}}
+	c := &RedisSessionCache{}
 
 	const total = sessionCacheL1KeepHeights + 800
 	for h := int64(1); h <= total; h++ {

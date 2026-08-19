@@ -3,12 +3,18 @@
 package cache
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/stretchr/testify/require"
 )
+
+// keyFor builds an arbitrary per-height L1 map key for these tests. Key
+// content is irrelevant to what they prove (growth bound, TTL floor); only
+// per-height uniqueness matters — real keys come from the KeyBuilder.
+func keyFor(h int64) string { return fmt.Sprintf("k:%d", h) }
 
 // TestSharedParamsLocal_BoundedGrowth is the regression guard for the unbounded
 // per-height L1 leak: RedisSharedParamCache.localCache used to grow ~1 entry per
@@ -19,7 +25,7 @@ func TestSharedParamsLocal_BoundedGrowth(t *testing.T) {
 
 	const total = 500
 	for h := int64(1); h <= total; h++ {
-		c.storeLocal(c.keys.SharedParams(h), h, &sharedtypes.Params{NumBlocksPerSession: uint64(h)})
+		c.storeLocal(keyFor(h), h, &sharedtypes.Params{NumBlocksPerSession: uint64(h)})
 	}
 
 	n := 0
@@ -31,9 +37,9 @@ func TestSharedParamsLocal_BoundedGrowth(t *testing.T) {
 		"L1 must stay bounded to the height window, not grow ~1 entry/block forever")
 
 	// The newest height is retained; a far-older one was pruned.
-	_, newest := c.localCache.Load(c.keys.SharedParams(total))
+	_, newest := c.localCache.Load(keyFor(total))
 	require.True(t, newest, "the newest height must be retained")
-	_, oldest := c.localCache.Load(c.keys.SharedParams(1))
+	_, oldest := c.localCache.Load(keyFor(1))
 	require.False(t, oldest, "a far-below-window height must be pruned")
 }
 
@@ -42,7 +48,7 @@ func TestSharedParamsLocal_BoundedGrowth(t *testing.T) {
 // are immutable.
 func TestSharedParamsLocal_TTLFloor(t *testing.T) {
 	c := &RedisSharedParamCache{}
-	key := c.keys.SharedParams(100)
+	key := keyFor(100)
 
 	// A fresh entry is a hit.
 	c.storeLocal(key, 100, &sharedtypes.Params{NumBlocksPerSession: 4})

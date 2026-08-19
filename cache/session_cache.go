@@ -75,7 +75,6 @@ type RedisSessionCache struct {
 	sessionCache sync.Map // map[string]sessionCacheL1Entry
 
 	// Cache keys helper
-	keys CacheKeys
 
 	// Lifecycle
 	mu       sync.RWMutex
@@ -93,9 +92,6 @@ func NewRedisSessionCache(
 	blockClient client.BlockClient,
 	config CacheConfig,
 ) *RedisSessionCache {
-	if config.CachePrefix == "" {
-		config.CachePrefix = redisClient.KB().CachePrefix()
-	}
 	if config.BlockTimeSeconds == 0 {
 		config.BlockTimeSeconds = 6
 	}
@@ -110,7 +106,6 @@ func NewRedisSessionCache(
 		sharedClient:  sharedClient,
 		blockClient:   blockClient,
 		config:        config,
-		keys:          CacheKeys{Prefix: config.CachePrefix},
 	}
 }
 
@@ -140,7 +135,7 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 	}
 	c.mu.RUnlock()
 
-	key := c.keys.Session(appAddress, serviceId, height)
+	key := c.redisClient.KB().SessionCacheKey(appAddress, serviceId, height)
 
 	// L1: Check local cache. Only a fresh entry (within sessionCacheL1TTL) is a
 	// hit; a stale one falls through to L2/L3 so the entry can never be frozen

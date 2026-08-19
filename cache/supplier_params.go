@@ -30,7 +30,6 @@ type RedisSupplierParamCache struct {
 	localCacheSet bool
 
 	// Cache keys helper
-	keys CacheKeys
 
 	// Lifecycle
 	mu       sync.RWMutex
@@ -46,9 +45,6 @@ func NewRedisSupplierParamCache(
 	supplierClient client.SupplierQueryClient,
 	config CacheConfig,
 ) *RedisSupplierParamCache {
-	if config.CachePrefix == "" {
-		config.CachePrefix = redisClient.KB().CachePrefix()
-	}
 	if config.TTLBlocks == 0 {
 		config.TTLBlocks = 100 // Supplier params rarely change
 	}
@@ -64,7 +60,6 @@ func NewRedisSupplierParamCache(
 		redisClient:    redisClient,
 		supplierClient: supplierClient,
 		config:         config,
-		keys:           CacheKeys{Prefix: config.CachePrefix},
 	}
 }
 
@@ -137,7 +132,7 @@ func (c *RedisSupplierParamCache) GetSupplierParams(ctx context.Context) (*suppl
 	cacheMisses.WithLabelValues("supplier_params", "l1").Inc()
 
 	// L2: Check Redis cache
-	key := c.keys.SupplierParams()
+	key := c.redisClient.KB().ParamsSupplierKey()
 	data, err := c.redisClient.Get(ctx, key).Bytes()
 	if err == nil {
 		params := &suppliertypes.Params{}
@@ -172,7 +167,7 @@ func (c *RedisSupplierParamCache) GetSupplierParams(ctx context.Context) (*suppl
 // queryAndCacheParams queries the chain and caches the result.
 // Uses distributed locking to prevent thundering herd.
 func (c *RedisSupplierParamCache) queryAndCacheParams(ctx context.Context, key string) (*suppliertypes.Params, error) {
-	lockKey := c.keys.SupplierParamsLock()
+	lockKey := c.redisClient.KB().ParamsSupplierLockKey()
 
 	// Try to acquire lock
 	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", c.config.LockTimeout).Result()
@@ -271,7 +266,7 @@ func (c *RedisSupplierParamCache) Refresh(ctx context.Context) error {
 	c.localCacheMu.Unlock()
 
 	// Update L2 cache (Redis)
-	key := c.keys.SupplierParams()
+	key := c.redisClient.KB().ParamsSupplierKey()
 	data, marshalErr := json.Marshal(params)
 	if marshalErr == nil {
 		ttl := c.config.BlocksToTTL(c.config.TTLBlocks)
@@ -294,7 +289,7 @@ func (c *RedisSupplierParamCache) Refresh(ctx context.Context) error {
 func (c *RedisSupplierParamCache) WarmupFromRedis(ctx context.Context) error {
 	c.logger.Info().Msg("warming up supplier params cache from Redis")
 
-	key := c.keys.SupplierParams()
+	key := c.redisClient.KB().ParamsSupplierKey()
 	data, err := c.redisClient.Get(ctx, key).Bytes()
 	if err != nil {
 		if err == redis.Nil {
