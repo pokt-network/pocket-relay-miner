@@ -14,6 +14,7 @@
 package conventions
 
 import (
+	"errors"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -79,6 +80,15 @@ func goFiles(t *testing.T, testFiles bool) (map[string]*ast.File, *token.FileSet
 
 	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
+			// An entry that vanished between the directory read and this
+			// callback is not a broken walk: Tilt, a build or another session
+			// writes under the repo root while these tests run, and
+			// propagating ErrNotExist made all nine walk-based checks flaky —
+			// Rule #1 broken inside the package that enforces Rule #1.
+			// Anything else is a real failure and still stops the walk.
+			if errors.Is(err, fs.ErrNotExist) {
+				return nil
+			}
 			return err
 		}
 		if d.IsDir() {
