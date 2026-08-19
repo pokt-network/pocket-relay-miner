@@ -84,13 +84,13 @@ done
 # ---------------------------------------------------------------------------
 gate_step "preflight: tooling"
 
-for tool in kubectl jq curl go; do
+for tool in kubectl jq curl go python3; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         gate_fail "$tool is not installed"
     fi
 done
 [ "$gate_failed" -ne 0 ] && gate_verdict "live"
-gate_pass "kubectl, jq, curl, go present"
+gate_pass "kubectl, jq, curl, go, python3 present"
 
 # ---------------------------------------------------------------------------
 gate_step "preflight: cluster"
@@ -202,7 +202,10 @@ else
     gate_verdict "live"
 fi
 
-suppliers="$("$BIN" redis supplier --list 2>/dev/null | awk '/^pokt/{print $1}')"
+# STAKED suppliers only: the registry also lists not_staked leftovers, and a
+# relay pinned to one of those is answered 503 ("supplier ... is not_staked").
+# The count also feeds the thin-load warning and the settlement filter.
+suppliers="$("$BIN" redis supplier --list 2>/dev/null | awk '/^pokt/ && $2 == "active" {print $1}')"
 supplier_count="$(printf '%s\n' "$suppliers" | grep -c '^pokt' || true)"
 if [ "$supplier_count" -gt 0 ]; then
     gate_pass "${supplier_count} supplier(s) registered"
@@ -245,19 +248,29 @@ run_transport_load() {
     stream | cometbft)
         # Sequential single requests; each successful invocation is one billed
         # relay. --all-suppliers does not apply (stream pins its supplier at
-        # the handshake), so successive requests spread suppliers on their own.
+        # the handshake), and with --localnet the CLI pins EVERY invocation to
+        # supplier1 when --supplier is absent -- successive requests do NOT
+        # spread on their own (the old comment claiming they did was false).
+        # All of this cell's relays go to ONE supplier, rotated per cell:
+        # concentration keeps the per-supplier-session count at 3 (issue #25
+        # reproduces at 1 relay/supplier-session), while rotating across cells
+        # stops every cell from stacking on supplier1's session budget.
         out=""
         rc=0
         TRANSPORT_SENT=0
-        local i
-        for i in 1 2 3; do
-            local one
+        local -a sup_arr
+        # shellcheck disable=SC2206 # suppliers are newline-separated bech32 addresses, no globs
+        sup_arr=($suppliers)
+        local one sup
+        sup="${sup_arr[$((STREAM_CELL_IDX % ${#sup_arr[@]}))]}"
+        STREAM_CELL_IDX=$((STREAM_CELL_IDX + 1))
+        for _ in 1 2 3; do
             if [ "$mode" = "stream" ]; then
                 one="$("$BIN" relay stream --localnet --service "$service" \
-                    --relayer-url "$relayer_url" --batches 3 2>&1)" || rc=$?
+                    --relayer-url "$relayer_url" --supplier "$sup" --batches 3 2>&1)" || rc=$?
             else
                 one="$("$BIN" relay cometbft --localnet --service "$service" \
-                    --relayer-url "$relayer_url" 2>&1)" || rc=$?
+                    --relayer-url "$relayer_url" --supplier "$sup" 2>&1)" || rc=$?
             fi
             out="${out}${one}"$'\n'
             [ "$rc" -ne 0 ] && break
@@ -283,8 +296,44 @@ transport_success_count() {
 }
 
 # mode:service pairs. Override with MATRIX="jsonrpc:develop-http ..." to narrow.
+matrix_overridden="${MATRIX+1}"
 MATRIX="${MATRIX:-jsonrpc:develop-http jsonrpc:develop-http-eager websocket:develop-websocket websocket:develop-websocket-optimistic grpc:develop-grpc grpc:develop-grpc-optimistic stream:develop-stream stream:develop-stream-optimistic cometbft:develop-cometbft cometbft:develop-cometbft-optimistic}"
 RELAYS_PER_TRANSPORT="${RELAYS_PER_TRANSPORT:-60}"
+STREAM_CELL_IDX=0
+
+# The default MATRIX must cover every staked develop-* service, and nothing
+# ties the hand-written list to what the Tiltfile actually stakes -- a cell
+# added to the mode matrix (or a renamed service) would simply never be loaded
+# or asserted, and the gate would stay green while a whole transport x mode
+# cell went unvalidated. Cross-check against the relayer's rendered config,
+# which lists exactly the services the localnet serves. A deliberate MATRIX
+# override skips this (narrowing is the override's purpose).
+if [ -z "$matrix_overridden" ]; then
+    staked_services="$(kubectl get configmap relayer-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null |
+        python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; print("\n".join(sorted((c.get("services") or {}).keys())))' 2>/dev/null || true)"
+    if [ -z "$staked_services" ]; then
+        gate_fail "could not read the staked services from configmap relayer-config -- cannot prove the matrix is complete"
+    else
+        for svc in $staked_services; do
+            case "$svc" in
+            develop-*)
+                case " $MATRIX " in
+                *":${svc} "*) ;;
+                *) gate_fail "staked service ${svc} is missing from the gate MATRIX -- its transport x mode cell is unvalidated" ;;
+                esac
+                ;;
+            esac
+        done
+        for pair in $MATRIX; do
+            svc="${pair#*:}"
+            if ! printf '%s\n' "$staked_services" | grep -qx "$svc"; then
+                gate_fail "MATRIX cell ${pair} names a service that is not staked -- stale matrix entry"
+            fi
+        done
+        [ "$gate_failed" -eq 0 ] && gate_pass "MATRIX covers all $(printf '%s\n' "$staked_services" | grep -c 'develop-') staked develop-* services"
+    fi
+    [ "$gate_failed" -ne 0 ] && gate_verdict "live"
+fi
 
 # Issue #25: single-relay-per-supplier claims can vanish between the WAL and
 # the claim (a supplier's entire 1-relay session goes unclaimed, with no drop
@@ -295,12 +344,27 @@ RELAYS_PER_TRANSPORT="${RELAYS_PER_TRANSPORT:-60}"
 if [ "$RELAYS_PER_TRANSPORT" -lt $(( supplier_count * 2 )) ]; then
     gate_skip "RELAYS_PER_TRANSPORT=${RELAYS_PER_TRANSPORT} gives <2 relays per supplier (${supplier_count} suppliers): exact billing may trip issue #25"
 fi
+# stream/cometbft cells ignore RELAYS_PER_TRANSPORT: each sends 3 sequential
+# relays pinned to ONE (per-cell rotated) supplier, so a session boundary can
+# split them 2+1 and leave a 1-relay supplier-session -- the issue #25 regime
+# the warning above cannot see for these transports.
+case " $MATRIX " in
+*" stream:"* | *" cometbft:"*)
+    gate_skip "stream/cometbft cells send 3 relays on one supplier: a session-boundary split can trip issue #25 for that cell"
+    ;;
+esac
 
 # Height at which THIS run's load begins: settlement events are later filtered
 # to sessions ending at or after it, so claims from earlier traffic on a shared
 # localnet (previous runs, bursts) cannot satisfy this run's expectations.
+# A failed fetch must be a hard stop: an empty value would degrade the filter
+# to ">= 0" and let ANY earlier session satisfy the exact-billing assertion.
 load_start_height="$(curl -fsS --max-time 5 "${VALIDATOR_RPC}/status" 2>/dev/null |
-    jq -r '.result.sync_info.latest_block_height // "0"')"
+    jq -r '.result.sync_info.latest_block_height // empty')"
+if [ -z "$load_start_height" ]; then
+    gate_fail "could not read the chain height before loading -- the per-run settlement filter would be void"
+    gate_verdict "live"
+fi
 
 # Per-service expectation ledger: "mode service sent exact" per line. `exact`
 # marks transports whose accounting model is pinned (one request signs one
@@ -451,12 +515,31 @@ while IFS=$'\t' read -r mode svc sent exact; do
     fi
 done <"$matrix_ledger"
 
-expired="$(grep -c 'EventClaimExpired' "$events_file" 2>/dev/null || true)"
-settled_invalid="$(jq -rs '[.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
-    | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?2\"?$"))] | length' \
-    "$events_file" 2>/dev/null || echo 0)"
-slashed="$(grep -c 'EventSupplierSlashed' "$events_file" 2>/dev/null || true)"
-discarded="$(grep -c 'EventClaimDiscarded' "$events_file" 2>/dev/null || true)"
+# Terminal-event assertions are scoped to THIS run's sessions, the same
+# session_end_block_height >= load_start_height filter the billed counter
+# uses (every one of these event types carries the field -- verified against
+# poktroll x/tokenomics event.pb.go). Without it, a claim from an EARLIER
+# run expiring while this gate polls fails THIS run: proof windows close up
+# to ~5.5 min after their session ends, well inside our scan window, and the
+# supplier filter alone matches all localnet traffic. A missing attribute
+# counts as in-window: for a gate, a false red beats a silent pass.
+count_terminal_events() {
+    jq -rs --arg type "$1" --argjson minend "${load_start_height:-0}" '
+        [.[] | select(.type == $type)
+             | select((.attrs.session_end_block_height == null)
+                 or ((.attrs.session_end_block_height | tostring | gsub("[^0-9]";"") | if . == "" then "0" else . end | tonumber) >= $minend))]
+        | length' "$events_file" 2>/dev/null || echo 0
+}
+
+expired="$(count_terminal_events 'pocket.tokenomics.EventClaimExpired')"
+slashed="$(count_terminal_events 'pocket.tokenomics.EventSupplierSlashed')"
+discarded="$(count_terminal_events 'pocket.tokenomics.EventClaimDiscarded')"
+settled_invalid="$(jq -rs --argjson minend "${load_start_height:-0}" '
+    [.[] | select(.type == "pocket.tokenomics.EventClaimSettled")
+         | select(.attrs.claim_proof_status_int // "" | tostring | test("^\"?2\"?$"))
+         | select((.attrs.session_end_block_height == null)
+             or ((.attrs.session_end_block_height | tostring | gsub("[^0-9]";"") | if . == "" then "0" else . end | tonumber) >= $minend))]
+    | length' "$events_file" 2>/dev/null || echo 0)"
 
 total_expired=$(( ${settled_invalid:-0} + ${expired:-0} ))
 if [ "$total_expired" -eq 0 ]; then
@@ -476,14 +559,19 @@ fi
 [ "${discarded:-0}" -ne 0 ] && gate_fail "${discarded} claim(s) discarded without settling"
 
 # The miner's own terminal failure states, as corroboration: they should agree
-# with the chain, and a disagreement is itself the finding.
+# with the chain, and a disagreement is itself the finding. One --json listing
+# per supplier, states counted with jq -- the previous form grepped for lines
+# starting with "session", which the CLI's table output never produces (rows
+# start with the bare hex session ID), so the check could never fire.
+fail_states_file="${BIN_DIR}/miner_session_states.txt"
+: >"$fail_states_file"
+for supplier in $suppliers; do
+    "$BIN" redis sessions --supplier "$supplier" --json 2>/dev/null |
+        jq -r '(if type == "array" then . else [] end)[] | .state // empty' 2>/dev/null
+done >>"$fail_states_file"
 for state in claim_missing claim_tx_error proof_tx_error proof_window_closed claim_window_closed; do
-    n=0
-    for supplier in $suppliers; do
-        n=$(( n + $("$BIN" redis sessions --supplier "$supplier" --state "$state" 2>/dev/null |
-            grep -c '^session' || true) ))
-    done
-    [ "$n" -gt 0 ] && gate_fail "miner reports ${n} session(s) in failure state '${state}'"
+    n="$(grep -cx "$state" "$fail_states_file" 2>/dev/null || true)"
+    [ "${n:-0}" -gt 0 ] && gate_fail "miner reports ${n} session(s) in failure state '${state}'"
 done
 
 if [ "$resolved" -eq 0 ]; then

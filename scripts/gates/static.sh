@@ -69,13 +69,19 @@ if [ "$staged_only" -eq 1 ]; then
         fi
     fi
 else
-    unformatted="$(gofmt -s -l . 2>/dev/null || true)"
+    # gofmt over TRACKED files only, never `gofmt -s -l .`: unlike the go
+    # command's walker, gofmt DOES descend dot- and underscore-prefixed
+    # directories, so gitignored scratch (.claude/worktrees/, an agent's
+    # half-edited file, a rescue under scripts/localonly/_rescued/) can turn
+    # the gate red -- and the printed remedy (`make fmt` = go fmt ./...,
+    # which skips those dirs) can never fix it.
+    unformatted="$(git ls-files -z '*.go' | xargs -0 -r gofmt -s -l 2>/dev/null || true)"
     if [ -n "$unformatted" ]; then
         gate_fail "these files are not gofmt'd:"
         gate_detail "$unformatted"
         printf '         run: %smake fmt%s\n' "$GATE_BOLD" "$GATE_RESET"
     else
-        gate_pass "all Go files are formatted"
+        gate_pass "all tracked Go files are formatted"
     fi
 fi
 

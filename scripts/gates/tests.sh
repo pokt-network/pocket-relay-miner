@@ -36,7 +36,11 @@ cache | miner) gate_step "go test $pkg (sequential -- shared miniredis fixture)"
 *) gate_step "go test $pkg" ;;
 esac
 
-if out="$(go test "${verbose[@]}" -tags test "${parallelism[@]}" "$pkg" 2>&1)"; then
+# ${arr[@]+"${arr[@]}"} instead of "${arr[@]}": under `set -u`, expanding an
+# EMPTY array aborts with "unbound variable" on bash < 4.4 -- and macOS ships
+# 3.2, so the plain form kills the default `make test` path there with an
+# empty "FAIL tests failed:" (the real error goes to uncaptured stderr).
+if out="$(go test ${verbose[@]+"${verbose[@]}"} -tags test ${parallelism[@]+"${parallelism[@]}"} "$pkg" 2>&1)"; then
     # Report what actually ran, so a suite that silently compiled to nothing is
     # visible rather than reading as success.
     ok_count="$(printf '%s\n' "$out" | grep -c '^ok ' || true)"

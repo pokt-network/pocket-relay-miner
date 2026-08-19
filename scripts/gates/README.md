@@ -63,13 +63,22 @@ break one routing path while the others stay green, or serve a transport's
 relays without ever publishing them to the WAL — so each protocol gets its own
 load and its own settlement assertion:
 
-| transport | service | mode covered | assertion |
-|---|---|---|---|
-| jsonrpc | develop-http | optimistic | served == billed, exactly |
-| websocket | develop-websocket | eager | served == billed, exactly |
-| grpc | develop-grpc | eager | served == billed, exactly |
-| stream | develop-stream | eager | served == billed (one request = one relay; batches do not multiply billing — pinned live) |
-| cometbft | develop-cometbft | eager | served == billed |
+| transport | services (mode) | assertion |
+|---|---|---|
+| jsonrpc | develop-http (optimistic), develop-http-eager (eager) | served == billed, exactly |
+| websocket | develop-websocket (eager), develop-websocket-optimistic (optimistic¹) | served == billed, exactly |
+| grpc | develop-grpc (eager), develop-grpc-optimistic (optimistic¹) | served == billed, exactly |
+| stream | develop-stream (eager), develop-stream-optimistic (optimistic¹) | served == billed (one request = one relay; batches do not multiply billing — pinned live) |
+| cometbft | develop-cometbft (eager), develop-cometbft-optimistic (optimistic) | served == billed, exactly |
+
+¹ websocket/grpc hard-wire eager admission regardless of the configured mode
+until issue #24 lands, so those cells exercise the config plumbing, not a
+distinct admission path — a deliberate decision, wired in advance.
+
+The gate derives nothing from this table: at runtime the default `MATRIX` is
+cross-checked against the services in the rendered `relayer-config` configmap,
+and a staked `develop-*` service missing from the matrix (or a matrix cell
+naming an unstaked service) fails the run before any load is sent.
 
 The exact equality is the point: `served 60, billed 40` is silent partial loss —
 relays answered to clients that never reached a claim — and a `billed > 0`
@@ -78,9 +87,8 @@ is excluded by session-end height, so the ledger only counts this run's
 sessions. Narrow with `MATRIX="jsonrpc:develop-http"` and size with
 `RELAYS_PER_TRANSPORT`.
 
-Because develop-http runs optimistic validation and every other service runs
-eager, the matrix also covers both validation modes — a mode-specific
-regression fails exactly one column.
+Every transport is staked twice — once per validation mode — so a
+mode-specific regression fails exactly one cell of the matrix.
 
 **It asserts the FINAL settlement outcome, not inclusion.** A claim can land
 on-chain and still expire without its proof, be discarded, or get its supplier
@@ -90,8 +98,8 @@ terminal events the chain emits in its EndBlocker, from `block_results`:
 
 | event | meaning |
 |---|---|
-| `EventClaimSettled`, status `1` | PROVEN — the relays were paid |
-| `EventClaimSettled`, status `3`, or `EventClaimExpired` | expired: served, claimed, never paid |
+| `EventClaimSettled`, status `0` (PENDING_VALIDATION) or `1` (VALIDATED) | PAID — status 0 means the protocol required no proof for this claim |
+| `EventClaimSettled`, status `2` (INVALID), or `EventClaimExpired` | served, claimed, never paid |
 | `EventSupplierSlashed` | staked funds burned |
 | `EventClaimDiscarded` | dropped without settling |
 
