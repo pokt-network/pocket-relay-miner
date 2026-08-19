@@ -151,8 +151,8 @@ func TestDedupMetrics_NoSessionIDLabel(t *testing.T) {
 
 	_, _ = d.IsDuplicate(ctx, []byte("h1"), "dedup-sess-A")
 	_, _ = d.IsDuplicate(ctx, []byte("h2"), "dedup-sess-B")
-	require.NoError(t, d.MarkProcessed(ctx, []byte("h1"), "dedup-sess-A"))
-	require.NoError(t, d.MarkProcessed(ctx, []byte("h2"), "dedup-sess-B"))
+	mustMarkProcessed(t, d, ctx, []byte("h1"), "dedup-sess-A")
+	mustMarkProcessed(t, d, ctx, []byte("h2"), "dedup-sess-B")
 
 	body := scrapeMinerRegistry(t)
 	for _, m := range []string{

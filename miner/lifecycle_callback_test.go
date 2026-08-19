@@ -28,8 +28,8 @@ func (m *mockDeduplicator) IsDuplicate(_ context.Context, _ []byte, _ string) (b
 	return false, nil
 }
 
-func (m *mockDeduplicator) MarkProcessed(_ context.Context, _ []byte, _ string) error {
-	return nil
+func (m *mockDeduplicator) MarkProcessed(_ context.Context, _ []byte, _ string) (bool, error) {
+	return true, nil
 }
 
 func (m *mockDeduplicator) MarkProcessedBatch(_ context.Context, _ [][]byte, _ string) error {

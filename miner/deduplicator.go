@@ -10,26 +10,33 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-// Deduplicator ensures that reclaimed relays (XAUTOCLAIM redeliveries from
-// a consumer that crashed without acking) are not processed twice. The SMST
-// tree is idempotent on insertions of the same (key, value, weight) tuple,
-// but the side counter `snapshot.TotalComputeUnits` is incremented
-// unconditionally by IncrementRelayCount and must be protected against
-// double-count: over-counting there would inflate the economic-viability
-// prediction and cause unprofitable sessions to be claimed.
+// Deduplicator ensures that redelivered relays (XAUTOCLAIM reclaims from a
+// consumer that crashed without acking, or the original copy still buffered
+// in a slow-but-alive consumer after another consumer reclaimed it) are not
+// counted twice. The SMST tree is idempotent on insertions of the same
+// (key, value, weight) tuple, but the side counter
+// `snapshot.TotalComputeUnits` is incremented unconditionally by
+// IncrementRelayCount and must be protected against double-count:
+// over-counting there would inflate the economic-viability prediction and
+// cause unprofitable sessions to be claimed.
 //
-// The deduplicator is only invoked on the reclaim path. Normal XREADGROUP
-// `>` delivery never redelivers a message to the same consumer group, so the
-// hot path is free of dedup overhead.
+// The relay worker calls MarkProcessed on EVERY relay and uses its return
+// value as the gate for the counter: XAUTOCLAIM honors only min-idle, not
+// consumer liveness, so the duplicate can arrive with IsReclaim=false (the
+// original copy, processed after the reclaimed one) and a reclaim-only check
+// would miss it. IsDuplicate remains as a cheap early exit on the reclaim
+// path before the SMST work.
 type Deduplicator interface {
 	// IsDuplicate returns true if the relay hash has already been marked as
 	// processed for the given session.
 	IsDuplicate(ctx context.Context, relayHash []byte, sessionID string) (bool, error)
 
 	// MarkProcessed records that a relay hash has been processed. Called
-	// unconditionally by the relay worker after a successful SMST update so
-	// that future reclaims of the same message are detected.
-	MarkProcessed(ctx context.Context, relayHash []byte, sessionID string) error
+	// unconditionally by the relay worker after a successful SMST update.
+	// Returns whether the hash was newly added: false means another
+	// processing of the same relay already marked it, and the caller must
+	// not increment the per-session counters again.
+	MarkProcessed(ctx context.Context, relayHash []byte, sessionID string) (bool, error)
 
 	// MarkProcessedBatch records multiple relay hashes in a single pipeline.
 	MarkProcessedBatch(ctx context.Context, relayHashes [][]byte, sessionID string) error
@@ -138,25 +145,28 @@ func (d *RedisDeduplicator) IsDuplicate(ctx context.Context, relayHash []byte, s
 }
 
 // MarkProcessed records relayHash in the session's dedup set and refreshes
-// the TTL. Called after a successful SMST update. If the caller crashes
-// between SMST update and this call, the next reclaim will not detect the
-// duplicate and IncrementRelayCount may run again — but that window is far
-// smaller than skipping the SMST update itself, and the SMST is idempotent.
-func (d *RedisDeduplicator) MarkProcessed(ctx context.Context, relayHash []byte, sessionID string) error {
+// the TTL. Called after a successful SMST update. The SADD result doubles as
+// the duplicate signal: 0 added members means the hash was already marked by
+// an earlier processing of the same relay, and the caller must skip the
+// per-session counter increment. If the caller crashes between SMST update
+// and this call, the next redelivery will not detect the duplicate and
+// IncrementRelayCount may run again — but that window is far smaller than
+// skipping the SMST update itself, and the SMST is idempotent.
+func (d *RedisDeduplicator) MarkProcessed(ctx context.Context, relayHash []byte, sessionID string) (bool, error) {
 	key := d.sessionKey(sessionID)
 	ttl := d.getTTL()
 
 	pipe := d.redisClient.Pipeline()
-	pipe.SAdd(ctx, key, hashMember(relayHash))
+	addCmd := pipe.SAdd(ctx, key, hashMember(relayHash))
 	pipe.Expire(ctx, key, ttl)
 
 	if _, err := pipe.Exec(ctx); err != nil {
 		dedupErrors.WithLabelValues("redis_mark").Inc()
-		return fmt.Errorf("failed to mark processed: %w", err)
+		return false, fmt.Errorf("failed to mark processed: %w", err)
 	}
 
 	dedupMarked.Inc()
-	return nil
+	return addCmd.Val() == 1, nil
 }
 
 // MarkProcessedBatch records multiple relay hashes in a single pipeline.
