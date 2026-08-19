@@ -758,20 +758,32 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
 
-	// The retired relay_meter.redis_key_prefix: harmless when it matches the
-	// effective namespace base prefix (the keys do not move), a hard error when
-	// it differs -- upgrading would silently migrate meter keys mid-session.
+	// The retired relay_meter.redis_key_prefix documented where meter keys
+	// USED to live: "{retired}:meter:...". Compare that against where the
+	// effective namespace puts them now ("{base}:{meter}:..."): equal means
+	// the keys do not move and the stale line is harmless; different means
+	// upgrading would silently relocate meter meta/consumed keys mid-session
+	// (each replica re-creating a fresh budget at the new location), so it is
+	// a hard error. The comparison is on the FULL meter prefix, not just the
+	// base: a custom redis.namespace.meter_prefix moves the keys even when
+	// the base prefix matches the retired value.
 	if c.RelayMeter.RemovedRedisKeyPrefix != "" {
-		effectiveBase := c.Redis.Namespace.WithDefaults().BasePrefix
-		if c.RelayMeter.RemovedRedisKeyPrefix != effectiveBase {
+		ns := c.Redis.Namespace.WithDefaults()
+		legacyMeterPrefix := c.RelayMeter.RemovedRedisKeyPrefix + ":meter"
+		effectiveMeterPrefix := ns.BasePrefix + ":" + ns.MeterPrefix
+		if legacyMeterPrefix != effectiveMeterPrefix {
 			return fmt.Errorf(
-				"relay_meter.redis_key_prefix is no longer supported: meter keys now derive from redis.namespace (effective base prefix %q). "+
-					"Your config sets it to %q, which would silently move meter meta/consumed keys and the cleanup channel to a different namespace, "+
-					"resetting in-flight session budgets. Set redis.namespace.base_prefix to %q instead, then remove relay_meter.redis_key_prefix",
-				effectiveBase, c.RelayMeter.RemovedRedisKeyPrefix, c.RelayMeter.RemovedRedisKeyPrefix,
+				"relay_meter.redis_key_prefix is no longer supported: meter keys now derive from redis.namespace. "+
+					"Your config would move them from %q to %q, silently resetting in-flight session budgets. "+
+					"Remove the relay_meter.redis_key_prefix line; if your meter keys really live under %q, "+
+					"drain in-flight sessions before upgrading (meter keys are ephemeral and session-scoped, "+
+					"so a drained fleet migrates with no data to move). Do NOT point redis.namespace.base_prefix "+
+					"at the retired value to preserve them: that would relocate the relayer's ENTIRE keyspace, "+
+					"including the WAL stream the miner consumes from",
+				legacyMeterPrefix, effectiveMeterPrefix, legacyMeterPrefix,
 			)
 		}
-		// Equal to the effective base: nothing moves. Accepted so that configs
+		// Equal full meter prefix: nothing moves. Accepted so that configs
 		// shipped with the old default ("ha") upgrade without editing.
 	}
 
