@@ -6,20 +6,23 @@ import (
 	"runtime/debug"
 
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/client_golang/prometheus/promauto"
 )
 
-var (
-	// PanicRecoveriesTotal tracks panic recoveries by component.
-	// Exported to allow other packages (e.g., middleware, interceptors) to increment it.
-	PanicRecoveriesTotal = promauto.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: "ha",
-			Name:      "panic_recoveries_total",
-			Help:      "Total number of panic recoveries by component",
-		},
-		[]string{"component"},
-	)
+// PanicRecoveriesTotal tracks panic recoveries by component.
+// Exported to allow other packages (e.g., middleware, interceptors) to
+// increment it. NOT created through promauto: that would register it in
+// the prometheus DEFAULT registry, which no binary in this repo serves —
+// the panic signal would be written into a registry nobody scrapes.
+// The observability package registers this collector into its
+// SharedRegistry (served by both binaries) at init; logging cannot do
+// that itself without an import cycle.
+var PanicRecoveriesTotal = prometheus.NewCounterVec(
+	prometheus.CounterOpts{
+		Namespace: "ha",
+		Name:      "panic_recoveries_total",
+		Help:      "Total number of panic recoveries by component",
+	},
+	[]string{"component"},
 )
 
 // RecoverGoRoutine wraps a goroutine with panic recovery and structured logging.

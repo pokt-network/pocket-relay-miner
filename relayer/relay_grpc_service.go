@@ -276,17 +276,14 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 	// Validate and meter the relay if pipeline is available
 	if s.relayPipeline != nil {
-		// TODO: Get actual compute units from service config
-		// For now, use default value of 1 (will be refined in future PR)
-		computeUnits := uint64(1)
 
 		// Build relay context for validation/metering
 		relayCtx := &RelayContext{
-			Request:            relayRequest,
-			ServiceID:          serviceID,
-			SupplierAddress:    supplierOperatorAddr,
-			SessionID:          sessionID,
-			ComputeUnits:       computeUnits,
+			Request:         relayRequest,
+			ServiceID:       serviceID,
+			SupplierAddress: supplierOperatorAddr,
+			SessionID:       sessionID,
+
 			ArrivalBlockHeight: arrivalHeight,
 		}
 
