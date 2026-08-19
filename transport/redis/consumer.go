@@ -19,7 +19,7 @@ var _ transport.MinedRelayConsumer = (*StreamsConsumer)(nil)
 // isStreamNotFoundError reports whether a Redis error indicates the stream (or
 // its consumer group) does not exist yet. Redis surfaces this as a "no such
 // key" error for missing keys and a "NOGROUP" error when the stream/group is
-// absent for group operations (XAUTOCLAIM, XPENDING, etc.).
+// absent for group operations (XREADGROUP, XPENDING, XCLAIM, etc.).
 func isStreamNotFoundError(err error) bool {
 	if err == nil {
 		return false
@@ -350,15 +350,6 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 	}
 }
 
-// claimPendingMessages claims messages that have been pending too long.
-// It recovers messages from consumers that crashed without acknowledging.
-//
-// It drains the WHOLE eligible PEL, not just the first page: XAUTOCLAIM
-// returns at most Count entries plus a cursor to continue the scan from, and
-// a dead consumer can leave thousands of deliveries behind (a full read
-// batch plus the delivery channel buffer). Stopping after one page would
-// recover them at Count-per-tick — far slower than the claim window this
-// reclaim exists to beat.
 // claimIdleFromOtherConsumers returns one page of pending entries that belong
 // to OTHER consumers and have been idle past ClaimIdleTimeout, reassigned to
 // this consumer, plus the cursor to continue from ("0-0" when the scan is
@@ -448,6 +439,16 @@ func nextStreamID(id string) string {
 	return ms + "-" + strconv.FormatUint(n+1, 10)
 }
 
+// claimPendingMessages recovers messages stranded in the PEL of a consumer
+// that crashed without acknowledging them.
+//
+// It drains the WHOLE eligible PEL, not just the first page: each
+// claimIdleFromOtherConsumers call examines at most one page of pending
+// entries and returns the cursor to continue the scan from, and a dead
+// consumer can leave thousands of deliveries behind (a full read batch plus
+// the delivery channel buffer). Stopping after one page would recover them at
+// one page per tick — far slower than the claim window this reclaim exists to
+// beat.
 func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 	start := "0-0"
 	totalClaimed := 0
