@@ -2408,6 +2408,15 @@ func (p *ProxyServer) validateRelayRequest(
 
 	// Check reward eligibility (for eager validation, we do this now)
 	if err := p.validator.CheckRewardEligibility(ctx, relayRequest); err != nil {
+		// Served but unclaimable: backend capacity spent for no reward. The
+		// line is Debug (per-request), so this counter is the only signal an
+		// operator gets that a gateway is sending past the grace-period
+		// cutoff.
+		svcID := metricLabelUnknown
+		if relayRequest.Meta.SessionHeader != nil && relayRequest.Meta.SessionHeader.ServiceId != "" {
+			svcID = relayRequest.Meta.SessionHeader.ServiceId
+		}
+		relaysNotRewardable.WithLabelValues(svcID).Inc()
 		p.logger.Debug().
 			Err(err).
 			Msg("relay not eligible for rewards (continuing to serve)")

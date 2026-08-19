@@ -174,6 +174,9 @@ func (rp *relayProcessor) ProcessRelay(
 	// Check mining difficulty using the difficulty at session start height
 	isApplicable, err := rp.checkMiningDifficulty(ctx, serviceID, relayHash[:], sessionStartHeight)
 	if err != nil {
+		// FAILS OPEN: the relay is mined as applicable. Debug is per-request,
+		// so the counter is the only signal that difficulty is unresolvable.
+		difficultyQueryFailures.WithLabelValues(serviceID).Inc()
 		rp.logger.Debug().
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
@@ -328,6 +331,9 @@ func (p *QueryDifficultyProvider) GetTargetHash(ctx context.Context, serviceID s
 
 	target, err := p.queryClient.GetServiceRelayDifficulty(ctx, serviceID, sessionStartHeight)
 	if err != nil {
+		// Falls back to base difficulty (every relay applicable) — same
+		// fail-open, same need for a counter.
+		difficultyQueryFailures.WithLabelValues(serviceID).Inc()
 		p.logger.Debug().
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
