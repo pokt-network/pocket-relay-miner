@@ -61,6 +61,15 @@ So:
 - **Propose the scale before dispatching.** Say how many agents and roughly what
   it costs, and prefer doing the pass yourself when the diff is small enough to
   read. A fan-out nobody sized is the failure mode the human has to catch.
+- **On this workstation the fan-out has failed twice, on two different models**
+  (2026-08-19: ten agents, then five on another model). The second time every
+  agent sent an idle notification with no report, none appeared alive in
+  ListAgents, and naming them directly changed nothing. So it is not a usage
+  limit — treat agent review here as unreliable until something proves
+  otherwise, and budget for doing the pass with commands.
+- **An agent that goes idle has NOT reported.** Ask it by name once. If it goes
+  idle again with nothing, stop asking and do the pass yourself; a second round
+  of reminders buys nothing and reads like progress.
 - **If the fan-out dies, the review did NOT run.** Redo it with commands and say
   so in the report, in those words. The command-based pass is legitimate — that
   same day it found five real defects, three of them introduced by the session
