@@ -178,8 +178,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("failed to create Redis client: %w", err)
 	}
 	defer func() {
-		if err = redisClient.Close(); err != nil {
-			logger.Error().Err(err).Msg("failed to close Redis client")
+		// closeErr, NOT err: runHAMiner has a NAMED result, so assigning to
+		// err here overwrites whatever the function returned — a nil Close
+		// would mask the leader-controller failure below and exit 0.
+		if closeErr := redisClient.Close(); closeErr != nil {
+			logger.Error().Err(closeErr).Msg("failed to close Redis client")
 		}
 	}()
 	logger.Info().
@@ -348,8 +351,10 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		logger.Info().Msg("leader controller in standby mode (not leader)")
 	}
 	defer func() {
-		if err = leaderController.Close(); err != nil {
-			logger.Error().Err(err).Msg("failed to close leader controller")
+		// closeErr, NOT err: see the Redis defer above — assigning to the
+		// named result here discarded the error this function returns.
+		if closeErr := leaderController.Close(); closeErr != nil {
+			logger.Error().Err(closeErr).Msg("failed to close leader controller")
 		}
 	}()
 
