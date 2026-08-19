@@ -8,6 +8,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/puzpuzpuz/xsync/v4"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 )
@@ -28,7 +30,7 @@ type StreamsPublisher struct {
 	// ttlSet tracks which stream keys already have TTL set.
 	// Avoids calling EXPIRE on every publish (saves 1 Redis round-trip per relay).
 	// Bounded by supplier count (stream names are ha:relays:{supplierAddr}).
-	ttlSet sync.Map // map[string]struct{}
+	ttlSet *xsync.Map[string, struct{}]
 
 	// mu protects closed state
 	mu     sync.RWMutex
@@ -48,6 +50,7 @@ func NewStreamsPublisher(
 	}
 
 	return &StreamsPublisher{
+		ttlSet:       xsync.NewMap[string, struct{}](),
 		logger:       logging.ForComponent(logger, logging.ComponentRedisPublisher),
 		client:       client,
 		streamPrefix: streamPrefix,

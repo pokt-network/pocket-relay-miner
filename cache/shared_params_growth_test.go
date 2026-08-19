@@ -8,6 +8,7 @@ import (
 	"time"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -21,7 +22,7 @@ func keyFor(h int64) string { return fmt.Sprintf("k:%d", h) }
 // block forever (only dead Delete paths existed). storeLocal must prune entries
 // far below the newest height so the map stays bounded.
 func TestSharedParamsLocal_BoundedGrowth(t *testing.T) {
-	c := &RedisSharedParamCache{}
+	c := &RedisSharedParamCache{localCache: xsync.NewMap[string, sharedParamLocalEntry]()}
 
 	const total = 500
 	for h := int64(1); h <= total; h++ {
@@ -29,7 +30,7 @@ func TestSharedParamsLocal_BoundedGrowth(t *testing.T) {
 	}
 
 	n := 0
-	c.localCache.Range(func(_, _ any) bool {
+	c.localCache.Range(func(_ string, _ sharedParamLocalEntry) bool {
 		n++
 		return true
 	})
@@ -47,14 +48,12 @@ func TestSharedParamsLocal_BoundedGrowth(t *testing.T) {
 // max-age floor as a miss (the cache-TTL mandate), even though params-at-height
 // are immutable.
 func TestSharedParamsLocal_TTLFloor(t *testing.T) {
-	c := &RedisSharedParamCache{}
+	c := &RedisSharedParamCache{localCache: xsync.NewMap[string, sharedParamLocalEntry]()}
 	key := keyFor(100)
 
 	// A fresh entry is a hit.
 	c.storeLocal(key, 100, &sharedtypes.Params{NumBlocksPerSession: 4})
-	cached, ok := c.localCache.Load(key)
-	require.True(t, ok)
-	e, ok := cached.(sharedParamLocalEntry)
+	e, ok := c.localCache.Load(key)
 	require.True(t, ok)
 	require.Less(t, time.Since(e.cachedAt), sharedParamsLocalTTL, "a just-stored entry is within the floor")
 

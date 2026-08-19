@@ -9,6 +9,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/puzpuzpuz/xsync/v4"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -46,8 +48,8 @@ func (c *RedisSharedParamCache) storeLocal(key string, height int64, params *sha
 	if cutoff <= 0 {
 		return
 	}
-	c.localCache.Range(func(k, v any) bool {
-		if e, ok := v.(sharedParamLocalEntry); ok && e.height < cutoff {
+	c.localCache.Range(func(k string, e sharedParamLocalEntry) bool {
+		if e.height < cutoff {
 			c.localCache.Delete(k)
 		}
 		return true
@@ -65,7 +67,7 @@ type RedisSharedParamCache struct {
 	// L1 local cache, keyed by height. Values are sharedParamLocalEntry so each
 	// is TTL-floored and the map is pruned to a bounded height window (it used to
 	// grow ~1 entry/block forever — only the latest few heights are ever read).
-	localCache sync.Map // map[string]sharedParamLocalEntry
+	localCache *xsync.Map[string, sharedParamLocalEntry]
 
 	// Cache keys helper
 
@@ -93,6 +95,7 @@ func NewRedisSharedParamCache(
 	}
 
 	return &RedisSharedParamCache{
+		localCache:   xsync.NewMap[string, sharedParamLocalEntry](),
 		logger:       logging.ForComponent(logger, logging.ComponentSharedParamCache),
 		redisClient:  redisClient,
 		sharedClient: sharedClient,
@@ -132,8 +135,8 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 	key := c.redisClient.KB().ParamsSharedAtHeightKey(height)
 
 	// L1: Check local cache (fresh within the TTL floor only).
-	if cached, ok := c.localCache.Load(key); ok {
-		if e, ok := cached.(sharedParamLocalEntry); ok && time.Since(e.cachedAt) < sharedParamsLocalTTL {
+	if e, ok := c.localCache.Load(key); ok {
+		if time.Since(e.cachedAt) < sharedParamsLocalTTL {
 			cacheHits.WithLabelValues("shared_params", CacheLevelL1).Inc()
 			cacheGetLatency.WithLabelValues("shared_params", CacheLevelL1).Observe(time.Since(start).Seconds())
 			return e.params, nil
