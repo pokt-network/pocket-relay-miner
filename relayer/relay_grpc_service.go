@@ -19,6 +19,8 @@ import (
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
+	"github.com/rs/zerolog"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/transport"
@@ -322,7 +324,9 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 	logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 		Str("method", poktHTTPRequest.Method).
-		Str("url", logging.RedactURL(poktHTTPRequest.Url)).
+		// Func: per-relay path, so the redaction parse is only paid when
+		// Debug is actually enabled (arguments evaluate regardless).
+		Func(func(e *zerolog.Event) { e.Str("url", logging.RedactURL(poktHTTPRequest.Url)) }).
 		Int("body_size", len(poktHTTPRequest.BodyBz)).
 		Msg("deserialized POKTHTTPRequest from relay payload")
 

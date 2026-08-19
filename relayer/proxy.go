@@ -30,6 +30,8 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
+	"github.com/rs/zerolog"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/transport"
@@ -1480,7 +1482,10 @@ func (p *ProxyServer) parseRelayRequest(body []byte) (*servicetypes.RelayRequest
 
 	logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 		Str("method", poktHTTPRequest.Method).
-		Str("url", logging.RedactURL(poktHTTPRequest.Url)).
+		// Func, not a plain Str: arguments are evaluated even when the level
+		// is disabled, and this runs once per relay — the redaction parse
+		// must not be paid on the hot path just to be thrown away.
+		Func(func(e *zerolog.Event) { e.Str("url", logging.RedactURL(poktHTTPRequest.Url)) }).
 		Msg("deserialized POKTHTTPRequest from relay payload")
 
 	return relayRequest, serviceID, poktHTTPRequest, nil
@@ -1645,7 +1650,9 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Str("method", poktHTTPRequest.Method).
-			Str("url", logging.RedactURL(requestURL.String())).
+			// See above: keep the URL build and redaction off the hot path
+			// when Debug is disabled.
+			Func(func(e *zerolog.Event) { e.Str("url", logging.RedactURL(requestURL.String())) }).
 			Int("body_size", len(poktHTTPRequest.BodyBz)).
 			Msg("built backend request from POKTHTTPRequest")
 	} else {
