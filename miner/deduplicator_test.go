@@ -289,8 +289,11 @@ func TestDeduplicator_RedisErrorOnCheck_FailsOpen(t *testing.T) {
 	d, mr := setupTestDeduplicator(t)
 	ctx := context.Background()
 
-	// Close miniredis to simulate connection failure
-	mr.Close()
+	// Break every command rather than closing miniredis: a close frees the
+	// port, and a concurrently running package test binary can bind it before
+	// the call below, which then succeeds against a foreign Redis and makes
+	// this test pass for the wrong reason.
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
 	isDup, err := d.IsDuplicate(ctx, hashOf("r1"), "sess-1")
 	require.Error(t, err, "expected redis error")
@@ -301,7 +304,7 @@ func TestDeduplicator_RedisErrorOnMark_Propagates(t *testing.T) {
 	d, mr := setupTestDeduplicator(t)
 	ctx := context.Background()
 
-	mr.Close()
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
 	_, err := d.MarkProcessed(ctx, hashOf("r1"), "sess-1")
 	require.Error(t, err)

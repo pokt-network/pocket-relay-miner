@@ -81,7 +81,11 @@ func TestCheckRelayHealth_RedisUnreachable(t *testing.T) {
 	// Prime the cost path once while Redis is up, then take Redis down so the
 	// probe fails specifically on the Ping reachability check.
 	require.NoError(t, meter.CheckRelayHealth(ctx, "svc-health"))
-	mr.Close()
+	// SetError rather than Close: closing frees the port, and a concurrently
+	// running package test binary can bind it mid-probe, at which point the
+	// Ping succeeds against a foreign Redis and this test passes for the wrong
+	// reason. A pre-hook error keeps the connection but breaks every command.
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
 	err := meter.CheckRelayHealth(ctx, "svc-health")
 	require.Error(t, err, "CheckRelayHealth must fail when Redis is unreachable")
