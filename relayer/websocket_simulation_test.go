@@ -205,7 +205,6 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 		http.Header{},
 		nil, // sessionMonitor
 		pipeline,
-		1, // computeUnits
 		2*time.Second,
 		true, // simulated
 		simVerifier,

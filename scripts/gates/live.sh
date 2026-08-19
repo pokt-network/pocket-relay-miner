@@ -439,9 +439,28 @@ fi
 # one of them, or the pool is not distributing.
 case " $MATRIX " in
 *" jsonrpc:develop-http "*)
-    backend_count="$(kubectl get configmap relayer-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null |
-        python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; b=(((c.get("services") or {}).get("develop-http") or {}).get("backends") or {}).get("jsonrpc") or {}; print(len(b.get("urls") or []))' 2>/dev/null || echo 0)"
-    if [ "${backend_count:-0}" -gt 1 ]; then
+    # Capture the configmap FIRST: piping kubectl straight into python under
+    # pipefail makes a kubectl failure emit "0" twice (python prints 0 for
+    # empty stdin AND the || fallback fires on the pipeline status), and the
+    # doubled value blows up the -gt test, skipping this block silently.
+    rendered_relayer_config="$(kubectl get configmap relayer-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+    if [ -z "$rendered_relayer_config" ]; then
+        gate_skip "could not read relayer-config for the distribution assert"
+        backend_count=0
+        lb_mode=""
+    else
+        backend_count="$(printf '%s' "$rendered_relayer_config" |
+            python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; b=(((c.get("services") or {}).get("develop-http") or {}).get("backends") or {}).get("jsonrpc") or {}; print(len(b.get("urls") or []))' 2>/dev/null || echo 0)"
+        lb_mode="$(printf '%s' "$rendered_relayer_config" |
+            python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; b=(((c.get("services") or {}).get("develop-http") or {}).get("backends") or {}).get("jsonrpc") or {}; print(b.get("load_balancing") or "round_robin")' 2>/dev/null || echo "")"
+    fi
+    # Only round_robin promises to SPREAD load; first_healthy with multiple
+    # urls is legitimate failover-only config where all relays landing on one
+    # backend is the correct behavior, not a distribution bug.
+    if [ "${backend_count:-0}" -gt 1 ] && [ "$lb_mode" != "round_robin" ]; then
+        gate_skip "develop-http has ${backend_count} backends but load_balancing=${lb_mode:-unknown}; distribution assert only applies to round_robin"
+    fi
+    if [ "${backend_count:-0}" -gt 1 ] && [ "$lb_mode" = "round_robin" ]; then
         gate_step "assert: multi-backend distribution on develop-http (${backend_count} backends)"
         seen_backends=""
         rr_served=0

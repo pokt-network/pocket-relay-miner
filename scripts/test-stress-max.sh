@@ -26,13 +26,10 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Build the relay CLI once: every relay below is ring-signed and its supplier
-# signature verified — load goes straight to the relayer at :8180, never
-# through the PATH gateway (which masks relayer 503s as empty 200s).
-CLI_BIN_DIR="$(mktemp -d)"
-trap 'rm -rf "$CLI_BIN_DIR"' EXIT
-CLI_BIN="$CLI_BIN_DIR/pocket-relay-miner"
-( cd "$SCRIPT_DIR/.." && go build -o "$CLI_BIN" . ) || exit 1
+# Build the relay CLI once (exports CLI_BIN / CLI_BIN_DIR; cleanup() below
+# removes the mktemp dir — see the no-trap contract in lib/cli-build.sh).
+. "$SCRIPT_DIR/lib/cli-build.sh"
+build_relay_cli || exit 1
 
 # ─── Configuration ───────────────────────────────────────────
 RELAYER_URL="${RELAYER_URL:-http://localhost:8180}"
@@ -92,6 +89,7 @@ cleanup() {
     log_info "Shutting down..."
     for pid in "${PIDS[@]}"; do kill "$pid" 2>/dev/null || true; done
     wait "${PIDS[@]}" 2>/dev/null || true
+    rm -rf "$CLI_BIN_DIR"
 }
 trap cleanup EXIT
 
@@ -99,17 +97,7 @@ trap cleanup EXIT
 log_phase "PRE-FLIGHT"
 
 # Wait for the relayer to serve a full signed relay (not just an HTTP status)
-RELAY_OK=false
-for i in $(seq 1 30); do
-    if "$CLI_BIN" relay jsonrpc --localnet --service "$HTTP_SERVICE" \
-        --relayer-url "$RELAYER_URL" >/dev/null 2>&1; then
-        RELAY_OK=true
-        break
-    fi
-    echo "  waiting for relayer ($i/30)..."
-    sleep 2
-done
-$RELAY_OK || { log_error "Relayer not serving signed relays after 60s"; exit 1; }
+wait_relay_ready "$HTTP_SERVICE" "$RELAYER_URL" 30 || { log_error "Relayer not serving signed relays"; exit 1; }
 log_info "HTTP relay OK (signed end to end)"
 
 RELAYER_PODS=$(kubectl --context "$K8S_CONTEXT" get pods -l app=relayer --no-headers 2>/dev/null | grep -c Running)
@@ -152,11 +140,15 @@ log_info "Starting HTTP: ${TOTAL_RPS} RPS, signed + verified"
 PIDS+=($!)
 log_info "  PID: ${PIDS[-1]}"
 
-# WebSocket stress: signed WS relays through the CLI
+# WebSocket stress: signed WS relays through the CLI.
+# The CLI rejects -n above 1,000,000 (cmd_relay.go); 200 conns × 20 msg/s ×
+# 300s asks for 1.2M, so clamp to the cap — the run just ends slightly early.
+WS_TOTAL=$((WS_CONNECTIONS * WS_MSG_RATE * DURATION))
+[ "$WS_TOTAL" -gt 1000000 ] && WS_TOTAL=1000000
 log_info "Starting WS: ${WS_CONNECTIONS} concurrent conns"
 "$CLI_BIN" relay websocket --localnet --service "$WS_SERVICE" \
     --relayer-url "$RELAYER_URL" \
-    --load-test -n "$((WS_CONNECTIONS * WS_MSG_RATE * DURATION))" \
+    --load-test -n "$WS_TOTAL" \
     --rps "$((WS_CONNECTIONS * WS_MSG_RATE))" \
     --concurrency "$WS_CONNECTIONS" --all-suppliers > /tmp/stress-ws.txt 2>&1 &
 PIDS+=($!)
@@ -189,9 +181,23 @@ while [ $ELAPSED -lt "$DURATION" ]; do
     fi
 done
 
-# Wait for load to finish
-log_info "Waiting for load processes..."
-for pid in "${PIDS[@]}"; do wait "$pid" 2>/dev/null || true; done
+# Wait for load to finish — bounded: the monitor loop already covered
+# DURATION, so give the loaders 120s of grace to flush their summaries and
+# kill them past that; an unbounded wait wedges the whole run on one stuck
+# connection.
+log_info "Waiting for load processes (up to 120s grace)..."
+WAIT_DEADLINE=$((SECONDS + 120))
+for pid in "${PIDS[@]}"; do
+    while kill -0 "$pid" 2>/dev/null; do
+        if [ "$SECONDS" -ge "$WAIT_DEADLINE" ]; then
+            log_warn "Load process $pid still running past grace — killing"
+            kill "$pid" 2>/dev/null || true
+            break
+        fi
+        sleep 2
+    done
+    wait "$pid" 2>/dev/null || true
+done
 PIDS=()
 
 # ─── Phase 3: Results (all from Loki) ─────────────────────
@@ -200,14 +206,14 @@ log_phase "RESULTS"
 # HTTP: signed relays, verified end to end by the CLI
 echo -e "${BOLD}─── HTTP Load (signed + verified) ───${NC}"
 if [ -f /tmp/stress-http.txt ]; then
-    grep -E "Total|Successful|Failed|RPS|Latency|p50|p95|p99" /tmp/stress-http.txt | head -20
+    grep -E "Total|Successful|Errors|Success Rate|RPS|Latency|p50|p95|p99" /tmp/stress-http.txt | head -20
 fi
 
 # WebSocket
 echo ""
 echo -e "${BOLD}─── WebSocket Stress ───${NC}"
 if [ -f /tmp/stress-ws.txt ]; then
-    grep -E "Total|Successful|Failed|RPS|Latency|p50|p95|p99" /tmp/stress-ws.txt | head -20
+    grep -E "Total|Successful|Errors|Success Rate|RPS|Latency|p50|p95|p99" /tmp/stress-ws.txt | head -20
 fi
 
 # Claim/proof from Loki (survives chaos pod kills)

@@ -12,16 +12,28 @@ you point it at your own Pocket full node and your own service backends.
 ```bash
 cp ../../config.relayer.example.yaml config/relayer.yaml
 cp ../../config.miner.example.yaml config/miner.yaml
-$EDITOR config/relayer.yaml   # pocket_node endpoints, services/backends
-$EDITOR config/miner.yaml     # pocket_node endpoints, chain id
-$EDITOR config/supplier-keys.yaml  # your supplier keys — never commit this
+cp config/supplier-keys.yaml.example config/supplier-keys.yaml
+```
 
+Then edit the copies — every step is required:
+
+1. **Set `redis.url: redis://redis:6379` in BOTH `config/relayer.yaml` and
+   `config/miner.yaml`.** The example configs dial `redis://localhost:6379`,
+   which inside a container is the container itself — both services
+   crash-loop until this points at the compose service name.
+2. Set `keys.keys_file: /keys/supplier-keys.yaml` in both configs (the path
+   the compose file mounts the keys at).
+3. In `config/relayer.yaml`: point `pocket_node` at your full node and
+   configure your services/backends.
+4. In `config/miner.yaml`: point `pocket_node` at your full node and set the
+   chain id.
+5. In `config/supplier-keys.yaml`: replace the placeholder with your real
+   hex-encoded supplier private keys — **never commit this file**.
+
+```bash
 docker compose up -d
 docker compose logs -f relayer miner
 ```
-
-Both configs must point `redis.url` at `redis://redis:6379` (the compose
-service name) and `keys.keys_file` at `/keys/supplier-keys.yaml`.
 
 ### Scaling is the whole point
 

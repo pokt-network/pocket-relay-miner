@@ -594,6 +594,13 @@ type KeysConfig struct {
 
 	// Keyring configuration for Cosmos SDK keyring.
 	Keyring *KeyringConfig `yaml:"keyring,omitempty"`
+
+	// RemovedKeysDir is the tombstone for the retired keys_dir setting. The
+	// YAML decoder drops unknown fields silently, so a config still carrying
+	// keys_dir would boot without those supplier keys — the relayer serves
+	// and signs nothing for them, which is revenue loss with no diagnostic.
+	// Validate() turns that case into a hard, explicit error instead.
+	RemovedKeysDir string `yaml:"keys_dir,omitempty"`
 }
 
 // KeyringConfig contains Cosmos SDK keyring configuration.
@@ -782,6 +789,19 @@ func (c *Config) Validate() error {
 		}
 		// Equal full meter prefix: nothing moves. Accepted so that configs
 		// shipped with the old default ("ha") upgrade without editing.
+	}
+
+	// The retired keys.keys_dir loaded supplier keys from a directory. A
+	// lenient decoder would drop the field and boot WITHOUT those keys: the
+	// relayer signs nothing for those suppliers and the revenue loss carries
+	// no diagnostic. Any non-empty value is therefore a hard error.
+	if c.Keys.RemovedKeysDir != "" {
+		return fmt.Errorf(
+			"keys.keys_dir is no longer supported: migrate the keys in %q to a keys_file "+
+				"(supplier addresses are derived from each private key) or import them into the "+
+				"keyring, then remove the keys_dir line",
+			c.Keys.RemovedKeysDir,
+		)
 	}
 
 	// Validate Redis pool settings (all are optional, 0 = use defaults)

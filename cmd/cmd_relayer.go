@@ -716,7 +716,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	logger.Info().Msg("proxy subscribed to block height updates from Redis")
 
 	// Load keys and create response signer
-	// Support multiple key sources: keys_file, keys_dir, keyring
+	// Support multiple key sources: keys_file, keyring
 	keyProviders, err := buildKeyProviders(logger, config.Keys)
 	if err != nil {
 		return err

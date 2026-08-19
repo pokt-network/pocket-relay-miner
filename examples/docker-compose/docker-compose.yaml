@@ -29,6 +29,8 @@ services:
       retries: 5
 
   relayer:
+    # config/relayer.yaml must set redis.url: redis://redis:6379 — the
+    # example config's localhost:6379 is THIS container inside compose.
     image: ghcr.io/pokt-network/pocket-relay-miner:latest
     command: ["relayer", "--config", "/config/relayer.yaml"]
     volumes:
@@ -41,6 +43,8 @@ services:
         condition: service_healthy
 
   miner:
+    # config/miner.yaml must set redis.url: redis://redis:6379 — the
+    # example config's localhost:6379 is THIS container inside compose.
     image: ghcr.io/pokt-network/pocket-relay-miner:latest
     command: ["miner", "--config", "/config/miner.yaml"]
     volumes:

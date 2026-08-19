@@ -47,10 +47,9 @@ cache -- inspect those with "redis cache --type service --key <id>".`,
 			}
 			defer func() { _ = client.Close() }()
 
-			if showAll {
-				return showAllMeterKeys(ctx, client)
-			}
-
+			// --session must win over --all: with the default already being
+			// the full listing, checking showAll first made
+			// `--session X --all` silently ignore the session filter.
 			if sessionID != "" {
 				return inspectSessionMeter(ctx, client, sessionID)
 			}
@@ -64,7 +63,7 @@ cache -- inspect those with "redis cache --type service --key <id>".`,
 	}
 
 	cmd.Flags().StringVar(&sessionID, "session", "", "Session ID")
-	cmd.Flags().BoolVar(&showAll, "all", false, "Show all meter keys")
+	cmd.Flags().BoolVar(&showAll, "all", false, "Show all meter keys (default behavior; kept for compatibility)")
 
 	return cmd
 }

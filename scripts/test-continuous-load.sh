@@ -34,25 +34,31 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-cd "$(dirname "$0")/.." || exit 1
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-BIN_DIR="$(mktemp -d)"
-trap 'rm -rf "$BIN_DIR"' EXIT
-BIN="${BIN_DIR}/pocket-relay-miner"
+# Build the relay CLI once (exports CLI_BIN / CLI_BIN_DIR). This script has
+# no cleanup() to clobber the EXIT trap, so the trap owns the mktemp dir.
 echo "Building the CLI under test..."
-go build -o "$BIN" . || exit 1
+. "$SCRIPT_DIR/lib/cli-build.sh"
+build_relay_cli || exit 1
+trap 'rm -rf "$CLI_BIN_DIR"' EXIT
 
 get_redis_memory() {
     redis-cli INFO memory 2>/dev/null | grep "used_memory_human" | cut -d: -f2 | tr -d '\r' || echo "?"
 }
 
+# No CLI subcommand exposes these counts namespace-aware, so the key prefix
+# is derived ONCE here. Localnet default namespace only — the counts read
+# zero under a custom redis.namespace.base_prefix.
+NS_BASE="ha"
+
 report_state() {
-    local active proved streams total_len
-    active=$(redis-cli KEYS "ha:miner:sessions:*:state:active" 2>/dev/null | wc -l)
-    proved=$(redis-cli KEYS "ha:miner:sessions:*:state:proved" 2>/dev/null | wc -l)
+    local active proved streams total_len key
+    active=$(redis-cli --scan --pattern "${NS_BASE}:miner:sessions:*:state:active" 2>/dev/null | wc -l)
+    proved=$(redis-cli --scan --pattern "${NS_BASE}:miner:sessions:*:state:proved" 2>/dev/null | wc -l)
     streams=0
     total_len=0
-    for key in $(redis-cli KEYS "ha:relays:*" 2>/dev/null); do
+    for key in $(redis-cli --scan --pattern "${NS_BASE}:relays:*" 2>/dev/null); do
         streams=$((streams + 1))
         total_len=$((total_len + $(redis-cli XLEN "$key" 2>/dev/null || echo 0)))
     done
@@ -84,13 +90,24 @@ finish() {
 trap finish INT TERM
 
 while true; do
-    out="$("$BIN" relay jsonrpc --localnet --service "$SERVICE_ID" \
+    out="$("$CLI_BIN" relay jsonrpc --localnet --service "$SERVICE_ID" \
         --relayer-url "$RELAYER_URL" \
         --load-test -n "$BATCH" --concurrency "$CONCURRENCY" --rps "$TARGET_RPS" \
         --all-suppliers 2>&1)"
+    status=$?
+    # Count only what the CLI reports as attempted: a failed run may have
+    # sent anything from zero to a full batch, and assuming BATCH would
+    # fabricate throughput while hot-spinning against a dead relayer.
+    sent="$(printf '%s\n' "$out" | awk -F': *' '/^Total Requests:/ {print $2; exit}')"
     ok="$(printf '%s\n' "$out" | awk -F': *' '/^Successful:/ {print $2; exit}')"
-    total_sent=$((total_sent + BATCH))
+    total_sent=$((total_sent + ${sent:-0}))
     total_ok=$((total_ok + ${ok:-0}))
-    echo "[$(date '+%H:%M:%S')] batch=${BATCH} verified_ok=${ok:-0} cumulative=${total_ok}/${total_sent}"
+    if [ "$status" -ne 0 ]; then
+        echo "[$(date '+%H:%M:%S')] CLI batch failed (exit ${status}); last output lines:"
+        printf '%s\n' "$out" | tail -5 | sed 's/^/    /'
+        sleep 5
+    else
+        echo "[$(date '+%H:%M:%S')] batch=${sent:-0} verified_ok=${ok:-0} cumulative=${total_ok}/${total_sent}"
+    fi
     report_state
 done
