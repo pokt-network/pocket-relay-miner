@@ -87,7 +87,9 @@ type BackendHealth struct {
 // When a pool endpoint is associated, derives status from endpoint.IsHealthy().
 func (h *BackendHealth) GetStatus() HealthStatus {
 	if h.endpoint != nil {
-		if h.endpoint.IsHealthy() {
+		// Pure read: a status observer must not trigger the half-open
+		// auto-recovery (see pool.BackendEndpoint.CurrentlyHealthy).
+		if h.endpoint.CurrentlyHealthy() {
 			return HealthStatusHealthy
 		}
 		return HealthStatusUnhealthy
@@ -129,7 +131,7 @@ func (h *BackendHealth) GetLastError() string {
 // Delegates to pool BackendEndpoint when available (single source of truth).
 func (h *BackendHealth) IsHealthy() bool {
 	if h.endpoint != nil {
-		return h.endpoint.IsHealthy()
+		return h.endpoint.CurrentlyHealthy()
 	}
 	status := h.GetStatus()
 	// Unknown is treated as healthy to avoid blocking on startup
@@ -490,7 +492,7 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 		// Delegate to pool endpoint atomics (shared with circuit breaker)
 		failures := backend.endpoint.IncrementFailures()
 		if int(failures) >= unhealthyThreshold {
-			wasHealthy := backend.endpoint.IsHealthy()
+			wasHealthy := backend.endpoint.CurrentlyHealthy()
 			backend.endpoint.SetUnhealthy()
 			if wasHealthy {
 				hc.logger.Warn().
@@ -548,7 +550,10 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 		backend.endpoint.ResetFailures()
 		successes := backend.consecutiveSuccesses.Add(1)
 		if int(successes) >= healthyThreshold {
-			wasUnhealthy := !backend.endpoint.IsHealthy()
+			// CurrentlyHealthy, not IsHealthy: IsHealthy mutates (half-open
+			// auto-recovery), so reading it here flipped the endpoint healthy
+			// and swallowed this very transition log and gauge update.
+			wasUnhealthy := !backend.endpoint.CurrentlyHealthy()
 			backend.endpoint.SetHealthy()
 			if wasUnhealthy {
 				// Full reset on recovery: clean slate for the backend
