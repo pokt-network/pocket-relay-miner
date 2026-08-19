@@ -332,22 +332,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		ChainID:          config.GetChainID(), // Get from config (defaults to "pocket" if not set)
 	})
 
-	// Register leader election callbacks
-	// On elected: Start all leader-only resources
-	globalLeader.OnElected(func(ctx context.Context) {
-		logger.Info().Msg("starting leader controller (became leader)")
-		if err = leaderController.Start(ctx); err != nil {
-			logger.Fatal().Err(err).Msg("failed to start leader controller - exiting process")
-		}
-	})
-
-	// On lost: Clean up all resources
-	globalLeader.OnLost(func(ctx context.Context) {
-		logger.Info().Msg("stopping leader controller (lost leadership)")
-		if err = leaderController.Close(); err != nil {
-			logger.Fatal().Err(err).Msg("failed to close leader controller")
-		}
-	})
+	// Register leader election callbacks. They run in goroutines, so failures
+	// are propagated to the main goroutine via this channel instead of
+	// logger.Fatal (os.Exit would skip every deferred cleanup).
+	leaderErrCh := make(chan error, 1)
+	registerLeaderCallbacks(logger, globalLeader, leaderController, leaderErrCh)
 
 	// If already a leader at startup, start immediately
 	if globalLeader.IsLeader() {
@@ -373,13 +362,18 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 
-	// Wait for a shutdown signal
-	<-sigCh
-	logger.Info().Msg("shutdown signal received, stopping HA Miner...")
+	// Wait for a shutdown signal or a leader-controller failure
+	var runErr error
+	select {
+	case <-sigCh:
+		logger.Info().Msg("shutdown signal received, stopping HA Miner...")
+	case runErr = <-leaderErrCh:
+		logger.Error().Err(runErr).Msg("leader controller failed, stopping HA Miner so a standby can take over...")
+	}
 
 	// Deferring handles graceful shutdown
 	logger.Info().Msg("HA Miner stopped")
-	return nil
+	return runErr
 }
 
 // loadMinerConfig loads the miner configuration from a file or flags.
