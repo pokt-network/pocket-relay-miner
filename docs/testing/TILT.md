@@ -182,7 +182,7 @@ DURATION=120 HTTP_RPS=300 ./scripts/test-quantitative-failover.sh
 # End-to-end claim payment: sends relays to develop-http for one supplier,
 # watches the miner log for the claim TX hash, then queries block_results for
 # EventClaimSettled to confirm the on-chain mint.
-./scripts/verify-claim-payment.sh
+scripts/gates/live.sh   # settlement asserted per service, on-chain
 ```
 
 Claim/proof timing (when a claim is expected on-chain, and why proofs may lag)

@@ -32,17 +32,13 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 | `test-chaos-leader-flush-gap.sh` | Kills the miner leader in the claim-flush→proof gap; regression guard for SMST lazy-load on failover. |
 | `test-quantitative-failover.sh` | Mid-flight miner scale-down; asserts on-chain claimed relays == loader successes within a drift budget. |
 | `verify-rebalance-fix.sh` | Rebalancer veto regression (issue #7): both miner replicas must end with non-zero claimed_count. |
-| `verify-claim-payment.sh` | End-to-end claim payment: sends relays, watches the claim tx, confirms `EventClaimSettled` on-chain. |
 
 ## Load / lifecycle (PATH + hey)
 
 | Script | What it does |
 |---|---|
-| `test-continuous-load.sh` | Sustained ~200 RPS (override `--rps`) until Ctrl-C; for memory/CPU leak watching. |
-| `test-multi-supplier-10k.sh` | 10k relays with no supplier pinning; forces concurrent claim/prove across every supplier. |
+| `test-continuous-load.sh` | Sustained signed load via the relay CLI at :8180 (override `--rps`) until Ctrl-C; reports Redis memory/session/stream growth for leak watching. |
 | `test-stress-max.sh` | ~1000 RPS HTTP + 200 concurrent WebSocket for ~5 min; asserts claims/proofs via Loki. |
-| `test-smst-claim-and-ws.sh` | HTTP claim/proof load + concurrent WebSocket writes (SMST-root + WS-mutex regression). |
-| `test-round-robin.sh` | Tallies `result.backend_id` to confirm even distribution across the multi-backend HTTP pool. |
 
 ## Direct CLI / feature validation
 
@@ -53,8 +49,7 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 
 ## Subdirectories
 
-- `loadtest/` — backend RPS-ceiling measurement and per-service pool tuning (`backends.sh`, `http-verify.go`). See [`loadtest/README.md`](loadtest/README.md).
+- `loadtest/` — backend RPS-ceiling measurement and per-service pool tuning (`backends.sh`). See [`loadtest/README.md`](loadtest/README.md).
 - `ws-test/` — manual WebSocket tester (session rollover, not covered by the CLI `relay websocket` mode).
-- `ws-stress/` — WebSocket memory/leak stress tester.
 - `lib/` — shared bash helpers (`common.sh`).
 - `localonly/` — gitignored; operator-specific config (see the operator-data rule in [`../CLAUDE.md`](../CLAUDE.md)).
