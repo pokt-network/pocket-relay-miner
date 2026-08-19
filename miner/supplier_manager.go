@@ -1122,10 +1122,8 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			ConsumerName:            m.config.ConsumerName,
 			BatchSize:               int64(m.config.BatchSize),                // Use config value (default: 1000)
 			ClaimIdleTimeout:        m.config.ClaimIdleTimeout.Milliseconds(), // From config (default: 60000ms)
-			MaxRetries:              3,
 			// Note: Uses BLOCK 0 (TRUE PUSH) for live consumption - hardcoded in consumer
 		},
-		0, // Discovery interval ignored with single stream architecture
 	)
 	if err != nil {
 		cancelFn()
@@ -1206,7 +1204,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 
 		// Wire stream deleter for cleanup after session settlement
 		// This stops the consumer from reading stale messages and frees Redis memory
-		lifecycleCallback.SetStreamDeleter(consumer)
 
 		// Wire the process-wide submission tracker + rebroadcast store (built
 		// once; see ensureSharedTrackers and the field docs). The submission
