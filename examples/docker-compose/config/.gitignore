@@ -2,3 +2,5 @@
 relayer.yaml
 miner.yaml
 supplier-keys.yaml
+# The placeholder templates ARE tracked.
+!*.example

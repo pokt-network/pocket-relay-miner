@@ -429,9 +429,22 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("pocket_node.query_node_grpc_url is required")
 	}
 
+	// The retired keys.keys_dir loaded supplier keys from a directory. A
+	// lenient decoder would drop the field and boot WITHOUT those keys: the
+	// miner claims and proves nothing for those suppliers and the revenue
+	// loss carries no diagnostic. Any non-empty value is therefore a hard error.
+	if c.Keys.RemovedKeysDir != "" {
+		return fmt.Errorf(
+			"keys.keys_dir is no longer supported: migrate the keys in %q to a keys_file "+
+				"(supplier addresses are derived from each private key) or import them into the "+
+				"keyring, then remove the keys_dir line",
+			c.Keys.RemovedKeysDir,
+		)
+	}
+
 	// Keys config is required (suppliers are auto-discovered from keys)
 	if !c.HasKeySource() {
-		return fmt.Errorf("keys config is required (at least one of: keys_file, keys_dir, or keyring)")
+		return fmt.Errorf("keys config is required (at least one of: keys_file or keyring)")
 	}
 
 	// Validate keyring config if provided

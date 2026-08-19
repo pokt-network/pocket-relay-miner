@@ -36,7 +36,7 @@ The HA Miner consumes mined relays from Redis Streams and builds SMST trees.
 It supports multiple suppliers and dynamically adds/removes them based on key changes.
 
 Configuration:
-  --config: Path to miner config YAML file (recommended)
+  --config: Path to miner config YAML file (required)
 
 
 Features:
@@ -55,8 +55,7 @@ Example:
 		RunE: runHAMiner,
 	}
 
-	// Config file (recommended approach)
-	cmd.Flags().String(flagMinerConfig, "", "Path to miner config YAML file")
+	cmd.Flags().String(flagMinerConfig, "", "Path to miner config YAML file (required)")
 
 	// Redis flags (can override config)
 	cmd.Flags().String(flagRedisURL, "", "Redis connection URL (overrides config)")

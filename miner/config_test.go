@@ -126,6 +126,36 @@ func TestConfig_Validate_NoKeySource(t *testing.T) {
 	require.Contains(t, err.Error(), "keys config is required")
 }
 
+// TestConfig_Validate_RemovedKeysDir pins the tombstone for the retired
+// keys.keys_dir setting. The YAML decoder drops unknown fields silently, so
+// without the tombstone an old config would boot WITHOUT those supplier keys
+// and mine nothing for them, with no diagnostic.
+func TestConfig_Validate_RemovedKeysDir(t *testing.T) {
+	cfg := &Config{
+		Redis: RedisConfig{
+			RedisConfig: config.RedisConfig{
+				URL: "redis://localhost:6379",
+			},
+			ConsumerName: "miner-1",
+		},
+		PocketNode: config.PocketNodeConfig{
+			QueryNodeRPCUrl:  "http://localhost:26657",
+			QueryNodeGRPCUrl: "localhost:9090",
+		},
+		Keys: config.KeysConfig{
+			KeysFile:       "/path/to/keys.yaml",
+			RemovedKeysDir: "/etc/pocket/keys",
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "keys_dir")
+	// The advice must name the safe migrations, not the removed mechanism.
+	require.Contains(t, err.Error(), "keys_file")
+	require.Contains(t, err.Error(), "keyring")
+}
+
 // Note: Supplier validation tests removed - suppliers are auto-discovered from keys
 // See TestConfig_Validate_NoKeySource for key validation
 

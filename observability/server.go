@@ -31,11 +31,13 @@ type ServerConfig struct {
 	PprofAddr string
 
 	// Registry is the Prometheus registry to serve metrics from.
-	// If nil, the default registry is used.
+	// Required when MetricsEnabled: Start fails if nil — both binaries pass
+	// their combined registry.
 	Registry prometheus.Gatherer
 }
 
-// DefaultServerConfig returns sensible defaults.
+// DefaultServerConfig returns sensible defaults. Registry is left nil: the
+// caller MUST set it before Start when MetricsEnabled is true.
 func DefaultServerConfig() ServerConfig {
 	return ServerConfig{
 		MetricsEnabled: true,

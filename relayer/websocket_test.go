@@ -157,7 +157,6 @@ func TestNewWebSocketBridge_RequiresRelayProcessor(t *testing.T) {
 		http.Header{},
 		nil,
 		nil,
-		1,
 		time.Second,
 		false, // simulated
 		nil,   // simVerifier

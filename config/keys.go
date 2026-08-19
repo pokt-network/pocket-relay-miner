@@ -8,6 +8,13 @@ type KeysConfig struct {
 
 	// Keyring configuration for Cosmos SDK keyring.
 	Keyring *KeyringConfig `yaml:"keyring,omitempty"`
+
+	// RemovedKeysDir is the tombstone for the retired keys_dir setting. The
+	// YAML decoder drops unknown fields silently, so a config still carrying
+	// keys_dir would boot without those supplier keys — the fleet serves and
+	// signs nothing for them, which is revenue loss with no diagnostic.
+	// Validation turns that case into a hard, explicit error instead.
+	RemovedKeysDir string `yaml:"keys_dir,omitempty"`
 }
 
 // KeyringConfig contains Cosmos SDK keyring configuration.

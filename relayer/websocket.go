@@ -197,7 +197,6 @@ type WebSocketBridge struct {
 	serviceID       string
 	supplierAddress string
 	arrivalHeight   int64
-	computeUnits    uint64 // Compute units for this service
 
 	// Simulation (optional). When simulated is true, every gateway message on
 	// this connection goes through simVerifier's Admission zone instead of
@@ -256,7 +255,6 @@ func NewWebSocketBridge(
 	headers http.Header,
 	sessionMonitor *SessionMonitor,
 	relayPipeline *RelayPipeline,
-	computeUnits uint64,
 	dialTimeout time.Duration,
 	simulated bool,
 	simVerifier *SimulationVerifier,
@@ -298,7 +296,6 @@ func NewWebSocketBridge(
 		serviceID:        serviceID,
 		supplierAddress:  supplierAddress,
 		arrivalHeight:    arrivalHeight,
-		computeUnits:     computeUnits,
 		simulated:        simulated,
 		simVerifier:      simVerifier,
 		simKeyID:         simKeyID,
@@ -1198,10 +1195,6 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 
 		arrivalHeight := p.currentBlockHeight.Load()
 
-		// TODO: Get actual compute units from service config or relay processor
-		// For now, use default value of 1 (will be refined in future PR)
-		computeUnits := uint64(1)
-
 		// Get dial timeout from service's timeout profile
 		dialTimeout := getWSDialTimeout(p.config.GetServiceTimeoutProfile(serviceID))
 
@@ -1234,8 +1227,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			headers,
 			p.sessionMonitor, // Global session monitor (shared across all connections)
 			p.relayPipeline,  // Unified relay pipeline for validation/metering/signing
-			computeUnits,
-			dialTimeout, // Dial timeout from service's timeout profile
+			dialTimeout,      // Dial timeout from service's timeout profile
 			simulated,
 			bridgeSimVerifier,
 			bridgeSimKeyID,

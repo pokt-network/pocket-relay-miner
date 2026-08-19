@@ -59,35 +59,35 @@ properties:
             default: ha
           cache_prefix:
             type: string
-            description: Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)
+            description: "Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)"
             default: cache
           events_prefix:
             type: string
-            description: Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)
+            description: "Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)"
             default: events
           streams_prefix:
             type: string
-            description: Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)
+            description: "Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)"
             default: relays
           miner_prefix:
             type: string
-            description: Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)
+            description: "Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)"
             default: miner
           supplier_prefix:
             type: string
-            description: Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)
+            description: "Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)"
             default: supplier
           meter_prefix:
             type: string
-            description: Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)
+            description: "Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)"
             default: meter
           params_prefix:
             type: string
-            description: Cached params prefix (full key: {base_prefix}:{params_prefix}:*)
+            description: "Cached params prefix (full key: {base_prefix}:{params_prefix}:*)"
             default: params
           consumer_group_prefix:
             type: string
-            description: Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})
+            description: "Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})"
             default: miners
 
   pocket_node:
