@@ -359,6 +359,12 @@ esac
 # localnet (previous runs, bursts) cannot satisfy this run's expectations.
 # A failed fetch must be a hard stop: an empty value would degrade the filter
 # to ">= 0" and let ANY earlier session satisfy the exact-billing assertion.
+# GRANULARITY: the filter is per SESSION. Traffic sent earlier within the
+# session that is still open when this run starts (or one that closes right
+# at the boundary) shares its session_end with this run's relays and is
+# counted -- the billed>sent failure then reads "foreign traffic", which is
+# accurate. Leave at least one full session (~200s on this localnet) between
+# a previous load and a gate run.
 load_start_height="$(curl -fsS --max-time 5 "${VALIDATOR_RPC}/status" 2>/dev/null |
     jq -r '.result.sync_info.latest_block_height // empty')"
 if [ -z "$load_start_height" ]; then
