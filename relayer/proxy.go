@@ -1876,7 +1876,7 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 		}
 		for _, ep := range bp.All() {
 			total++
-			isHealthy := ep.IsHealthy()
+			isHealthy := ep.CurrentlyHealthy() // pure read: status API must not trigger auto-recovery
 			if isHealthy {
 				healthy++
 			}
