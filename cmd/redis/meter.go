@@ -55,7 +55,11 @@ cache -- inspect those with "redis cache --type service --key <id>".`,
 				return inspectSessionMeter(ctx, client, sessionID)
 			}
 
-			return inspectGlobalParams(ctx, client)
+			// Default: everything. The old default read the legacy
+			// {base}:params:shared|session keys, which nothing has written
+			// for a long time — "Not found" guaranteed on every new
+			// deployment.
+			return showAllMeterKeys(ctx, client)
 		},
 	}
 
@@ -164,42 +168,6 @@ func supplierFromMeterMetaKey(metaKey string) (string, bool) {
 		return "", false
 	}
 	return supplier, true
-}
-
-func inspectGlobalParams(ctx context.Context, client *DebugRedisClient) error {
-	keys := []string{
-		client.KB().LegacyParamsKey("shared"),
-		client.KB().LegacyParamsKey("session"),
-	}
-
-	fmt.Printf("Global Parameters\n")
-	fmt.Printf("=================\n\n")
-
-	for _, key := range keys {
-		val, err := client.Get(ctx, key).Result()
-		if err == redis.Nil {
-			fmt.Printf("%s: Not found\n\n", key)
-			continue
-		}
-		if err != nil {
-			fmt.Printf("%s: Error - %v\n\n", key, err)
-			continue
-		}
-
-		ttl, _ := client.TTL(ctx, key).Result()
-
-		fmt.Printf("%s\n", key)
-		fmt.Printf("TTL: %v\n", ttl)
-		fmt.Printf("Size: %d bytes\n", len(val))
-		fmt.Printf("Value (first 200 chars):\n")
-		if len(val) > 200 {
-			fmt.Printf("%s...\n\n", val[:200])
-		} else {
-			fmt.Printf("%s\n\n", val)
-		}
-	}
-
-	return nil
 }
 
 func showAllMeterKeys(ctx context.Context, client *DebugRedisClient) error {

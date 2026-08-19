@@ -31,7 +31,6 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"ParamsProofLockKey":        kb.ParamsProofLockKey(),
 		"ParamsSharedCacheKey":      kb.ParamsSharedCacheKey(),
 		"ParamsSharedLockKey":       kb.ParamsSharedLockKey(),
-		"ParamsSessionKey":          kb.ParamsSessionKey(),
 		"MeterCleanupChannel":       kb.MeterCleanupChannel(),
 		"MeterActiveSessionsKey":    kb.MeterActiveSessionsKey(),
 		"BlockEventChannel":         kb.BlockEventChannel(),
@@ -65,7 +64,6 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"SupplierStateKey":                kb.SupplierStateKey("pokt1a"),
 		"SupplierStatePattern":            kb.SupplierStatePattern(),
 		"SMSTSessionNodesPattern":         kb.SMSTSessionNodesPattern("sess1"),
-		"LegacyParamsKey":                 kb.LegacyParamsKey("shared"),
 		"LegacyParamsPattern":             kb.LegacyParamsPattern(),
 		"SimulationReplayKey":             kb.SimulationReplayKey("deadbeef"),
 	}
@@ -115,7 +113,6 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"ParamsProofLockKey":        "ha:cache:lock:proof_params",
 		"ParamsSharedCacheKey":      "ha:cache:shared_params",
 		"ParamsSharedLockKey":       "ha:cache:lock:shared_params",
-		"ParamsSessionKey":          "ha:cache:session_params",
 		"MeterCleanupChannel":       "ha:meter:cleanup",
 		"MeterActiveSessionsKey":    "ha:meter:active_sessions",
 		"BlockEventChannel":         "ha:events:blocks",
@@ -140,7 +137,6 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"SupplierStateKey":                "ha:supplier:pokt1a",
 		"SupplierStatePattern":            "ha:supplier:*",
 		"SMSTSessionNodesPattern":         "ha:smst:*:sess1:nodes",
-		"LegacyParamsKey":                 "ha:params:shared",
 		"LegacyParamsPattern":             "ha:params:*",
 		"SimulationReplayKey":             "ha:sim:replay:deadbeef",
 

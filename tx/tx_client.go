@@ -72,9 +72,6 @@ const (
 	// Applied when GasLimit=0 (auto) to add safety margin: actual_gas = simulated_gas * adjustment
 	DefaultGasAdjustment = 1.7
 
-	// DefaultTimeoutHeight is the number of blocks after which a transaction times out.
-	DefaultTimeoutHeight = 100
-
 	// DefaultChainID for the pocket network.
 	DefaultChainID = "pocket"
 
@@ -167,9 +164,6 @@ type TxClientConfig struct {
 	// Default: 1.7 (adds 70% safety margin)
 	GasAdjustment float64
 
-	// TimeoutBlocks is the number of blocks after which a transaction times out.
-	TimeoutBlocks uint64
-
 	// TxTimeoutMin is the floor for window-based TX broadcast deadlines.
 	// Prevents a near-expired window from producing an unreasonably short deadline.
 	// Default: 2min
@@ -254,9 +248,6 @@ func NewTxClient(
 			return nil, fmt.Errorf("failed to parse default gas price: %w", err)
 		}
 		config.GasPrice = gasPrice
-	}
-	if config.TimeoutBlocks == 0 {
-		config.TimeoutBlocks = DefaultTimeoutHeight
 	}
 	if config.GasAdjustment == 0 {
 		config.GasAdjustment = DefaultGasAdjustment
