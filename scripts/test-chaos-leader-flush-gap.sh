@@ -43,8 +43,16 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Build the relay CLI once: load goes through it (signed relays against the
+# relayer at :8180), never through the PATH gateway, which masks relayer 503s
+# as empty 200s.
+CLI_BIN_DIR="$(mktemp -d)"
+trap 'rm -rf "$CLI_BIN_DIR"' EXIT
+CLI_BIN="$CLI_BIN_DIR/pocket-relay-miner"
+( cd "$SCRIPT_DIR/.." && go build -o "$CLI_BIN" . ) || exit 1
+
 # ─── Configuration ───────────────────────────────────────────
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:3069/v1}"
+RELAYER_URL="${RELAYER_URL:-http://localhost:8180}"
 HTTP_SERVICE="${HTTP_SERVICE:-develop-http}"
 K8S_CONTEXT="${K8S_CONTEXT:-kind-kind}"
 LOKI_URL="${LOKI_URL:-http://localhost:3100}"
@@ -125,10 +133,8 @@ command -v "$REDIS_CMD" >/dev/null || { log_error "redis-cli required"; exit 2; 
 # Pre-flight: wait up to 30s for a valid body (PATH may still be syncing sessions).
 RELAY_OK=false
 for i in $(seq 1 15); do
-    BODY=$(curl -s -m 5 -X POST \
-        -H "Content-Type: application/json" -H "Target-Service-Id: $HTTP_SERVICE" \
-        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-        "$GATEWAY_URL" 2>/dev/null || true)
+    BODY=$("$CLI_BIN" relay jsonrpc --localnet --service "$HTTP_SERVICE" \
+        --relayer-url "$RELAYER_URL" 2>/dev/null || true)
     if echo "$BODY" | grep -q '"result"'; then
         RELAY_OK=true
         log_info "Relay OK (attempt $i)"
@@ -177,13 +183,10 @@ echo ""
 log_phase "LAUNCHING LOAD (${DURATION}s)"
 
 log_info "HTTP: $HTTP_RPS RPS × $HTTP_WORKERS workers"
-go run "$SCRIPT_DIR/loadtest/http-verify.go" \
-    -url "$GATEWAY_URL" \
-    -service "$HTTP_SERVICE" \
-    -rps "$HTTP_RPS" \
-    -workers "$HTTP_WORKERS" \
-    -duration "${DURATION}s" \
-    -report 30 > /tmp/leader-chaos-load.txt 2>&1 &
+"$CLI_BIN" relay jsonrpc --localnet --service "$HTTP_SERVICE" \
+    --relayer-url "$RELAYER_URL" \
+    --load-test -n "$((HTTP_RPS * DURATION))" --rps "$HTTP_RPS" \
+    --concurrency "$HTTP_WORKERS" --all-suppliers > /tmp/leader-chaos-load.txt 2>&1 &
 LOAD_PID=$!
 log_info "Load PID: $LOAD_PID"
 

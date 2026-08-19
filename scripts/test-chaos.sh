@@ -81,9 +81,9 @@ chaos_kill_backend() {
 
 # 6. Exhaust relayer connections with rapid connect/disconnect
 chaos_connection_flood() {
-    log_chaos "CONN FLOOD: 500 rapid TCP connections to relayer"
+    log_chaos "CONN FLOOD: 500 rapid TCP connections to relayer (:8180 — the old code flooded 3069, which is PATH, not our software)"
     for i in $(seq 1 500); do
-        (echo "" | nc -w1 localhost 3069 2>/dev/null &)
+        (echo "" | nc -w1 localhost 8180 2>/dev/null &)
     done
     wait 2>/dev/null || true
     log_chaos "CONN FLOOD: done"
