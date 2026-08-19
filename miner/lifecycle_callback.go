@@ -2194,7 +2194,26 @@ func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *
 		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on claim window closed")
 	}
 
-	// Metrics already recorded at failure point, just cleanup
+	// Record the loss HERE, not at the caller. This callback is reached only
+	// from the lifecycle sweep (SessionLifecycleManager.executeTransition),
+	// which decides the timeout purely on height and recorded nothing -- so a
+	// session that simply ran out of window had its tree deleted and its lock
+	// released while sessions_failed_total, relays_lost_total,
+	// compute_units_lost_total and upokt_lost_total all stayed silent. The
+	// pre-submission aborts take a different route and cannot double count,
+	// for two independent reasons: marking the session terminal through the
+	// coordinator fires the terminal callback, which calls
+	// SessionLifecycleManager.RemoveSession and takes it out of the sweep's
+	// tracking altogether; and determineTransition has no case for a session
+	// already in claim_window_closed, so it would produce no transition even
+	// if it were still tracked.
+	RecordClaimWindowClosed(
+		snapshot.SupplierOperatorAddress,
+		snapshot.ServiceID,
+		snapshot.RelayCount,
+		int64(snapshot.TotalComputeUnits),
+	)
+
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
@@ -2218,7 +2237,15 @@ func (lc *LifecycleCallback) OnProofWindowClosed(ctx context.Context, snapshot *
 		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on proof window closed")
 	}
 
-	// Metrics already recorded at failure point, just cleanup
+	// Same gap as OnClaimWindowClosed above, one window later: the sweep is the
+	// only route here and it recorded nothing.
+	RecordProofWindowClosed(
+		snapshot.SupplierOperatorAddress,
+		snapshot.ServiceID,
+		snapshot.RelayCount,
+		int64(snapshot.TotalComputeUnits),
+	)
+
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
