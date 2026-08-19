@@ -24,8 +24,12 @@ as coverage and hold nothing.
 3. **Run the test. It MUST fail**, and the failure must name the thing you
    broke. A failure for an unrelated reason (a panic three layers away, a
    different test) does not count — the test found chaos, not the defect.
-4. **Revert the injection**, byte for byte. Back up the file first and restore
-   from the backup; do not retype it.
+4. **Revert the injection**, byte for byte. Back up the file first (`cp`) and
+   restore from that backup. Do not retype it, and **never restore with
+   `git checkout -- <file>`**: the file usually holds the uncommitted change
+   you are testing, so checkout throws that away along with the injection and
+   the loss is silent until a gate fails. Measured 2026-08-19: it wiped a whole
+   new method mid-session; only `go build` in the level-1 gate caught it.
 5. **Re-run. It must be green again**, and `git diff` on the file must be empty.
 
 ## What a red tells you
