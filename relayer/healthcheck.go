@@ -478,7 +478,11 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 	backend.lastError.Store(errMsg)
 	backend.consecutiveSuccesses.Store(0)
 
-	endpointLabel := backend.BackendURL
+	// Redact the fallback: a raw backend URL as a Prometheus label carries
+	// operator topology and, in its path/query, provider API keys — and a
+	// TSDB keeps them for the retention period. The endpoint name (host:port)
+	// is already safe.
+	endpointLabel := logging.RedactURL(backend.BackendURL)
 	if backend.endpoint != nil && backend.endpoint.Name != "" {
 		endpointLabel = backend.endpoint.Name
 	}
@@ -535,7 +539,11 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 	backend.lastCheck.Store(time.Now().UnixNano())
 	backend.lastError.Store("")
 
-	endpointLabel := backend.BackendURL
+	// Redact the fallback: a raw backend URL as a Prometheus label carries
+	// operator topology and, in its path/query, provider API keys — and a
+	// TSDB keeps them for the retention period. The endpoint name (host:port)
+	// is already safe.
+	endpointLabel := logging.RedactURL(backend.BackendURL)
 	if backend.endpoint != nil && backend.endpoint.Name != "" {
 		endpointLabel = backend.endpoint.Name
 	}
