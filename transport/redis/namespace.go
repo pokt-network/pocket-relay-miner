@@ -97,13 +97,6 @@ func (kb *KeyBuilder) CachePrefix() string {
 	return fmt.Sprintf("%s:%s", kb.ns.BasePrefix, kb.ns.CachePrefix)
 }
 
-// EventsCachePrefix returns the pub/sub prefix for cache events.
-// Format: {base}:{events}:{cache}
-// Example: "ha:events:cache"
-func (kb *KeyBuilder) EventsCachePrefix() string {
-	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.EventsPrefix, kb.ns.CachePrefix)
-}
-
 // MinerSessionsPrefix returns the prefix for miner session store.
 // Format: {base}:{miner}:sessions
 // Example: "ha:miner:sessions"
@@ -302,13 +295,6 @@ func (kb *KeyBuilder) SupplierParamsInvalidateChannel() string {
 	return fmt.Sprintf("%s:%s:%s:invalidate:supplier_params", kb.ns.BasePrefix, kb.ns.EventsPrefix, kb.ns.CachePrefix)
 }
 
-// MinerLeaderPrefix builds the key prefix for per-supplier leader election.
-// Format: {base}:{miner}:leader
-// Example: "ha:miner:leader"
-func (kb *KeyBuilder) MinerLeaderPrefix() string {
-	return fmt.Sprintf("%s:%s:leader", kb.ns.BasePrefix, kb.ns.MinerPrefix)
-}
-
 // MinerDedupPrefix builds the key prefix for relay deduplication sets.
 // Format: {base}:{miner}:dedup
 // Example: "ha:miner:dedup"
@@ -451,15 +437,6 @@ func (kb *KeyBuilder) SupplierStatePattern() string {
 // Example: "ha:smst:*:sess1:nodes"
 func (kb *KeyBuilder) SMSTSessionNodesPattern(sessionID string) string {
 	return fmt.Sprintf("%s:smst:*:%s:nodes", kb.ns.BasePrefix, sessionID)
-}
-
-// SMSTSessionAllPattern builds the SCAN pattern matching EVERY SMST key of
-// one supplier+session tree (:nodes, :root, :stats, :live_root), for
-// operator cleanup suggestions.
-// Format: {base}:smst:{supplier}:{sessionID}:*
-// Example: "ha:smst:pokt1abc:sess1:*"
-func (kb *KeyBuilder) SMSTSessionAllPattern(supplier, sessionID string) string {
-	return fmt.Sprintf("%s:smst:%s:%s:*", kb.ns.BasePrefix, supplier, sessionID)
 }
 
 // LegacyParamsKey builds a legacy metering params key. These keys are no
