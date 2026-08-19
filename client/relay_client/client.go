@@ -3,9 +3,10 @@ package relay_client
 import (
 	"context"
 	"fmt"
-	"sync"
 
 	"github.com/pokt-network/ring-go"
+
+	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
@@ -52,7 +53,7 @@ type RelayClient struct {
 	// This matches PATH's caching approach where rings are built once per session
 	// and reused for all requests within that session.
 	// Thread-safe via sync.Map for concurrent load testing.
-	ringCache sync.Map // map[ringCacheKey]*ring.Ring
+	ringCache *xsync.Map[ringCacheKey, *ring.Ring]
 
 	// simRingCache stores rings for the simulated-relay path, keyed by the
 	// pinned pubkeys they are built from (simRingCacheKey). Separate from
@@ -61,7 +62,7 @@ type RelayClient struct {
 	// and reused for every simulated relay. See simRingFor for why building
 	// it per call is expensive.
 	// Thread-safe via sync.Map for concurrent load testing.
-	simRingCache sync.Map // map[string]*simPinnedRing
+	simRingCache *xsync.Map[string, *simPinnedRing]
 }
 
 // Config contains configuration for the relay client.
@@ -172,6 +173,8 @@ func NewRelayClient(config Config, logger logging.Logger) (*RelayClient, error) 
 	)
 
 	return &RelayClient{
+		ringCache:    xsync.NewMap[ringCacheKey, *ring.Ring](),
+		simRingCache: xsync.NewMap[string, *simPinnedRing](),
 		queryClients: config.QueryClients,
 		ringClient:   ringClient,
 		signer:       signer,
@@ -271,7 +274,7 @@ func (c *RelayClient) getOrCreateRing(
 
 	// Check cache first (fast path)
 	if cached, ok := c.ringCache.Load(cacheKey); ok {
-		return cached.(*ring.Ring), nil
+		return cached, nil
 	}
 
 	// Cache miss - build ring from app's address (not signer's address)
@@ -284,7 +287,7 @@ func (c *RelayClient) getOrCreateRing(
 
 	// Store in cache (LoadOrStore handles race conditions)
 	actual, _ := c.ringCache.LoadOrStore(cacheKey, newRing)
-	return actual.(*ring.Ring), nil
+	return actual, nil
 }
 
 // getSession fetches the current session for the app and service.

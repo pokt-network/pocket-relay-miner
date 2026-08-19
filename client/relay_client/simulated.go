@@ -68,7 +68,7 @@ func simRingCacheKey(appPubKeyHex string, gatewayPubKeysHex []string) string {
 func (c *RelayClient) simRingFor(appPubKeyHex string, gatewayPubKeysHex []string) (*simPinnedRing, error) {
 	key := simRingCacheKey(appPubKeyHex, gatewayPubKeysHex)
 	if cached, ok := c.simRingCache.Load(key); ok {
-		return cached.(*simPinnedRing), nil
+		return cached, nil
 	}
 
 	appPub, err := rings.PubKeyFromHex(appPubKeyHex)
@@ -101,7 +101,7 @@ func (c *RelayClient) simRingFor(appPubKeyHex string, gatewayPubKeysHex []string
 	// LoadOrStore, not Store: concurrent first-touch of the same key must leave
 	// every caller holding the SAME ring, not one ring each.
 	actual, _ := c.simRingCache.LoadOrStore(key, built)
-	return actual.(*simPinnedRing), nil
+	return actual, nil
 }
 
 // BuildSimulatedRelayRequest builds a real, ring-signed RelayRequest for the
