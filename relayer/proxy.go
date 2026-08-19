@@ -1893,7 +1893,11 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 		}
 		for _, ep := range bp.All() {
 			total++
-			isHealthy := ep.CurrentlyHealthy() // pure read: status API must not trigger auto-recovery
+			// IsHealthy, not CurrentlyHealthy: readiness must report what the
+			// serving path would do, and that path (Pool.HasHealthy -> Next)
+			// auto-recovers past the half-open timeout. With the pure read,
+			// /ready answered 503 forever while relays were being served.
+			isHealthy := ep.IsHealthy()
 			if isHealthy {
 				healthy++
 			}
