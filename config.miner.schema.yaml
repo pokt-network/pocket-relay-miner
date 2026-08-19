@@ -245,9 +245,6 @@ properties:
       keys_file:
         type: string
         description: Path to YAML file with hex-encoded private keys
-      keys_dir:
-        type: string
-        description: Directory containing individual key files
       keyring:
         type: object
         description: Cosmos SDK keyring configuration

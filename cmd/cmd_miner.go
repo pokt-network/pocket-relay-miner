@@ -10,7 +10,6 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 
-	configpkg "github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -20,14 +19,10 @@ import (
 )
 
 const (
-	flagMinerConfig    = "config"
-	flagKeysFile       = "keys-file"
-	flagKeysDir        = "keys-dir"
-	flagKeyringBackend = "keyring-backend"
-	flagKeyringDir     = "keyring-dir"
-	flagConsumerName   = "consumer-name"
-	flagHotReload      = "hot-reload"
-	flagSessionTTL     = "session-ttl"
+	flagMinerConfig  = "config"
+	flagConsumerName = "consumer-name"
+	flagHotReload    = "hot-reload"
+	flagSessionTTL   = "session-ttl"
 )
 
 // MinerCmd returns the command for starting the HA Miner component.
@@ -43,10 +38,6 @@ It supports multiple suppliers and dynamically adds/removes them based on key ch
 Configuration:
   --config: Path to miner config YAML file (recommended)
 
-Legacy Key Sources (if not using config file):
-  --keys-file: Path to supplier.yaml containing hex-encoded private keys
-  --keys-dir: Directory containing individual key files (YAML/JSON)
-  --keyring-backend/--keyring-dir: Cosmos keyring integration
 
 Features:
 - Multi-supplier support (one consumer per supplier)
@@ -59,19 +50,13 @@ Features:
 
 Example:
   pocketd relayminer ha miner --config /path/to/miner-config.yaml
-  pocketd relayminer ha miner --keys-file /path/to/supplier.yaml --redis-url redis://localhost:6379
+
 `,
 		RunE: runHAMiner,
 	}
 
 	// Config file (recommended approach)
 	cmd.Flags().String(flagMinerConfig, "", "Path to miner config YAML file")
-
-	// Legacy key source flags (for backwards compatibility)
-	cmd.Flags().String(flagKeysFile, "", "Path to supplier.yaml with hex-encoded private keys")
-	cmd.Flags().String(flagKeysDir, "", "Directory containing individual key files (YAML/JSON)")
-	cmd.Flags().String(flagKeyringBackend, "", "Cosmos keyring backend: file, os, test")
-	cmd.Flags().String(flagKeyringDir, "", "Cosmos keyring directory")
 
 	// Redis flags (can override config)
 	cmd.Flags().String(flagRedisURL, "", "Redis connection URL (overrides config)")
@@ -405,38 +390,14 @@ func loadMinerConfig(cmd *cobra.Command) (*miner.Config, error) {
 	var config *miner.Config
 	var err error
 
-	if configPath != "" {
-		// Load from a config file
-		config, err = miner.LoadConfig(configPath)
-		if err != nil {
-			return nil, fmt.Errorf("failed to load config: %w", err)
-		}
-	} else {
-		// Build config from flags (legacy mode)
-		config = miner.DefaultConfig()
-
-		// Key sources
-		keysFile, _ := cmd.Flags().GetString(flagKeysFile)
-		keysDir, _ := cmd.Flags().GetString(flagKeysDir)
-		keyringBackend, _ := cmd.Flags().GetString(flagKeyringBackend)
-		keyringDir, _ := cmd.Flags().GetString(flagKeyringDir)
-
-		config.Keys.KeysFile = keysFile
-		config.Keys.KeysDir = keysDir
-		if keyringBackend != "" {
-			if keyringDir == "" {
-				keyringDir = os.ExpandEnv("$HOME/.pocket")
-			}
-			config.Keys.Keyring = &configpkg.KeyringConfig{
-				Backend: keyringBackend,
-				Dir:     keyringDir,
-			}
-		}
-
-		// Validate key sources
-		if !config.HasKeySource() {
-			return nil, fmt.Errorf("at least one key source must be specified: --config, --keys-file, --keys-dir, or --keyring-backend")
-		}
+	if configPath == "" {
+		// The flags-only legacy mode duplicated the whole config assembly and
+		// had zero tracked invocations; a config file is the one way to start.
+		return nil, fmt.Errorf("--config is required")
+	}
+	config, err = miner.LoadConfig(configPath)
+	if err != nil {
+		return nil, fmt.Errorf("failed to load config: %w", err)
 	}
 
 	// Apply flag overrides (flags take precedence over config file)
@@ -478,15 +439,6 @@ func createKeyProviders(logger logging.Logger, config *miner.Config) ([]keys.Key
 		}
 		providers = append(providers, provider)
 		logger.Info().Str("file", config.Keys.KeysFile).Msg("added supplier keys file provider")
-	}
-
-	if config.Keys.KeysDir != "" {
-		provider, err := keys.NewFileKeyProvider(logger, config.Keys.KeysDir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create file key provider: %w", err)
-		}
-		providers = append(providers, provider)
-		logger.Info().Str("dir", config.Keys.KeysDir).Msg("added file key provider")
 	}
 
 	if config.Keys.Keyring != nil && config.Keys.Keyring.Backend != "" {
@@ -534,7 +486,7 @@ func validateMinerConfig(config *miner.Config) error {
 
 	// Validate key sources
 	if !config.HasKeySource() {
-		return fmt.Errorf("at least one key source must be configured (keys_file, keys_dir, or keyring)")
+		return fmt.Errorf("at least one key source must be configured (keys_file or keyring)")
 	}
 
 	// Note: SessionTTL = 0 means use CacheTTL (default 2h), so it doesn't need validation

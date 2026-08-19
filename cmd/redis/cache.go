@@ -49,7 +49,6 @@ Cache types:
 Cache tracking sets:
   - ha:cache:known:applications
   - ha:cache:known:services
-  - ha:cache:known:suppliers
 
 Examples:
   # Inspect a single entry

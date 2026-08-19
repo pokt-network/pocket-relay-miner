@@ -135,54 +135,6 @@ func (m *MultiProviderKeyManager) ListSuppliers() []string {
 	return suppliers
 }
 
-// HasKey returns true if a key exists for the given operator address.
-func (m *MultiProviderKeyManager) HasKey(operatorAddr string) bool {
-	m.keysMu.RLock()
-	defer m.keysMu.RUnlock()
-
-	_, ok := m.keys[operatorAddr]
-	return ok
-}
-
-// AddKey dynamically adds a new supplier key.
-func (m *MultiProviderKeyManager) AddKey(operatorAddr string, key cryptotypes.PrivKey) error {
-	m.keysMu.Lock()
-	_, existed := m.keys[operatorAddr]
-	m.keys[operatorAddr] = key
-	m.keysMu.Unlock()
-
-	if !existed {
-		m.notifyKeyChange(operatorAddr, true)
-	}
-
-	m.logger.Info().
-		Str("operator", operatorAddr).
-		Bool("replaced", existed).
-		Msg("added key")
-
-	return nil
-}
-
-// RemoveKey removes a supplier key.
-func (m *MultiProviderKeyManager) RemoveKey(operatorAddr string) error {
-	m.keysMu.Lock()
-	_, existed := m.keys[operatorAddr]
-	if !existed {
-		m.keysMu.Unlock()
-		return fmt.Errorf("no key found for operator %s", operatorAddr)
-	}
-	delete(m.keys, operatorAddr)
-	m.keysMu.Unlock()
-
-	m.notifyKeyChange(operatorAddr, false)
-
-	m.logger.Info().
-		Str("operator", operatorAddr).
-		Msg("removed key")
-
-	return nil
-}
-
 // Reload reloads keys from all configured sources.
 func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 	newKeys := make(map[string]cryptotypes.PrivKey)
