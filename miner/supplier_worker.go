@@ -442,13 +442,12 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			Msg("MinedRelayMessage arrived with empty RelayHash; recomputed from RelayBytes (publisher bug upstream)")
 	}
 
-	// Deduplicate only on reclaim: the normal XREADGROUP `>` delivery path
-	// never redelivers a message to the same consumer group, so dedup is
-	// only required for messages recovered from the pending entries list via
-	// XAUTOCLAIM (previous consumer crashed without acking). SMST.Update is
-	// idempotent by construction — the concern protected here is the side
-	// counter `snapshot.TotalComputeUnits` which is incremented
-	// unconditionally by IncrementRelayCount below.
+	// Early duplicate check on reclaims only, as an optimization: a reclaimed
+	// message is likely to have been processed already, and detecting it here
+	// skips the SMST work. This check is NOT the correctness gate — that is
+	// the MarkProcessed result below, which covers the case XAUTOCLAIM cannot:
+	// the ORIGINAL copy still buffered in a slow-but-alive consumer, processed
+	// with IsReclaim=false after another consumer processed the reclaim.
 	if msg.IsReclaim {
 		if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
 			isDup, dupErr := dedup.IsDuplicate(ctx, msg.Message.RelayHash, msg.Message.SessionId)
@@ -524,18 +523,35 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// relay (not only reclaims) because if the current consumer crashes
 	// after the SMST update but before the stream ACK, the next consumer
 	// will reclaim the message via XAUTOCLAIM and needs the dedup set to
-	// recognize it as already processed. Ordering matters: MarkProcessed
-	// runs BEFORE OnRelayProcessed (IncrementRelayCount) below so that a
-	// crash between them leaves the counter under-counted rather than
-	// over-counted — under-count is the safe direction (economic viability
-	// predicts lower rewards and skips marginal sessions instead of
-	// claiming unprofitable ones).
+	// recognize it as already processed. The SADD result is the correctness
+	// gate for OnRelayProcessed below: XAUTOCLAIM honors only min-idle, not
+	// consumer liveness, so the duplicate can be the ORIGINAL copy arriving
+	// with IsReclaim=false after another consumer already processed the
+	// reclaimed one — this is the only place that catches that ordering.
+	// Ordering matters: MarkProcessed runs BEFORE OnRelayProcessed
+	// (IncrementRelayCount) below so that a crash between them leaves the
+	// counter under-counted rather than over-counted — under-count is the
+	// safe direction (economic viability predicts lower rewards and skips
+	// marginal sessions instead of claiming unprofitable ones).
+	firstProcessing := true
 	if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
-		if markErr := dedup.MarkProcessed(ctx, msg.Message.RelayHash, msg.Message.SessionId); markErr != nil {
+		added, markErr := dedup.MarkProcessed(ctx, msg.Message.RelayHash, msg.Message.SessionId)
+		switch {
+		case markErr != nil:
+			// Fail-open: count the relay anyway. Better to risk a rare
+			// double-count during Redis degradation than to drop billing
+			// for a valid relay.
 			w.logger.Debug().
 				Err(markErr).
 				Str("session_id", msg.Message.SessionId).
 				Msg("deduplicator mark_processed failed")
+		case !added:
+			firstProcessing = false
+			w.logger.Debug().
+				Str("session_id", msg.Message.SessionId).
+				Str("supplier", supplierAddr).
+				Msg("relay already marked processed - skipping session counter increment")
+			RecordRelayRejected(supplierAddr, "duplicate", msg.Message.ServiceId)
 		}
 	}
 
@@ -548,18 +564,20 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Track relay successfully added to SMST
 	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId)
 
-	// Track relay in session coordinator.
+	// Track relay in session coordinator, gated by the MarkProcessed result
+	// above: only the FIRST processing of a relay increments the counters.
 	//
 	// ACK-and-log on failure: SMST + dedup are the sources of truth for
 	// the claim; SessionCoordinator (snapshot.TotalComputeUnits) is
 	// derived state used for economic-viability decisions and operator
 	// observability. Returning an error here would leave the stream
-	// message un-ACK'd and XAUTOCLAIM would reclaim it on idle timeout.
-	// On reclaim the dedup set rejects the duplicate SMST update — good —
-	// but OnRelayProcessed is NOT gated by the dedup check and would
-	// run again, double-incrementing TotalComputeUnits if the dedup set
-	// entry had already expired or been cleaned up. Treat the call as
-	// best-effort: log at WARN for operator visibility, then ACK.
+	// message un-ACK'd and XAUTOCLAIM would reclaim it on idle timeout;
+	// the dedup gate above rejects the duplicate increment on that
+	// redelivery (unless the dedup set entry already expired — treat the
+	// call as best-effort). Log at WARN for operator visibility, then ACK.
+	if !firstProcessing {
+		return nil // ACK: SMST already holds the relay; counters already incremented once
+	}
 	if err := state.SessionCoordinator.OnRelayProcessed(
 		ctx,
 		msg.Message.SessionId,
