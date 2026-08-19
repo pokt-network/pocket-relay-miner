@@ -55,14 +55,48 @@ func TestValidate_RemovedRedisKeyPrefix(t *testing.T) {
 		require.NoError(t, c.Validate())
 	})
 
-	t.Run("diverging from the namespace is a hard error", func(t *testing.T) {
+	t.Run("explicitly restating the default meter prefix is accepted", func(t *testing.T) {
+		c := minimalValidConfig()
+		c.Redis.Namespace = config.RedisNamespaceConfig{MeterPrefix: "meter"}
+		c.RelayMeter.RemovedRedisKeyPrefix = "ha"
+		require.NoError(t, c.Validate())
+	})
+
+	t.Run("diverging base prefix is a hard error", func(t *testing.T) {
 		c := minimalValidConfig()
 		c.RelayMeter.RemovedRedisKeyPrefix = "prod" // namespace stays "ha"
 		err := c.Validate()
 		require.Error(t, err)
 		require.True(t, strings.Contains(err.Error(), "redis_key_prefix"),
 			"the error must name the retired key: %v", err)
-		require.True(t, strings.Contains(err.Error(), "base_prefix"),
-			"the error must say where the value belongs now: %v", err)
+		requireSafeRemediation(t, err)
 	})
+
+	t.Run("custom meter_prefix moves the keys even with a matching base", func(t *testing.T) {
+		// "ha" == base prefix, but meter keys land at ha:metering:* instead of
+		// ha:meter:* — the keys DO move, so "retired equals base" is not enough.
+		c := minimalValidConfig()
+		c.Redis.Namespace = config.RedisNamespaceConfig{MeterPrefix: "metering"}
+		c.RelayMeter.RemovedRedisKeyPrefix = "ha"
+		err := c.Validate()
+		require.Error(t, err)
+		require.True(t, strings.Contains(err.Error(), "redis_key_prefix"),
+			"the error must name the retired key: %v", err)
+		requireSafeRemediation(t, err)
+	})
+}
+
+// requireSafeRemediation pins the ADVICE in the tombstone error, not just the
+// key names: the previous message said "set redis.namespace.base_prefix to
+// the retired value", which — followed verbatim — relocates the relayer's
+// entire keyspace including the WAL stream, orphaning mined relays from the
+// miner. The safe remedy is deleting the retired line.
+func requireSafeRemediation(t *testing.T, err error) {
+	t.Helper()
+	require.True(t, strings.Contains(err.Error(), "Remove the relay_meter.redis_key_prefix line"),
+		"the error must advise removing the retired line: %v", err)
+	require.True(t, strings.Contains(err.Error(), "WAL"),
+		"the error must warn that repointing base_prefix moves the WAL: %v", err)
+	require.False(t, strings.Contains(err.Error(), "Set redis.namespace.base_prefix to"),
+		"the error must NOT advise repointing base_prefix at the retired value: %v", err)
 }
