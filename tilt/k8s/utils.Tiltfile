@@ -103,7 +103,22 @@ def apply_k8s_overrides_relayer(config, redis_host):
         if base in services:
             services[base] = dict(services[base])
             services[base]["validation_mode"] = base_mode
-            if clone_id not in services:
+            if clone_id in services:
+                # Force the CLONE's mode too. A clone entry that survived in an
+                # operator's generated tilt_config.yaml (edited by hand, or
+                # stale after the matrix changed) would otherwise run whatever
+                # mode it stored -- while the live gate trusts the service
+                # NAME for its per-mode verdict, turning a green "eager"
+                # column into unexercised coverage. Bases and clones get the
+                # same treatment: the mode-matrix table above is the only
+                # source of truth.
+                stored = services[clone_id].get("validation_mode")
+                if stored != clone_mode:
+                    print("mode-matrix: forcing {}.validation_mode {!r} -> {!r} (stored value ignored)".format(
+                        clone_id, stored, clone_mode))
+                services[clone_id] = dict(services[clone_id])
+                services[clone_id]["validation_mode"] = clone_mode
+            else:
                 clone = dict(services[base])
                 clone["validation_mode"] = clone_mode
                 services[clone_id] = clone
