@@ -34,7 +34,6 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"ParamsSessionKey":          kb.ParamsSessionKey(),
 		"MeterCleanupChannel":       kb.MeterCleanupChannel(),
 		"MeterActiveSessionsKey":    kb.MeterActiveSessionsKey(),
-		"SupplierUpdateChannel":     kb.SupplierUpdateChannel(),
 		"BlockEventChannel":         kb.BlockEventChannel(),
 		"SMSTNodesKey":              kb.SMSTNodesKey("sup1", "sess1"),
 		"SMSTNodesPattern":          kb.SMSTNodesPattern(),
@@ -119,7 +118,6 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"ParamsSessionKey":          "ha:cache:session_params",
 		"MeterCleanupChannel":       "ha:meter:cleanup",
 		"MeterActiveSessionsKey":    "ha:meter:active_sessions",
-		"SupplierUpdateChannel":     "ha:events:supplier_update",
 		"BlockEventChannel":         "ha:events:blocks",
 
 		// Frozen nonstandard channels (subscriber-side effective strings —

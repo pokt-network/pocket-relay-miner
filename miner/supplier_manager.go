@@ -119,8 +119,7 @@ type SupplierManagerConfig struct {
 	SMSTLiveRootCheckpointInterval int
 
 	// Batch configuration
-	BatchSize    int64 // Number of messages to fetch per XREADGROUP
-	AckBatchSize int64 // Number of messages to ACK in a batch
+	BatchSize int64 // Number of messages to fetch per XREADGROUP
 
 	// Redis stream configuration
 	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption - not configurable
