@@ -99,7 +99,6 @@ const (
 	// chain-lag; once the anchor is block time the margin only has to
 	// cover one-block-worth of in-flight settlement jitter.
 	DefaultTxTimeoutMax = 10*time.Minute - 10*time.Second
-
 	// DefaultTxTimeoutDefault is the fallback TX deadline when no window-based value is injected.
 	DefaultTxTimeoutDefault = 2 * time.Minute
 
@@ -177,10 +176,9 @@ type TxClientConfig struct {
 	TxTimeoutMin time.Duration
 
 	// TxTimeoutMax is the cap for window-based TX broadcast deadlines.
-	// Defaults to 500 ms below the cosmos-sdk 10-minute hard limit for
-	// unordered TXs so a round-trip of clock jitter can't push us over
-	// and trigger `unordered tx ttl exceeds 10m0s` CheckTx rejections.
-	// Default: 10min - 500ms
+	// See DefaultTxTimeoutMax for why the margin below the cosmos-sdk
+	// 10-minute unordered-TX ceiling is one block interval, not clock jitter.
+	// Default: 10min - 10s
 	TxTimeoutMax time.Duration
 
 	// TxTimeoutDefault is used when no window-based deadline is injected via context.
@@ -379,7 +377,7 @@ func (tc *TxClient) CreateClaims(
 
 	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, uint64(timeoutHeight), "claim", msgs...)
 	if err != nil {
-		txClaimErrors.WithLabelValues(supplierOperatorAddr, "broadcast").Inc()
+		txClaimErrors.WithLabelValues(supplierOperatorAddr).Inc()
 		return "", fmt.Errorf("failed to broadcast claims: %w", err)
 	}
 
@@ -429,7 +427,7 @@ func (tc *TxClient) SubmitProofs(
 			// Return empty hash to indicate success without submission
 			return "", nil
 		}
-		txProofErrors.WithLabelValues(supplierOperatorAddr, "broadcast").Inc()
+		txProofErrors.WithLabelValues(supplierOperatorAddr).Inc()
 		return "", fmt.Errorf("failed to broadcast proofs: %w", err)
 	}
 
@@ -664,7 +662,7 @@ func (tc *TxClient) signAndBroadcast(
 
 	// NOTE: We don't increment sequence for unordered TXs (they don't use sequence numbers)
 
-	txBroadcastsTotal.WithLabelValues(signerAddr, "success").Inc()
+	txBroadcastsTotal.WithLabelValues(signerAddr).Inc()
 	return txHash, nil
 }
 
