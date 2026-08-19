@@ -324,7 +324,14 @@ func (c *sharedParamsCache) queryChainWithLock(ctx context.Context) (*sharedtype
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
-	defer c.redisClient.Del(ctx, lockKey)
+	// Release the lock only when this instance actually acquired it: an
+	// unconditional deferred Del from a contended loser deletes the WINNER's
+	// still-held lock on exit, letting a third instance acquire immediately
+	// and re-fire the duplicate chain query the lock exists to prevent
+	// (same fix as cache/keyed_query_lock.go).
+	if locked {
+		defer c.redisClient.Del(ctx, lockKey)
+	}
 
 	if !locked {
 		// Another instance is querying, wait and retry L2

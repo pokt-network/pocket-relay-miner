@@ -302,15 +302,6 @@ func (kb *KeyBuilder) SupplierParamsInvalidateChannel() string {
 	return fmt.Sprintf("%s:%s:%s:invalidate:supplier_params", kb.ns.BasePrefix, kb.ns.EventsPrefix, kb.ns.CachePrefix)
 }
 
-// SharedParamsHeightInvalidateChannel builds the pub/sub channel for the
-// relayer's height-keyed shared-params cache (RedisSharedParamCache).
-// NONSTANDARD scheme; payload is a numeric height, not JSON. Frozen string.
-// Format: {base}:{events}:invalidate:params
-// Example: "ha:events:invalidate:params"
-func (kb *KeyBuilder) SharedParamsHeightInvalidateChannel() string {
-	return fmt.Sprintf("%s:%s:invalidate:params", kb.ns.BasePrefix, kb.ns.EventsPrefix)
-}
-
 // MinerLeaderPrefix builds the key prefix for per-supplier leader election.
 // Format: {base}:{miner}:leader
 // Example: "ha:miner:leader"
