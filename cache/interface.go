@@ -2,7 +2,6 @@ package cache
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
@@ -97,10 +96,6 @@ type BlockEvent struct {
 type CacheConfig struct {
 	// Redis configuration
 
-	// CachePrefix is the prefix for all Redis keys.
-	// Default: "ha:cache"
-	CachePrefix string
-
 	// TTLBlocks is the default TTL in blocks.
 	// Default: 1 (parameters change per block)
 	TTLBlocks int64
@@ -121,41 +116,6 @@ type CacheConfig struct {
 // BlocksToTTL converts a number of blocks to a time.Duration.
 func (c CacheConfig) BlocksToTTL(blocks int64) time.Duration {
 	return time.Duration(blocks*c.BlockTimeSeconds) * time.Second
-}
-
-// CacheKeys provides helpers for generating Redis cache keys.
-type CacheKeys struct {
-	Prefix string
-}
-
-// SharedParams returns the cache key for shared params at a given height.
-func (k CacheKeys) SharedParams(height int64) string {
-	return k.Prefix + ":params:shared:" + formatHeight(height)
-}
-
-// SharedParamsLock returns the lock key for shared params at a given height.
-func (k CacheKeys) SharedParamsLock(height int64) string {
-	return k.Prefix + ":lock:params:shared:" + formatHeight(height)
-}
-
-// SupplierParams returns the cache key for supplier params (singleton, not height-based).
-func (k CacheKeys) SupplierParams() string {
-	return k.Prefix + ":params:supplier"
-}
-
-// SupplierParamsLock returns the lock key for supplier params.
-func (k CacheKeys) SupplierParamsLock() string {
-	return k.Prefix + ":lock:params:supplier"
-}
-
-// Session returns the cache key for a session.
-func (k CacheKeys) Session(appAddr, serviceId string, height int64) string {
-	return k.Prefix + ":session:" + appAddr + ":" + serviceId + ":" + formatHeight(height)
-}
-
-// formatHeight converts a block height to a string.
-func formatHeight(height int64) string {
-	return fmt.Sprintf("%d", height)
 }
 
 // ========================================================================
