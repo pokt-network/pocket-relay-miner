@@ -49,6 +49,26 @@ a gate was skipped, name it and say the coverage is incomplete.
 
 Never claim a gate's result you did not observe. Run it and read the output.
 
+## The adversarial pass, when it is delegated to agents
+
+An adversarial review dispatched as a fan-out of agents can die WHOLE: on
+2026-08-19 a ten-agent review returned zero findings because every agent hit a
+model usage limit. A dead fan-out does not yield fewer findings, it yields
+none — while the branch reads as reviewed.
+
+So:
+
+- **Propose the scale before dispatching.** Say how many agents and roughly what
+  it costs, and prefer doing the pass yourself when the diff is small enough to
+  read. A fan-out nobody sized is the failure mode the human has to catch.
+- **If the fan-out dies, the review did NOT run.** Redo it with commands and say
+  so in the report, in those words. The command-based pass is legitimate — that
+  same day it found five real defects, three of them introduced by the session
+  itself — and it is weaker in exactly one nameable way: it cannot attack what
+  the author did not think of. Name the angles in writing BEFORE starting
+  (removed behaviour, cross-file callers, double-counted metrics, language
+  pitfalls, efficiency) so the pass is a checklist and not an improvisation.
+
 ## Related
 
 - `test-teeth` — before trusting a passing test, prove it can fail.
