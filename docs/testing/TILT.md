@@ -36,9 +36,9 @@ change — never manually build, `kubectl delete pod`, or `kubectl port-forward`
 Tilt owns all of that. Open the Tilt UI at <http://localhost:10350> to watch
 resources come up.
 
-A lighter Docker-Compose variant also exists (`make tilt-up-docker` /
-`make tilt-down-docker`); the K8s environment above is the production-like one
-and the target for the HA/chaos scripts, so prefer it.
+There is no Docker-Compose dev variant: the K8s environment above is the
+production-like one and the target for the HA/chaos scripts. A minimal
+compose file for documentation purposes lives in `examples/docker-compose/`.
 
 ## 2. What you get (pods & replicas)
 

@@ -1,0 +1,54 @@
+# Minimal HA reference deployment: shared Redis, one relayer, one miner.
+#
+# This is DOCUMENTATION, not a dev environment — local development uses the
+# Tilt/Kubernetes localnet (see tilt/README.md), which brings its own chain,
+# backends and observability. This file shows the smallest wiring that is
+# still the HA architecture: every piece of session state lives in Redis, so
+# adding replicas is just scaling the stateless services against the same
+# Redis and the same chain endpoints:
+#
+#   docker compose up -d --scale relayer=2 --scale miner=2
+#
+# Before starting:
+#   1. Edit config/relayer.yaml and config/miner.yaml: point pocket_node at
+#      your full node and configure your services/backends.
+#   2. Put your supplier signing keys in config/supplier-keys.yaml
+#      (hex-encoded private keys; see config.relayer.example.yaml for the
+#      schema). NEVER commit that file.
+
+services:
+  redis:
+    image: redis:8.2-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  relayer:
+    image: ghcr.io/pokt-network/pocket-relay-miner:latest
+    command: ["relayer", "--config", "/config/relayer.yaml"]
+    volumes:
+      - ./config/relayer.yaml:/config/relayer.yaml:ro
+      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
+    ports:
+      - "8080:8080" # relay traffic; front with your own LB when scaling
+    depends_on:
+      redis:
+        condition: service_healthy
+
+  miner:
+    image: ghcr.io/pokt-network/pocket-relay-miner:latest
+    command: ["miner", "--config", "/config/miner.yaml"]
+    volumes:
+      - ./config/miner.yaml:/config/miner.yaml:ro
+      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+
+volumes:
+  redis-data:

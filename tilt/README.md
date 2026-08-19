@@ -20,16 +20,9 @@ tilt/
 │   ├── observability.Tiltfile  # Prometheus + Grafana
 │   ├── path.Tiltfile       # PATH gateway (optional)
 │   └── account-init.Tiltfile   # Account initialization
-├── docker/                 # Docker Compose environment
-│   ├── Tiltfile            # Main entry point for Docker
-│   ├── docker-compose.yaml # Docker Compose services
-│   ├── config/             # Docker-specific configs
-│   ├── scripts/            # Init scripts
-│   └── README.md           # Docker-specific docs
 ├── config/                 # Shared configuration files
 │   ├── genesis.json        # Pocket Network genesis
 │   ├── all-keys.yaml       # All account keys
-│   ├── supplier-keys.yaml  # Supplier signing keys
 │   ├── *.toml              # Validator configs
 │   └── *.json              # Validator keys
 ├── backend-server/         # Demo backend server
@@ -40,22 +33,6 @@ tilt/
 ```
 
 ## Quick Start
-
-### Option 1: Docker Compose (Simpler)
-
-```bash
-# From project root
-make tilt-up-docker
-
-# Or with streaming logs
-make tilt-up-docker ARGS="--stream"
-
-# Stop
-make tilt-down-docker
-make tilt-down-docker ARGS="-v"  # Remove volumes
-```
-
-### Option 2: Kubernetes (Production-like)
 
 ```bash
 # Prerequisites: kubectl, kind/minikube, tilt
@@ -82,13 +59,12 @@ Multi-protocol demo server for testing relay capabilities.
 
 ### Shared Config (`config/`)
 
-Configuration files used by both K8s and Docker environments:
+Configuration files for the K8s environment:
 
 | File | Description |
 |------|-------------|
 | `genesis.json` | Pocket Network genesis with apps, suppliers, gateway |
 | `all-keys.yaml` | All account keys (apps, suppliers, gateway) |
-| `supplier-keys.yaml` | Supplier signing keys for relayer/miner |
 | `config.toml` | Validator CometBFT config |
 | `app.toml` | Validator app config |
 
@@ -101,18 +77,18 @@ Pre-configured dashboards for monitoring:
 
 ## Services
 
-| Service | Docker Port | K8s Port | Description |
-|---------|-------------|----------|-------------|
-| Redis | 6379 | 6379 | Shared state |
-| Validator RPC | 26657 | 26657 | Pocket node |
-| Validator gRPC | 9090 | 9090 | Pocket queries |
-| Backend HTTP | 8545 | 8545 | Demo backend |
-| Backend gRPC | 50051 | 50051 | Demo backend |
-| PATH Gateway | 3069 | 3069 | Relay routing |
-| Relayer HTTP | 8080 | 8180+ | Relay processing |
-| Miner Metrics | 9092 | 9092+ | Miner metrics |
-| Prometheus | 9091 | 9091 | Metrics |
-| Grafana | 3000 | 3000 | Dashboards |
+| Service | Port | Description |
+|---------|------|-------------|
+| Redis | 6379 | Shared state |
+| Validator RPC | 26657 | Pocket node |
+| Validator gRPC | 9090 | Pocket queries |
+| Backend HTTP | 8545 | Demo backend |
+| Backend gRPC | 50051 | Demo backend |
+| PATH Gateway | 3069 | Relay routing |
+| Relayer HTTP | 8180 | Relay processing |
+| Miner Metrics | 9092 | Miner metrics |
+| Prometheus | 9091 | Metrics |
+| Grafana | 3000 | Dashboards |
 
 ## Testing Relays
 
@@ -145,10 +121,6 @@ go run main.go redis leader
 ### Logs
 
 ```bash
-# Docker Compose
-docker-compose -f tilt/docker/docker-compose.yaml logs -f relayer
-
-# Kubernetes
 kubectl logs -f -l app=relayer
 ```
 
