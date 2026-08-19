@@ -64,7 +64,7 @@ func (p *RelayPipeline) ValidateRelay(
 
 	// Validate relay request (ring signature + session)
 	if err := p.validator.ValidateRelayRequest(ctx, relayCtx.Request); err != nil {
-		p.logger.Warn().
+		p.logger.Debug().
 			Err(err).
 			Str("service_id", relayCtx.ServiceID).
 			Str("session_id", relayCtx.SessionID).
@@ -112,7 +112,7 @@ func (p *RelayPipeline) MeterRelay(
 		relayCtx.ArrivalBlockHeight,
 	)
 	if err != nil {
-		p.logger.Warn().
+		p.logger.Debug().
 			Err(err).
 			Str("service_id", relayCtx.ServiceID).
 			Str("session_id", relayCtx.SessionID).
@@ -121,7 +121,7 @@ func (p *RelayPipeline) MeterRelay(
 	}
 
 	if !allowed {
-		p.logger.Warn().
+		p.logger.Debug().
 			Str("service_id", relayCtx.ServiceID).
 			Str("session_id", relayCtx.SessionID).
 			Msg("relay not allowed (stake limit exceeded)")

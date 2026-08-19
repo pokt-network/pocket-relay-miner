@@ -174,7 +174,7 @@ func (rp *relayProcessor) ProcessRelay(
 	// Check mining difficulty using the difficulty at session start height
 	isApplicable, err := rp.checkMiningDifficulty(ctx, serviceID, relayHash[:], sessionStartHeight)
 	if err != nil {
-		rp.logger.Warn().
+		rp.logger.Debug().
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
 			Msg("failed to check mining difficulty, assuming applicable")
@@ -328,7 +328,7 @@ func (p *QueryDifficultyProvider) GetTargetHash(ctx context.Context, serviceID s
 
 	target, err := p.queryClient.GetServiceRelayDifficulty(ctx, serviceID, sessionStartHeight)
 	if err != nil {
-		p.logger.Warn().
+		p.logger.Debug().
 			Err(err).
 			Str(logging.FieldServiceID, serviceID).
 			Int64("session_start_height", sessionStartHeight).

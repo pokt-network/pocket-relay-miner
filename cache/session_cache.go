@@ -215,10 +215,11 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 			Str("sha256", hex.EncodeToString(hash[:])).
 			Msg("session fetched from chain")
 		if err = c.redisClient.Set(ctx, key, data, ttl).Err(); err != nil {
-			c.logger.Warn().Err(err).Msg("failed to cache session in Redis")
+			c.logger.Debug().Err(err).Msg("failed to cache session in Redis")
 		}
 	} else {
-		c.logger.Error().Err(err).Msg("failed to marshal session for caching in Redis (L2)")
+		// Per-L3-miss; the session is still served and cached in L1.
+		c.logger.Warn().Err(err).Msg("failed to marshal session for caching in Redis (L2)")
 	}
 
 	// Cache in L1

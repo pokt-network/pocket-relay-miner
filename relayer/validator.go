@@ -197,7 +197,7 @@ func (rv *relayValidator) ValidateRelayRequest(
 	for _, supplier := range session.Suppliers {
 		if supplier.OperatorAddress == supplierAddr {
 			supplierFound = true
-			rv.logger.Info().
+			rv.logger.Debug().
 				Str("supplier", supplier.OperatorAddress).
 				Str("session_id", session.SessionId).
 				Str("service_id", serviceID).
@@ -209,7 +209,7 @@ func (rv *relayValidator) ValidateRelayRequest(
 		}
 	}
 	if !supplierFound {
-		rv.logger.Info().
+		rv.logger.Debug().
 			Str("supplier", supplierAddr).
 			Str("application", appAddress).
 			Str("session_id", session.SessionId).
@@ -339,7 +339,7 @@ func (rv *relayValidator) CheckRewardEligibility(
 	// grace period cutoff. Our relayer received it on time, but the session window
 	// has already closed on-chain. The relay is served (200 OK) but NOT rewarded.
 	if currentHeight >= gracePeriodLastAcceptBlock {
-		rv.logger.Warn().
+		rv.logger.Debug().
 			Str("application", applicationAddress).
 			Str("service_id", serviceID).
 			Int64("session_start", sessionStartHeight).
@@ -363,7 +363,7 @@ func (rv *relayValidator) CheckRewardEligibility(
 	// WARN: Relay arrived in last block before cutoff (risky timing)
 	blocksUntilCutoff := gracePeriodLastAcceptBlock - currentHeight
 	if blocksUntilCutoff <= 1 && currentHeight >= sessionEndHeight {
-		rv.logger.Warn().
+		rv.logger.Debug().
 			Str("application", applicationAddress).
 			Str("service_id", serviceID).
 			Int64("session_end", sessionEndHeight).

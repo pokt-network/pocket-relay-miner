@@ -123,7 +123,7 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 	if _, alreadySet := p.ttlSet.LoadOrStore(streamName, struct{}{}); !alreadySet {
 		if ttlErr := p.client.Expire(ctx, streamName, p.cacheTTL).Err(); ttlErr != nil {
 			p.ttlSet.Delete(streamName) // retry next publish
-			p.logger.Warn().
+			p.logger.Debug().
 				Err(ttlErr).
 				Str(logging.FieldStreamID, streamName).
 				Int64("ttl_seconds", int64(p.cacheTTL.Seconds())).

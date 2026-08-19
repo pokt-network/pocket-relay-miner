@@ -133,7 +133,8 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
 1. **Error Handling**
    - ALWAYS check errors
    - Use `fmt.Errorf("context: %w", err)` for wrapping
-   - Log errors with context (use `logger.Warn()` or `logger.Error()`)
+   - Log errors with context, at the level the logging policy (below)
+     assigns to the PATH -- a per-request error is `Debug` plus a metric
    - Never use `panic()` in production code paths
 
 2. **Logging**
@@ -166,8 +167,19 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
      - "Pre-existing" is not an excuse. If a race exists, fix it.
 
 5. **Logging**
-   - Per-request logs: `Debug` level only (never Info/Warn on hot path)
-   - State changes (failover, config reload, circuit breaker, rebalance): `Info` or `Warn`
+   - Per-request logs (including relay REJECTIONS, meter denials, backend
+     failures): `Debug` level only -- never Info/Warn/Error on a path that
+     fires once per relay/message/connection. The alertable signal for a
+     per-request condition is a METRIC with a bounded `reason` label
+     (`relays_rejected_total`, `relays_dropped_total`, ...), not a log line:
+     under flood (Redis outage, stake exhausted, broken gateway) a per-relay
+     Warn is one line per relay per instance.
+   - State changes (failover, config reload, circuit breaker transition,
+     rebalance, reconnect): `Info` or `Warn` -- these fire once per change,
+     and they are what an operator reads during an incident.
+   - A per-message condition that signals a DEFECT in a producer (malformed
+     stream message, empty RelayHash) may stay at `Warn`: it is bounded by
+     the defect existing, and it must be visible without debug logging.
    - Errors: `Error` level only for things that need immediate attention
    - Never `logger.Fatal` in goroutines -- use error channel propagation
 
@@ -242,7 +254,9 @@ func ProcessRelay(ctx context.Context, relay *Relay) error {
     logger := logging.ForComponent(logger, "relay_processor")
 
     if err := relay.Validate(); err != nil {
-        logger.Warn().
+        // Per-request rejection: Debug + metric, never Warn (see Logging).
+        relaysRejected.WithLabelValues(relay.ServiceID, rejectReasonValidationFailed).Inc()
+        logger.Debug().
             Err(err).
             Str("session_id", relay.SessionID).
             Msg("relay validation failed")

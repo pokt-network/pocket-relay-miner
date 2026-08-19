@@ -290,7 +290,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		// Validate relay request (ring signature + session)
 		if err := s.relayPipeline.ValidateRelay(ctx, relayCtx); err != nil {
 			grpcRelayErrors.WithLabelValues(serviceID, "validation_failed").Inc()
-			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("relay validation failed")
 			return status.Errorf(codes.PermissionDenied, "relay validation failed: %v", err)
@@ -299,14 +299,15 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		// Meter relay (check stake before serving)
 		allowed, meterErr := s.relayPipeline.MeterRelay(ctx, relayCtx)
 		if meterErr != nil {
-			// Fail-open: log warning but allow relay
-			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+			// Fail-open: log but allow relay (issue #23 tracks honouring
+			// fail_behavior here; only the log level changed in this pass)
+			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(meterErr).
 				Msg("relay metering error (fail-open: allowing relay)")
 		} else if !allowed {
 			// Stake limit exceeded - reject relay
 			grpcRelayErrors.WithLabelValues(serviceID, "meter_rejected").Inc()
-			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Msg("relay rejected - stake limit exceeded")
 			return status.Error(codes.ResourceExhausted, "relay rejected - stake limit exceeded")
 		}
@@ -368,7 +369,9 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 	if err != nil {
 		grpcRelayErrors.WithLabelValues(serviceID, "backend_error").Inc()
-		logging.WithSessionContext(s.logger.Error(), sessionCtx).
+		// Per-request; the state change (backend down) is the circuit
+		// breaker transition logged above.
+		logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 			Err(err).
 			Msg("failed to forward request to backend")
 
@@ -406,7 +409,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	// 5xx are infrastructure/backend failures (supplier should not be compensated)
 	if respStatus >= http.StatusInternalServerError {
 		grpcRelayErrors.WithLabelValues(serviceID, "backend_5xx").Inc()
-		logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+		logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 			Int("status_code", respStatus).
 			Msg("backend returned 5xx error - relay not mined")
 		// Return gRPC error without wrapping/signing/mining
@@ -436,7 +439,8 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		// Marshal request and response for ProcessRelay
 		reqBz, err := relayRequest.Marshal()
 		if err != nil {
-			logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+			relaysDropped.WithLabelValues(serviceID, dropReasonMarshalFailed).Inc()
+			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("failed to marshal relay request for processing")
 		} else {
@@ -474,7 +478,8 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				arrivalHeight,
 			)
 			if err != nil {
-				logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+				relaysDropped.WithLabelValues(serviceID, dropReasonProcessFailed).Inc()
+				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 					Err(err).
 					Msg("failed to process relay")
 			} else if msg == nil {
@@ -485,7 +490,8 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				logging.WithSessionContext(s.logger.Warn(), sessionCtx).
 					Msg("no publisher configured, skipping relay publication")
 			} else if pubErr := s.publisher.Publish(publishCtx, msg); pubErr != nil {
-				logging.WithSessionContext(s.logger.Warn(), sessionCtx).
+				relaysDropped.WithLabelValues(serviceID, dropReasonPublishFailed).Inc()
+				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 					Err(pubErr).
 					Msg("failed to publish mined relay")
 			} else {
