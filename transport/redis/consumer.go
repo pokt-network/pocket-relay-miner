@@ -90,8 +90,12 @@ func NewStreamsConsumer(
 		config.MaxRetries = 3
 	}
 
-	// Channel buffer: 5000 messages to match batch size for smooth pipelining
-	channelBufferSize := int64(5000)
+	// Channel buffer: 5000 messages by default to match batch size for smooth
+	// pipelining; configurable for tests and constrained deployments.
+	channelBufferSize := config.ChannelBufferSize
+	if channelBufferSize <= 0 {
+		channelBufferSize = 5000
+	}
 
 	// Single stream per supplier (simplified architecture)
 	streamName := transport.SupplierStreamName(config.StreamPrefix, config.SupplierOperatorAddress)
@@ -118,10 +122,22 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 	ctx, c.cancelFn = context.WithCancel(ctx)
 	c.mu.Unlock()
 
-	// Start consumer goroutine - consumer group creation happens in connectFn
-	// with proper exponential backoff retry via ReconnectionLoop
+	// Two producer goroutines feed msgCh: the blocking read loop and the
+	// reclaim ticker. The channel is closed by a third goroutine only after
+	// BOTH producers have returned — closing it from either producer would
+	// race the other's in-flight send (send on a closed channel panics and
+	// takes the whole process down).
+	producers := &sync.WaitGroup{}
+	producers.Add(2)
+
+	// Consumer group creation happens in connectFn with proper exponential
+	// backoff retry via ReconnectionLoop.
 	c.wg.Add(1)
-	go c.consumeLoop(ctx)
+	go func() {
+		defer c.wg.Done()
+		defer producers.Done()
+		c.consumeLoop(ctx)
+	}()
 
 	// Reclaim on a timer of its own. The blocking read above uses BLOCK 0, so
 	// XReadGroup never returns redis.Nil on a real server -- which was the ONLY
@@ -134,25 +150,15 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
-		interval := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-				c.claimMu.Lock()
-				due := time.Since(c.lastClaimTime) >= interval
-				if due {
-					c.lastClaimTime = time.Now()
-				}
-				c.claimMu.Unlock()
-				if due {
-					c.claimPendingMessages(ctx)
-				}
-			}
-		}
+		defer producers.Done()
+		c.reclaimLoop(ctx)
+	}()
+
+	c.wg.Add(1)
+	go func() {
+		defer c.wg.Done()
+		producers.Wait()
+		close(c.msgCh)
 	}()
 
 	c.logger.Info().
@@ -176,13 +182,35 @@ func (c *StreamsConsumer) ensureConsumerGroup(ctx context.Context) error {
 	return nil
 }
 
+// reclaimLoop periodically recovers messages stuck in dead consumers' PELs.
+// It runs as a producer on msgCh alongside consumeLoop; the channel close is
+// owned by the coordinator in Consume, never by either producer.
+func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
+	interval := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			c.claimMu.Lock()
+			due := time.Since(c.lastClaimTime) >= interval
+			if due {
+				c.lastClaimTime = time.Now()
+			}
+			c.claimMu.Unlock()
+			if due {
+				c.claimPendingMessages(ctx)
+			}
+		}
+	}
+}
+
 // consumeLoop is the main consumption loop with automatic reconnection.
 // This wraps the message consumption with exponential backoff reconnection,
 // matching the pattern in client/block_subscriber.go:145-194
 func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
-	defer c.wg.Done()
-	defer close(c.msgCh)
-
 	// Create reconnection loop
 	reconnectLoop := NewReconnectionLoop(
 		c.logger,
@@ -225,7 +253,6 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			Count:    c.config.BatchSize,
 			Block:    0, // TRUE PUSH: infinite wait, context cancellation interrupts
 		}).Result()
-
 		if err != nil {
 			// With BLOCK 0, context cancellation is the normal shutdown path
 			if ctx.Err() != nil {
@@ -323,60 +350,80 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 }
 
 // claimPendingMessages claims messages that have been pending too long.
-// This is only called when normal XREADGROUP consumption returns no new messages (idle state).
 // It recovers messages from consumers that crashed without acknowledging.
+//
+// It drains the WHOLE eligible PEL, not just the first page: XAUTOCLAIM
+// returns at most Count entries plus a cursor to continue the scan from, and
+// a dead consumer can leave thousands of deliveries behind (a full read
+// batch plus the delivery channel buffer). Stopping after one page would
+// recover them at Count-per-tick — far slower than the claim window this
+// reclaim exists to beat.
 func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
-	// Claim idle messages from the single supplier stream
-	messages, _, err := c.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
-		Stream:   c.streamName,
-		Group:    c.config.ConsumerGroup,
-		Consumer: c.config.ConsumerName,
-		MinIdle:  time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond,
-		Start:    "0-0",
-		Count:    50, // Reasonable batch size for claiming
-	}).Result()
+	start := "0-0"
+	totalClaimed := 0
 
-	if err != nil {
-		// Stream may not exist yet - skip
-		if isStreamNotFoundError(err) {
+	for {
+		messages, next, err := c.client.XAutoClaim(ctx, &redis.XAutoClaimArgs{
+			Stream:   c.streamName,
+			Group:    c.config.ConsumerGroup,
+			Consumer: c.config.ConsumerName,
+			MinIdle:  time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond,
+			Start:    start,
+			Count:    50, // Page size per XAUTOCLAIM call; the loop drains all pages
+		}).Result()
+		if err != nil {
+			// Stream may not exist yet - skip
+			if isStreamNotFoundError(err) {
+				return
+			}
+			if ctx.Err() == nil {
+				c.logger.Debug().Err(err).Msg("error claiming idle messages")
+			}
 			return
 		}
-		if ctx.Err() == nil {
-			c.logger.Debug().Err(err).Msg("error claiming idle messages")
+
+		if len(messages) > 0 {
+			totalClaimed += len(messages)
+			claimedMessages.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(messages)))
 		}
-		return
-	}
 
-	if len(messages) == 0 {
-		return
-	}
+		// Process claimed messages. These are reclaims — mark them so downstream
+		// workers know to run duplicate-detection before incrementing the
+		// per-session counter.
+		for _, message := range messages {
+			msg, parseErr := c.parseMessage(message, c.streamName)
+			if parseErr != nil {
+				deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
+				// Acknowledge AND delete bad message to keep stream clean
+				_ = c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID)
+				continue
+			}
+			msg.IsReclaim = true
 
-	claimedMessages.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(messages)))
-
-	c.logger.Debug().
-		Int("count", len(messages)).
-		Str("stream", c.streamName).
-		Msg("claimed idle messages")
-
-	// Process claimed messages. These are reclaims — mark them so downstream
-	// workers know to run duplicate-detection before inserting into the SMST
-	// and incrementing the per-session counter. Normal XREADGROUP `>` delivery
-	// never redelivers, so only this path needs the dedup check.
-	for _, message := range messages {
-		msg, parseErr := c.parseMessage(message, c.streamName)
-		if parseErr != nil {
-			deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
-			// Acknowledge AND delete bad message to keep stream clean
-			_ = c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID)
-			continue
+			select {
+			case c.msgCh <- msg:
+			case <-ctx.Done():
+				return
+			}
 		}
-		msg.IsReclaim = true
 
-		select {
-		case c.msgCh <- msg:
-		case <-ctx.Done():
+		// A returned cursor of "0-0" means the scan wrapped: the whole PEL has
+		// been examined. The empty-string check is defensive.
+		if next == "0-0" || next == "" {
+			break
+		}
+		start = next
+
+		if ctx.Err() != nil {
 			return
 		}
+	}
+
+	if totalClaimed > 0 {
+		c.logger.Debug().
+			Int("count", totalClaimed).
+			Str("stream", c.streamName).
+			Msg("claimed idle messages")
 	}
 }
 
