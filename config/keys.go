@@ -6,9 +6,6 @@ type KeysConfig struct {
 	// KeysFile is the path to a supplier-keys.yaml file with hex-encoded keys.
 	KeysFile string `yaml:"keys_file,omitempty"`
 
-	// KeysDir is a directory containing individual key files.
-	KeysDir string `yaml:"keys_dir,omitempty"`
-
 	// Keyring configuration for Cosmos SDK keyring.
 	Keyring *KeyringConfig `yaml:"keyring,omitempty"`
 }

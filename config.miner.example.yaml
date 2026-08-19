@@ -156,10 +156,7 @@ keys:
   # Option 1: Load from YAML file with hex-encoded keys
   keys_file: "/keys/supplier-keys.yaml"
 
-  # Option 2: Load from directory with individual key files
-  # keys_dir: "/keys/suppliers"
-
-  # Option 3: Use Cosmos SDK keyring (recommended for production)
+  # Option 2: Use Cosmos SDK keyring (recommended for production)
   # keyring:
   #   backend: "file"  # file, os, test, memory
   #   dir: "/keys/keyring"

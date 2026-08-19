@@ -938,6 +938,5 @@ func LoadConfig(path string) (*Config, error) {
 // HasKeySource returns true if at least one key source is configured.
 func (c *Config) HasKeySource() bool {
 	return c.Keys.KeysFile != "" ||
-		c.Keys.KeysDir != "" ||
 		(c.Keys.Keyring != nil && c.Keys.Keyring.Backend != "")
 }
