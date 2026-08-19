@@ -200,20 +200,12 @@ func TestGetQueryWorkers(t *testing.T) {
 	require.Equal(t, 30, cfg.GetQueryWorkers())
 }
 
-func TestGetSettlementWorkers(t *testing.T) {
-	cfg := &Config{}
-	require.Equal(t, 2, cfg.GetSettlementWorkers()) // default
-
-	cfg.WorkerPools.SettlementWorkers = 4
-	require.Equal(t, 4, cfg.GetSettlementWorkers())
-}
-
 func TestGetMasterPoolSize(t *testing.T) {
 	cfg := &Config{}
 
 	// Test auto-calculation with small supplier count (CPU-bound)
 	// With default values: cpu_multiplier=4, workers_per_supplier=6, query=20
-	// Settlement monitor disabled by default, so overhead = query_workers only (20)
+	// Overhead = query_workers (20)
 	// On a machine with N CPUs: max(N×4, suppliers×6) + 20
 	// For 5 suppliers: max(N×4, 30) + 20
 	// This test uses 5 suppliers which should be CPU-bound on most machines
@@ -226,13 +218,6 @@ func TestGetMasterPoolSize(t *testing.T) {
 	// 78 × 6 = 468, plus overhead 20 = 488
 	// This should be supplier-bound unless running on 117+ core machine
 	require.GreaterOrEqual(t, size, 488)
-
-	// Test with settlement monitor enabled (adds settlement_workers to overhead)
-	cfg.SettlementMonitor.Enabled = true
-	size = cfg.GetMasterPoolSize(78)
-	// 78 × 6 = 468, plus overhead 22 (20 query + 2 settlement) = 490
-	require.GreaterOrEqual(t, size, 490)
-	cfg.SettlementMonitor.Enabled = false // reset
 
 	// Test explicit override
 	cfg.WorkerPools.MasterPoolSize = 500
@@ -300,7 +285,6 @@ worker_pools:
   cpu_multiplier: 6
   workers_per_supplier: 3
   query_workers: 25
-  settlement_workers: 4
 `
 	var cfg Config
 	err := yaml.Unmarshal([]byte(yamlData), &cfg)
@@ -310,12 +294,10 @@ worker_pools:
 	require.Equal(t, 6, cfg.WorkerPools.CPUMultiplier)
 	require.Equal(t, 3, cfg.WorkerPools.WorkersPerSupplier)
 	require.Equal(t, 25, cfg.WorkerPools.QueryWorkers)
-	require.Equal(t, 4, cfg.WorkerPools.SettlementWorkers)
 
 	// Test that getters use the parsed values
 	require.Equal(t, 150, cfg.GetMasterPoolSize(100)) // explicit override
 	require.Equal(t, 6, cfg.GetCPUMultiplier())
 	require.Equal(t, 3, cfg.GetWorkersPerSupplier())
 	require.Equal(t, 25, cfg.GetQueryWorkers())
-	require.Equal(t, 4, cfg.GetSettlementWorkers())
 }

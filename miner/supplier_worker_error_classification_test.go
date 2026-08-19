@@ -222,9 +222,6 @@ func (s *errorOnIncrementStore) Delete(ctx context.Context, sessionID string) er
 func (s *errorOnIncrementStore) UpdateState(ctx context.Context, sessionID string, newState SessionState) error {
 	return s.inner.UpdateState(ctx, sessionID, newState)
 }
-func (s *errorOnIncrementStore) UpdateSettlementMetadata(ctx context.Context, sessionID string, outcome string, height int64) error {
-	return s.inner.UpdateSettlementMetadata(ctx, sessionID, outcome, height)
-}
 func (s *errorOnIncrementStore) IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {
 	s.incCalls.Add(1)
 	if s.delegateOK {
