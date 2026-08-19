@@ -371,15 +371,6 @@ properties:
       type: number
       minimum: 0
 
-  settlement_monitor:
-    type: object
-    description: On-chain claim settlement tracking configuration
-    properties:
-      enabled:
-        type: boolean
-        description: Enable on-chain settlement event tracking
-        default: false
-
   balance_monitor:
     type: object
     description: Balance and stake monitoring configuration (Feature 4)
@@ -442,11 +433,6 @@ properties:
         type: integer
         description: Fixed workers for blockchain queries (startup, cache refresh)
         default: 20
-        minimum: 1
-      settlement_workers:
-        type: integer
-        description: Fixed workers for settlement event processing
-        default: 2
         minimum: 1
 
   leader_election:
