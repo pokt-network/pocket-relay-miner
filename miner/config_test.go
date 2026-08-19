@@ -20,7 +20,6 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, int64(60000), cfg.Redis.ClaimIdleTimeoutMs)
 	require.Equal(t, int64(10), cfg.DeduplicationTTLBlocks)
 	require.Equal(t, int64(1000), cfg.BatchSize) // Increased from 100 for better throughput
-	require.Equal(t, int64(50), cfg.AckBatchSize)
 }
 
 func TestConfig_Validate_Valid(t *testing.T) {
@@ -153,15 +152,6 @@ func TestConfig_GetBatchSize(t *testing.T) {
 	// Test default
 	cfg.BatchSize = 0
 	require.Equal(t, int64(1000), cfg.GetBatchSize()) // Default increased from 100
-}
-
-func TestConfig_GetAckBatchSize(t *testing.T) {
-	cfg := &Config{AckBatchSize: 25}
-	require.Equal(t, int64(25), cfg.GetAckBatchSize())
-
-	// Test default
-	cfg.AckBatchSize = 0
-	require.Equal(t, int64(50), cfg.GetAckBatchSize())
 }
 
 func TestConfig_GetDeduplicationTTL(t *testing.T) {

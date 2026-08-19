@@ -45,10 +45,6 @@ type Config struct {
 	// Default: 100
 	BatchSize int64 `yaml:"batch_size"`
 
-	// AckBatchSize is the number of messages to acknowledge in a batch.
-	// Default: 50
-	AckBatchSize int64 `yaml:"ack_batch_size"`
-
 	// HotReloadEnabled enables hot-reload of keys.
 	// Default: true
 	HotReloadEnabled bool `yaml:"hot_reload_enabled"`
@@ -398,18 +394,6 @@ func (c TransactionConfig) InclusionReconcilerConfig() InclusionReconcilerConfig
 	return cfg
 }
 
-type SupplierConfig struct {
-	// OperatorAddress is the supplier's operator address (bech32).
-	OperatorAddress string `yaml:"operator_address"`
-
-	// SigningKeyName is the name of the key in the keyring used for signing.
-	SigningKeyName string `yaml:"signing_key_name"`
-
-	// Services is a list of service IDs this supplier serves.
-	// Used for filtering relays from the stream.
-	Services []string `yaml:"services,omitempty"`
-}
-
 // Validate validates the configuration.
 func (c *Config) Validate() error {
 	if c.Redis.URL == "" {
@@ -504,14 +488,6 @@ func (c *Config) GetBatchSize() int64 {
 		return c.BatchSize
 	}
 	return 1000 // Default (increased from 100 for better throughput)
-}
-
-// GetAckBatchSize returns the ack batch size with defaults.
-func (c *Config) GetAckBatchSize() int64 {
-	if c.AckBatchSize > 0 {
-		return c.AckBatchSize
-	}
-	return 50 // Default
 }
 
 // GetTxGasLimit returns the transaction gas limit with defaults.
@@ -918,7 +894,6 @@ func DefaultConfig() *Config {
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
-		AckBatchSize:           50,
 		HotReloadEnabled:       true,
 		// SessionTTL: 0 means use CacheTTL (default 2h) - ensures SMST trees and sessions expire together
 		// This prevents orphaned sessions causing "SMST missing but relay count > 0" warnings

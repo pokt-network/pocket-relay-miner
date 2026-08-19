@@ -482,11 +482,6 @@ properties:
     default: 1000
     minimum: 1
 
-  ack_batch_size:
-    type: integer
-    description: Number of messages to acknowledge in a batch
-    default: 50
-    minimum: 1
 
   hot_reload_enabled:
     type: boolean

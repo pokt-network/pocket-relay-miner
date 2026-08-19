@@ -323,9 +323,8 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.logger,
 		w.config.RedisClient,
 		SupplierRegistryConfig{
-			KeyPrefix:    w.config.RedisClient.KB().SuppliersRegistryPrefix(),
-			IndexKey:     w.config.RedisClient.KB().SuppliersRegistryIndexKey(),
-			EventChannel: w.config.RedisClient.KB().SupplierUpdateChannel(),
+			KeyPrefix: w.config.RedisClient.KB().SuppliersRegistryPrefix(),
+			IndexKey:  w.config.RedisClient.KB().SuppliersRegistryIndexKey(),
 		},
 	)
 
@@ -341,7 +340,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			CacheTTL:                       w.config.Config.GetCacheTTL(),
 			SMSTLiveRootCheckpointInterval: w.config.Config.SMSTLiveRootCheckpointInterval,
 			BatchSize:                      w.config.Config.BatchSize,
-			AckBatchSize:                   w.config.Config.AckBatchSize,
 			ClaimIdleTimeout:               w.config.Config.GetClaimIdleTimeout(),
 			SupplierCache:                  w.supplierCache,
 			MinerID:                        w.config.Config.Redis.ConsumerName,

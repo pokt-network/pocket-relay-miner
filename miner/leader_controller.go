@@ -59,7 +59,6 @@ type LeaderController struct {
 	serviceCache          cache.KeyedEntityCache[string, *sharedtypes.Service]
 	supplierCache         *cache.SupplierCache
 	cacheOrchestrator     *cache.CacheOrchestrator
-	proofChecker          *ProofRequirementChecker
 	balanceMonitor        *BalanceMonitor
 	blockHealthMonitor    *BlockHealthMonitor
 	supplierRegistry      *SupplierRegistry
@@ -294,23 +293,13 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger.Info().Str("chain_id", chainID).Msg("fetched chain ID from node")
 	}
 
-	// Create a proof checker
-	c.proofChecker = NewProofRequirementChecker(
-		c.logger,
-		c.queryClients.Proof(),
-		c.queryClients.Shared(),
-		c.queryClients.ServiceDifficulty(),
-	)
-	c.logger.Info().Msg("proof requirement checker initialized")
-
 	// Create supplier registry
 	c.supplierRegistry = NewSupplierRegistry(
 		c.logger,
 		c.config.RedisClient,
 		SupplierRegistryConfig{
-			KeyPrefix:    c.config.RedisClient.KB().SuppliersRegistryPrefix(),
-			IndexKey:     c.config.RedisClient.KB().SuppliersRegistryIndexKey(),
-			EventChannel: c.config.RedisClient.KB().SupplierUpdateChannel(),
+			KeyPrefix: c.config.RedisClient.KB().SuppliersRegistryPrefix(),
+			IndexKey:  c.config.RedisClient.KB().SuppliersRegistryIndexKey(),
 		},
 	)
 

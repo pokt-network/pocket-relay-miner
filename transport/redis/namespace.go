@@ -173,13 +173,6 @@ func (kb *KeyBuilder) SimulationReplayKey(sigHash string) string {
 	return fmt.Sprintf("%s:sim:replay:%s", kb.ns.BasePrefix, sigHash)
 }
 
-// SupplierUpdateChannel builds the pub/sub channel for supplier updates.
-// Format: {base}:{events}:supplier_update
-// Example: "ha:events:supplier_update"
-func (kb *KeyBuilder) SupplierUpdateChannel() string {
-	return fmt.Sprintf("%s:%s:supplier_update", kb.ns.BasePrefix, kb.ns.EventsPrefix)
-}
-
 // BlockEventChannel builds the pub/sub channel for block events.
 // Format: {base}:{events}:blocks
 // Example: "ha:events:blocks"
