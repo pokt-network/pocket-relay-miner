@@ -220,7 +220,7 @@ func cachePattern(kb *transportredis.KeyBuilder, cacheType string) (pattern stri
 	case "account":
 		return kb.CacheKey("account", "*"), "", nil
 	case "supplier":
-		return kb.SupplierStatePattern(), kb.CacheKnownKey("suppliers"), nil
+		return kb.SupplierStatePattern(), "", nil // no known-set: nothing writes cache:known:suppliers
 	case "shared_params":
 		return kb.ParamsSharedCacheKey(), "", nil
 	case "session_params":

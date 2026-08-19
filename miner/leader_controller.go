@@ -261,7 +261,6 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.applicationCache,
 		c.serviceCache,
 		c.supplierCache,
-		nil, // session cache placeholder
 		c.masterPool,
 	)
 	if err := c.cacheOrchestrator.Start(ctx); err != nil {

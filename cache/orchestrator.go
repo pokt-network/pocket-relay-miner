@@ -52,7 +52,6 @@ type CacheOrchestrator struct {
 	applicationCache    KeyedEntityCache[string, *apptypes.Application]
 	serviceCache        KeyedEntityCache[string, *sharedtypes.Service]
 	supplierCache       *SupplierCache // Uses SupplierState, not proto types
-	sessionCache        SessionCache   // Existing implementation
 
 	// Tracked entities - using xsync for lock-free performance
 	// Apps and Services: dynamically discovered from relay traffic
@@ -102,7 +101,6 @@ func NewCacheOrchestrator(
 	applicationCache KeyedEntityCache[string, *apptypes.Application],
 	serviceCache KeyedEntityCache[string, *sharedtypes.Service],
 	supplierCache *SupplierCache,
-	sessionCache SessionCache,
 	workerPool pond.Pool,
 ) *CacheOrchestrator {
 	// Calculate refresh workers: 15% of master pool for I/O-bound cache refresh
@@ -138,7 +136,6 @@ func NewCacheOrchestrator(
 		applicationCache:    applicationCache,
 		serviceCache:        serviceCache,
 		supplierCache:       supplierCache,
-		sessionCache:        sessionCache,
 		knownApps:           xsync.NewMap[string, struct{}](),
 		knownServices:       xsync.NewMap[string, struct{}](),
 		refreshSubpool:      refreshSubpool,
@@ -215,11 +212,6 @@ func (o *CacheOrchestrator) Close() error {
 	if o.supplierCache != nil {
 		if err := o.supplierCache.Close(); err != nil {
 			o.logger.Warn().Err(err).Msg("error closing supplier cache")
-		}
-	}
-	if o.sessionCache != nil {
-		if err := o.sessionCache.Close(); err != nil {
-			o.logger.Warn().Err(err).Msg("error closing session cache")
 		}
 	}
 
@@ -457,17 +449,10 @@ func (o *CacheOrchestrator) refreshApplications(ctx context.Context) error {
 
 	refresher, ok := o.applicationCache.(RefreshableCache)
 	if !ok {
-		// Fallback to Get() if RefreshEntity not available
-		o.logger.Warn().Msg("application cache does not support RefreshEntity, using Get()")
-		for _, appAddr := range knownApps {
-			if _, err := o.applicationCache.Get(ctx, appAddr); err != nil {
-				o.logger.Warn().
-					Err(err).
-					Str(logging.FieldAppAddress, appAddr).
-					Msg("failed to refresh application")
-			}
-		}
-		return nil
+		// Every concrete cache implements RefreshEntity; a cache that does not
+		// is a wiring bug, and a silent Get() fallback would hide it (no L3
+		// force-refresh, no invalidation events).
+		return fmt.Errorf("application cache %T does not implement RefreshEntity", o.applicationCache)
 	}
 
 	// Force refresh from L3 (chain) for each known app IN PARALLEL using pond workers
@@ -529,17 +514,9 @@ func (o *CacheOrchestrator) refreshServices(ctx context.Context) error {
 
 	refresher, ok := o.serviceCache.(RefreshableCache)
 	if !ok {
-		// Fallback to Get() if RefreshEntity not available
-		o.logger.Warn().Msg("service cache does not support RefreshEntity, using Get()")
-		for _, serviceID := range knownServices {
-			if _, err := o.serviceCache.Get(ctx, serviceID); err != nil {
-				o.logger.Warn().
-					Err(err).
-					Str(logging.FieldServiceID, serviceID).
-					Msg("failed to refresh service")
-			}
-		}
-		return nil
+		// Same contract as the application cache above: fail loud, never
+		// degrade to a silent Get() loop.
+		return fmt.Errorf("service cache %T does not implement RefreshEntity", o.serviceCache)
 	}
 
 	// Force refresh from L3 (chain) for each known service IN PARALLEL using pond workers
