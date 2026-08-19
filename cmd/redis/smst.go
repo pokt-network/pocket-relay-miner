@@ -144,7 +144,7 @@ func displaySMSTTree(ctx context.Context, client *DebugRedisClient, key string, 
 	// would orphan the sibling keys. Derived from the scanned key, which is
 	// KeyBuilder-shaped ({base}:smst:{supplier}:{session}:nodes).
 	treePattern := strings.TrimSuffix(key, ":nodes") + ":*"
-	fmt.Printf("\nTo delete this SMST tree, use: redis-debug flush --pattern '%s'\n\n", treePattern)
+	fmt.Printf("\nTo delete this SMST tree, use: pocket-relay-miner redis flush --pattern '%s'\n\n", treePattern)
 
 	return nil
 }

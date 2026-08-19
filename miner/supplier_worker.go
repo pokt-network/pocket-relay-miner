@@ -296,7 +296,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			GasLimit:                 w.config.Config.GetTxGasLimit(),
 			GasPrice:                 gasPrice,
 			GasAdjustment:            w.config.Config.GetTxGasAdjustment(),
-			TimeoutBlocks:            tx.DefaultTimeoutHeight,
 			TxTimeoutMin:             w.config.Config.GetTxTimeoutMin(),
 			TxTimeoutMax:             w.config.Config.GetTxTimeoutMax(),
 			TxTimeoutDefault:         w.config.Config.GetTxTimeoutDefault(),

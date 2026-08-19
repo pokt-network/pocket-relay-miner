@@ -132,13 +132,6 @@ func (kb *KeyBuilder) ParamsSharedCacheKey() string {
 	return fmt.Sprintf("%s:%s:shared_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
 }
 
-// ParamsSessionKey builds the key for the cached session params singleton.
-// Format: {base}:{cache}:session_params
-// Example: "ha:cache:session_params"
-func (kb *KeyBuilder) ParamsSessionKey() string {
-	return fmt.Sprintf("%s:%s:session_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
-}
-
 // ParamsSharedLockKey builds the lock key for shared params cache population.
 // Format: {base}:{cache}:lock:shared_params
 // Example: "ha:cache:lock:shared_params"
@@ -430,15 +423,6 @@ func (kb *KeyBuilder) SupplierStatePattern() string {
 // Example: "ha:smst:*:sess1:nodes"
 func (kb *KeyBuilder) SMSTSessionNodesPattern(sessionID string) string {
 	return fmt.Sprintf("%s:smst:*:%s:nodes", kb.ns.BasePrefix, sessionID)
-}
-
-// LegacyParamsKey builds a legacy metering params key. These keys are no
-// longer written by current code but remain inspectable for debugging older
-// deployments.
-// Format: {base}:params:{name}
-// Example: "ha:params:shared"
-func (kb *KeyBuilder) LegacyParamsKey(name string) string {
-	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.ParamsPrefix, name)
 }
 
 // LegacyParamsPattern builds the SCAN pattern for legacy metering params.
