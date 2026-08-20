@@ -162,3 +162,20 @@ gate_unexplained_shortfall() {
     fi
     printf '%s' "$unexplained"
 }
+
+# gate_served_shortfall EXPECTED SERVED
+#
+# Prints how many relays a cell asked for and did not get. A relay that never
+# reached the relayer never reaches a claim either, so scoring a run against
+# what SUCCEEDED instead of what was REQUESTED hides that loss by construction:
+# the settlement assert would then compare billed against the reduced number and
+# pass. Kept as a function so the rule cannot quietly decay back into "more than
+# zero is fine".
+gate_served_shortfall() {
+    local expected="${1:-0}" served="${2:-0}" missing
+    missing=$(( expected - served ))
+    if [ "$missing" -lt 0 ]; then
+        missing=0
+    fi
+    printf '%s' "$missing"
+}

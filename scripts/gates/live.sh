@@ -271,7 +271,7 @@ run_transport_load() {
         local one sup
         sup="${sup_arr[$((STREAM_CELL_IDX % ${#sup_arr[@]}))]}"
         STREAM_CELL_IDX=$((STREAM_CELL_IDX + 1))
-        for _ in 1 2 3; do
+        for _ in $(seq 1 "$STREAM_CELL_RELAYS"); do
             if [ "$mode" = "stream" ]; then
                 one="$("$BIN" relay stream --localnet --service "$service" \
                     --relayer-url "$relayer_url" --supplier "$sup" --batches 3 2>&1)" || rc=$?
@@ -287,6 +287,17 @@ run_transport_load() {
     esac
     TRANSPORT_OUT="$out"
     return "$rc"
+}
+
+# transport_expected_count MODE -- how many relays the cell ASKED for. The gate
+# compares this against what came back: a relay that never got served is a loss
+# too, just one that happens before the claim path this gate measures, and
+# scoring the run against what succeeded would hide it by construction.
+transport_expected_count() {
+    case "$1" in
+    jsonrpc | websocket | grpc) printf '%s' "$RELAYS_PER_TRANSPORT" ;;
+    stream | cometbft) printf '%s' "$STREAM_CELL_RELAYS" ;;
+    esac
 }
 
 transport_success_count() {
@@ -306,6 +317,11 @@ transport_success_count() {
 matrix_overridden="${MATRIX+1}"
 MATRIX="${MATRIX:-jsonrpc:develop-http jsonrpc:develop-http-eager websocket:develop-websocket websocket:develop-websocket-optimistic grpc:develop-grpc grpc:develop-grpc-optimistic stream:develop-stream stream:develop-stream-optimistic cometbft:develop-cometbft cometbft:develop-cometbft-optimistic}"
 RELAYS_PER_TRANSPORT="${RELAYS_PER_TRANSPORT:-60}"
+# stream/cometbft send one relay per invocation, three per cell.
+STREAM_CELL_RELAYS=3
+# Probes fired by the multi-backend distribution assert. They are REAL
+# signed relays and are billed, so the number appears in two assertions.
+BACKEND_PROBE_RELAYS=12
 STREAM_CELL_IDX=0
 
 # --service narrows the run to every cell of one service. Narrowing is
@@ -439,6 +455,15 @@ for pair in $MATRIX; do
 
     if run_transport_load "$mode" "$service"; then
         succeeded="$(transport_success_count "$mode" "$TRANSPORT_OUT")"
+        expected="$(transport_expected_count "$mode")"
+        unserved="$(gate_served_shortfall "${expected:-0}" "${succeeded:-0}")"
+        if [ "$unserved" -gt 0 ] && [ "${succeeded:-0}" -gt 0 ]; then
+            # Recorded in the ledger anyway: the settlement assert below still
+            # has something to say about the ones that DID get served, and the
+            # run is already failing.
+            gate_fail "${mode}: only ${succeeded} of ${expected} relays were served (${unserved} never made it) -- the loss is upstream of the claim path this gate measures"
+            gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | tail -15)"
+        fi
         if [ "${succeeded:-0}" -gt 0 ]; then
             gate_pass "${mode}: ${succeeded} relay(s)/batch(es) verified end to end"
             loaded_services="${loaded_services} ${service}"
@@ -495,7 +520,7 @@ case " $MATRIX " in
         gate_step "assert: multi-backend distribution on develop-http (${backend_count} backends)"
         seen_backends=""
         rr_served=0
-        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        for _ in $(seq 1 "$BACKEND_PROBE_RELAYS"); do
             rr_out="$("$BIN" relay jsonrpc --localnet --service develop-http \
                 --relayer-url "$relayer_url" 2>/dev/null)" && rr_served=$((rr_served + 1))
             bid="$(printf '%s' "$rr_out" | grep -o '"backend_id":"[^"]*"' | head -1 | cut -d'"' -f4)"
@@ -505,10 +530,14 @@ case " $MATRIX " in
             esac
         done
         distinct="$(printf '%s\n' $seen_backends | grep -c . || true)"
+        probe_unserved="$(gate_served_shortfall "$BACKEND_PROBE_RELAYS" "${rr_served:-0}")"
+        if [ "$probe_unserved" -gt 0 ]; then
+            gate_fail "backend probe: only ${rr_served} of ${BACKEND_PROBE_RELAYS} relays were served"
+        fi
         if [ "${distinct:-0}" -ge 2 ]; then
             gate_pass "load spread across ${distinct} backends:${seen_backends}"
         else
-            gate_fail "12 relays all landed on one backend (${seen_backends:-none}) with ${backend_count} configured -- pool not distributing"
+            gate_fail "${BACKEND_PROBE_RELAYS} relays all landed on one backend (${seen_backends:-none}) with ${backend_count} configured -- pool not distributing"
         fi
         # These probes are REAL signed relays: they mine and bill in the same
         # sessions the exact served==billed assertion counts. Add them to the

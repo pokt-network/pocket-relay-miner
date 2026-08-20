@@ -29,6 +29,13 @@ expect 0 "$(gate_unexplained_shortfall 72 66 9)"  "more announced than missing i
 expect 0 "$(gate_unexplained_shortfall 0 0 0)"    "empty run"
 expect 5 "$(gate_unexplained_shortfall 5 0 0)"    "everything lost, nothing said"
 
+# expected served -> missing
+expect 0  "$(gate_served_shortfall 60 60)" "everything asked for was served"
+expect 20 "$(gate_served_shortfall 60 40)" "a third never made it -- scoring against 40 would hide it"
+expect 60 "$(gate_served_shortfall 60 0)"  "nothing served"
+expect 0  "$(gate_served_shortfall 60 61)" "more than asked is not a shortfall"
+expect 0  "$(gate_served_shortfall 0 0)"   "empty cell"
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1
