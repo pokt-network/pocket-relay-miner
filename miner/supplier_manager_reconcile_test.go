@@ -196,7 +196,6 @@ func TestSupplierManager_Reconcile_DefersRemovalWhilePendingSessions(t *testing.
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		redisClient,
 		SessionStoreConfig{
-			KeyPrefix:       redisClient.KB().MinerSessionsPrefix(),
 			SupplierAddress: supplierAddr,
 			SessionTTL:      time.Hour,
 		},
