@@ -13,6 +13,7 @@ import (
 	"github.com/alitto/pond/v2"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -227,11 +228,99 @@ func TestSupplierManager_Reconcile_DefersRemovalWhilePendingSessions(t *testing.
 
 	mgr.reconcile(ctx)
 	require.NotContains(t, claimedSuppliersSnapshot(mgr.claimer), supplierAddr,
-		"once every session is terminal, the unstaked supplier must be dropped so the pipeline can be torn down")
+		"once every session is terminal, the unstaked supplier must be dropped from the configured list")
 }
 
-// claimedSuppliersSnapshot returns a copy of the claimer's configured
-// supplier list. Reads allSuppliers under its mutex.
+// TestSupplierManager_Reconcile_ReleasesLeaseOnceUnconfigured proves the step the
+// test above does NOT cover, and which nothing covered before.
+//
+// Dropping out of the configured list only rewrites a slice. Until
+// releaseUnconfigured existed, nothing compared that slice against the set of
+// suppliers this instance actually holds a LEASE on, so the lease was renewed
+// forever and the supplier's pipeline — stream consumer, SMST manager, lifecycle
+// manager — kept running for an address that is no longer staked.
+//
+// The distinction is exact and was the reason the older assertion proved nothing:
+// claimedSuppliersSnapshot reads allSuppliers (what we are CONFIGURED to mine),
+// while ClaimedSuppliers reads claimed (what we have LEASED). This test asserts on
+// the second, plus the Redis claim key, which is the state another miner reads to
+// decide whether the supplier is free.
+func TestSupplierManager_Reconcile_ReleasesLeaseOnceUnconfigured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	redisClient, _ := newTestRedis(t)
+
+	supplierAddr := "pokt1supplier_release_on_drop"
+	km := &fakeKeyManager{addrs: []string{supplierAddr}}
+	qc := &toggleableSupplierQueryClient{addr: supplierAddr}
+	qc.staked.Store(true)
+
+	registry := NewSupplierRegistry(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		redisClient,
+		SupplierRegistryConfig{},
+	)
+
+	pool := pond.NewPool(4)
+	defer pool.StopAndWait()
+
+	mgr := NewSupplierManager(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		km,
+		registry,
+		SupplierManagerConfig{
+			RedisClient:               redisClient,
+			MinerID:                   "test-miner",
+			SupplierQueryClient:       qc,
+			WorkerPool:                pool,
+			SessionTTL:                time.Hour,
+			SupplierReconcileInterval: 0,
+		},
+	)
+
+	require.NoError(t, mgr.Start(ctx))
+	defer func() { _ = mgr.Close() }()
+
+	mgr.reconcile(ctx)
+	require.Contains(t, claimedSuppliersSnapshot(mgr.claimer), supplierAddr,
+		"premise: while staked, the supplier is in the configured list")
+
+	// Establish the LEASE directly. mgr.Start does attempt an initial claim, but in
+	// this fixture the claim callback cannot complete, so the supplier ends up
+	// configured and not leased — which would make every assertion below vacuous.
+	// Seeding claimed + the Redis key is the precondition the production rebalance
+	// would have produced, stated explicitly so the test cannot silently test nothing.
+	claimKey := redisClient.KB().MinerClaimKey(supplierAddr)
+	require.NoError(t, redisClient.Set(ctx, claimKey, mgr.claimer.instanceID, time.Hour).Err())
+	mgr.claimer.claimedMu.Lock()
+	mgr.claimer.claimed[supplierAddr] = time.Now()
+	mgr.claimer.claimedMu.Unlock()
+
+	require.Contains(t, mgr.claimer.ClaimedSuppliers(), supplierAddr,
+		"premise: the lease is held before the supplier is dropped")
+
+	// The supplier unstakes and has no pending work, so the filter drops it.
+	qc.staked.Store(false)
+	mgr.reconcile(ctx)
+
+	require.NotContains(t, mgr.claimer.ClaimedSuppliers(), supplierAddr,
+		"a supplier that is no longer staked or configured must have its LEASE released, not merely "+
+			"be dropped from the configured list: the lease is what keeps its pipeline alive and what "+
+			"stops another miner from taking over")
+
+	owner, err := redisClient.Get(ctx, claimKey).Result()
+	require.ErrorIs(t, err, redis.Nil,
+		"the Redis claim key must be deleted so another miner can claim the supplier; it currently reads %q", owner)
+}
+
+// claimedSuppliersSnapshot returns a copy of the claimer's CONFIGURED
+// supplier list (allSuppliers) — NOT the leased set. Reads allSuppliers under
+// its mutex.
+//
+// The difference matters: a supplier can be dropped from the configured list
+// while this instance still holds its lease and runs its whole pipeline. Assert
+// on SupplierClaimer.ClaimedSuppliers when the claim is about teardown.
 func claimedSuppliersSnapshot(c *SupplierClaimer) []string {
 	c.allSuppliersMu.Lock()
 	defer c.allSuppliersMu.Unlock()
