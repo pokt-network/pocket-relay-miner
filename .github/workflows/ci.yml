@@ -93,6 +93,21 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    services:
+      # Real Redis, because miniredis is not Redis where it matters. The
+      # XREADGROUP BLOCK semantics that hung shutdown behave differently in the
+      # fake, which is exactly why nothing caught that bug: tests that assert on
+      # blocking, PEL ageing or eviction have to run against the real server.
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
@@ -129,6 +144,21 @@ jobs:
   race:
     name: Race Detector
     runs-on: ubuntu-latest
+    services:
+      # Real Redis, because miniredis is not Redis where it matters. The
+      # XREADGROUP BLOCK semantics that hung shutdown behave differently in the
+      # fake, which is exactly why nothing caught that bug: tests that assert on
+      # blocking, PEL ageing or eviction have to run against the real server.
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v7
