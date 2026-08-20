@@ -120,6 +120,58 @@ func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTermin
 // was a TOCTOU: concurrent relays all saw snapshot == nil, all called
 // Save, and could race on HSET(full) / HSET(metadata), potentially losing
 // HINCRBY-tracked counters and duplicating lifecycle registration.
+// EnsureSession creates the session snapshot if it does not exist yet.
+//
+// It is separate from OnRelayProcessed because the two have different gates.
+// Counting a relay must happen exactly once — a relay counted twice inflates
+// the claim — so the caller gates it on the deduplicator. Creating the session
+// must happen on EVERY delivery, because a redelivery can be the only chance
+// left to do it: the consumer that first processed the relay can die between
+// MarkProcessed and this call, and then the reclaiming consumer sees
+// added=false. Skipping creation there leaves the SMST holding relays that no
+// snapshot claims, and the work goes unpaid.
+//
+// Running it on every delivery is safe and nearly free: OnSessionCreated goes
+// through CreateIfAbsent, a first-write-wins gate, so N callers racing on one
+// fresh sessionID produce exactly one snapshot, one callback and one metric.
+//
+// Failures are logged, not returned: the caller's relay is already in the SMST
+// and must be ACKed either way.
+func (c *SessionCoordinator) EnsureSession(
+	ctx context.Context,
+	sessionID string,
+	supplierAddress, serviceID, applicationAddress string,
+	sessionStartHeight, sessionEndHeight int64,
+) {
+	// The Get is an optimisation that skips the CreateIfAbsent round-trip on
+	// the hot path where the session already exists; correctness does not
+	// depend on it.
+	snapshot, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		c.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("failed to check session existence")
+	}
+	if snapshot != nil {
+		return
+	}
+
+	if supplierAddress == "" || serviceID == "" {
+		c.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Msg("session not found and missing metadata to create it")
+		return
+	}
+	if err := c.OnSessionCreated(ctx, sessionID, supplierAddress, serviceID,
+		applicationAddress, sessionStartHeight, sessionEndHeight); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("failed to create session")
+	}
+}
+
 func (c *SessionCoordinator) OnRelayProcessed(
 	ctx context.Context,
 	sessionID string,
@@ -134,37 +186,7 @@ func (c *SessionCoordinator) OnRelayProcessed(
 	}
 	c.mu.Unlock()
 
-	// Check if session exists, create if not. The Get call here is an
-	// optimisation to skip the CreateIfAbsent Redis round-trip for the hot
-	// path where the session already exists; correctness does NOT depend on
-	// it because OnSessionCreated delegates to CreateIfAbsent which is the
-	// atomic first-write-wins gate.
-	snapshot, err := c.sessionStore.Get(ctx, sessionID)
-	if err != nil {
-		c.logger.Warn().
-			Err(err).
-			Str(logging.FieldSessionID, sessionID).
-			Msg("failed to check session existence")
-	}
-
-	if snapshot == nil {
-		// Session doesn't exist (or Get failed); attempt create. The
-		// CreateIfAbsent call inside OnSessionCreated serialises concurrent
-		// creators so only one caller fires the session-created callback
-		// and the RecordSessionCreated metric.
-		if supplierAddress == "" || serviceID == "" {
-			c.logger.Warn().
-				Str(logging.FieldSessionID, sessionID).
-				Msg("session not found and missing metadata to create it")
-		} else {
-			if err := c.OnSessionCreated(ctx, sessionID, supplierAddress, serviceID, applicationAddress, sessionStartHeight, sessionEndHeight); err != nil {
-				c.logger.Warn().
-					Err(err).
-					Str(logging.FieldSessionID, sessionID).
-					Msg("failed to create session")
-			}
-		}
-	}
+	c.EnsureSession(ctx, sessionID, supplierAddress, serviceID, applicationAddress, sessionStartHeight, sessionEndHeight)
 
 	// Update session relay count (critical for claim submission).
 	// Terminal state errors are expected for late relays — log and continue.

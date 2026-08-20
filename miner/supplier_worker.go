@@ -596,8 +596,29 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Track relay successfully added to SMST
 	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId)
 
+	// Create the session if it does not exist yet. This runs on EVERY
+	// delivery, including a redelivery the dedup set already knows about,
+	// and that is the point: the consumer that first processed this relay
+	// can die between MarkProcessed and the coordinator call, and then the
+	// consumer that reclaims the message is the last chance to record the
+	// session. Gating creation on firstProcessing left the SMST holding
+	// relays that no snapshot claimed — unpaid work. CreateIfAbsent makes
+	// it first-write-wins, so running it every time costs one round-trip
+	// and cannot double-create.
+	state.SessionCoordinator.EnsureSession(
+		ctx,
+		msg.Message.SessionId,
+		msg.Message.SupplierOperatorAddress,
+		msg.Message.ServiceId,
+		msg.Message.ApplicationAddress,
+		msg.Message.SessionStartHeight,
+		msg.Message.SessionEndHeight,
+	)
+
 	// Track relay in session coordinator, gated by the MarkProcessed result
-	// above: only the FIRST processing of a relay increments the counters.
+	// above: only the FIRST processing of a relay increments the COUNTERS.
+	// Counting one relay twice inflates the claim, so this half stays gated
+	// while the creation above does not.
 	//
 	// ACK-and-log on failure: SMST + dedup are the sources of truth for
 	// the claim; SessionCoordinator (snapshot.TotalComputeUnits) is
