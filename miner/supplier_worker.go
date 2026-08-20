@@ -426,19 +426,34 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
 			return nil
 
-		case snapshot == nil && state.SessionCoordinator != nil &&
+		case state.SessionCoordinator != nil &&
 			state.SessionCoordinator.ClaimWindowClosed(msg.Message.SessionEndHeight):
-			// No session and its claim window has already closed. Processing on
-			// would build an SMST tree and CREATE a session that can never be
-			// claimed: the lifecycle sweep would carry it to claim_window_closed
-			// and delete it again, having done the work for nothing. This is the
-			// reclaim-lands-late case -- the relay is genuinely unpayable, so it
-			// is counted and dropped here instead.
+			// The claim window has closed, so this relay cannot reach a claim
+			// whatever else is true. Deliberately NOT conditioned on the
+			// snapshot being absent: a session sitting in active or claiming
+			// past its window is not terminal yet -- the sweep has not reached
+			// it -- so the case above does not catch it, and without this the
+			// relay would be added to a tree nothing will ever claim.
+			//
+			// With no snapshot at all it is the same verdict for a different
+			// reason: processing on would CREATE a session the sweep could only
+			// carry to claim_window_closed and delete again.
+			//
+			// No money counter is booked here on purpose. This runs BEFORE the
+			// duplicate check, so a late copy of a relay that was already
+			// processed and paid would land in it; counting that as lost
+			// revenue would be wrong. relays_rejected says what happened
+			// without claiming the work went unpaid.
+			state_ := "absent"
+			if snapshot != nil {
+				state_ = string(snapshot.State)
+			}
 			w.logger.Debug().
 				Str("session_id", msg.Message.SessionId).
 				Str("supplier", supplierAddr).
+				Str("session_state", state_).
 				Int64("session_end_height", msg.Message.SessionEndHeight).
-				Msg("LATE_RELAY: dropping relay - claim window closed for an unknown session")
+				Msg("LATE_RELAY: dropping relay - claim window already closed")
 			RecordRelayRejected(supplierAddr, "claim_window_closed", msg.Message.ServiceId)
 			return nil
 		}
