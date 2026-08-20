@@ -401,11 +401,9 @@ func loadMinerConfig(cmd *cobra.Command) (*miner.Config, error) {
 	// Apply flag overrides (flags take precedence over config file)
 	applyFlagOverrides(cmd, config)
 
-	// Generate consumer name from hostname if not set
-	if config.Redis.ConsumerName == "" {
-		hostname, _ := os.Hostname()
-		config.Redis.ConsumerName = fmt.Sprintf("miner-%s-%d", hostname, os.Getpid())
-	}
+	// One rule, one implementation: miner.UniqueConsumerName always appends
+	// the process discriminator, including to a name the operator configured.
+	config.Redis.ConsumerName = miner.UniqueConsumerName(config.Redis.ConsumerName)
 
 	return config, nil
 }
