@@ -107,19 +107,6 @@ func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTermin
 	c.onSessionTerminal = callback
 }
 
-// OnRelayProcessed should be called when a relay is successfully processed and added to SMST.
-// It ensures the session exists and updates the relay count.
-// If the session doesn't exist, it will be created automatically using the provided metadata.
-//
-// Concurrency contract: N concurrent OnRelayProcessed calls for the same
-// brand-new session result in EXACTLY ONE OnSessionCreated invocation
-// (and therefore exactly one TrackSession / RecordSessionCreated). The
-// first-write-wins gate lives in SessionStore.CreateIfAbsent; OnSessionCreated
-// only fires the registered callback when CreateIfAbsent reports that this
-// caller is the creator. Without this gate the previous Get→nil→Save path
-// was a TOCTOU: concurrent relays all saw snapshot == nil, all called
-// Save, and could race on HSET(full) / HSET(metadata), potentially losing
-// HINCRBY-tracked counters and duplicating lifecycle registration.
 // EnsureSession creates the session snapshot if it does not exist yet.
 //
 // It is separate from OnRelayProcessed because the two have different gates.
@@ -127,9 +114,10 @@ func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTermin
 // the claim — so the caller gates it on the deduplicator. Creating the session
 // must happen on EVERY delivery, because a redelivery can be the only chance
 // left to do it: the consumer that first processed the relay can die between
-// MarkProcessed and this call, and then the reclaiming consumer sees
-// added=false. Skipping creation there leaves the SMST holding relays that no
-// snapshot claims, and the work goes unpaid.
+// MarkProcessed and telling the coordinator anything, and then the consumer
+// that reclaims the message finds the hash already marked and drops it.
+// Skipping creation there leaves the SMST holding relays that no snapshot
+// claims, and the work goes unpaid.
 //
 // Running it on every delivery is safe and nearly free: OnSessionCreated goes
 // through CreateIfAbsent, a first-write-wins gate, so N callers racing on one
@@ -143,6 +131,17 @@ func (c *SessionCoordinator) EnsureSession(
 	supplierAddress, serviceID, applicationAddress string,
 	sessionStartHeight, sessionEndHeight int64,
 ) {
+	// Same guard as its siblings. Without it a relay still in flight at
+	// shutdown does a Redis Get, then OnSessionCreated returns "closed", and
+	// the failure is logged Warn once PER RELAY — a per-request Warn, which
+	// the logging policy reserves for state changes.
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return
+	}
+
 	// The Get is an optimisation that skips the CreateIfAbsent round-trip on
 	// the hot path where the session already exists; correctness does not
 	// depend on it.
@@ -172,6 +171,23 @@ func (c *SessionCoordinator) EnsureSession(
 	}
 }
 
+// OnRelayProcessed should be called when a relay is successfully processed and
+// added to SMST. It updates the session's relay count.
+//
+// It does NOT create the session: EnsureSession does, and the caller must have
+// called it. The two are split because their gates differ — creation runs on
+// every delivery, counting only on the first — and merging them again would
+// either drop a session on a redelivery or count a relay twice.
+//
+// Concurrency contract, carried by EnsureSession: N concurrent creators for the
+// same brand-new session result in EXACTLY ONE OnSessionCreated invocation (and
+// therefore exactly one TrackSession / RecordSessionCreated). The
+// first-write-wins gate lives in SessionStore.CreateIfAbsent; OnSessionCreated
+// only fires the registered callback when CreateIfAbsent reports that this
+// caller is the creator. Without that gate the old Get→nil→Save path was a
+// TOCTOU: concurrent relays all saw snapshot == nil, all called Save, and could
+// race on HSET(full) / HSET(metadata), potentially losing HINCRBY-tracked
+// counters and duplicating lifecycle registration.
 func (c *SessionCoordinator) OnRelayProcessed(
 	ctx context.Context,
 	sessionID string,
@@ -185,8 +201,6 @@ func (c *SessionCoordinator) OnRelayProcessed(
 		return fmt.Errorf("session coordinator is closed")
 	}
 	c.mu.Unlock()
-
-	c.EnsureSession(ctx, sessionID, supplierAddress, serviceID, applicationAddress, sessionStartHeight, sessionEndHeight)
 
 	// Update session relay count (critical for claim submission).
 	// Terminal state errors are expected for late relays — log and continue.
