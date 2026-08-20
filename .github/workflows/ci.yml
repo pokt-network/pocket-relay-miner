@@ -2,12 +2,32 @@ name: CI
 
 on:
   push:
-    branches: ["main", "develop"]
+    branches: ["main", "develop", "chore/**", "feat/**", "fix/**"]
   pull_request:
-    branches: ["main", "develop"]
+    branches: ["main", "develop", "chore/**", "feat/**", "fix/**"]
+  # Lets CI be re-run on any branch on demand:
+  #   gh workflow run CI --ref <branch>
+  # GitHub reads this trigger from the DEFAULT branch only, which is why this
+  # change has to land on main to have any effect anywhere else.
+  workflow_dispatch:
 
+# The pull_request filter matches the BASE branch, so a PR stacked on another
+# topic branch never matched ["main", "develop"] and ran no CI at all. The
+# branch patterns above cover both halves of that: the base of a stacked PR,
+# and a push to a topic branch that has no PR yet.
 permissions:
   contents: read
+
+# push and pull_request both fire for a branch that has a PR open, which would
+# otherwise run all eight jobs twice per push. Grouping by the HEAD ref is what
+# collapses them: the two events carry different github.ref values
+# (refs/heads/x vs refs/pull/N/merge) but the same head branch.
+#
+# main never cancels: a run there is the record for a commit that is already
+# merged, and losing it to a later push leaves that commit unverified.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   tracked-files:
