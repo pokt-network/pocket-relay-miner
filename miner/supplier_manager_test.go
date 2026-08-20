@@ -54,9 +54,7 @@ func newCacheTestSupplierManager(t *testing.T, qc *fakeSupplierQueryClient) (*Su
 	redisClient, _ := newTestRedis(t)
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	supplierCache := cache.NewSupplierCache(logger, redisClient, cache.SupplierCacheConfig{
-		KeyPrefix: redisClient.KB().SupplierKeyPrefix(),
-	})
+	supplierCache := cache.NewSupplierCache(logger, redisClient, cache.SupplierCacheConfig{})
 
 	// Build a minimal SupplierManager with only the fields the helper uses:
 	// logger, config.SupplierCache, config.SupplierQueryClient, config.MinerID.

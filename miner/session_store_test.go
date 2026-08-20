@@ -33,7 +33,6 @@ func setupTestSessionStore(t *testing.T) (*RedisSessionStore, *redisutil.Client)
 		testLogger(),
 		client,
 		SessionStoreConfig{
-			KeyPrefix:       client.KB().MinerSessionsPrefix(),
 			SupplierAddress: "pokt1test",
 			SessionTTL:      1 * time.Hour,
 		},

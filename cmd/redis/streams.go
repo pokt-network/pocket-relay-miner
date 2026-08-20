@@ -90,7 +90,7 @@ func listAllStreams(ctx context.Context, client *DebugRedisClient, _ int64) erro
 }
 
 func inspectStream(ctx context.Context, client *DebugRedisClient, supplierAddr string, limit int64) error {
-	streamKey := fmt.Sprintf("%s:%s", client.KB().StreamPrefix(), supplierAddr)
+	streamKey := client.KB().StreamKey(supplierAddr)
 
 	// Check if stream exists
 	exists, err := client.Exists(ctx, streamKey).Result()

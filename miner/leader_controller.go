@@ -228,8 +228,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger,
 		c.config.RedisClient,
 		cache.SupplierCacheConfig{
-			KeyPrefix: c.config.RedisClient.KB().SupplierKeyPrefix(),
-			FailOpen:  false,
+			FailOpen: false,
 		},
 	)
 	if err := c.supplierCache.Start(ctx); err != nil {
@@ -296,8 +295,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger,
 		c.config.RedisClient,
 		SupplierRegistryConfig{
-			KeyPrefix: c.config.RedisClient.KB().SuppliersRegistryPrefix(),
-			IndexKey:  c.config.RedisClient.KB().SuppliersRegistryIndexKey(),
+			IndexKey: c.config.RedisClient.KB().SuppliersRegistryIndexKey(),
 		},
 	)
 

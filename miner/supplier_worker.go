@@ -257,8 +257,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.logger,
 		w.config.RedisClient,
 		cache.SupplierCacheConfig{
-			KeyPrefix: w.config.RedisClient.KB().SupplierKeyPrefix(),
-			FailOpen:  false,
+			FailOpen: false,
 		},
 	)
 	if err = w.supplierCache.Start(ctx); err != nil {
@@ -322,8 +321,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.logger,
 		w.config.RedisClient,
 		SupplierRegistryConfig{
-			KeyPrefix: w.config.RedisClient.KB().SuppliersRegistryPrefix(),
-			IndexKey:  w.config.RedisClient.KB().SuppliersRegistryIndexKey(),
+			IndexKey: w.config.RedisClient.KB().SuppliersRegistryIndexKey(),
 		},
 	)
 
