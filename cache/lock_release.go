@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"fmt"
+	"os"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -38,11 +40,15 @@ return 0
 func newLockToken() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// crypto/rand failing is not recoverable here, and a constant token is
-		// worse than none: every instance would then "own" every lock. Fall
-		// back to a value that cannot match any other token, which makes the
-		// release a no-op and lets the TTL do the work.
-		return "unreleasable"
+		// crypto/rand failing is not recoverable here, and a CONSTANT fallback
+		// is the trap: two instances both taking it would hold the same token,
+		// and releaseIfOwner would let each delete the other's lock — the exact
+		// thing the token exists to prevent. So the fallback still has to be
+		// unique, just not random: pid and nanosecond clock cannot collide
+		// across live processes on one host, and across hosts the lock is
+		// contended only through Redis, where the pid pair would have to
+		// coincide to the nanosecond.
+		return fmt.Sprintf("fallback-%d-%d", os.Getpid(), time.Now().UnixNano())
 	}
 	return hex.EncodeToString(b[:])
 }
