@@ -42,7 +42,7 @@ func pubKeyFromByte(b byte) cryptotypes.PubKey {
 // the entry was frozen for the process lifetime. Pubkeys are immutable, so this
 // is a safety floor rather than a correctness bug, but the mandate is that no L1
 // entry may live for the whole process lifetime. This test drives a downstream
-// change through the REAL account cache + miniredis and asserts L1 caches within
+// change through the REAL account cache + a real Redis and asserts L1 caches within
 // the TTL and refreshes once accountCacheL1TTL elapses.
 func TestAccountCache_L1RefreshesAfterTTL(t *testing.T) {
 	client := newTestRedis(t)
