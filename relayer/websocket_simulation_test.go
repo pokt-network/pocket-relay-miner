@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
@@ -25,6 +24,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
@@ -138,7 +138,8 @@ type simWSFixture struct {
 	supplierAddr string
 	appAddr      string
 	clock        func() time.Time
-	mr           *miniredis.Miniredis
+	redisClient  *redisutil.Client
+	redisPrefix  string
 }
 
 const simWSTestService = simTestService
@@ -169,11 +170,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 	}
 	require.NoError(t, simCfg.Validate())
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	rc, err := redisutil.NewClient(t.Context(), redisutil.ClientConfig{URL: "redis://" + mr.Addr()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = rc.Close(); mr.Close() })
+	rc, redisPrefix := newTestRedis(t)
 
 	simVerifier, err := NewSimulationVerifier(logger, &simCfg, rc, signer,
 		map[string]struct{}{simWSTestService: {}}, clock)
@@ -227,7 +224,8 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 		supplierAddr: supplierAddr,
 		appAddr:      appAddr,
 		clock:        clock,
-		mr:           mr,
+		redisClient:  rc,
+		redisPrefix:  redisPrefix,
 	}
 }
 
@@ -263,14 +261,19 @@ func (f *simWSFixture) buildSignedRelay(t *testing.T, sessionID string) *service
 	return rr
 }
 
-// countMeterKeys counts miniredis keys under the meter/stake prefixes used by
-// RelayMeter.CheckAndConsumeRelay (ha:meter:* and ha:app_stake:*). The
-// simulation replay-dedup key (ha:sim:replay:*) is a legitimate Admission
+// countMeterKeys counts the keys under the meter/stake prefixes used by
+// RelayMeter.CheckAndConsumeRelay (<base>:meter:* and <base>:app_stake:*). The
+// simulation replay-dedup key (<base>:sim:replay:*) is a legitimate Admission
 // write and is deliberately excluded -- this helper proves Accounting
 // (metering) never wrote anything, not that Redis was untouched.
-func countMeterKeys(mr *miniredis.Miniredis) int {
+//
+// It scans THIS fixture's namespace, not the server: the server is shared, so
+// counting every key would fold another package's meter keys into the total
+// and turn "the simulated path wrote nothing" into a coin flip.
+func (f *simWSFixture) countMeterKeys(t *testing.T) int {
+	t.Helper()
 	n := 0
-	for _, k := range mr.Keys() {
+	for _, k := range testredis.Keys(t, f.redisClient, f.redisPrefix) {
 		if strings.Contains(k, ":meter:") || strings.Contains(k, ":app_stake:") {
 			n++
 		}
@@ -289,7 +292,7 @@ func TestWebSocketBridge_Simulated_MultiMessageSuccessNoPublishNoMeter(t *testin
 	f := newSimWSFixture(t)
 
 	before := testutil.ToFloat64(simulatedRelaysTotal.WithLabelValues("websocket", simWSTestService, f.supplierAddr, SimResultSuccess))
-	metersBefore := countMeterKeys(f.mr)
+	metersBefore := f.countMeterKeys(t)
 
 	nonces := []string{"n1", "n2", "n3"}
 	for i, nonce := range nonces {
@@ -336,7 +339,7 @@ func TestWebSocketBridge_Simulated_MultiMessageSuccessNoPublishNoMeter(t *testin
 	require.Equal(t, int32(0), f.pub.calls.Load(), "simulated websocket relay must NEVER publish to the WAL")
 	require.Equal(t, int32(0), f.proc.calls.Load(), "simulated websocket relay must NEVER run mining/ProcessRelay")
 	require.Equal(t, int32(0), f.validator.calls.Load(), "ValidateRelay/MeterRelay must NEVER run for a simulated relay")
-	require.Equal(t, metersBefore, countMeterKeys(f.mr), "no meter/stake keys may be created by a simulated relay")
+	require.Equal(t, metersBefore, f.countMeterKeys(t), "no meter/stake keys may be created by a simulated relay")
 }
 
 // TestWebSocketBridge_Simulated_ForgedRejectedNoBackendHit proves a forged

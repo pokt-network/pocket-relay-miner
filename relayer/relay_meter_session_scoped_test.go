@@ -4,14 +4,11 @@ package relayer
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -31,7 +28,7 @@ func (s *stubComputeUnitsProvider) GetServiceComputeUnits(_ context.Context, _ s
 	return 1
 }
 
-// newScopedTestMeter builds a RelayMeter over miniredis with an epoch-aware
+// newScopedTestMeter builds a RelayMeter over a real Redis with an epoch-aware
 // shared params cache, so "which params epoch priced this?" is observable.
 func newScopedTestMeter(
 	t *testing.T,
@@ -41,15 +38,7 @@ func newScopedTestMeter(
 ) *RelayMeter {
 	t.Helper()
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = redisClient.Close() })
+	redisClient, _ := newTestRedis(t)
 
 	app := &fakeAppClient{addr: "pokt1app_scoped"}
 	app.stakeUpokt.Store(1_000_000)
