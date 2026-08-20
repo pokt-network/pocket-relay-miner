@@ -4,10 +4,8 @@ package miner
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	"github.com/pokt-network/smt"
@@ -181,7 +179,6 @@ func TestMigrateLegacySMSTKeys_MixedLegacyAndNewSchema(t *testing.T) {
 type migrationHarness struct {
 	t           *testing.T
 	ctx         context.Context
-	miniRedis   *miniredis.Miniredis
 	redisClient *redisutil.Client
 }
 
@@ -193,24 +190,17 @@ type testRelayEntry struct {
 
 func newMigrationHarness(t *testing.T) *migrationHarness {
 	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
+	client, _ := newTestRedis(t)
 	return &migrationHarness{
 		t:           t,
 		ctx:         ctx,
-		miniRedis:   mr,
 		redisClient: client,
 	}
 }
 
 func (h *migrationHarness) cleanup() {
 	_ = h.redisClient.Close()
-	h.miniRedis.Close()
 }
 
 func (h *migrationHarness) newManager(supplierAddr string) *RedisSMSTManager {

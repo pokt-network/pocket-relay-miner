@@ -20,31 +20,14 @@ import (
 // internal/testredis hands tests a real Redis 8; scripts/gates/redis.sh starts
 // one for the whole run. The files below still use the fake and are FROZEN at
 // 2026-08-19: this check only stops new ones from landing, and forces the list
-// to shrink as packages are migrated. transport/redis, cache and relayer have
-// been migrated with this check in place and are deliberately absent.
+// to shrink as packages are migrated. transport/redis, cache, relayer and
+// miner have been migrated with this check in place and are deliberately
+// absent.
 var miniredisAllowlist = map[string]bool{
-	"client/relay_client/simulated_test.go":              true,
-	"cmd/redis/cache_all_test.go":                        true,
-	"cmd/redis/cache_test.go":                            true,
-	"leader/redis_health_test.go":                        true,
-	"miner/deduplicator_test.go":                         true,
-	"miner/economic_viability_test.go":                   true,
-	"miner/inclusion_reconciler_test.go":                 true,
-	"miner/pre_proof_guard_test.go":                      true,
-	"miner/rebroadcast_store_test.go":                    true,
-	"miner/redis_smst_bench_test.go":                     true,
-	"miner/redis_smst_utils_test.go":                     true,
-	"miner/session_store_test.go":                        true,
-	"miner/smst_defensive_test.go":                       true,
-	"miner/smst_migration_test.go":                       true,
-	"miner/smst_redis_lifecycle_test.go":                 true,
-	"miner/submission_tracker_onchain_test.go":           true,
-	"miner/supplier_claimer_test.go":                     true,
-	"miner/supplier_manager_history_test.go":             true,
-	"miner/supplier_manager_reconcile_test.go":           true,
-	"miner/supplier_manager_test.go":                     true,
-	"miner/supplier_worker_discovery_test.go":            true,
-	"miner/supplier_worker_error_classification_test.go": true,
+	"client/relay_client/simulated_test.go": true,
+	"cmd/redis/cache_all_test.go":           true,
+	"cmd/redis/cache_test.go":               true,
+	"leader/redis_health_test.go":           true,
 }
 
 // importsMiniredisFake reports whether a file imports the miniredis package.

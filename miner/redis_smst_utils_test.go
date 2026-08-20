@@ -6,8 +6,9 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
-	"github.com/alicebob/miniredis/v2"
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	"github.com/pokt-network/smt"
@@ -18,54 +19,90 @@ import (
 )
 
 // RedisSMSTTestSuite is the base test suite for all Redis SMST tests.
-// It provides a shared miniredis instance to avoid creating thousands of instances.
+// One client on the shared real Redis serves the whole suite, under a
+// namespace of its own.
 //
 // CRITICAL: All tests must use this suite pattern for Rule #1 compliance:
 // - No flaky tests (deterministic, no timing dependencies)
 // - No race conditions (pass -race flag)
-// - No mocks (real miniredis, not mocks)
+// - No fakes (a real Redis 8, not miniredis and not mocks)
 // - No timeout weird tests (no time.Sleep)
 type RedisSMSTTestSuite struct {
 	suite.Suite
-	miniRedis   *miniredis.Miniredis
+	redisPrefix string
 	redisClient *redisutil.Client
 	ctx         context.Context
 }
 
 // SetupSuite runs ONCE before all tests in the suite.
-// Creates a single shared miniredis instance to prevent CPU exhaustion.
 func (s *RedisSMSTTestSuite) SetupSuite() {
-	// Create miniredis instance
-	mr, err := miniredis.Run()
-	s.Require().NoError(err, "failed to create miniredis")
-	s.miniRedis = mr
-
 	s.ctx = context.Background()
-
-	// Create Redis client pointing to miniredis
-	redisURL := fmt.Sprintf("redis://%s", mr.Addr())
-	client, err := redisutil.NewClient(s.ctx, redisutil.ClientConfig{
-		URL: redisURL,
-	})
-	s.Require().NoError(err, "failed to create Redis client")
-	s.redisClient = client
+	s.redisClient, s.redisPrefix = newTestRedis(s.T())
 }
 
 // SetupTest runs BEFORE each test.
-// Flushes all data from miniredis to ensure test isolation.
+//
+// It deletes this suite's OWN subtree, never FLUSHALL: the server is shared
+// with every other package running in parallel, so flushing it would delete
+// their keys mid-test and the failure would read as a bug in their code.
 func (s *RedisSMSTTestSuite) SetupTest() {
-	s.miniRedis.FlushAll()
+	testredis.DeletePrefix(s.T(), s.redisClient, s.redisPrefix)
 }
 
-// TearDownSuite runs ONCE after all tests complete.
-// Closes the shared miniredis instance.
-func (s *RedisSMSTTestSuite) TearDownSuite() {
-	if s.miniRedis != nil {
-		s.miniRedis.Close()
-	}
-	if s.redisClient != nil {
-		_ = s.redisClient.Close()
-	}
+// --- Redis inspection helpers ---
+//
+// These replace the miniredis handle the suite used to hold. Each goes through
+// the suite's client, so it sees exactly what the code under test wrote, in the
+// namespace it was configured with.
+
+// keyExists reports whether key is present.
+func (s *RedisSMSTTestSuite) keyExists(key string) bool {
+	s.T().Helper()
+	n, err := s.redisClient.Exists(s.ctx, key).Result()
+	s.Require().NoError(err)
+	return n == 1
+}
+
+// requireTTLNear asserts key's remaining TTL is want, within a second.
+//
+// miniredis froze time, so an exact equality held. A real server starts
+// counting the moment the expiry is set; the tolerance is what that costs, and
+// it is far smaller than any wrong answer — a missing TTL, or one from a
+// different configured window.
+func (s *RedisSMSTTestSuite) requireTTLNear(key string, want time.Duration, msgAndArgs ...any) {
+	s.T().Helper()
+	got, err := s.redisClient.PTTL(s.ctx, key).Result()
+	s.Require().NoError(err)
+	s.Require().InDeltaf(want.Seconds(), got.Seconds(), 1.0,
+		"TTL on %s: want ~%s, got %s (%v)", key, want, got, msgAndArgs)
+}
+
+// requirePersistent asserts key exists with NO expiry set.
+//
+// Redis answers -1 for "exists, no TTL" and -2 for "no such key"; go-redis
+// surfaces both as negative durations. miniredis returned 0 for both, so the
+// old assertion could not tell a persistent key from an absent one. This one
+// can, and checks that the key is really there.
+func (s *RedisSMSTTestSuite) requirePersistent(key string, msgAndArgs ...any) {
+	s.T().Helper()
+	s.Require().Truef(s.keyExists(key), "%s must exist to be persistent (%v)", key, msgAndArgs)
+	got, err := s.redisClient.TTL(s.ctx, key).Result()
+	s.Require().NoError(err)
+	s.Require().Equalf(time.Duration(-1), got,
+		"%s must have no TTL, got %s (%v)", key, got, msgAndArgs)
+}
+
+// ageKeyTo leaves key with exactly remaining time to live.
+//
+// It replaces miniredis's FastForward. A real server has no clock to wind, but
+// the remaining TTL IS the observable the test is about, so setting it directly
+// produces the same state winding the clock forward would have — without a
+// sleep and without a fake clock.
+func (s *RedisSMSTTestSuite) ageKeyTo(key string, remaining time.Duration) {
+	s.T().Helper()
+	ok, err := s.redisClient.PExpire(s.ctx, key, remaining).Result()
+	s.Require().NoError(err)
+	s.Require().Truef(ok, "%s must exist for its TTL to be aged", key)
 }
 
 // Helper Functions
@@ -184,7 +221,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTTestSuite_MiniredisConnection() {
 	s.Require().NoError(err, "miniredis should be reachable")
 
 	// Verify we can set and get a value
-	key := "test:key"
+	key := s.redisPrefix + ":test:key"
 	value := "test:value"
 	err = s.redisClient.Set(s.ctx, key, value, 0).Err()
 	s.Require().NoError(err, "should be able to set value")
@@ -250,12 +287,16 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTTestSuite_TestDataGeneration() {
 	s.Require().NotEqual(allZeros, alternating, "patterns should differ")
 }
 
-// TestRedisSMSTTestSuite_FlushIsolation verifies SetupTest flushes data between tests.
+// TestRedisSMSTTestSuite_FlushIsolation verifies SetupTest clears data between
+// tests.
+//
+// The key sits UNDER the suite's prefix, and must: the sweep deletes that
+// subtree and nothing else, so a raw key written outside it would survive
+// SetupTest and be left behind on a server every other package shares. That is
+// the whole contract, and writing the key raw is how you break it.
 func (s *RedisSMSTTestSuite) TestRedisSMSTTestSuite_FlushIsolation() {
-	// This test verifies that SetupTest (FlushAll) works correctly
-
 	// Set a value
-	key := "isolation:test:key"
+	key := s.redisPrefix + ":isolation:test:key"
 	value := "isolation:test:value"
 	err := s.redisClient.Set(s.ctx, key, value, 0).Err()
 	s.Require().NoError(err)
@@ -265,10 +306,10 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTTestSuite_FlushIsolation() {
 	s.Require().NoError(err)
 	s.Require().Equal(value, got)
 
-	// Manually flush (simulating what happens between tests)
-	s.miniRedis.FlushAll()
+	// Clear this suite's subtree, which is what SetupTest does between tests.
+	testredis.DeletePrefix(s.T(), s.redisClient, s.redisPrefix)
 
 	// Verify it's gone
 	_, err = s.redisClient.Get(s.ctx, key).Result()
-	s.Require().Equal(redis.Nil, err, "key should not exist after flush")
+	s.Require().Equal(redis.Nil, err, "key should not exist after the subtree is cleared")
 }

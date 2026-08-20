@@ -4,11 +4,9 @@ package miner
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -16,21 +14,15 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-func setupSubmissionTracker(t *testing.T) (*SubmissionTracker, *miniredis.Miniredis) {
+func setupSubmissionTracker(t *testing.T) (*SubmissionTracker, *redisutil.Client) {
 	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{URL: fmt.Sprintf("redis://%s", mr.Addr())})
-	require.NoError(t, err)
+	client, _ := newTestRedis(t)
 
 	return NewSubmissionTracker(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		client,
 		1*time.Hour,
-	), mr
+	), client
 }
 
 // seedClaim creates a tracking record representing a successful claim broadcast

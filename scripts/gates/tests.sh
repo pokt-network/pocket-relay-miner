@@ -13,12 +13,12 @@
 # without the tag the suite compiles into a different, smaller program than the
 # one this repository means by "the tests".
 #
-# The cache, miner and relayer packages run sequentially: their tests mutate
-# process-wide state in place (Prometheus counters read as before/after deltas,
-# plus cache's L1 TTL globals), so concurrent tests would read each other's
-# writes.
-# gate_parallelism in lib.sh holds the flags and the full reasoning. This
-# mirrors `make test`; keep the two in step.
+# The cache, miner and relayer packages run sequentially when targeted on their
+# own: their tests mutate process-wide state in place, so concurrent tests would
+# read each other's writes. The flags are not the guard -- they do not apply to
+# the whole-tree run -- TestNoTestParallelWhereStateIsShared in
+# internal/conventions is. gate_parallelism in lib.sh holds the full reasoning.
+# This mirrors `make test`; keep the two in step.
 
 set -uo pipefail
 

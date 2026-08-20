@@ -46,17 +46,17 @@ func (s *RedisSMSTTestSuite) TestEscalation_BelowThreshold_PreservesRedis() {
 	}
 	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
-	s.Require().True(s.miniRedis.Exists(nodesKey))
-	s.Require().True(s.miniRedis.Exists(liveKey))
+	s.Require().True(s.keyExists(nodesKey))
+	s.Require().True(s.keyExists(liveKey))
 
 	// Fire evictions up to one below the threshold. Every one must
 	// preserve Redis so the designed-for-transient resume path works.
 	for i := 1; i < persistentCorruptionThreshold; i++ {
 		mgr.evictCorruptSession(s.ctx, sessionID, "update_tree_corruption")
-		s.Require().Truef(s.miniRedis.Exists(nodesKey),
+		s.Require().Truef(s.keyExists(nodesKey),
 			"eviction #%d must NOT purge nodes hash (below threshold=%d)",
 			i, persistentCorruptionThreshold)
-		s.Require().Truef(s.miniRedis.Exists(liveKey),
+		s.Require().Truef(s.keyExists(liveKey),
 			"eviction #%d must NOT purge live_root (below threshold=%d)",
 			i, persistentCorruptionThreshold)
 	}
@@ -89,8 +89,8 @@ func (s *RedisSMSTTestSuite) TestEscalation_AtThreshold_PurgesRedis() {
 	// here we write directly to keep the test focused on the purge.
 	s.Require().NoError(s.redisClient.Set(s.ctx, claimedKey, make([]byte, SMSTRootLen), 0).Err())
 	s.Require().NoError(s.redisClient.Set(s.ctx, statsKey, "0:0", 0).Err())
-	s.Require().True(s.miniRedis.Exists(liveKey))
-	s.Require().True(s.miniRedis.Exists(nodesKey))
+	s.Require().True(s.keyExists(liveKey))
+	s.Require().True(s.keyExists(nodesKey))
 
 	// Drive the escalation.
 	for i := 1; i <= persistentCorruptionThreshold; i++ {
@@ -98,13 +98,13 @@ func (s *RedisSMSTTestSuite) TestEscalation_AtThreshold_PurgesRedis() {
 	}
 
 	// All 4 keys must be gone.
-	s.Require().Falsef(s.miniRedis.Exists(claimedKey),
+	s.Require().Falsef(s.keyExists(claimedKey),
 		"escalation must purge claimed_root")
-	s.Require().Falsef(s.miniRedis.Exists(liveKey),
+	s.Require().Falsef(s.keyExists(liveKey),
 		"escalation must purge live_root")
-	s.Require().Falsef(s.miniRedis.Exists(statsKey),
+	s.Require().Falsef(s.keyExists(statsKey),
 		"escalation must purge stats")
-	s.Require().Falsef(s.miniRedis.Exists(nodesKey),
+	s.Require().Falsef(s.keyExists(nodesKey),
 		"escalation must purge nodes hash")
 }
 
@@ -176,10 +176,10 @@ func (s *RedisSMSTTestSuite) TestEscalation_SuccessfulUpdateResetsCounter() {
 	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
 	for i := 1; i < persistentCorruptionThreshold; i++ {
 		mgr.evictCorruptSession(s.ctx, sessionID, "update_tree_corruption")
-		s.Require().Truef(s.miniRedis.Exists(liveKey),
+		s.Require().Truef(s.keyExists(liveKey),
 			"eviction #%d after reset must not purge live_root (below threshold=%d)",
 			i, persistentCorruptionThreshold)
-		s.Require().Truef(s.miniRedis.Exists(nodesKey),
+		s.Require().Truef(s.keyExists(nodesKey),
 			"eviction #%d after reset must not purge nodes hash (below threshold=%d)",
 			i, persistentCorruptionThreshold)
 	}

@@ -127,8 +127,7 @@ func TestClaimsProofsCreated_BoundedLabels(t *testing.T) {
 // TestDedupMetrics_NoSessionIDLabel drives the real deduplicator consumer
 // path for two sessions and proves the dedup counters carry no session_id.
 func TestDedupMetrics_NoSessionIDLabel(t *testing.T) {
-	d, mr := setupTestDeduplicator(t)
-	defer mr.Close()
+	d, _, _ := setupTestDeduplicator(t)
 	ctx := context.Background()
 
 	_, _ = d.IsDuplicate(ctx, []byte("h1"), "dedup-sess-A")

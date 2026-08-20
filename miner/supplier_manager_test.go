@@ -5,11 +5,9 @@ package miner
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	sdkmath "cosmossdk.io/math"
-	"github.com/alicebob/miniredis/v2"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -51,22 +49,13 @@ func (f *fakeSupplierQueryClient) InvalidateSupplier(string) { f.invalidate++ }
 // newCacheTestSupplierManager wires a SupplierManager with the minimum deps
 // needed to exercise resolveAndPublishSupplierState against a real
 // miniredis-backed SupplierCache.
-func newCacheTestSupplierManager(t *testing.T, qc *fakeSupplierQueryClient) (*SupplierManager, *cache.SupplierCache, *miniredis.Miniredis) {
+func newCacheTestSupplierManager(t *testing.T, qc *fakeSupplierQueryClient) (*SupplierManager, *cache.SupplierCache, *redisutil.Client) {
 	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	ctx := context.Background()
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = redisClient.Close() })
+	redisClient, _ := newTestRedis(t)
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	supplierCache := cache.NewSupplierCache(logger, redisClient, cache.SupplierCacheConfig{
-		KeyPrefix: "test:ha:supplier",
+		KeyPrefix: redisClient.KB().SupplierKeyPrefix(),
 	})
 
 	// Build a minimal SupplierManager with only the fields the helper uses:
@@ -84,7 +73,7 @@ func newCacheTestSupplierManager(t *testing.T, qc *fakeSupplierQueryClient) (*Su
 	if qc == nil {
 		mgr.config.SupplierQueryClient = nil
 	}
-	return mgr, supplierCache, mr
+	return mgr, supplierCache, redisClient
 }
 
 // TestResolveAndPublish_ChainOK: happy path — chain query succeeds,

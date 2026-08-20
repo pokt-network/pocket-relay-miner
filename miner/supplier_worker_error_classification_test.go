@@ -6,16 +6,15 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
-	"fmt"
 	"sync/atomic"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -28,8 +27,8 @@ type handlerTestFixture struct {
 	t           *testing.T
 	ctx         context.Context
 	cancel      context.CancelFunc
-	mr          *miniredis.Miniredis
 	redisClient *redisutil.Client
+	failRedis   *testredis.FailSwitch
 
 	supplierAddr string
 
@@ -44,17 +43,11 @@ type handlerTestFixture struct {
 func newHandlerTestFixture(t *testing.T, supplierAddr string) *handlerTestFixture {
 	t.Helper()
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
 	parent, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 
-	client, err := redisutil.NewClient(parent, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
+	client, _ := newTestRedis(t)
+	failRedis := testredis.NewFailSwitch(client)
 	t.Cleanup(func() { _ = client.Close() })
 
 	logger := zerolog.Nop()
@@ -97,10 +90,10 @@ func newHandlerTestFixture(t *testing.T, supplierAddr string) *handlerTestFixtur
 	worker.supplierManager = mgr
 
 	return &handlerTestFixture{
+		failRedis:    failRedis,
 		t:            t,
 		ctx:          parent,
 		cancel:       cancel,
-		mr:           mr,
 		redisClient:  client,
 		supplierAddr: supplierAddr,
 		sessionStore: sessionStore,
