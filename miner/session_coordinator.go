@@ -80,8 +80,9 @@ func (c *SessionCoordinator) SetClaimWindowClosedFn(fn func(sessionEndHeight int
 	c.claimWindowClosedFn = fn
 }
 
-// ClaimWindowClosed reports whether a session ending at sessionEndHeight can
-// still be claimed. It answers FALSE whenever it cannot tell -- no predicate
+// ClaimWindowClosed reports whether the claim window for a session ending at
+// sessionEndHeight has ALREADY CLOSED, so the session can no longer be
+// claimed. It answers FALSE whenever it cannot tell -- no predicate
 // wired, or a height that carries no information -- because the only caller
 // uses it to discard a relay, and discarding on an unknown is how served work
 // stops being paid for.
