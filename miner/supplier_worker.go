@@ -444,14 +444,16 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			// processed and paid would land in it; counting that as lost
 			// revenue would be wrong. relays_rejected says what happened
 			// without claiming the work went unpaid.
-			state_ := "absent"
+			// Named sessionState, not state: `state` is the *SupplierState
+			// this function already holds.
+			sessionState := "absent"
 			if snapshot != nil {
-				state_ = string(snapshot.State)
+				sessionState = string(snapshot.State)
 			}
 			w.logger.Debug().
 				Str("session_id", msg.Message.SessionId).
 				Str("supplier", supplierAddr).
-				Str("session_state", state_).
+				Str("session_state", sessionState).
 				Int64("session_end_height", msg.Message.SessionEndHeight).
 				Msg("LATE_RELAY: dropping relay - claim window already closed")
 			RecordRelayRejected(supplierAddr, "claim_window_closed", msg.Message.ServiceId)
