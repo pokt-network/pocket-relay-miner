@@ -23,7 +23,12 @@ properties:
           - redis://redis-node1:6379,redis-node2:6379
       consumer_name:
         type: string
-        description: Unique consumer name for this miner instance (auto-generated from hostname if not set)
+        description: >-
+          Readable PREFIX for this miner's Redis stream-consumer name, not the
+          name itself: "-<hostname>-<pid>" is always appended, because Redis
+          identifies a consumer by name alone and two replicas sharing one would
+          share a pending-entries list, so neither could reclaim the other's
+          stranded deliveries. Defaults to "miner".
       claim_idle_timeout_ms:
         type: integer
         description: Timeout for reclaiming idle messages from crashed consumers

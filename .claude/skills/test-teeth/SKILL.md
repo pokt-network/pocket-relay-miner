@@ -32,6 +32,29 @@ as coverage and hold nothing.
    new method mid-session; only `go build` in the level-1 gate caught it.
 5. **Re-run. It must be green again**, and `git diff` on the file must be empty.
 
+## Before the injection: does the test even reach the fix?
+
+A test that goes red before the fix and green after is not yet proof. It proves
+SOMETHING changed behaviour — not that it changed the behaviour you described.
+
+So, with the fix written, read the scenario in your own commit message and
+follow it through the function **line by line, down to the fix**. If a `return`
+sits between the entry point and your change, the scenario never arrives, and
+whatever your test exercised was a different path with the same symptom.
+
+Then look at which INPUT FIELD selects that path (a flag on the message, a
+config value, a state field). Test helpers default those to zero, so a helper
+that leaves it unset sends every test down the other branch. Set it explicitly
+in the test, and assert on it if the test's whole point is that branch.
+
+Measured 2026-08-20: a fix for "a redelivery skips creating the session" was
+placed below an `if msg.IsReclaim { ... return nil }` guard. The test used a
+helper that leaves `IsReclaim` false, so it drove the non-reclaim path — which
+already worked — and passed. Red before, green after, defect alive, and a commit
+message asserting the opposite. The injection that catches it: move the fix back
+to the wrong side and confirm THAT test goes red. If it stays green, the test is
+not pinning the position.
+
 ## What a red tells you
 
 - **Failed with a message naming the defect** — the test bites. Done.
