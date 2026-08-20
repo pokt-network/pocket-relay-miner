@@ -477,7 +477,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Early duplicate check on reclaims only, as an optimization: a reclaimed
 	// message is likely to have been processed already, and detecting it here
 	// skips the SMST work. This check is NOT the correctness gate — that is
-	// the MarkProcessed result below, which covers the case XAUTOCLAIM cannot:
+	// the MarkProcessed result below, which covers the case the reclaim cannot:
 	// the ORIGINAL copy still buffered in a slow-but-alive consumer, processed
 	// with IsReclaim=false after another consumer processed the reclaim.
 	// Create the session if it does not exist yet, BEFORE any path that can
@@ -578,12 +578,14 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Mark relay hash as processed in the deduplicator. This runs on every
 	// relay (not only reclaims) because if the current consumer crashes
 	// after the SMST update but before the stream ACK, the next consumer
-	// will reclaim the message via XAUTOCLAIM and needs the dedup set to
-	// recognize it as already processed. The SADD result is the correctness
-	// gate for OnRelayProcessed below: XAUTOCLAIM honors only min-idle, not
-	// consumer liveness, so the duplicate can be the ORIGINAL copy arriving
-	// with IsReclaim=false after another consumer already processed the
-	// reclaimed one — this is the only place that catches that ordering.
+	// will reclaim the message and needs the dedup set to recognize it as
+	// already processed. The SADD result is the correctness gate for
+	// OnRelayProcessed below: the reclaim skips entries this consumer owns
+	// and takes only those idle past the timeout, but idleness cannot
+	// distinguish a dead consumer from a slow-but-alive one — so the
+	// duplicate can be the ORIGINAL copy arriving with IsReclaim=false after
+	// another consumer already processed the reclaimed one, and this is the
+	// only place that catches that ordering.
 	// Ordering matters: MarkProcessed runs BEFORE OnRelayProcessed
 	// (IncrementRelayCount) below so that a crash between them leaves the
 	// counter under-counted rather than over-counted — under-count is the
@@ -629,7 +631,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// the claim; SessionCoordinator (snapshot.TotalComputeUnits) is
 	// derived state used for economic-viability decisions and operator
 	// observability. Returning an error here would leave the stream
-	// message un-ACK'd and XAUTOCLAIM would reclaim it on idle timeout;
+	// message un-ACK'd and the reclaim would take it on idle timeout;
 	// the dedup gate above rejects the duplicate increment on that
 	// redelivery (unless the dedup set entry already expired — treat the
 	// call as best-effort). Log at WARN for operator visibility, then ACK.

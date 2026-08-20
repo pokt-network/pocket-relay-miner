@@ -230,7 +230,7 @@ func (s *errorOnIncrementStore) Close() error { return s.inner.Close() }
 //   - MarkProcessed succeeds (dedup hash present).
 //   - OnRelayProcessed errors (simulated Redis failure on IncrementRelayCount).
 //   - handleRelay returned the wrapped error.
-//   - The stream message would stay pending; XAUTOCLAIM reclaims it; dedup
+//   - The stream message would stay pending; the reclaim takes it; dedup
 //     correctly rejects the reclaim for the SMST but the TotalComputeUnits
 //     counter could be double-incremented if the dedup entry expired or
 //     was cleaned up between the crash and the reclaim.
