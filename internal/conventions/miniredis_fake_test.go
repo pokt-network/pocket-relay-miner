@@ -20,8 +20,8 @@ import (
 // internal/testredis hands tests a real Redis 8; scripts/gates/redis.sh starts
 // one for the whole run. The files below still use the fake and are FROZEN at
 // 2026-08-19: this check only stops new ones from landing, and forces the list
-// to shrink as packages are migrated. transport/redis was migrated with this
-// check and are deliberately absent, as are cache and relayer.
+// to shrink as packages are migrated. transport/redis, cache and relayer have
+// been migrated with this check in place and are deliberately absent.
 var miniredisAllowlist = map[string]bool{
 	"client/relay_client/simulated_test.go":              true,
 	"cmd/redis/cache_all_test.go":                        true,
