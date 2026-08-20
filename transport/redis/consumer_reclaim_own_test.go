@@ -6,10 +6,10 @@ import (
 	"context"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 )
 
@@ -19,12 +19,12 @@ import (
 // re-delivered anything the live consumer had held longer than
 // ClaimIdleTimeout, turning a backlog into a duplicate storm.
 func TestReclaimSkipsOwnPendingEntries(t *testing.T) {
-	mr := miniredis.RunT(t)
-	client := redis.NewClient(&redis.Options{Addr: mr.Addr()})
-	t.Cleanup(func() { _ = client.Close() })
+	client := testredis.Client(t)
 
 	ctx := context.Background()
-	const stream, group, me, dead = "s", "g", "me", "dead-pod"
+	prefix := testredis.Prefix(t)
+	stream, group := prefix+":stream", prefix+":group"
+	const me, dead = "me", "dead-pod"
 
 	require.NoError(t, client.XGroupCreateMkStream(ctx, stream, group, "0").Err())
 	for i := 0; i < 2; i++ {
@@ -43,23 +43,31 @@ func TestReclaimSkipsOwnPendingEntries(t *testing.T) {
 	require.Len(t, mine[0].Messages, 1)
 	myID := mine[0].Messages[0].ID
 
-	// miniredis does not age PEL entries (FastForward leaves Idle at 0), so the
-	// threshold is 0 here: this test pins the CONSUMER filter, which is the
-	// defect. The time filter is Redis's own and was verified against a live
-	// server — XAUTOCLAIM there reclaims the caller's own entries.
-
-	c := &StreamsConsumer{
-		client:     client,
-		streamName: stream,
-		config: transport.ConsumerConfig{
-			ConsumerGroup:    group,
-			ConsumerName:     me,
-			ClaimIdleTimeout: 0,
-		},
+	newConsumer := func(idleTimeoutMs int64) *StreamsConsumer {
+		return &StreamsConsumer{
+			client:     client,
+			streamName: stream,
+			config: transport.ConsumerConfig{
+				ConsumerGroup:    group,
+				ConsumerName:     me,
+				ClaimIdleTimeout: idleTimeoutMs,
+			},
+		}
 	}
 
-	msgs, _, err := c.claimIdleFromOtherConsumers(ctx, "0-0")
+	// The CONSUMER filter, which is the defect: with no age threshold both
+	// entries are old enough, so only the owner can tell them apart.
+	msgs, _, err := newConsumer(0).claimIdleFromOtherConsumers(ctx, "0-0")
 	require.NoError(t, err)
 	require.Len(t, msgs, 1, "must reclaim exactly the dead pod's entry")
 	require.NotEqual(t, myID, msgs[0].ID, "must NOT reclaim our own in-flight delivery")
+
+	// The AGE filter, which only a real server can show: miniredis leaves PEL
+	// entries at Idle 0 whatever FastForward does, so this half used to be
+	// asserted by hand against a live Redis and written down in a comment.
+	// Both deliveries were made moments ago, so a minute-long threshold must
+	// hand over nothing at all.
+	fresh, _, err := newConsumer(60_000).claimIdleFromOtherConsumers(ctx, "0-0")
+	require.NoError(t, err)
+	require.Empty(t, fresh, "entries younger than ClaimIdleTimeout must not be reclaimed")
 }

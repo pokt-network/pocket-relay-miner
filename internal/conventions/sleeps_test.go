@@ -32,7 +32,7 @@ var testSleepAllowlist = map[string]int{
 	"relayer/healthcheck_autorecovery_test.go":    1,
 	"relayer/relay_grpc_publish_test.go":          1,
 	"relayer/websocket_writedeadline_test.go":     1,
-	"transport/redis/consumer_lifecycle_test.go":  2,
+	"transport/redis/consumer_lifecycle_test.go":  1,
 	"tx/tx_client_test.go":                        1,
 }
 
