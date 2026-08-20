@@ -13,9 +13,11 @@
 # without the tag the suite compiles into a different, smaller program than the
 # one this repository means by "the tests".
 #
-# The cache package runs sequentially. Its ~143 tests share one miniredis
-# instance, so running them in parallel is a race against a fixture rather than
-# a test of the code. This mirrors `make test`; keep the two in step.
+# The cache and miner packages run sequentially: their tests mutate
+# process-wide state in place (L1 TTL globals, Prometheus counters read as
+# before/after deltas), so concurrent tests would read each other's writes.
+# gate_parallelism in lib.sh holds the flags and the full reasoning. This
+# mirrors `make test`; keep the two in step.
 
 set -uo pipefail
 
@@ -46,7 +48,7 @@ pkg="$(gate_pkg_target)"
 read -r -a parallelism <<<"$(gate_parallelism)"
 
 case "${PKG:-}" in
-cache | miner) gate_step "go test $pkg (sequential -- shared miniredis fixture)" ;;
+cache | miner) gate_step "go test $pkg (sequential -- process-wide test state)" ;;
 *) gate_step "go test $pkg" ;;
 esac
 

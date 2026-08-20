@@ -106,7 +106,7 @@ gate_repo_root() {
 # gate_pkg_normalized -- PKG with the shapes shell completion produces
 # stripped (trailing slash, leading ./), so every dispatch below sees the same
 # name. Without this, PKG=cache/ targeted ./cache/... but missed the
-# sequential-parallelism branch and raced the shared miniredis fixture.
+# sequential-parallelism branch below.
 gate_pkg_normalized() {
     local p="${PKG:-}"
     p="${p%/}"
@@ -128,11 +128,20 @@ gate_pkg_target() {
 # word list on stdout.
 #
 # Two packages must run sequentially when targeted on their own: cache and
-# miner share a single miniredis fixture across their tests, so running them in
-# parallel races the fixture rather than testing the code. A whole-tree run
-# keeps parallelism because `go test` already isolates packages in separate
-# processes -- the contention is between tests INSIDE one package, which
-# -parallel governs.
+# miner mutate PROCESS-WIDE state in place. cache reassigns the L1 TTL globals
+# (serviceCacheL1TTL and its four siblings) and restores them in t.Cleanup, and
+# both packages read Prometheus counters through testutil.ToFloat64 as
+# before/after deltas. Two such tests running at once read each other's writes.
+#
+# Neither package calls t.Parallel() today, so -parallel is a guard rather than
+# a fix: it stops the first t.Parallel() somebody adds from making those
+# mutations concurrent. A whole-tree run keeps parallelism because `go test`
+# isolates packages in separate processes -- the contention is between tests
+# INSIDE one package, which -parallel governs.
+#
+# This used to say the two shared one miniredis fixture. They never did (each
+# test called miniredis.Run()), and cache has no miniredis at all since it
+# moved to internal/testredis.
 #
 # Keep this list in one place: it used to live inline in the Makefile's `test`
 # and `test_miner` targets with different values in each.
