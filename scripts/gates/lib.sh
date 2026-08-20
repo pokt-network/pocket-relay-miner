@@ -127,11 +127,12 @@ gate_pkg_target() {
 # gate_parallelism -- the -p/-parallel flags for a `go test` run, as a shell
 # word list on stdout.
 #
-# Two packages must run sequentially when targeted on their own: cache and
-# miner mutate PROCESS-WIDE state in place. cache reassigns the L1 TTL globals
-# (serviceCacheL1TTL and its four siblings) and restores them in t.Cleanup, and
-# both packages read Prometheus counters through testutil.ToFloat64 as
-# before/after deltas. Two such tests running at once read each other's writes.
+# Three packages must run sequentially when targeted on their own: cache, miner
+# and relayer mutate PROCESS-WIDE state in place. All three read Prometheus
+# counters through testutil.ToFloat64 as before/after deltas, and cache also
+# reassigns the L1 TTL globals (serviceCacheL1TTL and its four siblings),
+# restoring them in t.Cleanup. Two such tests running at once read each other's
+# writes.
 #
 # Neither package calls t.Parallel() today, so -parallel is a guard rather than
 # a fix: it stops the first t.Parallel() somebody adds from making those
@@ -147,7 +148,7 @@ gate_pkg_target() {
 # and `test_miner` targets with different values in each.
 gate_parallelism() {
     case "$(gate_pkg_normalized)" in
-    cache | miner) printf -- '-p 1 -parallel 1' ;;
+    cache | miner | relayer) printf -- '-p 1 -parallel 1' ;;
     *) printf -- '-p 4 -parallel 4' ;;
     esac
 }

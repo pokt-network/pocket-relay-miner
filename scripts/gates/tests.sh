@@ -13,9 +13,10 @@
 # without the tag the suite compiles into a different, smaller program than the
 # one this repository means by "the tests".
 #
-# The cache and miner packages run sequentially: their tests mutate
-# process-wide state in place (L1 TTL globals, Prometheus counters read as
-# before/after deltas), so concurrent tests would read each other's writes.
+# The cache, miner and relayer packages run sequentially: their tests mutate
+# process-wide state in place (Prometheus counters read as before/after deltas,
+# plus cache's L1 TTL globals), so concurrent tests would read each other's
+# writes.
 # gate_parallelism in lib.sh holds the flags and the full reasoning. This
 # mirrors `make test`; keep the two in step.
 
@@ -48,7 +49,7 @@ pkg="$(gate_pkg_target)"
 read -r -a parallelism <<<"$(gate_parallelism)"
 
 case "${PKG:-}" in
-cache | miner) gate_step "go test $pkg (sequential -- process-wide test state)" ;;
+cache | miner | relayer) gate_step "go test $pkg (sequential -- process-wide test state)" ;;
 *) gate_step "go test $pkg" ;;
 esac
 

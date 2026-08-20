@@ -4,10 +4,8 @@ package relayer
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -37,16 +35,9 @@ func (s staticServiceFactor) GetServiceFactor(_ context.Context, _ string) (floa
 // poktroll model: each supplier claims its portion of the app's stake
 // independently.
 func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
 
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = redisClient.Close() }()
+	redisClient, _ := newTestRedis(t)
 
 	// Deterministic cap. With appStake=1000 uPOKT, serviceFactor=0.5 →
 	// effectiveLimit = 500 uPOKT per supplier. Relay cost = 1 uPOKT
@@ -111,7 +102,7 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 
 	// Supplier B's counter must NOT exist yet — A's exhaustion must not
 	// pollute B's bucket.
-	bExists := mr.Exists(meter.consumedKey(sessionID, supplierB))
+	bExists := keyExists(t, redisClient, meter.consumedKey(sessionID, supplierB))
 	require.False(t, bExists,
 		"supplier B must not have a consumed counter before its first relay — "+
 			"the bug this test guards against is a shared counter keyed only by sessionID")
@@ -153,16 +144,9 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 // The cleanup publisher now carries (sessionID, supplierAddress) so the
 // subscriber can scope the deletion correctly.
 func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
 
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = redisClient.Close() }()
+	redisClient, _ := newTestRedis(t)
 
 	app := &fakeAppClient{addr: "pokt1app_shared"}
 	app.stakeUpokt.Store(1000)
@@ -201,15 +185,23 @@ func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
 	require.NoError(t, meter.ClearSessionMeter(ctx, sessionID, supplierA))
 
 	// A's keys must be gone.
-	require.False(t, mr.Exists(meter.consumedKey(sessionID, supplierA)),
+	require.False(t, keyExists(t, redisClient, meter.consumedKey(sessionID, supplierA)),
 		"A's consumed key must be deleted")
-	require.False(t, mr.Exists(meter.metaKey(sessionID, supplierA)),
+	require.False(t, keyExists(t, redisClient, meter.metaKey(sessionID, supplierA)),
 		"A's meta key must be deleted")
 
 	// B's keys must be untouched.
-	require.True(t, mr.Exists(meter.consumedKey(sessionID, supplierB)),
+	require.True(t, keyExists(t, redisClient, meter.consumedKey(sessionID, supplierB)),
 		"B's consumed key must survive A's cleanup — the bug to guard against "+
 			"is shared-sessionID cleanup clobbering a co-supplier's live meter")
-	require.True(t, mr.Exists(meter.metaKey(sessionID, supplierB)),
+	require.True(t, keyExists(t, redisClient, meter.metaKey(sessionID, supplierB)),
 		"B's meta key must survive A's cleanup")
+}
+
+// keyExists reports whether key is present, replacing miniredis's Exists.
+func keyExists(t *testing.T, client *redisutil.Client, key string) bool {
+	t.Helper()
+	n, err := client.Exists(context.Background(), key).Result()
+	require.NoError(t, err)
+	return n == 1
 }
