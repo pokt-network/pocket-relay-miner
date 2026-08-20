@@ -19,15 +19,17 @@ permissions:
   contents: read
 
 # push and pull_request both fire for a branch that has a PR open, which would
-# otherwise run all eight jobs twice per push. Grouping by the HEAD ref is what
-# collapses them: the two events carry different github.ref values
-# (refs/heads/x vs refs/pull/N/merge) but the same head branch.
+# otherwise run all eight jobs twice per push. Both sides of the fallback must
+# name the branch the SAME way for the group to collapse them: github.ref_name
+# is "chore/x" on a push, matching head.ref on the pull_request, whereas
+# github.ref would be "refs/heads/chore/x" and land in a second group -- which
+# is exactly what happened on the first branch pushed with this file.
 #
 # main never cancels: a run there is the record for a commit that is already
 # merged, and losing it to a later push leaves that commit unverified.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
+  cancel-in-progress: ${{ github.ref_name != 'main' }}
 
 jobs:
   tracked-files:
