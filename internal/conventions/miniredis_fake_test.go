@@ -21,7 +21,7 @@ import (
 // one for the whole run. The files below still use the fake and are FROZEN at
 // 2026-08-19: this check only stops new ones from landing, and forces the list
 // to shrink as packages are migrated. transport/redis was migrated with this
-// check and is deliberately absent, as is cache.
+// check and are deliberately absent, as are cache and relayer.
 var miniredisAllowlist = map[string]bool{
 	"client/relay_client/simulated_test.go":              true,
 	"cmd/redis/cache_all_test.go":                        true,
@@ -45,16 +45,6 @@ var miniredisAllowlist = map[string]bool{
 	"miner/supplier_manager_test.go":                     true,
 	"miner/supplier_worker_discovery_test.go":            true,
 	"miner/supplier_worker_error_classification_test.go": true,
-	"relayer/proxy_simulation_test.go":                   true,
-	"relayer/relay_grpc_simulation_test.go":              true,
-	"relayer/relay_meter_app_stake_test.go":              true,
-	"relayer/relay_meter_health_test.go":                 true,
-	"relayer/relay_meter_keys_test.go":                   true,
-	"relayer/relay_meter_per_supplier_test.go":           true,
-	"relayer/relay_meter_session_params_test.go":         true,
-	"relayer/relay_meter_session_scoped_test.go":         true,
-	"relayer/simulation_test.go":                         true,
-	"relayer/websocket_simulation_test.go":               true,
 }
 
 // importsMiniredisFake reports whether a file imports the miniredis package.
