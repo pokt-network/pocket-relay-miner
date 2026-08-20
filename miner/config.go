@@ -253,7 +253,8 @@ type RedisConfig struct {
 	// If not set, auto-generated from the hostname.
 	ConsumerName string `yaml:"consumer_name,omitempty"`
 
-	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption.
+	// Note: stream consumption blocks for one block interval per XREADGROUP,
+	// not BLOCK 0 -- a bounded block is what lets a shutdown interrupt the read.
 	// This is not configurable - messages are delivered instantly when available.
 
 	// ClaimIdleTimeoutMs is how long a message can be pending before being claimed.
@@ -883,7 +884,8 @@ func DefaultConfig() *Config {
 				URL: "redis://localhost:6379",
 				// Namespace uses defaults (ha:cache, ha:events, ha-miners, etc.)
 			},
-			// Note: BlockTimeout removed - BLOCK 0 (TRUE PUSH) is now hardcoded in consumer
+			// Note: BlockTimeout removed - the consumer blocks for one block
+			// interval per read, so a shutdown is never more than that away.
 			ClaimIdleTimeoutMs: 60000,
 		},
 		Metrics: config.MetricsConfig{
@@ -939,17 +941,45 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse cf file: %w", err)
 	}
 
-	// Generate consumer name from hostname if not set
-	if cf.Redis.ConsumerName == "" {
-		hostname, _ := os.Hostname()
-		cf.Redis.ConsumerName = fmt.Sprintf("miner-%s-%d", hostname, os.Getpid())
-	}
+	cf.Redis.ConsumerName = UniqueConsumerName(cf.Redis.ConsumerName)
 
 	if err = cf.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid cf: %w", err)
 	}
 
 	return cf, nil
+}
+
+// UniqueConsumerName returns the name this process registers with the Redis
+// stream group, given whatever the operator configured (possibly nothing).
+//
+// The process discriminator is appended ALWAYS, not only when the field is
+// empty. Redis identifies a consumer by name and by nothing else, so two
+// processes sharing one name share a pending-entries list: a crashed replica's
+// stranded deliveries then read as the survivor's own in-flight work and the
+// reclaim path passes over them forever. A fixed name in a shared ConfigMap is
+// an ordinary thing to write — the schema even calls the field "unique" —, so
+// uniqueness cannot be left to the operator to remember.
+//
+// What is configured survives as a readable prefix, which is what an operator
+// setting it actually wants.
+func UniqueConsumerName(configured string) string {
+	prefix := configured
+	if prefix == "" {
+		prefix = "miner"
+	}
+	return fmt.Sprintf("%s-%s-%d", prefix, hostnameOrUnknown(), os.Getpid())
+}
+
+// hostnameOrUnknown never fails: the pid still discriminates within a host, and
+// refusing to start over an unreadable hostname would be worse than a slightly
+// less readable name.
+func hostnameOrUnknown() string {
+	hostname, err := os.Hostname()
+	if err != nil || hostname == "" {
+		return "unknown-host"
+	}
+	return hostname
 }
 
 // HasKeySource returns true if at least one key source is configured.

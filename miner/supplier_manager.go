@@ -122,7 +122,8 @@ type SupplierManagerConfig struct {
 	BatchSize int64 // Number of messages to fetch per XREADGROUP
 
 	// Redis stream configuration
-	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption - not configurable
+	// Note: stream consumption blocks for one block interval per XREADGROUP
+	// (not BLOCK 0, which could not be interrupted on shutdown) - not configurable
 	ClaimIdleTimeout time.Duration // How long a message can be pending before being claimed
 
 	// SupplierCache for publishing supplier state to relayers
@@ -449,7 +450,8 @@ func (m *SupplierManager) reconcileLoop(ctx context.Context, interval time.Durat
 }
 
 // checkPoolSize validates that the Redis connection pool is large enough for the number of suppliers.
-// Each supplier holds 1 connection indefinitely for BLOCK 0 stream consumption.
+// Each supplier holds 1 connection for its blocking stream read, re-issued
+// every block interval, so the connection is held continuously in practice.
 // Formula: poolSize = numSuppliers + 20 overhead
 func (m *SupplierManager) checkPoolSize(numSuppliers int) {
 	poolSize := m.config.RedisClient.PoolSize()
@@ -1118,7 +1120,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			ConsumerName:            m.config.ConsumerName,
 			BatchSize:               int64(m.config.BatchSize),                // Use config value (default: 1000)
 			ClaimIdleTimeout:        m.config.ClaimIdleTimeout.Milliseconds(), // From config (default: 60000ms)
-			// Note: Uses BLOCK 0 (TRUE PUSH) for live consumption - hardcoded in consumer
+			// Note: blocks for one block interval per read - hardcoded in consumer
 		},
 	)
 	if err != nil {
