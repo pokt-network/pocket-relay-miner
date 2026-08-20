@@ -133,7 +133,8 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
 1. **Error Handling**
    - ALWAYS check errors
    - Use `fmt.Errorf("context: %w", err)` for wrapping
-   - Log errors with context (use `logger.Warn()` or `logger.Error()`)
+   - Log errors with context, at the level the logging policy (below)
+     assigns to the PATH -- a per-request error is `Debug` plus a metric
    - Never use `panic()` in production code paths
 
 2. **Logging**
@@ -143,17 +144,24 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
    - Never log sensitive data (private keys, credentials)
 
 3. **Concurrency**
-   - ✅ USE: Worker pools (`github.com/sourcegraph/conc/pool`) for bounded concurrency
-   - ❌ NEVER: Unbounded `go func()` - ALWAYS use worker pools to limit goroutines
-   - Use `xsync.MapOf` for lock-free concurrent maps
+   - ✅ USE: Worker pools (`github.com/alitto/pond/v2`) for bounded concurrency
+     — the library this repo actually uses (13 production files); the
+     previously documented `sourcegraph/conc` has zero imports here
+   - ❌ NEVER: Unbounded `go func()` - use a pond pool, or wrap a genuinely
+     long-lived goroutine in `go logging.RecoverGoRoutine(logger, "name", fn)(ctx)`
+     so a panic is counted and logged instead of crashing the process.
+     `internal/conventions` freezes the existing bare `go` statements and
+     fails on new ones.
+   - Use `xsync.Map` (puzpuzpuz/xsync/v4) for lock-free concurrent maps —
+     never `sync.Map` (enforced by `internal/conventions`)
    - Protect shared state with `sync.RWMutex` when necessary
    - Use `context.Context` for cancellation and timeouts
    - ALWAYS defer `Close()` or cleanup functions
    - **Worker Pool Pattern**:
      ```go
-     pool := pool.New().WithMaxGoroutines(10)
-     pool.Go(func() { /* work */ })
-     pool.Wait() // Wait for all tasks to complete
+     pool := pond.NewPool(10) // bounded concurrency
+     pool.Submit(func() { /* work */ })
+     pool.StopAndWait() // Wait for all tasks to complete
      ```
 
 4. **Testing**
@@ -166,8 +174,19 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
      - "Pre-existing" is not an excuse. If a race exists, fix it.
 
 5. **Logging**
-   - Per-request logs: `Debug` level only (never Info/Warn on hot path)
-   - State changes (failover, config reload, circuit breaker, rebalance): `Info` or `Warn`
+   - Per-request logs (including relay REJECTIONS, meter denials, backend
+     failures): `Debug` level only -- never Info/Warn/Error on a path that
+     fires once per relay/message/connection. The alertable signal for a
+     per-request condition is a METRIC with a bounded `reason` label
+     (`relays_rejected_total`, `relays_dropped_total`, ...), not a log line:
+     under flood (Redis outage, stake exhausted, broken gateway) a per-relay
+     Warn is one line per relay per instance.
+   - State changes (failover, config reload, circuit breaker transition,
+     rebalance, reconnect): `Info` or `Warn` -- these fire once per change,
+     and they are what an operator reads during an incident.
+   - A per-message condition that signals a DEFECT in a producer (malformed
+     stream message, empty RelayHash) may stay at `Warn`: it is bounded by
+     the defect existing, and it must be visible without debug logging.
    - Errors: `Error` level only for things that need immediate attention
    - Never `logger.Fatal` in goroutines -- use error channel propagation
 
@@ -242,7 +261,9 @@ func ProcessRelay(ctx context.Context, relay *Relay) error {
     logger := logging.ForComponent(logger, "relay_processor")
 
     if err := relay.Validate(); err != nil {
-        logger.Warn().
+        // Per-request rejection: Debug + metric, never Warn (see Logging).
+        relaysRejected.WithLabelValues(relay.ServiceID, rejectReasonValidationFailed).Inc()
+        logger.Debug().
             Err(err).
             Str("session_id", relay.SessionID).
             Msg("relay validation failed")
@@ -321,7 +342,7 @@ If any gate fails, fix it before reporting completion. Do NOT report "done" with
 
 ### Key Patterns
 
-Reference: See full mapping in `cmd/cmd_redis_debug.go` and subcommands
+Reference: See full mapping in `cmd/cmd_redis.go` and the subcommands under `cmd/redis/`
 
 - **WAL**: `ha:relays:{supplierAddress}` (Redis Streams)
 - **SMST Nodes**: `ha:smst:{sessionID}:nodes` (Redis Hashes)
@@ -558,10 +579,10 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats  # Inspect all HA keys
 ## Critical Files
 
 ### Entry Points
-- `main.go`: CLI entry point (relayer/miner/redis-debug subcommands)
+- `main.go`: CLI entry point (relayer/miner/redis subcommands)
 - `cmd/cmd_relayer.go`: Relayer startup and initialization
 - `cmd/cmd_miner.go`: Miner startup and initialization
-- `cmd/cmd_redis_debug.go`: Redis debug tooling entry point
+- `cmd/cmd_redis.go`: Redis debug tooling entry point (subcommands in `cmd/redis/`)
 
 ### Core Logic
 - `relayer/proxy.go`: HTTP/WebSocket relay handling

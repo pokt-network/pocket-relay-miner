@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"fmt"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
@@ -80,25 +81,18 @@ func (a *proofQueryClientAdapter) GetParams(ctx context.Context) (*prooftypes.Pa
 		return nil, err
 	}
 
-	// ProofParams is an interface, we need to extract the concrete type
-	// The actual implementation returns *prooftypes.Params
-	if concreteParams, ok := params.(*prooftypes.Params); ok {
-		return concreteParams, nil
+	// client.ProofParams is an interface; every implementation reachable here
+	// returns *prooftypes.Params (verified 2026-08-19: the adapter's only
+	// caller wires query.Clients.Proof(), whose GetParams is instantiated on
+	// the concrete type). A different dynamic type means a new, unvetted
+	// implementation — fail loud instead of reconstructing params field by
+	// field, which the old fallback did with a misnamed variable and would
+	// silently miss any field added to prooftypes.Params.
+	concreteParams, ok := params.(*prooftypes.Params)
+	if !ok {
+		return nil, fmt.Errorf("unexpected ProofParams implementation %T (want *prooftypes.Params)", params)
 	}
-
-	// Fallback: try to get compute units per relay (ProofParams interface method)
-	// and construct a new Params object
-	computeUnitsPerRelay := params.GetProofRequestProbability()
-	proofRequirementThreshold := params.GetProofRequirementThreshold()
-	proofMissingPenalty := params.GetProofMissingPenalty()
-	proofSubmissionFee := params.GetProofSubmissionFee()
-
-	return &prooftypes.Params{
-		ProofRequestProbability:   computeUnitsPerRelay,
-		ProofRequirementThreshold: proofRequirementThreshold,
-		ProofMissingPenalty:       proofMissingPenalty,
-		ProofSubmissionFee:        proofSubmissionFee,
-	}, nil
+	return concreteParams, nil
 }
 
 // NewProofQueryClientAdapter creates an adapter for client.ProofQueryClient.

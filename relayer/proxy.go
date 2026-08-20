@@ -30,6 +30,8 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
+	"github.com/rs/zerolog"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/transport"
@@ -85,7 +87,6 @@ const (
 	rejectReasonSupplierInactive            = "supplier_inactive"
 	rejectReasonNoServices                  = "no_services"
 	rejectReasonWrongService                = "wrong_service"
-	rejectReasonBackendUnhealthy            = "backend_unhealthy"
 	rejectReasonMeterError                  = "meter_error"
 	rejectReasonStakeExhausted              = "stake_exhausted"
 	rejectReasonValidationFailed            = "validation_failed"
@@ -100,6 +101,10 @@ const (
 	dropReasonValidationFailed = "validation_failed"
 	dropReasonMeterError       = "meter_error"
 	dropReasonStakeExhausted   = "stake_exhausted"
+	dropReasonNoSupplier       = "no_supplier"
+	dropReasonMarshalFailed    = "marshal_failed"
+	dropReasonProcessFailed    = "process_failed"
+	dropReasonPublishFailed    = "publish_failed"
 )
 
 // defaultGzipMinCompressSize is the fallback minimum response size worth
@@ -140,7 +145,6 @@ type publishTask struct {
 type ProxyServer struct {
 	logger         logging.Logger
 	config         *Config
-	healthChecker  *HealthChecker
 	publisher      transport.MinedRelayPublisher
 	validator      RelayValidator
 	relayProcessor RelayProcessor
@@ -216,7 +220,6 @@ type ProxyServer struct {
 func NewProxyServer(
 	logger logging.Logger,
 	config *Config,
-	healthChecker *HealthChecker,
 	publisher transport.MinedRelayPublisher,
 	workerPool pond.Pool,
 ) (*ProxyServer, error) {
@@ -278,7 +281,6 @@ func NewProxyServer(
 	proxy := &ProxyServer{
 		logger:             logging.ForComponent(logger, logging.ComponentProxyServer),
 		config:             config,
-		healthChecker:      healthChecker,
 		publisher:          publisher,
 		clientPool:         clientPool,
 		clientPoolFallback: clientPoolFallback,
@@ -539,6 +541,16 @@ func (p *ProxyServer) Start(ctx context.Context) error {
 	ctx, p.cancelFn = context.WithCancel(ctx)
 	p.mu.Unlock()
 
+	// One-shot wiring check: every relay handled without these rejects with
+	// a 500 (and a per-request Debug + relays_rejected_total sample), so the
+	// loud signal belongs here, once, at startup — not once per request.
+	if p.responseSigner == nil {
+		p.logger.Warn().Msg("starting without a response signer - every relay will be rejected until SetResponseSigner is called")
+	}
+	if p.supplierCache == nil {
+		p.logger.Warn().Msg("starting without a supplier cache - every relay will be rejected until SetSupplierCache is called")
+	}
+
 	// Initialize and start global session monitor for WebSocket connections
 	p.sessionMonitor = NewSessionMonitor(
 		p.logger,
@@ -794,7 +806,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// Validate critical dependencies are configured - fail fast before any processing
 	if p.responseSigner == nil {
-		logging.WithSessionContext(p.logger.Error(), sessionCtx).
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("response signer not configured")
 		p.sendError(w, http.StatusInternalServerError, "relayer not properly configured")
 		relaysReceived.WithLabelValues(serviceID, "unknown").Inc()
@@ -803,7 +815,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if p.supplierCache == nil {
-		logging.WithSessionContext(p.logger.Error(), sessionCtx).
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("supplier cache not configured")
 		p.sendError(w, http.StatusInternalServerError, "relayer not properly configured")
 		relaysReceived.WithLabelValues(serviceID, "unknown").Inc()
@@ -864,7 +876,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Validate supplier operator address - REQUIRED in every valid RelayRequest
 	supplierOperatorAddr := relayRequest.Meta.SupplierOperatorAddress
 	if supplierOperatorAddr == "" {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("missing supplier operator address in relay request")
 		p.sendError(w, http.StatusBadRequest, "missing supplier operator address in relay request")
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonMissingSupplierAddress).Inc()
@@ -874,7 +886,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Check supplier state against our registry
 	supplierState, cacheErr := p.supplierCache.GetSupplierState(r.Context(), supplierOperatorAddr)
 	if cacheErr != nil {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Err(cacheErr).
 			Msg("failed to check supplier state in cache")
 		p.sendError(w, http.StatusServiceUnavailable, "failed to verify supplier state")
@@ -883,7 +895,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	}
 	decision := p.decideSupplierServe(supplierState, supplierOperatorAddr, serviceID)
 	if !decision.serve {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Str("reason", decision.rejectReason).
 			Msg(decision.clientMsg)
 		p.sendError(w, http.StatusServiceUnavailable, decision.clientMsg)
@@ -906,13 +918,12 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// for this supplier+service. Serving continues — the relay is claimable.
 	p.warnUndeclaredTransport(supplierState, supplierOperatorAddr, serviceID, rpcType)
 
-	// Check backend health
-	if !p.healthChecker.IsHealthy(serviceID) {
-		// NOTE: this will return true always until is properly implemented.
-		p.sendError(w, http.StatusServiceUnavailable, "backend unhealthy")
-		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonBackendUnhealthy).Inc()
-		return
-	}
+	// Backend health is enforced further down by the per-rpc-type fast-fail
+	// (pool.HasHealthy on the resolved pool). A gate lived here that called
+	// healthChecker.IsHealthy(serviceID), but health-check pools are
+	// registered under "{serviceID}:{rpcType}" — the lookup never matched, so
+	// it returned "unknown pool, assume healthy" on every relay and its
+	// rejection reason could not be emitted. Its own NOTE said as much.
 
 	// Check service-specific body size limit
 	serviceMaxBodySize := p.config.GetServiceMaxBodySize(serviceID)
@@ -981,7 +992,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			p.metricRecorder.RecordDuration(relayMeterLatency, []string{serviceID, "eager"}, meterDuration)
 
 			if meterErr != nil {
-				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 					Err(meterErr).
 					Msg("relay meter error (eager mode)")
 				if !allowed {
@@ -1153,7 +1164,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		// Return raw 5xx status to client (no wrapping in RelayResponse)
 		p.sendError(w, respStatus, "backend service error")
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonBackend5xx).Inc()
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Int("status_code", respStatus).
 			Msg("backend returned 5xx error - relay not mined")
 		return
@@ -1172,7 +1183,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			respStatus,
 		)
 		if signErr != nil {
-			logging.WithSessionContext(p.logger.Error(), sessionCtx).
+			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Err(signErr).
 				Msg("failed to sign relay response")
 			p.sendError(w, http.StatusInternalServerError, "failed to sign response")
@@ -1195,7 +1206,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		if shouldCompressResponse(p.config.ResponseCompression, clientAcceptsGzip(r), len(signedResponseBz)) {
 			compressed, compressErr := compressGzip(signedResponseBz)
 			if compressErr != nil {
-				logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 					Err(compressErr).
 					Msg("failed to gzip compress response, sending uncompressed")
 			} else {
@@ -1334,7 +1345,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 				if meterErr != nil {
 					relaysDropped.WithLabelValues(capturedServiceID, dropReasonMeterError).Inc()
-					logging.WithSessionContext(p.logger.Warn(), capturedSessionCtx).
+					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 						Err(meterErr).
 						Str("validation_mode", "optimistic").
 						Msg("relay meter error (optimistic mode) - relay dropped")
@@ -1344,7 +1355,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					}
 				} else if !allowed {
 					relaysDropped.WithLabelValues(capturedServiceID, dropReasonStakeExhausted).Inc()
-					logging.WithSessionContext(p.logger.Warn(), capturedSessionCtx).
+					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 						Str("validation_mode", "optimistic").
 						Msg("relay served but NOT mined: session relay limit reached, relay dropped after serving")
 					// Stake exhausted - discard, don't submit to miner
@@ -1394,7 +1405,8 @@ func (p *ProxyServer) submitPublishTask(
 	if supplierAddr == "" {
 		// Create minimal session context from what we have
 		sessionCtx := logging.SessionContextPartial("", serviceID, "", "", 0)
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+		relaysDropped.WithLabelValues(serviceID, dropReasonNoSupplier).Inc()
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("no supplier address available, skipping relay publication")
 		return
 	}
@@ -1470,7 +1482,10 @@ func (p *ProxyServer) parseRelayRequest(body []byte) (*servicetypes.RelayRequest
 
 	logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 		Str("method", poktHTTPRequest.Method).
-		Str("url", poktHTTPRequest.Url).
+		// Func, not a plain Str: arguments are evaluated even when the level
+		// is disabled, and this runs once per relay — the redaction parse
+		// must not be paid on the hot path just to be thrown away.
+		Func(func(e *zerolog.Event) { e.Str("url", logging.RedactURL(poktHTTPRequest.Url)) }).
 		Msg("deserialized POKTHTTPRequest from relay payload")
 
 	return relayRequest, serviceID, poktHTTPRequest, nil
@@ -1635,7 +1650,9 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Str("method", poktHTTPRequest.Method).
-			Str("url", requestURL.String()).
+			// See above: keep the URL build and redaction off the hot path
+			// when Debug is disabled.
+			Func(func(e *zerolog.Event) { e.Str("url", logging.RedactURL(requestURL.String())) }).
 			Int("body_size", len(poktHTTPRequest.BodyBz)).
 			Msg("built backend request from POKTHTTPRequest")
 	} else {
@@ -1777,7 +1794,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to read response: %w", err)
 	}
 	if closeErr := resp.Body.Close(); closeErr != nil {
-		p.logger.Warn().Err(closeErr).Msg("failed to close response body")
+		p.logger.Debug().Err(closeErr).Msg("failed to close response body")
 	}
 
 	return respBody, resp.Header, resp.StatusCode, false, endpoint, backendPool, nil
@@ -1876,6 +1893,10 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 		}
 		for _, ep := range bp.All() {
 			total++
+			// IsHealthy, not CurrentlyHealthy: readiness must report what the
+			// serving path would do, and that path (Pool.HasHealthy -> Next)
+			// auto-recovers past the half-open timeout. With the pure read,
+			// /ready answered 503 forever while relays were being served.
 			isHealthy := ep.IsHealthy()
 			if isHealthy {
 				healthy++
@@ -2391,7 +2412,16 @@ func (p *ProxyServer) validateRelayRequest(
 
 	// Check reward eligibility (for eager validation, we do this now)
 	if err := p.validator.CheckRewardEligibility(ctx, relayRequest); err != nil {
-		p.logger.Warn().
+		// Served but unclaimable: backend capacity spent for no reward. The
+		// line is Debug (per-request), so this counter is the only signal an
+		// operator gets that a gateway is sending past the grace-period
+		// cutoff.
+		svcID := metricLabelUnknown
+		if relayRequest.Meta.SessionHeader != nil && relayRequest.Meta.SessionHeader.ServiceId != "" {
+			svcID = relayRequest.Meta.SessionHeader.ServiceId
+		}
+		relaysNotRewardable.WithLabelValues(svcID).Inc()
+		p.logger.Debug().
 			Err(err).
 			Msg("relay not eligible for rewards (continuing to serve)")
 		// Don't return error - we still serve the relay, just won't get rewards
@@ -2429,7 +2459,8 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 			task.arrivalBlockHeight,
 		)
 		if err != nil {
-			logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			relaysDropped.WithLabelValues(task.serviceID, dropReasonProcessFailed).Inc()
+			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("failed to process relay")
 			return
@@ -2444,7 +2475,8 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 
 		// Publish the mined relay
 		if err := p.publisher.Publish(ctx, msg); err != nil {
-			logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+			relaysDropped.WithLabelValues(task.serviceID, dropReasonPublishFailed).Inc()
+			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("failed to publish mined relay")
 			return
@@ -2474,7 +2506,8 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 	msg.SetPublishedAt()
 
 	if err := p.publisher.Publish(ctx, msg); err != nil {
-		logging.WithSessionContext(p.logger.Warn(), sessionCtx).
+		relaysDropped.WithLabelValues(task.serviceID, dropReasonPublishFailed).Inc()
+		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Err(err).
 			Msg("failed to publish mined relay")
 		return

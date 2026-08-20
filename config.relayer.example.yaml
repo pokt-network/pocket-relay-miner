@@ -361,10 +361,15 @@ cache_warmup:
 
 # Logging configuration
 logging:
-  level: "debug"  # trace, debug, info, warn, error (localnet uses debug)
-  format: "json"  # json, text (json required for Loki log level detection)
-  output: "stdout"  # stdout, stderr, or file path
+  level: "debug"  # debug, info, warn, error (localnet uses debug; anything else fails config load)
+  format: "json"  # json, text (json required for Loki log level detection; always stderr)
+  async: true  # Enable async logging for better performance
+  async_buffer_size: 100000  # Async log buffer size (bytes)
+  async_poll_interval: 100  # Async writer flush interval (ms); 10-50 for high-throughput production
   enable_caller: false  # Add caller file:line to logs (~14% alloc overhead, disable in production)
+  # sampling: false  # GLOBAL log sampling for extreme throughput; drops state-change logs too.
+  # sampling_initial: 100  # lines always written before sampling kicks in
+  # sampling_thereafter: 10  # then 1 in N lines
   # [PRODUCTION] level: "info", enable_caller: false
 
 # Simulated relays (optional - disabled by default)

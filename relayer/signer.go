@@ -288,7 +288,7 @@ func (rs *ResponseSigner) BuildAndSignRelayResponseFromBody(
 		if err != nil {
 			// If decompression fails, log warning but continue with original body
 			// This handles edge cases where magic bytes match but content isn't actually gzip
-			rs.logger.Warn().
+			rs.logger.Debug().
 				Err(err).
 				Int("body_size", len(respBody)).
 				Str("content_encoding", contentEncoding).

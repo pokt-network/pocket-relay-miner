@@ -159,7 +159,6 @@
           }
         }
       ],
-      "application_list": [],
       "params": {
         "max_delegated_gateways": "7",
         "min_stake": {

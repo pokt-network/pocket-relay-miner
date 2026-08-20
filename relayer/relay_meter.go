@@ -13,6 +13,8 @@ import (
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/redis/go-redis/v9"
 
+	"github.com/rs/zerolog"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/app/pocket"
@@ -263,7 +265,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	// Get relay cost first
 	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
 	if err != nil {
-		m.logger.Warn().Err(err).Str(logging.FieldServiceID, serviceID).
+		m.logger.Debug().Err(err).Str(logging.FieldServiceID, serviceID).
 			Msg("failed to get relay cost")
 		return m.handleRedisError("get relay cost")
 	}
@@ -271,7 +273,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	// Get or create session meter
 	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight, currentHeight)
 	if err != nil {
-		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
 		return m.handleRedisError("get session meter")
 	}
@@ -282,7 +284,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	consumedKey := m.consumedKey(sessionID, supplierAddress)
 	newConsumed, err := m.redisClient.IncrBy(ctx, consumedKey, relayCostUpokt).Result()
 	if err != nil {
-		m.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to increment consumed stake")
 		return m.handleRedisError("increment consumed")
 	}
@@ -297,31 +299,39 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	// Over the limit - reject the relay
 	relayMeterConsumptions.WithLabelValues(serviceID, "over_limit").Inc()
 
-	// Get diagnostic data for exhaustion logging
-	appStakeUpokt, _ := m.getAppStake(ctx, appAddress)
-	appParams, _ := m.getApplicationParams(ctx)
-	sessionParams, _ := m.getSessionParams(ctx)
+	// Fires on EVERY relay once the app is over the limit — per-request by
+	// construction, and rejections arrive in bursts because an exhausted app
+	// rejects every relay that follows. The operator signal is
+	// relay_meter_consumptions_total{result="over_limit"}.
+	//
+	// The three diagnostic lookups below exist ONLY to fill this line's
+	// fields, and each can miss its L1 cache and reach Redis or the chain, so
+	// they live inside Func: zerolog runs it only when the event is enabled,
+	// which keeps the whole diagnostic off the hot path at production levels.
+	m.logger.Debug().Func(func(e *zerolog.Event) {
+		appStakeUpokt, _ := m.getAppStake(ctx, appAddress)
+		appParams, _ := m.getApplicationParams(ctx)
+		sessionParams, _ := m.getSessionParams(ctx)
 
-	var minStakeUpokt int64
-	var numSuppliers uint64
-	if appParams != nil {
-		minStakeUpokt = appParams.GetMinStake().Amount.Int64()
-	}
-	if sessionParams != nil {
-		numSuppliers = sessionParams.NumSuppliersPerSession
-	}
+		var minStakeUpokt int64
+		var numSuppliers uint64
+		if appParams != nil {
+			minStakeUpokt = appParams.GetMinStake().Amount.Int64()
+		}
+		if sessionParams != nil {
+			numSuppliers = sessionParams.NumSuppliersPerSession
+		}
 
-	m.logger.Warn().
-		Str("application", appAddress).
-		Str(logging.FieldServiceID, serviceID).
-		Str(logging.FieldSessionID, sessionID).
-		Int64("session_end_height", sessionEndHeight).
-		Int64("consumed_upokt", newConsumed).
-		Int64("max_stake_upokt", maxStakeUpokt).
-		Int64("app_stake_upokt", appStakeUpokt).
-		Int64("app_min_stake_upokt", minStakeUpokt).
-		Uint64("num_suppliers_in_session", numSuppliers).
-		Msg("session relay limit reached: this supplier's claimable portion for the session is fully consumed")
+		e.Str("application", appAddress).
+			Str(logging.FieldServiceID, serviceID).
+			Str(logging.FieldSessionID, sessionID).
+			Int64("session_end_height", sessionEndHeight).
+			Int64("consumed_upokt", newConsumed).
+			Int64("max_stake_upokt", maxStakeUpokt).
+			Int64("app_stake_upokt", appStakeUpokt).
+			Int64("app_min_stake_upokt", minStakeUpokt).
+			Uint64("num_suppliers_in_session", numSuppliers)
+	}).Msg("session relay limit reached: this supplier's claimable portion for the session is fully consumed")
 
 	// Revert the increment since we're rejecting
 	m.redisClient.DecrBy(ctx, consumedKey, relayCostUpokt)
@@ -962,14 +972,17 @@ func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID strin
 func (m *RelayMeter) handleRedisError(operation string) (allowed bool, err error) {
 	relayMeterRedisErrors.WithLabelValues(operation).Inc()
 
+	// Per-relay under a Redis outage (one line per relay per instance); the
+	// outage itself is logged by the transport reconnect loop, and
+	// relay_meter_redis_errors_total carries the alertable rate.
 	if m.config.FailBehavior == FailOpen {
-		m.logger.Warn().
+		m.logger.Debug().
 			Str("operation", operation).
 			Msg("Redis error, fail-open: allowing relay")
 		return true, nil
 	}
 
-	m.logger.Warn().
+	m.logger.Debug().
 		Str("operation", operation).
 		Msg("Redis error, fail-closed: rejecting relay")
 	return false, fmt.Errorf("redis unavailable and fail-closed configured")

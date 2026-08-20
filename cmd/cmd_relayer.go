@@ -687,7 +687,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	proxy, err := relayer.NewProxyServer(
 		logger,
 		config,
-		healthChecker,
 		publisher,
 		masterPool, // Pass master worker pool
 	)
@@ -821,7 +820,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 			// Create caches for full session validation
 			cacheConfig := cache.CacheConfig{
-				CachePrefix:      redisClient.KB().CachePrefix(),
 				TTLBlocks:        1,
 				BlockTimeSeconds: 30, // CRITICAL: Must match actual block time (30s for this network, not 6s!)
 			}
