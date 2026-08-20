@@ -142,3 +142,23 @@ gate_parallelism() {
     *) printf -- '-p 4 -parallel 4' ;;
     esac
 }
+
+# gate_unexplained_shortfall SENT BILLED ANNOUNCED_DROPS
+#
+# Prints how many relays went missing WITHOUT the miner saying so. A relay that
+# arrives after its tree was sealed, or after its claim window closed, cannot be
+# paid and there is nothing to recover -- but it must have been counted, and the
+# counter is what makes it acceptable. Anything left over is the silent loss the
+# live gate exists to catch.
+#
+# Negative results are clamped to 0: more announced drops than missing relays
+# means the counter also caught traffic outside this measurement, which is not
+# evidence of a loss.
+gate_unexplained_shortfall() {
+    local sent="${1:-0}" billed="${2:-0}" dropped="${3:-0}" unexplained
+    unexplained=$(( sent - billed - dropped ))
+    if [ "$unexplained" -lt 0 ]; then
+        unexplained=0
+    fi
+    printf '%s' "$unexplained"
+}

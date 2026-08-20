@@ -44,6 +44,10 @@ CONCURRENCY="${CONCURRENCY:-10}"
 SERVICE_FILTER="${SERVICE_FILTER:-}"
 RELAYER_PORT="${RELAYER_PORT:-8180}"
 VALIDATOR_RPC="${VALIDATOR_RPC:-http://localhost:26657}"
+# Prometheus, for the ANNOUNCED-drop accounting below. Only used to explain a
+# shortfall; if it is unreachable the assertion stays strict, which is the
+# safe direction (a real loss must never be excused by a scrape failure).
+PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9091}"
 # How long to wait for the claim and proof windows to close and the settlement
 # to land. The localnet mirrors mainnet block proportions (20-block sessions,
 # grace 10, claim +11..+21, proof +22..+32) at 10s blocks, so a session settles
@@ -399,6 +403,33 @@ fi
 matrix_ledger="${BIN_DIR}/matrix.tsv"
 : >"$matrix_ledger"
 
+# announced_drops SERVICE -- relays the miner explicitly refused for this
+# service, summed over the reasons that mean "this relay can no longer reach a
+# claim, and we said so": a tree already sealed for its claim, or a claim window
+# already closed. Those are expected outcomes, not losses to hunt.
+#
+# It reads a COUNTER, which accumulates across runs, so every call is a delta
+# against the snapshot taken before the load. Prints 0 when Prometheus cannot be
+# reached, on purpose: the shortfall then stays unexplained and the assertion
+# fails, because a scrape failure must never excuse a real loss.
+announced_drop_reasons='session_sealed|claim_window_closed'
+
+announced_drops_now() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode "query=sum by (service_id) (ha_miner_relays_rejected_total{reason=~\"${announced_drop_reasons}\"})" 2>/dev/null |
+        jq -r '.data.result[]? | "\(.metric.service_id)\t\(.value[1])"' 2>/dev/null || true
+}
+
+drops_before="${BIN_DIR}/announced_drops_before.tsv"
+announced_drops_now >"$drops_before" || : >"$drops_before"
+
+announced_drops() {
+    local svc="$1" before after
+    before="$(awk -F'\t' -v s="$svc" '$1 == s {print int($2)}' "$drops_before" | tail -1)"
+    after="$(announced_drops_now | awk -F'\t' -v s="$svc" '$1 == s {print int($2)}' | tail -1)"
+    printf '%s' "$(( ${after:-0} - ${before:-0} ))"
+}
+
 loaded_services=""
 for pair in $MATRIX; do
     mode="${pair%%:*}"
@@ -591,8 +622,22 @@ while IFS=$'\t' read -r mode svc sent exact; do
         elif [ "${relays_n:-0}" -gt "${sent:-0}" ]; then
             gate_fail "${svc} (${mode}): billed MORE than sent (${relays_n}/${sent}) -- foreign traffic or double count"
         else
-            gate_fail "${svc} (${mode}): served ${sent}, billed only ${relays_n:-0} -- $((sent - ${relays_n:-0})) relay(s) LOST between serve and claim"
-            printf '         check the WAL (redis streams) and submissions for this service\n'
+            # A shortfall is only acceptable to the extent the miner ANNOUNCED
+            # it. A relay that arrives after its tree was sealed, or after its
+            # claim window closed, cannot be paid and there is nothing to
+            # recover -- but it must have been counted. Anything the counters do
+            # not account for is the silent loss this gate exists to catch, and
+            # still fails.
+            dropped="$(announced_drops "$svc")"
+            unexplained="$(gate_unexplained_shortfall "$sent" "${relays_n:-0}" "${dropped:-0}")"
+            if [ "$unexplained" -eq 0 ] && [ "${dropped:-0}" -gt 0 ]; then
+                gate_pass "${svc} (${mode}): ${relays_n}/${sent} relays billed across ${proven_n} proven claim(s)"
+                printf '         + %s dropped, announced as %s (accounted)\n' \
+                    "$dropped" "$(printf '%s' "$announced_drop_reasons" | tr '|' '/')"
+            else
+                gate_fail "${svc} (${mode}): served ${sent}, billed ${relays_n:-0}, announced drops ${dropped:-0} -- ${unexplained} relay(s) LOST with no counter"
+                printf '         check the WAL (redis streams) and submissions for this service\n'
+            fi
         fi
     else
         if [ "${proven_n:-0}" -gt 0 ] && [ "${relays_n:-0}" -gt 0 ]; then
