@@ -75,10 +75,6 @@ func (p *recordingPublisher) Publish(context.Context, *transport.MinedRelayMessa
 	return nil
 }
 
-func (p *recordingPublisher) PublishBatch(context.Context, []*transport.MinedRelayMessage) error {
-	return nil
-}
-
 func (p *recordingPublisher) Close() error { return nil }
 
 // mockServerStream is a minimal grpc.ServerStream: it hands the handler a fixed

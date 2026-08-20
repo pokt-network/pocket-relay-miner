@@ -192,7 +192,7 @@ func runCheckStake(ctx context.Context, config *relayer.Config, nodeOverride str
 		return fmt.Errorf("--check-stake: failed to load supplier keys: %w", err)
 	}
 	if len(addresses) == 0 {
-		return fmt.Errorf("--check-stake: no supplier keys configured (keys_file/keys_dir/keyring); nothing to check")
+		return fmt.Errorf("--check-stake: no supplier keys configured (keys_file/keyring); nothing to check")
 	}
 
 	grpcURL := config.PocketNode.QueryNodeGRPCUrl
@@ -315,7 +315,7 @@ func loadConfiguredSupplierAddresses(ctx context.Context, logger logging.Logger,
 }
 
 // buildKeyProviders constructs the configured key providers (keys_file,
-// keys_dir, keyring) in the same order and with the same logging as the relayer
+// keyring) in the same order and with the same logging as the relayer
 // boot path. Callers own closing the returned providers.
 func buildKeyProviders(logger logging.Logger, kc relayer.KeysConfig) ([]keys.KeyProvider, error) {
 	var providers []keys.KeyProvider
@@ -328,16 +328,6 @@ func buildKeyProviders(logger logging.Logger, kc relayer.KeysConfig) ([]keys.Key
 		}
 		providers = append(providers, provider)
 		logger.Info().Str("file", kc.KeysFile).Msg("added supplier keys file provider")
-	}
-
-	// keys_dir as additional source (directory of individual key files)
-	if kc.KeysDir != "" {
-		provider, err := keys.NewFileKeyProvider(logger, kc.KeysDir)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create keys directory provider: %w", err)
-		}
-		providers = append(providers, provider)
-		logger.Info().Str("dir", kc.KeysDir).Msg("added file key provider")
 	}
 
 	// keyring as additional source (can combine all)
@@ -726,7 +716,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	logger.Info().Msg("proxy subscribed to block height updates from Redis")
 
 	// Load keys and create response signer
-	// Support multiple key sources: keys_file, keys_dir, keyring
+	// Support multiple key sources: keys_file, keyring
 	keyProviders, err := buildKeyProviders(logger, config.Keys)
 	if err != nil {
 		return err

@@ -36,14 +36,13 @@ func newTestCacheClient(t *testing.T) (*DebugRedisClient, *miniredis.Miniredis) 
 	return &DebugRedisClient{Client: cli, Logger: logger}, mr
 }
 
-// seedSuppliers creates N supplier cache entries and their known-set membership.
+// seedSuppliers creates N supplier cache entries. There is no known-set for
+// suppliers: nothing in production ever wrote cache:known:suppliers, so the
+// CLI enumerates via SCAN of the supplier state pattern.
 func seedSuppliers(t *testing.T, mr *miniredis.Miniredis, addrs ...string) {
 	t.Helper()
 	for _, a := range addrs {
 		require.NoError(t, mr.Set(fmt.Sprintf("ha:supplier:%s", a), "payload"))
-		if _, err := mr.SAdd("ha:cache:known:suppliers", a); err != nil {
-			t.Fatalf("seed known-set: %v", err)
-		}
 	}
 }
 
@@ -59,10 +58,6 @@ func TestInvalidateAll_DryRunListsWithoutDeleting(t *testing.T) {
 	assert.True(t, mr.Exists("ha:supplier:pokt1b"))
 	assert.True(t, mr.Exists("ha:supplier:pokt1c"))
 
-	// Known-set untouched.
-	members, err := mr.SMembers("ha:cache:known:suppliers")
-	require.NoError(t, err)
-	assert.ElementsMatch(t, []string{"pokt1a", "pokt1b", "pokt1c"}, members)
 }
 
 func TestInvalidateAll_RemovesEveryEntry(t *testing.T) {
@@ -76,8 +71,6 @@ func TestInvalidateAll_RemovesEveryEntry(t *testing.T) {
 	assert.False(t, mr.Exists("ha:supplier:pokt1b"))
 	assert.False(t, mr.Exists("ha:supplier:pokt1c"))
 
-	// Known-set drained via SREM.
-	assert.False(t, mr.Exists("ha:cache:known:suppliers"))
 }
 
 func TestInvalidateAll_ZeroEntriesCleanly(t *testing.T) {
@@ -107,7 +100,6 @@ func TestInvalidateFromFile_ProcessesAllLines(t *testing.T) {
 	assert.False(t, mr.Exists("ha:supplier:pokt1b"))
 	assert.False(t, mr.Exists("ha:supplier:pokt1c"))
 
-	assert.False(t, mr.Exists("ha:cache:known:suppliers"))
 }
 
 func TestInvalidateFromFile_DryRunDoesNotDelete(t *testing.T) {
@@ -184,5 +176,4 @@ func TestInvalidateCache_SingleKeyPreservesBehavior(t *testing.T) {
 
 	assert.False(t, mr.Exists("ha:supplier:pokt1a"))
 	// Silent SREM on known-set should also drop membership.
-	assert.False(t, mr.Exists("ha:cache:known:suppliers"))
 }

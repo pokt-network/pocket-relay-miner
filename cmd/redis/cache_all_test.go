@@ -214,9 +214,9 @@ func TestInvalidateAllTypes_PublishesClearAllToSixChannels(t *testing.T) {
 		"ha:events:cache:account:invalidate",
 		"ha:events:cache:shared_params:invalidate",
 		"ha:events:cache:proof_params:invalidate",
-		// supplier_params subscribes on a nonstandard channel derived from
-		// EventsCachePrefix (miner wires PubSubPrefix to it — see
-		// miner/leader_controller.go) and its L1 has no TTL — the cleanup
+		// supplier_params publishes and subscribes on a frozen nonstandard
+		// channel (KB().SupplierParamsInvalidateChannel, see
+		// cache/supplier_params.go) and its L1 has no TTL — the cleanup
 		// must notify it too or running instances serve stale params until
 		// restart.
 		"ha:events:cache:invalidate:supplier_params",

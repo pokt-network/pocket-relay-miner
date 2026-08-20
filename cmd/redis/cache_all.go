@@ -75,9 +75,9 @@ func newCleanupScope(client *DebugRedisClient) cleanupScope {
 	for _, t := range clearAllChannelTypes {
 		channels = append(channels, kb.EventChannel(t, "invalidate"))
 	}
-	// RedisSupplierParamCache subscribes on {EventsCachePrefix}:invalidate:supplier_params:
-	// the miner wires its PubSubPrefix to KB().EventsCachePrefix() (see
-	// miner/leader_controller.go), not to the EventChannel scheme. Its L1 has
+	// RedisSupplierParamCache publishes and subscribes via
+	// KB().SupplierParamsInvalidateChannel() (cache/supplier_params.go), a
+	// frozen nonstandard channel outside the EventChannel scheme. Its L1 has
 	// no TTL — without this publish, running instances would serve the
 	// pre-cleanup supplier params until restart. The handler clears on any
 	// payload.

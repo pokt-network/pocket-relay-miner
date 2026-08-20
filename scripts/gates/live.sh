@@ -40,9 +40,8 @@ gate_repo_root
 
 # ---------------------------------------------------------------------------
 # Configuration
-RELAYS="${RELAYS:-600}"
 CONCURRENCY="${CONCURRENCY:-10}"
-SERVICE_ID="${SERVICE_ID:-develop-http}"
+SERVICE_FILTER="${SERVICE_FILTER:-}"
 RELAYER_PORT="${RELAYER_PORT:-8180}"
 VALIDATOR_RPC="${VALIDATOR_RPC:-http://localhost:26657}"
 # How long to wait for the claim and proof windows to close and the settlement
@@ -66,9 +65,13 @@ while [ $# -gt 0 ]; do
             exit 2
         fi
         case "$1" in
-        --relays) RELAYS="$2" ;;
+        # --relays sizes the per-transport load and --service narrows the
+        # matrix to every cell of one service. Both map onto the env knobs
+        # the script actually consumes -- they used to parse into variables
+        # nothing read, so the usage advertised no-ops.
+        --relays) RELAYS_PER_TRANSPORT="$2" ;;
         --concurrency) CONCURRENCY="$2" ;;
-        --service) SERVICE_ID="$2" ;;
+        --service) SERVICE_FILTER="$2" ;;
         --timeout-min) SETTLE_TIMEOUT_MIN="$2" ;;
         esac
         shift 2
@@ -301,6 +304,23 @@ MATRIX="${MATRIX:-jsonrpc:develop-http jsonrpc:develop-http-eager websocket:deve
 RELAYS_PER_TRANSPORT="${RELAYS_PER_TRANSPORT:-60}"
 STREAM_CELL_IDX=0
 
+# --service narrows the run to every cell of one service. Narrowing is
+# deliberate, so it also skips the completeness cross-check below.
+if [ -n "$SERVICE_FILTER" ]; then
+    narrowed=""
+    for pair in $MATRIX; do
+        case "${pair#*:}" in
+        "$SERVICE_FILTER") narrowed="${narrowed} ${pair}" ;;
+        esac
+    done
+    if [ -z "$narrowed" ]; then
+        printf 'no matrix cell matches --service %s\n' "$SERVICE_FILTER" >&2
+        exit 2
+    fi
+    MATRIX="${narrowed# }"
+    matrix_overridden=1
+fi
+
 # The default MATRIX must cover every staked develop-* service, and nothing
 # ties the hand-written list to what the Tiltfile actually stakes -- a cell
 # added to the mode matrix (or a renamed service) would simply never be loaded
@@ -409,6 +429,68 @@ if [ -z "$loaded_services" ]; then
     gate_fail "no transport delivered a single relay"
     gate_verdict "live"
 fi
+
+# ---------------------------------------------------------------------------
+# Multi-backend distribution (absorbed from the retired test-round-robin.sh,
+# which measured this through PATH and could not tell a relayer 503 from a
+# served relay). The demo backend stamps backend_id into eth_blockNumber
+# responses; when the rendered config gives develop-http more than one
+# jsonrpc backend, a handful of signed single relays must land on more than
+# one of them, or the pool is not distributing.
+case " $MATRIX " in
+*" jsonrpc:develop-http "*)
+    # Capture the configmap FIRST: piping kubectl straight into python under
+    # pipefail makes a kubectl failure emit "0" twice (python prints 0 for
+    # empty stdin AND the || fallback fires on the pipeline status), and the
+    # doubled value blows up the -gt test, skipping this block silently.
+    rendered_relayer_config="$(kubectl get configmap relayer-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null || true)"
+    if [ -z "$rendered_relayer_config" ]; then
+        gate_skip "could not read relayer-config for the distribution assert"
+        backend_count=0
+        lb_mode=""
+    else
+        backend_count="$(printf '%s' "$rendered_relayer_config" |
+            python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; b=(((c.get("services") or {}).get("develop-http") or {}).get("backends") or {}).get("jsonrpc") or {}; print(len(b.get("urls") or []))' 2>/dev/null || echo 0)"
+        lb_mode="$(printf '%s' "$rendered_relayer_config" |
+            python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; b=(((c.get("services") or {}).get("develop-http") or {}).get("backends") or {}).get("jsonrpc") or {}; print(b.get("load_balancing") or "round_robin")' 2>/dev/null || echo "")"
+    fi
+    # Only round_robin promises to SPREAD load; first_healthy with multiple
+    # urls is legitimate failover-only config where all relays landing on one
+    # backend is the correct behavior, not a distribution bug.
+    if [ "${backend_count:-0}" -gt 1 ] && [ "$lb_mode" != "round_robin" ]; then
+        gate_skip "develop-http has ${backend_count} backends but load_balancing=${lb_mode:-unknown}; distribution assert only applies to round_robin"
+    fi
+    if [ "${backend_count:-0}" -gt 1 ] && [ "$lb_mode" = "round_robin" ]; then
+        gate_step "assert: multi-backend distribution on develop-http (${backend_count} backends)"
+        seen_backends=""
+        rr_served=0
+        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+            rr_out="$("$BIN" relay jsonrpc --localnet --service develop-http \
+                --relayer-url "$relayer_url" 2>/dev/null)" && rr_served=$((rr_served + 1))
+            bid="$(printf '%s' "$rr_out" | grep -o '"backend_id":"[^"]*"' | head -1 | cut -d'"' -f4)"
+            [ -n "$bid" ] && case " $seen_backends " in
+            *" $bid "*) ;;
+            *) seen_backends="${seen_backends} ${bid}" ;;
+            esac
+        done
+        distinct="$(printf '%s\n' $seen_backends | grep -c . || true)"
+        if [ "${distinct:-0}" -ge 2 ]; then
+            gate_pass "load spread across ${distinct} backends:${seen_backends}"
+        else
+            gate_fail "12 relays all landed on one backend (${seen_backends:-none}) with ${backend_count} configured -- pool not distributing"
+        fi
+        # These probes are REAL signed relays: they mine and bill in the same
+        # sessions the exact served==billed assertion counts. Add them to the
+        # ledger's develop-http row or the cell fails with billed>sent by
+        # exactly the probe count.
+        if [ "$rr_served" -gt 0 ]; then
+            awk -F'\t' -v OFS='\t' -v add="$rr_served" \
+                '$2 == "develop-http" { $3 += add } { print }' \
+                "$matrix_ledger" >"${matrix_ledger}.tmp" && mv "${matrix_ledger}.tmp" "$matrix_ledger"
+        fi
+    fi
+    ;;
+esac
 
 # ---------------------------------------------------------------------------
 gate_step "settle: waiting for FINAL on-chain outcomes per service (up to ${SETTLE_TIMEOUT_MIN} min)"

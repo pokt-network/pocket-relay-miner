@@ -59,35 +59,35 @@ properties:
             default: ha
           cache_prefix:
             type: string
-            description: Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)
+            description: "Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)"
             default: cache
           events_prefix:
             type: string
-            description: Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)
+            description: "Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)"
             default: events
           streams_prefix:
             type: string
-            description: Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)
+            description: "Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)"
             default: relays
           miner_prefix:
             type: string
-            description: Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)
+            description: "Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)"
             default: miner
           supplier_prefix:
             type: string
-            description: Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)
+            description: "Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)"
             default: supplier
           meter_prefix:
             type: string
-            description: Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)
+            description: "Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)"
             default: meter
           params_prefix:
             type: string
-            description: Cached params prefix (full key: {base_prefix}:{params_prefix}:*)
+            description: "Cached params prefix (full key: {base_prefix}:{params_prefix}:*)"
             default: params
           consumer_group_prefix:
             type: string
-            description: Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})
+            description: "Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})"
             default: miners
 
   pocket_node:
@@ -245,9 +245,6 @@ properties:
       keys_file:
         type: string
         description: Path to YAML file with hex-encoded private keys
-      keys_dir:
-        type: string
-        description: Directory containing individual key files
       keyring:
         type: object
         description: Cosmos SDK keyring configuration
@@ -308,7 +305,6 @@ properties:
       level:
         type: string
         enum:
-          - trace
           - debug
           - info
           - warn
@@ -320,10 +316,6 @@ properties:
           - json
           - text
         default: json
-      output:
-        type: string
-        description: Log output destination
-        default: stdout
       async:
         type: boolean
         description: Enable async logging for better performance
@@ -370,15 +362,6 @@ properties:
     additionalProperties:
       type: number
       minimum: 0
-
-  settlement_monitor:
-    type: object
-    description: On-chain claim settlement tracking configuration
-    properties:
-      enabled:
-        type: boolean
-        description: Enable on-chain settlement event tracking
-        default: false
 
   balance_monitor:
     type: object
@@ -443,11 +426,6 @@ properties:
         description: Fixed workers for blockchain queries (startup, cache refresh)
         default: 20
         minimum: 1
-      settlement_workers:
-        type: integer
-        description: Fixed workers for settlement event processing
-        default: 2
-        minimum: 1
 
   leader_election:
     type: object
@@ -496,11 +474,6 @@ properties:
     default: 1000
     minimum: 1
 
-  ack_batch_size:
-    type: integer
-    description: Number of messages to acknowledge in a batch
-    default: 50
-    minimum: 1
 
   hot_reload_enabled:
     type: boolean

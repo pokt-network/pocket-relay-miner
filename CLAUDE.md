@@ -335,7 +335,6 @@ Reference: See full mapping in `cmd/cmd_redis_debug.go` and subcommands
   - `ha:cache:application:{address}` (Proto bytes)
   - `ha:cache:service:{serviceID}` (Proto bytes)
   - `ha:cache:shared_params` (Proto bytes)
-  - `ha:cache:session_params` (Proto bytes)
   - `ha:cache:proof_params` (Proto bytes)
   - `ha:supplier:{address}` (Proto/JSON bytes)
 - **Cache Locks**: `ha:cache:lock:{type}:{id}` (String with TTL)
@@ -345,14 +344,11 @@ Reference: See full mapping in `cmd/cmd_redis_debug.go` and subcommands
   session end):
   - `ha:meter:{sessionID}:{supplier}:meta` (String: SessionMeterMeta JSON)
   - `ha:meter:{sessionID}:{supplier}:consumed` (String: consumed uPOKT counter)
-  - `ha:params:shared` (Cached shared params)
-  - `ha:params:session` (Cached session params)
 - **Supplier Registry**:
   - `ha:suppliers:{supplier}` (Hash with supplier metadata)
   - `ha:suppliers:index` (Set of all supplier addresses)
 - **Pub/Sub Channels**:
   - `ha:events:cache:{type}:invalidate` (Cache invalidation)
-  - `ha:events:supplier_update` (Supplier registry updates)
   - `ha:meter:cleanup` (Meter cleanup signals)
 - **Submission Tracking** (7-day TTL for debugging):
   - `ha:tx:track:{supplier}:{sessionEndHeight}:{sessionID}` (JSON with claim/proof submission details)

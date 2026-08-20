@@ -100,3 +100,27 @@ func requireSafeRemediation(t *testing.T, err error) {
 	require.False(t, strings.Contains(err.Error(), "Set redis.namespace.base_prefix to"),
 		"the error must NOT advise repointing base_prefix at the retired value: %v", err)
 }
+
+// TestValidate_RemovedKeysDir pins the tombstone for the retired
+// keys.keys_dir setting. The YAML decoder drops unknown fields silently, so
+// without the tombstone an old config would boot WITHOUT those supplier keys:
+// the relayer serves and signs nothing for them, with no diagnostic.
+func TestValidate_RemovedKeysDir(t *testing.T) {
+	t.Run("absent is fine", func(t *testing.T) {
+		require.NoError(t, minimalValidConfig().Validate())
+	})
+
+	t.Run("any non-empty value is a hard error", func(t *testing.T) {
+		c := minimalValidConfig()
+		c.Keys.RemovedKeysDir = "/etc/pocket/keys"
+		err := c.Validate()
+		require.Error(t, err)
+		require.True(t, strings.Contains(err.Error(), "keys_dir"),
+			"the error must name the retired key: %v", err)
+		// The advice must name the safe migrations, not the removed mechanism.
+		require.True(t, strings.Contains(err.Error(), "keys_file"),
+			"the error must point at keys_file: %v", err)
+		require.True(t, strings.Contains(err.Error(), "keyring"),
+			"the error must point at the keyring: %v", err)
+	})
+}

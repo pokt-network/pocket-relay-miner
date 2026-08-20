@@ -48,10 +48,6 @@ func (n *noopPublisher) Publish(_ context.Context, _ *transport.MinedRelayMessag
 	return nil
 }
 
-func (n *noopPublisher) PublishBatch(_ context.Context, _ []*transport.MinedRelayMessage) error {
-	return nil
-}
-
 func (n *noopPublisher) Close() error {
 	return nil
 }
@@ -161,7 +157,6 @@ func TestNewWebSocketBridge_RequiresRelayProcessor(t *testing.T) {
 		http.Header{},
 		nil,
 		nil,
-		1,
 		time.Second,
 		false, // simulated
 		nil,   // simVerifier

@@ -96,7 +96,6 @@ type BlockEvent struct {
 // CacheConfig contains configuration for cache implementations.
 type CacheConfig struct {
 	// Redis configuration
-	RedisURL string
 
 	// CachePrefix is the prefix for all Redis keys.
 	// Default: "ha:cache"

@@ -20,7 +20,6 @@ func TestDefaultConfig(t *testing.T) {
 	require.Equal(t, int64(60000), cfg.Redis.ClaimIdleTimeoutMs)
 	require.Equal(t, int64(10), cfg.DeduplicationTTLBlocks)
 	require.Equal(t, int64(1000), cfg.BatchSize) // Increased from 100 for better throughput
-	require.Equal(t, int64(50), cfg.AckBatchSize)
 }
 
 func TestConfig_Validate_Valid(t *testing.T) {
@@ -127,6 +126,36 @@ func TestConfig_Validate_NoKeySource(t *testing.T) {
 	require.Contains(t, err.Error(), "keys config is required")
 }
 
+// TestConfig_Validate_RemovedKeysDir pins the tombstone for the retired
+// keys.keys_dir setting. The YAML decoder drops unknown fields silently, so
+// without the tombstone an old config would boot WITHOUT those supplier keys
+// and mine nothing for them, with no diagnostic.
+func TestConfig_Validate_RemovedKeysDir(t *testing.T) {
+	cfg := &Config{
+		Redis: RedisConfig{
+			RedisConfig: config.RedisConfig{
+				URL: "redis://localhost:6379",
+			},
+			ConsumerName: "miner-1",
+		},
+		PocketNode: config.PocketNodeConfig{
+			QueryNodeRPCUrl:  "http://localhost:26657",
+			QueryNodeGRPCUrl: "localhost:9090",
+		},
+		Keys: config.KeysConfig{
+			KeysFile:       "/path/to/keys.yaml",
+			RemovedKeysDir: "/etc/pocket/keys",
+		},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "keys_dir")
+	// The advice must name the safe migrations, not the removed mechanism.
+	require.Contains(t, err.Error(), "keys_file")
+	require.Contains(t, err.Error(), "keyring")
+}
+
 // Note: Supplier validation tests removed - suppliers are auto-discovered from keys
 // See TestConfig_Validate_NoKeySource for key validation
 
@@ -153,15 +182,6 @@ func TestConfig_GetBatchSize(t *testing.T) {
 	// Test default
 	cfg.BatchSize = 0
 	require.Equal(t, int64(1000), cfg.GetBatchSize()) // Default increased from 100
-}
-
-func TestConfig_GetAckBatchSize(t *testing.T) {
-	cfg := &Config{AckBatchSize: 25}
-	require.Equal(t, int64(25), cfg.GetAckBatchSize())
-
-	// Test default
-	cfg.AckBatchSize = 0
-	require.Equal(t, int64(50), cfg.GetAckBatchSize())
 }
 
 func TestConfig_GetDeduplicationTTL(t *testing.T) {
@@ -200,20 +220,12 @@ func TestGetQueryWorkers(t *testing.T) {
 	require.Equal(t, 30, cfg.GetQueryWorkers())
 }
 
-func TestGetSettlementWorkers(t *testing.T) {
-	cfg := &Config{}
-	require.Equal(t, 2, cfg.GetSettlementWorkers()) // default
-
-	cfg.WorkerPools.SettlementWorkers = 4
-	require.Equal(t, 4, cfg.GetSettlementWorkers())
-}
-
 func TestGetMasterPoolSize(t *testing.T) {
 	cfg := &Config{}
 
 	// Test auto-calculation with small supplier count (CPU-bound)
 	// With default values: cpu_multiplier=4, workers_per_supplier=6, query=20
-	// Settlement monitor disabled by default, so overhead = query_workers only (20)
+	// Overhead = query_workers (20)
 	// On a machine with N CPUs: max(N×4, suppliers×6) + 20
 	// For 5 suppliers: max(N×4, 30) + 20
 	// This test uses 5 suppliers which should be CPU-bound on most machines
@@ -226,13 +238,6 @@ func TestGetMasterPoolSize(t *testing.T) {
 	// 78 × 6 = 468, plus overhead 20 = 488
 	// This should be supplier-bound unless running on 117+ core machine
 	require.GreaterOrEqual(t, size, 488)
-
-	// Test with settlement monitor enabled (adds settlement_workers to overhead)
-	cfg.SettlementMonitor.Enabled = true
-	size = cfg.GetMasterPoolSize(78)
-	// 78 × 6 = 468, plus overhead 22 (20 query + 2 settlement) = 490
-	require.GreaterOrEqual(t, size, 490)
-	cfg.SettlementMonitor.Enabled = false // reset
 
 	// Test explicit override
 	cfg.WorkerPools.MasterPoolSize = 500
@@ -300,7 +305,6 @@ worker_pools:
   cpu_multiplier: 6
   workers_per_supplier: 3
   query_workers: 25
-  settlement_workers: 4
 `
 	var cfg Config
 	err := yaml.Unmarshal([]byte(yamlData), &cfg)
@@ -310,12 +314,10 @@ worker_pools:
 	require.Equal(t, 6, cfg.WorkerPools.CPUMultiplier)
 	require.Equal(t, 3, cfg.WorkerPools.WorkersPerSupplier)
 	require.Equal(t, 25, cfg.WorkerPools.QueryWorkers)
-	require.Equal(t, 4, cfg.WorkerPools.SettlementWorkers)
 
 	// Test that getters use the parsed values
 	require.Equal(t, 150, cfg.GetMasterPoolSize(100)) // explicit override
 	require.Equal(t, 6, cfg.GetCPUMultiplier())
 	require.Equal(t, 3, cfg.GetWorkersPerSupplier())
 	require.Equal(t, 25, cfg.GetQueryWorkers())
-	require.Equal(t, 4, cfg.GetSettlementWorkers())
 }
