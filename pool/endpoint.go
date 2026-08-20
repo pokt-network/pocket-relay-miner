@@ -120,6 +120,20 @@ func (ep *BackendEndpoint) CurrentlyHealthy() bool {
 	return ep.healthy.Load()
 }
 
+// ConsumePendingRecovery claims an unreported half-open auto-recovery, if there
+// is one, and reports whether it did.
+//
+// IsHealthy flips the endpoint healthy on the selection path, which has nowhere
+// to report a transition, and leaves the mark for whoever can. That is normally
+// RecordResult on the first success — but the active health checker's probe can
+// arrive first, and its SetHealthy clears the mark. Without this the transition
+// is then reported by nobody: the backend is up and the gauge still says down.
+//
+// The CAS makes exactly one caller win.
+func (ep *BackendEndpoint) ConsumePendingRecovery() bool {
+	return ep.pendingRecovery.CompareAndSwap(true, false)
+}
+
 // SetHealthy marks this endpoint as healthy and clears the unhealthy timestamp.
 // Callers (the active health checker) log their own transition, so any pending
 // auto-recovery report is dropped to avoid a duplicate "BACKEND UP".
