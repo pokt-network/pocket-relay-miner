@@ -15,13 +15,17 @@ import (
 
 // Keys returns every key under prefix, sorted.
 //
+// "Under" means prefix followed by a colon. The prefix ends in a sequence
+// number, so a bare prefix+"*" would also match a sibling test's keys ("t:X:N:1"
+// is a prefix of "t:X:N:11").
+//
 // It replaces miniredis's Keys(), which enumerated the WHOLE server. That is
 // not available here and must not be: the server is shared with the packages
 // running in parallel, so an unscoped listing would return their keys and a
 // "no key was created" assertion would fail on somebody else's traffic.
 func Keys(t testing.TB, client redis.UniversalClient, prefix string) []string {
 	t.Helper()
-	return scan(t, client, prefix+"*")
+	return scan(t, client, prefix+":*")
 }
 
 // KeysMatching returns every key matching a glob pattern, sorted.
@@ -163,7 +167,7 @@ func (f *FailSwitch) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.P
 func DeletePrefix(t testing.TB, client redis.UniversalClient, prefix string) {
 	t.Helper()
 
-	keys := scan(t, client, prefix+"*")
+	keys := scan(t, client, prefix+":*")
 	if len(keys) == 0 {
 		return
 	}

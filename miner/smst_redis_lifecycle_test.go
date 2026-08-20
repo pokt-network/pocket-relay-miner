@@ -101,9 +101,15 @@ func TestLoadTreeFromRedis_RefreshesClaimedRootTTL(t *testing.T) {
 	rootKey := client.KB().SMSTRootKey(supplier, sessionID)
 	statsKey := client.KB().SMSTStatsKey(supplier, sessionID)
 
-	// Age the key part-way to expiry without crossing it.
+	// Age BOTH keys part-way to expiry without crossing it. Ageing only the
+	// root would leave stats carrying its full TTL from FlushTree, and the
+	// stats assertion below would then pass whether or not the resume path
+	// refreshes it — miniredis's FastForward aged the whole server at once,
+	// so this is a hazard the fake did not have.
 	ageKeyTo(t, client, rootKey, cacheTTL/2)
+	ageKeyTo(t, client, statsKey, cacheTTL/2)
 	requireTTLNear(t, client, rootKey, cacheTTL/2)
+	requireTTLNear(t, client, statsKey, cacheTTL/2)
 
 	// Simulate a proof-submission retry path: drop the in-memory tree,
 	// then lazy-load from Redis. loadTreeFromRedis must refresh the TTL.

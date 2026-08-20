@@ -24,7 +24,6 @@ import (
 type RedisSMSTBenchSuite struct {
 	redisPrefix string
 	redisClient *redisutil.Client
-	b           *testing.B
 	ctx         context.Context
 }
 
@@ -36,7 +35,6 @@ func setupBenchSuite(b *testing.B) *RedisSMSTBenchSuite {
 	return &RedisSMSTBenchSuite{
 		redisPrefix: prefix,
 		redisClient: client,
-		b:           b,
 		ctx:         context.Background(),
 	}
 }
@@ -47,8 +45,14 @@ func (s *RedisSMSTBenchSuite) Cleanup() {}
 
 // reset clears this suite's OWN subtree between iterations, never FLUSHALL —
 // the server is shared with every other package.
-func (s *RedisSMSTBenchSuite) reset() {
-	testredis.DeletePrefix(s.b, s.redisClient, s.redisPrefix)
+//
+// It takes the RUNNING benchmark rather than holding the one the suite was
+// built from: a b.Run sub-benchmark calling this would otherwise fail its
+// parent, attributing the error to the wrong benchmark and unwinding the wrong
+// frame.
+func (s *RedisSMSTBenchSuite) reset(b *testing.B) {
+	b.Helper()
+	testredis.DeletePrefix(b, s.redisClient, s.redisPrefix)
 }
 
 func (s *RedisSMSTBenchSuite) createTestRedisStore(sessionID string) *RedisMapStore {
@@ -180,7 +184,7 @@ func BenchmarkRedisMapStore_Pipeline(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		suite.reset() // Clean between iterations
+		suite.reset(b) // Clean between iterations
 		b.StartTimer()
 
 		store.BeginPipeline()
@@ -565,7 +569,7 @@ func BenchmarkRedisSMST_PipelineSpeedup(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			suite.reset()
+			suite.reset(b)
 			b.StartTimer()
 
 			// 20 individual Set operations
@@ -588,7 +592,7 @@ func BenchmarkRedisSMST_PipelineSpeedup(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			suite.reset()
+			suite.reset(b)
 			b.StartTimer()
 
 			store.BeginPipeline()
