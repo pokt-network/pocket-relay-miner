@@ -83,7 +83,7 @@ func queryKeyedChainWithLock[V any](
 	// out -- that lets a third instance acquire immediately and fire another
 	// duplicate query, defeating the dedup this lock exists for.
 	if locked {
-		defer redisClient.Del(ctx, lockKey)
+		defer releaseCacheLock(ctx, redisClient, lockKey)
 	}
 
 	if !locked {
