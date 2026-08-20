@@ -87,11 +87,15 @@ type SupplierState struct {
 	// 0 means the supplier is active (not unstaking).
 	// >0 means the supplier is unstaking and will be fully unstaked at this session end height.
 	//
-	// TODO_IMPROVE: Handle unstaking grace period properly.
-	// When supplier unstakes, they should continue serving until current session ends.
-	// The unstaking takes effect at the next session boundary to prevent
-	// breaking sessions halfway for both gateway and supplier.
-	// This requires comparing against current session end height.
+	// It is INFORMATIONAL here and must not be turned into a serve gate. The grace
+	// period it describes is already enforced, one level down and more precisely, by
+	// Services: MsgUnstakeSupplier sets DeactivationHeight = next session start on
+	// every one of the supplier's service configs
+	// (x/supplier/keeper/msg_server_unstake_supplier.go:92-97), and Services is
+	// derived from GetActiveServiceConfigs at the observed height, so it empties at
+	// that boundary on its own. A second height comparison here would be redundant
+	// at best and would disagree with the per-service schedule at worst -- services
+	// can be deactivated individually, without any unstake.
 	UnstakeSessionEndHeight uint64 `json:"unstake_session_end_height"`
 
 	// OperatorAddress is the supplier's operator address.
