@@ -47,7 +47,7 @@ func TestHandleRelay_RedeliveryStillCreatesTheSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, before, "the session must not exist yet — that is the whole premise")
 
-	// B reclaims and handles the same relay. IsReclaim is what XAUTOCLAIM
+	// B reclaims and handles the same relay. IsReclaim is what the reclaim
 	// actually delivers, and it is load-bearing here: the reclaim guard drops
 	// an already-marked relay and returns before the SMST work, so a test with
 	// IsReclaim=false exercises a DIFFERENT path (the original copy arriving
@@ -106,8 +106,9 @@ func TestHandleRelay_RedeliveryDoesNotDoubleCount(t *testing.T) {
 // TestHandleRelay_OriginalCopyAfterAReclaimStillCreatesTheSession covers the
 // second ordering, which the reclaim guard does NOT see.
 //
-// XAUTOCLAIM honours min-idle, not liveness, so the consumer that "lost" a
-// message can still be alive and deliver its original copy afterwards — with
+// The reclaim skips entries the claiming consumer owns and takes only those
+// idle past the timeout, but idleness is not liveness: the consumer that "lost"
+// a message can still be alive and deliver its original copy afterwards — with
 // IsReclaim=false, past the reclaim guard, and only MarkProcessed to catch it.
 // The session must be created on that path too.
 func TestHandleRelay_OriginalCopyAfterAReclaimStillCreatesTheSession(t *testing.T) {
