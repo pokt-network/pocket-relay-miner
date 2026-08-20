@@ -47,7 +47,12 @@ func TestHandleRelay_RedeliveryStillCreatesTheSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, before, "the session must not exist yet — that is the whole premise")
 
-	// B reclaims and handles the same relay.
+	// B reclaims and handles the same relay. IsReclaim is what XAUTOCLAIM
+	// actually delivers, and it is load-bearing here: the reclaim guard drops
+	// an already-marked relay and returns before the SMST work, so a test with
+	// IsReclaim=false exercises a DIFFERENT path (the original copy arriving
+	// from a slow-but-alive consumer) and would pass while this one fails.
+	msg.IsReclaim = true
 	require.NoError(t, f.worker.handleRelay(f.ctx, f.supplierAddr, msg),
 		"a redelivered relay must still ACK")
 
@@ -96,4 +101,30 @@ func TestHandleRelay_RedeliveryDoesNotDoubleCount(t *testing.T) {
 		"a redelivered relay must not be counted twice — the count feeds the claim")
 	require.Equal(t, first.TotalComputeUnits, second.TotalComputeUnits,
 		"nor may its compute units be added twice")
+}
+
+// TestHandleRelay_OriginalCopyAfterAReclaimStillCreatesTheSession covers the
+// second ordering, which the reclaim guard does NOT see.
+//
+// XAUTOCLAIM honours min-idle, not liveness, so the consumer that "lost" a
+// message can still be alive and deliver its original copy afterwards — with
+// IsReclaim=false, past the reclaim guard, and only MarkProcessed to catch it.
+// The session must be created on that path too.
+func TestHandleRelay_OriginalCopyAfterAReclaimStillCreatesTheSession(t *testing.T) {
+	f := newHandlerTestFixture(t, "pokt1original_copy")
+	const sessionID = "sess-original-copy"
+
+	msg := newStreamMessage(f.supplierAddr, sessionID, "relay-original", 100)
+	require.False(t, msg.IsReclaim, "this path is the NON-reclaim one")
+
+	added, err := f.dedup.MarkProcessed(f.ctx, msg.Message.RelayHash, sessionID)
+	require.NoError(t, err)
+	require.True(t, added)
+
+	require.NoError(t, f.worker.handleRelay(f.ctx, f.supplierAddr, msg))
+
+	snap, err := f.sessionStore.Get(f.ctx, sessionID)
+	require.NoError(t, err)
+	require.NotNil(t, snap,
+		"the session must exist however the duplicate reached us")
 }

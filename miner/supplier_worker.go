@@ -492,6 +492,30 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// the MarkProcessed result below, which covers the case XAUTOCLAIM cannot:
 	// the ORIGINAL copy still buffered in a slow-but-alive consumer, processed
 	// with IsReclaim=false after another consumer processed the reclaim.
+	// Create the session if it does not exist yet, BEFORE any path that can
+	// return early.
+	//
+	// This has to sit above the reclaim guard below, not below it. The whole
+	// scenario is: consumer A updates the SMST and marks the hash, then dies
+	// before the ACK; B reclaims the message with IsReclaim=true, finds the
+	// hash already marked, and drops it. That drop is correct for the relay —
+	// it is already in the tree — but it used to take the session creation
+	// with it, and if that relay was the session's first, nothing ever claimed
+	// the tree. Unpaid work, on the one path the fix exists for.
+	//
+	// Running it on every delivery is safe: OnSessionCreated goes through
+	// CreateIfAbsent, a first-write-wins gate, so it costs one round-trip and
+	// cannot double-create.
+	state.SessionCoordinator.EnsureSession(
+		ctx,
+		msg.Message.SessionId,
+		msg.Message.SupplierOperatorAddress,
+		msg.Message.ServiceId,
+		msg.Message.ApplicationAddress,
+		msg.Message.SessionStartHeight,
+		msg.Message.SessionEndHeight,
+	)
+
 	if msg.IsReclaim {
 		if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
 			isDup, dupErr := dedup.IsDuplicate(ctx, msg.Message.RelayHash, msg.Message.SessionId)
@@ -607,25 +631,6 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 
 	// Track relay successfully added to SMST
 	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId)
-
-	// Create the session if it does not exist yet. This runs on EVERY
-	// delivery, including a redelivery the dedup set already knows about,
-	// and that is the point: the consumer that first processed this relay
-	// can die between MarkProcessed and the coordinator call, and then the
-	// consumer that reclaims the message is the last chance to record the
-	// session. Gating creation on firstProcessing left the SMST holding
-	// relays that no snapshot claimed — unpaid work. CreateIfAbsent makes
-	// it first-write-wins, so running it every time costs one round-trip
-	// and cannot double-create.
-	state.SessionCoordinator.EnsureSession(
-		ctx,
-		msg.Message.SessionId,
-		msg.Message.SupplierOperatorAddress,
-		msg.Message.ServiceId,
-		msg.Message.ApplicationAddress,
-		msg.Message.SessionStartHeight,
-		msg.Message.SessionEndHeight,
-	)
 
 	// Track relay in session coordinator, gated by the MarkProcessed result
 	// above: only the FIRST processing of a relay increments the COUNTERS.

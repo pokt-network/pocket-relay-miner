@@ -248,9 +248,11 @@ type WorkerPoolConfigYAML struct {
 type RedisConfig struct {
 	config.RedisConfig `yaml:",inline"`
 
-	// ConsumerName is the unique name of this miner instance.
-	// Typically derived from the hostname / pod name.
-	// If not set, auto-generated from the hostname.
+	// ConsumerName is a readable PREFIX for this instance's Redis
+	// stream-consumer name, not the name itself: UniqueConsumerName always
+	// appends the host and pid, because Redis identifies a consumer by name
+	// alone and two replicas sharing one would share a pending-entries list.
+	// Defaults to "miner".
 	ConsumerName string `yaml:"consumer_name,omitempty"`
 
 	// Note: stream consumption blocks for one block interval per XREADGROUP,
