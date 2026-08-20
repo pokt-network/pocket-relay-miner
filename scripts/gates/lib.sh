@@ -90,6 +90,43 @@ gate_verdict() {
     exit 0
 }
 
+# gate_settlement_breakdown <events file> <min session end height>
+#
+# Sums the settlement numbers the chain reports, as TSV:
+#   claims relays estimated claimed settled minted overloss deflation over_events spend_limit
+#
+# It lives here, with a self-test, because it parses MONEY out of event
+# attributes whose values arrive JSON-encoded (a uint64 field reads as the
+# string "\"4\"", a coin as "\"1000upokt\""), and a silent parse failure would
+# read as a clean zero -- indistinguishable from "this did not happen".
+#
+# relays and estimated are NOT the same quantity and must not be summed
+# together: relays counts the leaves in the submitted tree, i.e. only the relays
+# whose hash matched the service's mining difficulty, while estimated is that
+# count scaled back up by the difficulty multiplier. They coincide only at base
+# difficulty.
+gate_settlement_breakdown() {
+    local events_file="$1" minend="${2:-0}"
+    [ -s "$events_file" ] || { printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0'; return 0; }
+    jq -rs --argjson minend "$minend" '
+        def num: tostring | gsub("[^0-9]"; "") | if . == "" then 0 else tonumber end;
+        [ .[] | select(.type == "pocket.tokenomics.EventClaimSettled")
+              | select((.attrs.session_end_block_height // "0" | num) >= $minend) ] as $settled
+      | [ .[] | select(.type == "pocket.tokenomics.EventApplicationOverserviced") ] as $over
+      | [ ($settled | length),
+          ([$settled[].attrs.num_relays // 0 | num] | add // 0),
+          ([$settled[].attrs.num_estimated_relays // 0 | num] | add // 0),
+          ([$settled[].attrs.claimed_upokt // 0 | num] | add // 0),
+          ([$settled[].attrs.settled_upokt // 0 | num] | add // 0),
+          ([$settled[].attrs.minted_upokt // 0 | num] | add // 0),
+          ([$settled[].attrs.overservicing_loss_upokt // 0 | num] | add // 0),
+          ([$settled[].attrs.deflation_loss_upokt // 0 | num] | add // 0),
+          ($over | length),
+          ([$over[] | select((.attrs.spend_limit_exceeded // "" | tostring) | test("true"))] | length) ]
+      | @tsv
+    ' "$events_file" 2>/dev/null || printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0'
+}
+
 # gate_repo_root -- cd to the repository root so a gate behaves the same
 # wherever it is invoked from.
 gate_repo_root() {
