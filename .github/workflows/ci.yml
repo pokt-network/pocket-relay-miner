@@ -1,29 +1,38 @@
 name: CI
 
 on:
+  # main and develop only. A topic branch is covered by pull_request below, and
+  # firing BOTH events for it is what produced a red X on green work: the two
+  # runs share a concurrency group, so one gets cancelled, and GitHub attaches
+  # the cancelled run's jobs to the PR's check list where they count as
+  # non-success. Measured on PR #37: 8 passing jobs from the pull_request run,
+  # plus 2 that finished and 6 that were cancelled from the push run -- the
+  # "10 successful, 6 cancelled" a reviewer sees, with nothing having failed.
   push:
-    branches: ["main", "develop", "chore/**", "feat/**", "fix/**"]
+    branches: ["main", "develop"]
+  # This filter matches the BASE branch. A PR stacked on another topic branch
+  # never matched ["main", "develop"], so seven of the eleven stacked PRs ran no
+  # CI at all and nobody noticed; the patterns below are what fixed that, and
+  # they are the half that matters.
   pull_request:
     branches: ["main", "develop", "chore/**", "feat/**", "fix/**"]
-  # Lets CI be re-run on any branch on demand:
+  # Lets CI be re-run on any branch on demand, including a topic branch that has
+  # no PR yet:
   #   gh workflow run CI --ref <branch>
   # GitHub reads this trigger from the DEFAULT branch only, which is why this
   # change has to land on main to have any effect anywhere else.
   workflow_dispatch:
 
-# The pull_request filter matches the BASE branch, so a PR stacked on another
-# topic branch never matched ["main", "develop"] and ran no CI at all. The
-# branch patterns above cover both halves of that: the base of a stacked PR,
-# and a push to a topic branch that has no PR yet.
 permissions:
   contents: read
 
-# push and pull_request both fire for a branch that has a PR open, which would
-# otherwise run all eight jobs twice per push. Both sides of the fallback must
-# name the branch the SAME way for the group to collapse them: github.ref_name
-# is "chore/x" on a push, matching head.ref on the pull_request, whereas
-# github.ref would be "refs/heads/chore/x" and land in a second group -- which
-# is exactly what happened on the first branch pushed with this file.
+# Collapses SUCCESSIVE pushes to the same pull request, so only the newest run
+# survives. It no longer has to collapse a push run against a pull_request run
+# for the same commit -- the triggers above stop that pair from existing, which
+# is the point: a cancelled run is indistinguishable from a failed one on the
+# PR page. Both sides still name the branch the same way (github.ref_name is
+# "chore/x" on a push, matching head.ref on the pull_request; github.ref would
+# be "refs/heads/chore/x" and land in a second group).
 #
 # main never cancels: a run there is the record for a commit that is already
 # merged, and losing it to a later push leaves that commit unverified.
