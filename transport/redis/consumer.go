@@ -42,10 +42,11 @@ func isStreamNotFoundError(err error) bool {
 // StreamsConsumer implements MinedRelayConsumer using Redis Streams with consumer groups.
 // It provides exactly-once delivery semantics within the consumer group.
 // Push architecture: the blocking read returns the instant data arrives.
-// - Each consumer holds 1 connection while parked on XREADGROUP
-// - Pool sizing: Allocate numSuppliers + 20 overhead for cache/pubsub
-// - Context cancellation cleanly interrupts blocked calls
-// - Claims = money - we cannot afford ANY latency consuming relays.
+//   - Each consumer holds 1 connection while parked on XREADGROUP
+//   - Pool sizing: Allocate numSuppliers + 20 overhead for cache/pubsub
+//   - A cancelled context does NOT interrupt a blocked call; the block
+//     elapsing is what lets the loop see it (see blockInterval)
+//   - Claims = money - we cannot afford ANY latency consuming relays.
 type StreamsConsumer struct {
 	logger     logging.Logger
 	client     redis.UniversalClient
@@ -242,9 +243,12 @@ func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
 // consumeMessagesUntilError runs the message consumption loop until an error occurs.
 // Returns error to trigger reconnection via the reconnection loop.
 // The read blocks for blockInterval, then returns redis.Nil and loops.
-// - Returns INSTANTLY when data arrives (zero latency)
-// - Blocks indefinitely when stream is empty (zero CPU waste)
-// - Context cancellation interrupts the blocked call (clean shutdown)
+//   - Returns INSTANTLY when data arrives (zero latency)
+//   - Blocks for blockInterval when the stream is empty (no polling, and no
+//     indefinite park either)
+//   - A cancelled context is seen when that block elapses, NOT when it is
+//     cancelled: go-redis sets no read deadline from it
+//
 // This is the most efficient approach - no polling, pure push.
 func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 	for {
