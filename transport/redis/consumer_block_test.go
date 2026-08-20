@@ -77,7 +77,7 @@ func TestConsumeSendsAFiniteBlockOnTheWire(t *testing.T) {
 	t.Cleanup(func() { blockInterval = restore })
 
 	// A client of our own so the hook sees only this test's traffic.
-	opt, err := redis.ParseURL(testredis.URL(t))
+	opt, err := redis.ParseURL(testredis.URL())
 	require.NoError(t, err)
 	rec := &blockArgRecorder{first: make(chan struct{})}
 	client := redis.NewClient(opt)

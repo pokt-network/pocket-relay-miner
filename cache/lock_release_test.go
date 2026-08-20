@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
@@ -25,11 +26,15 @@ import (
 // Against a real Redis, because the whole assertion is about whether a command
 // with a cancelled context reaches the server.
 
+// newLockTestClient returns a client whose whole keyspace is namespaced to this
+// test: the server is shared with the packages running alongside, so a lock key
+// must not be guessable by another one.
 func newLockTestClient(t *testing.T) *redisutil.Client {
 	t.Helper()
-	raw := testredis.Client(t)
+	testredis.Client(t) // fail fast, with the "start one with..." message
 	client, err := redisutil.NewClient(context.Background(), redisutil.ClientConfig{
-		URL: "redis://" + raw.Options().Addr,
+		URL:       testredis.URL(),
+		Namespace: config.RedisNamespaceConfig{BasePrefix: testredis.Prefix(t)},
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = client.Close() })

@@ -28,6 +28,12 @@ set -uo pipefail
 
 gate_repo_root
 
+# These suites include tests that assert REAL Redis semantics (blocking reads,
+# PEL ageing) which miniredis does not reproduce. Bring one up; it is a single
+# container reused across the whole run, on its own port, never the localnet's.
+eval "$(./scripts/gates/redis.sh up)" || gate_fail "could not provide a real Redis for the tests"
+export REDIS_TEST_URL
+
 pkg="$(gate_pkg_target)"
 
 read -r -a parallelism <<<"$(gate_parallelism)"

@@ -120,9 +120,15 @@ jobs:
 
       - name: Run tests
         run: make test
+        env:
+          # The service above, not the gate's own container: CI has no Tilt
+          # fleet to collide with, so the mapped 6379 is fine here.
+          REDIS_TEST_URL: redis://127.0.0.1:6379
 
       - name: Run tests with coverage
         run: make test-coverage
+        env:
+          REDIS_TEST_URL: redis://127.0.0.1:6379
 
       - name: Upload coverage reports
         uses: codecov/codecov-action@v7
@@ -171,6 +177,10 @@ jobs:
 
       - name: Run tests under the race detector
         run: ./scripts/gates/race.sh
+        env:
+          # Set, so the gate reuses the service above instead of starting a
+          # container of its own.
+          REDIS_TEST_URL: redis://127.0.0.1:6379
 
   build:
     name: Build
