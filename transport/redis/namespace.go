@@ -55,6 +55,19 @@ func (kb *KeyBuilder) StreamPrefix() string {
 	return fmt.Sprintf("%s:%s", kb.ns.BasePrefix, kb.ns.StreamsPrefix)
 }
 
+// StreamPattern returns the SCAN glob that matches every supplier relay stream
+// in this namespace.
+//
+// It exists so nobody hand-builds `StreamPrefix() + ":*"`. The key-literal
+// convention check cannot see a pattern assembled that way -- it matches literal
+// prefixes, not concatenations -- so a hand-built pattern passes CI silently and
+// then matches nothing on a deployment with a custom base prefix.
+// Format: {base}:{streams}:*
+// Example: "ha:relays:*"
+func (kb *KeyBuilder) StreamPattern() string {
+	return fmt.Sprintf("%s:%s:*", kb.ns.BasePrefix, kb.ns.StreamsPrefix)
+}
+
 // ConsumerGroup returns the consumer group name for Redis Streams.
 // Format: {base}-{consumer_group_prefix}
 // Example: "ha-miners"
