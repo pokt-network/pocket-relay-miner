@@ -46,7 +46,8 @@ func TestReleaseCacheLock_ReleasesEvenWhenTheRequestWasCancelled(t *testing.T) {
 	lockKey := client.KB().CacheLockKey("application", "pokt1cancelled")
 
 	ctx, cancel := context.WithCancel(context.Background())
-	ok, err := client.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
+	token := newLockToken()
+	ok, err := client.SetNX(ctx, lockKey, token, 5*time.Second).Result()
 	require.NoError(t, err)
 	require.True(t, ok, "precondition: this instance holds the lock")
 
@@ -54,7 +55,7 @@ func TestReleaseCacheLock_ReleasesEvenWhenTheRequestWasCancelled(t *testing.T) {
 	// disconnecting client or an expired deadline does.
 	cancel()
 
-	releaseCacheLock(ctx, client, lockKey)
+	releaseCacheLock(ctx, client, lockKey, token)
 
 	exists, err := client.Exists(context.Background(), lockKey).Result()
 	require.NoError(t, err)
@@ -67,13 +68,43 @@ func TestReleaseCacheLock_ReleasesOnALiveContext(t *testing.T) {
 	lockKey := client.KB().CacheLockKey("service", "svc-live")
 
 	ctx := context.Background()
-	ok, err := client.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
+	token := newLockToken()
+	ok, err := client.SetNX(ctx, lockKey, token, 5*time.Second).Result()
 	require.NoError(t, err)
 	require.True(t, ok)
 
-	releaseCacheLock(ctx, client, lockKey)
+	releaseCacheLock(ctx, client, lockKey, token)
 
 	exists, err := client.Exists(ctx, lockKey).Result()
 	require.NoError(t, err)
 	require.Zero(t, exists)
+}
+
+// The release runs on a context detached from the request precisely so it
+// survives cancellation -- which means a request whose chain query outran the
+// lock TTL now DOES reach Redis on its way out, where before it failed and left
+// the successor alone. Without an ownership check that turns one duplicate
+// query into another: the straggler frees a lock a DIFFERENT instance is
+// holding, and a third instance walks in.
+func TestReleaseCacheLock_LeavesASuccessorsLockAlone(t *testing.T) {
+	client := newLockTestClient(t)
+	lockKey := client.KB().CacheLockKey("application", "pokt1succession")
+	ctx := context.Background()
+
+	// The straggler acquired, then its lock expired.
+	stragglerToken := newLockToken()
+
+	// A different instance acquired afterwards and is holding it now.
+	successorToken := newLockToken()
+	ok, err := client.SetNX(ctx, lockKey, successorToken, 5*time.Second).Result()
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	// The straggler's deferred release finally runs.
+	releaseCacheLock(ctx, client, lockKey, stragglerToken)
+
+	got, err := client.Get(ctx, lockKey).Result()
+	require.NoError(t, err, "the successor's lock must still be there")
+	require.Equal(t, successorToken, got,
+		"the straggler freed a lock it no longer owned, so a third instance can now fire the duplicate query")
 }
