@@ -651,17 +651,15 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// The relayer's ApplicationCache.WarmupFromRedis() will populate L1 from L2 on startup.
 	// Discovery of apps/services happens on the miner side when processing relays from Redis streams.
 
-	// Create publisher for mined relays
-	// CacheTTL default: 2h if not configured
-	cacheTTL := config.RelayMeter.CacheTTL
-	if cacheTTL == 0 {
-		cacheTTL = 2 * time.Hour
-	}
+	// Create publisher for mined relays.
+	//
+	// No TTL is passed: relay streams do not expire. relay_meter.cache_ttl still
+	// governs the meter's own per-session keys further down; it used to double as
+	// the stream's lifetime, which deleted un-consumed relays mid-session.
 	publisher := redistransport.NewStreamsPublisher(
 		logger,
 		redisClient.UniversalClient,     // Embedded go-redis client
 		redisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
-		cacheTTL,                        // TTL for relay streams (backup safety net)
 	)
 
 	// Create health checker
