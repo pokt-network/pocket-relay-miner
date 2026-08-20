@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 )
@@ -24,28 +24,27 @@ import (
 // must reach the live consumer's channel within a few ClaimIdleTimeout
 // periods regardless of what the blocking read is doing.
 //
-// Honest limitation: miniredis does not block on XREADGROUP (it returns Nil
-// immediately), so this test cannot distinguish the ticker trigger from the
-// old Nil-gated trigger. What it does pin is the reclaim MECHANISM end to
-// end -- dead consumer's pending entry, claimed by a different consumer name,
-// parsed, delivered, and marked as a reclaim for dedup -- which had zero
-// coverage while the bug shipped. The trigger topology is pinned by comment
-// and review on the ticker itself; the live gate exercises the real blocking
-// path.
+// The limitation that used to be written here is gone: this now runs against a
+// real Redis, where the read genuinely blocks, so the ticker really is what
+// delivers the stranded entry -- the old Nil-gated trigger could not fire at
+// all. What it pins is the reclaim MECHANISM end to end: a dead consumer's
+// pending entry, claimed by a different consumer name, parsed, delivered, and
+// marked as a reclaim for dedup, which had zero coverage while the bug shipped.
 func TestConsume_ReclaimsDeadConsumerPending(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
+	rdb := testredis.Client(t)
 
-	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
-	defer func() { _ = rdb.Close() }()
+	// Shorten the idle block so Close() does not wait a full interval for the
+	// read loop to come back and notice the cancel.
+	restore := blockInterval
+	blockInterval = 200 * time.Millisecond
+	t.Cleanup(func() { blockInterval = restore })
+
 	ctx := context.Background()
 
-	const (
-		supplier = "pokt1reclaim_test"
-		group    = "ha-miners"
-		stream   = "ha:relays:" + supplier
-	)
+	const supplier = "pokt1reclaim_test"
+	prefix := testredis.Prefix(t)
+	group := prefix + ":ha-miners"
+	stream := prefix + ":" + supplier
 
 	// A relay published before this consumer existed.
 	relay := &transport.MinedRelayMessage{
@@ -81,7 +80,7 @@ func TestConsume_ReclaimsDeadConsumerPending(t *testing.T) {
 		logging.NewLoggerFromConfig(logging.Config{Level: "error", Format: "json"}),
 		rdb,
 		transport.ConsumerConfig{
-			StreamPrefix:            "ha:relays",
+			StreamPrefix:            prefix,
 			SupplierOperatorAddress: supplier,
 			ConsumerGroup:           group,
 			ConsumerName:            "alive-pod-consumer",
@@ -94,12 +93,20 @@ func TestConsume_ReclaimsDeadConsumerPending(t *testing.T) {
 	runCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 	ch := consumer.Consume(runCtx)
-	// Deliberately NOT calling Close: it wg.Waits for the read goroutine, and a
-	// read blocked in XREADGROUP BLOCK 0 is not interrupted by context
-	// cancellation, so Close hangs until a message arrives. Pre-existing
-	// shutdown behavior (pods are killed, so production never waits); noted for
-	// PR A2. The cancel above bounds every goroutine this test starts except
-	// that blocked read, which dies with the test process.
+	// Close IS called now. It used to hang: the read parked on XREADGROUP with
+	// BLOCK 0, which sets no read deadline at all, so cancelling the context
+	// did not end it and wg.Wait sat there until a message happened to arrive.
+	// The read blocks for a bounded interval since, so shutdown terminates.
+	defer func() {
+		done := make(chan error, 1)
+		go func() { done <- consumer.Close() }()
+		select {
+		case err := <-done:
+			require.NoError(t, err)
+		case <-time.After(15 * time.Second):
+			t.Error("Close() did not return: the read loop cannot see a cancelled context")
+		}
+	}()
 
 	select {
 	case msg := <-ch:
