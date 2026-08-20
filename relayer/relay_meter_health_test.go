@@ -4,6 +4,7 @@ package relayer
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -54,13 +55,29 @@ func TestCheckRelayHealth_NonMutating(t *testing.T) {
 	meter, prefix, _, redisClient := newHealthTestMeter(t, ctx)
 	defer func() { _ = meter.Close() }()
 
+	// The service id carries a token unique to this run, so a key the probe
+	// writes ANYWHERE on the server can be attributed to this test.
+	serviceID := "svc-health-" + strings.ReplaceAll(prefix, ":", "_")
+
 	before := testredis.Keys(t, redisClient, prefix)
 
-	require.NoError(t, meter.CheckRelayHealth(ctx, "svc-health"))
+	require.NoError(t, meter.CheckRelayHealth(ctx, serviceID))
 
 	after := testredis.Keys(t, redisClient, prefix)
 	require.ElementsMatch(t, before, after,
-		"CheckRelayHealth must not create/mutate any Redis key (before=%v after=%v)", before, after)
+		"CheckRelayHealth must not create/mutate any key in its namespace (before=%v after=%v)", before, after)
+
+	// The namespaced check above cannot see a write that ignores the
+	// configured namespace -- a component prefixing "ha:" itself, which this
+	// repository has already shipped twice. Look for the token across the
+	// whole keyspace to catch that shape.
+	//
+	// What this still cannot see, stated rather than papered over: a stray
+	// write whose key is entirely constant. On a shared server that is
+	// indistinguishable from another package's traffic, and it is the static
+	// key-literal check in internal/conventions that has to catch it.
+	require.Empty(t, testredis.KeysMatching(t, redisClient, "*"+serviceID+"*"),
+		"CheckRelayHealth must not write outside its configured namespace either")
 }
 
 // TestCheckRelayHealth_RedisUnreachable proves the probe reports degradation

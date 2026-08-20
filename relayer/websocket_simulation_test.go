@@ -267,13 +267,28 @@ func (f *simWSFixture) buildSignedRelay(t *testing.T, sessionID string) *service
 // write and is deliberately excluded -- this helper proves Accounting
 // (metering) never wrote anything, not that Redis was untouched.
 //
-// It scans THIS fixture's namespace, not the server: the server is shared, so
-// counting every key would fold another package's meter keys into the total
-// and turn "the simulated path wrote nothing" into a coin flip.
+// It looks in two places, and the second one is the point. Scanning only THIS
+// fixture's namespace is necessary — the server is shared, so counting every
+// key would fold another package's meter keys in — but on its own it would
+// miss a write that ignores the configured namespace and prefixes "ha:"
+// itself, which is a bug this repository has shipped twice. So it also sweeps
+// the whole keyspace for this fixture's identities, which are freshly
+// generated per run and therefore cannot match anybody else's traffic.
 func (f *simWSFixture) countMeterKeys(t *testing.T) int {
 	t.Helper()
-	n := 0
+
+	seen := map[string]struct{}{}
 	for _, k := range testredis.Keys(t, f.redisClient, f.redisPrefix) {
+		seen[k] = struct{}{}
+	}
+	for _, identity := range []string{f.supplierAddr, f.appAddr} {
+		for _, k := range testredis.KeysMatching(t, f.redisClient, "*"+identity+"*") {
+			seen[k] = struct{}{}
+		}
+	}
+
+	n := 0
+	for k := range seen {
 		if strings.Contains(k, ":meter:") || strings.Contains(k, ":app_stake:") {
 			n++
 		}

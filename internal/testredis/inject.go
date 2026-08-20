@@ -21,30 +21,67 @@ import (
 // "no key was created" assertion would fail on somebody else's traffic.
 func Keys(t *testing.T, client redis.UniversalClient, prefix string) []string {
 	t.Helper()
+	return scan(t, client, prefix+"*")
+}
+
+// KeysMatching returns every key matching a glob pattern, sorted.
+//
+// Unlike Keys it is NOT bounded to one namespace, so it may only be used with a
+// pattern carrying a token unique to the running test -- never to delete, and
+// never with a pattern another package could match. It exists for the one
+// question a namespaced scan cannot answer: did the code under test write
+// OUTSIDE the namespace it was configured with?
+func KeysMatching(t *testing.T, client redis.UniversalClient, pattern string) []string {
+	t.Helper()
+	return scan(t, client, pattern)
+}
+
+// scan walks the keyspace and returns the distinct matches, sorted.
+//
+// The de-duplication is not defensive tidiness. SCAN guarantees a key present
+// throughout the iteration is returned AT LEAST once, not exactly once: a
+// rehash mid-iteration can hand the same key back twice. On a server shared by
+// every package that is ordinary, and callers compare the result with
+// require.Equal / ElementsMatch, so a duplicate would read as a spurious
+// second key -- a flake in the helper the whole migration rests on.
+func scan(t *testing.T, client redis.UniversalClient, pattern string) []string {
+	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	var (
-		out    []string
-		cursor uint64
-	)
+	seen := map[string]struct{}{}
+	var cursor uint64
 	for {
-		keys, next, err := client.Scan(ctx, cursor, prefix+"*", 500).Result()
+		keys, next, err := client.Scan(ctx, cursor, pattern, 500).Result()
 		if err != nil {
-			t.Fatalf("scanning test keys under %q: %v", prefix, err)
+			t.Fatalf("scanning test keys matching %q: %v", pattern, err)
 		}
-		out = append(out, keys...)
+		for _, k := range keys {
+			seen[k] = struct{}{}
+		}
 		if next == 0 {
 			break
 		}
 		cursor = next
 	}
+
+	out := make([]string, 0, len(seen))
+	for k := range seen {
+		out = append(out, k)
+	}
 	sort.Strings(out)
 	return out
 }
 
-// FailSwitch makes every command on a client fail, and lets it recover.
+// FailSwitch makes every command a client sends through Process or a pipeline
+// fail, and lets it recover.
+//
+// NOT PubSub: Subscribe builds its own connection (redis.go:1206-1269) and its
+// receive path goes through neither hook, so a subscriber keeps delivering
+// through a simulated outage. An outage test written against Subscribe would
+// pass for the wrong reason, which is the fault this package exists to remove
+// -- so it needs a different mechanism, not this one.
 //
 // It replaces miniredis's SetError. Reproducing an unreachable Redis by
 // CLOSING the server is what these tests must not do: closing frees the port,
