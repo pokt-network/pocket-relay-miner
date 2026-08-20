@@ -12,6 +12,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/miner"
 	transportredis "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -153,7 +154,9 @@ func TestKnownSupplierAddressesUnionsBothSources(t *testing.T) {
 	require.NoError(t, c.SAdd(ctx, c.KB().SuppliersRegistryIndexKey(), "pokt1from_index").Err())
 	require.NoError(t, c.Set(ctx, c.KB().SupplierStateKey("pokt1from_cache"), "{}", 0).Err())
 
-	known, err := knownSupplierAddresses(ctx, c)
+	known, err := miner.KnownSupplierAddresses(ctx, c.Client, func(ctx context.Context, pattern string) ([]string, error) {
+		return clusterAwareScanAllKeys(ctx, c, pattern)
+	})
 	require.NoError(t, err)
 	require.Contains(t, known, "pokt1from_index")
 	require.Contains(t, known, "pokt1from_cache")
@@ -166,7 +169,10 @@ func TestKnownSupplierAddressesUnionsBothSources(t *testing.T) {
 func TestKnownSupplierAddressesOnAnEmptyDeployment(t *testing.T) {
 	c, _ := newNamespacedDebugClient(t)
 
-	known, err := knownSupplierAddresses(context.Background(), c)
+	ctx := context.Background()
+	known, err := miner.KnownSupplierAddresses(ctx, c.Client, func(ctx context.Context, pattern string) ([]string, error) {
+		return clusterAwareScanAllKeys(ctx, c, pattern)
+	})
 	require.NoError(t, err, "a deployment that has never registered a supplier is not an error")
 	require.Empty(t, known)
 }

@@ -60,6 +60,7 @@ type LeaderController struct {
 	supplierCache         *cache.SupplierCache
 	cacheOrchestrator     *cache.CacheOrchestrator
 	balanceMonitor        *BalanceMonitor
+	orphanStreamMonitor   *OrphanStreamMonitor
 	blockHealthMonitor    *BlockHealthMonitor
 	supplierRegistry      *SupplierRegistry
 	serviceFactorRegistry *ServiceFactorRegistry
@@ -372,6 +373,19 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger.Info().Msg("balance monitor started")
 	}
 
+	// Relay streams no longer expire, so a supplier decommissioned for good
+	// leaves its lane behind. This reports those lanes; it never deletes one.
+	c.orphanStreamMonitor = NewOrphanStreamMonitor(
+		c.logger,
+		c.config.RedisClient,
+		c.config.GlobalLeader,
+		0, // default sweep interval
+	)
+	if err := c.orphanStreamMonitor.Start(ctx); err != nil {
+		c.cleanup()
+		return fmt.Errorf("failed to start orphan stream monitor: %w", err)
+	}
+
 	c.active = true
 	c.logger.Info().Msg("leader controller started - all resources active")
 	return nil
@@ -398,6 +412,13 @@ func (c *LeaderController) Close() error {
 // Must be called with c.mu held.
 func (c *LeaderController) cleanup() {
 	// Close in reverse order of creation
+
+	if c.orphanStreamMonitor != nil {
+		if err := c.orphanStreamMonitor.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close orphan stream monitor")
+		}
+		c.orphanStreamMonitor = nil
+	}
 
 	if c.balanceMonitor != nil {
 		if err := c.balanceMonitor.Close(); err != nil {

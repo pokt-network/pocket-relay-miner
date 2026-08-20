@@ -2,14 +2,14 @@ package redis
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"text/tabwriter"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/spf13/cobra"
+
+	"github.com/pokt-network/pocket-relay-miner/miner"
 )
 
 func StreamsCmd() *cobra.Command {
@@ -197,7 +197,12 @@ func orphanedStreams(ctx context.Context, client *DebugRedisClient, deleteEmpty,
 		return fmt.Errorf("failed to scan streams: %w", err)
 	}
 
-	known, err := knownSupplierAddresses(ctx, client)
+	// The "known" rule lives in the miner, which owns supplier lifecycle: two
+	// copies of it drifting apart would surface as a delete that should not have
+	// happened, long after the change that caused it.
+	known, err := miner.KnownSupplierAddresses(ctx, client.Client, func(ctx context.Context, pattern string) ([]string, error) {
+		return clusterAwareScanAllKeys(ctx, client, pattern)
+	})
 	if err != nil {
 		return err
 	}
@@ -286,31 +291,4 @@ func orphanedStreams(ctx context.Context, client *DebugRedisClient, deleteEmpty,
 		fmt.Printf("  deleted %s\n", o.addr)
 	}
 	return nil
-}
-
-// knownSupplierAddresses returns every supplier address this deployment has a
-// record of, from the registry index and from the supplier cache.
-func knownSupplierAddresses(ctx context.Context, client *DebugRedisClient) (map[string]struct{}, error) {
-	known := make(map[string]struct{})
-
-	indexed, err := client.SMembers(ctx, client.KB().SuppliersRegistryIndexKey()).Result()
-	if err != nil && !errors.Is(err, redis.Nil) {
-		return nil, fmt.Errorf("failed to read the supplier registry index: %w", err)
-	}
-	for _, addr := range indexed {
-		known[addr] = struct{}{}
-	}
-
-	cachePrefix := client.KB().SupplierKeyPrefix() + ":"
-	cached, err := clusterAwareScanAllKeys(ctx, client, cachePrefix+"*")
-	if err != nil {
-		return nil, fmt.Errorf("failed to scan supplier cache keys: %w", err)
-	}
-	for _, key := range cached {
-		if addr := strings.TrimPrefix(key, cachePrefix); addr != key && addr != "" {
-			known[addr] = struct{}{}
-		}
-	}
-
-	return known, nil
 }
