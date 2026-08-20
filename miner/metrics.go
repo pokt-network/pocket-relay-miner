@@ -47,6 +47,23 @@ var (
 		[]string{"supplier", "service_id"},
 	)
 
+	// orphanedStreams is the number of relay streams whose supplier this
+	// deployment has no record of, as counted by the leader.
+	//
+	// It is a Gauge because it is a level, not an event: the same orphan is
+	// counted again on every sweep. Zero labels on purpose -- the supplier
+	// address is the obvious thing to want here and is exactly what must not be
+	// a label, since it is unbounded; the addresses go to the log line the sweep
+	// emits, and to `redis streams --orphaned`.
+	orphanedStreams = observability.MinerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "orphaned_streams",
+			Help:      "Relay streams whose supplier is no longer known to this deployment (leader-reported; bookkeeping, not lost relays)",
+		},
+	)
+
 	// shutdownDrainedRelays counts relays pulled out of the delivery buffer during a
 	// GRACEFUL shutdown and processed to completion, and those abandoned because the
 	// drain window closed first.
@@ -1028,6 +1045,12 @@ var (
 // RecordRelayConsumedFromStream records a relay consumed from Redis Stream.
 func RecordRelayConsumedFromStream(supplier, serviceID string) {
 	relaysConsumedFromStream.WithLabelValues(supplier, serviceID).Inc()
+}
+
+// RecordOrphanedStreams publishes the number of relay streams with no known
+// supplier. Called only by the leader, so the gauge has a single writer.
+func RecordOrphanedStreams(n int) {
+	orphanedStreams.Set(float64(n))
 }
 
 // RecordShutdownDrainedRelay records one relay drained and processed during a
