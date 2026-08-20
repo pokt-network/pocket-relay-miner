@@ -178,7 +178,7 @@ func (c *RedisSupplierParamCache) queryAndCacheParams(ctx context.Context, key s
 	if locked {
 		// We got the lock - query chain
 		lockAcquisitions.WithLabelValues("supplier_params", "acquired").Inc()
-		defer c.redisClient.Del(ctx, lockKey)
+		defer releaseCacheLock(ctx, c.redisClient, lockKey)
 
 		chainQueries.WithLabelValues("supplier_params").Inc()
 		chainStart := time.Now()

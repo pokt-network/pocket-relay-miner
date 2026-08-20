@@ -124,3 +124,34 @@ func TestValidate_RemovedKeysDir(t *testing.T) {
 			"the error must point at the keyring: %v", err)
 	})
 }
+
+// TestValidate_RemovedGracePeriodExtraBlocks pins the upgrade contract for the
+// retired grace_period_extra_blocks. It widened the serve window past the
+// chain's grace period on the ADMISSION side only, so relays let in during
+// those extra blocks were served and then judged ineligible for rewards --
+// served for free. Silently dropping the key would instead narrow an
+// operator's window with nothing in their config to explain the rejections
+// that start appearing at the session boundary.
+func TestValidate_RemovedGracePeriodExtraBlocks(t *testing.T) {
+	t.Run("absent is fine", func(t *testing.T) {
+		require.NoError(t, minimalValidConfig().Validate())
+	})
+
+	t.Run("explicit zero upgrades untouched", func(t *testing.T) {
+		c := minimalValidConfig()
+		zero := 0
+		c.RemovedGracePeriodExtraBlocks = &zero
+		require.NoError(t, c.Validate(), "a config that spelled out \"no extra\" changes nothing")
+	})
+
+	t.Run("the old default is a hard error naming the consequence", func(t *testing.T) {
+		c := minimalValidConfig()
+		two := 2
+		c.RemovedGracePeriodExtraBlocks = &two
+		err := c.Validate()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "grace_period_extra_blocks is no longer supported")
+		require.Contains(t, strings.ToLower(err.Error()), "rejected as expired",
+			"the operator must be told what changes for them, not just that a key went away")
+	})
+}

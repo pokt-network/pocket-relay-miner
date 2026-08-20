@@ -108,6 +108,12 @@ for gate in "${gates[@]}"; do
     fi
 done
 
+# The shared test Redis is this run's, not the machine's: take it down again so
+# a developer box is not left with a container it did not ask for.
+if [ "$level" -ge 2 ]; then
+    "$GATES_DIR/redis.sh" down || true
+fi
+
 # ---------------------------------------------------------------------------
 echo
 printf '%s=== summary (level %s) ===%s\n' "$GATE_BOLD" "$level" "$GATE_RESET"

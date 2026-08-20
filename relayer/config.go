@@ -226,6 +226,21 @@ type Config struct {
 	// DefaultMaxBodySizeBytes is the default max body size for requests/responses.
 	DefaultMaxBodySizeBytes int64 `yaml:"default_max_body_size_bytes"`
 
+	// RemovedGracePeriodExtraBlocks is the tombstone for the retired
+	// grace_period_extra_blocks. It widened the window in which a relay for an
+	// ended session was still served, beyond the on-chain grace period -- and
+	// it did so on ONE side only: getTargetSessionBlockHeight accepted those
+	// relays while CheckRewardEligibility still judged them by the chain's
+	// window, so they were served and could never be paid. Grace now follows
+	// the on-chain parameter exactly.
+	//
+	// Kept as a field because the YAML decoder drops unknown keys in silence.
+	// Without it, an operator carrying the old default would upgrade into a
+	// grace window shorter than the one they configured and see relays start
+	// being rejected at the session boundary with nothing in their config to
+	// explain it. A pointer so "absent" and "explicitly 0" are distinguishable.
+	RemovedGracePeriodExtraBlocks *int `yaml:"grace_period_extra_blocks,omitempty"`
+
 	// Metrics configuration
 	Metrics MetricsConfig `yaml:"metrics"`
 
@@ -793,6 +808,22 @@ func (c *Config) Validate() error {
 		}
 		// Equal full meter prefix: nothing moves. Accepted so that configs
 		// shipped with the old default ("ha") upgrade without editing.
+	}
+
+	// The retired grace_period_extra_blocks widened the serve window past the
+	// chain's grace period, which meant serving relays that could never be
+	// paid. Zero is accepted so a config that spelled out "no extra" upgrades
+	// untouched; anything else is a real narrowing the operator must see.
+	if c.RemovedGracePeriodExtraBlocks != nil && *c.RemovedGracePeriodExtraBlocks != 0 {
+		return fmt.Errorf(
+			"grace_period_extra_blocks is no longer supported (found %d): it extended the serve window "+
+				"beyond the chain's grace period on the admission side only, so relays admitted in those "+
+				"extra blocks were served and then judged ineligible for rewards -- served for free. "+
+				"Grace now follows the on-chain grace_period_end_offset_blocks exactly. Remove the line; "+
+				"expect relays arriving in those %d block(s) after the grace period to be rejected as "+
+				"expired instead of served unpaid",
+			*c.RemovedGracePeriodExtraBlocks, *c.RemovedGracePeriodExtraBlocks,
+		)
 	}
 
 	// The retired keys.keys_dir loaded supplier keys from a directory. A
