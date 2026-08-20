@@ -11,38 +11,35 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// setupTestSessionStore creates a miniredis-backed session store for testing.
-func setupTestSessionStore(t *testing.T) (*RedisSessionStore, *miniredis.Miniredis) {
+// setupTestSessionStore creates a session store on its own namespace of the
+// real Redis.
+//
+// The key prefix comes from the client's KeyBuilder, not the "ha:miner:sessions"
+// literal it used to carry: with a per-test namespace a hardcoded prefix writes
+// outside the subtree the cleanup sweeps and the other tests read, so every
+// assertion here would miss and the keys would be left on a shared server.
+func setupTestSessionStore(t *testing.T) (*RedisSessionStore, *redisutil.Client) {
 	t.Helper()
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
+	client, _ := newTestRedis(t)
 
 	store := NewRedisSessionStore(
 		testLogger(),
 		client,
 		SessionStoreConfig{
-			KeyPrefix:       "ha:miner:sessions",
+			KeyPrefix:       client.KB().MinerSessionsPrefix(),
 			SupplierAddress: "pokt1test",
 			SessionTTL:      1 * time.Hour,
 		},
 	)
 
-	return store, mr
+	return store, client
 }
 
 // saveTestSession is a helper that saves a session with the given parameters.
@@ -269,7 +266,7 @@ func TestSave_StateIndexCleanup(t *testing.T) {
 // TestSave_HashFieldRoundTrip verifies every SessionSnapshot field
 // round-trips through the hash encode/decode path.
 func TestSave_HashFieldRoundTrip(t *testing.T) {
-	store, mr := setupTestSessionStore(t)
+	store, client := setupTestSessionStore(t)
 	ctx := context.Background()
 
 	original := &SessionSnapshot{
@@ -292,8 +289,8 @@ func TestSave_HashFieldRoundTrip(t *testing.T) {
 	require.NoError(t, store.Save(ctx, original))
 
 	// Confirm Redis actually stored the key as a hash, not a string.
-	key := fmt.Sprintf("ha:miner:sessions:pokt1test:%s", original.SessionID)
-	keyType := mr.DB(0).Type(key)
+	key := client.KB().MinerSessionKey("pokt1test", original.SessionID)
+	keyType := redisType(t, client, key)
 	assert.Equal(t, "hash", keyType, "Wave 3 must store sessions as Redis Hash")
 
 	got, err := store.Get(ctx, original.SessionID)
@@ -355,7 +352,7 @@ func TestSave_ClearsStaleOptionalFields(t *testing.T) {
 // TestGet_LegacyJSONFallback verifies Get transparently decodes a legacy
 // JSON string key written by a pre-Wave-3 miner during rolling upgrade.
 func TestGet_LegacyJSONFallback(t *testing.T) {
-	store, mr := setupTestSessionStore(t)
+	store, client := setupTestSessionStore(t)
 	ctx := context.Background()
 
 	// Write a legacy JSON string directly to Redis, mimicking the old layout.
@@ -374,8 +371,8 @@ func TestGet_LegacyJSONFallback(t *testing.T) {
 	}
 	buf, err := json.Marshal(&legacy)
 	require.NoError(t, err)
-	key := "ha:miner:sessions:pokt1test:sess-legacy"
-	require.NoError(t, mr.Set(key, string(buf)))
+	key := client.KB().MinerSessionKey("pokt1test", "sess-legacy")
+	require.NoError(t, client.Set(ctx, key, string(buf), 0).Err())
 
 	got, err := store.Get(ctx, "sess-legacy")
 	require.NoError(t, err)
@@ -389,7 +386,7 @@ func TestGet_LegacyJSONFallback(t *testing.T) {
 // rescue path: an old JSON string key is migrated to the hash layout and
 // the increment succeeds on retry.
 func TestIncrementRelayCount_MigratesLegacyJSON(t *testing.T) {
-	store, mr := setupTestSessionStore(t)
+	store, client := setupTestSessionStore(t)
 	ctx := context.Background()
 
 	legacy := SessionSnapshot{
@@ -407,14 +404,14 @@ func TestIncrementRelayCount_MigratesLegacyJSON(t *testing.T) {
 	}
 	buf, err := json.Marshal(&legacy)
 	require.NoError(t, err)
-	key := "ha:miner:sessions:pokt1test:sess-migrate"
-	require.NoError(t, mr.Set(key, string(buf)))
+	key := client.KB().MinerSessionKey("pokt1test", "sess-migrate")
+	require.NoError(t, client.Set(ctx, key, string(buf), 0).Err())
 
 	// First increment triggers WRONGTYPE → migrate → retry.
 	require.NoError(t, store.IncrementRelayCount(ctx, "sess-migrate", 10))
 
 	// Key should now be a hash.
-	assert.Equal(t, "hash", mr.DB(0).Type(key))
+	assert.Equal(t, "hash", redisType(t, client, key))
 
 	got, err := store.Get(ctx, "sess-migrate")
 	require.NoError(t, err)
@@ -429,18 +426,24 @@ func TestIncrementRelayCount_MigratesLegacyJSON(t *testing.T) {
 	assert.Equal(t, int64(5), got.RelayCount)
 }
 
-// writeLegacyJSONKey writes a pre-Wave-3 JSON string directly into miniredis.
-func writeLegacyJSONKey(t *testing.T, mr *miniredis.Miniredis, snap *SessionSnapshot) string {
+// writeLegacyJSONKey writes a pre-Wave-3 JSON string straight into Redis, as an
+// old binary would have.
+//
+// The SHAPE is the legacy one — a JSON string where the store now keeps a hash;
+// that is the point of the test. The ADDRESS is the current KeyBuilder's, so
+// the store under test actually finds it. Spelling the old "ha:..." literal
+// here would only prove that a key nobody reads can be ignored.
+func writeLegacyJSONKey(t *testing.T, client *redisutil.Client, snap *SessionSnapshot) string {
 	t.Helper()
+	ctx := context.Background()
 	buf, err := json.Marshal(snap)
 	require.NoError(t, err)
-	key := fmt.Sprintf("ha:miner:sessions:pokt1test:%s", snap.SessionID)
-	require.NoError(t, mr.Set(key, string(buf)))
+	key := client.KB().MinerSessionKey("pokt1test", snap.SessionID)
+	require.NoError(t, client.Set(ctx, key, string(buf), 0).Err())
 	// Mimic the old supplier index entry so list paths see the session.
-	_, err = mr.SAdd("ha:miner:sessions:pokt1test:index", snap.SessionID)
-	require.NoError(t, err)
-	_, err = mr.SAdd(fmt.Sprintf("ha:miner:sessions:pokt1test:state:%s", snap.State), snap.SessionID)
-	require.NoError(t, err)
+	require.NoError(t, client.SAdd(ctx, client.KB().MinerSessionsIndexKey("pokt1test"), snap.SessionID).Err())
+	require.NoError(t, client.SAdd(ctx,
+		client.KB().MinerSessionStateIndexKey("pokt1test", string(snap.State)), snap.SessionID).Err())
 	return key
 }
 
@@ -448,7 +451,7 @@ func writeLegacyJSONKey(t *testing.T, mr *miniredis.Miniredis, snap *SessionSnap
 // key with a hash layout in one transaction, preserving the old state so
 // the state index is updated correctly.
 func TestSave_MigratesLegacyJSONKey(t *testing.T) {
-	store, mr := setupTestSessionStore(t)
+	store, client := setupTestSessionStore(t)
 	ctx := context.Background()
 
 	legacy := &SessionSnapshot{
@@ -464,8 +467,8 @@ func TestSave_MigratesLegacyJSONKey(t *testing.T) {
 		CreatedAt:               time.Now(),
 		LastUpdatedAt:           time.Now(),
 	}
-	key := writeLegacyJSONKey(t, mr, legacy)
-	require.Equal(t, "string", mr.DB(0).Type(key))
+	key := writeLegacyJSONKey(t, client, legacy)
+	require.Equal(t, "string", redisType(t, client, key))
 
 	// Save with a new state → must DEL the legacy string, write a hash,
 	// and move the session from the active index to the claiming index.
@@ -481,7 +484,7 @@ func TestSave_MigratesLegacyJSONKey(t *testing.T) {
 		TotalComputeUnits:       110,
 	}))
 
-	assert.Equal(t, "hash", mr.DB(0).Type(key), "legacy key must be rewritten as hash")
+	assert.Equal(t, "hash", redisType(t, client, key), "legacy key must be rewritten as hash")
 
 	got, err := store.Get(ctx, "sess-save-migrate")
 	require.NoError(t, err)
@@ -501,7 +504,7 @@ func TestSave_MigratesLegacyJSONKey(t *testing.T) {
 // TestUpdateState_MigratesLegacyJSONKey verifies UpdateState transparently
 // handles a legacy JSON key during rolling upgrade.
 func TestUpdateState_MigratesLegacyJSONKey(t *testing.T) {
-	store, mr := setupTestSessionStore(t)
+	store, client := setupTestSessionStore(t)
 	ctx := context.Background()
 
 	legacy := &SessionSnapshot{
@@ -517,11 +520,11 @@ func TestUpdateState_MigratesLegacyJSONKey(t *testing.T) {
 		CreatedAt:               time.Now(),
 		LastUpdatedAt:           time.Now(),
 	}
-	key := writeLegacyJSONKey(t, mr, legacy)
+	key := writeLegacyJSONKey(t, client, legacy)
 
 	require.NoError(t, store.UpdateState(ctx, "sess-update-migrate", SessionStateClaimed))
 
-	assert.Equal(t, "hash", mr.DB(0).Type(key))
+	assert.Equal(t, "hash", redisType(t, client, key))
 	got, err := store.Get(ctx, "sess-update-migrate")
 	require.NoError(t, err)
 	require.NotNil(t, got)
@@ -533,14 +536,14 @@ func TestUpdateState_MigratesLegacyJSONKey(t *testing.T) {
 // TestGetBySupplier_MixedFormats verifies the list paths return both legacy
 // JSON sessions and new hash sessions during a rolling upgrade window.
 func TestGetBySupplier_MixedFormats(t *testing.T) {
-	store, mr := setupTestSessionStore(t)
+	store, client := setupTestSessionStore(t)
 	ctx := context.Background()
 
 	// New-format session via Save.
 	saveTestSession(t, store, "sess-new", SessionStateActive, 1, 10)
 
 	// Legacy-format session written directly.
-	writeLegacyJSONKey(t, mr, &SessionSnapshot{
+	writeLegacyJSONKey(t, client, &SessionSnapshot{
 		SessionID:               "sess-old",
 		SupplierOperatorAddress: "pokt1test",
 		ServiceID:               "svc",
@@ -740,4 +743,15 @@ func TestSave_ExistingKey_PreservesCounters(t *testing.T) {
 // testLogger returns a no-op logger for tests.
 func testLogger() logging.Logger {
 	return logging.NewLoggerFromConfig(logging.DefaultConfig())
+}
+
+// redisType returns a key's Redis type ("hash", "string", ...), replacing
+// miniredis's DB(0).Type. The distinction is the subject of the migration
+// tests: Wave 3 stores a session as a hash where the old binary wrote a JSON
+// string, and only the type tells the two apart at the same address.
+func redisType(t *testing.T, client *redisutil.Client, key string) string {
+	t.Helper()
+	typ, err := client.Type(context.Background(), key).Result()
+	require.NoError(t, err)
+	return typ
 }

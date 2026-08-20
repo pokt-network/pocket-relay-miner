@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
@@ -44,24 +43,16 @@ func TestIsClaimNotFoundError_DelegatesToTheSharedPolicy(t *testing.T) {
 // SessionCoordinator.OnClaimMissing — integration with miniredis
 // -----------------------------------------------------------------------------
 
-func setupTestCoordinator(t *testing.T) (*SessionCoordinator, *RedisSessionStore, *miniredis.Miniredis) {
+func setupTestCoordinator(t *testing.T) (*SessionCoordinator, *RedisSessionStore, *redisutil.Client) {
 	t.Helper()
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-
-	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
+	client, _ := newTestRedis(t)
 
 	store := NewRedisSessionStore(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		client,
 		SessionStoreConfig{
-			KeyPrefix:       "ha:miner:sessions",
+			KeyPrefix:       client.KB().MinerSessionsPrefix(),
 			SupplierAddress: "pokt1test",
 			SessionTTL:      1 * time.Hour,
 		},
@@ -73,7 +64,7 @@ func setupTestCoordinator(t *testing.T) (*SessionCoordinator, *RedisSessionStore
 		SMSTRecoveryConfig{SupplierAddress: "pokt1test"},
 	)
 
-	return coord, store, mr
+	return coord, store, client
 }
 
 func TestOnClaimMissing_MarksSessionTerminal(t *testing.T) {

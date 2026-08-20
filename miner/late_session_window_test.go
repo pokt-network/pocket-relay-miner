@@ -167,9 +167,9 @@ func TestMarkAndCountClaimWindowClosed_DoesNotRecordWhenTheMarkFails(t *testing.
 	before := testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
 
 	// Break every Redis command so UpdateState fails inside the coordinator.
-	f.mr.SetError("LOADING Redis is loading the dataset in memory")
+	f.failRedis.Fail("LOADING Redis is loading the dataset in memory")
 	lc.markAndCountClaimWindowClosed(f.ctx, snapshot)
-	f.mr.SetError("")
+	f.failRedis.Clear()
 
 	require.Equal(t, before,
 		testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
