@@ -27,7 +27,15 @@ gate_repo_root
 # These suites include tests that assert REAL Redis semantics (blocking reads,
 # PEL ageing) which miniredis does not reproduce. Bring one up; it is a single
 # container reused across the whole run, on its own port, never the localnet's.
-eval "$(./scripts/gates/redis.sh up)" || gate_fail "could not provide a real Redis for the tests"
+# Captured first and evaluated second, deliberately: the exit status of
+# `eval "$(cmd)"` is the status of the string it evaluates, not of cmd, so a
+# failing redis.sh would be swallowed and the run would collapse into a wall of
+# per-test fatals instead of one diagnostic.
+if ! redis_env="$(./scripts/gates/redis.sh up)"; then
+    gate_fail "could not provide a real Redis for the tests"
+    gate_verdict "$(basename "${BASH_SOURCE[0]}" .sh)"
+fi
+eval "$redis_env"
 export REDIS_TEST_URL
 
 verbose=()

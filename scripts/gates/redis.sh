@@ -24,6 +24,10 @@ set -uo pipefail
 REDIS_TEST_IMAGE="${REDIS_TEST_IMAGE:-redis:8-alpine}"
 REDIS_TEST_PORT="${REDIS_TEST_PORT:-6399}"
 REDIS_TEST_NAME="${REDIS_TEST_NAME:-prm-gate-redis}"
+# Written when this script STARTS the container, so `down` can tell "mine" from
+# "somebody else's". Keyed by container name so two differently-named servers do
+# not share a marker.
+REDIS_OWNED_MARKER="${TMPDIR:-/tmp}/.${REDIS_TEST_NAME}.started-by-gate"
 
 url() { printf 'redis://127.0.0.1:%s' "$REDIS_TEST_PORT"; }
 
@@ -49,6 +53,13 @@ up)
             printf 'scripts/gates/redis.sh: could not start %s\n' "$REDIS_TEST_IMAGE" >&2
             exit 1
         fi
+        # Mark it as ours. `down` removes the container only when this marker
+        # is present, so a run that merely REUSED a container somebody else
+        # started -- another `make gate` on this workstation, or a developer who
+        # ran `redis.sh up` in their shell -- cannot delete it out from under
+        # them. Killing another session's work is the failure this repository
+        # has a standing rule about.
+        : >"$REDIS_OWNED_MARKER"
     fi
 
     # Wait for it to answer rather than sleeping a guess.
@@ -63,7 +74,10 @@ up)
     exit 1
     ;;
 down)
-    docker rm -f "$REDIS_TEST_NAME" >/dev/null 2>&1 || true
+    if [ -f "$REDIS_OWNED_MARKER" ]; then
+        docker rm -f "$REDIS_TEST_NAME" >/dev/null 2>&1 || true
+        rm -f "$REDIS_OWNED_MARKER"
+    fi
     ;;
 url)
     url
