@@ -9,21 +9,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
-
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 func newRebroadcastStoreForTest(t *testing.T) *RebroadcastStore {
 	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	t.Cleanup(mr.Close)
-	rc, err := redisutil.NewClient(context.Background(), redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
+	rc, _ := newTestRedis(t)
 	return NewRebroadcastStore(rc, time.Hour)
 }
 

@@ -59,7 +59,7 @@ func URL() string {
 // a fake produced false greens, and a silent "not covered" would reproduce that
 // in another shape: run `eval "$(scripts/gates/redis.sh up)"` first, or let
 // `make gate` do it.
-func Client(t *testing.T) *redis.Client {
+func Client(t testing.TB) *redis.Client {
 	t.Helper()
 
 	opt, err := redis.ParseURL(URL())
@@ -83,7 +83,7 @@ func Client(t *testing.T) *redis.Client {
 // Prefix returns a key prefix unique to this test, and deletes everything under
 // it afterwards. Every key a test creates must sit beneath it: the server is
 // shared with the other packages running in parallel.
-func Prefix(t *testing.T) string {
+func Prefix(t testing.TB) string {
 	t.Helper()
 
 	// Redis glob metacharacters are replaced too, not only the separators:

@@ -19,7 +19,7 @@ import (
 // not available here and must not be: the server is shared with the packages
 // running in parallel, so an unscoped listing would return their keys and a
 // "no key was created" assertion would fail on somebody else's traffic.
-func Keys(t *testing.T, client redis.UniversalClient, prefix string) []string {
+func Keys(t testing.TB, client redis.UniversalClient, prefix string) []string {
 	t.Helper()
 	return scan(t, client, prefix+"*")
 }
@@ -31,7 +31,7 @@ func Keys(t *testing.T, client redis.UniversalClient, prefix string) []string {
 // never with a pattern another package could match. It exists for the one
 // question a namespaced scan cannot answer: did the code under test write
 // OUTSIDE the namespace it was configured with?
-func KeysMatching(t *testing.T, client redis.UniversalClient, pattern string) []string {
+func KeysMatching(t testing.TB, client redis.UniversalClient, pattern string) []string {
 	t.Helper()
 	return scan(t, client, pattern)
 }
@@ -44,7 +44,7 @@ func KeysMatching(t *testing.T, client redis.UniversalClient, pattern string) []
 // every package that is ordinary, and callers compare the result with
 // require.Equal / ElementsMatch, so a duplicate would read as a spurious
 // second key -- a flake in the helper the whole migration rests on.
-func scan(t *testing.T, client redis.UniversalClient, pattern string) []string {
+func scan(t testing.TB, client redis.UniversalClient, pattern string) []string {
 	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -149,5 +149,35 @@ func (f *FailSwitch) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.P
 			return err
 		}
 		return next(ctx, cmds)
+	}
+}
+
+// DeletePrefix removes every key under prefix.
+//
+// It replaces miniredis's FlushAll, which suites and benchmarks called between
+// iterations. FLUSHALL and FLUSHDB are forbidden here and always will be: the
+// server is shared with every other package, so flushing it would delete their
+// keys mid-test and the failure would surface as a bug in their code. Deleting
+// one subtree is the same intent expressed in a way that cannot reach anybody
+// else's data.
+func DeletePrefix(t testing.TB, client redis.UniversalClient, prefix string) {
+	t.Helper()
+
+	keys := scan(t, client, prefix+"*")
+	if len(keys) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// In batches: one DEL with tens of thousands of arguments is a long
+	// single-threaded command on a server other packages are waiting on.
+	const batch = 500
+	for start := 0; start < len(keys); start += batch {
+		end := min(start+batch, len(keys))
+		if err := client.Del(ctx, keys[start:end]...).Err(); err != nil {
+			t.Fatalf("deleting test keys under %q: %v", prefix, err)
+		}
 	}
 }

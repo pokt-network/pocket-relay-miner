@@ -7,53 +7,48 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	"github.com/rs/zerolog"
 )
 
 // Benchmark Suite Setup
-// Uses the same pattern as tests: single shared miniredis instance
+//
+// These now measure against a REAL Redis over a socket, not an in-process
+// fake. The numbers are therefore larger and they mean something different:
+// what an operator's Redis costs, rather than what a Go map costs. The old
+// results in CLAUDE.md carry the caveat "miniredis (in-process), production
+// adds ~1-2ms" precisely because the fake could not answer that question.
 
 type RedisSMSTBenchSuite struct {
-	miniRedis   *miniredis.Miniredis
+	redisPrefix string
 	redisClient *redisutil.Client
+	b           *testing.B
 	ctx         context.Context
 }
 
 func setupBenchSuite(b *testing.B) *RedisSMSTBenchSuite {
 	b.Helper()
 
-	// Create miniredis instance
-	mr, err := miniredis.Run()
-	if err != nil {
-		b.Fatalf("failed to create miniredis: %v", err)
-	}
-
-	ctx := context.Background()
-
-	// Create Redis client
-	redisURL := fmt.Sprintf("redis://%s", mr.Addr())
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{URL: redisURL})
-	if err != nil {
-		b.Fatalf("failed to create Redis client: %v", err)
-	}
+	client, prefix := newTestRedis(b)
 
 	return &RedisSMSTBenchSuite{
-		miniRedis:   mr,
+		redisPrefix: prefix,
 		redisClient: client,
-		ctx:         ctx,
+		b:           b,
+		ctx:         context.Background(),
 	}
 }
 
-func (s *RedisSMSTBenchSuite) Cleanup() {
-	if s.miniRedis != nil {
-		s.miniRedis.Close()
-	}
-	if s.redisClient != nil {
-		_ = s.redisClient.Close()
-	}
+// Cleanup is a no-op: newTestRedis registers the client close and the key
+// sweep on the benchmark itself.
+func (s *RedisSMSTBenchSuite) Cleanup() {}
+
+// reset clears this suite's OWN subtree between iterations, never FLUSHALL —
+// the server is shared with every other package.
+func (s *RedisSMSTBenchSuite) reset() {
+	testredis.DeletePrefix(s.b, s.redisClient, s.redisPrefix)
 }
 
 func (s *RedisSMSTBenchSuite) createTestRedisStore(sessionID string) *RedisMapStore {
@@ -185,7 +180,7 @@ func BenchmarkRedisMapStore_Pipeline(b *testing.B) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		suite.miniRedis.FlushAll() // Clean between iterations
+		suite.reset() // Clean between iterations
 		b.StartTimer()
 
 		store.BeginPipeline()
@@ -570,7 +565,7 @@ func BenchmarkRedisSMST_PipelineSpeedup(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			suite.miniRedis.FlushAll()
+			suite.reset()
 			b.StartTimer()
 
 			// 20 individual Set operations
@@ -593,7 +588,7 @@ func BenchmarkRedisSMST_PipelineSpeedup(b *testing.B) {
 
 		for i := 0; i < b.N; i++ {
 			b.StopTimer()
-			suite.miniRedis.FlushAll()
+			suite.reset()
 			b.StartTimer()
 
 			store.BeginPipeline()
