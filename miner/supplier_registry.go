@@ -32,9 +32,6 @@ type SupplierRegistryData struct {
 
 // SupplierRegistryConfig contains configuration for the SupplierRegistry.
 type SupplierRegistryConfig struct {
-	// KeyPrefix is the prefix for supplier registry keys.
-	// Default: "ha:suppliers"
-	KeyPrefix string
 
 	// IndexKey is the key for the supplier index set.
 	// Default: "ha:suppliers:index"
@@ -55,9 +52,6 @@ func NewSupplierRegistry(
 	redisClient *redisutil.Client,
 	config SupplierRegistryConfig,
 ) *SupplierRegistry {
-	if config.KeyPrefix == "" {
-		config.KeyPrefix = redisClient.KB().SuppliersRegistryPrefix()
-	}
 	if config.IndexKey == "" {
 		config.IndexKey = redisClient.KB().SuppliersRegistryIndexKey()
 	}
@@ -80,7 +74,7 @@ func (r *SupplierRegistry) PublishSupplierUpdate(
 	operatorAddr string,
 	services []string,
 ) error {
-	key := fmt.Sprintf("%s:%s", r.config.KeyPrefix, operatorAddr)
+	key := r.redisClient.KB().SupplierRegistryKey(operatorAddr)
 
 	switch action {
 	case SupplierUpdateActionAdd, SupplierUpdateActionUpdate:
@@ -141,7 +135,7 @@ func (r *SupplierRegistry) PublishSupplierUpdate(
 
 // GetSupplier retrieves supplier data from Redis.
 func (r *SupplierRegistry) GetSupplier(ctx context.Context, operatorAddr string) (*SupplierRegistryData, error) {
-	key := fmt.Sprintf("%s:%s", r.config.KeyPrefix, operatorAddr)
+	key := r.redisClient.KB().SupplierRegistryKey(operatorAddr)
 
 	data, err := r.redisClient.Get(ctx, key).Bytes()
 	if err != nil {
@@ -203,7 +197,7 @@ func (r *SupplierRegistry) ClearAll(ctx context.Context) error {
 	}
 
 	for _, addr := range suppliers {
-		key := fmt.Sprintf("%s:%s", r.config.KeyPrefix, addr)
+		key := r.redisClient.KB().SupplierRegistryKey(addr)
 		r.redisClient.Del(ctx, key)
 	}
 

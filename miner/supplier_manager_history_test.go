@@ -122,7 +122,7 @@ func newManagerForHistoryTest(t *testing.T, km *fakeKeyManager, qc *historySuppl
 	supplierCache := cache.NewSupplierCache(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		redisClient,
-		cache.SupplierCacheConfig{KeyPrefix: redisClient.KB().SupplierKeyPrefix()},
+		cache.SupplierCacheConfig{},
 	)
 	require.NoError(t, supplierCache.Start(ctx))
 

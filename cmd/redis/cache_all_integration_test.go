@@ -68,8 +68,7 @@ func TestCleanupAll_LiveReadersUnaffected(t *testing.T) {
 
 	// --- REAL supplier cache: same wiring as cmd_relayer.go (FailOpen, ha:supplier). ---
 	supplierCache := cache.NewSupplierCache(logger, client.Client, cache.SupplierCacheConfig{
-		KeyPrefix: "ha:supplier",
-		FailOpen:  true,
+		FailOpen: true,
 	})
 	require.NoError(t, supplierCache.Start(ctx))
 	t.Cleanup(func() { _ = supplierCache.Close() })
