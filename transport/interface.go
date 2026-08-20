@@ -64,8 +64,10 @@ type ConsumerConfig struct {
 	// BatchSize is the maximum number of messages to fetch per read operation.
 	BatchSize int64
 
-	// Note: Stream consumption uses BLOCK 0 (TRUE PUSH) for live consumption.
-	// This is hardcoded in the consumer and not configurable.
+	// Note: stream consumption blocks on XREADGROUP for a fixed interval
+	// (transport/redis.blockInterval), not configurable here. Delivery is still
+	// push -- the read returns the instant data arrives; the interval only
+	// bounds an idle wait so shutdown does not hang on it.
 
 	// ClaimIdleTimeout is how long a message can be pending before being claimed
 	// by another consumer. This handles consumer crashes.

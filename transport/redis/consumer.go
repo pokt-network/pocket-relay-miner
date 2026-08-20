@@ -16,6 +16,17 @@ import (
 
 var _ transport.MinedRelayConsumer = (*StreamsConsumer)(nil)
 
+// blockInterval bounds how long an idle XREADGROUP waits before returning
+// redis.Nil so the loop can look at ctx.Done(). It is NOT a polling interval:
+// the read still returns the instant a relay arrives, so nothing about delivery
+// latency depends on this number. It is the upper bound on how long Close()
+// waits for the read loop to notice it should stop, so it is chosen small
+// enough to sit well inside a Kubernetes termination grace period and large
+// enough that an idle supplier's stream is not woken up for nothing.
+// A var, not a const, only so a test can shrink it: nothing in production
+// writes it.
+var blockInterval = 5 * time.Second
+
 // isStreamNotFoundError reports whether a Redis error indicates the stream (or
 // its consumer group) does not exist yet. Redis surfaces this as a "no such
 // key" error for missing keys and a "NOGROUP" error when the stream/group is
@@ -30,8 +41,8 @@ func isStreamNotFoundError(err error) bool {
 
 // StreamsConsumer implements MinedRelayConsumer using Redis Streams with consumer groups.
 // It provides exactly-once delivery semantics within the consumer group.
-// TRUE PUSH architecture: BLOCK 0 means zero latency when data arrives.
-// - Each consumer holds 1 connection indefinitely waiting on XREADGROUP BLOCK 0
+// Push architecture: the blocking read returns the instant data arrives.
+// - Each consumer holds 1 connection while parked on XREADGROUP
 // - Pool sizing: Allocate numSuppliers + 20 overhead for cache/pubsub
 // - Context cancellation cleanly interrupts blocked calls
 // - Claims = money - we cannot afford ANY latency consuming relays.
@@ -56,7 +67,7 @@ type StreamsConsumer struct {
 }
 
 // NewStreamsConsumer creates a new Redis Streams consumer.
-// TRUE PUSH architecture: BLOCK 0 for zero-latency message delivery.
+// Push architecture: the blocking read delivers with no polling delay.
 func NewStreamsConsumer(
 	logger logging.Logger,
 	client redis.UniversalClient,
@@ -76,7 +87,8 @@ func NewStreamsConsumer(
 	}
 
 	// Set defaults - VERY AGGRESSIVE for minimal latency
-	// TRUE PUSH: BLOCK 0 returns instantly when data arrives, holds connection when empty
+	// The blocking read returns instantly when data arrives, and holds the
+	// connection while the stream is empty.
 	// Claims = money, we cannot afford to be slow consuming relays
 	if config.BatchSize <= 0 {
 		config.BatchSize = 5000 // Large batch for throughput
@@ -135,9 +147,9 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 		c.consumeLoop(ctx)
 	}()
 
-	// Reclaim on a timer of its own. The blocking read above uses BLOCK 0, so
-	// XReadGroup never returns redis.Nil on a real server -- which was the ONLY
-	// trigger for claimPendingMessages, making it unreachable: a relay
+	// Reclaim on a timer of its own. It used to be triggered only by XReadGroup
+	// returning redis.Nil, which the then-infinite block made impossible on a
+	// real server, so it was unreachable: a relay
 	// delivered to a consumer whose pod died before acking sat in that dead
 	// consumer's PEL forever, and its supplier's whole claim silently vanished
 	// (issue #25). The ticker runs regardless of what the read loop is doing;
@@ -229,46 +241,48 @@ func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
 
 // consumeMessagesUntilError runs the message consumption loop until an error occurs.
 // Returns error to trigger reconnection via the reconnection loop.
-// TRUE PUSH SEMANTICS: Uses BLOCK 0 (infinite wait).
+// The read blocks for blockInterval, then returns redis.Nil and loops.
 // - Returns INSTANTLY when data arrives (zero latency)
 // - Blocks indefinitely when stream is empty (zero CPU waste)
 // - Context cancellation interrupts the blocked call (clean shutdown)
 // This is the most efficient approach - no polling, pure push.
 func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 	for {
-		// TRUE PUSH: BLOCK 0 = infinite wait until data arrives (live consumption)
-		// go-redis respects context cancellation, so this is safe:
-		// - When data arrives: returns immediately with messages
-		// - When context cancelled: returns with context.Canceled error
-		// - No polling, no wasted CPU cycles
-		// Note: Each blocked call holds 1 connection from the pool
+		// Still push, not polling: the read returns the INSTANT data arrives, so
+		// delivery latency is unchanged by the block interval. The interval only
+		// bounds how long an IDLE read sits there.
+		//
+		// It is not zero, and cancelling the context is not what ends it.
+		// Verified against go-redis v9.17.2: for a blocking command, cmdTimeout
+		// returns 0 (redis.go:751); the context handed to the reader is
+		// context.Background() unless ContextTimeoutEnabled is set, which
+		// defaults to false (redis.go:764); and deadline(Background, 0) returns
+		// noDeadline (internal/pool/conn.go). So BLOCK 0 sets NO read deadline
+		// at all and the socket read blocks until Redis says something --
+		// Close() would cancel the context, then hang in wg.Wait() until a
+		// relay happened to arrive. On an idle supplier that is until
+		// Kubernetes runs out of grace and SIGKILLs the pod.
+		//
+		// Each blocked call holds one connection from the pool.
 		streams, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    c.config.ConsumerGroup,
 			Consumer: c.config.ConsumerName,
 			Streams:  []string{c.streamName, ">"},
 			Count:    c.config.BatchSize,
-			Block:    0, // TRUE PUSH: infinite wait, context cancellation interrupts
+			Block:    blockInterval,
 		}).Result()
 		if err != nil {
-			// With BLOCK 0, context cancellation is the normal shutdown path
+			// The block elapsing is how a cancelled context becomes visible.
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
 
 			if err == redis.Nil {
-				// With BLOCK 0, this shouldn't happen often (only on timeout which we don't have)
-				// But handle it gracefully - consider claiming idle messages
-				c.claimMu.Lock()
-				timeSinceLastClaim := time.Since(c.lastClaimTime)
-				shouldClaim := timeSinceLastClaim >= time.Duration(c.config.ClaimIdleTimeout)*time.Millisecond
-				if shouldClaim {
-					c.lastClaimTime = time.Now()
-				}
-				c.claimMu.Unlock()
-
-				if shouldClaim {
-					c.claimPendingMessages(ctx)
-				}
+				// The block elapsed with no messages. Nothing to do: reclaim
+				// runs on its own ticker (reclaimLoop), so this branch does not
+				// need to trigger it -- gating reclaim on this read is exactly
+				// the bug 8e3c66d fixed, and it could not fire at all while the
+				// block was infinite.
 				continue
 			}
 
