@@ -43,26 +43,6 @@ func newTestRedis(t testing.TB) (*redisutil.Client, string) {
 	return client, prefix
 }
 
-// expireNow makes Redis drop key immediately, replacing miniredis's
-// FastForward.
-//
-// A real server has no clock to wind forward, so a test cannot ask "what
-// happens once this TTL elapses" by pretending time passed. It can ask Redis to
-// expire the key for real, which is what PEXPIRE 0 does — the key is gone on
-// return, no sleep, no fake clock. Paired with an assertion on the TTL that was
-// actually set (client.TTL), the two together cover what FastForward covered:
-// the right expiry was configured, and the system behaves once it fires.
-func expireNow(t *testing.T, client *redisutil.Client, keys ...string) {
-	t.Helper()
-	ctx := context.Background()
-	for _, key := range keys {
-		require.NoError(t, client.PExpire(ctx, key, 0).Err())
-		n, err := client.Exists(ctx, key).Result()
-		require.NoError(t, err)
-		require.Zero(t, n, "key %s must be gone after PEXPIRE 0", key)
-	}
-}
-
 // keyExists reports whether key is present, replacing miniredis's Exists.
 func keyExists(t *testing.T, client *redisutil.Client, key string) bool {
 	t.Helper()

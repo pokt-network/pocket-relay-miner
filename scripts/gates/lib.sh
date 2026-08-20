@@ -134,15 +134,23 @@ gate_pkg_target() {
 # restoring them in t.Cleanup. Two such tests running at once read each other's
 # writes.
 #
-# Neither package calls t.Parallel() today, so -parallel is a guard rather than
-# a fix: it stops the first t.Parallel() somebody adds from making those
-# mutations concurrent. A whole-tree run keeps parallelism because `go test`
-# isolates packages in separate processes -- the contention is between tests
-# INSIDE one package, which -parallel governs.
+# The miner testify suites add a third: SetupTest clears the whole SUITE-WIDE
+# key prefix, so a sibling test running at the same time loses its keys.
 #
-# This used to say the two shared one miniredis fixture. They never did (each
-# test called miniredis.Run()), and cache has no miniredis at all since it
-# moved to internal/testredis.
+# These flags are NOT the guard, and must not be read as one. They only apply
+# when PKG names one of these packages; the whole-tree run that every gate and
+# CI actually perform falls through to the -p 4 -parallel 4 branch below. The
+# guard is TestNoTestParallelWhereStateIsShared in internal/conventions, which
+# fails on a t.Parallel() in any of them regardless of flags. These flags are
+# belt to that check'"'"'s braces, and cost nothing today because no test in the
+# three calls t.Parallel().
+#
+# This comment used to say the packages shared one miniredis fixture, and a
+# previous edit replaced that with "they never did". Both were wrong. Most
+# tests did call miniredis.Run() individually, but the miner testify suites
+# (RedisSMSTTestSuite, SupplierClaimerTestSuite) really did share one instance
+# per suite and FlushAll it between tests -- which is exactly the hazard that
+# survived the migration as the suite-wide DeletePrefix above.
 #
 # Keep this list in one place: it used to live inline in the Makefile's `test`
 # and `test_miner` targets with different values in each.
