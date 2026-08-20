@@ -1094,7 +1094,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		if endpoint != nil && backendPool != nil {
 			transition := backendPool.RecordResult(endpoint, respStatus, err, threshold)
 			if transition != nil {
-				p.logCircuitBreakerTransition(transition, serviceID, rpcType)
+				logCircuitBreakerTransition(p.logger, transition, serviceID, rpcType, threshold)
 			}
 		}
 
@@ -1290,7 +1290,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			optimisticStart := time.Now()
 			if err := p.validateRelayRequest(context.Background(), capturedHTTPReq, capturedReqBody, capturedBlockHeight); err != nil {
 				validationFailures.WithLabelValues(capturedServiceID, "signature").Inc()
-				relaysDropped.WithLabelValues(capturedServiceID, appAddress, dropReasonValidationFailed).Inc()
+				relaysDropped.WithLabelValues(capturedServiceID, dropReasonValidationFailed).Inc()
 				logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 					Err(err).
 					Str("validation_mode", "optimistic").
@@ -1333,7 +1333,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				p.metricRecorder.RecordDuration(relayMeterLatency, []string{capturedServiceID, "optimistic"}, meterDuration)
 
 				if meterErr != nil {
-					relaysDropped.WithLabelValues(capturedServiceID, appAddress, dropReasonMeterError).Inc()
+					relaysDropped.WithLabelValues(capturedServiceID, dropReasonMeterError).Inc()
 					logging.WithSessionContext(p.logger.Warn(), capturedSessionCtx).
 						Err(meterErr).
 						Str("validation_mode", "optimistic").
@@ -1343,7 +1343,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 						return
 					}
 				} else if !allowed {
-					relaysDropped.WithLabelValues(capturedServiceID, appAddress, dropReasonStakeExhausted).Inc()
+					relaysDropped.WithLabelValues(capturedServiceID, dropReasonStakeExhausted).Inc()
 					logging.WithSessionContext(p.logger.Warn(), capturedSessionCtx).
 						Str("validation_mode", "optimistic").
 						Msg("relay served but NOT mined: session relay limit reached, relay dropped after serving")
@@ -1658,21 +1658,8 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 		p.copyHeaders(req, originalReq)
 	}
 
-	// Apply service-specific configuration headers (override any matching headers)
-	for key, value := range configHeaders {
-		req.Header.Set(key, value)
-	}
-
-	// Apply authentication
-	if auth != nil {
-		if auth.Username != "" && auth.Password != "" {
-			req.SetBasicAuth(auth.Username, auth.Password)
-		} else if auth.BearerToken != "" {
-			req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
-		} else if auth.PlainToken != "" {
-			req.Header.Set("Authorization", auth.PlainToken)
-		}
-	}
+	// Apply backend config headers + authentication (shared with gRPC path).
+	applyBackendAuthAndHeaders(req, configHeaders, auth)
 
 	// Explicitly prevent compression from backend
 	// We'll compress the final RelayResponse ourselves if the client supports it
@@ -1998,6 +1985,29 @@ func (p *ProxyServer) getMaxRetries(serviceID, rpcType string) int {
 	return 1 // default: 1 retry attempt
 }
 
+// applyBackendAuthAndHeaders applies the service-specific configuration headers
+// (overriding any matching headers already on the request) and then applies the
+// configured backend authentication (basic auth, bearer token, or plain token).
+// It is a package-level helper shared by the HTTP and gRPC relay paths so both
+// apply backend auth/headers identically.
+func applyBackendAuthAndHeaders(req *http.Request, configHeaders map[string]string, auth *AuthenticationConfig) {
+	// Apply service-specific configuration headers (override any matching headers)
+	for key, value := range configHeaders {
+		req.Header.Set(key, value)
+	}
+
+	// Apply authentication if configured
+	if auth != nil {
+		if auth.Username != "" && auth.Password != "" {
+			req.SetBasicAuth(auth.Username, auth.Password)
+		} else if auth.BearerToken != "" {
+			req.Header.Set("Authorization", "Bearer "+auth.BearerToken)
+		} else if auth.PlainToken != "" {
+			req.Header.Set("Authorization", auth.PlainToken)
+		}
+	}
+}
+
 func (p *ProxyServer) getCircuitBreakerThreshold(serviceID, rpcType string) int32 {
 	if backendCfg := p.config.GetBackendConfig(serviceID, rpcType); backendCfg != nil {
 		if backendCfg.HealthCheck != nil && backendCfg.HealthCheck.UnhealthyThreshold > 0 {
@@ -2005,59 +2015,6 @@ func (p *ProxyServer) getCircuitBreakerThreshold(serviceID, rpcType string) int3
 		}
 	}
 	return pool.DefaultUnhealthyThreshold
-}
-
-// logCircuitBreakerTransition logs a circuit breaker state transition.
-// Warn level for healthy->unhealthy (circuit broken), Info level for recovery.
-// Always visible — operators rely on these logs to diagnose backend issues.
-func (p *ProxyServer) logCircuitBreakerTransition(transition *pool.TransitionEvent, serviceID, rpcType string) {
-	if transition.OldHealthy && !transition.NewHealthy {
-		// Circuit broken: healthy -> unhealthy
-		event := p.logger.Warn().
-			Str("backend", transition.Endpoint.Name).
-			Str("url", transition.Endpoint.RawURL).
-			Str(logging.FieldServiceID, serviceID).
-			Str("rpc_type", rpcType).
-			Int32("consecutive_failures", transition.Failures).
-			Int32("threshold", pool.DefaultUnhealthyThreshold)
-
-		// Classify and include the triggering cause so operators can tell at a
-		// glance *why* the breaker tripped (5xx vs transport error vs DNS vs …).
-		if reason := pool.ClassifyFailure(transition.StatusCode, transition.Error); reason != "" {
-			event = event.Str("trigger_reason", reason)
-		}
-		if transition.StatusCode > 0 {
-			event = event.Int("trigger_http_status", transition.StatusCode)
-		}
-		if transition.Error != nil {
-			event = event.Str("trigger_error", transition.Error.Error())
-		}
-
-		// Include recovery timeout info
-		recoveryTimeout := transition.Endpoint.RecoveryTimeout()
-		if recoveryTimeout > 0 {
-			event = event.Dur("auto_recovery_in", recoveryTimeout)
-		}
-
-		event.Msg("BACKEND DOWN: circuit breaker tripped, traffic will failover to other backends")
-	} else if !transition.OldHealthy && transition.NewHealthy {
-		// Recovery: unhealthy -> healthy
-		event := p.logger.Info().
-			Str("backend", transition.Endpoint.Name).
-			Str("url", transition.Endpoint.RawURL).
-			Str(logging.FieldServiceID, serviceID).
-			Str("rpc_type", rpcType)
-
-		if transition.DowntimeDuration > 0 {
-			event = event.Dur("downtime", transition.DowntimeDuration)
-		}
-
-		if transition.StatusCode > 0 {
-			event = event.Int("recovery_http_status", transition.StatusCode)
-		}
-
-		event.Msg("BACKEND UP: circuit breaker recovered, backend is healthy again")
-	}
 }
 
 // isStreamingResponse checks if the HTTP response should be handled as a stream.

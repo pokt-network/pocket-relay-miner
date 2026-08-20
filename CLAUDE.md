@@ -340,12 +340,13 @@ Reference: See full mapping in `cmd/cmd_redis_debug.go` and subcommands
   - `ha:supplier:{address}` (Proto/JSON bytes)
 - **Cache Locks**: `ha:cache:lock:{type}:{id}` (String with TTL)
 - **Cache Tracking**: `ha:cache:known:{type}` (Set of known entity IDs)
-- **Meter Data**:
-  - `ha:meter:{sessionID}` (Hash with metering fields)
+- **Meter Data** (per (session, supplier) — one session is served by many
+  suppliers and each meters its own stake; keys are ephemeral, cleaned at
+  session end):
+  - `ha:meter:{sessionID}:{supplier}:meta` (String: SessionMeterMeta JSON)
+  - `ha:meter:{sessionID}:{supplier}:consumed` (String: consumed uPOKT counter)
   - `ha:params:shared` (Cached shared params)
   - `ha:params:session` (Cached session params)
-  - `ha:app_stake:{appAddress}` (App stake data)
-  - `ha:service:{serviceID}:compute_units` (Service config)
 - **Supplier Registry**:
   - `ha:suppliers:{supplier}` (Hash with supplier metadata)
   - `ha:suppliers:index` (Set of all supplier addresses)
@@ -676,9 +677,10 @@ pocket-relay-miner redis dedup --session session_123
 # View supplier registry
 pocket-relay-miner redis supplier --list
 
-# Inspect metering data
+# Inspect metering data (scans every supplier that metered the session;
+# app stake lives inside the meter meta, service compute units in the
+# service cache: redis cache --type service --key <id>)
 pocket-relay-miner redis meter --session session_123
-pocket-relay-miner redis meter --app pokt1abc
 pocket-relay-miner redis meter --all
 
 # Debug claim/proof submission tracking (7-day history)

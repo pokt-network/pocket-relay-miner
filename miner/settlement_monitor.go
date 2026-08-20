@@ -180,8 +180,9 @@ func (sm *SettlementMonitor) processBlock(height int64) {
 				Dur("retry_in", retryDelay).
 				Msg("failed to query block_results, will retry")
 
-			// Record metric for retry
-			RecordBlockResultsRetry(height, attempt)
+			// Record metric for retry (height/attempt logged above, not
+			// metric labels — height is unbounded)
+			RecordBlockResultsRetry()
 
 			// Wait before retry with exponential backoff
 			select {

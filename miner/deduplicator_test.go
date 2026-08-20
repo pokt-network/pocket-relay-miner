@@ -46,6 +46,15 @@ func hashOf(s string) []byte {
 	return sum[:]
 }
 
+// mustMarkProcessed marks the hash and fails the test on error, returning
+// whether the hash was newly added.
+func mustMarkProcessed(t *testing.T, d Deduplicator, ctx context.Context, relayHash []byte, sessionID string) bool {
+	t.Helper()
+	added, err := d.MarkProcessed(ctx, relayHash, sessionID)
+	require.NoError(t, err)
+	return added
+}
+
 // --- IsDuplicate / MarkProcessed / CleanupSession ---
 
 func TestDeduplicator_EmptySession_IsNotDuplicate(t *testing.T) {
@@ -57,12 +66,33 @@ func TestDeduplicator_EmptySession_IsNotDuplicate(t *testing.T) {
 	assert.False(t, isDup)
 }
 
+// TestDeduplicator_MarkProcessed_ReturnsAddedFlag pins the dedup gate the
+// relay worker relies on: the FIRST mark of a hash reports added=true, every
+// subsequent mark of the same hash reports added=false. The worker uses this
+// to skip the per-session counter increment on redeliveries — including the
+// original copy of a message another consumer already reclaimed, which
+// arrives with IsReclaim=false and no other duplicate signal.
+func TestDeduplicator_MarkProcessed_ReturnsAddedFlag(t *testing.T) {
+	d, _ := setupTestDeduplicator(t)
+	ctx := context.Background()
+
+	h := hashOf("relay-1")
+	require.True(t, mustMarkProcessed(t, d, ctx, h, "sess-1"),
+		"first mark of a hash must report added=true")
+	require.False(t, mustMarkProcessed(t, d, ctx, h, "sess-1"),
+		"second mark of the same hash must report added=false (duplicate)")
+	require.True(t, mustMarkProcessed(t, d, ctx, h, "sess-2"),
+		"same hash in a DIFFERENT session is not a duplicate")
+	require.True(t, mustMarkProcessed(t, d, ctx, hashOf("relay-2"), "sess-1"),
+		"a different hash in the same session is not a duplicate")
+}
+
 func TestDeduplicator_MarkThenCheck_IsDuplicate(t *testing.T) {
 	d, _ := setupTestDeduplicator(t)
 	ctx := context.Background()
 
 	h := hashOf("relay-1")
-	require.NoError(t, d.MarkProcessed(ctx, h, "sess-1"))
+	mustMarkProcessed(t, d, ctx, h, "sess-1")
 
 	isDup, err := d.IsDuplicate(ctx, h, "sess-1")
 	require.NoError(t, err)
@@ -74,7 +104,7 @@ func TestDeduplicator_DifferentSessionsIsolated(t *testing.T) {
 	ctx := context.Background()
 
 	h := hashOf("relay-1")
-	require.NoError(t, d.MarkProcessed(ctx, h, "sess-A"))
+	mustMarkProcessed(t, d, ctx, h, "sess-A")
 
 	isDupA, err := d.IsDuplicate(ctx, h, "sess-A")
 	require.NoError(t, err)
@@ -89,7 +119,7 @@ func TestDeduplicator_DifferentHashesIsolated(t *testing.T) {
 	d, _ := setupTestDeduplicator(t)
 	ctx := context.Background()
 
-	require.NoError(t, d.MarkProcessed(ctx, hashOf("relay-A"), "sess-1"))
+	mustMarkProcessed(t, d, ctx, hashOf("relay-A"), "sess-1")
 
 	isDup, err := d.IsDuplicate(ctx, hashOf("relay-B"), "sess-1")
 	require.NoError(t, err)
@@ -132,7 +162,7 @@ func TestDeduplicator_CleanupSession(t *testing.T) {
 	ctx := context.Background()
 
 	h := hashOf("relay-1")
-	require.NoError(t, d.MarkProcessed(ctx, h, "sess-1"))
+	mustMarkProcessed(t, d, ctx, h, "sess-1")
 
 	// sanity: the Redis set exists
 	assert.True(t, mr.Exists("ha:miner:dedup:session:sess-1"))
@@ -154,7 +184,7 @@ func TestDeduplicator_TTLAppliedOnMark(t *testing.T) {
 	d, mr := setupTestDeduplicator(t)
 	ctx := context.Background()
 
-	require.NoError(t, d.MarkProcessed(ctx, hashOf("r1"), "sess-1"))
+	mustMarkProcessed(t, d, ctx, hashOf("r1"), "sess-1")
 
 	ttl := mr.TTL("ha:miner:dedup:session:sess-1")
 	expected := time.Duration(10*30) * time.Second // TTLBlocks * BlockTimeSeconds
@@ -165,13 +195,13 @@ func TestDeduplicator_TTLRefreshedOnSubsequentMark(t *testing.T) {
 	d, mr := setupTestDeduplicator(t)
 	ctx := context.Background()
 
-	require.NoError(t, d.MarkProcessed(ctx, hashOf("r1"), "sess-1"))
+	mustMarkProcessed(t, d, ctx, hashOf("r1"), "sess-1")
 
 	// fast-forward past half the TTL
 	mr.FastForward(150 * time.Second)
 
 	// second mark must refresh the expire to the full window
-	require.NoError(t, d.MarkProcessed(ctx, hashOf("r2"), "sess-1"))
+	mustMarkProcessed(t, d, ctx, hashOf("r2"), "sess-1")
 
 	ttl := mr.TTL("ha:miner:dedup:session:sess-1")
 	expected := time.Duration(10*30) * time.Second
@@ -185,7 +215,7 @@ func TestDeduplicator_StoresRawBytesNotHex(t *testing.T) {
 	ctx := context.Background()
 
 	h := hashOf("relay-1") // 32 bytes
-	require.NoError(t, d.MarkProcessed(ctx, h, "sess-1"))
+	mustMarkProcessed(t, d, ctx, h, "sess-1")
 
 	members, err := mr.SMembers("ha:miner:dedup:session:sess-1")
 	require.NoError(t, err)
@@ -217,7 +247,7 @@ func TestDeduplicator_ConcurrentMarkAndCheck(t *testing.T) {
 			defer wg.Done()
 			for i := 0; i < relaysPerOne; i++ {
 				h := hashOf(fmt.Sprintf("w%d-r%d", w, i))
-				if err := d.MarkProcessed(ctx, h, sessionID); err != nil {
+				if _, err := d.MarkProcessed(ctx, h, sessionID); err != nil {
 					t.Errorf("mark failed: %v", err)
 					return
 				}
@@ -259,8 +289,11 @@ func TestDeduplicator_RedisErrorOnCheck_FailsOpen(t *testing.T) {
 	d, mr := setupTestDeduplicator(t)
 	ctx := context.Background()
 
-	// Close miniredis to simulate connection failure
-	mr.Close()
+	// Break every command rather than closing miniredis: a close frees the
+	// port, and a concurrently running package test binary can bind it before
+	// the call below, which then succeeds against a foreign Redis and makes
+	// this test pass for the wrong reason.
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
 	isDup, err := d.IsDuplicate(ctx, hashOf("r1"), "sess-1")
 	require.Error(t, err, "expected redis error")
@@ -271,9 +304,9 @@ func TestDeduplicator_RedisErrorOnMark_Propagates(t *testing.T) {
 	d, mr := setupTestDeduplicator(t)
 	ctx := context.Background()
 
-	mr.Close()
+	mr.SetError("LOADING Redis is loading the dataset in memory")
 
-	err := d.MarkProcessed(ctx, hashOf("r1"), "sess-1")
+	_, err := d.MarkProcessed(ctx, hashOf("r1"), "sess-1")
 	require.Error(t, err)
 }
 
@@ -320,7 +353,7 @@ func TestDeduplicator_EmptyConfigGetsDefaults(t *testing.T) {
 	t.Cleanup(func() { _ = d.Close() })
 
 	// Mark a relay to trigger the TTL application.
-	require.NoError(t, d.MarkProcessed(ctx, hashOf("r1"), "sess-1"))
+	mustMarkProcessed(t, d, ctx, hashOf("r1"), "sess-1")
 
 	// Default key prefix.
 	assert.True(t, mr.Exists("ha:miner:dedup:session:sess-1"))

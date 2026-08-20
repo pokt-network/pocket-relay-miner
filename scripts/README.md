@@ -2,11 +2,22 @@
 
 Integration and load-test scripts that run against a live Tilt localnet.
 
+**Checking a change is good is [`gates/`](gates/README.md)** — `make gate` runs
+the same checks CI runs, in cost tiers. The scripts below are scenarios you
+reach for deliberately; the gates are what every change passes.
+
 **How to test is documented in [`../docs/testing/`](../docs/testing/README.md):**
 
 - [`TILT.md`](../docs/testing/TILT.md) — bring the localnet up, port map, and the HA/chaos suite.
-- [`PATH_HEY.md`](../docs/testing/PATH_HEY.md) — load/lifecycle testing through the PATH gateway with `hey`.
 - [`DIRECT_CLI.md`](../docs/testing/DIRECT_CLI.md) — signed relays straight to the relayer via the `relay` CLI.
+
+> **Scripts that drive PATH (`:3069`) cannot tell you whether relays were
+> mined.** PATH answers a relayer `503` with `200` and an empty body, so a
+> status-code check reports success either way — a real run showed
+> `20000/20000 OK` with the WAL at `XLEN 0`. Where a script below sends traffic
+> through PATH, treat its success count as "the gateway replied", and confirm
+> the outcome in Redis (`redis streams`, `redis submissions`) or with the CLI at
+> `:8180`.
 
 This file is just an inventory of what's here. All scripts assume the
 `kind-kind` context and the localnet defaults (PATH `:3069`, relayer `:8180`,
