@@ -83,9 +83,30 @@ func DefaultConfig() Config {
 // typo'd level ("warning", "trace") must fail at config load, not run the
 // process at the wrong verbosity without a word.
 func (c Config) Validate() error {
-	switch strings.ToLower(c.Level) {
+	switch level := strings.ToLower(c.Level); level {
 	case "", "debug", "info", "warn", "error":
 	default:
+		// Until this validation existed an unknown level fell back to info in
+		// silence, so a config carrying one of these BOOTED -- just not at the
+		// verbosity it asked for. Now it refuses to start, which is the point,
+		// but an operator hitting that on upgrade deserves the replacement
+		// rather than a list to guess from at 3am.
+		if nearest, ok := map[string]string{
+			"trace":    "debug",
+			"warning":  "warn",
+			"fatal":    "error",
+			"panic":    "error",
+			"critical": "error",
+			"disabled": "error",
+			"off":      "error",
+			"none":     "error",
+		}[level]; ok {
+			return fmt.Errorf(
+				"logging.level %q is not one of debug|info|warn|error -- use %q. "+
+					"Earlier versions accepted this and silently logged at info instead",
+				c.Level, nearest,
+			)
+		}
 		return fmt.Errorf("logging.level %q is not one of debug|info|warn|error", c.Level)
 	}
 	switch strings.ToLower(c.Format) {
