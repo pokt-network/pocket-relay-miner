@@ -623,20 +623,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 			// Mark all sessions in this group as failed (metrics + Redis state for HA)
 			for _, snapshot := range groupSnapshots {
-				RecordClaimWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
-
-				// CRITICAL: Update session state in Redis immediately for HA compatibility
-				// If this miner crashes, the new leader must know this session already failed
-				if lc.sessionCoordinator != nil {
-					if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
-						logger.Warn().
-							Err(err).
-							Str(logging.FieldSessionID, snapshot.SessionID).
-							Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
-							Str(logging.FieldServiceID, snapshot.ServiceID).
-							Msg("failed to mark session as claim_window_closed in Redis")
-					}
-				}
+				lc.markAndCountClaimWindowClosed(ctx, snapshot)
 			}
 
 			return nil, fmt.Errorf("insufficient time to build claims: %d blocks remaining, %d required (window closes at %d, current: %d)",
@@ -982,19 +969,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 			// Mark all sessions in this batch as failed (metrics + Redis state for HA)
 			for _, snapshot := range groupSnapshots {
-				RecordClaimWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
-
-				// CRITICAL: Update session state in Redis immediately for HA compatibility
-				if lc.sessionCoordinator != nil {
-					if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
-						logger.Warn().
-							Err(err).
-							Str(logging.FieldSessionID, snapshot.SessionID).
-							Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
-							Str(logging.FieldServiceID, snapshot.ServiceID).
-							Msg("failed to mark session as claim_window_closed in Redis")
-					}
-				}
+				lc.markAndCountClaimWindowClosed(ctx, snapshot)
 			}
 
 			return nil, fmt.Errorf("claim window closed while building claims at height %d (current: %d)", claimWindowClose, currentBlock.Height())
@@ -1041,17 +1016,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 					// Mark all sessions in this batch as failed (metrics + Redis state for HA)
 					for _, snapshot := range groupSnapshots {
-						RecordClaimWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
-
-						// CRITICAL: Update session state in Redis immediately for HA compatibility
-						if lc.sessionCoordinator != nil {
-							if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
-								logger.Warn().
-									Err(err).
-									Str(logging.FieldSessionID, snapshot.SessionID).
-									Msg("failed to mark session as claim_window_closed in Redis")
-							}
-						}
+						lc.markAndCountClaimWindowClosed(ctx, snapshot)
 					}
 
 					break // Don't retry - this is a permanent failure
@@ -1541,18 +1506,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 			// Mark all sessions in this group as failed (metrics + Redis state for HA)
 			for _, snapshot := range sessionsNeedingProof {
-				RecordProofWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
-
-				// CRITICAL: Update session state in Redis immediately for HA compatibility
-				// If this miner crashes, the new leader must know this session already failed
-				if lc.sessionCoordinator != nil {
-					if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
-						logger.Warn().
-							Err(err).
-							Str(logging.FieldSessionID, snapshot.SessionID).
-							Msg("failed to mark session as proof_window_closed in Redis")
-					}
-				}
+				lc.markAndCountProofWindowClosed(ctx, snapshot)
 			}
 
 			return fmt.Errorf("proof window already closed at height %d (current: %d)", proofWindowClose, currentBlock.Height())
@@ -1822,17 +1776,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			// build failed are already accounted for via the per-build
 			// warning + RecordProofSkipped("build_failed") above.
 			for _, snapshot := range validProofSnapshots {
-				RecordProofWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
-
-				// CRITICAL: Update session state in Redis immediately for HA compatibility
-				if lc.sessionCoordinator != nil {
-					if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
-						logger.Warn().
-							Err(err).
-							Str(logging.FieldSessionID, snapshot.SessionID).
-							Msg("failed to mark session as proof_window_closed in Redis")
-					}
-				}
+				lc.markAndCountProofWindowClosed(ctx, snapshot)
 			}
 
 			return fmt.Errorf("proof window closed while building proofs at height %d (current: %d)", proofWindowClose, currentBlock.Height())
@@ -1881,17 +1825,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					// therefore entered the submit tx) as window-closed. Build
 					// failures are already metered above.
 					for _, snapshot := range validProofSnapshots {
-						RecordProofWindowClosed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
-
-						// CRITICAL: Update session state in Redis immediately for HA compatibility
-						if lc.sessionCoordinator != nil {
-							if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
-								logger.Warn().
-									Err(err).
-									Str(logging.FieldSessionID, snapshot.SessionID).
-									Msg("failed to mark session as proof_window_closed in Redis")
-							}
-						}
+						lc.markAndCountProofWindowClosed(ctx, snapshot)
 					}
 
 					break // Don't retry - this is a permanent failure
@@ -2186,6 +2120,57 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 	return nil
 }
 
+// markAndCountClaimWindowClosed marks a session claim_window_closed and records
+// the loss ONLY IF the mark took.
+//
+// Order matters. OnClaimWindowClosed returns early when its Redis UpdateState
+// fails, before firing the terminal callback that removes the session from the
+// lifecycle's tracking -- so on that error the session stays in claiming, the
+// sweep transitions it on a later pass, and the callback below records it
+// there. Recording here as well would count the same relays, compute units and
+// uPOKT twice on every Redis blip during a window abort. Both failing leaves it
+// under-counted, which is the direction this codebase already chose elsewhere.
+func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) {
+	if lc.sessionCoordinator != nil {
+		if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
+			lc.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, snapshot.ServiceID).
+				Msg("failed to mark session as claim_window_closed in Redis")
+			return
+		}
+	}
+	RecordClaimWindowClosed(
+		snapshot.SupplierOperatorAddress,
+		snapshot.ServiceID,
+		snapshot.RelayCount,
+		int64(snapshot.TotalComputeUnits),
+	)
+}
+
+// markAndCountProofWindowClosed is markAndCountClaimWindowClosed one window later.
+func (lc *LifecycleCallback) markAndCountProofWindowClosed(ctx context.Context, snapshot *SessionSnapshot) {
+	if lc.sessionCoordinator != nil {
+		if err := lc.sessionCoordinator.OnProofWindowClosed(ctx, snapshot.SessionID); err != nil {
+			lc.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, snapshot.ServiceID).
+				Msg("failed to mark session as proof_window_closed in Redis")
+			return
+		}
+	}
+	RecordProofWindowClosed(
+		snapshot.SupplierOperatorAddress,
+		snapshot.ServiceID,
+		snapshot.RelayCount,
+		int64(snapshot.TotalComputeUnits),
+	)
+}
+
 // OnClaimWindowClosed is called when a session fails due to claim window timeout.
 
 func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) error {
@@ -2194,7 +2179,26 @@ func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *
 		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on claim window closed")
 	}
 
-	// Metrics already recorded at failure point, just cleanup
+	// Record the loss HERE, not at the caller. This callback is reached only
+	// from the lifecycle sweep (SessionLifecycleManager.executeTransition),
+	// which decides the timeout purely on height and recorded nothing -- so a
+	// session that simply ran out of window had its tree deleted and its lock
+	// released while sessions_failed_total, relays_lost_total,
+	// compute_units_lost_total and upokt_lost_total all stayed silent. The
+	// pre-submission aborts take a different route and cannot double count,
+	// for two independent reasons: marking the session terminal through the
+	// coordinator fires the terminal callback, which calls
+	// SessionLifecycleManager.RemoveSession and takes it out of the sweep's
+	// tracking altogether; and determineTransition has no case for a session
+	// already in claim_window_closed, so it would produce no transition even
+	// if it were still tracked.
+	RecordClaimWindowClosed(
+		snapshot.SupplierOperatorAddress,
+		snapshot.ServiceID,
+		snapshot.RelayCount,
+		int64(snapshot.TotalComputeUnits),
+	)
+
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
@@ -2218,7 +2222,15 @@ func (lc *LifecycleCallback) OnProofWindowClosed(ctx context.Context, snapshot *
 		lc.logger.Warn().Err(err).Str("session_id", snapshot.SessionID).Msg("failed to delete SMST tree on proof window closed")
 	}
 
-	// Metrics already recorded at failure point, just cleanup
+	// Same gap as OnClaimWindowClosed above, one window later: the sweep is the
+	// only route here and it recorded nothing.
+	RecordProofWindowClosed(
+		snapshot.SupplierOperatorAddress,
+		snapshot.ServiceID,
+		snapshot.RelayCount,
+		int64(snapshot.TotalComputeUnits),
+	)
+
 	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }

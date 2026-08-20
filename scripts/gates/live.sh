@@ -44,6 +44,10 @@ CONCURRENCY="${CONCURRENCY:-10}"
 SERVICE_FILTER="${SERVICE_FILTER:-}"
 RELAYER_PORT="${RELAYER_PORT:-8180}"
 VALIDATOR_RPC="${VALIDATOR_RPC:-http://localhost:26657}"
+# Prometheus, for the ANNOUNCED-drop accounting below. Only used to explain a
+# shortfall; if it is unreachable the assertion stays strict, which is the
+# safe direction (a real loss must never be excused by a scrape failure).
+PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9091}"
 # How long to wait for the claim and proof windows to close and the settlement
 # to land. The localnet mirrors mainnet block proportions (20-block sessions,
 # grace 10, claim +11..+21, proof +22..+32) at 10s blocks, so a session settles
@@ -267,7 +271,7 @@ run_transport_load() {
         local one sup
         sup="${sup_arr[$((STREAM_CELL_IDX % ${#sup_arr[@]}))]}"
         STREAM_CELL_IDX=$((STREAM_CELL_IDX + 1))
-        for _ in 1 2 3; do
+        for _ in $(seq 1 "$STREAM_CELL_RELAYS"); do
             if [ "$mode" = "stream" ]; then
                 one="$("$BIN" relay stream --localnet --service "$service" \
                     --relayer-url "$relayer_url" --supplier "$sup" --batches 3 2>&1)" || rc=$?
@@ -283,6 +287,17 @@ run_transport_load() {
     esac
     TRANSPORT_OUT="$out"
     return "$rc"
+}
+
+# transport_expected_count MODE -- how many relays the cell ASKED for. The gate
+# compares this against what came back: a relay that never got served is a loss
+# too, just one that happens before the claim path this gate measures, and
+# scoring the run against what succeeded would hide it by construction.
+transport_expected_count() {
+    case "$1" in
+    jsonrpc | websocket | grpc) printf '%s' "$RELAYS_PER_TRANSPORT" ;;
+    stream | cometbft) printf '%s' "$STREAM_CELL_RELAYS" ;;
+    esac
 }
 
 transport_success_count() {
@@ -302,6 +317,11 @@ transport_success_count() {
 matrix_overridden="${MATRIX+1}"
 MATRIX="${MATRIX:-jsonrpc:develop-http jsonrpc:develop-http-eager websocket:develop-websocket websocket:develop-websocket-optimistic grpc:develop-grpc grpc:develop-grpc-optimistic stream:develop-stream stream:develop-stream-optimistic cometbft:develop-cometbft cometbft:develop-cometbft-optimistic}"
 RELAYS_PER_TRANSPORT="${RELAYS_PER_TRANSPORT:-60}"
+# stream/cometbft send one relay per invocation, three per cell.
+STREAM_CELL_RELAYS=3
+# Probes fired by the multi-backend distribution assert. They are REAL
+# signed relays and are billed, so the number appears in two assertions.
+BACKEND_PROBE_RELAYS=12
 STREAM_CELL_IDX=0
 
 # --service narrows the run to every cell of one service. Narrowing is
@@ -399,6 +419,33 @@ fi
 matrix_ledger="${BIN_DIR}/matrix.tsv"
 : >"$matrix_ledger"
 
+# announced_drops SERVICE -- relays the miner explicitly refused for this
+# service, summed over the reasons that mean "this relay can no longer reach a
+# claim, and we said so": a tree already sealed for its claim, or a claim window
+# already closed. Those are expected outcomes, not losses to hunt.
+#
+# It reads a COUNTER, which accumulates across runs, so every call is a delta
+# against the snapshot taken before the load. Prints 0 when Prometheus cannot be
+# reached, on purpose: the shortfall then stays unexplained and the assertion
+# fails, because a scrape failure must never excuse a real loss.
+announced_drop_reasons='session_sealed|claim_window_closed'
+
+announced_drops_now() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode "query=sum by (service_id) (ha_miner_relays_rejected_total{reason=~\"${announced_drop_reasons}\"})" 2>/dev/null |
+        jq -r '.data.result[]? | "\(.metric.service_id)\t\(.value[1])"' 2>/dev/null || true
+}
+
+drops_before="${BIN_DIR}/announced_drops_before.tsv"
+announced_drops_now >"$drops_before" || : >"$drops_before"
+
+announced_drops() {
+    local svc="$1" before after
+    before="$(awk -F'\t' -v s="$svc" '$1 == s {print int($2)}' "$drops_before" | tail -1)"
+    after="$(announced_drops_now | awk -F'\t' -v s="$svc" '$1 == s {print int($2)}' | tail -1)"
+    printf '%s' "$(( ${after:-0} - ${before:-0} ))"
+}
+
 loaded_services=""
 for pair in $MATRIX; do
     mode="${pair%%:*}"
@@ -408,6 +455,15 @@ for pair in $MATRIX; do
 
     if run_transport_load "$mode" "$service"; then
         succeeded="$(transport_success_count "$mode" "$TRANSPORT_OUT")"
+        expected="$(transport_expected_count "$mode")"
+        unserved="$(gate_served_shortfall "${expected:-0}" "${succeeded:-0}")"
+        if [ "$unserved" -gt 0 ] && [ "${succeeded:-0}" -gt 0 ]; then
+            # Recorded in the ledger anyway: the settlement assert below still
+            # has something to say about the ones that DID get served, and the
+            # run is already failing.
+            gate_fail "${mode}: only ${succeeded} of ${expected} relays were served (${unserved} never made it) -- the loss is upstream of the claim path this gate measures"
+            gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | tail -15)"
+        fi
         if [ "${succeeded:-0}" -gt 0 ]; then
             gate_pass "${mode}: ${succeeded} relay(s)/batch(es) verified end to end"
             loaded_services="${loaded_services} ${service}"
@@ -464,7 +520,7 @@ case " $MATRIX " in
         gate_step "assert: multi-backend distribution on develop-http (${backend_count} backends)"
         seen_backends=""
         rr_served=0
-        for _ in 1 2 3 4 5 6 7 8 9 10 11 12; do
+        for _ in $(seq 1 "$BACKEND_PROBE_RELAYS"); do
             rr_out="$("$BIN" relay jsonrpc --localnet --service develop-http \
                 --relayer-url "$relayer_url" 2>/dev/null)" && rr_served=$((rr_served + 1))
             bid="$(printf '%s' "$rr_out" | grep -o '"backend_id":"[^"]*"' | head -1 | cut -d'"' -f4)"
@@ -474,10 +530,14 @@ case " $MATRIX " in
             esac
         done
         distinct="$(printf '%s\n' $seen_backends | grep -c . || true)"
+        probe_unserved="$(gate_served_shortfall "$BACKEND_PROBE_RELAYS" "${rr_served:-0}")"
+        if [ "$probe_unserved" -gt 0 ]; then
+            gate_fail "backend probe: only ${rr_served} of ${BACKEND_PROBE_RELAYS} relays were served"
+        fi
         if [ "${distinct:-0}" -ge 2 ]; then
             gate_pass "load spread across ${distinct} backends:${seen_backends}"
         else
-            gate_fail "12 relays all landed on one backend (${seen_backends:-none}) with ${backend_count} configured -- pool not distributing"
+            gate_fail "${BACKEND_PROBE_RELAYS} relays all landed on one backend (${seen_backends:-none}) with ${backend_count} configured -- pool not distributing"
         fi
         # These probes are REAL signed relays: they mine and bill in the same
         # sessions the exact served==billed assertion counts. Add them to the
@@ -591,8 +651,22 @@ while IFS=$'\t' read -r mode svc sent exact; do
         elif [ "${relays_n:-0}" -gt "${sent:-0}" ]; then
             gate_fail "${svc} (${mode}): billed MORE than sent (${relays_n}/${sent}) -- foreign traffic or double count"
         else
-            gate_fail "${svc} (${mode}): served ${sent}, billed only ${relays_n:-0} -- $((sent - ${relays_n:-0})) relay(s) LOST between serve and claim"
-            printf '         check the WAL (redis streams) and submissions for this service\n'
+            # A shortfall is only acceptable to the extent the miner ANNOUNCED
+            # it. A relay that arrives after its tree was sealed, or after its
+            # claim window closed, cannot be paid and there is nothing to
+            # recover -- but it must have been counted. Anything the counters do
+            # not account for is the silent loss this gate exists to catch, and
+            # still fails.
+            dropped="$(announced_drops "$svc")"
+            unexplained="$(gate_unexplained_shortfall "$sent" "${relays_n:-0}" "${dropped:-0}")"
+            if [ "$unexplained" -eq 0 ] && [ "${dropped:-0}" -gt 0 ]; then
+                gate_pass "${svc} (${mode}): ${relays_n}/${sent} relays billed across ${proven_n} proven claim(s)"
+                printf '         + %s dropped, announced as %s (accounted)\n' \
+                    "$dropped" "$(printf '%s' "$announced_drop_reasons" | tr '|' '/')"
+            else
+                gate_fail "${svc} (${mode}): served ${sent}, billed ${relays_n:-0}, announced drops ${dropped:-0} -- ${unexplained} relay(s) LOST with no counter"
+                printf '         check the WAL (redis streams) and submissions for this service\n'
+            fi
         fi
     else
         if [ "${proven_n:-0}" -gt 0 ] && [ "${relays_n:-0}" -gt 0 ]; then

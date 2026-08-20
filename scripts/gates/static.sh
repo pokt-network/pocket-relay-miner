@@ -175,4 +175,12 @@ else
     fi
 fi
 
+gate_step "gate self-tests"
+if lib_test_out="$(./scripts/gates/lib_test.sh 2>&1)"; then
+    gate_pass "gate helper self-tests pass"
+else
+    gate_fail "scripts/gates/lib_test.sh:"
+    gate_detail "$lib_test_out" 20
+fi
+
 gate_verdict "static"

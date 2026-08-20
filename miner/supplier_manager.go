@@ -1182,6 +1182,15 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			lifecycleCallbackConfig,
 		)
 
+		// Teach the coordinator when a claim window has already closed, so a
+		// relay for an unknown session past its window is dropped instead of
+		// creating a session nothing can ever claim. Wired only here, where the
+		// block and shared-params clients are known to exist; without them the
+		// predicate stays nil and the check answers false.
+		sessionCoordinator.SetClaimWindowClosedFn(func(sessionEndHeight int64) bool {
+			return m.claimWindowClosedAt(supplierCtx, sessionEndHeight)
+		})
+
 		if m.config.ServiceClient != nil {
 			lifecycleCallback.SetServiceClient(m.config.ServiceClient)
 		}
@@ -2173,4 +2182,43 @@ func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	default:
 		return "", fmt.Errorf("unknown rebroadcast phase %q", phase)
 	}
+}
+
+// claimWindowClosedAt reports whether the claim window for a session ending at
+// sessionEndHeight has already closed at the height this miner last observed.
+// It answers FALSE whenever it cannot tell; the caller uses the answer to
+// discard a relay, so an unknown must never cost one.
+func (m *SupplierManager) claimWindowClosedAt(ctx context.Context, sessionEndHeight int64) bool {
+	if m.config.BlockClient == nil || m.config.SharedClient == nil {
+		return false
+	}
+	block := m.config.BlockClient.LastBlock(ctx)
+	if block == nil {
+		return false // no observed height: cannot tell, do not drop
+	}
+	currentHeight := block.Height()
+
+	// Answer BEFORE any params query, and not for speed: this runs for every
+	// relay whose session is not already known-terminal, so on a live fleet it
+	// runs constantly with an end height in the FUTURE. GetParamsAtHeight has no
+	// future-height guard (query/query.go:492) -- it would query, get today's
+	// live params back, and cache them under a future height that the query
+	// layer treats as immutable for thirty minutes. The lifecycle sweep reads
+	// that same cache to compute a session's windows, so a governance change
+	// landing mid-session would be masked there. A session that has not ended
+	// cannot have a closed claim window, so the answer is already known.
+	if sessionEndHeight >= currentHeight {
+		return false
+	}
+
+	// Past its end height, so the at-height read is the immutable one it is
+	// meant to be. Fall back to live params rather than answering on a failure.
+	params, err := m.config.SharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+	if err != nil || params == nil {
+		params, err = m.config.SharedClient.GetParams(ctx)
+	}
+	if err != nil || params == nil {
+		return false
+	}
+	return currentHeight >= sharedtypes.GetClaimWindowCloseHeight(params, sessionEndHeight)
 }

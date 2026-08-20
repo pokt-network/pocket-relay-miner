@@ -408,19 +408,56 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// after first sight).
 	w.recordDiscovered(ctx, msg.Message.ApplicationAddress, msg.Message.ServiceId)
 
-	// Check session state BEFORE updating SMST
+	// Check session state BEFORE updating SMST. A store error falls through on
+	// purpose: it says nothing about the session, and dropping a relay on a
+	// Redis hiccup is the expensive direction.
 	if state.SessionStore != nil {
 		snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
-		if storeErr == nil && snapshot != nil {
-			if snapshot.State.IsTerminal() {
-				w.logger.Debug().
-					Str("session_id", msg.Message.SessionId).
-					Str("supplier", supplierAddr).
-					Str("session_state", string(snapshot.State)).
-					Msg("LATE_RELAY: dropping relay - session already in terminal state")
-				RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
-				return nil
+		switch {
+		case storeErr != nil:
+			// fall through and process the relay
+
+		case snapshot != nil && snapshot.State.IsTerminal():
+			w.logger.Debug().
+				Str("session_id", msg.Message.SessionId).
+				Str("supplier", supplierAddr).
+				Str("session_state", string(snapshot.State)).
+				Msg("LATE_RELAY: dropping relay - session already in terminal state")
+			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
+			return nil
+
+		case state.SessionCoordinator != nil &&
+			state.SessionCoordinator.ClaimWindowClosed(msg.Message.SessionEndHeight):
+			// The claim window has closed, so this relay cannot reach a claim
+			// whatever else is true. Deliberately NOT conditioned on the
+			// snapshot being absent: a session sitting in active or claiming
+			// past its window is not terminal yet -- the sweep has not reached
+			// it -- so the case above does not catch it, and without this the
+			// relay would be added to a tree nothing will ever claim.
+			//
+			// With no snapshot at all it is the same verdict for a different
+			// reason: processing on would CREATE a session the sweep could only
+			// carry to claim_window_closed and delete again.
+			//
+			// No money counter is booked here on purpose. This runs BEFORE the
+			// duplicate check, so a late copy of a relay that was already
+			// processed and paid would land in it; counting that as lost
+			// revenue would be wrong. relays_rejected says what happened
+			// without claiming the work went unpaid.
+			// Named sessionState, not state: `state` is the *SupplierState
+			// this function already holds.
+			sessionState := "absent"
+			if snapshot != nil {
+				sessionState = string(snapshot.State)
 			}
+			w.logger.Debug().
+				Str("session_id", msg.Message.SessionId).
+				Str("supplier", supplierAddr).
+				Str("session_state", sessionState).
+				Int64("session_end_height", msg.Message.SessionEndHeight).
+				Msg("LATE_RELAY: dropping relay - claim window already closed")
+			RecordRelayRejected(supplierAddr, "claim_window_closed", msg.Message.ServiceId)
+			return nil
 		}
 	}
 
