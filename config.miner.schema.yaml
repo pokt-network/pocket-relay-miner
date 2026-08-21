@@ -356,7 +356,14 @@ properties:
 
   block_time_seconds:
     type: integer
-    description: Expected block time in seconds (30s for mainnet/testnet, 6s for localnet)
+    description: >-
+      Expected block time in seconds. Set this explicitly per deployment --
+      mainnet, beta/testnet, and localnet run different real block times, and
+      mainnet's own drifts with network conditions rather than holding still.
+      Do not trust a single number here without measuring your target network.
+      The default below (cache.DefaultBlockTimeSeconds in Go, the ONLY place
+      this fallback is allowed to be a literal) is a last-resort value for an
+      unconfigured deployment, not production guidance.
     default: 30
     minimum: 1
 

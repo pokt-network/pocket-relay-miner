@@ -42,7 +42,8 @@ type ScanFunc func(ctx context.Context, pattern string) ([]string, error)
 // scripts/localonly/REVIEW-2026-08-20-r1-stream-lifecycle.md): that gap is
 // currently load-bearing for THIS function, not just an independent leak. The
 // supplier cache now carries a bounded TTL (cache.SupplierCacheTTLFromParams,
-// ~2 sessions, ~40 minutes on mainnet — HIGH-1) that expires an entry nobody
+// ~2 sessions -- tens of minutes on mainnet at its actual, drifting block
+// time, and configurable/operator-dependent regardless — HIGH-1) that expires an entry nobody
 // refreshes. During a whole-fleet outage or a network partition, NO miner
 // refreshes ANY supplier's cache entry, so every one of them ages out within
 // that window. Today that is masked: the un-pruned registry index still

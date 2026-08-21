@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
@@ -86,7 +87,7 @@ func NewRedisDeduplicator(
 		config.TTLBlocks = 10 // session length + grace period + buffer
 	}
 	if config.BlockTimeSeconds == 0 {
-		config.BlockTimeSeconds = 30
+		config.BlockTimeSeconds = cache.DefaultBlockTimeSeconds
 	}
 
 	return &RedisDeduplicator{
