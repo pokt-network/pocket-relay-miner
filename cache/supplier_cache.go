@@ -474,6 +474,17 @@ func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierSta
 
 // DeleteSupplierState removes a supplier's state from both L1 and L2 caches.
 // This should be called when a supplier is fully unstaked.
+//
+// UNUSED as of 2026-08-20 (review, "agujero 6" / LOW #4): removeSupplier no
+// longer calls this (see its own comment on why an immediate delete was
+// wrong — HIGH-1). SetSupplierState's TTL (SupplierCacheTTLFromParams) is
+// now the ONLY thing that ever clears this entry, and it is passive: it
+// bounds the blast radius but does not act the moment we KNOW a supplier is
+// gone. The still-open agujero-6 teardown design likely wants both — this
+// method for the confirmed-terminal moment, the TTL as the backstop for
+// crash/partition, where nothing ever reaches that moment. Kept unused
+// rather than deleted (against the repo's own "delete unused declarations"
+// rule) until that design lands and either calls it or removes it for real.
 func (c *SupplierCache) DeleteSupplierState(ctx context.Context, operatorAddress string) error {
 	// Remove from L1 (local cache)
 	c.localCache.Delete(operatorAddress)
