@@ -547,6 +547,7 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 
 	stakedSuppliers := make([]string, 0, len(supplierAddrs))
 	var unstakedCount int
+	var queryErrors int
 
 	for _, addr := range supplierAddrs {
 		// Invalidate cache before querying to ensure fresh chain data.
@@ -599,8 +600,26 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 				unstakedCount++
 				continue
 			}
-			// Network/timeout error — fail-open: treat as staked to avoid false drains
-			m.logger.Warn().
+			// Network/timeout error — fail-open: treat as staked to avoid false
+			// drains. The cache entry is deliberately left untouched: a stale
+			// answer beats a wrong one, and the next pass with a working node
+			// writes the truth.
+			//
+			// Counted under the same label the sibling path in
+			// resolveAndPublishSupplierState uses for this event, because it IS
+			// the same event: a cache write skipped because the chain could not
+			// be read. Until this line existed only one of the two paths
+			// reported it, so "the entry is current" and "we never managed to
+			// check" were indistinguishable in Prometheus.
+			//
+			// Debug, not Warn, for the per-supplier line: this fires once per
+			// supplier per reconcile pass, so an unreachable fullnode turns it
+			// into one line per supplier every interval. The operator-facing
+			// signal is the single aggregated Warn after the loop plus this
+			// metric -- per-entity conditions do not belong at Warn.
+			queryErrors++
+			supplierCacheWriteSkipped.WithLabelValues("chain_query_error").Inc()
+			m.logger.Debug().
 				Err(err).
 				Str("address", addr).
 				Msg("failed to query supplier status, treating as staked (fail-open)")
@@ -622,9 +641,24 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 		stakedSuppliers = append(stakedSuppliers, addr)
 	}
 
+	// One aggregated line per pass, not one per supplier: this is the signal an
+	// operator reads during a fullnode outage, and it must be visible without
+	// turning on debug logging. Warn rather than Info because every supplier it
+	// counts is now being served on an unverified assumption -- fail-open is the
+	// right call, but it is still an assumption, and its scale is the thing worth
+	// seeing.
+	if queryErrors > 0 {
+		m.logger.Warn().
+			Int("query_errors", queryErrors).
+			Int("total_keys", len(supplierAddrs)).
+			Msg("could not read staking status for some addresses; treated as staked (fail-open) " +
+				"and their cache entries left untouched")
+	}
+
 	m.logger.Debug().
 		Int("staked", len(stakedSuppliers)).
 		Int("not_staked", unstakedCount).
+		Int("query_errors", queryErrors).
 		Int("total_keys", len(supplierAddrs)).
 		Msg("checked staking status for all key addresses")
 
