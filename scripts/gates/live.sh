@@ -767,7 +767,7 @@ fi
 # holds. On a network with real difficulty it would not. Both are printed so the
 # day they diverge is visible rather than inferred.
 
-gate_step "settlement breakdown (reporting only)"
+gate_step "settlement breakdown (fails only if jq itself broke; overservicing/deflation values are reporting-only)"
 sb_line="$(gate_settlement_breakdown "$events_file" "${load_start_height:-0}")"
 sb_rc=$?
 IFS=$'\t' read -r sb_claims sb_relays sb_estimated sb_claimed sb_settled sb_minted \

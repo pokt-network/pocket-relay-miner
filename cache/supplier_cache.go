@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -261,7 +262,13 @@ type SupplierCache struct {
 	logger   logging.Logger
 	redis    *redisutil.Client
 	failOpen bool
-	ttl      time.Duration
+
+	// ttl is nanoseconds (time.Duration), atomic so SetTTL can update it after
+	// construction without a lock on the hot SetSupplierState write path. A
+	// caller that cannot afford to block startup on a chain query (see
+	// SetTTL's own doc comment) constructs with a safe default and upgrades
+	// it once the real value is available.
+	ttl atomic.Int64
 
 	// L1: In-memory cache (xsync for lock-free performance), TTL-bounded by
 	// supplierCacheL1TTL so an on-chain stake/services change is not frozen forever.
@@ -304,13 +311,33 @@ func NewSupplierCache(
 		ttl = defaultSupplierCacheTTL
 	}
 
-	return &SupplierCache{
+	c := &SupplierCache{
 		logger:     logging.ForComponent(logger, logging.ComponentQuerySupplier),
 		redis:      redisClient,
 		failOpen:   config.FailOpen,
-		ttl:        ttl,
 		localCache: xsync.NewMap[string, supplierCacheL1Entry](),
 	}
+	c.ttl.Store(int64(ttl))
+	return c
+}
+
+// SetTTL updates the TTL applied to every future SetSupplierState write.
+// Safe to call concurrently with writes (atomic) and at any time after
+// construction — in particular, from a caller that could not afford to
+// block on a chain query at construction time and constructed with the
+// safe default, then computed the real value asynchronously (see
+// miner/supplier_worker.go's use of this alongside its shared-params
+// advisory, both dispatched off the master pool so an unreachable node
+// does not lengthen startup).
+//
+// Does NOT retroactively touch entries already written with the old TTL;
+// only the transient mismatch on entries written in that window, at most
+// one reconcile cycle's worth, since the next write refreshes them anyway.
+func (c *SupplierCache) SetTTL(ttl time.Duration) {
+	if ttl <= 0 {
+		ttl = defaultSupplierCacheTTL
+	}
+	c.ttl.Store(int64(ttl))
 }
 
 // supplierKey returns the Redis key for a supplier's state.
@@ -447,7 +474,7 @@ func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierSta
 	// anymore, which is exactly the decommissioned-supplier case this TTL
 	// exists to bound (HIGH-1, review 2026-08-20). A TTL=0 write here is
 	// what let that entry freeze "still active" forever.
-	if err := c.redis.Set(ctx, key, data, c.ttl).Err(); err != nil {
+	if err := c.redis.Set(ctx, key, data, time.Duration(c.ttl.Load())).Err(); err != nil {
 		return fmt.Errorf("failed to set supplier state: %w", err)
 	}
 
