@@ -206,3 +206,56 @@ func TestShutdownDrainOnEmptyBufferIsANoOp(t *testing.T) {
 	}
 	require.Empty(t, *f.processed)
 }
+
+// TestShutdownDrainWaitsOutItsWindowEvenWhenTheBufferStartsEmpty is the
+// regression test for review 2026-08-21: drainDeliveryBuffer used to bail out
+// through a bare `default:` the instant msgChan looked momentarily empty,
+// instead of waiting out the drain window like the rest of the function
+// claims to. The transport-layer producer shares the supplier's already
+// cancelled context and can still be blocked inside a blocking XREADGROUP
+// call when the drain starts -- transport/redis/consumer.go documents why a
+// cancelled context is only observed once that block elapses, not when it is
+// cancelled -- so a message it delivers moments later used to arrive at a
+// channel nobody was reading from anymore.
+//
+// This does NOT race a send against the bug: an unbuffered send would
+// sometimes land before the old `default:` fires and sometimes not,
+// depending on goroutine scheduling -- exactly the kind of flake Rule #1
+// forbids. Instead it asserts the one thing that distinguishes the two
+// versions unconditionally: with the channel open and empty, the OLD code
+// returns within microseconds every time, while the fix blocks until the
+// window elapses or the channel closes. 200ms is a three-orders-of-magnitude
+// margin against that near-instant old-code return, chosen to survive CI
+// jitter without ever masking the bug.
+func TestShutdownDrainWaitsOutItsWindowEvenWhenTheBufferStartsEmpty(t *testing.T) {
+	f := newDrainFixture(t, 0)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	msgChan := make(chan transport.StreamMessage) // open, empty, nothing ever sent
+	done := make(chan struct{})
+	go func() {
+		f.mgr.drainDeliveryBuffer(ctx, f.state, msgChan)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+		t.Fatal("drainDeliveryBuffer returned immediately although its channel is still open and " +
+			"nothing has arrived yet -- an empty buffer must not be treated as \"nothing more is " +
+			"coming\" while the window has time left")
+	case <-time.After(200 * time.Millisecond):
+		// Still running, as required: the drain waited instead of bailing on
+		// the first empty check.
+	}
+
+	close(msgChan)
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("drainDeliveryBuffer did not return after its channel closed")
+	}
+	require.Empty(t, *f.processed, "nothing was ever sent, so nothing should have been processed")
+}
