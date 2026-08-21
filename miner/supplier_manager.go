@@ -1962,13 +1962,6 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	servicesCopy := make([]string, len(state.Services))
 	copy(servicesCopy, state.Services)
 
-	// Publish draining status to registry
-	if m.registry != nil {
-		if err := m.registry.PublishSupplierUpdate(ctx, SupplierUpdateActionDraining, operatorAddr, nil); err != nil {
-			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("failed to publish draining status")
-		}
-	}
-
 	// Update cache to mark supplier as unstaking (use copied services to avoid race)
 	if m.config.SupplierCache != nil {
 		supplierState := &cache.SupplierState{
