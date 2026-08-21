@@ -76,9 +76,15 @@ func (m *OrphanStreamMonitor) Start(ctx context.Context) error {
 		return fmt.Errorf("orphan stream monitor is closed")
 	}
 	m.ctx, m.cancelFn = context.WithCancel(ctx)
+	// wg.Add(1) must happen under the SAME lock section as the closed check
+	// above, before unlocking (review 2026-08-20, LOW). Outside the lock, a
+	// Close() that interleaves right here would see wg.Wait() return on a
+	// counter still at zero -- Close's documented contract ("when I return,
+	// the worker has finished") is broken, and the worker goroutine below
+	// then starts AFTER Close already returned.
+	m.wg.Add(1)
 	m.mu.Unlock()
 
-	m.wg.Add(1)
 	// Wrapped rather than a bare `go`: a panic in a long-lived goroutine would
 	// otherwise take the whole miner down, and internal/conventions freezes the
 	// bare ones that predate that rule so no new ones appear.
