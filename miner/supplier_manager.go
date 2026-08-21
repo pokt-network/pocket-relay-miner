@@ -1123,13 +1123,35 @@ func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr stri
 		}
 
 		// Update claimer if in distributed mode
-		if m.claimer != nil {
-			allSuppliers := m.keyManager.ListSuppliers()
-			stakedSuppliers := m.filterStakedSuppliers(ctx, allSuppliers)
-			m.claimer.UpdateSuppliers(stakedSuppliers)
+		if m.claimer == nil {
+			// Single-miner mode: no lease exists, so tear the pipeline down directly.
+			go m.removeSupplier(operatorAddr)
+			return
 		}
 
-		go m.removeSupplier(operatorAddr)
+		allSuppliers := m.keyManager.ListSuppliers()
+		stakedSuppliers := m.filterStakedSuppliers(ctx, allSuppliers)
+		m.claimer.UpdateSuppliers(stakedSuppliers)
+
+		// Release rather than calling removeSupplier directly. Both tear the
+		// pipeline down -- Release reaches it through onSupplierReleased -- but
+		// only Release deletes this instance's claim key and drops the address
+		// from the leased set. Going straight to removeSupplier left the lease
+		// behind, and renewAllClaims iterates the leased set, so the miner kept
+		// EXPIREing ha:miner:claim:{addr} forever for a supplier it no longer had
+		// any state for. No other instance could take that supplier over while
+		// the key kept being renewed.
+		//
+		// The audit above already recorded the "key_removal" decision;
+		// onSupplierReleased records its own under "rebalance_release", which
+		// costs one extra on-chain verification on a path an operator triggers by
+		// hand. Cheap, and the two entries together show the whole sequence.
+		if err := m.claimer.Release(ctx, operatorAddr); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSupplier, operatorAddr).
+				Msg("failed to release lease after key removal; the next reconcile retries")
+		}
 	}
 }
 
