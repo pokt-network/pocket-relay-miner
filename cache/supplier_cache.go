@@ -10,6 +10,7 @@ import (
 
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
+	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/redis/go-redis/v9"
 
@@ -34,9 +35,74 @@ const (
 	// Lock key prefix for distributed locking during L3 query
 	// supplierLockPrefix = "ha:cache:lock:supplier:"
 
-	// Default TTL for supplier cache (5 minutes)
-	// supplierCacheTTL = 5 * time.Minute
+	// defaultSupplierCacheTTL is the fallback used when SupplierCacheConfig.TTL
+	// is unset and SupplierCacheTTLFromParams could not compute one (chain
+	// unreachable at startup). Same order of magnitude as proof_params.go's
+	// own "10-minute safety net" convention, not a new arbitrary number.
+	defaultSupplierCacheTTL = 10 * time.Minute
+
+	// supplierCacheTTLMultiplier mirrors shared_params_singleton.go's
+	// sessionTTLMultiplier: margin beyond the protocol deadline the TTL is
+	// meant to outlive, so a missed reconcile tick does not race the expiry.
+	supplierCacheTTLMultiplier = 2
 )
+
+// SupplierCacheTTLFromParams computes the Redis TTL for a SupplierCache entry
+// from the chain's own session length, not an arbitrary constant.
+//
+// The miner rewrites an active supplier's entry every reconcile pass, so this
+// TTL only matters once nothing writes it anymore — the decommissioned-
+// supplier case (HIGH-1, review 2026-08-20:
+// scripts/localonly/REVIEW-2026-08-20-r1-stream-lifecycle.md). Before this,
+// SetSupplierState wrote with no TTL at all, so a supplier whose signing key
+// left the miner's keyring mid-teardown froze at its last-written state —
+// often still "staked, serving" — forever, with no cache layer left to
+// notice.
+//
+// A supplier legitimately stays IsActive() while Status == unstaking: poktroll
+// keeps it serving until the current session ends. Verified against
+// x/supplier/keeper/msg_server_unstake_supplier.go (poktroll@v0.1.35):
+// Supplier.UnstakeSessionEndHeight is set in the SAME block as
+// MsgUnstakeSupplier (so IsUnbonding() is true immediately), but
+// ServiceConfigHistory[].DeactivationHeight is deferred to the NEXT session
+// boundary only — "the supplier MUST continue to provide service until the
+// end of the current session". So the entry must outlive one session, not
+// one full unbonding period.
+//
+// SupplierUnbondingPeriodSessions is the WRONG axis for this, and an earlier
+// version of this function used it: that param answers "how long until the
+// stake unlocks" (an economic-security window), not "how long until services
+// deactivate" (always <= 1 session, regardless of the unbonding period's
+// length). Verified live against mainnet (sauron-api.infra.pocket.network,
+// x/shared/params, 2026-08-20): num_blocks_per_session=20 but
+// supplier_unbonding_period_sessions=1429 — using the unbonding axis would
+// have produced a ~40-day TTL, keeping a decommissioned supplier servable and
+// its orphaned stream invisible for over a month. num_blocks_per_session is
+// the parameter that actually bounds when services deactivate.
+//
+// The 2x multiplier (Jorge, 2026-08-20) is margin, not a second deadline: one
+// session for the protocol's own boundary, one more so a delayed reconcile
+// pass does not race the expiry — comfortably above the reconcile interval
+// (DefaultSupplierReconcileInterval = 60s; see the margin check in
+// TestSupplierCacheTTLFromParams). An operator who removes the signing key
+// before that window closes loses their own rewards — this repo does not try
+// to protect against that (there is no recovering a signature we no longer
+// hold the key for); the TTL only bounds how long the resulting stale entry
+// can mislead the relayer into serving it, instead of freezing that lie
+// forever.
+func SupplierCacheTTLFromParams(params *sharedtypes.Params, blockTimeSeconds int64) time.Duration {
+	if params == nil || blockTimeSeconds <= 0 {
+		return defaultSupplierCacheTTL
+	}
+
+	blocksPerSession := params.GetNumBlocksPerSession()
+	if blocksPerSession == 0 {
+		return defaultSupplierCacheTTL
+	}
+
+	ttlSeconds := int64(supplierCacheTTLMultiplier*blocksPerSession) * blockTimeSeconds
+	return time.Duration(ttlSeconds) * time.Second
+}
 
 // supplierCacheL1TTL bounds how long an L1 (in-process) supplier entry — its
 // stake status and service list — is served before it is treated as a miss and
@@ -195,6 +261,7 @@ type SupplierCache struct {
 	logger   logging.Logger
 	redis    *redisutil.Client
 	failOpen bool
+	ttl      time.Duration
 
 	// L1: In-memory cache (xsync for lock-free performance), TTL-bounded by
 	// supplierCacheL1TTL so an on-chain stake/services change is not frozen forever.
@@ -215,6 +282,12 @@ type SupplierCacheConfig struct {
 	// If true, treat supplier as active when cache unavailable (safer for traffic).
 	// If false, treat supplier as inactive when cache unavailable (safer for validation).
 	FailOpen bool
+
+	// TTL bounds how long a written entry survives in Redis without being
+	// refreshed. See SupplierCacheTTLFromParams for how to derive it from
+	// live chain params. <= 0 falls back to defaultSupplierCacheTTL — never
+	// to no TTL at all; see SetSupplierState.
+	TTL time.Duration
 }
 
 // NewSupplierCache creates a new SupplierCache.
@@ -226,10 +299,16 @@ func NewSupplierCache(
 	redisClient *redisutil.Client,
 	config SupplierCacheConfig,
 ) *SupplierCache {
+	ttl := config.TTL
+	if ttl <= 0 {
+		ttl = defaultSupplierCacheTTL
+	}
+
 	return &SupplierCache{
 		logger:     logging.ForComponent(logger, logging.ComponentQuerySupplier),
 		redis:      redisClient,
 		failOpen:   config.FailOpen,
+		ttl:        ttl,
 		localCache: xsync.NewMap[string, supplierCacheL1Entry](),
 	}
 }
@@ -362,8 +441,13 @@ func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierSta
 
 	key := c.supplierKey(state.OperatorAddress)
 
-	// No TTL - explicit state management only
-	if err := c.redis.Set(ctx, key, data, 0).Err(); err != nil {
+	// Bounded TTL (see SupplierCacheTTLFromParams), refreshed on every write.
+	// An actively-tracked supplier is rewritten every reconcile pass, long
+	// before the TTL matters; it only fires once nothing writes this entry
+	// anymore, which is exactly the decommissioned-supplier case this TTL
+	// exists to bound (HIGH-1, review 2026-08-20). A TTL=0 write here is
+	// what let that entry freeze "still active" forever.
+	if err := c.redis.Set(ctx, key, data, c.ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set supplier state: %w", err)
 	}
 

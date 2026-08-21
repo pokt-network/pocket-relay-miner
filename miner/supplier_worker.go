@@ -7,6 +7,7 @@ import (
 	stdhttp "net/http"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/alitto/pond/v2"
 	"github.com/cometbft/cometbft/rpc/client/http"
@@ -252,12 +253,30 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// orchestrator-refreshed param caches that need to exist live on the leader
 	// controller. Worker-local copies were dead duplicates.
 
+	// Compute the supplier cache's Redis TTL from the chain's own unbonding
+	// period (cache.SupplierCacheTTLFromParams) so a decommissioned
+	// supplier's cache entry ages out instead of freezing "still active"
+	// forever (HIGH-1, review 2026-08-20). Unlike the advisory above, this
+	// result IS consumed downstream, so it is read synchronously and bounded
+	// by a short timeout rather than fired-and-forgotten: an unreachable
+	// node falls back to a safe default instead of leaving the TTL unset.
+	supplierCacheTTL := time.Duration(0) // 0 -> NewSupplierCache falls back to its own default
+	ttlCtx, cancelTTL := context.WithTimeout(ctx, sharedParamsAdvisoryTimeout)
+	if sharedParamsForTTL, sharedErr := w.queryClients.Shared().GetParams(ttlCtx); sharedErr == nil {
+		supplierCacheTTL = cache.SupplierCacheTTLFromParams(sharedParamsForTTL, w.config.Config.GetBlockTimeSeconds())
+	} else {
+		w.logger.Warn().Err(sharedErr).
+			Msg("could not read shared params for supplier cache TTL; using fallback")
+	}
+	cancelTTL()
+
 	// Create supplier cache (for publishing supplier state)
 	w.supplierCache = cache.NewSupplierCache(
 		w.logger,
 		w.config.RedisClient,
 		cache.SupplierCacheConfig{
 			FailOpen: false,
+			TTL:      supplierCacheTTL,
 		},
 	)
 	if err = w.supplierCache.Start(ctx); err != nil {

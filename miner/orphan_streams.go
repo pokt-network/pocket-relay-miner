@@ -36,6 +36,24 @@ type ScanFunc func(ctx context.Context, pattern string) ([]string, error)
 //     claims are still being settled.
 //
 // Taking the union means only a supplier that NOTHING claims is treated as gone.
+//
+// PRECONDITION FOR PRUNING THE INDEX (the "agujero 8" gap — nothing today
+// removes a crashed miner's entries from the registry index — see
+// scripts/localonly/REVIEW-2026-08-20-r1-stream-lifecycle.md): that gap is
+// currently load-bearing for THIS function, not just an independent leak. The
+// supplier cache now carries a bounded TTL (cache.SupplierCacheTTLFromParams,
+// ~2 sessions, ~40 minutes on mainnet — HIGH-1) that expires an entry nobody
+// refreshes. During a whole-fleet outage or a network partition, NO miner
+// refreshes ANY supplier's cache entry, so every one of them ages out within
+// that window. Today that is masked: the un-pruned registry index still
+// lists every supplier the fleet ever claimed, so the union still calls them
+// known. Prune the index (fix agujero 8) WITHOUT also changing this function
+// and a whole-fleet outage will misreport every live, staked supplier as
+// orphaned — the CLI's non-empty-stream delete guard stops it from being
+// destructive, but the metric and the listing would still lie exactly when
+// an operator is most likely to be watching them. Fixing agujero 8 must
+// change what "orphan" requires here too: at minimum, both sources absent
+// AND some evidence the supplier is not staked on-chain, not silence alone.
 func KnownSupplierAddresses(
 	ctx context.Context,
 	client *redisutil.Client,

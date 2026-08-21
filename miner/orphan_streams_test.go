@@ -5,6 +5,7 @@ package miner
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
@@ -118,4 +119,46 @@ func TestKnownSupplierAddressesReadsAMissingIndexAsEmpty(t *testing.T) {
 	known, err := KnownSupplierAddresses(context.Background(), client, scanWith(client))
 	require.NoError(t, err)
 	require.Empty(t, known)
+}
+
+// TestOrphanStreamAddressesSeesADecommissionedSupplierOnceItsCacheEntryExpires
+// is HIGH-2's other half (review 2026-08-20): with HIGH-1 fixed, a supplier
+// cache entry no longer written (its key removed from this miner's keyring
+// mid-teardown) now carries a bounded TTL instead of none, so it eventually
+// falls out of KnownSupplierAddresses on its own, and the stream nobody
+// consumes anymore becomes visible to the orphan detector -- the one scenario
+// the feature exists to catch. (Contrast with TestOrphanStreamAddressesNeeds
+// BothSourcesOfKnown above, whose fromCache entry is a TEST FIXTURE written
+// with Set(..., 0) directly, on purpose, to exercise the union regardless of
+// TTL -- not a claim that production entries are still permanent.)
+//
+// ageKeyTo(..., 0), not a sleep: Rule #1 (CLAUDE.md) forbids time.Sleep for
+// synchronization, and internal/conventions' sleep allowlist would reject a
+// new one. The remaining TTL is the observable this test is about, and
+// setting it to 0 collapses "wait for the TTL to elapse" into "the key is
+// gone now" with no timing window to be flaky on.
+func TestOrphanStreamAddressesSeesADecommissionedSupplierOnceItsCacheEntryExpires(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+
+	const decommissioned = "pokt1decommissioned_stale_cache"
+	seedStream(t, client, decommissioned)
+
+	require.NoError(t, client.Set(ctx, client.KB().SupplierStateKey(decommissioned),
+		`{"status":"unstaking","staked":true}`, time.Minute).Err())
+
+	orphans, err := OrphanStreamAddresses(ctx, client, scanWith(client))
+	require.NoError(t, err)
+	require.Empty(t, orphans,
+		"while the cache entry is still within its TTL, the supplier stays known -- "+
+			"an active supplier mid-unbonding must not be misreported as orphaned")
+
+	ageKeyTo(t, client, client.KB().SupplierStateKey(decommissioned), 0)
+
+	orphans, err = OrphanStreamAddresses(ctx, client, scanWith(client))
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{decommissioned}, orphans,
+		"once the cache entry's TTL elapses with nothing left to refresh it, the "+
+			"detector must finally see the abandoned stream -- before HIGH-1's TTL "+
+			"fix, this entry would never expire and this stream would never be found")
 }
