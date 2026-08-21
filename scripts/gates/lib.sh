@@ -50,6 +50,27 @@ gate_pass() {
 }
 
 # gate_fail <message> -- marks the whole gate failed.
+#
+# ONLY WORKS CALLED DIRECTLY. gate_fail increments $gate_failed IN THE
+# CURRENT SHELL. A helper function invoked via command substitution --
+# anything called as `x="$(some_helper ...)"` -- runs in a SUBSHELL, and a
+# gate_fail called from inside it increments a copy of $gate_failed that dies
+# with the subshell. gate_verdict, back in the real shell, never sees it: the
+# gate prints PASS and the failure is gone with no error, no trace.
+#
+# A helper that needs to fail must instead `return` non-zero and let the
+# CALLER (which is not inside a subshell) check that and call gate_fail
+# itself. gate_settlement_breakdown is the worked example: it returns 1 on a
+# jq parse failure, and live.sh checks that exit status (captured via
+# `x="$(...)"; rc=$?` BEFORE the value is consumed by anything else, since
+# `read var <<<"$(...)"` throws the substitution's exit status away in favor
+# of read's own) before calling gate_fail itself (review 2026-08-20, found
+# while fixing exactly this in gate_settlement_breakdown).
+#
+# The pure helpers here today (gate_unexplained_shortfall, gate_served_
+# shortfall) dodge this because they return via echo and never call
+# gate_fail, so the trap is latent, not yet triggered -- waiting for the
+# next helper that tries to do both at once.
 gate_fail() {
     printf '%s  FAIL%s %s\n' "$GATE_RED" "$GATE_RESET" "$1"
     gate_failed=$((gate_failed + 1))
