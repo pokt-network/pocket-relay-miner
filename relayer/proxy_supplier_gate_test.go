@@ -183,3 +183,54 @@ func TestDecideSupplierServe_PresentStateButNoKeyRejects(t *testing.T) {
 	require.Equal(t, rejectReasonNoLocalSigner, d.rejectReason)
 	require.Contains(t, d.clientMsg, gateTestSupplier)
 }
+
+// TestDecideSupplierServe_EveryRejectionCarriesALabel pins what makes a
+// rejection diagnosable. handleRelay feeds decision.rejectReason straight into
+// relaysRejected.WithLabelValues(serviceID, rpcType, reason), so the label is
+// whatever the gate put there: a path that rejects without setting one produces
+// a series with an empty reason, which an operator filtering by reason never
+// sees. The relay is still refused, so nothing looks broken -- it just becomes
+// invisible, which is the worst combination for a 503 someone has to explain.
+//
+// The clientMsg matters for the same reason on the other side: it is the 503
+// body the gateway reads.
+func TestDecideSupplierServe_EveryRejectionCarriesALabel(t *testing.T) {
+	const foreignSupplier = "pokt1someothersupplier"
+
+	notStaked := &cache.SupplierState{
+		Status:          cache.SupplierStatusNotStaked,
+		Staked:          false,
+		OperatorAddress: gateTestSupplier,
+	}
+
+	for _, tt := range []struct {
+		name  string
+		proxy *ProxyServer
+		state *cache.SupplierState
+	}{
+		{name: "no signer at all", proxy: &ProxyServer{logger: testLogger()}, state: nil},
+		{name: "key for another supplier", proxy: newGateProxy(t, foreignSupplier), state: nil},
+		{
+			name:  "key for another supplier, state present and good",
+			proxy: newGateProxy(t, foreignSupplier),
+			state: activeState(gateTestService),
+		},
+		{name: "not staked", proxy: newGateProxy(t, gateTestSupplier), state: notStaked},
+		{name: "no services", proxy: newGateProxy(t, gateTestSupplier), state: activeState()},
+		{
+			name:  "wrong service",
+			proxy: newGateProxy(t, gateTestSupplier),
+			state: activeState("develop-grpc"),
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			d := tt.proxy.decideSupplierServe(tt.state, gateTestSupplier, gateTestService)
+
+			require.False(t, d.serve, "premise: this case must reject")
+			require.NotEmpty(t, d.rejectReason,
+				"a rejection with no reason becomes a relays_rejected_total series with an "+
+					"empty label, invisible to anyone filtering by reason")
+			require.NotEmpty(t, d.clientMsg, "the 503 body must say something")
+		})
+	}
+}
