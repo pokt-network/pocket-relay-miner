@@ -90,24 +90,6 @@ func (kb *KeyBuilder) SupplierKeyPrefix() string {
 	return fmt.Sprintf("%s:%s", kb.ns.BasePrefix, kb.ns.SupplierPrefix)
 }
 
-// SuppliersRegistryPrefix returns the prefix for suppliers registry.
-// Format: {base}:suppliers
-// Example: "ha:suppliers"
-func (kb *KeyBuilder) SuppliersRegistryPrefix() string {
-	return fmt.Sprintf("%s:suppliers", kb.ns.BasePrefix)
-}
-
-// SupplierRegistryKey builds the key for one supplier's registry entry.
-//
-// The registry is the miner-side view (who is claimed by whom); SupplierStateKey
-// is the cache-side stake/services state, under a different prefix. Two layouts,
-// two methods, neither assembled by its caller.
-// Format: {base}:suppliers:{operatorAddress}
-// Example: "ha:suppliers:pokt1abc"
-func (kb *KeyBuilder) SupplierRegistryKey(operatorAddress string) string {
-	return fmt.Sprintf("%s:suppliers:%s", kb.ns.BasePrefix, operatorAddress)
-}
-
 // StreamKey builds the relay WAL stream key for one supplier.
 // Format: {base}:{streams}:{supplierOperatorAddress}
 // Example: "ha:relays:pokt1abc"
@@ -132,7 +114,16 @@ func (kb *KeyBuilder) StreamAddress(key string) (string, bool) {
 	return addr, true
 }
 
-// SuppliersRegistryIndexKey returns the index key for suppliers registry.
+// SuppliersRegistryIndexKey returns the index key for suppliers registry: the
+// set of supplier addresses THIS FLEET handles.
+//
+// It is the only ha:suppliers:* key. The plural is a set; the singular
+// (SupplierStateKey, ha:supplier:{addr}) is one supplier's network state. There
+// used to be a per-supplier value here too, differing from the cache key by one
+// letter, with no readers and a latent collision -- SupplierStateKey takes its
+// prefix from the configurable ns.SupplierPrefix while this family hardcodes
+// "suppliers", so supplier_prefix: "suppliers" made the two identical. Do not
+// add a per-supplier key under this prefix; supplier state has a home.
 // Format: {base}:suppliers:index
 // Example: "ha:suppliers:index"
 func (kb *KeyBuilder) SuppliersRegistryIndexKey() string {

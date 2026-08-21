@@ -2,10 +2,12 @@ package redis
 
 import (
 	"fmt"
+	"reflect"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 )
@@ -39,8 +41,6 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"ConsumerGroup":               kb.ConsumerGroup(),
 		"MinerSessionKey":             kb.MinerSessionKey("sup1", "sess1"),
 		"SupplierKeyPrefix":           kb.SupplierKeyPrefix(),
-		"SuppliersRegistryPrefix":     kb.SuppliersRegistryPrefix(),
-		"SupplierRegistryKey":         kb.SupplierRegistryKey("pokt1abc"),
 		"SuppliersRegistryIndexKey":   kb.SuppliersRegistryIndexKey(),
 		"CachePrefix":                 kb.CachePrefix(),
 		"ParamsSharedAtHeightKey":     kb.ParamsSharedAtHeightKey(42),
@@ -133,8 +133,6 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"ConsumerGroup":               "ha-miners",
 		"MinerSessionKey":             "ha:miner:sessions:sup1:sess1",
 		"SupplierKeyPrefix":           "ha:supplier",
-		"SuppliersRegistryPrefix":     "ha:suppliers",
-		"SupplierRegistryKey":         "ha:suppliers:pokt1abc",
 		"SuppliersRegistryIndexKey":   "ha:suppliers:index",
 		"CachePrefix":                 "ha:cache",
 		"ParamsSharedAtHeightKey":     "ha:cache:params:shared:42",
@@ -270,4 +268,117 @@ func TestWithDefaults_FieldByField(t *testing.T) {
 		ConsumerGroupPrefix: "i",
 	}
 	assert.Equal(t, full, full.WithDefaults(), "fully-specified namespace untouched")
+}
+
+// TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace is the guard for the
+// footgun that motivated deleting the registry's per-supplier key: two methods
+// producing the SAME string for the same entity. SupplierStateKey is built from
+// the configurable ns.SupplierPrefix while SupplierRegistryKey hardcoded
+// "suppliers", so supplier_prefix: "suppliers" made them identical -- two
+// different JSON structs writing one key, and because they shared the "status"
+// and "services" fields the cross-read did not even fail, it returned a
+// half-populated struct (no "staked" -> IsActive() false -> relays refused).
+// Nothing validated it and no test caught it.
+//
+// It walks the methods by REFLECTION rather than through allKeyBuilderOutputs,
+// for two reasons. Reflection cannot go stale: a method added tomorrow is
+// covered without a table to remember. And it can feed every method the SAME
+// argument, which allKeyBuilderOutputs deliberately does not -- it passes
+// "pokt1a" to one supplier method and "pokt1abc" to another, so two layouts
+// that collide for one address produce different strings there and the
+// collision stays invisible. That is exactly why this bug survived a golden
+// test of every method.
+//
+// Prefix methods are excluded: a prefix is not a key anything writes (it is the
+// input to a pattern or a trim), so two prefixes agreeing corrupts nothing on
+// its own. The extractors are excluded because they parse a key rather than
+// build one.
+func TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace(t *testing.T) {
+	namespaces := []config.RedisNamespaceConfig{
+		{},
+		{SupplierPrefix: "suppliers"}, // the exact footgun
+		{BasePrefix: "prod", SupplierPrefix: "suppliers"},
+		{SupplierPrefix: "miner"}, // collide supplier with the miner family
+		{CachePrefix: "supplier"}, // and cache with supplier
+		{MinerPrefix: "meter"},
+	}
+
+	notAKey := map[string]bool{"StreamAddress": true, "SupplierStateAddress": true}
+
+	for _, ns := range namespaces {
+		kb := NewKeyBuilder(ns)
+		seen := map[string]string{} // output -> first method that produced it
+
+		for method, out := range keyBuilderOutputsWithUniformArgs(t, kb, notAKey) {
+			if first, dup := seen[out]; dup {
+				t.Errorf("namespace %+v: %s and %s both produce %q -- "+
+					"two writers on one key silently corrupt each other",
+					ns, first, method, out)
+
+				continue
+			}
+
+			seen[out] = method
+		}
+	}
+}
+
+// keyBuilderOutputsWithUniformArgs calls every exported KeyBuilder method whose
+// arguments are all strings or integers, passing ONE canonical value per kind,
+// and returns method name -> produced string. Methods with other argument or
+// return shapes are skipped, as are the excluded names and anything ending in
+// "Prefix".
+func keyBuilderOutputsWithUniformArgs(
+	t *testing.T,
+	kb *KeyBuilder,
+	exclude map[string]bool,
+) map[string]string {
+	t.Helper()
+
+	const sampleString = "pokt1abc"
+	const sampleNumber = 42
+
+	out := map[string]string{}
+	kbValue := reflect.ValueOf(kb)
+
+	for i := range kbValue.NumMethod() {
+		method := kbValue.Type().Method(i)
+		if exclude[method.Name] || strings.HasSuffix(method.Name, "Prefix") {
+			continue
+		}
+
+		signature := kbValue.Method(i).Type()
+		if signature.NumOut() == 0 || signature.Out(0).Kind() != reflect.String {
+			continue
+		}
+
+		args := make([]reflect.Value, 0, signature.NumIn())
+		callable := true
+
+		for j := range signature.NumIn() {
+			switch kind := signature.In(j).Kind(); kind {
+			case reflect.String:
+				args = append(args, reflect.ValueOf(sampleString))
+			case reflect.Uint64, reflect.Int64, reflect.Int:
+				args = append(args, reflect.New(signature.In(j)).Elem())
+				args[j].SetInt(sampleNumber)
+			default:
+				callable = false
+			}
+
+			if !callable {
+				break
+			}
+		}
+
+		if !callable {
+			continue
+		}
+
+		out[method.Name] = kbValue.Method(i).Call(args)[0].String()
+	}
+
+	require.NotEmpty(t, out, "reflection found no callable KeyBuilder methods")
+
+	return out
 }
