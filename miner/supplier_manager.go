@@ -316,10 +316,20 @@ func NewSupplierManager(
 	// nil if Redis is absent (e.g. tests) — handleRelay treats nil as fail-open.
 	if config.RedisClient != nil {
 		// KeyPrefix empty → defaults to "ha:miner:dedup" (matches KeyBuilder.MinerDedupKey).
+		//
+		// BlockTimeSeconds forwarded from config, not left zero: an empty
+		// DeduplicatorConfig here used to mean the operator's configured
+		// block_time_seconds was silently dropped, and NewRedisDeduplicator's
+		// own fallback (30) took over regardless of what was set. On mainnet
+		// (verified live 2026-08-21, ~64s/block) that produced a dedup TTL
+		// (TTLBlocks=10 x 30s = 5min) roughly HALF the wall-clock window it
+		// was meant to cover (~10.7min) -- a relay duplicate arriving after 5
+		// minutes but within the intended 10-block window would no longer be
+		// caught, and would be counted a second time.
 		mgr.deduplicator = NewRedisDeduplicator(
 			componentLogger,
 			config.RedisClient,
-			DeduplicatorConfig{},
+			DeduplicatorConfig{BlockTimeSeconds: config.BlockTimeSeconds},
 		)
 	}
 
