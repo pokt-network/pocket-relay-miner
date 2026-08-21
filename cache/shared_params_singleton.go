@@ -18,12 +18,27 @@ import (
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
+// DefaultBlockTimeSeconds is the fallback block time used wherever an
+// operator has not explicitly configured one, for every consumer in this
+// process (miner and relayer alike). This is the ONLY place that value is
+// allowed to be a literal (Jorge, 2026-08-21, after finding it hardcoded
+// independently in 5 places -- miner/config.go, miner/deduplicator.go, and
+// three call sites in this package -- three of which had silently drifted
+// from what an operator's config actually said). Every other fallback in the
+// codebase must reference this constant rather than writing its own "30":
+// changing the default is then a one-line change instead of a grep-and-hope.
+//
+// The VALUE is deliberately not "corrected" to a measured mainnet number: a
+// single constant cannot be right for mainnet, beta/testnet, and localnet at
+// once, and mainnet's own real block time drifts with network conditions
+// rather than holding still. This is a last-resort fallback for an operator
+// who configured nothing, not a substitute for setting block_time_seconds
+// correctly for the target deployment (see config.miner.example.yaml).
+const DefaultBlockTimeSeconds int64 = 30
+
 const (
 	// Cache type for pub/sub and metrics
 	sharedParamsCacheType = "shared_params"
-
-	// Default block time if not configured (30 seconds for mainnet/testnet)
-	defaultBlockTimeSeconds = 30
 
 	// Number of sessions to keep params cached (safety buffer)
 	sessionTTLMultiplier = 2
@@ -89,7 +104,7 @@ func NewSharedParamsCache(
 	blockTimeSeconds int64,
 ) SingletonEntityCache[*sharedtypes.Params] {
 	if blockTimeSeconds <= 0 {
-		blockTimeSeconds = defaultBlockTimeSeconds
+		blockTimeSeconds = DefaultBlockTimeSeconds
 	}
 
 	return &sharedParamsCache{

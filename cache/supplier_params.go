@@ -49,7 +49,7 @@ func NewRedisSupplierParamCache(
 		config.TTLBlocks = 100 // Supplier params rarely change
 	}
 	if config.BlockTimeSeconds == 0 {
-		config.BlockTimeSeconds = 30
+		config.BlockTimeSeconds = DefaultBlockTimeSeconds
 	}
 	if config.LockTimeout == 0 {
 		config.LockTimeout = 5 * time.Second

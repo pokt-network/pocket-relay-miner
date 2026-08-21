@@ -82,7 +82,7 @@ func NewProofParamsCache(
 	blockTimeSeconds int64,
 ) SingletonEntityCache[*prooftypes.Params] {
 	if blockTimeSeconds <= 0 {
-		blockTimeSeconds = defaultBlockTimeSeconds
+		blockTimeSeconds = DefaultBlockTimeSeconds
 	}
 
 	return &proofParamsCache{
