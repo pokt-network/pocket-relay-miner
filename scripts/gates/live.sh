@@ -740,4 +740,74 @@ if [ "$resolved" -eq 0 ]; then
     gate_fail "timed out after ${SETTLE_TIMEOUT_MIN} min with services still unpaid"
 fi
 
+# --- Settlement breakdown -----------------------------------------------------
+#
+# Reporting only. Nothing here fails the gate, and that is deliberate: the two
+# loss channels below are EXPECTED to read zero on a healthy localnet, so a
+# non-zero would be the finding while a zero proves nothing. Printing them keeps
+# "did not occur" and "was never looked at" from producing the same signal.
+#
+# The numbers are already on disk. scan_settlement_events captures every
+# attribute of every pocket.tokenomics.Event, so the settlement breakdown has
+# been collected on every run since that function existed -- only num_relays was
+# ever read out of it.
+#
+# THREE relay counts exist and they are not interchangeable:
+#
+#   sent (the CLI's count)   relays served, BEFORE the relayer's difficulty filter
+#   num_relays               leaves in the submitted tree, i.e. only the relays
+#                            whose hash matched the service's mining difficulty
+#   num_estimated_relays     num_relays x the difficulty multiplier, the chain's
+#                            estimate of the work actually done
+#
+# The gate's billing assertion compares sent against num_relays, which spans the
+# difficulty filter and is therefore only sound at BASE difficulty. Localnet runs
+# there (every service reports an unset target hash, which x/service resolves to
+# BaseRelayDifficultyHashBz, multiplier 1), so the two coincide and the assertion
+# holds. On a network with real difficulty it would not. Both are printed so the
+# day they diverge is visible rather than inferred.
+
+gate_step "settlement breakdown (fails only if jq itself broke; overservicing/deflation values are reporting-only)"
+sb_line="$(gate_settlement_breakdown "$events_file" "${load_start_height:-0}")"
+sb_rc=$?
+IFS=$'\t' read -r sb_claims sb_relays sb_estimated sb_claimed sb_settled sb_minted \
+    sb_overloss sb_deflation sb_over_events sb_spend_limit <<<"$sb_line"
+
+gate_detail "claims settled           ${sb_claims:-0}
+num_relays (tree leaves) ${sb_relays:-0}
+num_estimated_relays     ${sb_estimated:-0}
+claimed_upokt            ${sb_claimed:-0}
+settled_upokt            ${sb_settled:-0}
+minted_upokt             ${sb_minted:-0}" 12
+
+# gate_settlement_breakdown returns non-zero when jq itself failed to parse
+# the chain's events (schema change, malformed JSON) -- distinct from an
+# empty events file, which is not an error and is handled inside that
+# function. Failing loudly here, rather than reading the zeros it still
+# prints as "nothing happened", is the entire point of MEDIUM-3 (review
+# 2026-08-20): a parse failure and a genuinely quiet run must never look the
+# same on a money check.
+if [ "$sb_rc" -ne 0 ]; then
+    gate_fail "settlement breakdown: jq failed to parse ${events_file} (see error above) -- overservicing/deflation below are UNKNOWN, not zero"
+else
+    # Overservicing: the application's stake could not cover the claim, so the
+    # chain paid less than was claimed. It is money that did not arrive, and it
+    # does NOT show up in any relay count -- claimed and settled relay counts
+    # both stay put while the uPOKT shrinks, so a check that only counts relays
+    # cannot see it.
+    if [ "${sb_overloss:-0}" -gt 0 ] || [ "${sb_over_events:-0}" -gt 0 ]; then
+        gate_pass "overservicing OCCURRED: ${sb_overloss} uPOKT across ${sb_over_events} event(s), ${sb_spend_limit} from a per-session spend limit"
+    else
+        gate_pass "overservicing did not occur this run (0 events, 0 uPOKT) -- not evidence that it cannot"
+    fi
+
+    # Deflation is mint_ratio < 1, a governance parameter rather than a defect
+    # here. Reported separately so it is never mistaken for the line above.
+    if [ "${sb_deflation:-0}" -gt 0 ]; then
+        gate_pass "deflation (mint_ratio < 1): ${sb_deflation} uPOKT -- a governance parameter, not a fault"
+    else
+        gate_pass "no deflation this run (mint_ratio = 1)"
+    fi
+fi
+
 gate_verdict "live"

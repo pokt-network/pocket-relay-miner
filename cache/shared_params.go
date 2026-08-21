@@ -88,7 +88,7 @@ func NewRedisSharedParamCache(
 		config.TTLBlocks = 1
 	}
 	if config.BlockTimeSeconds == 0 {
-		config.BlockTimeSeconds = 30
+		config.BlockTimeSeconds = DefaultBlockTimeSeconds
 	}
 	if config.LockTimeout == 0 {
 		config.LockTimeout = 5 * time.Second

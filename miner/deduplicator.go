@@ -6,13 +6,14 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-// Deduplicator ensures that redelivered relays (XAUTOCLAIM reclaims from a
-// consumer that crashed without acking, or the original copy still buffered
-// in a slow-but-alive consumer after another consumer reclaimed it) are not
+// Deduplicator ensures that redelivered relays (reclaims from a consumer that
+// crashed without acking, or the original copy still buffered in a
+// slow-but-alive consumer after another consumer reclaimed it) are not
 // counted twice. The SMST tree is idempotent on insertions of the same
 // (key, value, weight) tuple, but the side counter
 // `snapshot.TotalComputeUnits` is incremented unconditionally by
@@ -21,10 +22,11 @@ import (
 // cause unprofitable sessions to be claimed.
 //
 // The relay worker calls MarkProcessed on EVERY relay and uses its return
-// value as the gate for the counter: XAUTOCLAIM honors only min-idle, not
-// consumer liveness, so the duplicate can arrive with IsReclaim=false (the
-// original copy, processed after the reclaimed one) and a reclaim-only check
-// would miss it. IsDuplicate remains as a cheap early exit on the reclaim
+// value as the gate for the counter: the reclaim skips entries owned by this
+// consumer and takes only those idle past the timeout, but idleness cannot
+// distinguish a dead consumer from a slow-but-alive one — so the duplicate can
+// arrive with IsReclaim=false (the original copy, processed after the reclaimed
+// one) and a reclaim-only check would miss it. IsDuplicate remains as a cheap early exit on the reclaim
 // path before the SMST work.
 type Deduplicator interface {
 	// IsDuplicate returns true if the relay hash has already been marked as
@@ -85,7 +87,7 @@ func NewRedisDeduplicator(
 		config.TTLBlocks = 10 // session length + grace period + buffer
 	}
 	if config.BlockTimeSeconds == 0 {
-		config.BlockTimeSeconds = 30
+		config.BlockTimeSeconds = cache.DefaultBlockTimeSeconds
 	}
 
 	return &RedisDeduplicator{

@@ -316,10 +316,20 @@ func NewSupplierManager(
 	// nil if Redis is absent (e.g. tests) — handleRelay treats nil as fail-open.
 	if config.RedisClient != nil {
 		// KeyPrefix empty → defaults to "ha:miner:dedup" (matches KeyBuilder.MinerDedupKey).
+		//
+		// BlockTimeSeconds forwarded from config, not left zero: an empty
+		// DeduplicatorConfig here used to mean the operator's configured
+		// block_time_seconds was silently dropped, and NewRedisDeduplicator's
+		// own fallback (30) took over regardless of what was set. On mainnet
+		// (verified live 2026-08-21, ~64s/block) that produced a dedup TTL
+		// (TTLBlocks=10 x 30s = 5min) roughly HALF the wall-clock window it
+		// was meant to cover (~10.7min) -- a relay duplicate arriving after 5
+		// minutes but within the intended 10-block window would no longer be
+		// caught, and would be counted a second time.
 		mgr.deduplicator = NewRedisDeduplicator(
 			componentLogger,
 			config.RedisClient,
-			DeduplicatorConfig{},
+			DeduplicatorConfig{BlockTimeSeconds: config.BlockTimeSeconds},
 		)
 	}
 
@@ -430,7 +440,58 @@ func (m *SupplierManager) reconcile(ctx context.Context) {
 	if m.claimer == nil {
 		return
 	}
-	m.claimer.UpdateSuppliers(m.filterStakedSuppliers(ctx, m.keyManager.ListSuppliers()))
+	configured := m.filterStakedSuppliers(ctx, m.keyManager.ListSuppliers())
+	m.claimer.UpdateSuppliers(configured)
+	m.releaseUnconfigured(ctx, configured)
+}
+
+// releaseUnconfigured releases the lease on every supplier this instance still
+// holds that the staking filter no longer returns.
+//
+// Without it, dropping out of the configured list changed nothing but a slice:
+// UpdateSuppliers replaced allSuppliers and nothing compared that against the
+// leased set, so the supplier's consumer, SMST manager, lifecycle manager and
+// claim-key renewal all kept running forever for an address that is no longer
+// staked. releaseExcess could not cover it either -- it picks victims
+// newest-claimed-first out of the leased set to hit a fair-share target, so it
+// cannot target a specific dropped address, and it only fires when the instance
+// holds MORE than its share.
+//
+// Release is cheap here and does not serialise: onSupplierReleased hands the
+// actual teardown to its own goroutine, so this loop does a Lua CAS-delete per
+// supplier and returns. The drain window each teardown then spends is paid in
+// parallel, not one after another.
+//
+// Suppliers with pending sessions are NOT dropped by the filter in the first
+// place (it keeps them so claim and proof can finish), so nothing here can cut
+// a session short.
+func (m *SupplierManager) releaseUnconfigured(ctx context.Context, configured []string) {
+	claimed := m.claimer.ClaimedSuppliers()
+	if len(claimed) == 0 {
+		return
+	}
+
+	keep := make(map[string]struct{}, len(configured))
+	for _, addr := range configured {
+		keep[addr] = struct{}{}
+	}
+
+	for _, addr := range claimed {
+		if _, ok := keep[addr]; ok {
+			continue
+		}
+		m.logger.Info().
+			Str(logging.FieldSupplier, addr).
+			Msg("releasing lease: supplier is no longer staked or no longer configured")
+		if err := m.claimer.Release(ctx, addr); err != nil {
+			// Release already logged the reason and kept the claim; the next
+			// reconcile pass retries. Nothing is stranded by a single failure.
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSupplier, addr).
+				Msg("failed to release lease for an unconfigured supplier; will retry next reconcile")
+		}
+	}
 }
 
 // reconcileLoop runs the background stake poller until ctx is cancelled.
@@ -486,6 +547,7 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 
 	stakedSuppliers := make([]string, 0, len(supplierAddrs))
 	var unstakedCount int
+	var queryErrors int
 
 	for _, addr := range supplierAddrs {
 		// Invalidate cache before querying to ensure fresh chain data.
@@ -517,6 +579,13 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 				// pending work and drop the supplier, which triggers the
 				// normal release → verifySupplierUnstaked → removeSupplier
 				// drain path in onSupplierReleased.
+				//
+				// releaseUnconfigured is what closes that loop: dropping out
+				// of this list only changes a slice, so something has to
+				// compare the configured list against the leased set and call
+				// Release. Until 2026-08-20 nothing did, and this paragraph
+				// described a teardown that never happened -- the pipeline for
+				// an unstaked supplier ran forever.
 				if m.hasPendingSessions(ctx, addr) {
 					m.logger.Info().
 						Str("address", addr).
@@ -531,8 +600,26 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 				unstakedCount++
 				continue
 			}
-			// Network/timeout error — fail-open: treat as staked to avoid false drains
-			m.logger.Warn().
+			// Network/timeout error — fail-open: treat as staked to avoid false
+			// drains. The cache entry is deliberately left untouched: a stale
+			// answer beats a wrong one, and the next pass with a working node
+			// writes the truth.
+			//
+			// Counted under the same label the sibling path in
+			// resolveAndPublishSupplierState uses for this event, because it IS
+			// the same event: a cache write skipped because the chain could not
+			// be read. Until this line existed only one of the two paths
+			// reported it, so "the entry is current" and "we never managed to
+			// check" were indistinguishable in Prometheus.
+			//
+			// Debug, not Warn, for the per-supplier line: this fires once per
+			// supplier per reconcile pass, so an unreachable fullnode turns it
+			// into one line per supplier every interval. The operator-facing
+			// signal is the single aggregated Warn after the loop plus this
+			// metric -- per-entity conditions do not belong at Warn.
+			queryErrors++
+			supplierCacheWriteSkipped.WithLabelValues("chain_query_error").Inc()
+			m.logger.Debug().
 				Err(err).
 				Str("address", addr).
 				Msg("failed to query supplier status, treating as staked (fail-open)")
@@ -554,9 +641,24 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 		stakedSuppliers = append(stakedSuppliers, addr)
 	}
 
+	// One aggregated line per pass, not one per supplier: this is the signal an
+	// operator reads during a fullnode outage, and it must be visible without
+	// turning on debug logging. Warn rather than Info because every supplier it
+	// counts is now being served on an unverified assumption -- fail-open is the
+	// right call, but it is still an assumption, and its scale is the thing worth
+	// seeing.
+	if queryErrors > 0 {
+		m.logger.Warn().
+			Int("query_errors", queryErrors).
+			Int("total_keys", len(supplierAddrs)).
+			Msg("could not read staking status for some addresses; treated as staked (fail-open) " +
+				"and their cache entries left untouched")
+	}
+
 	m.logger.Debug().
 		Int("staked", len(stakedSuppliers)).
 		Int("not_staked", unstakedCount).
+		Int("query_errors", queryErrors).
 		Int("total_keys", len(supplierAddrs)).
 		Msg("checked staking status for all key addresses")
 
@@ -1065,13 +1167,35 @@ func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr stri
 		}
 
 		// Update claimer if in distributed mode
-		if m.claimer != nil {
-			allSuppliers := m.keyManager.ListSuppliers()
-			stakedSuppliers := m.filterStakedSuppliers(ctx, allSuppliers)
-			m.claimer.UpdateSuppliers(stakedSuppliers)
+		if m.claimer == nil {
+			// Single-miner mode: no lease exists, so tear the pipeline down directly.
+			go m.removeSupplier(operatorAddr)
+			return
 		}
 
-		go m.removeSupplier(operatorAddr)
+		allSuppliers := m.keyManager.ListSuppliers()
+		stakedSuppliers := m.filterStakedSuppliers(ctx, allSuppliers)
+		m.claimer.UpdateSuppliers(stakedSuppliers)
+
+		// Release rather than calling removeSupplier directly. Both tear the
+		// pipeline down -- Release reaches it through onSupplierReleased -- but
+		// only Release deletes this instance's claim key and drops the address
+		// from the leased set. Going straight to removeSupplier left the lease
+		// behind, and renewAllClaims iterates the leased set, so the miner kept
+		// EXPIREing ha:miner:claim:{addr} forever for a supplier it no longer had
+		// any state for. No other instance could take that supplier over while
+		// the key kept being renewed.
+		//
+		// The audit above already recorded the "key_removal" decision;
+		// onSupplierReleased records its own under "rebalance_release", which
+		// costs one extra on-chain verification on a path an operator triggers by
+		// hand. Cheap, and the two entries together show the whole sequence.
+		if err := m.claimer.Release(ctx, operatorAddr); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSupplier, operatorAddr).
+				Msg("failed to release lease after key removal; the next reconcile retries")
+		}
 	}
 }
 
@@ -1513,7 +1637,7 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 
 // consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
 // Each message is ACK'd immediately after successful processing to prevent race conditions
-// with XAUTOCLAIM reclaiming messages that were already processed but not yet ACK'd.
+// with the reclaim taking messages that were already processed but not yet ACK'd.
 //
 // Belt-and-suspenders defense: even though every SMT boundary inside
 // handleRelay is wrapped with runSMSTSafely, any panic from unrelated
@@ -1522,6 +1646,19 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 // supplier until a restart. We cannot use logging.RecoverGoRoutine
 // directly because this loop must keep running after a single relay
 // panics, not exit. Instead we recover *per iteration* below.
+// shutdownDrainWindow bounds how long a supplier's graceful shutdown spends
+// finishing relays already sitting in its delivery buffer.
+//
+// It is deliberately well under Kubernetes' default 30s termination grace period,
+// which the whole miner shutdown has to fit inside -- and this drain runs per
+// supplier, so the budget is shared. It is NOT sized to empty a full 5000-slot
+// buffer: at Redis round-trip speed that would take far longer than any grace
+// period allows. Whatever does not fit stays pending and the reclaim recovers it,
+// so the window trades completeness for a bounded, predictable shutdown.
+//
+// A var, not a const, only so a test can shrink it: nothing in production writes it.
+var shutdownDrainWindow = 5 * time.Second
+
 func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *SupplierState) {
 	defer state.wg.Done()
 
@@ -1545,87 +1682,211 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 				// Channel closed, exit
 				return
 			}
-
-			// Track relay consumed from Redis Stream (relayer → miner)
-			RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
-
-			// When draining, we continue processing existing messages
-			// but log that we're in drain mode for visibility.
-			// LoadStatus is lock-free — removeSupplier publishes the
-			// draining flag via StoreStatus and this read stays off
-			// any shared mutex on the hot path.
-			if state.LoadStatus() == SupplierStatusDraining {
-				m.logger.Debug().
-					Str(logging.FieldSupplier, state.OperatorAddr).
-					Msg("processing relay during drain")
-			}
-
-			// Per-relay panic guard: if anything below (including code
-			// paths the runSMSTSafely boundary does NOT cover — pool
-			// release, deduplicator, session_store access) panics, we
-			// log, increment a metric, and move on to the next message
-			// rather than dying and leaving the supplier with no
-			// consumer. This is the difference between "a single relay
-			// is lost" (acceptable) and "the supplier stops earning
-			// until a restart" (the Anaski incident shape).
-			serviceID := msg.Message.ServiceId
-			sessionID := msg.Message.SessionId
-			var processErr error
-			func() {
-				defer func() {
-					if r := recover(); r != nil {
-						logging.PanicRecoveriesTotal.WithLabelValues("supplier_consume_relay").Inc()
-						m.logger.Error().
-							Str(logging.FieldSupplier, state.OperatorAddr).
-							Str("session_id", sessionID).
-							Str("panic_value", fmt.Sprintf("%v", r)).
-							Str("stack_trace", string(debug.Stack())).
-							Msg("PANIC RECOVERED during relay processing — relay dropped, consumer continuing")
-						processErr = fmt.Errorf("panic recovered in relay processing: %v", r)
-					}
-				}()
-				if m.onRelay != nil {
-					startTime := time.Now()
-					processErr = m.onRelay(ctx, state.OperatorAddr, &msg)
-					status := "success"
-					if processErr != nil {
-						status = "error"
-					}
-					RecordRelayProcessingLatency(state.OperatorAddr, serviceID, status, time.Since(startTime).Seconds())
-				}
-
-				// Pool release must run inside the recover scope so that
-				// a panic mid-processing still returns the borrowed
-				// MinedRelayMessage to the pool — otherwise the pool
-				// leaks one slot per panic and eventually starves.
-				transport.ReleaseMinedRelayMessage(msg.Message)
-				msg.Message = nil
-			}()
-
-			if processErr != nil {
-				m.logger.Debug().
-					Err(processErr).
-					Str(logging.FieldSupplier, state.OperatorAddr).
-					Str("session_id", sessionID).
-					Msg("failed to process relay")
-				// Don't ACK on processing failure - let XAUTOCLAIM retry
-				continue
-			}
-
-			// ACK immediately after successful processing
-			// This prevents race conditions where XAUTOCLAIM reclaims already-processed messages
-			if err := state.Consumer.AckMessage(ctx, msg); err != nil {
-				m.logger.Debug().
-					Err(err).
-					Str(logging.FieldSupplier, state.OperatorAddr).
-					Str("message_id", msg.ID).
-					Msg("failed to acknowledge message")
-			}
+			m.handleStreamMessage(ctx, state, msg)
 
 		case <-ctx.Done():
+			// Do NOT abandon what is already in the delivery buffer. Those
+			// relays were handed over by XREADGROUP, so they are in this
+			// consumer's pending list under a name that embeds the pid and
+			// will not exist after a restart.
+			m.drainDeliveryBuffer(ctx, state, msgChan)
 			return
 		}
 	}
+}
+
+// handleStreamMessage runs one delivered relay to completion: process, release
+// the pooled message, and acknowledge on success. Returns whether the message
+// was actually acknowledged -- false on a processing failure (by design: the
+// entry must stay pending for the reclaim) OR an AckMessage error (Redis
+// hiccup, connection reset), which a caller MUST check before treating the
+// relay as done rather than assuming success from "handleStreamMessage
+// returned" (review 2026-08-21: the shutdown drain's metric used to do
+// exactly that).
+//
+// It takes its own ctx rather than closing over the supplier's, because the
+// graceful-shutdown drain calls it with a context that is deliberately still
+// alive after the supplier's has been cancelled.
+func (m *SupplierManager) handleStreamMessage(
+	ctx context.Context,
+	state *SupplierState,
+	msg transport.StreamMessage,
+) (acked bool) {
+	// Track relay consumed from Redis Stream (relayer → miner)
+	RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
+
+	// When draining, we continue processing existing messages
+	// but log that we're in drain mode for visibility.
+	// LoadStatus is lock-free — removeSupplier publishes the
+	// draining flag via StoreStatus and this read stays off
+	// any shared mutex on the hot path.
+	if state.LoadStatus() == SupplierStatusDraining {
+		m.logger.Debug().
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Msg("processing relay during drain")
+	}
+
+	// Per-relay panic guard: if anything below (including code
+	// paths the runSMSTSafely boundary does NOT cover — pool
+	// release, deduplicator, session_store access) panics, we
+	// log, increment a metric, and move on to the next message
+	// rather than dying and leaving the supplier with no
+	// consumer. This is the difference between "a single relay
+	// is lost" (acceptable) and "the supplier stops earning
+	// until a restart" (the Anaski incident shape).
+	serviceID := msg.Message.ServiceId
+	sessionID := msg.Message.SessionId
+	var processErr error
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				logging.PanicRecoveriesTotal.WithLabelValues("supplier_consume_relay").Inc()
+				m.logger.Error().
+					Str(logging.FieldSupplier, state.OperatorAddr).
+					Str("session_id", sessionID).
+					Str("panic_value", fmt.Sprintf("%v", r)).
+					Str("stack_trace", string(debug.Stack())).
+					Msg("PANIC RECOVERED during relay processing — relay dropped, consumer continuing")
+				processErr = fmt.Errorf("panic recovered in relay processing: %v", r)
+			}
+		}()
+		if m.onRelay != nil {
+			startTime := time.Now()
+			processErr = m.onRelay(ctx, state.OperatorAddr, &msg)
+			status := "success"
+			if processErr != nil {
+				status = "error"
+			}
+			RecordRelayProcessingLatency(state.OperatorAddr, serviceID, status, time.Since(startTime).Seconds())
+		}
+
+		// Pool release must run inside the recover scope so that
+		// a panic mid-processing still returns the borrowed
+		// MinedRelayMessage to the pool — otherwise the pool
+		// leaks one slot per panic and eventually starves.
+		transport.ReleaseMinedRelayMessage(msg.Message)
+		msg.Message = nil
+	}()
+
+	if processErr != nil {
+		m.logger.Debug().
+			Err(processErr).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Str("session_id", sessionID).
+			Msg("failed to process relay")
+		// Don't ACK on processing failure - let the reclaim retry
+		return false
+	}
+
+	// ACK immediately after successful processing
+	// This prevents race conditions where the reclaim picks up already-processed messages
+	if err := state.Consumer.AckMessage(ctx, msg); err != nil {
+		m.logger.Debug().
+			Err(err).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Str("message_id", msg.ID).
+			Msg("failed to acknowledge message")
+		return false
+	}
+	return true
+}
+
+// drainDeliveryBuffer finishes the relays already handed to this consumer once
+// the supplier's context has been cancelled.
+//
+// Without it, everything sitting in the delivery channel is dropped on the floor:
+// never processed, never acknowledged, and its pooled MinedRelayMessage never
+// returned. Those entries stay in the pending list of a consumer name that embeds
+// this pid, so nothing here can ever reclaim them again — only another consumer's
+// reclaim can, one full claim_idle_timeout later, and only if one is running.
+//
+// The window is best-effort by design. What does not fit stays pending and IS
+// recovered by the reclaim; that is the same path a crash takes. The difference a
+// graceful drain makes is that the work completes now instead of after the idle
+// timeout, and the pool slots come back. A SIGKILL runs none of this, and nothing
+// can be done about that.
+//
+// The buffer being momentarily empty is NOT the same as the producer being done:
+// the transport-layer consumer's read loop shares this same cancelled context, but
+// a cancelled context is only observed when its blocking XREADGROUP call elapses
+// (transport/redis/consumer.go documents why go-redis sets no read deadline from
+// it), and msgChan is only closed after BOTH of its producer goroutines return.
+// Racing ahead of that with a non-blocking check used to let this return before a
+// message the producer was already mid-delivery on ever arrived — dropped exactly
+// the way this function exists to prevent, just on a narrower, timing-dependent
+// window (review 2026-08-21). Waiting on drainCtx as a second select case, instead
+// of falling through a bare default, is what makes the window it is named after
+// actually apply to this case too.
+func (m *SupplierManager) drainDeliveryBuffer(
+	ctx context.Context,
+	state *SupplierState,
+	msgChan <-chan transport.StreamMessage,
+) {
+	// The supplier's context is already cancelled, so every Redis call made with
+	// it would fail and be classified as a shutdown-cancel (ACK-and-discard).
+	// Detaching from that cancellation is what makes the drain actually process
+	// the work rather than throw it away with extra steps.
+	drainCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownDrainWindow)
+	defer cancel()
+
+	drained := 0
+	abandoned := 0
+
+	for {
+		select {
+		case msg, ok := <-msgChan:
+			if !ok {
+				m.reportDrain(state, drained, abandoned)
+				return
+			}
+			select {
+			case <-drainCtx.Done():
+				// Out of time. Release the pooled message so the slot returns,
+				// but leave the entry unacknowledged for the reclaim.
+				transport.ReleaseMinedRelayMessage(msg.Message)
+				msg.Message = nil
+				abandoned++
+				continue
+			default:
+			}
+			if acked := m.handleStreamMessage(drainCtx, state, msg); acked {
+				RecordShutdownDrainedRelay(state.OperatorAddr)
+				drained++
+			} else {
+				// Processing failed, or it succeeded but AckMessage itself
+				// did not (Redis hiccup near the deadline): either way the
+				// entry is still PENDING, same as anything the window ran
+				// out on -- counting it as drained would tell an operator
+				// this finished when Redis says otherwise.
+				abandoned++
+			}
+
+		case <-drainCtx.Done():
+			// Out of time and nothing is sitting in the buffer right now.
+			// Anything the producer still delivers after this stays
+			// unacknowledged in this consumer's PEL for the reclaim, same as
+			// any entry the window did not fit -- an already-closed msgChan
+			// (the ordinary idle-supplier case) is still picked immediately
+			// above, since a closed channel read is always ready.
+			m.reportDrain(state, drained, abandoned)
+			return
+		}
+	}
+}
+
+// reportDrain emits the one log line a shutdown drain produces. It fires once per
+// supplier per shutdown -- a state change, not a per-request event -- so Info is
+// the right level and an operator reading a restart sees it without debug logging.
+func (m *SupplierManager) reportDrain(state *SupplierState, drained, abandoned int) {
+	RecordShutdownAbandonedRelays(state.OperatorAddr, abandoned)
+	if drained == 0 && abandoned == 0 {
+		return
+	}
+	m.logger.Info().
+		Str(logging.FieldSupplier, state.OperatorAddr).
+		Int("drained", drained).
+		Int("abandoned", abandoned).
+		Msg("drained delivery buffer on shutdown; abandoned entries stay pending for the reclaim")
 }
 
 // removeSupplier gracefully removes a supplier (waits for pending work).
@@ -1777,15 +2038,23 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 			}
 		}
 
-		// Delete supplier from cache
-		if m.config.SupplierCache != nil {
-			if cacheErr := m.config.SupplierCache.DeleteSupplierState(ctx, operatorAddr); cacheErr != nil {
-				m.logger.Warn().
-					Err(cacheErr).
-					Str(logging.FieldSupplier, operatorAddr).
-					Msg("failed to delete supplier state from cache")
-			}
-		}
+		// The supplier's cache entry is deliberately NOT deleted.
+		//
+		// That entry is not our bookkeeping: it is the CHAIN's answer, cached. Its
+		// Services list is derived from GetActiveServiceConfigs at the observed
+		// height, so after a supplier unstakes it empties by itself at the session
+		// boundary poktroll scheduled (MsgUnstakeSupplier sets DeactivationHeight =
+		// next session start on every service config). That list IS the thing that
+		// stops the relayer serving, at exactly the right block.
+		//
+		// Deleting it replaces a correct answer with "unknown" -- and the relayer
+		// reads a missing entry as permission to serve optimistically whenever it
+		// still holds the signing key (see decideSupplierServe). So the delete
+		// undid the very protection the teardown had just written, and made
+		// removing a supplier cause MORE serving, not less.
+		//
+		// What ages the entry out instead is the orphan sweep, which reports and
+		// lets an operator clean up; nothing auto-deletes state that gates money.
 	}
 
 	supplierManagerSuppliersActive.Dec()
@@ -2171,7 +2440,7 @@ func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	// a timeout that keeps it inside the remaining window.
 	blkTime := m.config.BlockTimeSeconds
 	if blkTime <= 0 {
-		blkTime = 30
+		blkTime = cache.DefaultBlockTimeSeconds
 	}
 	remaining := timeoutHeight - m.config.BlockClient.LastBlock(ctx).Height()
 	if remaining < 1 {

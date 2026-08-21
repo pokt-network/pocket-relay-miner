@@ -50,6 +50,27 @@ gate_pass() {
 }
 
 # gate_fail <message> -- marks the whole gate failed.
+#
+# ONLY WORKS CALLED DIRECTLY. gate_fail increments $gate_failed IN THE
+# CURRENT SHELL. A helper function invoked via command substitution --
+# anything called as `x="$(some_helper ...)"` -- runs in a SUBSHELL, and a
+# gate_fail called from inside it increments a copy of $gate_failed that dies
+# with the subshell. gate_verdict, back in the real shell, never sees it: the
+# gate prints PASS and the failure is gone with no error, no trace.
+#
+# A helper that needs to fail must instead `return` non-zero and let the
+# CALLER (which is not inside a subshell) check that and call gate_fail
+# itself. gate_settlement_breakdown is the worked example: it returns 1 on a
+# jq parse failure, and live.sh checks that exit status (captured via
+# `x="$(...)"; rc=$?` BEFORE the value is consumed by anything else, since
+# `read var <<<"$(...)"` throws the substitution's exit status away in favor
+# of read's own) before calling gate_fail itself (review 2026-08-20, found
+# while fixing exactly this in gate_settlement_breakdown).
+#
+# The pure helpers here today (gate_unexplained_shortfall, gate_served_
+# shortfall) dodge this because they return via echo and never call
+# gate_fail, so the trap is latent, not yet triggered -- waiting for the
+# next helper that tries to do both at once.
 gate_fail() {
     printf '%s  FAIL%s %s\n' "$GATE_RED" "$GATE_RESET" "$1"
     gate_failed=$((gate_failed + 1))
@@ -88,6 +109,64 @@ gate_verdict() {
     fi
     printf '%sPASS%s %s\n' "$GATE_GREEN" "$GATE_RESET" "$name"
     exit 0
+}
+
+# gate_settlement_breakdown <events file> <min session end height>
+#
+# Sums the settlement numbers the chain reports, as TSV:
+#   claims relays estimated claimed settled minted overloss deflation over_events spend_limit
+#
+# It lives here, with a self-test, because it parses MONEY out of event
+# attributes whose values arrive JSON-encoded (a uint64 field reads as the
+# string "\"4\"", a coin as "\"1000upokt\""), and a silent parse failure would
+# read as a clean zero -- indistinguishable from "this did not happen".
+#
+# relays and estimated are NOT the same quantity and must not be summed
+# together: relays counts the leaves in the submitted tree, i.e. only the relays
+# whose hash matched the service's mining difficulty, while estimated is that
+# count scaled back up by the difficulty multiplier. They coincide only at base
+# difficulty.
+#
+# EventApplicationOverserviced is filtered by the same min-session-end-height
+# window as EventClaimSettled -- an events file spans the whole scan range a
+# caller handed to scan_settlement_events, not just this run's load window,
+# so an unfiltered $over would let a stale overservicing event from a
+# PREVIOUS run report as "overservicing occurred" for this one (review
+# 2026-08-21, same failure shape the window filter above already guards
+# against for $settled).
+#
+# Returns non-zero, on stdout the same all-zero row as the empty-file case,
+# when jq itself fails (schema change, malformed JSON, jq missing). The
+# CALLER must check that exit status and gate_fail -- this function cannot
+# call gate_fail itself and have it count: every caller invokes it via
+# $(...) to capture the TSV, and a command substitution runs in a subshell,
+# so a gate_failed increment made in here would vanish when the subshell
+# exits (review 2026-08-20, MEDIUM). The empty-events-file case above is
+# NOT an error and stays a silent, correct zero; jq actually failing IS
+# one, and used to be indistinguishable from it -- this ONLY existed to
+# swallow the (already-handled) empty-file case, and swallowed jq failures
+# with it.
+gate_settlement_breakdown() {
+    local events_file="$1" minend="${2:-0}"
+    [ -s "$events_file" ] || { printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0'; return 0; }
+    jq -rs --argjson minend "$minend" '
+        def num: tostring | gsub("[^0-9]"; "") | if . == "" then 0 else tonumber end;
+        [ .[] | select(.type == "pocket.tokenomics.EventClaimSettled")
+              | select((.attrs.session_end_block_height // "0" | num) >= $minend) ] as $settled
+      | [ .[] | select(.type == "pocket.tokenomics.EventApplicationOverserviced")
+              | select((.attrs.session_end_block_height // "0" | num) >= $minend) ] as $over
+      | [ ($settled | length),
+          ([$settled[].attrs.num_relays // 0 | num] | add // 0),
+          ([$settled[].attrs.num_estimated_relays // 0 | num] | add // 0),
+          ([$settled[].attrs.claimed_upokt // 0 | num] | add // 0),
+          ([$settled[].attrs.settled_upokt // 0 | num] | add // 0),
+          ([$settled[].attrs.minted_upokt // 0 | num] | add // 0),
+          ([$settled[].attrs.overservicing_loss_upokt // 0 | num] | add // 0),
+          ([$settled[].attrs.deflation_loss_upokt // 0 | num] | add // 0),
+          ($over | length),
+          ([$over[] | select((.attrs.spend_limit_exceeded // "" | tostring) | test("true"))] | length) ]
+      | @tsv
+    ' "$events_file" || { printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0'; return 1; }
 }
 
 # gate_repo_root -- cd to the repository root so a gate behaves the same
