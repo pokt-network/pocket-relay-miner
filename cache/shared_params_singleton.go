@@ -36,13 +36,8 @@ import (
 // correctly for the target deployment (see config.miner.example.yaml).
 const DefaultBlockTimeSeconds int64 = 30
 
-const (
-	// Cache type for pub/sub and metrics
-	sharedParamsCacheType = "shared_params"
-
-	// Number of sessions to keep params cached (safety buffer)
-	sessionTTLMultiplier = 2
-)
+// Cache type for pub/sub and metrics
+const sharedParamsCacheType = "shared_params"
 
 // sharedParamsCache implements SingletonEntityCache[*sharedtypes.Params]
 // for caching shared module parameters.
@@ -384,20 +379,18 @@ func (c *sharedParamsCache) queryChainWithLock(ctx context.Context) (*sharedtype
 // This avoids an extra gRPC call during refresh.
 // Formula: TTL = 2 × num_blocks_per_session × block_time_seconds
 func (c *sharedParamsCache) calculateTTLFromParams(params *sharedtypes.Params) time.Duration {
-	if params == nil {
-		return 10 * time.Minute // Default fallback
-	}
-
-	numBlocksPerSession := params.NumBlocksPerSession
-	ttlSeconds := int64(sessionTTLMultiplier*numBlocksPerSession) * c.blockTimeSeconds
+	// Same formula as SupplierCacheTTLFromParams (2 x num_blocks_per_session x
+	// block_time_seconds) -- shared, not reimplemented, so the two cannot
+	// silently drift apart the way this package's own duplicate copy did
+	// before this fix (review 2026-08-21).
+	ttl := SupplierCacheTTLFromParams(params, c.blockTimeSeconds)
 
 	c.logger.Debug().
-		Uint64("blocks_per_session", numBlocksPerSession).
 		Int64("block_time_seconds", c.blockTimeSeconds).
-		Int64("ttl_seconds", ttlSeconds).
+		Dur("ttl", ttl).
 		Msg("calculated shared params TTL")
 
-	return time.Duration(ttlSeconds) * time.Second
+	return ttl
 }
 
 // handleInvalidation handles cache invalidation events from pub/sub.
