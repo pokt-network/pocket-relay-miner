@@ -5,9 +5,10 @@
 # Runs alongside the stress test and randomly injects failures:
 #   1. Kill random relayer/miner pods (test HA failover)
 #   2. Redis connection blip (test fail-open/closed behavior)
-#   3. Backend latency injection (test pool exhaustion)
-#   4. Network partition simulation (test reconnection)
-#   5. Memory pressure (test graceful degradation)
+#   3. Redis latency marker (test pool behaviour under slow commands)
+#   4. Kill a backend pod (test circuit breaker + health-check recovery)
+#   5. Connection flood against the relayer (test pool exhaustion)
+#   6. Pull and restore a supplier signing key (test the no_local_signer gate)
 #
 # Usage:
 #   # In terminal 1: run stress test
@@ -26,6 +27,14 @@ K8S_CONTEXT="kind-kind"
 CHAOS_INTERVAL="${CHAOS_INTERVAL:-20}"  # seconds between chaos events
 DURATION="${DURATION:-300}"             # total chaos duration
 REDIS_POD="redis-standalone-0"
+KEYS_SECRET="supplier-keys"
+KEYS_SECRET_FIELD="supplier-keys.yaml"
+
+# Base64 of the untouched supplier-keys.yaml, captured the first time a key is
+# pulled and replayed by the EXIT trap. A chaos script that dies holding a key
+# hostage turns a test into an outage, so this is snapshotted before the first
+# mutation and restored unconditionally, including on Ctrl-C.
+KEYS_BACKUP=""
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; MAGENTA='\033[0;35m'; NC='\033[0m'
 log_chaos() { echo -e "${MAGENTA}[CHAOS]${NC} $(date +%H:%M:%S) $1"; }
@@ -89,6 +98,111 @@ chaos_connection_flood() {
     log_chaos "CONN FLOOD: done"
 }
 
+# 6. Pull a supplier signing key, then put it back.
+#
+# The one failure the other five never produce: the fleet still has the supplier
+# in its state (the miner's teardown writes {unstaking, staked: true,
+# services: [...]}, which reads as perfectly servable) but can no longer sign for
+# it. The relayer must refuse those relays promptly with no_local_signer instead
+# of paying for a backend call and failing to sign, and must serve again once the
+# key returns.
+#
+# Two timings matter and neither is instant: kubelet syncs secret volumes on a
+# period of roughly a minute, and the key manager only sees the change when that
+# lands, so this action is deliberately slower than CHAOS_INTERVAL.
+restore_signing_keys() {
+    [ -z "$KEYS_BACKUP" ] && return 0
+
+    kubectl --context "$K8S_CONTEXT" patch secret "$KEYS_SECRET" \
+        -p "{\"data\":{\"$KEYS_SECRET_FIELD\":\"$KEYS_BACKUP\"}}" >/dev/null 2>&1 || true
+    log_info "signing keys restored from snapshot"
+    KEYS_BACKUP=""
+}
+
+# Restore on every exit path, including a failure under `set -e` and Ctrl-C.
+trap restore_signing_keys EXIT
+
+# secret_key_count prints how many keys the secret currently carries.
+secret_key_count() {
+    kubectl --context "$K8S_CONTEXT" get secret "$KEYS_SECRET" \
+        -o "jsonpath={.data['supplier-keys\.yaml']}" 2>/dev/null \
+        | base64 -d 2>/dev/null | grep -c '^[[:space:]]*-' || true
+}
+
+chaos_pull_signing_key() {
+    # Snapshot once. If a previous event is still holding a key out, skip rather
+    # than snapshotting the already-reduced secret as the "original".
+    if [ -n "$KEYS_BACKUP" ]; then
+        log_chaos "PULL KEY: skipped, a key is already pulled"
+        return 0
+    fi
+
+    local original
+    original=$(kubectl --context "$K8S_CONTEXT" get secret "$KEYS_SECRET" \
+        -o "jsonpath={.data['supplier-keys\.yaml']}" 2>/dev/null || true)
+    if [ -z "$original" ]; then
+        log_chaos "PULL KEY: skipped, secret $KEYS_SECRET has no $KEYS_SECRET_FIELD"
+        return 0
+    fi
+
+    local before
+    before=$(secret_key_count)
+    # A failed kubectl gives an empty string, and an empty string in an integer
+    # test aborts the whole script under `set -e`.
+    [ -z "$before" ] && before=0
+    if [ "$before" -lt 2 ]; then
+        log_chaos "PULL KEY: skipped, only $before key(s) — pulling the last one is an outage, not chaos"
+        return 0
+    fi
+
+    KEYS_BACKUP="$original"
+
+    # Drop the last list entry. The secret is `keys:` followed by one `- <hex>`
+    # per key (Tiltfile builds it with encode_yaml), so deleting the final list
+    # line removes exactly one key and leaves valid YAML.
+    local reduced
+    reduced=$(printf '%s' "$original" | base64 -d | sed -e '${/^[[:space:]]*-/d}' | base64 -w0)
+
+    log_chaos "PULL KEY: removing 1 of $before supplier keys (relays for it must get no_local_signer, not a signing error)"
+    if ! kubectl --context "$K8S_CONTEXT" patch secret "$KEYS_SECRET" \
+        -p "{\"data\":{\"$KEYS_SECRET_FIELD\":\"$reduced\"}}" >/dev/null 2>&1; then
+        log_chaos "PULL KEY: patch failed, nothing changed"
+        KEYS_BACKUP=""
+        return 0
+    fi
+
+    # Wait for the fleet to notice. The miner logs a drain decision audit when
+    # its key manager sees the removal; bounded because a miss here is a finding
+    # for the operator to read, not a reason to hold the key out forever.
+    local waited=0
+    while [ "$waited" -lt 120 ]; do
+        if kubectl --context "$K8S_CONTEXT" logs -l app=miner --since=3m --tail=2000 2>/dev/null \
+            | grep -q "drain decision audit"; then
+            log_chaos "PULL KEY: miner saw the removal after ${waited}s"
+            break
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    [ "$waited" -ge 120 ] && log_chaos "PULL KEY: miner did not log a drain decision within 120s — CHECK THIS"
+
+    sleep "$CHAOS_INTERVAL"
+
+    restore_signing_keys
+
+    # Recovery is the half a one-way guard would fail: verify the count is back.
+    waited=0
+    while [ "$waited" -lt 120 ]; do
+        if [ "$(secret_key_count)" -eq "$before" ]; then
+            log_chaos "PULL KEY: secret back to $before keys"
+            return 0
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    log_chaos "PULL KEY: secret did NOT return to $before keys — the fleet is short a key, FIX BEFORE CONTINUING"
+}
+
 # 7. PATH is OUT OF SCOPE — never kill it. It's not our software.
 
 # Weighted random chaos selection
@@ -104,6 +218,7 @@ CHAOS_ACTIONS=(
     chaos_kill_backend
     chaos_kill_backend
     chaos_connection_flood
+    chaos_pull_signing_key
 )
 
 # ─── Main Loop ───────────────────────────────────────────────
