@@ -38,15 +38,24 @@ func TestPublishSupplierUpdateRejectsUnknownActions(t *testing.T) {
 	err = registry.PublishSupplierUpdate(ctx, SupplierUpdateAction("whatever"), addr, nil)
 	require.Error(t, err, "an arbitrary action must not reach the metric's label set")
 
-	// The consequence, not just the return value: nothing was written.
-	n, redisErr := client.Exists(ctx, client.KB().SupplierRegistryKey(addr)).Result()
+	// "draining" joins them: it wrote a per-supplier value nobody read and never
+	// touched the index, so it had no observable effect on either reader. The
+	// draining SEMANTICS did not disappear -- they live where they are actually
+	// enforced, in the supplier cache entry removeSupplier writes.
+	err = registry.PublishSupplierUpdate(ctx, SupplierUpdateAction("draining"), addr, nil)
+	require.Error(t, err,
+		"draining is not a membership change; the registry only tracks whether "+
+			"this fleet handles the address")
+
+	// The consequence, not just the return value: membership is untouched.
+	members, redisErr := registry.ListSuppliers(ctx)
 	require.NoError(t, redisErr)
-	require.Equal(t, int64(0), n,
-		"a rejected action must leave no registry entry behind")
+	require.NotContains(t, members, addr,
+		"a rejected action must leave no membership behind")
 }
 
 // TestPublishSupplierUpdateAcceptsTheRealActions guards the other direction: the
-// new default branch must not reject the three actions production emits.
+// new default branch must not reject the actions production emits.
 func TestPublishSupplierUpdateAcceptsTheRealActions(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
@@ -59,7 +68,6 @@ func TestPublishSupplierUpdateAcceptsTheRealActions(t *testing.T) {
 	const addr = "pokt1supplier_real_actions"
 	for _, action := range []SupplierUpdateAction{
 		SupplierUpdateActionAdd,
-		SupplierUpdateActionDraining,
 		SupplierUpdateActionRemove,
 	} {
 		require.NoError(t, registry.PublishSupplierUpdate(ctx, action, addr, nil),
