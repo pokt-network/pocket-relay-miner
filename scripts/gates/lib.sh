@@ -127,6 +127,14 @@ gate_verdict() {
 # count scaled back up by the difficulty multiplier. They coincide only at base
 # difficulty.
 #
+# EventApplicationOverserviced is filtered by the same min-session-end-height
+# window as EventClaimSettled -- an events file spans the whole scan range a
+# caller handed to scan_settlement_events, not just this run's load window,
+# so an unfiltered $over would let a stale overservicing event from a
+# PREVIOUS run report as "overservicing occurred" for this one (review
+# 2026-08-21, same failure shape the window filter above already guards
+# against for $settled).
+#
 # Returns non-zero, on stdout the same all-zero row as the empty-file case,
 # when jq itself fails (schema change, malformed JSON, jq missing). The
 # CALLER must check that exit status and gate_fail -- this function cannot
@@ -145,7 +153,8 @@ gate_settlement_breakdown() {
         def num: tostring | gsub("[^0-9]"; "") | if . == "" then 0 else tonumber end;
         [ .[] | select(.type == "pocket.tokenomics.EventClaimSettled")
               | select((.attrs.session_end_block_height // "0" | num) >= $minend) ] as $settled
-      | [ .[] | select(.type == "pocket.tokenomics.EventApplicationOverserviced") ] as $over
+      | [ .[] | select(.type == "pocket.tokenomics.EventApplicationOverserviced")
+              | select((.attrs.session_end_block_height // "0" | num) >= $minend) ] as $over
       | [ ($settled | length),
           ([$settled[].attrs.num_relays // 0 | num] | add // 0),
           ([$settled[].attrs.num_estimated_relays // 0 | num] | add // 0),

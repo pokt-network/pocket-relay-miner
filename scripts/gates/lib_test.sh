@@ -45,23 +45,28 @@ trap 'rm -f "$sb_fixture"' EXIT
 cat >"$sb_fixture" <<'FIXTURE'
 {"height":"100","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"100\"","num_relays":"\"4\"","num_estimated_relays":"\"4\"","claimed_upokt":"\"1000upokt\"","settled_upokt":"\"1000upokt\"","minted_upokt":"\"1000upokt\"","overservicing_loss_upokt":"\"0\"","deflation_loss_upokt":"\"0\""}}
 {"height":"100","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"100\"","num_relays":"\"6\"","num_estimated_relays":"\"12\"","claimed_upokt":"\"3000upokt\"","settled_upokt":"\"2000upokt\"","minted_upokt":"\"1800upokt\"","overservicing_loss_upokt":"\"1000\"","deflation_loss_upokt":"\"200\""}}
-{"height":"100","type":"pocket.tokenomics.EventApplicationOverserviced","attrs":{"spend_limit_exceeded":"true"}}
+{"height":"100","type":"pocket.tokenomics.EventApplicationOverserviced","attrs":{"session_end_block_height":"\"100\"","spend_limit_exceeded":"true"}}
 {"height":"50","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"50\"","num_relays":"\"99\"","num_estimated_relays":"\"99\"","claimed_upokt":"\"9999upokt\"","settled_upokt":"\"9999upokt\"","minted_upokt":"\"9999upokt\"","overservicing_loss_upokt":"\"7\"","deflation_loss_upokt":"\"7\""}}
+{"height":"50","type":"pocket.tokenomics.EventApplicationOverserviced","attrs":{"session_end_block_height":"\"50\"","spend_limit_exceeded":"true"}}
 FIXTURE
 
 # The height-50 claim is BEFORE the window and must be excluded; leaving it in
 # would inflate every number and, worse, invent 7 uPOKT of overservicing from a
-# previous run.
+# previous run. The height-50 EventApplicationOverserviced is the same trap on
+# the OTHER counter: $settled already filtered by session_end_block_height,
+# $over did not, so a stale overservicing event from a previous run used to
+# report as "overservicing occurred THIS run" no matter how old it was
+# (review 2026-08-21).
 expect "$(printf '2\t10\t16\t4000\t3000\t2800\t1000\t200\t1\t1')" \
     "$(gate_settlement_breakdown "$sb_fixture" 100)" \
-    "settlement breakdown, window at 100"
+    "settlement breakdown, window at 100 -- both the stale claim AND the stale overservicing event must be excluded"
 
 # estimated (16) differs from relays (10) on purpose: summing them together, or
 # reading one for the other, is the difficulty-multiplier confusion this helper
 # exists to keep visible.
-expect "$(printf '3\t109\t115\t13999\t12999\t12799\t1007\t207\t1\t1')" \
+expect "$(printf '3\t109\t115\t13999\t12999\t12799\t1007\t207\t2\t2')" \
     "$(gate_settlement_breakdown "$sb_fixture" 0)" \
-    "no window: the older claim is included"
+    "no window: the older claim and the older overservicing event are both included"
 
 expect "$(printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0')" \
     "$(gate_settlement_breakdown /nonexistent/events.jsonl 0)" \
