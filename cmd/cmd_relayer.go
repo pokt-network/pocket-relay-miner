@@ -816,9 +816,14 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			)
 
 			// Create caches for full session validation
+			//
+			// BlockTimeSeconds has no operator-configurable field on this path today
+			// (unlike the miner's block_time_seconds) -- cache.DefaultBlockTimeSeconds
+			// is the single source for that fallback value across the whole process;
+			// see its doc comment for why the value itself is not "corrected" here.
 			cacheConfig := cache.CacheConfig{
 				TTLBlocks:        1,
-				BlockTimeSeconds: 30, // CRITICAL: Must match actual block time (30s for this network, not 6s!)
+				BlockTimeSeconds: cache.DefaultBlockTimeSeconds,
 			}
 
 			// Create SharedParamCache for shared parameter caching

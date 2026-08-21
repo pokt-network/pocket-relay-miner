@@ -2390,7 +2390,7 @@ func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	// a timeout that keeps it inside the remaining window.
 	blkTime := m.config.BlockTimeSeconds
 	if blkTime <= 0 {
-		blkTime = 30
+		blkTime = cache.DefaultBlockTimeSeconds
 	}
 	remaining := timeoutHeight - m.config.BlockClient.LastBlock(ctx).Height()
 	if remaining < 1 {
