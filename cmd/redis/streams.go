@@ -174,6 +174,33 @@ func inspectStream(ctx context.Context, client *DebugRedisClient, supplierAddr s
 	return nil
 }
 
+// streamStats reads a stream's length and total pending count (summed across
+// every consumer group) in one place, so the listing's classification and the
+// pre-delete re-check can never disagree about what "safe" requires.
+//
+// ok=false on ANY read error (XLen or XInfoGroups) and NEVER on a partial
+// result: before this, a failed XLen alone left length at its zero value
+// silently, and a stream that genuinely had relays in it printed
+// "SAFE TO DELETE true". A transient Redis error must make a stream UNKNOWN,
+// not empty -- the two look identical in the length/pending numbers, but only
+// one of them is safe to act on.
+func streamStats(ctx context.Context, client *DebugRedisClient, key string) (length, pending int64, ok bool) {
+	n, err := client.XLen(ctx, key).Result()
+	if err != nil {
+		return 0, 0, false
+	}
+	length = n
+
+	groups, err := client.XInfoGroups(ctx, key).Result()
+	if err != nil {
+		return length, 0, false
+	}
+	for _, g := range groups {
+		pending += g.Pending
+	}
+	return length, pending, true
+}
+
 // orphanedStreams reports relay streams whose supplier this deployment no longer
 // knows about, and optionally deletes the ones that hold nothing.
 //
@@ -213,6 +240,7 @@ func orphanedStreams(ctx context.Context, client *DebugRedisClient, deleteEmpty,
 		addr    string
 		length  int64
 		pending int64
+		statsOK bool
 	}
 	var orphans []orphan
 
@@ -225,18 +253,8 @@ func orphanedStreams(ctx context.Context, client *DebugRedisClient, deleteEmpty,
 			continue
 		}
 
-		o := orphan{key: key, addr: addr}
-		if n, lenErr := client.XLen(ctx, key).Result(); lenErr == nil {
-			o.length = n
-		}
-		// Pending is summed across every group: a stream can carry more than one,
-		// and an entry pending in ANY of them is unfinished work.
-		if groups, groupErr := client.XInfoGroups(ctx, key).Result(); groupErr == nil {
-			for _, g := range groups {
-				o.pending += g.Pending
-			}
-		}
-		orphans = append(orphans, o)
+		length, pending, statsOK := streamStats(ctx, client, key)
+		orphans = append(orphans, orphan{key: key, addr: addr, length: length, pending: pending, statsOK: statsOK})
 	}
 
 	if len(orphans) == 0 {
@@ -249,11 +267,17 @@ func orphanedStreams(ctx context.Context, client *DebugRedisClient, deleteEmpty,
 	_, _ = fmt.Fprintf(w, "SUPPLIER\tENTRIES\tPENDING\tSAFE TO DELETE\n")
 	deletable := make([]orphan, 0, len(orphans))
 	for _, o := range orphans {
-		safe := o.length == 0 && o.pending == 0
+		// !statsOK must never read as safe: a stream we failed to read is
+		// unknown, not empty, and unknown is never a green light to delete.
+		safe := o.statsOK && o.length == 0 && o.pending == 0
 		if safe {
 			deletable = append(deletable, o)
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%v\n", o.addr, o.length, o.pending, safe)
+		safeCol := "unknown (read error)"
+		if o.statsOK {
+			safeCol = fmt.Sprintf("%v", safe)
+		}
+		_, _ = fmt.Fprintf(w, "%s\t%d\t%d\t%s\n", o.addr, o.length, o.pending, safeCol)
 	}
 	_ = w.Flush()
 
@@ -276,12 +300,16 @@ func orphanedStreams(ctx context.Context, client *DebugRedisClient, deleteEmpty,
 	}
 
 	for _, o := range deletable {
-		// Re-check immediately before deleting. The listing above is a snapshot,
-		// and a supplier can be re-claimed by another miner between the scan and
-		// this line; deleting then would destroy live deliveries.
-		length, lenErr := client.XLen(ctx, o.key).Result()
-		if lenErr != nil || length != 0 {
-			fmt.Printf("  skip %s: stream is no longer empty\n", o.addr)
+		// Re-check immediately before deleting, with the SAME two-part guard as
+		// the listing above (streamStats). A supplier can be re-claimed by
+		// another miner between the scan and this line, and length==0 alone is
+		// not enough: XACKDEL/DELREF or XDEL can leave a stream at length 0
+		// while another group's pending list still references those entry IDs.
+		// Re-running only XLen here (as this used to) would pass that stream
+		// straight through and Del would take the pending list with it.
+		length, pending, statsOK := streamStats(ctx, client, o.key)
+		if !statsOK || length != 0 || pending != 0 {
+			fmt.Printf("  skip %s: stream is no longer empty (or could not be re-checked)\n", o.addr)
 			continue
 		}
 		if err := client.Del(ctx, o.key).Err(); err != nil {
