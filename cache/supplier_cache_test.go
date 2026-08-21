@@ -734,3 +734,53 @@ func TestNewSupplierCache_DefaultsTTLWhenUnconfigured(t *testing.T) {
 	require.Greater(t, ttl, time.Duration(0))
 	require.LessOrEqual(t, ttl, defaultSupplierCacheTTL)
 }
+
+// TestWarmupFromRedis_DiscoversEveryKeyItScans is the L2 half of a check that
+// was only ever done by hand against a live stack (2026-08-21): every supplier
+// key present in Redis must come back from the discovery scan and land in L1.
+//
+// It exists because the failure is INVISIBLE to the live gate. Discovery
+// extracts the operator address from each scanned key; if that extraction breaks
+// -- a drifted trim prefix, a namespace change -- the scan returns keys and the
+// loop discards every one of them. L1 stays empty, every relay falls through to
+// L2, and the relays still get served and billed. The live gate measures relays
+// billed, so it passes green while the cache layer it depends on does nothing.
+//
+// Asserting on L1 CONTENT rather than on the log line is the point: the count in
+// "discovered_suppliers" can be right while the addresses are garbage.
+func TestWarmupFromRedis_DiscoversEveryKeyItScans(t *testing.T) {
+	cache, client := newTestSupplierCache(t)
+	ctx := context.Background()
+
+	// A staked entry, an unstaked one, and an address whose text could tempt a
+	// naive prefix trim (it repeats the prefix's last segment).
+	addrs := []string{
+		"pokt1warmup_discover_a",
+		"pokt1warmup_discover_b",
+		"pokt1supplier_looking_addr",
+	}
+	for i, addr := range addrs {
+		state := &SupplierState{
+			OperatorAddress: addr,
+			Status:          SupplierStatusActive,
+			Staked:          true,
+			Services:        []string{"svc1"},
+		}
+		if i == 1 {
+			state.Status = SupplierStatusNotStaked
+			state.Staked = false
+			state.Services = nil
+		}
+		writeSupplierToRedis(t, client, state)
+	}
+
+	require.NoError(t, cache.WarmupFromRedis(ctx, nil))
+
+	for _, addr := range addrs {
+		_, ok := cache.localCache.Load(addr)
+		require.Truef(t, ok,
+			"warmup scanned this key but %q never reached L1: the address extraction "+
+				"dropped it, which leaves L1 empty and sends every relay to L2 -- "+
+				"degraded silently, and invisible to the live gate", addr)
+	}
+}
