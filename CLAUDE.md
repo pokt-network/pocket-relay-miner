@@ -357,7 +357,6 @@ Reference: See full mapping in `cmd/cmd_redis.go` and the subcommands under `cmd
   - `ha:cache:service:{serviceID}` (Proto bytes)
   - `ha:cache:shared_params` (Proto bytes)
   - `ha:cache:proof_params` (Proto bytes)
-  - `ha:supplier:{address}` (Proto/JSON bytes)
 - **Cache Locks**: `ha:cache:lock:{type}:{id}` (String with TTL)
 - **Cache Tracking**: `ha:cache:known:{type}` (Set of known entity IDs)
 - **Meter Data** (per (session, supplier) — one session is served by many
@@ -365,9 +364,14 @@ Reference: See full mapping in `cmd/cmd_redis.go` and the subcommands under `cmd
   session end):
   - `ha:meter:{sessionID}:{supplier}:meta` (String: SessionMeterMeta JSON)
   - `ha:meter:{sessionID}:{supplier}:consumed` (String: consumed uPOKT counter)
-- **Supplier Registry**:
-  - `ha:suppliers:{supplier}` (Hash with supplier metadata)
-  - `ha:suppliers:index` (Set of all supplier addresses)
+- **Supplier state and fleet index** (plural is the set, singular is the entity):
+  - `ha:supplier:{address}` (String: SupplierState JSON — the replica of the
+    supplier's on-chain state; the relayer reads this to decide whether to serve)
+  - `ha:suppliers:index` (Set of addresses THIS FLEET handles; read by the
+    balance monitor and orphan-stream detection)
+  - There is NO `ha:suppliers:{address}`. It existed, had zero readers, and
+    collided with the key above whenever `supplier_prefix` was set to
+    `suppliers`. Do not reintroduce a per-supplier key under the plural prefix.
 - **Pub/Sub Channels**:
   - `ha:events:cache:{type}:invalidate` (Cache invalidation)
   - `ha:meter:cleanup` (Meter cleanup signals)
