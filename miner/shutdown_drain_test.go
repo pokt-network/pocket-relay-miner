@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
@@ -258,4 +259,48 @@ func TestShutdownDrainWaitsOutItsWindowEvenWhenTheBufferStartsEmpty(t *testing.T
 		t.Fatal("drainDeliveryBuffer did not return after its channel closed")
 	}
 	require.Empty(t, *f.processed, "nothing was ever sent, so nothing should have been processed")
+}
+
+// TestShutdownDrainCountsAnAckFailureAsAbandonedNotDrained is the regression
+// test for review 2026-08-21: the drain loop used to call
+// RecordShutdownDrainedRelay and increment `drained` right after
+// handleStreamMessage returned, with no check on whether AckMessage inside
+// it actually succeeded. shutdown_drained_relays_total documents itself as
+// relays "drained... and processed", but a message can be fully processed by
+// onRelay and still fail to acknowledge (a Redis hiccup coincident with
+// shutdown) -- the entry stays PENDING in Redis exactly like a
+// window-timeout abandonment, yet used to be reported as a success.
+//
+// AckMessage is forced to fail deterministically by closing the consumer
+// first: StreamsConsumer.AckMessage returns an error once closed, without
+// touching the shared Redis client the fixture also uses for assertions
+// (Close() only flips an internal flag and waits for goroutines this fixture
+// never started). onRelay does not go through the consumer, so this isolates
+// exactly the ack-failure path from the processing path.
+//
+// The metric deltas are the actual regression signal: the Redis PEL state
+// (still pending) is IDENTICAL whether or not the drain loop checks
+// handleStreamMessage's return value -- AckMessage fails either way. Only
+// shutdown_drained_relays_total / shutdown_abandoned_relays_total tell old
+// code (increments drained regardless) apart from the fix (increments
+// abandoned instead).
+func TestShutdownDrainCountsAnAckFailureAsAbandonedNotDrained(t *testing.T) {
+	f := newDrainFixture(t, 1)
+	require.NoError(t, f.state.Consumer.Close())
+
+	drainedBefore := testutil.ToFloat64(shutdownDrainedRelays.WithLabelValues(drainSupplier))
+	abandonedBefore := testutil.ToFloat64(shutdownAbandonedRelays.WithLabelValues(drainSupplier))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	f.mgr.drainDeliveryBuffer(ctx, f.state, f.bufferedChan())
+
+	require.Len(t, *f.processed, 1, "the relay was still processed by onRelay")
+	require.Equal(t, int64(1), f.pendingCount(t),
+		"an ack failure must leave the entry PENDING in Redis, same as any other abandoned entry")
+	require.Equal(t, drainedBefore, testutil.ToFloat64(shutdownDrainedRelays.WithLabelValues(drainSupplier)),
+		"a relay whose AckMessage failed must NOT count as drained -- it is not done, Redis still has it pending")
+	require.Equal(t, abandonedBefore+1, testutil.ToFloat64(shutdownAbandonedRelays.WithLabelValues(drainSupplier)),
+		"a relay whose AckMessage failed must count as abandoned, same as one the window ran out on")
 }
