@@ -176,3 +176,105 @@ func TestKnownSupplierAddressesOnAnEmptyDeployment(t *testing.T) {
 	require.NoError(t, err, "a deployment that has never registered a supplier is not an error")
 	require.Empty(t, known)
 }
+
+// TestStreamStatsReportsUnknownOnAReadError is MEDIUM-1's test-teeth (review
+// 2026-08-20): a stream key that fails to read must come back ok=false, never
+// a silent zero. Before the fix, orphanedStreams left length/pending at their
+// zero value on an XLen/XInfoGroups error and printed "SAFE TO DELETE true"
+// for a stream it could not actually inspect.
+//
+// WRONGTYPE, not a mock: setting a plain string at the stream's key is a
+// real, deterministic way to make XLen/XInfoGroups fail against real Redis,
+// without needing an error-injecting client.
+func TestStreamStatsReportsUnknownOnAReadError(t *testing.T) {
+	c, _ := newNamespacedDebugClient(t)
+	ctx := context.Background()
+
+	const addr = "pokt1wrongtype"
+	key := c.KB().StreamKey(addr)
+	require.NoError(t, c.Set(ctx, key, "not a stream", 0).Err())
+
+	length, pending, ok := streamStats(ctx, c, key)
+	require.False(t, ok, "a read error must report ok=false, never a silent zero")
+	require.Zero(t, length)
+	require.Zero(t, pending)
+}
+
+// TestStreamStatsCountsPendingEvenWhenLengthIsZero is MEDIUM-2's test-teeth.
+// It reproduces the exact shape the review named: entries acknowledged-and-
+// deleted (XACKDEL/DELREF) or plain XDEL can leave a stream at XLEN==0 while
+// a consumer group's pending list still references those entry IDs. The
+// pre-delete re-check used to run only XLen and would have called this
+// stream safe; it now calls the same streamStats the listing uses, so this
+// proves the shared primitive reports the case correctly for both call sites
+// at once.
+func TestStreamStatsCountsPendingEvenWhenLengthIsZero(t *testing.T) {
+	c, _ := newNamespacedDebugClient(t)
+	ctx := context.Background()
+
+	const addr = "pokt1acked_but_pending"
+	key := c.KB().StreamKey(addr)
+
+	id, err := c.XAdd(ctx, &redis.XAddArgs{Stream: key, Values: map[string]any{"data": []byte("x")}}).Result()
+	require.NoError(t, err)
+	require.NoError(t, c.XGroupCreate(ctx, key, "g1", "0").Err())
+
+	// Deliver the entry to a consumer without acking it: it lands in the
+	// group's pending list.
+	_, err = c.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: "g1", Consumer: "c1", Streams: []string{key, ">"}, Count: 1,
+	}).Result()
+	require.NoError(t, err)
+
+	// The entry is gone from the stream itself, but the group never acked it,
+	// so it stays in the PEL -- exactly what XACKDEL/DELREF and XDEL both can
+	// leave behind.
+	require.NoError(t, c.XDel(ctx, key, id).Err())
+
+	length, err := c.XLen(ctx, key).Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(0), length, "premise: XLEN reports empty despite the pending entry")
+
+	gotLength, gotPending, ok := streamStats(ctx, c, key)
+	require.True(t, ok)
+	require.Equal(t, int64(0), gotLength)
+	require.Equal(t, int64(1), gotPending,
+		"a stream at XLEN==0 with a group's PEL still non-empty must NOT be reported as empty -- "+
+			"deleting it would take that pending entry, and the relay it represents, with it")
+}
+
+// TestOrphanedStreamsRefusesToDeleteAStreamWithOnlyPendingEntries pins the
+// safety property end to end: an orphan stream at XLEN==0 with a nonzero PEL
+// must survive --delete-empty.
+//
+// It does NOT discriminate MEDIUM-2's specific fix (the pre-delete re-check
+// re-running only XLen): the state here is already this shape at scan time,
+// so the classification pass -- which always summed pending, before and
+// after the fix -- excludes it from `deletable` before the re-check ever
+// runs. Verified by injecting the pre-fix re-check (XLen-only) and confirming
+// this test still passes. The actual test-teeth for the re-check's own code
+// path is TestStreamStatsCountsPendingEvenWhenLengthIsZero above: the
+// re-check now calls that exact function, so proving it correct there proves
+// the re-check correct without needing to win a scan-vs-delete race, which
+// orphanedStreams has no seam to inject deterministically.
+func TestOrphanedStreamsRefusesToDeleteAStreamWithOnlyPendingEntries(t *testing.T) {
+	c, _ := newNamespacedDebugClient(t)
+	ctx := context.Background()
+
+	const addr = "pokt1orphan_acked_but_pending"
+	key := c.KB().StreamKey(addr)
+
+	id, err := c.XAdd(ctx, &redis.XAddArgs{Stream: key, Values: map[string]any{"data": []byte("x")}}).Result()
+	require.NoError(t, err)
+	require.NoError(t, c.XGroupCreate(ctx, key, "g1", "0").Err())
+	_, err = c.XReadGroup(ctx, &redis.XReadGroupArgs{
+		Group: "g1", Consumer: "c1", Streams: []string{key, ">"}, Count: 1,
+	}).Result()
+	require.NoError(t, err)
+	require.NoError(t, c.XDel(ctx, key, id).Err())
+
+	require.NoError(t, orphanedStreams(ctx, c, true, true))
+
+	require.True(t, streamExists(t, c, addr),
+		"XLEN==0 is not enough to call a stream empty -- a group's pending entry must block the delete")
+}
