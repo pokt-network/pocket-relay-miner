@@ -740,6 +740,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			_ = provider.Close()
 		}
 
+		// Publish the key count: this process holds its signing keys directly
+		// from the providers and never builds a MultiProviderKeyManager, which is
+		// what drives this gauge on the miner. Without this the relayer reported
+		// a hard 0 while holding a full key set.
+		keys.SetSupplierKeysActive(len(loadedKeys))
+
 		if len(loadedKeys) == 0 {
 			logger.Warn().Msg("no keys found - response signing will be disabled")
 		} else {

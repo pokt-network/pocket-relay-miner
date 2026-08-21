@@ -37,6 +37,20 @@ type LeaderControllerConfig struct {
 	QueryNodeGRPCUrl string
 	GRPCInsecure     bool
 	ChainID          string
+
+	// SharedSupplierCache, when set, is used instead of building a
+	// leader-local supplier cache.
+	//
+	// The SupplierWorker already owns one for the whole life of the process on
+	// every replica; a second instance here meant two L1 maps and two
+	// subscriptions to the same invalidation channel, so the leader did every
+	// invalidation twice (measured 2026-08-21: leader +204 over an idle window
+	// where a relayer saw +102, exactly 2x).
+	//
+	// Ownership stays with the worker: this controller must NOT Close a cache
+	// it did not create, or a demotion would tear down the cache the worker is
+	// still writing supplier state into.
+	SharedSupplierCache *cache.SupplierCache
 }
 
 // LeaderController manages all leader-only resources.
@@ -55,6 +69,7 @@ type LeaderController struct {
 	sharedParamsCache     cache.SingletonEntityCache[*sharedtypes.Params]
 	proofParamsCache      cache.SingletonEntityCache[*prooftypes.Params]
 	supplierParamsCache   *cache.RedisSupplierParamCache
+	ownsSupplierCache     bool // false when supplierCache came from the worker
 	applicationCache      cache.KeyedEntityCache[string, *apptypes.Application]
 	serviceCache          cache.KeyedEntityCache[string, *sharedtypes.Service]
 	supplierCache         *cache.SupplierCache
@@ -224,19 +239,31 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start service cache: %w", err)
 	}
 
-	// Create supplier cache
-	c.supplierCache = cache.NewSupplierCache(
-		c.logger,
-		c.config.RedisClient,
-		cache.SupplierCacheConfig{
-			FailOpen: false,
-		},
-	)
-	if err := c.supplierCache.Start(ctx); err != nil {
-		c.cleanup()
-		return fmt.Errorf("failed to start supplier cache: %w", err)
+	// Supplier cache: share the worker's rather than build a second one.
+	//
+	// Both live in this same process, and both Start() subscribe to the same
+	// invalidation channel, so two instances meant two L1 maps and every
+	// invalidation handled twice. ownsSupplierCache records which case we are
+	// in so cleanup() only closes what it created.
+	if shared := c.config.SharedSupplierCache; shared != nil {
+		c.supplierCache = shared
+		c.ownsSupplierCache = false
+		c.logger.Info().Msg("reusing the supplier worker's supplier cache")
+	} else {
+		c.supplierCache = cache.NewSupplierCache(
+			c.logger,
+			c.config.RedisClient,
+			cache.SupplierCacheConfig{
+				FailOpen: false,
+			},
+		)
+		c.ownsSupplierCache = true
+		if err := c.supplierCache.Start(ctx); err != nil {
+			c.cleanup()
+			return fmt.Errorf("failed to start supplier cache: %w", err)
+		}
+		c.logger.Info().Msg("supplier cache initialized for state publishing")
 	}
-	c.logger.Info().Msg("supplier cache initialized for state publishing")
 
 	// Create block subscriber adapter for orchestrator
 	blockSubscriberAdapter := cache.NewBlockSubscriberAdapter(
@@ -452,11 +479,17 @@ func (c *LeaderController) cleanup() {
 		c.cacheOrchestrator = nil
 	}
 
+	// Only close what this controller created. A shared cache belongs to the
+	// SupplierWorker, which keeps writing supplier state after a demotion --
+	// closing it here would kill the writer's cache on every leadership change.
 	if c.supplierCache != nil {
-		if err := c.supplierCache.Close(); err != nil {
-			c.logger.Error().Err(err).Msg("failed to close supplier cache")
+		if c.ownsSupplierCache {
+			if err := c.supplierCache.Close(); err != nil {
+				c.logger.Error().Err(err).Msg("failed to close supplier cache")
+			}
 		}
 		c.supplierCache = nil
+		c.ownsSupplierCache = false
 	}
 
 	if c.serviceCache != nil {

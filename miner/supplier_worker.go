@@ -799,6 +799,24 @@ func (w *SupplierWorker) cleanup() {
 }
 
 // GetSupplierManager returns the supplier manager for external access.
+// GetSupplierCache returns the worker's supplier cache so leader-only code can
+// SHARE it instead of constructing a second one.
+//
+// The worker's cache is the right one to share because the worker runs on every
+// replica for the process's whole life, while LeaderController's resources are
+// built on election and torn down on demotion. Two instances in one process
+// meant two L1 maps and two subscriptions to the same invalidation channel, so
+// the leader processed every invalidation twice -- measured 2026-08-21: the
+// leader miner counted +204 supplier invalidations over an idle window where a
+// relayer counted +102, exactly 2x.
+//
+// Returns nil before Start() has built it; callers must handle that.
+func (w *SupplierWorker) GetSupplierCache() *cache.SupplierCache {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.supplierCache
+}
+
 func (w *SupplierWorker) GetSupplierManager() *SupplierManager {
 	return w.supplierManager
 }
