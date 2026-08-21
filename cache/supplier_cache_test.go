@@ -556,11 +556,10 @@ func TestSupplierCache_L1RefreshesAfterTTL(t *testing.T) {
 }
 
 // TestSupplierCacheTTLFromParams pins the formula (HIGH-1, review
-// 2026-08-20): TTL = 2 x unbonding_period_sessions x blocks_per_session x
-// num_blocks_per_session x block_time_seconds, grounded in live chain params
-// rather than an arbitrary constant, with every missing-input path falling
-// back to defaultSupplierCacheTTL instead of ever landing on a zero/no-TTL
-// write.
+// 2026-08-20): TTL = 2 x num_blocks_per_session x block_time_seconds,
+// grounded in live chain params rather than an arbitrary constant, with
+// every missing-input path falling back to defaultSupplierCacheTTL instead
+// of ever landing on a zero/no-TTL write.
 //
 // SupplierUnbondingPeriodSessions is deliberately NOT a formula input and
 // deliberately NOT in these cases — an earlier version used it and produced a
@@ -720,7 +719,7 @@ func TestNewSupplierCache_DefaultsTTLWhenUnconfigured(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
 	cache := NewSupplierCache(logger, client, SupplierCacheConfig{FailOpen: false})
-	require.Equal(t, defaultSupplierCacheTTL, cache.ttl)
+	require.Equal(t, defaultSupplierCacheTTL, time.Duration(cache.ttl.Load()))
 
 	const addr = "pokt1ttldefault"
 	require.NoError(t, cache.SetSupplierState(ctx, &SupplierState{

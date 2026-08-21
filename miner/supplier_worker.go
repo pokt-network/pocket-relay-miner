@@ -7,7 +7,6 @@ import (
 	stdhttp "net/http"
 	"runtime"
 	"sync"
-	"time"
 
 	"github.com/alitto/pond/v2"
 	"github.com/cometbft/cometbft/rpc/client/http"
@@ -253,35 +252,48 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// orchestrator-refreshed param caches that need to exist live on the leader
 	// controller. Worker-local copies were dead duplicates.
 
-	// Compute the supplier cache's Redis TTL from the chain's own unbonding
-	// period (cache.SupplierCacheTTLFromParams) so a decommissioned
-	// supplier's cache entry ages out instead of freezing "still active"
-	// forever (HIGH-1, review 2026-08-20). Unlike the advisory above, this
-	// result IS consumed downstream, so it is read synchronously and bounded
-	// by a short timeout rather than fired-and-forgotten: an unreachable
-	// node falls back to a safe default instead of leaving the TTL unset.
-	supplierCacheTTL := time.Duration(0) // 0 -> NewSupplierCache falls back to its own default
-	ttlCtx, cancelTTL := context.WithTimeout(ctx, sharedParamsAdvisoryTimeout)
-	if sharedParamsForTTL, sharedErr := w.queryClients.Shared().GetParams(ttlCtx); sharedErr == nil {
-		supplierCacheTTL = cache.SupplierCacheTTLFromParams(sharedParamsForTTL, w.config.Config.GetBlockTimeSeconds())
-	} else {
-		w.logger.Warn().Err(sharedErr).
-			Msg("could not read shared params for supplier cache TTL; using fallback")
-	}
-	cancelTTL()
-
-	// Create supplier cache (for publishing supplier state)
+	// Create supplier cache (for publishing supplier state). Constructed with
+	// SupplierCacheConfig{} — no TTL set — so it starts on cache.
+	// defaultSupplierCacheTTL immediately: HIGH-1's write path (SetSupplierState)
+	// always writes a bounded TTL from the moment this cache exists, never TTL=0.
 	w.supplierCache = cache.NewSupplierCache(
 		w.logger,
 		w.config.RedisClient,
-		cache.SupplierCacheConfig{
-			FailOpen: false,
-			TTL:      supplierCacheTTL,
-		},
+		cache.SupplierCacheConfig{FailOpen: false},
 	)
 	if err = w.supplierCache.Start(ctx); err != nil {
 		w.cleanup()
 		return fmt.Errorf("failed to start supplier cache: %w", err)
+	}
+
+	// Refine that default to the chain's own session length
+	// (cache.SupplierCacheTTLFromParams, num_blocks_per_session x
+	// block_time_seconds — NOT the unbonding period; see that function's doc
+	// comment for why) once shared params are available, via SetTTL.
+	//
+	// Dispatched off the master pool, same as the advisory above and for the
+	// same reason: this used to be a synchronous GetParams() call here,
+	// duplicating the advisory's own chain round trip and reintroducing the
+	// exact "an unreachable node must not lengthen every miner start" problem
+	// the advisory was written to avoid (review 2026-08-21). Nothing blocks
+	// on this result — the cache already has a safe default the moment it
+	// was constructed above — so there is no correctness reason for it to be
+	// synchronous either.
+	supplierCache := w.supplierCache
+	if ttlErr := w.masterPool.Go(func() {
+		ttlCtx, cancelTTL := context.WithTimeout(w.ctx, sharedParamsAdvisoryTimeout)
+		defer cancelTTL()
+
+		sharedParamsForTTL, sharedErr := w.queryClients.Shared().GetParams(ttlCtx)
+		if sharedErr != nil {
+			w.logger.Warn().Err(sharedErr).
+				Msg("could not read shared params for supplier cache TTL; keeping the default")
+			return
+		}
+		supplierCache.SetTTL(cache.SupplierCacheTTLFromParams(sharedParamsForTTL, w.config.Config.GetBlockTimeSeconds()))
+	}); ttlErr != nil {
+		w.logger.Warn().Err(ttlErr).
+			Msg("supplier cache TTL refinement skipped: worker pool would not accept the task")
 	}
 
 	// Get chain ID - required for transaction signing
