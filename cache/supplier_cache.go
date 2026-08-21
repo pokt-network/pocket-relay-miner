@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -477,6 +478,24 @@ func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierSta
 
 	key := c.supplierKey(state.OperatorAddress)
 
+	// Whether this write carries new information, decided BEFORE the write --
+	// the write is what would make them equal.
+	//
+	// Only the invalidation below is suppressed; the write itself stays
+	// unconditional. Two reasons the write is not the thing to skip:
+	//
+	//  - The TTL is the only thing keeping this entry alive, and an expired
+	//    entry makes the relayer serve optimistically, which disables the
+	//    per-service gate exactly for the suppliers stable enough never to
+	//    trigger a rewrite.
+	//  - LastUpdated is what the CLI reports as "Last Updated"; refreshing only
+	//    the TTL would freeze it at the last CHANGE, so a healthy supplier that
+	//    has not changed in hours would read as one nothing is tracking.
+	//
+	// The write costs a round trip that happens either way; the publish is the
+	// expensive half, and the one worth suppressing.
+	unchanged := c.supplierStateUnchanged(ctx, key, state)
+
 	// Bounded TTL (see SupplierCacheTTLFromParams), refreshed on every write.
 	// An actively-tracked supplier is rewritten every reconcile pass, long
 	// before the TTL matters; it only fires once nothing writes this entry
@@ -491,21 +510,85 @@ func (c *SupplierCache) SetSupplierState(ctx context.Context, state *SupplierSta
 	// and reload fresh data from L2 on next access.
 	// This fixes the bug where relayers show "supplier not staked for service"
 	// after services are updated but L1 cache still has stale data.
-	payload := fmt.Sprintf(`{"operator_address": "%s"}`, state.OperatorAddress)
-	if err := PublishInvalidation(ctx, c.redis, c.logger, supplierCacheType, payload); err != nil {
-		c.logger.Warn().
-			Err(err).
-			Str(logging.FieldSupplierOperator, state.OperatorAddress).
-			Msg("failed to publish supplier cache invalidation (other instances may have stale data)")
+	//
+	// Only when something actually changed. A reconcile pass rewrites EVERY
+	// tracked supplier every interval, so publishing unconditionally means
+	// dropping every supplier's L1 on every relayer for nothing: measured at
+	// rest with 17 suppliers and 2 miners, 34 invalidations/min per relayer,
+	// which is exactly 17 x 2 / 60s. At 594 suppliers it is ~1200/min, and it
+	// scales with the miner count.
+	if !unchanged {
+		payload := fmt.Sprintf(`{"operator_address": "%s"}`, state.OperatorAddress)
+		if err := PublishInvalidation(ctx, c.redis, c.logger, supplierCacheType, payload); err != nil {
+			c.logger.Warn().
+				Err(err).
+				Str(logging.FieldSupplierOperator, state.OperatorAddress).
+				Msg("failed to publish supplier cache invalidation (other instances may have stale data)")
+		}
 	}
 
 	c.logger.Debug().
 		Str(logging.FieldSupplierOperator, state.OperatorAddress).
 		Str("status", state.Status).
 		Uint64("unstake_session_end_height", state.UnstakeSessionEndHeight).
+		Bool("unchanged", unchanged).
 		Msg("updated supplier state in cache")
 
 	return nil
+}
+
+// supplierStateUnchanged reports whether the entry already stored at key
+// carries the same information as next.
+//
+// It compares CONTENT, not the stored bytes. SetSupplierState stamps
+// LastUpdated with the current second before marshalling, so a byte comparison
+// could only ever match two writes landing in the same second -- never two
+// reconcile passes 60s apart, which is the entire case worth suppressing. It
+// would look like it worked in a test that writes twice in a row and do nothing
+// in production.
+//
+// Re-marshalling the stored entry also normalises it, so an entry written by a
+// version that did not yet have a field (StakedEndpoints was added this way)
+// compares equal when the information is genuinely the same, instead of
+// republishing forever after an upgrade.
+//
+// Any failure to read or decode the stored entry answers false: republishing is
+// the safe direction, since the alternative is a relayer keeping stale services.
+func (c *SupplierCache) supplierStateUnchanged(
+	ctx context.Context,
+	key string,
+	next *SupplierState,
+) bool {
+	raw, err := c.redis.Get(ctx, key).Bytes()
+	if err != nil {
+		return false
+	}
+
+	var stored SupplierState
+	if err := json.Unmarshal(raw, &stored); err != nil {
+		return false
+	}
+
+	storedContent, err := supplierStateContent(&stored)
+	if err != nil {
+		return false
+	}
+
+	nextContent, err := supplierStateContent(next)
+	if err != nil {
+		return false
+	}
+
+	return bytes.Equal(storedContent, nextContent)
+}
+
+// supplierStateContent serialises a supplier state with the timestamp
+// normalised, so two passes carrying the same information compare equal.
+func supplierStateContent(state *SupplierState) ([]byte, error) {
+	content := *state
+	content.LastUpdated = 0
+
+	return json.Marshal(&content)
 }
 
 // DeleteSupplierState removes a supplier's state from both L1 and L2 caches.
