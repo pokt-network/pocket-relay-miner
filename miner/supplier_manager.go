@@ -1931,6 +1931,32 @@ func (m *SupplierManager) reportDrain(state *SupplierState, drained, abandoned i
 // Consumer/SessionCoordinator/SessionStore run against a fully quiesced
 // supplier — no mid-flight writer can resurrect state after the map
 // delete.
+// teardownCanFinishWork reports whether this fleet still holds the signing key
+// for a supplier being torn down — that is, whether "draining" describes
+// anything real. Without the key no relay response, claim or proof can be
+// signed, so there is no pending work to drain, only messages to stop
+// consuming, and saying "waiting for pending work" describes work that cannot
+// happen. That line is what an operator reads mid-incident.
+//
+// It asks the key manager instead of taking the caller's word, because the
+// caller does not always know which case it is: in distributed mode an operator
+// removing a key tears the supplier down through the claimer's release path
+// (onSupplierReleased), the very same path a plain rebalance uses, so a reason
+// threaded down from there would report a key removal as a rebalance in exactly
+// the mode production runs. The key manager is local and authoritative.
+//
+// A nil key manager (tests only) answers true, which keeps the message it had
+// before this distinction existed.
+func (m *SupplierManager) teardownCanFinishWork(operatorAddr string) bool {
+	if m.keyManager == nil {
+		return true
+	}
+
+	_, err := m.keyManager.GetSigner(operatorAddr)
+
+	return err == nil
+}
+
 func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	// Capture the lifecycle context once under m.mu.RLock. removeSupplier
 	// can run concurrently with Close() (Close() writes m.ctx under m.mu),
@@ -1979,9 +2005,16 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 		}
 	}
 
-	m.logger.Info().
-		Str(logging.FieldSupplier, operatorAddr).
-		Msg("supplier marked as draining, waiting for pending work...")
+	if m.teardownCanFinishWork(operatorAddr) {
+		m.logger.Info().
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("supplier marked as draining, waiting for pending work...")
+	} else {
+		m.logger.Info().
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("supplier torn down: this fleet no longer holds its signing key, so no " +
+				"pending relay, claim or proof can be signed for it")
+	}
 
 	// Wait for pending work (TODO: implement proper tracking)
 	// For now, just wait for consumer to finish.
