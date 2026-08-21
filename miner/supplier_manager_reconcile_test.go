@@ -328,3 +328,73 @@ func claimedSuppliersSnapshot(c *SupplierClaimer) []string {
 	copy(out, c.allSuppliers)
 	return out
 }
+
+// TestSupplierManager_KeyRemoval_ReleasesTheLease covers the hot-reload path an
+// operator triggers by deleting a signing key.
+//
+// That path used to call removeSupplier directly, which tears the pipeline down
+// but never touches the LEASE. renewAllClaims iterates the leased set, so the
+// miner went on EXPIREing ha:miner:claim:{addr} forever for a supplier it no
+// longer had any state for -- and while that key kept being renewed, no other
+// instance could take the supplier over. The pipeline looked gone and the claim
+// looked alive.
+//
+// The assertion is on the Redis claim key, because that key is what another
+// miner reads to decide whether the supplier is free; the in-memory set is only
+// this process's opinion.
+func TestSupplierManager_KeyRemoval_ReleasesTheLease(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	redisClient, _ := newTestRedis(t)
+
+	supplierAddr := "pokt1supplier_key_removed"
+	km := &fakeKeyManager{addrs: []string{supplierAddr}}
+	qc := &toggleableSupplierQueryClient{addr: supplierAddr}
+	qc.staked.Store(true)
+
+	registry := NewSupplierRegistry(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		redisClient,
+		SupplierRegistryConfig{},
+	)
+
+	pool := pond.NewPool(4)
+	defer pool.StopAndWait()
+
+	mgr := NewSupplierManager(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		km,
+		registry,
+		SupplierManagerConfig{
+			RedisClient:               redisClient,
+			MinerID:                   "test-miner",
+			SupplierQueryClient:       qc,
+			WorkerPool:                pool,
+			SessionTTL:                time.Hour,
+			SupplierReconcileInterval: 0,
+		},
+	)
+
+	require.NoError(t, mgr.Start(ctx))
+	defer func() { _ = mgr.Close() }()
+
+	// Seed the lease this instance holds, which is the precondition the
+	// production rebalance would have produced.
+	claimKey := redisClient.KB().MinerClaimKey(supplierAddr)
+	require.NoError(t, redisClient.Set(ctx, claimKey, mgr.claimer.instanceID, time.Hour).Err())
+	mgr.claimer.claimedMu.Lock()
+	mgr.claimer.claimed[supplierAddr] = time.Now()
+	mgr.claimer.claimedMu.Unlock()
+	require.Contains(t, mgr.claimer.ClaimedSuppliers(), supplierAddr, "premise: the lease is held")
+
+	// The operator removes the signing key.
+	mgr.handleKeyChange(ctx, supplierAddr, false)
+
+	owner, err := redisClient.Get(ctx, claimKey).Result()
+	require.ErrorIs(t, err, redis.Nil,
+		"removing the key must release the lease, not just tear the pipeline down: while the claim "+
+			"key survives, this miner keeps renewing it and no other instance can take the supplier "+
+			"over. It currently reads %q", owner)
+	require.NotContains(t, mgr.claimer.ClaimedSuppliers(), supplierAddr)
+}
