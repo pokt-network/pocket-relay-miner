@@ -1763,6 +1763,18 @@ func (m *SupplierManager) handleStreamMessage(
 // graceful drain makes is that the work completes now instead of after the idle
 // timeout, and the pool slots come back. A SIGKILL runs none of this, and nothing
 // can be done about that.
+//
+// The buffer being momentarily empty is NOT the same as the producer being done:
+// the transport-layer consumer's read loop shares this same cancelled context, but
+// a cancelled context is only observed when its blocking XREADGROUP call elapses
+// (transport/redis/consumer.go documents why go-redis sets no read deadline from
+// it), and msgChan is only closed after BOTH of its producer goroutines return.
+// Racing ahead of that with a non-blocking check used to let this return before a
+// message the producer was already mid-delivery on ever arrived — dropped exactly
+// the way this function exists to prevent, just on a narrower, timing-dependent
+// window (review 2026-08-21). Waiting on drainCtx as a second select case, instead
+// of falling through a bare default, is what makes the window it is named after
+// actually apply to this case too.
 func (m *SupplierManager) drainDeliveryBuffer(
 	ctx context.Context,
 	state *SupplierState,
@@ -1799,9 +1811,13 @@ func (m *SupplierManager) drainDeliveryBuffer(
 			RecordShutdownDrainedRelay(state.OperatorAddr)
 			drained++
 
-		default:
-			// Buffer empty. Producers are winding down on the same cancelled
-			// context, so nothing more is coming that is worth waiting for.
+		case <-drainCtx.Done():
+			// Out of time and nothing is sitting in the buffer right now.
+			// Anything the producer still delivers after this stays
+			// unacknowledged in this consumer's PEL for the reclaim, same as
+			// any entry the window did not fit -- an already-closed msgChan
+			// (the ordinary idle-supplier case) is still picked immediately
+			// above, since a closed channel read is always ready.
 			m.reportDrain(state, drained, abandoned)
 			return
 		}
