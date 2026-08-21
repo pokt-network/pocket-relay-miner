@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,8 +13,22 @@ import (
 // allKeyBuilderOutputs exercises every KeyBuilder method with fixed sample
 // arguments and returns method name → produced string. New KB methods MUST
 // be added here — the property tests below only protect what they can see.
+//
+// StreamAddress and SupplierStateAddress return (string, bool), not a bare
+// string like every builder here, so their "output" is the two results
+// joined with "|" -- close enough to a golden string for the convention
+// scanner (internal/conventions) to pin them by name, which is the actual
+// point: it does not care about shape, only that every exported method has a
+// row here and in the golden map.
 func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
-	return map[string]string{
+	streamAddr, streamAddrOK := kb.StreamAddress(kb.StreamKey("pokt1abc"))
+	supplierAddr, supplierAddrOK := kb.SupplierStateAddress(kb.SupplierStateKey("pokt1a"))
+	extractors := map[string]string{
+		"StreamAddress":        fmt.Sprintf("%s|%v", streamAddr, streamAddrOK),
+		"SupplierStateAddress": fmt.Sprintf("%s|%v", supplierAddr, supplierAddrOK),
+	}
+
+	out := map[string]string{
 		"CacheKey":                    kb.CacheKey("application", "k1"),
 		"CacheLockKey":                kb.CacheLockKey("application", "k1"),
 		"CacheKnownKey":               kb.CacheKnownKey("applications"),
@@ -75,6 +90,10 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"LegacyParamsPattern":             kb.LegacyParamsPattern(),
 		"SimulationReplayKey":             kb.SimulationReplayKey("deadbeef"),
 	}
+	for k, v := range extractors {
+		out[k] = v
+	}
+	return out
 }
 
 // TestKeyBuilder_PartialNamespaceNeverProducesEmptySegments is the anti-`::`
@@ -169,6 +188,11 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"MinerClaimKey":           "ha:miner:claim:sup1",
 		"MinerActiveSetKey":       "ha:miner:active",
 		"MinerInstanceKey":        "ha:miner:instance:inst1",
+
+		// Extractors (review 2026-08-21): the "output" is result|ok, not a
+		// bare key -- see allKeyBuilderOutputs' doc comment for why.
+		"StreamAddress":        "pokt1abc|true",
+		"SupplierStateAddress": "pokt1a|true",
 	}
 	outputs := allKeyBuilderOutputs(kb)
 	for method, want := range golden {
