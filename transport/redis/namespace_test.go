@@ -176,6 +176,55 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 	}
 }
 
+// TestKeyBuilder_AddressExtractorsRoundTrip pins StreamAddress and
+// SupplierStateAddress: extractors, not builders, so they don't fit
+// allKeyBuilderOutputs' single-string shape and are pinned here instead.
+// Both exist so nothing outside this file hand-builds
+// StreamPrefix()/SupplierKeyPrefix()+":" to trim a scanned key back to an
+// address (review 2026-08-20, LOW; recurred review 2026-08-21) — a hand-built
+// trim silently drifts from the builder the moment either format changes,
+// exactly like a hand-built SCAN pattern would.
+func TestKeyBuilder_AddressExtractorsRoundTrip(t *testing.T) {
+	kb := NewKeyBuilder(config.RedisNamespaceConfig{})
+
+	streamKey := kb.StreamKey("pokt1abc")
+	addr, ok := kb.StreamAddress(streamKey)
+	assert.True(t, ok)
+	assert.Equal(t, "pokt1abc", addr)
+
+	stateKey := kb.SupplierStateKey("pokt1abc")
+	addr, ok = kb.SupplierStateAddress(stateKey)
+	assert.True(t, ok)
+	assert.Equal(t, "pokt1abc", addr)
+
+	// A key from a foreign namespace/prefix must not be misread as an
+	// address — this is the failure mode a drifted hand-built trim produces.
+	_, ok = kb.StreamAddress("ha:cache:application:pokt1abc")
+	assert.False(t, ok, "a non-stream key must not parse as a stream address")
+	_, ok = kb.SupplierStateAddress("ha:cache:application:pokt1abc")
+	assert.False(t, ok, "a non-supplier-state key must not parse as a supplier address")
+
+	// The prefix alone, with nothing after the separator, must not extract
+	// an empty address.
+	_, ok = kb.StreamAddress(kb.StreamPrefix() + ":")
+	assert.False(t, ok, "an empty address must not round-trip as valid")
+
+	// A non-default namespace changes both prefixes' text. An extractor that
+	// hand-built its own trim prefix at the CALL SITE instead of asking
+	// StreamPrefix()/SupplierKeyPrefix() for it would still trim against the
+	// DEFAULT text and silently misparse every key under this namespace --
+	// exactly the drift this pair of methods exists to make impossible.
+	custom := NewKeyBuilder(config.RedisNamespaceConfig{
+		BasePrefix: "prod", StreamsPrefix: "wal", SupplierPrefix: "sup",
+	})
+	addr, ok = custom.StreamAddress(custom.StreamKey("pokt1xyz"))
+	assert.True(t, ok)
+	assert.Equal(t, "pokt1xyz", addr)
+	addr, ok = custom.SupplierStateAddress(custom.SupplierStateKey("pokt1xyz"))
+	assert.True(t, ok)
+	assert.Equal(t, "pokt1xyz", addr)
+}
+
 // TestWithDefaults_FieldByField proves each field defaults independently.
 func TestWithDefaults_FieldByField(t *testing.T) {
 	ns := config.RedisNamespaceConfig{BasePrefix: "prod"}.WithDefaults()

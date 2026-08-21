@@ -234,7 +234,6 @@ func orphanedStreams(ctx context.Context, client *DebugRedisClient, deleteEmpty,
 		return err
 	}
 
-	streamPrefix := client.KB().StreamPrefix() + ":"
 	type orphan struct {
 		key     string
 		addr    string
@@ -245,8 +244,8 @@ func orphanedStreams(ctx context.Context, client *DebugRedisClient, deleteEmpty,
 	var orphans []orphan
 
 	for _, key := range streams {
-		addr := strings.TrimPrefix(key, streamPrefix)
-		if addr == key || addr == "" {
+		addr, ok := client.KB().StreamAddress(key)
+		if !ok {
 			continue // not a supplier stream under this namespace
 		}
 		if _, ok := known[addr]; ok {

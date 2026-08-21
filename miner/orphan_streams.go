@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 
 	"github.com/redis/go-redis/v9"
 
@@ -70,17 +69,18 @@ func KnownSupplierAddresses(
 		known[addr] = struct{}{}
 	}
 
-	// SupplierStatePattern(), not SupplierKeyPrefix()+":*" hand-built here: the
-	// two already drifted once (review 2026-08-20, LOW) -- this is the exact
-	// hand-built pattern StreamPattern() was added to stop repeating, in the
-	// commit right before this one was written the same way anyway.
-	cachePrefix := client.KB().SupplierKeyPrefix() + ":"
+	// SupplierStatePattern() for the SCAN, SupplierStateAddress() for the
+	// trim back to an address: neither is hand-built here. The two already
+	// drifted once trimming a hand-built prefix this same way (review
+	// 2026-08-20, LOW; recurred review 2026-08-21) -- KeyBuilder owns both
+	// directions now, so there is nothing left in this file for the two to
+	// drift apart from.
 	cached, err := scan(ctx, client.KB().SupplierStatePattern())
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan supplier cache keys: %w", err)
 	}
 	for _, key := range cached {
-		if addr := strings.TrimPrefix(key, cachePrefix); addr != key && addr != "" {
+		if addr, ok := client.KB().SupplierStateAddress(key); ok {
 			known[addr] = struct{}{}
 		}
 	}
@@ -116,11 +116,10 @@ func OrphanStreamAddresses(
 		return nil, err
 	}
 
-	streamPrefix := client.KB().StreamPrefix() + ":"
 	var orphans []string
 	for _, key := range streams {
-		addr := strings.TrimPrefix(key, streamPrefix)
-		if addr == key || addr == "" {
+		addr, ok := client.KB().StreamAddress(key)
+		if !ok {
 			continue // not a supplier stream under this namespace
 		}
 		if _, ok := known[addr]; ok {
