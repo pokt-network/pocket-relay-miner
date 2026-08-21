@@ -768,8 +768,10 @@ fi
 # day they diverge is visible rather than inferred.
 
 gate_step "settlement breakdown (reporting only)"
+sb_line="$(gate_settlement_breakdown "$events_file" "${load_start_height:-0}")"
+sb_rc=$?
 IFS=$'\t' read -r sb_claims sb_relays sb_estimated sb_claimed sb_settled sb_minted \
-    sb_overloss sb_deflation sb_over_events sb_spend_limit <<<"$(gate_settlement_breakdown "$events_file" "${load_start_height:-0}")"
+    sb_overloss sb_deflation sb_over_events sb_spend_limit <<<"$sb_line"
 
 gate_detail "claims settled           ${sb_claims:-0}
 num_relays (tree leaves) ${sb_relays:-0}
@@ -778,22 +780,34 @@ claimed_upokt            ${sb_claimed:-0}
 settled_upokt            ${sb_settled:-0}
 minted_upokt             ${sb_minted:-0}" 12
 
-# Overservicing: the application's stake could not cover the claim, so the chain
-# paid less than was claimed. It is money that did not arrive, and it does NOT
-# show up in any relay count -- claimed and settled relay counts both stay put
-# while the uPOKT shrinks, so a check that only counts relays cannot see it.
-if [ "${sb_overloss:-0}" -gt 0 ] || [ "${sb_over_events:-0}" -gt 0 ]; then
-    gate_pass "overservicing OCCURRED: ${sb_overloss} uPOKT across ${sb_over_events} event(s), ${sb_spend_limit} from a per-session spend limit"
+# gate_settlement_breakdown returns non-zero when jq itself failed to parse
+# the chain's events (schema change, malformed JSON) -- distinct from an
+# empty events file, which is not an error and is handled inside that
+# function. Failing loudly here, rather than reading the zeros it still
+# prints as "nothing happened", is the entire point of MEDIUM-3 (review
+# 2026-08-20): a parse failure and a genuinely quiet run must never look the
+# same on a money check.
+if [ "$sb_rc" -ne 0 ]; then
+    gate_fail "settlement breakdown: jq failed to parse ${events_file} (see error above) -- overservicing/deflation below are UNKNOWN, not zero"
 else
-    gate_pass "overservicing did not occur this run (0 events, 0 uPOKT) -- not evidence that it cannot"
-fi
+    # Overservicing: the application's stake could not cover the claim, so the
+    # chain paid less than was claimed. It is money that did not arrive, and it
+    # does NOT show up in any relay count -- claimed and settled relay counts
+    # both stay put while the uPOKT shrinks, so a check that only counts relays
+    # cannot see it.
+    if [ "${sb_overloss:-0}" -gt 0 ] || [ "${sb_over_events:-0}" -gt 0 ]; then
+        gate_pass "overservicing OCCURRED: ${sb_overloss} uPOKT across ${sb_over_events} event(s), ${sb_spend_limit} from a per-session spend limit"
+    else
+        gate_pass "overservicing did not occur this run (0 events, 0 uPOKT) -- not evidence that it cannot"
+    fi
 
-# Deflation is mint_ratio < 1, a governance parameter rather than a defect here.
-# Reported separately so it is never mistaken for the line above.
-if [ "${sb_deflation:-0}" -gt 0 ]; then
-    gate_pass "deflation (mint_ratio < 1): ${sb_deflation} uPOKT -- a governance parameter, not a fault"
-else
-    gate_pass "no deflation this run (mint_ratio = 1)"
+    # Deflation is mint_ratio < 1, a governance parameter rather than a defect
+    # here. Reported separately so it is never mistaken for the line above.
+    if [ "${sb_deflation:-0}" -gt 0 ]; then
+        gate_pass "deflation (mint_ratio < 1): ${sb_deflation} uPOKT -- a governance parameter, not a fault"
+    else
+        gate_pass "no deflation this run (mint_ratio = 1)"
+    fi
 fi
 
 gate_verdict "live"

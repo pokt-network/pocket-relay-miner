@@ -67,6 +67,24 @@ expect "$(printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0')" \
     "$(gate_settlement_breakdown /nonexistent/events.jsonl 0)" \
     "a missing events file yields zeros, not an error"
 
+# A NON-empty but malformed events file (schema change, truncated write, jq
+# missing) is a real parse failure, not the "no events yet" case above -- and
+# must be distinguishable from it. Before this test existed, both cases
+# returned the exact same all-zero row with no exit-status signal, so
+# live.sh's overservicing check read "jq broke" as "overservicing did not
+# occur" (MEDIUM-3, review 2026-08-20).
+bad_fixture="$(mktemp)"
+printf 'not json at all\n' >"$bad_fixture"
+bad_out="$(gate_settlement_breakdown "$bad_fixture" 0 2>/dev/null)"
+bad_rc=$?
+rm -f "$bad_fixture"
+expect "$(printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0')" "$bad_out" \
+    "malformed input still prints the zero row, so a numeric read downstream does not blow up"
+if [ "$bad_rc" -eq 0 ]; then
+    printf '  FAIL malformed input: want a non-zero exit status from gate_settlement_breakdown, got 0 -- the caller cannot tell this apart from a genuinely quiet run\n' >&2
+    failures=$((failures + 1))
+fi
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1

@@ -105,6 +105,18 @@ gate_verdict() {
 # whose hash matched the service's mining difficulty, while estimated is that
 # count scaled back up by the difficulty multiplier. They coincide only at base
 # difficulty.
+#
+# Returns non-zero, on stdout the same all-zero row as the empty-file case,
+# when jq itself fails (schema change, malformed JSON, jq missing). The
+# CALLER must check that exit status and gate_fail -- this function cannot
+# call gate_fail itself and have it count: every caller invokes it via
+# $(...) to capture the TSV, and a command substitution runs in a subshell,
+# so a gate_failed increment made in here would vanish when the subshell
+# exits (review 2026-08-20, MEDIUM). The empty-events-file case above is
+# NOT an error and stays a silent, correct zero; jq actually failing IS
+# one, and used to be indistinguishable from it -- this ONLY existed to
+# swallow the (already-handled) empty-file case, and swallowed jq failures
+# with it.
 gate_settlement_breakdown() {
     local events_file="$1" minend="${2:-0}"
     [ -s "$events_file" ] || { printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0'; return 0; }
@@ -124,7 +136,7 @@ gate_settlement_breakdown() {
           ($over | length),
           ([$over[] | select((.attrs.spend_limit_exceeded // "" | tostring) | test("true"))] | length) ]
       | @tsv
-    ' "$events_file" 2>/dev/null || printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0'
+    ' "$events_file" || { printf '0\t0\t0\t0\t0\t0\t0\t0\t0\t0'; return 1; }
 }
 
 # gate_repo_root -- cd to the repository root so a gate behaves the same
