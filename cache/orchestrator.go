@@ -640,9 +640,15 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 		}
 	}
 
-	// Warmup suppliers — nil triggers WarmupFromRedis' discover-all-from-registry
-	// path (ha:supplier:*), which is how suppliers were actually warmed all along
-	// (the removed knownSuppliers list was always empty).
+	// Warmup suppliers — nil triggers WarmupFromRedis' discover-all-from-CACHE
+	// path (it scans SupplierStatePattern, i.e. ha:supplier:*, NOT the fleet
+	// index at ha:suppliers:index), which is how suppliers were actually warmed
+	// all along (the removed knownSuppliers list was always empty).
+	//
+	// "registry" is the wrong word for that scan and this comment used to use it.
+	// The two are one "s" apart and the code has already been misread that way
+	// (relayer/proxy.go's gate comment calls the cache "registry state" too), so
+	// naming the right one here is load-bearing, not pedantry.
 	group.SubmitErr(func() error {
 		return o.supplierCache.WarmupFromRedis(ctx, nil)
 	})

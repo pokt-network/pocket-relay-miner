@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -662,11 +661,13 @@ func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddres
 			return fmt.Errorf("failed to discover suppliers: %w", err)
 		}
 
-		// Extract operator addresses from keys (ha:supplier:{operator} -> {operator})
+		// Extract operator addresses from keys (ha:supplier:{operator} -> {operator}).
+		// SupplierStateAddress, not a hand-built prefix: this runs on the RELAYER's
+		// startup path (cmd_relayer.go passes nil to reach this branch), so a trim
+		// that drifted from the key layout would leave L1 empty and send every
+		// relay to L2 -- degraded, silently.
 		for _, key := range keys {
-			// Remove prefix to get operator address
-			addr := strings.TrimPrefix(key, c.redis.KB().SupplierKeyPrefix()+":")
-			if addr != key { // Ensure prefix was found and removed
+			if addr, ok := c.redis.KB().SupplierStateAddress(key); ok {
 				knownSupplierAddresses = append(knownSupplierAddresses, addr)
 			}
 		}
