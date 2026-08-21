@@ -279,18 +279,22 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// on this result — the cache already has a safe default the moment it
 	// was constructed above — so there is no correctness reason for it to be
 	// synchronous either.
+	//
+	// qcForTTL is captured HERE, before dispatch — same as sharedForAdvisory
+	// above — not read as w.queryClients inside the closure. cleanup() sets
+	// w.queryClients = nil before calling masterPool.Stop(), and pond's
+	// Stop() does not wait for queued tasks to finish (StopAndWait() does;
+	// this call site does not use it, see leader_controller.go:517 for the
+	// blocking sibling). A task still queued when Start() fails a later step
+	// and Close() runs would read w.queryClients.Shared() on a nil receiver
+	// and panic — silently, since the pool's default panicRecovery swallows
+	// it (review 2026-08-21, verified against pond/v2 v2.6.0's Stop()/Task
+	// semantics). Reading the captured qcForTTL instead of the field closes
+	// that window the same way the advisory block already does.
+	qcForTTL := w.queryClients
 	supplierCache := w.supplierCache
 	if ttlErr := w.masterPool.Go(func() {
-		ttlCtx, cancelTTL := context.WithTimeout(w.ctx, sharedParamsAdvisoryTimeout)
-		defer cancelTTL()
-
-		sharedParamsForTTL, sharedErr := w.queryClients.Shared().GetParams(ttlCtx)
-		if sharedErr != nil {
-			w.logger.Warn().Err(sharedErr).
-				Msg("could not read shared params for supplier cache TTL; keeping the default")
-			return
-		}
-		supplierCache.SetTTL(cache.SupplierCacheTTLFromParams(sharedParamsForTTL, w.config.Config.GetBlockTimeSeconds()))
+		w.refineSupplierCacheTTL(qcForTTL, supplierCache)
 	}); ttlErr != nil {
 		w.logger.Warn().Err(ttlErr).
 			Msg("supplier cache TTL refinement skipped: worker pool would not accept the task")
@@ -699,6 +703,28 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	}
 
 	return nil
+}
+
+// refineSupplierCacheTTL fetches shared params via qc and, on success, sets
+// supplierCache's TTL from them.
+//
+// qc and supplierCache are explicit parameters, not w.queryClients /
+// w.supplierCache, BY DESIGN: this runs on the master pool, dispatched from
+// Start() before it returns, and cleanup() can nil w.queryClients out from
+// under a still-queued task (see the capture comment at the Start() call
+// site). Reading only the parameters makes that race impossible to
+// reintroduce here without changing this signature.
+func (w *SupplierWorker) refineSupplierCacheTTL(qc *query.Clients, supplierCache *cache.SupplierCache) {
+	ttlCtx, cancelTTL := context.WithTimeout(w.ctx, sharedParamsAdvisoryTimeout)
+	defer cancelTTL()
+
+	sharedParamsForTTL, sharedErr := qc.Shared().GetParams(ttlCtx)
+	if sharedErr != nil {
+		w.logger.Warn().Err(sharedErr).
+			Msg("could not read shared params for supplier cache TTL; keeping the default")
+		return
+	}
+	supplierCache.SetTTL(cache.SupplierCacheTTLFromParams(sharedParamsForTTL, w.config.Config.GetBlockTimeSeconds()))
 }
 
 // Close shuts down the supplier worker.
