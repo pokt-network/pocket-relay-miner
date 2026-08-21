@@ -42,9 +42,10 @@ const (
 	// own "10-minute safety net" convention, not a new arbitrary number.
 	defaultSupplierCacheTTL = 10 * time.Minute
 
-	// supplierCacheTTLMultiplier mirrors shared_params_singleton.go's
-	// sessionTTLMultiplier: margin beyond the protocol deadline the TTL is
-	// meant to outlive, so a missed reconcile tick does not race the expiry.
+	// supplierCacheTTLMultiplier: margin beyond the protocol deadline the TTL
+	// is meant to outlive, so a missed reconcile tick does not race the
+	// expiry. shared_params_singleton.go's calculateTTLFromParams calls this
+	// same formula (SupplierCacheTTLFromParams) rather than keeping its own copy.
 	supplierCacheTTLMultiplier = 2
 )
 
@@ -91,6 +92,15 @@ const (
 // hold the key for); the TTL only bounds how long the resulting stale entry
 // can mislead the relayer into serving it, instead of freezing that lie
 // forever.
+//
+// ROLLING-UPGRADE GAP (review 2026-08-21, not fixed here): a supplier
+// decommissioned by a PRE-fix binary already has a Redis entry written with
+// no expiry at all (the old Set(ctx, key, data, 0)). Nothing rewrites an
+// entry for an address no longer in the keyring, so that specific entry
+// stays frozen post-upgrade too, until an operator clears it by hand (`redis
+// cache --type supplier --key <addr> --invalidate`) or it is otherwise
+// removed. Only entries written AFTER this fix ships get a bounded TTL; this
+// is not a live migration.
 func SupplierCacheTTLFromParams(params *sharedtypes.Params, blockTimeSeconds int64) time.Duration {
 	if params == nil || blockTimeSeconds <= 0 {
 		return defaultSupplierCacheTTL
