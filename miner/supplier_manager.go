@@ -1662,7 +1662,13 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 }
 
 // handleStreamMessage runs one delivered relay to completion: process, release
-// the pooled message, and acknowledge on success.
+// the pooled message, and acknowledge on success. Returns whether the message
+// was actually acknowledged -- false on a processing failure (by design: the
+// entry must stay pending for the reclaim) OR an AckMessage error (Redis
+// hiccup, connection reset), which a caller MUST check before treating the
+// relay as done rather than assuming success from "handleStreamMessage
+// returned" (review 2026-08-21: the shutdown drain's metric used to do
+// exactly that).
 //
 // It takes its own ctx rather than closing over the supplier's, because the
 // graceful-shutdown drain calls it with a context that is deliberately still
@@ -1671,7 +1677,7 @@ func (m *SupplierManager) handleStreamMessage(
 	ctx context.Context,
 	state *SupplierState,
 	msg transport.StreamMessage,
-) {
+) (acked bool) {
 	// Track relay consumed from Redis Stream (relayer → miner)
 	RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
 
@@ -1735,7 +1741,7 @@ func (m *SupplierManager) handleStreamMessage(
 			Str("session_id", sessionID).
 			Msg("failed to process relay")
 		// Don't ACK on processing failure - let the reclaim retry
-		return
+		return false
 	}
 
 	// ACK immediately after successful processing
@@ -1746,7 +1752,9 @@ func (m *SupplierManager) handleStreamMessage(
 			Str(logging.FieldSupplier, state.OperatorAddr).
 			Str("message_id", msg.ID).
 			Msg("failed to acknowledge message")
+		return false
 	}
+	return true
 }
 
 // drainDeliveryBuffer finishes the relays already handed to this consumer once
@@ -1807,9 +1815,17 @@ func (m *SupplierManager) drainDeliveryBuffer(
 				continue
 			default:
 			}
-			m.handleStreamMessage(drainCtx, state, msg)
-			RecordShutdownDrainedRelay(state.OperatorAddr)
-			drained++
+			if acked := m.handleStreamMessage(drainCtx, state, msg); acked {
+				RecordShutdownDrainedRelay(state.OperatorAddr)
+				drained++
+			} else {
+				// Processing failed, or it succeeded but AckMessage itself
+				// did not (Redis hiccup near the deadline): either way the
+				// entry is still PENDING, same as anything the window ran
+				// out on -- counting it as drained would tell an operator
+				// this finished when Redis says otherwise.
+				abandoned++
+			}
 
 		case <-drainCtx.Done():
 			// Out of time and nothing is sitting in the buffer right now.
