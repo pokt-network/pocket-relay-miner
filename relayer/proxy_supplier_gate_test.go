@@ -63,9 +63,13 @@ func TestDecideSupplierServe_UnknownSupplierRejected(t *testing.T) {
 
 	require.False(t, d.serve, "a supplier we hold no key for must be rejected")
 	require.False(t, d.optimistic)
-	require.Equal(t, rejectReasonSupplierNotFound, d.rejectReason)
+	// The reason moved from supplier_not_found to no_local_signer when the key
+	// check became the first, unconditional gate. Both were true here -- we have
+	// neither state nor key -- but the missing KEY is the root cause and the
+	// actionable one: it points the operator at their keys file instead of at the
+	// miner. supplier_not_found had no reachable branch left and was deleted.
+	require.Equal(t, rejectReasonNoLocalSigner, d.rejectReason)
 	require.Contains(t, d.clientMsg, gateTestSupplier)
-	require.Contains(t, d.clientMsg, "not registered with any miner")
 }
 
 // TestDecideSupplierServe_NilSignerRejects: defensive — no signer configured at
@@ -76,7 +80,10 @@ func TestDecideSupplierServe_NilSignerRejects(t *testing.T) {
 	d := p.decideSupplierServe(nil, gateTestSupplier, gateTestService)
 
 	require.False(t, d.serve)
-	require.Equal(t, rejectReasonSupplierNotFound, d.rejectReason)
+	// A nil signer means no key for anybody, so the key check answers "no" and
+	// owns this rejection now. Still unreachable in production: handleRelay
+	// rejects a nil signer with HTTP 500 before this gate runs.
+	require.Equal(t, rejectReasonNoLocalSigner, d.rejectReason)
 }
 
 // TestDecideSupplierServe_ActiveForServiceServes: normal steady-state accept.
@@ -146,4 +153,33 @@ func TestDecideSupplierServe_PresentStateAuthoritative_KeyDoesNotOverride(t *tes
 			require.Contains(t, d.clientMsg, tt.wantMsg)
 		})
 	}
+}
+
+// TestDecideSupplierServe_PresentStateButNoKeyRejects is the other half of
+// TestDecideSupplierServe_PresentStateAuthoritative_KeyDoesNotOverride, and the
+// two are not in tension: serving requires good state AND the ability to sign,
+// so the more restrictive answer wins in both directions. That one pins that
+// HOLDING the key does not override state saying the supplier is bad; this one
+// pins that NOT holding it rejects even when state says everything is fine.
+//
+// The state here is the one the miner's teardown writes when an operator removes
+// a signing key: {unstaking, staked: true, services: [...]}, which reads as
+// perfectly servable. Before the key check moved to the front, this relay was
+// served -- a backend call was paid for and the response then failed to sign,
+// returning a signing error instead of a clean 503 -- and it stayed that way for
+// as long as the cache TTL, ~42 min on mainnet.
+func TestDecideSupplierServe_PresentStateButNoKeyRejects(t *testing.T) {
+	p := newGateProxy(t, "pokt1someothersupplier") // key for a DIFFERENT supplier
+
+	state := activeState(gateTestService)
+	state.Status = cache.SupplierStatusUnstaking
+
+	d := p.decideSupplierServe(state, gateTestSupplier, gateTestService)
+
+	require.False(t, d.serve,
+		"a relay we cannot sign must be rejected before the backend is called, "+
+			"not after the signing fails")
+	require.False(t, d.optimistic)
+	require.Equal(t, rejectReasonNoLocalSigner, d.rejectReason)
+	require.Contains(t, d.clientMsg, gateTestSupplier)
 }
