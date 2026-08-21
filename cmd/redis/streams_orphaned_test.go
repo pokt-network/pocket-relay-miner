@@ -26,6 +26,13 @@ import (
 // point, since the convention check cannot see a pattern built by concatenation.
 func newNamespacedDebugClient(t *testing.T) (*DebugRedisClient, string) {
 	t.Helper()
+
+	// Fail fast with testredis's "start one with ..." message rather than
+	// NewClient's bare dial error and ~5 retries (review 2026-08-20, LOW) --
+	// matches the preamble every sibling helper uses (e.g.
+	// miner/redis_helper_test.go's newTestRedis).
+	testredis.Client(t)
+
 	prefix := testredis.Prefix(t)
 
 	client, err := transportredis.NewClient(context.Background(), transportredis.ClientConfig{

@@ -69,8 +69,12 @@ func KnownSupplierAddresses(
 		known[addr] = struct{}{}
 	}
 
+	// SupplierStatePattern(), not SupplierKeyPrefix()+":*" hand-built here: the
+	// two already drifted once (review 2026-08-20, LOW) -- this is the exact
+	// hand-built pattern StreamPattern() was added to stop repeating, in the
+	// commit right before this one was written the same way anyway.
 	cachePrefix := client.KB().SupplierKeyPrefix() + ":"
-	cached, err := scan(ctx, cachePrefix+"*")
+	cached, err := scan(ctx, client.KB().SupplierStatePattern())
 	if err != nil {
 		return nil, fmt.Errorf("failed to scan supplier cache keys: %w", err)
 	}
