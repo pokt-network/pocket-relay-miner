@@ -66,3 +66,35 @@ func TestPublishSupplierUpdateAcceptsTheRealActions(t *testing.T) {
 			"action %q is emitted by production and must be accepted", action)
 	}
 }
+
+// TestRegistryIndexMembershipIsTheContract pins the ONLY part of the registry
+// that has readers: the index set. balance_monitor.go (ListSuppliers) and
+// orphan_streams.go (KnownSupplierAddresses, via SMembers) both read it; nothing
+// reads the per-supplier value. This is the safety net for removing that value:
+// add must make an address a member, remove must take it out, and neither may
+// disturb another address's membership.
+func TestRegistryIndexMembershipIsTheContract(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+	registry := NewSupplierRegistry(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		client,
+		SupplierRegistryConfig{},
+	)
+
+	const a, b = "pokt1membership_a", "pokt1membership_b"
+
+	require.NoError(t, registry.PublishSupplierUpdate(ctx, SupplierUpdateActionAdd, a, nil))
+	require.NoError(t, registry.PublishSupplierUpdate(ctx, SupplierUpdateActionAdd, b, nil))
+
+	members, err := registry.ListSuppliers(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{a, b}, members, "add must make an address a member")
+
+	require.NoError(t, registry.PublishSupplierUpdate(ctx, SupplierUpdateActionRemove, a, nil))
+
+	members, err = registry.ListSuppliers(ctx)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{b}, members,
+		"remove must drop exactly one address and leave the others alone")
+}
