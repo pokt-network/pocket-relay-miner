@@ -83,6 +83,21 @@ spec:
       # exist and no second place to update.
       - name: build-keyring
         image: ghcr.io/pokt-network/pocketd:0.1.34
+        # As the SAME user the app container runs as, so the keyring files are
+        # born owned by it. The first attempt chowned them afterwards instead and
+        # failed with "Operation not permitted": this image does not run as root,
+        # so it could not hand ownership to anyone. Before that the files were
+        # simply unreadable to the app, which loaded ZERO keys.
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        env:
+        # pocketd writes a client config under $HOME on startup, and as a
+        # non-root user in this image $HOME is not writable: it tried /.pocket
+        # and failed with "permission denied", which surfaced as a failed key
+        # import until the error stopped being swallowed.
+        - name: HOME
+          value: /tmp
         command:
         - sh
         - -c
@@ -93,7 +108,11 @@ spec:
           # retry after any failure would die on supplier1 "already exists" --
           # reporting the retry instead of the cause. Measured: that is exactly
           # what a CrashLoopBackOff here looked like.
-          rm -rf /keyring
+          # The CONTENTS, not the directory: /keyring is the mount point and
+          # removing it fails with "Permission denied". Named explicitly rather
+          # than globbed, because these are the only two subdirectories cosmos-sdk
+          # creates and a glob would need a shell brace this YAML cannot carry.
+          rm -rf /keyring/keyring-file /keyring/keyring-test
           mkdir -p /keyring
           # Read the backend from the RENDERED config rather than taking it as a
           # parameter: the keyring must be built in the same format the process
@@ -133,12 +152,9 @@ spec:
               exit 1
             fi
           done
-          # The app container runs as uid 1000; this one runs as root, so the
-          # files it just wrote would be unreadable there. Measured: without
-          # this the keyring loads ZERO keys, which the miner reports as a
-          # hard startup failure and the relayer used to survive silently.
-          chown -R 1000:1000 /keyring
-          chmod -R go-rwx /keyring
+          # No chown and no chmod: runAsUser above makes these files the app
+          # user's, and cosmos-sdk writes them 0600 already. Touching the mount
+          # point itself is not permitted to a non-root user anyway.
           echo "imported $i keys into the $BACKEND keyring at /keyring, owned by uid 1000"
         volumeMounts:
         - name: config
