@@ -176,7 +176,9 @@ chaos_pull_signing_key() {
     # for the operator to read, not a reason to hold the key out forever.
     local waited=0
     while [ "$waited" -lt 120 ]; do
-        if kubectl --context "$K8S_CONTEXT" logs -l app=miner --since=3m --tail=2000 2>/dev/null \
+        # Big tail on purpose: the miner logs hard enough that this line falls off
+        # a small one, which reads as "the miner never noticed" when it did.
+        if kubectl --context "$K8S_CONTEXT" logs -l app=miner --since=3m --tail=30000 2>/dev/null \
             | grep -q "drain decision audit"; then
             log_chaos "PULL KEY: miner saw the removal after ${waited}s"
             break
