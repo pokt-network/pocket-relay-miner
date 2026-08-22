@@ -482,7 +482,7 @@ func (c *Config) Validate() error {
 
 	// Validate keyring config if provided
 	if c.Keys.Keyring != nil && c.Keys.Keyring.Backend != "" {
-		if err := keys.ValidateServiceKeyringBackend(c.Keys.Keyring.Backend); err != nil {
+		if err := keys.ValidateKeyringBackend(c.Keys.Keyring.Backend); err != nil {
 			return err
 		}
 	}

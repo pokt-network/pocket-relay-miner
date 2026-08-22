@@ -64,7 +64,9 @@ keys:
 
   # Option 2: Use Cosmos SDK keyring (recommended for production)
   # keyring:
-  #   backend: "file"  # file, os, test, memory
+  #   backend: "file"  # file (passphrase, piped in) or test (fixed password).
+  #                    # "os" and "memory" are refused at startup -- see
+  #                    # keys.ValidateKeyringBackend for why.
   #   dir: "/path/to/keyring"
   #   app_name: "pocket"
   #   key_names:  # Optional: specific keys to load

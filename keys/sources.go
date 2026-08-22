@@ -73,46 +73,41 @@ func NoKeysLoadedError(keysFile, keyringBackend, keyringDir string) error {
 	)
 }
 
-// serviceKeyringBackends are the keyring backends a long-running signer -- the
-// relayer or the miner -- may be configured with.
+// keyringBackends are the keyring backends this project supports, anywhere: the
+// relayer, the miner and the CLI all accept exactly these.
 //
-// The bar is "we can guarantee it works", not "cosmos-sdk offers it":
+// The bar is "we can confirm it works", not "cosmos-sdk offers it":
 //
-//   - "file" qualifies. It is passphrase-protected, the passphrase is piped in
-//     (see NewKeyringProvider's PasswordReader) and unlocking is cached for the
-//     whole keyring, and there is a regression test that seeds a real on-disk
-//     file keyring and reads it back.
-//   - "test" qualifies. Fixed password, no prompt; it is what the local stack
-//     runs and it is verified end to end there.
+//   - "file" is passphrase-protected, the passphrase is piped in (see
+//     NewKeyringProvider's PasswordReader) and unlocking is cached for the whole
+//     keyring; a regression test seeds a real on-disk file keyring and reads it
+//     back, and the local stack runs it end to end.
+//   - "test" uses a fixed password and no prompt; the local stack runs it too.
 //
-// Two are deliberately absent:
+// The ones cosmos-sdk also offers are refused, and the reasons are not symmetric:
 //
-//   - "memory" CANNOT work here. cosmos-sdk's in-memory keyring is created
-//     EMPTY and nothing in this codebase ever writes a key into a keyring
-//     (verified 2026-08-22: no ImportPrivKeyHex, NewAccount or SaveOfflineKey
-//     outside tests), so the process would hold zero keys for its whole life.
-//     It was accepted as valid, which meant the one thing an operator could not
-//     tell from their config was that it could never work.
-//   - "os" is not guaranteed. cosmos-sdk sets no AllowedBackends for it, so it
-//     uses a system keychain where one is reachable -- needing dbus and an
-//     unlocked desktop session, which a service account does not have -- and
-//     silently falls back to an encrypted file where one is not, in a DIFFERENT
-//     directory from "file" ("os" uses the dir it is given, "file" appends
-//     keyring-file/). Which of those a given host does is not something this
-//     code can establish, and there is no portable test for it. An operator who
-//     wants a passphrase-protected keyring on a bare VM should say "file" and
-//     get the behaviour they asked for.
-//
-// The interactive CLI is a different case and keeps "os": a human is present to
-// answer the keychain prompt, on a machine that has one. See
-// cmd/relay/keys.go.
-var serviceKeyringBackends = []string{"file", "test"}
+//   - "memory" CANNOT hold supplier keys. Its keyring is created EMPTY and
+//     nothing in this codebase ever writes a key into a keyring (verified
+//     2026-08-22: no ImportPrivKeyHex, NewAccount or SaveOfflineKey outside
+//     tests), so a process configured with it holds none for its whole life. It
+//     used to be accepted, which meant the one thing an operator could not tell
+//     from their config was that it could never work.
+//   - "os" cannot be confirmed. cosmos-sdk sets no AllowedBackends for it, so it
+//     uses a system keychain where dbus and an unlocked session exist -- which a
+//     service account does not have -- and silently falls back to an encrypted
+//     file where they do not, in a DIFFERENT directory than "file" ("os" uses the
+//     dir it is given, "file" appends keyring-file/). Which of those a host does
+//     is not something this code can establish, and there is no portable test.
+//     An operator who wants a passphrase-protected keyring says "file" and gets
+//     the behaviour they asked for.
+//   - "kwallet" and "pass" were never wired at all.
+var keyringBackends = []string{"file", "test"}
 
-// ValidateServiceKeyringBackend rejects a keyring backend a long-running signer
-// cannot be guaranteed to use. Shared by both binaries so neither can drift on
-// what it accepts.
-func ValidateServiceKeyringBackend(backend string) error {
-	for _, b := range serviceKeyringBackends {
+// ValidateKeyringBackend rejects a keyring backend this project does not support.
+// One list for every caller, so a config, a flag and a provider cannot disagree
+// about what is usable.
+func ValidateKeyringBackend(backend string) error {
+	for _, b := range keyringBackends {
 		if backend == b {
 			return nil
 		}
@@ -121,18 +116,17 @@ func ValidateServiceKeyringBackend(backend string) error {
 	switch backend {
 	case "memory":
 		return fmt.Errorf(
-			"keys.keyring.backend %q cannot hold supplier keys: an in-memory keyring starts empty "+
+			"keyring backend %q cannot hold supplier keys: an in-memory keyring starts empty "+
 				"and nothing writes to it, so this process would run with no signing key. Use one of: %s",
-			backend, strings.Join(serviceKeyringBackends, ", "))
+			backend, strings.Join(keyringBackends, ", "))
 	case "os":
 		return fmt.Errorf(
-			"keys.keyring.backend %q is not supported for a long-running signer: it needs a system "+
-				"keychain (dbus and an unlocked session) where one is reachable and silently falls back "+
-				"to an encrypted file elsewhere, in a different directory than %q. Use %q for a "+
-				"passphrase-protected keyring. Valid: %s",
-			backend, "file", "file", strings.Join(serviceKeyringBackends, ", "))
+			"keyring backend %q is not supported: it needs a system keychain (dbus and an unlocked "+
+				"session) where one is reachable and silently falls back to an encrypted file elsewhere, "+
+				"in a different directory. Use \"file\" for a passphrase-protected keyring. Valid: %s",
+			backend, strings.Join(keyringBackends, ", "))
 	}
 
-	return fmt.Errorf("invalid keys.keyring.backend %q: use one of: %s",
-		backend, strings.Join(serviceKeyringBackends, ", "))
+	return fmt.Errorf("invalid keyring backend %q: use one of: %s",
+		backend, strings.Join(keyringBackends, ", "))
 }

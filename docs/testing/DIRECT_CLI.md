@@ -210,12 +210,19 @@ Raw `--app-priv-key`/`--gateway-priv-key` hex is visible in your shell history
 and to `ps`, so it is for throwaway/localnet testing only. For real keys, use one
 of the two secure sources instead — both resolve the key in memory:
 
-- **Keyring by name** (same keyring the miner/relayer and `pocketd` use):
+- **Keyring by name** (same keyring the miner/relayer and `pocketd` use).
+  Supported backends are `file` and `test`; `os` and `memory` are refused, and
+  `--keyring-dir` is the directory CONTAINING the keyring, not the keyring
+  itself (the `file` backend reads `<dir>/keyring-file`):
 
   ```bash
-  pocket-relay-miner relay jsonrpc --service <svc> \
-    --keyring-backend os --keyring-dir ~/.pocket \
-    --app-key <app-key-name> --gateway-key <gateway-key-name> ...
+  # file backend: the passphrase is read from stdin, so pipe it in rather than
+  # typing it where it can land in shell history. One pipe unlocks the whole
+  # keyring.
+  read-passphrase-from-your-secret-manager | \
+    pocket-relay-miner relay jsonrpc --service <svc> \
+      --keyring-backend file --keyring-dir ~/.pocket \
+      --app-key <app-key-name> --gateway-key <gateway-key-name> ...
   ```
 
 - **Keys file** (YAML; the CLI uses the first application and first gateway):

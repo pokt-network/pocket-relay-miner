@@ -636,8 +636,8 @@ type KeysConfig struct {
 
 // KeyringConfig contains Cosmos SDK keyring configuration.
 type KeyringConfig struct {
-	// Backend is the keyring backend type: "file", "os" or "test".
-	// "memory" is rejected: see keys.ValidateKeyringBackend.
+	// Backend is the keyring backend type: "file" or "test".
+	// "memory", "os" and the rest are rejected: see keys.ValidateKeyringBackend.
 	Backend string `yaml:"backend"`
 
 	// Dir is the directory containing the keyring (for "file" backend).
@@ -883,7 +883,7 @@ func (c *Config) Validate() error {
 	// "unsupported keyring backend" from the provider, without saying what is
 	// valid. Same check as the miner, from the same list.
 	if keyringBackend != "" {
-		if err := keys.ValidateServiceKeyringBackend(keyringBackend); err != nil {
+		if err := keys.ValidateKeyringBackend(keyringBackend); err != nil {
 			return err
 		}
 	}

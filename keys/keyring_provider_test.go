@@ -160,7 +160,16 @@ func TestKeyringDirLooksLikeKeyringItself(t *testing.T) {
 		},
 		{name: "correct parent directory", backend: "file", dir: "/home/op/bin"},
 		{name: "empty dir uses backend default", backend: "file", dir: ""},
-		{name: "os backend has no such subdir", backend: "os", dir: "/home/op/keyring-file"},
+		{
+			// The other supported backend has its own subdir, so the same mistake
+			// is possible there and must be caught with the right suggestion.
+			name:      "test backend, dir points at the keyring itself",
+			backend:   "test",
+			dir:       "/home/op/.pocket/keyring-test",
+			wantWarn:  true,
+			suggested: "/home/op/.pocket",
+		},
+		{name: "unsupported backend has no subdir to confuse", backend: "kwallet", dir: "/home/op/keyring-file"},
 		{name: "unrelated directory named similarly", backend: "file", dir: "/home/op/keyring-files"},
 	}
 
