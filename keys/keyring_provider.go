@@ -33,7 +33,10 @@ type KeyringProvider struct {
 
 // KeyringProviderConfig contains configuration for the KeyringProvider.
 type KeyringProviderConfig struct {
-	// Backend is the keyring backend type: "file", "os", "test", "memory"
+	// Backend is the keyring backend type: "file", "os" or "test".
+	// See keys.ValidateKeyringBackend for why "memory" is not one of them.
+	// A caller that wants an in-memory keyring builds it itself and uses
+	// NewKeyringProviderWithKeyring, which is what the tests do.
 	Backend string
 
 	// Dir is the directory containing the keyring (for "file" backend).
@@ -85,8 +88,6 @@ func NewKeyringProvider(
 	var err error
 
 	switch config.Backend {
-	case "memory":
-		kr = keyring.NewInMemory(cdc)
 	case "test":
 		// Test backend stores to disk but doesn't require password
 		kr, err = keyring.New(
@@ -98,7 +99,7 @@ func NewKeyringProvider(
 		)
 	case "file":
 		// The file backend is password-protected, so it ALWAYS needs a reader to
-		// prompt from. Unlike "test" (fixed password) and "memory", passing nil
+		// prompt from. Unlike "test", which uses a fixed password, passing nil
 		// here makes the backend unusable in every case: the passphrase prompt
 		// dereferences the reader and panics before any key is read.
 		logger.Info().Msg("keyring backend \"file\" is password-protected; the passphrase is read from the configured reader (stdin by default)")
