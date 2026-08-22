@@ -204,44 +204,23 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	}
 	defer func() { _ = redisHealthMonitor.Close() }()
 
-	// Create key providers from config
-	providers, err := createKeyProviders(logger, config)
+	// One shared sequence for both binaries: build the providers the config
+	// names, put a key manager over them, load once, arm the watch and the
+	// reload timer, and refuse to continue with no keys. See keys.OpenManager
+	// for why that lives there and not here.
+	keyManager, err := keys.OpenManager(
+		ctx, logger,
+		config.Keys.KeysFile,
+		keyringSettings(config.Keys.Keyring),
+		config.Keys.HotReloadEnabled,
+	)
 	if err != nil {
 		return err
 	}
-
-	if len(providers) == 0 {
-		return fmt.Errorf("no key providers configured")
-	}
-
-	// Create a key manager
-	keyManager := keys.NewMultiProviderKeyManager(
-		logger,
-		providers,
-		keys.KeyManagerConfig{
-			HotReloadEnabled: config.HotReloadEnabled,
-		},
-	)
 	defer func() { _ = keyManager.Close() }()
 
-	// Start key manager
-	if err = keyManager.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start key manager: %w", err)
-	}
-
-	// Check if any keys were loaded - FAIL FAST if no keys
-	// This prevents the miner from silently running with no keys and doing nothing.
-	// Users with invalid key files will see clear error messages instead of exit 0.
-	suppliers := keyManager.ListSuppliers()
-	if len(suppliers) == 0 {
-		keyringBackend, keyringDir := "", ""
-		if config.Keys.Keyring != nil {
-			keyringBackend, keyringDir = config.Keys.Keyring.Backend, config.Keys.Keyring.Dir
-		}
-		return keys.NoKeysLoadedError(config.Keys.KeysFile, keyringBackend, keyringDir)
-	}
 	logger.Info().
-		Int("count", len(suppliers)).
+		Int("count", len(keyManager.ListSuppliers())).
 		Msg("loaded supplier keys")
 
 	// Generate unique instance ID for global leader election
@@ -316,7 +295,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	}()
 
 	logger.Info().
-		Int("suppliers", len(suppliers)).
+		Int("suppliers", len(keyManager.ListSuppliers())).
 		Msg("SupplierWorker started - claiming suppliers")
 
 	// Create leader controller for leader-only resources (cache refresh + block publishing)
@@ -435,57 +414,6 @@ func applyFlagOverrides(cmd *cobra.Command, config *miner.Config) {
 	if cmd.Flags().Changed(flagSessionTTL) {
 		config.SessionTTL, _ = cmd.Flags().GetDuration(flagSessionTTL)
 	}
-}
-
-// createKeyProviders creates key providers based on the config.
-func createKeyProviders(logger logging.Logger, config *miner.Config) ([]keys.KeyProvider, error) {
-	var providers []keys.KeyProvider
-
-	if config.Keys.KeysFile != "" {
-		provider, err := keys.NewSupplierKeysFileProvider(logger, config.Keys.KeysFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create supplier keys file provider: %w", err)
-		}
-		providers = append(providers, provider)
-		logger.Info().Str("file", config.Keys.KeysFile).Msg("added supplier keys file provider")
-	}
-
-	if config.Keys.Keyring != nil && config.Keys.Keyring.Backend != "" {
-		keyringDir := config.Keys.Keyring.Dir
-		if keyringDir == "" {
-			keyringDir = os.ExpandEnv("$HOME/.pocket")
-		}
-		// Where the passphrase comes from is a DEPLOYMENT concern -- a mounted
-		// Secret or an env var -- so it is resolved from config here rather than
-		// left to stdin, which would force the deployment to wrap the command in
-		// a shell just to redirect a file into it. Nil means stdin, which only
-		// the interactive CLI relies on.
-		passphrase, err := keys.PassphraseReader(keys.PassphraseSource{
-			File: config.Keys.Keyring.PassphraseFile,
-			Env:  config.Keys.Keyring.PassphraseEnv,
-		})
-		if err != nil {
-			return nil, err
-		}
-
-		provider, err := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{
-			Backend:        config.Keys.Keyring.Backend,
-			Dir:            keyringDir,
-			AppName:        config.Keys.Keyring.AppName,
-			KeyNames:       config.Keys.Keyring.KeyNames,
-			PasswordReader: passphrase,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create keyring provider: %w", err)
-		}
-		providers = append(providers, provider)
-		logger.Info().
-			Str("backend", config.Keys.Keyring.Backend).
-			Str("dir", keyringDir).
-			Msg("added keyring provider")
-	}
-
-	return providers, nil
 }
 
 // validateMinerConfig performs upfront validation of configuration

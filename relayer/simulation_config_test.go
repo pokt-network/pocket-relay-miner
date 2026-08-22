@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 )
@@ -496,7 +497,7 @@ func minimalValidRelayerConfig() *Config {
 		DefaultValidationMode: ValidationModeOptimistic,
 		// Validate requires exactly one key source (keys.ValidateKeySources);
 		// these cases are about the simulation block.
-		Keys: KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
+		Keys: config.KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
 		Services: map[string]ServiceConfig{
 			"op": {
 				DefaultBackend: "jsonrpc",

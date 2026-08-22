@@ -164,6 +164,11 @@ func resolveKeyringKey(logger logging.Logger, backend, dir, name string) (string
 	if err := keys.ValidateKeyringBackend(backend); err != nil {
 		return "", err
 	}
+	// Same rule as the services: an empty directory is not a default, it is a
+	// relative path to somewhere else. See keys.ValidateKeyringDir.
+	if err := keys.ValidateKeyringDir(dir); err != nil {
+		return "", err
+	}
 
 	provider, err := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{
 		Backend: backend,

@@ -23,6 +23,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 )
@@ -72,7 +73,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 		PocketNode: PocketNodeConfig{QueryNodeRPCUrl: "http://x", QueryNodeGRPCUrl: "x:9090"},
 		// Validate requires exactly one key source (keys.ValidateKeySources);
 		// these tests are about other config, so the minimum is supplied here.
-		Keys:                    KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
+		Keys:                    config.KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
 		DefaultValidationMode:   validationMode,
 		DefaultMaxBodySizeBytes: 1 << 20,
 		HTTPTransport:           HTTPTransportConfig{MaxConnsPerHost: 500, MaxIdleConnsPerHost: 100, IdleConnTimeoutSeconds: 90},
