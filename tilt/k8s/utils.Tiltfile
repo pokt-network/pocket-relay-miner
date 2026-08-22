@@ -45,10 +45,33 @@ def apply_k8s_overrides_miner(config, redis_host):
     config["pocket_node"]["query_node_grpc_url"] = "validator:9090"
     config["pocket_node"]["grpc_insecure"] = True
 
-    # Override keys path for k8s volume mount
+    # Point the binary at the key SOURCE this run is exercising.
+    #
+    # BOTH sources are mounted in every pod -- the keys_file secret and a keyring
+    # built from it at pod start -- but a config may name only ONE: setting both
+    # is a startup error (keys.ValidateKeySources). Mounting both anyway is what
+    # makes switching a one-line config change instead of a redeploy, and the
+    # config-hash annotation rolls the pods, which is required because the
+    # binaries read their config only at startup.
+    #
+    #   key_source: keys_file   the WATCHED source; a change lands at once
+    #   key_source: keyring     UNWATCHABLE; found by the reload timer (30s)
     if "keys" not in config:
         config["keys"] = {}
-    config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
+    key_source = config.get("key_source", "keys_file")
+    config.pop("key_source", None)
+    if key_source not in ("keys_file", "keyring"):
+        fail("key_source must be keys_file or keyring (they are mutually exclusive); got: " + str(key_source))
+    config["keys"].pop("keys_file", None)
+    config["keys"].pop("keyring", None)
+    if key_source == "keys_file":
+        config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
+    else:
+        config["keys"]["keyring"] = {
+            "backend": "test",
+            "dir": "/keyring",
+            "app_name": "pocket",
+        }
 
     # Override metrics addr for container
     if "metrics" not in config:
@@ -136,10 +159,33 @@ def apply_k8s_overrides_relayer(config, redis_host):
     config["pocket_node"]["query_node_grpc_url"] = "validator:9090"
     config["pocket_node"]["grpc_insecure"] = True
 
-    # Override keys path for k8s volume mount
+    # Point the binary at the key SOURCE this run is exercising.
+    #
+    # BOTH sources are mounted in every pod -- the keys_file secret and a keyring
+    # built from it at pod start -- but a config may name only ONE: setting both
+    # is a startup error (keys.ValidateKeySources). Mounting both anyway is what
+    # makes switching a one-line config change instead of a redeploy, and the
+    # config-hash annotation rolls the pods, which is required because the
+    # binaries read their config only at startup.
+    #
+    #   key_source: keys_file   the WATCHED source; a change lands at once
+    #   key_source: keyring     UNWATCHABLE; found by the reload timer (30s)
     if "keys" not in config:
         config["keys"] = {}
-    config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
+    key_source = config.get("key_source", "keys_file")
+    config.pop("key_source", None)
+    if key_source not in ("keys_file", "keyring"):
+        fail("key_source must be keys_file or keyring (they are mutually exclusive); got: " + str(key_source))
+    config["keys"].pop("keys_file", None)
+    config["keys"].pop("keyring", None)
+    if key_source == "keys_file":
+        config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
+    else:
+        config["keys"]["keyring"] = {
+            "backend": "test",
+            "dir": "/keyring",
+            "app_name": "pocket",
+        }
 
     # Override metrics addr for container
     if "metrics" not in config:
