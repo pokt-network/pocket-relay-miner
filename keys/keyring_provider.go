@@ -2,6 +2,7 @@ package keys
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -200,9 +201,26 @@ func (p *KeyringProvider) Name() string {
 	return "keyring"
 }
 
+// Kind returns the provider family, for metric labels.
+func (p *KeyringProvider) Kind() string { return "keyring" }
+
 // LoadKeys loads all keys from the keyring.
+// A key that cannot be read is returned as an ERROR alongside the keys that
+// could, because the manager's "an unreadable source is not a key removal"
+// guard keys off that error. Logging a warning and returning a shorter map with
+// a nil error -- what this did until 2026-08-22 -- made the exact triggers that
+// guard enumerates (a keyring briefly locked, a permissions blip, a .info file
+// caught mid-rewrite) look like the operator having removed those suppliers:
+// the relayer stops serving them and the miner drains their pipelines.
+//
+// One gap remains and is NOT closed here: keyring.List() is cosmos-sdk's
+// keystore.MigrateAll (crypto/keyring/keyring.go, v0.53.7), which SKIPS any
+// record it cannot decode -- it prints to stderr and continues, returning a nil
+// error. Read in the dependency's source, not inferred. A record lost that way
+// is invisible to this provider, so it still reads as a removal.
 func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.PrivKey, error) {
 	keys := make(map[string]cryptotypes.PrivKey)
+	var loadErrs []error
 
 	// If specific key names are provided, load only those
 	if len(p.keyNames) > 0 {
@@ -214,6 +232,7 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 					Str("key_name", name).
 					Msg("failed to load key from keyring")
 				keyLoadErrors.WithLabelValues("keyring").Inc()
+				loadErrs = append(loadErrs, fmt.Errorf("key %q: %w", name, err))
 				continue
 			}
 			keys[addr] = privKey
@@ -237,6 +256,7 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 					Str("key_name", record.Name).
 					Msg("failed to load key from keyring")
 				keyLoadErrors.WithLabelValues("keyring").Inc()
+				loadErrs = append(loadErrs, fmt.Errorf("key %q: %w", record.Name, err))
 				continue
 			}
 			keys[addr] = privKey
@@ -250,6 +270,11 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	p.logger.Info().
 		Int("loaded", len(keys)).
 		Msg("loaded keys from keyring")
+
+	if len(loadErrs) > 0 {
+		return keys, fmt.Errorf("%d keyring key(s) could not be read: %w",
+			len(loadErrs), errors.Join(loadErrs...))
+	}
 
 	return keys, nil
 }

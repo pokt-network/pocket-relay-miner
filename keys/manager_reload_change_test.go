@@ -82,6 +82,7 @@ func (p *staticProvider) LoadKeys(context.Context) (map[string]cryptotypes.PrivK
 	return out, nil
 }
 
+func (p *staticProvider) Kind() string            { return "static" }
 func (p *staticProvider) SupportsHotReload() bool { return false }
 
 func (p *staticProvider) WatchForChanges(context.Context) <-chan struct{} { return nil }
@@ -356,4 +357,119 @@ func TestAProviderThatFailsOnTheFIRSTLoadIsToleratedPerProvider(t *testing.T) {
 
 	require.NoError(t, m.Start(context.Background()), "one unreadable source must not stop startup")
 	require.Equal(t, []string{fromHealthy}, m.ListSuppliers())
+}
+
+// partialProvider serves a key set and, independently, an error -- the shape a
+// real keyring has when one of its records cannot be read: some keys come back
+// AND the load failed. A provider that could only do one or the other could not
+// reproduce the bug this pins.
+type partialProvider struct {
+	mu      sync.Mutex
+	keys    map[string]cryptotypes.PrivKey
+	loadErr error
+
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (p *partialProvider) Name() string            { return "partial" }
+func (p *partialProvider) Kind() string            { return "partial" }
+func (p *partialProvider) SupportsHotReload() bool { return false }
+
+func (p *partialProvider) WatchForChanges(context.Context) <-chan struct{} { return nil }
+
+func (p *partialProvider) Close() error { return nil }
+
+func (p *partialProvider) set(keys map[string]cryptotypes.PrivKey, err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.keys, p.loadErr = keys, err
+}
+
+func (p *partialProvider) LoadKeys(context.Context) (map[string]cryptotypes.PrivKey, error) {
+	if p.entered != nil {
+		p.entered <- struct{}{}
+		<-p.release
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make(map[string]cryptotypes.PrivKey, len(p.keys))
+	for addr, key := range p.keys {
+		out[addr] = key
+	}
+	return out, p.loadErr
+}
+
+// TestReload_PartialLoadWithErrorIsNotARemoval pins the guard for the case a
+// keyring actually produces: SOME keys come back and the load reports an error.
+//
+// Until 2026-08-22 the keyring provider logged a warning per unreadable key and
+// returned the shorter map with a NIL error, so the guard -- which keys off the
+// error -- never fired and the diff read the missing addresses as removals. The
+// relayer then stops serving those suppliers and the miner drains their
+// pipelines, for a permissions blip nobody performed.
+func TestReload_PartialLoadWithErrorIsNotARemoval(t *testing.T) {
+	addrA, keyA := "pokt1partial-a", secp256k1.GenPrivKey()
+	addrB, keyB := "pokt1partial-b", secp256k1.GenPrivKey()
+
+	provider := &partialProvider{keys: map[string]cryptotypes.PrivKey{addrA: keyA, addrB: keyB}}
+	manager := NewMultiProviderKeyManager(logging.NewLoggerFromConfig(logging.DefaultConfig()), []KeyProvider{provider}, KeyManagerConfig{})
+	require.NoError(t, manager.Start(context.Background()))
+	t.Cleanup(func() { _ = manager.Close() })
+
+	var removed []string
+	var mu sync.Mutex
+	manager.OnKeyChange(func(addr string, added bool) {
+		if !added {
+			mu.Lock()
+			removed = append(removed, addr)
+			mu.Unlock()
+		}
+	})
+
+	// B unreadable this pass: a shorter map AND an error, exactly what a
+	// keyring whose record cannot be exported now returns.
+	provider.set(map[string]cryptotypes.PrivKey{addrA: keyA}, errors.New("keyring locked"))
+	require.Error(t, manager.Reload(context.Background()),
+		"a source that could not be fully read must report it")
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Empty(t, removed, "no key was removed by an operator; the source was unreadable")
+	require.ElementsMatch(t, []string{addrA, addrB}, manager.ListSuppliers(),
+		"the previous key set must survive an unreadable source")
+}
+
+// TestReload_IsSerialized pins that two reloads cannot overlap.
+//
+// Reload does its I/O outside keysMu and takes the lock only to diff and store,
+// so overlapping reloads can apply their snapshots in the opposite order to the
+// one they were taken in -- and the older snapshot wins, resurrecting a key the
+// operator pulled. Harmless while only the per-source watchers called Reload;
+// the 30s timer makes the overlap routine.
+func TestReload_IsSerialized(t *testing.T) {
+	addrA, keyA := "pokt1serialized", secp256k1.GenPrivKey()
+
+	provider := &partialProvider{
+		keys:    map[string]cryptotypes.PrivKey{addrA: keyA},
+		entered: make(chan struct{}, 2),
+		release: make(chan struct{}),
+	}
+	manager := NewMultiProviderKeyManager(logging.NewLoggerFromConfig(logging.DefaultConfig()), []KeyProvider{provider}, KeyManagerConfig{})
+	t.Cleanup(func() { _ = manager.Close() })
+
+	go func() { _ = manager.Reload(context.Background()) }()
+	go func() { _ = manager.Reload(context.Background()) }()
+
+	<-provider.entered // the first reload is inside LoadKeys and holding it
+
+	select {
+	case <-provider.entered:
+		t.Fatal("a second reload entered LoadKeys while the first was still loading: " +
+			"reloads are not serialized, so the older snapshot can overwrite the newer one")
+	case <-time.After(200 * time.Millisecond):
+		// Nobody else got in, which is the property under test.
+	}
+
+	close(provider.release)
 }

@@ -143,6 +143,10 @@ func (p *SupplierKeysFileProvider) Name() string {
 	return "supplier_keys_file:" + p.filePath
 }
 
+// Kind returns the provider family, for metric labels. Deliberately without the
+// path that Name() carries: a metric label must be bounded.
+func (p *SupplierKeysFileProvider) Kind() string { return "supplier_keys_file" }
+
 // LoadKeys loads all keys from the supplier.yaml file.
 // The operator address is derived from each private key.
 //

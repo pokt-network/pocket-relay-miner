@@ -40,8 +40,16 @@ type KeyChangeCallback func(operatorAddr string, added bool)
 // KeyProvider is a source of keys for the KeyManager.
 // Multiple providers can be combined (keyring + file).
 type KeyProvider interface {
-	// Name returns a human-readable name for this provider.
+	// Name returns a human-readable name for this provider, for LOGS. It may
+	// carry unbounded detail such as a file path.
 	Name() string
+
+	// Kind returns the provider's family -- "keyring", "supplier_keys_file" --
+	// and is the only one of the two safe as a metric label. Name() puts the
+	// key file's absolute path in the series, which is both unbounded and a
+	// different value than the providers use when they count their own
+	// failures, so one failed load produced two disjoint series.
+	Kind() string
 
 	// LoadKeys loads all keys from this provider.
 	// Returns a map of operator address -> private key.

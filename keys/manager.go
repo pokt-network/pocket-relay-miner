@@ -30,6 +30,20 @@ type MultiProviderKeyManager struct {
 	keys   map[string]cryptotypes.PrivKey // operatorAddr -> privKey
 	keysMu sync.RWMutex
 
+	// reloadMu serializes whole reloads. keysMu cannot do it: Reload does its
+	// I/O (provider.LoadKeys) OUTSIDE that lock and takes it only to diff and
+	// store, so two reloads can read the source at different moments and apply
+	// their snapshots in the opposite order.
+	//
+	// Before the reload timer existed only the watchers called Reload, one per
+	// source, so this could not happen. The timer makes concurrent reloaders
+	// the normal case: the tick starts reading, the operator pulls a key, the
+	// watcher's reload sees the removal and applies it, and then the tick --
+	// holding a snapshot taken BEFORE the removal -- overwrites it and
+	// resurrects the key, signing with material the operator withdrew until the
+	// next tick happens to read again.
+	reloadMu sync.Mutex
+
 	// Change callbacks
 	callbacks   []KeyChangeCallback
 	callbacksMu sync.RWMutex
@@ -254,6 +268,10 @@ func (m *MultiProviderKeyManager) ListSuppliers() []string {
 
 // Reload reloads keys from all configured sources.
 func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
+	// One reload at a time, load included: see reloadMu.
+	m.reloadMu.Lock()
+	defer m.reloadMu.Unlock()
+
 	newKeys := make(map[string]cryptotypes.PrivKey)
 	var loadErrs []error
 
@@ -261,13 +279,19 @@ func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 	for _, provider := range m.providers {
 		keys, err := provider.LoadKeys(ctx)
 		if err != nil {
-			keyLoadErrors.WithLabelValues(provider.Name()).Inc()
+			// Kind(), not Name(): the label vocabulary has to match what the
+			// providers themselves use, and Name() carries the key file's
+			// absolute path -- an unbounded Prometheus label.
+			keyLoadErrors.WithLabelValues(provider.Kind()).Inc()
 			loadErrs = append(loadErrs, fmt.Errorf("%s: %w", provider.Name(), err))
 			m.logger.Warn().
 				Err(err).
 				Str("provider", provider.Name()).
 				Msg("failed to load keys from provider")
-			continue
+			// Fall through: a provider may return keys AND an error, and the
+			// keys it did read still matter on the FIRST load, which the guard
+			// below exempts. On any later load the guard abandons the reload
+			// anyway, so merging here cannot apply a partial set as a removal.
 		}
 
 		for addr, key := range keys {
