@@ -122,6 +122,15 @@ restore_signing_keys() {
 # Restore on every exit path, including a failure under `set -e` and Ctrl-C.
 trap restore_signing_keys EXIT
 
+# keys_removed_total prints the fleet-wide count of key removals seen, via
+# Prometheus. Prints 0 when it cannot be reached, so an unreachable Prometheus
+# shows up as "not registered" rather than as a silent pass.
+keys_removed_total() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL:-http://localhost:9091}/api/v1/query" \
+        --data-urlencode 'query=sum(ha_keys_changes_total{type="removed"})' 2>/dev/null |
+        jq -r '[.data.result[]?.value[1] | tonumber] | add // 0' 2>/dev/null | cut -d. -f1 || echo 0
+}
+
 # secret_key_count prints how many keys the secret currently carries.
 secret_key_count() {
     kubectl --context "$K8S_CONTEXT" get secret "$KEYS_SECRET" \
@@ -171,22 +180,30 @@ chaos_pull_signing_key() {
         return 0
     fi
 
-    # Wait for the fleet to notice. The miner logs a drain decision audit when
-    # its key manager sees the removal; bounded because a miss here is a finding
-    # for the operator to read, not a reason to hold the key out forever.
-    local waited=0
+    # Wait for the fleet to notice, measured on the COUNTER rather than by
+    # grepping the miner log. The log version was wrong in both directions: it
+    # matched a "drain decision audit" line left by the PREVIOUS event (it looks
+    # at a 3-minute window) and reported a detection that had not happened, and it
+    # missed real ones when the line fell off the tail. Measured 2026-08-21 while
+    # it reported 0 detections in 4 events: ha_keys_changes_total{type="removed"}
+    # was 13 and the miner had logged 16 audits.
+    # Deliberately NOT named before/after: `before` already holds the key count
+    # this function restores against, and a second `local before` in the same
+    # function silently overwrites it -- which turned the recovery check into a
+    # comparison against the removals metric and raised a false "the fleet is
+    # short a key" while the secret was in fact whole.
+    local removed_at_start removed_now waited=0
+    removed_at_start="$(keys_removed_total)"
     while [ "$waited" -lt 120 ]; do
-        # Big tail on purpose: the miner logs hard enough that this line falls off
-        # a small one, which reads as "the miner never noticed" when it did.
-        if kubectl --context "$K8S_CONTEXT" logs -l app=miner --since=3m --tail=30000 2>/dev/null \
-            | grep -q "drain decision audit"; then
-            log_chaos "PULL KEY: miner saw the removal after ${waited}s"
+        removed_now="$(keys_removed_total)"
+        if [ "${removed_now:-0}" -gt "${removed_at_start:-0}" ]; then
+            log_chaos "PULL KEY: fleet registered the removal after ${waited}s"
             break
         fi
         sleep 10
         waited=$((waited + 10))
     done
-    [ "$waited" -ge 120 ] && log_chaos "PULL KEY: miner did not log a drain decision within 120s"
+    [ "$waited" -ge 120 ] && log_chaos "PULL KEY: fleet did not register a key removal within 120s — CHECK THIS"
 
     # Hold the key out for longer than kubelet's secret sync period, not for one
     # chaos interval. Measured 2026-08-21 with a 20s hold: the fleet registered
