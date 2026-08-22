@@ -46,7 +46,20 @@ type Config struct {
 	// Default: 100
 	BatchSize int64 `yaml:"batch_size"`
 
-	// HotReloadEnabled enables hot-reload of keys.
+	// HotReloadEnabled reloads the signing keys while the miner runs, so a key
+	// added or pulled takes effect without a restart.
+	//
+	// It covers every key source. keys_file is additionally WATCHED (its
+	// provider watches the containing directory for Write|Create, which is what
+	// makes a Kubernetes secret's ..data swap register), so a change there lands
+	// almost at once. A keyring cannot be watched, so its changes are found by
+	// the reload timer -- within keys.DefaultReloadInterval. The key manager
+	// logs which sources are watched and which rely on the timer at startup.
+	//
+	// NOTE: the relayer's equivalent lives under keys.hot_reload_enabled, not at
+	// the top level. The two are not unified because renaming either breaks
+	// deployed configs silently -- the YAML decoder drops unknown keys.
+	//
 	// Default: true
 	HotReloadEnabled bool `yaml:"hot_reload_enabled"`
 

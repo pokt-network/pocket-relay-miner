@@ -480,7 +480,11 @@ properties:
 
   hot_reload_enabled:
     type: boolean
-    description: Enable hot-reload of supplier keys
+    description: >-
+      Reload signing keys while the miner runs, so a key added or pulled takes
+      effect without a restart. Covers every key source: keys_file is watched
+      and reacts at once, a keyring cannot be watched and is picked up by the
+      reload timer within 30s.
     default: true
 
   session_ttl:

@@ -306,7 +306,12 @@ supplier_claiming:
 # Redis streams serve as the WAL for relays, enabling HA compatibility and data durability.
 deduplication_ttl_blocks: 10  # Keep relay hashes for 10 blocks to prevent duplicates
 batch_size: 1000  # Relay batch size for XREADGROUP (increased from 100 for better throughput)
-hot_reload_enabled: true  # Enable hot-reload of keys on startup
+# Reload signing keys while the miner runs, so a key added or pulled takes effect
+# without a restart. Covers every key source: keys_file is watched and reacts at
+# once, a keyring cannot be watched and is picked up by the reload timer within
+# 30s. The miner logs which sources are watched and which rely on the timer at
+# startup. Default: true.
+hot_reload_enabled: true
 cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget). Backup safety net if manual cleanup fails.
 
 # SMST live_root checkpoint interval (in UpdateTree calls).

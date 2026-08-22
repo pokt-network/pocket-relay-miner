@@ -367,43 +367,6 @@ func supplierSigningKeys(km keys.KeyManager) map[string]cryptotypes.PrivKey {
 	return signingKeys
 }
 
-// logKeySourceReloadability states, at startup, how promptly each configured
-// key source reacts to a change.
-//
-// It exists because the answer differs per source and the difference is
-// invisible at runtime. The supplier keys FILE is watched (its provider watches
-// the containing directory for Write|Create, which is what makes a Kubernetes
-// secret's ..data swap register), so a change there lands almost at once. The
-// KEYRING cannot be watched at all -- its WatchForChanges returns nil -- so a
-// change there is found by the reload timer instead, within one interval.
-//
-// Both paths re-read EVERY source, so the distinction is about latency, not
-// about whether a source reloads: with the timer running, all of them do.
-func logKeySourceReloadability(logger logging.Logger, providers []keys.KeyProvider, hotReloadEnabled bool) {
-	watched := make([]string, 0, len(providers))
-	timerOnly := make([]string, 0, len(providers))
-	for _, provider := range providers {
-		if provider.SupportsHotReload() {
-			watched = append(watched, provider.Name())
-			continue
-		}
-		timerOnly = append(timerOnly, provider.Name())
-	}
-
-	if !hotReloadEnabled {
-		logger.Warn().
-			Strs("sources", append(watched, timerOnly...)).
-			Msg("key hot reload is DISABLED: a key added or removed takes effect only on restart")
-		return
-	}
-
-	logger.Info().
-		Strs("watched_sources", watched).
-		Strs("timer_only_sources", timerOnly).
-		Dur("reload_interval", keys.DefaultReloadInterval).
-		Msg("key hot reload active: watched sources react at once, every source within one reload interval")
-}
-
 // stripGRPCScheme removes a URL scheme prefix from a gRPC endpoint, matching the
 // relayer boot path — grpc.NewClient wants host:port, not a scheme.
 func stripGRPCScheme(grpcURL string) string {
@@ -803,8 +766,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		if startErr := keyManager.Start(ctx); startErr != nil {
 			return fmt.Errorf("failed to start key manager: %w", startErr)
 		}
-
-		logKeySourceReloadability(logger, keyProviders, config.Keys.HotReloadEnabled)
 
 		loadedKeys := supplierSigningKeys(keyManager)
 
