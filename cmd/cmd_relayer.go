@@ -766,6 +766,14 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			Msg("signing key change applied to the running relayer")
 	})
 
+	// Re-read AFTER registering, because the manager returned from OpenManager
+	// is already running: a reload landing between the snapshot above and this
+	// registration would update the manager's keys and find no callback to
+	// notify, leaving the signer on the pre-reload set until the NEXT change --
+	// which on a steady fleet may never come. Rebuilding the whole set is
+	// idempotent, so paying for one extra read at startup closes the window.
+	responseSigner.ReplaceKeys(supplierSigningKeys(keyManager))
+
 	// Wire the simulated-relay verifier (Admission zone). Optional and
 	// off by default; when disabled the header is ignored. Needs the
 	// response signer (to sign simulated responses) and the set of
