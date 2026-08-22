@@ -773,9 +773,22 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 		loadedKeys := supplierSigningKeys(keyManager)
 
+		// A configured key source that yields NO keys is fatal, the same way it is
+		// on the miner. Until 2026-08-22 this only warned, and the result was a
+		// relayer that Kubernetes reported as healthy -- readiness and liveness
+		// both pass -- while it rejected every relay for want of a signer. Found
+		// live: a keyring whose files the process could not read loaded zero keys,
+		// the miner refused to start and said why, and the relayer came up and
+		// served nothing. Crash-looping with the reason is the honest outcome; the
+		// config named a source, so an empty result is a fault, not a choice.
 		if len(loadedKeys) == 0 {
-			logger.Warn().Msg("no keys found - response signing will be disabled")
-		} else {
+			keyringBackend, keyringDir := "", ""
+			if config.Keys.Keyring != nil {
+				keyringBackend, keyringDir = config.Keys.Keyring.Backend, config.Keys.Keyring.Dir
+			}
+			return keys.NoKeysLoadedError(config.Keys.KeysFile, keyringBackend, keyringDir)
+		}
+		{
 			responseSigner, signerErr := relayer.NewResponseSigner(logger, loadedKeys)
 			if signerErr != nil {
 				return fmt.Errorf("failed to create response signer: %w", signerErr)

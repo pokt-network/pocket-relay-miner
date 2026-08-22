@@ -102,7 +102,13 @@ spec:
               exit 1
             fi
           done
-          echo "imported $i keys into the keyring at /keyring"
+          # The app container runs as uid 1000; this one runs as root, so the
+          # files it just wrote would be unreadable there. Measured: without
+          # this the keyring loads ZERO keys, which the miner reports as a
+          # hard startup failure and the relayer used to survive silently.
+          chown -R 1000:1000 /keyring
+          chmod -R go-rwx /keyring
+          echo "imported $i keys into the keyring at /keyring, owned by uid 1000"
         volumeMounts:
         - name: keys
           mountPath: /keys

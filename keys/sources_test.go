@@ -3,6 +3,8 @@
 package keys
 
 import (
+	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -58,4 +60,31 @@ func TestValidateKeySourcesDemandsExactlyOne(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestNoKeysLoadedErrorNamesTheSourceAndTheUID pins what this error has to say.
+//
+// The wording it replaced ("check your key file configuration") sent the reader
+// looking for a mistake in the config when the config was right and the process
+// simply could not read the files -- which is what actually happened, live, with
+// a keyring written by a root init container and read by a process running as
+// uid 1000. Naming the source and the uid is the whole value.
+func TestNoKeysLoadedErrorNamesTheSourceAndTheUID(t *testing.T) {
+	uid := strconv.Itoa(os.Getuid())
+
+	t.Run("keys file", func(t *testing.T) {
+		err := NoKeysLoadedError("/keys/supplier-keys.yaml", "", "")
+		require.Contains(t, err.Error(), "/keys/supplier-keys.yaml")
+		require.Contains(t, err.Error(), uid)
+		require.NotContains(t, err.Error(), "keyring", "a keys_file fault must not talk about a keyring")
+	})
+
+	t.Run("keyring wins when both are somehow set", func(t *testing.T) {
+		// Config validation refuses both, so this only fixes which one the
+		// message describes if it ever gets here.
+		err := NoKeysLoadedError("/keys/supplier-keys.yaml", "test", "/keyring")
+		require.Contains(t, err.Error(), "test")
+		require.Contains(t, err.Error(), "/keyring")
+		require.Contains(t, err.Error(), uid)
+	})
 }

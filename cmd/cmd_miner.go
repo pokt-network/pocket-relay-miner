@@ -234,9 +234,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// Users with invalid key files will see clear error messages instead of exit 0.
 	suppliers := keyManager.ListSuppliers()
 	if len(suppliers) == 0 {
-		return fmt.Errorf("no supplier keys loaded at startup - cannot proceed. " +
-			"Check your key file configuration and ensure at least one valid key is provided. " +
-			"Key file errors are logged above with details about what's wrong")
+		keyringBackend, keyringDir := "", ""
+		if config.Keys.Keyring != nil {
+			keyringBackend, keyringDir = config.Keys.Keyring.Backend, config.Keys.Keyring.Dir
+		}
+		return keys.NoKeysLoadedError(config.Keys.KeysFile, keyringBackend, keyringDir)
 	}
 	logger.Info().
 		Int("count", len(suppliers)).
