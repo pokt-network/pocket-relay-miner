@@ -2,6 +2,7 @@ package keys
 
 import (
 	"context"
+	"time"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 )
@@ -60,4 +61,13 @@ type KeyManagerConfig struct {
 
 	// HotReloadEnabled enables automatic key reload on file changes.
 	HotReloadEnabled bool
+
+	// ReloadInterval is how often the keys are re-read regardless of whether
+	// any source reported a change. Zero means DefaultReloadInterval.
+	//
+	// It is not an operator setting and has no YAML field: the interval IS the
+	// promise made to whoever pulls a key ("it takes effect within this"), and
+	// a promise that varies per deployment is not one. It exists as a field so
+	// a test can drive the timer.
+	ReloadInterval time.Duration
 }
