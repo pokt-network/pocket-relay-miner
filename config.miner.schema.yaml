@@ -249,13 +249,12 @@ properties:
               in, cached for the whole keyring) and "test" uses a fixed
               password. "memory" starts empty and nothing writes to it, and "os"
               depends on whether a system keychain is reachable -- both are
-              rejected at startup. The interactive CLI still accepts "os".
+              rejected at startup. The interactive CLI rejects them too.
           dir:
             type: string
             description: >-
               Directory CONTAINING the keyring, not the keyring itself: the file
               backend reads <dir>/keyring-file.
-            description: Directory for keyring (file backend only)
           app_name:
             type: string
             description: Application name for keyring

@@ -71,7 +71,7 @@ def apply_k8s_overrides_miner(config, redis_host):
     config.pop("keyring_backend", None)
     if keyring_backend not in ("test", "file"):
         fail("keyring_backend must be test or file -- the only backends a service accepts " +
-             "(keys.ValidateServiceKeyringBackend); got: " + str(keyring_backend))
+             "(keys.ValidateKeyringBackend); got: " + str(keyring_backend))
 
     config["keys"].pop("keys_file", None)
     config["keys"].pop("keyring", None)
@@ -203,7 +203,7 @@ def apply_k8s_overrides_relayer(config, redis_host):
     config.pop("keyring_backend", None)
     if keyring_backend not in ("test", "file"):
         fail("keyring_backend must be test or file -- the only backends a service accepts " +
-             "(keys.ValidateServiceKeyringBackend); got: " + str(keyring_backend))
+             "(keys.ValidateKeyringBackend); got: " + str(keyring_backend))
 
     config["keys"].pop("keys_file", None)
     config["keys"].pop("keyring", None)
