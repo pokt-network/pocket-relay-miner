@@ -293,6 +293,15 @@ func TestWithDefaults_FieldByField(t *testing.T) {
 // input to a pattern or a trim), so two prefixes agreeing corrupts nothing on
 // its own. The extractors are excluded because they parse a key rather than
 // build one.
+//
+// SCOPE, because the difference matters: this checks EXACT equality only. Two
+// methods can still collide through a GLOB -- verified under the very namespaces
+// listed below, SupplierStatePattern() is "ha:suppliers:*" and matches
+// SuppliersRegistryIndexKey(), and under {CachePrefix: "supplier"} it matches
+// every CacheKey(...). That hazard predates this test and reaches a destructive
+// path, since `redis cache --type supplier --invalidate` deletes what it scans;
+// it is tracked separately. A pass here does NOT mean no two methods can ever
+// touch the same key.
 func TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace(t *testing.T) {
 	namespaces := []config.RedisNamespaceConfig{
 		{},
@@ -359,9 +368,17 @@ func keyBuilderOutputsWithUniformArgs(
 			switch kind := signature.In(j).Kind(); kind {
 			case reflect.String:
 				args = append(args, reflect.ValueOf(sampleString))
-			case reflect.Uint64, reflect.Int64, reflect.Int:
+			case reflect.Int64, reflect.Int:
 				args = append(args, reflect.New(signature.In(j)).Elem())
 				args[j].SetInt(sampleNumber)
+			// SetInt panics on an unsigned Value ("reflect: call of
+			// reflect.Value.SetInt on uint64 Value"). No KeyBuilder method takes
+			// a uint64 today, so folding it into the signed case was latent --
+			// and it would have made the first one added PANIC this guard rather
+			// than fail it, in a helper whose whole point is not going stale.
+			case reflect.Uint64, reflect.Uint:
+				args = append(args, reflect.New(signature.In(j)).Elem())
+				args[j].SetUint(sampleNumber)
 			default:
 				callable = false
 			}

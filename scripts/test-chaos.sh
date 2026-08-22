@@ -113,10 +113,21 @@ chaos_connection_flood() {
 restore_signing_keys() {
     [ -z "$KEYS_BACKUP" ] && return 0
 
-    kubectl --context "$K8S_CONTEXT" patch secret "$KEYS_SECRET" \
-        -p "{\"data\":{\"$KEYS_SECRET_FIELD\":\"$KEYS_BACKUP\"}}" >/dev/null 2>&1 || true
-    log_info "signing keys restored from snapshot"
-    KEYS_BACKUP=""
+    # Report and forget ONLY on success. `|| true` followed by an unconditional
+    # "restored" log and KEYS_BACKUP="" meant a failed patch left the key out of
+    # the secret, claimed it had been put back, and then discarded the only copy
+    # that could restore it -- defeating the invariant this whole function exists
+    # for.
+    if kubectl --context "$K8S_CONTEXT" patch secret "$KEYS_SECRET" \
+        -p "{\"data\":{\"$KEYS_SECRET_FIELD\":\"$KEYS_BACKUP\"}}" >/dev/null 2>&1; then
+        log_info "signing keys restored from snapshot"
+        KEYS_BACKUP=""
+    else
+        log_chaos "RESTORE FAILED: the fleet is still short a key. Snapshot kept; restore by hand:"
+        log_chaos "  kubectl --context $K8S_CONTEXT patch secret $KEYS_SECRET -p '{\"data\":{\"$KEYS_SECRET_FIELD\":\"<snapshot>\"}}'"
+        printf '%s\n' "$KEYS_BACKUP" > "./chaos-keys-snapshot.b64"
+        log_chaos "  snapshot written to ./chaos-keys-snapshot.b64"
+    fi
 }
 
 # Restore on every exit path, including a failure under `set -e` and Ctrl-C.
@@ -273,9 +284,15 @@ echo ""
 log_info "Waiting 30s for system to stabilize before chaos..."
 sleep 30
 
+# Wall clock, not the sum of the inter-event sleeps: an action can block for
+# minutes (chaos_pull_signing_key waits for detection, holds the key, then waits
+# for recovery), and counting only WAIT made a DURATION=330 run take ~20 minutes.
+CHAOS_STARTED_AT=$(date +%s)
+elapsed_seconds() { echo $(( $(date +%s) - CHAOS_STARTED_AT )); }
+
 ELAPSED=0
 EVENT_NUM=0
-while [ $ELAPSED -lt "$DURATION" ]; do
+while [ "$(elapsed_seconds)" -lt "$DURATION" ]; do
     EVENT_NUM=$((EVENT_NUM + 1))
 
     # Pick random chaos action
@@ -291,7 +308,7 @@ while [ $ELAPSED -lt "$DURATION" ]; do
     WAIT=$((CHAOS_INTERVAL + JITTER))
     [ "$WAIT" -lt 5 ] && WAIT=5
     sleep "$WAIT"
-    ELAPSED=$((ELAPSED + WAIT))
+    ELAPSED="$(elapsed_seconds)"
 
     # Quick health check after each event
     RELAYER_READY=$(kubectl --context "$K8S_CONTEXT" get pods -l app=relayer --no-headers 2>/dev/null | grep -c "Running" || true)
