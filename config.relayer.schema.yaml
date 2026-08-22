@@ -107,13 +107,19 @@ properties:
             type: string
             enum:
               - file
-              - os
               - test
-              - memory
-            description: Keyring backend type
+            description: >-
+              Keyring backend. Only backends whose behaviour can be guaranteed
+              for a long-running signer: "file" is passphrase-protected (piped
+              in, cached for the whole keyring) and "test" uses a fixed
+              password. "memory" starts empty and nothing writes to it, and "os"
+              depends on whether a system keychain is reachable -- both are
+              rejected at startup. The interactive CLI still accepts "os".
           dir:
             type: string
-            description: Directory for keyring (file backend only)
+            description: >-
+              Directory CONTAINING the keyring, not the keyring itself: the file
+              backend reads <dir>/keyring-file.
           app_name:
             type: string
             description: Application name for keyring

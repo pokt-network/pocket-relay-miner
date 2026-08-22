@@ -482,9 +482,8 @@ func (c *Config) Validate() error {
 
 	// Validate keyring config if provided
 	if c.Keys.Keyring != nil && c.Keys.Keyring.Backend != "" {
-		validBackends := map[string]bool{"file": true, "os": true, "test": true, "memory": true}
-		if !validBackends[c.Keys.Keyring.Backend] {
-			return fmt.Errorf("invalid keys.keyring.backend: %s", c.Keys.Keyring.Backend)
+		if err := keys.ValidateServiceKeyringBackend(c.Keys.Keyring.Backend); err != nil {
+			return err
 		}
 	}
 

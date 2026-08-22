@@ -88,3 +88,46 @@ func TestNoKeysLoadedErrorNamesTheSourceAndTheUID(t *testing.T) {
 		require.Contains(t, err.Error(), uid)
 	})
 }
+
+// TestValidateServiceKeyringBackendAllowsOnlyTheGuaranteedOnes states which
+// backends a long-running signer may be configured with, and -- more usefully --
+// why each rejection is a rejection, so the next reader does not widen the list
+// back out for symmetry with cosmos-sdk.
+func TestValidateServiceKeyringBackendAllowsOnlyTheGuaranteedOnes(t *testing.T) {
+	for _, backend := range []string{"file", "test"} {
+		t.Run("allows "+backend, func(t *testing.T) {
+			require.NoError(t, ValidateServiceKeyringBackend(backend))
+		})
+	}
+
+	t.Run("memory is refused because it can never hold a key", func(t *testing.T) {
+		err := ValidateServiceKeyringBackend("memory")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "starts empty")
+		require.Contains(t, err.Error(), "file")
+	})
+
+	t.Run("os is refused because its behaviour depends on the host", func(t *testing.T) {
+		err := ValidateServiceKeyringBackend("os")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "system keychain")
+		require.Contains(t, err.Error(), "file", "the error must point at the backend to use instead")
+	})
+
+	t.Run("an unknown backend lists the valid ones", func(t *testing.T) {
+		err := ValidateServiceKeyringBackend("kwallet")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "file")
+		require.Contains(t, err.Error(), "test")
+	})
+}
+
+// TestTheInteractiveCLIStillAcceptsOS guards the split. The CLI resolves one key
+// with a human present, on a machine that may actually have a keychain, so it
+// keeps "os" -- and the service-side list must not be mistaken for a global one.
+func TestTheInteractiveCLIStillAcceptsOS(t *testing.T) {
+	require.Error(t, ValidateServiceKeyringBackend("os"),
+		"a service must refuse os")
+	require.NotContains(t, serviceKeyringBackends, "os",
+		"if os is ever added here, cmd/relay/keys.go and DIRECT_CLI.md need revisiting together")
+}

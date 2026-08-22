@@ -62,13 +62,24 @@ def apply_k8s_overrides_miner(config, redis_host):
     config.pop("key_source", None)
     if key_source not in ("keys_file", "keyring"):
         fail("key_source must be keys_file or keyring (they are mutually exclusive); got: " + str(key_source))
+
+    # Which keyring BACKEND, when the source is a keyring. Production uses
+    # "file", which is passphrase-protected, so exercising only "test" would
+    # leave the backend an operator actually runs untested -- and "file" is the
+    # one that panicked until 0b3b929 for want of a password reader.
+    keyring_backend = config.get("keyring_backend", "test")
+    config.pop("keyring_backend", None)
+    if keyring_backend not in ("test", "file"):
+        fail("keyring_backend must be test or file -- the only backends a service accepts " +
+             "(keys.ValidateServiceKeyringBackend); got: " + str(keyring_backend))
+
     config["keys"].pop("keys_file", None)
     config["keys"].pop("keyring", None)
     if key_source == "keys_file":
         config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
     else:
         config["keys"]["keyring"] = {
-            "backend": "test",
+            "backend": keyring_backend,
             "dir": "/keyring",
             "app_name": "pocket",
         }
@@ -176,13 +187,24 @@ def apply_k8s_overrides_relayer(config, redis_host):
     config.pop("key_source", None)
     if key_source not in ("keys_file", "keyring"):
         fail("key_source must be keys_file or keyring (they are mutually exclusive); got: " + str(key_source))
+
+    # Which keyring BACKEND, when the source is a keyring. Production uses
+    # "file", which is passphrase-protected, so exercising only "test" would
+    # leave the backend an operator actually runs untested -- and "file" is the
+    # one that panicked until 0b3b929 for want of a password reader.
+    keyring_backend = config.get("keyring_backend", "test")
+    config.pop("keyring_backend", None)
+    if keyring_backend not in ("test", "file"):
+        fail("keyring_backend must be test or file -- the only backends a service accepts " +
+             "(keys.ValidateServiceKeyringBackend); got: " + str(keyring_backend))
+
     config["keys"].pop("keys_file", None)
     config["keys"].pop("keyring", None)
     if key_source == "keys_file":
         config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
     else:
         config["keys"]["keyring"] = {
-            "backend": "test",
+            "backend": keyring_backend,
             "dir": "/keyring",
             "app_name": "pocket",
         }
