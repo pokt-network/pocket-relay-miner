@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 
@@ -11,6 +12,11 @@ import (
 )
 
 var _ KeyManager = (*MultiProviderKeyManager)(nil)
+
+// DefaultReloadInterval is how often the keys are re-read when no interval is
+// configured. It is the promptness an operator can rely on for ANY key source,
+// including the ones that cannot be watched.
+const DefaultReloadInterval = 30 * time.Second
 
 // MultiProviderKeyManager implements KeyManager using multiple KeyProviders.
 // It aggregates keys from all providers and supports hot-reload.
@@ -72,6 +78,25 @@ func (m *MultiProviderKeyManager) Start(ctx context.Context) error {
 				go m.watchProvider(ctx, provider)
 			}
 		}
+
+		// And re-read every source on a timer, whether or not anything said it
+		// changed. The watch is an ACCELERATOR, not the mechanism:
+		//
+		//   - a source can be unwatchable. The keyring's WatchForChanges
+		//     returns nil, so on watches alone a key pulled from a keyring
+		//     never takes effect at all.
+		//   - a watch can die and say nothing. fsnotify drops the watch when
+		//     the inode it holds is renamed away, and a watcher goroutine that
+		//     ends leaves a process that reloads for the rest of its life
+		//     without ever reporting that it stopped.
+		//
+		// A timer has neither failure mode, and it turns promptness into a
+		// number that can be stated: a key change takes effect within one
+		// interval, from any source. Both paths call the same Reload, so there
+		// is exactly one piece of code that decides what changed -- and Reload
+		// is silent when nothing did, which is what makes a steady tick free.
+		m.wg.Add(1)
+		go logging.RecoverGoRoutine(m.logger, "key_manager_periodic_reload", m.reloadPeriodically)(ctx)
 	}
 
 	m.logger.Info().
@@ -80,6 +105,41 @@ func (m *MultiProviderKeyManager) Start(ctx context.Context) error {
 		Msg("key manager started")
 
 	return nil
+}
+
+// reloadPeriodically re-reads every key source on a fixed interval until the
+// context ends.
+//
+// A failed reload is logged and the loop continues: the next tick retries, so a
+// transient unreadable key file costs one interval of staleness rather than
+// ending hot reload for the life of the process.
+func (m *MultiProviderKeyManager) reloadPeriodically(ctx context.Context) {
+	defer m.wg.Done()
+
+	interval := m.config.ReloadInterval
+	if interval <= 0 {
+		interval = DefaultReloadInterval
+	}
+
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	m.logger.Info().
+		Dur("interval", interval).
+		Msg("key reload timer started: a key change takes effect within one interval from any source")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := m.Reload(ctx); err != nil {
+				m.logger.Error().
+					Err(err).
+					Msg("periodic key reload failed; retrying on the next tick")
+			}
+		}
+	}
 }
 
 // watchProvider watches a single provider for key changes.
@@ -166,7 +226,17 @@ func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 			Msg("loaded keys from provider")
 	}
 
-	// Determine added and removed keys
+	// Determine added and removed keys.
+	//
+	// An address appearing or disappearing is the WHOLE space of changes, and
+	// that is a property of how addresses are made, not an assumption: every
+	// provider DERIVES the operator address from the key material
+	// (parseHexKeyWithAddress in supplier_keys_file.go, record.GetAddress in
+	// keyring_provider.go). Same address means same public key means same
+	// private key, so "the key behind an unchanged address changed" cannot
+	// occur -- a rotation shows up as one address leaving and another arriving.
+	// A provider that ever took an address from configuration instead of
+	// deriving it would break this, and the diff below with it.
 	m.keysMu.Lock()
 	oldKeys := m.keys
 
@@ -196,6 +266,19 @@ func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 	}
 	for _, addr := range removed {
 		m.notifyKeyChange(addr, false)
+	}
+
+	// A reload that changed nothing is SILENT: no counter, and a Debug line
+	// rather than an Info one. Reloads can be driven on a timer over sources
+	// that cannot be watched, so the steady state is a reload that finds the
+	// same keys -- reporting that as an event would bury the reload that
+	// mattered under the ones that did not.
+	if len(added) == 0 && len(removed) == 0 {
+		m.logger.Debug().
+			Int("total", len(newKeys)).
+			Msg("reloaded keys: unchanged")
+		supplierKeysActive.Set(float64(len(newKeys)))
+		return nil
 	}
 
 	m.logger.Info().
