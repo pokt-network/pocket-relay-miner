@@ -78,11 +78,17 @@ func DefaultRedisNamespaceConfig() RedisNamespaceConfig {
 	return RedisNamespaceConfig{BasePrefix: "ha"}
 }
 
-// basePrefixPattern is what a base prefix may contain. A glob character here
-// would end up inside every SCAN pattern the KeyBuilder produces, so a base of
-// "*" would make a pattern match the whole database -- and one of those patterns
-// feeds a delete.
-var basePrefixPattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+// basePrefixRejected matches what a base prefix may NOT contain: Redis glob
+// metacharacters and whitespace.
+//
+// The ban is narrow on purpose. A glob character ends up inside every SCAN
+// pattern the KeyBuilder produces, so a base of "*" makes a pattern match the
+// whole database -- and one of those patterns feeds a delete. Everything else is
+// just text: a colon or a dot ("ha:prod", "pocket.ha") only adds segments, and
+// those bases work today. Rejecting them would lock out a running deployment
+// whose only alternative is renaming the base, which relocates its ENTIRE
+// keyspace including the WAL the miner consumes.
+var basePrefixRejected = regexp.MustCompile(`[*?\[\]\\s]`)
 
 // retiredNamespaceFields returns the retired sub-prefix fields an operator has
 // set, by their YAML name, together with the constant now used instead.
@@ -115,10 +121,14 @@ func (ns RedisNamespaceConfig) retiredNamespaceFields() []string {
 // accepted -- those keys do not move -- so an operator who copied the shipped
 // example and uncommented it is not locked out.
 func (ns RedisNamespaceConfig) Validate() error {
-	if ns.BasePrefix != "" && !basePrefixPattern.MatchString(ns.BasePrefix) {
+	if basePrefixRejected.MatchString(ns.BasePrefix) {
 		return fmt.Errorf(
-			"redis.namespace.base_prefix %q is invalid: only letters, digits, '_' and '-' are allowed "+
-				"(it is the first segment of every key and of every SCAN pattern)",
+			"redis.namespace.base_prefix %q contains a glob metacharacter or whitespace. It is the first "+
+				"segment of every key AND of every SCAN pattern, and one of those patterns feeds a delete, "+
+				"so a glob here can match keys this fleet does not own. Everything else is allowed, "+
+				"including ':' and '.'. If this value is already in use, do NOT simply rename it: that "+
+				"relocates the entire keyspace, including the relay WAL the miner consumes. Drain the fleet "+
+				"and migrate",
 			ns.BasePrefix)
 	}
 
