@@ -9,6 +9,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -757,12 +758,24 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// every provider derives the operator address FROM the key material
 	// -- see the diff in MultiProviderKeyManager.Reload for why a key
 	// cannot change behind an address that stays.
-	keyManager.OnKeyChange(func(operatorAddr string, added bool) {
+	// Rebuilding is read-then-store, so it has to be serialised with itself: two
+	// rebuilds racing can store in the opposite order to the one they read in,
+	// and the older set wins. That is not hypothetical here -- the startup
+	// re-read below runs while the reload timer is already ticking.
+	var signerSync sync.Mutex
+	resyncSigner := func() int {
+		signerSync.Lock()
+		defer signerSync.Unlock()
 		responseSigner.ReplaceKeys(supplierSigningKeys(keyManager))
+		return len(responseSigner.GetOperatorAddresses())
+	}
+
+	keyManager.OnKeyChange(func(operatorAddr string, added bool) {
+		keptKeys := resyncSigner()
 		logger.Info().
 			Str("operator_address", operatorAddr).
 			Bool("added", added).
-			Int("keys", len(responseSigner.GetOperatorAddresses())).
+			Int("keys", keptKeys).
 			Msg("signing key change applied to the running relayer")
 	})
 
@@ -772,7 +785,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// notify, leaving the signer on the pre-reload set until the NEXT change --
 	// which on a steady fleet may never come. Rebuilding the whole set is
 	// idempotent, so paying for one extra read at startup closes the window.
-	responseSigner.ReplaceKeys(supplierSigningKeys(keyManager))
+	resyncSigner()
 
 	// Wire the simulated-relay verifier (Admission zone). Optional and
 	// off by default; when disabled the header is ignored. Needs the

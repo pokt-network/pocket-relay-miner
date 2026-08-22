@@ -279,10 +279,9 @@ func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 	for _, provider := range m.providers {
 		keys, err := provider.LoadKeys(ctx)
 		if err != nil {
-			// Kind(), not Name(): the label vocabulary has to match what the
-			// providers themselves use, and Name() carries the key file's
-			// absolute path -- an unbounded Prometheus label.
-			keyLoadErrors.WithLabelValues(provider.Kind()).Inc()
+			// NOT counted here: every provider already increments
+			// keyLoadErrors itself, per failing key. Counting again per failing
+			// provider made one bad key move the series by two.
 			loadErrs = append(loadErrs, fmt.Errorf("%s: %w", provider.Name(), err))
 			m.logger.Warn().
 				Err(err).

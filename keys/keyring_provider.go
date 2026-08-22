@@ -15,6 +15,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
+	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
@@ -204,6 +205,13 @@ func (p *KeyringProvider) Name() string {
 // Kind returns the provider family, for metric labels.
 func (p *KeyringProvider) Kind() string { return "keyring" }
 
+// isPermanentKeyFailure reports whether a per-key load failure will repeat on
+// every future reload, in which case the record is simply not a signing key and
+// must not stall the reload of the ones that are.
+func isPermanentKeyFailure(err error) bool {
+	return errors.Is(err, keyring.ErrPrivKeyExtr) || errors.Is(err, sdkerrors.ErrKeyNotFound)
+}
+
 // LoadKeys loads all keys from the keyring.
 // A key that cannot be read is returned as an ERROR alongside the keys that
 // could, because the manager's "an unreadable source is not a key removal"
@@ -212,6 +220,15 @@ func (p *KeyringProvider) Kind() string { return "keyring" }
 // guard enumerates (a keyring briefly locked, a permissions blip, a .info file
 // caught mid-rewrite) look like the operator having removed those suppliers:
 // the relayer stops serving them and the miner drains their pipelines.
+//
+// Only a TRANSIENT failure counts. A record that can never yield a private key
+// -- an offline pubkey, a multisig or a ledger entry, which return
+// keyring.ErrPrivKeyExtr on every call -- and a named key the operator deleted
+// are not signing keys and never will be, so reporting them would abandon every
+// reload for the life of the process: the guard keeps the previous set, the
+// stable failure repeats, and hot reload dies silently while a pulled key keeps
+// signing. Those are skipped; only errors that may clear on a retry are
+// returned.
 //
 // One gap remains and is NOT closed here: keyring.List() is cosmos-sdk's
 // keystore.MigrateAll (crypto/keyring/keyring.go, v0.53.7), which SKIPS any
@@ -231,6 +248,9 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 					Err(err).
 					Str("key_name", name).
 					Msg("failed to load key from keyring")
+				if isPermanentKeyFailure(err) {
+					continue
+				}
 				keyLoadErrors.WithLabelValues("keyring").Inc()
 				loadErrs = append(loadErrs, fmt.Errorf("key %q: %w", name, err))
 				continue
@@ -255,6 +275,9 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 					Err(err).
 					Str("key_name", record.Name).
 					Msg("failed to load key from keyring")
+				if isPermanentKeyFailure(err) {
+					continue
+				}
 				keyLoadErrors.WithLabelValues("keyring").Inc()
 				loadErrs = append(loadErrs, fmt.Errorf("key %q: %w", record.Name, err))
 				continue

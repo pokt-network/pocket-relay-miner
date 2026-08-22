@@ -47,7 +47,19 @@ func BuildProviders(logger logging.Logger, keysFile string, keyring *KeyringSett
 		return providers, nil
 	}
 
+	// Everything below can fail, and the keys-file provider above already holds
+	// an fsnotify watcher plus its directory watch. Returning nil on error
+	// leaves the caller with no handle to close it, so close what was built
+	// before giving up: the two binaries exit here, but the validate
+	// subcommands and loadConfiguredSupplierAddresses call this in-process.
+	closeBuilt := func() {
+		for _, built := range providers {
+			_ = built.Close()
+		}
+	}
+
 	if err := ValidateKeyringDir(keyring.Dir); err != nil {
+		closeBuilt()
 		return nil, err
 	}
 
@@ -61,6 +73,7 @@ func BuildProviders(logger logging.Logger, keysFile string, keyring *KeyringSett
 		Env:  keyring.PassphraseEnv,
 	})
 	if err != nil {
+		closeBuilt()
 		return nil, err
 	}
 
@@ -72,6 +85,7 @@ func BuildProviders(logger logging.Logger, keysFile string, keyring *KeyringSett
 		PasswordReader: passphrase,
 	})
 	if err != nil {
+		closeBuilt()
 		return nil, fmt.Errorf("failed to create keyring provider: %w", err)
 	}
 	providers = append(providers, provider)

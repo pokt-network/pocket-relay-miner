@@ -2,6 +2,8 @@ package keys
 
 import (
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,6 +11,7 @@ import (
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
+	sdkerrors "github.com/cosmos/cosmos-sdk/types/errors"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -179,6 +182,50 @@ func TestKeyringDirLooksLikeKeyringItself(t *testing.T) {
 
 			require.Equal(t, tt.wantWarn, ok)
 			require.Equal(t, tt.suggested, suggested)
+		})
+	}
+}
+
+// TestIsPermanentKeyFailure pins the classification against the REAL cosmos-sdk
+// sentinels, because getting it wrong is silent in both directions: calling a
+// transient failure permanent brings back the phantom removals, and calling a
+// permanent one transient freezes the key set for the life of the process --
+// every reload abandoned, hot reload dead, and a pulled key still signing.
+func TestIsPermanentKeyFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		permanent bool
+	}{
+		{
+			// An offline pubkey, a multisig or a ledger entry: keyring.List()
+			// keeps returning the record and the export fails on every call.
+			name:      "record is not a Local key",
+			err:       fmt.Errorf("failed to export: %w", keyring.ErrPrivKeyExtr),
+			permanent: true,
+		},
+		{
+			// With key_names set, a key the operator deleted is gone for good.
+			name:      "named key no longer in the keyring",
+			err:       fmt.Errorf("key not found: %w", sdkerrors.ErrKeyNotFound),
+			permanent: true,
+		},
+		{
+			// The reason the guard exists: retrying can succeed.
+			name:      "keyring temporarily unreadable",
+			err:       errors.New("open /keyring/keyring-file/x.info: permission denied"),
+			permanent: false,
+		},
+		{
+			name:      "decrypt failed mid-rewrite",
+			err:       errors.New("ciphertext decryption failed"),
+			permanent: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.permanent, isPermanentKeyFailure(tt.err))
 		})
 	}
 }
