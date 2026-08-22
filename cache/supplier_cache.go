@@ -582,11 +582,25 @@ func (c *SupplierCache) supplierStateUnchanged(
 	return bytes.Equal(storedContent, nextContent)
 }
 
-// supplierStateContent serialises a supplier state with the timestamp
-// normalised, so two passes carrying the same information compare equal.
+// supplierStateContent serialises a supplier state with the two fields that
+// describe the WRITE rather than the supplier normalised away, so two passes
+// carrying the same information about the network compare equal.
+//
+// LastUpdated is stamped with the current second on every write. UpdatedBy is
+// the writing miner's own instance ID, kept "for debugging" — and in a fleet it
+// ALTERNATES, because every miner reconciles every supplier: miner A writes and
+// finds B's value there, then B writes and finds A's. Comparing either one makes
+// every pass look like a change.
+//
+// Measured live (2026-08-21): with UpdatedBy compared, two miners and 17
+// suppliers produced 37.3 invalidations/min per side against a 34/min baseline —
+// the suppression bought nothing, while the stored value differed in nothing
+// else. Both fields are still WRITTEN; they are just not evidence that the
+// supplier changed.
 func supplierStateContent(state *SupplierState) ([]byte, error) {
 	content := *state
 	content.LastUpdated = 0
+	content.UpdatedBy = ""
 
 	return json.Marshal(&content)
 }

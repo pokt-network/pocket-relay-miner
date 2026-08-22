@@ -943,3 +943,59 @@ func TestSetSupplierStateComparesContentNotStoredBytes(t *testing.T) {
 		"the unchanged path must still refresh last_updated: it is the operator's "+
 			"only signal that this entry is still being tracked")
 }
+
+// TestSetSupplierStateIgnoresTheWriterWhenComparing is the regression test for a
+// suppression that was correct in a one-miner test and inert in the real fleet.
+//
+// Every write stamps UpdatedBy with the miner's own instance ID (it exists "for
+// debugging", per the field's own comment). With two miners both reconciling all
+// suppliers, that field ALTERNATES: miner A writes and sees B's value, miner B
+// writes and sees A's. Comparing it makes every pass look like a change, so both
+// miners republish every supplier every interval and the invalidation rate does
+// not move at all.
+//
+// Measured live on a clean stack (2026-08-21) with the comparison including
+// UpdatedBy: 37.3 invalidations/min per side against a 34/min baseline, i.e. the
+// fix bought nothing, while the stored value provably differed only in
+// last_updated and updated_by. No single-writer test can see this.
+func TestSetSupplierStateIgnoresTheWriterWhenComparing(t *testing.T) {
+	cache, client := newTestSupplierCache(t)
+	ctx := context.Background()
+
+	state := &SupplierState{
+		OperatorAddress: "pokt1twowriters",
+		Status:          SupplierStatusActive,
+		Staked:          true,
+		Services:        []string{"svc1"},
+		UpdatedBy:       "miner-a",
+	}
+	require.NoError(t, cache.SetSupplierState(ctx, state))
+
+	sub := client.Subscribe(ctx, client.KB().EventChannel(supplierCacheType, "invalidate"))
+	t.Cleanup(func() { _ = sub.Close() })
+	_, err := sub.Receive(ctx)
+	require.NoError(t, err)
+	msgs := sub.Channel()
+
+	// The second miner, same supplier, same state, different writer.
+	fromB := *state
+	fromB.UpdatedBy = "miner-b"
+	require.NoError(t, cache.SetSupplierState(ctx, &fromB))
+	require.Equal(t, 0, countInvalidationsUntilFence(t, client, msgs),
+		"a different miner writing the same supplier state is not a change: comparing "+
+			"UpdatedBy makes every reconcile of every miner republish everything")
+
+	// And back to the first miner, which is what actually alternates in a fleet.
+	require.NoError(t, cache.SetSupplierState(ctx, state))
+	require.Equal(t, 0, countInvalidationsUntilFence(t, client, msgs),
+		"and alternating back is not a change either")
+
+	// The field is still recorded: it is how an operator sees who wrote last.
+	raw, err := client.Get(ctx, client.KB().SupplierStateKey(state.OperatorAddress)).Bytes()
+	require.NoError(t, err)
+
+	var stored SupplierState
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	require.Equal(t, "miner-a", stored.UpdatedBy,
+		"ignoring the writer for the comparison must not stop recording it")
+}
