@@ -487,3 +487,31 @@ func TestKeyBuilder_AllKeysPatternMatchesEverything(t *testing.T) {
 		require.Truef(t, ok, "AllKeysPattern (%q) does not match %s (%q)", all, name, key)
 	}
 }
+
+// TestSupplierStateAddress_RejectsForeignKeys pins that the extractor answers
+// only for keys it actually owns.
+//
+// A supplier state key has exactly one segment after the prefix. The check used
+// to be "the trim changed something", which answers confidently for any key
+// sharing the prefix: under the retired cache_prefix "supplier" a CACHE key came
+// back as the address "application:k1". Neither call site can produce that today
+// -- both scan SupplierStatePattern(), which reaches only its own family -- so
+// this pins the extractor's own contract rather than a reachable bug.
+func TestSupplierStateAddress_RejectsForeignKeys(t *testing.T) {
+	kb := NewKeyBuilder(config.RedisNamespaceConfig{})
+
+	addr, ok := kb.SupplierStateAddress(kb.SupplierStateKey("pokt1abc"))
+	require.True(t, ok, "premise: a real supplier state key must resolve")
+	require.Equal(t, "pokt1abc", addr)
+
+	for _, foreign := range []string{
+		"ha:supplier:application:k1", // the shape the retired cache_prefix produced
+		"ha:cache:application:k1",
+		"ha:suppliers:index",
+		"ha:supplier:",
+		"ha:supplier",
+	} {
+		_, ok := kb.SupplierStateAddress(foreign)
+		require.Falsef(t, ok, "%q is not a supplier state key and must not resolve to one", foreign)
+	}
+}

@@ -155,9 +155,10 @@ func (kb *KeyBuilder) StreamAddress(key string) (string, bool) {
 // It is the only ha:suppliers:* key. The plural is a set; the singular
 // (SupplierStateKey, ha:supplier:{addr}) is one supplier's network state. There
 // used to be a per-supplier value here too, differing from the cache key by one
-// letter, with no readers and a latent collision -- SupplierStateKey takes its
-// prefix from the configurable ns.SupplierPrefix while this family hardcodes
-// "suppliers", so supplier_prefix: "suppliers" made the two identical. Do not
+// letter, with no readers and a latent collision: back when each family took its
+// segment from config, SupplierStateKey read ns.SupplierPrefix while this family
+// hardcoded "suppliers", so supplier_prefix: "suppliers" made the two identical.
+// Both are constants now, which is what makes that unrepresentable. Do not
 // add a per-supplier key under this prefix; supplier state has a home.
 //
 // That removes the EXACT-key collision. A glob one survives under the same
@@ -553,9 +554,19 @@ func (kb *KeyBuilder) SupplierStatePattern() string {
 // It exists for the same reason StreamAddress does: nobody hand-builds
 // SupplierKeyPrefix()+":" to strip a scanned key back to its address (review
 // 2026-08-20, LOW; recurred review 2026-08-21).
+//
+// A remainder containing ":" is rejected. A supplier state key has exactly one
+// segment after the prefix, so anything else is a key from another family that
+// happens to share the prefix -- which is precisely what a namespace could
+// produce while the segments were configurable: under cache_prefix "supplier"
+// this returned ("application:k1", true) for a CACHE key and called it an
+// address. The layout is constant now and the caller scans a pattern that no
+// longer reaches other families, so this cannot be hit from either call site;
+// it is stated anyway, because an extractor that answers confidently for a key
+// it does not own is the kind of thing the next caller trusts.
 func (kb *KeyBuilder) SupplierStateAddress(key string) (string, bool) {
 	addr := strings.TrimPrefix(key, kb.SupplierKeyPrefix()+":")
-	if addr == key || addr == "" {
+	if addr == key || addr == "" || strings.Contains(addr, ":") {
 		return "", false
 	}
 	return addr, true

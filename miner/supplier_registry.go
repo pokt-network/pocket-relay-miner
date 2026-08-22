@@ -64,8 +64,9 @@ func NewSupplierRegistry(
 // LITERAL through relayer/ and miner/, not just the method names, so a reader
 // building the key by hand would have shown up too.
 //
-// Keeping it also kept a latent collision: SupplierStateKey is built from the
-// configurable ns.SupplierPrefix while the registry key hardcoded "suppliers",
+// Keeping it also kept a latent collision: back when each family took its segment
+// from config, SupplierStateKey read ns.SupplierPrefix while the registry key
+// hardcoded "suppliers",
 // so an operator setting supplier_prefix: "suppliers" made the two collide on
 // one key with two different structs writing it — and because they shared the
 // "status" and "services" JSON fields the cross-read did not even fail, it
