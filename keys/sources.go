@@ -1,6 +1,9 @@
 package keys
 
-import "fmt"
+import (
+	"fmt"
+	"os"
+)
 
 // ValidateKeySources requires a configuration to name EXACTLY ONE key source.
 //
@@ -43,4 +46,28 @@ func ValidateKeySources(keysFile, keyringBackend string) error {
 	}
 
 	return nil
+}
+
+// NoKeysLoadedError is the error for a key source that is configured but
+// produced nothing.
+//
+// It names the SOURCE and the uid, because that is what the answer turns on and
+// what the previous wording made the reader go and find out: a keyring written
+// by a root init container is unreadable to a process running as uid 1000, and
+// "check your key configuration" does not point at that. Both binaries use it so
+// the same fault reads the same way in either log.
+func NoKeysLoadedError(keysFile, keyringBackend, keyringDir string) error {
+	if keyringBackend != "" {
+		return fmt.Errorf(
+			"no signing keys loaded from keyring %q at %q (this process runs as uid %d): "+
+				"empty, unreadable, or holds no valid secp256k1 key",
+			keyringBackend, keyringDir, os.Getuid(),
+		)
+	}
+
+	return fmt.Errorf(
+		"no signing keys loaded from keys_file %q (this process runs as uid %d): "+
+			"empty, unreadable, or holds no valid secp256k1 key",
+		keysFile, os.Getuid(),
+	)
 }
