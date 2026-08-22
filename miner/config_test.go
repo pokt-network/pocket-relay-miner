@@ -164,6 +164,52 @@ func TestConfig_Validate_RemovedKeysDir(t *testing.T) {
 	require.Contains(t, err.Error(), "keyring")
 }
 
+// TestConfig_Validate_RemovedTopLevelHotReload pins the tombstone for the
+// retired top-level hot_reload_enabled.
+//
+// This is not a hypothetical migration: between 35101fb and 2026-08-22 the
+// miner read keys.hot_reload_enabled while its DEPLOYED config set
+// hot_reload_enabled at the top level, so the process ran with key hot reload
+// OFF and said ON. With a keyring -- which nothing can watch -- a key added or
+// pulled then never reaches the miner at all.
+func TestConfig_Validate_RemovedTopLevelHotReload(t *testing.T) {
+	for _, enabled := range []bool{true, false} {
+		value := enabled
+		cfg := &Config{
+			Redis: RedisConfig{
+				RedisConfig: config.RedisConfig{
+					URL: "redis://localhost:6379",
+				},
+				ConsumerName: "miner-1",
+			},
+			PocketNode: config.PocketNodeConfig{
+				QueryNodeRPCUrl:  "http://localhost:26657",
+				QueryNodeGRPCUrl: "localhost:9090",
+			},
+			Keys: config.KeysConfig{
+				KeysFile: "/path/to/keys.yaml",
+			},
+			// Either value must be rejected: what is wrong is the PLACE, and a
+			// config that says false at the top level is just as misleading as
+			// one that says true.
+			RemovedHotReloadEnabled: &value,
+		}
+
+		err := cfg.Validate()
+		require.Error(t, err, "top-level hot_reload_enabled=%v must be rejected", value)
+		require.Contains(t, err.Error(), "keys.hot_reload_enabled")
+	}
+}
+
+// TestDefaultConfig_KeyHotReloadOn pins the default the operator gets when they
+// say nothing. It is the counterpart of the tombstone above: moving the setting
+// without moving its default is the same bug in the other direction, and it is
+// the one that actually shipped.
+func TestDefaultConfig_KeyHotReloadOn(t *testing.T) {
+	require.True(t, DefaultConfig().Keys.HotReloadEnabled,
+		"a miner that is told nothing must reload keys; the relayer already does")
+}
+
 // Note: Supplier validation tests removed - suppliers are auto-discovered from keys
 // See TestConfig_Validate_NoKeySource for key validation
 

@@ -347,7 +347,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 
 	logger.Info().
 		Str("consumer_name", config.Redis.ConsumerName).
-		Bool("hot_reload", config.HotReloadEnabled).
+		Bool("hot_reload", config.Keys.HotReloadEnabled).
 		Msg("HA Miner started")
 
 	// Set up signal handling
@@ -409,7 +409,9 @@ func applyFlagOverrides(cmd *cobra.Command, config *miner.Config) {
 		config.Redis.ConsumerName, _ = cmd.Flags().GetString(flagConsumerName)
 	}
 	if cmd.Flags().Changed(flagHotReload) {
-		config.HotReloadEnabled, _ = cmd.Flags().GetBool(flagHotReload)
+		// The flag drives the same field the config file does; there is one
+		// hot-reload switch per process, not one per surface.
+		config.Keys.HotReloadEnabled, _ = cmd.Flags().GetBool(flagHotReload)
 	}
 	if cmd.Flags().Changed(flagSessionTTL) {
 		config.SessionTTL, _ = cmd.Flags().GetDuration(flagSessionTTL)

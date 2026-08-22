@@ -126,12 +126,23 @@ which the miner needs in order to release its supplier leases on shutdown.
 
 ## Hot reload — a key added or pulled takes effect without a restart
 
-Enabled by default:
+On by default, in **both** binaries, and configured in the same place in both:
 
 ```yaml
 keys:
-  hot_reload_enabled: true
+  hot_reload_enabled: true   # default
 ```
+
+Turning it off is legitimate — some operators want key changes to happen only on
+a deliberate restart — so the setting stays. What the process will not do is let
+you turn it off quietly: with `hot_reload_enabled: false` the key manager logs a
+**warning** at startup saying a key added or removed now takes effect only on
+restart.
+
+`hot_reload_enabled` at the TOP level of a miner config is a startup error, not
+an ignored line. It used to live there, and until 2026-08-22 it was read by
+nothing: a miner whose config said `true` ran with key hot reload off. The error
+names the new location so the migration is one line.
 
 Two mechanisms feed the same reload, so there is one piece of code deciding what
 changed:
@@ -151,6 +162,25 @@ are watched and which rely on the timer when it starts.
 
 A reload that finds nothing changed is silent — no log, no metric, no work. Only
 real changes are reported.
+
+### Removing a key is per key STORE, not per fleet
+
+A reload sees the store the process opened, so where that store lives decides
+how many places a removal has to happen:
+
+- **`keys_file` on a shared Secret or file** — one write reaches every pod. The
+  directory watch fires as soon as the volume is synced.
+- **A keyring built per instance** — each process has its own copy, so a key
+  deleted in one pod is still loaded in the others. Delete it in every instance,
+  or the fleet is left in a split state where some replicas serve a supplier and
+  some refuse it.
+
+Measured on 2026-08-22 with a per-pod keyring: deleting `<name>.info` from all
+four pods dropped the key from every process within one reload interval, relays
+for that supplier were refused at the gate with **zero** backend calls, other
+suppliers were unaffected, and nothing restarted. Deleting only the `.info` is
+enough — cosmos-sdk lists a keyring by its `.info` files and ignores the
+leftover `.address` entry.
 
 ### What a reload can and cannot do
 

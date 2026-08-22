@@ -47,22 +47,19 @@ type Config struct {
 	// Default: 100
 	BatchSize int64 `yaml:"batch_size"`
 
-	// HotReloadEnabled reloads the signing keys while the miner runs, so a key
-	// added or pulled takes effect without a restart.
+	// RemovedHotReloadEnabled is the tombstone for the retired top-level
+	// hot_reload_enabled. The setting now lives at keys.hot_reload_enabled,
+	// which both binaries share, and the top-level field is READ BY NOTHING.
 	//
-	// It covers every key source. keys_file is additionally WATCHED (its
-	// provider watches the containing directory for Write|Create, which is what
-	// makes a Kubernetes secret's ..data swap register), so a change there lands
-	// almost at once. A keyring cannot be watched, so its changes are found by
-	// the reload timer -- within keys.DefaultReloadInterval. The key manager
-	// logs which sources are watched and which rely on the timer at startup.
-	//
-	// NOTE: the relayer's equivalent lives under keys.hot_reload_enabled, not at
-	// the top level. The two are not unified because renaming either breaks
-	// deployed configs silently -- the YAML decoder drops unknown keys.
-	//
-	// Default: true
-	HotReloadEnabled bool `yaml:"hot_reload_enabled"`
+	// It has to be a tombstone rather than a silent removal, because that gap
+	// was measured in production shape on 2026-08-22: the deployment set
+	// hot_reload_enabled: true at the top level, the code read
+	// keys.hot_reload_enabled (unset, so false), and the miner ran with key hot
+	// reload OFF while its own config said ON. With a keyring -- which nothing
+	// can watch -- that means a key added or pulled never reaches the miner at
+	// all. A pointer, not a bool, so "the operator wrote it" is distinguishable
+	// from "the field is absent" no matter which value they wrote.
+	RemovedHotReloadEnabled *bool `yaml:"hot_reload_enabled,omitempty"`
 
 	// SessionTTL is the TTL for session state data in Redis.
 	// Default: CacheTTL (2h) - aligned with SMST tree TTL to prevent orphaned sessions.
@@ -468,6 +465,18 @@ func (c *Config) Validate() error {
 				"(supplier addresses are derived from each private key) or import them into the "+
 				"keyring, then remove the keys_dir line",
 			c.Keys.RemovedKeysDir,
+		)
+	}
+
+	// The retired top-level hot_reload_enabled is read by nothing. Dropping it
+	// silently is how the miner came to run with key hot reload OFF while the
+	// config said ON, so any value at all is a hard error naming the new home.
+	if c.RemovedHotReloadEnabled != nil {
+		return fmt.Errorf(
+			"hot_reload_enabled at the top level is no longer read: the setting moved to "+
+				"keys.hot_reload_enabled, which the miner and the relayer share. Set "+
+				"keys.hot_reload_enabled: %t and delete the top-level line",
+			*c.RemovedHotReloadEnabled,
 		)
 	}
 
@@ -946,7 +955,13 @@ func DefaultConfig() *Config {
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
-		HotReloadEnabled:       true,
+		// Hot reload on by default, in BOTH binaries: an operator who never
+		// thinks about it gets a fleet that picks up a key change on its own,
+		// and one who turns it off is told so at startup by the key manager's
+		// own warning.
+		Keys: config.KeysConfig{
+			HotReloadEnabled: true,
+		},
 		// SessionTTL: 0 means use CacheTTL (default 2h) - ensures SMST trees and sessions expire together
 		// This prevents orphaned sessions causing "SMST missing but relay count > 0" warnings
 		CacheTTL:              2 * time.Hour,  // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
@@ -971,13 +986,13 @@ func LoadConfig(path string) (*Config, error) {
 	cf := DefaultConfig()
 
 	if err = yaml.Unmarshal(data, cf); err != nil {
-		return nil, fmt.Errorf("failed to parse cf file: %w", err)
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
 	cf.Redis.ConsumerName = UniqueConsumerName(cf.Redis.ConsumerName)
 
 	if err = cf.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid cf: %w", err)
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	return cf, nil
