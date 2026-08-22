@@ -127,7 +127,11 @@ func TestConfig_Validate_NoKeySource(t *testing.T) {
 
 	err := cfg.Validate()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "keys config is required")
+	// The rule and its wording now live in keys.ValidateKeySources, shared with
+	// the relayer so the two binaries cannot drift on what a key config means.
+	require.Contains(t, err.Error(), "no key source configured")
+	require.Contains(t, err.Error(), "keys_file")
+	require.Contains(t, err.Error(), "keyring")
 }
 
 // TestConfig_Validate_RemovedKeysDir pins the tombstone for the retired

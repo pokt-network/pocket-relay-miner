@@ -67,9 +67,12 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 	}
 
 	c := &Config{
-		ListenAddr:              "0.0.0.0:8080",
-		Redis:                   RedisConfig{URL: "redis://localhost:6379"},
-		PocketNode:              PocketNodeConfig{QueryNodeRPCUrl: "http://x", QueryNodeGRPCUrl: "x:9090"},
+		ListenAddr: "0.0.0.0:8080",
+		Redis:      RedisConfig{URL: "redis://localhost:6379"},
+		PocketNode: PocketNodeConfig{QueryNodeRPCUrl: "http://x", QueryNodeGRPCUrl: "x:9090"},
+		// Validate requires exactly one key source (keys.ValidateKeySources);
+		// these tests are about other config, so the minimum is supplied here.
+		Keys:                    KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
 		DefaultValidationMode:   validationMode,
 		DefaultMaxBodySizeBytes: 1 << 20,
 		HTTPTransport:           HTTPTransportConfig{MaxConnsPerHost: 500, MaxIdleConnsPerHost: 100, IdleConnTimeoutSeconds: 90},

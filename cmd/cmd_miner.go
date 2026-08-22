@@ -491,10 +491,8 @@ func validateMinerConfig(config *miner.Config) error {
 		return fmt.Errorf("pocket_node.query_node_grpc_url is required")
 	}
 
-	// Validate key sources
-	if !config.HasKeySource() {
-		return fmt.Errorf("at least one key source must be configured (keys_file or keyring)")
-	}
+	// Key sources are validated by miner.Config.Validate (exactly one), which
+	// validateMinerConfig runs; nothing to repeat here.
 
 	// Note: SessionTTL = 0 means use CacheTTL (default 2h), so it doesn't need validation
 

@@ -10,6 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -865,6 +866,17 @@ func (c *Config) Validate() error {
 				"keyring, then remove the keys_dir line",
 			c.Keys.RemovedKeysDir,
 		)
+	}
+
+	// Exactly one key source. See keys.ValidateKeySources: both is refused so
+	// nothing has to pick a winner at runtime, and zero is refused because a
+	// relayer with no signing key rejects every relay while looking healthy.
+	keyringBackend := ""
+	if c.Keys.Keyring != nil {
+		keyringBackend = c.Keys.Keyring.Backend
+	}
+	if err := keys.ValidateKeySources(c.Keys.KeysFile, keyringBackend); err != nil {
+		return err
 	}
 
 	// Validate Redis pool settings (all are optional, 0 = use defaults)

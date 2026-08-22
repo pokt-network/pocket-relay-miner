@@ -4,13 +4,11 @@ package keys
 
 import (
 	"context"
-	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -21,6 +19,9 @@ import (
 // whether hot reload works for the sources an operator actually configures. The
 // stand-in provider in manager_reload_change_test.go answers a different
 // question (does the TIMER fire) and cannot answer this one.
+//
+// One source at a time, because that is all a configuration may name: both
+// keys_file and keyring set is a startup error (keys.ValidateKeySources).
 
 // hotReloadTestKeys are two well-formed secp256k1 private keys in hex. Their
 // operator addresses are derived from the material, so importing one into a
@@ -29,13 +30,6 @@ const (
 	hotReloadHexA = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
 	hotReloadHexB = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 )
-
-// randomKeyHex is a freshly generated, well-formed secp256k1 key in hex, for
-// cases that need a third distinct supplier.
-func randomKeyHex(t *testing.T) string {
-	t.Helper()
-	return hex.EncodeToString(secp256k1.GenPrivKey().Bytes())
-}
 
 func addressOfHex(t *testing.T, hexKey string) string {
 	t.Helper()
@@ -188,58 +182,6 @@ func TestKeysFileAddAndRemoveReachTheManagerThroughItsWatch(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestBothSourcesTogether covers the configuration that has both, which is the
-// one where a reload can go wrong in a way neither source alone reveals: a
-// change in the WATCHED source triggers a reload that re-reads EVERY source, so
-// the keyring's keys must survive it rather than be seen as removed.
-func TestBothSourcesTogether(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "supplier-keys.yaml")
-	writeKeysFile(t, path, hotReloadHexA)
-
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	fileProvider, err := NewSupplierKeysFileProvider(logger, path)
-	require.NoError(t, err)
-
-	kr := newInMemoryKeyring(t)
-	require.NoError(t, kr.ImportPrivKeyHex("from-keyring", hotReloadHexB, "secp256k1"))
-	keyringProvider := NewKeyringProviderWithKeyring(logger, kr, nil)
-
-	m := NewMultiProviderKeyManager(logger,
-		[]KeyProvider{fileProvider, keyringProvider},
-		KeyManagerConfig{})
-	t.Cleanup(func() { _ = m.Close() })
-	require.NoError(t, m.Start(context.Background()))
-
-	addrA := addressOfHex(t, hotReloadHexA)
-	addrB := addressOfHex(t, hotReloadHexB)
-	require.ElementsMatch(t, []string{addrA, addrB}, m.ListSuppliers(),
-		"the merged set must hold both sources' keys")
-
-	changes := make([]string, 0)
-	m.OnKeyChange(func(addr string, addedKey bool) {
-		verb := "removed"
-		if addedKey {
-			verb = "added"
-		}
-		changes = append(changes, verb+":"+addr)
-	})
-
-	// Rewrite the FILE only, swapping its key for a different supplier. The
-	// keyring was not touched, so its key must survive a reload it did not cause.
-	hexC := randomKeyHex(t)
-	addrC := addressOfHex(t, hexC)
-	writeKeysFile(t, path, hexC)
-	require.NoError(t, m.Reload(context.Background()))
-
-	require.ElementsMatch(t, []string{"removed:" + addrA, "added:" + addrC}, changes)
-	require.ElementsMatch(t, []string{addrB, addrC}, m.ListSuppliers(),
-		"the keyring's key was lost when the file changed")
-	signer, err := m.GetSigner(addrB)
-	require.NoError(t, err)
-	require.NotNil(t, signer)
-}
-
 // TestAnEmptiedKeysFileIsRefusedRatherThanTreatedAsRemoveEverything is a
 // deliberate assertion about what a key file with no entries MEANS.
 //
@@ -278,36 +220,6 @@ func TestAnEmptiedKeysFileIsRefusedRatherThanTreatedAsRemoveEverything(t *testin
 	signer, err := m.GetSigner(addrA)
 	require.NoError(t, err)
 	require.NotNil(t, signer)
-}
-
-// TestTheSameKeyInBothSourcesIsOneSupplier covers the overlap: the same private
-// key configured in both places derives ONE operator address, so it must appear
-// once and must not look like a change on every reload.
-func TestTheSameKeyInBothSourcesIsOneSupplier(t *testing.T) {
-	dir := t.TempDir()
-	path := filepath.Join(dir, "supplier-keys.yaml")
-	writeKeysFile(t, path, hotReloadHexA)
-
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	fileProvider, err := NewSupplierKeysFileProvider(logger, path)
-	require.NoError(t, err)
-
-	kr := newInMemoryKeyring(t)
-	require.NoError(t, kr.ImportPrivKeyHex("same", hotReloadHexA, "secp256k1"))
-	keyringProvider := NewKeyringProviderWithKeyring(logger, kr, nil)
-
-	m := NewMultiProviderKeyManager(logger,
-		[]KeyProvider{fileProvider, keyringProvider},
-		KeyManagerConfig{})
-	t.Cleanup(func() { _ = m.Close() })
-	require.NoError(t, m.Start(context.Background()))
-
-	require.Equal(t, []string{addressOfHex(t, hotReloadHexA)}, m.ListSuppliers())
-
-	changes := make([]string, 0)
-	m.OnKeyChange(func(string, bool) { changes = append(changes, "x") })
-	require.NoError(t, m.Reload(context.Background()))
-	require.Empty(t, changes, "a key present in both sources looked like a change")
 }
 
 // TestAnUnreadableKeysFileKeepsTheKeysItAlreadyLoaded is the failure mode that
