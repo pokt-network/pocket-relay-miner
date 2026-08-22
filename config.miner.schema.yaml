@@ -217,8 +217,20 @@ properties:
 
   keys:
     type: object
-    description: Supplier signing key configuration
+    description: >-
+      Supplier signing key configuration. Full reference: docs/SUPPLIER_KEYS.md. keys_file and keyring are MUTUALLY
+      EXCLUSIVE: setting both is a startup error. Exactly one is required -- a
+      miner with no keys has nothing to do.
     properties:
+      hot_reload_enabled:
+        type: boolean
+        description: >-
+          Reload signing keys while the process runs, so a key added or pulled
+          takes effect without a restart. Covers every key source: keys_file is
+          watched and reacts at once, a keyring cannot be watched and is picked
+          up by the reload timer within 30s. Turning it off is logged as a
+          warning at startup, because a key change then needs a restart.
+        default: true
       keys_file:
         type: string
         description: Path to YAML file with hex-encoded private keys
@@ -230,17 +242,41 @@ properties:
             type: string
             enum:
               - file
-              - os
               - test
-              - memory
-            description: Keyring backend type
+            description: >-
+              Keyring backend. Only backends whose behaviour can be guaranteed
+              for a long-running signer: "file" is passphrase-protected (piped
+              in, cached for the whole keyring) and "test" uses a fixed
+              password. "memory" starts empty and nothing writes to it, and "os"
+              depends on whether a system keychain is reachable -- both are
+              rejected at startup. The interactive CLI still accepts "os".
           dir:
             type: string
+            description: >-
+              Directory CONTAINING the keyring, not the keyring itself: the file
+              backend reads <dir>/keyring-file.
             description: Directory for keyring (file backend only)
           app_name:
             type: string
             description: Application name for keyring
             default: pocket
+          passphrase_file:
+            type: string
+            description: >-
+              Path to a file holding the keyring passphrase ("file" backend
+              only). A REFERENCE, not the secret: mount a Kubernetes or compose
+              secret and point at it, the same way keys_file points at a file of
+              private keys. Preferred over passphrase_env, since an environment
+              variable is readable from /proc/<pid>/environ and tends to reach
+              crash dumps and process listings. With neither set the passphrase
+              is read from stdin, which suits a pipe or a terminal but not a
+              container (its stdin is /dev/null).
+          passphrase_env:
+            type: string
+            description: >-
+              NAME of an environment variable holding the keyring passphrase
+              ("file" backend only) -- not the passphrase itself. Mutually
+              exclusive with passphrase_file.
           key_names:
             type: array
             description: Specific key names to load (empty = load all)
@@ -478,10 +514,8 @@ properties:
     minimum: 1
 
 
-  hot_reload_enabled:
-    type: boolean
-    description: Enable hot-reload of supplier keys
-    default: true
+  # hot_reload_enabled is NOT a top-level setting: it lives under keys, in both
+  # binaries. A top-level value is rejected at startup with a migration message.
 
   session_ttl:
     type: string

@@ -3,6 +3,9 @@ package keys
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -30,7 +33,11 @@ type KeyringProvider struct {
 
 // KeyringProviderConfig contains configuration for the KeyringProvider.
 type KeyringProviderConfig struct {
-	// Backend is the keyring backend type: "file", "os", "test", "memory"
+	// Backend is the keyring backend type: "file" or "test".
+	// See keys.ValidateKeyringBackend for why the other cosmos-sdk backends
+	// ("memory", "os", "kwallet", "pass") are not supported.
+	// A caller that wants an in-memory keyring builds it itself and uses
+	// NewKeyringProviderWithKeyring, which is what the tests do.
 	Backend string
 
 	// Dir is the directory containing the keyring (for "file" backend).
@@ -42,6 +49,12 @@ type KeyringProviderConfig struct {
 	// KeyNames is an optional list of specific key names to load.
 	// If empty, loads all keys from the keyring.
 	KeyNames []string
+
+	// PasswordReader is where password-protected backends ("file", and "os"
+	// when it falls back to an encrypted file) read the passphrase from.
+	// Defaults to os.Stdin, so a caller that must stay non-interactive pipes
+	// the password in (e.g. from a secret manager). Tests inject a reader.
+	PasswordReader io.Reader
 }
 
 // getKeyringCodec returns a codec for keyring operations.
@@ -62,13 +75,20 @@ func NewKeyringProvider(
 
 	cdc := getKeyringCodec()
 
+	// Password-protected backends dereference this reader inside cosmos-sdk's
+	// newRealPrompt; a nil one panics before doing any work.
+	passwordReader := config.PasswordReader
+	if passwordReader == nil {
+		passwordReader = os.Stdin
+	}
+
+	warnIfKeyringDirIsTheKeyringItself(logger, config.Backend, config.Dir)
+
 	// Create keyring based on backend type
 	var kr keyring.Keyring
 	var err error
 
 	switch config.Backend {
-	case "memory":
-		kr = keyring.NewInMemory(cdc)
 	case "test":
 		// Test backend stores to disk but doesn't require password
 		kr, err = keyring.New(
@@ -79,19 +99,30 @@ func NewKeyringProvider(
 			cdc,
 		)
 	case "file":
+		// A "file" keyring with nothing configured to feed it reads the
+		// passphrase from stdin. That is right for a human at a terminal or a
+		// pipe -- echo "$SECRET" | pocket-relay-miner ... -- and wrong for a
+		// container, whose stdin is /dev/null: cosmos-sdk gets EOF, retries
+		// three times and the process dies at startup. Saying so here costs one
+		// line and turns that into an expected outcome rather than a mystery.
+		if config.PasswordReader == nil {
+			logger.Warn().
+				Str("keyring_dir", config.Dir).
+				Msg("no keyring passphrase source configured: it will be read from stdin. " +
+					"Set keys.keyring.passphrase_file (a mounted secret) or passphrase_env " +
+					"for anything that runs without a terminal -- a container's stdin is /dev/null")
+		}
+
+		// The file backend is password-protected, so it ALWAYS needs a reader to
+		// prompt from. Unlike "test", which uses a fixed password, passing nil
+		// here makes the backend unusable in every case: the passphrase prompt
+		// dereferences the reader and panics before any key is read.
+		logger.Info().Msg("keyring backend \"file\" is password-protected; the passphrase is read from the configured reader (stdin by default)")
 		kr, err = keyring.New(
 			config.AppName,
 			keyring.BackendFile,
 			config.Dir,
-			nil, // No stdin for non-interactive
-			cdc,
-		)
-	case "os":
-		kr, err = keyring.New(
-			config.AppName,
-			keyring.BackendOS,
-			config.Dir,
-			nil,
+			passwordReader,
 			cdc,
 		)
 	default:
@@ -108,6 +139,47 @@ func NewKeyringProvider(
 		appName:  config.AppName,
 		keyNames: config.KeyNames,
 	}, nil
+}
+
+// keyringSubdirs maps a backend to the subdirectory cosmos-sdk appends to the
+// configured directory. This is the whole reason the directory is the PARENT of
+// the keyring: pointing at the keyring itself yields dir/keyring-file/keyring-file,
+// which is empty, and every lookup then fails as "key not found" -- a message
+// that reads like a wrong key name rather than a wrong path.
+var keyringSubdirs = map[string]string{
+	"file": "keyring-file",
+	"test": "keyring-test",
+}
+
+// keyringDirLooksLikeKeyringItself reports whether dir points at the keyring
+// directory instead of its parent, along with the parent to suggest.
+func keyringDirLooksLikeKeyringItself(backend, dir string) (suggested string, ok bool) {
+	subdir, known := keyringSubdirs[backend]
+	if !known || dir == "" {
+		return "", false
+	}
+	clean := filepath.Clean(dir)
+	if filepath.Base(clean) != subdir {
+		return "", false
+	}
+	return filepath.Dir(clean), true
+}
+
+// warnIfKeyringDirIsTheKeyringItself flags the mistake above at open time, while
+// the path is still in front of the operator.
+func warnIfKeyringDirIsTheKeyringItself(logger logging.Logger, backend, dir string) {
+	suggested, ok := keyringDirLooksLikeKeyringItself(backend, dir)
+	if !ok {
+		return
+	}
+	logger.Warn().
+		Str("keyring_dir", dir).
+		Str("backend", backend).
+		Str("suggested_keyring_dir", suggested).
+		Msgf("keyring directory points at the keyring itself: it must be the PARENT "+
+			"directory, since the %q backend looks for %s/ inside it. Keys will be "+
+			"reported as \"key not found\"; pass %q instead",
+			backend, keyringSubdirs[backend], suggested)
 }
 
 // NewKeyringProviderWithKeyring creates a provider with an existing keyring.
@@ -222,7 +294,14 @@ func (p *KeyringProvider) loadKeyByName(name string) (cryptotypes.PrivKey, strin
 		return nil, "", fmt.Errorf("key %s is not a secp256k1 key", name)
 	}
 
-	return secpPrivKey, addr.String(), nil
+	// NOT addr.String(): that encodes with the global SDK prefix, which the
+	// miner never sets -- see OperatorAddressPrefix.
+	operatorAddr, err := OperatorAddress(addr)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return secpPrivKey, operatorAddr, nil
 }
 
 // SupportsHotReload returns false - keyring doesn't support hot-reload.

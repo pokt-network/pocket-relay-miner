@@ -223,12 +223,11 @@ func parseHexKeyWithAddress(hexKey string) (cryptotypes.PrivKey, string, error) 
 
 	privKey := &secp256k1.PrivKey{Key: keyBytes}
 
-	// Derive the operator address from the public key using "pokt" bech32 prefix
+	// Derive the operator address from the public key using Pocket's bech32 prefix
 	pubKey := privKey.PubKey()
 	addr := cosmostypes.AccAddress(pubKey.Address())
 
-	// Convert to "pokt" prefix (Pocket Network uses "pokt" instead of "cosmos")
-	operatorAddr, err := cosmostypes.Bech32ifyAddressBytes("pokt", addr)
+	operatorAddr, err := OperatorAddress(addr)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to encode address with pokt prefix: %w", err)
 	}

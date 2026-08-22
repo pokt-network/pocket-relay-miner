@@ -174,7 +174,7 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().StringVar(&relay.RelayGatewayPrivKey, "gateway-priv-key", "", "Gateway private key for ring signing (hex) — testing/localnet only; prefer --gateway-key or --keys-file")
 
 	// Secure key sources (resolved to keys in memory; hex never appears on the CLI)
-	relayCmd.PersistentFlags().StringVar(&relay.RelayKeyringBackend, "keyring-backend", "", "Cosmos keyring backend for --app-key/--gateway-key: file, os, or test")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayKeyringBackend, "keyring-backend", "", "Cosmos keyring backend for --app-key/--gateway-key: file or test")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayKeyringDir, "keyring-dir", "", "Cosmos keyring directory (default: the backend's default location)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayAppKeyName, "app-key", "", "Application key name in the keyring (resolved via --keyring-backend)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayGatewayKeyName, "gateway-key", "", "Gateway key name in the keyring (resolved via --keyring-backend)")

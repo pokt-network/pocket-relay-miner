@@ -45,10 +45,51 @@ def apply_k8s_overrides_miner(config, redis_host):
     config["pocket_node"]["query_node_grpc_url"] = "validator:9090"
     config["pocket_node"]["grpc_insecure"] = True
 
-    # Override keys path for k8s volume mount
+    # Point the binary at the key SOURCE this run is exercising.
+    #
+    # BOTH sources are mounted in every pod -- the keys_file secret and a keyring
+    # built from it at pod start -- but a config may name only ONE: setting both
+    # is a startup error (keys.ValidateKeySources). Mounting both anyway is what
+    # makes switching a one-line config change instead of a redeploy, and the
+    # config-hash annotation rolls the pods, which is required because the
+    # binaries read their config only at startup.
+    #
+    #   key_source: keys_file   the WATCHED source; a change lands at once
+    #   key_source: keyring     UNWATCHABLE; found by the reload timer (30s)
     if "keys" not in config:
         config["keys"] = {}
-    config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
+    key_source = config.get("key_source", "keys_file")
+    config.pop("key_source", None)
+    if key_source not in ("keys_file", "keyring"):
+        fail("key_source must be keys_file or keyring (they are mutually exclusive); got: " + str(key_source))
+
+    # Which keyring BACKEND, when the source is a keyring. Production uses
+    # "file", which is passphrase-protected, so exercising only "test" would
+    # leave the backend an operator actually runs untested -- and "file" is the
+    # one that panicked until 0b3b929 for want of a password reader.
+    keyring_backend = config.get("keyring_backend", "test")
+    config.pop("keyring_backend", None)
+    if keyring_backend not in ("test", "file"):
+        fail("keyring_backend must be test or file -- the only backends a service accepts " +
+             "(keys.ValidateServiceKeyringBackend); got: " + str(keyring_backend))
+
+    config["keys"].pop("keys_file", None)
+    config["keys"].pop("keyring", None)
+    if key_source == "keys_file":
+        config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
+    else:
+        keyring = {
+            "backend": keyring_backend,
+            "dir": "/keyring",
+            "app_name": "pocket",
+        }
+        if keyring_backend == "file":
+            # A REFERENCE to the mounted secret, not the passphrase: the config
+            # stays non-sensitive, exactly like keys_file pointing at a file of
+            # private keys. This is also why the container command needs no shell
+            # wrapper to redirect stdin.
+            keyring["passphrase_file"] = "/keyring-pass/passphrase"
+        config["keys"]["keyring"] = keyring
 
     # Override metrics addr for container
     if "metrics" not in config:
@@ -136,10 +177,51 @@ def apply_k8s_overrides_relayer(config, redis_host):
     config["pocket_node"]["query_node_grpc_url"] = "validator:9090"
     config["pocket_node"]["grpc_insecure"] = True
 
-    # Override keys path for k8s volume mount
+    # Point the binary at the key SOURCE this run is exercising.
+    #
+    # BOTH sources are mounted in every pod -- the keys_file secret and a keyring
+    # built from it at pod start -- but a config may name only ONE: setting both
+    # is a startup error (keys.ValidateKeySources). Mounting both anyway is what
+    # makes switching a one-line config change instead of a redeploy, and the
+    # config-hash annotation rolls the pods, which is required because the
+    # binaries read their config only at startup.
+    #
+    #   key_source: keys_file   the WATCHED source; a change lands at once
+    #   key_source: keyring     UNWATCHABLE; found by the reload timer (30s)
     if "keys" not in config:
         config["keys"] = {}
-    config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
+    key_source = config.get("key_source", "keys_file")
+    config.pop("key_source", None)
+    if key_source not in ("keys_file", "keyring"):
+        fail("key_source must be keys_file or keyring (they are mutually exclusive); got: " + str(key_source))
+
+    # Which keyring BACKEND, when the source is a keyring. Production uses
+    # "file", which is passphrase-protected, so exercising only "test" would
+    # leave the backend an operator actually runs untested -- and "file" is the
+    # one that panicked until 0b3b929 for want of a password reader.
+    keyring_backend = config.get("keyring_backend", "test")
+    config.pop("keyring_backend", None)
+    if keyring_backend not in ("test", "file"):
+        fail("keyring_backend must be test or file -- the only backends a service accepts " +
+             "(keys.ValidateServiceKeyringBackend); got: " + str(keyring_backend))
+
+    config["keys"].pop("keys_file", None)
+    config["keys"].pop("keyring", None)
+    if key_source == "keys_file":
+        config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
+    else:
+        keyring = {
+            "backend": keyring_backend,
+            "dir": "/keyring",
+            "app_name": "pocket",
+        }
+        if keyring_backend == "file":
+            # A REFERENCE to the mounted secret, not the passphrase: the config
+            # stays non-sensitive, exactly like keys_file pointing at a file of
+            # private keys. This is also why the container command needs no shell
+            # wrapper to redirect stdin.
+            keyring["passphrase_file"] = "/keyring-pass/passphrase"
+        config["keys"]["keyring"] = keyring
 
     # Override metrics addr for container
     if "metrics" not in config:

@@ -150,11 +150,24 @@ func privKeyToHex(pk cryptotypes.PrivKey) string {
 }
 
 // resolveKeyringKey loads a named key from a Cosmos keyring and returns it as hex.
-// The backend (file|os|test) must be given explicitly, mirroring the miner/relayer
-// flags; the hex it returns lives only in memory.
+// The backend must be given explicitly, mirroring the miner/relayer config; the
+// hex it returns lives only in memory.
+//
+// The backend is validated against the SAME list the services use
+// (keys.ValidateKeyringBackend) rather than a CLI-specific one: a key resolved
+// here is a key a service will be configured with, so a backend the CLI accepts
+// and a service refuses would only teach the operator the wrong thing.
 func resolveKeyringKey(logger logging.Logger, backend, dir, name string) (string, error) {
 	if backend == "" {
-		return "", fmt.Errorf("--keyring-backend is required to resolve key %q from a keyring (file, os, or test)", name)
+		return "", fmt.Errorf("--keyring-backend is required to resolve key %q from a keyring", name)
+	}
+	if err := keys.ValidateKeyringBackend(backend); err != nil {
+		return "", err
+	}
+	// Same rule as the services: an empty directory is not a default, it is a
+	// relative path to somewhere else. See keys.ValidateKeyringDir.
+	if err := keys.ValidateKeyringDir(dir); err != nil {
+		return "", err
 	}
 
 	provider, err := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{

@@ -19,6 +19,9 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
+	// Aliased because runHARelayer binds a local variable named `config` to
+	// the relayer configuration, which would shadow the package name.
+	sharedconfig "github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/observability"
@@ -284,7 +287,7 @@ func printStakeReport(report relayer.StakeCheckReport, notStaked []string) {
 // loadConfiguredSupplierAddresses builds the configured key providers, loads
 // every key, and returns the sorted unique operator addresses. Providers are
 // closed before returning.
-func loadConfiguredSupplierAddresses(ctx context.Context, logger logging.Logger, kc relayer.KeysConfig) ([]string, error) {
+func loadConfiguredSupplierAddresses(ctx context.Context, logger logging.Logger, kc sharedconfig.KeysConfig) ([]string, error) {
 	providers, err := buildKeyProviders(logger, kc)
 	if err != nil {
 		return nil, err
@@ -317,35 +320,43 @@ func loadConfiguredSupplierAddresses(ctx context.Context, logger logging.Logger,
 // buildKeyProviders constructs the configured key providers (keys_file,
 // keyring) in the same order and with the same logging as the relayer
 // boot path. Callers own closing the returned providers.
-func buildKeyProviders(logger logging.Logger, kc relayer.KeysConfig) ([]keys.KeyProvider, error) {
-	var providers []keys.KeyProvider
+func buildKeyProviders(logger logging.Logger, kc sharedconfig.KeysConfig) ([]keys.KeyProvider, error) {
+	return keys.BuildProviders(logger, kc.KeysFile, keyringSettings(kc.Keyring))
+}
 
-	// keys_file first (preferred for HA setup - same as miner)
-	if kc.KeysFile != "" {
-		provider, err := keys.NewSupplierKeysFileProvider(logger, kc.KeysFile)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create supplier keys file provider: %w", err)
-		}
-		providers = append(providers, provider)
-		logger.Info().Str("file", kc.KeysFile).Msg("added supplier keys file provider")
+// keyringSettings maps a configured keyring onto what keys.BuildProviders needs,
+// or nil when no keyring is configured.
+func keyringSettings(kr *sharedconfig.KeyringConfig) *keys.KeyringSettings {
+	if kr == nil || kr.Backend == "" {
+		return nil
 	}
-
-	// keyring as additional source (can combine all)
-	if kc.Keyring != nil && kc.Keyring.Backend != "" {
-		provider, err := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{
-			Backend:  kc.Keyring.Backend,
-			Dir:      kc.Keyring.Dir,
-			AppName:  kc.Keyring.AppName,
-			KeyNames: kc.Keyring.KeyNames,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("failed to create keyring provider: %w", err)
-		}
-		providers = append(providers, provider)
-		logger.Info().Str("backend", kc.Keyring.Backend).Msg("added keyring provider")
+	return &keys.KeyringSettings{
+		Backend:        kr.Backend,
+		Dir:            kr.Dir,
+		AppName:        kr.AppName,
+		KeyNames:       kr.KeyNames,
+		PassphraseFile: kr.PassphraseFile,
+		PassphraseEnv:  kr.PassphraseEnv,
 	}
+}
 
-	return providers, nil
+// supplierSigningKeys snapshots the key manager's current key set.
+//
+// KeyManager exposes ListSuppliers plus GetSigner rather than the map itself, so
+// the map is rebuilt here. A key removed between the two calls is skipped rather
+// than treated as an error: the reload that removed it fires its own change
+// callback, and that callback takes a fresh snapshot.
+func supplierSigningKeys(km keys.KeyManager) map[string]cryptotypes.PrivKey {
+	addresses := km.ListSuppliers()
+	signingKeys := make(map[string]cryptotypes.PrivKey, len(addresses))
+	for _, addr := range addresses {
+		key, err := km.GetSigner(addr)
+		if err != nil {
+			continue
+		}
+		signingKeys[addr] = key
+	}
+	return signingKeys
 }
 
 // stripGRPCScheme removes a URL scheme prefix from a gRPC endpoint, matching the
@@ -713,274 +724,276 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Load keys and create response signer
 	// Support multiple key sources: keys_file, keyring
-	keyProviders, err := buildKeyProviders(logger, config.Keys)
+	// One shared sequence for both binaries: build the providers the config
+	// names, put a key manager over them, load once, arm the watch and the
+	// reload timer, and refuse to continue with no keys. See keys.OpenManager
+	// for why that lives there and not here.
+	keyManager, err := keys.OpenManager(
+		ctx, logger,
+		config.Keys.KeysFile,
+		keyringSettings(config.Keys.Keyring),
+		config.Keys.HotReloadEnabled,
+	)
 	if err != nil {
 		return err
 	}
+	defer func() { _ = keyManager.Close() }()
 
-	if len(keyProviders) == 0 {
-		logger.Warn().Msg("no key providers configured - response signing will be disabled (relays will fail)")
-	} else {
-		// Load keys from all providers (both return map[string]cryptotypes.PrivKey)
-		loadedKeys := make(map[string]cryptotypes.PrivKey)
-		for _, provider := range keyProviders {
-			providerKeys, loadErr := provider.LoadKeys(ctx)
-			if loadErr != nil {
-				logger.Warn().Err(loadErr).Str("provider", provider.Name()).Msg("failed to load keys from provider")
-				continue
-			}
-			for addr, key := range providerKeys {
-				loadedKeys[addr] = key
-			}
-			logger.Info().Str("provider", provider.Name()).Int("keys", len(providerKeys)).Msg("loaded keys from provider")
+	loadedKeys := supplierSigningKeys(keyManager)
+
+	responseSigner, signerErr := relayer.NewResponseSigner(logger, loadedKeys)
+	if signerErr != nil {
+		return fmt.Errorf("failed to create response signer: %w", signerErr)
+	}
+	proxy.SetResponseSigner(responseSigner)
+
+	// One reload can add keys and remove keys at once, and the manager
+	// reports each changed address separately. The whole set is rebuilt
+	// on every callback rather than patched: replacing it is atomic, so
+	// a supplier the reload did not touch is never briefly without a
+	// signer, and applying N changes N times is idempotent.
+	//
+	// Added and removed is the whole space of changes here, because
+	// every provider derives the operator address FROM the key material
+	// -- see the diff in MultiProviderKeyManager.Reload for why a key
+	// cannot change behind an address that stays.
+	keyManager.OnKeyChange(func(operatorAddr string, added bool) {
+		responseSigner.ReplaceKeys(supplierSigningKeys(keyManager))
+		logger.Info().
+			Str("operator_address", operatorAddr).
+			Bool("added", added).
+			Int("keys", len(responseSigner.GetOperatorAddresses())).
+			Msg("signing key change applied to the running relayer")
+	})
+
+	// Wire the simulated-relay verifier (Admission zone). Optional and
+	// off by default; when disabled the header is ignored. Needs the
+	// response signer (to sign simulated responses) and the set of
+	// configured service IDs (to bind a simulated relay to a real,
+	// routable service).
+	simServiceIDs := make(map[string]struct{}, len(config.Services))
+	for svcID := range config.Services {
+		simServiceIDs[svcID] = struct{}{}
+	}
+	simVerifier, simErr := relayer.NewSimulationVerifier(
+		logger, &config.Simulation, redisClient, responseSigner, simServiceIDs, nil,
+	)
+	if simErr != nil {
+		return fmt.Errorf("failed to create simulation verifier: %w", simErr)
+	}
+	proxy.SetSimulationVerifier(simVerifier)
+	if config.Simulation.Enabled {
+		logger.Info().
+			Int("identities", len(config.Simulation.Identities)).
+			Msg("simulated relays ENABLED")
+		// Valid config that serves nothing: the identity loads and
+		// then rejects every relay with ErrSimExpired. Never fatal —
+		// see SimulationConfig.ExpiredIdentities.
+		if expired := config.Simulation.ExpiredIdentities(time.Now()); len(expired) > 0 {
+			logger.Warn().
+				Strs("key_ids", expired).
+				Msg("simulated relay identities are past their not_after: they will reject every relay")
 		}
-
-		// Close providers
-		for _, provider := range keyProviders {
-			_ = provider.Close()
-		}
-
-		// Publish the key count: this process holds its signing keys directly
-		// from the providers and never builds a MultiProviderKeyManager, which is
-		// what drives this gauge on the miner. Without this the relayer reported
-		// a hard 0 while holding a full key set.
-		keys.SetSupplierKeysActive(len(loadedKeys))
-
-		if len(loadedKeys) == 0 {
-			logger.Warn().Msg("no keys found - response signing will be disabled")
-		} else {
-			responseSigner, signerErr := relayer.NewResponseSigner(logger, loadedKeys)
-			if signerErr != nil {
-				return fmt.Errorf("failed to create response signer: %w", signerErr)
-			}
-			proxy.SetResponseSigner(responseSigner)
-
-			// Wire the simulated-relay verifier (Admission zone). Optional and
-			// off by default; when disabled the header is ignored. Needs the
-			// response signer (to sign simulated responses) and the set of
-			// configured service IDs (to bind a simulated relay to a real,
-			// routable service).
-			simServiceIDs := make(map[string]struct{}, len(config.Services))
-			for svcID := range config.Services {
-				simServiceIDs[svcID] = struct{}{}
-			}
-			simVerifier, simErr := relayer.NewSimulationVerifier(
-				logger, &config.Simulation, redisClient, responseSigner, simServiceIDs, nil,
-			)
-			if simErr != nil {
-				return fmt.Errorf("failed to create simulation verifier: %w", simErr)
-			}
-			proxy.SetSimulationVerifier(simVerifier)
-			if config.Simulation.Enabled {
-				logger.Info().
-					Int("identities", len(config.Simulation.Identities)).
-					Msg("simulated relays ENABLED")
-				// Valid config that serves nothing: the identity loads and
-				// then rejects every relay with ErrSimExpired. Never fatal —
-				// see SimulationConfig.ExpiredIdentities.
-				if expired := config.Simulation.ExpiredIdentities(time.Now()); len(expired) > 0 {
-					logger.Warn().
-						Strs("key_ids", expired).
-						Msg("simulated relay identities are past their not_after: they will reject every relay")
-				}
-			} else if len(config.Simulation.Identities) > 0 {
-				// The block is off, so it cannot affect this process — but it
-				// may still be unbootable, and the next deploy that enables it
-				// would crashloop this replica. Say so now, while it is cheap.
-				// Identities must be present: the shipped default is disabled
-				// with none, and warning about that would fire on every
-				// correct config.
-				if simCfgErr := config.Simulation.ValidateAsIfEnabled(); simCfgErr != nil {
-					logger.Warn().
-						Err(simCfgErr).
-						Msg("simulation is disabled and its config is invalid: enabling it would prevent startup")
-				}
-			}
-
-			logger.Info().
-				Int("num_keys", len(responseSigner.GetOperatorAddresses())).
-				Msg("response signer initialized")
-
-			// Create RingClient for relay request signature verification
-			// This is critical for security - it validates that relay requests
-			// are properly signed by the application or a delegated gateway
-			//
-			// IMPORTANT: Use Redis-backed caches for all queries to minimize latency:
-			// - Application cache: L1→L2→L3 for app delegation info
-			// - Account cache: L1→L2→L3 for public key lookups (NO EXPIRY - keys are immutable)
-			// - Shared params cache: L1→L2→L3 for session parameters
-			//
-			// At 1000 RPS, this prevents:
-			// - 1000+ application queries/sec to blockchain
-			// - 2000-4000 public key queries/sec to blockchain (N keys per ring)
-			// - 1000+ shared params queries/sec to blockchain
-			ringClient := rings.NewRingClient(
-				logger,
-				cache.NewCachedApplicationQueryClient(applicationCache),
-				cache.NewCachedAccountQueryClient(accountCache),
-				cache.NewCachedSharedQueryClient(sharedParamsCache, queryClients.Shared()),
-			)
-
-			// Create caches for full session validation
-			//
-			// BlockTimeSeconds has no operator-configurable field on this path today
-			// (unlike the miner's block_time_seconds) -- cache.DefaultBlockTimeSeconds
-			// is the single source for that fallback value across the whole process;
-			// see its doc comment for why the value itself is not "corrected" here.
-			cacheConfig := cache.CacheConfig{
-				TTLBlocks:        1,
-				BlockTimeSeconds: cache.DefaultBlockTimeSeconds,
-			}
-
-			// Create SharedParamCache for shared parameter caching
-			sharedParamCache := cache.NewRedisSharedParamCache(
-				logger,
-				redisClient,
-				queryClients.Shared(),
-				blockSubscriber,
-				cacheConfig,
-			)
-			if err := sharedParamCache.Start(ctx); err != nil {
-				return fmt.Errorf("failed to start shared param cache: %w", err)
-			}
-			defer func() { _ = sharedParamCache.Close() }()
-			logger.Info().Msg("shared param cache started")
-
-			// Create SessionCache for session validation caching
-			sessionCache := cache.NewRedisSessionCache(
-				logger,
-				redisClient,
-				queryClients.Session(),
-				queryClients.Shared(),
-				blockSubscriber,
-				cacheConfig,
-			)
-			if err := sessionCache.Start(ctx); err != nil {
-				return fmt.Errorf("failed to start session cache: %w", err)
-			}
-			defer func() { _ = sessionCache.Close() }()
-			logger.Info().Msg("session cache started")
-
-			// Create full RelayValidator with all validations:
-			// - Ring signature verification
-			// - Session validity (not expired, within grace period)
-			// - Supplier membership in session
-			// - Application staking status (via session query)
-			validatorConfig := &relayer.ValidatorConfig{
-				AllowedSupplierAddresses: responseSigner.GetOperatorAddresses(),
-			}
-			fullValidator := relayer.NewRelayValidator(
-				logger,
-				validatorConfig,
-				ringClient,
-				sessionCache,
-				sharedParamCache,
-			)
-			proxy.SetValidator(fullValidator)
-			logger.Info().
-				Int("allowed_suppliers", len(validatorConfig.AllowedSupplierAddresses)).
-				Msg("full relay validator initialized with session validation")
-
-			// Create RelayProcessor for proper relay mining with session metadata
-			signerAdapter := relayer.NewResponseSignerAdapter(responseSigner)
-			relayProcessor := relayer.NewRelayProcessor(
-				logger,
-				publisher,
-				signerAdapter,
-				ringClient, // Enable relay request signature verification
-			)
-			// Wire up the difficulty provider using on-chain service difficulty data
-			difficultyProviderAdapter := &serviceDifficultyQueryAdapter{queryClient: queryClients.ServiceDifficulty()}
-			difficultyProvider := relayer.NewQueryDifficultyProvider(logger, difficultyProviderAdapter)
-			relayProcessor.SetDifficultyProvider(difficultyProvider)
-
-			// Wire the service compute units provider to the height-aware query client:
-			// the mined ComputeUnitsPerRelay becomes the SMST leaf weight, and the chain
-			// resolves CUPR at SESSION START when validating the claim and settling it.
-			// The orchestrator-refreshed serviceCache stays wired as the fallback for
-			// relays that carry no session start height.
-			// Shared with the relay meter below: the meter MUST price a relay with the
-			// same compute units the relay is mined with, or the supplier is billed
-			// against one number and paid against another.
-			computeUnitsProvider := relayer.NewServiceCacheComputeUnitsProvider(logger, serviceCache, queryClients.Service())
-			relayProcessor.SetServiceComputeUnitsProvider(computeUnitsProvider)
-
-			// NOTE: App discovery callbacks are no longer needed on the relayer.
-			// Discovery happens on the miner side: the supplier worker SAdds apps/
-			// services seen in Redis-stream relays to the shared known-sets, which the
-			// leader's CacheOrchestrator refreshes. Relayers only consume shared caches.
-
-			proxy.SetRelayProcessor(relayProcessor)
-			logger.Info().Msg("relay processor initialized")
-
-			// Create and wire relay meter for rate limiting based on app stakes
-			if config.RelayMeter.Enabled {
-				// Convert fail behavior string to type
-				failBehavior := relayer.FailOpen // Default
-				if config.RelayMeter.FailBehavior == "closed" {
-					failBehavior = relayer.FailClosed
-				}
-
-				relayMeterConfig := relayer.RelayMeterConfig{
-					FailBehavior: failBehavior,
-					CacheTTL:     config.RelayMeter.CacheTTL,
-				}
-
-				// Create service factor client for reading service factors from Redis
-				// Service factors are published by the miner
-				serviceFactorClient := relayer.NewServiceFactorClient(
-					logger,
-					redisClient,
-				)
-				if err := serviceFactorClient.Start(ctx); err != nil {
-					return fmt.Errorf("failed to start service factor client: %w", err)
-				}
-				defer func() { _ = serviceFactorClient.Close() }()
-
-				// Use the cached application client so app stake changes
-				// land within RefreshIntervalBlocks via the orchestrator's
-				// invalidation pub/sub, and the hot path avoids chain
-				// round-trips on every relay. GetApplication resolves through
-				// the entity cache; GetParams is routed to the query-layer app
-				// client (90s TTL) so the meter's app_min_stake_upokt reflects
-				// the on-chain application MinStake instead of a frozen 0 — the
-				// plain cached client stubs GetParams to (nil, nil).
-				relayMeter := relayer.NewRelayMeter(
-					logger,
-					redisClient,
-					cache.NewCachedApplicationQueryClientWithParams(applicationCache, queryClients.Application()),
-					queryClients.Shared(),
-					queryClients.Session(),
-					blockSubscriber,
-					sharedParamCache,    // L1->L2->L3 cache for shared params (no Redis blocking!)
-					serviceCache,        // L1->L2->L3 cache for service data (no Redis blocking!)
-					serviceFactorClient, // Reads service factors from Redis (published by miner)
-					relayMeterConfig,
-				)
-
-				// Price relays at the session-start CUPR, matching what the relay
-				// processor stamps into the SMST and what the chain settles against.
-				relayMeter.SetServiceComputeUnitsProvider(computeUnitsProvider)
-
-				if err := relayMeter.Start(ctx); err != nil {
-					return fmt.Errorf("failed to start relay meter: %w", err)
-				}
-				defer func() { _ = relayMeter.Close() }()
-
-				proxy.SetRelayMeter(relayMeter)
-				logger.Info().
-					Str("fail_behavior", string(failBehavior)).
-					Msg("relay meter initialized and wired")
-			} else {
-				logger.Info().Msg("relay meter disabled in config")
-			}
-
-			// Initialize gRPC handler for gRPC and gRPC-Web requests
-			proxy.InitGRPCHandler()
-			// Initialize unified relay pipeline (validation + metering + signing + publishing)
-			proxy.InitializeRelayPipeline()
+	} else if len(config.Simulation.Identities) > 0 {
+		// The block is off, so it cannot affect this process — but it
+		// may still be unbootable, and the next deploy that enables it
+		// would crashloop this replica. Say so now, while it is cheap.
+		// Identities must be present: the shipped default is disabled
+		// with none, and warning about that would fire on every
+		// correct config.
+		if simCfgErr := config.Simulation.ValidateAsIfEnabled(); simCfgErr != nil {
+			logger.Warn().
+				Err(simCfgErr).
+				Msg("simulation is disabled and its config is invalid: enabling it would prevent startup")
 		}
 	}
+
+	logger.Info().
+		Int("num_keys", len(responseSigner.GetOperatorAddresses())).
+		Msg("response signer initialized")
+
+	// Create RingClient for relay request signature verification
+	// This is critical for security - it validates that relay requests
+	// are properly signed by the application or a delegated gateway
+	//
+	// IMPORTANT: Use Redis-backed caches for all queries to minimize latency:
+	// - Application cache: L1→L2→L3 for app delegation info
+	// - Account cache: L1→L2→L3 for public key lookups (NO EXPIRY - keys are immutable)
+	// - Shared params cache: L1→L2→L3 for session parameters
+	//
+	// At 1000 RPS, this prevents:
+	// - 1000+ application queries/sec to blockchain
+	// - 2000-4000 public key queries/sec to blockchain (N keys per ring)
+	// - 1000+ shared params queries/sec to blockchain
+	ringClient := rings.NewRingClient(
+		logger,
+		cache.NewCachedApplicationQueryClient(applicationCache),
+		cache.NewCachedAccountQueryClient(accountCache),
+		cache.NewCachedSharedQueryClient(sharedParamsCache, queryClients.Shared()),
+	)
+
+	// Create caches for full session validation
+	//
+	// BlockTimeSeconds has no operator-configurable field on this path today
+	// (unlike the miner's block_time_seconds) -- cache.DefaultBlockTimeSeconds
+	// is the single source for that fallback value across the whole process;
+	// see its doc comment for why the value itself is not "corrected" here.
+	cacheConfig := cache.CacheConfig{
+		TTLBlocks:        1,
+		BlockTimeSeconds: cache.DefaultBlockTimeSeconds,
+	}
+
+	// Create SharedParamCache for shared parameter caching
+	sharedParamCache := cache.NewRedisSharedParamCache(
+		logger,
+		redisClient,
+		queryClients.Shared(),
+		blockSubscriber,
+		cacheConfig,
+	)
+	if err := sharedParamCache.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start shared param cache: %w", err)
+	}
+	defer func() { _ = sharedParamCache.Close() }()
+	logger.Info().Msg("shared param cache started")
+
+	// Create SessionCache for session validation caching
+	sessionCache := cache.NewRedisSessionCache(
+		logger,
+		redisClient,
+		queryClients.Session(),
+		queryClients.Shared(),
+		blockSubscriber,
+		cacheConfig,
+	)
+	if err := sessionCache.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start session cache: %w", err)
+	}
+	defer func() { _ = sessionCache.Close() }()
+	logger.Info().Msg("session cache started")
+
+	// Create full RelayValidator with all validations:
+	// - Ring signature verification
+	// - Session validity (not expired, within grace period)
+	// - Supplier membership in session
+	// - Application staking status (via session query)
+	// HasSigner and not a snapshot of the addresses: the validator's
+	// gate and the signing key have to answer the same question at the
+	// same time, or a key added by a reload would be rejected here
+	// while the signer holds it.
+	validatorConfig := &relayer.ValidatorConfig{
+		OwnsSupplierKey: responseSigner.HasSigner,
+	}
+	fullValidator := relayer.NewRelayValidator(
+		logger,
+		validatorConfig,
+		ringClient,
+		sessionCache,
+		sharedParamCache,
+	)
+	proxy.SetValidator(fullValidator)
+	logger.Info().
+		Int("allowed_suppliers", len(responseSigner.GetOperatorAddresses())).
+		Msg("full relay validator initialized with session validation")
+
+	// Create RelayProcessor for proper relay mining with session metadata
+	signerAdapter := relayer.NewResponseSignerAdapter(responseSigner)
+	relayProcessor := relayer.NewRelayProcessor(
+		logger,
+		publisher,
+		signerAdapter,
+		ringClient, // Enable relay request signature verification
+	)
+	// Wire up the difficulty provider using on-chain service difficulty data
+	difficultyProviderAdapter := &serviceDifficultyQueryAdapter{queryClient: queryClients.ServiceDifficulty()}
+	difficultyProvider := relayer.NewQueryDifficultyProvider(logger, difficultyProviderAdapter)
+	relayProcessor.SetDifficultyProvider(difficultyProvider)
+
+	// Wire the service compute units provider to the height-aware query client:
+	// the mined ComputeUnitsPerRelay becomes the SMST leaf weight, and the chain
+	// resolves CUPR at SESSION START when validating the claim and settling it.
+	// The orchestrator-refreshed serviceCache stays wired as the fallback for
+	// relays that carry no session start height.
+	// Shared with the relay meter below: the meter MUST price a relay with the
+	// same compute units the relay is mined with, or the supplier is billed
+	// against one number and paid against another.
+	computeUnitsProvider := relayer.NewServiceCacheComputeUnitsProvider(logger, serviceCache, queryClients.Service())
+	relayProcessor.SetServiceComputeUnitsProvider(computeUnitsProvider)
+
+	// NOTE: App discovery callbacks are no longer needed on the relayer.
+	// Discovery happens on the miner side: the supplier worker SAdds apps/
+	// services seen in Redis-stream relays to the shared known-sets, which the
+	// leader's CacheOrchestrator refreshes. Relayers only consume shared caches.
+
+	proxy.SetRelayProcessor(relayProcessor)
+	logger.Info().Msg("relay processor initialized")
+
+	// Create and wire relay meter for rate limiting based on app stakes
+	if config.RelayMeter.Enabled {
+		// Convert fail behavior string to type
+		failBehavior := relayer.FailOpen // Default
+		if config.RelayMeter.FailBehavior == "closed" {
+			failBehavior = relayer.FailClosed
+		}
+
+		relayMeterConfig := relayer.RelayMeterConfig{
+			FailBehavior: failBehavior,
+			CacheTTL:     config.RelayMeter.CacheTTL,
+		}
+
+		// Create service factor client for reading service factors from Redis
+		// Service factors are published by the miner
+		serviceFactorClient := relayer.NewServiceFactorClient(
+			logger,
+			redisClient,
+		)
+		if err := serviceFactorClient.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start service factor client: %w", err)
+		}
+		defer func() { _ = serviceFactorClient.Close() }()
+
+		// Use the cached application client so app stake changes
+		// land within RefreshIntervalBlocks via the orchestrator's
+		// invalidation pub/sub, and the hot path avoids chain
+		// round-trips on every relay. GetApplication resolves through
+		// the entity cache; GetParams is routed to the query-layer app
+		// client (90s TTL) so the meter's app_min_stake_upokt reflects
+		// the on-chain application MinStake instead of a frozen 0 — the
+		// plain cached client stubs GetParams to (nil, nil).
+		relayMeter := relayer.NewRelayMeter(
+			logger,
+			redisClient,
+			cache.NewCachedApplicationQueryClientWithParams(applicationCache, queryClients.Application()),
+			queryClients.Shared(),
+			queryClients.Session(),
+			blockSubscriber,
+			sharedParamCache,    // L1->L2->L3 cache for shared params (no Redis blocking!)
+			serviceCache,        // L1->L2->L3 cache for service data (no Redis blocking!)
+			serviceFactorClient, // Reads service factors from Redis (published by miner)
+			relayMeterConfig,
+		)
+
+		// Price relays at the session-start CUPR, matching what the relay
+		// processor stamps into the SMST and what the chain settles against.
+		relayMeter.SetServiceComputeUnitsProvider(computeUnitsProvider)
+
+		if err := relayMeter.Start(ctx); err != nil {
+			return fmt.Errorf("failed to start relay meter: %w", err)
+		}
+		defer func() { _ = relayMeter.Close() }()
+
+		proxy.SetRelayMeter(relayMeter)
+		logger.Info().
+			Str("fail_behavior", string(failBehavior)).
+			Msg("relay meter initialized and wired")
+	} else {
+		logger.Info().Msg("relay meter disabled in config")
+	}
+
+	// Initialize gRPC handler for gRPC and gRPC-Web requests
+	proxy.InitGRPCHandler()
+	// Initialize unified relay pipeline (validation + metering + signing + publishing)
+	proxy.InitializeRelayPipeline()
 
 	// Set supplier cache for checking supplier state before accepting relays
 	proxy.SetSupplierCache(supplierCache)

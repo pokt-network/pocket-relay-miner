@@ -2,6 +2,7 @@ package keys
 
 import (
 	"encoding/hex"
+	"strings"
 	"testing"
 
 	"github.com/cosmos/cosmos-sdk/codec"
@@ -45,6 +46,73 @@ func TestKeyringProvider_LoadKeyByName(t *testing.T) {
 		"the returned private key must round-trip to the imported hex")
 }
 
+// testKeyringPassword is the passphrase for the transient on-disk file keyring
+// below. cosmos-sdk enforces a minimum length, so it cannot be shortened.
+const testKeyringPassword = "testpassword123"
+
+// TestNewKeyringProvider_FileBackend_LoadsKey is the regression test for the
+// file backend being constructed with a nil passphrase reader: the passphrase
+// prompt dereferences that reader, so every read from a file keyring panicked
+// before returning a key. It seeds a real on-disk file keyring, then reads it
+// back through NewKeyringProvider with the passphrase piped in — the exact
+// non-interactive flow an operator uses from a secret manager.
+func TestNewKeyringProvider_FileBackend_LoadsKey(t *testing.T) {
+	dir := t.TempDir()
+	registry := codectypes.NewInterfaceRegistry()
+	cryptocodec.RegisterInterfaces(registry)
+	cdc := codec.NewProtoCodec(registry)
+
+	// Creating a new file keyring prompts for the passphrase twice (set +
+	// confirm); opening an existing one prompts once.
+	seedKR, err := keyring.New("pocket", keyring.BackendFile, dir,
+		strings.NewReader(testKeyringPassword+"\n"+testKeyringPassword+"\n"), cdc)
+	require.NoError(t, err)
+	require.NoError(t, seedKR.ImportPrivKeyHex("app", testAppHex, "secp256k1"))
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	p, err := NewKeyringProvider(logger, KeyringProviderConfig{
+		Backend:        "file",
+		Dir:            dir,
+		AppName:        "pocket",
+		PasswordReader: strings.NewReader(testKeyringPassword + "\n"),
+	})
+	require.NoError(t, err)
+
+	privKey, addr, err := p.LoadKeyByName("app")
+
+	require.NoError(t, err)
+	require.NotEmpty(t, addr, "operator address must be derived")
+	require.Equal(t, testAppHex, hex.EncodeToString(privKey.Bytes()),
+		"the returned private key must round-trip to the imported hex")
+}
+
+// TestNewKeyringProvider_FileBackend_WrongPassword proves a bad passphrase is a
+// returned error, not a panic and not a silently empty keyring.
+func TestNewKeyringProvider_FileBackend_WrongPassword(t *testing.T) {
+	dir := t.TempDir()
+	registry := codectypes.NewInterfaceRegistry()
+	cryptocodec.RegisterInterfaces(registry)
+	cdc := codec.NewProtoCodec(registry)
+
+	seedKR, err := keyring.New("pocket", keyring.BackendFile, dir,
+		strings.NewReader(testKeyringPassword+"\n"+testKeyringPassword+"\n"), cdc)
+	require.NoError(t, err)
+	require.NoError(t, seedKR.ImportPrivKeyHex("app", testAppHex, "secp256k1"))
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	p, err := NewKeyringProvider(logger, KeyringProviderConfig{
+		Backend:        "file",
+		Dir:            dir,
+		AppName:        "pocket",
+		PasswordReader: strings.NewReader("wrongpassword123\n"),
+	})
+	require.NoError(t, err)
+
+	_, _, err = p.LoadKeyByName("app")
+
+	require.Error(t, err)
+}
+
 // TestKeyringProvider_LoadKeyByName_Missing proves an unknown key name is a clear
 // error rather than a nil key.
 func TestKeyringProvider_LoadKeyByName_Missing(t *testing.T) {
@@ -55,4 +123,62 @@ func TestKeyringProvider_LoadKeyByName_Missing(t *testing.T) {
 	_, _, err := p.LoadKeyByName("does-not-exist")
 
 	require.Error(t, err)
+}
+
+// TestKeyringDirLooksLikeKeyringItself covers the "key not found" trap: cosmos-sdk
+// appends keyring-file/ to the directory it is given, so an operator who passes
+// the real keyring path gets an empty keyring and an error that blames the key
+// name instead of the path.
+func TestKeyringDirLooksLikeKeyringItself(t *testing.T) {
+	tests := []struct {
+		name      string
+		backend   string
+		dir       string
+		wantWarn  bool
+		suggested string
+	}{
+		{
+			name:      "file backend pointed at the keyring itself",
+			backend:   "file",
+			dir:       "/home/op/bin/keyring-file",
+			wantWarn:  true,
+			suggested: "/home/op/bin",
+		},
+		{
+			name:      "trailing slash still detected",
+			backend:   "file",
+			dir:       "/home/op/bin/keyring-file/",
+			wantWarn:  true,
+			suggested: "/home/op/bin",
+		},
+		{
+			name:      "test backend has its own subdir",
+			backend:   "test",
+			dir:       "/home/op/.pocket/keyring-test",
+			wantWarn:  true,
+			suggested: "/home/op/.pocket",
+		},
+		{name: "correct parent directory", backend: "file", dir: "/home/op/bin"},
+		{name: "empty dir uses backend default", backend: "file", dir: ""},
+		{
+			// The other supported backend has its own subdir, so the same mistake
+			// is possible there and must be caught with the right suggestion.
+			name:      "test backend, dir points at the keyring itself",
+			backend:   "test",
+			dir:       "/home/op/.pocket/keyring-test",
+			wantWarn:  true,
+			suggested: "/home/op/.pocket",
+		},
+		{name: "unsupported backend has no subdir to confuse", backend: "kwallet", dir: "/home/op/keyring-file"},
+		{name: "unrelated directory named similarly", backend: "file", dir: "/home/op/keyring-files"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			suggested, ok := keyringDirLooksLikeKeyringItself(tt.backend, tt.dir)
+
+			require.Equal(t, tt.wantWarn, ok)
+			require.Equal(t, tt.suggested, suggested)
+		})
+	}
 }

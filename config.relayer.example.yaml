@@ -55,17 +55,42 @@ pocket_node:
 
 # Supplier signing keys (required for signing relay responses)
 keys:
+  # Full reference: docs/SUPPLIER_KEYS.md
+  # keys_file and keyring are MUTUALLY EXCLUSIVE -- setting both is a startup
+  # error. Configure exactly one, so nothing has to decide at runtime which
+  # source wins a duplicate or what it means when one of them is unreadable.
+
   # Option 1: Load from YAML file (simple, recommended for testing)
   keys_file: "/keys/supplier-keys.yaml"
 
   # Option 2: Use Cosmos SDK keyring (recommended for production)
   # keyring:
-  #   backend: "file"  # file, os, test, memory
+  #   backend: "file"  # file (passphrase, piped in) or test (fixed password).
+  #                    # "os" and "memory" are refused at startup -- see
+  #                    # keys.ValidateKeyringBackend for why.
   #   dir: "/path/to/keyring"
   #   app_name: "pocket"
+  #   # For backend "file", say WHERE the passphrase is -- never the passphrase
+  #   # itself, so the config stays non-sensitive:
+  #   passphrase_file: "/secrets/keyring-passphrase"   # a mounted secret
+  #   # passphrase_env: "KEYRING_PASSPHRASE"           # or the NAME of an env var
+  #   # With neither, it is read from stdin:
+  #   #   echo "$SECRET" | pocket-relay-miner relayer --config config.yaml
+  #   # which suits a terminal or a pipe, but not a container (stdin is /dev/null).
   #   key_names:  # Optional: specific keys to load
   #     - "supplier1"
   #     - "supplier2"
+
+  # Reload signing keys while the relayer runs, so adding or pulling a key takes
+  # effect on a RUNNING relayer instead of only on the next restart.
+  # Default: true.
+  #
+  # Every key source is covered. keys_file is also watched (its directory is
+  # watched, which is what makes a Kubernetes secret's ..data swap register), so
+  # a change there lands almost at once. A keyring cannot be watched, so its
+  # changes are found by the reload timer instead -- within 30s. The relayer logs
+  # which sources are watched and which rely on the timer at startup.
+  hot_reload_enabled: true
 
 # Service configurations (map of service_id -> config)
 # Genesis defines 4 services: develop-http, develop-websocket, develop-stream, develop-grpc

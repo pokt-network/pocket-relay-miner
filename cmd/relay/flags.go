@@ -8,7 +8,7 @@ var (
 	RelayGatewayPrivKey string // Gateway private key for ring signing (matches PATH's approach)
 	// Key sources that avoid raw hex on the command line (resolved to the hex
 	// fields above, in memory, before signing). See resolveRelayKeys.
-	RelayKeyringBackend string // Cosmos keyring backend: file|os|test
+	RelayKeyringBackend string // Cosmos keyring backend: file|test (keys.ValidateKeyringBackend)
 	RelayKeyringDir     string // Cosmos keyring directory
 	RelayAppKeyName     string // keyring key name for the application
 	RelayGatewayKeyName string // keyring key name for the gateway
