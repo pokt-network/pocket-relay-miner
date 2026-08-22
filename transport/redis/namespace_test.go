@@ -2,6 +2,7 @@ package redis
 
 import (
 	"fmt"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -80,6 +81,7 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"RebroadcastKey":                  kb.RebroadcastKey("claim", "sup1", 100),
 		"RebroadcastIndexKey":             kb.RebroadcastIndexKey("claim"),
 		"MinerDedupSessionKey":            kb.MinerDedupSessionKey("sess1"),
+		"MeterPrefix":                     kb.MeterPrefix(),
 		"MeterSessionKey":                 kb.MeterSessionKey("sess1"),
 		"MeterMetaKey":                    kb.MeterMetaKey("sess1", "pokt1a"),
 		"MeterConsumedKey":                kb.MeterConsumedKey("sess1", "pokt1a"),
@@ -163,6 +165,7 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"RebroadcastKey":                  "ha:miner:rebroadcast:{claim}:sup1:100",
 		"RebroadcastIndexKey":             "ha:miner:rebroadcast:{claim}:index",
 		"MinerDedupSessionKey":            "ha:miner:dedup:session:sess1",
+		"MeterPrefix":                     "ha:meter",
 		"MeterSessionKey":                 "ha:meter:sess1",
 		"MeterMetaKey":                    "ha:meter:sess1:pokt1a:meta",
 		"MeterConsumedKey":                "ha:meter:sess1:pokt1a:consumed",
@@ -294,14 +297,9 @@ func TestWithDefaults_FieldByField(t *testing.T) {
 // its own. The extractors are excluded because they parse a key rather than
 // build one.
 //
-// SCOPE, because the difference matters: this checks EXACT equality only. Two
-// methods can still collide through a GLOB -- verified under the very namespaces
-// listed below, SupplierStatePattern() is "ha:suppliers:*" and matches
-// SuppliersRegistryIndexKey(), and under {CachePrefix: "supplier"} it matches
-// every CacheKey(...). That hazard predates this test and reaches a destructive
-// path, since `redis cache --type supplier --invalidate` deletes what it scans;
-// it is tracked separately. A pass here does NOT mean no two methods can ever
-// touch the same key.
+// Equality is only half of it; the glob half is
+// TestKeyBuilder_PatternsMatchOnlyTheirOwnFamily below, which is what the key
+// layout becoming constant made checkable at all.
 func TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace(t *testing.T) {
 	namespaces := []config.RedisNamespaceConfig{
 		{},
@@ -398,4 +396,94 @@ func keyBuilderOutputsWithUniformArgs(
 	require.NotEmpty(t, out, "reflection found no callable KeyBuilder methods")
 
 	return out
+}
+
+// TestKeyBuilder_PatternsMatchOnlyTheirOwnFamily is the glob half of the
+// collision guard, and it only became possible once the key layout stopped being
+// operator-configurable.
+//
+// Two methods do not have to produce the SAME key to corrupt each other: a SCAN
+// pattern eating another family's keys is worse, because a pattern feeds
+// deletion (`redis cache --type supplier --invalidate` deletes what it scans).
+// While the segments were config, this was reachable: supplier_prefix
+// "suppliers" made SupplierStatePattern() "ha:suppliers:*", which matched the
+// fleet index, and cache_prefix "supplier" made it match every cache key. No
+// test could pin the property, because it depended on values an operator chose.
+//
+// Now every segment below the base is a constant, so what a pattern matches is a
+// property of the code and nothing else. Each pattern must match its OWN family
+// and nothing more.
+func TestKeyBuilder_PatternsMatchOnlyTheirOwnFamily(t *testing.T) {
+	expected := map[string][]string{
+		"StreamPattern":           {"StreamKey"},
+		"SupplierStatePattern":    {"SupplierStateKey"},
+		"SMSTNodesPattern":        {"SMSTNodesKey"},
+		"SMSTSessionNodesPattern": {"SMSTNodesKey"},
+		"MeterSessionMetaPattern": {"MeterMetaKey"},
+		"TxTrackPattern":          {"TxTrackKey"},
+		"TxTrackAllPattern":       {"TxTrackKey"},
+		// Matches nothing: the family it scanned for is gone, and it is kept
+		// only so an upgrade can clear what older versions left behind.
+		"LegacyParamsPattern": {},
+	}
+
+	notAKey := map[string]bool{"StreamAddress": true, "SupplierStateAddress": true}
+
+	// Several bases, because the base is the one thing still configurable and it
+	// must not change which family a pattern reaches.
+	for _, ns := range []config.RedisNamespaceConfig{{}, {BasePrefix: "prod"}, {BasePrefix: "ha-2"}} {
+		kb := NewKeyBuilder(ns)
+		outputs := keyBuilderOutputsWithUniformArgs(t, kb, notAKey)
+
+		for name, pattern := range outputs {
+			if !strings.HasSuffix(name, "Pattern") || name == "AllKeysPattern" {
+				continue
+			}
+
+			want, listed := expected[name]
+			require.Truef(t, listed,
+				"%s is a new SCAN pattern with no expectation here. Add it: a pattern "+
+					"nobody pinned is a pattern nobody noticed was eating another family", name)
+
+			var matched []string
+			for other, key := range outputs {
+				if other == name || strings.HasSuffix(other, "Pattern") {
+					continue
+				}
+				if ok, err := filepath.Match(pattern, key); err == nil && ok {
+					matched = append(matched, other)
+				}
+			}
+
+			require.ElementsMatchf(t, want, matched,
+				"namespace %+v: %s (%q) matches %v, expected %v -- a pattern reaching "+
+					"another family is a scan-and-delete reaching data it does not own",
+				ns, name, pattern, matched, want)
+		}
+	}
+}
+
+// TestKeyBuilder_AllKeysPatternMatchesEverything pins the one pattern that is
+// SUPPOSED to be total, so the test above excluding it stays honest: if this
+// ever stopped matching some family, a cleanup that relies on it would silently
+// skip that family instead of failing.
+func TestKeyBuilder_AllKeysPatternMatchesEverything(t *testing.T) {
+	kb := NewKeyBuilder(config.RedisNamespaceConfig{})
+	outputs := keyBuilderOutputsWithUniformArgs(t, kb,
+		map[string]bool{"StreamAddress": true, "SupplierStateAddress": true})
+
+	all := outputs["AllKeysPattern"]
+	require.NotEmpty(t, all)
+
+	for name, key := range outputs {
+		// ConsumerGroup is not a key: it is a Redis Streams consumer-group name,
+		// and it is joined with a dash ("ha-miners") precisely so it does not sit
+		// in the keyspace. No key pattern should reach it.
+		if strings.HasSuffix(name, "Pattern") || name == "ConsumerGroup" {
+			continue
+		}
+		ok, err := filepath.Match(all, key)
+		require.NoError(t, err)
+		require.Truef(t, ok, "AllKeysPattern (%q) does not match %s (%q)", all, name, key)
+	}
 }
