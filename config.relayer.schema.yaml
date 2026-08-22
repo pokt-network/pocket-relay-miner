@@ -87,6 +87,14 @@ properties:
       keys_file:
         type: string
         description: Path to YAML file with hex-encoded private keys
+      hot_reload_enabled:
+        type: boolean
+        description: >-
+          Reload signing keys while the relayer runs, so a key added or pulled
+          takes effect on a running relayer instead of only on restart. Covers
+          every key source: keys_file is watched and reacts at once, a keyring
+          cannot be watched and is picked up by the reload timer within 30s.
+        default: true
       keyring:
         type: object
         description: Cosmos SDK keyring configuration

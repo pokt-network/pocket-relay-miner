@@ -348,6 +348,62 @@ func buildKeyProviders(logger logging.Logger, kc relayer.KeysConfig) ([]keys.Key
 	return providers, nil
 }
 
+// supplierSigningKeys snapshots the key manager's current key set.
+//
+// KeyManager exposes ListSuppliers plus GetSigner rather than the map itself, so
+// the map is rebuilt here. A key removed between the two calls is skipped rather
+// than treated as an error: the reload that removed it fires its own change
+// callback, and that callback takes a fresh snapshot.
+func supplierSigningKeys(km keys.KeyManager) map[string]cryptotypes.PrivKey {
+	addresses := km.ListSuppliers()
+	signingKeys := make(map[string]cryptotypes.PrivKey, len(addresses))
+	for _, addr := range addresses {
+		key, err := km.GetSigner(addr)
+		if err != nil {
+			continue
+		}
+		signingKeys[addr] = key
+	}
+	return signingKeys
+}
+
+// logKeySourceReloadability states, at startup, how promptly each configured
+// key source reacts to a change.
+//
+// It exists because the answer differs per source and the difference is
+// invisible at runtime. The supplier keys FILE is watched (its provider watches
+// the containing directory for Write|Create, which is what makes a Kubernetes
+// secret's ..data swap register), so a change there lands almost at once. The
+// KEYRING cannot be watched at all -- its WatchForChanges returns nil -- so a
+// change there is found by the reload timer instead, within one interval.
+//
+// Both paths re-read EVERY source, so the distinction is about latency, not
+// about whether a source reloads: with the timer running, all of them do.
+func logKeySourceReloadability(logger logging.Logger, providers []keys.KeyProvider, hotReloadEnabled bool) {
+	watched := make([]string, 0, len(providers))
+	timerOnly := make([]string, 0, len(providers))
+	for _, provider := range providers {
+		if provider.SupportsHotReload() {
+			watched = append(watched, provider.Name())
+			continue
+		}
+		timerOnly = append(timerOnly, provider.Name())
+	}
+
+	if !hotReloadEnabled {
+		logger.Warn().
+			Strs("sources", append(watched, timerOnly...)).
+			Msg("key hot reload is DISABLED: a key added or removed takes effect only on restart")
+		return
+	}
+
+	logger.Info().
+		Strs("watched_sources", watched).
+		Strs("timer_only_sources", timerOnly).
+		Dur("reload_interval", keys.DefaultReloadInterval).
+		Msg("key hot reload active: watched sources react at once, every source within one reload interval")
+}
+
 // stripGRPCScheme removes a URL scheme prefix from a gRPC endpoint, matching the
 // relayer boot path — grpc.NewClient wants host:port, not a scheme.
 func stripGRPCScheme(grpcURL string) string {
@@ -721,30 +777,36 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if len(keyProviders) == 0 {
 		logger.Warn().Msg("no key providers configured - response signing will be disabled (relays will fail)")
 	} else {
-		// Load keys from all providers (both return map[string]cryptotypes.PrivKey)
-		loadedKeys := make(map[string]cryptotypes.PrivKey)
-		for _, provider := range keyProviders {
-			providerKeys, loadErr := provider.LoadKeys(ctx)
-			if loadErr != nil {
-				logger.Warn().Err(loadErr).Str("provider", provider.Name()).Msg("failed to load keys from provider")
-				continue
-			}
-			for addr, key := range providerKeys {
-				loadedKeys[addr] = key
-			}
-			logger.Info().Str("provider", provider.Name()).Int("keys", len(providerKeys)).Msg("loaded keys from provider")
+		// The relayer holds its signing keys through a MultiProviderKeyManager,
+		// the same component the miner uses, so that pulling a key from the
+		// secret stops a RUNNING relayer from signing for that supplier instead
+		// of only the next replica to restart. Before this the relayer loaded
+		// its keys once and closed the providers, so a removal took effect on a
+		// restart and nowhere else -- measured 2026-08-21.
+		//
+		// The manager also owns closing the providers (Close walks them), and
+		// its Reload drives supplier_keys_active, so neither is done here.
+		keyManager := keys.NewMultiProviderKeyManager(
+			logger,
+			keyProviders,
+			keys.KeyManagerConfig{
+				HotReloadEnabled: config.Keys.HotReloadEnabled,
+			},
+		)
+		defer func() { _ = keyManager.Close() }()
+
+		// Start performs the initial load of every provider, then arms both
+		// reload paths: a watch on the sources that can be watched, and the
+		// reload timer that covers all of them. A provider that fails to load
+		// is warned about and skipped, as before -- it does not stop startup;
+		// the empty-key-set check below is what reports that outcome.
+		if startErr := keyManager.Start(ctx); startErr != nil {
+			return fmt.Errorf("failed to start key manager: %w", startErr)
 		}
 
-		// Close providers
-		for _, provider := range keyProviders {
-			_ = provider.Close()
-		}
+		logKeySourceReloadability(logger, keyProviders, config.Keys.HotReloadEnabled)
 
-		// Publish the key count: this process holds its signing keys directly
-		// from the providers and never builds a MultiProviderKeyManager, which is
-		// what drives this gauge on the miner. Without this the relayer reported
-		// a hard 0 while holding a full key set.
-		keys.SetSupplierKeysActive(len(loadedKeys))
+		loadedKeys := supplierSigningKeys(keyManager)
 
 		if len(loadedKeys) == 0 {
 			logger.Warn().Msg("no keys found - response signing will be disabled")
@@ -754,6 +816,25 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 				return fmt.Errorf("failed to create response signer: %w", signerErr)
 			}
 			proxy.SetResponseSigner(responseSigner)
+
+			// One reload can add keys and remove keys at once, and the manager
+			// reports each changed address separately. The whole set is rebuilt
+			// on every callback rather than patched: replacing it is atomic, so
+			// a supplier the reload did not touch is never briefly without a
+			// signer, and applying N changes N times is idempotent.
+			//
+			// Added and removed is the whole space of changes here, because
+			// every provider derives the operator address FROM the key material
+			// -- see the diff in MultiProviderKeyManager.Reload for why a key
+			// cannot change behind an address that stays.
+			keyManager.OnKeyChange(func(operatorAddr string, added bool) {
+				responseSigner.ReplaceKeys(supplierSigningKeys(keyManager))
+				logger.Info().
+					Str("operator_address", operatorAddr).
+					Bool("added", added).
+					Int("keys", len(responseSigner.GetOperatorAddresses())).
+					Msg("signing key change applied to the running relayer")
+			})
 
 			// Wire the simulated-relay verifier (Admission zone). Optional and
 			// off by default; when disabled the header is ignored. Needs the
@@ -866,8 +947,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			// - Session validity (not expired, within grace period)
 			// - Supplier membership in session
 			// - Application staking status (via session query)
+			// HasSigner and not a snapshot of the addresses: the validator's
+			// gate and the signing key have to answer the same question at the
+			// same time, or a key added by a reload would be rejected here
+			// while the signer holds it.
 			validatorConfig := &relayer.ValidatorConfig{
-				AllowedSupplierAddresses: responseSigner.GetOperatorAddresses(),
+				OwnsSupplierKey: responseSigner.HasSigner,
 			}
 			fullValidator := relayer.NewRelayValidator(
 				logger,
@@ -878,7 +963,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			)
 			proxy.SetValidator(fullValidator)
 			logger.Info().
-				Int("allowed_suppliers", len(validatorConfig.AllowedSupplierAddresses)).
+				Int("allowed_suppliers", len(responseSigner.GetOperatorAddresses())).
 				Msg("full relay validator initialized with session validation")
 
 			// Create RelayProcessor for proper relay mining with session metadata
