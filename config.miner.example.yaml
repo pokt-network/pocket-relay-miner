@@ -158,6 +158,15 @@ pocket_node:
 # ==============================================================================
 # Full reference: docs/SUPPLIER_KEYS.md
 keys:
+  # Reload signing keys while the miner runs, so a key added or pulled takes
+  # effect without a restart. Every key source is covered: keys_file is also
+  # watched (its directory is watched, which is what makes a Kubernetes secret's
+  # ..data swap register) so a change there lands almost at once, while a keyring
+  # cannot be watched and is found by the reload timer within 30s. Setting it to
+  # false is logged as a warning at startup, because a key change then needs a
+  # restart. Default: true.
+  hot_reload_enabled: true
+
   # Option 1: Load from YAML file with hex-encoded keys
   keys_file: "/keys/supplier-keys.yaml"
 
@@ -316,12 +325,9 @@ supplier_claiming:
 # Redis streams serve as the WAL for relays, enabling HA compatibility and data durability.
 deduplication_ttl_blocks: 10  # Keep relay hashes for 10 blocks to prevent duplicates
 batch_size: 1000  # Relay batch size for XREADGROUP (increased from 100 for better throughput)
-# Reload signing keys while the miner runs, so a key added or pulled takes effect
-# without a restart. Covers every key source: keys_file is watched and reacts at
-# once, a keyring cannot be watched and is picked up by the reload timer within
-# 30s. The miner logs which sources are watched and which rely on the timer at
-# startup. Default: true.
-hot_reload_enabled: true
+# NOTE: hot_reload_enabled moved under keys: (see the keys block). At the top
+# level it is now a startup error, on purpose -- it was read by nothing, so a
+# miner could run with key hot reload off while this file said on.
 cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget). Backup safety net if manual cleanup fails.
 
 # SMST live_root checkpoint interval (in UpdateTree calls).

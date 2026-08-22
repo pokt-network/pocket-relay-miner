@@ -222,6 +222,15 @@ properties:
       EXCLUSIVE: setting both is a startup error. Exactly one is required -- a
       miner with no keys has nothing to do.
     properties:
+      hot_reload_enabled:
+        type: boolean
+        description: >-
+          Reload signing keys while the process runs, so a key added or pulled
+          takes effect without a restart. Covers every key source: keys_file is
+          watched and reacts at once, a keyring cannot be watched and is picked
+          up by the reload timer within 30s. Turning it off is logged as a
+          warning at startup, because a key change then needs a restart.
+        default: true
       keys_file:
         type: string
         description: Path to YAML file with hex-encoded private keys
@@ -505,14 +514,8 @@ properties:
     minimum: 1
 
 
-  hot_reload_enabled:
-    type: boolean
-    description: >-
-      Reload signing keys while the miner runs, so a key added or pulled takes
-      effect without a restart. Covers every key source: keys_file is watched
-      and reacts at once, a keyring cannot be watched and is picked up by the
-      reload timer within 30s.
-    default: true
+  # hot_reload_enabled is NOT a top-level setting: it lives under keys, in both
+  # binaries. A top-level value is rejected at startup with a migration message.
 
   session_ttl:
     type: string
