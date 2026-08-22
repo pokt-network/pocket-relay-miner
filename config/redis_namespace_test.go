@@ -49,13 +49,23 @@ func TestRedisNamespaceValidate(t *testing.T) {
 		{
 			name:    "a glob in the base prefix would end up inside every SCAN pattern",
 			ns:      RedisNamespaceConfig{BasePrefix: "ha:*"},
-			wantErr: "is invalid",
+			wantErr: "glob metacharacter",
 		},
 		{
 			name:    "and so would a space",
 			ns:      RedisNamespaceConfig{BasePrefix: "two words"},
-			wantErr: "is invalid",
+			wantErr: "glob metacharacter",
 		},
+		{
+			name:    "a bracket is a glob character too",
+			ns:      RedisNamespaceConfig{BasePrefix: "ha[12]"},
+			wantErr: "glob metacharacter",
+		},
+		// These are not dangerous, they only add segments -- and they work in
+		// deployments today. Rejecting them would lock out a running fleet whose
+		// only way out is renaming the base, which relocates everything.
+		{name: "a colon in the base is only another segment", ns: RedisNamespaceConfig{BasePrefix: "ha:prod"}},
+		{name: "so is a dot", ns: RedisNamespaceConfig{BasePrefix: "pocket.ha"}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			err := tt.ns.Validate()

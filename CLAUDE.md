@@ -331,14 +331,18 @@ If any gate fails, fix it before reporting completion. Do NOT report "done" with
 - ✅ One KeyBuilder method per key pattern and per channel. Publisher and
   subscriber MUST call the SAME method — if a channel has no KB method,
   add one; do not inline the string.
-- ✅ Namespace defaults are per-field: an operator setting only
-  `namespace.base_prefix` must still get every sub-prefix defaulted.
-  Malformed keys with empty segments (`prod::application:x`) must be
-  impossible by construction.
+- ✅ **Only `base_prefix` is configurable.** Every segment below it is a
+  constant in `transport/redis/namespace.go`, so a partial namespace cannot
+  produce an empty segment (`prod::application:x`) and there is nothing to
+  default per-field. Do NOT reintroduce a per-family knob: one that can be
+  turned until it equals another family's literal is how a key ended up with
+  two writers, and how the supplier SCAN pattern could be made to match every
+  cache key. New family, new KeyBuilder method — not new config.
 - ✅ Tests: golden-string tests pin each KB method's default output
-  (changing a default string is a breaking cross-version change — mixed
-  fleets stop hearing each other); a property test asserts no KB method
-  can produce `::` under partial namespace config.
+  (changing a constant is a breaking cross-version change — mixed fleets stop
+  hearing each other); a collision test asserts no two methods produce the
+  same key, and a pattern test asserts every SCAN pattern matches only its own
+  family.
 
 ### Key Patterns
 

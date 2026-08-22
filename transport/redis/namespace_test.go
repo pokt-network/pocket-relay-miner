@@ -99,14 +99,19 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 }
 
 // TestKeyBuilder_PartialNamespaceNeverProducesEmptySegments is the anti-`::`
-// property test: an operator setting ONLY base_prefix (the realistic partial
-// config) must still get every sub-prefix defaulted, on every method.
+// property test: no method may emit an empty segment.
+//
+// It used to guard per-field defaulting, because a namespace that set only
+// base_prefix once left every other segment empty ("prod::application:x"). That
+// cannot happen any more -- the segments are constants -- so the axis worth
+// varying is the base, including the empty one. The test stays because the
+// property is about the METHODS: a new one that forgets a segment still
+// produces "::", and nothing else would catch it.
 func TestKeyBuilder_PartialNamespaceNeverProducesEmptySegments(t *testing.T) {
 	partials := []config.RedisNamespaceConfig{
-		{},                     // fully empty → all defaults
-		{BasePrefix: "prod"},   // the footgun that produced "prod::..."
-		{CachePrefix: "kache"}, // sub-prefix only, base defaulted
-		{BasePrefix: "p", MinerPrefix: "m"},
+		{},                   // empty → base defaulted
+		{BasePrefix: "prod"}, // the footgun that produced "prod::..."
+		{BasePrefix: "p"},
 	}
 	for _, ns := range partials {
 		kb := NewKeyBuilder(ns)
@@ -240,7 +245,7 @@ func TestKeyBuilder_AddressExtractorsRoundTrip(t *testing.T) {
 	// DEFAULT text and silently misparse every key under this namespace --
 	// exactly the drift this pair of methods exists to make impossible.
 	custom := NewKeyBuilder(config.RedisNamespaceConfig{
-		BasePrefix: "prod", StreamsPrefix: "wal", SupplierPrefix: "sup",
+		BasePrefix: "prod",
 	})
 	addr, ok = custom.StreamAddress(custom.StreamKey("pokt1xyz"))
 	assert.True(t, ok)
@@ -248,29 +253,6 @@ func TestKeyBuilder_AddressExtractorsRoundTrip(t *testing.T) {
 	addr, ok = custom.SupplierStateAddress(custom.SupplierStateKey("pokt1xyz"))
 	assert.True(t, ok)
 	assert.Equal(t, "pokt1xyz", addr)
-}
-
-// TestWithDefaults_FieldByField proves each field defaults independently.
-func TestWithDefaults_FieldByField(t *testing.T) {
-	ns := config.RedisNamespaceConfig{BasePrefix: "prod"}.WithDefaults()
-	def := config.DefaultRedisNamespaceConfig()
-
-	assert.Equal(t, "prod", ns.BasePrefix, "explicit field preserved")
-	assert.Equal(t, def.CachePrefix, ns.CachePrefix)
-	assert.Equal(t, def.EventsPrefix, ns.EventsPrefix)
-	assert.Equal(t, def.StreamsPrefix, ns.StreamsPrefix)
-	assert.Equal(t, def.MinerPrefix, ns.MinerPrefix)
-	assert.Equal(t, def.SupplierPrefix, ns.SupplierPrefix)
-	assert.Equal(t, def.MeterPrefix, ns.MeterPrefix)
-	assert.Equal(t, def.ParamsPrefix, ns.ParamsPrefix)
-	assert.Equal(t, def.ConsumerGroupPrefix, ns.ConsumerGroupPrefix)
-
-	full := config.RedisNamespaceConfig{
-		BasePrefix: "a", CachePrefix: "b", EventsPrefix: "c", StreamsPrefix: "d",
-		MinerPrefix: "e", SupplierPrefix: "f", MeterPrefix: "g", ParamsPrefix: "h",
-		ConsumerGroupPrefix: "i",
-	}
-	assert.Equal(t, full, full.WithDefaults(), "fully-specified namespace untouched")
 }
 
 // TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace is the guard for the
@@ -301,13 +283,16 @@ func TestWithDefaults_FieldByField(t *testing.T) {
 // TestKeyBuilder_PatternsMatchOnlyTheirOwnFamily below, which is what the key
 // layout becoming constant made checkable at all.
 func TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace(t *testing.T) {
+	// Only the base varies. The per-family prefixes this list used to bend --
+	// SupplierPrefix "suppliers", CachePrefix "supplier" -- are constants now, so
+	// setting them here would produce output byte-identical to {} while the code
+	// claimed to be exercising "the exact footgun". The footgun itself is pinned
+	// where it now lives: change a constant in namespace.go and this test, plus
+	// TestKeyBuilder_PatternsMatchOnlyTheirOwnFamily, go red.
 	namespaces := []config.RedisNamespaceConfig{
 		{},
-		{SupplierPrefix: "suppliers"}, // the exact footgun
-		{BasePrefix: "prod", SupplierPrefix: "suppliers"},
-		{SupplierPrefix: "miner"}, // collide supplier with the miner family
-		{CachePrefix: "supplier"}, // and cache with supplier
-		{MinerPrefix: "meter"},
+		{BasePrefix: "prod"},
+		{BasePrefix: "ha-2"},
 	}
 
 	notAKey := map[string]bool{"StreamAddress": true, "SupplierStateAddress": true}

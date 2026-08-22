@@ -15,6 +15,10 @@ var (
 	// Package-level variables set by parent cmd package
 	RedisURL    string
 	RedisConfig string
+
+	// RedisBasePrefix points the tool at a keyspace directly, bypassing config
+	// loading entirely.
+	RedisBasePrefix string
 )
 
 // CreateRedisClient creates a wrapped Redis client with KeyBuilder support.
@@ -29,8 +33,18 @@ func CreateRedisClient(ctx context.Context) (*DebugRedisClient, error) {
 	var url string
 	var namespace config.RedisNamespaceConfig
 
-	// Load config file if provided (inherits namespace and Redis settings)
-	if RedisConfig != "" {
+	// An explicit base prefix wins over a config file, and needs no config at
+	// all. It exists because the two are otherwise coupled in the worst place:
+	// the namespace guard rejects a config whose keys this version would
+	// relocate, and this CLI resolves its namespace through the same LoadConfig,
+	// so the operator told to "inspect and migrate your keys" would find this
+	// tool refusing to start for the same reason their fleet did.
+	if RedisBasePrefix != "" {
+		namespace = config.RedisNamespaceConfig{BasePrefix: RedisBasePrefix}
+		logger.Info().
+			Str("base_prefix", RedisBasePrefix).
+			Msg("using the base prefix given on the command line")
+	} else if RedisConfig != "" {
 		// Try loading as miner config first
 		minerCfg, minerErr := miner.LoadConfig(RedisConfig)
 		if minerErr == nil {

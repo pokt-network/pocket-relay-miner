@@ -140,9 +140,8 @@ func TestInvalidateAllTypes_CustomNamespaceScopesDeletesAndChannels(t *testing.T
 	_ = mrClient // default-namespace client unused; we build a custom one below
 
 	ctx := context.Background()
-	// Note: transport NewClient defaults the namespace all-or-nothing (a
-	// partial struct yields empty sub-prefixes), so spell out every field the
-	// way a real config file would.
+	// Note: the namespace carries only a base prefix now; every segment below it
+	// is a constant in transport/redis, so there is nothing else to spell out.
 	customNS := config.DefaultRedisNamespaceConfig()
 	customNS.BasePrefix = "custom"
 	cli, err := transportredis.NewClient(ctx, transportredis.ClientConfig{
