@@ -2,6 +2,7 @@ package keys
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -190,11 +191,10 @@ func (m *MultiProviderKeyManager) reloadPeriodically(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			if err := m.Reload(ctx); err != nil {
-				m.logger.Error().
-					Err(err).
-					Msg("periodic key reload failed; retrying on the next tick")
-			}
+			// Not logged here: Reload already reports a failure at Error with
+			// which sources failed and how many keys it kept. Logging again
+			// would double every line for as long as a source stays broken.
+			_ = m.Reload(ctx)
 		}
 	}
 }
@@ -255,11 +255,14 @@ func (m *MultiProviderKeyManager) ListSuppliers() []string {
 // Reload reloads keys from all configured sources.
 func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 	newKeys := make(map[string]cryptotypes.PrivKey)
+	var loadErrs []error
 
 	// Load keys from each provider
 	for _, provider := range m.providers {
 		keys, err := provider.LoadKeys(ctx)
 		if err != nil {
+			keyLoadErrors.WithLabelValues(provider.Name()).Inc()
+			loadErrs = append(loadErrs, fmt.Errorf("%s: %w", provider.Name(), err))
 			m.logger.Warn().
 				Err(err).
 				Str("provider", provider.Name()).
@@ -296,6 +299,38 @@ func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 	// deriving it would break this, and the diff below with it.
 	m.keysMu.Lock()
 	oldKeys := m.keys
+
+	// A source that could not be READ is not the operator REMOVING its keys, and
+	// the diff below cannot tell those apart -- both are an address that is no
+	// longer present. Translating the first into the second is severe and silent:
+	// on the relayer every affected supplier stops being served, and on the miner
+	// a removal drains the supplier's pipeline and releases its lease. The
+	// triggers are ordinary -- a key file rewritten in place and read mid-write,
+	// a projected secret caught mid-swap, a permissions blip, a keyring briefly
+	// locked -- and the reload timer reaches them without anyone touching
+	// anything.
+	//
+	// So a failed load abandons the WHOLE reload and keeps the previous set
+	// intact. Applying the readable sources alone would still mean a removal
+	// nobody performed; the price is that a genuine change in a healthy source
+	// waits until the broken one is fixed, and the next reload retries.
+	//
+	// The FIRST load is exempt: with no previous set there is nothing to mistake
+	// for a removal, and refusing to start over one misconfigured source would
+	// take out a deployment whose other source is fine. The caller decides what
+	// zero keys means -- the miner fails fast, the relayer warns.
+	if len(loadErrs) > 0 && len(oldKeys) > 0 {
+		m.keysMu.Unlock()
+
+		joined := errors.Join(loadErrs...)
+		m.logger.Error().
+			Err(joined).
+			Int("sources_failed", len(loadErrs)).
+			Int("keys_held", len(oldKeys)).
+			Msg("keeping the previous signing keys: a key source could not be read, and that is not a key removal")
+
+		return fmt.Errorf("failed to reload keys: %w", joined)
+	}
 
 	added := make([]string, 0)
 	removed := make([]string, 0)
