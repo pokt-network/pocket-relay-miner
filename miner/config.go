@@ -485,6 +485,12 @@ func (c *Config) Validate() error {
 		if err := keys.ValidateKeyringBackend(c.Keys.Keyring.Backend); err != nil {
 			return err
 		}
+		if err := keys.ValidatePassphraseSource(c.Keys.Keyring.Backend, keys.PassphraseSource{
+			File: c.Keys.Keyring.PassphraseFile,
+			Env:  c.Keys.Keyring.PassphraseEnv,
+		}); err != nil {
+			return err
+		}
 	}
 
 	// Validate leader election: heartbeat must be less than TTL

@@ -99,6 +99,20 @@ func NewKeyringProvider(
 			cdc,
 		)
 	case "file":
+		// A "file" keyring with nothing configured to feed it reads the
+		// passphrase from stdin. That is right for a human at a terminal or a
+		// pipe -- echo "$SECRET" | pocket-relay-miner ... -- and wrong for a
+		// container, whose stdin is /dev/null: cosmos-sdk gets EOF, retries
+		// three times and the process dies at startup. Saying so here costs one
+		// line and turns that into an expected outcome rather than a mystery.
+		if config.PasswordReader == nil {
+			logger.Warn().
+				Str("keyring_dir", config.Dir).
+				Msg("no keyring passphrase source configured: it will be read from stdin. " +
+					"Set keys.keyring.passphrase_file (a mounted secret) or passphrase_env " +
+					"for anything that runs without a terminal -- a container's stdin is /dev/null")
+		}
+
 		// The file backend is password-protected, so it ALWAYS needs a reader to
 		// prompt from. Unlike "test", which uses a fixed password, passing nil
 		// here makes the backend unusable in every case: the passphrase prompt

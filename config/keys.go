@@ -21,7 +21,6 @@ type KeysConfig struct {
 type KeyringConfig struct {
 	// Backend is the keyring backend type: "file" or "test".
 	// Everything else cosmos-sdk offers is rejected: see keys.ValidateKeyringBackend.
-	// "memory" is rejected: see keys.ValidateKeyringBackend.
 	Backend string `yaml:"backend"`
 
 	// Dir is the directory containing the keyring (for "file" backend).
@@ -34,4 +33,23 @@ type KeyringConfig struct {
 	// KeyNames is an optional list of specific key names to load.
 	// If empty, all keys are loaded.
 	KeyNames []string `yaml:"key_names,omitempty"`
+
+	// PassphraseFile is a file holding the keyring passphrase, for the "file"
+	// backend. This is how a deployment actually supplies it: a Kubernetes
+	// Secret or a docker compose secret mounted as a file. Preferred over
+	// PassphraseEnv, because an environment variable is readable from
+	// /proc/<pid>/environ by anything in the same namespace and tends to end up
+	// in crash dumps and process listings.
+	PassphraseFile string `yaml:"passphrase_file,omitempty"`
+
+	// PassphraseEnv is the NAME of an environment variable holding the keyring
+	// passphrase (not the passphrase itself). For deployments that only have
+	// env vars to work with -- a bare compose file, a PaaS.
+	//
+	// Exactly one of PassphraseFile and PassphraseEnv may be set. With neither,
+	// the passphrase is read from stdin, which is right for a human at a
+	// terminal or a pipe from a secret manager, and wrong for a container:
+	// there is nothing on stdin, so validation refuses that combination rather
+	// than letting the process hang or fail obscurely.
+	PassphraseEnv string `yaml:"passphrase_env,omitempty"`
 }
