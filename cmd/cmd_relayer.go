@@ -332,11 +332,25 @@ func buildKeyProviders(logger logging.Logger, kc relayer.KeysConfig) ([]keys.Key
 
 	// keyring as additional source (can combine all)
 	if kc.Keyring != nil && kc.Keyring.Backend != "" {
+		// Where the passphrase comes from is a DEPLOYMENT concern -- a mounted
+		// Secret or an env var -- so it is resolved from config here rather than
+		// left to stdin, which would force the deployment to wrap the command in
+		// a shell just to redirect a file into it. Nil means stdin, which only
+		// the interactive CLI relies on.
+		passphrase, err := keys.PassphraseReader(keys.PassphraseSource{
+			File: kc.Keyring.PassphraseFile,
+			Env:  kc.Keyring.PassphraseEnv,
+		})
+		if err != nil {
+			return nil, err
+		}
+
 		provider, err := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{
-			Backend:  kc.Keyring.Backend,
-			Dir:      kc.Keyring.Dir,
-			AppName:  kc.Keyring.AppName,
-			KeyNames: kc.Keyring.KeyNames,
+			Backend:        kc.Keyring.Backend,
+			Dir:            kc.Keyring.Dir,
+			AppName:        kc.Keyring.AppName,
+			KeyNames:       kc.Keyring.KeyNames,
+			PasswordReader: passphrase,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create keyring provider: %w", err)

@@ -2,6 +2,7 @@ package keys
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"strings"
 )
@@ -129,4 +130,78 @@ func ValidateKeyringBackend(backend string) error {
 
 	return fmt.Errorf("invalid keyring backend %q: use one of: %s",
 		backend, strings.Join(keyringBackends, ", "))
+}
+
+// PassphraseSource describes where a keyring passphrase comes from, as a
+// deployment can express it.
+type PassphraseSource struct {
+	// File is a path holding the passphrase (a mounted Secret).
+	File string
+	// Env is the NAME of an environment variable holding it.
+	Env string
+}
+
+// ValidatePassphraseSource checks a keyring's passphrase configuration.
+//
+// It does NOT require a source for the "file" backend, deliberately. Piping the
+// passphrase in -- `echo "$SECRET" | pocket-relay-miner relayer --config ...` --
+// is a legitimate way to run this on a host where that is natural, and stdin is
+// how the CLI has always taken it. Refusing it would outlaw a working setup to
+// prevent a mistake that already reports itself: a container's stdin is
+// /dev/null, so cosmos-sdk gets EOF, gives up after three attempts
+// (maxPassphraseEntryAttempts) and the process fails at startup with a message
+// rather than hanging. NewKeyringProvider warns about that combination instead.
+func ValidatePassphraseSource(backend string, src PassphraseSource) error {
+	if src.File != "" && src.Env != "" {
+		return fmt.Errorf(
+			"keys.keyring.passphrase_file and passphrase_env are mutually exclusive, but both are set "+
+				"(passphrase_file=%q, passphrase_env=%q): configure one", src.File, src.Env)
+	}
+
+	if backend != "file" {
+		if src.File != "" || src.Env != "" {
+			return fmt.Errorf(
+				"keys.keyring backend %q takes no passphrase, but one is configured: "+
+					"only the \"file\" backend is passphrase-protected", backend)
+		}
+		return nil
+	}
+
+	return nil
+}
+
+// PassphraseReader resolves a PassphraseSource into the reader cosmos-sdk reads
+// the passphrase from. A nil result means "use stdin".
+//
+// The trailing newline matters: cosmos-sdk reads a LINE, so a secret file saved
+// without one would otherwise block.
+func PassphraseReader(src PassphraseSource) (io.Reader, error) {
+	switch {
+	case src.File != "":
+		raw, err := os.ReadFile(src.File)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read keyring passphrase file %q: %w", src.File, err)
+		}
+		return passphraseLines(strings.TrimRight(string(raw), "\r\n")), nil
+
+	case src.Env != "":
+		value, ok := os.LookupEnv(src.Env)
+		if !ok {
+			return nil, fmt.Errorf(
+				"keyring passphrase environment variable %q is not set in this process", src.Env)
+		}
+		return passphraseLines(strings.TrimRight(value, "\r\n")), nil
+	}
+
+	return nil, nil
+}
+
+// passphraseLines yields the passphrase twice.
+//
+// Once is enough to UNLOCK an existing keyring, but cosmos-sdk asks a second
+// time to confirm when it is CREATING one (no keyhash file yet). Supplying both
+// lines means the same configuration works either way; the spare line is never
+// read when the keyring already exists.
+func passphraseLines(pass string) io.Reader {
+	return strings.NewReader(pass + "\n" + pass + "\n")
 }

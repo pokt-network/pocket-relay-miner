@@ -69,6 +69,13 @@ keys:
   #                    # keys.ValidateKeyringBackend for why.
   #   dir: "/path/to/keyring"
   #   app_name: "pocket"
+  #   # For backend "file", say WHERE the passphrase is -- never the passphrase
+  #   # itself, so the config stays non-sensitive:
+  #   passphrase_file: "/secrets/keyring-passphrase"   # a mounted secret
+  #   # passphrase_env: "KEYRING_PASSPHRASE"           # or the NAME of an env var
+  #   # With neither, it is read from stdin:
+  #   #   echo "$SECRET" | pocket-relay-miner relayer --config config.yaml
+  #   # which suits a terminal or a pipe, but not a container (stdin is /dev/null).
   #   key_names:  # Optional: specific keys to load
   #     - "supplier1"
   #     - "supplier2"

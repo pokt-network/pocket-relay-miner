@@ -251,6 +251,23 @@ properties:
             type: string
             description: Application name for keyring
             default: pocket
+          passphrase_file:
+            type: string
+            description: >-
+              Path to a file holding the keyring passphrase ("file" backend
+              only). A REFERENCE, not the secret: mount a Kubernetes or compose
+              secret and point at it, the same way keys_file points at a file of
+              private keys. Preferred over passphrase_env, since an environment
+              variable is readable from /proc/<pid>/environ and tends to reach
+              crash dumps and process listings. With neither set the passphrase
+              is read from stdin, which suits a pipe or a terminal but not a
+              container (its stdin is /dev/null).
+          passphrase_env:
+            type: string
+            description: >-
+              NAME of an environment variable holding the keyring passphrase
+              ("file" backend only) -- not the passphrase itself. Mutually
+              exclusive with passphrase_file.
           key_names:
             type: array
             description: Specific key names to load (empty = load all)

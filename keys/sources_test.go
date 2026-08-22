@@ -3,7 +3,9 @@
 package keys
 
 import (
+	"io"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -127,4 +129,84 @@ func TestValidateKeyringBackendAllowsOnlyWhatIsConfirmed(t *testing.T) {
 func TestOneBackendListForEveryCaller(t *testing.T) {
 	require.Equal(t, []string{"file", "test"}, keyringBackends,
 		"widening this list means revisiting the CLI flag help, both schemas and DIRECT_CLI.md together")
+}
+
+// TestValidatePassphraseSourceAllowsStdinAndRefusesTheContradictions states what
+// a passphrase configuration may say. It may say nothing -- piping the passphrase
+// in is a real way to run this -- but it may not say two things at once, nor
+// configure a passphrase for a backend that has none.
+func TestValidatePassphraseSourceAllowsStdinAndRefusesTheContradictions(t *testing.T) {
+	t.Run("file backend with a file", func(t *testing.T) {
+		require.NoError(t, ValidatePassphraseSource("file", PassphraseSource{File: "/secrets/pp"}))
+	})
+
+	t.Run("file backend with an env var name", func(t *testing.T) {
+		require.NoError(t, ValidatePassphraseSource("file", PassphraseSource{Env: "KEYRING_PASSPHRASE"}))
+	})
+
+	t.Run("file backend with neither is allowed: that is stdin", func(t *testing.T) {
+		require.NoError(t, ValidatePassphraseSource("file", PassphraseSource{}),
+			"refusing this would outlaw `echo \"$SECRET\" | pocket-relay-miner ...`")
+	})
+
+	t.Run("both at once is refused", func(t *testing.T) {
+		err := ValidatePassphraseSource("file", PassphraseSource{File: "/secrets/pp", Env: "KEYRING_PASSPHRASE"})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "mutually exclusive")
+	})
+
+	t.Run("a passphrase for a backend that takes none is refused", func(t *testing.T) {
+		err := ValidatePassphraseSource("test", PassphraseSource{File: "/secrets/pp"})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "takes no passphrase")
+	})
+}
+
+// TestPassphraseReaderYieldsTheSecretTwiceWithoutTrailingNewlines covers the two
+// details that decide whether an unlock works at all: cosmos-sdk reads a LINE, so
+// a secret file saved without a trailing newline must still produce one, and it
+// asks a SECOND time when it is creating the keyring.
+func TestPassphraseReaderYieldsTheSecretTwiceWithoutTrailingNewlines(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "passphrase")
+	// Written WITH a trailing newline, as most secret tooling does; the reader
+	// must not pass it through as an empty second line.
+	require.NoError(t, os.WriteFile(path, []byte("localnet-passphrase\n"), 0o600))
+
+	r, err := PassphraseReader(PassphraseSource{File: path})
+	require.NoError(t, err)
+	got, err := io.ReadAll(r)
+	require.NoError(t, err)
+	require.Equal(t, "localnet-passphrase\nlocalnet-passphrase\n", string(got))
+
+	t.Run("no trailing newline in the file works too", func(t *testing.T) {
+		bare := filepath.Join(dir, "bare")
+		require.NoError(t, os.WriteFile(bare, []byte("no-newline-here"), 0o600))
+		r, err := PassphraseReader(PassphraseSource{File: bare})
+		require.NoError(t, err)
+		got, err := io.ReadAll(r)
+		require.NoError(t, err)
+		require.Equal(t, "no-newline-here\nno-newline-here\n", string(got))
+	})
+
+	t.Run("env var, same shape", func(t *testing.T) {
+		t.Setenv("PRM_TEST_PASSPHRASE", "from-the-environment")
+		r, err := PassphraseReader(PassphraseSource{Env: "PRM_TEST_PASSPHRASE"})
+		require.NoError(t, err)
+		got, err := io.ReadAll(r)
+		require.NoError(t, err)
+		require.Equal(t, "from-the-environment\nfrom-the-environment\n", string(got))
+	})
+
+	t.Run("an env var that is not set is an error, not an empty passphrase", func(t *testing.T) {
+		_, err := PassphraseReader(PassphraseSource{Env: "PRM_TEST_PASSPHRASE_MISSING"})
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "PRM_TEST_PASSPHRASE_MISSING")
+	})
+
+	t.Run("nothing configured means stdin", func(t *testing.T) {
+		r, err := PassphraseReader(PassphraseSource{})
+		require.NoError(t, err)
+		require.Nil(t, r, "nil is the signal to fall back to stdin")
+	})
 }

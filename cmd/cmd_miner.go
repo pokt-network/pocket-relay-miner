@@ -455,11 +455,25 @@ func createKeyProviders(logger logging.Logger, config *miner.Config) ([]keys.Key
 		if keyringDir == "" {
 			keyringDir = os.ExpandEnv("$HOME/.pocket")
 		}
+		// Where the passphrase comes from is a DEPLOYMENT concern -- a mounted
+		// Secret or an env var -- so it is resolved from config here rather than
+		// left to stdin, which would force the deployment to wrap the command in
+		// a shell just to redirect a file into it. Nil means stdin, which only
+		// the interactive CLI relies on.
+		passphrase, err := keys.PassphraseReader(keys.PassphraseSource{
+			File: config.Keys.Keyring.PassphraseFile,
+			Env:  config.Keys.Keyring.PassphraseEnv,
+		})
+		if err != nil {
+			return nil, err
+		}
+
 		provider, err := keys.NewKeyringProvider(logger, keys.KeyringProviderConfig{
-			Backend:  config.Keys.Keyring.Backend,
-			Dir:      keyringDir,
-			AppName:  config.Keys.Keyring.AppName,
-			KeyNames: config.Keys.Keyring.KeyNames,
+			Backend:        config.Keys.Keyring.Backend,
+			Dir:            keyringDir,
+			AppName:        config.Keys.Keyring.AppName,
+			KeyNames:       config.Keys.Keyring.KeyNames,
+			PasswordReader: passphrase,
 		})
 		if err != nil {
 			return nil, fmt.Errorf("failed to create keyring provider: %w", err)

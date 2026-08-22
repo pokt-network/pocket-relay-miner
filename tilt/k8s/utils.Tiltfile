@@ -78,11 +78,18 @@ def apply_k8s_overrides_miner(config, redis_host):
     if key_source == "keys_file":
         config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
     else:
-        config["keys"]["keyring"] = {
+        keyring = {
             "backend": keyring_backend,
             "dir": "/keyring",
             "app_name": "pocket",
         }
+        if keyring_backend == "file":
+            # A REFERENCE to the mounted secret, not the passphrase: the config
+            # stays non-sensitive, exactly like keys_file pointing at a file of
+            # private keys. This is also why the container command needs no shell
+            # wrapper to redirect stdin.
+            keyring["passphrase_file"] = "/keyring-pass/passphrase"
+        config["keys"]["keyring"] = keyring
 
     # Override metrics addr for container
     if "metrics" not in config:
@@ -203,11 +210,18 @@ def apply_k8s_overrides_relayer(config, redis_host):
     if key_source == "keys_file":
         config["keys"]["keys_file"] = "/keys/supplier-keys.yaml"
     else:
-        config["keys"]["keyring"] = {
+        keyring = {
             "backend": keyring_backend,
             "dir": "/keyring",
             "app_name": "pocket",
         }
+        if keyring_backend == "file":
+            # A REFERENCE to the mounted secret, not the passphrase: the config
+            # stays non-sensitive, exactly like keys_file pointing at a file of
+            # private keys. This is also why the container command needs no shell
+            # wrapper to redirect stdin.
+            keyring["passphrase_file"] = "/keyring-pass/passphrase"
+        config["keys"]["keyring"] = keyring
 
     # Override metrics addr for container
     if "metrics" not in config:

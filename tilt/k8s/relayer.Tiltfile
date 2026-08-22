@@ -84,7 +84,34 @@ spec:
         - -c
         - |
           set -eu
+          # Derived data, rebuilt from scratch. An emptyDir survives a container
+          # RESTART, and import-hex refuses a name that already exists, so a
+          # retry after any failure would die on supplier1 "already exists" --
+          # reporting the retry instead of the cause. Measured: that is exactly
+          # what a CrashLoopBackOff here looked like.
+          rm -rf /keyring
           mkdir -p /keyring
+          # Read the backend from the RENDERED config rather than taking it as a
+          # parameter: the keyring must be built in the same format the process
+          # will open, and reading the one file that decides that makes them
+          # agree by construction. No keyring block (keys_file mode) means the
+          # keyring is still built, in the default format, so switching source
+          # later is a config change and nothing else.
+          # No braces and no backslashes anywhere in this script. This YAML goes
+          # through Starlark's .format() (which reads a brace as a placeholder)
+          # inside a triple-quoted Starlark string (where a backslash-n becomes
+          # a REAL newline -- that one produced a YAML "unknown directive"
+          # because the fragment after it started with a percent sign). Two
+          # greps instead of awk or sed for exactly that reason.
+          BACKEND=$(grep -oE 'backend: *"?(file|test)' /config/config.yaml | head -1 | grep -oE 'file|test')
+          if [ -z "$BACKEND" ]; then BACKEND=test; fi
+          # The passphrase, twice, in a file: cosmos-sdk asks once and then a
+          # second time to confirm when it is CREATING the keyring (no keyhash
+          # file yet), so feeding two lines covers both cases. A file rather
+          # than a printf because printf would need a backslash-n.
+          PASS=$(cat /keyring-pass/passphrase)
+          echo "$PASS" > /tmp/pp
+          echo "$PASS" >> /tmp/pp
           i=0
           # The hex keys are one per line in the mounted secret. Selecting them by
           # LENGTH instead of a regex quantifier keeps this free of a yq
@@ -92,9 +119,13 @@ spec:
           # Starlark .format() that renders this YAML reads as placeholders.
           for hex in $(grep -oiE '[0-9a-f]+' /keys/supplier-keys.yaml | awk 'length == 64'); do
             i=$((i+1))
+            # The spare second line dies with the process; the test backend
+            # ignores stdin entirely. pocketd's own error is PRINTED, not
+            # swallowed: discarding it once already hid the real cause behind a
+            # generic failure line.
             if ! pocketd keys import-hex "supplier$i" "$hex" \
-              --keyring-backend test --keyring-dir /keyring >/dev/null 2>&1; then
-              echo "failed to import supplier$i into the keyring" >&2
+              --keyring-backend "$BACKEND" --keyring-dir /keyring < /tmp/pp >/dev/null; then
+              echo "failed to import supplier$i into the $BACKEND keyring (error above)" >&2
               exit 1
             fi
           done
@@ -104,12 +135,16 @@ spec:
           # hard startup failure and the relayer used to survive silently.
           chown -R 1000:1000 /keyring
           chmod -R go-rwx /keyring
-          echo "imported $i keys into the keyring at /keyring, owned by uid 1000"
+          echo "imported $i keys into the $BACKEND keyring at /keyring, owned by uid 1000"
         volumeMounts:
+        - name: config
+          mountPath: /config
         - name: keys
           mountPath: /keys
         - name: keyring
           mountPath: /keyring
+        - name: keyring-pass
+          mountPath: /keyring-pass
       containers:
       - name: relayer
         image: {}
@@ -143,6 +178,8 @@ spec:
           mountPath: /keys
         - name: keyring
           mountPath: /keyring
+        - name: keyring-pass
+          mountPath: /keyring-pass
         resources:
           requests:
             cpu: "2000m"
@@ -172,6 +209,9 @@ spec:
           optional: true
       - name: keyring
         emptyDir: {{}}
+      - name: keyring-pass
+        secret:
+          secretName: keyring-passphrase
 ---
 apiVersion: v1
 kind: Service
