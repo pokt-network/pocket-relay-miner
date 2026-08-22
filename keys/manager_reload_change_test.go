@@ -4,6 +4,7 @@ package keys
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -49,8 +50,9 @@ func TestOperatorAddressIsDerivedFromTheKeyMaterial(t *testing.T) {
 // Guarded by a mutex because a test rewrites the keys while the manager's reload
 // timer is reading them.
 type staticProvider struct {
-	mu   sync.Mutex
-	keys map[string]cryptotypes.PrivKey
+	mu      sync.Mutex
+	keys    map[string]cryptotypes.PrivKey
+	loadErr error
 }
 
 func (p *staticProvider) Name() string { return "static" }
@@ -61,9 +63,18 @@ func (p *staticProvider) setKeys(keys map[string]cryptotypes.PrivKey) {
 	p.keys = keys
 }
 
+func (p *staticProvider) failWith(err error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.loadErr = err
+}
+
 func (p *staticProvider) LoadKeys(context.Context) (map[string]cryptotypes.PrivKey, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	if p.loadErr != nil {
+		return nil, p.loadErr
+	}
 	out := make(map[string]cryptotypes.PrivKey, len(p.keys))
 	for addr, key := range p.keys {
 		out[addr] = key
@@ -230,4 +241,114 @@ func TestPeriodicReloadPicksUpAChangeFromAnUnwatchableSource(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the periodic reload never noticed a key added to an unwatchable source")
 	}
+}
+
+// TestAProviderThatFailsToLoadIsNotAKeyRemoval is the difference between "the
+// operator pulled these keys" and "I could not read them", which the diff
+// cannot tell apart on its own -- both look like an address that is no longer
+// there.
+//
+// Getting it wrong is severe and silent. On the relayer every affected supplier
+// stops being served (no_local_signer); on the miner a removal DRAINS the
+// supplier's pipeline and releases its lease. The triggers are ordinary: a key
+// file rewritten in place and read mid-write, a projected secret caught during
+// its swap, a permissions blip, a keyring that is briefly unavailable.
+//
+// The reload timer makes this reachable without anyone touching anything, which
+// is why it is load-bearing: before the timer, a reload only happened when a
+// watch fired.
+func TestAProviderThatFailsToLoadIsNotAKeyRemoval(t *testing.T) {
+	const (
+		first  = "pokt1failfirst"
+		second = "pokt1failsecond"
+	)
+	firstKey := secp256k1.GenPrivKey()
+
+	m, provider, changes := newReloadManager(t, map[string]cryptotypes.PrivKey{
+		first:  firstKey,
+		second: secp256k1.GenPrivKey(),
+	})
+
+	provider.failWith(errors.New("key file is being rewritten"))
+	err := m.Reload(context.Background())
+
+	require.Error(t, err, "a reload that could read nothing must report it, not return success")
+	require.Empty(t, *changes, "an unreadable key source was reported as the operator removing every key")
+	require.ElementsMatch(t, []string{first, second}, m.ListSuppliers(),
+		"the keys were dropped because a source could not be read")
+
+	// The keys still sign: the previous set was kept whole, not partially.
+	signer, err := m.GetSigner(first)
+	require.NoError(t, err)
+	require.True(t, signer.Equals(firstKey))
+}
+
+// TestOneFailingProviderDoesNotLetAnotherProvidersChangeThroughHalfWay states
+// that a reload is all-or-nothing.
+//
+// With one source unreadable, the key set that a partial reload would produce is
+// not a state any operator asked for: it is "everything from the sources I could
+// read". Applying it would mean a removal nobody performed. The cost is that a
+// genuine change in the healthy source waits until the broken one is fixed,
+// which is the right trade -- the next tick retries, and the error says which
+// source to fix.
+func TestOneFailingProviderDoesNotLetAnotherProvidersChangeThroughHalfWay(t *testing.T) {
+	const (
+		fromHealthy = "pokt1healthy"
+		fromBroken  = "pokt1broken"
+		arriving    = "pokt1arriving"
+	)
+
+	healthy := &staticProvider{keys: map[string]cryptotypes.PrivKey{fromHealthy: secp256k1.GenPrivKey()}}
+	broken := &staticProvider{keys: map[string]cryptotypes.PrivKey{fromBroken: secp256k1.GenPrivKey()}}
+
+	m := NewMultiProviderKeyManager(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		[]KeyProvider{healthy, broken},
+		KeyManagerConfig{HotReloadEnabled: false},
+	)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Start(context.Background()))
+	require.ElementsMatch(t, []string{fromHealthy, fromBroken}, m.ListSuppliers())
+
+	changes := make([]string, 0)
+	m.OnKeyChange(func(addr string, added bool) { changes = append(changes, addr) })
+
+	// A real addition in the healthy source, at the same time as the other one
+	// becoming unreadable.
+	healthy.setKeys(map[string]cryptotypes.PrivKey{
+		fromHealthy: secp256k1.GenPrivKey(),
+		arriving:    secp256k1.GenPrivKey(),
+	})
+	broken.failWith(errors.New("keyring is locked"))
+
+	require.Error(t, m.Reload(context.Background()))
+	require.Empty(t, changes)
+	require.ElementsMatch(t, []string{fromHealthy, fromBroken}, m.ListSuppliers(),
+		"a partial reload was applied: the unreadable source's keys went missing")
+}
+
+// TestAProviderThatFailsOnTheFIRSTLoadIsToleratedPerProvider pins that the fix
+// above did NOT change startup.
+//
+// At the first load there is no previous key set, so nothing can be mistaken for
+// a removal, and refusing to start over one misconfigured source would take out
+// a deployment whose other source is fine. The count is logged and the caller
+// decides -- the miner fails fast on zero keys, the relayer warns.
+func TestAProviderThatFailsOnTheFIRSTLoadIsToleratedPerProvider(t *testing.T) {
+	const fromHealthy = "pokt1startuphealthy"
+
+	healthy := &staticProvider{keys: map[string]cryptotypes.PrivKey{fromHealthy: secp256k1.GenPrivKey()}}
+	broken := &staticProvider{keys: map[string]cryptotypes.PrivKey{}}
+	broken.failWith(errors.New("no such file"))
+
+	m := NewMultiProviderKeyManager(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		[]KeyProvider{healthy, broken},
+		KeyManagerConfig{HotReloadEnabled: false},
+	)
+	t.Cleanup(func() { _ = m.Close() })
+
+	require.NoError(t, m.Start(context.Background()), "one unreadable source must not stop startup")
+	require.Equal(t, []string{fromHealthy}, m.ListSuppliers())
 }
