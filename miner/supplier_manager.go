@@ -1889,6 +1889,32 @@ func (m *SupplierManager) reportDrain(state *SupplierState, drained, abandoned i
 		Msg("drained delivery buffer on shutdown; abandoned entries stay pending for the reclaim")
 }
 
+// teardownCanFinishWork reports whether this fleet still holds the signing key
+// for a supplier being torn down — that is, whether "draining" describes
+// anything real. Without the key no relay response, claim or proof can be
+// signed, so there is no pending work to drain, only messages to stop
+// consuming, and saying "waiting for pending work" describes work that cannot
+// happen. That line is what an operator reads mid-incident.
+//
+// It asks the key manager instead of taking the caller's word, because the
+// caller does not always know which case it is: in distributed mode an operator
+// removing a key tears the supplier down through the claimer's release path
+// (onSupplierReleased), the very same path a plain rebalance uses, so a reason
+// threaded down from there would report a key removal as a rebalance in exactly
+// the mode production runs. The key manager is local and authoritative.
+//
+// A nil key manager (tests only) answers true, which keeps the message it had
+// before this distinction existed.
+func (m *SupplierManager) teardownCanFinishWork(operatorAddr string) bool {
+	if m.keyManager == nil {
+		return true
+	}
+
+	_, err := m.keyManager.GetSigner(operatorAddr)
+
+	return err == nil
+}
+
 // removeSupplier gracefully removes a supplier (waits for pending work).
 //
 // Drain-window semantics (post commit 8eb604c):
@@ -1962,13 +1988,6 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	servicesCopy := make([]string, len(state.Services))
 	copy(servicesCopy, state.Services)
 
-	// Publish draining status to registry
-	if m.registry != nil {
-		if err := m.registry.PublishSupplierUpdate(ctx, SupplierUpdateActionDraining, operatorAddr, nil); err != nil {
-			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("failed to publish draining status")
-		}
-	}
-
 	// Update cache to mark supplier as unstaking (use copied services to avoid race)
 	if m.config.SupplierCache != nil {
 		supplierState := &cache.SupplierState{
@@ -1986,9 +2005,16 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 		}
 	}
 
-	m.logger.Info().
-		Str(logging.FieldSupplier, operatorAddr).
-		Msg("supplier marked as draining, waiting for pending work...")
+	if m.teardownCanFinishWork(operatorAddr) {
+		m.logger.Info().
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("supplier marked as draining, waiting for pending work...")
+	} else {
+		m.logger.Info().
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("supplier torn down: this fleet no longer holds its signing key, so no " +
+				"pending relay, claim or proof can be signed for it")
+	}
 
 	// Wait for pending work (TODO: implement proper tracking)
 	// For now, just wait for consumer to finish.
