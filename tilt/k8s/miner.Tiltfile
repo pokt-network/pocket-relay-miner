@@ -126,7 +126,12 @@ spec:
           # a REAL newline -- that one produced a YAML "unknown directive"
           # because the fragment after it started with a percent sign). Two
           # greps instead of awk or sed for exactly that reason.
-          BACKEND=$(grep -oE 'backend: *"?(file|test)' /config/config.yaml | head -1 | grep -oE 'file|test')
+          # The two greps must not be allowed to fail the script: under set -e an
+          # assignment from a failing pipeline aborts immediately, and in
+          # keys_file mode there IS no backend line, so the init container died
+          # before printing anything and the fallback below never ran. Measured
+          # 2026-08-22, switching the fleet back to keys_file.
+          BACKEND=$(grep -oE 'backend: *"?(file|test)' /config/config.yaml | head -1 | grep -oE 'file|test' || true)
           if [ -z "$BACKEND" ]; then BACKEND=test; fi
           # The passphrase, twice, in a file: cosmos-sdk asks once and then a
           # second time to confirm when it is CREATING the keyring (no keyhash
@@ -155,6 +160,14 @@ spec:
           # No chown and no chmod: runAsUser above makes these files the app
           # user's, and cosmos-sdk writes them 0600 already. Touching the mount
           # point itself is not permitted to a non-root user anyway.
+          # Importing nothing is a failure, not a quiet success. When the
+          # supplier-keys Secret went missing this printed "imported 0 keys" and
+          # exited 0, and the problem only surfaced two layers down as the app
+          # refusing to start. Fail where the cause is.
+          if [ "$i" -eq 0 ]; then
+            echo "no 64-character hex keys in /keys/supplier-keys.yaml: the supplier-keys secret is missing or empty" >&2
+            exit 1
+          fi
           echo "imported $i keys into the $BACKEND keyring at /keyring, owned by uid 1000"
         volumeMounts:
         - name: config
