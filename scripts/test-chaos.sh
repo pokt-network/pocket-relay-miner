@@ -186,9 +186,17 @@ chaos_pull_signing_key() {
         sleep 10
         waited=$((waited + 10))
     done
-    [ "$waited" -ge 120 ] && log_chaos "PULL KEY: miner did not log a drain decision within 120s — CHECK THIS"
+    [ "$waited" -ge 120 ] && log_chaos "PULL KEY: miner did not log a drain decision within 120s"
 
-    sleep "$CHAOS_INTERVAL"
+    # Hold the key out for longer than kubelet's secret sync period, not for one
+    # chaos interval. Measured 2026-08-21 with a 20s hold: the fleet registered
+    # the removal in 2 of 10 events, because the secret went 17 -> 16 -> 17 well
+    # inside the sync window and the pods never saw the middle state. A chaos
+    # action that reverts before anything can observe it is a no-op wearing a
+    # log line.
+    hold="$CHAOS_INTERVAL"
+    [ "$hold" -lt 90 ] && hold=90
+    sleep "$hold"
 
     restore_signing_keys
 
@@ -222,6 +230,15 @@ CHAOS_ACTIONS=(
     chaos_connection_flood
     chaos_pull_signing_key
 )
+
+# CHAOS_ONLY forces a single action instead of sampling. Random selection is the
+# point in a soak, but it means a specific action may simply never come up: a
+# 300s run at 20s intervals picked 15 events and never chose the signing-key one,
+# which would have been reported as "chaos passed" for a change whose whole
+# subject is that action. Use it to prove one action works, then go back to random.
+if [ -n "${CHAOS_ONLY:-}" ]; then
+    CHAOS_ACTIONS=("$CHAOS_ONLY")
+fi
 
 # ─── Main Loop ───────────────────────────────────────────────
 
