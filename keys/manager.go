@@ -99,12 +99,72 @@ func (m *MultiProviderKeyManager) Start(ctx context.Context) error {
 		go logging.RecoverGoRoutine(m.logger, "key_manager_periodic_reload", m.reloadPeriodically)(ctx)
 	}
 
+	// Read the count under the lock: the watchers and the reload timer are
+	// already running by this point, so a reload can land between arming them
+	// and logging here.
+	m.keysMu.RLock()
+	loaded := len(m.keys)
+	m.keysMu.RUnlock()
+
 	m.logger.Info().
 		Int("providers", len(m.providers)).
-		Int("keys", len(m.keys)).
+		Int("keys", loaded).
 		Msg("key manager started")
 
+	m.logReloadPromptness()
+
 	return nil
+}
+
+// reloadInterval is the interval the timer actually uses. Both the timer and the
+// startup log read it from here so the number an operator is told cannot drift
+// from the number being honoured.
+func (m *MultiProviderKeyManager) reloadInterval() time.Duration {
+	if m.config.ReloadInterval <= 0 {
+		return DefaultReloadInterval
+	}
+	return m.config.ReloadInterval
+}
+
+// logReloadPromptness states, once at startup, how promptly each configured key
+// source reacts to a change.
+//
+// It lives here rather than in either binary's startup because the answer
+// depends only on the providers and the config, and because both binaries need
+// it: the difference is invisible at runtime and it is what an operator relies
+// on after pulling a key. keys_file is WATCHED -- its provider watches the
+// containing directory for Write|Create, which is what makes a Kubernetes
+// secret's ..data swap register -- so a change there lands almost at once. A
+// keyring cannot be watched at all (WatchForChanges returns nil) and is picked
+// up by the timer instead. Every source reloads; only the latency differs.
+func (m *MultiProviderKeyManager) logReloadPromptness() {
+	watched := make([]string, 0, len(m.providers))
+	timerOnly := make([]string, 0, len(m.providers))
+	for _, provider := range m.providers {
+		if provider.SupportsHotReload() {
+			watched = append(watched, provider.Name())
+			continue
+		}
+		timerOnly = append(timerOnly, provider.Name())
+	}
+
+	if !m.config.HotReloadEnabled {
+		// A fresh slice, not append into watched: it was allocated with capacity
+		// for every provider, so appending would write into its backing array.
+		all := make([]string, 0, len(watched)+len(timerOnly))
+		all = append(all, watched...)
+		all = append(all, timerOnly...)
+		m.logger.Warn().
+			Strs("sources", all).
+			Msg("key hot reload is DISABLED: a key added or removed takes effect only on restart")
+		return
+	}
+
+	m.logger.Info().
+		Strs("watched_sources", watched).
+		Strs("timer_only_sources", timerOnly).
+		Dur("reload_interval", m.reloadInterval()).
+		Msg("key hot reload active: watched sources react at once, every source within one reload interval")
 }
 
 // reloadPeriodically re-reads every key source on a fixed interval until the
@@ -116,10 +176,7 @@ func (m *MultiProviderKeyManager) Start(ctx context.Context) error {
 func (m *MultiProviderKeyManager) reloadPeriodically(ctx context.Context) {
 	defer m.wg.Done()
 
-	interval := m.config.ReloadInterval
-	if interval <= 0 {
-		interval = DefaultReloadInterval
-	}
+	interval := m.reloadInterval()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
