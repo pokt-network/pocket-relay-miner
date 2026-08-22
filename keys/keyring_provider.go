@@ -222,7 +222,14 @@ func (p *KeyringProvider) loadKeyByName(name string) (cryptotypes.PrivKey, strin
 		return nil, "", fmt.Errorf("key %s is not a secp256k1 key", name)
 	}
 
-	return secpPrivKey, addr.String(), nil
+	// NOT addr.String(): that encodes with the global SDK prefix, which the
+	// miner never sets -- see OperatorAddressPrefix.
+	operatorAddr, err := OperatorAddress(addr)
+	if err != nil {
+		return nil, "", err
+	}
+
+	return secpPrivKey, operatorAddr, nil
 }
 
 // SupportsHotReload returns false - keyring doesn't support hot-reload.
