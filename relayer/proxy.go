@@ -649,6 +649,16 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 	// with the cache TTL (~42 min on mainnet). Checked further down, that
 	// supplier keeps being served for tens of minutes.
 	//
+	// WHEN this bites, measured live 2026-08-21: THIS process loads its signing
+	// keys once at startup (cmd_relayer.go builds the ResponseSigner from the
+	// providers and closes them; there is no KeyManager and no hot-reload here,
+	// unlike the miner). So pulling a key from the mounted secret does NOT stop a
+	// running relayer -- it keeps the key in memory and keeps serving. The guard
+	// covers the case that actually reaches a relayer: one that does not hold the
+	// key at the moment it starts, which is any replica restarted or rolled after
+	// the key was removed, and any replica whose key set differs from the fleet's.
+	// A key removal that must take effect now still needs the relayers restarted.
+	//
 	// A nil responseSigner is folded in deliberately: no signer means no key for
 	// anybody, so the answer is still no. In production that branch is
 	// unreachable — handleRelay rejects a nil signer with HTTP 500 long before
