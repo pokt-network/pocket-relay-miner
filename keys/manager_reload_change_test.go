@@ -286,6 +286,11 @@ func TestAProviderThatFailsToLoadIsNotAKeyRemoval(t *testing.T) {
 // TestOneFailingProviderDoesNotLetAnotherProvidersChangeThroughHalfWay states
 // that a reload is all-or-nothing.
 //
+// Two providers, which no deployment can configure -- keys_file and keyring are
+// mutually exclusive (keys.ValidateKeySources). This pins the MANAGER's
+// contract, which is generic over providers, so the guarantee does not quietly
+// depend on there only ever being one.
+//
 // With one source unreadable, the key set that a partial reload would produce is
 // not a state any operator asked for: it is "everything from the sources I could
 // read". Applying it would mean a removal nobody performed. The cost is that a

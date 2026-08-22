@@ -217,7 +217,10 @@ properties:
 
   keys:
     type: object
-    description: Supplier signing key configuration
+    description: >-
+      Supplier signing key configuration. keys_file and keyring are MUTUALLY
+      EXCLUSIVE: setting both is a startup error. Exactly one is required -- a
+      miner with no keys has nothing to do.
     properties:
       keys_file:
         type: string

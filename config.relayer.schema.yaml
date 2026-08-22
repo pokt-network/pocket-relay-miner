@@ -82,7 +82,11 @@ properties:
 
   keys:
     type: object
-    description: Supplier signing key configuration
+    description: >-
+      Supplier signing key configuration. keys_file and keyring are MUTUALLY
+      EXCLUSIVE: setting both is a startup error, so that nothing has to decide
+      at runtime which source wins a duplicate or what a single unreadable
+      source means.
     properties:
       keys_file:
         type: string

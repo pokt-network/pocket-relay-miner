@@ -738,6 +738,10 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	}
 
 	if len(keyProviders) == 0 {
+		// Defensive: Config.Validate refuses a config that names no key source
+		// (keys.ValidateKeySources), so a config loaded through LoadConfig cannot
+		// reach here. Kept because this function does not itself prove the config
+		// was validated, and because "signing disabled" must never be silent.
 		logger.Warn().Msg("no key providers configured - response signing will be disabled (relays will fail)")
 	} else {
 		// The relayer holds its signing keys through a MultiProviderKeyManager,

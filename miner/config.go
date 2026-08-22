@@ -12,6 +12,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
@@ -470,9 +471,13 @@ func (c *Config) Validate() error {
 		)
 	}
 
-	// Keys config is required (suppliers are auto-discovered from keys)
-	if !c.HasKeySource() {
-		return fmt.Errorf("keys config is required (at least one of: keys_file or keyring)")
+	// Exactly one key source (suppliers are auto-discovered from the keys).
+	keyringBackend := ""
+	if c.Keys.Keyring != nil {
+		keyringBackend = c.Keys.Keyring.Backend
+	}
+	if err := keys.ValidateKeySources(c.Keys.KeysFile, keyringBackend); err != nil {
+		return err
 	}
 
 	// Validate keyring config if provided
@@ -1003,10 +1008,4 @@ func hostnameOrUnknown() string {
 		return "unknown-host"
 	}
 	return hostname
-}
-
-// HasKeySource returns true if at least one key source is configured.
-func (c *Config) HasKeySource() bool {
-	return c.Keys.KeysFile != "" ||
-		(c.Keys.Keyring != nil && c.Keys.Keyring.Backend != "")
 }
