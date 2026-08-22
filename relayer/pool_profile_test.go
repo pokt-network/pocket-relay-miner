@@ -4,6 +4,7 @@ package relayer
 
 import (
 	"fmt"
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"net/http"
 	"testing"
 	"time"
@@ -390,7 +391,7 @@ func TestConfigValidate_IncludesPoolProfiles(t *testing.T) {
 		DefaultValidationMode: ValidationModeOptimistic,
 		// Validate requires exactly one key source; this test is about the pool
 		// profile hook, so the key source is just enough to reach it.
-		Keys: KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
+		Keys: config.KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
 		Services: map[string]ServiceConfig{
 			"op": {
 				PoolProfile:    "does-not-exist",

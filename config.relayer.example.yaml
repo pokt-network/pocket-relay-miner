@@ -55,6 +55,7 @@ pocket_node:
 
 # Supplier signing keys (required for signing relay responses)
 keys:
+  # Full reference: docs/SUPPLIER_KEYS.md
   # keys_file and keyring are MUTUALLY EXCLUSIVE -- setting both is a startup
   # error. Configure exactly one, so nothing has to decide at runtime which
   # source wins a duplicate or what it means when one of them is unreadable.

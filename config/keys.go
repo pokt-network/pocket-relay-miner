@@ -9,6 +9,19 @@ type KeysConfig struct {
 	// Keyring configuration for Cosmos SDK keyring.
 	Keyring *KeyringConfig `yaml:"keyring,omitempty"`
 
+	// HotReloadEnabled reloads the signing keys while the process runs, so a key
+	// added or pulled takes effect without a restart.
+	//
+	// It covers every key source. keys_file is additionally WATCHED (its provider
+	// watches the containing directory for Write|Create, which is what makes a
+	// Kubernetes secret's ..data swap register), so a change there lands almost
+	// at once. A keyring cannot be watched, so its changes are found by the
+	// reload timer -- within keys.DefaultReloadInterval. The key manager logs
+	// which sources are watched and which rely on the timer at startup.
+	//
+	// Defaults to true.
+	HotReloadEnabled bool `yaml:"hot_reload_enabled"`
+
 	// RemovedKeysDir is the tombstone for the retired keys_dir setting. The
 	// YAML decoder drops unknown fields silently, so a config still carrying
 	// keys_dir would boot without those supplier keys — the fleet serves and

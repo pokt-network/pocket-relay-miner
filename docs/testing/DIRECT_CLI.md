@@ -210,7 +210,9 @@ Raw `--app-priv-key`/`--gateway-priv-key` hex is visible in your shell history
 and to `ps`, so it is for throwaway/localnet testing only. For real keys, use one
 of the two secure sources instead — both resolve the key in memory:
 
-- **Keyring by name** (same keyring the miner/relayer and `pocketd` use).
+- **Keyring by name** (same keyring the miner/relayer and `pocketd` use; the
+  backends, the directory rule and the passphrase are documented once in
+  [../SUPPLIER_KEYS.md](../SUPPLIER_KEYS.md)).
   Supported backends are `file` and `test`; `os` and `memory` are refused, and
   `--keyring-dir` is the directory CONTAINING the keyring, not the keyring
   itself (the `file` backend reads `<dir>/keyring-file`):

@@ -156,6 +156,7 @@ pocket_node:
 # ==============================================================================
 # Supplier Keys Configuration (REQUIRED)
 # ==============================================================================
+# Full reference: docs/SUPPLIER_KEYS.md
 keys:
   # Option 1: Load from YAML file with hex-encoded keys
   keys_file: "/keys/supplier-keys.yaml"
