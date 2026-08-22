@@ -397,8 +397,14 @@ Reference: See full mapping in `cmd/cmd_redis.go` and the subcommands under `cmd
   - `ha:suppliers:index` (Set of addresses THIS FLEET handles; read by the
     balance monitor and orphan-stream detection)
   - There is NO `ha:suppliers:{address}`. It existed, had zero readers, and
-    collided with the key above whenever `supplier_prefix` was set to
-    `suppliers`. Do not reintroduce a per-supplier key under the plural prefix.
+    collided with the key above. Do not reintroduce a per-supplier key under
+    the plural prefix.
+- **Only `base_prefix` is configurable.** Every segment below it is a constant
+  in `transport/redis/namespace.go`, and that is deliberate: a per-family knob
+  can be turned until it equals another family's literal, which is how one key
+  ended up with two writers and how the supplier SCAN pattern could be made to
+  match every cache key. Do not add a new namespace knob; add a KeyBuilder
+  method.
 - **Pub/Sub Channels**:
   - `ha:events:cache:{type}:invalidate` (Cache invalidation)
   - `ha:meter:cleanup` (Meter cleanup signals)

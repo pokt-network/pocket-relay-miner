@@ -37,7 +37,12 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 	testredis.Client(t) // fail fast with the "start one with ..." message
 	ctx := context.Background()
 
-	// Deliberately non-default on BOTH segments the meter keys are built from.
+	// The base is deliberately non-default. meter_prefix is set too, and it must
+	// have NO effect: it is a retired knob, so the assertions below prove the
+	// keys follow the base plus the fixed "meter" segment, and that nothing
+	// landed where the retired value would have put it. (A config that sets it
+	// is rejected at startup by RedisNamespaceConfig.Validate; this test builds
+	// the client directly, which is what lets it observe the key layout.)
 	// The base carries this test's isolation prefix as well: the server is
 	// shared, and a bare "prod" would collide with any other test that picked
 	// the same obvious placeholder.
@@ -100,12 +105,14 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 
 	// 1. The writer's keys are exactly the KeyBuilder's, under this namespace.
 	metaKey := kb.MeterMetaKey(sessionID, supplier)
-	require.Equal(t, base+":metering:"+sessionID+":"+supplier+":meta", metaKey,
-		"the meta key must follow the configured namespace, not a component prefix")
+	require.Equal(t, base+":meter:"+sessionID+":"+supplier+":meta", metaKey,
+		"the meta key must follow the configured BASE, and the fixed meter segment: "+
+			"the per-family prefix is no longer configurable, so a config that sets it "+
+			"cannot move these keys (it is rejected at startup instead)")
 	requireKeyExists(t, redisClient, metaKey, "the meter must WRITE the key the KeyBuilder names: %s", metaKey)
 
 	consumedKey := kb.MeterConsumedKey(sessionID, supplier)
-	require.Equal(t, base+":metering:"+sessionID+":"+supplier+":consumed", consumedKey)
+	require.Equal(t, base+":meter:"+sessionID+":"+supplier+":consumed", consumedKey)
 	requireKeyExists(t, redisClient, consumedKey, "consumed counter missing at %s", consumedKey)
 
 	// The CLI contract: both keys are plain STRINGS -- the meta a JSON blob,
@@ -139,7 +146,7 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 	//    pattern, so a match here is the command working.
 	keys := testredis.Keys(t, redisClient, prefix)
 	pattern := kb.MeterSessionMetaPattern(sessionID)
-	require.Equal(t, base+":metering:"+sessionID+":*:meta", pattern)
+	require.Equal(t, base+":meter:"+sessionID+":*:meta", pattern)
 
 	var matched []string
 	for _, k := range keys {
