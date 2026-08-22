@@ -64,6 +64,46 @@ spec:
         # running relayers on the old one.
         pocket-relay-miner/config-hash: "{}"
     spec:
+      initContainers:
+      # Build a cosmos keyring from the SAME hex keys the keys_file holds, so the
+      # stack can be run against either source without changing what suppliers
+      # exist. The "test" backend needs no passphrase and stores to disk; pocketd
+      # writes /keyring/keyring-test/<name>.info, which is exactly what a
+      # KeyringProvider with backend "test" and dir /keyring reads.
+      #
+      # No curly braces below: this YAML is rendered through Starlark's
+      # .format(), which reads them as placeholders and fails the Tiltfile.
+      #
+      # An emptyDir, rebuilt on every pod start, on purpose: the keyring is
+      # DERIVED from the secret, so there is one source of truth for which keys
+      # exist and no second place to update.
+      - name: build-keyring
+        image: ghcr.io/pokt-network/pocketd:0.1.34
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          mkdir -p /keyring
+          i=0
+          # The hex keys are one per line in the mounted secret. Selecting them by
+          # LENGTH instead of a regex quantifier keeps this free of a yq
+          # dependency in the pocketd image and free of curly braces, which the
+          # Starlark .format() that renders this YAML reads as placeholders.
+          for hex in $(grep -oiE '[0-9a-f]+' /keys/supplier-keys.yaml | awk 'length == 64'); do
+            i=$((i+1))
+            if ! pocketd keys import-hex "supplier$i" "$hex" \
+              --keyring-backend test --keyring-dir /keyring >/dev/null 2>&1; then
+              echo "failed to import supplier$i into the keyring" >&2
+              exit 1
+            fi
+          done
+          echo "imported $i keys into the keyring at /keyring"
+        volumeMounts:
+        - name: keys
+          mountPath: /keys
+        - name: keyring
+          mountPath: /keyring
       containers:
       - name: relayer
         image: {}
@@ -95,6 +135,8 @@ spec:
           mountPath: /config
         - name: keys
           mountPath: /keys
+        - name: keyring
+          mountPath: /keyring
         resources:
           requests:
             cpu: "2000m"
@@ -122,6 +164,8 @@ spec:
         secret:
           secretName: supplier-keys
           optional: true
+      - name: keyring
+        emptyDir: {{}}
 ---
 apiVersion: v1
 kind: Service
