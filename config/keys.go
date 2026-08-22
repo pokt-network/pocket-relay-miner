@@ -19,7 +19,8 @@ type KeysConfig struct {
 
 // KeyringConfig contains Cosmos SDK keyring configuration.
 type KeyringConfig struct {
-	// Backend is the keyring backend type: "file", "os" or "test".
+	// Backend is the keyring backend type: "file" or "test".
+	// Everything else cosmos-sdk offers is rejected: see keys.ValidateKeyringBackend.
 	// "memory" is rejected: see keys.ValidateKeyringBackend.
 	Backend string `yaml:"backend"`
 

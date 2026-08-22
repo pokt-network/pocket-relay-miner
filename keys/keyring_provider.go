@@ -33,8 +33,9 @@ type KeyringProvider struct {
 
 // KeyringProviderConfig contains configuration for the KeyringProvider.
 type KeyringProviderConfig struct {
-	// Backend is the keyring backend type: "file", "os" or "test".
-	// See keys.ValidateKeyringBackend for why "memory" is not one of them.
+	// Backend is the keyring backend type: "file" or "test".
+	// See keys.ValidateKeyringBackend for why the other cosmos-sdk backends
+	// ("memory", "os", "kwallet", "pass") are not supported.
 	// A caller that wants an in-memory keyring builds it itself and uses
 	// NewKeyringProviderWithKeyring, which is what the tests do.
 	Backend string
@@ -106,18 +107,6 @@ func NewKeyringProvider(
 		kr, err = keyring.New(
 			config.AppName,
 			keyring.BackendFile,
-			config.Dir,
-			passwordReader,
-			cdc,
-		)
-	case "os":
-		// "os" is NOT prompt-free: cosmos-sdk builds it with the same passphrase
-		// prompt, and the underlying keyring falls back to an encrypted file when
-		// no system keychain is reachable -- the usual case in a Linux container.
-		// A nil reader panics there exactly like it did for "file".
-		kr, err = keyring.New(
-			config.AppName,
-			keyring.BackendOS,
 			config.Dir,
 			passwordReader,
 			cdc,
