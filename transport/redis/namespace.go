@@ -124,6 +124,11 @@ func (kb *KeyBuilder) StreamAddress(key string) (string, bool) {
 // prefix from the configurable ns.SupplierPrefix while this family hardcodes
 // "suppliers", so supplier_prefix: "suppliers" made the two identical. Do not
 // add a per-supplier key under this prefix; supplier state has a home.
+//
+// That removes the EXACT-key collision. A glob one survives under the same
+// setting: SupplierStatePattern() is "ha:suppliers:*", which matches THIS key,
+// so nothing may scan-and-delete by that pattern without checking what it
+// actually matched.
 // Format: {base}:suppliers:index
 // Example: "ha:suppliers:index"
 func (kb *KeyBuilder) SuppliersRegistryIndexKey() string {

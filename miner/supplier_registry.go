@@ -70,8 +70,10 @@ func NewSupplierRegistry(
 // one key with two different structs writing it — and because they shared the
 // "status" and "services" JSON fields the cross-read did not even fail, it
 // returned a half-populated struct (no "staked" -> IsActive() false -> relays
-// refused). Deleting the value removes that by construction instead of by
-// validation.
+// refused). Deleting the value removes that EXACT-key collision by construction
+// instead of by validation. A glob collision survives under the same setting --
+// SupplierStatePattern() is "ha:suppliers:*" and matches the index key -- so "by
+// construction" covers equality, not pattern overlap.
 //
 // The index is what has readers: balance_monitor (ListSuppliers) and
 // KnownSupplierAddresses (orphan-stream detection).
