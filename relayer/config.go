@@ -12,6 +12,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -777,6 +778,13 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("redis.url is required")
 	}
 
+	// The namespace is validated here rather than where keys are built, because
+	// the failure it catches is a config that would relocate the whole keyspace:
+	// it has to stop startup, not surface as a cache miss.
+	if err := c.Redis.Namespace.Validate(); err != nil {
+		return err
+	}
+
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
@@ -791,9 +799,8 @@ func (c *Config) Validate() error {
 	// base: a custom redis.namespace.meter_prefix moves the keys even when
 	// the base prefix matches the retired value.
 	if c.RelayMeter.RemovedRedisKeyPrefix != "" {
-		ns := c.Redis.Namespace.WithDefaults()
 		legacyMeterPrefix := c.RelayMeter.RemovedRedisKeyPrefix + ":meter"
-		effectiveMeterPrefix := ns.BasePrefix + ":" + ns.MeterPrefix
+		effectiveMeterPrefix := redisutil.NewKeyBuilder(c.Redis.Namespace).MeterPrefix()
 		if legacyMeterPrefix != effectiveMeterPrefix {
 			return fmt.Errorf(
 				"relay_meter.redis_key_prefix is no longer supported: meter keys now derive from redis.namespace. "+

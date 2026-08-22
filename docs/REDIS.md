@@ -56,15 +56,30 @@ All keys use configurable prefixes (default shown):
 ```yaml
 redis:
   namespace:
-    base_prefix: "ha"           # Root prefix for all keys
-    cache_prefix: "cache"       # Cache data
-    events_prefix: "events"     # Pub/sub channels
-    streams_prefix: "relays"    # Redis Streams (WAL)
-    miner_prefix: "miner"       # Miner state
-    supplier_prefix: "supplier" # Supplier state replica
-    meter_prefix: "meter"       # Relay metering
-    params_prefix: "params"     # Cached params
+    base_prefix: "ha"           # The ONLY configurable segment
 ```
+
+Everything below the base prefix is fixed in code (`transport/redis/namespace.go`),
+which is what makes miner and relayer unable to drift apart on the key layout.
+
+It also removes a whole class of hazard. While each family had its own knob, one
+could be turned until it equalled another family's literal: `supplier_prefix:
+"suppliers"` made the supplier state key and the fleet registry key the same
+string, and `cache_prefix: "supplier"` made the supplier SCAN pattern
+(`ha:supplier:*`) match every cache key — reachable from `redis cache --type
+supplier --invalidate`, which deletes what it scans. With the layout constant,
+each pattern provably matches only its own family, and a test pins it.
+
+The base prefix stays configurable because it is safe by position: it is the
+first segment of every key, so two base prefixes are two disjoint keyspaces —
+one Redis, several fleets. It must match `^[a-zA-Z0-9_-]+$`; a glob character
+there would end up inside every SCAN pattern.
+
+**Upgrading from a config that set the per-family prefixes**: those keys would
+move, so startup fails with a message naming each field rather than coming up
+healthy against an empty keyspace. Setting one to its historical value is
+accepted (nothing moves); anything else means draining the fleet and migrating
+before upgrading.
 
 ---
 
