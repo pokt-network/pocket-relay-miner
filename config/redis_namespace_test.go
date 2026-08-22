@@ -61,6 +61,31 @@ func TestRedisNamespaceValidate(t *testing.T) {
 			ns:      RedisNamespaceConfig{BasePrefix: "ha[12]"},
 			wantErr: "glob metacharacter",
 		},
+		// The two cases that caught the first version of this rule. It was
+		// written as `[*?\[\]\\s]`, which in a Go raw string is the class
+		// {* ? [ ] \ s} -- the LETTER s, and no whitespace at all. So it locked
+		// out every base containing an "s" and let a space straight through,
+		// which is the opposite of the rule on both counts. The cases above did
+		// not catch it: "two words" errored on the "s" of "words" and "ha:*" on
+		// the star, so both passed for the wrong reason.
+		{
+			name: "a base containing 's' is ordinary text and must be accepted",
+			ns:   RedisNamespaceConfig{BasePrefix: "prod-us"},
+		},
+		{
+			name: "and so is one that is mostly s",
+			ns:   RedisNamespaceConfig{BasePrefix: "suppliers"},
+		},
+		{
+			name:    "a bare space, with no other suspicious character",
+			ns:      RedisNamespaceConfig{BasePrefix: "ha prod"},
+			wantErr: "glob metacharacter",
+		},
+		{
+			name:    "a tab, likewise",
+			ns:      RedisNamespaceConfig{BasePrefix: "ha\tprod"},
+			wantErr: "glob metacharacter",
+		},
 		// These are not dangerous, they only add segments -- and they work in
 		// deployments today. Rejecting them would lock out a running fleet whose
 		// only way out is renaming the base, which relocates everything.

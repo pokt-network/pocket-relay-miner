@@ -88,7 +88,7 @@ func DefaultRedisNamespaceConfig() RedisNamespaceConfig {
 // those bases work today. Rejecting them would lock out a running deployment
 // whose only alternative is renaming the base, which relocates its ENTIRE
 // keyspace including the WAL the miner consumes.
-var basePrefixRejected = regexp.MustCompile(`[*?\[\]\\s]`)
+var basePrefixRejected = regexp.MustCompile(`[*?\[\]\\\s]`)
 
 // retiredNamespaceFields returns the retired sub-prefix fields an operator has
 // set, by their YAML name, together with the constant now used instead.
