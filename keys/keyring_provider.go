@@ -3,6 +3,9 @@ package keys
 import (
 	"context"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -42,6 +45,12 @@ type KeyringProviderConfig struct {
 	// KeyNames is an optional list of specific key names to load.
 	// If empty, loads all keys from the keyring.
 	KeyNames []string
+
+	// PasswordReader is where password-protected backends ("file", and "os"
+	// when it falls back to an encrypted file) read the passphrase from.
+	// Defaults to os.Stdin, so a caller that must stay non-interactive pipes
+	// the password in (e.g. from a secret manager). Tests inject a reader.
+	PasswordReader io.Reader
 }
 
 // getKeyringCodec returns a codec for keyring operations.
@@ -62,6 +71,15 @@ func NewKeyringProvider(
 
 	cdc := getKeyringCodec()
 
+	// Password-protected backends dereference this reader inside cosmos-sdk's
+	// newRealPrompt; a nil one panics before doing any work.
+	passwordReader := config.PasswordReader
+	if passwordReader == nil {
+		passwordReader = os.Stdin
+	}
+
+	warnIfKeyringDirIsTheKeyringItself(logger, config.Backend, config.Dir)
+
 	// Create keyring based on backend type
 	var kr keyring.Keyring
 	var err error
@@ -79,19 +97,28 @@ func NewKeyringProvider(
 			cdc,
 		)
 	case "file":
+		// The file backend is password-protected, so it ALWAYS needs a reader to
+		// prompt from. Unlike "test" (fixed password) and "memory", passing nil
+		// here makes the backend unusable in every case: the passphrase prompt
+		// dereferences the reader and panics before any key is read.
+		logger.Info().Msg("keyring backend \"file\" is password-protected; the passphrase is read from the configured reader (stdin by default)")
 		kr, err = keyring.New(
 			config.AppName,
 			keyring.BackendFile,
 			config.Dir,
-			nil, // No stdin for non-interactive
+			passwordReader,
 			cdc,
 		)
 	case "os":
+		// "os" is NOT prompt-free: cosmos-sdk builds it with the same passphrase
+		// prompt, and the underlying keyring falls back to an encrypted file when
+		// no system keychain is reachable -- the usual case in a Linux container.
+		// A nil reader panics there exactly like it did for "file".
 		kr, err = keyring.New(
 			config.AppName,
 			keyring.BackendOS,
 			config.Dir,
-			nil,
+			passwordReader,
 			cdc,
 		)
 	default:
@@ -108,6 +135,47 @@ func NewKeyringProvider(
 		appName:  config.AppName,
 		keyNames: config.KeyNames,
 	}, nil
+}
+
+// keyringSubdirs maps a backend to the subdirectory cosmos-sdk appends to the
+// configured directory. This is the whole reason the directory is the PARENT of
+// the keyring: pointing at the keyring itself yields dir/keyring-file/keyring-file,
+// which is empty, and every lookup then fails as "key not found" -- a message
+// that reads like a wrong key name rather than a wrong path.
+var keyringSubdirs = map[string]string{
+	"file": "keyring-file",
+	"test": "keyring-test",
+}
+
+// keyringDirLooksLikeKeyringItself reports whether dir points at the keyring
+// directory instead of its parent, along with the parent to suggest.
+func keyringDirLooksLikeKeyringItself(backend, dir string) (suggested string, ok bool) {
+	subdir, known := keyringSubdirs[backend]
+	if !known || dir == "" {
+		return "", false
+	}
+	clean := filepath.Clean(dir)
+	if filepath.Base(clean) != subdir {
+		return "", false
+	}
+	return filepath.Dir(clean), true
+}
+
+// warnIfKeyringDirIsTheKeyringItself flags the mistake above at open time, while
+// the path is still in front of the operator.
+func warnIfKeyringDirIsTheKeyringItself(logger logging.Logger, backend, dir string) {
+	suggested, ok := keyringDirLooksLikeKeyringItself(backend, dir)
+	if !ok {
+		return
+	}
+	logger.Warn().
+		Str("keyring_dir", dir).
+		Str("backend", backend).
+		Str("suggested_keyring_dir", suggested).
+		Msgf("keyring directory points at the keyring itself: it must be the PARENT "+
+			"directory, since the %q backend looks for %s/ inside it. Keys will be "+
+			"reported as \"key not found\"; pass %q instead",
+			backend, keyringSubdirs[backend], suggested)
 }
 
 // NewKeyringProviderWithKeyring creates a provider with an existing keyring.
