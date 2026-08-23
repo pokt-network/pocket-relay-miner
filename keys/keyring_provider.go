@@ -264,11 +264,54 @@ func (p *KeyringProvider) Name() string {
 // Kind returns the provider family, for metric labels.
 func (p *KeyringProvider) Kind() string { return "keyring" }
 
+// ErrNotSecp256k1Key marks a record whose algorithm is not the one this
+// service signs with. It is a SENTINEL rather than a string match because
+// isPermanentKeyFailure has to recognise it: a record's algorithm is a property
+// of the record, so this failure repeats on every reload forever.
+var ErrNotSecp256k1Key = errors.New("key is not a secp256k1 key")
+
 // isPermanentKeyFailure reports whether a per-key load failure will repeat on
 // every future reload, in which case the record is simply not a signing key and
 // must not stall the reload of the ones that are.
+//
+// Getting this set WRONG IN EITHER DIRECTION is harmful, and the two harms are
+// not symmetric:
+//
+//   - Too NARROW: a permanent failure is reported as transient, the manager's
+//     guard keeps the previous keys and abandons the reload, the failure repeats
+//     next tick, and hot reload is dead for the life of the process while a key
+//     the operator pulled keeps signing. "not a secp256k1 key" used to be a bare
+//     fmt.Errorf that nothing matched, so it fell in this bucket.
+//
+//     HOW REACHABLE that particular branch is was MEASURED, not assumed, and the
+//     answer is: not through this keyring's own API. A default cosmos-sdk
+//     keyring rejects the import outright -- ImportPrivKeyHex with "ed25519" or
+//     "sr25519" returns "unsupported signing algo" (probed against v0.53.7),
+//     and hd exposes no Ed25519 algorithm to pass to NewAccount. It would take a
+//     record written by a tool built with different SupportedAlgos and then
+//     mounted into this directory. So the sentinel below is defence in depth,
+//     not a fix for a reproduced failure, and there is deliberately no test for
+//     it: a test that fabricates a state no provider can produce proves nothing
+//     and teaches the next reader a false model.
+//
+//   - Too WIDE: a TRANSIENT failure is treated as "not a signing key", the
+//     address is skipped, and the diff reports it as removed -- precisely the
+//     silent removal this whole guard exists to prevent.
+//
+// So a failure only counts as permanent when it is a property of the RECORD, not
+// of the attempt. A record with no extractable private key (offline pubkey,
+// multisig, ledger), a named key that is gone, and a record of the wrong
+// algorithm all qualify.
+//
+// Deliberately NOT here, though both are deterministic in practice: a
+// GetAddress failure and an UnarmorDecryptPrivKey failure. A .info file caught
+// mid-rewrite can produce either, and calling that permanent would turn a
+// half-written file into a supplier removal. They stay transient, which costs a
+// stalled reload and never costs a signature.
 func isPermanentKeyFailure(err error) bool {
-	return errors.Is(err, keyring.ErrPrivKeyExtr) || errors.Is(err, sdkerrors.ErrKeyNotFound)
+	return errors.Is(err, keyring.ErrPrivKeyExtr) ||
+		errors.Is(err, sdkerrors.ErrKeyNotFound) ||
+		errors.Is(err, ErrNotSecp256k1Key)
 }
 
 // LoadKeys loads all keys from the keyring.
@@ -478,7 +521,7 @@ func (p *KeyringProvider) loadKeyByName(name string) (cryptotypes.PrivKey, strin
 	// Ensure it's a secp256k1 key
 	secpPrivKey, ok := privKey.(*secp256k1.PrivKey)
 	if !ok {
-		return nil, "", fmt.Errorf("key %s is not a secp256k1 key", name)
+		return nil, "", fmt.Errorf("key %s: %w", name, ErrNotSecp256k1Key)
 	}
 
 	// NOT addr.String(): that encodes with the global SDK prefix, which the
