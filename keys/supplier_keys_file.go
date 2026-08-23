@@ -184,7 +184,7 @@ func (p *SupplierKeysFileProvider) LoadKeys(ctx context.Context) (map[string]cry
 				Err(err).
 				Int("index", i).
 				Msg("failed to parse key from supplier.yaml")
-			keyLoadErrors.WithLabelValues("supplier_keys_file").Inc()
+			keyLoadErrors.WithLabelValues(p.Kind()).Inc()
 			continue
 		}
 
