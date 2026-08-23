@@ -7,6 +7,9 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
 
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -31,6 +34,22 @@ type KeyringProvider struct {
 	// Optional: list of specific key names to load.
 	// If empty, loads all keys from keyring.
 	keyNames []string
+
+	// keyringDir is the directory cosmos-sdk actually stores records in --
+	// config.Dir plus the backend's subdirectory -- or "" for a keyring this
+	// process built in memory (the tests, via NewKeyringProviderWithKeyring).
+	// Two things need it, and neither can be done through keyring.Keyring:
+	// telling "the operator emptied the keyring" apart from "the directory is
+	// gone", and knowing that nothing changed so a reload can skip the argon2
+	// work. Empty means both fall back to the safe behaviour.
+	keyringDir string
+
+	// fingerprintMu guards the reload cache below.
+	fingerprintMu sync.Mutex
+	// lastFingerprint is the keyring directory's state at the last successful
+	// full load, and cachedKeys is what that load produced.
+	lastFingerprint string
+	cachedKeys      map[string]cryptotypes.PrivKey
 }
 
 // KeyringProviderConfig contains configuration for the KeyringProvider.
@@ -136,11 +155,51 @@ func NewKeyringProvider(
 	}
 
 	return &KeyringProvider{
-		logger:   logging.ForComponent(logger, logging.ComponentKeyRingProvider),
-		keyring:  kr,
-		appName:  config.AppName,
-		keyNames: config.KeyNames,
+		logger:     logging.ForComponent(logger, logging.ComponentKeyRingProvider),
+		keyring:    kr,
+		appName:    config.AppName,
+		keyNames:   config.KeyNames,
+		keyringDir: keyringRecordDir(config.Backend, config.Dir),
 	}, nil
+}
+
+// keyringRecordDir returns the directory cosmos-sdk stores records in for this
+// backend, or "" when it cannot be known (no directory configured, or a backend
+// with no on-disk form). Verified in cosmos-sdk v0.53.7
+// crypto/keyring/keyring.go:677,704 -- newKeyringGeneric joins the backend's
+// subdirectory onto the configured root.
+func keyringRecordDir(backend, dir string) string {
+	subdir, known := keyringSubdirs[backend]
+	if !known || dir == "" {
+		return ""
+	}
+	return filepath.Join(dir, subdir)
+}
+
+// keyringDirFingerprint summarises the keyring directory: every entry's name,
+// size and modification time. A key added, removed or rewritten moves it; a
+// tick where nothing happened does not.
+//
+// Returns an error the caller must NOT treat as "no keys": an unreadable
+// directory is the condition this exists to distinguish.
+func (p *KeyringProvider) keyringDirFingerprint() (string, error) {
+	entries, err := os.ReadDir(p.keyringDir)
+	if err != nil {
+		return "", err
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		info, ierr := e.Info()
+		if ierr != nil {
+			return "", fmt.Errorf("stat %s: %w", e.Name(), ierr)
+		}
+		names = append(names, fmt.Sprintf("%s:%d:%d", e.Name(), info.Size(), info.ModTime().UnixNano()))
+	}
+	sort.Strings(names)
+	// Prefixed with the count so the fingerprint is never the empty string: an
+	// EMPTY keyring directory is a real, cacheable state, and letting it share a
+	// value with "not computed" is how a sentinel turns into a bug.
+	return fmt.Sprintf("%d\n%s", len(names), strings.Join(names, "\n")), nil
 }
 
 // keyringSubdirs maps a backend to the subdirectory cosmos-sdk appends to the
@@ -236,6 +295,46 @@ func isPermanentKeyFailure(err error) bool {
 // error. Read in the dependency's source, not inferred. A record lost that way
 // is invisible to this provider, so it still reads as a removal.
 func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.PrivKey, error) {
+	// A reload that finds the directory byte-for-byte unchanged returns the
+	// previous keys without touching the keyring. This is not a micro-
+	// optimisation: reading one key runs argon2id TWICE (cosmos-sdk
+	// crypto/armor.go:165 to armor it, :223 to unarmor it, both t=1 m=64MiB
+	// p=4), measured at 40.5 ms and ~128 MiB transient on this machine. On the
+	// 30 s reload timer that is 0.7 s per tick at 17 keys and 24 s at 594 --
+	// the fleet size this project's own block-event scaling note describes --
+	// so a busy core and tens of GiB of churn per tick on a process with a
+	// 1000 RPS budget, and the interval stops being the promise it is
+	// documented to be. ReloadInterval is deliberately not an operator knob,
+	// so the cost had to come out of the no-op path instead.
+	//
+	// The cache is only ever consulted when the fingerprint MATCHES, so it can
+	// hold a key past its removal only if a change left names, sizes and
+	// nanosecond mtimes all identical.
+	var fingerprint string
+	if p.keyringDir != "" {
+		fp, err := p.keyringDirFingerprint()
+		if err != nil {
+			// Deliberately an error, not an empty key set: see the guard at the
+			// end of this function.
+			return nil, fmt.Errorf("keyring directory %s could not be read: %w", p.keyringDir, err)
+		}
+		fingerprint = fp
+
+		p.fingerprintMu.Lock()
+		if p.cachedKeys != nil && p.lastFingerprint == fingerprint {
+			cached := make(map[string]cryptotypes.PrivKey, len(p.cachedKeys))
+			for addr, key := range p.cachedKeys {
+				cached[addr] = key
+			}
+			p.fingerprintMu.Unlock()
+			p.logger.Debug().
+				Int("keys", len(cached)).
+				Msg("keyring unchanged on disk, reusing the loaded keys")
+			return cached, nil
+		}
+		p.fingerprintMu.Unlock()
+	}
+
 	keys := make(map[string]cryptotypes.PrivKey)
 	var loadErrs []error
 
@@ -251,7 +350,7 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 				if isPermanentKeyFailure(err) {
 					continue
 				}
-				keyLoadErrors.WithLabelValues("keyring").Inc()
+				keyLoadErrors.WithLabelValues(p.Kind()).Inc()
 				loadErrs = append(loadErrs, fmt.Errorf("key %q: %w", name, err))
 				continue
 			}
@@ -278,7 +377,7 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 				if isPermanentKeyFailure(err) {
 					continue
 				}
-				keyLoadErrors.WithLabelValues("keyring").Inc()
+				keyLoadErrors.WithLabelValues(p.Kind()).Inc()
 				loadErrs = append(loadErrs, fmt.Errorf("key %q: %w", record.Name, err))
 				continue
 			}
@@ -297,6 +396,46 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	if len(loadErrs) > 0 {
 		return keys, fmt.Errorf("%d keyring key(s) could not be read: %w",
 			len(loadErrs), errors.Join(loadErrs...))
+	}
+
+	// ZERO KEYS AND NO ERROR is the dangerous answer, because the keyring
+	// cannot tell us which of two very different things happened.
+	//
+	// 99designs/keyring v1.2.2 (the file backend under cosmos-sdk) discards the
+	// error: fileKeyring.Keys() is `files, _ := os.ReadDir(dir)` (file.go:174),
+	// and resolveDir MkdirAlls a directory that is missing (file.go:44-49). Read
+	// in the dependency's source, not inferred. So a keyring directory that was
+	// deleted, remounted, or lost its permissions comes back as an empty list
+	// with a nil error -- indistinguishable, here, from an operator who removed
+	// every key.
+	//
+	// The manager's "an unreadable source is not a key removal" guard keys off
+	// an error, so with no error it applies the empty set: every address is
+	// diffed as removed, the relayer rejects every relay while /ready still
+	// answers true, and the miner drains every pipeline and releases every
+	// lease. keys.OpenManager already refuses zero keys AT STARTUP for exactly
+	// this reason; nothing refused it on RELOAD.
+	//
+	// Reading the directory ourselves settles it, and keeps the distinction the
+	// blunt fix would have lost: a genuinely emptied keyring is still applied,
+	// so pulling the last key out of a single-key deployment still stops it
+	// signing.
+	if len(keys) == 0 && p.keyringDir != "" {
+		if _, err := os.ReadDir(p.keyringDir); err != nil {
+			return nil, fmt.Errorf(
+				"keyring reported no keys, but its directory %s could not be read, "+
+					"so this is not the operator removing keys: %w", p.keyringDir, err)
+		}
+	}
+
+	if p.keyringDir != "" {
+		p.fingerprintMu.Lock()
+		p.lastFingerprint = fingerprint
+		p.cachedKeys = make(map[string]cryptotypes.PrivKey, len(keys))
+		for addr, key := range keys {
+			p.cachedKeys[addr] = key
+		}
+		p.fingerprintMu.Unlock()
 	}
 
 	return keys, nil
