@@ -182,7 +182,11 @@ func PassphraseReader(src PassphraseSource) (io.Reader, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read keyring passphrase file %q: %w", src.File, err)
 		}
-		return passphraseLines(strings.TrimRight(string(raw), "\r\n")), nil
+		pass := strings.TrimRight(string(raw), "\r\n")
+		if err := checkPassphraseLength(pass, fmt.Sprintf("keyring passphrase file %q", src.File)); err != nil {
+			return nil, err
+		}
+		return passphraseLines(pass), nil
 
 	case src.Env != "":
 		value, ok := os.LookupEnv(src.Env)
@@ -190,10 +194,44 @@ func PassphraseReader(src PassphraseSource) (io.Reader, error) {
 			return nil, fmt.Errorf(
 				"keyring passphrase environment variable %q is not set in this process", src.Env)
 		}
-		return passphraseLines(strings.TrimRight(value, "\r\n")), nil
+		pass := strings.TrimRight(value, "\r\n")
+		if err := checkPassphraseLength(pass, fmt.Sprintf("keyring passphrase environment variable %q", src.Env)); err != nil {
+			return nil, err
+		}
+		return passphraseLines(pass), nil
 	}
 
 	return nil, nil
+}
+
+// minKeyringPassphraseLength mirrors cosmos-sdk's client/input.MinPassLength
+// (v0.53.7 client/input/input.go:16). Duplicated rather than imported because
+// the point is to reject the passphrase HERE, naming the source, instead of
+// letting the SDK reject it later with a message about something else.
+const minKeyringPassphraseLength = 8
+
+// checkPassphraseLength rejects a passphrase cosmos-sdk will refuse anyway, and
+// names the source that produced it.
+//
+// Without this the failure is unrecognisable. An empty or short value -- a
+// mounted Secret whose key templated to nothing is the ordinary way to get one
+// -- reaches cosmos-sdk's GetPassword, which refuses anything under
+// MinPassLength and re-prompts. The two lines passphraseLines supplies are
+// consumed by those retries, the third read hits EOF, and the process dies with
+// "too many failed passphrase attempts" -- which describes neither what
+// happened nor what to fix, in a change whose whole point is naming the fault
+// where it is.
+func checkPassphraseLength(pass, source string) error {
+	if pass == "" {
+		return fmt.Errorf("%s is empty: the keyring passphrase cannot be blank "+
+			"(a mounted Secret whose key is missing or templated to nothing reads as empty here)", source)
+	}
+	if len(pass) < minKeyringPassphraseLength {
+		return fmt.Errorf("%s holds %d characters, but cosmos-sdk requires at least %d "+
+			"and will otherwise fail with \"too many failed passphrase attempts\"",
+			source, len(pass), minKeyringPassphraseLength)
+	}
+	return nil
 }
 
 // passphraseLines yields the passphrase twice.

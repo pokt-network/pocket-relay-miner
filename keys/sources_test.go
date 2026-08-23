@@ -210,3 +210,49 @@ func TestPassphraseReaderYieldsTheSecretTwiceWithoutTrailingNewlines(t *testing.
 		require.Nil(t, r, "nil is the signal to fall back to stdin")
 	})
 }
+
+// TestPassphraseSourceRejectsAnEmptyOrShortSecret names the fault where it is.
+// Before this, an empty mounted Secret produced "too many failed passphrase
+// attempts" from deep inside cosmos-sdk: passphraseLines supplies two lines,
+// GetPassword refuses both for being under MinPassLength (8), the third read
+// hits EOF, and the operator is told about retries rather than about the empty
+// Secret key that caused them.
+func TestPassphraseSourceRejectsAnEmptyOrShortSecret(t *testing.T) {
+	tests := []struct {
+		name        string
+		contents    string
+		wantErrPart string
+	}{
+		{name: "empty file", contents: "", wantErrPart: "is empty"},
+		{name: "only a newline", contents: "\n", wantErrPart: "is empty"},
+		{name: "shorter than cosmos-sdk allows", contents: "short", wantErrPart: "at least 8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "passphrase")
+			require.NoError(t, os.WriteFile(path, []byte(tt.contents), 0o600))
+
+			reader, err := PassphraseReader(PassphraseSource{File: path})
+			require.Error(t, err, "an unusable passphrase must be refused here, not by a retry counter")
+			require.Nil(t, reader)
+			require.Contains(t, err.Error(), tt.wantErrPart)
+			require.Contains(t, err.Error(), path, "the error must name the source the operator has to fix")
+		})
+	}
+}
+
+// TestPassphraseSourceAcceptsAUsableSecret is the other direction: the check
+// must not reject what already worked.
+func TestPassphraseSourceAcceptsAUsableSecret(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "passphrase")
+	require.NoError(t, os.WriteFile(path, []byte("a-real-passphrase\n"), 0o600))
+
+	reader, err := PassphraseReader(PassphraseSource{File: path})
+	require.NoError(t, err)
+	require.NotNil(t, reader)
+
+	got, err := io.ReadAll(reader)
+	require.NoError(t, err)
+	require.Equal(t, "a-real-passphrase\na-real-passphrase\n", string(got),
+		"the passphrase is offered twice so the same config works for an existing and a new keyring")
+}
