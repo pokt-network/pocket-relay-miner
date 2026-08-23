@@ -437,8 +437,11 @@ func validateMinerConfig(config *miner.Config) error {
 		return fmt.Errorf("pocket_node.query_node_grpc_url is required")
 	}
 
-	// Key sources are validated by miner.Config.Validate (exactly one), which
-	// validateMinerConfig runs; nothing to repeat here.
+	// Key sources are NOT validated here. miner.LoadConfig calls
+	// Config.Validate, which enforces exactly one source -- this function does
+	// not, so a caller that builds a miner.Config in memory and calls only this
+	// gets no key-source check at all. Every caller goes through LoadConfig
+	// today; anyone adding one that does not must call Config.Validate itself.
 
 	// Note: SessionTTL = 0 means use CacheTTL (default 2h), so it doesn't need validation
 
