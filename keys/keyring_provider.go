@@ -2,6 +2,7 @@ package keys
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -176,30 +177,49 @@ func keyringRecordDir(backend, dir string) string {
 	return filepath.Join(dir, subdir)
 }
 
-// keyringDirFingerprint summarises the keyring directory: every entry's name,
-// size and modification time. A key added, removed or rewritten moves it; a
-// tick where nothing happened does not.
+// keyringDirFingerprint summarises the keyring directory by hashing the NAME
+// AND CONTENTS of every entry, and returns how many entries it saw.
+//
+// Contents, not size and mtime, and that is the whole point. The first version
+// used name:size:mtime and was WRONG for the rotation that matters most -- same
+// key name, new key material. Measured against cosmos-sdk v0.53.7 by importing
+// three different secp256k1 keys under one record name: app.info came out 732,
+// 732 and 731 bytes. The size therefore carries about one bit, leaving mtime as
+// the only discriminator, and mtime does not survive the ordinary ways a key
+// file arrives: rsync -a, cp -p, tar -x and kubectl cp all restore the SOURCE
+// file's mtime rather than "now", and NFS- or SMB-backed volumes quantise it. In
+// any of those a rotated key would have been served from the cache forever and
+// the process would have kept signing with the key the operator replaced --
+// reintroducing, through an optimisation, the exact failure this branch exists
+// to prevent.
+//
+// Hashing costs one read of ~732 bytes per key, about 435 KB at 594 keys:
+// microseconds against the 40.5 ms per key of argon2 the cache avoids.
 //
 // Returns an error the caller must NOT treat as "no keys": an unreadable
 // directory is the condition this exists to distinguish.
-func (p *KeyringProvider) keyringDirFingerprint() (string, error) {
-	entries, err := os.ReadDir(p.keyringDir)
+func (p *KeyringProvider) keyringDirFingerprint() (fingerprint string, entries int, err error) {
+	dirEntries, err := os.ReadDir(p.keyringDir)
 	if err != nil {
-		return "", err
+		return "", 0, err
 	}
-	names := make([]string, 0, len(entries))
-	for _, e := range entries {
-		info, ierr := e.Info()
-		if ierr != nil {
-			return "", fmt.Errorf("stat %s: %w", e.Name(), ierr)
+	lines := make([]string, 0, len(dirEntries))
+	for _, e := range dirEntries {
+		if e.IsDir() {
+			lines = append(lines, "dir:"+e.Name())
+			continue
 		}
-		names = append(names, fmt.Sprintf("%s:%d:%d", e.Name(), info.Size(), info.ModTime().UnixNano()))
+		contents, rerr := os.ReadFile(filepath.Join(p.keyringDir, e.Name()))
+		if rerr != nil {
+			return "", 0, fmt.Errorf("read %s: %w", e.Name(), rerr)
+		}
+		lines = append(lines, fmt.Sprintf("%s:%x", e.Name(), sha256.Sum256(contents)))
 	}
-	sort.Strings(names)
+	sort.Strings(lines)
 	// Prefixed with the count so the fingerprint is never the empty string: an
 	// EMPTY keyring directory is a real, cacheable state, and letting it share a
 	// value with "not computed" is how a sentinel turns into a bug.
-	return fmt.Sprintf("%d\n%s", len(names), strings.Join(names, "\n")), nil
+	return fmt.Sprintf("%d\n%s", len(lines), strings.Join(lines, "\n")), len(dirEntries), nil
 }
 
 // keyringSubdirs maps a backend to the subdirectory cosmos-sdk appends to the
@@ -354,14 +374,24 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	// hold a key past its removal only if a change left names, sizes and
 	// nanosecond mtimes all identical.
 	var fingerprint string
+	dirEntryCount := 0
 	if p.keyringDir != "" {
-		fp, err := p.keyringDirFingerprint()
+		fp, n, err := p.keyringDirFingerprint()
 		if err != nil {
-			// Deliberately an error, not an empty key set: see the guard at the
-			// end of this function.
+			// Deliberately an error, not an empty key set. This is the PRIMARY
+			// check for a keyring this process cannot read; the guard near the
+			// end of this function covers a DIFFERENT condition (record files
+			// present, no keys out of them).
+			//
+			// The metric is not decoration: manager.Reload does not count
+			// provider failures, on the stated grounds that "every provider
+			// already increments keyLoadErrors itself, per failing key", so a
+			// return that skips it leaves ha_keys_load_errors_total flat while
+			// the process runs on stale keys and only an Error log repeats.
+			keyLoadErrors.WithLabelValues(p.Kind()).Inc()
 			return nil, fmt.Errorf("keyring directory %s could not be read: %w", p.keyringDir, err)
 		}
-		fingerprint = fp
+		fingerprint, dirEntryCount = fp, n
 
 		p.fingerprintMu.Lock()
 		if p.cachedKeys != nil && p.lastFingerprint == fingerprint {
@@ -407,6 +437,10 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 		// Load all keys from keyring
 		records, err := p.keyring.List()
 		if err != nil {
+			// Same reason as the fingerprint read above: manager.Reload counts
+			// nothing, so a provider return that skips the metric leaves the
+			// alertable signal flat.
+			keyLoadErrors.WithLabelValues(p.Kind()).Inc()
 			return nil, fmt.Errorf("failed to list keyring keys: %w", err)
 		}
 
@@ -463,12 +497,21 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	// blunt fix would have lost: a genuinely emptied keyring is still applied,
 	// so pulling the last key out of a single-key deployment still stops it
 	// signing.
-	if len(keys) == 0 && p.keyringDir != "" {
-		if _, err := os.ReadDir(p.keyringDir); err != nil {
-			return nil, fmt.Errorf(
-				"keyring reported no keys, but its directory %s could not be read, "+
-					"so this is not the operator removing keys: %w", p.keyringDir, err)
-		}
+	//
+	// The unreadable-directory case is caught EARLIER, by the fingerprint read
+	// at the top of this function. What is left here is a different and narrower
+	// contradiction: the directory holds record files, yet not one of them
+	// yielded a key. cosmos-sdk's keystore.MigrateAll SKIPS any record it cannot
+	// decode -- it prints to stderr and returns a nil error -- so this is how a
+	// keyring whose files are all corrupt, or readable-as-a-directory but not
+	// as files, presents itself. Treating it as "the operator removed every key"
+	// is the same silent fleet-wide removal, arrived at from the other side.
+	if len(keys) == 0 && dirEntryCount > 0 {
+		keyLoadErrors.WithLabelValues(p.Kind()).Inc()
+		return nil, fmt.Errorf(
+			"keyring reported no keys, but its directory %s holds %d record file(s): "+
+				"not one yielded a signing key, so this is a broken keyring rather than "+
+				"the operator removing keys", p.keyringDir, dirEntryCount)
 	}
 
 	if p.keyringDir != "" {

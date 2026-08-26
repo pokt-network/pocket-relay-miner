@@ -221,6 +221,19 @@ func TestIsPermanentKeyFailure(t *testing.T) {
 			err:       errors.New("ciphertext decryption failed"),
 			permanent: false,
 		},
+		{
+			// A record's algorithm is a property of the record, so this repeats
+			// forever. It is here because the commit that added the sentinel
+			// touched only the production file: this table is OPEN, it was green
+			// before and after, and it could not catch the omission. The
+			// commit's "deliberately no test" reasoning was about a DIFFERENT
+			// test -- one that fabricates a keyring record of another algorithm,
+			// which no default cosmos-sdk keyring will accept. This assertion
+			// fabricates nothing: it feeds the classifier an error value.
+			name:      "record is of the wrong algorithm",
+			err:       fmt.Errorf("key app: %w", ErrNotSecp256k1Key),
+			permanent: true,
+		},
 	}
 
 	for _, tt := range tests {
