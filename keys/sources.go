@@ -182,7 +182,7 @@ func PassphraseReader(src PassphraseSource) (io.Reader, error) {
 		if err != nil {
 			return nil, fmt.Errorf("failed to read keyring passphrase file %q: %w", src.File, err)
 		}
-		pass := strings.TrimRight(string(raw), "\r\n")
+		pass := strings.TrimSpace(string(raw))
 		if err := checkPassphraseLength(pass, fmt.Sprintf("keyring passphrase file %q", src.File)); err != nil {
 			return nil, err
 		}
@@ -194,7 +194,7 @@ func PassphraseReader(src PassphraseSource) (io.Reader, error) {
 			return nil, fmt.Errorf(
 				"keyring passphrase environment variable %q is not set in this process", src.Env)
 		}
-		pass := strings.TrimRight(value, "\r\n")
+		pass := strings.TrimSpace(value)
 		if err := checkPassphraseLength(pass, fmt.Sprintf("keyring passphrase environment variable %q", src.Env)); err != nil {
 			return nil, err
 		}
@@ -208,6 +208,15 @@ func PassphraseReader(src PassphraseSource) (io.Reader, error) {
 // (v0.53.7 client/input/input.go:16). Duplicated rather than imported because
 // the point is to reject the passphrase HERE, naming the source, instead of
 // letting the SDK reject it later with a message about something else.
+//
+// The value must be measured the way the SDK measures it. readLineFromBuf
+// returns strings.TrimSpace(pass) (input.go:110) and it is THAT string
+// GetPassword compares against MinPassLength -- so trimming only "\r\n" here,
+// as the first version did, accepted a Secret holding "  abc   " (8 bytes) that
+// reached the SDK as "abc" (3) and died with the very message this check exists
+// to prevent. Leading and trailing whitespace in a Secret is as ordinary as the
+// empty-templated-key case: a YAML block scalar, or a stringData value with a
+// stray space.
 const minKeyringPassphraseLength = 8
 
 // checkPassphraseLength rejects a passphrase cosmos-sdk will refuse anyway, and

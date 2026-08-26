@@ -49,13 +49,10 @@ type KeyProvider interface {
 	// key file's absolute path in the series, which is both unbounded and a
 	// different value than the providers use when they count their own
 	// failures, so one failed load produced two disjoint series.
-	// Kind is the provider FAMILY, and it is the metric label: every
-	// keyLoadErrors series is labelled with it. Distinct from Name(), which may
-	// carry an instance detail; a label must stay bounded. It was added for
-	// exactly this and then left uncalled while the three increment sites
-	// repeated the literal -- a dead interface method every future provider had
-	// to implement, plus three copies of a string that could drift from it.
-	// The values are unchanged, so no series moved when this was wired up.
+	// It was added for exactly that and then left uncalled, while the three
+	// increment sites repeated the literal. Wiring it up removed a dead
+	// interface method and three copies of a string that could drift from it;
+	// the values are identical, so no series moved.
 	Kind() string
 
 	// LoadKeys loads all keys from this provider.

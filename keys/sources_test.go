@@ -226,6 +226,11 @@ func TestPassphraseSourceRejectsAnEmptyOrShortSecret(t *testing.T) {
 		{name: "empty file", contents: "", wantErrPart: "is empty"},
 		{name: "only a newline", contents: "\n", wantErrPart: "is empty"},
 		{name: "shorter than cosmos-sdk allows", contents: "short", wantErrPart: "at least 8"},
+		// 8 bytes on disk, 3 after the SDK's TrimSpace. The first version of
+		// this check trimmed only "\r\n", accepted it, and the process died
+		// with the retry message this check exists to replace.
+		{name: "long enough only because of whitespace", contents: "  abc   ", wantErrPart: "at least 8"},
+		{name: "only whitespace", contents: "     \t  ", wantErrPart: "is empty"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
