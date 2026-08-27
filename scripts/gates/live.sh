@@ -394,16 +394,6 @@ case " $MATRIX " in
     ;;
 esac
 
-# Issue #25: single-relay-per-supplier claims can vanish between the WAL and
-# the claim (a supplier's entire 1-relay session goes unclaimed, with no drop
-# counter and no failure state). Reproduced at 1 relay/supplier regardless of
-# session timing; never observed at >=4 relays/supplier (300/300 billed). Until
-# it is fixed, warn when the load is thin enough to trip it -- the exact
-# served==billed assertion is then testing #25, not the change under test.
-if [ "$RELAYS_PER_TRANSPORT" -lt $(( supplier_count * 2 )) ]; then
-    gate_skip "RELAYS_PER_TRANSPORT=${RELAYS_PER_TRANSPORT} gives <2 relays per supplier (${supplier_count} suppliers): exact billing may trip issue #25"
-fi
-
 # Height at which THIS run's load begins: settlement events are later filtered
 # to sessions ending at or after it, so claims from earlier traffic on a shared
 # localnet (previous runs, bursts) cannot satisfy this run's expectations.
