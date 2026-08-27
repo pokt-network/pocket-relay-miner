@@ -19,6 +19,21 @@ found one, the filler sends the next session hunting a problem that never
 existed. **The absence of a finding is itself a finding, and often the useful
 one.**
 
+### Write every fact in the PAST TENSE, with its date
+
+A fact in the present tense rots; the same fact dated cannot. This is not style:
+three of the four counts in this file were re-measured on 2026-08-27, one day
+after being written, and **three were already false** — the remote had moved from
+6 commits behind to 13, the hand-overs from 25 to 26, and the L3 example named a
+branch state that no longer held. "Measured <date>: X was Y" stays true forever;
+"X is Y" becomes a lie on a schedule nobody watches, in a file the next session
+reads as fact.
+
+The same applies to a HEADING: read each one against what sits under it and say
+whether it still tells the truth. A heading is a claim with no token to extract,
+so no grep will ever catch it — budgetkit measured a `## Gates NOT run` section
+whose first bullet said a gate had run and was green.
+
 ## The reference files — read one the moment its trigger fires
 
 `references/conditional.md` holds the steps that do NOT fire on every close: a
@@ -30,9 +45,9 @@ transcript. Everything below fires every time.
 ## 1. The work does not end at the hand-over
 
 It ends at **asking Jorge for push and PR**. Leaving it "ready and flagged in the
-hand-over" is not a close — it is the failure, measured: **15 PRs open, none
-merged, none with human review**, 13 of them in one stacked chain whose top's
-remote sits 6 commits behind the local branch. Each session wrote its finding
+hand-over" is not a close — it is the failure. Measured 2026-08-26: **15 PRs
+were open, none merged, none with human review**, 13 of them in one stacked
+chain whose top's remote sat 6 commits behind its local branch. Each session wrote its finding
 into a hand-over nobody actioned.
 
 Committing locally may be delegated. **Push and PR are asked for, never done
@@ -77,7 +92,8 @@ Exit 1 = nothing is declared canonical, or the pointer names a missing file. Exi
 pointer nobody moved or an old hand-over that really does still govern — say
 which, in the queue.
 
-25 hand-overs have accumulated and none was ever overwritten, which is right. The
+Measured 2026-08-26: 25 hand-overs had accumulated and none was ever
+overwritten, which is right. The
 cost is the inverse: which one governs used to live in a sentence a human had to
 keep rewriting. Measured on 2026-08-19, authority was SPLIT across two files —
 `HANDOFF-2026-08-19-r3.md` opens with *"Sucede a `HANDOFF-2026-08-19-r1.md`. Ese
@@ -98,8 +114,9 @@ the gap, its size, and why — and it does not dress a choice as an obstacle.
 
 ## 5. A green gate belongs to a COMMIT, not to a branch
 
-Say which commit each level passed on. The L3 log on this branch says PASS and is
-from `2ce1d30`, **four commits behind** the HEAD it was being read as covering;
+Say which commit each level passed on. Measured 2026-08-26 on the signing-key
+branch: an L3 log said PASS and came from `2ce1d30`, **four commits behind** the
+HEAD it was being read as covering;
 the log does not record its own commit, so it had to be corroborated by comparing
 its mtime against `git log`. Two levels green on HEAD and the third green
 somewhere else reads exactly like three levels green.
@@ -135,24 +152,6 @@ valid answer that still gets written down.
 **An autonomous close cannot answer these.** See `references/conditional.md`;
 write "not asked — closed autonomously" rather than something plausible.
 
-## 7. Hand the next session its first command
-
-Last step. In the canonical hand-over's §0, write the command the next session
-runs before anything else — today that is `scripts/handoff-index.sh`, plus
-whatever this session leaves half-done (a gate to re-run, a stash to pick up).
-
-This exists because the trigger has nowhere else to live. A start-of-session
-skill has the same defect as any other skill: it fires only when somebody
-invokes it, which is the failure in rule 6. And this repository versions
-`.claude/skills/` and nothing else — `.gitignore` is `.claude/*` plus
-`!.claude/skills/`, enforced by `scripts/check-tracked-files.sh` in CI — so no
-hook can be committed to fire it automatically, deliberately. The machine's
-memory index can carry the pointer, but it is not in the repository, so a clone
-does not get it.
-
-The hand-over IS the surface the next session cannot skip. Put the command
-there, and starting stops depending on anyone remembering.
-
 ## 6c. Close the PLAN, and carry what is left
 
 `start` step 4b wrote a plan and had it confirmed. Close it item by item: done,
@@ -185,6 +184,24 @@ Named exactly, because the missing one is always the same:
 
 Then the hand-over is declared canonical in the queue's header, or
 `handoff-index.sh` will not see it.
+
+## 7. Hand the next session its first command — RUNS AFTER 7-ante, ONCE THE HAND-OVER EXISTS
+
+In the canonical hand-over's §0, write the command the next session
+runs before anything else — today that is `scripts/handoff-index.sh`, plus
+whatever this session leaves half-done (a gate to re-run, a stash to pick up).
+
+This exists because the trigger has nowhere else to live. A start-of-session
+skill has the same defect as any other skill: it fires only when somebody
+invokes it, which is the failure in rule 6. And this repository versions
+`.claude/skills/` and nothing else — `.gitignore` is `.claude/*` plus
+`!.claude/skills/`, enforced by `scripts/check-tracked-files.sh` in CI — so no
+hook can be committed to fire it automatically, deliberately. The machine's
+memory index can carry the pointer, but it is not in the repository, so a clone
+does not get it.
+
+The hand-over IS the surface the next session cannot skip. Put the command
+there, and starting stops depending on anyone remembering.
 
 ## 7-bis. Review the hand-over. It is a numbered step and it BLOCKS step 8
 
