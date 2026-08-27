@@ -622,11 +622,10 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		// Validate and meter the relay if pipeline is available
 		// Build relay context for validation/metering
 		relayCtx := &RelayContext{
-			Request:         relayReq,
-			ServiceID:       b.serviceID,
-			SupplierAddress: b.supplierAddress,
-			SessionID:       relayReq.Meta.SessionHeader.SessionId,
-
+			Request:            relayReq,
+			ServiceID:          b.serviceID,
+			SupplierAddress:    b.supplierAddress,
+			SessionID:          relayReq.Meta.SessionHeader.SessionId,
 			ArrivalBlockHeight: b.arrivalHeight,
 		}
 

@@ -94,8 +94,6 @@ type BlockEvent struct {
 
 // CacheConfig contains configuration for cache implementations.
 type CacheConfig struct {
-	// Redis configuration
-
 	// TTLBlocks is the default TTL in blocks.
 	// Default: 1 (parameters change per block)
 	TTLBlocks int64

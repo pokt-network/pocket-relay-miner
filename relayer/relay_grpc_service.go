@@ -281,11 +281,10 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 		// Build relay context for validation/metering
 		relayCtx := &RelayContext{
-			Request:         relayRequest,
-			ServiceID:       serviceID,
-			SupplierAddress: supplierOperatorAddr,
-			SessionID:       sessionID,
-
+			Request:            relayRequest,
+			ServiceID:          serviceID,
+			SupplierAddress:    supplierOperatorAddr,
+			SessionID:          sessionID,
 			ArrivalBlockHeight: arrivalHeight,
 		}
 
