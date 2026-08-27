@@ -43,7 +43,6 @@ Cache types:
   - account: ha:cache:account:{address}
   - supplier: ha:supplier:{address}
   - shared_params: ha:cache:shared_params
-
   - proof_params: ha:cache:proof_params
 
 Cache tracking sets:

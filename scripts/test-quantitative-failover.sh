@@ -237,7 +237,10 @@ done
 # --- phase 3: continue load until duration elapsed ---
 log_phase "CONTINUING LOAD THROUGH FAILOVER"
 
-# Wait for loader to finish (AfterFunc in loader stops at DURATION from its start)
+# Wait for the loader to finish. It is bounded by REQUEST COUNT, not by a
+# clock: `--load-test -n $((HTTP_RPS*DURATION))` returns when N requests are
+# done. Under the failover this test induces, throughput drops, so this wait
+# runs PAST DURATION by however long the backlog takes to drain.
 wait "$LOADER_PID" 2>/dev/null || true
 LOADER_PID=""
 log_info "Load window complete"

@@ -16,10 +16,7 @@ import (
 )
 
 func MeterCmd() *cobra.Command {
-	var (
-		sessionID string
-		showAll   bool
-	)
+	var sessionID string
 
 	cmd := &cobra.Command{
 		Use:   "meter",
@@ -47,9 +44,8 @@ cache -- inspect those with "redis cache --type service --key <id>".`,
 			}
 			defer func() { _ = client.Close() }()
 
-			// --session must win over --all: with the default already being
-			// the full listing, checking showAll first made
-			// `--session X --all` silently ignore the session filter.
+			// --session wins: the full listing is the default, so an --all that
+			// short-circuited here made `--session X --all` drop the filter.
 			if sessionID != "" {
 				return inspectSessionMeter(ctx, client, sessionID)
 			}
@@ -63,7 +59,12 @@ cache -- inspect those with "redis cache --type service --key <id>".`,
 	}
 
 	cmd.Flags().StringVar(&sessionID, "session", "", "Session ID")
-	cmd.Flags().BoolVar(&showAll, "all", false, "Show all meter keys (default behavior; kept for compatibility)")
+	// Still ACCEPTED so an existing script does not start failing on an
+	// unknown flag, but it is a no-op: listing everything is the default, and
+	// the variable it used to fill was never read. Deprecated rather than
+	// silently ignored, so a caller passing it is told once.
+	cmd.Flags().Bool("all", false, "Show all meter keys")
+	_ = cmd.Flags().MarkDeprecated("all", "listing every meter key is the default; the flag does nothing")
 
 	return cmd
 }

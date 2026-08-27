@@ -92,7 +92,6 @@ const (
 	ComponentRedisConsumer  = "redis_streams_consumer"
 
 	ComponentKeyManager       = "key_manager"
-	ComponentKeyFileProvider  = "key_file_provider"
 	ComponentKeyRingProvider  = "keyring_provider"
 	ComponentSupplierKeysFile = "supplier_keys_file"
 
@@ -112,9 +111,6 @@ const (
 	ComponentRedisBlockClientAdapter = "redis_block_client_adapter"
 	ComponentBlockSubscriberAdapter  = "block_subscriber_adapter"
 )
-
-// Cache level constants for the "cache_level" field.
-const ()
 
 // Cache type constants for the "cache_type" field.
 const (
