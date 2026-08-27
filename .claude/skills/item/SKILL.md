@@ -12,6 +12,22 @@ each step DOES differs where the products differ.
 
 1. **The success criterion is written before the work**, and it is checkable.
    `CLAUDE.md` requires it; "it works" is not one.
+
+   **"This one is mechanical" is not an exemption — it is the case that needs it
+   MOST.** Measured 2026-08-27: the criterion was written for a small gate change
+   (three checks, all met) and skipped for a branch cascade, on the grounds that
+   a rebase is mechanical. The script then took the wrong fork point, replayed
+   ZERO commits onto each new base, and **collapsed seven branches and pushed
+   them broken**. The criterion that would have caught it on the FIRST link is
+   one line — "each branch keeps the N commits it contributed" — and it is
+   exactly the `N de N` guard that had to be written afterwards, at the cost of
+   a restore. Automation does not make a missing criterion cheaper; it repeats
+   the mistake once per item.
+
+   Jorge, same day, on being asked what he had to repeat: *"solo lo de karpathy,
+   que sigo teniendo que recordarlo"*. It had already been the finding of
+   2026-08-25. A rule that fires only when someone remembers it is not a rule,
+   which is why it is step one here and not advice.
 2. **A finding is not recorded until it is in `scripts/localonly/QUEUE-deep-cleanup.md`.**
    A hand-over, a digest and a task list feel like three records and are none.
 3. **The work ends at asking for push and PR**, not at the hand-over. See
