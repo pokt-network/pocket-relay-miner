@@ -41,10 +41,20 @@ func CreateRedisClient(ctx context.Context) (*DebugRedisClient, error) {
 	// tool refusing to start for the same reason their fleet did.
 	if RedisBasePrefix != "" {
 		namespace = config.RedisNamespaceConfig{BasePrefix: RedisBasePrefix}
+		// VALIDATED, unlike before. The flag exists to get past the retired-field
+		// guard, not past the character rule -- and this is the one binary that
+		// deletes by pattern: --base-prefix '*' produced AllKeysPattern() "*:*",
+		// which flush --all and cache --invalidate hand straight to a delete.
+		// The retired-field branch of Validate cannot fire here: this namespace
+		// has nothing but a base prefix.
+		if err := namespace.Validate(); err != nil {
+			return nil, err
+		}
 		logger.Info().
 			Str("base_prefix", RedisBasePrefix).
 			Msg("using the base prefix given on the command line")
-	} else if RedisConfig != "" {
+	}
+	if RedisBasePrefix == "" && RedisConfig != "" {
 		// Try loading as miner config first
 		minerCfg, minerErr := miner.LoadConfig(RedisConfig)
 		if minerErr == nil {
@@ -72,6 +82,19 @@ func CreateRedisClient(ctx context.Context) (*DebugRedisClient, error) {
 		// No config file - use default namespace
 		namespace = config.DefaultRedisNamespaceConfig()
 		logger.Info().Msg("using default namespace config (ha:*)")
+	}
+
+	// With --base-prefix AND --config, the base prefix overrides the namespace
+	// but the config still supplies the URL. Before this, the flag returned
+	// before any config was read, so `--config x --base-prefix ha` connected to
+	// localhost and reported "No keys found" -- to an operator inspecting a
+	// keyspace they had just been told to migrate.
+	if RedisBasePrefix != "" && RedisConfig != "" && url == "" {
+		if minerCfg, err := miner.LoadConfig(RedisConfig); err == nil {
+			url = minerCfg.Redis.URL
+		} else if relayerCfg, err := relayer.LoadConfig(RedisConfig); err == nil {
+			url = relayerCfg.Redis.URL
+		}
 	}
 
 	// Allow --redis flag to override URL from config

@@ -78,17 +78,26 @@ func DefaultRedisNamespaceConfig() RedisNamespaceConfig {
 	return RedisNamespaceConfig{BasePrefix: "ha"}
 }
 
-// basePrefixRejected matches what a base prefix may NOT contain: Redis glob
-// metacharacters and whitespace.
+// basePrefixAccepted is what a base prefix may contain: ONE flat segment of
+// letters, digits, underscore and dash. It is the rule docs/REDIS.md and both
+// config schemas have always stated.
 //
-// The ban is narrow on purpose. A glob character ends up inside every SCAN
-// pattern the KeyBuilder produces, so a base of "*" makes a pattern match the
-// whole database -- and one of those patterns feeds a delete. Everything else is
-// just text: a colon or a dot ("ha:prod", "pocket.ha") only adds segments, and
-// those bases work today. Rejecting them would lock out a running deployment
-// whose only alternative is renaming the base, which relocates its ENTIRE
-// keyspace including the WAL the miner consumes.
-var basePrefixRejected = regexp.MustCompile(`[*?\[\]\\\s]`)
+// Why not just ban globs and allow the rest. A glob is the loud hazard -- it
+// reaches every SCAN pattern the KeyBuilder builds, and one of those feeds a
+// delete -- but ':' is the quiet one. The base prefix is a NAMESPACE, one
+// segment, and a colon turns it into a hierarchy the key layout does not model:
+//
+//   - a trailing colon yields the empty segment this package promises cannot
+//     exist: base "prod:" makes CacheKey("application","x") = "prod::cache:..."
+//   - two fleets nested by colon are NOT disjoint. Base "ha" has
+//     AllKeysPattern() "ha:*", which matches "ha:prod:miner:sessions:...", and
+//     `redis flush --all` deletes every key that pattern scans. One fleet wipes
+//     the other, in exactly the shared-Redis deployment the docs describe.
+//
+// Operators separating fleets have a mechanism that actually isolates: a
+// different Redis database, or a different server. A colon hierarchy only looks
+// like one (ruling: 2026-08-27).
+var basePrefixAccepted = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
 // retiredNamespaceFields returns the retired sub-prefix fields an operator has
 // set, by their YAML name, together with the constant now used instead.
@@ -121,15 +130,25 @@ func (ns RedisNamespaceConfig) retiredNamespaceFields() []string {
 // accepted -- those keys do not move -- so an operator who copied the shipped
 // example and uncommented it is not locked out.
 func (ns RedisNamespaceConfig) Validate() error {
-	if basePrefixRejected.MatchString(ns.BasePrefix) {
+	// The EFFECTIVE prefix, not the raw field: an omitted base_prefix is valid
+	// and means the default. WithDefaults runs later, at KeyBuilder
+	// construction, so validating ns.BasePrefix directly would reject every
+	// config that simply does not set it.
+	if effective := ns.WithDefaults().BasePrefix; !basePrefixAccepted.MatchString(effective) {
 		return fmt.Errorf(
-			"redis.namespace.base_prefix %q contains a glob metacharacter or whitespace. It is the first "+
-				"segment of every key AND of every SCAN pattern, and one of those patterns feeds a delete, "+
-				"so a glob here can match keys this fleet does not own. Everything else is allowed, "+
-				"including ':' and '.'. If this value is already in use, do NOT simply rename it: that "+
-				"relocates the entire keyspace, including the relay WAL the miner consumes. Drain the fleet "+
-				"and migrate",
-			ns.BasePrefix)
+			"redis.namespace.base_prefix %q is not a single namespace segment. It must match "+
+				"^[a-zA-Z0-9_-]+$ -- the rule docs/REDIS.md and both config schemas already state. "+
+				"A glob character reaches every SCAN pattern the key builder produces and one of those "+
+				"feeds a delete; a ':' is worse for being quiet: a trailing one produces keys with an "+
+				"empty segment (%q would build \"prod::cache:application:x\"), and two fleets nested by "+
+				"colon are not disjoint -- base \"ha\" scans \"ha:*\", which matches every key of a fleet "+
+				"based at \"ha:prod\", so `redis flush --all` on one deletes the other. To separate "+
+				"fleets use a different Redis database or server, which isolates for real. "+
+				"If this value is already in use, do NOT simply rename it: that relocates the entire "+
+				"keyspace, including the relay WAL the miner consumes -- drain the fleet and migrate. "+
+				"To inspect the keyspace of a config that no longer starts, the CLI takes "+
+				"--base-prefix",
+			ns.BasePrefix, "prod:")
 	}
 
 	if retired := ns.retiredNamespaceFields(); len(retired) > 0 {
@@ -139,7 +158,11 @@ func (ns RedisNamespaceConfig) Validate() error {
 				"relocate that data: the fleet would come up healthy against an empty keyspace and leave its "+
 				"sessions, meters and relay WAL behind under the old names. Remove those lines. If keys really "+
 				"live under them today, drain the fleet and migrate before upgrading. Do NOT fold the old value "+
-				"into base_prefix: that moves the ENTIRE keyspace instead of one family",
+				"into base_prefix: that moves the ENTIRE keyspace instead of one family. "+
+				"consumer_group_prefix is the exception and its hazard is different: the consumer "+
+				"group is a NAME, not a key (it is dash-joined, \"ha-miners\", so it never sits in the "+
+				"keyspace). Removing that line renames the group, which orphans its pending-entries "+
+				"list -- relays already delivered and not yet acked are then never reclaimed",
 			len(retired), strings.Join(retired, "; "))
 	}
 

@@ -70,10 +70,18 @@ string, and `cache_prefix: "supplier"` made the supplier SCAN pattern
 supplier --invalidate`, which deletes what it scans. With the layout constant,
 each pattern provably matches only its own family, and a test pins it.
 
-The base prefix stays configurable because it is safe by position: it is the
-first segment of every key, so two base prefixes are two disjoint keyspaces —
-one Redis, several fleets. It must match `^[a-zA-Z0-9_-]+$`; a glob character
-there would end up inside every SCAN pattern.
+The base prefix stays configurable, and it must match `^[a-zA-Z0-9_-]+$` — ONE
+flat segment, enforced at startup. That rule is what makes two base prefixes two
+disjoint keyspaces, so one Redis can host several fleets. Position alone does not
+give you that: a colon-nested base would not be disjoint at all, because a fleet
+based at `ha` scans `ha:*`, which matches every key of a fleet based at
+`ha:prod`, and that pattern is what `redis flush --all` deletes. A glob character
+is rejected for the same family of reason — it would end up inside every SCAN
+pattern the key builder produces.
+
+If you want stronger isolation than a shared keyspace with distinct prefixes,
+use a different Redis database or a different server. That isolates; a prefix
+hierarchy only looks like it does.
 
 **Upgrading from a config that set the per-family prefixes**: those keys would
 move, so startup fails with a message naming each field rather than coming up
