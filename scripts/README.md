@@ -2,11 +2,22 @@
 
 Integration and load-test scripts that run against a live Tilt localnet.
 
+**Checking a change is good is [`gates/`](gates/README.md)** — `make gate` runs
+the same checks CI runs, in cost tiers. The scripts below are scenarios you
+reach for deliberately; the gates are what every change passes.
+
 **How to test is documented in [`../docs/testing/`](../docs/testing/README.md):**
 
 - [`TILT.md`](../docs/testing/TILT.md) — bring the localnet up, port map, and the HA/chaos suite.
-- [`PATH_HEY.md`](../docs/testing/PATH_HEY.md) — load/lifecycle testing through the PATH gateway with `hey`.
 - [`DIRECT_CLI.md`](../docs/testing/DIRECT_CLI.md) — signed relays straight to the relayer via the `relay` CLI.
+
+> **Scripts that drive PATH (`:3069`) cannot tell you whether relays were
+> mined.** PATH answers a relayer `503` with `200` and an empty body, so a
+> status-code check reports success either way — a real run showed
+> `20000/20000 OK` with the WAL at `XLEN 0`. Where a script below sends traffic
+> through PATH, treat its success count as "the gateway replied", and confirm
+> the outcome in Redis (`redis streams`, `redis submissions`) or with the CLI at
+> `:8180`.
 
 This file is just an inventory of what's here. All scripts assume the
 `kind-kind` context and the localnet defaults (PATH `:3069`, relayer `:8180`,
@@ -21,17 +32,13 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 | `test-chaos-leader-flush-gap.sh` | Kills the miner leader in the claim-flush→proof gap; regression guard for SMST lazy-load on failover. |
 | `test-quantitative-failover.sh` | Mid-flight miner scale-down; asserts on-chain claimed relays == loader successes within a drift budget. |
 | `verify-rebalance-fix.sh` | Rebalancer veto regression (issue #7): both miner replicas must end with non-zero claimed_count. |
-| `verify-claim-payment.sh` | End-to-end claim payment: sends relays, watches the claim tx, confirms `EventClaimSettled` on-chain. |
 
 ## Load / lifecycle (PATH + hey)
 
 | Script | What it does |
 |---|---|
-| `test-continuous-load.sh` | Sustained ~200 RPS (override `--rps`) until Ctrl-C; for memory/CPU leak watching. |
-| `test-multi-supplier-10k.sh` | 10k relays with no supplier pinning; forces concurrent claim/prove across every supplier. |
+| `test-continuous-load.sh` | Sustained signed load via the relay CLI at :8180 (override `--rps`) until Ctrl-C; reports Redis memory/session/stream growth for leak watching. |
 | `test-stress-max.sh` | ~1000 RPS HTTP + 200 concurrent WebSocket for ~5 min; asserts claims/proofs via Loki. |
-| `test-smst-claim-and-ws.sh` | HTTP claim/proof load + concurrent WebSocket writes (SMST-root + WS-mutex regression). |
-| `test-round-robin.sh` | Tallies `result.backend_id` to confirm even distribution across the multi-backend HTTP pool. |
 
 ## Direct CLI / feature validation
 
@@ -42,8 +49,7 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 
 ## Subdirectories
 
-- `loadtest/` — backend RPS-ceiling measurement and per-service pool tuning (`backends.sh`, `http-verify.go`). See [`loadtest/README.md`](loadtest/README.md).
+- `loadtest/` — backend RPS-ceiling measurement and per-service pool tuning (`backends.sh`). See [`loadtest/README.md`](loadtest/README.md).
 - `ws-test/` — manual WebSocket tester (session rollover, not covered by the CLI `relay websocket` mode).
-- `ws-stress/` — WebSocket memory/leak stress tester.
 - `lib/` — shared bash helpers (`common.sh`).
 - `localonly/` — gitignored; operator-specific config (see the operator-data rule in [`../CLAUDE.md`](../CLAUDE.md)).

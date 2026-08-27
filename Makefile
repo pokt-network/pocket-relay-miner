@@ -49,32 +49,19 @@ install: ## Install the binary to $GOPATH/bin
 	@echo "Install complete"
 
 test: ## Run tests (PKG=package_name for specific package, VERBOSE=1 for verbose output)
-	@echo "Running tests..."
-	@if [ -n "$(PKG)" ]; then \
-		if [ "$(PKG)" = "cache" ]; then \
-			echo "Running cache tests sequentially (143 tests with shared miniredis)..."; \
-			go test $(if $(VERBOSE),-v) -tags test -p 1 -parallel 1 ./$(PKG)/...; \
-		else \
-			go test $(if $(VERBOSE),-v) -tags test -p 4 -parallel 4 ./$(PKG)/...; \
-		fi; \
-	else \
-		go test $(if $(VERBOSE),-v) -tags test -p 4 -parallel 4 ./...; \
-	fi
+	@./scripts/gates/tests.sh
 
 test_miner: ## Run miner tests exclusively with race detection (Rule #1: no flakes, no races, no mocks)
-	@echo "Running miner tests with race detection..."
-	@echo "Rule #1: No flaky tests, no race conditions, no timeout weird tests, no mocks"
-	@go test -v -tags test -race -count=1 -p 1 -parallel 1 ./miner/...
+	@PKG=miner ./scripts/gates/race.sh
+
+race: ## Run the whole tree under the race detector (Rule #1; PKG=package to narrow)
+	@./scripts/gates/race.sh
+
+gate: ## Run the quality gates (LEVEL=1 static, 2 +tests/race/coverage, 3 +live)
+	@./scripts/gates/all.sh --level $(or $(LEVEL),2)
 
 test-coverage: ## Run tests with coverage (use PKG=package for specific package)
-	@echo "Running tests with coverage..."
-ifdef PKG
-	@go test -v -tags test -p 4 -parallel 4 -coverprofile=coverage.out ./$(PKG)/...
-else
-	@go test -v -tags test -p 4 -parallel 4 -coverprofile=coverage.out ./...
-endif
-	@go tool cover -html=coverage.out -o coverage.html
-	@echo "Coverage report generated: coverage.html"
+	@COVERAGE_HTML=1 ./scripts/gates/coverage.sh
 
 clean: ## Clean build artifacts
 	@echo "Cleaning build artifacts..."
@@ -133,7 +120,9 @@ build-backend: proto-backend ## Build the backend test server
 # =============================================================================
 # Tilt Development Environments
 # =============================================================================
-# Pass additional tilt args via ARGS, e.g.: make tilt-up-docker ARGS="--stream"
+# Pass additional tilt args via ARGS, e.g.: make tilt-up-k8s ARGS="--stream"
+
+
 
 tilt-up-docker: ## Start Docker Compose dev environment with Tilt
 	@echo "Starting Docker Compose Tilt environment..."

@@ -52,7 +52,6 @@ fi
 # *SPEC* pattern would be wrong.
 working_doc_paths=(
     '.planning'
-    '.claude'
     'docs/superpowers'
     'scripts/localonly'
     ':(glob)**/HANDOFF-*.md'
@@ -74,6 +73,33 @@ if [ -n "$working_docs" ]; then
     echo ""
     echo "If this is genuinely documentation for users of this software, put it"
     echo "in docs/ under a name that says so."
+    echo ""
+    failed=1
+fi
+
+# Check 3 governs .claude/, which is local by default with exactly ONE shareable
+# subtree: .claude/skills/, the repository's own agent instructions, reviewed as
+# code like any other file.
+#
+# This is an allowlist rather than a list of forbidden paths, because the danger
+# here is specific and measured: .claude/settings.local.json holds a permission
+# allowlist that, on this repository today, contains an operator ssh alias and
+# personal home paths -- exactly what CONTRIBUTING.md forbids committing. An
+# allowlist keeps that file, agent worktrees, and anything a future tool decides
+# to drop under .claude/ out by default, instead of only the paths someone
+# thought to enumerate.
+claude_tracked="$(git ls-files -- '.claude' | grep -v '^\.claude/skills/' || true)"
+if [ -n "$claude_tracked" ]; then
+    echo "ERROR: these files under .claude/ are tracked, but only .claude/skills/ may be:"
+    echo ""
+    echo "$claude_tracked" | indent
+    echo ""
+    echo ".claude/ holds machine-local agent state: permission allowlists that"
+    echo "leak operator hostnames and personal paths, agent worktrees, scratch."
+    echo "Only .claude/skills/ is shared, because it is instructions written for"
+    echo "this repository. Untrack the rest, keeping the files on disk:"
+    echo ""
+    echo "    git rm -r --cached <path>"
     echo ""
     failed=1
 fi
