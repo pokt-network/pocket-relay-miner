@@ -266,25 +266,86 @@ func (s *RedisBlockSubscriber) PublishBlockHeight(ctx context.Context, event Blo
 	}
 	s.mu.RUnlock()
 
+	return publishBlockEvent(ctx, s.logger, s.redisClient, event)
+}
+
+// publishBlockEvent writes one block event onto the shared channel. It is the
+// single implementation of the block-event wire format: both the subscriber
+// (which can also publish) and the publish-only RedisBlockPublisher go through
+// here, so the channel name, the JSON shape and the counter cannot drift apart
+// between the two.
+func publishBlockEvent(
+	ctx context.Context,
+	logger logging.Logger,
+	redisClient *redisutil.Client,
+	event BlockEvent,
+) error {
 	// Set the timestamp if not set
 	if event.Timestamp.IsZero() {
 		event.Timestamp = time.Now()
 	}
 
-	channel := s.redisClient.KB().BlockEventChannel()
+	channel := redisClient.KB().BlockEventChannel()
 
 	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("failed to marshal block event: %w", err)
 	}
 
-	if err = s.redisClient.Publish(ctx, channel, data).Err(); err != nil {
+	if err = redisClient.Publish(ctx, channel, data).Err(); err != nil {
 		return fmt.Errorf("failed to publish block event: %w", err)
 	}
 
 	blockEventsPublished.Inc()
 
-	s.logger.Debug().Int64("height", event.Height).Msg("published block event")
+	logger.Debug().Int64("height", event.Height).Msg("published block event")
+	return nil
+}
+
+// RedisBlockPublisher publishes block events onto the shared channel and does
+// NOTHING ELSE. It exists because the leader needs to publish but has no reason
+// to receive: RedisBlockSubscriber.Start always spawns a pub/sub receive loop,
+// so using one as a publisher made the leader consume every event it published
+// and hand it to zero subscribers. Measured on a resting localnet before this
+// type existed: the leader reported 480 received against 240 published, exactly
+// double, while a follower reported 240 — which put a per-process floor under
+// ha_cache_block_events_received_total that no gate could assert against.
+//
+// There is no Start: a publisher has no background work. Close is present so
+// callers can treat it like every other component they own.
+type RedisBlockPublisher struct {
+	logger      logging.Logger
+	redisClient *redisutil.Client
+
+	mu     sync.RWMutex
+	closed bool
+}
+
+// NewRedisBlockPublisher creates a publish-only block event endpoint.
+func NewRedisBlockPublisher(logger logging.Logger, redisClient *redisutil.Client) *RedisBlockPublisher {
+	return &RedisBlockPublisher{
+		logger:      logging.ForComponent(logger, logging.ComponentBlockSubscriber),
+		redisClient: redisClient,
+	}
+}
+
+// PublishBlockHeight publishes a new block height to all subscribers.
+func (p *RedisBlockPublisher) PublishBlockHeight(ctx context.Context, event BlockEvent) error {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return fmt.Errorf("publisher is closed")
+	}
+	p.mu.RUnlock()
+
+	return publishBlockEvent(ctx, p.logger, p.redisClient, event)
+}
+
+// Close marks the publisher closed. Idempotent.
+func (p *RedisBlockPublisher) Close() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.closed = true
 	return nil
 }
 
