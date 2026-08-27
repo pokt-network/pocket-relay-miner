@@ -1333,9 +1333,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			m.config.ProofChecker.SetClaimedRootProvider(smstManager)
 		}
 
-		// Wire stream deleter for cleanup after session settlement
-		// This stops the consumer from reading stale messages and frees Redis memory
-
 		// Wire the process-wide submission tracker + rebroadcast store (built
 		// once; see ensureSharedTrackers and the field docs). The submission
 		// tracker records tx hashes / success / errors / timing; the rebroadcast
