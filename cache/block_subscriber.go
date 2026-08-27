@@ -302,6 +302,14 @@ func publishBlockEvent(
 	return nil
 }
 
+// redisBlockPublisherComponentName labels this endpoint's logs. It is NOT
+// ComponentBlockSubscriber: on the leader, a publish line tagged block_subscriber
+// tells an operator reading logs during an incident that the leader is
+// consuming, which is the exact wrong conclusion and the confusion this type
+// exists to end. It is not blockPublisherComponentName either -- that belongs to
+// BlockPublisher, the chain watcher one layer above.
+const redisBlockPublisherComponentName = "redis_block_publisher"
+
 // RedisBlockPublisher publishes block events onto the shared channel and does
 // NOTHING ELSE. It exists because the leader needs to publish but has no reason
 // to receive: RedisBlockSubscriber.Start always spawns a pub/sub receive loop,
@@ -324,7 +332,7 @@ type RedisBlockPublisher struct {
 // NewRedisBlockPublisher creates a publish-only block event endpoint.
 func NewRedisBlockPublisher(logger logging.Logger, redisClient *redisutil.Client) *RedisBlockPublisher {
 	return &RedisBlockPublisher{
-		logger:      logging.ForComponent(logger, logging.ComponentBlockSubscriber),
+		logger:      logging.ForComponent(logger, redisBlockPublisherComponentName),
 		redisClient: redisClient,
 	}
 }
