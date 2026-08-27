@@ -105,12 +105,17 @@ prov_repo="$(mktemp -d)"
 # cached agent, would leave a directory that is not a repository -- against
 # which the "clean tree" and "names HEAD" assertions below would both pass for
 # the wrong reason. So: signing off, and the setup's exit status is CHECKED.
-prov_setup_err="$(
+# The redirection goes INSIDE the substitution. Written as `)" 2>&1` it is a
+# simple command made of an assignment plus a redirection, so the redirection
+# applies to THIS shell -- fd 2 pointed at its own fd 1 -- and never reaches
+# the subshell: the capture came back empty while git's error text leaked to
+# stdout. Measured 2026-08-27 with `git definitely-not-a-flag`.
+prov_setup_err="$( {
     cd "$prov_repo" || exit 1
     git init -q . &&
         git -c user.email=gate@test -c user.name=gate -c commit.gpgsign=false \
             commit -q --allow-empty -m 'first'
-)" 2>&1
+} 2>&1 )"
 prov_setup_rc=$?
 if [ "$prov_setup_rc" -ne 0 ]; then
     printf '  FAIL gate_provenance fixture: could not build the throwaway repo (rc=%s): %s\n' \
@@ -148,10 +153,13 @@ esac
 
 : >"$prov_repo/uncommitted"
 prov_dirty="$(cd "$prov_repo" && gate_provenance)"
+# `DIRTY TREE`, not the `NOT attributable` the two branches share: matching the
+# shared phrase would stay green if the helper regressed to reporting a dirty
+# tree as UNKNOWN, which is the neighbouring branch (review, 2026-08-27).
 case "$prov_dirty" in
-*"NOT attributable"*) ;;
+*"DIRTY TREE"*) ;;
 *)
-    printf '  FAIL gate_provenance on a DIRTY tree: want the run marked NOT attributable, got %s\n' \
+    printf '  FAIL gate_provenance on a DIRTY tree: want the run marked DIRTY TREE, got %s\n' \
         "$prov_dirty" >&2
     failures=$((failures + 1))
     ;;
@@ -161,8 +169,25 @@ esac
 # produce, and only this assertion tells them apart. Found by review on
 # 2026-08-27, when the helper printed `revision (none) ((none)) -- clean tree`
 # from outside a repository.
+#
+# TMPDIR is not guaranteed to sit outside every repository -- a $HOME that is
+# itself a dotfiles repo is the ordinary case -- and git would then discover
+# THAT repo and print a revision, failing this assertion for a reason that has
+# nothing to do with the helper. GIT_CEILING_DIRECTORIES stops the upward
+# search, but only for an entry STRICTLY ABOVE the working directory: measured
+# 2026-08-27, a ceiling equal to the working directory was ignored and the
+# parent repo was found anyway, while the parent as ceiling worked. Hence
+# dirname, plus an explicit precondition so a fixture that is still inside a
+# repo says so instead of failing as if the helper were broken.
 prov_norepo_dir="$(mktemp -d)"
-prov_norepo="$(cd "$prov_norepo_dir" && gate_provenance)"
+prov_norepo_ceiling="$(dirname "$prov_norepo_dir")"
+if (cd "$prov_norepo_dir" && GIT_CEILING_DIRECTORIES="$prov_norepo_ceiling" \
+    git rev-parse --show-toplevel >/dev/null 2>&1); then
+    printf '  FAIL gate_provenance fixture: %s is inside a git repository even with a ceiling at %s, so the no-repo case cannot be exercised here\n' \
+        "$prov_norepo_dir" "$prov_norepo_ceiling" >&2
+    failures=$((failures + 1))
+fi
+prov_norepo="$(cd "$prov_norepo_dir" && GIT_CEILING_DIRECTORIES="$prov_norepo_ceiling" gate_provenance)"
 rmdir "$prov_norepo_dir"
 case "$prov_norepo" in
 *"NOT attributable"*) ;;

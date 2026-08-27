@@ -163,7 +163,9 @@ printf '%s=== summary (level %s) ===%s\n' "$GATE_BOLD" "$level" "$GATE_RESET"
 gate_provenance
 
 closing_head="$(git rev-parse HEAD 2>/dev/null)" || closing_head=''
+head_moved=0
 if [ "$opening_head" != "$closing_head" ]; then
+    head_moved=1
     printf '%sHEAD MOVED DURING THIS RUN%s (%s -> %s) -- the gates below did not all measure one commit\n' \
         "$GATE_YELLOW" "$GATE_RESET" \
         "${opening_head:-unknown}" "${closing_head:-unknown}"
@@ -181,6 +183,21 @@ fi
 if [ "${#failed_gates[@]}" -ne 0 ]; then
     printf '%sFAIL%s level %s -- failed: %s\n' \
         "$GATE_RED" "$GATE_RESET" "$level" "${failed_gates[*]}"
+    exit 1
+fi
+
+# A run whose HEAD moved verified NEITHER commit, so it must not end on a line a
+# reader -- or a script reading $? -- records as a green gate for the HEAD being
+# proposed. That is the exact failure this provenance work exists to close, and
+# a warning many screens above the verdict is the same "two SHAs far apart are
+# not a check" the opening comment argues against. It is RED, following the rule
+# already applied to a gate that ran and measured nothing.
+#
+# A DIRTY tree is deliberately NOT red: gates are run mid-edit on purpose, and
+# gate_provenance has already said so twice.
+if [ "$head_moved" -eq 1 ]; then
+    printf '%sFAIL%s level %s -- the gates passed, but HEAD moved mid-run: this run attributes to no commit, re-run it\n' \
+        "$GATE_RED" "$GATE_RESET" "$level"
     exit 1
 fi
 
