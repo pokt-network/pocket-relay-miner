@@ -279,6 +279,32 @@ gate_repo_root() {
     cd "$root" || exit 1
 }
 
+# gate_provenance -- name the revision this run measured. Printed when the run
+# opens and again beside the verdict, so a log can be checked against the HEAD
+# actually being proposed.
+#
+# Measured 2026-08-27: a level 3 PASS log contained no line naming a commit, so
+# tying that run to `13a7362` needed a comparison of file timestamps against
+# `git log`. The rule "the gates must be green on the exact HEAD" was
+# procedural only, and it had already failed that week -- green on `c0ff4d2`
+# while HEAD was `13a7362`.
+#
+# A dirty tree is announced, not failed: gates are run mid-edit on purpose. But
+# the code that ran is then not the code the SHA names, so the run is not
+# attributable to that commit and the line must say so.
+gate_provenance() {
+    local head branch
+    head="$(git rev-parse --short HEAD 2>/dev/null)" || head='(none)'
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch='(none)'
+    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+        printf '%srevision%s %s (%s) -- %sDIRTY TREE: this run is NOT attributable to that commit%s\n' \
+            "$GATE_BOLD" "$GATE_RESET" "$head" "$branch" "$GATE_YELLOW" "$GATE_RESET"
+    else
+        printf '%srevision%s %s (%s) -- clean tree\n' \
+            "$GATE_BOLD" "$GATE_RESET" "$head" "$branch"
+    fi
+}
+
 # gate_pkg_target -- the package pattern a gate should act on, honouring PKG.
 # PKG=miner narrows to ./miner/...; unset means the whole tree.
 # gate_pkg_normalized -- PKG with the shapes shell completion produces

@@ -84,6 +84,8 @@ fi
 exercise_dir="$(mktemp -d)"
 trap 'rm -rf "$exercise_dir"' EXIT
 
+gate_provenance
+
 failed_gates=()
 skipped_gates=()
 # Gates that ran and exercised nothing (exit 3). Reported as NOT RUN, never as
@@ -154,6 +156,7 @@ fi
 # ---------------------------------------------------------------------------
 echo
 printf '%s=== summary (level %s) ===%s\n' "$GATE_BOLD" "$level" "$GATE_RESET"
+gate_provenance
 
 if [ "${#skipped_gates[@]}" -ne 0 ]; then
     printf '%sNOT RUN:%s %s (gate missing)\n' "$GATE_YELLOW" "$GATE_RESET" "${skipped_gates[*]}"

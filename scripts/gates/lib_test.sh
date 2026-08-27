@@ -90,6 +90,50 @@ if [ "$bad_rc" -eq 0 ]; then
     failures=$((failures + 1))
 fi
 
+# gate_provenance: the line that ties a green log to a commit. The dirty-tree
+# branch is the load-bearing one -- a clean-looking "revision <sha>" on a tree
+# that does not match that sha is exactly the false attribution the helper was
+# added to prevent (2026-08-27). Run against a throwaway repo, because the
+# repository this test lives in is dirty precisely when someone is editing it.
+prov_repo="$(mktemp -d)"
+(
+    cd "$prov_repo" || exit 1
+    git init -q .
+    git -c user.email=gate@test -c user.name=gate commit -q --allow-empty -m 'first'
+) >/dev/null 2>&1
+
+prov_clean="$(cd "$prov_repo" && gate_provenance)"
+case "$prov_clean" in
+*"clean tree"*) ;;
+*)
+    printf '  FAIL gate_provenance on a clean tree: want a line saying "clean tree", got %s\n' \
+        "$prov_clean" >&2
+    failures=$((failures + 1))
+    ;;
+esac
+
+prov_head="$(cd "$prov_repo" && git rev-parse --short HEAD)"
+case "$prov_clean" in
+*"$prov_head"*) ;;
+*)
+    printf '  FAIL gate_provenance: the line does not name HEAD (%s), so it cannot tie the run to a commit: %s\n' \
+        "$prov_head" "$prov_clean" >&2
+    failures=$((failures + 1))
+    ;;
+esac
+
+: >"$prov_repo/uncommitted"
+prov_dirty="$(cd "$prov_repo" && gate_provenance)"
+case "$prov_dirty" in
+*"NOT attributable"*) ;;
+*)
+    printf '  FAIL gate_provenance on a DIRTY tree: want the run marked NOT attributable, got %s\n' \
+        "$prov_dirty" >&2
+    failures=$((failures + 1))
+    ;;
+esac
+rm -rf "$prov_repo"
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1
