@@ -59,7 +59,11 @@ if go test -json -race -count=1 -tags test ${parallelism[@]+"${parallelism[@]}"}
     fi
 else
     gate_fail "race detector or tests failed:"
-    gate_detail "$(gate_json_output "$json_out" | grep -E 'DATA RACE|^(---|FAIL|panic)' || gate_json_output "$json_out")" 40
+    # `tail`, not the head the fallback used to print: when the grep matches
+    # nothing the interesting part is the END of the run, and the head is a wall
+    # of passes that says nothing about the failure (measured 2026-08-27).
+    gate_detail "$(gate_json_output "$json_out" | grep -E 'DATA RACE|^(---|FAIL|panic)' || gate_json_output "$json_out" | tail -40)" 40
+    gate_keep_evidence "$json_out" race
 fi
 rm -f "$json_out"
 

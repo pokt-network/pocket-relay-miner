@@ -70,7 +70,10 @@ if go test -json ${verbose[@]+"${verbose[@]}"} -tags test ${parallelism[@]+"${pa
     fi
 else
     gate_fail "tests failed:"
-    gate_detail "$(gate_json_output "$json_out" | grep -E '^(---|FAIL|panic|\s+.*_test\.go:)' || gate_json_output "$json_out")" 40
+    # `tail` on the fallback, and the raw output kept: see the comment on
+    # gate_keep_evidence -- a red whose cause the gate deleted forces a re-run.
+    gate_detail "$(gate_json_output "$json_out" | grep -E '^(---|FAIL|panic|\s+.*_test\.go:)' || gate_json_output "$json_out" | tail -40)" 40
+    gate_keep_evidence "$json_out" tests
 fi
 rm -f "$json_out"
 

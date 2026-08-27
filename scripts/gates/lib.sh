@@ -180,6 +180,32 @@ gate_detail() {
     printf '%s\n' "$text" | head -"$max" | sed 's/^/           /'
 }
 
+# gate_keep_evidence <file> <gate name> -- keep a FAILING gate's raw output and
+# say where it went.
+#
+# Measured 2026-08-27: `race.sh` went red, printed forty `--- PASS` lines
+# because its `grep` for DATA RACE / --- / FAIL / panic matched nothing and the
+# fallback dumped the HEAD of the run, then deleted the JSON on the way out. The
+# cause was destroyed by the gate that found it, and the only way left to
+# diagnose was to re-run -- which is exactly what a red must not force, since a
+# second run that comes back green has hidden whatever produced the first. A
+# gate that cannot say WHY it failed is a gate that gets re-run until it is
+# green.
+gate_keep_evidence() {
+    local src="$1" name="$2" dir dest
+    dir="scripts/localonly/_state/gate-evidence"
+    if ! mkdir -p "$dir" 2>/dev/null; then
+        printf '           (could not keep the raw output: %s is not writable)\n' "$dir"
+        return 0
+    fi
+    dest="$dir/${name}-$(date +%Y%m%d-%H%M%S).log"
+    if cp "$src" "$dest" 2>/dev/null; then
+        printf '           raw output kept at %s\n' "$dest"
+    else
+        printf '           (could not keep the raw output at %s)\n' "$dest"
+    fi
+}
+
 # gate_verdict <gate name> -- print the final line and exit with the gate's
 # status. Call this as the last statement of every gate script.
 gate_verdict() {

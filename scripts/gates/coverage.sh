@@ -93,7 +93,13 @@ if out="$(go test -tags test "${parallelism[@]}" -coverprofile=coverage.out "$pk
     fi
 else
     gate_fail "tests failed under coverage instrumentation:"
-    gate_detail "$(printf '%s\n' "$out" | grep -E '^(---|FAIL|panic)' || printf '%s' "$out")" 40
+    # `tail` on the fallback, and the raw output kept rather than left to die
+    # with the variable holding it: see the comment on gate_keep_evidence.
+    gate_detail "$(printf '%s\n' "$out" | grep -E '^(---|FAIL|panic)' || printf '%s\n' "$out" | tail -40)" 40
+    coverage_evidence="$(mktemp)"
+    printf '%s\n' "$out" >"$coverage_evidence"
+    gate_keep_evidence "$coverage_evidence" coverage
+    rm -f "$coverage_evidence"
     printf '         coverage timing differs from a plain run -- this can be a\n'
     printf '         real flake that %smake test%s hides, not a coverage bug\n' \
         "$GATE_BOLD" "$GATE_RESET"

@@ -201,6 +201,25 @@ esac
 rm -rf "$prov_repo"
 prov_repo=''
 
+# gate_keep_evidence: the raw output of a FAILING gate must survive the gate.
+# Asserted on the CONTENT, not just on a path being printed -- a path naming an
+# empty or missing file is the same "looked nowhere" signal in another costume.
+keep_src="$(mktemp)"
+printf 'first line\nTHE ACTUAL CAUSE\n' >"$keep_src"
+keep_out="$(gate_keep_evidence "$keep_src" libtest-probe)"
+keep_dest="$(printf '%s' "$keep_out" | grep -oE 'scripts/localonly/[^ ]+')"
+if [ -z "$keep_dest" ] || [ ! -f "$keep_dest" ]; then
+    printf '  FAIL gate_keep_evidence: no readable file behind the reported path: %s\n' \
+        "$keep_out" >&2
+    failures=$((failures + 1))
+elif ! grep -q 'THE ACTUAL CAUSE' "$keep_dest"; then
+    printf '  FAIL gate_keep_evidence: the kept file does not carry the output it was given (%s)\n' \
+        "$keep_dest" >&2
+    failures=$((failures + 1))
+fi
+rm -f "$keep_src"
+[ -n "$keep_dest" ] && rm -f "$keep_dest"
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1
