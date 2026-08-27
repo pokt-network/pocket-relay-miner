@@ -247,11 +247,8 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		instanceID,
 		leaderConfig,
 	)
-	if err = globalLeader.Start(ctx); err != nil {
-		return fmt.Errorf("failed to start global leader elector: %w", err)
-	}
-	defer func() { globalLeader.Close() }()
-
+	// NOT started yet: the election loop must not be able to fire OnElected
+	// before registerLeaderCallbacks has wired it. See where Start now lives.
 	// Use dynamic logger that evaluates replica status at log time
 	// The replica field will automatically reflect leader election changes
 	logger = logging.ForMinerDynamic(logger, instanceID, globalLeader)
@@ -328,15 +325,22 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	leaderErrCh := make(chan error, 1)
 	registerLeaderCallbacks(logger, globalLeader, leaderController, leaderErrCh)
 
-	// If already a leader at startup, start immediately
-	if globalLeader.IsLeader() {
-		logger.Info().Msg("starting leader controller (already leader at startup)")
-		if err = leaderController.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start leader controller: %w", err)
-		}
-	} else {
-		logger.Info().Msg("leader controller in standby mode (not leader)")
+	// The election loop starts HERE, once its callbacks exist, and the callback
+	// is the ONLY thing that starts the leader controller.
+	//
+	// Before this, Start ran ~80 lines earlier and main also started the
+	// controller behind an IsLeader() check. Acquiring the lock in that window
+	// meant the elector's goroutine and main both called
+	// LeaderController.Start; the loser got "leader controller already active",
+	// which the error channel added in this stack then reported as a leader
+	// failure -- shutting the miner down right after a successful start.
+	// invokeOnElectedCallbacks fires on the FIRST acquisition too, so nothing
+	// is lost by dropping the manual branch: one owner, no window.
+	if err = globalLeader.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start global leader elector: %w", err)
 	}
+	defer func() { globalLeader.Close() }()
+	logger.Info().Msg("leader election started; the controller starts on election")
 	defer func() {
 		// closeErr, NOT err: see the Redis defer above — assigning to the
 		// named result here discarded the error this function returns.

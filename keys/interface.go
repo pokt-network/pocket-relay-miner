@@ -72,7 +72,6 @@ type KeyProvider interface {
 
 // KeyManagerConfig contains configuration for the KeyManager.
 type KeyManagerConfig struct {
-
 	// HotReloadEnabled enables automatic key reload on file changes.
 	HotReloadEnabled bool
 
