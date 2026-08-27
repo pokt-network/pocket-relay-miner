@@ -3,11 +3,12 @@ package redis
 import (
 	"context"
 	"fmt"
+	"os"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	"github.com/pokt-network/pocket-relay-miner/miner"
-	"github.com/pokt-network/pocket-relay-miner/relayer"
 	transportredis "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -30,71 +31,9 @@ func CreateRedisClient(ctx context.Context) (*DebugRedisClient, error) {
 		Async:  false,
 	})
 
-	var url string
-	var namespace config.RedisNamespaceConfig
-
-	// An explicit base prefix wins over a config file, and needs no config at
-	// all. It exists because the two are otherwise coupled in the worst place:
-	// the namespace guard rejects a config whose keys this version would
-	// relocate, and this CLI resolves its namespace through the same LoadConfig,
-	// so the operator told to "inspect and migrate your keys" would find this
-	// tool refusing to start for the same reason their fleet did.
-	if RedisBasePrefix != "" {
-		namespace = config.RedisNamespaceConfig{BasePrefix: RedisBasePrefix}
-		// VALIDATED, unlike before. The flag exists to get past the retired-field
-		// guard, not past the character rule -- and this is the one binary that
-		// deletes by pattern: --base-prefix '*' produced AllKeysPattern() "*:*",
-		// which flush --all and cache --invalidate hand straight to a delete.
-		// The retired-field branch of Validate cannot fire here: this namespace
-		// has nothing but a base prefix.
-		if err := namespace.Validate(); err != nil {
-			return nil, err
-		}
-		logger.Info().
-			Str("base_prefix", RedisBasePrefix).
-			Msg("using the base prefix given on the command line")
-	}
-	if RedisBasePrefix == "" && RedisConfig != "" {
-		// Try loading as miner config first
-		minerCfg, minerErr := miner.LoadConfig(RedisConfig)
-		if minerErr == nil {
-			url = minerCfg.Redis.URL
-			namespace = minerCfg.Redis.Namespace
-			logger.Info().
-				Str("config_file", RedisConfig).
-				Str("type", "miner").
-				Msg("loaded namespace config from miner config")
-		} else {
-			// Try as relayer config
-			relayerCfg, relayerErr := relayer.LoadConfig(RedisConfig)
-			if relayerErr == nil {
-				url = relayerCfg.Redis.URL
-				namespace = relayerCfg.Redis.Namespace
-				logger.Info().
-					Str("config_file", RedisConfig).
-					Str("type", "relayer").
-					Msg("loaded namespace config from relayer config")
-			} else {
-				return nil, fmt.Errorf("failed to load config as miner or relayer: miner_err=%v, relayer_err=%v", minerErr, relayerErr)
-			}
-		}
-	} else {
-		// No config file - use default namespace
-		namespace = config.DefaultRedisNamespaceConfig()
-		logger.Info().Msg("using default namespace config (ha:*)")
-	}
-
-	// With --base-prefix AND --config, the base prefix overrides the namespace
-	// but the config still supplies the URL. Before this, the flag returned
-	// before any config was read, so `--config x --base-prefix ha` connected to
-	// localhost and reported "No keys found" -- to an operator inspecting a
-	// keyspace they had just been told to migrate.
-	if RedisBasePrefix != "" && RedisConfig != "" && url == "" {
-		if minerCfg, err := miner.LoadConfig(RedisConfig); err == nil {
-			url = minerCfg.Redis.URL
-		} else if relayerCfg, err := relayer.LoadConfig(RedisConfig); err == nil {
-			url = relayerCfg.Redis.URL
-		}
+	url, namespace, err := resolveTarget(logger)
+	if err != nil {
+		return nil, err
 	}
 
 	// Allow --redis flag to override URL from config
@@ -132,4 +71,87 @@ func CreateRedisClient(ctx context.Context) (*DebugRedisClient, error) {
 type DebugRedisClient struct {
 	*transportredis.Client
 	Logger logging.Logger
+}
+
+// namespaceFromConfig reads the TWO values this tool needs out of a miner or
+// relayer config file: the Redis URL and the namespace.
+//
+// Deliberately NOT miner.LoadConfig / relayer.LoadConfig. Those validate the
+// whole config, so a file the fleet rejects -- which is precisely when an
+// operator reaches for this tool -- also stopped the tool: a config missing an
+// unrelated field like pocket_node.query_node_rpc_url made it fall back to
+// localhost and report "No keys found", which reads as "my data is gone".
+// Both configs carry the same `redis:` block, so one shape reads either.
+func namespaceFromConfig(path string, logger logging.Logger) (string, config.RedisNamespaceConfig, error) {
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return "", config.RedisNamespaceConfig{}, fmt.Errorf("read %s: %w", path, err)
+	}
+
+	var file struct {
+		Redis struct {
+			URL       string                      `yaml:"url"`
+			Namespace config.RedisNamespaceConfig `yaml:"namespace"`
+		} `yaml:"redis"`
+	}
+	if err := yaml.Unmarshal(raw, &file); err != nil {
+		return "", config.RedisNamespaceConfig{}, fmt.Errorf("parse %s: %w", path, err)
+	}
+
+	logger.Info().
+		Str("config_file", path).
+		Str("base_prefix", file.Redis.Namespace.WithDefaults().BasePrefix).
+		Msg("read the redis url and namespace from the config file")
+	return file.Redis.URL, file.Redis.Namespace.WithDefaults(), nil
+}
+
+// resolveTarget decides WHICH Redis and WHICH keyspace this invocation acts on.
+//
+// Extracted so the rule can be tested: it is the whole of the CLI's
+// config-versus-flags behaviour, and it used to be three exclusive branches
+// inside client construction, where the only way to exercise it was to run the
+// binary against a live server.
+func resolveTarget(logger logging.Logger) (string, config.RedisNamespaceConfig, error) {
+	var url string
+	// ONE rule, no exclusive branches: start from the defaults, let a config
+	// file replace them, then let each flag override its own value. The previous
+	// shape was three branches over two settings, and it had already produced a
+	// defect -- `--base-prefix midemo` with no --config logged "using the base
+	// prefix given on the command line" and then fell into the else that reset
+	// the namespace to the default, so the flag did nothing.
+	namespace := config.DefaultRedisNamespaceConfig()
+
+	if RedisConfig != "" {
+		cfgURL, cfgNS, err := namespaceFromConfig(RedisConfig, logger)
+		switch {
+		case err == nil:
+			url, namespace = cfgURL, cfgNS
+		case RedisBasePrefix == "":
+			return "", namespace, err
+		default:
+			// --base-prefix settles the namespace on its own; the config was only
+			// going to supply the URL. A config this tool cannot load is the very
+			// situation the flag exists for, so it must not be fatal here.
+			logger.Warn().
+				Err(err).
+				Str("config_file", RedisConfig).
+				Msg("could not read the config; continuing with --base-prefix, and the URL from --redis or the default")
+		}
+	}
+
+	if RedisBasePrefix != "" {
+		namespace = config.RedisNamespaceConfig{BasePrefix: RedisBasePrefix}
+		logger.Info().
+			Str("base_prefix", RedisBasePrefix).
+			Msg("using the base prefix given on the command line")
+	}
+
+	// Validated wherever it came from. This is the one binary that deletes by
+	// pattern: a glob in the base makes AllKeysPattern() "*:*", which flush --all
+	// and cache --invalidate hand straight to a delete.
+	if err := namespace.Validate(); err != nil {
+		return "", namespace, err
+	}
+
+	return url, namespace, nil
 }
