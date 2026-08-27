@@ -41,6 +41,28 @@ and they are not the same:
   did not look" must not produce the same signal.
 - **FAIL** — go to the `gate-triage` skill. Do not re-run hoping for green.
 
+### FIRST read WHICH revision it measured — a verdict without one is not evidence
+
+`all.sh` opens and closes with `revision <sha> (<branch>) -- clean tree`. Read
+it, and compare it against the branch you believe you are gating. Three things
+measured on 2026-08-27, all in one session:
+
+- **A review agent checked out another branch in this worktree mid-run.** The
+  gate reported `PASS level 2` for a branch that was not the one under work, and
+  uncommitted changes rode the checkout so a commit landed on the wrong branch.
+  The revision line was the only thing that said so.
+- **The dirty-tree mark does not cover it.** The tree was clean at both ends.
+- **The HEAD-moved warning does not cover it either**: it compares the two
+  samples, so leaving a branch and returning before the summary is invisible to
+  it. That run went red for another reason — `[build failed]`, the signature of a
+  tree that changed under the compiler — and the cause was only readable because
+  the gate now KEEPS the raw output of a failure under
+  `scripts/localonly/_state/gate-evidence/`.
+
+**So: ONE worktree, ONE job at a time.** Never launch an agent that checks out
+branches while gating, and never leave uncommitted changes with one in flight. If
+work must run in parallel, it goes in a separate `git worktree`.
+
 ## Never through a pipe
 
 `cmd | tail` reports **tail's** exit code: a red suite and a 600-second deadlock
