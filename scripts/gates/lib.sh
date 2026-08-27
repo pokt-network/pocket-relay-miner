@@ -293,10 +293,24 @@ gate_repo_root() {
 # the code that ran is then not the code the SHA names, so the run is not
 # attributable to that commit and the line must say so.
 gate_provenance() {
-    local head branch
-    head="$(git rev-parse --short HEAD 2>/dev/null)" || head='(none)'
-    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch='(none)'
-    if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
+    local head branch status_out status_rc
+    head="$(git rev-parse --short HEAD 2>/dev/null)" || head=''
+    branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch=''
+    # Its own statement, so $? is git's and not the assignment's. An empty
+    # `status --porcelain` means "no changes"; a FAILED one also prints nothing,
+    # and the two must not reach the same branch below -- reporting a clean tree
+    # because git could not be read is the "I found nothing" / "I looked
+    # nowhere" collapse this helper exists to prevent (review, 2026-08-27:
+    # outside a repository it printed `revision (none) ((none)) -- clean tree`).
+    status_out="$(git status --porcelain 2>/dev/null)"
+    status_rc=$?
+
+    if [ -z "$head" ] || [ "$status_rc" -ne 0 ]; then
+        printf '%srevision%s UNKNOWN -- %sgit could not be read here: this run is NOT attributable to any commit%s\n' \
+            "$GATE_BOLD" "$GATE_RESET" "$GATE_YELLOW" "$GATE_RESET"
+        return 0
+    fi
+    if [ -n "$status_out" ]; then
         printf '%srevision%s %s (%s) -- %sDIRTY TREE: this run is NOT attributable to that commit%s\n' \
             "$GATE_BOLD" "$GATE_RESET" "$head" "$branch" "$GATE_YELLOW" "$GATE_RESET"
     else

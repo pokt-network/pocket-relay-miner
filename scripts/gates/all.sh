@@ -85,6 +85,10 @@ exercise_dir="$(mktemp -d)"
 trap 'rm -rf "$exercise_dir"' EXIT
 
 gate_provenance
+# Remembered so the summary can prove the run measured ONE commit. A level 3 run
+# takes tens of minutes, which is ample time for a checkout or a rebase in
+# another terminal; two SHAs printed many screens apart are not a check.
+opening_head="$(git rev-parse HEAD 2>/dev/null)" || opening_head=''
 
 failed_gates=()
 skipped_gates=()
@@ -157,6 +161,13 @@ fi
 echo
 printf '%s=== summary (level %s) ===%s\n' "$GATE_BOLD" "$level" "$GATE_RESET"
 gate_provenance
+
+closing_head="$(git rev-parse HEAD 2>/dev/null)" || closing_head=''
+if [ "$opening_head" != "$closing_head" ]; then
+    printf '%sHEAD MOVED DURING THIS RUN%s (%s -> %s) -- the gates below did not all measure one commit\n' \
+        "$GATE_YELLOW" "$GATE_RESET" \
+        "${opening_head:-unknown}" "${closing_head:-unknown}"
+fi
 
 if [ "${#skipped_gates[@]}" -ne 0 ]; then
     printf '%sNOT RUN:%s %s (gate missing)\n' "$GATE_YELLOW" "$GATE_RESET" "${skipped_gates[*]}"

@@ -41,7 +41,11 @@ expect 0  "$(gate_served_shortfall 0 0)"   "empty cell"
 # helper is read as "overservicing did not occur"; if it can also mean "the parse
 # broke", the report is worse than nothing.
 sb_fixture="$(mktemp)"
-trap 'rm -f "$sb_fixture"' EXIT
+prov_repo=''
+# One EXIT trap for the whole file: a second bare `trap ... EXIT` REPLACES this
+# one rather than adding to it, and lib_test runs inside the pre-commit hook,
+# where a Ctrl-C mid-commit is ordinary.
+trap 'rm -f "$sb_fixture"; [ -n "$prov_repo" ] && rm -rf "$prov_repo"' EXIT
 cat >"$sb_fixture" <<'FIXTURE'
 {"height":"100","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"100\"","num_relays":"\"4\"","num_estimated_relays":"\"4\"","claimed_upokt":"\"1000upokt\"","settled_upokt":"\"1000upokt\"","minted_upokt":"\"1000upokt\"","overservicing_loss_upokt":"\"0\"","deflation_loss_upokt":"\"0\""}}
 {"height":"100","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"100\"","num_relays":"\"6\"","num_estimated_relays":"\"12\"","claimed_upokt":"\"3000upokt\"","settled_upokt":"\"2000upokt\"","minted_upokt":"\"1800upokt\"","overservicing_loss_upokt":"\"1000\"","deflation_loss_upokt":"\"200\""}}
@@ -96,11 +100,32 @@ fi
 # added to prevent (2026-08-27). Run against a throwaway repo, because the
 # repository this test lives in is dirty precisely when someone is editing it.
 prov_repo="$(mktemp -d)"
-(
+# gpgsign is set globally on at least one developer machine (verified
+# 2026-08-27), and a fixture commit that waits on pinentry, or fails without a
+# cached agent, would leave a directory that is not a repository -- against
+# which the "clean tree" and "names HEAD" assertions below would both pass for
+# the wrong reason. So: signing off, and the setup's exit status is CHECKED.
+prov_setup_err="$(
     cd "$prov_repo" || exit 1
-    git init -q .
-    git -c user.email=gate@test -c user.name=gate commit -q --allow-empty -m 'first'
-) >/dev/null 2>&1
+    git init -q . &&
+        git -c user.email=gate@test -c user.name=gate -c commit.gpgsign=false \
+            commit -q --allow-empty -m 'first'
+)" 2>&1
+prov_setup_rc=$?
+if [ "$prov_setup_rc" -ne 0 ]; then
+    printf '  FAIL gate_provenance fixture: could not build the throwaway repo (rc=%s): %s\n' \
+        "$prov_setup_rc" "$prov_setup_err" >&2
+    failures=$((failures + 1))
+fi
+
+prov_head="$(cd "$prov_repo" && git rev-parse --short HEAD 2>/dev/null)"
+if [ -z "$prov_head" ]; then
+    # Without this the glob `*""*` below matches EVERY string, so the assertion
+    # that the line names HEAD would pass against any output at all.
+    printf '  FAIL gate_provenance fixture: no HEAD in the throwaway repo, so the assertions below cannot bite\n' >&2
+    failures=$((failures + 1))
+    prov_head='<no-head>'
+fi
 
 prov_clean="$(cd "$prov_repo" && gate_provenance)"
 case "$prov_clean" in
@@ -112,7 +137,6 @@ case "$prov_clean" in
     ;;
 esac
 
-prov_head="$(cd "$prov_repo" && git rev-parse --short HEAD)"
 case "$prov_clean" in
 *"$prov_head"*) ;;
 *)
@@ -132,7 +156,25 @@ case "$prov_dirty" in
     failures=$((failures + 1))
     ;;
 esac
+# git unreadable is a THIRD state, not a synonym for clean: an empty
+# `status --porcelain` is what BOTH "no changes" and "the command failed"
+# produce, and only this assertion tells them apart. Found by review on
+# 2026-08-27, when the helper printed `revision (none) ((none)) -- clean tree`
+# from outside a repository.
+prov_norepo_dir="$(mktemp -d)"
+prov_norepo="$(cd "$prov_norepo_dir" && gate_provenance)"
+rmdir "$prov_norepo_dir"
+case "$prov_norepo" in
+*"NOT attributable"*) ;;
+*)
+    printf '  FAIL gate_provenance outside a repository: want the run marked NOT attributable, got %s\n' \
+        "$prov_norepo" >&2
+    failures=$((failures + 1))
+    ;;
+esac
+
 rm -rf "$prov_repo"
+prov_repo=''
 
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
