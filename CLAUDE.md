@@ -46,6 +46,33 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
 - When reporting a fix: show the before/after and the test that proves it.
 - When reporting "no issues found": explain what you checked and how.
 
+## Before the First Edit — State the Success Criterion
+
+**Invoke the `andrej-karpathy-skills:karpathy-guidelines` skill before the first
+edit of any coding task.** Not conditional on the task looking small.
+
+Its rule 4 is the load-bearing one here: **write the success criterion down
+before starting, as something checkable.** "It works" is not one. "Level 2 passes
+and the new test goes red when the sentinel is removed from the classifier" is
+one. If the criterion cannot be written down, the task is not understood yet --
+say so instead of starting.
+
+This lives in CLAUDE.md and NOT in a skill on purpose: a rule that has to fire
+before anyone chooses to invoke something cannot itself depend on being invoked.
+Measured 2026-08-26 -- `test-teeth` already said "passed with the defect present
+-- the test is decoration", `TestIsPermanentKeyFailure` was exactly its case, and
+nobody pointed the skill at it across four commits of the same defect
+(`efd2fb8` -> `fb46b85` -> `47116f8` -> `2ce1d30`, the last reintroducing the
+failure mode the previous one had just fixed).
+
+## Closing a Session
+
+**Use the `close-session` skill.** The work does not end at the hand-over -- it
+ends at asking for push and PR. Every finding reaches
+`scripts/localonly/QUEUE-deep-cleanup.md` or it is not recorded, and the
+canonical hand-over is whatever `scripts/handoff-index.sh` says it is, never the
+newest by date.
+
 ## CRITICAL DEVELOPMENT WORKFLOW REMINDERS
 
 **READ THIS EVERY TIME BEFORE SUGGESTING COMMANDS:**
