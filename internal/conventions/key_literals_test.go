@@ -117,16 +117,31 @@ func prefixPlusSuffixKeys(f *ast.File, fset *token.FileSet) []string {
 			if !strings.HasSuffix(sel.Sel.Name, "Prefix") {
 				return false
 			}
-			inner, ok := sel.X.(*ast.CallExpr)
-			if !ok {
-				return false
+			switch recv := sel.X.(type) {
+			case *ast.CallExpr:
+				// x.KB().SomethingPrefix() -- the receiver chain contains KB().
+				innerSel, ok := recv.Fun.(*ast.SelectorExpr)
+				return ok && innerSel.Sel.Name == "KB"
+			case *ast.Ident:
+				// kb.SomethingPrefix(), where kb was STORED first. The repo
+				// already writes `kb := client.KB()` (cmd/redis/cache_all.go),
+				// so requiring the literal .KB() call left a blind spot one
+				// refactor wide: measured 2026-08-28, this shape scored zero
+				// hits. Any identifier will do -- a method whose name ends in
+				// Prefix, called on anything, then interpolated into a key, is
+				// the shape this check exists to police, and the exemption list
+				// is where a legitimate one is written down.
+				return true
 			}
-			innerSel, ok := inner.Fun.(*ast.SelectorExpr)
-			return ok && innerSel.Sel.Name == "KB"
+			return false
 		case *ast.SelectorExpr:
-			// r.config.KeyPrefix, c.keyPrefix, s.config.StreamPrefix
+			// r.config.KeyPrefix, c.keyPrefix, s.config.StreamPrefix.
+			// Any *Prefix field, not only *KeyPrefix: the comment above named
+			// StreamPrefix for a year while the condition could not match it,
+			// and the stream prefix is threaded as a config field through four
+			// production sites. Measured 2026-08-28: the shape scored zero hits.
 			name := a.Sel.Name
-			return strings.HasSuffix(name, "KeyPrefix") || strings.HasSuffix(name, "keyPrefix")
+			return strings.HasSuffix(name, "Prefix") || strings.HasSuffix(name, "prefix")
 		}
 		return false
 	}
@@ -270,13 +285,38 @@ func f(serviceID, rpcType string) string { return fmt.Sprintf("%s:%s", serviceID
 			want: 0,
 		},
 		{
-			name: "the KeyBuilder building its own key is not a caller",
+			// The matcher SEES this, and that is deliberate. The KeyBuilder is
+			// allowed to build its own keys, but the place that says so is
+			// keyLiteralExemptions -- with a written reason -- not a blind spot
+			// in the matcher. Until 2026-08-28 the condition only accepted names
+			// ending in KeyPrefix, so it missed this AND every *Prefix config
+			// field, StreamPrefix included.
+			name: "the KeyBuilder building its own key matches; the file exemption is what allows it",
 			src: `package x
 import "fmt"
 func (kb *KeyBuilder) K(id string) string {
 	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.CachePrefix, id)
 }`,
-			want: 0,
+			want: 1,
+		},
+		{
+			// Measured zero hits before 2026-08-28: the comment beside the
+			// condition named StreamPrefix while the condition could not match it.
+			name: "a *Prefix config field that is not a *KeyPrefix",
+			src: `package x
+import "fmt"
+func f(s *S, addr string) string { return fmt.Sprintf("%s:%s", s.config.StreamPrefix, addr) }`,
+			want: 1,
+		},
+		{
+			// Measured zero hits before 2026-08-28. The repo already writes
+			// `kb := client.KB()`, so requiring the literal .KB() call left the
+			// blind spot one refactor wide.
+			name: "a KeyBuilder stored in a variable first",
+			src: `package x
+import "fmt"
+func f(c *C, addr string) string { kb := c.KB(); return fmt.Sprintf("%s:%s", kb.SupplierKeyPrefix(), addr) }`,
+			want: 1,
 		},
 		{
 			name: "a scan pattern is not key construction",
