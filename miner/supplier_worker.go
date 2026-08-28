@@ -413,8 +413,21 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Redis hiccup is the expensive direction.
 	if state.SessionStore != nil {
 		snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
+
+		// Hoisted because it is STORE-INDEPENDENT: the claim window is decided by
+		// the message's own session end height against the observed block height,
+		// and reads nothing the store could fail to answer. Until 2026-08-28 it
+		// sat inside the switch, so a transient Redis Get error fell through to
+		// the first case and skipped it -- admitting a relay whose window had
+		// definitively closed, which then created or extended a session the sweep
+		// could only carry to claim_window_closed and delete. The store error is
+		// still a reason to keep the relay when the window is OPEN; it is not a
+		// reason to stop knowing what the height already says.
+		windowClosed := state.SessionCoordinator != nil &&
+			state.SessionCoordinator.ClaimWindowClosed(msg.Message.SessionEndHeight)
+
 		switch {
-		case storeErr != nil:
+		case storeErr != nil && !windowClosed:
 			// fall through and process the relay
 
 		case snapshot != nil && snapshot.State.IsTerminal():
@@ -426,8 +439,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
 			return nil
 
-		case state.SessionCoordinator != nil &&
-			state.SessionCoordinator.ClaimWindowClosed(msg.Message.SessionEndHeight):
+		case windowClosed:
 			// The claim window has closed, so this relay cannot reach a claim
 			// whatever else is true. Deliberately NOT conditioned on the
 			// snapshot being absent: a session sitting in active or claiming

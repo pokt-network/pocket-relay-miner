@@ -336,3 +336,33 @@ func TestClaimWindowClosedAt_AnswersFalseWithoutClients(t *testing.T) {
 	require.False(t, m.claimWindowClosedAt(context.Background(), 50),
 		"no clients means it cannot tell, and an unknown must never cost a relay")
 }
+
+// A transient store failure must not buy a relay a place in a tree nothing will
+// claim. The claim-window verdict reads only the message's session end height
+// against the observed block height -- nothing the store could fail to answer --
+// so a Redis error is a reason to keep the relay when the window is OPEN, and no
+// reason at all to stop knowing what the height already says. Until 2026-08-28
+// the store-error case fell through and skipped the check.
+func TestHandleRelay_StoreErrorPastClaimWindow_IsStillDropped(t *testing.T) {
+	const supplier = "pokt1store_err_past_window"
+	f := newHandlerTestFixture(t, supplier)
+	f.coordinator.SetClaimWindowClosedFn(func(int64) bool { return true })
+
+	msg := newStreamMessage(supplier, "sess-store-err-past-window", "payload", 7)
+	rejectedBefore := testutil.ToFloat64(relaysRejected.WithLabelValues(supplier, "claim_window_closed", "svc-1"))
+	addedBefore := testutil.ToFloat64(relaysAddedToSMST.WithLabelValues(supplier, "svc-1"))
+
+	// Break every Redis command so SessionStore.Get returns an error rather than
+	// a snapshot -- the transient hiccup the fall-through exists for.
+	f.mr.SetError("LOADING Redis is loading the dataset in memory")
+	err := f.worker.handleRelay(f.ctx, supplier, msg)
+	f.mr.SetError("")
+
+	require.NoError(t, err, "a dropped late relay is ACKed, not retried")
+	require.Equal(t, addedBefore,
+		testutil.ToFloat64(relaysAddedToSMST.WithLabelValues(supplier, "svc-1")),
+		"no SMST work for a relay whose claim window closed, store error or not")
+	require.Equal(t, rejectedBefore+1,
+		testutil.ToFloat64(relaysRejected.WithLabelValues(supplier, "claim_window_closed", "svc-1")),
+		"the drop must be announced with the reason the height gave, not swallowed")
+}
