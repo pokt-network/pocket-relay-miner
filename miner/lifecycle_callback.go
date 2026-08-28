@@ -998,6 +998,14 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 		// Submit all claims in a single transaction with retries
 		var lastErr error
+		// windowClosed records that the batch already reached its terminal state
+		// through markAndCount*WindowClosed. lastErr stays set (the submission DID
+		// fail, and the tracker and the returned error both need it), so without
+		// this the block after the loop counts the SAME sessions a second time --
+		// relays_lost_total, compute_units_lost_total and upokt_lost_total doubled
+		// for one session -- and overwrites the accurate window-closed state in
+		// Redis with the vaguer tx_error one.
+		windowClosed := false
 		var claimTxHash string
 		for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; attempt++ {
 			submitErr := lc.supplierClient.CreateClaims(claimCtx, claimWindowClose, interfaceClaimMsgs...)
@@ -1019,6 +1027,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 						lc.markAndCountClaimWindowClosed(ctx, snapshot)
 					}
 
+					windowClosed = true
 					break // Don't retry - this is a permanent failure
 				}
 
@@ -1136,7 +1145,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			}
 		}
 
-		if lastErr != nil {
+		if lastErr != nil && !windowClosed {
 			// Mark all sessions as failed due to claim TX error (after exhausting retries)
 			for _, snapshot := range groupSnapshots {
 				RecordClaimTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
@@ -1805,6 +1814,14 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 		// Submit all proofs in a single transaction with retries
 		var lastErr error
+		// windowClosed records that the batch already reached its terminal state
+		// through markAndCount*WindowClosed. lastErr stays set (the submission DID
+		// fail, and the tracker and the returned error both need it), so without
+		// this the block after the loop counts the SAME sessions a second time --
+		// relays_lost_total, compute_units_lost_total and upokt_lost_total doubled
+		// for one session -- and overwrites the accurate window-closed state in
+		// Redis with the vaguer tx_error one.
+		windowClosed := false
 		var proofTxHash string
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
 			submitErr := lc.supplierClient.SubmitProofs(proofCtx, proofWindowClose, interfaceProofMsgs...)
@@ -1828,6 +1845,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 						lc.markAndCountProofWindowClosed(ctx, snapshot)
 					}
 
+					windowClosed = true
 					break // Don't retry - this is a permanent failure
 				}
 
@@ -1935,7 +1953,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			}
 		}
 
-		if lastErr != nil {
+		if lastErr != nil && !windowClosed {
 			// Mark sessions that entered the tx as failed (the ones that did
 			// not build are already counted as build_failed via RecordProofSkipped).
 			for _, snapshot := range validProofSnapshots {
@@ -2130,6 +2148,14 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 // there. Recording here as well would count the same relays, compute units and
 // uPOKT twice on every Redis blip during a window abort. Both failing leaves it
 // under-counted, which is the direction this codebase already chose elsewhere.
+//
+// That covers the double-count reachable from HERE. There is a second one, on
+// the CALLER's side, and it needed its own guard: the submit loop breaks out of
+// its retries with lastErr still set -- it has to, the tracker and the returned
+// error both read it -- so the "if lastErr != nil" block after the loop used to
+// record the very same snapshots again as a tx error. The windowClosed flag at
+// the two call sites is what stops it; without it this function's careful
+// ordering was undone one frame up the stack.
 func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) {
 	if lc.sessionCoordinator != nil {
 		if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
