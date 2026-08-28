@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/alitto/pond/v2"
 
@@ -211,7 +212,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		cache.CacheConfig{
 			TTLBlocks:        100,
 			BlockTimeSeconds: blockTimeSeconds,
-			LockTimeout:      5,
+			LockTimeout:      5 * time.Second,
 		},
 	)
 	if err := c.supplierParamsCache.Start(ctx); err != nil {

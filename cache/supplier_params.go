@@ -51,7 +51,13 @@ func NewRedisSupplierParamCache(
 	if config.BlockTimeSeconds == 0 {
 		config.BlockTimeSeconds = DefaultBlockTimeSeconds
 	}
-	if config.LockTimeout == 0 {
+	// Below the floor is treated as unset, not honoured. A bare `LockTimeout: 5`
+	// on a time.Duration field is FIVE NANOSECONDS -- go-redis truncates it to
+	// PX 1 and the lock expires in about a millisecond, so it dedups nothing
+	// while every reader still pays the contended path. It was wired exactly
+	// that way in miner/leader_controller.go and the `== 0` check waved it
+	// through, because an absurd value is not a zero one. Measured 2026-08-28.
+	if config.LockTimeout < minLockTimeout {
 		config.LockTimeout = 5 * time.Second
 	}
 
