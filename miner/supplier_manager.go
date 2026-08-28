@@ -2212,11 +2212,15 @@ func (m *SupplierManager) claimWindowClosedAt(ctx context.Context, sessionEndHei
 	}
 
 	// Past its end height, so the at-height read is the immutable one it is
-	// meant to be. Fall back to live params rather than answering on a failure.
+	// meant to be -- and it is the ONLY one that may answer here. Live params
+	// were a fallback until 2026-08-28: if governance shortened the claim window
+	// after this session ended, they report a window closed that was open at the
+	// height that governs it, and the caller DISCARDS the relay on that answer.
+	// That is this function's contract inverted, three lines above its own
+	// signature. An at-height read that fails is an unknown, and an unknown
+	// answers false -- the relay is admitted and, if it really is late, the
+	// lifecycle sweep records it as claim_window_closed with the right reason.
 	params, err := m.config.SharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
-	if err != nil || params == nil {
-		params, err = m.config.SharedClient.GetParams(ctx)
-	}
 	if err != nil || params == nil {
 		return false
 	}
