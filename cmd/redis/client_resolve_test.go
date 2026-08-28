@@ -82,16 +82,42 @@ func TestResolveTarget(t *testing.T) {
 		require.Equal(t, "override", ns.BasePrefix)
 	})
 
-	t.Run("an unreadable config is fatal alone, survivable with --base-prefix", func(t *testing.T) {
+	t.Run("an unreadable config needs BOTH flags to be survivable", func(t *testing.T) {
 		reset()
 		RedisConfig = filepath.Join(t.TempDir(), "does-not-exist.yaml")
 		_, _, err := resolveTarget(logger)
 		require.Error(t, err, "nothing else can supply the namespace")
 
+		// --base-prefix settles the namespace but nothing settles the SERVER,
+		// and the default is localhost. This used to warn and continue, so a
+		// typo in the config path produced a clean-looking connection to a local
+		// Redis and an empty keyspace -- which reads as "the upgrade destroyed
+		// my data".
 		RedisBasePrefix = "rescue"
-		_, ns, err := resolveTarget(logger)
+		_, _, err = resolveTarget(logger)
+		require.Error(t, err, "no --redis means no server to act on")
+		require.Contains(t, err.Error(), "--redis")
+
+		// Both flags: the namespace and the server are settled, so the config
+		// was going to add nothing. This is what the flags exist for.
+		RedisURL = "redis://elsewhere:6379"
+		url, ns, err := resolveTarget(logger)
 		require.NoError(t, err,
-			"a config this tool cannot read is the situation --base-prefix exists for")
+			"a config the FLEET rejects must not stop the tool reached for because of it")
 		require.Equal(t, "rescue", ns.BasePrefix)
+		require.Empty(t, url, "the URL comes from the flag, applied by CreateRedisClient")
+	})
+
+	t.Run("a YAML with no redis block is not a config for this tool", func(t *testing.T) {
+		reset()
+		path := filepath.Join(t.TempDir(), "values.yaml")
+		require.NoError(t, os.WriteFile(path, []byte("image:\n  tag: v1\nreplicas: 2\n"), 0o600))
+		RedisConfig = path
+
+		_, _, err := resolveTarget(logger)
+		require.Error(t, err,
+			"it parses as YAML and yields an empty URL, which defaults to localhost -- "+
+				"so flush and cache --invalidate would act on the wrong server")
+		require.Contains(t, err.Error(), "redis.url")
 	})
 }

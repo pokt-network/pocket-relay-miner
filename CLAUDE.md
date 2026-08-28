@@ -367,9 +367,13 @@ If any gate fails, fix it before reporting completion. Do NOT report "done" with
   cache key. New family, new KeyBuilder method — not new config.
 - ✅ Tests: golden-string tests pin each KB method's default output
   (changing a constant is a breaking cross-version change — mixed fleets stop
-  hearing each other); a collision test asserts no two methods produce the
-  same key, and a pattern test asserts every SCAN pattern matches only its own
-  family.
+  hearing each other), and a pattern test asserts every SCAN pattern matches
+  only its own family. **There is NO collision test** — this file claimed one
+  until 2026-08-28 and a grep of `transport/redis/` and `internal/` found none;
+  `allKeyBuilderOutputs` feeds only the golden-string and partial-namespace
+  tests. It is worth writing: with `supplier_prefix: suppliers`,
+  `SupplierStateKey` and `SupplierRegistryKey` produce the same key, two writers
+  and mutually unparseable readers.
 
 ### Key Patterns
 

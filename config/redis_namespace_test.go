@@ -104,9 +104,15 @@ func TestRedisNamespaceValidate(t *testing.T) {
 			wantErr: "single namespace segment",
 		},
 		{
-			name:    "a dot is not in the documented rule either",
-			ns:      RedisNamespaceConfig{BasePrefix: "pocket.ha"},
-			wantErr: "single namespace segment",
+			// Accepted since 2026-08-28. A dot is not a Redis namespace
+			// separator, carries no glob, and a fleet based at "pocket.ha" is
+			// disjoint from every other -- so rejecting it only meant an existing
+			// fleet would refuse to start after upgrading, with the sole remedy a
+			// rename that relocates the whole keyspace including the WAL the
+			// miner is consuming. The rule rejects what Redis treats as
+			// structure, not everything unfamiliar (ruling: Jorge, 2026-08-28).
+			name: "a dot is not a separator, so it is accepted",
+			ns:   RedisNamespaceConfig{BasePrefix: "pocket.ha"},
 		},
 		{
 			// An omitted base_prefix is VALID and means the default. Validate

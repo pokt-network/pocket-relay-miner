@@ -97,7 +97,20 @@ func DefaultRedisNamespaceConfig() RedisNamespaceConfig {
 // Operators separating fleets have a mechanism that actually isolates: a
 // different Redis database, or a different server. A colon hierarchy only looks
 // like one (ruling: 2026-08-27).
-var basePrefixAccepted = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
+// The rule rejects what Redis itself treats as structure -- a namespace
+// separator and the glob metacharacters a SCAN pattern is built from -- and
+// nothing else. It was a whitelist until 2026-08-28, and a whitelist rejected
+// characters with no stated hazard: a fleet running base_prefix "prod.v1" today
+// is disjoint, carries no glob and no colon, and would have refused to start
+// after the upgrade, with the only remedy a rename that relocates the entire
+// keyspace including the WAL the miner is consuming -- the exact outcome this
+// guard exists to prevent (ruling: Jorge, 2026-08-28).
+var basePrefixRejected = regexp.MustCompile(`[:*?\[\]]|\s`)
+
+// basePrefixAccepted reports whether the effective base prefix is usable.
+func basePrefixAccepted(prefix string) bool {
+	return prefix != "" && !basePrefixRejected.MatchString(prefix)
+}
 
 // retiredNamespaceFields returns the retired sub-prefix fields an operator has
 // set, by their YAML name, together with the constant now used instead.
@@ -134,10 +147,10 @@ func (ns RedisNamespaceConfig) Validate() error {
 	// and means the default. WithDefaults runs later, at KeyBuilder
 	// construction, so validating ns.BasePrefix directly would reject every
 	// config that simply does not set it.
-	if effective := ns.WithDefaults().BasePrefix; !basePrefixAccepted.MatchString(effective) {
+	if effective := ns.WithDefaults().BasePrefix; !basePrefixAccepted(effective) {
 		return fmt.Errorf(
-			"redis.namespace.base_prefix %q is not a single namespace segment. It must match "+
-				"^[a-zA-Z0-9_-]+$ -- the rule docs/REDIS.md and both config schemas already state. "+
+			"redis.namespace.base_prefix %q is not a single namespace segment. It must not be "+
+				"empty and must not contain ':', whitespace, or the glob characters * ? [ ]. "+
 				"A glob character reaches every SCAN pattern the key builder produces and one of those "+
 				"feeds a delete; a ':' is worse for being quiet: a trailing one produces keys with an "+
 				"empty segment (%q would build \"prod::cache:application:x\"), and two fleets nested by "+

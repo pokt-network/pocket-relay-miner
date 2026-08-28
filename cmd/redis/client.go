@@ -98,6 +98,22 @@ func namespaceFromConfig(path string, logger logging.Logger) (string, config.Red
 		return "", config.RedisNamespaceConfig{}, fmt.Errorf("parse %s: %w", path, err)
 	}
 
+	// yaml.v3 ignores every key it was not asked about and errors on none, so
+	// ANY well-formed YAML unmarshals into that struct "successfully" and yields
+	// an empty URL -- which CreateRedisClient then defaults to localhost. Measured
+	// 2026-08-28: `image:\n  tag: v1` resolved to url="" base="ha" err=<nil>.
+	// An operator who passes a helm values.yaml, or yesterday's renamed file,
+	// gets "No keys found" against their own laptop -- the exact "my data is
+	// gone" confusion this function's header says it exists to prevent -- and
+	// `flush` and `cache --invalidate` act on the wrong server. A config file
+	// that carries no redis.url is not a config file for this tool.
+	if file.Redis.URL == "" {
+		return "", config.RedisNamespaceConfig{}, fmt.Errorf(
+			"%s has no redis.url: it parsed as YAML but carries no redis block, so it is "+
+				"not a miner or relayer config. Point --config at the rendered config, or "+
+				"pass --redis explicitly", path)
+	}
+
 	logger.Info().
 		Str("config_file", path).
 		Str("base_prefix", file.Redis.Namespace.WithDefaults().BasePrefix).
@@ -128,14 +144,27 @@ func resolveTarget(logger logging.Logger) (string, config.RedisNamespaceConfig, 
 			url, namespace = cfgURL, cfgNS
 		case RedisBasePrefix == "":
 			return "", namespace, err
+		case RedisURL == "":
+			// --base-prefix settles the namespace, but nothing settles the URL,
+			// and the default is localhost. Warning and continuing meant a typo
+			// in the config path produced a clean-looking connection to a local
+			// Redis, an empty keyspace, and an operator concluding the upgrade
+			// destroyed their data -- one Warn above a "connected to Redis" line
+			// that prints localhost as if it had been chosen. The flag exists for
+			// a config the FLEET rejects; a config this tool cannot even read
+			// says nothing about which server to act on.
+			return "", namespace, fmt.Errorf(
+				"%w -- and no --redis was given, so there is no server to act on. "+
+					"Pass --redis explicitly alongside --base-prefix", err)
 		default:
-			// --base-prefix settles the namespace on its own; the config was only
-			// going to supply the URL. A config this tool cannot load is the very
-			// situation the flag exists for, so it must not be fatal here.
+			// --base-prefix settles the namespace and --redis settles the server,
+			// so the config was going to add nothing. This is the situation the
+			// two flags exist for: a config the fleet rejects must not stop the
+			// tool an operator reaches for BECAUSE the fleet rejects it.
 			logger.Warn().
 				Err(err).
 				Str("config_file", RedisConfig).
-				Msg("could not read the config; continuing with --base-prefix, and the URL from --redis or the default")
+				Msg("could not read the config; continuing with --base-prefix and the URL from --redis")
 		}
 	}
 
