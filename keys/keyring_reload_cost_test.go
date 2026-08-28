@@ -342,3 +342,66 @@ func TestAnOnDiskProviderAppliesASingleKeyRemoval(t *testing.T) {
 	require.NoError(t, err, "a partial removal is the operator's own doing, not a fault")
 	require.Len(t, after, 1, "exactly the pulled key must be gone")
 }
+
+// The emptied-keyring test above removes EVERY file, which is not what deleting
+// a key does. cosmos-sdk's file backend writes a "keyhash" beside the records on
+// first unlock and never removes it -- not per key, not on the last one. So an
+// operator who withdraws their only key leaves a directory holding exactly one
+// file, and counting that file as a record made LoadKeys report a broken
+// keyring: Reload then abandoned the reload, kept the previous key set, and the
+// process went on signing with the withdrawn key, retrying every tick forever.
+// Measured 2026-08-28. That is this branch's own failure mode, reintroduced by
+// the guard that was added to prevent a different one.
+func TestABackendBookkeepingFileIsNotAKeyRecord(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{"app": testAppHex})
+	p := newOnDiskProvider(t, parentDir)
+
+	before, err := p.LoadKeys(context.Background())
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+
+	// Remove the key RECORDS, the way `keys delete` does...
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
+	}
+	// ...and leave the passphrase hash behind, the way the backend does.
+	require.NoError(t, os.WriteFile(filepath.Join(recordsDir, "keyhash"), []byte("not-a-key"), 0o600))
+
+	after, err := p.LoadKeys(context.Background())
+	require.NoError(t, err,
+		"a directory holding only the backend's own bookkeeping is an EMPTY keyring, "+
+			"not a broken one -- reporting an error here keeps a withdrawn key signing")
+	require.Empty(t, after, "the removal must be applied, or a pulled key keeps signing")
+}
+
+// The procedure docs/SUPPLIER_KEYS.md actually documents, end to end: remove the
+// .info and leave everything else. It was measured on a four-pod fleet on
+// 2026-08-22 and it works because cosmos-sdk lists a keyring by its .info files,
+// so the orphaned .address is inert -- which is exactly why .address must not
+// count as a record here either.
+func TestTheDocumentedWithdrawalLeavesAnEmptyKeyring(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{"app": testAppHex})
+	p := newOnDiskProvider(t, parentDir)
+
+	before, err := p.LoadKeys(context.Background())
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	removed := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
+			removed++
+		}
+	}
+	require.Equal(t, 1, removed, "precondition: exactly one .info to withdraw")
+	require.NoError(t, os.WriteFile(filepath.Join(recordsDir, "keyhash"), []byte("not-a-key"), 0o600))
+
+	after, err := p.LoadKeys(context.Background())
+	require.NoError(t, err, "the documented withdrawal must not read as a broken keyring")
+	require.Empty(t, after, "the withdrawal must be applied, or a pulled key keeps signing")
+}

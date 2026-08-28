@@ -59,7 +59,7 @@ Example:
 
 	// Redis flags (can override config)
 	cmd.Flags().String(flagRedisURL, "", "Redis connection URL (overrides config)")
-	cmd.Flags().String(flagConsumerName, "", "Consumer name (defaults to hostname)")
+	cmd.Flags().String(flagConsumerName, "", "Consumer name PREFIX; -<hostname>-<pid> is always appended (default \"miner\")")
 
 	// Configuration flags (can override config)
 	cmd.Flags().Bool(flagHotReload, true, "Enable hot-reload of keys")

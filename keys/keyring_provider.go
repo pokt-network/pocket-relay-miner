@@ -219,7 +219,50 @@ func (p *KeyringProvider) keyringDirFingerprint() (fingerprint string, entries i
 	// Prefixed with the count so the fingerprint is never the empty string: an
 	// EMPTY keyring directory is a real, cacheable state, and letting it share a
 	// value with "not computed" is how a sentinel turns into a bug.
-	return fmt.Sprintf("%d\n%s", len(lines), strings.Join(lines, "\n")), len(dirEntries), nil
+	//
+	// The fingerprint hashes EVERY file, so any change is seen. The returned
+	// COUNT is narrower on purpose -- it feeds the "records present, no keys out
+	// of them" guard, and only key records may answer that question. See
+	// isKeyRecord.
+	records := 0
+	for _, e := range dirEntries {
+		if !e.IsDir() && isKeyRecord(e.Name()) {
+			records++
+		}
+	}
+	return fmt.Sprintf("%d\n%s", len(lines), strings.Join(lines, "\n")), records, nil
+}
+
+// isKeyRecord reports whether a file in a keyring directory is a KEY, as opposed
+// to the backend's own bookkeeping.
+//
+// cosmos-sdk's file backend writes one <name>.info per key and one
+// <addressHex>.address alias, and it also writes a "keyhash" file that records
+// the passphrase hash. That keyhash is created on first unlock and is NEVER
+// removed -- not when a key is deleted, not when the LAST key is deleted. So a
+// keyring the operator legitimately emptied still has one file in it.
+//
+// Counting it as a record made the guard below read that state as "record files
+// present, yet not one yielded a key", i.e. a broken keyring: LoadKeys returned
+// an error, MultiProviderKeyManager.Reload abandoned the reload and kept the
+// PREVIOUS key set, and the process went on signing with a key that had been
+// withdrawn -- forever, retrying every tick. That is the exact failure this
+// branch exists to prevent, arrived at from the other side. Measured 2026-08-28.
+//
+// Only ".info" counts, and that is cosmos-sdk's own semantics rather than a
+// guess: it LISTS a keyring by its .info files and ignores a leftover .address.
+// docs/SUPPLIER_KEYS.md documents removing just the .info as the way to withdraw
+// a key -- measured on a four-pod fleet on 2026-08-22 -- so counting the orphaned
+// .address as a record would make that documented, working procedure report a
+// broken keyring.
+//
+// Matching the record suffix rather than excluding "keyhash" by name is
+// deliberate: a future bookkeeping file would slip past an exclusion list and
+// rebuild the same bug, while a new record type is a visible, deliberate edit
+// here. A keyring whose .info files are all corrupt still has records and still
+// reports broken, which is the condition the guard was written for.
+func isKeyRecord(name string) bool {
+	return strings.HasSuffix(name, ".info")
 }
 
 // keyringSubdirs maps a backend to the subdirectory cosmos-sdk appends to the
