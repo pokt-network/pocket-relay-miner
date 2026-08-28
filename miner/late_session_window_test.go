@@ -354,9 +354,9 @@ func TestHandleRelay_StoreErrorPastClaimWindow_IsStillDropped(t *testing.T) {
 
 	// Break every Redis command so SessionStore.Get returns an error rather than
 	// a snapshot -- the transient hiccup the fall-through exists for.
-	f.mr.SetError("LOADING Redis is loading the dataset in memory")
+	f.failRedis.Fail("LOADING Redis is loading the dataset in memory")
 	err := f.worker.handleRelay(f.ctx, supplier, msg)
-	f.mr.SetError("")
+	f.failRedis.Clear()
 
 	require.NoError(t, err, "a dropped late relay is ACKed, not retried")
 	require.Equal(t, addedBefore,
