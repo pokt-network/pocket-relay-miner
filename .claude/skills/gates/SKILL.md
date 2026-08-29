@@ -75,6 +75,21 @@ Measured in this session, repeatedly: `all.sh --level 1 2>&1 | grep -E '...'`
 reads grep's status. It happened to be green every time, which is exactly why the
 habit survives — the first red it hides is the one that matters.
 
+**And a `;` list hides it exactly like a pipe does.** Measured 2026-08-28:
+`cascade.sh ... > log 2>&1; echo "EXIT=$?"` reports the status of the `echo`,
+which is always 0 — the `$?` inside the string is expanded and printed, but the
+LIST's own exit code is the last command's. A cascade that aborted on a red gate
+was read as a success, and a defect was filed against the script for returning 0
+when the script returns 1 correctly. Verified by running it and reading `$?` with
+nothing after it. Capture the status in a variable on its OWN line, then echo the
+variable:
+
+```sh
+scripts/gates/all.sh --level 2 > "$log" 2>&1
+rc=$?                      # nothing between the command and this line
+echo "gate rc=$rc"
+```
+
 And when you match against a gate's output, **strip the colour escapes in a
 separate statement after capturing the status**: the runner prints
 `<red>FAIL<reset> level 2`, so no fixed-string match spans it (budgetkit paid for
