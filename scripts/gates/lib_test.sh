@@ -7,6 +7,16 @@
 
 set -uo pipefail
 
+# A pre-commit hook runs with GIT_DIR exported, and from a LINKED WORKTREE that
+# value is ABSOLUTE -- so every `git` this file runs in a throwaway directory
+# operates on the parent repository instead. Measured 2026-08-29: committing from
+# a linked worktree made the fixture below `git init` and `git commit -m first`
+# against the real repo, which took whatever was staged and moved `main` onto a
+# commit called "first". Reproduced in isolation with an absolute GIT_DIR
+# exported; the same run also left core.bare=true on the parent, which was
+# observed but not reproduced. Unset before any fixture touches git.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_OBJECT_DIRECTORY
+
 # shellcheck source=scripts/gates/lib.sh
 . "$(dirname "${BASH_SOURCE[0]}")/lib.sh"
 
