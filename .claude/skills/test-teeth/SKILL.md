@@ -111,6 +111,40 @@ never proved the check DISCRIMINATES, and those are different claims. Before
 trusting any guard, ask where each side of its comparison comes from; if the
 answer is the same place, it cannot fail.
 
+## A GATE is a test, and it is the one nobody injects into
+
+The skill gets pointed at `_test.go` and stops there. Measured 2026-08-27: the
+Go tests of a change were injected and proven to bite, and the 237 lines of shell
+that the same change added to `scripts/gates/live.sh` were read carefully and
+never injected into. Two reviews then found, in that shell, a delta that came out
+zero whenever the before-snapshot was empty -- which is the NORMAL shape for a
+CounterVec that has not fired -- so the first loss a run ever saw would have
+printed "series present and unchanged over the run". A green money gate that
+cannot go red.
+
+The reading pass is not a substitute and the difference is nameable: reading
+answers "what does this check?", injection answers "can it fail?". Only the second
+is evidence. The angles named before that reading pass were removed behaviour,
+callers, double-counted metrics, language pitfalls and efficiency -- five angles,
+and not one of them was "the arithmetic of the measurement".
+
+**How, when the test is a shell gate:** EXTRACT the real block with `sed` and run
+it against fabricated inputs with the `gate_*` functions stubbed to record which
+one was called. Never copy the block into the harness -- a copy drifts from the
+original and then the harness proves something that is no longer there. Then run
+the SAME harness against the pre-fix version of the gate (`git show <sha>:<path>`)
+and watch it go red: a harness that only passes on the fixed gate has not shown
+it would have caught anything.
+
+Working example, written that day:
+`scripts/localonly/_state/teeth-live-gate.sh` -- six cases, and it reports which
+defect each one catches and, in its header, which defect it does NOT cover.
+
+**And a machine trap that comes with it:** a test may READ a gate script
+(`internal/conventions/metric_coverage_test.go` reads `scripts/gates/live.sh`),
+so editing a `.sh` with a gate run in flight poisons that run exactly the way
+editing a `.go` does.
+
 ## The one-line test for whether this ran
 
 The report names the defect that was injected, quotes the failure showing it named
