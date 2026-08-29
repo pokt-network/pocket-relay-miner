@@ -140,6 +140,26 @@ Working example, written that day:
 `scripts/localonly/_state/teeth-live-gate.sh` -- six cases, and it reports which
 defect each one catches and, in its header, which defect it does NOT cover.
 
+**The baseline ROTS, and it rots the moment you succeed.** A harness that
+compares against `HEAD` is comparing the fix against itself as soon as the fix is
+committed — measured 2026-08-29: `pre=1 post=1`, printed as "no teeth" about a
+gate that was fine. Anchor it to the commit where the DEFECT IS PRESENT, found by
+its own text rather than by a hand-written SHA. And note which end of that search
+you want: `git log -S '<string>'` lists the commit that REMOVED the string and
+the one that ADDED it, newest first, so `head -1` hands you the removal — a
+baseline with the defect already gone. `tail -1` is the one that has it. Both
+mistakes happened in the same session, hours apart. Re-run the harness AFTER
+committing; that is the only way the rot shows.
+
+**When the INJECTION comes from the environment, it expires.** A harness whose
+defect condition is a live state — a deleted pod inside a metrics window, a
+stopped service, a full disk — proves nothing once that state is gone, and it
+must say so DIFFERENTLY from a failure. Measured the same day: the window harness
+printed "no teeth" three hours after the pod it needed had aged out of the query
+window, which reads as "the gate got worse". It now exits with its own status and
+says what to re-inject. "I had no injection" and "the guard has no teeth" must
+not produce the same signal — the same rule the gates themselves run on.
+
 **And a machine trap that comes with it:** a test may READ a gate script
 (`internal/conventions/metric_coverage_test.go` reads `scripts/gates/live.sh`),
 so editing a `.sh` with a gate run in flight poisons that run exactly the way

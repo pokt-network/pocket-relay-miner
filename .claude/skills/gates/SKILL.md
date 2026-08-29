@@ -90,6 +90,18 @@ rc=$?                      # nothing between the command and this line
 echo "gate rc=$rc"
 ```
 
+**Reading the rule is not obeying it, and this is the measured proof.** On
+2026-08-29 a session with this whole section in context wrote
+`git rebase ... 2>&1 | tail -30` then `rc=$?` — tail's status — and later
+`PROM_WINDOW=20m gate.sh --preflight-only 2>&1 | head -3` then `echo "rc: $?"`,
+which reported 0 for a check that had not run at all and briefly stood as
+evidence that a new validation worked. Both were caught by re-measuring, not by
+remembering. So the habit that actually holds is mechanical, not vigilant: when a
+command's status matters, **it gets its own line with nothing after it**, and any
+`| head`, `| tail`, `| grep` or `| jq` you want goes in a SEPARATE statement over
+the captured output. If you find yourself typing `$?` on a line that also
+contains a pipe, you have already lost the status.
+
 And when you match against a gate's output, **strip the colour escapes in a
 separate statement after capturing the status**: the runner prints
 `<red>FAIL<reset> level 2`, so no fixed-string match spans it (budgetkit paid for

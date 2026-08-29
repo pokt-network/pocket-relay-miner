@@ -116,6 +116,22 @@ double-counted metrics, language pitfalls, efficiency. Measured 2026-08-26, that
 pass over a 17-commit branch found a real defect the gates could not: a gate
 reporting its units in one mode and not the other.
 
+**When you change how DATA IS PRODUCED, enumerate the consumers and walk each one
+separately.** Naming the angle is not doing it: measured 2026-08-29, "the
+arithmetic of the measurement" WAS on the written angle list, and the change
+still shipped validated against one consumer out of three. It was correct for the
+consumer that sums per-series deltas and wrong for the one that compares a single
+delta to a target and the one that aggregates before differencing — level 3 went
+red on a healthy fleet, naming a pod the session had deleted itself. Then the
+correction repeated the shape one level down: it created a FOURTH consumer of the
+same helper and gave it none of the handling the other three had, eleven minutes
+before a commit whose whole subject was "it was the only one reading just the
+delta".
+
+So: list the consumers by `file:line` first, then walk each. A producer with N
+consumers is N checks, and the count is the cheap part — it is knowing there were
+N rather than one that the two rounds above cost.
+
 ## The tree — what each finding of a review earns
 
 - **Branch 1 — fix now**: money, data loss, a guard that does not bite, anything
