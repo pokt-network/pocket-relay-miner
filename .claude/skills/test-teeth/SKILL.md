@@ -160,6 +160,17 @@ window, which reads as "the gate got worse". It now exits with its own status an
 says what to re-inject. "I had no injection" and "the guard has no teeth" must
 not produce the same signal — the same rule the gates themselves run on.
 
+**A guard must certify the thing it DEPENDS ON, not a proxy for it.** This is the
+shape that survives a teeth pass, because the guard does fire — on the wrong
+question. Measured 2026-08-29: a sentinel was added so an empty result could be
+told apart from a failed read, and it was emitted on the HTTP call exiting zero.
+The dependency was not the status, it was the PARSE: a 200 carrying a proxy error
+page, or an empty body, exits zero and yields no rows, so the sentinel certified
+a baseline that had measured nothing, and the false pass it was written to close
+was reproduced with a stubbed transport, number for number. Ask what the next
+line actually relies on, and certify that. The gap is invisible in a happy-path
+test, so the injection has to be the ugly success: the 200 that is not an answer.
+
 **And a machine trap that comes with it:** a test may READ a gate script
 (`internal/conventions/metric_coverage_test.go` reads `scripts/gates/live.sh`),
 so editing a `.sh` with a gate run in flight poisons that run exactly the way

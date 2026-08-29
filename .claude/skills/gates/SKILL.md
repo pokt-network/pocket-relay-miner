@@ -102,6 +102,17 @@ command's status matters, **it gets its own line with nothing after it**, and an
 the captured output. If you find yourself typing `$?` on a line that also
 contains a pipe, you have already lost the status.
 
+**And a status is not a boolean.** Capturing `$?` correctly is only half of it;
+the other half is that non-zero codes mean DIFFERENT things and collapsing them
+hides the worst one. Measured 2026-08-29, an hour after the paragraph above was
+written: a probe classified a gate's exit as "rejected" on 2 and "accepted" on
+anything else, so when the script ABORTED at 1 -- an unbound variable under
+`set -u`, because a check had been moved above the line that defines what it
+reads -- every case printed "accepted" and the validation looked like it was
+letting everything through. The defect was the opposite: nothing ran at all.
+Print the number, then classify; a probe that maps a range of codes onto one
+word cannot tell "it said no" from "it never got there".
+
 And when you match against a gate's output, **strip the colour escapes in a
 separate statement after capturing the status**: the runner prints
 `<red>FAIL<reset> level 2`, so no fixed-string match spans it (budgetkit paid for
