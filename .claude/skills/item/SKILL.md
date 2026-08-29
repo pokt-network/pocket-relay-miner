@@ -65,18 +65,42 @@ Conventions are tests here (`internal/conventions`), so a violation fails rather
 than waits for review. Do not add a knob where a KeyBuilder method belongs, do
 not add a bare `go` statement, do not reach for `sync.Map`.
 
-### Choosing the fix for a BRANCH-1 finding — evaluate BEFORE writing code
+### Choosing the approach — THE COUNCIL RUNS FIRST, on every item
 
-A branch-1 finding is one where the fix is not obvious and a wrong choice costs
-more fixes. **This is where the council is invoked**, and it is the step that
-exists because of this repository's most expensive measured failure: the signing
-key classification took FOUR commits — `efd2fb8` → `fb46b85` → `47116f8` →
-`2ce1d30` — and the last one reintroduced the exact failure mode the previous one
-had just fixed, leaving a reload abandoned forever while a pulled key kept
-signing.
+**Invoke the council before the first edit of ANY issue or feature.** Not when the
+space looks wide, not when the fix looks hard, not only for product code — every
+item. Jorge, 2026-08-29, after a session skipped it: *"claramente te instrui que
+para cualquier fix usaras el council, porque? simple, para que la solucion sea la
+mejor, no la primera que se te ocurrio, para que te hagan dudar, re-pensar el
+caso."* And the reasoning behind it, his words: *"2 piensan mejor que 1 y 3 mejor
+que 2; aveces es ruido, pero del ruido filtrado, salen otros puntos importantes
+que ayudan a considerar la mejor solucion."*
 
-- **Invoke it when the space is wide**: three or more defensible fixes, each
-  touching a different contract. Two options is not wide — choose and move on.
+**The council is not the review.** A review reads code you already wrote; the
+council reads the SPACE OF APPROACHES before you pick one. They do not substitute
+for each other, and running three rounds of review afterwards does not pay back a
+council that never ran.
+
+This step exists because of this repository's most expensive measured failure: the
+signing key classification took FOUR commits — `efd2fb8` → `fb46b85` → `47116f8`
+→ `2ce1d30` — and the last one reintroduced the exact failure mode the previous
+one had just fixed, leaving a reload abandoned forever while a pulled key kept
+signing. **It recurred on 2026-08-29, worse**, in `scripts/gates/live.sh`: five
+defensible fixes existed for one defect, the session chose one from a single
+paragraph of its own reasoning — reading the old "invoke it when the space is
+wide" bullet as permission to skip — and it cost ELEVEN commits on one file, a
+level-3 run in RED, and a correction that reintroduced what the previous one had
+just fixed. That bullet is gone; this paragraph replaced it.
+
+**And the trap that made skipping feel safe:** a measurement that proves the
+PROBLEM does not authorise the FIX. That session had measured, correctly, that an
+instant Prometheus query loses a dead pod's series — and took the confidence from
+that measurement into choosing a fix it had not tested against three of the four
+consumers that read the value.
+
+- **Size it before spending it**, always: say roughly how many members and how
+  many tokens, in the same message that proposes it. A fan-out nobody sized is
+  the failure Jorge has to catch.
 - **It finds STRUCTURAL defects, the kind visible by reading** — a system that
   agrees with its own error. It does not find behavioural ones that only appear
   when you run the thing.
@@ -192,6 +216,8 @@ closing CANNOT skip; everything with a nameable trigger moves.
 
 ## The one-line test for whether this ran
 
-The reply names the success criterion, the gate level with what it exercised, and
-the queue line that holds the item. If any of the three is missing, the item is
-still open.
+The reply names the success criterion, **what the council said and what was done
+with it**, the gate level with what it exercised, and the queue line that holds
+the item. If any of the four is missing, the item is still open — and "I ran a
+review afterwards" does not fill the council slot, because the two answer
+different questions.
