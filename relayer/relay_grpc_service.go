@@ -841,11 +841,6 @@ func (s *RelayGRPCService) getCircuitBreakerThreshold(serviceID, rpcType string)
 	return pool.DefaultUnhealthyThreshold
 }
 
-// Close releases resources held by the relay gRPC service.
-func (s *RelayGRPCService) Close() error {
-	return nil
-}
-
 // NewGRPCServerForRelayService creates a gRPC server configured for the relay service.
 // It uses the standard proto codec and handles typed RelayRequest/RelayResponse messages.
 // Includes panic recovery interceptors for both unary and stream RPCs.

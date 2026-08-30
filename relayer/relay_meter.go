@@ -17,7 +17,6 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
-	"github.com/pokt-network/poktroll/app/pocket"
 	"github.com/pokt-network/poktroll/pkg/client"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -75,14 +74,6 @@ type RelayMeterConfig struct {
 	// CacheTTL is the TTL for all cached Redis data (params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	CacheTTL time.Duration
-}
-
-// DefaultRelayMeterConfig returns sensible defaults.
-func DefaultRelayMeterConfig() RelayMeterConfig {
-	return RelayMeterConfig{
-		FailBehavior: FailOpen,      // Default to availability
-		CacheTTL:     2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
-	}
 }
 
 // SessionMeterMeta contains metadata for a session meter stored in Redis.
@@ -240,6 +231,15 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 	return nil
 }
 
+// There is deliberately no revert. A relay that misses the mining-difficulty
+// target never becomes a leaf, which looks like something to refund -- it is
+// not. The protocol pays leaves TIMES the difficulty multiplier
+// (poktroll x/tokenomics settle_pending_claims.go: numEstimatedComputeUnits =
+// GetNumEstimatedComputeUnits(relayMiningDifficulty)), so a relay that missed
+// the tree is already represented in what gets paid. Consuming at serve time is
+// correct, and a RevertRelayConsumption existed here for years without a single
+// caller because the case it was written for does not exist.
+//
 // CheckAndConsumeRelay checks if a relay can be served and consumes stake if so.
 // Uses atomic Redis INCRBY for distributed state.
 // Returns:
@@ -372,61 +372,6 @@ func (m *RelayMeter) CheckRelayHealth(ctx context.Context, serviceID string) err
 	return nil
 }
 
-// RevertRelayConsumption reverts the stake consumption for a relay that wasn't mined.
-//
-// sessionStartHeight MUST be the same value passed to the CheckAndConsumeRelay
-// being reverted. The refund is recomputed rather than remembered, so pricing the
-// revert at a different height refunds a different amount than was charged and
-// permanently desynchronises the session's consumed counter.
-func (m *RelayMeter) RevertRelayConsumption(
-	ctx context.Context,
-	sessionID string,
-	supplierAddress string,
-	serviceID string,
-	sessionStartHeight int64,
-) error {
-	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
-	if err != nil {
-		return nil // Can't calculate, skip revert
-	}
-
-	consumedKey := m.consumedKey(sessionID, supplierAddress)
-	newVal, err := m.redisClient.DecrBy(ctx, consumedKey, relayCostUpokt).Result()
-	if err != nil {
-		return fmt.Errorf("failed to revert consumption: %w", err)
-	}
-
-	// Ensure we don't go negative
-	if newVal < 0 {
-		m.redisClient.Set(ctx, consumedKey, 0, 0)
-	}
-
-	return nil
-}
-
-// GetSessionMeterState returns the current meter state for a session and
-// supplier. The meter is per-(session, supplier); callers that held a
-// prior "per-session" mental model must now specify which supplier's
-// portion they want.
-func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID, supplierAddress string) *SessionMeterState {
-	meta, err := m.getSessionMeta(ctx, sessionID, supplierAddress)
-	if err != nil || meta == nil {
-		return nil
-	}
-
-	consumed, _ := m.redisClient.Get(ctx, m.consumedKey(sessionID, supplierAddress)).Int64()
-
-	return &SessionMeterState{
-		SessionID:        meta.SessionID,
-		AppAddress:       meta.AppAddress,
-		ServiceID:        meta.ServiceID,
-		MaxStake:         cosmostypes.NewInt64Coin(pocket.DenomuPOKT, meta.MaxStakeUpokt),
-		ConsumedStake:    cosmostypes.NewInt64Coin(pocket.DenomuPOKT, consumed),
-		SessionEndHeight: meta.SessionEndHeight,
-		LastUpdated:      time.Unix(meta.CreatedAt, 0),
-	}
-}
-
 // ClearSessionMeter clears all metering data for a (session, supplier)
 // pair. Called by miners when claims for that supplier's portion of the
 // session are processed, to free Redis space. The meter is per-supplier,
@@ -465,17 +410,6 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 		Msg("cleared session meter")
 
 	return nil
-}
-
-// PublishCleanupSignal publishes a cleanup signal for a (session, supplier)
-// pair. Miners call this after processing claims to notify all relayers
-// that this supplier's portion of the session meter can be released.
-// The payload format is "sessionID|supplierAddress"; subscribers parse on
-// the '|' separator.
-func (m *RelayMeter) PublishCleanupSignal(ctx context.Context, sessionID, supplierAddress string) error {
-	channel := m.redisClient.KB().MeterCleanupChannel()
-	payload := sessionID + "|" + supplierAddress
-	return m.redisClient.Publish(ctx, channel, payload).Err()
 }
 
 // getOrCreateSessionMeter gets or creates a session meter in Redis.
@@ -1138,18 +1072,6 @@ func localCacheKey(sessionID, supplierAddress string) string {
 type RelayMeterSnapshot struct {
 	ActiveSessions int
 	FailBehavior   FailBehavior
-}
-
-// GetSnapshot returns a snapshot of the relay meter state.
-func (m *RelayMeter) GetSnapshot(ctx context.Context) RelayMeterSnapshot {
-	m.localCacheMu.RLock()
-	activeLocal := len(m.localCache)
-	m.localCacheMu.RUnlock()
-
-	return RelayMeterSnapshot{
-		ActiveSessions: activeLocal,
-		FailBehavior:   m.config.FailBehavior,
-	}
 }
 
 // calculateAppStakePerSessionSupplier calculates the portion of app stake
