@@ -25,6 +25,22 @@ had been deleted and recreated. And measured 2026-08-26, pods reported Running
 while serving a binary four days old. The check that catches that one is the pod's
 start time against the newest commit touching Go; restarts never caught it.
 
+**And the pod's start time is not enough either.** Measured 2026-08-29, after a
+15-link rebase: the relayer pods were 4 minutes old and their image tag had not
+changed across a `tilt trigger`, yet the binary inside had been rebuilt — the
+image layout itself moved, from `/app/pocket-relay-miner` to
+`/usr/local/bin/pocket-relay-miner`. Age said fresh, the tag said unchanged, and
+only the CONTENT told the truth.
+
+So verify by content, and **discover the path, never hard-code it**. A `grep`
+against a stale path returns "no such file or directory", and a `2>/dev/null`
+turns that into "the marker is absent" — indistinguishable from "the binary is
+the old one", and it reads as a legitimate wait. Ask the container
+(`command -v <binary>`), grep what it answers, and make "could not measure" print
+differently from "does not match". Use two markers, not one: a string the current
+tree HAS and a string only the other branch has, so presence and absence are both
+asserted.
+
 ## Step 0a — a mid-session crash re-enters HERE, and what survives is the repo
 
 A session that died does not reopen as a new one. Run Step 0, then read
