@@ -62,6 +62,20 @@ not pinning the position.
   delete it; a test that cannot fail costs runtime and buys false confidence.
 - **Failed for an unrelated reason** — narrow the injection. You broke more than
   the one thing.
+- **Printed the failure and still exited 0** — the harness around the test is
+  broken, and the test itself may be fine. Read the exit status, never the
+  output: a red you can see and the runner cannot is worth nothing, because the
+  gate reads the status.
+
+Measured 2026-08-29, and it was self-inflicted in the minute before: new cases
+were appended to `scripts/gates/lib_test.sh` with `cat >>`, which put them
+**after the block that tallies failures and exits 1**. The file printed
+`lib_test: all cases pass`, then printed two `FAIL` lines, then returned 0. The
+injection was caught only because this skill's loop reads `$?` rather than the
+text. Appending to a script that ends in its own verdict puts your code past the
+verdict — the same family as the pipe that reports `tail`'s status. **Before
+trusting a case you added to an existing test file, look at where the file
+decides.**
 
 ## Rules
 
