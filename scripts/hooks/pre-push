@@ -27,8 +27,16 @@ scripts/gates/all.sh --level 2 > "$log" 2>&1
 rc=$?
 
 if [ "$rc" -ne 0 ]; then
-    printf '\npre-push: level 2 FAILED (exit %s). Nothing was pushed.\n' "$rc" >&2
-    tail -40 "$log" >&2
+    printf '\npre-push: level 2 FAILED (exit %s). Nothing was pushed.\n\n' "$rc" >&2
+
+    # Show WHY, not the last 40 lines. Measured on this hook's first red run:
+    # `tail -40` printed forty PASSING subtests and the actual failure was not
+    # among them, so the operator got a verdict with no cause. Surface the
+    # failing lines and the gate's own summary instead.
+    grep -E '^(FAIL|NOTHING)|--- FAIL|^\s+FAIL |panic: |^\s+\?\?' "$log" | head -30 >&2
+    printf '\n' >&2
+    sed -n '/=== summary/,$p' "$log" >&2
+
     printf '\nfull log: %s\n' "$log" >&2
     exit "$rc"
 fi
