@@ -89,13 +89,16 @@ lint: ## Run golangci-lint
 check-tracked-files: ## Verify no local-only files (planning docs, IDE config, secrets) are tracked
 	@./scripts/check-tracked-files.sh
 
-install-hooks: ## Install the git pre-commit hook (gofmt, build, vet, lint checks)
+install-hooks: ## Point git at the versioned hooks in scripts/hooks/
 	@echo "Installing git hooks..."
-	@chmod +x scripts/pre-commit-hook.sh
-	@ln -sf ../../scripts/pre-commit-hook.sh .git/hooks/pre-commit
-	@echo "Pre-commit hook installed."
-	@echo "Before each commit it checks: gofmt, go build, go vet, tracked files, golangci-lint."
-	@echo "It reports problems rather than fixing them; bypass once with 'git commit --no-verify'."
+	@chmod +x scripts/hooks/*
+	@git config core.hooksPath scripts/hooks
+	@echo "core.hooksPath -> scripts/hooks"
+	@echo "  pre-commit: gofmt, build, vet, tracked files, lint, gate self-tests, unreachable functions."
+	@echo "  pre-push:   level 2 -- suite, race detector, coverage. Minutes, not seconds."
+	@echo "They report problems rather than fixing them; bypass once with --no-verify."
+	@echo "NOTE: hooks now live IN THE REPO. A hook added later reaches you with a pull,"
+	@echo "      instead of needing a new symlink per hook under .git/hooks (not versioned)."
 
 docker-build: ## Build Docker image (override with DOCKER_IMAGE env var)
 	@echo "Building Docker image: $(DOCKER_IMAGE)..."

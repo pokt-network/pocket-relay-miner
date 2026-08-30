@@ -1,0 +1,38 @@
+#!/usr/bin/env bash
+#
+# Level 2 is the floor this repository declares for a push -- suite, race
+# detector and coverage over the whole tree. Until this hook existed, nothing
+# enforced it: it depended on somebody remembering, which is the same kind of
+# gap that let an exported function sit unreachable for four months.
+#
+# It is NOT in pre-commit on purpose. Level 2 takes minutes, and the pre-commit
+# hook's own header already says "level 2 owns the slow ones". A hook that costs
+# minutes per commit gets bypassed with --no-verify, and then you lose the fast
+# checks too. Pushing is rare; a commit is not.
+#
+# Bypass once, deliberately, with `git push --no-verify`.
+set -uo pipefail
+
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+if [ ! -x scripts/gates/all.sh ]; then
+    printf 'pre-push: scripts/gates/all.sh not present on this branch -- skipping\n' >&2
+    exit 0
+fi
+
+printf 'pre-push: running level 2 (suite, race, coverage). Minutes, not seconds.\n' >&2
+
+log="$(mktemp -t prepush-l2-XXXXXX.log)"
+scripts/gates/all.sh --level 2 > "$log" 2>&1
+rc=$?
+
+if [ "$rc" -ne 0 ]; then
+    printf '\npre-push: level 2 FAILED (exit %s). Nothing was pushed.\n' "$rc" >&2
+    tail -40 "$log" >&2
+    printf '\nfull log: %s\n' "$log" >&2
+    exit "$rc"
+fi
+
+tail -3 "$log" >&2
+rm -f "$log"
+exit 0
