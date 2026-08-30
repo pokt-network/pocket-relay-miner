@@ -154,11 +154,17 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 
 	// Dedicated client for forwarding to gRPC backends. h2c (HTTP/2 cleartext,
 	// prior knowledge) with HTTP/1.1 disabled is exactly how a native gRPC
-	// client opens a non-TLS connection. No client-level Timeout: the per-request
-	// context deadline (service timeout) governs, matching the HTTP path.
+	// client opens a non-TLS connection. HTTP/2 over TLS is enabled too, for the
+	// https:// and grpcs:// backends: measured on Go 1.26, a TLS request with
+	// only UnencryptedHTTP2 set does NOT fail -- it silently negotiates HTTP/1.1
+	// and returns 200, which cannot carry gRPC. A silent downgrade to a protocol
+	// that cannot serve the request is harder to diagnose than a dial error.
+	// No client-level Timeout: the per-request context deadline (service
+	// timeout) governs, matching the HTTP path.
 	grpcTransport := &http.Transport{}
 	grpcTransport.Protocols = new(http.Protocols)
 	grpcTransport.Protocols.SetUnencryptedHTTP2(true)
+	grpcTransport.Protocols.SetHTTP2(true)
 	grpcTransport.Protocols.SetHTTP1(false)
 	grpcHTTPClient := &http.Client{
 		Transport: grpcTransport,
