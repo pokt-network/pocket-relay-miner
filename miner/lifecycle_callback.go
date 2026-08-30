@@ -758,6 +758,37 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					return
 				}
 
+				// The two numbers that decide whether we get paid for what we
+				// served, and the only moment they coexist: smstCount is what the
+				// chain will bill (num_relays is Count() of this very root), and
+				// snap.RelayCount is what the session coordinator counted in Redis.
+				// They come from different writers -- a Lua HINCRBY on the shared
+				// session hash versus this process's own trie -- so a shortfall
+				// here is work we performed and will not be paid for.
+				//
+				// Measured 2026-08-19 (FINDING-partial-claim): five claims where
+				// the coordinator had counted 4 and the flushed root held 1, and
+				// nothing said so -- claim_success and proof_success were both
+				// true. This recorder was written for exactly that in April, its
+				// only caller was deleted with claim_pipeline.go, and the metric
+				// has been declared, documented and silent ever since.
+				RecordClaimLeafStats(
+					snap.SupplierOperatorAddress,
+					snap.ServiceID,
+					snap.SessionID,
+					int64(smstCount),
+					snap.RelayCount,
+				)
+				if int64(smstCount) < snap.RelayCount {
+					logger.Warn().
+						Str(logging.FieldSessionID, snap.SessionID).
+						Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+						Str(logging.FieldServiceID, snap.ServiceID).
+						Int64("claim_leaf_count", int64(smstCount)).
+						Int64("coordinator_relay_count", snap.RelayCount).
+						Msg("claiming fewer leaves than relays counted -- served work that will not be billed")
+				}
+
 				// Phase 3: Check if tree is empty (no relays mined).
 				if smstCount == 0 || smstSum == 0 {
 					logger.Warn().
