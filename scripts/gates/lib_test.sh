@@ -230,6 +230,14 @@ fi
 rm -f "$keep_src"
 [ -n "$keep_dest" ] && rm -f "$keep_dest"
 
+# before after -> delta. The reset case is the one that matters: a negative
+# delta would be subtracted from a shortfall and would EXCUSE a silent loss.
+expect 0  "$(gate_counter_delta 0 0)"      "counter never moved"
+expect 6  "$(gate_counter_delta 10 16)"    "counter advanced normally"
+expect 16 "$(gate_counter_delta 0 16)"     "counter started at zero"
+expect 4  "$(gate_counter_delta 10 4)"     "RESET: after < before, the honest delta is what it has seen since"
+expect 0  "$(gate_counter_delta 10 0)"     "reset with no traffic since -- zero, never -10"
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1
