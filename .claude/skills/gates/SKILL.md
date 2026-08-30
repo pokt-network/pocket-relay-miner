@@ -102,6 +102,18 @@ command's status matters, **it gets its own line with nothing after it**, and an
 the captured output. If you find yourself typing `$?` on a line that also
 contains a pipe, you have already lost the status.
 
+**A backgrounded command hands the same lie to the HARNESS, which then reports it
+to you as fact.** Measured 2026-08-29: a watcher launched with
+`run_in_background` as `wait-fleet-binary.sh ... | tail -20` returned 1 on a
+TIMEOUT, and the completion notification said **"exit code 0"** — the pipeline's
+status, which is `tail`'s. Everything the earlier paragraphs teach about reading
+`$?` yourself is bypassed here, because you never read it: a message arrives
+saying the job succeeded. The rule is therefore stricter for background work than
+for foreground: **a backgrounded command whose verdict matters ends in the
+command itself, never in a pipe** — redirect to a file and read the file
+afterwards. Same run, the L3 gate was launched bare and its 0 was real, which is
+the only reason the two could be told apart.
+
 **And a status is not a boolean.** Capturing `$?` correctly is only half of it;
 the other half is that non-zero codes mean DIFFERENT things and collapsing them
 hides the worst one. Measured 2026-08-29, an hour after the paragraph above was
