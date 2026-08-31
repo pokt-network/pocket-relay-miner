@@ -19,10 +19,11 @@ import (
 // Safety invariants:
 //  1. State keys ({base}:miner:*, {base}:smst:*, {base}:relays:*,
 //     {base}:suppliers:*, {base}:tx:*) are never touched.
-//  2. Healthy supplier entries are never deleted: the relayer returns 503 on
-//     a supplier cache miss (fail-open covers Redis errors only), so wiping
-//     a healthy entry rejects that supplier's relays until the miner
-//     reconcile rewrites it. Only contaminated entries (staked+active with
+//  2. Healthy supplier entries are never deleted: an absent entry is served
+//     OPTIMISTICALLY for a supplier whose key this relayer holds, so wiping a
+//     healthy entry does not stop its relays -- it serves them against state
+//     nobody verified until the miner reconcile rewrites the entry. Only
+//     contaminated entries (staked+active with
 //     empty services) are deleted — those are already treated as misses by
 //     the read guard, and the deletion re-checks contamination atomically
 //     under WATCH so a concurrently-healed entry is preserved.

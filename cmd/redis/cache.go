@@ -298,12 +298,18 @@ func confirmProceed() bool {
 	return strings.TrimSpace(resp) == "y"
 }
 
-// supplierWipeWarning is shown before ANY supplier-state invalidation:
-// relayers return 503 on a supplier cache miss (fail-open covers Redis
-// errors only), so deleting a healthy entry rejects that supplier's relays
-// until the miner reconcile rewrites it.
+// supplierWipeWarning is shown before ANY supplier-state invalidation.
+//
+// Deleting a healthy entry does not reject that supplier's relays: an absent
+// entry reads as the boot window, and decideSupplierServe serves it
+// OPTIMISTICALLY for a supplier whose key this relayer holds. What it does is
+// remove the check -- until the miner rewrites the entry, relays are served
+// against state nobody verified, including for a supplier that is unstaked or
+// jailed, and those are not claimable. Corrected 2026-08-31: this said the
+// relayer returns 503, which stopped being true when optimistic serve landed.
 func supplierWipeWarning() {
-	fmt.Printf("WARNING: relayers return 503 on supplier cache misses; wiping healthy\n")
+	fmt.Printf("WARNING: wiping a healthy supplier entry does not stop its relays -- it makes them\n")
+	fmt.Printf("         served UNVERIFIED until the miner rewrites the entry\n")
 	fmt.Printf("supplier entries rejects their relays until the miner reconcile rewrites\n")
 	fmt.Printf("them (up to ~60s). For a hot-safe cleanup use --type all instead.\n")
 }
