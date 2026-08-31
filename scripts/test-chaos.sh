@@ -5,9 +5,10 @@
 # Runs alongside the stress test and randomly injects failures:
 #   1. Kill random relayer/miner pods (test HA failover)
 #   2. Redis connection blip (test fail-open/closed behavior)
-#   3. Backend latency injection (test pool exhaustion)
-#   4. Network partition simulation (test reconnection)
-#   5. Memory pressure (test graceful degradation)
+#   3. Redis latency marker (test pool behaviour under slow commands)
+#   4. Kill a backend pod (test circuit breaker + health-check recovery)
+#   5. Connection flood against the relayer (test pool exhaustion)
+#   6. Pull and restore a supplier signing key (test the no_local_signer gate)
 #
 # Usage:
 #   # In terminal 1: run stress test
@@ -26,6 +27,14 @@ K8S_CONTEXT="kind-kind"
 CHAOS_INTERVAL="${CHAOS_INTERVAL:-20}"  # seconds between chaos events
 DURATION="${DURATION:-300}"             # total chaos duration
 REDIS_POD="redis-standalone-0"
+KEYS_SECRET="supplier-keys"
+KEYS_SECRET_FIELD="supplier-keys.yaml"
+
+# Base64 of the untouched supplier-keys.yaml, captured the first time a key is
+# pulled and replayed by the EXIT trap. A chaos script that dies holding a key
+# hostage turns a test into an outage, so this is snapshotted before the first
+# mutation and restored unconditionally, including on Ctrl-C.
+KEYS_BACKUP=""
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; MAGENTA='\033[0;35m'; NC='\033[0m'
 log_chaos() { echo -e "${MAGENTA}[CHAOS]${NC} $(date +%H:%M:%S) $1"; }
@@ -89,6 +98,149 @@ chaos_connection_flood() {
     log_chaos "CONN FLOOD: done"
 }
 
+# 6. Pull a supplier signing key, then put it back.
+#
+# The one failure the other five never produce: the fleet still has the supplier
+# in its state (the miner's teardown writes {unstaking, staked: true,
+# services: [...]}, which reads as perfectly servable) but can no longer sign for
+# it. The relayer must refuse those relays promptly with no_local_signer instead
+# of paying for a backend call and failing to sign, and must serve again once the
+# key returns.
+#
+# Two timings matter and neither is instant: kubelet syncs secret volumes on a
+# period of roughly a minute, and the key manager only sees the change when that
+# lands, so this action is deliberately slower than CHAOS_INTERVAL.
+restore_signing_keys() {
+    [ -z "$KEYS_BACKUP" ] && return 0
+
+    # Report and forget ONLY on success. `|| true` followed by an unconditional
+    # "restored" log and KEYS_BACKUP="" meant a failed patch left the key out of
+    # the secret, claimed it had been put back, and then discarded the only copy
+    # that could restore it -- defeating the invariant this whole function exists
+    # for.
+    if kubectl --context "$K8S_CONTEXT" patch secret "$KEYS_SECRET" \
+        -p "{\"data\":{\"$KEYS_SECRET_FIELD\":\"$KEYS_BACKUP\"}}" >/dev/null 2>&1; then
+        log_info "signing keys restored from snapshot"
+        KEYS_BACKUP=""
+    else
+        log_chaos "RESTORE FAILED: the fleet is still short a key. Snapshot kept; restore by hand:"
+        log_chaos "  kubectl --context $K8S_CONTEXT patch secret $KEYS_SECRET -p '{\"data\":{\"$KEYS_SECRET_FIELD\":\"<snapshot>\"}}'"
+        printf '%s\n' "$KEYS_BACKUP" > "./chaos-keys-snapshot.b64"
+        log_chaos "  snapshot written to ./chaos-keys-snapshot.b64"
+    fi
+}
+
+# Restore on every exit path, including a failure under `set -e` and Ctrl-C.
+trap restore_signing_keys EXIT
+
+# keys_removed_total prints the fleet-wide count of key removals seen, via
+# Prometheus. Prints 0 when it cannot be reached, so an unreachable Prometheus
+# shows up as "not registered" rather than as a silent pass.
+keys_removed_total() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL:-http://localhost:9091}/api/v1/query" \
+        --data-urlencode 'query=sum(ha_keys_changes_total{type="removed"})' 2>/dev/null |
+        jq -r '[.data.result[]?.value[1] | tonumber] | add // 0' 2>/dev/null | cut -d. -f1 || echo 0
+}
+
+# secret_key_count prints how many keys the secret currently carries.
+secret_key_count() {
+    kubectl --context "$K8S_CONTEXT" get secret "$KEYS_SECRET" \
+        -o "jsonpath={.data['supplier-keys\.yaml']}" 2>/dev/null \
+        | base64 -d 2>/dev/null | grep -c '^[[:space:]]*-' || true
+}
+
+chaos_pull_signing_key() {
+    # Snapshot once. If a previous event is still holding a key out, skip rather
+    # than snapshotting the already-reduced secret as the "original".
+    if [ -n "$KEYS_BACKUP" ]; then
+        log_chaos "PULL KEY: skipped, a key is already pulled"
+        return 0
+    fi
+
+    local original
+    original=$(kubectl --context "$K8S_CONTEXT" get secret "$KEYS_SECRET" \
+        -o "jsonpath={.data['supplier-keys\.yaml']}" 2>/dev/null || true)
+    if [ -z "$original" ]; then
+        log_chaos "PULL KEY: skipped, secret $KEYS_SECRET has no $KEYS_SECRET_FIELD"
+        return 0
+    fi
+
+    local before
+    before=$(secret_key_count)
+    # A failed kubectl gives an empty string, and an empty string in an integer
+    # test aborts the whole script under `set -e`.
+    [ -z "$before" ] && before=0
+    if [ "$before" -lt 2 ]; then
+        log_chaos "PULL KEY: skipped, only $before key(s) — pulling the last one is an outage, not chaos"
+        return 0
+    fi
+
+    KEYS_BACKUP="$original"
+
+    # Drop the last list entry. The secret is `keys:` followed by one `- <hex>`
+    # per key (Tiltfile builds it with encode_yaml), so deleting the final list
+    # line removes exactly one key and leaves valid YAML.
+    local reduced
+    reduced=$(printf '%s' "$original" | base64 -d | sed -e '${/^[[:space:]]*-/d}' | base64 -w0)
+
+    log_chaos "PULL KEY: removing 1 of $before supplier keys (relays for it must get no_local_signer, not a signing error)"
+    if ! kubectl --context "$K8S_CONTEXT" patch secret "$KEYS_SECRET" \
+        -p "{\"data\":{\"$KEYS_SECRET_FIELD\":\"$reduced\"}}" >/dev/null 2>&1; then
+        log_chaos "PULL KEY: patch failed, nothing changed"
+        KEYS_BACKUP=""
+        return 0
+    fi
+
+    # Wait for the fleet to notice, measured on the COUNTER rather than by
+    # grepping the miner log. The log version was wrong in both directions: it
+    # matched a "drain decision audit" line left by the PREVIOUS event (it looks
+    # at a 3-minute window) and reported a detection that had not happened, and it
+    # missed real ones when the line fell off the tail. Measured 2026-08-21 while
+    # it reported 0 detections in 4 events: ha_keys_changes_total{type="removed"}
+    # was 13 and the miner had logged 16 audits.
+    # Deliberately NOT named before/after: `before` already holds the key count
+    # this function restores against, and a second `local before` in the same
+    # function silently overwrites it -- which turned the recovery check into a
+    # comparison against the removals metric and raised a false "the fleet is
+    # short a key" while the secret was in fact whole.
+    local removed_at_start removed_now waited=0
+    removed_at_start="$(keys_removed_total)"
+    while [ "$waited" -lt 120 ]; do
+        removed_now="$(keys_removed_total)"
+        if [ "${removed_now:-0}" -gt "${removed_at_start:-0}" ]; then
+            log_chaos "PULL KEY: fleet registered the removal after ${waited}s"
+            break
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    [ "$waited" -ge 120 ] && log_chaos "PULL KEY: fleet did not register a key removal within 120s — CHECK THIS"
+
+    # Hold the key out for longer than kubelet's secret sync period, not for one
+    # chaos interval. Measured 2026-08-21 with a 20s hold: the fleet registered
+    # the removal in 2 of 10 events, because the secret went 17 -> 16 -> 17 well
+    # inside the sync window and the pods never saw the middle state. A chaos
+    # action that reverts before anything can observe it is a no-op wearing a
+    # log line.
+    hold="$CHAOS_INTERVAL"
+    [ "$hold" -lt 90 ] && hold=90
+    sleep "$hold"
+
+    restore_signing_keys
+
+    # Recovery is the half a one-way guard would fail: verify the count is back.
+    waited=0
+    while [ "$waited" -lt 120 ]; do
+        if [ "$(secret_key_count)" -eq "$before" ]; then
+            log_chaos "PULL KEY: secret back to $before keys"
+            return 0
+        fi
+        sleep 10
+        waited=$((waited + 10))
+    done
+    log_chaos "PULL KEY: secret did NOT return to $before keys — the fleet is short a key, FIX BEFORE CONTINUING"
+}
+
 # 7. PATH is OUT OF SCOPE — never kill it. It's not our software.
 
 # Weighted random chaos selection
@@ -104,7 +256,17 @@ CHAOS_ACTIONS=(
     chaos_kill_backend
     chaos_kill_backend
     chaos_connection_flood
+    chaos_pull_signing_key
 )
+
+# CHAOS_ONLY forces a single action instead of sampling. Random selection is the
+# point in a soak, but it means a specific action may simply never come up: a
+# 300s run at 20s intervals picked 15 events and never chose the signing-key one,
+# which would have been reported as "chaos passed" for a change whose whole
+# subject is that action. Use it to prove one action works, then go back to random.
+if [ -n "${CHAOS_ONLY:-}" ]; then
+    CHAOS_ACTIONS=("$CHAOS_ONLY")
+fi
 
 # ─── Main Loop ───────────────────────────────────────────────
 
@@ -122,9 +284,15 @@ echo ""
 log_info "Waiting 30s for system to stabilize before chaos..."
 sleep 30
 
+# Wall clock, not the sum of the inter-event sleeps: an action can block for
+# minutes (chaos_pull_signing_key waits for detection, holds the key, then waits
+# for recovery), and counting only WAIT made a DURATION=330 run take ~20 minutes.
+CHAOS_STARTED_AT=$(date +%s)
+elapsed_seconds() { echo $(( $(date +%s) - CHAOS_STARTED_AT )); }
+
 ELAPSED=0
 EVENT_NUM=0
-while [ $ELAPSED -lt "$DURATION" ]; do
+while [ "$(elapsed_seconds)" -lt "$DURATION" ]; do
     EVENT_NUM=$((EVENT_NUM + 1))
 
     # Pick random chaos action
@@ -140,7 +308,7 @@ while [ $ELAPSED -lt "$DURATION" ]; do
     WAIT=$((CHAOS_INTERVAL + JITTER))
     [ "$WAIT" -lt 5 ] && WAIT=5
     sleep "$WAIT"
-    ELAPSED=$((ELAPSED + WAIT))
+    ELAPSED="$(elapsed_seconds)"
 
     # Quick health check after each event
     RELAYER_READY=$(kubectl --context "$K8S_CONTEXT" get pods -l app=relayer --no-headers 2>/dev/null | grep -c "Running" || true)

@@ -83,7 +83,7 @@ const (
 	rejectReasonUnknownService              = "unknown_service"
 	rejectReasonMissingSupplierAddress      = "missing_supplier_address"
 	rejectReasonSupplierCacheError          = "supplier_cache_error"
-	rejectReasonSupplierNotFound            = "supplier_not_found"
+	rejectReasonNoLocalSigner               = "no_local_signer"
 	rejectReasonSupplierInactive            = "supplier_inactive"
 	rejectReasonNoServices                  = "no_services"
 	rejectReasonWrongService                = "wrong_service"
@@ -618,31 +618,63 @@ type supplierServeDecision struct {
 	clientMsg    string
 }
 
-// decideSupplierServe applies the supplier-registry gate for an incoming relay.
+// decideSupplierServe applies the supplier gate for an incoming relay.
 //
-// When the registry has no state for the supplier (state == nil) — e.g. during
-// the boot window before the miner has populated ha:supplier:* in Redis — the
-// relay is served OPTIMISTICALLY if this relayer holds the supplier's operator
-// signing key. Holding the key proves the supplier is ours; the miner is the
-// final arbiter and will not claim a relay for a supplier that is not actually
-// staked for the service, so there is no reward hazard — at worst a wasted
-// backend call. A supplier we hold no key for is a genuine unknown supplier and
-// is rejected with 503. When registry state IS present it is authoritative, and
-// the active / has-services / staked-for-service gates apply unchanged.
+// It asks two questions, in this order: can we sign for this supplier at all,
+// and does its state allow serving this service. Serving requires BOTH, so the
+// more restrictive answer wins — holding the key never overrides state that says
+// the supplier is bad, and good state never overrides not holding the key.
 //
-// Note: the WebSocket and gRPC transports never gated on the registry at all
+// With the key established, absent state (state == nil) — the boot window before
+// the miner has populated ha:supplier:* in Redis — serves OPTIMISTICALLY. The
+// miner is the final arbiter and will not claim a relay for a supplier that is
+// not actually staked for the service, so there is no reward hazard, at worst a
+// wasted backend call. When state IS present it is authoritative and the active
+// / has-services / staked-for-service gates apply unchanged.
+//
+// Note: the WebSocket and gRPC transports never gated on supplier state at all
 // (they only require the signing key, which is enforced when signing the
 // response), so this aligns the HTTP/stream path with them instead of dropping
 // relays for owned suppliers during startup.
 func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOperatorAddr, serviceID string) supplierServeDecision {
-	if state == nil {
-		if p.responseSigner != nil && p.responseSigner.HasSigner(supplierOperatorAddr) {
-			return supplierServeDecision{serve: true, optimistic: true}
-		}
+	// The dumb check, first and unconditional: do we hold this supplier's
+	// signing key? Without it nothing else matters — we cannot sign the relay
+	// response, so serving means paying for a backend call and failing anyway,
+	// and the client gets a signing error instead of a clean 503, which PATH
+	// penalises.
+	//
+	// It has to be FIRST rather than another case further down, because the
+	// miner's teardown writes {unstaking, staked: true, services: [...]} when an
+	// operator removes a key, which reads as perfectly servable and only expires
+	// with the cache TTL (~42 min on mainnet). Checked further down, that
+	// supplier keeps being served for tens of minutes.
+	//
+	// WHEN this bites, measured live 2026-08-21: THIS process loads its signing
+	// keys once at startup (cmd_relayer.go builds the ResponseSigner from the
+	// providers and closes them; there is no KeyManager and no hot-reload here,
+	// unlike the miner). So pulling a key from the mounted secret does NOT stop a
+	// running relayer -- it keeps the key in memory and keeps serving. The guard
+	// covers the case that actually reaches a relayer: one that does not hold the
+	// key at the moment it starts, which is any replica restarted or rolled after
+	// the key was removed, and any replica whose key set differs from the fleet's.
+	// A key removal that must take effect now still needs the relayers restarted.
+	//
+	// A nil responseSigner is folded in deliberately: no signer means no key for
+	// anybody, so the answer is still no. In production that branch is
+	// unreachable — handleRelay rejects a nil signer with HTTP 500 long before
+	// this gate runs — so folding it in cannot switch off a real deployment; it
+	// only keeps the defensive path honest.
+	if p.responseSigner == nil || !p.responseSigner.HasSigner(supplierOperatorAddr) {
 		return supplierServeDecision{
-			rejectReason: rejectReasonSupplierNotFound,
-			clientMsg:    fmt.Sprintf("supplier %s not registered with any miner", supplierOperatorAddr),
+			rejectReason: rejectReasonNoLocalSigner,
+			clientMsg:    fmt.Sprintf("supplier %s is not served by this relayer", supplierOperatorAddr),
 		}
+	}
+
+	// PAST THIS LINE WE HOLD THE KEY, which is why the absent-state branch does
+	// not have to ask about it: reaching it at all proves the supplier is ours.
+	if state == nil {
+		return supplierServeDecision{serve: true, optimistic: true}
 	}
 	if !state.IsActive() {
 		return supplierServeDecision{
