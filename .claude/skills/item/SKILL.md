@@ -116,6 +116,47 @@ consumers that read the value.
   command that reproduces it: the members are all the same model, so agreement
   between them is not corroboration.
 
+### Before the commit — get the WRITING evaluated, not just the approach
+
+The council reads the space of approaches BEFORE you pick one. Nothing in this
+skill used to read what you actually WROTE before it landed, and that gap has a
+measured shape: **the code was right and the prose around it overclaimed, three
+times in one session** (2026-08-31, `keys/keyring_provider.go`). Each round of
+review found that the comment written to explain the PREVIOUS fix asserted more
+than had been measured:
+
+- "two causes that are byte-identical from here" — they were only
+  indistinguishable because the code did not look; the dependency offered a
+  discriminator that was never tried.
+- a commit message reading "releasing every supplier must never be silent",
+  written in the commit that left the MAXIMAL form of that event silent. Measured
+  after the fact: the counter did not move.
+- a clamp comment reasoning only about removals, when an addition in the same
+  window produces the same reading.
+
+Jorge, that day: *"eso te pasa por no revisarte lo que vas a ir a escribir, te vas
+a escribir o hacer fix sin consultar alguien que te evalúe a vos."* The council
+evaluates the PLAN. Nothing was evaluating the author.
+
+So, before `git commit`, and on the diff you are about to commit:
+
+1. **Read every claim you wrote as if someone else wrote it.** Comments, commit
+   message, doc edits. Mark each sentence that asserts a property of the world:
+   "cannot", "never", "must", "identical", "the only", "no readers", "always".
+2. **For each one, point at the measurement or mark it.** A command you ran, a
+   test that goes red without it, a line of the dependency's source. If you
+   cannot, write "not verified" — `CLAUDE.md` already requires this of durable
+   artifacts, and a comment and a commit message are both durable. The rule
+   existed and did not fire, because nothing made it fire HERE.
+3. **Then get it evaluated by something that is not you** — `/code-review` on the
+   staged diff, or a subagent asked to attack the claims specifically. Afterwards
+   is not the same: a review that runs post-commit turns a claim you could have
+   deleted into history someone has to correct.
+
+The cheap tell that this step is being skipped: the diff explains WHY at length
+and the reply says the change is small. Length of justification is not evidence,
+and it is where the overclaiming lives.
+
 ## Step 3 — prove the test can fail
 
 Use `test-teeth`. Do not restate it here.
