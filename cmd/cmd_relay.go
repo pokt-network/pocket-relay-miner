@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"net/url"
 	"strings"
 
@@ -188,7 +190,7 @@ func RelayCmd() *cobra.Command {
 	// Optional flags
 	relayCmd.PersistentFlags().StringVar(&relay.RelayRelayerURL, "relayer-url", "", "Relayer endpoint URL")
 	relayCmd.PersistentFlags().StringVar(&relay.RelaySupplierAddr, "supplier", "", "Supplier operator address")
-	relayCmd.PersistentFlags().BoolVar(&relay.RelayAllSuppliers, "all-suppliers", false, "Load test: round-robin relays across every supplier in the current session (avoids exhausting one supplier's per-session claimable budget)")
+	relayCmd.PersistentFlags().BoolVar(&relay.RelayAllSuppliers, "all-suppliers", false, "Do not pin one supplier: a load test round-robins across every supplier in the session (avoids exhausting one supplier's per-session claimable budget); a single relay picks one of them at random")
 	relayCmd.PersistentFlags().IntVarP(&relay.RelayCount, "count", "n", 1, "Number of requests to send (jsonrpc/websocket/grpc load test)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayBatches, "batches", 0, "stream mode: ask the backend to emit this many SSE batches then close (0 = receive until the server closes or --timeout)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayGRPCMethod, "grpc-method", "", "grpc mode: /package.Service/Method to invoke (default: the localnet demo method, which any other backend answers UNIMPLEMENTED)")
@@ -436,6 +438,31 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	// --supplier, and the fallback would otherwise mask a missing one.
 	if err := relay.ResolveSimulationFlags(); err != nil {
 		return err
+	}
+
+	// --all-suppliers on a single relay means "any of them, do not make me name
+	// one", so pick one of the session's suppliers at random. Before this, the
+	// flag was consulted only on the load-test paths: a single relay fell through
+	// to the placeholder below and the warning said "--supplier not provided",
+	// which reads as "you forgot a flag" to someone who passed one that should
+	// have covered it. Recorded during the beta/pnf bring-up as silent wrong
+	// behaviour.
+	if relay.RelaySupplierAddr == "" && relay.RelayAllSuppliers {
+		suppliers, err := relayClient.SessionSupplierAddresses(cmd.Context(), relay.RelayServiceID)
+		if err != nil {
+			return fmt.Errorf("--all-suppliers: failed to list the session's suppliers: %w", err)
+		}
+		// suppliers is never empty here: SessionSupplierAddresses returns an
+		// error for a session with none (client/relay_client/client.go:476).
+		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(suppliers))))
+		if err != nil {
+			return fmt.Errorf("--all-suppliers: failed to choose a supplier: %w", err)
+		}
+		relay.RelaySupplierAddr = suppliers[n.Int64()]
+		logger.Info().
+			Str("supplier", relay.RelaySupplierAddr).
+			Int("session_suppliers", len(suppliers)).
+			Msg("--all-suppliers: picked one of the session's suppliers at random")
 	}
 
 	// If supplier address not provided, try to detect from relayer
