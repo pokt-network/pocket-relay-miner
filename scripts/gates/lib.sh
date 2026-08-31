@@ -441,3 +441,26 @@ gate_served_shortfall() {
     fi
     printf '%s' "$missing"
 }
+
+# gate_counter_delta BEFORE AFTER
+#
+# Prints how much a Prometheus COUNTER moved over a run. A counter lives in the
+# process that exports it, so a restart -- a rollout, an OOM kill, Tilt
+# rebuilding under a gate -- takes it back to zero. The naive `after - before`
+# is then NEGATIVE, and a negative delta does not read as "the process
+# restarted": subtracted from a shortfall it reads as CREDIT, and it excuses
+# relays nobody announced. That is precisely the silent loss the live gate
+# exists to catch, so the bug hides the failure it was built to find.
+#
+# On a reset the honest delta is `after` -- everything the counter has seen
+# since it came back. That undercounts whatever it held before the restart, and
+# undercounting an EXCUSE is the safe direction: it can only make the gate
+# stricter, never more forgiving.
+gate_counter_delta() {
+    local before="${1:-0}" after="${2:-0}"
+    if [ "$after" -lt "$before" ]; then
+        printf '%s' "$after"
+        return
+    fi
+    printf '%s' "$(( after - before ))"
+}

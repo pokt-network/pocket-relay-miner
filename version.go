@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"runtime"
 )
 
@@ -19,22 +18,3 @@ var (
 	// GoVersion is the Go version used to build the binary
 	GoVersion = runtime.Version()
 )
-
-// VersionInfo returns a formatted string with all version information.
-func VersionInfo() string {
-	return fmt.Sprintf(
-		"Version:    %s\nCommit:     %s\nBuild Date: %s\nGo Version: %s",
-		Version,
-		Commit,
-		BuildDate,
-		GoVersion,
-	)
-}
-
-// ShortVersion returns a compact version string.
-func ShortVersion() string {
-	if Commit != "unknown" && len(Commit) >= 7 {
-		return fmt.Sprintf("%s-%s", Version, Commit[:7])
-	}
-	return Version
-}

@@ -116,6 +116,64 @@ consumers that read the value.
   command that reproduces it: the members are all the same model, so agreement
   between them is not corroboration.
 
+### Before the commit — get the WRITING evaluated, not just the approach
+
+The council reads the space of approaches BEFORE you pick one. Nothing in this
+skill used to read what you actually WROTE before it landed, and that gap has a
+measured shape: **the code was right and the prose around it overclaimed, three
+times in one session** (2026-08-31, `keys/keyring_provider.go`). Each round of
+review found that the comment written to explain the PREVIOUS fix asserted more
+than had been measured:
+
+- "two causes that are byte-identical from here" — they were only
+  indistinguishable because the code did not look; the dependency offered a
+  discriminator that was never tried.
+- a commit message reading "releasing every supplier must never be silent",
+  written in the commit that left the MAXIMAL form of that event silent. Measured
+  after the fact: the counter did not move.
+- a clamp comment reasoning only about removals, when an addition in the same
+  window produces the same reading.
+
+Jorge, that day: *"eso te pasa por no revisarte lo que vas a ir a escribir, te vas
+a escribir o hacer fix sin consultar alguien que te evalúe a vos."* The council
+evaluates the PLAN. Nothing was evaluating the author.
+
+So, before `git commit`, and on the diff you are about to commit:
+
+1. **Read every claim you wrote as if someone else wrote it.** Comments, commit
+   message, doc edits. Mark each sentence that asserts a property of the world:
+   "cannot", "never", "must", "identical", "the only", "no readers", "always".
+2. **For each one, point at the measurement or mark it.** A command you ran, a
+   test that goes red without it, a line of the dependency's source. If you
+   cannot, write "not verified" — `CLAUDE.md` already requires this of durable
+   artifacts, and a comment and a commit message are both durable. The rule
+   existed and did not fire, because nothing made it fire HERE.
+3. **Then get it evaluated by something that is not you** — `/code-review` on the
+   staged diff, or a subagent asked to attack the claims specifically. Afterwards
+   is not the same: a review that runs post-commit turns a claim you could have
+   deleted into history someone has to correct.
+
+**And the failure one level below overclaiming: a measurement you ran, read for
+its RESULT and not its CONSEQUENCE.** Measured 2026-08-31, same session, and it
+cost the HIGH that all three review rounds were about. A probe printed that a
+corrupt record under `key_names` comes back as an ERROR rather than being
+silently skipped. That was read as "so this branch already catches corruption,
+and needs no guard" — correct, and the wrong conclusion. Being caught meant the
+provider returned an error, which meant `manager.Reload` abandoned the reload and
+kept the previous key set, which meant a key withdrawn afterwards kept signing
+forever: the exact defect the session was fixing, still alive in the branch its
+own measurement had just visited. The probe was right. The sentence after it was
+not.
+
+So for every measurement used as evidence FOR a decision, write the next hop:
+not "X returns an error" but "X returns an error, which its caller turns into Y,
+which for the operator means Z". The measurement ends at the value; the claim
+does not.
+
+The cheap tell that this step is being skipped: the diff explains WHY at length
+and the reply says the change is small. Length of justification is not evidence,
+and it is where the overclaiming lives.
+
 ## Step 3 — prove the test can fail
 
 Use `test-teeth`. Do not restate it here.
@@ -165,6 +223,32 @@ N rather than one that the two rounds above cost.
   queue line is what makes it real.
 - **Branch 3 — say why it is not a finding**, in one line. Silence and "not a
   problem" must not produce the same signal.
+
+**A finding that re-enters a DECIDED topic is not a finding — it is the decision
+being re-litigated, and it is branch 3.** Jorge, 2026-08-31, after three rounds
+each opened with a HIGH about the same tension: *"así dejamos de tener ya estas
+preguntaderas de HIGH, por el mismo topic. En realidad no son findings, es dar
+vuelta sobre lo mismo."*
+
+The three rounds that day reported, as three separate HIGHs, three doorways into
+one room: a key source that reports a failure makes the manager hold its previous
+keys, and holding them is either the protection or the bug depending on which
+disk state you walk in with. Each round the session patched the doorway it was
+shown and the next round found another. What ended it was not a fourth round; it
+was the owner deciding the policy — *an error freezes, it is reported, the
+operator repairs it* — and that decision being written where the next reader hits
+it: in the operator doc, and in a test that goes red if anyone silences the
+reporting.
+
+So, when a round raises something whose ROOT is already decided:
+
+- do not fix it, and do not treat it as new. Name the decision, name where it is
+  pinned, and move on. That is branch 3 with an address.
+- if it is NOT written down anywhere a reviewer would find it, that is the real
+  finding, and the work is to write it down — not to change the code again.
+- **the count that matters for stopping is TOPICS, not findings.** A second round
+  on the same topic is a signal the topic needs an owner's decision; a third is
+  proof of it.
 
 **When the loop stops** (Jorge, 2026-08-26):
 

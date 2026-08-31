@@ -89,10 +89,17 @@ func backendTypeHint(s string) string {
 // "malformed ws or wss URL", after the client upgrade is already accepted.
 // Catching it here names the problem at startup.
 //
-// Only websocket is checked. The HTTP-family types (jsonrpc/rest/cometbft)
-// accept http/https, and grpc intentionally allows http (h2c) as well as
-// grpc/grpcs, so constraining those here would reject valid configs.
+// gRPC is checked too, for the mirror-image reason: a gRPC backend is forwarded
+// as an HTTP/2 request, so it must end up as something net/http can dial. The
+// accepted set is not restated here -- it is whatever pool.NormalizeGRPCScheme
+// produces, so validation cannot drift away from the dialer.
+//
+// The HTTP-family types (jsonrpc/rest/cometbft) accept http/https and are not
+// constrained here.
 func validateBackendURLScheme(serviceID, rpcType, rawURL string) error {
+	if rpcType == BackendTypeGRPC {
+		return validateGRPCBackendURLScheme(serviceID, rawURL)
+	}
 	if rpcType != BackendTypeWebSocket {
 		return nil
 	}
@@ -108,6 +115,31 @@ func validateBackendURLScheme(serviceID, rpcType, rawURL string) error {
 		)
 	}
 	return nil
+}
+
+// validateGRPCBackendURLScheme rejects, at startup, a gRPC backend url the
+// dialers cannot reach. It does NOT carry its own list of accepted schemes:
+// it asks pool.NormalizeGRPCScheme what the URL becomes and requires the result
+// to be dialable. A second list here is exactly the divergence this whole check
+// exists to close -- config.relayer.schema.yaml promised grpc:// from the
+// initial commit while the dialer refused it for seven months.
+func validateGRPCBackendURLScheme(serviceID, rawURL string) error {
+	normalized := pool.NormalizeGRPCScheme(rawURL)
+
+	scheme, _, hasScheme := strings.Cut(normalized, "://")
+	if !hasScheme {
+		// Bare host:port -- NewBackendEndpoint dials it as h2c cleartext.
+		return nil
+	}
+	if scheme == "http" || scheme == "https" {
+		return nil
+	}
+	return fmt.Errorf(
+		"service[%s].backends[%s]: gRPC backend url must use grpc://, grpcs://, http://, https:// "+
+			"or a bare host:port (got %q in %q); gRPC is forwarded as an HTTP/2 request, "+
+			"so any other scheme is undialable and fails on the first relay",
+		serviceID, BackendTypeGRPC, scheme, rawURL,
+	)
 }
 
 // RPCTypeToBackendType converts numeric RPCType codes (from Rpc-Type header) to backend type strings.

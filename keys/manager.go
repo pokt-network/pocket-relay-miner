@@ -375,6 +375,19 @@ func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 	m.keys = newKeys
 	m.keysMu.Unlock()
 
+	// Past every abandonment above, so this is the reload COMPLETING. It is
+	// stamped here rather than at either return below because both of those are
+	// success and only the staleness of this series distinguishes a manager that
+	// is frozen from one on a quiet fleet.
+	//
+	// Not stamped when a source failed. The guard above exempts the FIRST load,
+	// so a provider error there falls through to here and Reload returns nil --
+	// and a series whose name says "completed" must not advance for a reload in
+	// which a key source could not be read.
+	if len(loadErrs) == 0 {
+		keysLastSuccessfulReload.Set(float64(time.Now().Unix()))
+	}
+
 	// Notify callbacks
 	for _, addr := range added {
 		m.notifyKeyChange(addr, true)

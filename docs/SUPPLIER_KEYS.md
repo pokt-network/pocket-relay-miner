@@ -195,9 +195,53 @@ unreadable source as "the operator removed these keys" would stop the relayer
 serving those suppliers and make the miner drain their pipelines, on a transient
 read error, every 30 seconds.
 
-**An emptied key file is refused.** A file with no keys is far more often a
-truncated write or a bad template than a request to stop serving every supplier
-at once, so it is not applied. To stop serving, unstake or stop the process.
+**An emptied key FILE is refused, and an emptied KEYRING is not.** The two
+sources answer this differently, on purpose. A `supplier.yaml` with no keys is
+far more often a truncated write or a bad template than a request to stop
+serving, so it is refused and the previous keys are kept; to stop serving,
+unstake or stop the process.
+
+A keyring that yields no signing keys IS applied — every supplier is released.
+Refusing there was tried and measured on 2026-08-31: the condition is stable, so
+it repeated on every reload, the previous key set was kept for the life of the
+process, and a key withdrawn afterwards went on signing. Removing a record's
+`.info` is the documented withdrawal, so this is also what makes that withdrawal
+work. The release logs at `Error` and moves `ha_keys_load_errors_total` — once.
+The load after it finds the directory unchanged and returns from cache, so the
+counter goes flat while every supplier stays released: **alert on
+`ha_keys_supplier_keys_active` falling to zero, not on a rate over the error
+counter**, which fires and self-resolves. Measured 2026-08-31.
+
+A keyring whose records are present but **undecodable** is handled by one rule,
+and the rule is whether the keyring REPORTED the problem or hid it:
+
+- **The keyring hid it.** Without `key_names`, cosmos-sdk lists what it can
+  decode and silently skips the rest — no error reaches us. There is nothing to
+  report and nothing to wait for, so the broken record is applied: that supplier
+  loses service, because nothing can sign with a key it cannot decode.
+  `ha_keys_undecodable_records` counts how many are broken right now. That series
+  is only published in this mode; with `key_names` set nothing counts the
+  records, so it is **absent rather than zero**.
+- **The keyring reported it.** With `key_names`, a broken record among the
+  selected names comes back as an error. The reload is then **abandoned and the
+  previous keys are kept — deliberately, and for as long as the record stays
+  broken.** Nothing is guessed and nothing is released on a source that told us
+  it could not be read. A key withdrawn while that condition lasts does NOT take
+  effect, so repair or remove the broken `.info` first.
+
+  This is safe only because it never goes quiet, and that is asserted by a test:
+  every reload attempt logs at `Error` and moves `ha_keys_load_errors_total`
+  again, and `ha_keys_last_successful_reload_timestamp_seconds` stops advancing.
+  **The age of that last series is what tells you a process is stuck**, and it is
+  the one to alert on — a rate over the error counter tells you it is failing, a
+  stale timestamp tells you it has been failing since a specific moment.
+
+Of the ways a keyring can come back short, the one still refused outright is
+records that exist and **not one** decoding, which is what a wrong or rotated
+passphrase looks like: applying that would release every supplier at once over a
+credential the operator can fix. The refusals in the paragraph above — a
+directory this process cannot read, a source that errored — are unchanged and are
+a different thing: there, nothing was measured at all.
 
 ## What fails at startup, and what it tells you
 

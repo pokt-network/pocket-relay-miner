@@ -816,7 +816,3 @@ func (w *SupplierWorker) GetSupplierCache() *cache.SupplierCache {
 	defer w.mu.Unlock()
 	return w.supplierCache
 }
-
-func (w *SupplierWorker) GetSupplierManager() *SupplierManager {
-	return w.supplierManager
-}

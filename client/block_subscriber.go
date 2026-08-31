@@ -93,13 +93,6 @@ type BlockSubscriberConfig struct {
 	QueryTimeout time.Duration
 }
 
-// DefaultBlockSubscriberConfig returns sensible defaults.
-func DefaultBlockSubscriberConfig() BlockSubscriberConfig {
-	return BlockSubscriberConfig{
-		QueryTimeout: defaultQueryTimeout,
-	}
-}
-
 // BlockSubscriber is a WebSocket-based BlockClient that subscribes to block events.
 // It implements `client.BlockClient` interface using CometBFT WebSocket subscriptions
 // instead of polling, providing immediate block notifications with automatic reconnection.

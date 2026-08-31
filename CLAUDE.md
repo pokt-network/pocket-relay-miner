@@ -46,10 +46,31 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
 - When reporting a fix: show the before/after and the test that proves it.
 - When reporting "no issues found": explain what you checked and how.
 
-## Before the First Edit — State the Success Criterion
+## Before the First Edit — THE COUNCIL, then the Success Criterion
 
-**Invoke the `andrej-karpathy-skills:karpathy-guidelines` skill before the first
-edit of any coding task.** Not conditional on the task looking small.
+**Invoke the council before choosing the approach to ANY fix or feature, and
+invoke the `andrej-karpathy-skills:karpathy-guidelines` skill before the first
+edit.** Both, in that order, and neither conditional on the task looking small.
+
+The council reads the SPACE OF APPROACHES before you pick one. A code review
+afterwards does NOT fill its slot: a review reads code you already wrote, so the
+approach it critiques is the one you already committed to. If no external
+provider is configured, run the local council (`claude-council:local-council-execution`)
+and say in the report that its members share a model, so their agreement is a
+common prior to stress-test, not corroboration.
+
+Measured 2026-08-30, and it is why this paragraph moved here: the council rule
+lived only in `.claude/skills/item/SKILL.md`, and `CLAUDE.md` did not mention the
+council at all. That session invoked karpathy -- because THIS file demands it
+unconditionally -- edited `relayer/config.go`, committed, and only then ran the
+council. The council immediately found that the fix touched one of THREE
+forwarding paths (`relayer/proxy.go` and `relayer/healthcheck.go` never normalize
+a backend URL), so the commit turned "invalid config that fails on the first
+relay" into "config certified valid by `relayer validate` that fails on the first
+relay" -- worse than not fixing it. The commit was reverted. A `feedback_*` memory
+saying exactly this was auto-loaded in that session's context and did not fire
+either: **a rule only executes from the place that is read before anyone chooses
+what to invoke.**
 
 Its rule 4 is the load-bearing one here: **write the success criterion down
 before starting, as something checkable.** "It works" is not one. "Level 2 passes

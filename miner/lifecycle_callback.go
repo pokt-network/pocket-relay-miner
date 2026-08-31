@@ -758,6 +758,37 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					return
 				}
 
+				// The two numbers that decide whether we get paid for what we
+				// served, and the only moment they coexist: smstCount is what the
+				// chain will bill (num_relays is Count() of this very root), and
+				// snap.RelayCount is what the session coordinator counted in Redis.
+				// They come from different writers -- a Lua HINCRBY on the shared
+				// session hash versus this process's own trie -- so a shortfall
+				// here is work we performed and will not be paid for.
+				//
+				// Measured 2026-08-19 (FINDING-partial-claim): five claims where
+				// the coordinator had counted 4 and the flushed root held 1, and
+				// nothing said so -- claim_success and proof_success were both
+				// true. This recorder was written for exactly that in April, its
+				// only caller was deleted with claim_pipeline.go, and the metric
+				// has been declared, documented and silent ever since.
+				RecordClaimLeafStats(
+					snap.SupplierOperatorAddress,
+					snap.ServiceID,
+					snap.SessionID,
+					int64(smstCount),
+					snap.RelayCount,
+				)
+				if int64(smstCount) < snap.RelayCount {
+					logger.Warn().
+						Str(logging.FieldSessionID, snap.SessionID).
+						Str(logging.FieldSupplier, snap.SupplierOperatorAddress).
+						Str(logging.FieldServiceID, snap.ServiceID).
+						Int64("claim_leaf_count", int64(smstCount)).
+						Int64("coordinator_relay_count", snap.RelayCount).
+						Msg("claiming fewer leaves than relays counted -- served work that will not be billed")
+				}
+
 				// Phase 3: Check if tree is empty (no relays mined).
 				if smstCount == 0 || smstSum == 0 {
 					logger.Warn().
@@ -908,7 +939,20 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 						Msg("failed to finalise claim_skipped transition")
 				}
 			case "empty_tree":
-				// Session had no mined relays — not a failure, just nothing to claim
+				// Session had no mined relays — not a failure, just nothing to
+				// claim. It is still TERMINAL, so the per-session gauges have to
+				// go: RecordClaimLeafStats already fired for this session before
+				// Phase 3 decided the tree was empty, and this arm is the only
+				// one that reaches no OnClaimSkipped / OnSessionProved, so
+				// nothing else would ever delete them. Both carry session_id as
+				// a label, which CLAUDE.md forbids leaving unbounded.
+				//
+				// The recording itself stays where it is on purpose: an empty
+				// tree with RelayCount > 0 is the EXTREME shortfall, and
+				// claimLeafCollapseTotal -- labelled supplier+service only, so
+				// bounded -- must still fire for it. Only the per-session detail
+				// is dropped here.
+				ClearClaimLeafStats(snap.SupplierOperatorAddress, snap.ServiceID, snap.SessionID)
 			}
 		}
 

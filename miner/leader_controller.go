@@ -65,7 +65,7 @@ type LeaderController struct {
 	// Heavy resources (only created when leader)
 	queryClients          *query.Clients
 	blockSubscriber       *haclient.BlockSubscriber
-	redisBlockSubscriber  *cache.RedisBlockSubscriber
+	redisBlockPublisher   *cache.RedisBlockPublisher
 	blockPublisher        *cache.BlockPublisher
 	sharedParamsCache     cache.SingletonEntityCache[*sharedtypes.Params]
 	proofParamsCache      cache.SingletonEntityCache[*prooftypes.Params]
@@ -162,18 +162,17 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	}
 	c.logger.Info().Msg("block subscriber started (WebSocket)")
 
-	// Create a Redis block subscriber for publishing to relayers
-	// Uses KeyBuilder for namespace-aware channel names
-	c.redisBlockSubscriber = cache.NewRedisBlockSubscriber(
+	// Create the Redis block PUBLISHER for fanning blocks out to the fleet.
+	// Publish-only on purpose: this controller never reads block events off the
+	// channel (the supplier worker's own subscriber does that), and a
+	// RedisBlockSubscriber here would run a receive loop with zero consumers,
+	// counting every event this process publishes a second time. Uses
+	// KeyBuilder for namespace-aware channel names.
+	c.redisBlockPublisher = cache.NewRedisBlockPublisher(
 		c.logger,
 		c.config.RedisClient,
-		c.blockSubscriber,
 	)
-	if err = c.redisBlockSubscriber.Start(ctx); err != nil {
-		c.cleanup()
-		return fmt.Errorf("failed to start redis block subscriber: %w", err)
-	}
-	c.logger.Info().Msg("redis block subscriber started for publishing to Redis")
+	c.logger.Info().Msg("redis block publisher ready")
 
 	// Get block time
 	blockTimeSeconds := c.config.Config.GetBlockTimeSeconds()
@@ -300,7 +299,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	c.blockPublisher = cache.NewBlockPublisher(
 		c.logger,
 		c.blockSubscriber,
-		c.redisBlockSubscriber,
+		c.redisBlockPublisher,
 	)
 	if err = c.blockPublisher.Start(ctx); err != nil {
 		c.cleanup()
@@ -528,11 +527,11 @@ func (c *LeaderController) cleanup() {
 		c.sharedParamsCache = nil
 	}
 
-	if c.redisBlockSubscriber != nil {
-		if err := c.redisBlockSubscriber.Close(); err != nil {
-			c.logger.Error().Err(err).Msg("failed to close redis block subscriber")
+	if c.redisBlockPublisher != nil {
+		if err := c.redisBlockPublisher.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close redis block publisher")
 		}
-		c.redisBlockSubscriber = nil
+		c.redisBlockPublisher = nil
 	}
 
 	if c.blockSubscriber != nil {

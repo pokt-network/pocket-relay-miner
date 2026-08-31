@@ -73,6 +73,20 @@ Example configurations with full documentation:
 - **Miner**: [`config.miner.example.yaml`](config.miner.example.yaml)
 - **Schema**: [`config.relayer.schema.yaml`](config.relayer.schema.yaml), [`config.miner.schema.yaml`](config.miner.schema.yaml)
 
+Validate a config before deploying it, and cross-check it against on-chain stake:
+
+```bash
+pocket-relay-miner relayer validate --config config.relayer.yaml
+pocket-relay-miner relayer validate --config config.relayer.yaml --check-stake
+```
+
+> **The relayer reads its config once, at startup.** There is no config watcher:
+> `hot_reload_enabled` appears in both schemas, but it governs **signing keys**,
+> not the config file. A deployment that mounts the config from a Kubernetes
+> ConfigMap must therefore restart the pods on every config change — otherwise
+> the ConfigMap updates, the GitOps controller reports Synced and Healthy, and
+> the process keeps serving the old config.
+
 ## Local Development
 
 This project uses [Tilt](https://tilt.dev/) for local development with two environment options.

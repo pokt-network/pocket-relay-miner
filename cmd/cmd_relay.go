@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"net/url"
 	"strings"
 
@@ -188,9 +190,11 @@ func RelayCmd() *cobra.Command {
 	// Optional flags
 	relayCmd.PersistentFlags().StringVar(&relay.RelayRelayerURL, "relayer-url", "", "Relayer endpoint URL")
 	relayCmd.PersistentFlags().StringVar(&relay.RelaySupplierAddr, "supplier", "", "Supplier operator address")
-	relayCmd.PersistentFlags().BoolVar(&relay.RelayAllSuppliers, "all-suppliers", false, "Load test: round-robin relays across every supplier in the current session (avoids exhausting one supplier's per-session claimable budget)")
+	relayCmd.PersistentFlags().BoolVar(&relay.RelayAllSuppliers, "all-suppliers", false, "Do not pin one supplier: a load test round-robins across every supplier in the session (avoids exhausting one supplier's per-session claimable budget); a single relay picks one of them at random")
 	relayCmd.PersistentFlags().IntVarP(&relay.RelayCount, "count", "n", 1, "Number of requests to send (jsonrpc/websocket/grpc load test)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayBatches, "batches", 0, "stream mode: ask the backend to emit this many SSE batches then close (0 = receive until the server closes or --timeout)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayGRPCMethod, "grpc-method", "", "grpc mode: /package.Service/Method to invoke (default: the localnet demo method, which any other backend answers UNIMPLEMENTED)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayGRPCRequestHex, "grpc-request-hex", "", "grpc mode: protobuf request body as hex (default: empty, which is correct for any request message with no fields)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayLoadTest, "load-test", false, "Enable load test mode with concurrency")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayConcurrency, "concurrency", 10, "Number of concurrent workers (load test mode)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayRPS, "rps", 0, "Target requests per second (0 = unlimited, only for load test mode)")
@@ -275,7 +279,7 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 		if relay.RelayRelayerURL == "" {
 			relay.RelayRelayerURL = localnetRelayerURL
 		}
-		if relay.RelaySupplierAddr == "" {
+		if shouldPinLocalnetSupplier(relay.RelaySupplierAddr, relay.RelayAllSuppliers, relay.RelaySimulate) {
 			relay.RelaySupplierAddr = localnetSupplier1Addr
 		}
 	}
@@ -376,6 +380,21 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	if relay.RelayBatches > 0 && mode != "stream" {
 		return fmt.Errorf("--batches only applies to stream mode (other modes use -n/--count)")
 	}
+	if (relay.RelayGRPCMethod != "" || relay.RelayGRPCRequestHex != "") && mode != "grpc" {
+		return fmt.Errorf("--grpc-method/--grpc-request-hex only apply to grpc mode")
+	}
+	// A custom --payload drives the REST fallback, where buildNativeGRPCPayload
+	// never runs -- so the method and request body would be dropped without a
+	// word. Silently ignoring a flag the operator passed is the defect this
+	// whole rescue answers; refuse instead.
+	if (relay.RelayGRPCMethod != "" || relay.RelayGRPCRequestHex != "") && relay.RelayPayloadJSON != "" {
+		return fmt.Errorf("--grpc-method/--grpc-request-hex cannot be combined with --payload: " +
+			"a custom payload drives the REST fallback, which never builds a gRPC request")
+	}
+	if relay.RelayGRPCRequestHex != "" && relay.RelayGRPCMethod == "" {
+		return fmt.Errorf("--grpc-request-hex needs --grpc-method: " +
+			"a request body for the demo method is almost certainly a mistake")
+	}
 	if mode == "stream" && relay.RelayCount > 1 {
 		return fmt.Errorf("-n/--count does not apply to stream mode (a stream is read until the server closes; use --batches to ask the backend for a bounded number of SSE batches)")
 	}
@@ -421,6 +440,29 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// --all-suppliers on a single relay means "any of them, do not make me name
+	// one", so pick one of the session's suppliers at random. Before this, the
+	// flag was consulted only on the load-test paths: a single relay fell through
+	// to the placeholder below and the warning said "--supplier not provided",
+	// which reads as "you forgot a flag" to someone who passed one that should
+	// have covered it. Recorded during the beta/pnf bring-up as silent wrong
+	// behaviour.
+	if relay.RelaySupplierAddr == "" && relay.RelayAllSuppliers {
+		suppliers, err := relayClient.SessionSupplierAddresses(cmd.Context(), relay.RelayServiceID)
+		if err != nil {
+			return fmt.Errorf("--all-suppliers: failed to list the session's suppliers: %w", err)
+		}
+		picked, err := pickRandomSupplier(suppliers)
+		if err != nil {
+			return fmt.Errorf("--all-suppliers: %w", err)
+		}
+		relay.RelaySupplierAddr = picked
+		logger.Info().
+			Str("supplier", relay.RelaySupplierAddr).
+			Int("session_suppliers", len(suppliers)).
+			Msg("--all-suppliers: picked one of the session's suppliers at random")
+	}
+
 	// If supplier address not provided, try to detect from relayer
 	if relay.RelaySupplierAddr == "" {
 		logger.Warn().Msg("--supplier not provided, using placeholder (may not work with all relayers)")
@@ -457,4 +499,47 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("mode %q not yet implemented", mode)
 	}
+}
+
+// pickRandomSupplier returns one of suppliers, chosen uniformly at random.
+//
+// Random rather than suppliers[0]: --all-suppliers means "any of them, do not
+// make me name one", so always returning the same element would quietly turn the
+// flag into a fixed choice and drain that one supplier's per-session claimable
+// budget -- the exact thing the flag exists to avoid.
+//
+// The empty case is an error rather than a panic even though the only caller
+// cannot produce it (SessionSupplierAddresses returns an error for a session
+// with no suppliers, client/relay_client/client.go:476), because the guarantee
+// lives in a different file and nothing enforces it here.
+func pickRandomSupplier(suppliers []string) (string, error) {
+	if len(suppliers) == 0 {
+		return "", fmt.Errorf("no suppliers to choose from")
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(suppliers))))
+	if err != nil {
+		return "", fmt.Errorf("failed to choose a supplier: %w", err)
+	}
+	return suppliers[n.Int64()], nil
+}
+
+// shouldPinLocalnetSupplier says whether --localnet should fill in its default
+// supplier. It must not when --all-suppliers was passed: this runs ~170 lines
+// BEFORE the random pick, so pinning here silently wins and the flag goes on
+// being ignored under --localnet -- which is how every local test and the live
+// gate invoke the CLI.
+//
+// --simulate is the exception, and it must stay one: ResolveSimulationFlags
+// runs BEFORE the random pick and rejects an empty address, so suppressing the
+// default here would turn a working `--localnet --simulate --all-suppliers`
+// into a startup error. A simulated relay wants the simulation identity's
+// supplier anyway, not an arbitrary one, so "any of them" has no meaning there.
+//
+// Measured 2026-08-30: the random pick shipped with a unit test that passed and
+// a code path that never ran. Eight consecutive --localnet --all-suppliers
+// relays all went to supplier1; after this guard, eight runs hit six different
+// suppliers. The helper was right and the wiring was not, which is why the
+// precedence is a function with its own test rather than a condition inline.
+func shouldPinLocalnetSupplier(currentAddr string, allSuppliers, simulate bool) bool {
+	return currentAddr == "" && (!allSuppliers || simulate)
 }

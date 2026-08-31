@@ -155,13 +155,6 @@ func TestBlockSubscriber_IncreaseBackoff(t *testing.T) {
 	require.Equal(t, reconnectMaxDelay, delay4, "Backoff should stay at max delay")
 }
 
-// TestDefaultBlockSubscriberConfig tests default configuration.
-func TestDefaultBlockSubscriberConfig(t *testing.T) {
-	config := DefaultBlockSubscriberConfig()
-	require.Empty(t, config.RPCEndpoint, "Default config should have empty endpoint")
-	require.False(t, config.UseTLS, "Default config should have TLS disabled")
-}
-
 // TestSimpleBlock_Interface tests the SimpleBlock implementation.
 func TestSimpleBlock_Interface(t *testing.T) {
 	block := &SimpleBlock{
