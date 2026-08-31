@@ -275,9 +275,10 @@ run_transport_load() {
         # supplier1 when --supplier is absent -- successive requests do NOT
         # spread on their own (the old comment claiming they did was false).
         # All of this cell's relays go to ONE supplier, rotated per cell:
-        # concentration keeps the per-supplier-session count at 3 (issue #25
-        # reproduces at 1 relay/supplier-session), while rotating across cells
-        # stops every cell from stacking on supplier1's session budget.
+        # concentration keeps the per-supplier-session count at 3 -- a
+        # 1-relay supplier-session is the regime where a claim can vanish
+        # between the WAL and the claim -- while rotating across cells stops
+        # every cell from stacking on supplier1's session budget.
         out=""
         rc=0
         TRANSPORT_SENT=0
@@ -391,22 +392,23 @@ if [ -z "$matrix_overridden" ]; then
     [ "$gate_failed" -ne 0 ] && gate_verdict "live"
 fi
 
-# Issue #25: single-relay-per-supplier claims can vanish between the WAL and
-# the claim (a supplier's entire 1-relay session goes unclaimed, with no drop
-# counter and no failure state). Reproduced at 1 relay/supplier regardless of
-# session timing; never observed at >=4 relays/supplier (300/300 billed). Until
-# it is fixed, warn when the load is thin enough to trip it -- the exact
-# served==billed assertion is then testing #25, not the change under test.
+# A single-relay-per-supplier claim can vanish between the WAL and the claim:
+# the supplier's entire 1-relay session goes unclaimed, with no drop counter and
+# no failure state. Reproduced at 1 relay/supplier regardless of session timing;
+# never observed at >=4 relays/supplier (300/300 billed). So when the load is
+# thin enough to reach that regime, say so -- an exact served==billed assertion
+# would then be measuring the thin-load behaviour rather than the change under
+# test.
 if [ "$RELAYS_PER_TRANSPORT" -lt $(( supplier_count * 2 )) ]; then
-    gate_skip "RELAYS_PER_TRANSPORT=${RELAYS_PER_TRANSPORT} gives <2 relays per supplier (${supplier_count} suppliers): exact billing may trip issue #25"
+    gate_skip "RELAYS_PER_TRANSPORT=${RELAYS_PER_TRANSPORT} gives <2 relays per supplier (${supplier_count} suppliers): too thin to assert exact billing, a 1-relay supplier-session can go unclaimed"
 fi
 # stream/cometbft cells ignore RELAYS_PER_TRANSPORT: each sends 3 sequential
 # relays pinned to ONE (per-cell rotated) supplier, so a session boundary can
-# split them 2+1 and leave a 1-relay supplier-session -- the issue #25 regime
-# the warning above cannot see for these transports.
+# split them 2+1 and leave a 1-relay supplier-session -- the unclaimed-session
+# regime the warning above cannot see for these transports.
 case " $MATRIX " in
 *" stream:"* | *" cometbft:"*)
-    gate_skip "stream/cometbft cells send 3 relays on one supplier: a session-boundary split can trip issue #25 for that cell"
+    gate_skip "stream/cometbft cells send 3 relays on one supplier: a session-boundary split can leave a 1-relay supplier-session, which is not asserted exactly"
     ;;
 esac
 
