@@ -653,11 +653,16 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	//
 	// The unreadable-DIRECTORY case is caught earlier still, by the fingerprint
 	// read at the top of this function.
-	// One increment per LOAD, not one per condition. Both blocks below are
-	// reachable from a single load -- a keyring holding one corrupt record and
-	// one record that is not a signing key satisfies each -- and manager.Reload
-	// records the same defect it removed on its own side: counting twice made
-	// one bad keyring move the series by two.
+	// The two TAIL conditions below are deduped against each other, and that is
+	// all this claims. Both are reachable from one load -- a keyring holding one
+	// corrupt record and one record that is not a signing key satisfies each --
+	// and before 2026-08-31 a single load moved the series by two for one cause.
+	//
+	// The per-KEY increments in the loops above are deliberately not deduped:
+	// manager.Reload counts nothing itself precisely because every provider
+	// "already increments keyLoadErrors per failing key", so three failing keys
+	// in one load are three. This series is per failing key, plus at most one
+	// for the load-level condition.
 	loadFailureCounted := false
 	countLoadFailure := func() {
 		if !loadFailureCounted {
@@ -692,10 +697,10 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	//
 	// The condition is len(keys) == 0 and nothing else. An earlier version added
 	// "while records are still on disk", which excluded the maximal form of the
-	// very event: withdrawing EVERY record, or a Secret projected empty, leaves
-	// a readable directory with no records at all, releases every supplier, and
-	// said nothing. Measured 2026-08-31, in the commit that claimed to have made
-	// this loud.
+	// very event: withdrawing EVERY record leaves a readable directory with no
+	// records at all, releases every supplier, and said nothing. Measured
+	// 2026-08-31, in the commit that claimed to have made this loud. A Secret
+	// projected empty is believed to present the same way and was NOT measured.
 	//
 	// Applied rather than refused, and that is a decision rather than a
 	// deduction. This provider does not distinguish the operator withdrawing the
@@ -708,11 +713,26 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	// 2026-08-31 and kept a withdrawn key signing.
 	if len(keys) == 0 {
 		countLoadFailure()
-		p.logger.Error().
+
+		// Whether anything is being RELEASED depends on whether this provider
+		// ever held keys. On the first load against an empty or unprojected
+		// keyring nothing was ever served, and a message asserting a fleet-wide
+		// release there is a false alarm at boot -- on a path OpenManager
+		// refuses anyway.
+		p.fingerprintMu.Lock()
+		heldBefore := len(p.cachedKeys)
+		p.fingerprintMu.Unlock()
+
+		event := p.logger.Error().
 			Str("keyring_dir", p.keyringDir).
 			Int("records_on_disk", dirEntryCount).
-			Strs("key_names", p.keyNames).
-			Msg("the keyring yielded no signing keys; every supplier this process served is being released")
+			Strs("key_names", p.keyNames)
+		if heldBefore > 0 {
+			event.Int("previously_held", heldBefore).
+				Msg("the keyring yielded no signing keys; every supplier this process served is being released")
+		} else {
+			event.Msg("the keyring yielded no signing keys, and none were held before: this process can sign for nothing")
+		}
 	}
 
 	if p.keyringDir != "" {

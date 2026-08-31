@@ -803,8 +803,8 @@ func TestAProviderWithoutADirectoryPublishesNoShortfall(t *testing.T) {
 
 // TestWithdrawingEVERYRecordIsNotSilent covers the maximal form of a release,
 // which the first version of the loud path excluded by asking whether records
-// were still on disk. Withdrawing every .info -- or a Secret projected empty --
-// leaves a readable directory with no records at all: every supplier released,
+// were still on disk. Withdrawing every .info leaves a readable directory with
+// no records at all: every supplier released,
 // and measured on 2026-08-31 as moving nothing, in the very commit whose message
 // said releasing every supplier must never be silent.
 func TestWithdrawingEVERYRecordIsNotSilent(t *testing.T) {
@@ -871,6 +871,47 @@ func TestOneLoadMovesTheErrorSeriesOnce(t *testing.T) {
 	require.Empty(t, keys, "precondition: both conditions hold at once")
 
 	require.Equal(t, 1.0, testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))-before,
-		"one load, one increment: a rate built on this series must count loads that "+
-			"failed, not conditions that happened to coincide")
+		"two load-level conditions coinciding are one cause, so they count once; the "+
+			"per-key increments in the loops are a different contract and stay per key")
+}
+
+// TestAFrozenReloadNeverGoesQuiet pins the decision taken on 2026-08-31: when a
+// key source REPORTS that it could not be read, the reload is abandoned and the
+// previous keys are kept, for as long as the condition lasts. Nothing is guessed
+// and nothing is released on a source that said it could not be read.
+//
+// That policy is only defensible while it keeps saying so. A frozen manager and
+// a healthy idle one differ in exactly one thing an operator can see, and it is
+// this: the failure repeats, every tick, in the log and in the counter. The
+// obvious future optimisation -- caching the fingerprint on the error path so a
+// stable failure stops re-running argon2 over every healthy key -- would silence
+// it and leave a process that holds withdrawn keys while looking well.
+func TestAFrozenReloadNeverGoesQuiet(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+	})
+	p := newOnDiskProvider(t, parentDir, "app", "app2")
+	m := NewMultiProviderKeyManager(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		[]KeyProvider{p}, KeyManagerConfig{HotReloadEnabled: false})
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Start(context.Background()))
+	require.Len(t, m.ListSuppliers(), 2, "precondition: both selected keys held")
+
+	corruptRecord(t, recordsDir, "app2")
+
+	base := testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))
+	const ticks = 5
+	for i := 1; i <= ticks; i++ {
+		require.Error(t, m.Reload(context.Background()),
+			"tick %d: a source that reported a failure must keep reporting it", i)
+		require.Equal(t, float64(i),
+			testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))-base,
+			"tick %d: every attempt moves the series, or a stuck process looks idle", i)
+	}
+
+	require.Len(t, m.ListSuppliers(), 2,
+		"the previous keys are KEPT while the source is unreadable -- that is the "+
+			"policy, not a bug, and the operator repairs the record")
 }
