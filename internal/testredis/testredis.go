@@ -59,7 +59,7 @@ func URL() string {
 // a fake produced false greens, and a silent "not covered" would reproduce that
 // in another shape: run `eval "$(scripts/gates/redis.sh up)"` first, or let
 // `make gate` do it.
-func Client(t *testing.T) *redis.Client {
+func Client(t testing.TB) *redis.Client {
 	t.Helper()
 
 	opt, err := redis.ParseURL(URL())
@@ -81,9 +81,15 @@ func Client(t *testing.T) *redis.Client {
 }
 
 // Prefix returns a key prefix unique to this test, and deletes everything under
-// it afterwards. Every key a test creates must sit beneath it: the server is
-// shared with the other packages running in parallel.
-func Prefix(t *testing.T) string {
+// it afterwards. Every key a test creates must sit beneath it, SEPARATED BY A
+// COLON: the server is shared with the other packages running in parallel.
+//
+// The colon is not cosmetic. The prefix ends in a sequence number, so "t:X:N:1"
+// is a textual prefix of "t:X:N:11"; matching prefix+"*" would let one test's
+// cleanup delete a sibling's keys. Only the nanosecond timestamp keeps those
+// apart today, which is a coincidence and not a guarantee. Matching
+// prefix+":*" makes the boundary structural.
+func Prefix(t testing.TB) string {
 	t.Helper()
 
 	// Redis glob metacharacters are replaced too, not only the separators:
@@ -105,7 +111,7 @@ func Prefix(t *testing.T) string {
 
 		var cursor uint64
 		for {
-			keys, next, err := client.Scan(ctx, cursor, prefix+"*", 500).Result()
+			keys, next, err := client.Scan(ctx, cursor, prefix+":*", 500).Result()
 			if err != nil {
 				t.Logf("could not clean up test keys under %q: %v", prefix, err)
 				return

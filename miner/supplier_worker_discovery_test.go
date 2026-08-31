@@ -4,14 +4,11 @@ package miner
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // TestRecordDiscovered_WritesToKnownSets proves relay-traffic discovery persists
@@ -19,13 +16,9 @@ import (
 // reads. Before the fix, discovery was gated on a never-wired cacheOrchestrator
 // (always nil), so apps seen only via live traffic were never refreshed.
 func TestRecordDiscovered_WritesToKnownSets(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 
 	ctx := context.Background()
-	rc, err := redisutil.NewClient(ctx, redisutil.ClientConfig{URL: fmt.Sprintf("redis://%s", mr.Addr())})
-	require.NoError(t, err)
+	rc, _ := newTestRedis(t)
 	defer func() { _ = rc.Close() }()
 
 	w := NewSupplierWorker(SupplierWorkerConfig{
