@@ -375,6 +375,12 @@ func (m *MultiProviderKeyManager) Reload(ctx context.Context) error {
 	m.keys = newKeys
 	m.keysMu.Unlock()
 
+	// Past every abandonment above, so this is the reload COMPLETING. It is
+	// stamped here rather than at either return below because both of those are
+	// success and only the staleness of this series distinguishes a manager that
+	// is frozen from one on a quiet fleet.
+	keysLastSuccessfulReload.Set(float64(time.Now().Unix()))
+
 	// Notify callbacks
 	for _, addr := range added {
 		m.notifyKeyChange(addr, true)

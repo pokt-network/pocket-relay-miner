@@ -415,13 +415,50 @@ func TestTheDocumentedWithdrawalLeavesAnEmptyKeyring(t *testing.T) {
 	require.Empty(t, after, "the withdrawal must be applied, or a pulled key keeps signing")
 }
 
+// thirdAppHex gives these tests a fleet rather than a pair, so "one record is
+// broken" can be told apart from "nothing decoded".
+const thirdAppHex = "2b00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0c"
+
+// corruptRecord overwrites a record's .info in place, leaving the file present.
+// That is what an undecodable record looks like: cosmos-sdk's MigrateAll skips
+// it, printing to stderr and returning a nil error.
+func corruptRecord(t *testing.T, recordsDir, uidPrefix string) {
+	t.Helper()
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	n := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), uidPrefix) && strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.WriteFile(
+				filepath.Join(recordsDir, e.Name()), []byte("corrupt"), 0o600))
+			n++
+		}
+	}
+	require.Equal(t, 1, n, "precondition: exactly one record matching %q was corrupted", uidPrefix)
+}
+
+// withdrawRecord removes a record's .info and nothing else, which is the
+// withdrawal docs/SUPPLIER_KEYS.md documents and a four-pod fleet measured.
+func withdrawRecord(t *testing.T, recordsDir, uidPrefix string) {
+	t.Helper()
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	n := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), uidPrefix) && strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
+			n++
+		}
+	}
+	require.Equal(t, 1, n, "precondition: exactly one record matching %q was withdrawn", uidPrefix)
+}
+
 // TestWithdrawingASelectedKeyIsNotABrokenKeyring is the defect the deep-review
 // found and this branch measured on 2026-08-31. With key_names configured,
 // LoadKeys attempts ONLY the named records, but the guard was comparing that
 // result against every .info in the directory. Withdrawing the one selected key
-// from a keyring that holds others therefore read as "records present, none
-// yielded a key" -- a broken keyring -- and MultiProviderKeyManager.Reload
-// abandoned the reload and kept the previous set.
+// from a keyring that holds others therefore read as a broken keyring, and
+// MultiProviderKeyManager.Reload abandoned the reload and kept the previous set.
 func TestWithdrawingASelectedKeyIsNotABrokenKeyring(t *testing.T) {
 	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
 		"app":  testAppHex,
@@ -433,16 +470,7 @@ func TestWithdrawingASelectedKeyIsNotABrokenKeyring(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, before, 1, "precondition: key_names selects exactly one of the two records")
 
-	removed := 0
-	entries, err := os.ReadDir(recordsDir)
-	require.NoError(t, err)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "app2") && strings.HasSuffix(e.Name(), ".info") {
-			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
-			removed++
-		}
-	}
-	require.Equal(t, 1, removed, "precondition: exactly the selected key was withdrawn")
+	withdrawRecord(t, recordsDir, "app2")
 
 	after, err := p.LoadKeys(context.Background())
 	require.NoError(t, err,
@@ -475,16 +503,10 @@ func TestAWithdrawnSelectedKeyStopsSigning(t *testing.T) {
 	require.Len(t, held, 1, "precondition: the manager holds exactly the selected key")
 	withdrawn := held[0]
 
-	entries, err := os.ReadDir(recordsDir)
-	require.NoError(t, err)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "app2") && strings.HasSuffix(e.Name(), ".info") {
-			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
-		}
-	}
+	withdrawRecord(t, recordsDir, "app2")
 
 	require.NoError(t, m.Reload(context.Background()))
-	_, err = m.GetSigner(withdrawn)
+	_, err := m.GetSigner(withdrawn)
 	require.Error(t, err,
 		"one reload after the withdrawal must retire the key: decideSupplierServe "+
 			"asks HasSigner first, so a key still in the signer is a supplier still served")
@@ -495,9 +517,10 @@ func TestAWithdrawnSelectedKeyStopsSigning(t *testing.T) {
 // records that are not signing keys -- an offline pubkey, a multisig, a ledger
 // entry -- and those return keyring.ErrPrivKeyExtr on every call, forever, so
 // LoadKeys skips them by design. They still leave a .info on disk, so counting
-// files kept the old guard's denominator above zero and withdrawing the last
-// REAL key read as a broken keyring: the same freeze, reached the way the
-// keyhash file reached it on 2026-08-28.
+// FILES kept the old guard's denominator above zero and withdrawing the last
+// REAL key read as a broken keyring: the same freeze the keyhash file reached on
+// 2026-08-28. Counting what List DECODED sees them for what they are -- List
+// returns them fine; it is the private-key export that fails.
 func TestAWithdrawalBesideANonSigningRecordIsApplied(t *testing.T) {
 	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{"app": testAppHex})
 
@@ -514,16 +537,7 @@ func TestAWithdrawalBesideANonSigningRecordIsApplied(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, before, 1, "precondition: the offline record yields no signing key")
 
-	entries, err := os.ReadDir(recordsDir)
-	require.NoError(t, err)
-	removed := 0
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "app.") && strings.HasSuffix(e.Name(), ".info") {
-			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
-			removed++
-		}
-	}
-	require.Equal(t, 1, removed, "precondition: exactly the signing key was withdrawn")
+	withdrawRecord(t, recordsDir, "app.")
 
 	after, err := p.LoadKeys(context.Background())
 	require.NoError(t, err,
@@ -532,12 +546,23 @@ func TestAWithdrawalBesideANonSigningRecordIsApplied(t *testing.T) {
 	require.Empty(t, after, "the withdrawal must be applied, or a pulled key keeps signing")
 }
 
-// TestPartialCorruptionIsNotAPartialRemoval is the hole the old guard left wide
-// open, and it never needed key_names to reach. MigrateAll's swallow is PER
-// RECORD, so nine corrupt records beside one healthy one came back as one key
-// and a nil error: nine addresses diffed as removed, nine suppliers dropped, and
-// no signal anywhere. Asking whether the load came back EMPTY could not see it.
-func TestPartialCorruptionIsNotAPartialRemoval(t *testing.T) {
+// TestPartialCorruptionIsReportedAndApplied pins the decision taken on
+// 2026-08-31, and it is a decision rather than a deduction: an undecodable
+// record means that supplier loses service, loudly, instead of the whole reload
+// being refused.
+//
+// Refusing was tried and measured over the same afternoon. The condition is
+// STABLE, so every later reload failed identically, the manager kept its
+// previous key set, and a key withdrawn afterwards went on signing forever --
+// one corrupt file freezing the withdrawal of every other. Keeping the address
+// alive instead cannot be done honestly either: nothing can sign with a record
+// it cannot decode, and a pod that restarts loads the same partial set with no
+// previous state to protect, so the fleet would split between pods holding the
+// address in memory and pods that never saw it.
+//
+// What must NOT come back is the silence: before 2026-08-31 this returned a
+// shorter map with a nil error and moved no series at all.
+func TestPartialCorruptionIsReportedAndApplied(t *testing.T) {
 	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
 		"app":  testAppHex,
 		"app2": secondAppHex,
@@ -548,35 +573,66 @@ func TestPartialCorruptionIsNotAPartialRemoval(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, before, 2)
 
-	corrupted := 0
-	entries, err := os.ReadDir(recordsDir)
-	require.NoError(t, err)
-	for _, e := range entries {
-		if strings.HasPrefix(e.Name(), "app2") && strings.HasSuffix(e.Name(), ".info") {
-			require.NoError(t, os.WriteFile(
-				filepath.Join(recordsDir, e.Name()), []byte("corrupt"), 0o600))
-			corrupted++
-		}
-	}
-	require.Equal(t, 1, corrupted, "precondition: exactly one of the two records is corrupt")
+	errsBefore := testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))
+	corruptRecord(t, recordsDir, "app2")
 
 	after, err := p.LoadKeys(context.Background())
-	require.Error(t, err,
-		"one record silently skipped is one supplier silently dropped: it must be "+
-			"an error, not a shorter map with a nil error")
-	require.Contains(t, err.Error(), "broken keyring")
-	require.Len(t, after, 1,
-		"the record that DID decode is still returned: the manager exempts the first "+
-			"load, so a partly corrupt keyring still starts on what it could read")
+	require.NoError(t, err,
+		"a per-record failure must not refuse the whole load: doing so freezes every "+
+			"other key's reload for the life of the process")
+	require.Len(t, after, 1, "the record that still decodes must still load")
+	require.Greater(t, testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind())), errsBefore,
+		"applying the removal is only defensible if it is visible")
+	require.Equal(t, 1.0,
+		testutil.ToFloat64(keyringUndecodableRecords.WithLabelValues(p.Kind())),
+		"the standing condition needs a gauge: a counter cannot say how many records "+
+			"are broken RIGHT NOW, which is what an operator has to act on")
 }
 
-// TestTheGuardBehavesTheSameOnTheFileBackend exists because every other test
-// around this guard uses the "test" backend, and production uses "file". The two
-// differ by a passphrase, and the decode path they share is cosmos-sdk's
-// keystore -- so they SHOULD classify identically. That is a claim about a
-// dependency, which is exactly the kind this file has been wrong about before,
-// so it is measured here rather than asserted in a comment.
-func TestTheGuardBehavesTheSameOnTheFileBackend(t *testing.T) {
+// TestACorruptRecordDoesNotBlockTheWithdrawalOfAnother is the regression test
+// for the freeze itself, and it is the one that would have gone red on
+// 2026-08-31 before the fix: with a corrupt record present, the manager kept
+// BOTH addresses across five reloads, including one the operator had withdrawn.
+func TestACorruptRecordDoesNotBlockTheWithdrawalOfAnother(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+		"app3": thirdAppHex,
+	})
+	p := newOnDiskProvider(t, parentDir)
+	m := NewMultiProviderKeyManager(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		[]KeyProvider{p}, KeyManagerConfig{HotReloadEnabled: false})
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Start(context.Background()))
+	require.Len(t, m.ListSuppliers(), 3, "precondition: three keys held")
+
+	corruptRecord(t, recordsDir, "app2")
+	require.NoError(t, m.Reload(context.Background()),
+		"one broken record is not a broken keyring while others still decode")
+	require.Len(t, m.ListSuppliers(), 2)
+
+	withdrawn := ""
+	for _, addr := range m.ListSuppliers() {
+		withdrawn = addr
+		break
+	}
+	require.NotEmpty(t, withdrawn)
+
+	withdrawRecord(t, recordsDir, "app.")
+	require.NoError(t, m.Reload(context.Background()))
+	require.Len(t, m.ListSuppliers(), 1,
+		"the withdrawal must land while a corrupt record sits beside it -- a key that "+
+			"cannot be pulled is the failure this whole guard exists to prevent")
+}
+
+// TestNothingDecodedIsRefused is the other half of the split, and the reason the
+// split exists at all. A rotated or wrong passphrase makes every jose.Decode
+// fail, so List returns an empty slice and a NIL error with not one corrupt byte
+// on disk -- measured 2026-08-31. Applying that would diff every supplier as
+// removed at once, which is a fleet-wide outage nobody performed, so a load
+// where nothing decoded is refused however many records are on disk.
+func TestNothingDecodedIsRefused(t *testing.T) {
 	parentDir := t.TempDir()
 	registry := codectypes.NewInterfaceRegistry()
 	cryptocodec.RegisterInterfaces(registry)
@@ -586,61 +642,82 @@ func TestTheGuardBehavesTheSameOnTheFileBackend(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, kr.ImportPrivKeyHex("app", testAppHex, "secp256k1"))
 	require.NoError(t, kr.ImportPrivKeyHex("app2", secondAppHex, "secp256k1"))
-	recordsDir := filepath.Join(parentDir, "keyring-file")
 
-	newFileProvider := func(names ...string) *KeyringProvider {
-		p, perr := NewKeyringProvider(logging.NewLoggerFromConfig(logging.DefaultConfig()),
+	p, err := NewKeyringProvider(logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		KeyringProviderConfig{Backend: "file", Dir: parentDir, AppName: "pocket",
+			PasswordReader: strings.NewReader(strings.Repeat("thewrongpassphrase\n", 40))})
+	require.NoError(t, err)
+
+	keys, err := p.LoadKeys(context.Background())
+	require.Error(t, err,
+		"a wrong passphrase decodes nothing and reports nothing: applying it removes "+
+			"every supplier at once")
+	require.Contains(t, err.Error(), "broken keyring")
+	require.Empty(t, keys)
+}
+
+// TestTheGuardBehavesTheSameOnTheFileBackend exists because every other test
+// around this guard uses the "test" backend, and production uses "file". The two
+// differ by a passphrase and share cosmos-sdk's keystore decode path, so they
+// SHOULD classify identically -- a claim about a dependency, which is the kind
+// this file has been wrong about before, so it is measured rather than asserted.
+//
+// Each case seeds its own keyring: subtests that share one are ordered, and an
+// ordered test cannot be run alone or in parallel.
+func TestTheGuardBehavesTheSameOnTheFileBackend(t *testing.T) {
+	// The passphrase is read ONCE per keyring and cached on the instance
+	// (99designs/keyring v1.2.2, fileKeyring.unlock, file.go:53-67), so a reload
+	// does not prompt again. The reader is generously long anyway: one that runs
+	// dry reports as a WRONG passphrase, which is the very condition these tests
+	// distinguish.
+	seed := func(t *testing.T) (parentDir, recordsDir string) {
+		t.Helper()
+		parentDir = t.TempDir()
+		registry := codectypes.NewInterfaceRegistry()
+		cryptocodec.RegisterInterfaces(registry)
+		kr, err := keyring.New("pocket", keyring.BackendFile, parentDir,
+			strings.NewReader(testKeyringPassword+"\n"+testKeyringPassword+"\n"),
+			codec.NewProtoCodec(registry))
+		require.NoError(t, err)
+		require.NoError(t, kr.ImportPrivKeyHex("app", testAppHex, "secp256k1"))
+		require.NoError(t, kr.ImportPrivKeyHex("app2", secondAppHex, "secp256k1"))
+		return parentDir, filepath.Join(parentDir, "keyring-file")
+	}
+	newFileProvider := func(t *testing.T, parentDir string, names ...string) *KeyringProvider {
+		t.Helper()
+		p, err := NewKeyringProvider(logging.NewLoggerFromConfig(logging.DefaultConfig()),
 			KeyringProviderConfig{Backend: "file", Dir: parentDir, AppName: "pocket",
-				KeyNames: names,
-				// One line per unlock, and a reload unlocks again: a reader that
-				// runs dry reports as a wrong passphrase, which would look like
-				// the defect this test is about.
-				PasswordReader: strings.NewReader(strings.Repeat(testKeyringPassword+"\n", 40))})
-		require.NoError(t, perr)
+				KeyNames:       names,
+				PasswordReader: strings.NewReader(strings.Repeat(testKeyringPassword+"\n", 8))})
+		require.NoError(t, err)
 		return p
 	}
 
 	t.Run("withdrawing the selected key is applied", func(t *testing.T) {
-		p := newFileProvider("app2")
-		before, lerr := p.LoadKeys(context.Background())
-		require.NoError(t, lerr)
+		parentDir, recordsDir := seed(t)
+		p := newFileProvider(t, parentDir, "app2")
+		before, err := p.LoadKeys(context.Background())
+		require.NoError(t, err)
 		require.Len(t, before, 1)
 
-		entries, rerr := os.ReadDir(recordsDir)
-		require.NoError(t, rerr)
-		removed := 0
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), "app2") && strings.HasSuffix(e.Name(), ".info") {
-				require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
-				removed++
-			}
-		}
-		require.Equal(t, 1, removed, "precondition: exactly the selected key was withdrawn")
+		withdrawRecord(t, recordsDir, "app2")
 
-		after, lerr := p.LoadKeys(context.Background())
-		require.NoError(t, lerr, "the file backend must not read a withdrawal as a broken keyring")
+		after, err := p.LoadKeys(context.Background())
+		require.NoError(t, err, "the file backend must not read a withdrawal as a broken keyring")
 		require.Empty(t, after)
 	})
 
-	t.Run("partial corruption is reported", func(t *testing.T) {
-		// app2's record is gone from the subtest above; corrupt app's, so one of
-		// the directory's remaining records fails to decode.
-		entries, rerr := os.ReadDir(recordsDir)
-		require.NoError(t, rerr)
-		corrupted := 0
-		for _, e := range entries {
-			if strings.HasPrefix(e.Name(), "app.") && strings.HasSuffix(e.Name(), ".info") {
-				require.NoError(t, os.WriteFile(
-					filepath.Join(recordsDir, e.Name()), []byte("corrupt"), 0o600))
-				corrupted++
-			}
-		}
-		require.Equal(t, 1, corrupted, "precondition: exactly one record corrupted")
+	t.Run("partial corruption is applied and reported", func(t *testing.T) {
+		parentDir, recordsDir := seed(t)
+		p := newFileProvider(t, parentDir)
+		before, err := p.LoadKeys(context.Background())
+		require.NoError(t, err)
+		require.Len(t, before, 2)
 
-		p := newFileProvider()
-		after, lerr := p.LoadKeys(context.Background())
-		require.Error(t, lerr, "a swallowed record is a swallowed record on either backend")
-		require.Contains(t, lerr.Error(), "broken keyring")
-		require.Empty(t, after)
+		corruptRecord(t, recordsDir, "app2")
+
+		after, err := p.LoadKeys(context.Background())
+		require.NoError(t, err, "a swallowed record is per-record on either backend")
+		require.Len(t, after, 1)
 	})
 }
