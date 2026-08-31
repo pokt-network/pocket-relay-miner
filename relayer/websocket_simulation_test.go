@@ -186,7 +186,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 	// ValidateRelay succeeds in the real (non-simulated) branch, and
 	// neverCallValidator always errors, so MeterRelay/relayMeter is never
 	// dereferenced even if the simulated guard were broken.
-	pipeline := NewRelayPipeline(validator, nil, signer, proc, logger, nil, nil)
+	pipeline := NewRelayPipeline(validator, nil, logger)
 
 	backendURL, backendHits, backendTypes := newSimWSBackendServer(t)
 	relayerConn, gwClient := newGatewaySideHarness(t)
@@ -205,7 +205,6 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 		http.Header{},
 		nil, // sessionMonitor
 		pipeline,
-		1, // computeUnits
 		2*time.Second,
 		true, // simulated
 		simVerifier,

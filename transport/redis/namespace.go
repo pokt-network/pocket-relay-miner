@@ -97,13 +97,6 @@ func (kb *KeyBuilder) CachePrefix() string {
 	return fmt.Sprintf("%s:%s", kb.ns.BasePrefix, kb.ns.CachePrefix)
 }
 
-// EventsCachePrefix returns the pub/sub prefix for cache events.
-// Format: {base}:{events}:{cache}
-// Example: "ha:events:cache"
-func (kb *KeyBuilder) EventsCachePrefix() string {
-	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.EventsPrefix, kb.ns.CachePrefix)
-}
-
 // MinerSessionsPrefix returns the prefix for miner session store.
 // Format: {base}:{miner}:sessions
 // Example: "ha:miner:sessions"
@@ -139,13 +132,6 @@ func (kb *KeyBuilder) ParamsSharedCacheKey() string {
 	return fmt.Sprintf("%s:%s:shared_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
 }
 
-// ParamsSessionKey builds the key for the cached session params singleton.
-// Format: {base}:{cache}:session_params
-// Example: "ha:cache:session_params"
-func (kb *KeyBuilder) ParamsSessionKey() string {
-	return fmt.Sprintf("%s:%s:session_params", kb.ns.BasePrefix, kb.ns.CachePrefix)
-}
-
 // ParamsSharedLockKey builds the lock key for shared params cache population.
 // Format: {base}:{cache}:lock:shared_params
 // Example: "ha:cache:lock:shared_params"
@@ -178,13 +164,6 @@ func (kb *KeyBuilder) MeterActiveSessionsKey() string {
 // Example: "ha:sim:replay:deadbeef"
 func (kb *KeyBuilder) SimulationReplayKey(sigHash string) string {
 	return fmt.Sprintf("%s:sim:replay:%s", kb.ns.BasePrefix, sigHash)
-}
-
-// SupplierUpdateChannel builds the pub/sub channel for supplier updates.
-// Format: {base}:{events}:supplier_update
-// Example: "ha:events:supplier_update"
-func (kb *KeyBuilder) SupplierUpdateChannel() string {
-	return fmt.Sprintf("%s:%s:supplier_update", kb.ns.BasePrefix, kb.ns.EventsPrefix)
 }
 
 // BlockEventChannel builds the pub/sub channel for block events.
@@ -300,13 +279,6 @@ func (kb *KeyBuilder) MinerInstanceKey(instanceID string) string {
 // Example: "ha:events:cache:invalidate:supplier_params"
 func (kb *KeyBuilder) SupplierParamsInvalidateChannel() string {
 	return fmt.Sprintf("%s:%s:%s:invalidate:supplier_params", kb.ns.BasePrefix, kb.ns.EventsPrefix, kb.ns.CachePrefix)
-}
-
-// MinerLeaderPrefix builds the key prefix for per-supplier leader election.
-// Format: {base}:{miner}:leader
-// Example: "ha:miner:leader"
-func (kb *KeyBuilder) MinerLeaderPrefix() string {
-	return fmt.Sprintf("%s:%s:leader", kb.ns.BasePrefix, kb.ns.MinerPrefix)
 }
 
 // MinerDedupPrefix builds the key prefix for relay deduplication sets.
@@ -451,24 +423,6 @@ func (kb *KeyBuilder) SupplierStatePattern() string {
 // Example: "ha:smst:*:sess1:nodes"
 func (kb *KeyBuilder) SMSTSessionNodesPattern(sessionID string) string {
 	return fmt.Sprintf("%s:smst:*:%s:nodes", kb.ns.BasePrefix, sessionID)
-}
-
-// SMSTSessionAllPattern builds the SCAN pattern matching EVERY SMST key of
-// one supplier+session tree (:nodes, :root, :stats, :live_root), for
-// operator cleanup suggestions.
-// Format: {base}:smst:{supplier}:{sessionID}:*
-// Example: "ha:smst:pokt1abc:sess1:*"
-func (kb *KeyBuilder) SMSTSessionAllPattern(supplier, sessionID string) string {
-	return fmt.Sprintf("%s:smst:%s:%s:*", kb.ns.BasePrefix, supplier, sessionID)
-}
-
-// LegacyParamsKey builds a legacy metering params key. These keys are no
-// longer written by current code but remain inspectable for debugging older
-// deployments.
-// Format: {base}:params:{name}
-// Example: "ha:params:shared"
-func (kb *KeyBuilder) LegacyParamsKey(name string) string {
-	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.ParamsPrefix, name)
 }
 
 // LegacyParamsPattern builds the SCAN pattern for legacy metering params.

@@ -10,6 +10,10 @@ import (
 )
 
 func main() {
+	// Version/Commit/BuildDate live in version.go, stamped by the Makefile's
+	// ldflags; hand them to the cmd package so `version` prints the real
+	// build instead of its compiled-in "dev" defaults.
+	cmd.SetVersionInfo(Version, Commit, BuildDate)
 	rootCmd := &cobra.Command{
 		Use:   "pocket-relay-miner",
 		Short: "Pocket Network High-Availability RelayMiner",

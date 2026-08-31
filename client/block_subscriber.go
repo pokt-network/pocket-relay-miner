@@ -45,8 +45,8 @@ const (
 )
 
 // SimpleBlock implements client.Block interface with timestamp support.
-// This is a lightweight implementation used by both BlockPoller (deprecated)
-// and BlockSubscriber for representing blockchain blocks.
+// It is what RedisBlockClientAdapter hands to its subscribers, and what
+// BlockSubscriber emits, to represent a blockchain block.
 type SimpleBlock struct {
 	height    int64
 	hash      []byte

@@ -32,12 +32,11 @@ func TestNewTxClient_ValidConfig(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint:  testServer.address,
-		ChainID:       "test-chain",
-		GasLimit:      100000,
-		GasPrice:      parseGasPrice(t, "0.001upokt"),
-		TimeoutBlocks: 50,
-		UseTLS:        false,
+		GRPCEndpoint: testServer.address,
+		ChainID:      "test-chain",
+		GasLimit:     100000,
+		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		UseTLS:       false,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -47,7 +46,6 @@ func TestNewTxClient_ValidConfig(t *testing.T) {
 
 	require.Equal(t, "test-chain", tc.config.ChainID)
 	require.Equal(t, uint64(100000), tc.config.GasLimit)
-	require.Equal(t, uint64(50), tc.config.TimeoutBlocks)
 	require.True(t, tc.ownsConn, "client should own the connection")
 }
 
@@ -65,11 +63,10 @@ func TestNewTxClient_WithSharedConnection(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	config := TxClientConfig{
-		GRPCConn:      conn,
-		ChainID:       "test-chain",
-		GasLimit:      100000,
-		GasPrice:      parseGasPrice(t, "0.001upokt"),
-		TimeoutBlocks: 50,
+		GRPCConn: conn,
+		ChainID:  "test-chain",
+		GasLimit: 100000,
+		GasPrice: parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -170,7 +167,6 @@ func TestNewTxClient_Defaults(t *testing.T) {
 
 	// Verify defaults were applied
 	require.Equal(t, DefaultChainID, tc.config.ChainID)
-	require.Equal(t, uint64(DefaultTimeoutHeight), tc.config.TimeoutBlocks)
 
 	// Verify gas price has a denom (means it was initialized)
 	require.NotEmpty(t, tc.config.GasPrice.Denom)

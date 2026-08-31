@@ -59,12 +59,10 @@ type LeaderController struct {
 	serviceCache          cache.KeyedEntityCache[string, *sharedtypes.Service]
 	supplierCache         *cache.SupplierCache
 	cacheOrchestrator     *cache.CacheOrchestrator
-	proofChecker          *ProofRequirementChecker
 	balanceMonitor        *BalanceMonitor
 	blockHealthMonitor    *BlockHealthMonitor
 	supplierRegistry      *SupplierRegistry
 	serviceFactorRegistry *ServiceFactorRegistry
-	settlementMonitor     *SettlementMonitor
 	masterPool            pond.Pool
 
 	// Lifecycle
@@ -263,7 +261,6 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.applicationCache,
 		c.serviceCache,
 		c.supplierCache,
-		nil, // session cache placeholder
 		c.masterPool,
 	)
 	if err := c.cacheOrchestrator.Start(ctx); err != nil {
@@ -295,23 +292,13 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger.Info().Str("chain_id", chainID).Msg("fetched chain ID from node")
 	}
 
-	// Create a proof checker
-	c.proofChecker = NewProofRequirementChecker(
-		c.logger,
-		c.queryClients.Proof(),
-		c.queryClients.Shared(),
-		c.queryClients.ServiceDifficulty(),
-	)
-	c.logger.Info().Msg("proof requirement checker initialized")
-
 	// Create supplier registry
 	c.supplierRegistry = NewSupplierRegistry(
 		c.logger,
 		c.config.RedisClient,
 		SupplierRegistryConfig{
-			KeyPrefix:    c.config.RedisClient.KB().SuppliersRegistryPrefix(),
-			IndexKey:     c.config.RedisClient.KB().SuppliersRegistryIndexKey(),
-			EventChannel: c.config.RedisClient.KB().SupplierUpdateChannel(),
+			KeyPrefix: c.config.RedisClient.KB().SuppliersRegistryPrefix(),
+			IndexKey:  c.config.RedisClient.KB().SuppliersRegistryIndexKey(),
 		},
 	)
 
@@ -388,37 +375,6 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger.Info().Msg("balance monitor started")
 	}
 
-	// Start settlement monitor if enabled
-	if c.config.Config.GetSettlementMonitorEnabled() {
-		// Get supplier addresses to monitor
-		suppliersMap, err := c.supplierRegistry.GetAllSuppliers(ctx)
-		if err != nil {
-			c.cleanup()
-			return fmt.Errorf("failed to get suppliers for settlement monitor: %w", err)
-		}
-		supplierAddresses := make([]string, 0, len(suppliersMap))
-		for addr := range suppliersMap {
-			supplierAddresses = append(supplierAddresses, addr)
-		}
-
-		c.settlementMonitor = NewSettlementMonitor(
-			c.logger,
-			c.blockSubscriber,
-			c.blockSubscriber.GetRPCClient(),
-			supplierAddresses,
-			c.masterPool,
-			nil, // SessionStore not available in LeaderController (settlement metadata won't be updated)
-			c.config.Config.GetSettlementWorkers(),
-		)
-		if err := c.settlementMonitor.Start(ctx); err != nil {
-			c.cleanup()
-			return fmt.Errorf("failed to start settlement monitor: %w", err)
-		}
-		c.logger.Info().
-			Int("suppliers", len(supplierAddresses)).
-			Msg("settlement monitor started (tracking on-chain claim settlements)")
-	}
-
 	c.active = true
 	c.logger.Info().Msg("leader controller started - all resources active")
 	return nil
@@ -445,10 +401,6 @@ func (c *LeaderController) Close() error {
 // Must be called with c.mu held.
 func (c *LeaderController) cleanup() {
 	// Close in reverse order of creation
-	if c.settlementMonitor != nil {
-		c.settlementMonitor.Close()
-		c.settlementMonitor = nil
-	}
 
 	if c.balanceMonitor != nil {
 		if err := c.balanceMonitor.Close(); err != nil {

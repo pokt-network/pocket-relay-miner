@@ -14,7 +14,7 @@
 #   - late-arriving relays rejected by the new leader (expected, bounded).
 #
 # Success criteria:
-#   |ON_CHAIN_RELAYS - body_valid| / body_valid <= MAX_DRIFT_PCT/100
+#   |ON_CHAIN_RELAYS - verified_ok| / verified_ok <= MAX_DRIFT_PCT/100
 #
 # Drift is bidirectional: either direction is noise at low %, a bug at high %.
 #   - Under-count signals relay loss during failover (survivor skipped stream
@@ -37,8 +37,13 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Build the relay CLI once (exports CLI_BIN / CLI_BIN_DIR; cleanup() below
+# removes the mktemp dir — see the no-trap contract in lib/cli-build.sh).
+. "$SCRIPT_DIR/lib/cli-build.sh"
+build_relay_cli || exit 1
+
 # --- configuration ---
-GATEWAY_URL="${GATEWAY_URL:-http://localhost:3069/v1}"
+RELAYER_URL="${RELAYER_URL:-http://localhost:8180}"
 HTTP_SERVICE="${HTTP_SERVICE:-develop-http}"
 K8S_CONTEXT="${K8S_CONTEXT:-kind-kind}"
 
@@ -112,6 +117,7 @@ cleanup() {
         kubectl --context "$K8S_CONTEXT" scale deploy/miner --replicas="$ORIG_REPLICAS" 2>&1 | head -1 || true
     fi
     wait 2>/dev/null || true
+    rm -rf "$CLI_BIN_DIR"
 }
 trap cleanup EXIT
 
@@ -121,20 +127,9 @@ log_phase "PRE-FLIGHT"
 command -v jq >/dev/null || { log_error "jq required"; exit 2; }
 command -v redis-cli >/dev/null || { log_error "redis-cli required"; exit 2; }
 
-# Relay smoke test with body verification
-for i in $(seq 1 15); do
-    BODY=$(curl -s -m 5 -X POST \
-        -H "Content-Type: application/json" -H "Target-Service-Id: $HTTP_SERVICE" \
-        -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' \
-        "$GATEWAY_URL" 2>/dev/null || true)
-    if echo "$BODY" | grep -q '"result"'; then
-        log_info "Relay OK (attempt $i)"
-        break
-    fi
-    log_warn "Relay not ready (attempt $i/15): [${BODY:0:60}]"
-    sleep 2
-done
-echo "$BODY" | grep -q '"result"' || { log_error "Relay never returned valid body"; exit 1; }
+# Relay smoke test — a zero exit from the CLI implies a signed, verified relay
+wait_relay_ready "$HTTP_SERVICE" "$RELAYER_URL" 15 || { log_error "Relay never served a signed relay"; exit 1; }
+log_info "Relay OK (signed end to end)"
 
 ORIG_REPLICAS=$(kubectl --context "$K8S_CONTEXT" get deploy/miner -o jsonpath='{.spec.replicas}' 2>/dev/null)
 [ "$ORIG_REPLICAS" != "2" ] && { log_warn "Miner replicas=$ORIG_REPLICAS (expected 2); test still runs but 'scale down' is less meaningful"; }
@@ -169,13 +164,10 @@ log_phase "LAUNCHING LOAD"
 
 LOADER_OUT=/tmp/quant-loader.txt
 rm -f "$LOADER_OUT"
-go run "$SCRIPT_DIR/loadtest/http-verify.go" \
-    -url "$GATEWAY_URL" \
-    -service "$HTTP_SERVICE" \
-    -rps "$HTTP_RPS" \
-    -workers "$HTTP_WORKERS" \
-    -duration "${DURATION}s" \
-    -report 15 > "$LOADER_OUT" 2>&1 &
+"$CLI_BIN" relay jsonrpc --localnet --service "$HTTP_SERVICE" \
+    --relayer-url "$RELAYER_URL" \
+    --load-test -n "$((HTTP_RPS * DURATION))" --rps "$HTTP_RPS" \
+    --concurrency "$HTTP_WORKERS" --all-suppliers > "$LOADER_OUT" 2>&1 &
 LOADER_PID=$!
 log_info "Loader PID: $LOADER_PID, writing to $LOADER_OUT"
 
@@ -245,7 +237,10 @@ done
 # --- phase 3: continue load until duration elapsed ---
 log_phase "CONTINUING LOAD THROUGH FAILOVER"
 
-# Wait for loader to finish (AfterFunc in loader stops at DURATION from its start)
+# Wait for the loader to finish. It is bounded by REQUEST COUNT, not by a
+# clock: `--load-test -n $((HTTP_RPS*DURATION))` returns when N requests are
+# done. Under the failover this test induces, throughput drops, so this wait
+# runs PAST DURATION by however long the backlog takes to drain.
 wait "$LOADER_PID" 2>/dev/null || true
 LOADER_PID=""
 log_info "Load window complete"
@@ -261,22 +256,23 @@ log_info "End block height: $END_HEIGHT"
 # --- phase 5: extract loader stats ---
 log_phase "LOADER RESULT"
 
-SENT=$(grep -E '^\s+Sent:' "$LOADER_OUT" | awk '{print $2}')
-BODY_VALID=$(grep -E 'body_valid:' "$LOADER_OUT" | awk '{print $2}')
-BODY_EMPTY=$(grep -E 'body_empty:' "$LOADER_OUT" | awk '{print $2}')
-BODY_INVALID=$(grep -E 'body_invalid:' "$LOADER_OUT" | awk '{print $2}')
-BODY_RPC_ERR=$(grep -E 'body_rpc_error:' "$LOADER_OUT" | awk '{print $2}')
-CONN_ERRS=$(grep -E '^\s+Connection errs:' "$LOADER_OUT" | awk '{print $3}')
+# The loader is `relay jsonrpc --load-test` (summary format in
+# cmd/relay/metrics.go): "Total Requests:", "Successful:", "Errors:",
+# "Success Rate:". "Successful" only counts relays whose supplier signature
+# AND JSON-RPC body verified — it is the client-observed truth the on-chain
+# relay sum is compared against.
+SENT=$(grep -E '^Total Requests:' "$LOADER_OUT" | awk -F': *' '{print $2}')
+VERIFIED_OK=$(grep -E '^Successful:' "$LOADER_OUT" | awk -F': *' '{print $2}')
+ERR_COUNT=$(grep -E '^Errors:' "$LOADER_OUT" | awk -F': *' '{print $2}')
+SUCCESS_RATE=$(grep -E '^Success Rate:' "$LOADER_OUT" | awk -F': *' '{print $2}')
 
-echo "  sent:           ${SENT:-?}"
-echo "  body_valid:     ${BODY_VALID:-?}"
-echo "  body_empty:     ${BODY_EMPTY:-?}"
-echo "  body_invalid:   ${BODY_INVALID:-?}"
-echo "  body_rpc_error: ${BODY_RPC_ERR:-?}"
-echo "  conn_errors:    ${CONN_ERRS:-?}"
+echo "  sent:         ${SENT:-?}"
+echo "  verified_ok:  ${VERIFIED_OK:-?}"
+echo "  errors:       ${ERR_COUNT:-?}"
+echo "  success_rate: ${SUCCESS_RATE:-?}"
 
-[ -z "$BODY_VALID" ] && { log_error "loader did not report body_valid - cannot continue"; cat "$LOADER_OUT" | tail -20; exit 1; }
-[ "$BODY_VALID" = "0" ] && { log_error "body_valid=0 - loader is broken or PATH is not routing; see $LOADER_OUT"; exit 1; }
+[ -z "$VERIFIED_OK" ] && { log_error "loader did not report a Successful count - cannot continue"; tail -20 "$LOADER_OUT"; exit 1; }
+[ "$VERIFIED_OK" = "0" ] && { log_error "Successful=0 - loader is broken or the relayer is not serving; see $LOADER_OUT"; exit 1; }
 
 # --- phase 6: on-chain sum ---
 log_phase "ON-CHAIN AGGREGATE (heights $START_HEIGHT..$END_HEIGHT)"
@@ -341,14 +337,14 @@ fi
 # in a small amount is usually client-side timeouts on a relay the relayer
 # fully processed and signed. Either direction at >MAX_DRIFT_PCT signals a
 # real bug.
-DRIFT_SIGNED=$((ON_CHAIN_RELAYS - BODY_VALID))
+DRIFT_SIGNED=$((ON_CHAIN_RELAYS - VERIFIED_OK))
 DRIFT=$DRIFT_SIGNED
 if [ "$DRIFT" -lt 0 ]; then DRIFT=$((-DRIFT)); fi
-DRIFT_PCT_X100=$((DRIFT * 10000 / BODY_VALID))  # basis points
+DRIFT_PCT_X100=$((DRIFT * 10000 / VERIFIED_OK))  # basis points
 DRIFT_PCT=$((DRIFT_PCT_X100 / 100))
 DRIFT_PCT_REM=$((DRIFT_PCT_X100 % 100))
 
-echo "  body_valid (client-observed): $BODY_VALID"
+echo "  verified_ok (client-observed): $VERIFIED_OK"
 echo "  on_chain (supplier-observed): $ON_CHAIN_RELAYS"
 if [ "$DRIFT_SIGNED" -ge 0 ]; then
     echo "  drift:                        +$DRIFT relays (${DRIFT_PCT}.${DRIFT_PCT_REM}%) - supplier counted more than client saw"
@@ -367,7 +363,7 @@ fi
 echo ""
 if $PASS; then
     echo -e "${GREEN}${BOLD}  PASS: HA failover preserved relay counts end-to-end${NC}"
-    echo "    body_valid=$BODY_VALID, on_chain_relays=$ON_CHAIN_RELAYS (drift ${DRIFT_PCT}.${DRIFT_PCT_REM}%)"
+    echo "    verified_ok=$VERIFIED_OK, on_chain_relays=$ON_CHAIN_RELAYS (drift ${DRIFT_PCT}.${DRIFT_PCT_REM}%)"
     echo "    claims=$CLAIM_COUNT, proofs=$PROOF_COUNT, settled=$SETTLED_COUNT, expired=$EXPIRED_COUNT"
     exit 0
 else

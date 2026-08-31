@@ -4,6 +4,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 	"github.com/prometheus/client_golang/prometheus/promauto"
+
+	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
 // Component-specific registries to ensure clean metric separation.
@@ -27,6 +29,14 @@ var (
 	// SharedFactory creates metrics registered to the shared registry.
 	SharedFactory = promauto.With(SharedRegistry)
 )
+
+func init() {
+	// logging.PanicRecoveriesTotal cannot register itself here without an
+	// import cycle (observability imports logging). Register it into the
+	// shared registry so the panic signal is actually served — it previously
+	// lived in the prometheus default registry, which no binary exposes.
+	SharedRegistry.MustRegister(logging.PanicRecoveriesTotal)
+}
 
 func init() {
 	// Register standard Go metrics collectors to both registries

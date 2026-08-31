@@ -31,13 +31,13 @@ Options:
 
 Examples:
   # Delete all SMST trees
-  redis-debug flush --pattern "ha:smst:*"
+  pocket-relay-miner redis flush --pattern "ha:smst:*"
 
   # Delete all session data for a supplier
-  redis-debug flush --pattern "ha:miner:sessions:pokt1abc*"
+  pocket-relay-miner redis flush --pattern "ha:miner:sessions:pokt1abc*"
 
   # Delete everything (DANGEROUS)
-  redis-debug flush --all
+  pocket-relay-miner redis flush --all
 
 Safety:
   - Without --force, you will be prompted to confirm

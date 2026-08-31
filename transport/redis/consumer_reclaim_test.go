@@ -88,7 +88,6 @@ func TestConsume_ReclaimsDeadConsumerPending(t *testing.T) {
 			BatchSize:               10,
 			ClaimIdleTimeout:        100, // ms; keeps the test fast
 		},
-		0,
 	)
 	require.NoError(t, err)
 
