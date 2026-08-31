@@ -381,3 +381,20 @@ func TestPanicRecoveriesTotal_ServedBySharedRegistry(t *testing.T) {
 	}
 	t.Fatal("ha_panic_recoveries_total is not served by the shared registry")
 }
+
+// TestLogMessagesDroppedTotal_ServedBySharedRegistry pins that the async
+// log writer's drop counter is scrapeable: the diode callback also writes
+// to stderr, but stderr is invisible to Prometheus — if this metric fell
+// out of the shared registry, log loss under load could not be alerted on.
+func TestLogMessagesDroppedTotal_ServedBySharedRegistry(t *testing.T) {
+	logging.LogMessagesDroppedTotal.Add(1)
+
+	families, err := SharedRegistry.Gather()
+	require.NoError(t, err)
+	for _, fam := range families {
+		if fam.GetName() == "ha_log_messages_dropped_total" {
+			return
+		}
+	}
+	t.Fatal("ha_log_messages_dropped_total is not served by the shared registry")
+}

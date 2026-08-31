@@ -87,7 +87,9 @@ type BackendHealth struct {
 // When a pool endpoint is associated, derives status from endpoint.IsHealthy().
 func (h *BackendHealth) GetStatus() HealthStatus {
 	if h.endpoint != nil {
-		if h.endpoint.IsHealthy() {
+		// Pure read: a status observer must not trigger the half-open
+		// auto-recovery (see pool.BackendEndpoint.CurrentlyHealthy).
+		if h.endpoint.CurrentlyHealthy() {
 			return HealthStatusHealthy
 		}
 		return HealthStatusUnhealthy
@@ -129,7 +131,7 @@ func (h *BackendHealth) GetLastError() string {
 // Delegates to pool BackendEndpoint when available (single source of truth).
 func (h *BackendHealth) IsHealthy() bool {
 	if h.endpoint != nil {
-		return h.endpoint.IsHealthy()
+		return h.endpoint.CurrentlyHealthy()
 	}
 	status := h.GetStatus()
 	// Unknown is treated as healthy to avoid blocking on startup
@@ -476,7 +478,11 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 	backend.lastError.Store(errMsg)
 	backend.consecutiveSuccesses.Store(0)
 
-	endpointLabel := backend.BackendURL
+	// Redact the fallback: a raw backend URL as a Prometheus label carries
+	// operator topology and, in its path/query, provider API keys — and a
+	// TSDB keeps them for the retention period. The endpoint name (host:port)
+	// is already safe.
+	endpointLabel := logging.RedactURL(backend.BackendURL)
 	if backend.endpoint != nil && backend.endpoint.Name != "" {
 		endpointLabel = backend.endpoint.Name
 	}
@@ -490,12 +496,12 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 		// Delegate to pool endpoint atomics (shared with circuit breaker)
 		failures := backend.endpoint.IncrementFailures()
 		if int(failures) >= unhealthyThreshold {
-			wasHealthy := backend.endpoint.IsHealthy()
+			wasHealthy := backend.endpoint.CurrentlyHealthy()
 			backend.endpoint.SetUnhealthy()
 			if wasHealthy {
 				hc.logger.Warn().
 					Str(logging.FieldServiceID, backend.ServiceID).
-					Str("backend_url", backend.BackendURL).
+					Str("backend_url", logging.RedactURL(backend.BackendURL)).
 					Str("endpoint", endpointLabel).
 					Str("error", errMsg).
 					Int32("consecutive_failures", failures).
@@ -512,7 +518,7 @@ func (hc *HealthChecker) recordFailure(backend *BackendHealth, config *BackendHe
 			if oldStatus != HealthStatusUnhealthy {
 				hc.logger.Warn().
 					Str(logging.FieldServiceID, backend.ServiceID).
-					Str("backend_url", backend.BackendURL).
+					Str("backend_url", logging.RedactURL(backend.BackendURL)).
 					Str("endpoint", endpointLabel).
 					Str("error", errMsg).
 					Int32("consecutive_failures", failures).
@@ -533,7 +539,11 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 	backend.lastCheck.Store(time.Now().UnixNano())
 	backend.lastError.Store("")
 
-	endpointLabel := backend.BackendURL
+	// Redact the fallback: a raw backend URL as a Prometheus label carries
+	// operator topology and, in its path/query, provider API keys — and a
+	// TSDB keeps them for the retention period. The endpoint name (host:port)
+	// is already safe.
+	endpointLabel := logging.RedactURL(backend.BackendURL)
 	if backend.endpoint != nil && backend.endpoint.Name != "" {
 		endpointLabel = backend.endpoint.Name
 	}
@@ -548,7 +558,10 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 		backend.endpoint.ResetFailures()
 		successes := backend.consecutiveSuccesses.Add(1)
 		if int(successes) >= healthyThreshold {
-			wasUnhealthy := !backend.endpoint.IsHealthy()
+			// CurrentlyHealthy, not IsHealthy: IsHealthy mutates (half-open
+			// auto-recovery), so reading it here flipped the endpoint healthy
+			// and swallowed this very transition log and gauge update.
+			wasUnhealthy := !backend.endpoint.CurrentlyHealthy()
 			backend.endpoint.SetHealthy()
 			if wasUnhealthy {
 				// Full reset on recovery: clean slate for the backend
@@ -556,7 +569,7 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 				backend.consecutiveSuccesses.Store(0)
 				hc.logger.Info().
 					Str(logging.FieldServiceID, backend.ServiceID).
-					Str("backend_url", backend.BackendURL).
+					Str("backend_url", logging.RedactURL(backend.BackendURL)).
 					Str("endpoint", endpointLabel).
 					Int32("consecutive_successes", successes).
 					Msg("backend became healthy (active health check)")
@@ -575,7 +588,7 @@ func (hc *HealthChecker) recordSuccess(backend *BackendHealth, config *BackendHe
 				backend.consecutiveSuccesses.Store(0)
 				hc.logger.Info().
 					Str(logging.FieldServiceID, backend.ServiceID).
-					Str("backend_url", backend.BackendURL).
+					Str("backend_url", logging.RedactURL(backend.BackendURL)).
 					Str("endpoint", endpointLabel).
 					Int32("consecutive_successes", successes).
 					Msg("backend became healthy")

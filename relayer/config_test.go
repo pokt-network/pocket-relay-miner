@@ -512,3 +512,15 @@ func validConfigFromYAML(t *testing.T, yamlStr string) Config {
 	require.NoError(t, err)
 	return cfg
 }
+
+// TestConfig_Validate_RejectsBadLoggingLevel pins that logging validation is
+// wired into the relayer's Validate: a typo'd level used to silently run the
+// process at Info.
+func TestConfig_Validate_RejectsBadLoggingLevel(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Logging.Level = "warning"
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "logging.level")
+}

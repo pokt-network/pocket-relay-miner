@@ -410,7 +410,10 @@ func TestRecoveryTimeout_ReTripsAfterRecoveryIfStillFailing(t *testing.T) {
 	for i := 0; i < 5; i++ {
 		p.RecordResult(ep, 500, nil, 5)
 	}
-	require.False(t, ep.IsHealthy())
+	// CurrentlyHealthy, not IsHealthy: on a loaded machine more than the
+	// 50ms recovery timeout can elapse between the re-trip and this line,
+	// and IsHealthy would auto-recover again and flake the assertion.
+	require.False(t, ep.CurrentlyHealthy())
 }
 
 func TestRecoveryTimeout_SuccessBeforeTimeoutPreventsRecoveryLoop(t *testing.T) {

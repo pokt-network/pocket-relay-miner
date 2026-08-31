@@ -28,7 +28,7 @@ func logCircuitBreakerTransition(
 		// Circuit broken: healthy -> unhealthy.
 		event := logger.Warn().
 			Str("backend", transition.Endpoint.Name).
-			Str("url", transition.Endpoint.RawURL).
+			Str("url", logging.RedactURL(transition.Endpoint.RawURL)).
 			Str(logging.FieldServiceID, serviceID).
 			Str("rpc_type", rpcType).
 			Int32("consecutive_failures", transition.Failures).
@@ -55,7 +55,7 @@ func logCircuitBreakerTransition(
 		// Recovery: unhealthy -> healthy.
 		event := logger.Info().
 			Str("backend", transition.Endpoint.Name).
-			Str("url", transition.Endpoint.RawURL).
+			Str("url", logging.RedactURL(transition.Endpoint.RawURL)).
 			Str(logging.FieldServiceID, serviceID).
 			Str("rpc_type", rpcType)
 
@@ -64,6 +64,11 @@ func logCircuitBreakerTransition(
 		}
 		if transition.StatusCode > 0 {
 			event = event.Int("recovery_http_status", transition.StatusCode)
+		}
+		if transition.AutoRecovered {
+			// Recovered by the half-open timeout, confirmed by this first
+			// successful request — not by traffic while marked unhealthy.
+			event = event.Bool("auto_recovered", true)
 		}
 
 		event.Msg("BACKEND UP: circuit breaker recovered, backend is healthy again")

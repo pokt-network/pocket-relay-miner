@@ -400,6 +400,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("redis.url is required")
 	}
 
+	if err := c.Logging.Validate(); err != nil {
+		return err
+	}
+
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
