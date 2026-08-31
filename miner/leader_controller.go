@@ -253,9 +253,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.supplierCache = cache.NewSupplierCache(
 			c.logger,
 			c.config.RedisClient,
-			cache.SupplierCacheConfig{
-				FailOpen: false,
-			},
+			cache.SupplierCacheConfig{},
 		)
 		c.ownsSupplierCache = true
 		if err := c.supplierCache.Start(ctx); err != nil {

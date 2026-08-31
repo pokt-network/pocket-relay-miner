@@ -26,9 +26,7 @@ func newTestSupplierCache(t *testing.T) (*SupplierCache, *redisutil.Client) {
 	client := newTestRedis(t)
 
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	cache := NewSupplierCache(logger, client, SupplierCacheConfig{
-		FailOpen: false,
-	})
+	cache := NewSupplierCache(logger, client, SupplierCacheConfig{})
 
 	return cache, client
 }
@@ -676,8 +674,7 @@ func TestSetSupplierState_WritesABoundedTTL(t *testing.T) {
 
 	const configuredTTL = 3 * time.Second
 	cache := NewSupplierCache(logger, client, SupplierCacheConfig{
-		FailOpen: false,
-		TTL:      configuredTTL,
+		TTL: configuredTTL,
 	})
 
 	const addr = "pokt1ttlbound"
@@ -719,7 +716,7 @@ func TestNewSupplierCache_DefaultsTTLWhenUnconfigured(t *testing.T) {
 	client := newTestRedis(t)
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 
-	cache := NewSupplierCache(logger, client, SupplierCacheConfig{FailOpen: false})
+	cache := NewSupplierCache(logger, client, SupplierCacheConfig{})
 	require.Equal(t, defaultSupplierCacheTTL, time.Duration(cache.ttl.Load()))
 
 	const addr = "pokt1ttldefault"

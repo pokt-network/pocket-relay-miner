@@ -269,9 +269,8 @@ func (s *SupplierState) IsActiveForService(serviceID string) bool {
 // The cache subscribes to pub/sub invalidation events to stay synchronized
 // across all instances.
 type SupplierCache struct {
-	logger   logging.Logger
-	redis    *redisutil.Client
-	failOpen bool
+	logger logging.Logger
+	redis  *redisutil.Client
 
 	// ttl is nanoseconds (time.Duration), atomic so SetTTL can update it after
 	// construction without a lock on the hot SetSupplierState write path. A
@@ -295,11 +294,6 @@ type SupplierCache struct {
 
 // SupplierCacheConfig contains configuration for SupplierCache.
 type SupplierCacheConfig struct {
-	// FailOpen determines behavior when Redis is unavailable.
-	// If true, treat supplier as active when cache unavailable (safer for traffic).
-	// If false, treat supplier as inactive when cache unavailable (safer for validation).
-	FailOpen bool
-
 	// TTL bounds how long a written entry survives in Redis without being
 	// refreshed. See SupplierCacheTTLFromParams for how to derive it from
 	// live chain params. <= 0 falls back to defaultSupplierCacheTTL — never
@@ -324,7 +318,6 @@ func NewSupplierCache(
 	c := &SupplierCache{
 		logger:     logging.ForComponent(logger, logging.ComponentQuerySupplier),
 		redis:      redisClient,
-		failOpen:   config.FailOpen,
 		localCache: xsync.NewMap[string, supplierCacheL1Entry](),
 	}
 	c.ttl.Store(int64(ttl))
@@ -356,8 +349,18 @@ func (c *SupplierCache) supplierKey(operatorAddress string) string {
 }
 
 // GetSupplierState retrieves a supplier's state from the cache using L1 → L2 fallback.
-// Returns nil if the supplier is not in the cache.
-// If Redis is unavailable and FailOpen is true, returns a synthetic "active" state.
+//
+// Three answers, and they are distinct on purpose:
+//   - (state, nil)  the supplier's state, from L1 or L2.
+//   - (nil, nil)    the supplier is NOT in the cache. The caller serves
+//     optimistically on this one -- see decideSupplierServe -- because absence
+//     is the boot window before the miner has populated the store.
+//   - (nil, error)  the store could not be read. Never guessed around: the
+//     caller turns it into a fast 503 that says the state could not be
+//     verified, and says nothing about the supplier.
+//
+// The error is deliberately not described to the client beyond that. Which
+// store backs L2 is an implementation detail and stays one.
 func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress string) (*SupplierState, error) {
 	start := time.Now()
 
@@ -400,30 +403,22 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 			return nil, nil
 		}
 
-		// Redis error — per-relay under an outage; the cache error rate is
-		// in the cache metrics and the outage state in the reconnect logs.
+		// A store read that FAILED is reported, never guessed around. The
+		// caller turns it into a fast 503 saying the state could not be
+		// verified, rather than a claim about the supplier.
+		//
+		// Until 2026-08-31 this branch fabricated a "fail-open" state instead,
+		// and the fabrication did not even do what its name said: the synthetic
+		// value left Staked false, so decideSupplierServe rejected it anyway,
+		// with reason "supplier_inactive" and the message "supplier X is
+		// active". Three signals -- the log, the metric and the client body --
+		// all said something different from what happened. Measured, and the
+		// reason it is gone rather than repaired: the option existed to keep
+		// traffic flowing and it never did.
 		c.logger.Debug().
 			Err(err).
 			Str(logging.FieldSupplierOperator, operatorAddress).
-			Bool("fail_open", c.failOpen).
 			Msg("failed to get supplier state from cache")
-
-		if c.failOpen {
-			// Return synthetic active state to avoid blocking traffic
-			c.logger.Debug().
-				Str(logging.FieldSupplierOperator, operatorAddress).
-				Msg("fail-open: treating supplier as active due to cache error")
-			// Its OWN series. cacheGetLatency{level="l2_error"} is shared with
-			// the fail-closed and unmarshal branches, so it cannot answer "am I
-			// serving suppliers I could not verify?" -- which is the question
-			// that costs money.
-			supplierFailOpen.WithLabelValues("l2_error").Inc()
-			cacheGetLatency.WithLabelValues(supplierCacheType, "l2_error").Observe(time.Since(start).Seconds())
-			return &SupplierState{
-				Status:          SupplierStatusActive,
-				OperatorAddress: operatorAddress,
-			}, nil
-		}
 
 		cacheGetLatency.WithLabelValues(supplierCacheType, "l2_error").Observe(time.Since(start).Seconds())
 		return nil, fmt.Errorf("failed to get supplier state: %w", err)
@@ -649,37 +644,6 @@ func (c *SupplierCache) DeleteSupplierState(ctx context.Context, operatorAddress
 		Msg("deleted supplier state from cache")
 
 	return nil
-}
-
-// IsSupplierActiveForService checks if a supplier is active for a service.
-// This is a convenience method that combines GetSupplierState and IsActiveForService.
-// Returns (true, nil) if supplier is active for the service.
-// Returns (false, nil) if supplier is not active or not in cache.
-// Returns (false, error) if there was a cache error and FailOpen is false.
-func (c *SupplierCache) IsSupplierActiveForService(
-	ctx context.Context,
-	operatorAddress string,
-	serviceID string,
-) (bool, error) {
-	state, err := c.GetSupplierState(ctx, operatorAddress)
-	if err != nil {
-		return false, err
-	}
-
-	if state == nil {
-		// Supplier not in cache
-		if c.failOpen {
-			c.logger.Debug().
-				Str("operator_address", operatorAddress).
-				Str("service_id", serviceID).
-				Msg("fail-open: supplier not in cache, treating as active")
-			supplierFailOpen.WithLabelValues("not_cached").Inc()
-			return true, nil
-		}
-		return false, nil
-	}
-
-	return state.IsActiveForService(serviceID), nil
 }
 
 // GetAllSupplierStates returns all supplier states from the cache.

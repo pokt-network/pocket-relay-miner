@@ -259,7 +259,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	w.supplierCache = cache.NewSupplierCache(
 		w.logger,
 		w.config.RedisClient,
-		cache.SupplierCacheConfig{FailOpen: false},
+		cache.SupplierCacheConfig{},
 	)
 	if err = w.supplierCache.Start(ctx); err != nil {
 		w.cleanup()
