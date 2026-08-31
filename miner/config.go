@@ -408,6 +408,13 @@ func (c *Config) Validate() error {
 		return err
 	}
 
+	// The namespace is validated here rather than where keys are built, because
+	// the failure it catches is a config that would relocate the whole keyspace:
+	// it has to stop startup, not surface as a cache miss.
+	if err := c.Redis.Namespace.Validate(); err != nil {
+		return err
+	}
+
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
