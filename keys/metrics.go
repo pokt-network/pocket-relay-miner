@@ -11,6 +11,13 @@ const (
 )
 
 var (
+	// supplierKeysActive is driven only by MultiProviderKeyManager.Reload, which
+	// both binaries now go through. It used to read a hard 0 on the relayer --
+	// measured 2026-08-21: 0 reported against 17 keys actually loaded -- because
+	// the relayer loaded its keys straight from the providers and never built a
+	// manager. It does now (see cmd_relayer.go), so there is one writer and no
+	// exported setter. A metric that reads "no keys" on a healthy relayer is
+	// worse than no metric, because an operator believes it.
 	supplierKeysActive = observability.SharedFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
@@ -20,12 +27,19 @@ var (
 		},
 	)
 
+	// keyReloadsTotal counts reloads that CHANGED the key set -- a key added,
+	// removed, or rotated -- not reload attempts. Reloads can be driven on a
+	// timer over sources that cannot be watched, so counting attempts would
+	// count ticks: a number that grows at a fixed rate on a fleet where nothing
+	// happened, and cannot be alerted on. Nothing read this series when the
+	// meaning was narrowed (grepped 2026-08-22: declared and incremented, no
+	// dashboard, no alert).
 	keyReloadsTotal = observability.SharedFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "reloads_total",
-			Help:      "Total number of key reloads",
+			Help:      "Total number of key reloads that changed the key set (added, removed or rotated)",
 		},
 	)
 
@@ -49,18 +63,3 @@ var (
 		[]string{"provider"},
 	)
 )
-
-// SetSupplierKeysActive publishes how many supplier signing keys this process
-// holds.
-//
-// It is exported because supplier_keys_active lives on the SHARED metric
-// factory, so both binaries expose the series, but only the miner drives it
-// through MultiProviderKeyManager.Reload. The relayer loads its signing keys
-// straight from the KeyProviders (see buildKeyProviders in cmd_relayer.go) and
-// never constructs a manager, so without this the relayer published a hard 0
-// while holding a full key set -- measured 2026-08-21: 0 reported against 17
-// keys actually loaded. A metric that reads "no keys" on a healthy relayer is
-// worse than no metric, because an operator believes it.
-func SetSupplierKeysActive(n int) {
-	supplierKeysActive.Set(float64(n))
-}

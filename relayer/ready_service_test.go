@@ -4,6 +4,7 @@ package relayer
 
 import (
 	"encoding/json"
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -20,9 +21,12 @@ import (
 func newReadyTestProxy(t *testing.T, services map[string]ServiceConfig) *ProxyServer {
 	t.Helper()
 	c := &Config{
-		ListenAddr:            "0.0.0.0:8080",
-		Redis:                 RedisConfig{URL: "redis://localhost:6379"},
-		PocketNode:            PocketNodeConfig{QueryNodeRPCUrl: "http://x", QueryNodeGRPCUrl: "x:9090"},
+		ListenAddr: "0.0.0.0:8080",
+		Redis:      RedisConfig{URL: "redis://localhost:6379"},
+		PocketNode: PocketNodeConfig{QueryNodeRPCUrl: "http://x", QueryNodeGRPCUrl: "x:9090"},
+		// Validate requires exactly one key source (keys.ValidateKeySources);
+		// these tests are about other config, so the minimum is supplied here.
+		Keys:                  config.KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
 		DefaultValidationMode: ValidationModeOptimistic,
 		HTTPTransport: HTTPTransportConfig{
 			MaxConnsPerHost:        500,
