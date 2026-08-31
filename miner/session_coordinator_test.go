@@ -12,8 +12,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestOnRelayProcessed_ConcurrentFirstRelay_ExactlyOneCreateCallback is the
-// reproducer for the TOCTOU bug in SessionCoordinator.OnRelayProcessed. N
+// TestEnsureSession_ConcurrentFirstRelay_ExactlyOneCreateCallback is the
+// reproducer for the TOCTOU bug that used to live in OnRelayProcessed. N
 // concurrent relays for the same brand-new session used to observe
 // snapshot == nil and all fired OnSessionCreated → TrackSession, causing
 // duplicate lifecycle entries and lost relay counters (two racing Save
@@ -22,7 +22,12 @@ import (
 //
 // After the fix (first-write-wins via SessionStore.CreateIfAbsent) exactly
 // one callback fires no matter how many goroutines race.
-func TestOnRelayProcessed_ConcurrentFirstRelay_ExactlyOneCreateCallback(t *testing.T) {
+//
+// Creation moved out of OnRelayProcessed into EnsureSession — the two are
+// gated differently, so a redelivery that must not be counted must still be
+// able to create — and the property moved with it. It is exercised here where
+// it now lives.
+func TestEnsureSession_ConcurrentFirstRelay_ExactlyOneCreateCallback(t *testing.T) {
 	store, _ := setupTestSessionStore(t)
 	defer func() { _ = store.Close() }()
 
@@ -63,6 +68,18 @@ func TestOnRelayProcessed_ConcurrentFirstRelay_ExactlyOneCreateCallback(t *testi
 		go func(cu uint64) {
 			defer wg.Done()
 			<-start // release all goroutines together to maximise race
+			// Both calls, in the order the worker makes them: creation is
+			// unconditional, counting is what the caller gates. Driving only
+			// one of them would leave half the contract unpinned.
+			coord.EnsureSession(
+				ctx,
+				sessionID,
+				supplierAddress,
+				serviceID,
+				appAddress,
+				startHeight,
+				endHeight,
+			)
 			err := coord.OnRelayProcessed(
 				ctx,
 				sessionID,
@@ -73,10 +90,9 @@ func TestOnRelayProcessed_ConcurrentFirstRelay_ExactlyOneCreateCallback(t *testi
 				startHeight,
 				endHeight,
 			)
-			// OnRelayProcessed may return nil or a terminal error depending
-			// on how the relay count update interleaves with create; both
-			// are acceptable for this test. The pinned contract is the
-			// callback count, not the return code.
+			// May return nil or a terminal error depending on how the count
+			// update interleaves with the create; both are acceptable here.
+			// The pinned contracts are the callback count and the total.
 			_ = err
 		}(uint64(10 * (i + 1)))
 	}
