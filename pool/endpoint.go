@@ -48,13 +48,17 @@ type BackendEndpoint struct {
 // backend url; they are not network schemes. Anything else is returned
 // unchanged, so ws:// and wss:// reach the WebSocket dialer intact.
 //
-// This is the ONLY place the rewrite happens. It sits in the constructor
-// because every consumer of an endpoint -- the gRPC relay path, the HTTP proxy
-// path, the WebSocket path, the health checker and the breaker logs -- reads
-// RawURL or URL, and a rewrite applied per-path is a rewrite one path will
-// miss. Measured 2026-08-30: relayer/proxy.go and relayer/healthcheck.go had no
-// gRPC normalization at all, so a grpc:// backend that the native gRPC path
-// could dial was undialable for the other two.
+// It sits in the constructor because every consumer of an ENDPOINT -- the gRPC
+// relay path, the HTTP proxy path, the WebSocket path, the health checker and
+// the breaker logs -- reads RawURL or URL, and a rewrite applied per-path is a
+// rewrite one path will miss. Measured 2026-08-30: relayer/proxy.go and
+// relayer/healthcheck.go had no gRPC normalization at all, so a grpc:// backend
+// that the native gRPC path could dial was undialable for the other two.
+//
+// It is NOT the only call site, and saying so would be false: relay_grpc_service
+// falls back to the configured BackendConfig.URL when no pool is wired, which
+// never passes through this constructor, so that path calls this function
+// directly.
 func NormalizeGRPCScheme(rawURL string) string {
 	if rest, found := strings.CutPrefix(rawURL, "grpc://"); found {
 		return "http://" + rest

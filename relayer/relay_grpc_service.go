@@ -650,15 +650,20 @@ func (s *RelayGRPCService) forwardToBackend(
 	}
 
 	// Get headers and auth from backend config (always needed regardless of pool usage)
+	//
+	// pool.NormalizeGRPCScheme is applied on these fallbacks too: they read the
+	// configured URL directly instead of going through pool.NewBackendEndpoint,
+	// so without it a grpc:// backend reached by this path would still fail as
+	// an undialable scheme. Reachable when no pool is wired (getPool == nil).
 	if backend, ok := svcConfig.Backends[rpcType]; ok {
 		if backendURL == "" {
-			backendURL = backend.URL
+			backendURL = pool.NormalizeGRPCScheme(backend.URL)
 		}
 		configHeaders = backend.Headers
 		auth = backend.Authentication
 	} else if backend, ok := svcConfig.Backends["rest"]; ok {
 		if backendURL == "" {
-			backendURL = backend.URL
+			backendURL = pool.NormalizeGRPCScheme(backend.URL)
 		}
 		configHeaders = backend.Headers
 		auth = backend.Authentication
@@ -666,7 +671,7 @@ func (s *RelayGRPCService) forwardToBackend(
 		// Use any available backend
 		for _, backend := range svcConfig.Backends {
 			if backendURL == "" {
-				backendURL = backend.URL
+				backendURL = pool.NormalizeGRPCScheme(backend.URL)
 			}
 			configHeaders = backend.Headers
 			auth = backend.Authentication

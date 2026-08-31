@@ -623,6 +623,20 @@ gate_step "assert: the mining-difficulty filter actually ran"
 # to 0 -- which would read as a clean run. So liveness is asserted first, with a
 # counter that MUST have series after the load, and the outcome when it does not
 # is gate_nothing_measured, never a pass.
+#
+# relays_published_total is the liveness proxy because it is the one counter
+# that MUST have series after any successful load. The two difficulty counters
+# cannot serve as their own liveness check: they are per-service_id counters
+# that legitimately have NO series when nothing failed and nothing was skipped,
+# so "absent because all is well" and "absent because the metric was renamed"
+# are indistinguishable from the query alone.
+#
+# NOT COVERED, and said plainly rather than papered over: if either counter is
+# RENAMED, both queries go empty, both deltas sum to 0, and this block prints
+# two green lines while checking nothing. Verified 2026-08-30 -- no test in this
+# repository reads this file, so nothing ties the names below to the code that
+# declares them (internal/conventions/metrics_test.go freezes session_id labels
+# and counts references; it does not know this gate exists).
 prom_series_count() {
     curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
         --data-urlencode "query=count(ha_relayer_relays_published_total)" 2>/dev/null |
@@ -637,7 +651,7 @@ else
     skipped_difficulty="$(counter_family_delta "$skipped_difficulty_before" skipped_difficulty_now)"
 
     if [ "${difficulty_failures:-0}" -gt 0 ]; then
-        gate_fail "difficulty filter: ${difficulty_failures} relay(s) could not resolve a target hash and were mined ANYWAY (it fails open, relay_processor.go:181) -- every assertion below about served==billed passed through a filter that was not working"
+        gate_fail "difficulty filter: ${difficulty_failures} relay(s) could not resolve a target hash and were mined ANYWAY (it fails open, relay_processor.go:179 and :336) -- every assertion below about served==billed passed through a filter that was not working"
     else
         gate_pass "difficulty filter: resolved a target hash for every relay (0 query failures)"
     fi
