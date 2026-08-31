@@ -76,6 +76,12 @@ var (
 	// that gauge holds its last good value, and reloads_total counts only
 	// reloads that CHANGED something, which is flat on a quiet fleet either way.
 	// The staleness of this series is the only thing that separates them.
+	//
+	// It is only alertable where reloads actually happen: with hot reload
+	// disabled nothing drives Reload on a timer, so the series is stamped once
+	// at startup and then stands still forever, which is indistinguishable from
+	// the freeze. An alert on its age has to be scoped to fleets that run with
+	// hot reload on.
 	keysLastSuccessfulReload = observability.SharedFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,

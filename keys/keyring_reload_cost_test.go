@@ -721,3 +721,82 @@ func TestTheGuardBehavesTheSameOnTheFileBackend(t *testing.T) {
 		require.Len(t, after, 1)
 	})
 }
+
+// TestAKeyringRebuiltUnderNewNamesIsAppliedButNotSilent pins the second half of
+// the 2026-08-31 decision. With key_names configured, "the operator withdrew the
+// selected key" and "the keyring was rebuilt with records under different uids"
+// are the same observable state -- every named lookup returns ErrKeyNotFound
+// with records still on disk -- so the removal is applied rather than refused,
+// because refusing froze the reload and kept a withdrawn key signing.
+//
+// The part that had to change is the silence: this returned an empty map and a
+// nil error, so every supplier was released while ha_keys_load_errors_total
+// stayed flat and nothing anywhere said so.
+func TestAKeyringRebuiltUnderNewNamesIsAppliedButNotSilent(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+	})
+	p := newOnDiskProvider(t, parentDir, "app2")
+
+	before, err := p.LoadKeys(context.Background())
+	require.NoError(t, err)
+	require.Len(t, before, 1)
+
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	renamed := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.Rename(
+				filepath.Join(recordsDir, e.Name()),
+				filepath.Join(recordsDir, "rebuilt-"+e.Name())))
+			renamed++
+		}
+	}
+	require.Equal(t, 2, renamed, "precondition: every record now carries a different uid")
+
+	errsBefore := testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))
+	after, err := p.LoadKeys(context.Background())
+
+	require.NoError(t, err,
+		"this is indistinguishable from the documented withdrawal of the selected "+
+			"key, and refusing it is what froze the reload")
+	require.Empty(t, after)
+	require.Greater(t, testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind())), errsBefore,
+		"releasing every supplier this process served must move the alertable series")
+}
+
+// TestAProviderWithoutADirectoryPublishesNoShortfall pins the fix for an
+// arithmetic hole rather than a behaviour. The gauge is a shortfall between two
+// counts, and a provider built without a keyring directory has no count for one
+// side: it published 0 - N, measured as -1 on 2026-08-31, on a series whose help
+// text reads "records present on disk that the keyring could not decode".
+//
+// The assertion is that the series carries NO SAMPLE, not that it reads zero.
+// Zero is what an absent sample and a published zero both look like through
+// ToFloat64, and only one of them is the invariant: with no directory there is
+// nothing to compare against, so there is no number to report.
+//
+// The vec is reset first because it is process-global and every other test in
+// this file writes it.
+func TestAProviderWithoutADirectoryPublishesNoShortfall(t *testing.T) {
+	parentDir, _ := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+	})
+	withDir := newOnDiskProvider(t, parentDir)
+
+	keyringUndecodableRecords.Reset()
+	t.Cleanup(keyringUndecodableRecords.Reset)
+
+	p := NewKeyringProviderWithKeyring(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()), withDir.keyring, nil)
+	keys, err := p.LoadKeys(context.Background())
+	require.NoError(t, err)
+	require.Len(t, keys, 2, "precondition: the directory-less provider still loads")
+
+	require.Zero(t, testutil.CollectAndCount(keyringUndecodableRecords),
+		"a provider with no directory has nothing to count against, so it must "+
+			"publish no sample at all")
+}

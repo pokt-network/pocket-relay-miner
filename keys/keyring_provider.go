@@ -233,6 +233,28 @@ func (p *KeyringProvider) keyringDirFingerprint() (fingerprint string, entries i
 	return fmt.Sprintf("%d\n%s", len(lines), strings.Join(lines, "\n")), records, nil
 }
 
+// countKeyRecords counts the key records currently in the keyring directory.
+//
+// Separate from keyringDirFingerprint because the two are read at different
+// moments for different questions: the fingerprint answers "has anything
+// changed since last time", and is hashed once at the top; this answers "how
+// many records were on disk when List ran", and must be read beside List or the
+// comparison between them straddles a change. It reads names only -- no file
+// contents -- so it costs a single ReadDir.
+func (p *KeyringProvider) countKeyRecords() (int, error) {
+	dirEntries, err := os.ReadDir(p.keyringDir)
+	if err != nil {
+		return 0, err
+	}
+	records := 0
+	for _, e := range dirEntries {
+		if !e.IsDir() && isKeyRecord(e.Name()) {
+			records++
+		}
+	}
+	return records, nil
+}
+
 // isKeyRecord reports whether a file in a keyring directory is a KEY, as opposed
 // to the backend's own bookkeeping.
 //
@@ -507,12 +529,33 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 			return nil, fmt.Errorf("failed to list keyring keys: %w", err)
 		}
 
-		// dirEntryCount and List() enumerate the SAME set: isKeyRecord matches
-		// ".info" and MigrateAll skips every other name (cosmos-sdk v0.53.7,
-		// crypto/keyring/keyring.go:917-919). So len(records) can only be lower,
-		// and the shortfall is exactly what MigrateAll swallowed.
+		// The record count is re-read HERE rather than reused from the
+		// fingerprint at the top, because the two are compared against each
+		// other and a directory that changed in between makes the comparison
+		// lie. The withdrawal docs/SUPPLIER_KEYS.md documents is a file being
+		// removed, and with the fingerprint's count -- taken before List -- a
+		// withdrawal landing in that window counted a record List correctly did
+		// not return, reporting a healthy keyring as broken. Reading after List
+		// cannot do that: a record removed before List is absent from both
+		// sides, and one removed during it can only make the shortfall
+		// NEGATIVE, which clamps to zero.
+		//
+		// The counts enumerate the SAME set: isKeyRecord matches ".info" and
+		// MigrateAll skips every other name (cosmos-sdk v0.53.7,
+		// crypto/keyring/keyring.go:917-919). The shortfall is exactly what
+		// MigrateAll swallowed.
 		decodedRecords = len(records)
-		swallowedRecords = dirEntryCount - decodedRecords
+		if p.keyringDir != "" {
+			recordsOnDisk, cerr := p.countKeyRecords()
+			if cerr != nil {
+				keyLoadErrors.WithLabelValues(p.Kind()).Inc()
+				return nil, fmt.Errorf("keyring directory %s could not be read: %w", p.keyringDir, cerr)
+			}
+			dirEntryCount = recordsOnDisk
+			if swallowedRecords = dirEntryCount - decodedRecords; swallowedRecords < 0 {
+				swallowedRecords = 0
+			}
+		}
 
 		for _, record := range records {
 			privKey, addr, err := p.loadKeyByName(record.Name)
@@ -539,6 +582,15 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	p.logger.Info().
 		Int("loaded", len(keys)).
 		Msg("loaded keys from keyring")
+
+	// Published BEFORE the transient-error return below. A keyring can hold
+	// undecodable records AND a record that failed transiently, and returning
+	// there without setting the gauge left it holding a previous value -- zero,
+	// on the first such load -- while the standing condition it exists to expose
+	// was present.
+	if p.keyringDir != "" {
+		keyringUndecodableRecords.WithLabelValues(p.Kind()).Set(float64(swallowedRecords))
+	}
 
 	if len(loadErrs) > 0 {
 		return keys, fmt.Errorf("%d keyring key(s) could not be read: %w",
@@ -590,15 +642,13 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	//
 	// The unreadable-DIRECTORY case is caught earlier still, by the fingerprint
 	// read at the top of this function.
-	keyringUndecodableRecords.WithLabelValues(p.Kind()).Set(float64(swallowedRecords))
 	if swallowedRecords > 0 {
 		keyLoadErrors.WithLabelValues(p.Kind()).Inc()
 
 		if decodedRecords == 0 {
-			// The keys that DID load are returned alongside the error: the
-			// manager exempts the FIRST load from its keep-the-previous-set
-			// guard, so a deployment starting against a keyring it cannot read
-			// still comes up on whatever else it has.
+			// keys is provably empty here -- this branch is only reachable from
+			// the List() path, where every key comes from a record, and no
+			// record decoded -- so this returns an empty map, not a partial one.
 			return keys, fmt.Errorf(
 				"keyring directory %s holds %d record file(s) and not one could be decoded: "+
 					"this is a broken keyring -- a wrong passphrase, or records this process "+
@@ -611,6 +661,33 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 			Int("undecodable_records", swallowedRecords).
 			Int("decoded_records", decodedRecords).
 			Msg("keyring records could not be decoded; the suppliers behind them lose service until the files are removed or repaired")
+	}
+
+	// ZERO SIGNING KEYS while the directory still holds records is applied, and
+	// it is applied LOUDLY, which is the whole point of this block.
+	//
+	// It cannot be refused, and that is not a preference. In the by-name branch
+	// the state is reached by two causes that are byte-identical from here: the
+	// operator withdrew the selected key -- the documented, measured procedure --
+	// or the keyring was rebuilt with records under different uids, a
+	// re-projected Secret or a rename. Both leave every named lookup returning
+	// ErrKeyNotFound with records still on disk. Refusing to tell them apart is
+	// what froze the reload before 2026-08-31, so the removal is applied. The
+	// same shape reaches the List branch when every record decodes but none is a
+	// signing key.
+	//
+	// What must not happen is applying it in SILENCE, and until this block it
+	// did: loadErrs was empty, so the load returned (empty map, nil) and
+	// ha_keys_load_errors_total never moved while every supplier was diffed as
+	// removed -- the relayer serving none of them, the miner draining every
+	// pipeline. Measured 2026-08-31.
+	if len(keys) == 0 && dirEntryCount > 0 {
+		keyLoadErrors.WithLabelValues(p.Kind()).Inc()
+		p.logger.Error().
+			Str("keyring_dir", p.keyringDir).
+			Int("records_on_disk", dirEntryCount).
+			Strs("key_names", p.keyNames).
+			Msg("the keyring yielded no signing keys while it still holds records; every supplier this process served is being released")
 	}
 
 	if p.keyringDir != "" {
