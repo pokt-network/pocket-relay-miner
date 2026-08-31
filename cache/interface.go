@@ -107,6 +107,7 @@ type CacheConfig struct {
 	ExtraGracePeriodBlocks int64
 
 	// LockTimeout is how long to wait when acquiring distributed locks.
+	// A value below minLockTimeout is treated as unset -- see the constant.
 	// Default: 5s
 	LockTimeout time.Duration
 }
@@ -182,3 +183,11 @@ type SingletonEntityCache[V any] interface {
 	// Set stores the singleton entity in both L1 and L2 caches with the specified TTL.
 	Set(ctx context.Context, value V, ttl time.Duration) error
 }
+
+// minLockTimeout is the floor below which a configured LockTimeout is treated as
+// unset rather than honoured. It exists because the units are easy to get wrong
+// on a time.Duration field: `LockTimeout: 5` is five NANOSECONDS, which go-redis
+// truncates to PX 1, and a lock that expires in a millisecond dedups nothing
+// while every reader still pays the contended path. A `== 0` check cannot catch
+// that -- an absurd value is not a zero one.
+const minLockTimeout = time.Millisecond

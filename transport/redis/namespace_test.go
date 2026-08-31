@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -12,14 +13,29 @@ import (
 // allKeyBuilderOutputs exercises every KeyBuilder method with fixed sample
 // arguments and returns method name → produced string. New KB methods MUST
 // be added here — the property tests below only protect what they can see.
+//
+// StreamAddress and SupplierStateAddress return (string, bool), not a bare
+// string like every builder here, so their "output" is the two results
+// joined with "|" -- close enough to a golden string for the convention
+// scanner (internal/conventions) to pin them by name, which is the actual
+// point: it does not care about shape, only that every exported method has a
+// row here and in the golden map.
 func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
-	return map[string]string{
+	streamAddr, streamAddrOK := kb.StreamAddress(kb.StreamKey("pokt1abc"))
+	supplierAddr, supplierAddrOK := kb.SupplierStateAddress(kb.SupplierStateKey("pokt1a"))
+	extractors := map[string]string{
+		"StreamAddress":        fmt.Sprintf("%s|%v", streamAddr, streamAddrOK),
+		"SupplierStateAddress": fmt.Sprintf("%s|%v", supplierAddr, supplierAddrOK),
+	}
+
+	out := map[string]string{
 		"CacheKey":                    kb.CacheKey("application", "k1"),
 		"CacheLockKey":                kb.CacheLockKey("application", "k1"),
 		"CacheKnownKey":               kb.CacheKnownKey("applications"),
 		"EventChannel":                kb.EventChannel("supplier", "invalidate"),
 		"StreamPrefix":                kb.StreamPrefix(),
 		"StreamKey":                   kb.StreamKey("pokt1abc"),
+		"StreamPattern":               kb.StreamPattern(),
 		"ConsumerGroup":               kb.ConsumerGroup(),
 		"MinerSessionKey":             kb.MinerSessionKey("sup1", "sess1"),
 		"SupplierKeyPrefix":           kb.SupplierKeyPrefix(),
@@ -74,6 +90,10 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"LegacyParamsPattern":             kb.LegacyParamsPattern(),
 		"SimulationReplayKey":             kb.SimulationReplayKey("deadbeef"),
 	}
+	for k, v := range extractors {
+		out[k] = v
+	}
+	return out
 }
 
 // TestKeyBuilder_PartialNamespaceNeverProducesEmptySegments is the anti-`::`
@@ -109,6 +129,7 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"EventChannel":                "ha:events:cache:supplier:invalidate",
 		"StreamPrefix":                "ha:relays",
 		"StreamKey":                   "ha:relays:pokt1abc",
+		"StreamPattern":               "ha:relays:*",
 		"ConsumerGroup":               "ha-miners",
 		"MinerSessionKey":             "ha:miner:sessions:sup1:sess1",
 		"SupplierKeyPrefix":           "ha:supplier",
@@ -167,11 +188,65 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 		"MinerClaimKey":           "ha:miner:claim:sup1",
 		"MinerActiveSetKey":       "ha:miner:active",
 		"MinerInstanceKey":        "ha:miner:instance:inst1",
+
+		// Extractors (review 2026-08-21): the "output" is result|ok, not a
+		// bare key -- see allKeyBuilderOutputs' doc comment for why.
+		"StreamAddress":        "pokt1abc|true",
+		"SupplierStateAddress": "pokt1a|true",
 	}
 	outputs := allKeyBuilderOutputs(kb)
 	for method, want := range golden {
 		assert.Equalf(t, want, outputs[method], "golden string drift on %s (BREAKING for mixed-version fleets)", method)
 	}
+}
+
+// TestKeyBuilder_AddressExtractorsRoundTrip pins StreamAddress and
+// SupplierStateAddress: extractors, not builders, so they don't fit
+// allKeyBuilderOutputs' single-string shape and are pinned here instead.
+// Both exist so nothing outside this file hand-builds
+// StreamPrefix()/SupplierKeyPrefix()+":" to trim a scanned key back to an
+// address (review 2026-08-20, LOW; recurred review 2026-08-21) — a hand-built
+// trim silently drifts from the builder the moment either format changes,
+// exactly like a hand-built SCAN pattern would.
+func TestKeyBuilder_AddressExtractorsRoundTrip(t *testing.T) {
+	kb := NewKeyBuilder(config.RedisNamespaceConfig{})
+
+	streamKey := kb.StreamKey("pokt1abc")
+	addr, ok := kb.StreamAddress(streamKey)
+	assert.True(t, ok)
+	assert.Equal(t, "pokt1abc", addr)
+
+	stateKey := kb.SupplierStateKey("pokt1abc")
+	addr, ok = kb.SupplierStateAddress(stateKey)
+	assert.True(t, ok)
+	assert.Equal(t, "pokt1abc", addr)
+
+	// A key from a foreign namespace/prefix must not be misread as an
+	// address — this is the failure mode a drifted hand-built trim produces.
+	_, ok = kb.StreamAddress("ha:cache:application:pokt1abc")
+	assert.False(t, ok, "a non-stream key must not parse as a stream address")
+	_, ok = kb.SupplierStateAddress("ha:cache:application:pokt1abc")
+	assert.False(t, ok, "a non-supplier-state key must not parse as a supplier address")
+
+	// The prefix alone, with nothing after the separator, must not extract
+	// an empty address.
+	_, ok = kb.StreamAddress(kb.StreamPrefix() + ":")
+	assert.False(t, ok, "an empty address must not round-trip as valid")
+
+	// A non-default namespace changes both prefixes' text. An extractor that
+	// hand-built its own trim prefix at the CALL SITE instead of asking
+	// StreamPrefix()/SupplierKeyPrefix() for it would still trim against the
+	// DEFAULT text and silently misparse every key under this namespace --
+	// exactly the drift this pair of methods exists to make impossible.
+	custom := NewKeyBuilder(config.RedisNamespaceConfig{
+		BasePrefix: "prod", StreamsPrefix: "wal", SupplierPrefix: "sup",
+	})
+	addr, ok = custom.StreamAddress(custom.StreamKey("pokt1xyz"))
+	assert.True(t, ok)
+	assert.Equal(t, "pokt1xyz", addr)
+	addr, ok = custom.SupplierStateAddress(custom.SupplierStateKey("pokt1xyz"))
+	assert.True(t, ok)
+	assert.Equal(t, "pokt1xyz", addr)
 }
 
 // TestWithDefaults_FieldByField proves each field defaults independently.

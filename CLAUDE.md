@@ -398,7 +398,7 @@ Reference: See full mapping in `cmd/cmd_redis.go` and the subcommands under `cmd
 - **Pub/Sub Channels**:
   - `ha:events:cache:{type}:invalidate` (Cache invalidation)
   - `ha:meter:cleanup` (Meter cleanup signals)
-- **Submission Tracking** (7-day TTL for debugging):
+- **Submission Tracking** (24h TTL for debugging, configurable via `SubmissionTrackingTTL` / `submission_tracking_ttl` — `miner/config.go` default was lowered from 7 days):
   - `ha:tx:track:{supplier}:{sessionEndHeight}:{sessionID}` (JSON with claim/proof submission details)
   - Tracks: tx hashes, success/failure, error reasons, timing, relays, compute units
 
@@ -727,7 +727,7 @@ pocket-relay-miner redis supplier --list
 pocket-relay-miner redis meter --session session_123
 pocket-relay-miner redis meter --all
 
-# Debug claim/proof submission tracking (7-day history)
+# Debug claim/proof submission tracking (24h history by default)
 pocket-relay-miner redis submissions --supplier pokt1abc...
 pocket-relay-miner redis submissions --supplier pokt1abc... --failed-only
 pocket-relay-miner redis submissions --supplier pokt1abc... --session <session_id> --session-end <height>
