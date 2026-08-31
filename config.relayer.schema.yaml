@@ -447,13 +447,6 @@ properties:
         type: boolean
         description: Enable metering and rate limiting
         default: true
-      fail_behavior:
-        type: string
-        enum:
-          - open
-          - closed
-        description: Behavior when Redis unavailable (open=allow, closed=reject)
-        default: open
       cache_ttl:
         type: string
         description: TTL for all cached Redis data (streams, params, app stakes, meters). Redis TTL handles automatic expiration.

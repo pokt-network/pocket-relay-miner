@@ -249,6 +249,25 @@ var (
 		[]string{"service_id", "mode"}, // mode: eager, optimistic
 	)
 
+	// relayMeterUnbilled counts relays that were SERVED and submitted for mining
+	// without their stake being metered, because the meter could not answer.
+	//
+	// It exists because that outcome has no other signal. In optimistic mode the
+	// meter runs after the response is out, so refusing is not an option -- the
+	// relay is gone -- and dropping it, which is what happened until
+	// 2026-08-31, threw away work whose backend call was already paid for. What
+	// is left is over-servicing, bounded by the application's stake and settled
+	// by the chain, and this is the series that says how much of it happened.
+	relayMeterUnbilled = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_meter_unbilled_total",
+			Help:      "Relays served and submitted for mining without being metered (the meter could not answer)",
+		},
+		[]string{"service_id"},
+	)
+
 	relayMeterLatency = observability.RelayerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,

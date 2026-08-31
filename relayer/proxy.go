@@ -99,7 +99,6 @@ const (
 
 	// Drop reasons (for relaysDropped metric)
 	dropReasonValidationFailed = "validation_failed"
-	dropReasonMeterError       = "meter_error"
 	dropReasonStakeExhausted   = "stake_exhausted"
 	dropReasonNoSupplier       = "no_supplier"
 	dropReasonMarshalFailed    = "marshal_failed"
@@ -1380,15 +1379,22 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				p.metricRecorder.RecordDuration(relayMeterLatency, []string{capturedServiceID, "optimistic"}, meterDuration)
 
 				if meterErr != nil {
-					relaysDropped.WithLabelValues(capturedServiceID, dropReasonMeterError).Inc()
+					// The relay is ALREADY SERVED here -- optimistic meters
+					// after the response goes out -- so refusing now cannot
+					// protect anything. It would only throw away work whose
+					// backend call was already paid for, and the miner is the
+					// arbiter: it re-derives what it needs when it claims, and
+					// it retries. So this is reported and submitted anyway.
+					//
+					// This is the whole reason fail-closed is a rule about
+					// ADMISSION and not about accounting. Until 2026-08-31 a
+					// store blip here dropped every relay it touched, after
+					// serving every one of them.
+					relayMeterUnbilled.WithLabelValues(capturedServiceID).Inc()
 					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 						Err(meterErr).
 						Str("validation_mode", "optimistic").
-						Msg("relay meter error (optimistic mode) - relay dropped")
-					// Meter error in optimistic mode - discard, don't submit to miner
-					if !allowed {
-						return
-					}
+						Msg("relay served and submitted without being metered; the miner arbitrates")
 				} else if !allowed {
 					relaysDropped.WithLabelValues(capturedServiceID, dropReasonStakeExhausted).Inc()
 					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).

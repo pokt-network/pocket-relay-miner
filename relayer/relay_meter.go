@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -47,16 +48,17 @@ type ServiceFactorProvider interface {
 	GetServiceFactor(ctx context.Context, serviceID string) (float64, bool)
 }
 
-// FailBehavior determines how the relay meter behaves when Redis is unavailable.
-type FailBehavior string
-
-const (
-	// FailOpen allows relays when Redis is unavailable (higher availability, risk of over-servicing).
-	FailOpen FailBehavior = "open"
-
-	// FailClosed rejects relays when Redis is unavailable (safer, lower availability).
-	FailClosed FailBehavior = "closed"
-)
+// ErrMeterStoreUnavailable marks a metering failure whose cause is the meter's
+// own store, as opposed to a chain query it also depends on.
+//
+// The distinction decides whether a relay is served, so it is derived rather
+// than guessed: it is attached at the call that failed, never inferred from the
+// error text. CheckAndConsumeRelay reaches the store directly AND reaches the
+// chain through getAppStake and the session/shared param clients, so an
+// unclassified failure could be either -- and an unclassified failure is
+// treated as the chain's, because the miner is the final arbiter and a relay it
+// cannot bill is cheaper than a relay never served.
+var ErrMeterStoreUnavailable = errors.New("relay meter store unavailable")
 
 // RelayMeterConfig contains configuration for the relay meter.
 //
@@ -66,10 +68,6 @@ const (
 // namespace config. A second prefix owned by this component is what made
 // `redis meter --session` read a key nothing writes.
 type RelayMeterConfig struct {
-	// FailBehavior determines behavior when Redis is unavailable.
-	// "open" = allow relays (risk over-servicing)
-	// "closed" = reject relays (safer)
-	FailBehavior FailBehavior
 
 	// CacheTTL is the TTL for all cached Redis data (params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
@@ -171,9 +169,6 @@ func NewRelayMeter(
 	serviceFactorProvider ServiceFactorProvider,
 	config RelayMeterConfig,
 ) *RelayMeter {
-	if config.FailBehavior == "" {
-		config.FailBehavior = FailOpen
-	}
 	if config.CacheTTL == 0 {
 		config.CacheTTL = 2 * time.Hour
 	}
@@ -224,7 +219,6 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 	go m.activeSessionsMetricTicker(m.ctx)
 
 	m.logger.Info().
-		Str("fail_behavior", string(m.config.FailBehavior)).
 		Dur("cache_ttl", m.config.CacheTTL).
 		Msg("relay meter started")
 
@@ -267,7 +261,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldServiceID, serviceID).
 			Msg("failed to get relay cost")
-		return m.handleRedisError("get relay cost")
+		return m.handleMeterError("get relay cost", err)
 	}
 
 	// Get or create session meter
@@ -275,7 +269,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
-		return m.handleRedisError("get session meter")
+		return m.handleMeterError("get session meter", err)
 	}
 
 	// Atomically increment consumed stake in Redis. Key is
@@ -286,7 +280,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to increment consumed stake")
-		return m.handleRedisError("increment consumed")
+		return m.handleMeterError("increment consumed", fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err))
 	}
 
 	// Check if within limits
@@ -530,7 +524,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	metaKey := m.metaKey(sessionID, supplierAddress)
 	set, err := m.redisClient.SetNX(ctx, metaKey, metaBytes, m.config.CacheTTL).Result()
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create session meter: %w", err)
+		return nil, 0, fmt.Errorf("failed to create session meter: %w: %w", ErrMeterStoreUnavailable, err)
 	}
 
 	if !set {
@@ -569,7 +563,9 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddr
 		if err == redis.Nil {
 			return nil, nil
 		}
-		return nil, err
+		// Marked at the call that failed, not sniffed from the error later:
+		// this is the store, and handleMeterError refuses admission on it.
+		return nil, fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err)
 	}
 
 	var meta SessionMeterMeta
@@ -902,24 +898,38 @@ func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID strin
 	return computeUnits, nil
 }
 
-// handleRedisError handles Redis errors based on fail behavior.
-func (m *RelayMeter) handleRedisError(operation string) (allowed bool, err error) {
+// handleMeterError decides what a metering failure means for THIS relay, and
+// the answer depends only on what failed -- there is no operator knob, because
+// the one that existed (relay_meter.fail_behavior) let a deployment choose to
+// serve relays it could not budget.
+//
+// The store is ours and is required: if it cannot be read we do not know what
+// this session has already consumed, so admission refuses. The chain is a
+// dependency we tolerate blinking: the miner re-derives what it needs when it
+// claims, and it retries, so a relay we could not price here is still worth
+// serving and passing on. That asymmetry is the whole rule -- the relayer fails
+// fast on what it owns, and never throws away work the miner can still resolve.
+//
+// An UNCLASSIFIED failure counts as the chain's. Guessing the other way would
+// turn any unrecognised error into a fleet-wide refusal.
+func (m *RelayMeter) handleMeterError(operation string, cause error) (allowed bool, err error) {
 	relayMeterRedisErrors.WithLabelValues(operation).Inc()
 
-	// Per-relay under a Redis outage (one line per relay per instance); the
-	// outage itself is logged by the transport reconnect loop, and
-	// relay_meter_redis_errors_total carries the alertable rate.
-	if m.config.FailBehavior == FailOpen {
-		m.logger.Debug().
-			Str("operation", operation).
-			Msg("Redis error, fail-open: allowing relay")
-		return true, nil
-	}
+	storeDown := errors.Is(cause, ErrMeterStoreUnavailable)
 
+	// Per-relay under an outage (one line per relay per instance); the outage
+	// itself is logged by the transport reconnect loop, and
+	// relay_meter_redis_errors_total carries the alertable rate.
 	m.logger.Debug().
+		Err(cause).
 		Str("operation", operation).
-		Msg("Redis error, fail-closed: rejecting relay")
-	return false, fmt.Errorf("redis unavailable and fail-closed configured")
+		Bool("store_unavailable", storeDown).
+		Msg("relay metering failed")
+
+	if storeDown {
+		return false, fmt.Errorf("%w: %s", ErrMeterStoreUnavailable, operation)
+	}
+	return true, fmt.Errorf("could not meter relay (%s): %w", operation, cause)
 }
 
 // cleanupSubscriber subscribes to cleanup signals from miners.
@@ -1071,7 +1081,6 @@ func localCacheKey(sessionID, supplierAddress string) string {
 // RelayMeterSnapshot captures the current state for monitoring/debugging.
 type RelayMeterSnapshot struct {
 	ActiveSessions int
-	FailBehavior   FailBehavior
 }
 
 // calculateAppStakePerSessionSupplier calculates the portion of app stake

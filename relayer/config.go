@@ -643,11 +643,21 @@ type RelayMeterYAMLConfig struct {
 	// Default: true
 	Enabled bool `yaml:"enabled"`
 
-	// FailBehavior determines behavior when Redis is unavailable.
-	// "open" - Allow relays when Redis down (prioritize availability)
-	// "closed" - Reject relays when Redis down (prioritize safety)
-	// Default: "open"
-	FailBehavior string `yaml:"fail_behavior"`
+	// RemovedFailBehavior is the tombstone for the retired fail_behavior, which
+	// let a deployment choose to SERVE relays whose budget could not be checked.
+	// There is no choice now: admission refuses what it cannot verify, and
+	// accounting never throws away work the miner can still resolve.
+	//
+	// It is kept as a field because the YAML decoder is lenient -- an unknown
+	// key is dropped without a word -- so deleting it outright would let a
+	// config that still says "open" boot as closed, with the file and the
+	// process disagreeing and nothing saying so.
+	//
+	// Unlike the other three tombstones in this file it does NOT fail the boot,
+	// and that is deliberate rather than an oversight: the owner chose a warning
+	// so a fleet mid-rollout is not held back by a line that no longer does
+	// anything. See Config.Warnings.
+	RemovedFailBehavior string `yaml:"fail_behavior,omitempty"`
 
 	// CacheTTL is the TTL for all cached Redis data (streams, params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
@@ -713,9 +723,8 @@ func DefaultConfig() Config {
 			Addr:    "0.0.0.0:8081",
 		},
 		RelayMeter: RelayMeterYAMLConfig{
-			Enabled:      true,
-			FailBehavior: "open",
-			CacheTTL:     2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
+			Enabled:  true,
+			CacheTTL: 2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 		},
 		HTTPTransport: HTTPTransportConfig{
 			MaxIdleConns:                 500,  // Total idle connections across all hosts (5x for 1000+ RPS)
@@ -768,6 +777,30 @@ func DefaultConfig() Config {
 }
 
 // Validate validates the configuration and returns an error if invalid.
+// Warnings returns deprecation notices for a config that LOADS but contains
+// keys that no longer do anything.
+//
+// It exists because there was nowhere to put one: LoadConfig has no logger and
+// Validate returns only an error, so the choice used to be "fail the boot" or
+// "say nothing". Callers -- the relayer at startup and `relayer validate` --
+// log each line. A retired key that changes behaviour by its absence belongs
+// here or in Validate, never in neither: the decoder drops unknown keys
+// silently, so the file and the process would disagree with no signal at all.
+func (c *Config) Warnings() []string {
+	var warnings []string
+
+	if c.RelayMeter.RemovedFailBehavior != "" {
+		warnings = append(warnings, fmt.Sprintf(
+			"relay_meter.fail_behavior is no longer supported (found %q) and is ignored: the relayer "+
+				"now refuses a relay whose budget it cannot verify, and never chooses to serve one. "+
+				"Remove the line. If it said \"open\", expect relays to be rejected during an outage "+
+				"of the meter's store that were previously served unbilled",
+			c.RelayMeter.RemovedFailBehavior))
+	}
+
+	return warnings
+}
+
 func (c *Config) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("listen_addr is required")

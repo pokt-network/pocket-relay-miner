@@ -642,13 +642,40 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 
 		// Meter relay (check stake before serving)
 		allowed, meterErr := b.relayPipeline.MeterRelay(b.ctx, relayCtx)
-		if meterErr != nil {
-			// Fail-open: log but allow relay (issue #23 tracks honouring
-			// fail_behavior here; only the log level changed in this pass)
+		if meterErr != nil && allowed {
+			// The meter could not answer, but not because OUR store was
+			// unreadable -- a chain query it depends on blinked. Served and
+			// passed on: the miner re-derives what it needs and retries.
+			relayMeterUnbilled.WithLabelValues(b.serviceID).Inc()
 			b.logger.Debug().
 				Err(meterErr).
 				Str("session_id", relayCtx.SessionID).
-				Msg("relay metering error (fail-open: allowing relay)")
+				Msg("relay served unmetered; the miner arbitrates")
+		} else if meterErr != nil {
+			// The meter's own store is unreadable, so what this session has
+			// already consumed is unknown. This is admission, and admission
+			// refuses.
+			//
+			// The connection is CLOSED rather than the message refused, and the
+			// cost of that is understood: every subscription on this socket
+			// goes, and reconnecting a WebSocket is not free. A per-message
+			// refusal was tried and dropped -- it would have to arrive as a
+			// payload on a stream the client is reading as backend traffic, and
+			// nothing in the shape of a WebSocket message lets the client tell
+			// "the relayminer refused this" from "the backend said this". A
+			// close code says exactly one thing, and PATH and SAGE both already
+			// handle it, which is why every other refusal on this path closes
+			// too.
+			//
+			// Nothing is emitted: emitRelay runs on the BACKEND-response path,
+			// and this request never reached the backend.
+			relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonMeterError).Inc()
+			b.logger.Debug().
+				Err(meterErr).
+				Str("session_id", relayCtx.SessionID).
+				Msg("relay rejected - unable to verify session budget, closing connection")
+			_ = b.closeWithReason(CloseTryAgainLater, "unable to process relay request", wsCloseInitiatorRelayer)
+			return
 		} else if !allowed {
 			// Stake limit exceeded - reject relay
 			relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonStakeExhausted).Inc()

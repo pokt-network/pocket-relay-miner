@@ -305,12 +305,24 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 		// Meter relay (check stake before serving)
 		allowed, meterErr := s.relayPipeline.MeterRelay(ctx, relayCtx)
-		if meterErr != nil {
-			// Fail-open: log but allow relay (issue #23 tracks honouring
-			// fail_behavior here; only the log level changed in this pass)
+		if meterErr != nil && allowed {
+			// The meter could not answer, but not because OUR store was
+			// unreadable -- a chain query it depends on blinked. The relay is
+			// served and passed on: the miner re-derives what it needs when it
+			// claims, and it retries. See RelayMeter.handleMeterError.
+			relayMeterUnbilled.WithLabelValues(serviceID).Inc()
 			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(meterErr).
-				Msg("relay metering error (fail-open: allowing relay)")
+				Msg("relay served unmetered; the miner arbitrates")
+		} else if meterErr != nil {
+			// The meter's own store is unreadable, so what this session has
+			// already consumed is unknown. This is admission: it is refused,
+			// and the message says nothing about which store or why.
+			grpcRelayErrors.WithLabelValues(serviceID, "meter_unavailable").Inc()
+			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
+				Err(meterErr).
+				Msg("relay rejected - unable to verify session budget")
+			return status.Error(codes.Unavailable, "unable to process relay request")
 		} else if !allowed {
 			// Stake limit exceeded - reject relay
 			grpcRelayErrors.WithLabelValues(serviceID, "meter_rejected").Inc()
