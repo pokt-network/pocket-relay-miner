@@ -250,6 +250,37 @@ So, when a round raises something whose ROOT is already decided:
   on the same topic is a signal the topic needs an owner's decision; a third is
   proof of it.
 
+**And the sharper half, which is what actually ended it** (Jorge, 2026-08-31,
+answering what he had to repeat): *"justamente el tema este de seguir trayendo
+items como HIGH que eran preguntas, se solucionaron presentando un caso y
+pidiendo claridad/opinion a mi."*
+
+The three HIGHs of that day were not re-litigations of a DECIDED topic — nothing
+had been decided. They were **questions with no owner**, reported as defects
+because they had the shape of one: a measurement, a file:line, a failure mode.
+Every round found another face of the same unanswered question, and each was
+written up, fixed, and reviewed again. What ended it took one message: walk ONE
+concrete case, and ask for a criterion.
+
+So, before reporting a finding at all, ask what it actually is:
+
+- **A defect** has a right answer the code should already implement. Fix it.
+- **A question** has a right answer only the owner can give — because it trades
+  money against availability, or one failure mode against another. It is not a
+  finding, and severity on it is noise: "HIGH" on a question means "I would like
+  an answer", which is not what the word says.
+
+For the second kind, the deliverable is not a report. It is **one traced case and
+one question**: the operator, the sequence, what happens today, what it costs —
+then the fork, with the options priced. `references/` has the format under
+"Trace before naming"; the short version is that the case comes first and the
+name of the thing comes last.
+
+The tell that a finding is a question wearing a defect's clothes: you can write
+the fix three defensible ways and the choice between them is about what the
+business wants, not about what the code means. If two rounds of review keep
+landing on the same area, that is not a bug-rich area — it is an undecided one.
+
 **When the loop stops** (Jorge, 2026-08-26):
 
 ```
