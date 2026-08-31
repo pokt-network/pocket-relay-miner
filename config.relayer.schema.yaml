@@ -319,12 +319,6 @@ properties:
     default: 10485760
     minimum: 1024
 
-  grace_period_extra_blocks:
-    type: integer
-    description: Additional grace period blocks beyond on-chain config
-    default: 2
-    minimum: 0
-
   metrics:
     type: object
     description: Prometheus metrics server configuration
