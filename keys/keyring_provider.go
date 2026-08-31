@@ -395,11 +395,13 @@ func isPermanentKeyFailure(err error) bool {
 // signing. Those are skipped; only errors that may clear on a retry are
 // returned.
 //
-// One gap remains and is NOT closed here: keyring.List() is cosmos-sdk's
-// keystore.MigrateAll (crypto/keyring/keyring.go, v0.53.7), which SKIPS any
-// record it cannot decode -- it prints to stderr and continues, returning a nil
-// error. Read in the dependency's source, not inferred. A record lost that way
-// is invisible to this provider, so it still reads as a removal.
+// A record cosmos-sdk drops on the floor is a different problem, and it IS
+// closed, at the end of this function: keyring.List() is keystore.MigrateAll
+// (crypto/keyring/keyring.go, v0.53.7), which SKIPS any record it cannot
+// decode -- it prints to stderr and continues, returning a nil error. Read in
+// the dependency's source, not inferred. Such a record would otherwise be
+// invisible here and read as a removal, so the records the directory holds are
+// counted against the records List reported.
 func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.PrivKey, error) {
 	// A reload that finds the directory byte-for-byte unchanged returns the
 	// previous keys without touching the keyring. This is not a micro-
@@ -423,8 +425,18 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 		if err != nil {
 			// Deliberately an error, not an empty key set. This is the PRIMARY
 			// check for a keyring this process cannot read; the guard near the
-			// end of this function covers a DIFFERENT condition (record files
-			// present, no keys out of them).
+			// end of this function covers a DIFFERENT condition (records the
+			// keyring listed but could not decode).
+			//
+			// The keyring itself cannot answer this. 99designs/keyring v1.2.2,
+			// the file backend under cosmos-sdk, DISCARDS the error --
+			// fileKeyring.Keys() is `files, _ := os.ReadDir(dir)` (file.go:174)
+			// -- and resolveDir MkdirAlls a directory that is missing
+			// (file.go:44-49). Read in the dependency's source, not inferred. So
+			// a keyring directory deleted, remounted, or stripped of its
+			// permissions comes back as an empty list with a NIL error, which is
+			// indistinguishable from an operator who removed every key. Reading
+			// the directory ourselves is what separates them.
 			//
 			// The metric is not decoration: manager.Reload does not count
 			// provider failures, on the stated grounds that "every provider
@@ -453,6 +465,11 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 
 	keys := make(map[string]cryptotypes.PrivKey)
 	var loadErrs []error
+
+	// Records the keyring listed but could not decode. Only the List() branch
+	// below can produce one, and only it can count them -- see the guard near
+	// the end of this function.
+	swallowedRecords := 0
 
 	// If specific key names are provided, load only those
 	if len(p.keyNames) > 0 {
@@ -487,6 +504,12 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 			return nil, fmt.Errorf("failed to list keyring keys: %w", err)
 		}
 
+		// dirEntryCount and List() enumerate the SAME set: isKeyRecord matches
+		// ".info" and MigrateAll skips every other name (cosmos-sdk v0.53.7,
+		// crypto/keyring/keyring.go:917-919). So len(records) can only be lower,
+		// and the shortfall is exactly what MigrateAll swallowed.
+		swallowedRecords = dirEntryCount - len(records)
+
 		for _, record := range records {
 			privKey, addr, err := p.loadKeyByName(record.Name)
 			if err != nil {
@@ -518,43 +541,55 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 			len(loadErrs), errors.Join(loadErrs...))
 	}
 
-	// ZERO KEYS AND NO ERROR is the dangerous answer, because the keyring
-	// cannot tell us which of two very different things happened.
+	// A RECORD THAT VANISHED WITHOUT AN ERROR is the dangerous answer, because
+	// the manager cannot tell it from a key the operator withdrew: both are an
+	// address that is no longer there. It applies the second, so every affected
+	// address is diffed as removed -- the relayer rejects those relays while
+	// /ready still answers true, and the miner drains their pipelines and
+	// releases their leases. keys.OpenManager already refuses zero keys AT
+	// STARTUP for exactly this reason; nothing refused it on RELOAD.
 	//
-	// 99designs/keyring v1.2.2 (the file backend under cosmos-sdk) discards the
-	// error: fileKeyring.Keys() is `files, _ := os.ReadDir(dir)` (file.go:174),
-	// and resolveDir MkdirAlls a directory that is missing (file.go:44-49). Read
-	// in the dependency's source, not inferred. So a keyring directory that was
-	// deleted, remounted, or lost its permissions comes back as an empty list
-	// with a nil error -- indistinguishable, here, from an operator who removed
-	// every key.
+	// cosmos-sdk's keystore.MigrateAll SKIPS any record it cannot decode -- it
+	// prints to stderr and returns a nil error (v0.53.7, keyring.go:920-924) --
+	// and List() IS MigrateAll (keyring.go:539-541). That swallow is the whole
+	// hazard, and it is PER RECORD, so it is counted per record: dirEntryCount
+	// enumerates the .info files and List() reports the ones it decoded.
 	//
-	// The manager's "an unreadable source is not a key removal" guard keys off
-	// an error, so with no error it applies the empty set: every address is
-	// diffed as removed, the relayer rejects every relay while /ready still
-	// answers true, and the miner drains every pipeline and releases every
-	// lease. keys.OpenManager already refuses zero keys AT STARTUP for exactly
-	// this reason; nothing refused it on RELOAD.
+	// Asking instead whether the whole load came back EMPTY -- what this did
+	// until 2026-08-31 -- was wrong in both directions, and both were measured:
 	//
-	// Reading the directory ourselves settles it, and keeps the distinction the
-	// blunt fix would have lost: a genuinely emptied keyring is still applied,
-	// so pulling the last key out of a single-key deployment still stops it
-	// signing.
+	//   - It missed partial corruption entirely. Two records, one corrupt, and
+	//     LoadKeys returned the survivor with a nil error: one supplier silently
+	//     dropped, no signal anywhere.
+	//   - It fired on withdrawals it had no business judging, because
+	//     dirEntryCount counts records this load never even attempted. A record
+	//     that is not a signing key -- an offline pubkey, a multisig, a ledger
+	//     entry, all of which return keyring.ErrPrivKeyExtr forever -- kept the
+	//     count above zero, so withdrawing the last REAL key read as a broken
+	//     keyring: the manager abandoned the reload, kept the previous set, and
+	//     the withdrawn key went on signing, retrying every tick forever. The
+	//     same shape as the keyhash bug of 2026-08-28, from a third side.
 	//
-	// The unreadable-directory case is caught EARLIER, by the fingerprint read
-	// at the top of this function. What is left here is a different and narrower
-	// contradiction: the directory holds record files, yet not one of them
-	// yielded a key. cosmos-sdk's keystore.MigrateAll SKIPS any record it cannot
-	// decode -- it prints to stderr and returns a nil error -- so this is how a
-	// keyring whose files are all corrupt, or readable-as-a-directory but not
-	// as files, presents itself. Treating it as "the operator removed every key"
-	// is the same silent fleet-wide removal, arrived at from the other side.
-	if len(keys) == 0 && dirEntryCount > 0 {
+	// The by-name branch above needs no guard of its own, and that is a property
+	// of the dependency rather than a choice: Key(uid) calls migrate directly
+	// (keyring.go:603-609) and PROPAGATES the decode error, so a corrupt
+	// selected record already lands in loadErrs and returns above -- measured
+	// 2026-08-31. Only List() swallows, so only List() counts.
+	//
+	// The unreadable-DIRECTORY case is caught earlier still, by the fingerprint
+	// read at the top of this function.
+	//
+	// The keys that DID load are returned alongside the error: the manager
+	// exempts the first load from its keep-the-previous-set guard, so a
+	// deployment whose keyring is partly corrupt at startup still comes up on
+	// the records it could read.
+	if swallowedRecords > 0 {
 		keyLoadErrors.WithLabelValues(p.Kind()).Inc()
-		return nil, fmt.Errorf(
-			"keyring reported no keys, but its directory %s holds %d record file(s): "+
-				"not one yielded a signing key, so this is a broken keyring rather than "+
-				"the operator removing keys", p.keyringDir, dirEntryCount)
+		return keys, fmt.Errorf(
+			"keyring directory %s holds %d record file(s) but only %d could be decoded: "+
+				"%d were skipped, so this is a broken keyring rather than the operator "+
+				"removing keys", p.keyringDir, dirEntryCount, dirEntryCount-swallowedRecords,
+			swallowedRecords)
 	}
 
 	if p.keyringDir != "" {

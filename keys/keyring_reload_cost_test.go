@@ -12,6 +12,7 @@ import (
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
 	cryptocodec "github.com/cosmos/cosmos-sdk/crypto/codec"
 	"github.com/cosmos/cosmos-sdk/crypto/keyring"
+	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
@@ -45,10 +46,18 @@ func newOnDiskTestKeyring(t *testing.T, hexKeys map[string]string) (parentDir, r
 	return parentDir, recordsDir
 }
 
-func newOnDiskProvider(t *testing.T, parentDir string) *KeyringProvider {
+// The variadic key names are not decoration: NewKeyringProvider is the only
+// constructor that sets keyringDir, and keyringDir is what switches on both the
+// reload cache and the broken-keyring guard. Until 2026-08-31 this helper took
+// no names, so the suite could express "guard on, no key_names" and "key_names,
+// guard off" but never the two together -- which is the shipping configuration
+// (config/keys.go, schema-validated in both binaries). The defect that lived in
+// that blind spot was not merely untested, it was UNREPRESENTABLE.
+func newOnDiskProvider(t *testing.T, parentDir string, keyNames ...string) *KeyringProvider {
 	t.Helper()
 	p, err := NewKeyringProvider(logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		KeyringProviderConfig{Backend: "test", Dir: parentDir, AppName: "pocket"})
+		KeyringProviderConfig{Backend: "test", Dir: parentDir, AppName: "pocket",
+			KeyNames: keyNames})
 	require.NoError(t, err)
 	return p
 }
@@ -404,4 +413,159 @@ func TestTheDocumentedWithdrawalLeavesAnEmptyKeyring(t *testing.T) {
 	after, err := p.LoadKeys(context.Background())
 	require.NoError(t, err, "the documented withdrawal must not read as a broken keyring")
 	require.Empty(t, after, "the withdrawal must be applied, or a pulled key keeps signing")
+}
+
+// TestWithdrawingASelectedKeyIsNotABrokenKeyring is the defect the deep-review
+// found and this branch measured on 2026-08-31. With key_names configured,
+// LoadKeys attempts ONLY the named records, but the guard was comparing that
+// result against every .info in the directory. Withdrawing the one selected key
+// from a keyring that holds others therefore read as "records present, none
+// yielded a key" -- a broken keyring -- and MultiProviderKeyManager.Reload
+// abandoned the reload and kept the previous set.
+func TestWithdrawingASelectedKeyIsNotABrokenKeyring(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+	})
+	p := newOnDiskProvider(t, parentDir, "app2")
+
+	before, err := p.LoadKeys(context.Background())
+	require.NoError(t, err)
+	require.Len(t, before, 1, "precondition: key_names selects exactly one of the two records")
+
+	removed := 0
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "app2") && strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
+			removed++
+		}
+	}
+	require.Equal(t, 1, removed, "precondition: exactly the selected key was withdrawn")
+
+	after, err := p.LoadKeys(context.Background())
+	require.NoError(t, err,
+		"the unselected records were never attempted, so they cannot testify that "+
+			"this keyring is broken")
+	require.Empty(t, after, "the withdrawal must be applied, or a pulled key keeps signing")
+}
+
+// TestAWithdrawnSelectedKeyStopsSigning is the money half of the test above, and
+// the reason it is worth its own test: the provider returning an error is not
+// the damage. The damage is that Reload gives up on it, so the retired key stays
+// in the running signer -- with no TTL, because the error path never advances
+// the fingerprint, so every later tick fails identically.
+func TestAWithdrawnSelectedKeyStopsSigning(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+	})
+	p := newOnDiskProvider(t, parentDir, "app2")
+
+	m := NewMultiProviderKeyManager(
+		logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		[]KeyProvider{p},
+		KeyManagerConfig{HotReloadEnabled: false},
+	)
+	t.Cleanup(func() { _ = m.Close() })
+	require.NoError(t, m.Start(context.Background()))
+
+	held := m.ListSuppliers()
+	require.Len(t, held, 1, "precondition: the manager holds exactly the selected key")
+	withdrawn := held[0]
+
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "app2") && strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
+		}
+	}
+
+	require.NoError(t, m.Reload(context.Background()))
+	_, err = m.GetSigner(withdrawn)
+	require.Error(t, err,
+		"one reload after the withdrawal must retire the key: decideSupplierServe "+
+			"asks HasSigner first, so a key still in the signer is a supplier still served")
+}
+
+// TestAWithdrawalBesideANonSigningRecordIsApplied covers the same defect on the
+// OTHER branch, where key_names is not involved at all. A keyring may hold
+// records that are not signing keys -- an offline pubkey, a multisig, a ledger
+// entry -- and those return keyring.ErrPrivKeyExtr on every call, forever, so
+// LoadKeys skips them by design. They still leave a .info on disk, so counting
+// files kept the old guard's denominator above zero and withdrawing the last
+// REAL key read as a broken keyring: the same freeze, reached the way the
+// keyhash file reached it on 2026-08-28.
+func TestAWithdrawalBesideANonSigningRecordIsApplied(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{"app": testAppHex})
+
+	registry := codectypes.NewInterfaceRegistry()
+	cryptocodec.RegisterInterfaces(registry)
+	kr, err := keyring.New("pocket", keyring.BackendTest, parentDir, nil,
+		codec.NewProtoCodec(registry))
+	require.NoError(t, err)
+	_, err = kr.SaveOfflineKey("watcher", secp256k1.GenPrivKey().PubKey())
+	require.NoError(t, err, "precondition: cosmos-sdk accepts a pubkey-only record")
+
+	p := newOnDiskProvider(t, parentDir)
+	before, err := p.LoadKeys(context.Background())
+	require.NoError(t, err)
+	require.Len(t, before, 1, "precondition: the offline record yields no signing key")
+
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	removed := 0
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "app.") && strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
+			removed++
+		}
+	}
+	require.Equal(t, 1, removed, "precondition: exactly the signing key was withdrawn")
+
+	after, err := p.LoadKeys(context.Background())
+	require.NoError(t, err,
+		"a record that can never yield a private key must not testify that the "+
+			"keyring is broken")
+	require.Empty(t, after, "the withdrawal must be applied, or a pulled key keeps signing")
+}
+
+// TestPartialCorruptionIsNotAPartialRemoval is the hole the old guard left wide
+// open, and it never needed key_names to reach. MigrateAll's swallow is PER
+// RECORD, so nine corrupt records beside one healthy one came back as one key
+// and a nil error: nine addresses diffed as removed, nine suppliers dropped, and
+// no signal anywhere. Asking whether the load came back EMPTY could not see it.
+func TestPartialCorruptionIsNotAPartialRemoval(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+	})
+	p := newOnDiskProvider(t, parentDir)
+
+	before, err := p.LoadKeys(context.Background())
+	require.NoError(t, err)
+	require.Len(t, before, 2)
+
+	corrupted := 0
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "app2") && strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.WriteFile(
+				filepath.Join(recordsDir, e.Name()), []byte("corrupt"), 0o600))
+			corrupted++
+		}
+	}
+	require.Equal(t, 1, corrupted, "precondition: exactly one of the two records is corrupt")
+
+	after, err := p.LoadKeys(context.Background())
+	require.Error(t, err,
+		"one record silently skipped is one supplier silently dropped: it must be "+
+			"an error, not a shorter map with a nil error")
+	require.Contains(t, err.Error(), "broken keyring")
+	require.Len(t, after, 1,
+		"the record that DID decode is still returned: the manager exempts the first "+
+			"load, so a partly corrupt keyring still starts on what it could read")
 }
