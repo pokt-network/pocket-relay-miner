@@ -244,12 +244,28 @@ fi
 #   cometbft                sequential single relays; one request bills one relay.
 run_transport_load() {
     local mode="$1" service="$2" out rc
+    local -a extra_args=()
+    # One gRPC cell drives a NON-default method, so --grpc-method is exercised
+    # against the real relayer instead of only in unit tests. It rides an
+    # existing cell rather than firing extra probe relays: the settlement
+    # assertion compares billed against what this ledger recorded as served, so
+    # any relay sent outside the load phase would surface as "foreign traffic"
+    # and fail the money assertion for the wrong reason.
+    #
+    # HealthCheck is one of the four methods tilt/backend-server/pb/demo.proto
+    # serves, and it takes a request with no fields, so the default empty
+    # --grpc-request-hex is correct. If --grpc-method regresses, this cell goes
+    # red on verification or on served==billed -- which is the whole point:
+    # before this, the custom-method path had no gate at any level.
+    if [ "$mode" = "grpc" ] && [ "$service" = "${GRPC_CUSTOM_METHOD_SERVICE:-develop-grpc-optimistic}" ]; then
+        extra_args=(--grpc-method "${GRPC_CUSTOM_METHOD:-/demo.DemoService/HealthCheck}")
+    fi
     case "$mode" in
     jsonrpc | websocket | grpc)
         out="$("$BIN" relay "$mode" --localnet --service "$service" \
             --relayer-url "$relayer_url" \
             --load-test -n "$RELAYS_PER_TRANSPORT" --concurrency "$CONCURRENCY" \
-            --all-suppliers 2>&1)"
+            --all-suppliers "${extra_args[@]}" 2>&1)"
         rc=$?
         ;;
     stream | cometbft)
