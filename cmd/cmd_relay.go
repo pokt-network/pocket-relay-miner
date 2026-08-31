@@ -191,6 +191,8 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayAllSuppliers, "all-suppliers", false, "Load test: round-robin relays across every supplier in the current session (avoids exhausting one supplier's per-session claimable budget)")
 	relayCmd.PersistentFlags().IntVarP(&relay.RelayCount, "count", "n", 1, "Number of requests to send (jsonrpc/websocket/grpc load test)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayBatches, "batches", 0, "stream mode: ask the backend to emit this many SSE batches then close (0 = receive until the server closes or --timeout)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayGRPCMethod, "grpc-method", "", "grpc mode: /package.Service/Method to invoke (default: the localnet demo method, which any other backend answers UNIMPLEMENTED)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayGRPCRequestHex, "grpc-request-hex", "", "grpc mode: protobuf request body as hex (default: empty, which is correct for any request message with no fields)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayLoadTest, "load-test", false, "Enable load test mode with concurrency")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayConcurrency, "concurrency", 10, "Number of concurrent workers (load test mode)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayRPS, "rps", 0, "Target requests per second (0 = unlimited, only for load test mode)")
@@ -375,6 +377,21 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	}
 	if relay.RelayBatches > 0 && mode != "stream" {
 		return fmt.Errorf("--batches only applies to stream mode (other modes use -n/--count)")
+	}
+	if (relay.RelayGRPCMethod != "" || relay.RelayGRPCRequestHex != "") && mode != "grpc" {
+		return fmt.Errorf("--grpc-method/--grpc-request-hex only apply to grpc mode")
+	}
+	// A custom --payload drives the REST fallback, where buildNativeGRPCPayload
+	// never runs -- so the method and request body would be dropped without a
+	// word. Silently ignoring a flag the operator passed is the defect this
+	// whole rescue answers; refuse instead.
+	if (relay.RelayGRPCMethod != "" || relay.RelayGRPCRequestHex != "") && relay.RelayPayloadJSON != "" {
+		return fmt.Errorf("--grpc-method/--grpc-request-hex cannot be combined with --payload: " +
+			"a custom payload drives the REST fallback, which never builds a gRPC request")
+	}
+	if relay.RelayGRPCRequestHex != "" && relay.RelayGRPCMethod == "" {
+		return fmt.Errorf("--grpc-request-hex needs --grpc-method: " +
+			"a request body for the demo method is almost certainly a mistake")
 	}
 	if mode == "stream" && relay.RelayCount > 1 {
 		return fmt.Errorf("-n/--count does not apply to stream mode (a stream is read until the server closes; use --batches to ask the backend for a bounded number of SSE batches)")

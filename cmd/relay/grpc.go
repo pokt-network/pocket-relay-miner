@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"net/http"
 	"strings"
@@ -53,13 +54,61 @@ func RunGRPCMode(ctx context.Context, logger logging.Logger, relayClient *relay_
 		return fmt.Errorf("failed to build payload: %w", err)
 	}
 
+	// Decided ONCE, here, and passed down. The demo method's reply always
+	// carries fields, so an empty one is a failure; a method the operator chose
+	// may legitimately reply empty. Re-deriving this deeper down by comparing
+	// the method against a constant would mean that renaming the demo backend
+	// silently relaxes the check instead of breaking loudly.
+	requireNonEmpty := strings.TrimSpace(RelayGRPCMethod) == ""
+
 	// Diagnostic mode: single request with detailed output
 	if !RelayLoadTest {
-		return runGRPCDiagnostic(ctx, logger, relayClient, payloadBz)
+		return runGRPCDiagnostic(ctx, logger, relayClient, payloadBz, requireNonEmpty)
 	}
 
 	// Load test mode: concurrent requests with metrics
-	return runGRPCLoadTest(ctx, logger, relayClient, payloadBz)
+	return runGRPCLoadTest(ctx, logger, relayClient, payloadBz, requireNonEmpty)
+}
+
+// resolveGRPCMethodPath returns the gRPC method to invoke: --grpc-method when
+// set, the localnet demo method otherwise.
+//
+// The shape check is not decoration. Measured on Go 1.26: http.NewRequest
+// accepts "/demo.DemoService" (no method), "/a/b/c" and "" without complaint,
+// and the malformed path travels as URL.Path all the way to the backend -- so a
+// typo would be signed, metered against the application's stake and mined,
+// returning an opaque UNIMPLEMENTED. Rejecting the shape here fails before any
+// of that happens.
+func resolveGRPCMethodPath() (string, error) {
+	method := strings.TrimSpace(RelayGRPCMethod)
+	if method == "" {
+		return demoGRPCMethodPath, nil
+	}
+	parts := strings.Split(method, "/")
+	if len(parts) != 3 || parts[0] != "" || parts[1] == "" || parts[2] == "" {
+		return "", fmt.Errorf(
+			"--grpc-method %q is not of the form /package.Service/Method", method)
+	}
+	return method, nil
+}
+
+// buildGRPCRequestFrame wraps --grpc-request-hex in a gRPC length-prefixed
+// frame. An empty value yields the zero-length frame, which is the correct body
+// for any request message with no fields -- demo.Empty and cosmos'
+// GetLatestBlockRequest among them, so the common case needs no hex at all.
+func buildGRPCRequestFrame() ([]byte, error) {
+	msg := []byte{}
+	if h := strings.TrimSpace(RelayGRPCRequestHex); h != "" {
+		decoded, err := hex.DecodeString(h)
+		if err != nil {
+			return nil, fmt.Errorf("--grpc-request-hex is not valid hex: %w", err)
+		}
+		msg = decoded
+	}
+	frame := make([]byte, grpcFramePrefixLen+len(msg))
+	binary.BigEndian.PutUint32(frame[1:grpcFramePrefixLen], uint32(len(msg)))
+	copy(frame[grpcFramePrefixLen:], msg)
+	return frame, nil
 }
 
 // buildNativeGRPCPayload creates a serialized POKTHTTPRequest carrying a real
@@ -71,9 +120,16 @@ func RunGRPCMode(ctx context.Context, logger logging.Logger, relayClient *relay_
 // length-prefixed frame is just its 5-byte header:
 // [compression flag=0][big-endian uint32 length=0].
 func buildNativeGRPCPayload() ([]byte, error) {
-	emptyFrame := []byte{0x00, 0x00, 0x00, 0x00, 0x00}
+	methodPath, err := resolveGRPCMethodPath()
+	if err != nil {
+		return nil, err
+	}
+	frame, err := buildGRPCRequestFrame()
+	if err != nil {
+		return nil, err
+	}
 
-	httpReq, err := http.NewRequest("POST", demoGRPCMethodPath, bytes.NewReader(emptyFrame))
+	httpReq, err := http.NewRequest("POST", methodPath, bytes.NewReader(frame))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC HTTP request: %w", err)
 	}
@@ -93,7 +149,7 @@ func buildNativeGRPCPayload() ([]byte, error) {
 }
 
 // runGRPCDiagnostic sends a single gRPC relay request with detailed output.
-func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
+func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte, requireNonEmpty bool) error {
 	// Parse gRPC address (remove http:// prefix if present)
 	grpcAddr := RelayRelayerURL
 	if strings.HasPrefix(grpcAddr, "http://") {
@@ -128,7 +184,7 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 	// confirm the reply is a well-formed gRPC frame with grpc-status 0. Skipped
 	// when a custom --payload drove the REST fallback instead of a gRPC frame.
 	if result.Success && RelayPayloadJSON == "" {
-		if err := verifyGRPCRelayPayload(result.Response); err != nil {
+		if err := verifyGRPCRelayPayload(result.Response, requireNonEmpty); err != nil {
 			result.Success = false
 			result.Error = fmt.Errorf("gRPC relay verification failed: %w", err)
 		}
@@ -144,7 +200,7 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 
 	// Surface the demo backend's block height decoded from the gRPC response
 	// frame, proving the native gRPC round trip actually reached the backend.
-	if RelayPayloadJSON == "" {
+	if RelayPayloadJSON == "" && RelayGRPCMethod == "" {
 		if height, err := decodeGRPCBlockHeight(result.Response); err == nil {
 			fmt.Printf("Block Height: %d\n", height)
 		}
@@ -159,7 +215,7 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 // fresh per relay (ring sigs are randomized). This matches PATH's production
 // behavior (one sign per incoming request) and guarantees distinct relay bytes
 // per call, so the SMST stores one leaf per request instead of collapsing.
-func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
+func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte, requireNonEmpty bool) error {
 	// Create gRPC connection (reuse across workers)
 	// Parse URL to extract host:port (gRPC doesn't accept http:// prefix)
 	grpcAddr := RelayRelayerURL
@@ -259,7 +315,7 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			// grpc-status 0. Skipped when a custom --payload drove the REST
 			// fallback instead of a native gRPC frame.
 			if RelayPayloadJSON == "" {
-				if err := verifyGRPCRelayPayload(relayResponse); err != nil {
+				if err := verifyGRPCRelayPayload(relayResponse, requireNonEmpty); err != nil {
 					metrics.RecordError(err)
 					logger.Debug().
 						Err(err).
@@ -349,7 +405,7 @@ func invokeGRPCRelay(ctx context.Context, conn *grpc.ClientConn, relayRequest *s
 // shared signature and error checks so `relay grpc` has a real end-to-end
 // assertion that the relayer forwarded to the gRPC backend (not the REST
 // fallback) and got a valid gRPC reply.
-func verifyGRPCRelayPayload(relayResponse *servicetypes.RelayResponse) error {
+func verifyGRPCRelayPayload(relayResponse *servicetypes.RelayResponse, requireNonEmpty bool) error {
 	if relayResponse == nil {
 		return fmt.Errorf("nil relay response")
 	}
@@ -368,10 +424,17 @@ func verifyGRPCRelayPayload(relayResponse *servicetypes.RelayResponse) error {
 		return fmt.Errorf("missing grpc-status header (backend gRPC trailers not folded into response)")
 	}
 	if grpcStatus != "0" {
-		return fmt.Errorf("grpc-status %q is non-zero (gRPC call failed)", grpcStatus)
+		// grpc-message carries the backend's own explanation. The relayer folds
+		// the backend trailers into the response headers, so it is already here;
+		// printing only the numeric status throws away the one line that says
+		// which method or field was wrong.
+		if msg, found := lookupGRPCHeader(poktResp.Header, "Grpc-Message"); found && msg != "" {
+			return fmt.Errorf("grpc-status %q is non-zero (gRPC call failed): %s", grpcStatus, msg)
+		}
+		return fmt.Errorf("grpc-status %q is non-zero (gRPC call failed, backend sent no grpc-message)", grpcStatus)
 	}
 
-	if err := validateGRPCFrame(poktResp.BodyBz); err != nil {
+	if err := validateGRPCFrame(poktResp.BodyBz, requireNonEmpty); err != nil {
 		return err
 	}
 
@@ -382,7 +445,13 @@ func verifyGRPCRelayPayload(relayResponse *servicetypes.RelayResponse) error {
 // length-prefixed message frame carrying a non-empty message. GetBlockHeight
 // always encodes height>0, so an empty message means the backend answered
 // nothing.
-func validateGRPCFrame(bodyBz []byte) error {
+// validateGRPCFrame checks the reply is a well-formed gRPC frame. requireNonEmpty
+// says whether an empty message is a failure: it is for the demo method, whose
+// response always carries fields, and it is not for an operator-chosen method,
+// whose reply may legitimately be empty. The caller decides once and passes it
+// down -- deriving it here by comparing the method string would turn a stale
+// constant into a silent downgrade of this check.
+func validateGRPCFrame(bodyBz []byte, requireNonEmpty bool) error {
 	if len(bodyBz) < grpcFramePrefixLen {
 		return fmt.Errorf("gRPC frame too short: %d bytes (need at least %d)", len(bodyBz), grpcFramePrefixLen)
 	}
@@ -393,7 +462,7 @@ func validateGRPCFrame(bodyBz []byte) error {
 	if int(msgLen) != len(bodyBz)-grpcFramePrefixLen {
 		return fmt.Errorf("gRPC frame length %d does not match message size %d", msgLen, len(bodyBz)-grpcFramePrefixLen)
 	}
-	if msgLen == 0 {
+	if msgLen == 0 && requireNonEmpty {
 		return fmt.Errorf("gRPC frame carries an empty message")
 	}
 	return nil
@@ -421,7 +490,7 @@ func decodeGRPCBlockHeight(relayResponse *servicetypes.RelayResponse) (uint64, e
 	if err != nil {
 		return 0, fmt.Errorf("deserialize POKTHTTPResponse: %w", err)
 	}
-	if err := validateGRPCFrame(poktResp.BodyBz); err != nil {
+	if err := validateGRPCFrame(poktResp.BodyBz, true); err != nil {
 		return 0, err
 	}
 
