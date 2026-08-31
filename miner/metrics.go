@@ -2,7 +2,6 @@ package miner
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	"github.com/alitto/pond/v2"
@@ -42,7 +41,10 @@ var (
 			Name:      "relays_added_to_smst_total",
 			Help:      "SMST UpdateTree successes (NOT unique leaves — see claim_num_leaves for billable count)",
 		},
-		[]string{"supplier", "service_id", "session_id"},
+		// session_id deliberately excluded: it is an unbounded value on a
+		// Counter (never DeleteLabelValues'd) → TSDB OOM. Per-session detail
+		// lives in logs and the claim_num_leaves gauges (which DO clean up).
+		[]string{"supplier", "service_id"},
 	)
 
 	// claimNumLeaves is the number of distinct SMST leaves in the claim
@@ -97,7 +99,8 @@ var (
 			Name:      "relays_failed_smst_total",
 			Help:      "Total number of relays that failed to add to SMST tree",
 		},
-		[]string{"supplier", "service_id", "session_id", "reason"},
+		// session_id excluded (unbounded on a Counter); reason is bounded.
+		[]string{"supplier", "service_id", "reason"},
 	)
 
 	// Relay consumption metrics
@@ -306,29 +309,6 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
-	// ====== SERVICE FACTOR METRICS ======
-	// These metrics track claim ceiling events when claims exceed configured limits
-
-	claimCeilingExceededTotal = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "claim_ceiling_exceeded_total",
-			Help:      "Total number of claims that exceeded the configured ceiling (potential unpaid work)",
-		},
-		[]string{"supplier", "service_id"},
-	)
-
-	claimCeilingExceededUpokt = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "claim_ceiling_exceeded_upokt",
-			Help:      "Total uPOKT claimed above the configured ceiling (potential unpaid amount)",
-		},
-		[]string{"supplier", "service_id"},
-	)
-
 	// claimsSkippedTotal tracks claim submissions that were intentionally
 	// dropped before going to the chain. reason values (extend as new skip
 	// paths land):
@@ -344,17 +324,6 @@ var (
 			Help:      "Claims intentionally not submitted. reason carries the cause (e.g. unprofitable, zero_relays).",
 		},
 		[]string{"supplier", "service_id", "reason"},
-	)
-
-	// Legacy metric for backward compatibility (deprecated - use compute_units_proved_total)
-	computeUnitsSettledTotal = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "compute_units_settled_total",
-			Help:      "DEPRECATED: Use compute_units_proved_total instead. Total compute units settled (proven) across all sessions",
-		},
-		[]string{"supplier", "service_id"},
 	)
 
 	// ====== ON-CHAIN SETTLEMENT TRACKING METRICS ======
@@ -475,47 +444,50 @@ var (
 	)
 
 	// Settlement monitor operational metrics
-	blockResultsRetriesTotal = observability.MinerFactory.NewCounterVec(
+	// height deliberately excluded: it is monotonic (~1/block) → a new
+	// series forever on a Counter → TSDB OOM. The retried height is logged
+	// at the call site (settlement_monitor) for incident diagnosis.
+	blockResultsRetriesTotal = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "block_results_retries_total",
 			Help:      "Total number of block_results query retries due to ABCI indexing delays",
 		},
-		[]string{"height"},
 	)
 
 	// Deduplication metrics. The deduplicator only runs on the reclaim path
 	// (XAUTOCLAIM redelivery), so hit volume is expected to be near-zero in
 	// normal operation and non-zero only after consumer crashes.
-	dedupRedisCacheHits = observability.MinerFactory.NewCounterVec(
+	// session_id deliberately excluded from all dedup counters: it is an
+	// unbounded value on Counters (never DeleteLabelValues'd) and
+	// dedupMisses/dedupMarked fire on every new relay (hot path) → TSDB OOM.
+	// Aggregate rates are the actionable signal; per-session goes to logs.
+	dedupRedisCacheHits = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "dedup_redis_cache_hits_total",
 			Help:      "Total number of reclaimed relays detected as already-processed (prevented double-count)",
 		},
-		[]string{"session_id"},
 	)
 
-	dedupMisses = observability.MinerFactory.NewCounterVec(
+	dedupMisses = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "dedup_misses_total",
 			Help:      "Total number of deduplication cache misses (new relays)",
 		},
-		[]string{"session_id"},
 	)
 
-	dedupMarked = observability.MinerFactory.NewCounterVec(
+	dedupMarked = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "dedup_marked_total",
 			Help:      "Total number of relays marked as processed",
 		},
-		[]string{"session_id"},
 	)
 
 	dedupErrors = observability.MinerFactory.NewCounterVec(
@@ -525,59 +497,19 @@ var (
 			Name:      "dedup_errors_total",
 			Help:      "Total number of deduplication errors",
 		},
-		[]string{"session_id", "operation"},
+		// session_id excluded; operation is bounded (redis_check/redis_mark/redis_batch_mark).
+		[]string{"operation"},
 	)
 
-	// Session tree metrics (reserved for future instrumentation)
-	_ = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_trees_active",
-			Help:      "Number of active session trees",
-		},
-		[]string{"supplier"},
-	)
-
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_tree_updates_total",
-			Help:      "Total number of session tree updates",
-		},
-		[]string{"supplier", "session_id"},
-	)
-
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_tree_flushes_total",
-			Help:      "Total number of session tree flushes",
-		},
-		[]string{"supplier"},
-	)
-
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "session_tree_errors_total",
-			Help:      "Total number of session tree errors",
-		},
-		[]string{"supplier", "operation"},
-	)
-
-	// Claim and proof metrics (claimsCreated reserved for future instrumentation)
-	_ = observability.MinerFactory.NewCounterVec(
+	// Claim and proof metrics
+	claimsCreated = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "claims_created_total",
-			Help:      "Total number of claims created",
+			Help:      "Total claims built into a submission batch (attempts; see claims_submitted_total / claim_errors_total)",
 		},
-		[]string{"supplier"},
+		[]string{"supplier", "service_id"},
 	)
 
 	claimsSubmitted = observability.MinerFactory.NewCounterVec(
@@ -600,15 +532,14 @@ var (
 		[]string{"supplier", "reason"},
 	)
 
-	// proofsCreated reserved for future instrumentation
-	_ = observability.MinerFactory.NewCounterVec(
+	proofsCreated = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "proofs_created_total",
-			Help:      "Total number of proofs created",
+			Help:      "Total proofs built into a submission batch (attempts; see proofs_submitted_total)",
 		},
-		[]string{"supplier"},
+		[]string{"supplier", "service_id"},
 	)
 
 	proofsSubmitted = observability.MinerFactory.NewCounterVec(
@@ -754,27 +685,6 @@ var (
 		[]string{"supplier", "service_id", "result"},
 	)
 
-	// Redis consumer metrics (reserved for future instrumentation)
-	_ = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "consumer_lag",
-			Help:      "Number of messages pending in the consumer group",
-		},
-		[]string{"supplier"},
-	)
-
-	_ = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "messages_acknowledged_total",
-			Help:      "Total number of Redis messages acknowledged",
-		},
-		[]string{"supplier"},
-	)
-
 	// Block height
 	currentBlockHeight = observability.MinerFactory.NewGauge(
 		prometheus.GaugeOpts{
@@ -857,48 +767,6 @@ var (
 			Name:      "fullnode_slow_blocks_consecutive",
 			Help:      "Number of consecutive slow blocks currently detected (resets when block time normalizes)",
 		},
-	)
-
-	// Leader election metrics (legacy - from old per-supplier leader elector)
-	// These are kept for backwards compatibility with miner/leader.go but not actively used
-	leaderStatus = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "leader_status_legacy",
-			Help:      "LEGACY: Whether this instance is the leader (1=leader, 0=standby) - per supplier",
-		},
-		[]string{"supplier", "instance"},
-	)
-
-	leaderAcquisitions = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "leader_acquisitions_total",
-			Help:      "LEGACY: Total number of times this instance acquired leadership",
-		},
-		[]string{"supplier"},
-	)
-
-	leaderLosses = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "leader_losses_total_legacy",
-			Help:      "LEGACY: Total number of times this instance lost leadership",
-		},
-		[]string{"supplier"},
-	)
-
-	leaderHeartbeats = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "leader_heartbeats_total",
-			Help:      "Total number of successful leader heartbeats",
-		},
-		[]string{"supplier"},
 	)
 
 	// Session store metrics
@@ -1263,8 +1131,8 @@ func RecordRelayConsumedFromStream(supplier, serviceID string) {
 }
 
 // RecordRelayAddedToSMST records a relay successfully added to SMST tree.
-func RecordRelayAddedToSMST(supplier, serviceID, sessionID string) {
-	relaysAddedToSMST.WithLabelValues(supplier, serviceID, sessionID).Inc()
+func RecordRelayAddedToSMST(supplier, serviceID string) {
+	relaysAddedToSMST.WithLabelValues(supplier, serviceID).Inc()
 }
 
 // RecordClaimLeafStats pins the two gauges that let operators compare the
@@ -1288,8 +1156,8 @@ func ClearClaimLeafStats(supplier, serviceID, sessionID string) {
 }
 
 // RecordRelayFailedSMST records a relay that failed to add to SMST tree.
-func RecordRelayFailedSMST(supplier, serviceID, sessionID, reason string) {
-	relaysFailedSMST.WithLabelValues(supplier, serviceID, sessionID, reason).Inc()
+func RecordRelayFailedSMST(supplier, serviceID, reason string) {
+	relaysFailedSMST.WithLabelValues(supplier, serviceID, reason).Inc()
 }
 
 // RecordRelayRejected records a relay that was rejected.
@@ -1407,7 +1275,6 @@ func recordRevenueProved(supplier, serviceID string, computeUnits uint64, relayC
 
 	// Compute Units view (in pPOKT from service config)
 	computeUnitsProvedTotal.WithLabelValues(supplier, serviceID).Add(cu)
-	computeUnitsSettledTotal.WithLabelValues(supplier, serviceID).Add(cu) // Legacy metric
 
 	// uPOKT view (convert pPOKT to uPOKT by dividing by 1e6)
 	upoktProvedTotal.WithLabelValues(supplier, serviceID).Add(cu / 1e6)
@@ -1430,6 +1297,16 @@ func RecordRevenueProved(supplier, serviceID string, computeUnits uint64, relayC
 // Uses same metrics as explicit proof since both are successful outcomes.
 func RecordRevenueProbabilisticProved(supplier, serviceID string, computeUnits uint64, relayCount int64) {
 	recordRevenueProved(supplier, serviceID, computeUnits, relayCount)
+}
+
+// RecordClaimCreated records a claim built into a submission batch (pre-submit attempt).
+func RecordClaimCreated(supplier, serviceID string) {
+	claimsCreated.WithLabelValues(supplier, serviceID).Inc()
+}
+
+// RecordProofCreated records a proof built into a submission batch (pre-submit attempt).
+func RecordProofCreated(supplier, serviceID string) {
+	proofsCreated.WithLabelValues(supplier, serviceID).Inc()
 }
 
 // RecordClaimSubmitted increments the claims submitted counter.
@@ -1495,13 +1372,6 @@ func RecordProofSkipped(supplier, serviceID, reason string) {
 // (unprofitable, dedup hit, zero-work, etc).
 func RecordClaimSkipped(supplier, serviceID, reason string) {
 	claimsSkippedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
-}
-
-// RecordClaimCeilingExceeded records when a claim exceeds the configured ceiling.
-// excessUpokt is the amount of uPOKT claimed above the ceiling.
-func RecordClaimCeilingExceeded(supplier, serviceID string, excessUpokt int64) {
-	claimCeilingExceededTotal.WithLabelValues(supplier, serviceID).Inc()
-	claimCeilingExceededUpokt.WithLabelValues(supplier, serviceID).Add(float64(excessUpokt))
 }
 
 // ====== ON-CHAIN SETTLEMENT TRACKING ======
@@ -1583,9 +1453,11 @@ func RecordClaimDiscarded(supplier, serviceID, _ string, _, _ int64) {
 }
 
 // RecordBlockResultsRetry records a retry attempt for block_results query.
-func RecordBlockResultsRetry(height int64, _ int) {
+// The retried height/attempt are logged by the caller; not metric labels
+// (height is unbounded, see blockResultsRetriesTotal).
+func RecordBlockResultsRetry() {
 	// Track retry attempts (helps identify ABCI indexing lag)
-	blockResultsRetriesTotal.WithLabelValues(fmt.Sprintf("%d", height)).Inc()
+	blockResultsRetriesTotal.Inc()
 }
 
 // ====== WORKER POOL METRICS HELPERS ======

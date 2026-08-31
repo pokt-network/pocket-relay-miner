@@ -55,17 +55,16 @@ const (
 
 	// FailClosed rejects relays when Redis is unavailable (safer, lower availability).
 	FailClosed FailBehavior = "closed"
-
-	// Redis key suffixes (combined with RedisKeyPrefix config to form full keys)
-	meterKeySuffix      = "meter"         // Session metering data
-	meterCleanupChannel = "meter:cleanup" // Pub/sub channel for cleanup signals
 )
 
 // RelayMeterConfig contains configuration for the relay meter.
+//
+// There is deliberately no key-prefix setting here. Meter keys and the cleanup
+// channel are built by the shared KeyBuilder, so the relayer that writes them
+// and the miner and CLI that read them derive the same strings from one
+// namespace config. A second prefix owned by this component is what made
+// `redis meter --session` read a key nothing writes.
 type RelayMeterConfig struct {
-	// RedisKeyPrefix is the prefix for Redis keys.
-	RedisKeyPrefix string
-
 	// FailBehavior determines behavior when Redis is unavailable.
 	// "open" = allow relays (risk over-servicing)
 	// "closed" = reject relays (safer)
@@ -79,9 +78,8 @@ type RelayMeterConfig struct {
 // DefaultRelayMeterConfig returns sensible defaults.
 func DefaultRelayMeterConfig() RelayMeterConfig {
 	return RelayMeterConfig{
-		RedisKeyPrefix: "ha",
-		FailBehavior:   FailOpen,      // Default to availability
-		CacheTTL:       2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
+		FailBehavior: FailOpen,      // Default to availability
+		CacheTTL:     2 * time.Hour, // Covers ~15 session lifecycles at 30s blocks
 	}
 }
 
@@ -180,9 +178,6 @@ func NewRelayMeter(
 	serviceFactorProvider ServiceFactorProvider,
 	config RelayMeterConfig,
 ) *RelayMeter {
-	if config.RedisKeyPrefix == "" {
-		config.RedisKeyPrefix = "ha"
-	}
 	if config.FailBehavior == "" {
 		config.FailBehavior = FailOpen
 	}
@@ -468,7 +463,7 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 // The payload format is "sessionID|supplierAddress"; subscribers parse on
 // the '|' separator.
 func (m *RelayMeter) PublishCleanupSignal(ctx context.Context, sessionID, supplierAddress string) error {
-	channel := fmt.Sprintf("%s:%s", m.config.RedisKeyPrefix, meterCleanupChannel)
+	channel := m.redisClient.KB().MeterCleanupChannel()
 	payload := sessionID + "|" + supplierAddress
 	return m.redisClient.Publish(ctx, channel, payload).Err()
 }
@@ -984,7 +979,7 @@ func (m *RelayMeter) handleRedisError(operation string) (allowed bool, err error
 func (m *RelayMeter) cleanupSubscriber(ctx context.Context) {
 	defer m.wg.Done()
 
-	channel := fmt.Sprintf("%s:%s", m.config.RedisKeyPrefix, meterCleanupChannel)
+	channel := m.redisClient.KB().MeterCleanupChannel()
 	pubsub := m.redisClient.Subscribe(ctx, channel)
 	defer func() { _ = pubsub.Close() }()
 
@@ -1112,11 +1107,11 @@ func (m *RelayMeter) Close() error {
 // schema keyed only by sessionID, which caused every supplier after the
 // first to starve because they shared one consumed counter.
 func (m *RelayMeter) metaKey(sessionID, supplierAddress string) string {
-	return fmt.Sprintf("%s:%s:%s:%s:meta", m.config.RedisKeyPrefix, meterKeySuffix, sessionID, supplierAddress)
+	return m.redisClient.KB().MeterMetaKey(sessionID, supplierAddress)
 }
 
 func (m *RelayMeter) consumedKey(sessionID, supplierAddress string) string {
-	return fmt.Sprintf("%s:%s:%s:%s:consumed", m.config.RedisKeyPrefix, meterKeySuffix, sessionID, supplierAddress)
+	return m.redisClient.KB().MeterConsumedKey(sessionID, supplierAddress)
 }
 
 // localCacheKey joins sessionID and supplierAddress with a separator that

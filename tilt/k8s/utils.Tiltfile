@@ -62,11 +62,67 @@ def apply_k8s_overrides_miner(config, redis_host):
     config["pprof"]["enabled"] = True
     config["pprof"]["addr"] = "0.0.0.0:6065"
 
+    # Localnet supplier-lease override. The example default (90s) is sized for
+    # production fleets; on the localnet, whose claim window is 100s (10 blocks
+    # of 10s, mainnet-proportional), a crashed miner's lease must expire and be
+    # taken over well inside that window or the dead pod's relays miss their
+    # claim. 30s keeps crash takeover at ~30-90s. Rollouts are unaffected
+    # (graceful shutdown releases leases immediately).
+    if "supplier_claiming" not in config:
+        config["supplier_claiming"] = {}
+    config["supplier_claiming"]["claim_ttl_seconds"] = 30
+
     return config
 
 def apply_k8s_overrides_relayer(config, redis_host):
     """Apply k8s-specific overrides to relayer config (service names, etc.)"""
     config = dict(config)
+
+    # Mode-matrix services: every develop-X service gets a sibling with the
+    # OPPOSITE validation_mode, staked in genesis with its own application, so
+    # one gate run measures each (rpc_type, validation_mode) cell. The BASE
+    # mode is forced explicitly too, so the matrix cannot drift with the
+    # example config (it shipped every service as eager, which silently made
+    # earlier "optimistic" coverage a lie). A fresh tilt_config.yaml
+    # regenerated from a clean checkout yields exactly this truth table.
+    # NOTE: gRPC and WebSocket currently ignore validation_mode (issue #24);
+    # their -optimistic cells behave eager until that lands, and exist so the
+    # matrix is already wired to measure it when it does.
+    mode_matrix = {
+        "develop-http": ("optimistic", "develop-http-eager", "eager"),
+        "develop-websocket": ("eager", "develop-websocket-optimistic", "optimistic"),
+        "develop-grpc": ("eager", "develop-grpc-optimistic", "optimistic"),
+        "develop-stream": ("eager", "develop-stream-optimistic", "optimistic"),
+        "develop-cometbft": ("eager", "develop-cometbft-optimistic", "optimistic"),
+    }
+    services = config.get("services", {})
+    for base, triple in mode_matrix.items():
+        base_mode = triple[0]
+        clone_id = triple[1]
+        clone_mode = triple[2]
+        if base in services:
+            services[base] = dict(services[base])
+            services[base]["validation_mode"] = base_mode
+            if clone_id in services:
+                # Force the CLONE's mode too. A clone entry that survived in an
+                # operator's generated tilt_config.yaml (edited by hand, or
+                # stale after the matrix changed) would otherwise run whatever
+                # mode it stored -- while the live gate trusts the service
+                # NAME for its per-mode verdict, turning a green "eager"
+                # column into unexercised coverage. Bases and clones get the
+                # same treatment: the mode-matrix table above is the only
+                # source of truth.
+                stored = services[clone_id].get("validation_mode")
+                if stored != clone_mode:
+                    print("mode-matrix: forcing {}.validation_mode {!r} -> {!r} (stored value ignored)".format(
+                        clone_id, stored, clone_mode))
+                services[clone_id] = dict(services[clone_id])
+                services[clone_id]["validation_mode"] = clone_mode
+            else:
+                clone = dict(services[base])
+                clone["validation_mode"] = clone_mode
+                services[clone_id] = clone
+    config["services"] = services
 
     # Override Redis URL with k8s service name
     if "redis" not in config:

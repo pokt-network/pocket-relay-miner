@@ -71,10 +71,8 @@ type RedisSharedParamCache struct {
 	keys CacheKeys
 
 	// Lifecycle
-	mu       sync.RWMutex
-	closed   bool
-	cancelFn context.CancelFunc
-	wg       sync.WaitGroup
+	mu     sync.RWMutex
+	closed bool
 }
 
 // NewRedisSharedParamCache creates a new SharedParamCache backed by Redis.
@@ -108,51 +106,21 @@ func NewRedisSharedParamCache(
 	}
 }
 
-// Start begins the cache's background processes.
-func (c *RedisSharedParamCache) Start(ctx context.Context) error {
+// Start marks the cache as running. It spawns no background processes:
+// per-height entries are immutable on chain and age out via the L1 TTL
+// floor. A height-targeted invalidation subscriber used to run here, but its
+// only publisher was removed — keeping the subscriber cost every replica a
+// dedicated pub/sub connection on a channel nothing could publish to, while
+// implying a working invalidation mechanism that did not exist.
+func (c *RedisSharedParamCache) Start(_ context.Context) error {
 	c.mu.Lock()
+	defer c.mu.Unlock()
 	if c.closed {
-		c.mu.Unlock()
 		return fmt.Errorf("cache is closed")
 	}
 
-	ctx, c.cancelFn = context.WithCancel(ctx)
-	c.mu.Unlock()
-
-	// Subscribe to cache invalidation events
-	c.wg.Add(1)
-	go c.subscribeToInvalidations(ctx)
-
 	c.logger.Info().Msg("shared param cache started")
 	return nil
-}
-
-// subscribeToInvalidations listens for cache invalidation events from other instances.
-func (c *RedisSharedParamCache) subscribeToInvalidations(ctx context.Context) {
-	defer c.wg.Done()
-
-	channel := c.redisClient.KB().SharedParamsHeightInvalidateChannel()
-	pubsub := c.redisClient.Subscribe(ctx, channel)
-	defer func() { _ = pubsub.Close() }()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case msg := <-pubsub.Channel():
-			// Parse the height from the message
-			var height int64
-			if _, err := fmt.Sscanf(msg.Payload, "%d", &height); err != nil {
-				c.logger.Warn().Err(err).Str("payload", msg.Payload).Msg("invalid invalidation message")
-				continue
-			}
-
-			// Clear local cache for this height
-			key := c.keys.SharedParams(height)
-			c.localCache.Delete(key)
-			cacheInvalidations.WithLabelValues("shared_params", "pubsub").Inc()
-		}
-	}
 }
 
 // GetSharedParams returns the shared module parameters for the given block height.
@@ -288,35 +256,6 @@ func (c *RedisSharedParamCache) GetLatestSharedParams(ctx context.Context) (*sha
 	return c.GetSharedParams(ctx, latestBlock.Height())
 }
 
-// InvalidateSharedParams invalidates the cached shared params for a specific height.
-func (c *RedisSharedParamCache) InvalidateSharedParams(ctx context.Context, height int64) error {
-	c.mu.RLock()
-	if c.closed {
-		c.mu.RUnlock()
-		return fmt.Errorf("cache is closed")
-	}
-	c.mu.RUnlock()
-
-	key := c.keys.SharedParams(height)
-
-	// Clear L1
-	c.localCache.Delete(key)
-
-	// Clear L2
-	if err := c.redisClient.Del(ctx, key).Err(); err != nil {
-		return fmt.Errorf("failed to delete from Redis: %w", err)
-	}
-
-	// Notify other instances
-	channel := c.redisClient.KB().SharedParamsHeightInvalidateChannel()
-	if err := c.redisClient.Publish(ctx, channel, fmt.Sprintf("%d", height)).Err(); err != nil {
-		c.logger.Warn().Err(err).Msg("failed to publish invalidation")
-	}
-
-	cacheInvalidations.WithLabelValues("shared_params", "manual").Inc()
-	return nil
-}
-
 // WarmupFromRedis populates L1 cache from Redis for the latest block height.
 // Since shared params are indexed by height, we warm up the most recent params
 // which are most likely to be queried on startup.
@@ -363,12 +302,6 @@ func (c *RedisSharedParamCache) Close() error {
 	}
 
 	c.closed = true
-
-	if c.cancelFn != nil {
-		c.cancelFn()
-	}
-
-	c.wg.Wait()
 
 	c.logger.Info().Msg("shared param cache closed")
 	return nil

@@ -124,7 +124,7 @@ func TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges(t *testi
 		&fakeSharedParamCache{params: sharedParams},
 		nil, // serviceCache (unused in getOrCreateSessionMeter path)
 		nil, // serviceFactorProvider → baseLimit path
-		RelayMeterConfig{RedisKeyPrefix: "ha"},
+		RelayMeterConfig{},
 	)
 	require.NoError(t, meter.Start(ctx))
 	defer func() { _ = meter.Close() }()

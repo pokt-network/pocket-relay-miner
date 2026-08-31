@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -204,37 +203,16 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 	// Create metrics collector
 	metrics := NewRelayMetrics()
 
-	// Worker pool pattern with semaphore
-	semaphore := make(chan struct{}, RelayConcurrency)
-	var wg sync.WaitGroup
-
-	// Create rate limiter if RPS targeting is enabled
-	rateLimiter := NewRateLimiter(RelayRPS)
-	if rateLimiter != nil {
-		defer rateLimiter.Stop()
-	}
-
-	logger.Info().
-		Int("count", RelayCount).
-		Int("concurrency", RelayConcurrency).
-		Int("connection_pool_size", len(poolSuppliers)).
-		Int("rps", RelayRPS).
-		Msg("starting WebSocket load test with connection pool")
-
-	metrics.Start()
-
-	// Spawn workers
-	for i := 0; i < RelayCount; i++ {
-		// Wait for rate limiter if enabled (pace request launches)
-		WaitForRateLimit(rateLimiter)
-
-		wg.Add(1)
-		semaphore <- struct{}{} // Acquire slot
-
-		go func(reqNum int) {
-			defer wg.Done()
-			defer func() { <-semaphore }() // Release slot
-
+	runLoadTest(RelayCount, RelayConcurrency, RelayRPS, metrics,
+		func() {
+			logger.Info().
+				Int("count", RelayCount).
+				Int("concurrency", RelayConcurrency).
+				Int("connection_pool_size", len(poolSuppliers)).
+				Int("rps", RelayRPS).
+				Msg("starting WebSocket load test with connection pool")
+		},
+		func(reqNum int) {
 			// Pop a connection from the pool (blocking until one is available).
 			// The connection is pinned to a supplier at its handshake, so this
 			// worker signs and verifies against that same supplier.
@@ -299,15 +277,8 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 				Int("request_num", reqNum).
 				Float64("latency_ms", latencyMs).
 				Msg("WebSocket relay request succeeded")
-		}(i)
-	}
-
-	// Wait for all workers to finish
-	wg.Wait()
-	metrics.End()
-
-	// Display results
-	fmt.Println(metrics.GetSummary())
+		},
+	)
 
 	return nil
 }
@@ -378,8 +349,6 @@ func connectWebSocket(relayerURL, serviceID, supplierAddr string) (*websocket.Co
 
 	return conn, nil
 }
-
-// sendWebSocketRelay sends a relay request via WebSocket and returns the response.
 
 // sendWebSocketRelayOnConnection sends a relay request via an existing WebSocket connection.
 // This is used by the load test to reuse connections from the connection pool.

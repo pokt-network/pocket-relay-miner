@@ -3,12 +3,11 @@
 This is the zero-to-running guide for the local test environment. Tilt spins up
 a full Pocket Network localnet in a **kind** Kubernetes cluster (context
 `kind-kind`): a validator, Redis, the relayer + miner under test, demo backends,
-a PATH gateway, and an observability stack. Once it is up you send relays two
-ways — through the PATH gateway ([PATH_HEY.md](PATH_HEY.md)) or straight at a
-relayer with the CLI ([DIRECT_CLI.md](DIRECT_CLI.md)) — and run the HA/chaos
-suite against it.
+a PATH gateway, and an observability stack. Once it is up you send relays with
+the `relay` CLI straight at a relayer ([DIRECT_CLI.md](DIRECT_CLI.md)) and run
+the HA/chaos suite against it.
 
-This doc is one of three testing guides; the index is
+This doc is one of two testing guides; the index is
 [README.md](README.md).
 
 ## 1. Bring up the localnet
@@ -238,22 +237,22 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats
 pocket-relay-miner redis submissions --supplier pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj
 ```
 
-## 7. Sending relays: the two paths
+## 7. Sending relays
 
-Once the smoke test passes, drive real traffic one of two ways:
+Once the smoke test passes, drive real traffic with the CLI:
+`pocket-relay-miner relay <mode> --localnet` talks straight to a relayer replica
+on `:8180`, verifies the supplier signature and the backend's own error field,
+and reports honest per-relay results — for single relays and for sustained load
+alike. See [DIRECT_CLI.md](DIRECT_CLI.md).
 
-- **Through PATH with `hey`** — realistic gateway routing and throughput /
-  lifecycle testing. See [PATH_HEY.md](PATH_HEY.md). PATH masks relayer `503`s,
-  so use this for load, not error-path correctness.
-- **Direct via the CLI** — `pocket-relay-miner relay <mode> --localnet` talks
-  straight to a relayer replica on `:8180`, verifies the supplier signature and
-  the backend's own error field, and reports honest per-relay results. This is
-  the tool for per-protocol correctness. See [DIRECT_CLI.md](DIRECT_CLI.md).
+The PATH gateway runs in the localnet so the production routing path exists, but
+do **not** measure relays through it: PATH answers a relayer `503` with `200`
+and an empty body, so a gateway-side load tool reports success for relays that
+were never mined.
 
 ## See also
 
 - [README.md](README.md) — testing docs index.
-- [PATH_HEY.md](PATH_HEY.md) — load testing through the PATH gateway.
 - [DIRECT_CLI.md](DIRECT_CLI.md) — direct relay testing via the CLI.
 - [../CLAIM_PROOF_LIFECYCLE.md](../CLAIM_PROOF_LIFECYCLE.md) — claim/proof windows.
 - [../CLAIM_LEAF_MODEL.md](../CLAIM_LEAF_MODEL.md) — the SMST leaf / relay-count model.

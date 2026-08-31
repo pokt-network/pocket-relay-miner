@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"strings"
+	"sync"
 	"time"
 
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
@@ -281,127 +281,62 @@ func DisplayDiagnosticResult(client *relay_client.RelayClient, result *RelayResu
 	fmt.Printf("\n")
 }
 
-// LoadTestStats tracks statistics for load testing.
-type LoadTestStats struct {
-	TotalRequests    int64
-	SuccessCount     int64
-	FailureCount     int64
-	ValidationFailed int64 // Failed signature verification
-	ErrorResponses   int64 // RelayResponse contained error
-	NetworkErrors    int64 // Network/transport errors
+// runLoadTest runs the shared worker-pool load-test scaffold used by the HTTP,
+// gRPC, and WebSocket load tests. It owns the bounded worker pool (semaphore +
+// WaitGroup), optional RPS pacing, the metrics lifecycle, and result output.
+//
+// Protocol-specific concerns (connection setup/teardown, building/sending/
+// verifying a single relay, and per-protocol log fields) are provided by the
+// caller:
+//   - startLog: invoked once, just before workers spawn, to emit the
+//     protocol-specific "starting ..." log line.
+//   - workerFn: invoked once per request inside an acquired worker slot; it is
+//     responsible for sending one relay and recording the outcome on metrics.
+//
+// Workers run with at most `concurrency` in flight. When `rps > 0`, request
+// launches are paced by a ticker so the aggregate launch rate approaches rps.
+func runLoadTest(
+	count, concurrency, rps int,
+	metrics *RelayMetrics,
+	startLog func(),
+	workerFn func(reqNum int),
+) {
+	// Worker pool pattern with semaphore
+	semaphore := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
 
-	TotalLatency   time.Duration
-	MinLatency     time.Duration
-	MaxLatency     time.Duration
-	LatencyBuckets map[string]int64 // e.g., "0-10ms", "10-50ms", etc.
-}
-
-// NewLoadTestStats creates a new load test statistics tracker.
-func NewLoadTestStats() *LoadTestStats {
-	return &LoadTestStats{
-		MinLatency: time.Hour, // Start with very high value
-		LatencyBuckets: map[string]int64{
-			"0-10ms":     0,
-			"10-50ms":    0,
-			"50-100ms":   0,
-			"100-500ms":  0,
-			"500-1000ms": 0,
-			"1000ms+":    0,
-		},
-	}
-}
-
-// RecordResult records a relay result in the statistics.
-func (s *LoadTestStats) RecordResult(result *RelayResult) {
-	s.TotalRequests++
-
-	if result.Success {
-		s.SuccessCount++
-	} else {
-		s.FailureCount++
-
-		// Categorize failure type
-		if result.Error != nil {
-			errMsg := result.Error.Error()
-			if contains(errMsg, "signature verification") {
-				s.ValidationFailed++
-			} else if contains(errMsg, "relay response contains error") || contains(errMsg, "JSON-RPC error") {
-				s.ErrorResponses++
-			} else {
-				s.NetworkErrors++
-			}
-		}
+	// Create rate limiter if RPS targeting is enabled
+	rateLimiter := NewRateLimiter(rps)
+	if rateLimiter != nil {
+		defer rateLimiter.Stop()
 	}
 
-	// Track latency
-	latency := result.TotalDuration
-	s.TotalLatency += latency
+	startLog()
 
-	if latency < s.MinLatency {
-		s.MinLatency = latency
-	}
-	if latency > s.MaxLatency {
-		s.MaxLatency = latency
-	}
+	metrics.Start()
 
-	// Update latency buckets
-	ms := latency.Milliseconds()
-	switch {
-	case ms < 10:
-		s.LatencyBuckets["0-10ms"]++
-	case ms < 50:
-		s.LatencyBuckets["10-50ms"]++
-	case ms < 100:
-		s.LatencyBuckets["50-100ms"]++
-	case ms < 500:
-		s.LatencyBuckets["100-500ms"]++
-	case ms < 1000:
-		s.LatencyBuckets["500-1000ms"]++
-	default:
-		s.LatencyBuckets["1000ms+"]++
-	}
-}
+	// Spawn workers
+	for i := 0; i < count; i++ {
+		// Wait for rate limiter if enabled (pace request launches)
+		WaitForRateLimit(rateLimiter)
 
-// DisplayLoadTestSummary prints a formatted summary of load test results.
-func (s *LoadTestStats) DisplayLoadTestSummary(duration time.Duration) {
-	fmt.Printf("\n=== Load Test Summary ===\n")
-	fmt.Printf("Total Requests: %d\n", s.TotalRequests)
-	fmt.Printf("Successful: %d (%.2f%%)\n", s.SuccessCount, float64(s.SuccessCount)/float64(s.TotalRequests)*100)
-	fmt.Printf("Failed: %d (%.2f%%)\n", s.FailureCount, float64(s.FailureCount)/float64(s.TotalRequests)*100)
+		wg.Add(1)
+		semaphore <- struct{}{} // Acquire slot
 
-	if s.FailureCount > 0 {
-		fmt.Printf("\n=== Failure Breakdown ===\n")
-		fmt.Printf("Validation Failed: %d\n", s.ValidationFailed)
-		fmt.Printf("Error Responses: %d\n", s.ErrorResponses)
-		fmt.Printf("Network Errors: %d\n", s.NetworkErrors)
+		go func(reqNum int) {
+			defer wg.Done()
+			defer func() { <-semaphore }() // Release slot
+
+			workerFn(reqNum)
+		}(i)
 	}
 
-	fmt.Printf("\n=== Latency ===\n")
-	if s.TotalRequests > 0 {
-		avgLatency := s.TotalLatency / time.Duration(s.TotalRequests)
-		fmt.Printf("Min: %v\n", s.MinLatency)
-		fmt.Printf("Avg: %v\n", avgLatency)
-		fmt.Printf("Max: %v\n", s.MaxLatency)
-	}
+	// Wait for all workers to finish
+	wg.Wait()
+	metrics.End()
 
-	fmt.Printf("\n=== Latency Distribution ===\n")
-	for _, bucket := range []string{"0-10ms", "10-50ms", "50-100ms", "100-500ms", "500-1000ms", "1000ms+"} {
-		count := s.LatencyBuckets[bucket]
-		pct := float64(count) / float64(s.TotalRequests) * 100
-		fmt.Printf("%12s: %6d (%.1f%%)\n", bucket, count, pct)
-	}
-
-	fmt.Printf("\n=== Performance ===\n")
-	rps := float64(s.TotalRequests) / duration.Seconds()
-	fmt.Printf("Duration: %v\n", duration)
-	fmt.Printf("Throughput: %.2f RPS\n", rps)
-
-	fmt.Printf("\n")
-}
-
-// contains is a helper function to check if a string contains a substring.
-func contains(s, substr string) bool {
-	return strings.Contains(s, substr)
+	// Display results
+	fmt.Println(metrics.GetSummary())
 }
 
 // NewRateLimiter creates a rate limiter for RPS targeting.
