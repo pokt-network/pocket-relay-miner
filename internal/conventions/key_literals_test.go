@@ -78,6 +78,102 @@ func keySuffixConcats(f *ast.File, fset *token.FileSet) []string {
 	return hits
 }
 
+// prefixPlusSuffixKeys returns positions of fmt.Sprintf calls that assemble a
+// key from a prefix the KeyBuilder produced plus segments of the caller's own.
+//
+// This is the shape the two matchers above cannot see, and it is the one this
+// repository actually produces: the format literal is "%s:%s", so it does not
+// start with the namespace, and there is no ":segment" literal to concatenate.
+// A component is handed the FIRST half of a layout by a KeyBuilder method (or
+// a *KeyPrefix config field fed from one) and assembles the SECOND half itself
+// — and the second half is the one that goes out of sync. That is exactly the
+// meter split: writer five segments, reader three, both "using the KeyBuilder".
+//
+// The rule is therefore not "does a KeyBuilder method appear" but "who builds
+// the suffix". One method per layout, and no caller finishing the job.
+func prefixPlusSuffixKeys(f *ast.File, fset *token.FileSet) []string {
+	// A format made only of %s verbs separated by ':' — "%s:%s", "%s:%s:%s".
+	onlyStringVerbs := func(format string) bool {
+		if !strings.HasPrefix(format, "%s:%s") {
+			return false
+		}
+		for _, part := range strings.Split(format, ":") {
+			if part != "%s" {
+				return false
+			}
+		}
+		return true
+	}
+
+	// The first argument comes from a KeyBuilder method or a *KeyPrefix field.
+	fromKeyBuilder := func(arg ast.Expr) bool {
+		switch a := arg.(type) {
+		case *ast.CallExpr:
+			// x.KB().SomethingPrefix() — the receiver chain contains KB().
+			sel, ok := a.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return false
+			}
+			if !strings.HasSuffix(sel.Sel.Name, "Prefix") {
+				return false
+			}
+			switch recv := sel.X.(type) {
+			case *ast.CallExpr:
+				// x.KB().SomethingPrefix() -- the receiver chain contains KB().
+				innerSel, ok := recv.Fun.(*ast.SelectorExpr)
+				return ok && innerSel.Sel.Name == "KB"
+			case *ast.Ident:
+				// kb.SomethingPrefix(), where kb was STORED first. The repo
+				// already writes `kb := client.KB()` (cmd/redis/cache_all.go),
+				// so requiring the literal .KB() call left a blind spot one
+				// refactor wide: measured 2026-08-28, this shape scored zero
+				// hits. Any identifier will do -- a method whose name ends in
+				// Prefix, called on anything, then interpolated into a key, is
+				// the shape this check exists to police, and the exemption list
+				// is where a legitimate one is written down.
+				return true
+			}
+			return false
+		case *ast.SelectorExpr:
+			// r.config.KeyPrefix, c.keyPrefix, s.config.StreamPrefix.
+			// Any *Prefix field, not only *KeyPrefix: the comment above named
+			// StreamPrefix for a year while the condition could not match it,
+			// and the stream prefix is threaded as a config field through four
+			// production sites. Measured 2026-08-28: the shape scored zero hits.
+			name := a.Sel.Name
+			return strings.HasSuffix(name, "Prefix") || strings.HasSuffix(name, "prefix")
+		}
+		return false
+	}
+
+	var hits []string
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || len(call.Args) < 2 {
+			return true
+		}
+		sel, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "Sprintf" {
+			return true
+		}
+		if pkg, ok := sel.X.(*ast.Ident); !ok || pkg.Name != "fmt" {
+			return true
+		}
+		lit, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || lit.Kind != token.STRING {
+			return true
+		}
+		if !onlyStringVerbs(strings.Trim(lit.Value, "`\"")) {
+			return true
+		}
+		if fromKeyBuilder(call.Args[1]) {
+			hits = append(hits, fset.Position(call.Pos()).String())
+		}
+		return true
+	})
+	return hits
+}
+
 // keyLiteralExemptions are files allowed to fail these matchers, each with a
 // written reason. Adding a file here is a deliberate, reviewed edit.
 var keyLiteralExemptions = map[string]string{
@@ -113,6 +209,9 @@ func TestNoHandBuiltRedisKeysOutsideTheKeyBuilder(t *testing.T) {
 		for _, pos := range keySuffixConcats(f, fset) {
 			violations = append(violations, fmt.Sprintf("%s (prefix + \":suffix\" concat)", pos))
 		}
+		for _, pos := range prefixPlusSuffixKeys(f, fset) {
+			violations = append(violations, fmt.Sprintf("%s (KeyBuilder prefix + hand-built suffix)", pos))
+		}
 	}
 	if len(violations) > 0 {
 		t.Fatalf("hand-built Redis keys outside transport/redis (add a KeyBuilder method instead):\n%s",
@@ -120,7 +219,7 @@ func TestNoHandBuiltRedisKeysOutsideTheKeyBuilder(t *testing.T) {
 	}
 }
 
-// TestKeyLiteralMatchersCatchHostileShapes proves both matchers can fail and
+// TestKeyLiteralMatchersCatchHostileShapes proves the matchers can fail and
 // refuse near-misses.
 func TestKeyLiteralMatchersCatchHostileShapes(t *testing.T) {
 	hostile := `package x
@@ -141,5 +240,106 @@ var somePrefix, id, msg, base, scheme, host, prefix2 string
 	}
 	if got := len(keySuffixConcats(f, fset)); got != 1 {
 		t.Fatalf("concat matcher found %d hits in the synthetic source, want 1", got)
+	}
+}
+
+// TestPrefixPlusSuffixMatcherCatchesHostileShapes proves the third matcher sees
+// the shape the first two cannot, and does not fire on a Sprintf that merely
+// looks similar.
+func TestPrefixPlusSuffixMatcherCatchesHostileShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{
+			name: "KB prefix method plus a hand-built suffix",
+			src: `package x
+import "fmt"
+func f(client C, addr string) string {
+	return fmt.Sprintf("%s:%s", client.KB().SupplierKeyPrefix(), addr)
+}`,
+			want: 1,
+		},
+		{
+			name: "a KeyPrefix config field, three segments",
+			src: `package x
+import "fmt"
+func f(s S, supplier, id string) string {
+	return fmt.Sprintf("%s:%s:%s", s.config.KeyPrefix, supplier, id)
+}`,
+			want: 1,
+		},
+		{
+			name: "an unexported keyPrefix field",
+			src: `package x
+import "fmt"
+func f(c C, addr string) string { return fmt.Sprintf("%s:%s", c.keyPrefix, addr) }`,
+			want: 1,
+		},
+		{
+			name: "not a Redis key: neither arg comes from a prefix",
+			src: `package x
+import "fmt"
+func f(serviceID, rpcType string) string { return fmt.Sprintf("%s:%s", serviceID, rpcType) }`,
+			want: 0,
+		},
+		{
+			// The matcher SEES this, and that is deliberate. The KeyBuilder is
+			// allowed to build its own keys, but the place that says so is
+			// keyLiteralExemptions -- with a written reason -- not a blind spot
+			// in the matcher. Until 2026-08-28 the condition only accepted names
+			// ending in KeyPrefix, so it missed this AND every *Prefix config
+			// field, StreamPrefix included.
+			name: "the KeyBuilder building its own key matches; the file exemption is what allows it",
+			src: `package x
+import "fmt"
+func (kb *KeyBuilder) K(id string) string {
+	return fmt.Sprintf("%s:%s:%s", kb.ns.BasePrefix, kb.ns.CachePrefix, id)
+}`,
+			want: 1,
+		},
+		{
+			// Measured zero hits before 2026-08-28: the comment beside the
+			// condition named StreamPrefix while the condition could not match it.
+			name: "a *Prefix config field that is not a *KeyPrefix",
+			src: `package x
+import "fmt"
+func f(s *S, addr string) string { return fmt.Sprintf("%s:%s", s.config.StreamPrefix, addr) }`,
+			want: 1,
+		},
+		{
+			// Measured zero hits before 2026-08-28. The repo already writes
+			// `kb := client.KB()`, so requiring the literal .KB() call left the
+			// blind spot one refactor wide.
+			name: "a KeyBuilder stored in a variable first",
+			src: `package x
+import "fmt"
+func f(c *C, addr string) string { kb := c.KB(); return fmt.Sprintf("%s:%s", kb.SupplierKeyPrefix(), addr) }`,
+			want: 1,
+		},
+		{
+			name: "a scan pattern is not key construction",
+			src: `package x
+import "fmt"
+func f(c C) string { return fmt.Sprintf("%s:*", c.keyPrefix) }`,
+			want: 0,
+		},
+		{
+			name: "prose with a colon is not a key",
+			src: `package x
+import "fmt"
+func f(c C, err error) string { return fmt.Sprintf("%s: %v", c.keyPrefix, err) }`,
+			want: 0,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, fset := parseSource(t, tc.src)
+			if got := len(prefixPlusSuffixKeys(f, fset)); got != tc.want {
+				t.Errorf("prefixPlusSuffixKeys matched %d, want %d", got, tc.want)
+			}
+		})
 	}
 }

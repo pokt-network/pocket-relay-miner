@@ -188,10 +188,9 @@ func (s *SupplierState) IsActiveForService(serviceID string) bool {
 // The cache subscribes to pub/sub invalidation events to stay synchronized
 // across all instances.
 type SupplierCache struct {
-	logger    logging.Logger
-	redis     *redisutil.Client
-	keyPrefix string
-	failOpen  bool
+	logger   logging.Logger
+	redis    *redisutil.Client
+	failOpen bool
 
 	// L1: In-memory cache (xsync for lock-free performance), TTL-bounded by
 	// supplierCacheL1TTL so an on-chain stake/services change is not frozen forever.
@@ -208,9 +207,6 @@ type SupplierCache struct {
 
 // SupplierCacheConfig contains configuration for SupplierCache.
 type SupplierCacheConfig struct {
-	// KeyPrefix is the Redis key prefix for supplier state.
-	KeyPrefix string
-
 	// FailOpen determines behavior when Redis is unavailable.
 	// If true, treat supplier as active when cache unavailable (safer for traffic).
 	// If false, treat supplier as inactive when cache unavailable (safer for validation).
@@ -226,15 +222,9 @@ func NewSupplierCache(
 	redisClient *redisutil.Client,
 	config SupplierCacheConfig,
 ) *SupplierCache {
-	keyPrefix := config.KeyPrefix
-	if keyPrefix == "" {
-		keyPrefix = redisClient.KB().SupplierKeyPrefix()
-	}
-
 	return &SupplierCache{
 		logger:     logging.ForComponent(logger, logging.ComponentQuerySupplier),
 		redis:      redisClient,
-		keyPrefix:  keyPrefix,
 		failOpen:   config.FailOpen,
 		localCache: xsync.NewMap[string, supplierCacheL1Entry](),
 	}
@@ -242,7 +232,7 @@ func NewSupplierCache(
 
 // supplierKey returns the Redis key for a supplier's state.
 func (c *SupplierCache) supplierKey(operatorAddress string) string {
-	return fmt.Sprintf("%s:%s", c.keyPrefix, operatorAddress)
+	return c.redis.KB().SupplierStateKey(operatorAddress)
 }
 
 // GetSupplierState retrieves a supplier's state from the cache using L1 → L2 fallback.
@@ -457,7 +447,7 @@ func (c *SupplierCache) IsSupplierActiveForService(
 // GetAllSupplierStates returns all supplier states from the cache.
 // This is useful for debugging and monitoring.
 func (c *SupplierCache) GetAllSupplierStates(ctx context.Context) (map[string]*SupplierState, error) {
-	pattern := fmt.Sprintf("%s:*", c.keyPrefix)
+	pattern := c.redis.KB().SupplierStatePattern()
 	keys, err := c.redis.Keys(ctx, pattern).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to list supplier keys: %w", err)
@@ -530,7 +520,7 @@ func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddres
 	// If no addresses provided, discover all suppliers in Redis
 	if len(knownSupplierAddresses) == 0 {
 		c.logger.Info().Msg("discovering all suppliers in Redis for warmup")
-		pattern := fmt.Sprintf("%s:*", c.keyPrefix)
+		pattern := c.redis.KB().SupplierStatePattern()
 		keys, err := c.redis.Keys(ctx, pattern).Result()
 		if err != nil {
 			return fmt.Errorf("failed to discover suppliers: %w", err)
@@ -539,7 +529,7 @@ func (c *SupplierCache) WarmupFromRedis(ctx context.Context, knownSupplierAddres
 		// Extract operator addresses from keys (ha:supplier:{operator} -> {operator})
 		for _, key := range keys {
 			// Remove prefix to get operator address
-			addr := strings.TrimPrefix(key, c.keyPrefix+":")
+			addr := strings.TrimPrefix(key, c.redis.KB().SupplierKeyPrefix()+":")
 			if addr != key { // Ensure prefix was found and removed
 				knownSupplierAddresses = append(knownSupplierAddresses, addr)
 			}
