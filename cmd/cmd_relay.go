@@ -279,7 +279,7 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 		if relay.RelayRelayerURL == "" {
 			relay.RelayRelayerURL = localnetRelayerURL
 		}
-		if relay.RelaySupplierAddr == "" {
+		if shouldPinLocalnetSupplier(relay.RelaySupplierAddr, relay.RelayAllSuppliers) {
 			relay.RelaySupplierAddr = localnetSupplier1Addr
 		}
 	}
@@ -452,13 +452,11 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 		if err != nil {
 			return fmt.Errorf("--all-suppliers: failed to list the session's suppliers: %w", err)
 		}
-		// suppliers is never empty here: SessionSupplierAddresses returns an
-		// error for a session with none (client/relay_client/client.go:476).
-		n, err := rand.Int(rand.Reader, big.NewInt(int64(len(suppliers))))
+		picked, err := pickRandomSupplier(suppliers)
 		if err != nil {
-			return fmt.Errorf("--all-suppliers: failed to choose a supplier: %w", err)
+			return fmt.Errorf("--all-suppliers: %w", err)
 		}
-		relay.RelaySupplierAddr = suppliers[n.Int64()]
+		relay.RelaySupplierAddr = picked
 		logger.Info().
 			Str("supplier", relay.RelaySupplierAddr).
 			Int("session_suppliers", len(suppliers)).
@@ -501,4 +499,41 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 	default:
 		return fmt.Errorf("mode %q not yet implemented", mode)
 	}
+}
+
+// pickRandomSupplier returns one of suppliers, chosen uniformly at random.
+//
+// Random rather than suppliers[0]: --all-suppliers means "any of them, do not
+// make me name one", so always returning the same element would quietly turn the
+// flag into a fixed choice and drain that one supplier's per-session claimable
+// budget -- the exact thing the flag exists to avoid.
+//
+// The empty case is an error rather than a panic even though the only caller
+// cannot produce it (SessionSupplierAddresses returns an error for a session
+// with no suppliers, client/relay_client/client.go:476), because the guarantee
+// lives in a different file and nothing enforces it here.
+func pickRandomSupplier(suppliers []string) (string, error) {
+	if len(suppliers) == 0 {
+		return "", fmt.Errorf("no suppliers to choose from")
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(suppliers))))
+	if err != nil {
+		return "", fmt.Errorf("failed to choose a supplier: %w", err)
+	}
+	return suppliers[n.Int64()], nil
+}
+
+// shouldPinLocalnetSupplier says whether --localnet should fill in its default
+// supplier. It must not when --all-suppliers was passed: this runs ~170 lines
+// BEFORE the random pick, so pinning here silently wins and the flag goes on
+// being ignored under --localnet -- which is how every local test and the live
+// gate invoke the CLI.
+//
+// Measured 2026-08-30: the random pick shipped with a unit test that passed and
+// a code path that never ran. Eight consecutive --localnet --all-suppliers
+// relays all went to supplier1; after this guard, eight runs hit six different
+// suppliers. The helper was right and the wiring was not, which is why the
+// precedence is a function with its own test rather than a condition inline.
+func shouldPinLocalnetSupplier(currentAddr string, allSuppliers bool) bool {
+	return currentAddr == "" && !allSuppliers
 }

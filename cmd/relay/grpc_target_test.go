@@ -9,7 +9,9 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
+	"google.golang.org/protobuf/proto"
 )
 
 // resetGRPCTargetFlags restores the package globals the tests drive, so a
@@ -149,4 +151,77 @@ func TestValidateGRPCFrame_EmptyMessageIsCallerDecided(t *testing.T) {
 		require.Error(t, validateGRPCFrame([]byte{0x01, 0x00, 0x00, 0x00, 0x00}, mode), "compressed frame")
 		require.Error(t, validateGRPCFrame([]byte{0x00, 0x00, 0x00, 0x00, 0x09, 0x01}, mode), "length mismatch")
 	}
+}
+
+// grpcResponseWithHeaders builds a RelayResponse carrying exactly the headers
+// given, so a test can say what the backend folded back and nothing else.
+func grpcResponseWithHeaders(t *testing.T, headers map[string]string, body []byte) *servicetypes.RelayResponse {
+	t.Helper()
+	h := make(map[string]*sdktypes.Header, len(headers))
+	for k, v := range headers {
+		h[k] = &sdktypes.Header{Key: k, Values: []string{v}}
+	}
+	poktResp := &sdktypes.POKTHTTPResponse{StatusCode: 200, Header: h, BodyBz: body}
+	payloadBz, err := proto.MarshalOptions{Deterministic: true}.Marshal(poktResp)
+	require.NoError(t, err)
+	return &servicetypes.RelayResponse{Payload: payloadBz}
+}
+
+// TestVerifyGRPCRelayPayload_SurfacesGrpcMessage proves the backend's own
+// explanation reaches the operator. The relayer folds the backend's trailers
+// into the response headers (relayer/relay_grpc_service.go:762), so grpc-message
+// is already present; this command used to print the numeric status alone and
+// throw the sentence away. With --grpc-method the operator names the method
+// themselves, so a wrong one is the likeliest failure and "12" without a message
+// is the least useful thing to hand back.
+func TestVerifyGRPCRelayPayload_SurfacesGrpcMessage(t *testing.T) {
+	frame := []byte{0x00, 0x00, 0x00, 0x00, 0x02, 0x08, 0x2a}
+
+	t.Run("message present is included verbatim", func(t *testing.T) {
+		resp := grpcResponseWithHeaders(t, map[string]string{
+			"Grpc-Status":  "12",
+			"Grpc-Message": "unknown method GetLatestBlok",
+		}, frame)
+
+		err := verifyGRPCRelayPayload(resp, true)
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "12", "the status code must still be shown")
+		require.ErrorContains(t, err, "unknown method GetLatestBlok",
+			"the backend's explanation is the useful half and must not be dropped")
+	})
+
+	t.Run("lowercase wire casing is found too", func(t *testing.T) {
+		resp := grpcResponseWithHeaders(t, map[string]string{
+			"grpc-status":  "3",
+			"grpc-message": "field number 1 is not a uint64",
+		}, frame)
+
+		err := verifyGRPCRelayPayload(resp, true)
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "field number 1 is not a uint64")
+	})
+
+	t.Run("no message says so instead of pretending", func(t *testing.T) {
+		resp := grpcResponseWithHeaders(t, map[string]string{"Grpc-Status": "13"}, frame)
+
+		err := verifyGRPCRelayPayload(resp, true)
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "13")
+		require.ErrorContains(t, err, "no grpc-message",
+			"absence of an explanation must be stated, not left looking like there was none to give")
+	})
+
+	t.Run("empty message is treated as absent", func(t *testing.T) {
+		resp := grpcResponseWithHeaders(t, map[string]string{
+			"Grpc-Status": "2", "Grpc-Message": "",
+		}, frame)
+
+		err := verifyGRPCRelayPayload(resp, true)
+
+		require.Error(t, err)
+		require.ErrorContains(t, err, "no grpc-message")
+	})
 }
