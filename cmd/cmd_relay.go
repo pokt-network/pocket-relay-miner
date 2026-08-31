@@ -279,7 +279,7 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 		if relay.RelayRelayerURL == "" {
 			relay.RelayRelayerURL = localnetRelayerURL
 		}
-		if shouldPinLocalnetSupplier(relay.RelaySupplierAddr, relay.RelayAllSuppliers) {
+		if shouldPinLocalnetSupplier(relay.RelaySupplierAddr, relay.RelayAllSuppliers, relay.RelaySimulate) {
 			relay.RelaySupplierAddr = localnetSupplier1Addr
 		}
 	}
@@ -529,11 +529,17 @@ func pickRandomSupplier(suppliers []string) (string, error) {
 // being ignored under --localnet -- which is how every local test and the live
 // gate invoke the CLI.
 //
+// --simulate is the exception, and it must stay one: ResolveSimulationFlags
+// runs BEFORE the random pick and rejects an empty address, so suppressing the
+// default here would turn a working `--localnet --simulate --all-suppliers`
+// into a startup error. A simulated relay wants the simulation identity's
+// supplier anyway, not an arbitrary one, so "any of them" has no meaning there.
+//
 // Measured 2026-08-30: the random pick shipped with a unit test that passed and
 // a code path that never ran. Eight consecutive --localnet --all-suppliers
 // relays all went to supplier1; after this guard, eight runs hit six different
 // suppliers. The helper was right and the wiring was not, which is why the
 // precedence is a function with its own test rather than a condition inline.
-func shouldPinLocalnetSupplier(currentAddr string, allSuppliers bool) bool {
-	return currentAddr == "" && !allSuppliers
+func shouldPinLocalnetSupplier(currentAddr string, allSuppliers, simulate bool) bool {
+	return currentAddr == "" && (!allSuppliers || simulate)
 }

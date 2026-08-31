@@ -77,17 +77,26 @@ func TestShouldPinLocalnetSupplier(t *testing.T) {
 		name         string
 		currentAddr  string
 		allSuppliers bool
+		simulate     bool
 		want         bool
 	}{
 		{name: "no supplier, no flag: localnet fills in its default", want: true},
 		{name: "no supplier, --all-suppliers: leave it empty for the random pick", allSuppliers: true, want: false},
 		{name: "explicit --supplier wins over the localnet default", currentAddr: "pokt1explicit", want: false},
 		{name: "explicit --supplier wins over --all-suppliers too", currentAddr: "pokt1explicit", allSuppliers: true, want: false},
+		// --simulate resolves BEFORE the random pick and rejects an empty
+		// address, so suppressing the default would turn a working invocation
+		// into a startup error. A simulated relay wants the simulation
+		// identity's supplier, not an arbitrary one.
+		{name: "--simulate keeps the default even with --all-suppliers", allSuppliers: true, simulate: true, want: true},
+		{name: "--simulate alone still gets the default", simulate: true, want: true},
+		{name: "--simulate does not override an explicit --supplier", currentAddr: "pokt1explicit", simulate: true, want: false},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			require.Equal(t, tt.want, shouldPinLocalnetSupplier(tt.currentAddr, tt.allSuppliers))
+			require.Equal(t, tt.want,
+				shouldPinLocalnetSupplier(tt.currentAddr, tt.allSuppliers, tt.simulate))
 		})
 	}
 }
