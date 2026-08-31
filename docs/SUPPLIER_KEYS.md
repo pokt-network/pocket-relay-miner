@@ -195,9 +195,26 @@ unreadable source as "the operator removed these keys" would stop the relayer
 serving those suppliers and make the miner drain their pipelines, on a transient
 read error, every 30 seconds.
 
-**An emptied key file is refused.** A file with no keys is far more often a
-truncated write or a bad template than a request to stop serving every supplier
-at once, so it is not applied. To stop serving, unstake or stop the process.
+**An emptied key FILE is refused, and an emptied KEYRING is not.** The two
+sources answer this differently, on purpose. A `supplier.yaml` with no keys is
+far more often a truncated write or a bad template than a request to stop
+serving, so it is refused and the previous keys are kept; to stop serving,
+unstake or stop the process.
+
+A keyring that yields no signing keys IS applied — every supplier is released.
+Refusing there was tried and measured on 2026-08-31: the condition is stable, so
+it repeated on every reload, the previous key set was kept for the life of the
+process, and a key withdrawn afterwards went on signing. It is never applied
+quietly: the load logs at `Error` and moves `ha_keys_load_errors_total`, which is
+what to alert on. Removing a record's `.info` is the documented withdrawal, so
+this is also what makes that withdrawal work.
+
+A keyring whose records are present but **undecodable** is applied the same way,
+per record: those suppliers lose service — nothing can sign with a key it cannot
+decode — while `ha_keys_undecodable_records` counts how many are broken right
+now. The one case still refused is a keyring where records exist and **not one**
+decodes, which is what a wrong or rotated passphrase looks like: applying that
+would release every supplier at once over a credential the operator can fix.
 
 ## What fails at startup, and what it tells you
 

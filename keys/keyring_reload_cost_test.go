@@ -800,3 +800,77 @@ func TestAProviderWithoutADirectoryPublishesNoShortfall(t *testing.T) {
 		"a provider with no directory has nothing to count against, so it must "+
 			"publish no sample at all")
 }
+
+// TestWithdrawingEVERYRecordIsNotSilent covers the maximal form of a release,
+// which the first version of the loud path excluded by asking whether records
+// were still on disk. Withdrawing every .info -- or a Secret projected empty --
+// leaves a readable directory with no records at all: every supplier released,
+// and measured on 2026-08-31 as moving nothing, in the very commit whose message
+// said releasing every supplier must never be silent.
+func TestWithdrawingEVERYRecordIsNotSilent(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+	})
+	p := newOnDiskProvider(t, parentDir)
+
+	before, err := p.LoadKeys(context.Background())
+	require.NoError(t, err)
+	require.Len(t, before, 2)
+
+	entries, err := os.ReadDir(recordsDir)
+	require.NoError(t, err)
+	removed := 0
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".info") {
+			require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
+			removed++
+		}
+	}
+	require.Equal(t, 2, removed, "precondition: every record withdrawn")
+
+	errsBefore := testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))
+	after, err := p.LoadKeys(context.Background())
+
+	require.NoError(t, err, "an emptied keyring is the operator's own doing and is applied")
+	require.Empty(t, after)
+	require.Greater(t, testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind())), errsBefore,
+		"releasing EVERY supplier is the loudest thing this provider can do, so it "+
+			"cannot be the quietest")
+}
+
+// TestOneLoadMovesTheErrorSeriesOnce guards a counting defect the manager
+// already paid for on its own side: it stopped counting per failing provider
+// because "one bad key moved the series by two". Two conditions here are
+// reachable from a single load -- a corrupt record, and a load that yielded no
+// signing keys -- and each used to increment.
+func TestOneLoadMovesTheErrorSeriesOnce(t *testing.T) {
+	parentDir, recordsDir := newOnDiskTestKeyring(t, map[string]string{
+		"app":  testAppHex,
+		"app2": secondAppHex,
+	})
+	registry := codectypes.NewInterfaceRegistry()
+	cryptocodec.RegisterInterfaces(registry)
+	kr, err := keyring.New("pocket", keyring.BackendTest, parentDir, nil,
+		codec.NewProtoCodec(registry))
+	require.NoError(t, err)
+	_, err = kr.SaveOfflineKey("watcher", secp256k1.GenPrivKey().PubKey())
+	require.NoError(t, err, "precondition: a record that can never yield a private key")
+
+	p := newOnDiskProvider(t, parentDir)
+	_, err = p.LoadKeys(context.Background())
+	require.NoError(t, err)
+
+	// Both signing records go undecodable; only the non-signing one still lists.
+	corruptRecord(t, recordsDir, "app.")
+	corruptRecord(t, recordsDir, "app2")
+
+	before := testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))
+	keys, err := p.LoadKeys(context.Background())
+	require.NoError(t, err, "one record still decodes, so this is per-record, not a broken keyring")
+	require.Empty(t, keys, "precondition: both conditions hold at once")
+
+	require.Equal(t, 1.0, testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))-before,
+		"one load, one increment: a rate built on this series must count loads that "+
+			"failed, not conditions that happened to coincide")
+}

@@ -540,6 +540,13 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 		// sides, and one removed during it can only make the shortfall
 		// NEGATIVE, which clamps to zero.
 		//
+		// The window is narrowed, not closed, and it is asymmetric: a record
+		// ADDED between List and this count -- copying a .info in, which is how
+		// a key is added -- still reads as a shortfall, so one tick reports a
+		// record that is not broken. It self-heals, because the directory
+		// changed and the next load recomputes; the cost is one spurious Error
+		// and one increment.
+		//
 		// The counts enumerate the SAME set: isKeyRecord matches ".info" and
 		// MigrateAll skips every other name (cosmos-sdk v0.53.7,
 		// crypto/keyring/keyring.go:917-919). The shortfall is exactly what
@@ -588,7 +595,11 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	// there without setting the gauge left it holding a previous value -- zero,
 	// on the first such load -- while the standing condition it exists to expose
 	// was present.
-	if p.keyringDir != "" {
+	// Only the List() branch measures this. With key_names configured nothing
+	// counted the records, so publishing a confident 0 would report "no records
+	// are broken" from a load that never looked -- the same collapse of "found
+	// nothing" into "looked nowhere" that the no-directory case already had.
+	if p.keyringDir != "" && len(p.keyNames) == 0 {
 		keyringUndecodableRecords.WithLabelValues(p.Kind()).Set(float64(swallowedRecords))
 	}
 
@@ -642,8 +653,21 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	//
 	// The unreadable-DIRECTORY case is caught earlier still, by the fingerprint
 	// read at the top of this function.
+	// One increment per LOAD, not one per condition. Both blocks below are
+	// reachable from a single load -- a keyring holding one corrupt record and
+	// one record that is not a signing key satisfies each -- and manager.Reload
+	// records the same defect it removed on its own side: counting twice made
+	// one bad keyring move the series by two.
+	loadFailureCounted := false
+	countLoadFailure := func() {
+		if !loadFailureCounted {
+			keyLoadErrors.WithLabelValues(p.Kind()).Inc()
+			loadFailureCounted = true
+		}
+	}
+
 	if swallowedRecords > 0 {
-		keyLoadErrors.WithLabelValues(p.Kind()).Inc()
+		countLoadFailure()
 
 		if decodedRecords == 0 {
 			// keys is provably empty here -- this branch is only reachable from
@@ -663,31 +687,32 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 			Msg("keyring records could not be decoded; the suppliers behind them lose service until the files are removed or repaired")
 	}
 
-	// ZERO SIGNING KEYS while the directory still holds records is applied, and
-	// it is applied LOUDLY, which is the whole point of this block.
+	// A LOAD THAT YIELDS NO SIGNING KEYS releases every supplier this process
+	// served, so it is applied -- and it is never applied in silence.
 	//
-	// It cannot be refused, and that is not a preference. In the by-name branch
-	// the state is reached by two causes that are byte-identical from here: the
-	// operator withdrew the selected key -- the documented, measured procedure --
-	// or the keyring was rebuilt with records under different uids, a
-	// re-projected Secret or a rename. Both leave every named lookup returning
-	// ErrKeyNotFound with records still on disk. Refusing to tell them apart is
-	// what froze the reload before 2026-08-31, so the removal is applied. The
-	// same shape reaches the List branch when every record decodes but none is a
-	// signing key.
+	// The condition is len(keys) == 0 and nothing else. An earlier version added
+	// "while records are still on disk", which excluded the maximal form of the
+	// very event: withdrawing EVERY record, or a Secret projected empty, leaves
+	// a readable directory with no records at all, releases every supplier, and
+	// said nothing. Measured 2026-08-31, in the commit that claimed to have made
+	// this loud.
 	//
-	// What must not happen is applying it in SILENCE, and until this block it
-	// did: loadErrs was empty, so the load returned (empty map, nil) and
-	// ha_keys_load_errors_total never moved while every supplier was diffed as
-	// removed -- the relayer serving none of them, the miner draining every
-	// pipeline. Measured 2026-08-31.
-	if len(keys) == 0 && dirEntryCount > 0 {
-		keyLoadErrors.WithLabelValues(p.Kind()).Inc()
+	// Applied rather than refused, and that is a decision rather than a
+	// deduction. This provider does not distinguish the operator withdrawing the
+	// selected key -- the documented, measured procedure -- from a keyring
+	// rebuilt with records under different uids: both leave every named lookup
+	// returning ErrKeyNotFound. It COULD be distinguished, by listing the
+	// keyring and looking for the previously held address under a new name, and
+	// that is worth doing; it is not done here. What is not acceptable is
+	// refusing to apply either, which is what froze the reload before
+	// 2026-08-31 and kept a withdrawn key signing.
+	if len(keys) == 0 {
+		countLoadFailure()
 		p.logger.Error().
 			Str("keyring_dir", p.keyringDir).
 			Int("records_on_disk", dirEntryCount).
 			Strs("key_names", p.keyNames).
-			Msg("the keyring yielded no signing keys while it still holds records; every supplier this process served is being released")
+			Msg("the keyring yielded no signing keys; every supplier this process served is being released")
 	}
 
 	if p.keyringDir != "" {
