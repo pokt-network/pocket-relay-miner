@@ -74,7 +74,8 @@ func queryKeyedChainWithLock[V any](
 	lockKey := redisClient.KB().CacheLockKey(spec.cacheType, key)
 
 	// Try to acquire distributed lock
-	locked, err := redisClient.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
+	lockToken := newLockToken()
+	locked, err := redisClient.SetNX(ctx, lockKey, lockToken, 5*time.Second).Result()
 	if err != nil {
 		return zero, fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -83,7 +84,7 @@ func queryKeyedChainWithLock[V any](
 	// out -- that lets a third instance acquire immediately and fire another
 	// duplicate query, defeating the dedup this lock exists for.
 	if locked {
-		defer releaseCacheLock(ctx, redisClient, lockKey)
+		defer releaseCacheLock(ctx, redisClient, lockKey, lockToken)
 	}
 
 	if !locked {
