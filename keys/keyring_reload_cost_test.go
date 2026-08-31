@@ -569,3 +569,78 @@ func TestPartialCorruptionIsNotAPartialRemoval(t *testing.T) {
 		"the record that DID decode is still returned: the manager exempts the first "+
 			"load, so a partly corrupt keyring still starts on what it could read")
 }
+
+// TestTheGuardBehavesTheSameOnTheFileBackend exists because every other test
+// around this guard uses the "test" backend, and production uses "file". The two
+// differ by a passphrase, and the decode path they share is cosmos-sdk's
+// keystore -- so they SHOULD classify identically. That is a claim about a
+// dependency, which is exactly the kind this file has been wrong about before,
+// so it is measured here rather than asserted in a comment.
+func TestTheGuardBehavesTheSameOnTheFileBackend(t *testing.T) {
+	parentDir := t.TempDir()
+	registry := codectypes.NewInterfaceRegistry()
+	cryptocodec.RegisterInterfaces(registry)
+	kr, err := keyring.New("pocket", keyring.BackendFile, parentDir,
+		strings.NewReader(testKeyringPassword+"\n"+testKeyringPassword+"\n"),
+		codec.NewProtoCodec(registry))
+	require.NoError(t, err)
+	require.NoError(t, kr.ImportPrivKeyHex("app", testAppHex, "secp256k1"))
+	require.NoError(t, kr.ImportPrivKeyHex("app2", secondAppHex, "secp256k1"))
+	recordsDir := filepath.Join(parentDir, "keyring-file")
+
+	newFileProvider := func(names ...string) *KeyringProvider {
+		p, perr := NewKeyringProvider(logging.NewLoggerFromConfig(logging.DefaultConfig()),
+			KeyringProviderConfig{Backend: "file", Dir: parentDir, AppName: "pocket",
+				KeyNames: names,
+				// One line per unlock, and a reload unlocks again: a reader that
+				// runs dry reports as a wrong passphrase, which would look like
+				// the defect this test is about.
+				PasswordReader: strings.NewReader(strings.Repeat(testKeyringPassword+"\n", 40))})
+		require.NoError(t, perr)
+		return p
+	}
+
+	t.Run("withdrawing the selected key is applied", func(t *testing.T) {
+		p := newFileProvider("app2")
+		before, lerr := p.LoadKeys(context.Background())
+		require.NoError(t, lerr)
+		require.Len(t, before, 1)
+
+		entries, rerr := os.ReadDir(recordsDir)
+		require.NoError(t, rerr)
+		removed := 0
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "app2") && strings.HasSuffix(e.Name(), ".info") {
+				require.NoError(t, os.Remove(filepath.Join(recordsDir, e.Name())))
+				removed++
+			}
+		}
+		require.Equal(t, 1, removed, "precondition: exactly the selected key was withdrawn")
+
+		after, lerr := p.LoadKeys(context.Background())
+		require.NoError(t, lerr, "the file backend must not read a withdrawal as a broken keyring")
+		require.Empty(t, after)
+	})
+
+	t.Run("partial corruption is reported", func(t *testing.T) {
+		// app2's record is gone from the subtest above; corrupt app's, so one of
+		// the directory's remaining records fails to decode.
+		entries, rerr := os.ReadDir(recordsDir)
+		require.NoError(t, rerr)
+		corrupted := 0
+		for _, e := range entries {
+			if strings.HasPrefix(e.Name(), "app.") && strings.HasSuffix(e.Name(), ".info") {
+				require.NoError(t, os.WriteFile(
+					filepath.Join(recordsDir, e.Name()), []byte("corrupt"), 0o600))
+				corrupted++
+			}
+		}
+		require.Equal(t, 1, corrupted, "precondition: exactly one record corrupted")
+
+		p := newFileProvider()
+		after, lerr := p.LoadKeys(context.Background())
+		require.Error(t, lerr, "a swallowed record is a swallowed record on either backend")
+		require.Contains(t, lerr.Error(), "broken keyring")
+		require.Empty(t, after)
+	})
+}
