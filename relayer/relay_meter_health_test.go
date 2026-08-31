@@ -4,29 +4,25 @@ package relayer
 
 import (
 	"context"
-	"fmt"
+	"strings"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
-// newHealthTestMeter builds a RelayMeter backed by a fresh miniredis for the
-// CheckRelayHealth probe tests. Returns the meter and the miniredis handle so
-// tests can snapshot/inspect keys and simulate an outage.
-func newHealthTestMeter(t *testing.T, ctx context.Context) (*RelayMeter, *miniredis.Miniredis, *redisutil.Client) {
+// newHealthTestMeter builds a RelayMeter on its own namespace of the real
+// Redis for the CheckRelayHealth probe tests. Returns the meter, that
+// namespace's prefix (so a test can list what the probe wrote, and only that),
+// and a switch that breaks every command to simulate an outage.
+func newHealthTestMeter(t *testing.T, ctx context.Context) (*RelayMeter, string, *testredis.FailSwitch, *redisutil.Client) {
 	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
+	redisClient, prefix := newTestRedis(t)
+	failRedis := testredis.NewFailSwitch(redisClient)
 
 	app := &fakeAppClient{addr: "pokt1app_health"}
 	app.stakeUpokt.Store(1000)
@@ -48,7 +44,7 @@ func newHealthTestMeter(t *testing.T, ctx context.Context) (*RelayMeter, *minire
 		RelayMeterConfig{},
 	)
 	require.NoError(t, meter.Start(ctx))
-	return meter, mr, redisClient
+	return meter, prefix, failRedis, redisClient
 }
 
 // TestCheckRelayHealth_NonMutating proves the probe resolves the service cost
@@ -56,36 +52,49 @@ func newHealthTestMeter(t *testing.T, ctx context.Context) (*RelayMeter, *minire
 // path must never leave meter state behind for its synthetic session.
 func TestCheckRelayHealth_NonMutating(t *testing.T) {
 	ctx := context.Background()
-	meter, mr, redisClient := newHealthTestMeter(t, ctx)
+	meter, prefix, _, redisClient := newHealthTestMeter(t, ctx)
 	defer func() { _ = meter.Close() }()
-	defer func() { _ = redisClient.Close() }()
-	defer mr.Close()
 
-	before := append([]string(nil), mr.Keys()...)
+	// The service id carries a token unique to this run, so a key the probe
+	// writes ANYWHERE on the server can be attributed to this test.
+	serviceID := "svc-health-" + strings.ReplaceAll(prefix, ":", "_")
 
-	require.NoError(t, meter.CheckRelayHealth(ctx, "svc-health"))
+	before := testredis.Keys(t, redisClient, prefix)
 
-	after := mr.Keys()
+	require.NoError(t, meter.CheckRelayHealth(ctx, serviceID))
+
+	after := testredis.Keys(t, redisClient, prefix)
 	require.ElementsMatch(t, before, after,
-		"CheckRelayHealth must not create/mutate any Redis key (before=%v after=%v)", before, after)
+		"CheckRelayHealth must not create/mutate any key in its namespace (before=%v after=%v)", before, after)
+
+	// The namespaced check above cannot see a write that ignores the
+	// configured namespace -- a component prefixing "ha:" itself, which this
+	// repository has already shipped twice. Look for the token across the
+	// whole keyspace to catch that shape.
+	//
+	// What this still cannot see, stated rather than papered over: a stray
+	// write whose key is entirely constant. On a shared server that is
+	// indistinguishable from another package's traffic, and it is the static
+	// key-literal check in internal/conventions that has to catch it.
+	require.Empty(t, testredis.KeysMatching(t, redisClient, "*"+serviceID+"*"),
+		"CheckRelayHealth must not write outside its configured namespace either")
 }
 
 // TestCheckRelayHealth_RedisUnreachable proves the probe reports degradation
 // when Redis is down, so a health check can surface "meter degraded".
 func TestCheckRelayHealth_RedisUnreachable(t *testing.T) {
 	ctx := context.Background()
-	meter, mr, redisClient := newHealthTestMeter(t, ctx)
+	meter, _, failRedis, _ := newHealthTestMeter(t, ctx)
 	defer func() { _ = meter.Close() }()
-	defer func() { _ = redisClient.Close() }()
 
-	// Prime the cost path once while Redis is up, then take Redis down so the
-	// probe fails specifically on the Ping reachability check.
+	// Prime the cost path once while Redis is up, then break it so the probe
+	// fails specifically on the Ping reachability check.
 	require.NoError(t, meter.CheckRelayHealth(ctx, "svc-health"))
-	// SetError rather than Close: closing frees the port, and a concurrently
-	// running package test binary can bind it mid-probe, at which point the
-	// Ping succeeds against a foreign Redis and this test passes for the wrong
-	// reason. A pre-hook error keeps the connection but breaks every command.
-	mr.SetError("LOADING Redis is loading the dataset in memory")
+	// Break the commands, never the server: taking the server away frees its
+	// port, another package's test binary can bind it mid-probe, and the Ping
+	// then succeeds against a foreign Redis so this test passes for the wrong
+	// reason. Doubly so now that the server is shared by every package.
+	failRedis.Fail("LOADING Redis is loading the dataset in memory")
 
 	err := meter.CheckRelayHealth(ctx, "svc-health")
 	require.Error(t, err, "CheckRelayHealth must fail when Redis is unreachable")
@@ -94,9 +103,7 @@ func TestCheckRelayHealth_RedisUnreachable(t *testing.T) {
 // TestCheckRelayHealth_Closed proves the probe fails fast on a closed meter.
 func TestCheckRelayHealth_Closed(t *testing.T) {
 	ctx := context.Background()
-	meter, mr, redisClient := newHealthTestMeter(t, ctx)
-	defer mr.Close()
-	defer func() { _ = redisClient.Close() }()
+	meter, _, _, _ := newHealthTestMeter(t, ctx)
 
 	require.NoError(t, meter.Close())
 	require.Error(t, meter.CheckRelayHealth(ctx, "svc-health"))

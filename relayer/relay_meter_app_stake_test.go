@@ -10,12 +10,10 @@ import (
 	"testing"
 
 	sdkmath "cosmossdk.io/math"
-	"github.com/alicebob/miniredis/v2"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -91,16 +89,9 @@ func (f *fakeSharedParamCache) heightsQueried() []int64 {
 // and zero invalidation. This test drives the meter through a stake change
 // and asserts the recomputed meta reflects the new value.
 func TestGetOrCreateSessionMeter_RecomputesMaxStake_WhenAppStakeChanges(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
 
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = redisClient.Close() }()
+	redisClient, _ := newTestRedis(t)
 
 	appAddr := "pokt1app_under_test"
 	app := &fakeAppClient{addr: appAddr}
