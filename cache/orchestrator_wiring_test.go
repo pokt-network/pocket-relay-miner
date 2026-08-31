@@ -23,7 +23,7 @@ import (
 )
 
 // This file is the wiring smoke test the CUPR incident demanded: it wires the
-// REAL CacheOrchestrator + REAL cache-pkg entity caches + miniredis + a fake
+// REAL CacheOrchestrator + REAL cache-pkg entity caches + a real Redis + a fake
 // chain, drives a real block event through the leader's refresh worker, and
 // asserts the full propagation chain end-to-end:
 //
@@ -165,7 +165,7 @@ type smokeHarness struct {
 	relayerSvc KeyedEntityCache[string, *sharedtypes.Service]
 }
 
-// newSmokeOrchestrator wires the full orchestrator with real caches + miniredis +
+// newSmokeOrchestrator wires the full orchestrator with real caches + a real Redis +
 // fake chain clients. It does NOT start the leader elector; the test drives
 // leadership deterministically via onBecameLeader (no heartbeat timing).
 func newSmokeOrchestrator(t *testing.T, svcCUPR uint64, appDelegatees []string) *smokeHarness {
