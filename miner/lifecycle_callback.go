@@ -939,7 +939,20 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 						Msg("failed to finalise claim_skipped transition")
 				}
 			case "empty_tree":
-				// Session had no mined relays — not a failure, just nothing to claim
+				// Session had no mined relays — not a failure, just nothing to
+				// claim. It is still TERMINAL, so the per-session gauges have to
+				// go: RecordClaimLeafStats already fired for this session before
+				// Phase 3 decided the tree was empty, and this arm is the only
+				// one that reaches no OnClaimSkipped / OnSessionProved, so
+				// nothing else would ever delete them. Both carry session_id as
+				// a label, which CLAUDE.md forbids leaving unbounded.
+				//
+				// The recording itself stays where it is on purpose: an empty
+				// tree with RelayCount > 0 is the EXTREME shortfall, and
+				// claimLeafCollapseTotal -- labelled supplier+service only, so
+				// bounded -- must still fire for it. Only the per-session detail
+				// is dropped here.
+				ClearClaimLeafStats(snap.SupplierOperatorAddress, snap.ServiceID, snap.SessionID)
 			}
 		}
 
