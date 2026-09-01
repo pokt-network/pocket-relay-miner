@@ -1003,6 +1003,10 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// For eager validation, validate before forwarding
 	if validationMode == ValidationModeEager {
+		// Set when the meter could not answer for a reason that still allows
+		// serving (a chain query blinked). Recorded only after the relay
+		// survives validation, so the counter matches its own help text.
+		servedUnmetered := false
 		// EAGER MODE: Check meter BEFORE backend call (synchronous, blocks the hot path)
 		if p.relayMeter != nil && relayRequest.Meta.SessionHeader != nil {
 			sessionHeader := relayRequest.Meta.SessionHeader
@@ -1037,11 +1041,13 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonMeterError).Inc()
 					return
 				}
-				// Served without being metered, exactly like the optimistic
-				// path and the two streaming ones. Counting it only there left
-				// eager as the single mode where an unmetered relay was
-				// invisible, so a wobbling full node read as zero.
-				relayMeterUnbilled.WithLabelValues(serviceID).Inc()
+				// Counted only once the relay is actually SERVED -- see the
+				// increment after validation below. Counting it here would
+				// report a relay that the signature check or the fast-fail
+				// gate is about to reject as "served and submitted for
+				// mining", which is the opposite of what an operator reading
+				// this series during an outage needs.
+				servedUnmetered = true
 			} else if !allowed {
 				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 					Msg("relay rejected: session relay limit reached (eager mode)")
@@ -1071,6 +1077,10 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			validationFailures.WithLabelValues(serviceID, "signature").Inc()
 			return
 		}
+		if servedUnmetered {
+			relayMeterUnbilled.WithLabelValues(serviceID).Inc()
+		}
+
 		eagerDuration := time.Since(eagerStart)
 
 		// Record eager validation latency asynchronously
