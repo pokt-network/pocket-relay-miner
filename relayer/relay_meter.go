@@ -459,7 +459,16 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 
 	// Check Redis (L2)
 	meta, err := m.getSessionMeta(ctx, sessionID, supplierAddress)
-	if err == nil && meta != nil {
+	if err != nil {
+		// The error is RETURNED, not discarded. It arrives already marked, and
+		// dropping it here had two costs: the store-unavailable marking never
+		// reached the policy from this call, and an unreadable meta fell
+		// through to the create path below -- where SetNX reports the key
+		// already exists and the function calls itself again, unbounded, on
+		// every relay of that session.
+		return nil, 0, err
+	}
+	if meta != nil {
 		if fresh(meta) {
 			// Cache locally
 			m.localCacheMu.Lock()
@@ -570,7 +579,10 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddr
 
 	var meta SessionMeterMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, err
+		// Our own blob, in our own store, and unreadable: what this session has
+		// consumed is unknown, which is the store-unavailable case and not the
+		// chain's. Unmarked it would count as the chain's and be SERVED.
+		return nil, fmt.Errorf("%w: corrupt session meter meta: %w", ErrMeterStoreUnavailable, err)
 	}
 
 	return &meta, nil

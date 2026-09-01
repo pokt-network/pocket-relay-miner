@@ -5,6 +5,7 @@ package relayer
 import (
 	"context"
 	"testing"
+	"time"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/stretchr/testify/require"
@@ -93,4 +94,44 @@ func TestOnlyTheChainBeingUnreachableStillAdmits(t *testing.T) {
 			"full node into a total outage, and the miner arbitrates anyway")
 	require.NotErrorIs(t, err, ErrMeterStoreUnavailable,
 		"nothing may mark a chain failure as a store failure, or it becomes a refusal")
+}
+
+// TestACorruptMeterMetaRefusesInsteadOfRecursing covers the third way the store
+// can fail, which is not "unreachable" but "unreadable": the meta blob is there
+// and does not parse.
+//
+// Two things used to go wrong at once. The unmarshal error was unmarked, so the
+// policy counted it as the chain's and SERVED the relay with the consumed
+// budget unknown. And getOrCreateSessionMeter discarded the read error and fell
+// through to its create path, where SetNX reports the key already exists and the
+// function calls itself again -- unbounded, on every relay of that session.
+//
+// MEASURED, restoring the discard: this test stops finishing and fails on the
+// package timeout after ~60s. A stack overflow is the eventual end state but was
+// NOT observed -- each level costs a store round trip, so the visible symptom is
+// a relay that never answers, not a crash.
+func TestACorruptMeterMetaRefusesInsteadOfRecursing(t *testing.T) {
+	const appAddr = "pokt1app"
+	const sessionID = "sess-corrupt"
+	const supplier = "pokt1supplier"
+	meter, _ := newFailClosedMeter(t, appAddr)
+	ctx := context.Background()
+
+	// Prove the happy path first, or the test cannot tell "refused" from
+	// "never worked".
+	allowed, err := meter.CheckAndConsumeRelay(ctx, "sess-ok", appAddr, "svc", supplier, 100, 91, 95)
+	require.NoError(t, err)
+	require.True(t, allowed, "precondition: a healthy meter admits the relay")
+
+	// A meta blob that exists and does not parse.
+	require.NoError(t, meter.redisClient.Set(
+		ctx, meter.metaKey(sessionID, supplier), []byte("{not json"), time.Minute).Err())
+
+	allowed, err = meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, "svc", supplier, 100, 91, 95)
+
+	require.Error(t, err)
+	require.False(t, allowed,
+		"the consumed counter cannot be trusted when its meta does not parse")
+	require.ErrorIs(t, err, ErrMeterStoreUnavailable,
+		"corruption in OUR store is the store's failure, not the chain's -- unmarked it is served")
 }
