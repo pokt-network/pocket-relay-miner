@@ -84,7 +84,7 @@ func TestResolveAndPublish_PersistsStakedEndpoints(t *testing.T) {
 	}
 	mgr, supplierCache, _ := newCacheTestSupplierManager(t, qc)
 
-	_, services := mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
+	_, services, _ := mgr.resolveAndPublishSupplierState(context.Background(), addr, nil)
 	require.ElementsMatch(t, []string{"eth", "poly"}, services)
 
 	state, err := supplierCache.GetSupplierState(context.Background(), addr)
@@ -99,4 +99,65 @@ func TestResolveAndPublish_PersistsStakedEndpoints(t *testing.T) {
 	// End-to-end with the relayer check: eth/jsonrpc declared, eth/grpc not.
 	require.True(t, state.TransportDeclared("eth", "jsonrpc"))
 	require.False(t, state.TransportDeclared("eth", "grpc"))
+}
+
+// TestPublishUnstakingState_PreservesStakedEndpoints pins the write that runs
+// when a supplier starts draining.
+//
+// The trap it guards: a draining supplier KEEPS SERVING (IsActive is true for
+// unstaking), and SetSupplierState marshals the whole struct and overwrites
+// rather than merging. So a drain write that rebuilds a partial state erases
+// the per-transport stake view the relayer reads -- in a fleet that is entirely
+// up to date, with no old miner anywhere.
+func TestPublishUnstakingState_PreservesStakedEndpoints(t *testing.T) {
+	const addr = "pokt1draining"
+	qc := &fakeSupplierQueryClient{
+		supplier: sharedtypes.Supplier{
+			OperatorAddress: addr,
+			OwnerAddress:    "pokt1owner",
+			Stake:           &cosmostypes.Coin{Denom: "upokt", Amount: sdkmath.NewInt(1000)},
+			Services: []*sharedtypes.SupplierServiceConfig{
+				{ServiceId: "eth", Endpoints: []*sharedtypes.SupplierEndpoint{
+					endpoint(sharedtypes.RPCType_JSON_RPC),
+					endpoint(sharedtypes.RPCType_WEBSOCKET),
+				}},
+			},
+		},
+	}
+	mgr, supplierCache, _ := newCacheTestSupplierManager(t, qc)
+	ctx := context.Background()
+
+	_, services, endpoints := mgr.resolveAndPublishSupplierState(ctx, addr, nil)
+	require.NotEmpty(t, endpoints, "precondition: the healthy write must publish a transport view")
+
+	// The internal state exactly as removeSupplier finds it in m.suppliers.
+	state := &SupplierState{OperatorAddr: addr}
+	state.stakeView.Store(&supplierStakeView{Services: services, StakedEndpoints: endpoints})
+	mgr.publishUnstakingState(ctx, state)
+
+	got, err := supplierCache.GetSupplierState(ctx, addr)
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	require.Equal(t, cache.SupplierStatusUnstaking, got.Status)
+	require.True(t, got.IsActive(),
+		"a draining supplier still serves relays -- that is why erasing its state matters")
+	require.ElementsMatch(t, endpoints, got.StakedEndpoints,
+		"the drain write must republish the per-transport stake view, not erase it")
+	require.True(t, got.TransportDeclared("eth", "jsonrpc"),
+		"the relayer must still see eth/jsonrpc as declared while the supplier drains")
+
+	// The helper's comment claims it copies rather than aliases. Back the claim.
+	state.stakeView.Load().StakedEndpoints[0].ServiceID = "mutated-after-publish"
+	again, err := supplierCache.GetSupplierState(ctx, addr)
+	require.NoError(t, err)
+	require.NotContains(t, endpointServiceIDs(again.StakedEndpoints), "mutated-after-publish",
+		"publishUnstakingState must copy the slice it publishes, not alias the caller's")
+}
+
+func endpointServiceIDs(eps []cache.StakedEndpoint) []string {
+	ids := make([]string, 0, len(eps))
+	for _, e := range eps {
+		ids = append(ids, e.ServiceID)
+	}
+	return ids
 }

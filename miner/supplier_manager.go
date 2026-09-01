@@ -52,10 +52,25 @@ const (
 // teardown writer. The owning map is xsync.Map (lock-free); this atomic
 // is the per-state field equivalent. Callers must use LoadStatus /
 // StoreStatus — do not access `status` directly.
+// supplierStakeView is what the drain write has to republish: the service list
+// and the per-transport stake view, carried here so that write never depends on
+// reading the store back.
+//
+// They live behind one atomic pointer because they are written AFTER the state
+// is already reachable from m.suppliers (addSupplierWithData stores the state
+// and starts consuming before it resolves them), and removeSupplier can load
+// that same state and read them concurrently. Copying the slices at the read
+// fixes aliasing, not the race on the slice headers themselves.
+type supplierStakeView struct {
+	Services        []string
+	StakedEndpoints []cache.StakedEndpoint
+}
+
 type SupplierState struct {
 	OperatorAddr string
-	Services     []string
-	status       atomic.Int32
+
+	stakeView atomic.Pointer[supplierStakeView]
+	status    atomic.Int32
 
 	// Redis stream consumer for this supplier
 	Consumer *redistransport.StreamsConsumer
@@ -1466,8 +1481,8 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 	// to the shared cache. Extracted into a helper so we can unit-test the
 	// "don't overwrite with empty services on chain query error" guard rail
 	// without spinning up the full addSupplierWithData pipeline.
-	_, services := m.resolveAndPublishSupplierState(ctx, operatorAddr, prewarmedData)
-	state.Services = services
+	_, services, endpoints := m.resolveAndPublishSupplierState(ctx, operatorAddr, prewarmedData)
+	state.stakeView.Store(&supplierStakeView{Services: services, StakedEndpoints: endpoints})
 
 	supplierManagerSuppliersActive.Inc()
 
@@ -1502,15 +1517,16 @@ const (
 // on every boot (see fix(miner): don't persist empty supplier services
 // on failed chain query).
 //
-// Returns the resolved ownerAddr and services so callers can populate
-// per-supplier state; empty values are returned on any failure path.
+// Returns the resolved ownerAddr, services and per-transport stake view so
+// callers can populate per-supplier state; empty values are returned on any
+// failure path. The endpoints are returned, and not only published, because the
+// drain write has to republish them without reading the store back.
 func (m *SupplierManager) resolveAndPublishSupplierState(
 	ctx context.Context,
 	operatorAddr string,
 	prewarmedData *SupplierWarmupData,
-) (ownerAddr string, services []string) {
+) (ownerAddr string, services []string, endpoints []cache.StakedEndpoint) {
 	source := supplierDataSourceNoQueryClient
-	var endpoints []cache.StakedEndpoint
 
 	switch {
 	case prewarmedData != nil:
@@ -1560,7 +1576,7 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 	}
 
 	if m.config.SupplierCache == nil {
-		return ownerAddr, services
+		return ownerAddr, services, endpoints
 	}
 
 	switch source {
@@ -1629,7 +1645,7 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 		// No query client and no prewarmed data — nothing to publish.
 	}
 
-	return ownerAddr, services
+	return ownerAddr, services, endpoints
 }
 
 // consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
@@ -1912,6 +1928,54 @@ func (m *SupplierManager) teardownCanFinishWork(operatorAddr string) bool {
 	return err == nil
 }
 
+// publishUnstakingState writes the draining supplier's state to the shared
+// cache. Extracted from removeSupplier so the write can be unit-tested without
+// standing up a consumer, a session store and an SMST manager -- the same
+// reason resolveAndPublishSupplierState is a helper.
+//
+// A supplier keeps serving while it drains (IsActive is true for unstaking, see
+// cache.SupplierState.IsActive), and SetSupplierState marshals the whole struct
+// and overwrites. So every field the relayer reads has to be carried here or
+// this write silently erases it.
+// It copies the slices it publishes rather than aliasing the caller's state,
+// and it does the copying itself so that no untested glue sits between the
+// state and the write.
+func (m *SupplierManager) publishUnstakingState(ctx context.Context, state *SupplierState) {
+	if m.config.SupplierCache == nil {
+		return
+	}
+
+	// nil means the supplier was removed before addSupplierWithData finished
+	// resolving it. Treated as empty, which is exactly what the plain fields
+	// used to yield -- this function fixed a race, and deliberately did not
+	// change what gets written. That this write can publish an empty view over
+	// a healthy one is a separate question, filed rather than answered here.
+	view := state.stakeView.Load()
+	if view == nil {
+		view = &supplierStakeView{}
+	}
+
+	servicesCopy := make([]string, len(view.Services))
+	copy(servicesCopy, view.Services)
+	endpointsCopy := make([]cache.StakedEndpoint, len(view.StakedEndpoints))
+	copy(endpointsCopy, view.StakedEndpoints)
+
+	supplierState := &cache.SupplierState{
+		Status:          cache.SupplierStatusUnstaking,
+		Staked:          true, // Still staked, just unstaking
+		OperatorAddress: state.OperatorAddr,
+		Services:        servicesCopy,
+		StakedEndpoints: endpointsCopy,
+		UpdatedBy:       m.config.MinerID,
+	}
+	if cacheErr := m.config.SupplierCache.SetSupplierState(ctx, supplierState); cacheErr != nil {
+		m.logger.Warn().
+			Err(cacheErr).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Msg("failed to update supplier state to unstaking in cache")
+	}
+}
+
 // removeSupplier gracefully removes a supplier (waits for pending work).
 //
 // Drain-window semantics (post commit 8eb604c):
@@ -1982,25 +2046,8 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 	}
 
 	state.StoreStatus(SupplierStatusDraining)
-	servicesCopy := make([]string, len(state.Services))
-	copy(servicesCopy, state.Services)
 
-	// Update cache to mark supplier as unstaking (use copied services to avoid race)
-	if m.config.SupplierCache != nil {
-		supplierState := &cache.SupplierState{
-			Status:          cache.SupplierStatusUnstaking,
-			Staked:          true, // Still staked, just unstaking
-			OperatorAddress: operatorAddr,
-			Services:        servicesCopy,
-			UpdatedBy:       m.config.MinerID,
-		}
-		if cacheErr := m.config.SupplierCache.SetSupplierState(ctx, supplierState); cacheErr != nil {
-			m.logger.Warn().
-				Err(cacheErr).
-				Str(logging.FieldSupplier, operatorAddr).
-				Msg("failed to update supplier state to unstaking in cache")
-		}
-	}
+	m.publishUnstakingState(ctx, state)
 
 	if m.teardownCanFinishWork(operatorAddr) {
 		m.logger.Info().
