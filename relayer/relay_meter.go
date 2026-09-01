@@ -579,9 +579,24 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddr
 
 	var meta SessionMeterMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
-		// Our own blob, in our own store, and unreadable: what this session has
-		// consumed is unknown, which is the store-unavailable case and not the
-		// chain's. Unmarked it would count as the chain's and be SERVED.
+		// Our own blob, in our own store, and unreadable: what this session is
+		// allowed to spend is unknown, which is the store-unavailable case and
+		// not the chain's. Unmarked it would count as the chain's and be SERVED.
+		//
+		// The key is DELETED, and that is what keeps this from being permanent.
+		// Refusing without deleting bricks the (session, supplier) for the whole
+		// key TTL: getOrCreateSessionMeter repairs by SetNX, which cannot write
+		// over a key that exists, so every later relay would be refused too.
+		// Deleting is safe because this blob holds only the derived allowance
+		// (MaxStakeUpokt and the inputs it came from) -- the consumed counter is
+		// a SEPARATE key, so nothing about what was already spent is lost, and
+		// the next relay re-derives the allowance.
+		if delErr := m.redisClient.Del(ctx, m.metaKey(sessionID, supplierAddress)).Err(); delErr != nil {
+			m.logger.Debug().
+				Err(delErr).
+				Str("session_id", sessionID).
+				Msg("could not drop a corrupt session meter meta; it will keep refusing until its TTL")
+		}
 		return nil, fmt.Errorf("%w: corrupt session meter meta: %w", ErrMeterStoreUnavailable, err)
 	}
 
