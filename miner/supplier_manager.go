@@ -45,13 +45,6 @@ const (
 	SupplierStatusDraining
 )
 
-// SupplierState holds the state for a single supplier in the miner.
-//
-// Status is stored atomically (int32) so consumeForSupplier on the relay
-// hot path can read the draining flag without coordinating with the
-// teardown writer. The owning map is xsync.Map (lock-free); this atomic
-// is the per-state field equivalent. Callers must use LoadStatus /
-// StoreStatus — do not access `status` directly.
 // supplierStakeView is what the drain write has to republish: the service list
 // and the per-transport stake view, carried here so that write never depends on
 // reading the store back.
@@ -66,6 +59,13 @@ type supplierStakeView struct {
 	StakedEndpoints []cache.StakedEndpoint
 }
 
+// SupplierState holds the state for a single supplier in the miner.
+//
+// Status is stored atomically (int32) so consumeForSupplier on the relay
+// hot path can read the draining flag without coordinating with the
+// teardown writer. The owning map is xsync.Map (lock-free); this atomic
+// is the per-state field equivalent. Callers must use LoadStatus /
+// StoreStatus — do not access `status` directly.
 type SupplierState struct {
 	OperatorAddr string
 
@@ -650,6 +650,14 @@ func (m *SupplierManager) filterStakedSuppliers(ctx context.Context, supplierAdd
 		services, endpoints, reliable := m.resolveSupplierServices(ctx, &supplier, addr)
 		if reliable {
 			m.writeSupplierStatusToCache(ctx, addr, true, services, endpoints, supplier.GetUnstakeSessionEndHeight())
+			// Refresh the in-memory view too, or the drain write republishes
+			// the ADD-TIME services and endpoints over what this pass just
+			// wrote: a supplier that restaked to add a service after being
+			// claimed would have that service dropped for the whole drain
+			// window, and decideSupplierServe would answer wrong_service.
+			if st, ok := m.suppliers.Load(addr); ok {
+				st.stakeView.Store(&supplierStakeView{Services: services, StakedEndpoints: endpoints})
+			}
 		} else {
 			supplierCacheWriteSkipped.WithLabelValues("unreliable_boot_snapshot").Inc()
 		}
