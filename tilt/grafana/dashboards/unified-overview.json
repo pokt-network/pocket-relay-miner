@@ -2754,7 +2754,7 @@
             "uid": "${datasource}"
           },
           "editorMode": "code",
-          "expr": "histogram_quantile(0.95, sum(rate(ha_smst_redis_operation_duration_seconds_bucket[$__rate_interval])) by (le, operation))",
+          "expr": "histogram_quantile(0.95, sum(rate(ha_smst_store_operation_duration_seconds_bucket[$__rate_interval])) by (le, operation))",
           "legendFormat": "p95 - {{operation}}",
           "range": true,
           "refId": "A"
