@@ -155,9 +155,10 @@ type SupplierState struct {
 	// not know this field still gets Services.
 	//
 	// MIXED-FLEET BACK-COMPAT: an old miner does not publish this field, so a new
-	// relayer reading old state sees it empty. Consumers MUST treat empty as
-	// "unknown, do not act" (fail-open) — see TransportDeclared — never as "no
-	// endpoints declared". Adding a field is safe: old relayers ignore it.
+	// relayer reading old state sees it empty, and TransportDeclared then reads
+	// every transport as undeclared. That is deliberate — see TransportDeclared
+	// — and it costs a warn plus a counter, never a relay. Adding a field is
+	// safe: old relayers ignore it.
 	StakedEndpoints []StakedEndpoint `json:"staked_endpoints,omitempty"`
 
 	// UnstakeSessionEndHeight is the session end height when unstaking takes effect.
@@ -202,16 +203,15 @@ type StakedEndpoint struct {
 }
 
 // TransportDeclared reports whether the supplier declared an on-chain endpoint
-// for (serviceID, backendType).
+// for (serviceID, backendType). An empty StakedEndpoints declares nothing, so
+// every pair answers false.
 //
-// FAIL-OPEN: when StakedEndpoints is empty the transport view is unknown (old
-// miner, or not yet published) — this returns true so callers never act on
-// missing data. It answers "false" only when StakedEndpoints is populated AND
-// the pair is genuinely absent.
+// This used to answer true on an empty list, so that a relayer reading state
+// written by an older miner never acted on a view that miner does not publish.
+// That knob is gone: the fleet is expected to run one version, and the only
+// caller warns rather than rejecting, so a wrong answer here costs a log line
+// and a counter, never a relay.
 func (s *SupplierState) TransportDeclared(serviceID, backendType string) bool {
-	if len(s.StakedEndpoints) == 0 {
-		return true
-	}
 	for _, e := range s.StakedEndpoints {
 		if e.ServiceID == serviceID && e.RpcType == backendType {
 			return true

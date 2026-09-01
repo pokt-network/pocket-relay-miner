@@ -58,17 +58,20 @@ func TestWarnUndeclaredTransport_DeclaredIsSilent(t *testing.T) {
 	require.Equal(t, 0, p.warnedUndeclaredTransport.Size())
 }
 
-func TestWarnUndeclaredTransport_FailOpenOnEmptyEndpoints(t *testing.T) {
+func TestWarnUndeclaredTransport_EmptyEndpointsWarns(t *testing.T) {
 	p := newWarnProxy()
 	before := testutil.ToFloat64(undeclaredTransportServed.WithLabelValues("eth", "grpc"))
 
-	// Old miner: no StakedEndpoints published → fail-open, never warn.
+	// A miner too old to publish StakedEndpoints leaves the view empty, and an
+	// empty view declares nothing. The relay is still SERVED -- this path only
+	// warns -- so the whole cost of being wrong here is one counter and one
+	// deduped log line.
 	state := &cache.SupplierState{Status: cache.SupplierStatusActive, Staked: true, Services: []string{"eth"}}
 	p.warnUndeclaredTransport(state, gateTestSupplier, "eth", "grpc")
 
 	got := testutil.ToFloat64(undeclaredTransportServed.WithLabelValues("eth", "grpc"))
-	require.InDelta(t, before, got, 0.0001, "empty StakedEndpoints must fail open (no warn)")
-	require.Equal(t, 0, p.warnedUndeclaredTransport.Size())
+	require.InDelta(t, before+1, got, 0.0001, "an absent transport view must warn, not buy silence")
+	require.Equal(t, 1, p.warnedUndeclaredTransport.Size())
 }
 
 func TestWarnUndeclaredTransport_NilStateNoPanic(t *testing.T) {

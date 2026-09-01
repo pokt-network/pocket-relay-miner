@@ -707,11 +707,11 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 // the operator should declare the endpoint on-chain so PATH routes it on purpose
 // and the network has an accurate view of what each supplier serves.
 //
-// FAIL-OPEN and mixed-fleet safe: skipped when state is nil (boot/optimistic) or
-// when the supplier's per-transport view is empty (old miner that does not yet
-// publish StakedEndpoints) — see SupplierState.TransportDeclared. The metric
-// counts every occurrence; the log line is deduped to once per tuple so the hot
-// path never spams.
+// Skipped only when state is nil (boot/optimistic). An empty per-transport view
+// no longer buys silence — see SupplierState.TransportDeclared — so an old miner
+// that does not publish StakedEndpoints makes every relay of that supplier count
+// here. The metric counts every occurrence; the log line is deduped to once per
+// tuple so the hot path never spams.
 func (p *ProxyServer) warnUndeclaredTransport(state *cache.SupplierState, supplier, serviceID, backendType string) {
 	if state == nil || state.TransportDeclared(serviceID, backendType) {
 		return
@@ -727,8 +727,10 @@ func (p *ProxyServer) warnUndeclaredTransport(state *cache.SupplierState, suppli
 		Str("supplier", supplier).
 		Str("service", serviceID).
 		Str("transport", backendType).
-		Msg("serving a relay for a (service, transport) not declared in the supplier's on-chain stake; " +
-			"still served and claimable, but declare this endpoint on-chain so PATH routes it deliberately")
+		Msg("serving a relay for a (service, transport) this supplier's cached stake does not declare; " +
+			"still served and claimable. Either the endpoint is genuinely undeclared on-chain -- declare it " +
+			"so PATH routes it deliberately -- or the miner writing this supplier's state is too old to " +
+			"publish the per-transport view, in which case upgrade it rather than restaking")
 }
 
 // handleRelay handles incoming relay requests.

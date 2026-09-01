@@ -65,8 +65,10 @@ var (
 	// rpc_type endpoint). The relay is still served and is claimable — the chain
 	// keys claims by (supplier, session) and never sees the transport — so this
 	// is a visibility signal, not a rejection: declare the endpoint on-chain so
-	// PATH routes it deliberately. Fires only when the miner has published the
-	// per-transport stake view (StakedEndpoints); silent on an old miner.
+	// PATH routes it deliberately. It also fires for every relay of a supplier
+	// whose miner is too old to publish the per-transport stake view, because an
+	// empty view now declares nothing; the deduped warn names which of the two
+	// cases it is.
 	// Cardinality is service_id × rpc_type (bounded); the supplier is in the
 	// deduped warn log, not a label.
 	undeclaredTransportServed = observability.RelayerFactory.NewCounterVec(

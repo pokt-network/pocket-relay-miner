@@ -457,13 +457,16 @@ func TestTransportDeclared(t *testing.T) {
 	require.False(t, state.TransportDeclared("poly", "jsonrpc"))
 }
 
-func TestTransportDeclared_FailOpenWhenEmpty(t *testing.T) {
-	// Old miner / not-yet-published: empty StakedEndpoints means "unknown", so
-	// every transport reads as declared (fail-open — never warn on missing data).
+func TestTransportDeclared_EmptyDeclaresNothing(t *testing.T) {
+	// An empty StakedEndpoints declares nothing, so every transport reads as
+	// undeclared. This inverts a deliberate earlier choice: the empty list used
+	// to answer true so a relayer never acted on a view an older miner does not
+	// publish. The only caller warns rather than rejecting, so the cost of the
+	// inversion is a log line and a counter, never a relay.
 	state := SupplierState{Staked: true, Status: SupplierStatusActive, Services: []string{"eth"}}
-	require.True(t, state.TransportDeclared("eth", "jsonrpc"))
-	require.True(t, state.TransportDeclared("eth", "grpc"))
-	require.True(t, state.TransportDeclared("anything", "rest"))
+	require.False(t, state.TransportDeclared("eth", "jsonrpc"))
+	require.False(t, state.TransportDeclared("eth", "grpc"))
+	require.False(t, state.TransportDeclared("anything", "rest"))
 }
 
 func TestStakedEndpoints_JSONRoundTripAndBackCompat(t *testing.T) {
@@ -481,13 +484,15 @@ func TestStakedEndpoints_JSONRoundTripAndBackCompat(t *testing.T) {
 	require.NoError(t, json.Unmarshal(b, &out))
 	require.Equal(t, in.StakedEndpoints, out.StakedEndpoints)
 
-	// Back-compat: JSON written by an OLD miner (no staked_endpoints key) decodes
-	// with a nil slice → fail-open.
+	// Back-compat: JSON written by an OLD miner (no staked_endpoints key) still
+	// DECODES — that is the part that matters and it is unchanged. What such a
+	// state then reports is "nothing declared", which is what makes the relayer
+	// warn until that miner is upgraded.
 	const oldJSON = `{"status":"active","staked":true,"services":["eth"],"operator_address":"pokt1x"}`
 	var legacy SupplierState
 	require.NoError(t, json.Unmarshal([]byte(oldJSON), &legacy))
 	require.Nil(t, legacy.StakedEndpoints)
-	require.True(t, legacy.TransportDeclared("eth", "grpc"), "empty endpoints must fail-open")
+	require.False(t, legacy.TransportDeclared("eth", "grpc"), "an absent view declares nothing")
 }
 
 // TestSupplierCache_L1RefreshesAfterTTL is the regression test for the supplier
