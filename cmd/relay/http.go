@@ -12,6 +12,8 @@ import (
 	"sync/atomic"
 	"time"
 
+	poktclient "github.com/pokt-network/poktroll/pkg/client"
+	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 
 	"github.com/pokt-network/pocket-relay-miner/client"
@@ -159,7 +161,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	monitorWg.Add(1)
 	go func() {
 		defer monitorWg.Done()
-		invalidateSessionOnRollover(monitorCtx, logger, relayClient, blockSubscriber, tracker)
+		renewSessionOnRollover(monitorCtx, logger, relayClient, blockSubscriber, tracker, sessionRolloverTick)
 	}()
 
 	// Create metrics collector
@@ -221,7 +223,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			// randomness, so each call produces different bytes even for an
 			// identical payload, matching PATH's per-request sign behaviour.
 			supplier := supplierAddrs[supplierIdx.Add(1)%uint64(len(supplierAddrs))]
-			_, relayRequestBz, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
+			relayRequest, relayRequestBz, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
 			if err != nil {
 				metrics.RecordError(fmt.Errorf("build relay request: %w", err))
 				logger.Debug().
@@ -232,7 +234,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 			}
 
 			start := time.Now()
-			relayResponseBz, err := sendHTTPRelay(requestCtx, relayRequestBz)
+			relayResponseBz, respHeaders, err := sendHTTPRelay(requestCtx, relayRequestBz)
 			latencyMs := float64(time.Since(start).Microseconds()) / 1000.0
 
 			if err != nil {
@@ -273,6 +275,30 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 				return
 			}
 
+			// Optional receipt: proves this response answers THIS request, which
+			// the response signature does not. A missing header is NOT counted
+			// as a failure — the relayer may predate the feature. A header that
+			// is present and does not verify IS a failure.
+			if RelayRequestReceipt {
+				if header := respHeaders.Get(ReceiptResponseHeader); header != "" {
+					supplierPub, pkErr := relayClient.SupplierPubKey(requestCtx, supplier)
+					if pkErr != nil {
+						metrics.RecordError(fmt.Errorf("receipt: supplier pubkey: %w", pkErr))
+						return
+					}
+					if vErr := VerifyRelayReceipt(
+						header, relayRequest.Meta.Signature, relayResponse.PayloadHash, supplierPub,
+					); vErr != nil {
+						metrics.RecordError(fmt.Errorf("receipt verification failed: %w", vErr))
+						logger.Debug().
+							Err(vErr).
+							Int("request_num", reqNum).
+							Msg("relay request failed (invalid receipt)")
+						return
+					}
+				}
+			}
+
 			// Success: HTTP 200 + valid signature + no JSON-RPC error
 			metrics.RecordSuccess(latencyMs)
 			logger.Debug().
@@ -298,25 +324,61 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 	return nil
 }
 
-// invalidateSessionOnRollover watches blocks and clears the shared session
-// cache when the session boundary is crossed. Workers build their own relay
-// requests per call, so all that's needed is to ensure the next getSession()
-// in the client hits chain and returns the new session header.
-func invalidateSessionOnRollover(
+// sessionRolloverTick is how often the monitor compares the chain height
+// against the end of the session the workers are relaying against. Blocks are
+// ~10s apart, so a second is far finer than the event it watches for.
+const sessionRolloverTick = 1 * time.Second
+
+// blockHeightSource reports the most recent block seen on chain.
+// *client.BlockSubscriber satisfies it.
+type blockHeightSource interface {
+	LastBlock(ctx context.Context) poktclient.Block
+}
+
+// sessionRenewer is the slice of the relay client the rollover monitor needs.
+// *relay_client.RelayClient satisfies it.
+type sessionRenewer interface {
+	GetSessionAtHeight(ctx context.Context, serviceID string, height int64) (*sessiontypes.Session, error)
+	ReplaceCachedSession(session *sessiontypes.Session)
+}
+
+// renewSessionOnRollover watches blocks and installs the new session when the
+// chain crosses the boundary of the one the workers are relaying against.
+//
+// Sessions sit on a deterministic grid, so the session in hand already carries
+// the height at which it stops being valid: the per-block check is an integer
+// comparison and costs no query. Crossing it costs exactly one.
+//
+// It REPLACES the cached session rather than clearing it. Clearing looks
+// equivalent — the next relay would re-fetch — but it is not: that re-fetch
+// asks for the session at the current height, and the query layer serves those
+// from an entry keyed by session start height that outlives the boundary. The
+// cleared cache is refilled with the session that just expired and every
+// subsequent relay is rejected with "session expired ... (grace period
+// elapsed)". Measured: 28,455 of 36,000 relays in one 90s run.
+//
+// A failed fetch leaves the old session in place and retries on the next tick.
+// Relays against an expired session are rejected one by one; relays with no
+// session at all cannot even be built.
+func renewSessionOnRollover(
 	ctx context.Context,
 	logger logging.Logger,
-	relayClient *relay_client.RelayClient,
-	blockSubscriber *client.BlockSubscriber,
+	sessions sessionRenewer,
+	blocks blockHeightSource,
 	tracker *sessionEndTracker,
+	tick time.Duration,
 ) {
-	var lastRefreshHeight atomic.Int64
+	var lastRenewedHeight atomic.Int64
+
+	ticker := time.NewTicker(tick)
+	defer ticker.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-time.After(1 * time.Second):
-			currentBlock := blockSubscriber.LastBlock(ctx)
+		case <-ticker.C:
+			currentBlock := blocks.LastBlock(ctx)
 			if currentBlock == nil {
 				continue
 			}
@@ -324,37 +386,37 @@ func invalidateSessionOnRollover(
 			currentHeight := currentBlock.Height()
 			sessionEndHeight := tracker.get()
 
-			if currentHeight < sessionEndHeight+1 {
+			if currentHeight <= sessionEndHeight {
 				continue
 			}
-			if lastRefreshHeight.Load() >= currentHeight {
+			if lastRenewedHeight.Load() >= currentHeight {
 				continue
 			}
 
 			logger.Warn().
 				Int64("current_height", currentHeight).
 				Int64("session_end_height", sessionEndHeight).
-				Msg("session boundary crossed - invalidating session cache")
+				Msg("session boundary crossed - renewing session")
 
-			relayClient.ClearSessionCache()
-
-			// Prime tracker with the new session end so we don't re-fire until
-			// the NEXT rollover. We use GetSessionAtHeight to bypass the cache.
-			newSession, err := relayClient.GetSessionAtHeight(ctx, RelayServiceID, currentHeight)
+			// Fetch at an explicit height: a height-0 query is the one the
+			// query layer answers from its own cache, which is what went stale.
+			newSession, err := sessions.GetSessionAtHeight(ctx, RelayServiceID, currentHeight)
 			if err != nil {
 				logger.Error().
 					Err(err).
 					Int64("current_height", currentHeight).
-					Msg("failed to fetch new session after rollover")
+					Msg("failed to fetch new session after rollover; keeping the old one and retrying")
 				continue
 			}
+
+			sessions.ReplaceCachedSession(newSession)
 			tracker.set(newSession.Header.SessionEndBlockHeight)
-			lastRefreshHeight.Store(currentHeight)
+			lastRenewedHeight.Store(currentHeight)
 
 			logger.Info().
 				Str("new_session_id", newSession.Header.SessionId).
 				Int64("new_session_end_height", newSession.Header.SessionEndBlockHeight).
-				Msg("session cache invalidated; workers will pick up new session on next BuildRelayRequest")
+				Msg("session renewed; workers build against it from the next relay")
 		}
 	}
 }
@@ -366,7 +428,7 @@ const (
 )
 
 // sendHTTPRelay sends a JSON-RPC (Rpc-Type 3) relay request via HTTP.
-func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
+func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, http.Header, error) {
 	return sendRelayOverHTTP(ctx, relayRequestBz, rpcTypeJSONRPC)
 }
 
@@ -382,14 +444,14 @@ func sendHTTPRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
 //
 // Note: Go's http.Client automatically handles Accept-Encoding and decompression
 // when DisableCompression is false (the default).
-func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType string) ([]byte, error) {
+func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType string) ([]byte, http.Header, error) {
 	// Build URL: {relayerURL}/{serviceID}
 	url := fmt.Sprintf("%s/%s", RelayRelayerURL, RelayServiceID)
 
 	// Create HTTP request
 	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(relayRequestBz))
 	if err != nil {
-		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
+		return nil, nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
 
 	// === Required Headers ===
@@ -406,6 +468,13 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 		req.Header.Set(key, val)
 	}
 
+	// Pocket-Sign-Receipt: ask the relayer to bind this request to its response
+	// with a supplier signature. Absent unless --request-receipt is set, and a
+	// relayer that predates the feature simply ignores it.
+	if RelayRequestReceipt {
+		req.Header.Set(ReceiptRequestHeader, "true")
+	}
+
 	// === Compression (RFC 7231 compliance) ===
 	// Accept-Encoding is automatically added by Go's http.Client when DisableCompression=false
 	// The relayer will compress responses when this header is present
@@ -414,14 +483,14 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 	// Send request using shared client with connection pooling
 	resp, err := sharedHTTPClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("HTTP request failed: %w", err)
+		return nil, nil, fmt.Errorf("HTTP request failed: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, resp.Header, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	// Read response body
@@ -429,10 +498,10 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 	// is present in the response (because DisableCompression=false in our Transport)
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %w", err)
+		return nil, resp.Header, fmt.Errorf("failed to read response body: %w", err)
 	}
 
-	return respBody, nil
+	return respBody, resp.Header, nil
 }
 
 // buildJSONRPCPayload creates a serialized POKTHTTPRequest with JSON-RPC payload.

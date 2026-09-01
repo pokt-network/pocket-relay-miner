@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"sync"
 
+	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/pokt-network/ring-go"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -45,7 +46,13 @@ type RelayClient struct {
 	// This matches PATH's approach where gateway signs relays for delegated apps.
 	gatewayMode bool
 
-	// Cached session for reuse in load tests
+	// cachedSession is the session every relay is built against, reused so a
+	// load test does not query the chain once per relay.
+	//
+	// sessionMu guards it because two different goroutines touch it: the relay
+	// workers, which read it on every request, and the rollover monitor, which
+	// replaces it when the chain crosses a session boundary.
+	sessionMu     sync.RWMutex
 	cachedSession *sessiontypes.Session
 
 	// ringCache stores rings keyed by (appAddress, sessionEndHeight).
@@ -295,10 +302,13 @@ func (c *RelayClient) getSession(
 	serviceID string,
 	height int64,
 ) (*sessiontypes.Session, error) {
-	// Return cached session if available and still valid
-	// NOTE: Cache only used when height=0 (default behavior)
-	if height == 0 && c.cachedSession != nil && c.cachedSession.Header.ServiceId == serviceID {
-		return c.cachedSession, nil
+	// Serve the cached session. Only height=0 ("current") is cacheable: an
+	// explicit height is a question about a specific session and must reach
+	// the chain.
+	if height == 0 {
+		if cached := c.cachedSessionFor(serviceID); cached != nil {
+			return cached, nil
+		}
 	}
 
 	// Fetch session from chain at specific height
@@ -309,7 +319,7 @@ func (c *RelayClient) getSession(
 
 	// Cache for reuse (only if height=0, default behavior)
 	if height == 0 {
-		c.cachedSession = session
+		c.ReplaceCachedSession(session)
 	}
 
 	return session, nil
@@ -398,17 +408,55 @@ func (c *RelayClient) GetSessionAtHeight(ctx context.Context, serviceID string, 
 	return session, nil
 }
 
+// cachedSessionFor returns the cached session when it belongs to serviceID,
+// and nil otherwise. A nil result means the caller must query the chain.
+func (c *RelayClient) cachedSessionFor(serviceID string) *sessiontypes.Session {
+	c.sessionMu.RLock()
+	defer c.sessionMu.RUnlock()
+
+	if c.cachedSession == nil || c.cachedSession.Header.ServiceId != serviceID {
+		return nil
+	}
+
+	return c.cachedSession
+}
+
+// ReplaceCachedSession installs session as the one every subsequent relay is
+// built against, in a single step.
+//
+// This is what a session rollover must call. Clearing the cache and letting the
+// next relay re-fetch is not equivalent: the chain query for the current height
+// is served from the query layer's own cache, which is keyed by session start
+// height and therefore returns the SAME entry for every "current height" lookup
+// within its TTL. A cleared cache is refilled with the session that just
+// expired, and every relay after the boundary is rejected with
+// "session expired ... (grace period elapsed)". The rollover monitor already
+// holds a session fetched at an explicit height, which is not subject to that
+// key; handing it over here is what makes the renewal take effect.
+//
+// Safe for concurrent use with relay workers building requests.
+func (c *RelayClient) ReplaceCachedSession(session *sessiontypes.Session) {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+
+	c.cachedSession = session
+}
+
 // ClearSessionCache clears the cached session.
 //
 // Forces the next BuildRelayRequest call to fetch a fresh session from the blockchain
 // instead of using the cached session. This is essential when:
-//   - Testing across session boundaries (when block height crosses session end)
 //   - Simulating session rollovers in load tests
 //   - Recovering from session-related errors
 //
-// Thread-safe but should be called when no concurrent BuildRelayRequest calls are active
-// to avoid race conditions.
+// For crossing a session boundary, prefer ReplaceCachedSession: it installs the
+// new session instead of leaving a gap that a stale chain read can refill.
+//
+// Safe for concurrent use with relay workers building requests.
 func (c *RelayClient) ClearSessionCache() {
+	c.sessionMu.Lock()
+	defer c.sessionMu.Unlock()
+
 	c.cachedSession = nil
 }
 
@@ -449,6 +497,27 @@ func (c *RelayClient) VerifyRelayResponse(
 	}
 
 	return relayResponse, nil
+}
+
+// SupplierPubKey returns a supplier operator's on-chain public key.
+//
+// VerifyRelayResponse fetches this internally to check the response signature
+// but does not expose it. A caller verifying a relay receipt needs the same key
+// to check a signature over a digest that is not a RelayResponse, so it is
+// exposed here rather than fetched a second way.
+func (c *RelayClient) SupplierPubKey(
+	ctx context.Context,
+	supplierAddr string,
+) (cryptotypes.PubKey, error) {
+	pubKey, err := c.queryClients.Account().GetPubKeyFromAddress(ctx, supplierAddr)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch public key for supplier %s: %w", supplierAddr, err)
+	}
+	if pubKey == nil {
+		return nil, fmt.Errorf("supplier %s has no public key on chain "+
+			"(the account has never signed a transaction)", supplierAddr)
+	}
+	return pubKey, nil
 }
 
 // SessionSupplierAddresses returns the operator addresses of every supplier

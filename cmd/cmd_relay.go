@@ -188,6 +188,7 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayOutputJSON, "output-json", false, "Output results as JSON")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayTimeout, "timeout", 120, "Request timeout in seconds (also the max time a stream is read before giving up)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayVerbose, "verbose", false, "Verbose logging")
+	relayCmd.PersistentFlags().BoolVar(&relay.RelayRequestReceipt, "request-receipt", false, "Ask the relayer for a Pocket-Relay-Receipt: a supplier signature binding the request sent to the response received, and verify it. The response signature is always verified regardless; this adds the request-to-response binding it does not cover. A relayer that predates the feature returns none, which is reported as a warning, not an error")
 
 	// Simulated-relay flags: fire a real, ring-signed relay verified by the
 	// relayer's SimulationVerifier against a config-pinned ring instead of an

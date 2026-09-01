@@ -158,6 +158,40 @@ count. For WebSocket the supplier is pinned at the handshake, so the pool
 opens one connection per supplier; for HTTP/gRPC the supplier rotates
 per request over the shared connection.
 
+## Relay receipts (`--request-receipt`)
+
+A receipt binds the request you sent to the response you got, signed by the
+supplier. The response signature alone does not do this: it proves the supplier
+produced that body in that session, but not which request it answers.
+
+```bash
+# Simulated: no staking needed, same data path as a real relay.
+pocket-relay-miner relay jsonrpc --localnet --simulate --sim-key-id sim-http \
+  --service develop-http --request-receipt --verbose
+```
+
+```
+Signature: ✅ VALID
+Receipt: ✅ VALID (binds this request to this response)
+  request signature: 199 bytes (bLSAG ring)
+  response payload hash: 035246ede2579f9e...
+```
+
+Works the same on a real relay — drop `--simulate --sim-key-id`.
+
+The response signature is verified with or without the flag; that check is
+unconditional on every transport. `--request-receipt` adds the binding the
+response signature does not cover.
+
+**A missing receipt is a warning, not a failure.** The operator may be running
+a build that predates the feature, and there is nothing to configure either
+way. A receipt that comes back and does **not** verify is an error.
+
+Works in `--load-test` too, where an invalid receipt counts as a failed relay
+and a missing one does not.
+
+Full reference: [`docs/relay-receipts.md`](../relay-receipts.md).
+
 ## The `[::1]:8180` gotcha
 
 After a relayer pod restart, Tilt sometimes re-binds the `:8180` port-forward

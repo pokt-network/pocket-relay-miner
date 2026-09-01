@@ -1,6 +1,9 @@
-# No dependencies. sign.py is pure Python 3 stdlib, and that is deliberate:
-# this is example code meant to be copied into an agent or a script without
-# dragging a build toolchain along with it.
+# No dependencies. sign.py and verify.py are pure Python 3 stdlib, and that is
+# deliberate: this is example code meant to be copied into an agent or a script
+# without dragging a build toolchain along with it. No protobuf library either
+# — verify.py reads the wire format directly, which is a page of code and
+# removes the one dependency a caller in another language would struggle with
+# most.
 #
 #   python3 verify_against_oracle.py     # needs nothing but Python 3.8+ and Go
 #                                        # (Go only to build the test oracle)

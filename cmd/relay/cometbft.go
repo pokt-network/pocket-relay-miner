@@ -74,6 +74,6 @@ func buildCometBFTPayload() ([]byte, error) {
 }
 
 // sendCometBFTRelay sends a relay tagged as CometBFT (Rpc-Type: 5).
-func sendCometBFTRelay(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
+func sendCometBFTRelay(ctx context.Context, relayRequestBz []byte) ([]byte, http.Header, error) {
 	return sendRelayOverHTTP(ctx, relayRequestBz, rpcTypeCometBFT)
 }

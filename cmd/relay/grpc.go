@@ -111,15 +111,18 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 	defer func() { _ = conn.Close() }()
 
 	// Create sendFunc that invokes gRPC relay
-	sendFunc := func(ctx context.Context, relayRequestBz []byte) ([]byte, error) {
+	// gRPC carries no HTTP response headers, so no receipt can ride back on
+	// this transport. It returns a nil header for the shared signature.
+	sendFunc := func(ctx context.Context, relayRequestBz []byte) ([]byte, http.Header, error) {
 		// Unmarshal relay request (needed for gRPC invocation)
 		relayRequest := &servicetypes.RelayRequest{}
 		if err := relayRequest.Unmarshal(relayRequestBz); err != nil {
-			return nil, fmt.Errorf("failed to unmarshal relay request: %w", err)
+			return nil, nil, fmt.Errorf("failed to unmarshal relay request: %w", err)
 		}
 
 		// Invoke gRPC relay
-		return invokeGRPCRelay(ctx, conn, relayRequest)
+		bz, err := invokeGRPCRelay(ctx, conn, relayRequest)
+		return bz, nil, err
 	}
 
 	// Use shared build/send/verify logic
