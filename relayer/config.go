@@ -776,7 +776,6 @@ func DefaultConfig() Config {
 	return cfg
 }
 
-// Validate validates the configuration and returns an error if invalid.
 // Warnings returns deprecation notices for a config that LOADS but contains
 // keys that no longer do anything.
 //
@@ -801,6 +800,7 @@ func (c *Config) Warnings() []string {
 	return warnings
 }
 
+// Validate validates the configuration and returns an error if invalid.
 func (c *Config) Validate() error {
 	if c.ListenAddr == "" {
 		return fmt.Errorf("listen_addr is required")

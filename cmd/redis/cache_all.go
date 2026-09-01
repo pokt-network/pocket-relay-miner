@@ -206,8 +206,9 @@ var errSupplierPreserved = errors.New("supplier entry no longer contaminated")
 // classify-then-delete TOCTOU: the miner reconcile rewrites every supplier
 // key on its cadence, and an entry that was contaminated at scan time (e.g.
 // written while BlockClient height was 0 at miner boot) may legitimately be
-// healthy by delete time — deleting it then would 503 that supplier's
-// relays until the next reconcile pass. If the value changes between GET and
+// healthy by delete time — deleting it then would serve that supplier
+// UNVERIFIED until the next reconcile pass, and those relays are not
+// claimable. If the value changes between GET and
 // EXEC, the transaction aborts (TxFailedErr) and the entry is preserved:
 // losing a delete is safe (the next cleanup catches it), deleting a healthy
 // entry is not.
