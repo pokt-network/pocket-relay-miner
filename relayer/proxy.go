@@ -1035,6 +1035,11 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 					relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonMeterError).Inc()
 					return
 				}
+				// Served without being metered, exactly like the optimistic
+				// path and the two streaming ones. Counting it only there left
+				// eager as the single mode where an unmetered relay was
+				// invisible, so a wobbling full node read as zero.
+				relayMeterUnbilled.WithLabelValues(serviceID).Inc()
 			} else if !allowed {
 				logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 					Msg("relay rejected: session relay limit reached (eager mode)")
