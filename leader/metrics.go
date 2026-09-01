@@ -62,7 +62,7 @@ func initMetrics() *leaderMetrics {
 					Namespace: metricsNamespace,
 					Subsystem: metricsSubsystem,
 					Name:      "leader_acquisition_failures_total",
-					Help:      "Total number of failed leadership acquisition attempts due to Redis errors",
+					Help:      "Total number of failed leadership acquisition attempts due to store errors",
 				},
 				[]string{"instance", "reason"},
 			),

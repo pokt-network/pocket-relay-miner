@@ -23,7 +23,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_consumed_from_stream_total",
-			Help:      "Total number of relays consumed from Redis Streams (relayer → miner)",
+			Help:      "Total number of relays consumed from the relay stream (relayer → miner)",
 		},
 		[]string{"supplier", "service_id"},
 	)
@@ -380,11 +380,11 @@ var (
 	// unbounded value on Counters (never DeleteLabelValues'd) and
 	// dedupMisses/dedupMarked fire on every new relay (hot path) → TSDB OOM.
 	// Aggregate rates are the actionable signal; per-session goes to logs.
-	dedupRedisCacheHits = observability.MinerFactory.NewCounter(
+	dedupCacheHits = observability.MinerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "dedup_redis_cache_hits_total",
+			Name:      "dedup_cache_hits_total",
 			Help:      "Total number of reclaimed relays detected as already-processed (prevented double-count)",
 		},
 	)
@@ -692,7 +692,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "session_snapshots_saved_total",
-			Help:      "Total number of session snapshots saved to Redis",
+			Help:      "Total number of session snapshots saved to the store",
 		},
 		[]string{"supplier"},
 	)
@@ -702,7 +702,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "session_snapshots_loaded_total",
-			Help:      "Total number of session snapshots loaded from Redis",
+			Help:      "Total number of session snapshots loaded from the store",
 		},
 		[]string{"supplier"},
 	)

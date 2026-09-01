@@ -925,13 +925,13 @@ func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID strin
 // An UNCLASSIFIED failure counts as the chain's. Guessing the other way would
 // turn any unrecognised error into a fleet-wide refusal.
 func (m *RelayMeter) handleMeterError(operation string, cause error) (allowed bool, err error) {
-	relayMeterRedisErrors.WithLabelValues(operation).Inc()
+	relayMeterErrors.WithLabelValues(operation).Inc()
 
 	storeDown := errors.Is(cause, ErrMeterStoreUnavailable)
 
 	// Per-relay under an outage (one line per relay per instance); the outage
 	// itself is logged by the transport reconnect loop, and
-	// relay_meter_redis_errors_total carries the alertable rate.
+	// relay_meter_errors_total carries the alertable rate.
 	m.logger.Debug().
 		Err(cause).
 		Str("operation", operation).

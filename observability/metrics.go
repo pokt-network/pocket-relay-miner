@@ -23,36 +23,36 @@ var (
 
 var (
 
-	// SMSTRedisOperations tracks Redis operations for SMST storage.
-	SMSTRedisOperations = MinerFactory.NewCounterVec(
+	// SMSTStoreOperations tracks store operations for SMST storage.
+	SMSTStoreOperations = MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: "smst",
-			Name:      "redis_operations_total",
-			Help:      "Total number of Redis operations for SMST storage",
+			Name:      "store_operations_total",
+			Help:      "Total number of store operations for SMST storage",
 		},
 		[]string{"operation", "result"},
 	)
 
-	// SMSTRedisOperationDuration tracks latency of Redis operations for SMST.
-	SMSTRedisOperationDuration = MinerFactory.NewHistogramVec(
+	// SMSTStoreOperationDuration tracks latency of store operations for SMST.
+	SMSTStoreOperationDuration = MinerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: "smst",
-			Name:      "redis_operation_duration_seconds",
-			Help:      "Duration of Redis operations for SMST storage",
+			Name:      "store_operation_duration_seconds",
+			Help:      "Duration of store operations for SMST storage",
 			Buckets:   MicroLatencyBuckets,
 		},
 		[]string{"operation"},
 	)
 
-	// SMSTRedisErrors tracks Redis error counts for SMST storage.
-	SMSTRedisErrors = MinerFactory.NewCounterVec(
+	// SMSTStoreErrors tracks store error counts for SMST storage.
+	SMSTStoreErrors = MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: "smst",
-			Name:      "redis_errors_total",
-			Help:      "Total number of Redis errors for SMST storage",
+			Name:      "store_errors_total",
+			Help:      "Total number of store errors for SMST storage",
 		},
 		[]string{"operation", "error_type"},
 	)
@@ -99,7 +99,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: "smst",
 			Name:      "corruption_purged_total",
-			Help:      "Sessions whose Redis-backed SMST state was purged after repeated corruption evictions (escalation past persistentCorruptionThreshold)",
+			Help:      "Sessions whose stored SMST state was purged after repeated corruption evictions (escalation past persistentCorruptionThreshold)",
 		},
 		[]string{"supplier", "reason"},
 	)

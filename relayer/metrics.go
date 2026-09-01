@@ -101,7 +101,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_published_total",
-			Help:      "Total number of mined relays published to Redis",
+			Help:      "Total number of mined relays published to the store",
 		},
 		[]string{"service_id", "supplier"},
 	)
@@ -275,7 +275,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relay_meter_latency_seconds",
-			Help:      "Latency of relay meter check and consume operations (Redis calls)",
+			Help:      "Latency of relay meter check and consume operations (store calls)",
 			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"service_id", "mode"}, // mode: eager, optimistic
@@ -622,7 +622,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "grpc_relays_published_total",
-			Help:      "Total number of gRPC relays published to Redis",
+			Help:      "Total number of gRPC relays published to the store",
 		},
 		[]string{"service_id"},
 	)
@@ -658,12 +658,12 @@ var (
 		[]string{"supplier", "service_id"},
 	)
 
-	relayMeterRedisErrors = observability.RelayerFactory.NewCounterVec(
+	relayMeterErrors = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "relay_meter_redis_errors_total",
-			Help:      "Total relay meter Redis errors",
+			Name:      "relay_meter_errors_total",
+			Help:      "Total relay meter errors, whether the meter's own store or a chain query it depends on",
 		},
 		[]string{"operation"},
 	)
