@@ -23,6 +23,8 @@ que no se puede leer de la fuente.
 | [session](session.md) | **no hay reparto de claims entre suppliers**: esa lógica está comentada |
 | [claim y proof](claim-and-proof.md) | la cantidad se deriva **del root que firmamos nosotros**; el proof es **efímero** |
 | [application](application.md) | el piso `B/N` es un **piso, no un techo**, así que cobrar menos de lo reclamado no es pérdida por defecto |
+| [service](service.md) | la dificultad decide **cuáles relays entran al árbol**; con dificultad base el multiplicador es 1 y estimado == reclamado |
+| [gateway](gateway.md) | la delegación **la guarda la application**, no el gateway |
 
 ### Cómo se actualiza
 
