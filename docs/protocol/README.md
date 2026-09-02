@@ -26,6 +26,13 @@ que no se puede leer de la fuente.
 | [service](service.md) | la dificultad decide **cuáles relays entran al árbol**; con dificultad base el multiplicador es 1 y estimado == reclamado |
 | [gateway](gateway.md) | la delegación **la guarda la application**, no el gateway |
 
+### Los dos transversales, y son los que explican la plata
+
+| documento | para qué |
+|---|---|
+| [params](params.md) | **el inventario completo de governance**: 30 parámetros en 8 módulos, y qué nos hace cada uno. Cambian sin que toquemos código, y varios cambian cuánto cobramos |
+| [interactions](interactions.md) | **cómo se encadena todo**: la vida de un relay desde que llega hasta el uPOKT que cobra el supplier, los cinco recortes legítimos, y qué entidad responde cada pregunta |
+
 ### Cómo se actualiza
 
 Al subir la versión de poktroll: re-leer las citas, no la prosa. Una regla cuya
