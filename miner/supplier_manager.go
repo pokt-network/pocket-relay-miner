@@ -66,8 +66,31 @@ type supplierStakeView struct {
 // teardown writer. The owning map is xsync.Map (lock-free); this atomic
 // is the per-state field equivalent. Callers must use LoadStatus /
 // StoreStatus — do not access `status` directly.
+// drainReason says WHY a supplier is being torn down, because the three reasons
+// have three different right answers for the relays still in its delivery
+// buffer, and one code path serves all three.
+type drainReason int32
+
+const (
+	// drainShutdown: the process is going away. We still hold the key, but the
+	// work is released rather than finished -- best effort, bounded window.
+	drainShutdown drainReason = iota
+	// drainRebalance: another replica claimed this supplier. It can finish the
+	// work; we must not destroy it.
+	drainRebalance
+	// drainKeyRemoved: the operator withdrew the signing key. NOBODY in this
+	// fleet can build an SMST, a claim or a proof for these relays, so holding
+	// them pending only makes another consumer rediscover that. They are
+	// acknowledged deliberately -- and counted as LOSS, never as a successful
+	// drain.
+	drainKeyRemoved
+)
+
 type SupplierState struct {
 	OperatorAddr string
+
+	// drainReason is set before cancelFn fires and read by the drain.
+	drainReason atomic.Int32
 
 	stakeView atomic.Pointer[supplierStakeView]
 	status    atomic.Int32
@@ -873,7 +896,7 @@ func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier strin
 		Str("instance_id", m.config.MinerID).
 		Msg("drain decision audit")
 
-	go m.removeSupplier(supplier)
+	go m.removeSupplier(supplier, drainRebalance)
 	return nil
 }
 
@@ -1192,7 +1215,7 @@ func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr stri
 		// Update claimer if in distributed mode
 		if m.claimer == nil {
 			// Single-miner mode: no lease exists, so tear the pipeline down directly.
-			go m.removeSupplier(operatorAddr)
+			go m.removeSupplier(operatorAddr, drainKeyRemoved)
 			return
 		}
 
@@ -1870,7 +1893,24 @@ func (m *SupplierManager) drainDeliveryBuffer(
 				continue
 			default:
 			}
-			if acked := m.handleStreamMessage(drainCtx, state, msg); acked {
+			// The key is gone: no SMST, no claim, no proof is possible for
+			// this relay by anyone in this fleet, so it is acknowledged
+			// deliberately -- and counted as LOSS. Leaving it pending would
+			// only make the next consumer rediscover the same dead end.
+			if drainReason(state.drainReason.Load()) == drainKeyRemoved {
+				if ackErr := state.Consumer.AckMessage(drainCtx, msg); ackErr == nil {
+					RecordRelayDroppedNoKey(state.OperatorAddr, msg.Message.ServiceId)
+					drained++
+				} else {
+					abandoned++
+				}
+				continue
+			}
+
+			// Shutdown or rebalance: someone else can still finish this, so it
+			// is RELEASED, never acknowledged. Acknowledging deletes it from the
+			// stream and takes it out of reach of the reclaim.
+			if relErr := state.Consumer.ReleaseMessage(drainCtx, msg); relErr == nil {
 				RecordShutdownDrainedRelay(state.OperatorAddr)
 				drained++
 			} else {
@@ -2026,7 +2066,7 @@ func (m *SupplierManager) publishUnstakingState(ctx context.Context, state *Supp
 // Consumer/SessionCoordinator/SessionStore run against a fully quiesced
 // supplier — no mid-flight writer can resurrect state after the map
 // delete.
-func (m *SupplierManager) removeSupplier(operatorAddr string) {
+func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason) {
 	// Capture the lifecycle context once under m.mu.RLock. removeSupplier
 	// can run concurrently with Close() (Close() writes m.ctx under m.mu),
 	// so every direct `m.ctx` read inside this function would be a data
@@ -2053,6 +2093,7 @@ func (m *SupplierManager) removeSupplier(operatorAddr string) {
 		return
 	}
 
+	state.drainReason.Store(int32(reason))
 	state.StoreStatus(SupplierStatusDraining)
 
 	m.publishUnstakingState(ctx, state)
@@ -2200,6 +2241,10 @@ func (m *SupplierManager) Close() error {
 	// Cancelled together, the intervals overlap and the whole teardown costs
 	// one of them.
 	m.suppliers.Range(func(_ string, state *SupplierState) bool {
+		// The process is going away, so the buffered work is RELEASED rather
+		// than destroyed. Set explicitly instead of leaning on the zero value:
+		// a default that happens to be right is not the same as a decision.
+		state.drainReason.Store(int32(drainShutdown))
 		state.cancelFn()
 		return true
 	})

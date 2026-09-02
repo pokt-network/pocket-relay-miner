@@ -389,11 +389,15 @@ If any gate fails, fix it before reporting completion. Do NOT report "done" with
 - ✅ Tests: golden-string tests pin each KB method's default output
   (changing a constant is a breaking cross-version change — mixed fleets stop
   hearing each other), and a pattern test asserts every SCAN pattern matches
-  only its own family. **There is NO collision test** — this file claimed one
-  until 2026-08-28 and a grep of `transport/redis/` and `internal/` found none;
-  `allKeyBuilderOutputs` feeds only the golden-string and partial-namespace
-  tests. It is worth writing: with `supplier_prefix: suppliers`,
-  `SupplierStateKey` and `SupplierRegistryKey` produce the same key, two writers
+  only its own family. **The collision test now EXISTS** — measured 2026-09-01:
+  `TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace`
+  (`transport/redis/namespace_test.go:285`) walks the KeyBuilder by reflection,
+  and `TestKeyBuilder_PatternsMatchOnlyTheirOwnFamily` (`:401`) is its glob half.
+  This file said the opposite until today, because the test landed inside the
+  stack and nobody came back to the sentence. What it CANNOT see, by
+  construction, is a collision that only appears with specific arguments: it
+  passes uniform ones. The case that motivated it — `SupplierStateKey` and
+  `SupplierRegistryKey` colliding under `supplier_prefix: suppliers`, two writers
   and mutually unparseable readers.
 
 ### Key Patterns
@@ -884,7 +888,13 @@ on known working-doc paths. If it fires, untrack with
 
 ### Failure Scenarios
 
-- **Redis Unavailable**: Relayer degrades gracefully (fail-open or fail-closed based on config)
+- **Redis Unavailable**: the relayer FAILS CLOSED on admission — there is no
+  setting for this any more. The knob that existed (`relay_meter.fail_behavior`)
+  was erased on 2026-08-31 and left a tombstone that warns; a relay whose budget
+  the meter cannot verify is refused, because the store holds what the session
+  already consumed. A CHAIN query blinking is the other half and is NOT the same:
+  that one is served and the miner arbitrates. See `relayer/relay_meter.go`,
+  `ErrMeterStoreUnavailable`.
 - **Blockchain Unreachable**: Miner retries with exponential backoff
 - **Leader Failure**: Standby takes over within 5 seconds
 - **High Latency**: Circuit breaker prevents cascading failures

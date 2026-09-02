@@ -111,6 +111,16 @@ func newDrainFixture(t *testing.T, buffered int) *drainFixture {
 	}
 }
 
+// streamLen is how many entries still EXIST in the stream. It is the assertion
+// that separates a release from an acknowledgement: XAckDel with DELREF removes
+// the entry, a release leaves it.
+func (f *drainFixture) streamLen(t *testing.T) int64 {
+	t.Helper()
+	n, err := f.client.XLen(context.Background(), f.stream).Result()
+	require.NoError(t, err)
+	return n
+}
+
 func (f *drainFixture) pendingCount(t *testing.T) int64 {
 	t.Helper()
 	res, err := f.client.XPending(context.Background(), f.stream, f.group).Result()
@@ -143,7 +153,7 @@ func (f *drainFixture) bufferedChan() <-chan transport.StreamMessage {
 // The assertion is on the server's pending count, not on a call count: an entry
 // that is still pending is an entry that was not acknowledged, whatever the code
 // believes it did.
-func TestShutdownDrainProcessesAndAcksBufferedRelays(t *testing.T) {
+func TestShutdownDrainReleasesBufferedRelaysInsteadOfDestroyingThem(t *testing.T) {
 	f := newDrainFixture(t, 3)
 	require.Equal(t, int64(3), f.pendingCount(t), "premise: three deliveries are outstanding")
 
@@ -154,10 +164,26 @@ func TestShutdownDrainProcessesAndAcksBufferedRelays(t *testing.T) {
 
 	f.mgr.drainDeliveryBuffer(ctx, f.state, f.bufferedChan())
 
-	require.Len(t, *f.processed, 3, "every buffered relay must be processed, not dropped")
-	require.Equal(t, int64(0), f.pendingCount(t),
-		"every drained relay must be acknowledged; a still-pending entry is work this process "+
-			"can never reclaim once its pid changes")
+	// The policy changed on 2026-09-01 by owner decision, and this assertion is
+	// the inversion of the old one. A departing consumer RELEASES; it does not
+	// process and it does not acknowledge. Acknowledging is XAckDel with DELREF,
+	// which DELETES the entry from the stream -- so the previous behaviour did
+	// not "finish" the work, it destroyed relays that had been served and signed
+	// and put them out of reach of the reclaim that used to rescue them.
+	require.Empty(t, *f.processed, "a departing consumer must not process: it releases")
+	require.Equal(t, int64(3), f.pendingCount(t),
+		"released entries stay PENDING so another consumer can claim them")
+	require.Equal(t, int64(3), f.streamLen(t),
+		"and they stay IN THE STREAM -- this is the assertion the old behaviour could not pass")
+
+	// Teeth: another consumer takes them immediately, even with a min-idle far
+	// larger than their real age. That is what makes the release a handoff
+	// rather than a wait.
+	claimed, _, err := f.client.XAutoClaimJustID(context.Background(), &redis.XAutoClaimArgs{
+		Stream: f.stream, Group: f.group, Consumer: "other", MinIdle: 30 * time.Second, Start: "0", Count: 10,
+	}).Result()
+	require.NoError(t, err)
+	require.Len(t, claimed, 3, "another consumer must be able to claim them right away")
 }
 
 // TestShutdownDrainLeavesLeftoversPendingWhenWindowCloses pins the deliberate
@@ -284,7 +310,7 @@ func TestShutdownDrainWaitsOutItsWindowEvenWhenTheBufferStartsEmpty(t *testing.T
 // shutdown_drained_relays_total / shutdown_abandoned_relays_total tell old
 // code (increments drained regardless) apart from the fix (increments
 // abandoned instead).
-func TestShutdownDrainCountsAnAckFailureAsAbandonedNotDrained(t *testing.T) {
+func TestShutdownDrainCountsAReleaseFailureAsAbandonedNotDrained(t *testing.T) {
 	f := newDrainFixture(t, 1)
 	require.NoError(t, f.state.Consumer.Close())
 
@@ -296,11 +322,39 @@ func TestShutdownDrainCountsAnAckFailureAsAbandonedNotDrained(t *testing.T) {
 
 	f.mgr.drainDeliveryBuffer(ctx, f.state, f.bufferedChan())
 
-	require.Len(t, *f.processed, 1, "the relay was still processed by onRelay")
+	require.Empty(t, *f.processed, "a departing consumer releases; it does not process")
 	require.Equal(t, int64(1), f.pendingCount(t),
-		"an ack failure must leave the entry PENDING in Redis, same as any other abandoned entry")
+		"a release failure must leave the entry PENDING in Redis, same as any other abandoned entry")
 	require.Equal(t, drainedBefore, testutil.ToFloat64(shutdownDrainedRelays.WithLabelValues(drainSupplier)),
-		"a relay whose AckMessage failed must NOT count as drained -- it is not done, Redis still has it pending")
+		"a relay whose release failed must NOT count as drained -- it is not done, Redis still has it pending")
 	require.Equal(t, abandonedBefore+1, testutil.ToFloat64(shutdownAbandonedRelays.WithLabelValues(drainSupplier)),
-		"a relay whose AckMessage failed must count as abandoned, same as one the window ran out on")
+		"a relay whose release failed must count as abandoned, same as one the window ran out on")
+}
+
+// TestKeyRemovalDrainAcksAndCountsItAsLoss pins the third trigger, which is the
+// one that destroys on purpose.
+//
+// When the operator withdraws the signing key, nobody in this fleet can build an
+// SMST, a claim or a proof for the buffered relays, so releasing them would only
+// make the next consumer rediscover the same dead end. They are acknowledged --
+// and counted as LOSS, on a counter of their own. Counting a destroyed relay as
+// a successful drain is how the cost of pulling a key stayed invisible.
+func TestKeyRemovalDrainAcksAndCountsItAsLoss(t *testing.T) {
+	f := newDrainFixture(t, 2)
+	f.state.drainReason.Store(int32(drainKeyRemoved))
+
+	lostBefore := testutil.ToFloat64(relaysDroppedNoKey.WithLabelValues(drainSupplier, "svc-a"))
+	drainedBefore := testutil.ToFloat64(shutdownDrainedRelays.WithLabelValues(drainSupplier))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	f.mgr.drainDeliveryBuffer(ctx, f.state, f.bufferedChan())
+
+	require.Equal(t, int64(0), f.pendingCount(t), "the entries are acknowledged, not left pending")
+	require.Equal(t, int64(0), f.streamLen(t), "and gone from the stream: this destruction is deliberate")
+	require.InDelta(t, lostBefore+2, testutil.ToFloat64(relaysDroppedNoKey.WithLabelValues(drainSupplier, "svc-a")), 0.0001,
+		"destroyed relays must land on the LOSS counter")
+	require.InDelta(t, drainedBefore, testutil.ToFloat64(shutdownDrainedRelays.WithLabelValues(drainSupplier)), 0.0001,
+		"and must NOT be reported as a successful drain")
 }

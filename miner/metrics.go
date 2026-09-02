@@ -73,6 +73,18 @@ var (
 	// up once it passes claim_idle_timeout. What IS lost is only what a SIGKILL or a
 	// crash leaves behind, because no drain runs at all there -- which is the whole
 	// reason the graceful path bothers to drain.
+	// relaysDroppedNoKey counts relays destroyed because the signing key was
+	// withdrawn. Money that was served and will never be claimed, on purpose.
+	relaysDroppedNoKey = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_dropped_no_key_total",
+			Help:      "Relays acknowledged and destroyed because the supplier's signing key was withdrawn (no SMST, claim or proof is possible)",
+		},
+		[]string{"supplier", "service_id"},
+	)
+
 	shutdownDrainedRelays = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -1055,6 +1067,18 @@ func RecordOrphanedStreams(n int) {
 
 // RecordShutdownDrainedRelay records one relay drained and processed during a
 // graceful shutdown.
+// RecordRelayDroppedNoKey counts a relay destroyed on purpose because the
+// operator withdrew the supplier's signing key: without it no SMST, claim or
+// proof can be built by anyone in this fleet, so the entry is acknowledged
+// rather than left for another consumer to rediscover the same dead end.
+//
+// It is a LOSS counter and deliberately separate from shutdown_drained_relays:
+// counting a destroyed relay as a successful drain is how the cost of pulling a
+// key stayed invisible.
+func RecordRelayDroppedNoKey(supplier, serviceID string) {
+	relaysDroppedNoKey.WithLabelValues(supplier, serviceID).Inc()
+}
+
 func RecordShutdownDrainedRelay(supplier string) {
 	shutdownDrainedRelays.WithLabelValues(supplier).Inc()
 }
