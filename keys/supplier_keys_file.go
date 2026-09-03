@@ -12,6 +12,7 @@ import (
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
+	dcrsecp256k1 "github.com/decred/dcrd/dcrec/secp256k1/v4"
 	"github.com/fsnotify/fsnotify"
 	"gopkg.in/yaml.v2"
 
@@ -60,8 +61,10 @@ func (f *SupplierKeysFile) Validate() error {
 	return nil
 }
 
-// validateHexKeyFormat validates the format of a hex-encoded key WITHOUT parsing it.
-// This provides fast, detailed error messages before attempting expensive crypto operations.
+// validateHexKeyFormat validates a hex-encoded key without deriving anything from
+// it: shape first, then the one property that shape cannot show -- whether the
+// number is a usable private key at all. Both are cheap, so the detailed error
+// still arrives before any expensive crypto happens.
 func validateHexKeyFormat(hexKey string) error {
 	// Remove 0x prefix if present
 	cleaned := strings.TrimPrefix(hexKey, "0x")
@@ -84,6 +87,45 @@ func validateHexKeyFormat(hexKey string) error {
 		if !isDigit && !isLowerHex && !isUpperHex {
 			return fmt.Errorf("invalid hex character '%c' at position %d", c, i)
 		}
+	}
+
+	// Shape is not enough: 32 bytes are not automatically a private key. A
+	// secp256k1 key is a NUMBER and it has to sit in [1, N-1], N being the
+	// curve's order. Handed something outside that range the crypto library
+	// does not refuse it -- it REDUCES the value modulo N. So the key the
+	// operator wrote is silently not the key that signs, and the address is not
+	// the one they expect; the supplier then matches nothing staked and the
+	// error they eventually read is "no key for this supplier", which points
+	// nowhere near the file that is actually wrong.
+	//
+	// Measured 2026-09-03 (scripts/localonly/_probe): 1 and N+1 derive the SAME
+	// address, and so do 0 and N. Two VALID keys never collide -- that was
+	// measured too -- so this is about material that is not a key, not about
+	// collisions between real ones.
+	//
+	// A value >= N essentially never arrives by accident: it is about 1 in 10^39
+	// of the space, so random corruption does not land there. ZERO does arrive:
+	// a secret that mounted empty, a truncated copy, a zeroed volume. That case
+	// is the reason this check earns its place -- it turns a confusing symptom
+	// into a message that names the file.
+	//
+	// The question is put to the very library that performs the reduction, so
+	// the check cannot drift from the behaviour it guards against: SetByteSlice
+	// reports whether the value had to be reduced. It is a copy and a compare,
+	// with no point multiplication.
+	raw, err := hex.DecodeString(cleaned)
+	if err != nil {
+		return fmt.Errorf("invalid hex: %w", err)
+	}
+	var scalar dcrsecp256k1.ModNScalar
+	if overflow := scalar.SetByteSlice(raw); overflow {
+		return fmt.Errorf("not a usable secp256k1 private key: the value is at or above the curve " +
+			"order N, and the crypto library reduces such a value instead of rejecting it, so this " +
+			"key would sign as a DIFFERENT key at a DIFFERENT address")
+	}
+	if scalar.IsZero() {
+		return fmt.Errorf("not a usable secp256k1 private key: the value is zero " +
+			"(all-zero key material usually means the file was truncated, or a mounted secret came up empty)")
 	}
 
 	return nil
