@@ -751,15 +751,30 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 		msg.data, // Raw WebSocket payload (e.g., JSON-RPC response)
 	)
 	if signErr != nil {
-		b.logger.Debug().Err(signErr).Msg("failed to sign websocket response")
-		// Fall back to unsigned on signing error only (not nil signer)
-		relayResp = &servicetypes.RelayResponse{
-			Meta: servicetypes.RelayResponseMetadata{
-				SessionHeader: latestReq.Meta.SessionHeader,
-			},
-			Payload: msg.data,
-		}
-		respBytes, _ = relayResp.Marshal()
+		// An unsigned response is not a cheaper response, it is a different
+		// thing: emitRelay below mines the RelayHash over {Req, Res}, so serving
+		// one does not merely hand the gateway something it cannot verify -- it
+		// commits an SMST leaf to a response no supplier ever signed. Nothing is
+		// written and nothing is billed.
+		//
+		// Closing is the same answer every other refusal on this path already
+		// gives (see the meter error above), and it is the only one that ends
+		// the failure: admission already refused any request whose supplier we
+		// hold no key for, so reaching here means the key set changed mid
+		// connection -- a hot removal. The supplier is fixed for the life of
+		// this bridge, so the next backend push would fail identically; skipping
+		// the message instead would leave a subscription pushing into a bin.
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonSigningError).Inc()
+		// Warn, not Debug: this fires at most once per CONNECTION rather than
+		// once per message, and its causes are ours -- a missing signer, an
+		// empty supplier address, a malformed header -- never client traffic.
+		b.logger.Warn().
+			Err(signErr).
+			Str("session_id", latestReq.Meta.GetSessionHeader().GetSessionId()).
+			Str("supplier", latestReq.Meta.SupplierOperatorAddress).
+			Msg("cannot sign the websocket response: closing the connection, nothing served and nothing billed")
+		_ = b.closeWithReason(CloseInternalError, "unable to sign response", wsCloseInitiatorRelayer)
+		return
 	}
 
 	// Store latest response for relay emission
