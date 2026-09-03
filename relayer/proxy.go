@@ -85,7 +85,13 @@ const (
 	// rejectReasonSupplierChanged marks a WebSocket frame naming a supplier
 	// other than the one that owns the connection. Bounded label: it is the
 	// name of one gate, not client-supplied text.
-	rejectReasonSupplierChanged     = "supplier_changed"
+	rejectReasonSupplierChanged = "supplier_changed"
+	// rejectReasonNoRelayYet marks a raw (non-RelayRequest) WebSocket frame
+	// arriving before any relay has established the connection.
+	rejectReasonNoRelayYet = "no_relay_yet"
+	// rejectReasonBackendDialFailed marks a WebSocket frame that passed
+	// admission and then could not reach the backend.
+	rejectReasonBackendDialFailed   = "backend_dial_failed"
 	rejectReasonSupplierCacheError  = "supplier_cache_error"
 	rejectReasonNoLocalSigner       = "no_local_signer"
 	rejectReasonSupplierInactive    = "supplier_inactive"

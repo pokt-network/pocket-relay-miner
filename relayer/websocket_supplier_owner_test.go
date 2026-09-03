@@ -91,7 +91,7 @@ func newSageShapedBridge(
 		"", // sage sends no Pocket-Supplier-Address
 		100,
 		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
-		nil, pipeline, 2*time.Second, false, nil, "",
+		nil, pipeline, 2*time.Second, false, nil, "", nil,
 	)
 	require.NoError(t, err)
 	go bridge.Run()

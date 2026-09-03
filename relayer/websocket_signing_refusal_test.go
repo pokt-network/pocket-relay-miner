@@ -53,7 +53,7 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 	bridge, err := NewWebSocketBridge(
 		logger, relayerConn, backendURL, simWSTestService, supplierAddr, 1,
 		proc, pub, signer, http.Header{}, nil, nil,
-		2*time.Second, false, nil, "",
+		2*time.Second, false, nil, "", nil,
 	)
 	require.NoError(t, err)
 	go bridge.Run()

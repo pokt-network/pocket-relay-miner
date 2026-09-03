@@ -161,6 +161,7 @@ func TestNewWebSocketBridge_RequiresRelayProcessor(t *testing.T) {
 		false, // simulated
 		nil,   // simVerifier
 		"",    // simKeyID
+		nil,   // onBackendDial
 	)
 	require.Error(t, err, "nil relayProcessor must fail fast — the old fallback silently collapsed events")
 	assert.Nil(t, bridge)

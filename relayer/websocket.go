@@ -5,8 +5,10 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -63,6 +65,29 @@ const (
 // test depend on pushing 15MB through loopback inside a deadline, which is a
 // timing race, not a behaviour check.
 var wsMaxMessageBytes int64 = 15 * 1024 * 1024
+
+// wsFirstFrameWait bounds how long a connection may stay open without having
+// sent a frame that passes admission.
+//
+// TWO MINUTES, set by the owner (Jorge, 2026-09-03): "2m hardcode, no veo que ni
+// 1m sea necesario, so 2m es mas que de sobra". Hardcoded on purpose, no config
+// knob.
+//
+// The measurement it was decided against: PATH upgrades its CLIENT and then
+// dials the relayminer immediately (path/websockets/bridge.go:97-105), and the
+// handshake RelayRequest it builds (protocol/shannon/websocket_context.go:493)
+// exists only to produce the Pocket-Signature header -- it is never written to
+// the socket. So the first frame arrives when the client speaks, not when the
+// gateway connects, and the residual is real and accepted: a client that holds a
+// socket open for more than two minutes before its first subscribe is closed
+// with 1013 and reconnects.
+//
+// A var, like wsMaxMessageBytes above, so a test can drive it in milliseconds.
+var wsFirstFrameWait = 2 * time.Minute
+
+// wsCloseSettle is how long release waits between writing the close frames and
+// closing the sockets, so a peer can actually receive them.
+const wsCloseSettle = 100 * time.Millisecond
 
 // RFC 6455 WebSocket Close Codes
 // https://datatracker.ietf.org/doc/html/rfc6455#section-7.4.1
@@ -187,9 +212,37 @@ type wsMessage struct {
 // WebSocketBridge handles bidirectional WebSocket communication between
 // a gateway client and a backend service.
 type WebSocketBridge struct {
-	logger         logging.Logger
-	gatewayConn    *websocket.Conn
-	backendConn    *websocket.Conn
+	logger      logging.Logger
+	gatewayConn *websocket.Conn
+
+	// backendConn is nil until a frame has passed admission. The backend is a
+	// resource the operator pays for, and it is not dialled on the strength of a
+	// WebSocket upgrade alone: before this, anyone who could open a socket could
+	// push the operator's backend without ever sending a relay.
+	//
+	// A PLAIN FIELD and not an atomic, and that is a property of the lifecycle
+	// rather than an oversight: it is written once, by awaitFirstFrame, on the
+	// Run goroutine, before any other goroutine exists; and it is read by
+	// release, on that same goroutine. Nothing that signals a close touches it.
+	backendConn *websocket.Conn
+
+	// What awaitFirstFrame needs to dial, held from construction because the
+	// dial no longer happens there.
+	backendURL     string
+	backendHeaders http.Header
+	dialTimeout    time.Duration
+
+	// onBackendDial reports the outcome of the dial to whoever built this bridge,
+	// which owns the circuit breaker for the endpoint. It used to be recorded as
+	// an unconditional success right after construction, which was accurate only
+	// while the constructor dialled. Optional: nil means nobody is watching.
+	onBackendDial func(statusCode int, err error)
+
+	// firstFrameWait is captured from wsFirstFrameWait at construction rather
+	// than read later: the constructor runs on the caller's goroutine, so a test
+	// that shortens the package var is ordered with this read.
+	firstFrameWait time.Duration
+
 	relayProcessor RelayProcessor
 	publisher      transport.MinedRelayPublisher
 	responseSigner *ResponseSigner
@@ -259,8 +312,14 @@ type WebSocketBridge struct {
 	// Lifecycle
 	ctx      context.Context
 	cancelFn context.CancelFunc
-	closed   atomic.Bool
 	wg       sync.WaitGroup
+
+	// closeReason holds the FIRST verdict recorded by whichever goroutine
+	// noticed the bridge is finished. It replaced a `closed atomic.Bool` that
+	// several goroutines both set and polled: a boolean says a close happened,
+	// which is not enough to build the close frame, so the code that needed the
+	// code and the reason had to go and find them elsewhere.
+	closeReason atomic.Pointer[wsCloseReason]
 }
 
 // WebSocketUpgrader upgrades HTTP connections to WebSocket.
@@ -299,6 +358,7 @@ func NewWebSocketBridge(
 	simulated bool,
 	simVerifier *SimulationVerifier,
 	simKeyID string,
+	onBackendDial func(statusCode int, err error),
 ) (*WebSocketBridge, error) {
 	// A nil relayProcessor used to drop us into a "fallback" emit path that
 	// published MinedRelayMessage{RelayHash: nil, CU: 1}, which silently
@@ -311,23 +371,18 @@ func NewWebSocketBridge(
 
 	ctx, cancelFn := context.WithCancel(context.Background())
 
-	// Connect to backend WebSocket using dial timeout from profile
-	backendConn, err := connectWebSocketBackend(backendURL, headers, dialTimeout)
-	if err != nil {
-		cancelFn()
-		return nil, err
-	}
-
-	// Bound inbound frame size on both connections before either readLoop starts.
-	// Either peer can send an abusive frame, and the gateway side is reachable
-	// pre-auth -- see wsMaxMessageBytes.
+	// Bound inbound frame size on the gateway connection, the side reachable
+	// pre-auth -- see wsMaxMessageBytes. The backend gets the same limit in
+	// ensureBackend, when a frame has earned it.
 	gatewayConn.SetReadLimit(wsMaxMessageBytes)
-	backendConn.SetReadLimit(wsMaxMessageBytes)
 
 	bridge := &WebSocketBridge{
 		logger:           logger.With().Str(logging.FieldComponent, logging.ComponentWebsocketBridge).Str(logging.FieldServiceID, serviceID).Logger(),
 		gatewayConn:      gatewayConn,
-		backendConn:      backendConn,
+		backendURL:       backendURL,
+		backendHeaders:   headers,
+		dialTimeout:      dialTimeout,
+		firstFrameWait:   wsFirstFrameWait,
 		relayProcessor:   relayProcessor,
 		publisher:        publisher,
 		responseSigner:   responseSigner,
@@ -339,6 +394,7 @@ func NewWebSocketBridge(
 		simVerifier:      simVerifier,
 		simKeyID:         simKeyID,
 		sessionMonitor:   sessionMonitor,
+		onBackendDial:    onBackendDial,
 		sessionEndHeight: 0, // Will be set from first relay request
 		ctx:              ctx,
 		cancelFn:         cancelFn,
@@ -351,11 +407,50 @@ func NewWebSocketBridge(
 		bridge.owner.Store(&supplierAddress)
 	}
 
-	// Track connection
-	wsConnectionsActive.WithLabelValues(serviceID).Inc()
 	wsConnectionsTotal.WithLabelValues(serviceID).Inc()
 
 	return bridge, nil
+}
+
+// ensureBackend dials the backend, and is reachable only from the first frame.
+//
+// No atomics, no re-checks, no closed flag -- awaitFirstFrame runs it on the Run
+// goroutine before any other goroutine exists, and phase two never starts unless
+// it succeeded. That is what the two-phase lifecycle buys: the previous shape
+// dialled from inside the message loop with four goroutines already running, and
+// every guard it needed was a consequence of that.
+func (b *WebSocketBridge) ensureBackend() error {
+	if b.backendConn != nil {
+		return nil
+	}
+
+	// The backend's Pocket-Supplier header is set HERE and not at the handshake,
+	// which is the second thing deferring the dial buys: at handshake time the
+	// owner is unknown for v1 and sage, so the header the backend saw was empty.
+	if owner := b.ownerAddress(); owner != "" {
+		b.backendHeaders.Set(HeaderPocketSupplier, owner)
+	}
+
+	conn, err := connectWebSocketBackend(b.backendURL, b.backendHeaders, b.dialTimeout)
+
+	// The circuit breaker learns about the backend HERE and nowhere else. It
+	// used to be told "200, no error" right after the bridge was constructed,
+	// which was true only while the constructor dialled.
+	if b.onBackendDial != nil {
+		if err != nil {
+			b.onBackendDial(0, err)
+		} else {
+			b.onBackendDial(http.StatusOK, nil)
+		}
+	}
+	if err != nil {
+		return err
+	}
+
+	conn.SetReadLimit(wsMaxMessageBytes)
+	b.backendConn = conn
+	b.logger.Debug().Msg("backend connection established after the first admitted frame")
+	return nil
 }
 
 // connectWebSocketBackend establishes a WebSocket connection to the backend.
@@ -386,20 +481,38 @@ func connectWebSocketBackend(backendURL string, headers http.Header, dialTimeout
 	return conn, nil
 }
 
-// Run starts the WebSocket bridge message loop.
-// This is a blocking call that runs until the bridge is closed.
+// Run drives the bridge: first frame, then loops, then teardown. It blocks
+// until the bridge is finished and it is the ONLY place that releases.
+//
+// THE LIFECYCLE HAS TWO PHASES AND ONLY THE SECOND IS CONCURRENT.
+//
+// Phase one reads the first frame synchronously, right here, with a native read
+// deadline. No goroutine exists yet, so the backend dial that phase one performs
+// cannot race a close, a panic, or another frame -- which is the whole class of
+// defect this shape replaces. Four separate guards were written one at a time
+// against that class before it was removed instead.
+//
+// Phase two starts the four loops and the message loop, by which point the
+// backend either exists or the bridge is already gone.
 func (b *WebSocketBridge) Run() {
-	// Start connection read loops
-	b.wg.Add(2)
+	// Acquired here and released in release, three lines apart and in the same
+	// function. It used to be incremented in the constructor and decremented in
+	// the teardown, so a bridge that was built and never Run left the gauge
+	// wrong for the life of the process.
+	wsConnectionsActive.WithLabelValues(b.serviceID).Inc()
+	defer b.release()
+
+	if !b.awaitFirstFrame() {
+		return
+	}
+
+	b.wg.Add(4)
 	go logging.RecoverGoRoutine(b.logger, "websocket_read_gateway", func(ctx context.Context) {
 		b.readLoop(b.gatewayConn, wsMessageSourceGateway)
 	})(b.ctx)
 	go logging.RecoverGoRoutine(b.logger, "websocket_read_backend", func(ctx context.Context) {
 		b.readLoop(b.backendConn, wsMessageSourceBackend)
 	})(b.ctx)
-
-	// Start ping loops for keep-alive
-	b.wg.Add(2)
 	go logging.RecoverGoRoutine(b.logger, "websocket_ping_gateway", func(ctx context.Context) {
 		b.pingLoop(b.gatewayConn, &b.gatewayWriteMu, wsMessageSourceGateway)
 	})(b.ctx)
@@ -409,11 +522,133 @@ func (b *WebSocketBridge) Run() {
 
 	// Note: Session expiration monitoring happens via global SessionMonitor.
 	// This bridge registers itself when session parameters are known.
-
-	// Main message processing loop
 	b.messageLoop()
+}
 
-	// Wait for all goroutines to finish
+// awaitFirstFrame reads and admits the frame that earns this connection its
+// backend, and reports whether the bridge should go on to phase two.
+//
+// A NATIVE read deadline, not a goroutine watching a timer. That is possible
+// only because pingLoop has not started: gorilla's DEFAULT ping handler replies
+// to a ping without touching the read deadline (conn.go:1158-1170 in the
+// vendored v1.5.3), while the SetPongHandler pingLoop installs REFRESHES it. So
+// during this window the gateway's pings are answered and keep the peer happy,
+// and a client that answers pings forever without asking for anything still
+// hits the deadline. The previous shape needed a fifth goroutine, a flag and a
+// package var to say the same thing.
+func (b *WebSocketBridge) awaitFirstFrame() bool {
+	if err := b.gatewayConn.SetReadDeadline(time.Now().Add(b.firstFrameWait)); err != nil {
+		b.logger.Debug().Err(err).Msg("failed to set first-frame deadline")
+		_ = b.closeWithReason(CloseInternalError, "internal error", wsCloseInitiatorRelayer)
+		return false
+	}
+
+	messageType, data, err := b.gatewayConn.ReadMessage()
+	if err != nil {
+		code, text := closeInfoForReadError(err)
+		if ne, ok := err.(net.Error); ok && ne.Timeout() {
+			code, text = CloseTryAgainLater, "no relay request within the first-frame deadline"
+			b.logger.Debug().
+				Dur("deadline", b.firstFrameWait).
+				Msg("no relay request within the first-frame deadline - closing connection")
+		}
+		_ = b.closeWithReason(code, text, closeInitiatorForSource(wsMessageSourceGateway))
+		return false
+	}
+
+	// From here the loops own the deadlines.
+	if err := b.gatewayConn.SetReadDeadline(time.Now().Add(wsPongWait)); err != nil {
+		b.logger.Debug().Err(err).Msg("failed to hand the read deadline to the loops")
+	}
+
+	b.handleGatewayMessage(wsMessage{data: data, source: wsMessageSourceGateway, messageType: messageType})
+
+	// handleGatewayMessage closes on every rejection, so a live context is
+	// exactly "the frame was admitted and the backend is up".
+	return b.ctx.Err() == nil && b.backendConn != nil
+}
+
+// release is the ONLY code that gives anything back: the SessionMonitor
+// registration, the active-connections gauge, the close frames, the sockets, and
+// the wait for every loop.
+//
+// It runs from exactly one place -- Run's defer -- and that is the invariant the
+// four guards it replaces were each approximating: a teardown reachable from
+// several goroutines is a teardown that some path can skip. closeWithReason and
+// Close only SIGNAL; they do not release.
+//
+// Being a defer also makes it panic-proof for free: the recover here is why a
+// panic on the message loop can no longer walk past the teardown, which net/http
+// will not do for a hijacked connection.
+func (b *WebSocketBridge) release() {
+	if r := recover(); r != nil {
+		logging.PanicRecoveriesTotal.WithLabelValues(logging.ComponentWebsocketBridge).Inc()
+		b.logger.Error().
+			Str("panic_value", fmt.Sprintf("%v", r)).
+			Str("stack_trace", string(debug.Stack())).
+			Msg("PANIC RECOVERED on the websocket bridge")
+		b.recordCloseReason(CloseInternalError, "internal error", wsCloseInitiatorRelayer)
+	}
+
+	b.cancelFn()
+
+	reason := b.closeReason.Load()
+	if reason == nil {
+		reason = &wsCloseReason{code: CloseNormalClosure, text: "bridge closing", initiator: wsCloseInitiatorRelayer}
+	}
+
+	if b.sessionMonitor != nil {
+		b.sessionMonitor.UnregisterBridge(b)
+	}
+
+	wsConnectionsActive.WithLabelValues(b.serviceID).Dec()
+	wsClosesTotal.WithLabelValues(b.serviceID, closeCodeName(reason.code), string(reason.initiator)).Inc()
+
+	b.logger.Debug().
+		Int("close_code", reason.code).
+		Str("close_code_name", closeCodeName(reason.code)).
+		Str("close_reason", reason.text).
+		Str("initiated_by", string(reason.initiator)).
+		Uint64("relays_emitted", b.relayCount.Load()).
+		Msg("websocket bridge closing")
+
+	deadline := time.Now().Add(wsWriteWait)
+
+	// The gateway gets the original code -- PATH understands Pocket codes.
+	gatewayCloseMsg := websocket.FormatCloseMessage(reason.code, reason.text)
+	b.gatewayWriteMu.Lock()
+	gwErr := b.gatewayConn.WriteControl(websocket.CloseMessage, gatewayCloseMsg, deadline)
+	b.gatewayWriteMu.Unlock()
+	if gwErr != nil {
+		b.logger.Debug().Err(gwErr).Msg("failed to send close to client (PATH)")
+	}
+
+	// The backend gets an RFC-compliant code, and may not exist at all: a
+	// connection refused before the first frame never dialled one.
+	if b.backendConn != nil {
+		backendCode, backendReason := mapToRFCCloseCode(reason.code)
+		if backendReason == "" {
+			backendReason = reason.text
+		}
+		backendCloseMsg := websocket.FormatCloseMessage(backendCode, backendReason)
+		b.backendWriteMu.Lock()
+		beErr := b.backendConn.WriteControl(websocket.CloseMessage, backendCloseMsg, deadline)
+		b.backendWriteMu.Unlock()
+		if beErr != nil {
+			b.logger.Debug().Err(beErr).Msg("failed to send close to backend")
+		}
+	}
+
+	// Give the peers time to receive the close frame before the socket goes.
+	time.Sleep(wsCloseSettle)
+
+	// Closing is what unblocks a readLoop parked in ReadMessage, which does not
+	// observe a context -- so it MUST happen before the wait, never after.
+	_ = b.gatewayConn.Close()
+	if b.backendConn != nil {
+		_ = b.backendConn.Close()
+	}
+
 	b.wg.Wait()
 
 	b.logger.Debug().Msg("websocket bridge stopped")
@@ -424,7 +659,7 @@ func (b *WebSocketBridge) readLoop(conn *websocket.Conn, source wsMessageSource)
 	defer b.wg.Done()
 
 	for {
-		if b.closed.Load() {
+		if b.ctx.Err() != nil {
 			return
 		}
 
@@ -589,8 +824,16 @@ func (b *WebSocketBridge) writeToGateway(messageType int, data []byte) error {
 	return writeDataFrame(b.gatewayConn, &b.gatewayWriteMu, messageType, data, wsWriteWait)
 }
 
+// errBackendNotConnected is returned when a frame is written before any frame
+// has earned the backend dial. It is a normal state, not a fault: the bridge
+// exists from the WebSocket upgrade, the backend from the first admitted relay.
+var errBackendNotConnected = errors.New("backend not connected yet")
+
 // writeToBackend writes a data frame to the backend connection.
 func (b *WebSocketBridge) writeToBackend(messageType int, data []byte) error {
+	if b.backendConn == nil {
+		return errBackendNotConnected
+	}
 	return writeDataFrame(b.backendConn, &b.backendWriteMu, messageType, data, wsWriteWait)
 }
 
@@ -801,6 +1044,21 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		}
 	}
 
+	// PAST THIS LINE THE FRAME HAS PASSED ADMISSION, and only now does the
+	// operator's backend get dialled. Jorge, 2026-09-03: "en son de proteger el
+	// recurso valioso (backend, blockchain) no hacemos el handshake al backend
+	// hasta no tener validacion del supplier address, evitamos un ddos a sus
+	// backends sin relays."
+	//
+	// Reachable with backendConn nil only from awaitFirstFrame, on the Run
+	// goroutine, before any loop exists -- see ensureBackend.
+	if err := b.ensureBackend(); err != nil {
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonBackendDialFailed).Inc()
+		b.logger.Debug().Err(err).Msg("backend dial failed after admission - closing connection")
+		_ = b.closeWithReason(CloseTryAgainLater, "backend unavailable", wsCloseInitiatorBackend)
+		return
+	}
+
 	// Clear any previous request when new one arrives
 	// This ensures each incoming request becomes the new latestRequest
 	b.clearLatestRequest()
@@ -918,8 +1176,20 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 }
 
 // forwardToBackend forwards a raw message to the backend.
+//
+// A raw frame -- one that does not parse as a RelayRequest -- is only
+// forwardable once a relay has established this connection and dialled the
+// backend. Before that there is nothing to forward to, and that is the point: a
+// raw frame used to reach the operator's backend on a connection that had never
+// carried a single relay.
 func (b *WebSocketBridge) forwardToBackend(msg wsMessage) {
 	err := b.writeToBackend(msg.messageType, msg.data)
+	if errors.Is(err, errBackendNotConnected) {
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonNoRelayYet).Inc()
+		b.logger.Debug().Msg("raw frame before any relay established this connection - closing connection")
+		_ = b.closeWithReason(CloseValidationFailed, "no relay request has established this connection", wsCloseInitiatorRelayer)
+		return
+	}
 	if err != nil {
 		b.logger.Debug().Err(err).Msg("failed to forward raw message to backend")
 		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
@@ -1183,71 +1453,45 @@ func mapToRFCCloseCode(code int) (int, string) {
 	}
 }
 
-// closeWithReason closes the bridge with a specific close code and reason.
-// Close codes are handled differently for each connection:
-// - Gateway (PATH): Receives the original code (including custom Pocket codes like 4000)
-// - Backend: Receives RFC 6455 standard codes only (custom codes are mapped)
+// wsCloseReason is the verdict recorded by whichever goroutine decided the
+// bridge is finished. It is DATA, not control flow: release reads it once to
+// build the close frames.
+type wsCloseReason struct {
+	code      int
+	text      string
+	initiator wsCloseInitiator
+}
+
+// recordCloseReason keeps the FIRST verdict. Later ones are noise from goroutines
+// noticing the same shutdown.
+func (b *WebSocketBridge) recordCloseReason(code int, text string, initiator wsCloseInitiator) {
+	b.closeReason.CompareAndSwap(nil, &wsCloseReason{code: code, text: text, initiator: initiator})
+}
+
+// closeWithReason SIGNALS that the bridge is finished. It does not release
+// anything -- release does, from Run's defer, and only from there.
+//
+// The split is the point. This used to do the whole teardown and was reachable
+// from six goroutines, so every path that reached it early, late, or not at all
+// was a defect waiting to be found one at a time. Now the worst a caller can do
+// is signal twice.
+//
+// It expires the gateway's READ deadline rather than closing the socket, and the
+// difference matters twice: a synchronous ReadMessage in awaitFirstFrame does not
+// observe the context and would otherwise sit there until the first-frame
+// deadline, and release still has to WRITE close frames afterwards, which a
+// closed socket would not accept.
 func (b *WebSocketBridge) closeWithReason(code int, reason string, initiator wsCloseInitiator) error {
-	if !b.closed.CompareAndSwap(false, true) {
-		return nil // Already closed
-	}
-
-	// Unregister from global session monitor
-	if b.sessionMonitor != nil {
-		b.sessionMonitor.UnregisterBridge(b)
-	}
-
-	// Decrement active connections metric
-	wsConnectionsActive.WithLabelValues(b.serviceID).Dec()
-	wsClosesTotal.WithLabelValues(b.serviceID, closeCodeName(code), string(initiator)).Inc()
-
-	// Log final stats for this connection
-	relayCount := b.relayCount.Load()
-	b.logger.Debug().
-		Int("close_code", code).
-		Str("close_code_name", closeCodeName(code)).
-		Str("close_reason", reason).
-		Str("initiated_by", string(initiator)).
-		Uint64("relays_emitted", relayCount).
-		Msg("websocket bridge closing")
-
+	b.recordCloseReason(code, reason, initiator)
 	b.cancelFn()
-
-	deadline := time.Now().Add(wsWriteWait)
-
-	// Send close to gateway (PATH) with original code - PATH understands Pocket codes
-	gatewayCloseMsg := websocket.FormatCloseMessage(code, reason)
-	b.gatewayWriteMu.Lock()
-	gwErr := b.gatewayConn.WriteControl(websocket.CloseMessage, gatewayCloseMsg, deadline)
-	b.gatewayWriteMu.Unlock()
-	if gwErr != nil {
-		b.logger.Debug().Err(gwErr).Msg("failed to send close to client (PATH)")
-	}
-
-	// Send close to backend with RFC-compliant code - backends don't understand Pocket codes
-	backendCode, backendReason := mapToRFCCloseCode(code)
-	if backendReason == "" {
-		backendReason = reason // Use original reason if no mapping override
-	}
-	backendCloseMsg := websocket.FormatCloseMessage(backendCode, backendReason)
-	b.backendWriteMu.Lock()
-	beErr := b.backendConn.WriteControl(websocket.CloseMessage, backendCloseMsg, deadline)
-	b.backendWriteMu.Unlock()
-	if beErr != nil {
-		b.logger.Debug().Err(beErr).Msg("failed to send close to backend")
-	}
-
-	// Give connections time to receive close message
-	time.Sleep(100 * time.Millisecond)
-
-	_ = b.gatewayConn.Close()
-	_ = b.backendConn.Close()
-
-	b.logger.Debug().Msg("websocket bridge closed")
+	_ = b.gatewayConn.SetReadDeadline(time.Now())
 	return nil
 }
 
-// Close shuts down the WebSocket bridge with normal closure.
+// Close asks the bridge to shut down. Like every other caller it only SIGNALS:
+// Run's deferred release does the work, so a bridge that was never Run is not
+// released by this either. In production that state does not exist -- the
+// handler owns the connection until it hands it to a bridge it then Runs.
 func (b *WebSocketBridge) Close() error {
 	return b.closeWithReason(CloseNormalClosure, "bridge closing", wsCloseInitiatorRelayer)
 }
@@ -1440,24 +1684,25 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			simulated,
 			bridgeSimVerifier,
 			bridgeSimKeyID,
+			// The breaker is told about the backend when the bridge actually
+			// dials it, which is now the first admitted frame rather than
+			// construction. Recording a success here instead would report a
+			// backend nobody contacted, and a dead backend would stop being
+			// visible -- the one signal an operator uses to find them.
+			func(statusCode int, dialErr error) {
+				threshold := p.getCircuitBreakerThreshold(serviceID, "websocket")
+				transition := wsPool.RecordResult(wsEndpoint, statusCode, dialErr, threshold)
+				if transition != nil {
+					logCircuitBreakerTransition(p.logger, transition, serviceID, "websocket", threshold)
+				}
+			},
 		)
 		if err != nil {
+			// Construction no longer dials, so a failure here is a wiring fault
+			// on OUR side and says nothing about the backend. Reporting it to
+			// the breaker would trip an endpoint that was never contacted.
 			p.logger.Debug().Err(err).Msg("failed to create websocket bridge")
-
-			// Record connection error for circuit breaker
-			threshold := p.getCircuitBreakerThreshold(serviceID, "websocket")
-			transition := wsPool.RecordResult(wsEndpoint, 0, err, threshold)
-			if transition != nil {
-				logCircuitBreakerTransition(p.logger, transition, serviceID, "websocket", threshold)
-			}
 			return
-		}
-
-		// Record successful backend connection for circuit breaker
-		threshold := p.getCircuitBreakerThreshold(serviceID, "websocket")
-		transition := wsPool.RecordResult(wsEndpoint, 200, nil, threshold)
-		if transition != nil {
-			logCircuitBreakerTransition(p.logger, transition, serviceID, "websocket", threshold)
 		}
 
 		// Ownership transfers here: from now on the bridge closes it.
