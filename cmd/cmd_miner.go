@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -56,6 +57,7 @@ Example:
 	}
 
 	cmd.Flags().String(flagMinerConfig, "", "Path to miner config YAML file (required)")
+	cmd.Flags().Bool(flagStrictConfig, false, "Refuse to start when the config carries keys this binary does not understand (default: warn and start)")
 
 	// Redis flags (can override config)
 	cmd.Flags().String(flagRedisURL, "", "Redis connection URL (overrides config)")
@@ -94,6 +96,21 @@ Example:
 			if err := validateMinerConfig(config); err != nil {
 				return fmt.Errorf("config is INVALID: %w", err)
 			}
+
+			// Validating IS this command's job, so a key the miner does not
+			// understand is a failure here, with no flag involved. The serving
+			// binary makes the friendlier choice (warn and start, unless
+			// --strict-config); this is the door an operator walks through
+			// deliberately, before the rollout, to be told everything at once.
+			//
+			// Returned rather than printed: cobra renders it and sets a non-zero
+			// exit, which is what a pipeline reads.
+			if unknown := config.Warnings(); len(unknown) > 0 {
+				return fmt.Errorf(
+					"config is INVALID: %d key(s) this miner does not understand:\n  %s",
+					len(unknown), strings.Join(unknown, "\n  "))
+			}
+
 			configPath, _ := cmd.Flags().GetString(flagMinerConfig)
 			fmt.Printf("config OK: %s would start\n", configPath)
 			return nil
@@ -123,6 +140,30 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
+
+	// Keys the file carries that this binary does not understand.
+	//
+	// Warn and start, by default and on purpose: the ConfigMap and the binary
+	// roll out separately, so a new binary landing beside an older config is the
+	// NORMAL case of a rolling deploy, not an anomaly. Refusing to boot there
+	// converts a stale key into an outage. Loading a config is a state change,
+	// not a per-request event, so Warn is the right level.
+	//
+	// The miner had no channel for this at all until now, which is why the
+	// retired top-level hot_reload_enabled had to be a hard boot failure: with
+	// only "fail" and "say nothing" on offer, failing was correct. It now has
+	// the same three doors as the relayer.
+	unknownConfigKeys := config.Warnings()
+	for _, w := range unknownConfigKeys {
+		logger.Warn().Msg(w)
+	}
+	if len(unknownConfigKeys) > 0 {
+		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
+			return fmt.Errorf(
+				"--strict-config: refusing to start, %d key(s) this miner does not understand (listed above)",
+				len(unknownConfigKeys))
+		}
+	}
 
 	// Validate configuration before starting components
 	if err := validateMinerConfig(config); err != nil {

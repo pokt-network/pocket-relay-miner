@@ -34,7 +34,14 @@ import (
 
 const (
 	flagRelayerConfig = "config"
-	flagRedisURL      = "redis-url"
+
+	// flagStrictConfig turns the unknown-key diagnostic from a warning into a
+	// refusal to start. Off by default because a rolling deploy lands a new
+	// binary beside an older ConfigMap as a matter of course; on for the
+	// operator who would rather not serve at all than serve with a config the
+	// binary partly ignores.
+	flagStrictConfig = "strict-config"
+	flagRedisURL     = "redis-url"
 
 	// Pocket Network Bech32 address prefix
 	// Reference: poktroll/app/app.go:49
@@ -88,6 +95,7 @@ Example:
 
 	cmd.Flags().String(flagRelayerConfig, "", "Path to HA relayer config file (required)")
 	cmd.Flags().String(flagRedisURL, "redis://localhost:6379", "Redis connection URL")
+	cmd.Flags().Bool(flagStrictConfig, false, "Refuse to start when the config carries keys this binary does not understand (default: warn and start)")
 
 	_ = cmd.MarkFlagRequired(flagRelayerConfig)
 
@@ -140,14 +148,21 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("config is INVALID: %w", err)
 			}
-			fmt.Printf("config OK: %s would start\n", configPath)
-
-			// Keys the config still carries that no longer do anything. Printed
-			// here as well as at startup because this command exists precisely
-			// so an operator finds out before the rollout, not during it.
-			for _, w := range config.Warnings() {
-				fmt.Printf("warning: %s\n", w)
+			// Validating IS this command's job, so a key the relayer does not
+			// understand is a failure here, with no flag involved. The serving
+			// binary makes the friendlier choice (warn and start, unless
+			// --strict-config); this is the door an operator walks through
+			// deliberately, before the rollout, to be told everything at once.
+			//
+			// Returned rather than printed: cobra renders it and sets a non-zero
+			// exit, which is what a pipeline reads.
+			if unknown := config.Warnings(); len(unknown) > 0 {
+				return fmt.Errorf(
+					"config is INVALID: %d key(s) this relayer does not understand:\n  %s",
+					len(unknown), strings.Join(unknown, "\n  "))
 			}
+
+			fmt.Printf("config OK: %s would start\n", configPath)
 
 			// A disabled simulation block is skipped by Validate, by design.
 			// Report what enabling it would do anyway: otherwise the operator
@@ -410,11 +425,27 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
 
-	// Retired keys the file still carries. Warn rather than fail: the process
-	// runs correctly, but the file says something that is no longer true, and a
-	// config nobody re-reads is how that survives a year.
-	for _, w := range config.Warnings() {
+	// Keys the file carries that this binary does not understand.
+	//
+	// Warn and start, by default and on purpose: the ConfigMap and the binary
+	// roll out separately, so a new binary landing beside an older config is the
+	// NORMAL case of a rolling deploy, not an anomaly. Refusing to boot there
+	// converts a stale key into an outage. Loading a config change is a state
+	// change, not a per-request event, so Warn is the right level.
+	//
+	// --strict-config is for the operator who wants the guarantee instead: same
+	// finding, fatal. `relayer validate` is always strict, with no flag, because
+	// validating is what that command is for.
+	unknown := config.Warnings()
+	for _, w := range unknown {
 		logger.Warn().Msg(w)
+	}
+	if len(unknown) > 0 {
+		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
+			return fmt.Errorf(
+				"--strict-config: refusing to start, %d key(s) this relayer does not understand (listed above)",
+				len(unknown))
+		}
 	}
 
 	// Start observability server (metrics and pprof)

@@ -13,7 +13,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -247,6 +246,15 @@ type Config struct {
 	// Required for signing relay responses.
 	Keys config.KeysConfig `yaml:"keys"`
 
+	// unknownKeys are the keys the file carries that this struct does not
+	// declare, found by the strict second pass in LoadConfig and surfaced by
+	// Warnings().
+	//
+	// Unexported on purpose: it is a property of the FILE this config was loaded
+	// from, not a setting, and nothing may set it from YAML. A Config built in
+	// code rather than loaded from disk correctly reports none.
+	unknownKeys []string
+
 	// Services is a map of service configurations keyed by service ID.
 	Services map[string]ServiceConfig `yaml:"services"`
 
@@ -259,21 +267,6 @@ type Config struct {
 
 	// DefaultMaxBodySizeBytes is the default max body size for requests/responses.
 	DefaultMaxBodySizeBytes int64 `yaml:"default_max_body_size_bytes"`
-
-	// RemovedGracePeriodExtraBlocks is the tombstone for the retired
-	// grace_period_extra_blocks. It widened the window in which a relay for an
-	// ended session was still served, beyond the on-chain grace period -- and
-	// it did so on ONE side only: getTargetSessionBlockHeight accepted those
-	// relays while CheckRewardEligibility still judged them by the chain's
-	// window, so they were served and could never be paid. Grace now follows
-	// the on-chain parameter exactly.
-	//
-	// Kept as a field because the YAML decoder drops unknown keys in silence.
-	// Without it, an operator carrying the old default would upgrade into a
-	// grace window shorter than the one they configured and see relays start
-	// being rejected at the session boundary with nothing in their config to
-	// explain it. A pointer so "absent" and "explicitly 0" are distinguishable.
-	RemovedGracePeriodExtraBlocks *int `yaml:"grace_period_extra_blocks,omitempty"`
 
 	// Metrics configuration
 	Metrics MetricsConfig `yaml:"metrics"`
@@ -643,37 +636,10 @@ type RelayMeterYAMLConfig struct {
 	// Default: true
 	Enabled bool `yaml:"enabled"`
 
-	// RemovedFailBehavior is the tombstone for the retired fail_behavior, which
-	// let a deployment choose to SERVE relays whose budget could not be checked.
-	// There is no choice now: admission refuses what it cannot verify, and
-	// accounting never throws away work the miner can still resolve.
-	//
-	// It is kept as a field because the YAML decoder is lenient -- an unknown
-	// key is dropped without a word -- so deleting it outright would let a
-	// config that still says "open" boot as closed, with the file and the
-	// process disagreeing and nothing saying so.
-	//
-	// Unlike the other three tombstones in this file it does NOT fail the boot,
-	// and that is deliberate rather than an oversight: the owner chose a warning
-	// so a fleet mid-rollout is not held back by a line that no longer does
-	// anything. See Config.Warnings.
-	RemovedFailBehavior string `yaml:"fail_behavior,omitempty"`
-
 	// CacheTTL is the TTL for all cached Redis data (streams, params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	// Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
-
-	// RemovedRedisKeyPrefix is the tombstone for the retired redis_key_prefix
-	// setting. Meter keys and the cleanup channel are now built by the shared
-	// KeyBuilder from redis.namespace, so this field configures nothing -- but
-	// the YAML decoder is lenient (unknown fields are silently dropped), and a
-	// config still carrying a non-default value here would otherwise upgrade
-	// into a silent key migration: meter meta/consumed keys move namespaces
-	// mid-session, in-flight consumed counters reset to a fresh budget, and a
-	// rolling deploy meters one session under two different keys. Validate()
-	// turns that case into a hard, explicit error instead.
-	RemovedRedisKeyPrefix string `yaml:"redis_key_prefix,omitempty"`
 }
 
 // CacheWarmupConfig contains configuration for cache pre-warming at startup.
@@ -776,28 +742,23 @@ func DefaultConfig() Config {
 	return cfg
 }
 
-// Warnings returns deprecation notices for a config that LOADS but contains
-// keys that no longer do anything.
+// Warnings returns one line per key the file carries that this struct does not
+// declare -- typos, settings this project retired, and keys that were never
+// fields at all.
 //
-// It exists because there was nowhere to put one: LoadConfig has no logger and
-// Validate returns only an error, so the choice used to be "fail the boot" or
-// "say nothing". Callers -- the relayer at startup and `relayer validate` --
-// log each line. A retired key that changes behaviour by its absence belongs
-// here or in Validate, never in neither: the decoder drops unknown keys
-// silently, so the file and the process would disagree with no signal at all.
+// It exists because there was nowhere to put such a notice: LoadConfig has no
+// logger and Validate returns only an error, so the choice used to be "fail the
+// boot" or "say nothing". Callers -- the relayer at startup and
+// `relayer validate` -- decide what the finding means.
+//
+// This used to be a hand-written branch per retired setting, one tombstone
+// struct field each. Those fields were deleted: a field per retired key is
+// config that configures nothing, and it could never cover the case that
+// actually bit us, which was a key that was never a field. The sentence that
+// says what each removal CHANGED for the operator now lives in
+// config.retiredKeys and is attached to the generic finding.
 func (c *Config) Warnings() []string {
-	var warnings []string
-
-	if c.RelayMeter.RemovedFailBehavior != "" {
-		warnings = append(warnings, fmt.Sprintf(
-			"relay_meter.fail_behavior is no longer supported (found %q) and is ignored: the relayer "+
-				"now refuses a relay whose budget it cannot verify, and never chooses to serve one. "+
-				"Remove the line. If it said \"open\", expect relays to be rejected during an outage "+
-				"of the meter's store that were previously served unbilled",
-			c.RelayMeter.RemovedFailBehavior))
-	}
-
-	return warnings
+	return c.unknownKeys
 }
 
 // Validate validates the configuration and returns an error if invalid.
@@ -823,67 +784,6 @@ func (c *Config) Validate() error {
 
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
-	}
-
-	// The retired relay_meter.redis_key_prefix documented where meter keys
-	// USED to live: "{retired}:meter:...". Compare that against where the
-	// effective namespace puts them now: equal means the keys do not move and
-	// the stale line is harmless; different means upgrading would silently
-	// relocate meter meta/consumed keys mid-session (each replica re-creating a
-	// fresh budget at the new location), so it is a hard error.
-	//
-	// It compares the FULL meter prefix through the KeyBuilder rather than
-	// against the base alone. That is now the same thing -- the meter segment is
-	// a constant, and a config that still sets meter_prefix is rejected by
-	// Namespace.Validate above, before reaching here -- but building the prefix
-	// here by hand is exactly how this check silently started comparing against
-	// "ha:" when the segment stopped coming from config.
-	if c.RelayMeter.RemovedRedisKeyPrefix != "" {
-		legacyMeterPrefix := c.RelayMeter.RemovedRedisKeyPrefix + ":meter"
-		effectiveMeterPrefix := redisutil.NewKeyBuilder(c.Redis.Namespace).MeterPrefix()
-		if legacyMeterPrefix != effectiveMeterPrefix {
-			return fmt.Errorf(
-				"relay_meter.redis_key_prefix is no longer supported: meter keys now derive from redis.namespace. "+
-					"Your config would move them from %q to %q, silently resetting in-flight session budgets. "+
-					"Remove the relay_meter.redis_key_prefix line; if your meter keys really live under %q, "+
-					"drain in-flight sessions before upgrading (meter keys are ephemeral and session-scoped, "+
-					"so a drained fleet migrates with no data to move). Do NOT point redis.namespace.base_prefix "+
-					"at the retired value to preserve them: that would relocate the relayer's ENTIRE keyspace, "+
-					"including the WAL stream the miner consumes from",
-				legacyMeterPrefix, effectiveMeterPrefix, legacyMeterPrefix,
-			)
-		}
-		// Equal full meter prefix: nothing moves. Accepted so that configs
-		// shipped with the old default ("ha") upgrade without editing.
-	}
-
-	// The retired grace_period_extra_blocks widened the serve window past the
-	// chain's grace period, which meant serving relays that could never be
-	// paid. Zero is accepted so a config that spelled out "no extra" upgrades
-	// untouched; anything else is a real narrowing the operator must see.
-	if c.RemovedGracePeriodExtraBlocks != nil && *c.RemovedGracePeriodExtraBlocks != 0 {
-		return fmt.Errorf(
-			"grace_period_extra_blocks is no longer supported (found %d): it extended the serve window "+
-				"beyond the chain's grace period on the admission side only, so relays admitted in those "+
-				"extra blocks were served and then judged ineligible for rewards -- served for free. "+
-				"Grace now follows the on-chain grace_period_end_offset_blocks exactly. Remove the line; "+
-				"expect relays arriving in those %d block(s) after the grace period to be rejected as "+
-				"expired instead of served unpaid",
-			*c.RemovedGracePeriodExtraBlocks, *c.RemovedGracePeriodExtraBlocks,
-		)
-	}
-
-	// The retired keys.keys_dir loaded supplier keys from a directory. A
-	// lenient decoder would drop the field and boot WITHOUT those keys: the
-	// relayer signs nothing for those suppliers and the revenue loss carries
-	// no diagnostic. Any non-empty value is therefore a hard error.
-	if c.Keys.RemovedKeysDir != "" {
-		return fmt.Errorf(
-			"keys.keys_dir is no longer supported: migrate the keys in %q to a keys_file "+
-				"(supplier addresses are derived from each private key) or import them into the "+
-				"keyring, then remove the keys_dir line",
-			c.Keys.RemovedKeysDir,
-		)
 	}
 
 	// Exactly one key source. See keys.ValidateKeySources: both is refused so
@@ -1450,12 +1350,26 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	// Second pass over the same bytes, diagnostic only: the yaml.Unmarshal below
+	// is lenient and drops every key this struct does not declare, so the file
+	// and the process can disagree with no signal at all. What to DO with the
+	// finding belongs to the caller -- `validate` fails on it because validating
+	// is its whole job, and the serving binary warns and starts unless
+	// --strict-config was passed, because refusing to boot over a stale key turns
+	// a rolling deploy into an outage. See config.UnknownKeys.
+	//
+	// Computed here, ahead of the local named `config`, because that local
+	// shadows the shared package of the same name for the rest of the function.
+	unknownKeys := config.UnknownKeys(data, &Config{})
+
 	// Start with defaults
 	config := DefaultConfig()
 
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+
+	config.unknownKeys = unknownKeys
 
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)

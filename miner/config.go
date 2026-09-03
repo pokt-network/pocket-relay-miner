@@ -27,6 +27,15 @@ type Config struct {
 	// Keys configuration for loading supplier signing keys.
 	Keys config.KeysConfig `yaml:"keys"`
 
+	// unknownKeys are the keys the file carries that this struct does not
+	// declare, found by the strict second pass in LoadConfig and surfaced by
+	// Warnings().
+	//
+	// Unexported on purpose: it is a property of the FILE this config was loaded
+	// from, not a setting, and nothing may set it from YAML. A Config built in
+	// code rather than loaded from disk correctly reports none.
+	unknownKeys []string
+
 	// Transaction configuration for claim/proof submission.
 	Transaction TransactionConfig `yaml:"transaction,omitempty"`
 
@@ -46,20 +55,6 @@ type Config struct {
 	// BatchSize is the number of relays to process in a single batch.
 	// Default: 100
 	BatchSize int64 `yaml:"batch_size"`
-
-	// RemovedHotReloadEnabled is the tombstone for the retired top-level
-	// hot_reload_enabled. The setting now lives at keys.hot_reload_enabled,
-	// which both binaries share, and the top-level field is READ BY NOTHING.
-	//
-	// It has to be a tombstone rather than a silent removal, because that gap
-	// was measured in production shape on 2026-08-22: the deployment set
-	// hot_reload_enabled: true at the top level, the code read
-	// keys.hot_reload_enabled (unset, so false), and the miner ran with key hot
-	// reload OFF while its own config said ON. With a keyring -- which nothing
-	// can watch -- that means a key added or pulled never reaches the miner at
-	// all. A pointer, not a bool, so "the operator wrote it" is distinguishable
-	// from "the field is absent" no matter which value they wrote.
-	RemovedHotReloadEnabled *bool `yaml:"hot_reload_enabled,omitempty"`
 
 	// SessionTTL is the TTL for session state data in Redis.
 	// Default: CacheTTL (2h) - aligned with SMST tree TTL to prevent orphaned sessions.
@@ -453,31 +448,6 @@ func (c *Config) Validate() error {
 
 	if c.PocketNode.QueryNodeGRPCUrl == "" {
 		return fmt.Errorf("pocket_node.query_node_grpc_url is required")
-	}
-
-	// The retired keys.keys_dir loaded supplier keys from a directory. A
-	// lenient decoder would drop the field and boot WITHOUT those keys: the
-	// miner claims and proves nothing for those suppliers and the revenue
-	// loss carries no diagnostic. Any non-empty value is therefore a hard error.
-	if c.Keys.RemovedKeysDir != "" {
-		return fmt.Errorf(
-			"keys.keys_dir is no longer supported: migrate the keys in %q to a keys_file "+
-				"(supplier addresses are derived from each private key) or import them into the "+
-				"keyring, then remove the keys_dir line",
-			c.Keys.RemovedKeysDir,
-		)
-	}
-
-	// The retired top-level hot_reload_enabled is read by nothing. Dropping it
-	// silently is how the miner came to run with key hot reload OFF while the
-	// config said ON, so any value at all is a hard error naming the new home.
-	if c.RemovedHotReloadEnabled != nil {
-		return fmt.Errorf(
-			"hot_reload_enabled at the top level is no longer read: the setting moved to "+
-				"keys.hot_reload_enabled, which the miner and the relayer share. Set "+
-				"keys.hot_reload_enabled: %t and delete the top-level line",
-			*c.RemovedHotReloadEnabled,
-		)
 	}
 
 	// Exactly one key source (suppliers are auto-discovered from the keys).
@@ -989,6 +959,15 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Second pass over the same bytes, diagnostic only: the decode above is
+	// lenient and drops every key this struct does not declare, so the file and
+	// the process can disagree with no signal at all. What to DO with the finding
+	// belongs to the caller -- `validate` fails on it because validating is its
+	// whole job, and the serving binary warns and starts unless --strict-config
+	// was passed, because refusing to boot over a stale key turns a rolling
+	// deploy into an outage. See config.UnknownKeys.
+	cf.unknownKeys = config.UnknownKeys(data, &Config{})
+
 	cf.Redis.ConsumerName = UniqueConsumerName(cf.Redis.ConsumerName)
 
 	if err = cf.Validate(); err != nil {
@@ -996,6 +975,23 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return cf, nil
+}
+
+// Warnings returns one line per key the file carries that this struct does not
+// declare -- typos, settings this project retired, and keys that were never
+// fields at all.
+//
+// The miner had no channel for this at all, which is why the retired top-level
+// hot_reload_enabled had to be a HARD boot failure: with only "fail" and "say
+// nothing" available, failing was the right call. With a channel, a stale key is
+// a warning at startup and a hard failure under `miner validate` or
+// --strict-config, which is the same rule the relayer follows.
+//
+// The sentence that says what each removal CHANGED for the operator lives in
+// config.retiredKeys and is attached to the generic finding, so deleting the
+// tombstone struct fields lost the fields and not the knowledge.
+func (c *Config) Warnings() []string {
+	return c.unknownKeys
 }
 
 // UniqueConsumerName returns the name this process registers with the Redis

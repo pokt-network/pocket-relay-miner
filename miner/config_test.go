@@ -1,6 +1,9 @@
 package miner
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -134,71 +137,110 @@ func TestConfig_Validate_NoKeySource(t *testing.T) {
 	require.Contains(t, err.Error(), "keyring")
 }
 
-// TestConfig_Validate_RemovedKeysDir pins the tombstone for the retired
-// keys.keys_dir setting. The YAML decoder drops unknown fields silently, so
-// without the tombstone an old config would boot WITHOUT those supplier keys
-// and mine nothing for them, with no diagnostic.
-func TestConfig_Validate_RemovedKeysDir(t *testing.T) {
-	cfg := &Config{
-		Redis: RedisConfig{
-			RedisConfig: config.RedisConfig{
-				URL: "redis://localhost:6379",
-			},
-			ConsumerName: "miner-1",
-		},
-		PocketNode: config.PocketNodeConfig{
-			QueryNodeRPCUrl:  "http://localhost:26657",
-			QueryNodeGRPCUrl: "localhost:9090",
-		},
-		Keys: config.KeysConfig{
-			KeysFile:       "/path/to/keys.yaml",
-			RemovedKeysDir: "/etc/pocket/keys",
-		},
-	}
+// TestLoadConfig_RetiredKeysAreNamedWithWhatTheyChanged replaces the two
+// tombstone tests this file used to carry (keys.keys_dir and the top-level
+// hot_reload_enabled).
+//
+// The tombstone STRUCT FIELDS are gone: a field per retired key is config that
+// configures nothing, and it could never cover the case that actually bit us --
+// a key that was never a field at all. What replaced them is a strict second
+// decode of the same bytes, so this test drives the real path (file ->
+// LoadConfig -> Warnings) instead of a struct literal, which is the stronger
+// assertion: the struct literal could never have caught a typo.
+//
+// The retired-key SENTENCE is the part worth pinning. A bare "field not found"
+// tells the operator a key is unknown; it does not tell them their keys were
+// silently not loaded, which is the loss that earned the tombstone.
+func TestLoadConfig_RetiredKeysAreNamedWithWhatTheyChanged(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "miner.yaml")
 
-	err := cfg.Validate()
-	require.Error(t, err)
-	require.Contains(t, err.Error(), "keys_dir")
-	// The advice must name the safe migrations, not the removed mechanism.
-	require.Contains(t, err.Error(), "keys_file")
-	require.Contains(t, err.Error(), "keyring")
+	// A config that boots, carrying both retired keys. Neither may fail the
+	// load: warn-and-start is the deliberate default, because a rolling deploy
+	// lands a new binary beside an older ConfigMap as a matter of course.
+	require.NoError(t, os.WriteFile(path, []byte(
+		"redis:\n"+
+			"  url: redis://localhost:6379\n"+
+			"  consumer_name: miner-1\n"+
+			"pocket_node:\n"+
+			"  query_node_rpc_url: http://localhost:26657\n"+
+			"  query_node_grpc_url: localhost:9090\n"+
+			"keys:\n"+
+			"  keys_file: /path/to/keys.yaml\n"+
+			"  keys_dir: /etc/pocket/keys\n"+
+			"hot_reload_enabled: true\n"), 0o600))
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err, "a retired key must NOT fail the load: the serving binary warns and starts")
+
+	warnings := strings.Join(cfg.Warnings(), "\n")
+
+	require.Contains(t, warnings, "keys_dir")
+	require.Contains(t, warnings, "keys_file",
+		"the advice must name the safe migration, not just the removed mechanism")
+
+	require.Contains(t, warnings, "hot_reload_enabled")
+	require.Contains(t, warnings, "keys.hot_reload_enabled",
+		"the operator has to be told the NEW home, or the warning costs them a search")
+
+	require.Contains(t, warnings, "REMOVED",
+		"a retired key must read as removed, not merely unknown")
 }
 
-// TestConfig_Validate_RemovedTopLevelHotReload pins the tombstone for the
-// retired top-level hot_reload_enabled.
-//
-// This is not a hypothetical migration: between 35101fb and 2026-08-22 the
-// miner read keys.hot_reload_enabled while its DEPLOYED config set
-// hot_reload_enabled at the top level, so the process ran with key hot reload
-// OFF and said ON. With a keyring -- which nothing can watch -- a key added or
-// pulled then never reaches the miner at all.
-func TestConfig_Validate_RemovedTopLevelHotReload(t *testing.T) {
-	for _, enabled := range []bool{true, false} {
-		value := enabled
-		cfg := &Config{
-			Redis: RedisConfig{
-				RedisConfig: config.RedisConfig{
-					URL: "redis://localhost:6379",
-				},
-				ConsumerName: "miner-1",
-			},
-			PocketNode: config.PocketNodeConfig{
-				QueryNodeRPCUrl:  "http://localhost:26657",
-				QueryNodeGRPCUrl: "localhost:9090",
-			},
-			Keys: config.KeysConfig{
-				KeysFile: "/path/to/keys.yaml",
-			},
-			// Either value must be rejected: what is wrong is the PLACE, and a
-			// config that says false at the top level is just as misleading as
-			// one that says true.
-			RemovedHotReloadEnabled: &value,
-		}
+// TestLoadConfig_AnUnknownKeyIsReportedButDoesNotFailTheLoad covers the case no
+// tombstone could ever have covered: a key that was never a field. This is the
+// shape that cost real money -- config.miner.example.yaml shipped a `suppliers:`
+// block promising supplier filtering while no such field existed, so an operator
+// who uncommented it believed they were filtering and the miner claimed for
+// every key it held.
+func TestLoadConfig_AnUnknownKeyIsReportedButDoesNotFailTheLoad(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "miner.yaml")
 
-		err := cfg.Validate()
-		require.Error(t, err, "top-level hot_reload_enabled=%v must be rejected", value)
-		require.Contains(t, err.Error(), "keys.hot_reload_enabled")
-	}
+	require.NoError(t, os.WriteFile(path, []byte(
+		"redis:\n"+
+			"  url: redis://localhost:6379\n"+
+			"  consumer_name: miner-1\n"+
+			"pocket_node:\n"+
+			"  query_node_rpc_url: http://localhost:26657\n"+
+			"  query_node_grpc_url: localhost:9090\n"+
+			"keys:\n"+
+			"  keys_file: /path/to/keys.yaml\n"+
+			"suppliers:\n"+
+			"  - operator_address: pokt1abc\n"), 0o600))
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+
+	warnings := cfg.Warnings()
+	require.Len(t, warnings, 1)
+	require.Contains(t, warnings[0], "suppliers")
+	require.Contains(t, warnings[0], "line ",
+		"the operator must be pointed at the line, or a long config is a hunt")
+	require.NotContains(t, warnings[0], "REMOVED",
+		"a key that was never a field is unknown, not retired: calling it removed would be a lie")
+}
+
+// TestLoadConfig_AGoodConfigWarnsAboutNothing is the other half, and it is the
+// one that keeps the warning worth reading. A false positive here trains the
+// operator to ignore the output, which is worse than the silence it replaced.
+func TestLoadConfig_AGoodConfigWarnsAboutNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "miner.yaml")
+
+	require.NoError(t, os.WriteFile(path, []byte(
+		"redis:\n"+
+			"  url: redis://localhost:6379\n"+
+			"  consumer_name: miner-1\n"+
+			"pocket_node:\n"+
+			"  query_node_rpc_url: http://localhost:26657\n"+
+			"  query_node_grpc_url: localhost:9090\n"+
+			"keys:\n"+
+			"  keys_file: /path/to/keys.yaml\n"), 0o600))
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err)
+	require.Empty(t, cfg.Warnings())
 }
 
 // TestDefaultConfig_KeyHotReloadOn pins the default the operator gets when they
