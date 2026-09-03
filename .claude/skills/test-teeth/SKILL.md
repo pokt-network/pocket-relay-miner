@@ -60,6 +60,23 @@ not pinning the position.
 - **Failed with a message naming the defect** — the test bites. Done.
 - **Passed with the defect present** — the test is decoration. Fix the test, or
   delete it; a test that cannot fail costs runtime and buys false confidence.
+  **But first make sure the injection restored the defect you NAMED**, because a
+  green here has two causes and they lead opposite ways. Measured 2026-09-03: a
+  cache fix stored a fingerprint only when the directory had not changed, and the
+  injection disabled that condition with `if false && (...)`. The test stayed
+  green and read as decoration. It was not: with the condition off, the code fell
+  through to storing the RE-READ fingerprint — a DIFFERENT repair, which happens
+  to close the same case. The original defect lived on the other line (storing
+  the fingerprint taken BEFORE the load), and injecting THAT went red at once.
+  Mutilating a condition gives you whatever the fallthrough does; it is not the
+  same as putting the old code back. When a defect was removed by a commit, the
+  cheap check is `git show <sha>` — inject what the minus lines said.
+
+  The unexpected green is worth reading rather than dismissing: it says the test
+  cannot tell your fix from that other one. If the other one was considered and
+  REJECTED — as it was there, because re-reading moves the failure onto a commoner
+  case — then the suite is missing the test that pins the choice, and the green
+  just told you which one to write.
 - **Failed for an unrelated reason** — narrow the injection. You broke more than
   the one thing.
 - **Printed the failure and still exited 0** — the harness around the test is
