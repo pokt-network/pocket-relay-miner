@@ -148,6 +148,7 @@ func readServedResponse(t *testing.T, conn *websocket.Conn) {
 // Asserting on the Redis KEY and not on a call argument is what makes it a test
 // of the consequence: the key is the budget.
 func TestWebSocketMetersAgainstTheSupplierThatOwnsTheConnection(t *testing.T) {
+	verifyNoBridgeGoroutines(t)
 	const sessionID = "owner-metering"
 	pipeline, rc, prefix := newOwnerTestPipeline(t)
 	backendURL, _, _ := newSimWSBackendServer(t)
@@ -190,6 +191,7 @@ func TestWebSocketMetersAgainstTheSupplierThatOwnsTheConnection(t *testing.T) {
 // supplier B while the response signer and the backend headers stayed bound to
 // A -- the bridge would sign as one identity and bill another.
 func TestWebSocketClosesWhenAFrameNamesADifferentSupplier(t *testing.T) {
+	verifyNoBridgeGoroutines(t)
 	const sessionID = "owner-change"
 	pipeline, _, _ := newOwnerTestPipeline(t)
 	backendURL, _, _ := newSimWSBackendServer(t)
@@ -226,6 +228,7 @@ func TestWebSocketClosesWhenAFrameNamesADifferentSupplier(t *testing.T) {
 // with an empty supplier can no longer establish an empty owner, which is the
 // exact state that produced the shared meter key.
 func TestWebSocketClosesWhenAFrameNamesNoSupplier(t *testing.T) {
+	verifyNoBridgeGoroutines(t)
 	pipeline, _, _ := newOwnerTestPipeline(t)
 	backendURL, _, _ := newSimWSBackendServer(t)
 	_, signer := newSupplier(t)
@@ -246,5 +249,44 @@ func TestWebSocketClosesWhenAFrameNamesNoSupplier(t *testing.T) {
 
 	require.Equal(t, before+1, testutil.ToFloat64(relaysRejected.WithLabelValues(
 		simWSTestService, "websocket", rejectReasonMissingSupplierAddress)),
+		"the refusal is counted under its own bounded reason")
+}
+
+// TestWebSocketClosesWhenAFrameCarriesNoSessionHeader closes a remote panic that
+// sat one line below the owner gate.
+//
+// The RelayContext built just after this gate dereferences Meta.SessionHeader
+// unguarded, and a remote peer chooses the frame's shape. net/http recovers the
+// handler goroutine so the process survives, but the BRIDGE did not tear itself
+// down: net/http does not close a hijacked connection, so the gauge, the socket
+// and the SessionMonitor registration all stayed.
+func TestWebSocketClosesWhenAFrameCarriesNoSessionHeader(t *testing.T) {
+	verifyNoBridgeGoroutines(t)
+	pipeline, _, _ := newOwnerTestPipeline(t)
+	backendURL, _, _ := newSimWSBackendServer(t)
+	supplier, signer := newSupplier(t)
+
+	conn := newSageShapedBridge(t, backendURL, signer, pipeline)
+
+	before := testutil.ToFloat64(relaysRejected.WithLabelValues(
+		simWSTestService, "websocket", rejectReasonInvalidRelayRequest))
+
+	headerless := &servicetypes.RelayRequest{
+		Payload: []byte(`{"jsonrpc":"2.0","method":"eth_subscribe","id":1}`),
+		Meta: servicetypes.RelayRequestMetadata{
+			SupplierOperatorAddress: supplier, // passes the supplier half of the gate
+		},
+	}
+	sendRelay(t, conn, headerless)
+
+	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
+	_, data, readErr := conn.ReadMessage()
+	require.Error(t, readErr,
+		"a frame with no session header must not be served; got %q", string(data))
+	require.True(t, websocket.IsCloseError(readErr, CloseValidationFailed),
+		"it closes with the client-verdict code rather than panicking, got %v", readErr)
+
+	require.Equal(t, before+1, testutil.ToFloat64(relaysRejected.WithLabelValues(
+		simWSTestService, "websocket", rejectReasonInvalidRelayRequest)),
 		"the refusal is counted under its own bounded reason")
 }

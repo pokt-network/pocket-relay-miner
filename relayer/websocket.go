@@ -134,6 +134,23 @@ func closeCodeName(code int) string {
 	}
 }
 
+// closeInitiatorForSource maps a message source onto one of the three declared
+// initiators. The two vocabularies do not line up -- the source side calls the
+// upstream peer "gateway" and the initiator side calls it "client" -- so
+// converting one string to the other directly produced a FOURTH initiator value
+// that no constant declares. Harmless while nothing read it; the moment a metric
+// carries it as a label, client-initiated closes split across two series.
+func closeInitiatorForSource(source wsMessageSource) wsCloseInitiator {
+	switch source {
+	case wsMessageSourceGateway:
+		return wsCloseInitiatorClient
+	case wsMessageSourceBackend:
+		return wsCloseInitiatorBackend
+	default:
+		return wsCloseInitiatorRelayer
+	}
+}
+
 // wsCloseInitiator identifies who initiated a WebSocket close.
 type wsCloseInitiator string
 
@@ -384,10 +401,10 @@ func (b *WebSocketBridge) Run() {
 	// Start ping loops for keep-alive
 	b.wg.Add(2)
 	go logging.RecoverGoRoutine(b.logger, "websocket_ping_gateway", func(ctx context.Context) {
-		b.pingLoop(b.gatewayConn, &b.gatewayWriteMu, "gateway")
+		b.pingLoop(b.gatewayConn, &b.gatewayWriteMu, wsMessageSourceGateway)
 	})(b.ctx)
 	go logging.RecoverGoRoutine(b.logger, "websocket_ping_backend", func(ctx context.Context) {
-		b.pingLoop(b.backendConn, &b.backendWriteMu, "backend")
+		b.pingLoop(b.backendConn, &b.backendWriteMu, wsMessageSourceBackend)
 	})(b.ctx)
 
 	// Note: Session expiration monitoring happens via global SessionMonitor.
@@ -426,7 +443,7 @@ func (b *WebSocketBridge) readLoop(conn *websocket.Conn, source wsMessageSource)
 				b.logCloseError(err, source)
 			}
 			closeCode, closeText := closeInfoForReadError(err)
-			_ = b.closeWithReason(closeCode, closeText, wsCloseInitiator(source))
+			_ = b.closeWithReason(closeCode, closeText, closeInitiatorForSource(source))
 			return
 		}
 
@@ -451,7 +468,8 @@ func (b *WebSocketBridge) readLoop(conn *websocket.Conn, source wsMessageSource)
 }
 
 // pingLoop sends periodic ping messages to keep the connection alive.
-func (b *WebSocketBridge) pingLoop(conn *websocket.Conn, writeMu *sync.Mutex, name string) {
+func (b *WebSocketBridge) pingLoop(conn *websocket.Conn, writeMu *sync.Mutex, source wsMessageSource) {
+	name := string(source)
 	defer b.wg.Done()
 
 	ticker := time.NewTicker(wsPingPeriod)
@@ -480,17 +498,10 @@ func (b *WebSocketBridge) pingLoop(conn *websocket.Conn, writeMu *sync.Mutex, na
 					Err(err).
 					Str("connection", name).
 					Msg("ping failed - connection may be dead")
-				// Determine initiator based on which connection failed
-				var initiator wsCloseInitiator
-				switch name {
-				case "gateway":
-					initiator = wsCloseInitiatorClient
-				case "backend":
-					initiator = wsCloseInitiatorBackend
-				default:
-					initiator = wsCloseInitiatorRelayer
-				}
-				_ = b.closeWithReason(CloseGoingAway, "ping timeout", initiator)
+				// The SAME mapping readLoop uses. It was a second switch here,
+				// on free-text names passed by the call sites, with no
+				// compile-time link to the source constants.
+				_ = b.closeWithReason(CloseGoingAway, "ping timeout", closeInitiatorForSource(source))
 				return
 			}
 		}
@@ -615,6 +626,18 @@ func (b *WebSocketBridge) adoptOrVerifyOwner(relayReq *servicetypes.RelayRequest
 		b.logger.Debug().
 			Msg("relay request names no supplier operator address - closing connection")
 		_ = b.closeWithReason(CloseValidationFailed, "relay request names no supplier", wsCloseInitiatorRelayer)
+		return false
+	}
+
+	// A nil SessionHeader is refused HERE because the next thing this frame
+	// reaches dereferences it unguarded (the RelayContext's SessionID), and a
+	// remote peer chooses the frame's shape. This gate is the one place that
+	// already asks whether the frame has the shape the rest of the path assumes.
+	if relayReq.Meta.SessionHeader == nil {
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonInvalidRelayRequest).Inc()
+		b.logger.Debug().
+			Msg("relay request carries no session header - closing connection")
+		_ = b.closeWithReason(CloseValidationFailed, "relay request carries no session header", wsCloseInitiatorRelayer)
 		return false
 	}
 
@@ -1176,6 +1199,7 @@ func (b *WebSocketBridge) closeWithReason(code int, reason string, initiator wsC
 
 	// Decrement active connections metric
 	wsConnectionsActive.WithLabelValues(b.serviceID).Dec()
+	wsClosesTotal.WithLabelValues(b.serviceID, closeCodeName(code), string(initiator)).Inc()
 
 	// Log final stats for this connection
 	relayCount := b.relayCount.Load()
@@ -1323,11 +1347,35 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			return
 		}
 
+		// PAST THIS LINE THE CONNECTION IS HIJACKED, and this function owns it
+		// until the bridge takes it.
+		//
+		// Every early return below used to leak it. http.Error and
+		// sendServiceUnavailable write NOWHERE once the connection is hijacked
+		// -- net/http logs "WriteHeader on hijacked connection" and drops it --
+		// so a bare `return` left the client holding an open WebSocket that
+		// nothing would ever read or close: one FD here and one on the client,
+		// reclaimed only when the peer gave up.
+		//
+		// A defer and not a close at each return, because the defect is the
+		// SHAPE: an early return that skips teardown. Four of those were fixed
+		// one at a time inside the bridge before this one was found here, a
+		// hundred lines away. This makes the next early return safe without
+		// anyone remembering, which a fifth point fix would not.
+		bridgeOwnsConn := false
+		defer func() {
+			if !bridgeOwnsConn {
+				_ = gatewayConn.Close()
+			}
+		}()
+
 		// Get WebSocket backend endpoint from pre-checked pool
 		// (wsPool is guaranteed non-nil and HasHealthy() from pre-check above)
 		wsEndpoint := wsPool.Next()
 		if wsEndpoint == nil {
-			http.Error(w, "No healthy WebSocket backend available", http.StatusServiceUnavailable)
+			p.logger.Debug().
+				Str(logging.FieldServiceID, serviceID).
+				Msg("no healthy websocket backend at selection time")
 			return
 		}
 		backendURL := wsEndpoint.RawURL
@@ -1395,7 +1443,6 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		)
 		if err != nil {
 			p.logger.Debug().Err(err).Msg("failed to create websocket bridge")
-			_ = gatewayConn.Close()
 
 			// Record connection error for circuit breaker
 			threshold := p.getCircuitBreakerThreshold(serviceID, "websocket")
@@ -1412,6 +1459,9 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		if transition != nil {
 			logCircuitBreakerTransition(p.logger, transition, serviceID, "websocket", threshold)
 		}
+
+		// Ownership transfers here: from now on the bridge closes it.
+		bridgeOwnsConn = true
 
 		// Run bridge (blocking)
 		bridge.Run()

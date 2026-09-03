@@ -585,6 +585,26 @@ var (
 		[]string{"service_id"},
 	)
 
+	// wsClosesTotal is what separates "clients we refused" from "the backend is
+	// down" during an incident. Without it the only WebSocket counters are
+	// active/total/forwarded/emitted, so a flood of refused connections and a
+	// dead backend produce the same shape: connections_total climbing and
+	// connections_active flat.
+	//
+	// Both labels are bounded: close_code goes through closeCodeName, which has
+	// an Unknown default so a peer-supplied code cannot invent a series, and
+	// initiated_by goes through closeInitiatorForSource, which maps onto the
+	// three declared wsCloseInitiator constants.
+	wsClosesTotal = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "websocket_closes_total",
+			Help:      "Total number of WebSocket bridge closures by close code and initiator",
+		},
+		[]string{"service_id", "close_code", "initiated_by"},
+	)
+
 	// gRPC Relay Service metrics (for proper relay protocol over gRPC)
 	grpcRelaysTotal = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{

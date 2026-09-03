@@ -146,6 +146,7 @@ const simWSTestService = simTestService
 
 func newSimWSFixture(t *testing.T) *simWSFixture {
 	t.Helper()
+	verifyNoBridgeGoroutines(t)
 	logger := testLogger()
 	fixed := time.Unix(1_700_000_000, 0).UTC()
 	clock := func() time.Time { return fixed }

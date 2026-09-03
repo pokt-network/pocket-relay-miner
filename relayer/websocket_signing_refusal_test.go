@@ -33,6 +33,7 @@ import (
 // backend push would fail identically -- dropping the message instead would
 // leave a subscription pushing into a bin with the client waiting forever.
 func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
+	verifyNoBridgeGoroutines(t)
 	logger := testLogger()
 
 	// A signer that holds SOMEBODY ELSE's key: HasSigner is false for this
