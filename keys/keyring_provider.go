@@ -736,8 +736,42 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	}
 
 	if p.keyringDir != "" {
+		// The fingerprint above was read BEFORE List and before the argon2id
+		// work -- seconds of it, ~40ms per key twice over -- so storing it
+		// beside what those seconds produced records the pair (state of the
+		// directory then, keys that came out later). Those disagree whenever the
+		// directory changed in between, and the damage lands when it changes
+		// BACK byte for byte: restoring a backup, rolling a Secret back. The
+		// check at the top then matches, and hands out the shorter set. A
+		// supplier present on disk silently stops signing until something else
+		// changes the directory or the process restarts.
+		//
+		// Re-reading and storing the NEW fingerprint would be worse, not better:
+		// the keys are not read at an instant either, so the second reading
+		// describes a third state and the mismatch simply moves -- from the
+		// rollback case, which is rare, to the ordinary forward one, where a key
+		// added during a load would be cached out forever.
+		//
+		// So the fingerprint is only recorded when the directory is provably
+		// unchanged across the whole load, which is the same read-work-reread
+		// shape the record count above already uses. Otherwise the cache is
+		// poisoned rather than emptied: lastFingerprint is set to a value
+		// keyringDirFingerprint can never return -- it always begins with a
+		// count -- so the next load does the full work, while cachedKeys is left
+		// alone because the release/boot alarm below reads its length to tell a
+		// fleet-wide release from a process that never held anything.
+		after, _, ferr := p.keyringDirFingerprint()
+		stored := after
+		if ferr != nil || after != fingerprint {
+			stored = ""
+			keyringCacheDiscarded.WithLabelValues(p.Kind()).Inc()
+			p.logger.Debug().
+				Str("keyring_dir", p.keyringDir).
+				Msg("keyring directory changed while it was being read; not caching this load")
+		}
+
 		p.fingerprintMu.Lock()
-		p.lastFingerprint = fingerprint
+		p.lastFingerprint = stored
 		p.cachedKeys = make(map[string]cryptotypes.PrivKey, len(keys))
 		for addr, key := range keys {
 			p.cachedKeys[addr] = key
