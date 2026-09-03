@@ -183,3 +183,60 @@ func TestReapOnMissingStreamIsQuiet(t *testing.T) {
 
 	require.NotPanics(t, func() { c.reapDeadConsumers(context.Background()) })
 }
+
+// TestReapNeverRemovesTheReleasedSentinel guards the premise the other three
+// conditions rest on.
+//
+// They were written for the record of a dead pod, which is INERT: its name
+// embeds a hostname and a pid, so once it reads Pending == 0 nothing can ever
+// put another entry under it and the window between reading that and deleting
+// is unreachable. The sentinel introduced for the pre-8.8 release path is not
+// inert -- every consumer XCLAIMs into it on a transient processing failure and
+// on a shutdown drain -- so it reaches Pending == 0 and then grows idle like any
+// other record, and a release landing in that window would have its entry
+// discarded by XGROUP DELCONSUMER. Those are relays already served.
+//
+// The sentinel is walked through its real lifecycle here rather than created by
+// hand, because the claim under test is that PRODUCTION reaches this state.
+func TestReapNeverRemovesTheReleasedSentinel(t *testing.T) {
+	f := newReaperFixture(t)
+	ctx := context.Background()
+
+	held, err := f.client.XPendingExt(ctx, &redis.XPendingExtArgs{
+		Stream: f.stream, Group: f.group, Consumer: reaperDeadBusy,
+		Start: "-", End: "+", Count: 10,
+	}).Result()
+	require.NoError(t, err)
+	require.Len(t, held, 1, "premise: dead-busy holds exactly one entry to release")
+
+	// What ReleaseMessage's pre-8.8 fallback does, verbatim.
+	require.NoError(t, f.client.Do(ctx,
+		"XCLAIM", f.stream, f.group, releasedConsumerName, 0,
+		held[0].ID, "IDLE", releaseIdleMillis, "JUSTID",
+	).Err())
+	require.Equal(t, int64(1), f.names(t)[releasedConsumerName],
+		"premise: the released entry is parked under the sentinel")
+
+	// And what any consumer's reclaim then does, which is what empties it.
+	_, err = f.client.XClaim(ctx, &redis.XClaimArgs{
+		Stream: f.stream, Group: f.group, Consumer: reaperSelf,
+		MinIdle: 0, Messages: []string{held[0].ID},
+	}).Result()
+	require.NoError(t, err)
+
+	names := f.names(t)
+	require.Contains(t, names, releasedConsumerName)
+	require.Equal(t, int64(0), names[releasedConsumerName],
+		"premise: the sentinel is now empty, which is exactly what the reaper accepts")
+
+	// ClaimIdleTimeout 0 makes every record old enough, so the name guard is the
+	// only thing left that can save it. Nothing sleeps.
+	f.consumer(0).reapDeadConsumers(ctx)
+
+	after := f.names(t)
+	require.Contains(t, after, releasedConsumerName,
+		"the sentinel must survive: it is a live target, and deleting it races with a "+
+			"release parking a served relay under it")
+	require.NotContains(t, after, reaperDeadEmpty,
+		"and the reaper must still remove a genuinely dead, empty record")
+}

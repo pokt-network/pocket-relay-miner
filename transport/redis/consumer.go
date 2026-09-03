@@ -523,6 +523,26 @@ func (c *StreamsConsumer) reapDeadConsumers(ctx context.Context) {
 		if consumer.Name == c.config.ConsumerName {
 			continue
 		}
+		// The sentinel is the one candidate the three conditions below cannot
+		// make safe. They were written for the record of a DEAD POD: the name
+		// embeds hostname and pid, so such a record is inert -- once it reads
+		// Pending == 0 it can never gain another entry, and the window between
+		// reading that and deleting is unreachable in practice.
+		//
+		// releasedConsumerName breaks that premise, because ReleaseMessage's
+		// pre-8.8 fallback parks entries under it on every transient processing
+		// failure and every shutdown drain. It reaches Pending == 0 whenever the
+		// reclaim drains it and its idle then grows like any other record, so it
+		// DOES become a candidate -- and a release landing between XINFO
+		// CONSUMERS and XGROUP DELCONSUMER would be destroyed, which for a relay
+		// already served means it is never billed.
+		//
+		// The cost of skipping it is one permanent consumer record per group,
+		// which is what the sentinel is: it names handed-back work, and an
+		// operator reading XINFO CONSUMERS wants to see it.
+		if consumer.Name == releasedConsumerName {
+			continue
+		}
 		if consumer.Pending != 0 {
 			continue
 		}
