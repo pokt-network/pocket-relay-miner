@@ -193,10 +193,33 @@ type WebSocketBridge struct {
 	latestResponse *servicetypes.RelayResponse
 	latestMu       sync.RWMutex
 
-	// Service and supplier info
-	serviceID       string
-	supplierAddress string
-	arrivalHeight   int64
+	// Service info
+	serviceID     string
+	arrivalHeight int64
+
+	// owner is the supplier operator address this bridge belongs to, and it is
+	// the ONLY supplier this connection may ever mine, meter or sign for.
+	//
+	// It has two sources and one moment of decision. A v2 handshake carries
+	// Pocket-Supplier-Address, so the owner exists before the first frame; v1
+	// and sage carry nothing, so it is adopted from the first RelayRequest.
+	// From that moment on the bridge HAS an owner: adoptOrVerifyOwner requires
+	// every subsequent frame to name the same one, and closes the connection
+	// otherwise.
+	//
+	// It replaced a plain string that was written once at construction and
+	// never again, while a comment promised the bridge would "extract from
+	// first RelayRequest". It did not: a sage connection metered against an
+	// EMPTY supplier segment, which is not a mis-labelled key but a SHARED
+	// budget -- measured 2026-09-03, two suppliers on one session produced a
+	// single "<session>::consumed" counter reading 2. The per-supplier limit is
+	// computed by dividing the app stake by the session's supplier count, so
+	// sharing one counter throttles the session to roughly 1/N.
+	//
+	// atomic.Pointer and not a plain field because it is written from
+	// messageLoop and read from the SessionMonitor callback goroutine
+	// (handleSessionExpiration -> sendSessionExpirationMessage).
+	owner atomic.Pointer[string]
 
 	// Simulation (optional). When simulated is true, every gateway message on
 	// this connection goes through simVerifier's Admission zone instead of
@@ -294,7 +317,6 @@ func NewWebSocketBridge(
 		relayPipeline:    relayPipeline,
 		msgChan:          make(chan wsMessage, 100),
 		serviceID:        serviceID,
-		supplierAddress:  supplierAddress,
 		arrivalHeight:    arrivalHeight,
 		simulated:        simulated,
 		simVerifier:      simVerifier,
@@ -303,6 +325,13 @@ func NewWebSocketBridge(
 		sessionEndHeight: 0, // Will be set from first relay request
 		ctx:              ctx,
 		cancelFn:         cancelFn,
+	}
+
+	// A v2 handshake names the supplier, so the bridge has an owner before the
+	// first frame; v1 and sage do not, and the owner is adopted from the first
+	// RelayRequest instead. Either way every later frame must name the same one.
+	if supplierAddress != "" {
+		bridge.owner.Store(&supplierAddress)
 	}
 
 	// Track connection
@@ -554,6 +583,63 @@ func (b *WebSocketBridge) writeToBackend(messageType int, data []byte) error {
 	return writeDataFrame(b.backendConn, &b.backendWriteMu, messageType, data, wsWriteWait)
 }
 
+// ownerAddress returns the supplier this bridge belongs to, or "" while no
+// frame has established one yet (v1/sage before the first RelayRequest).
+//
+// Every accounting and signing site reads THIS and not the address inside the
+// frame it is handling. Preferring the frame's is exploitable: the backend
+// headers and the response signer are bound to the owner, so a later frame
+// naming a different supplier would be mined against that other supplier while
+// the connection kept serving under the first one's identity.
+func (b *WebSocketBridge) ownerAddress() string {
+	if owner := b.owner.Load(); owner != nil {
+		return *owner
+	}
+	return ""
+}
+
+// adoptOrVerifyOwner enforces the rule that a bridge has exactly one supplier.
+//
+// The first frame that names a supplier adopts it as the bridge's owner; every
+// frame after that must name the same one. A frame naming a different supplier,
+// or none at all, closes the connection -- the same convention every other
+// admission failure on this bridge already follows, because a close code is the
+// only thing a WebSocket client can tell apart from backend traffic.
+//
+// It returns false when it has closed the connection, and the caller returns.
+func (b *WebSocketBridge) adoptOrVerifyOwner(relayReq *servicetypes.RelayRequest) bool {
+	reqSupplier := relayReq.Meta.SupplierOperatorAddress
+
+	if reqSupplier == "" {
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonMissingSupplierAddress).Inc()
+		b.logger.Debug().
+			Msg("relay request names no supplier operator address - closing connection")
+		_ = b.closeWithReason(CloseValidationFailed, "relay request names no supplier", wsCloseInitiatorRelayer)
+		return false
+	}
+
+	owner := b.owner.Load()
+	if owner == nil {
+		// v1/sage: the handshake carried no supplier, so this frame establishes
+		// the owner. Admission still runs below and closes the connection if it
+		// fails, so an owner adopted here never outlives a rejected frame.
+		b.owner.Store(&reqSupplier)
+		return true
+	}
+
+	if *owner != reqSupplier {
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonSupplierChanged).Inc()
+		b.logger.Debug().
+			Str("owner", *owner).
+			Str("requested", reqSupplier).
+			Msg("relay request names a different supplier than this connection - closing connection")
+		_ = b.closeWithReason(CloseValidationFailed, "supplier does not own this connection", wsCloseInitiatorRelayer)
+		return false
+	}
+
+	return true
+}
+
 // handleGatewayMessage handles messages from the gateway.
 func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	wsMessagesForwarded.WithLabelValues(b.serviceID, "gateway_to_backend").Inc()
@@ -563,6 +649,14 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	if err := relayReq.Unmarshal(msg.data); err != nil {
 		// Not a valid RelayRequest - forward raw data to backend
 		b.forwardToBackend(msg)
+		return
+	}
+
+	// The owner gate runs before ANYTHING else this frame could reach: before
+	// the session height is pinned and before the bridge is registered with the
+	// global SessionMonitor, both of which are state a frame that does not own
+	// this connection must not be able to set.
+	if !b.adoptOrVerifyOwner(relayReq) {
 		return
 	}
 
@@ -586,10 +680,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		// binding/freshness Verify -> per-key rate. On rejection the bridge
 		// closes the connection, the existing convention on this bridge for a
 		// gateway message that fails admission/validation.
-		supplier := b.supplierAddress
-		if relayReq.Meta.SupplierOperatorAddress != "" {
-			supplier = relayReq.Meta.SupplierOperatorAddress
-		}
+		supplier := b.ownerAddress()
 		recordSim := func(result string) {
 			simulatedRelaysTotal.WithLabelValues("websocket", b.serviceID, supplier, result).Inc()
 		}
@@ -624,7 +715,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		relayCtx := &RelayContext{
 			Request:            relayReq,
 			ServiceID:          b.serviceID,
-			SupplierAddress:    b.supplierAddress,
+			SupplierAddress:    b.ownerAddress(),
 			SessionID:          relayReq.Meta.SessionHeader.SessionId,
 			ArrivalBlockHeight: b.arrivalHeight,
 		}
@@ -823,11 +914,7 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 		// WebSocketHandler) as an additional belt-and-suspenders guard, but
 		// this check does not rely on that: it is what actually prevents the
 		// WAL publish.
-		supplierAddr := b.supplierAddress
-		if req.Meta.SupplierOperatorAddress != "" {
-			supplierAddr = req.Meta.SupplierOperatorAddress
-		}
-		simulatedRelaysTotal.WithLabelValues("websocket", b.serviceID, supplierAddr, SimResultSuccess).Inc()
+		simulatedRelaysTotal.WithLabelValues("websocket", b.serviceID, b.ownerAddress(), SimResultSuccess).Inc()
 		return
 	}
 
@@ -838,11 +925,11 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	// Increment relay count for this connection
 	count := b.relayCount.Add(1)
 
-	// Get supplier address from request metadata or fallback to bridge config
-	supplierAddr := b.supplierAddress
-	if req.Meta.SupplierOperatorAddress != "" {
-		supplierAddr = req.Meta.SupplierOperatorAddress
-	}
+	// The bridge's owner, never the address inside req: adoptOrVerifyOwner has
+	// already proved they are equal for every frame that gets this far, and
+	// reading the owner is what keeps mining, metering and signing on one
+	// identity if that gate is ever weakened.
+	supplierAddr := b.ownerAddress()
 
 	// Extract session context for logging
 	sessionCtx := logging.SessionContextFromRelayRequest(req)
@@ -920,10 +1007,7 @@ func (b *WebSocketBridge) sendSessionExpirationMessage() error {
 		return nil // No session to expire
 	}
 
-	supplierAddr := b.supplierAddress
-	if latestReq.Meta.SupplierOperatorAddress != "" {
-		supplierAddr = latestReq.Meta.SupplierOperatorAddress
-	}
+	supplierAddr := b.ownerAddress()
 
 	// Build error response
 	_, respBytes, err := b.responseSigner.BuildErrorRelayResponse(
@@ -1200,6 +1284,33 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			return
 		}
 
+		// The v2 half of the owner rule: a handshake that NAMES a supplier is
+		// checked against the live key set before anything is upgraded or
+		// dialled. Jorge, 2026-09-03: "la primera vez lo miras y ves que lo
+		// tengas etc, si pasa ... se crea el handshake (v2)".
+		//
+		// An HTTP status and not a 4xxx close code, and the difference is
+		// deliberate: this is a verdict about the ENDPOINT -- this relayer does
+		// not serve that supplier, so the gateway picked the wrong one -- while
+		// a frame that contradicts an established owner is a verdict about the
+		// CLIENT and closes with CloseValidationFailed instead.
+		//
+		// v1 and sage name no supplier here; their gate is adoptOrVerifyOwner on
+		// the first frame, whose ring signature and ownsSupplierKey check are
+		// the real authority for both protocols.
+		if handshakeSupplier := r.Header.Get(HeaderPocketSupplierAddress); handshakeSupplier != "" {
+			if p.responseSigner == nil || !p.responseSigner.HasSigner(handshakeSupplier) {
+				relaysRejected.WithLabelValues(serviceID, "websocket", rejectReasonNoLocalSigner).Inc()
+				p.logger.Debug().
+					Str(logging.FieldServiceID, serviceID).
+					Str("supplier", handshakeSupplier).
+					Msg("websocket handshake names a supplier this relayer holds no key for")
+				p.sendError(w, http.StatusForbidden,
+					fmt.Sprintf("supplier %s is not served by this relayer", handshakeSupplier))
+				return
+			}
+		}
+
 		// Validate and log WebSocket handshake (permissive - never rejects)
 		// - PATH v2: Attempts signature verification, logs WARN if fails
 		// - PATH v1: Logs INFO about legacy handshake
@@ -1232,8 +1343,9 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			headers.Set(k, v)
 		}
 
-		// Extract supplier address from handshake header (sent by PATH v2 protocol)
-		// For PATH v1, this will be empty and should be extracted from first RelayRequest
+		// Extract supplier address from handshake header (sent by PATH v2 protocol).
+		// Empty for PATH v1 and for sage, which send no supplier header; the
+		// bridge adopts the owner from the first RelayRequest in that case.
 		supplierAddress := r.Header.Get(HeaderPocketSupplierAddress)
 
 		// Add Pocket context headers for backend visibility
@@ -1260,8 +1372,9 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		}
 
 		// Create and run bridge
-		// Session end height will be set when the first relay request arrives
-		// Note: supplierAddress may be empty for PATH v1 - bridge will extract from first RelayRequest
+		// Session end height will be set when the first relay request arrives.
+		// supplierAddress is empty for PATH v1 and sage; the bridge adopts its
+		// owner from the first RelayRequest (see WebSocketBridge.owner).
 		bridge, err := NewWebSocketBridge(
 			p.logger,
 			gatewayConn,
