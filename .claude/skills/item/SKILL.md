@@ -49,6 +49,41 @@ FAIL" had never been executed.
 If the item came from a review or an issue, re-derive the claim from the code.
 Somebody else's finding is a claim until you reproduce it.
 
+### WALK ONE CONCRETE CASE, AND REPRODUCE IT, BEFORE SIZING OR CHOOSING
+
+Jorge, 2026-09-03: *"siempre debemos caminar el ejemplo, para entender que y donde
+esta pasando, reproducirlo, eso nos da entendimiento y perspectiva - solo asi vemos
+lo que se intenta y buscamos la mejor solucion."*
+
+Not "read the code": take ONE operator, ONE file, ONE request, and follow it hop by
+hop to the consequence — then RUN it. A probe, a failing test, a bare container. The
+reproduction is what turns a claim into a thing you can see.
+
+**"It is small" is a conclusion, and it needs measuring like any other.** Reading
+sizes the SYMPTOM; walking sizes the DEFECT, and they are routinely different by an
+order of magnitude. Three times in one session, 2026-09-02/03:
+
+- An inherited item said two keys collide and money is lost. Walked with a probe:
+  valid keys never collide, the trigger is ~1 in 10^39, and the outcome is
+  fail-closed. It was correctly SHRUNK, and the owner dropped it.
+- The same item's sibling was reported as "a misleading label, about three lines".
+  Walking one corrupt `.info` through both branches found TWO CONTRADICTORY POLICIES,
+  each written down and justified in the repo, one of which BLOCKED KEY WITHDRAWALS
+  — money. The three-line reading was the symptom.
+- A release fix looked provable against the gate's Redis. Running it against the
+  version the cluster actually runs showed the test would have passed without ever
+  reaching the line the fix changed.
+
+**It also fixes the council.** The council reads the space of approaches, and that
+space is only as good as the question. A question written from a symptom sends four
+members to deliberate where the defect is not — the failure this skill already warns
+about under "the question must carry the STRUCTURE". Walking the case IS how the
+structure is obtained.
+
+So the order is: walk one case → reproduce it → size it → only then invoke the
+council. And if the walk cannot be done, say so and say why; that is a finding about
+the item, not a licence to skip to the fix.
+
 ## Step 1c — list the assertions that already govern what you are about to change
 
 Before touching it, name the tests, guards and gates that already hold that code,
