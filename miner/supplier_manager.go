@@ -1816,12 +1816,26 @@ func (m *SupplierManager) handleStreamMessage(
 	}()
 
 	if processErr != nil {
-		// A recovered panic is DETERMINISTIC: the same bytes through the same
-		// code panic again, so handing the entry back only spends the failure
-		// on a loop. The relay was already served -- the backend did the work
-		// and the client has its answer -- so it is lost work, and it is
-		// counted as such. The loud Error log with the stack lives at the
-		// recover() above; this is the accounting half, which did not exist.
+		// A recovered panic is ACKed rather than handed back: a panic that is a
+		// pure function of the relay bytes repeats on every redelivery, so
+		// returning the entry only spends the failure on a loop. The relay was
+		// already served -- the backend did the work and the client has its
+		// answer -- so it is lost work, and it is counted as such. The loud
+		// Error log with the stack lives at the recover() above; this is the
+		// accounting half, which did not exist.
+		//
+		// NOT VERIFIED that every panic arriving here is deterministic, and the
+		// guard above says why: it deliberately also covers paths that are
+		// state-dependent (pool release, deduplicator, session_store access). One
+		// of those failing while a component is torn down could panic for one
+		// in-flight relay on this replica and not on another. AckMessage is
+		// XAckDel with DELREF, so this DELETES the entry and no replica can
+		// rescue it afterwards.
+		//
+		// Losing that relay rather than risking a loop is an owner decision, not
+		// a property of the code (Jorge, 2026-09-02: "el panic debe perderse
+		// lamentablemente... o quedara vivo sin cobrar"). It is written here so
+		// it is not re-litigated and not read as something that was measured.
 		if errors.Is(processErr, ErrRelayPanicRecovered) {
 			RecordRelayLostToPanic(state.OperatorAddr, serviceID)
 			if ackErr := state.Consumer.AckMessage(ctx, msg); ackErr != nil {
