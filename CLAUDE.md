@@ -203,6 +203,13 @@ newest by date.
    - Use `xsync.Map` (puzpuzpuz/xsync/v4) for lock-free concurrent maps —
      never `sync.Map` (enforced by `internal/conventions`)
    - Protect shared state with `sync.RWMutex` when necessary
+   - **A package var a test overrides must be read on the CALLER's goroutine**,
+     not inside one the code spawns. Measured 2026-09-03: `wsMaxMessageBytes` is
+     read in the constructor and never raced; `wsFirstFrameWait` was read inside
+     the deadline goroutine and gave `DATA RACE` under `-race`, because one
+     test's bridge was still winding down while the next test wrote the var.
+     Capture it into a struct field at construction — the constructor runs on
+     the caller's goroutine, so the test's write is ordered with the read.
    - Use `context.Context` for cancellation and timeouts
    - ALWAYS defer `Close()` or cleanup functions
    - **Worker Pool Pattern**:

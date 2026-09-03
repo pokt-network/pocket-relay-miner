@@ -55,6 +55,24 @@ message asserting the opposite. The injection that catches it: move the fix back
 to the wrong side and confirm THAT test goes red. If it stays green, the test is
 not pinning the position.
 
+## The assertion that names the defect goes FIRST
+
+An injection can be exactly right and the red still unreadable, because a
+different assertion fires before the one that names the thing.
+
+Measured 2026-09-03: restoring the eager backend dial made a test fail on its
+close-code assertion with `got read tcp ...: i/o timeout` — true, and one hop
+removed from the defect. The assertion that NAMED it, `dials.Load() == 0` right
+after the upgrade, sat further down and was never reached. Moving it first made
+the red say *"the upgrade alone must not open a connection to the operator's
+backend"*.
+
+This is not the same failure as "narrow the injection" below, and the fix is the
+opposite end: the injection was already minimal, and it was the TEST's ordering
+that had to change. So when a red is technically correct but reads as a symptom,
+ask which assertion states the claim, and put that one where nothing can fire
+before it.
+
 ## What a red tells you
 
 - **Failed with a message naming the defect** — the test bites. Done.
@@ -79,6 +97,17 @@ not pinning the position.
   just told you which one to write.
 - **Failed for an unrelated reason** — narrow the injection. You broke more than
   the one thing.
+- **Passed, and the injection WAS the named defect** — then the third cause is
+  that the test never REACHED the window. Measured 2026-09-03: a test for a
+  backend connection leaked by a close that races a dial closed the bridge
+  immediately after writing the frame, so the close usually won and the dial
+  never started; the test read green with the guard removed. Synchronising on
+  the dependency's own state — the backend handler signalling that it had the
+  request, and the test deciding when it answers — made the same injection go
+  red at once. The tell is that the assertions never fire rather than firing
+  and passing: if the code under test would have had to run for the assertion
+  to mean anything, prove it ran. A timing window closed by a duration is a
+  window you are guessing at; close it with a channel the test controls.
 - **Printed the failure and still exited 0** — the harness around the test is
   broken, and the test itself may be fine. Read the exit status, never the
   output: a red you can see and the runner cannot is worth nothing, because the
