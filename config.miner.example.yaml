@@ -189,18 +189,6 @@ keys:
   #     - "supplier2"
 
 # ==============================================================================
-# Explicit Supplier Configuration (OPTIONAL)
-# ==============================================================================
-# If not specified, suppliers are auto-discovered from keys.
-# Use this for explicit control over which suppliers/services to handle.
-# suppliers:
-#   - operator_address: "pokt1abc..."
-#     signing_key_name: "supplier1"  # Must match key in keyring/keys file
-#     services:  # Optional: filter which services this supplier handles
-#       - "develop"
-#       - "eth-mainnet"
-
-# ==============================================================================
 # Block Time Configuration (Feature 1)
 # ==============================================================================
 block_time_seconds: 10  # Expected block time (localnet uses faster blocks)
