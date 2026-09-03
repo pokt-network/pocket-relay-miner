@@ -1470,3 +1470,17 @@ func StartWorkerPoolMetricsTicker(
 		}
 	}()
 }
+
+// RecordRelayLostToPanic counts ONE relay that was served and will never be
+// billed because processing it panicked.
+//
+// It increments relays_lost_total alone, deliberately: the session-level
+// recorder next to it also moves sessions_failed_total and
+// compute_units_lost_total, and a single panicked relay is not a failed session.
+//
+// This exists because the panic path counted NOTHING. logging.PanicRecoveriesTotal
+// says a panic happened; nothing said a relay had already been served to the
+// client, at the supplier's expense, and then dropped.
+func RecordRelayLostToPanic(supplier, serviceID string) {
+	relaysLostTotal.WithLabelValues(supplier, serviceID, "panic_recovered").Add(1)
+}

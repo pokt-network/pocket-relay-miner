@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"runtime/debug"
 	"sync"
@@ -1741,8 +1742,10 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 
 // handleStreamMessage runs one delivered relay to completion: process, release
 // the pooled message, and acknowledge on success. Returns whether the message
-// was actually acknowledged -- false on a processing failure (by design: the
-// entry must stay pending for the reclaim) OR an AckMessage error (Redis
+// was actually acknowledged -- true when the relay was processed, and also when
+// it was LOST to a recovered panic (deterministic, so it is acked and counted
+// rather than retried forever); false on any other processing failure, where the
+// entry is handed back for a later delivery, OR on an AckMessage error (Redis
 // hiccup, connection reset), which a caller MUST check before treating the
 // relay as done rather than assuming success from "handleStreamMessage
 // returned" (review 2026-08-21: the shutdown drain's metric used to do
@@ -1791,7 +1794,7 @@ func (m *SupplierManager) handleStreamMessage(
 					Str("panic_value", fmt.Sprintf("%v", r)).
 					Str("stack_trace", string(debug.Stack())).
 					Msg("PANIC RECOVERED during relay processing — relay dropped, consumer continuing")
-				processErr = fmt.Errorf("panic recovered in relay processing: %v", r)
+				processErr = fmt.Errorf("%w: %v", ErrRelayPanicRecovered, r)
 			}
 		}()
 		if m.onRelay != nil {
@@ -1813,12 +1816,48 @@ func (m *SupplierManager) handleStreamMessage(
 	}()
 
 	if processErr != nil {
+		// A recovered panic is DETERMINISTIC: the same bytes through the same
+		// code panic again, so handing the entry back only spends the failure
+		// on a loop. The relay was already served -- the backend did the work
+		// and the client has its answer -- so it is lost work, and it is
+		// counted as such. The loud Error log with the stack lives at the
+		// recover() above; this is the accounting half, which did not exist.
+		if errors.Is(processErr, ErrRelayPanicRecovered) {
+			RecordRelayLostToPanic(state.OperatorAddr, serviceID)
+			if ackErr := state.Consumer.AckMessage(ctx, msg); ackErr != nil {
+				m.logger.Warn().
+					Err(ackErr).
+					Str(logging.FieldSupplier, state.OperatorAddr).
+					Str("session_id", sessionID).
+					Msg("failed to ack a relay lost to a panic; it will be redelivered and panic again")
+				return false
+			}
+			return true
+		}
+
 		m.logger.Debug().
 			Err(processErr).
 			Str(logging.FieldSupplier, state.OperatorAddr).
 			Str("session_id", sessionID).
 			Msg("failed to process relay")
-		// Don't ACK on processing failure - let the reclaim retry
+
+		// Everything else is the transient class -- the worker already ACKs and
+		// counts the permanent ones before they reach here (see
+		// supplier_worker.go: IsRetryableError / IsPermanentSMSTError). Hand the
+		// entry BACK so a later delivery retries it.
+		//
+		// Not simply "leave it pending": measured 2026-09-02, the reclaim skips
+		// any entry still owned by this consumer, so on a single-miner fleet a
+		// pending entry is stranded until the process restarts and its name
+		// changes. Releasing parks it under a sentinel owner (8.4.6) or unowned
+		// (XNACK, 8.8+), which is what makes it visible again.
+		if relErr := state.Consumer.ReleaseMessage(ctx, msg); relErr != nil {
+			m.logger.Warn().
+				Err(relErr).
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str("session_id", sessionID).
+				Msg("failed to release a relay after a processing error; it stays pending until this process restarts")
+		}
 		return false
 	}
 

@@ -35,6 +35,15 @@ var (
 	// boundary intercepts a panic from the smt library. The recovered
 	// panic value is wrapped with %w so callers can still inspect it.
 	ErrSMSTPanicRecovered = errors.New("SMST library panic recovered")
+
+	// ErrRelayPanicRecovered marks a relay whose processing panicked and was
+	// recovered. It is a SENTINEL rather than a bare fmt.Errorf because the
+	// decision it drives is binary and consequential: a panic is deterministic,
+	// so handing the entry back for another delivery just repeats it, while
+	// every other processing failure deserves the retry. errors.Is is the only
+	// honest way to ask that question -- matching on the message text would
+	// break the day someone rewords it.
+	ErrRelayPanicRecovered = errors.New("relay processing panic recovered")
 )
 
 // Supplier errors - permanent, should not retry
