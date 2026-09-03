@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -20,6 +21,12 @@ func RunWebSocketMode(ctx context.Context, logger logging.Logger, relayClient *r
 	payloadBz, err := buildWebSocketPayload()
 	if err != nil {
 		return fmt.Errorf("failed to build payload: %w", err)
+	}
+
+	// One adversarial case instead of a relay: everything a WebSocket does
+	// besides the happy path, asserted rather than eyeballed.
+	if RelayWSCase != "" {
+		return RunWebSocketCase(ctx, logger, relayClient)
 	}
 
 	// Diagnostic mode: single request with detailed output
@@ -322,8 +329,17 @@ func connectWebSocket(relayerURL, serviceID, supplierAddr string) (*websocket.Co
 	// Pocket-Service-Id: Identifies which service to consume
 	headers.Set("Pocket-Service-Id", serviceID)
 
-	// Pocket-Supplier-Address: Optional supplier preference
-	if supplierAddr != "" {
+	// Pocket-Supplier-Address: names the supplier in the handshake. That is
+	// PATH's shape, and it is what the relayer's 403 gate checks against its
+	// live key set.
+	//
+	// --ws-handshake=v1 omits it, which is sage's shape: the supplier then
+	// arrives inside the first RelayRequest and the bridge adopts it as its
+	// owner. Those are two different code paths in the relayer, and before this
+	// flag the CLI could only ever produce the first one -- so the metering
+	// path that the owner rule was written to fix had never been exercised
+	// end to end.
+	if supplierAddr != "" && !strings.EqualFold(RelayWSHandshake, "v1") {
 		headers.Set("Pocket-Supplier-Address", supplierAddr)
 	}
 

@@ -32,6 +32,16 @@ var (
 	RelayLocalnet       bool
 	RelayAllSuppliers   bool
 
+	// WebSocket handshake shape and adversarial cases. The two gateways in the
+	// wild do NOT send the same handshake, and until this existed the CLI could
+	// only produce one of them: it always names the supplier up front, which is
+	// PATH's shape (v2). Sage sends only Target-Service-Id, App-Address and
+	// Rpc-Type, so the supplier arrives inside the first RelayRequest instead
+	// (v1) -- measured 2026-09-03 in both repos. That is the path the relayer's
+	// owner-adoption rule exists for, and no gate at any level reached it.
+	RelayWSHandshake string // --ws-handshake: v1 (no supplier header) or v2
+	RelayWSCase      string // --ws-case: one adversarial scenario, asserted
+
 	// gRPC-mode targeting. Without these, `relay grpc` can only reach the
 	// localnet demo backend, so the one transport this CLI could not validate
 	// against a real backend was gRPC -- recorded during the beta/pnf bring-up,

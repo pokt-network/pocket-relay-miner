@@ -195,6 +195,8 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().IntVar(&relay.RelayBatches, "batches", 0, "stream mode: ask the backend to emit this many SSE batches then close (0 = receive until the server closes or --timeout)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayGRPCMethod, "grpc-method", "", "grpc mode: /package.Service/Method to invoke (default: the localnet demo method, which any other backend answers UNIMPLEMENTED)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayGRPCRequestHex, "grpc-request-hex", "", "grpc mode: protobuf request body as hex (default: empty, which is correct for any request message with no fields)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayWSHandshake, "ws-handshake", "v2", "websocket mode: handshake shape — v2 names the supplier in a header (PATH), v1 omits it so the supplier comes from the first RelayRequest (sage)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayWSCase, "ws-case", "", "websocket mode: run ONE adversarial case instead of a relay and assert what the relayer did (hang, garbage, abrupt-disconnect, supplier-change, no-session-header, oversized, subscribe)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayLoadTest, "load-test", false, "Enable load test mode with concurrency")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayConcurrency, "concurrency", 10, "Number of concurrent workers (load test mode)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayRPS, "rps", 0, "Target requests per second (0 = unlimited, only for load test mode)")
