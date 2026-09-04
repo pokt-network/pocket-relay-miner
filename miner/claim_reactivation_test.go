@@ -4,6 +4,8 @@ package miner
 
 import (
 	"context"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -274,4 +276,57 @@ func TestReactivatedSession_IsDrivenByHeightNotByArrivalTime(t *testing.T) {
 	state, _ = m.determineTransition(snapshot, proofClose, params)
 	require.Equal(t, SessionStateProofWindowClosed, state,
 		"after the window it must terminate honestly, not stay immortal")
+}
+
+// The reactivation must be first-writer-wins under real concurrency, and that
+// is load-bearing rather than stylistic.
+//
+// The easy argument is that it cannot happen: a supplier is owned through a
+// SetNX lease (supplier_claimer.go), so one replica holds its coordinator. That
+// argument has a hole, measured 2026-09-04 and filed as queue item 35: when a
+// lease is STOLEN, renewAllClaims deletes the supplier from the claimer's own
+// map and returns without calling onReleaseFn — the only path to
+// removeSupplier — so the losing replica keeps it in m.suppliers, which is
+// exactly the map the reconciler's ownership filter reads
+// (supplier_manager.go:2557). In that state both replicas reconcile the same
+// supplier and both can observe the same inclusion.
+//
+// A read-then-write guard (the shape OnClaimTxError and OnSessionClaimed use)
+// would let both win and both submit a proof. The Lua CAS cannot: Redis runs
+// one script at a time, so exactly one caller sees a state behind `claimed`.
+func TestReactivateClaimed_ConcurrentObserversProduceExactlyOneFlip(t *testing.T) {
+	ctx := context.Background()
+	store, _ := setupTestSessionStore(t)
+	defer func() { _ = store.Close() }()
+
+	const sessionID = "session-concurrent"
+	require.NoError(t, store.Save(ctx, reactivationTestSnapshot(sessionID, SessionStateClaimTxError)))
+
+	const observers = 16
+	root := reactivationTestRoot("one-winner-only")
+
+	var flips atomic.Int32
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < observers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			flipped, err := store.ReactivateClaimed(ctx, sessionID, root, "TX-RACE")
+			if err == nil && flipped {
+				flips.Add(1)
+			}
+		}()
+	}
+	close(start)
+	wg.Wait()
+
+	require.Equal(t, int32(1), flips.Load(),
+		"exactly one observer may flip the session, or two replicas both submit a proof")
+
+	got, err := store.Get(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, SessionStateClaimed, got.State)
+	require.Equal(t, root, got.ClaimedRootHash)
 }
