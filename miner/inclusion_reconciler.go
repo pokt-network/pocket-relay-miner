@@ -126,7 +126,13 @@ type reconcilePhase struct {
 	onChainSessions   func(ctx context.Context, supplier string) (map[string]struct{}, error)
 	// recordOutcome persists the terminal outcome + emits the phase's outcome
 	// metric. inclusionHeight is the poll-granularity height for a found outcome.
-	recordOutcome func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64)
+	//
+	// It returns an error when the outcome could NOT be fully acted upon. The
+	// caller uses that to keep the pending entry instead of clearing it: an
+	// observation is the only thing that can rescue a session whose broadcast
+	// reported failure, so losing one to a transient Redis error would be
+	// permanent. Metric-only outcomes never fail.
+	recordOutcome func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error
 	// recordRebroadcast emits the phase's rebroadcast metric.
 	recordRebroadcast func(supplier, serviceID, result string)
 }
@@ -349,7 +355,7 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 				r.clear(ctx, rp.phase, g, sessionID)
 				continue
 			}
-			rp.recordOutcome(ctx, e, g.Supplier, g.SessionEnd, sessionID, inclusionPollErr, 0)
+			_ = rp.recordOutcome(ctx, e, g.Supplier, g.SessionEnd, sessionID, inclusionPollErr, 0)
 			r.clear(ctx, rp.phase, g, sessionID)
 		}
 		return
@@ -364,14 +370,26 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 		}
 
 		if _, ok := onChain[sessionID]; ok {
-			rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionFound, height)
+			if oErr := rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionFound, height); oErr != nil {
+				// KEEP the entry. The claim IS on-chain; acting on that
+				// observation is what keeps the proof coming, so a transient
+				// failure must get another block rather than be cleared away.
+				// The rebroadcast cap still bounds resends, and the entry TTL
+				// bounds the retrying.
+				r.logger.Warn().Err(oErr).
+					Str("phase", string(rp.phase)).
+					Str("supplier", g.Supplier).
+					Str("session_id", sessionID).
+					Msg("inclusion reconcile: on-chain outcome observed but not fully recorded; keeping entry for retry")
+				continue
+			}
 			r.clear(ctx, rp.phase, g, sessionID)
 			continue
 		}
 
 		// Missing on-chain.
 		if windowClosed {
-			rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionMissing, 0)
+			_ = rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionMissing, 0)
 			r.clear(ctx, rp.phase, g, sessionID)
 			continue
 		}

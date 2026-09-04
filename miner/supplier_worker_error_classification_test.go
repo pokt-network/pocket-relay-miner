@@ -214,6 +214,9 @@ func (s *errorOnIncrementStore) Delete(ctx context.Context, sessionID string) er
 func (s *errorOnIncrementStore) UpdateState(ctx context.Context, sessionID string, newState SessionState) error {
 	return s.inner.UpdateState(ctx, sessionID, newState)
 }
+func (s *errorOnIncrementStore) ReactivateClaimed(ctx context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (bool, error) {
+	return s.inner.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
+}
 func (s *errorOnIncrementStore) IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error {
 	s.incCalls.Add(1)
 	if s.delegateOK {

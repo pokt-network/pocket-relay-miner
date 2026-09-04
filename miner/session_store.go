@@ -185,6 +185,15 @@ type SessionStore interface {
 	// UpdateState atomically updates the state of a session.
 	UpdateState(ctx context.Context, sessionID string, newState SessionState) error
 
+	// ReactivateClaimed atomically returns a session to SessionStateClaimed
+	// after the chain was observed to hold its claim, filling the claimed root
+	// hash and (when known) the claim tx hash in the same write.
+	//
+	// Returns (true, nil) when this caller performed the flip, (false, nil)
+	// when the session was already at or past `claimed` and nothing was
+	// written, and (false, err) on Redis failure.
+	ReactivateClaimed(ctx context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (bool, error)
+
 	// IncrementRelayCount atomically increments the relay count and compute units.
 	IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error
 
@@ -763,18 +772,7 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		return nil
 	}
 
-	// Update state indexes (add to new, remove from old)
-	pipe := s.redisClient.TxPipeline()
-	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)
-	pipe.Expire(ctx, s.stateIndexKey(newState), s.config.SessionTTL)
-	if oldState != "" {
-		pipe.SRem(ctx, s.stateIndexKey(oldState), sessionID)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		s.logger.Warn().Err(err).
-			Str("session_id", sessionID).
-			Msg("failed to update state indexes after state change")
-	}
+	s.reindexState(ctx, sessionID, oldState, newState)
 
 	s.logger.Debug().
 		Str("session_id", sessionID).
@@ -783,6 +781,76 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		Msg("updated session state")
 
 	return nil
+}
+
+// reindexState moves a session between the per-state index sets after its
+// state changed. Best-effort: the hash is the source of truth and the index
+// is a lookup accelerator, so a failure here is logged, not returned.
+func (s *RedisSessionStore) reindexState(ctx context.Context, sessionID string, oldState, newState SessionState) {
+	pipe := s.redisClient.TxPipeline()
+	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)
+	pipe.Expire(ctx, s.stateIndexKey(newState), s.config.SessionTTL)
+	if oldState != "" && oldState != newState {
+		pipe.SRem(ctx, s.stateIndexKey(oldState), sessionID)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID).
+			Msg("failed to update state indexes after state change")
+	}
+}
+
+// ReactivateClaimed implements SessionStore. See the interface for the
+// contract and reactivateClaimedScript for the guard.
+func (s *RedisSessionStore) ReactivateClaimed(
+	ctx context.Context,
+	sessionID string,
+	claimedRootHash []byte,
+	claimTxHash string,
+) (bool, error) {
+	key := s.sessionKey(sessionID)
+	now := time.Now().Format(time.RFC3339Nano)
+
+	oldStateStr, err := reactivateClaimedScript.Run(
+		ctx,
+		s.redisClient,
+		[]string{key},
+		claimedRootHash,
+		claimTxHash,
+		now,
+		int64(s.config.SessionTTL.Seconds()),
+	).Text()
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "session not found") {
+			return false, fmt.Errorf("session not found: %s", sessionID)
+		}
+		if strings.Contains(errMsg, "legacy key") {
+			// Legacy JSON string keys predate the hash codec and cannot be
+			// guarded atomically. They are not worth a second, racy write
+			// path here: a session old enough to still be a legacy key is
+			// long past its proof window.
+			return false, fmt.Errorf("session %s is a legacy key; not reactivating", sessionID)
+		}
+		return false, fmt.Errorf("failed to reactivate session: %w", err)
+	}
+
+	if oldStateStr == "" {
+		// Already at or past `claimed` — another observation won, or the
+		// session advanced on its own. Nothing written, nothing to track.
+		return false, nil
+	}
+
+	s.reindexState(ctx, sessionID, SessionState(oldStateStr), SessionStateClaimed)
+
+	s.logger.Info().
+		Str("session_id", sessionID).
+		Str("old_state", oldStateStr).
+		Str("claim_tx_hash", claimTxHash).
+		Int("root_hash_len", len(claimedRootHash)).
+		Msg("session reactivated to claimed: the chain holds this claim")
+
+	return true, nil
 }
 
 // updateStateScript atomically reads the old state and sets the new state
@@ -806,6 +874,53 @@ end
 local old_state = redis.call('HGET', KEYS[1], 'state')
 redis.call('HSET', KEYS[1], 'state', ARGV[1], 'last_updated_at', ARGV[2])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+return old_state
+`)
+
+// reactivateClaimedScript is the first-writer-wins gate behind
+// ReactivateClaimed. It flips a session to `claimed` and fills the claim
+// fields in ONE round-trip, refusing every state that is already at or past
+// `claimed`.
+//
+// The guard cannot be expressed as "not terminal": `claim_tx_error` IS
+// terminal and is precisely the state this must accept. What it rejects is a
+// state that would be a REGRESSION — re-observing an inclusion after the
+// session already advanced (the reconciler records the outcome and clears the
+// entry in two separate operations, so a failed clear re-delivers the same
+// observation on the next block).
+//
+// Writing the fields inside the same script is not a convenience: a later
+// Save() with an empty snapshot HDELs `claimed_root_hash`/`claim_tx_hash`
+// (see Save), so the fields must land atomically with the state, not after it.
+//
+// KEYS[1] = session hash key
+// ARGV[1] = claimed root hash (raw bytes)
+// ARGV[2] = claim tx hash, or "" to leave the field untouched
+// ARGV[3] = RFC3339Nano timestamp for last_updated_at
+// ARGV[4] = TTL seconds
+//
+// Returns: the OLD state when this caller flipped it, "" when refused, or an
+// error reply "session not found" / "legacy key".
+var reactivateClaimedScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then
+	return redis.error_reply('session not found')
+end
+local ktype = redis.call('TYPE', KEYS[1])['ok']
+if ktype ~= 'hash' then
+	return redis.error_reply('legacy key')
+end
+local old_state = redis.call('HGET', KEYS[1], 'state')
+if old_state ~= 'active' and old_state ~= 'claiming'
+	and old_state ~= 'claim_window_closed' and old_state ~= 'claim_tx_error'
+	and old_state ~= 'claim_missing' then
+	return ''
+end
+redis.call('HSET', KEYS[1], 'state', 'claimed',
+	'claimed_root_hash', ARGV[1], 'last_updated_at', ARGV[3])
+if ARGV[2] ~= '' then
+	redis.call('HSET', KEYS[1], 'claim_tx_hash', ARGV[2])
+end
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
 return old_state
 `)
 

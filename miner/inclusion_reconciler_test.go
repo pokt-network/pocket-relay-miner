@@ -63,6 +63,9 @@ type reconcilerHarness struct {
 	rebroadcast []string
 	onChain     map[string]struct{}
 	onChainErr  error
+	// outcomeErr, when set, makes recordOutcome fail — the reconciler must
+	// then KEEP the pending entry so the observation gets another block.
+	outcomeErr  error
 	windowClose int64
 }
 
@@ -103,10 +106,11 @@ func newReconcilerHarness(t *testing.T, safetyBlocks int64) *reconcilerHarness {
 				}
 				return cp, nil
 			},
-			recordOutcome: func(_ context.Context, _ rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, height int64) {
+			recordOutcome: func(_ context.Context, _ rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, height int64) error {
 				h.mu.Lock()
 				defer h.mu.Unlock()
 				h.outcomes = append(h.outcomes, capturedOutcome{supplier, sessionID, outcome, height})
+				return h.outcomeErr
 			},
 			recordRebroadcast: func(supplier, _, result string) {
 				h.mu.Lock()
@@ -206,6 +210,33 @@ func TestReconciler_Found(t *testing.T) {
 	require.Equal(t, testMid, outcomes[0].height)
 	require.Equal(t, 0, h.resub.count(), "found proof must not rebroadcast")
 	require.Equal(t, 0, h.pendingCount(t, hSupplier, hEnd), "found entry must be cleared")
+}
+
+// An observed inclusion that could NOT be fully acted upon must KEEP its entry.
+//
+// This is the difference between a lost reward and a slash. The `found` outcome
+// is what puts a session whose broadcast reported failure back into `claimed`
+// so its proof goes out; if a transient Redis error while doing that also
+// cleared the entry, the observation would be gone for good and the session
+// would stay terminal with its claim on-chain — which is exactly the slash the
+// whole path exists to prevent. Keeping the entry costs one more pass.
+func TestReconciler_FoundButNotRecorded_KeepsEntryForRetry(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+	h.onChain = map[string]struct{}{"s1": {}}
+	h.outcomeErr = fmt.Errorf("redis unavailable while reactivating")
+
+	h.r.OnBlock(testMid)
+
+	require.Len(t, h.getOutcomes(), 1, "the outcome was still observed")
+	require.Equal(t, 1, h.pendingCount(t, hSupplier, hEnd),
+		"a found-but-unrecorded entry must survive for the next block")
+
+	// Next block, the write succeeds: the entry is then cleared normally.
+	h.outcomeErr = nil
+	h.r.OnBlock(testMid + 1)
+	require.Equal(t, 0, h.pendingCount(t, hSupplier, hEnd),
+		"once recorded, the entry is cleared as usual")
 }
 
 // Sent-but-missing resends exactly once AT the window midpoint, not before.
@@ -418,10 +449,11 @@ func TestReconciler_ObserveOnly(t *testing.T) {
 			onChainSessions: func(_ context.Context, _ string) (map[string]struct{}, error) {
 				return map[string]struct{}{}, nil
 			},
-			recordOutcome: func(_ context.Context, _ rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, height int64) {
+			recordOutcome: func(_ context.Context, _ rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, height int64) error {
 				h.mu.Lock()
 				defer h.mu.Unlock()
 				h.outcomes = append(h.outcomes, capturedOutcome{supplier, sessionID, outcome, height})
+				return h.outcomeErr
 			},
 			recordRebroadcast: func(string, string, string) {},
 		}
@@ -517,7 +549,7 @@ func (h *reconcilerHarness) newPeerReconciler(t *testing.T, resub *mockResubmitt
 				}
 				return cp, nil
 			},
-			recordOutcome:     func(context.Context, rebroadcastEntry, string, int64, string, string, int64) {},
+			recordOutcome:     func(context.Context, rebroadcastEntry, string, int64, string, string, int64) error { return nil },
 			recordRebroadcast: func(string, string, string) {},
 		}
 	}

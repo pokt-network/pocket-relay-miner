@@ -338,6 +338,90 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	return nil
 }
 
+// OnClaimObservedOnChain is called when the InclusionReconciler has OBSERVED
+// this session's claim on-chain — which can happen after the broadcast
+// reported failure and the session was already marked claim_tx_error.
+//
+// That combination is not academic: it is the path that turns a lost reward
+// into a SLASH. The self-heal persists the built MsgCreateClaim on any
+// broadcast failure, the reconciler re-sends it, the claim lands, and without
+// this edge nobody tells the lifecycle — so the session stays terminal, the
+// proof never goes out, and the chain penalises a claim we did submit.
+//
+// A state is terminal only when it rests on an OBSERVATION of the chain.
+// claim_tx_error rests on a broadcast REPORT, and a report can be wrong; this
+// method is where the observation overrides it.
+//
+// The write is a single guarded round-trip (see ReactivateClaimed), and the
+// snapshot is RE-READ afterwards before re-tracking: TrackSession saves what
+// it is handed, and Save HDELs empty optional fields, so handing it anything
+// but the stored snapshot would erase the claim fields just written.
+func (c *SessionCoordinator) OnClaimObservedOnChain(
+	ctx context.Context,
+	sessionID string,
+	claimedRootHash []byte,
+	claimTxHash string,
+) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	createdCallback := c.onSessionCreated
+	c.mu.Unlock()
+
+	// Without a well-formed root the session is unprovable, and it fails LATE
+	// and quietly: decodeSnapshot drops a wrong-length root (it would panic the
+	// smt library on import), so the session would come back `claimed` with no
+	// root, resolveClaimedRoot would fall back to the SMST, and a rehydration
+	// miss ends in proof_tx_error. Refuse loudly instead of reactivating
+	// something that cannot produce a proof.
+	if len(claimedRootHash) != SMSTRootLen {
+		return fmt.Errorf(
+			"refusing to reactivate session %s: claimed root hash is %d bytes, want %d",
+			sessionID, len(claimedRootHash), SMSTRootLen,
+		)
+	}
+
+	reactivated, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
+	if err != nil {
+		return fmt.Errorf("failed to reactivate session %s: %w", sessionID, err)
+	}
+	if !reactivated {
+		// Already at or past claimed. Not an error and not a no-op worth
+		// logging above Debug: a failed clear in the reconciler re-delivers
+		// the same observation on the next block.
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Msg("claim observed on-chain but session already at or past claimed")
+		return nil
+	}
+
+	if createdCallback == nil {
+		// Redis says claimed but nothing re-tracks it in memory. The row is
+		// recoverable by loadExistingSessions on the next start/handoff, so
+		// this is degraded, not silent.
+		c.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Msg("session reactivated in Redis but no lifecycle callback is wired; proof depends on a restart")
+		return nil
+	}
+
+	snapshot, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to re-read reactivated session %s: %w", sessionID, err)
+	}
+	if snapshot == nil {
+		return fmt.Errorf("reactivated session %s vanished before re-tracking", sessionID)
+	}
+
+	if err := createdCallback(ctx, snapshot); err != nil {
+		return fmt.Errorf("failed to re-track reactivated session %s: %w", sessionID, err)
+	}
+
+	return nil
+}
+
 // OnProofSubmitted should be called when a session's proof TX is broadcast.
 // It stores the proof TX hash for deduplication and tracking.
 func (c *SessionCoordinator) OnProofSubmitted(

@@ -2475,7 +2475,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 		}
 		m.rebroadcastStore = NewRebroadcastStore(m.config.RedisClient, 0) // 0 → default TTL
 
-		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, _, outcome string, inclusionHeight int64) {
+		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, inclusionHeight int64) error {
 			claimInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
 			if m.sharedSubmissionTracker != nil {
 				// Claim outcome is matched by the ORIGINAL submit tx hash (the one
@@ -2492,8 +2492,16 @@ func (m *SupplierManager) ensureSharedTrackers() {
 					InclusionHeight: inclusionHeight,
 				})
 			}
+			if outcome != inclusionFound {
+				return nil
+			}
+			// The chain holds this claim. Whatever the broadcast reported, the
+			// session must go back to `claimed` or its proof never goes out —
+			// and a claim on-chain without a proof is a SLASH, strictly worse
+			// than the lost reward the resend was meant to avoid.
+			return m.reactivateClaimedSession(ctx, supplier, sessionID, e)
 		}
-		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) {
+		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error {
 			proofInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
 			if m.sharedSubmissionTracker != nil {
 				_ = m.sharedSubmissionTracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
@@ -2506,6 +2514,9 @@ func (m *SupplierManager) ensureSharedTrackers() {
 					Rebroadcasts:    e.Rebroadcasts,
 				})
 			}
+			// Proof is the last phase: there is no next state to restore, so a
+			// proof outcome is metric + tracker only and cannot fail.
+			return nil
 		}
 
 		claimPhase := reconcilePhase{
@@ -2600,6 +2611,52 @@ func (m *SupplierManager) startReconcilerBlockLoop() {
 			m.logger.Debug().Msg("inclusion reconciler block loop stopped")
 		}
 	}()
+}
+
+// reactivateClaimedSession returns a session to `claimed` after the reconciler
+// OBSERVED its claim on-chain, so the lifecycle resumes and submits the proof.
+//
+// The claimed root comes from the persisted MsgCreateClaim, not from the SMST:
+// those bytes are the message that was signed and accepted, they are never
+// mutated by a rebroadcast, and reading them costs no Redis round-trip and does
+// not depend on the tree's TTL still being alive.
+func (m *SupplierManager) reactivateClaimedSession(
+	ctx context.Context,
+	supplier, sessionID string,
+	e rebroadcastEntry,
+) error {
+	state, ok := m.suppliers.Load(supplier)
+	if !ok || state.SessionCoordinator == nil {
+		// Ownership moved between the reconcile pass and here. Returning an
+		// error keeps the pending entry so the new owner still sees the
+		// observation instead of it being cleared away by a replica that can
+		// no longer act on it.
+		return fmt.Errorf("supplier %s no longer owned by this replica", supplier)
+	}
+
+	var msg prooftypes.MsgCreateClaim
+	if err := msg.Unmarshal(e.MsgBytes); err != nil {
+		// A corrupt payload cannot be fixed by retrying, so this returns nil
+		// and lets the entry clear. Error level, not Warn: the session stays
+		// terminal with its claim on-chain, which is the slash this whole path
+		// exists to prevent, and it is bounded by the defect existing.
+		m.logger.Error().Err(err).
+			Str(logging.FieldSupplier, supplier).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("claim observed on-chain but its stored message will not unmarshal; session stays terminal and will be slashed")
+		return nil
+	}
+
+	// The last hash we broadcast. It is the best identifier available — with
+	// every original attempt failed, OrigTxHash is empty — but the reconciler
+	// reads inclusion from module state, not from this hash, so treat it as
+	// provenance, not as a verified on-chain tx.
+	txHash := e.TxHash
+	if txHash == "" {
+		txHash = e.OrigTxHash
+	}
+
+	return state.SessionCoordinator.OnClaimObservedOnChain(ctx, sessionID, msg.RootHash, txHash)
 }
 
 // ResubmitMessage implements MessageResubmitter: it routes a re-broadcast to the
