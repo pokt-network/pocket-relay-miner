@@ -198,8 +198,11 @@ properties:
           hard-rejects unordered TXs whose timeoutTimestamp is >10 minutes ahead of
           validator time. Stay strictly below 600; setting exactly 600 will
           intermittently fail CheckTx due to clock jitter. When unset, the default
-          is 500 ms below the hard limit (sub-second precision, applied in code).
-        maximum: 599
+          is the hard limit minus a 10s drift budget minus the nonce spread that
+          is added after clamping. A larger value is CLAMPED DOWN to that same
+          derived ceiling: the drift budget is what keeps CheckTx from rejecting
+          the transaction outright, so it is not an operator's to spend.
+        maximum: 590
         minimum: 1
       tx_timeout_default_seconds:
         type: integer

@@ -258,8 +258,11 @@ func TestSignAndBroadcast_AnchorsOnBlockTime_NotWallClock(t *testing.T) {
 	// Wall-clock anchoring under this scenario would have produced a
 	// delta of roughly (DefaultTxTimeoutDefault + 108s). Prove we're
 	// nowhere near that — this is what protects us.
-	require.Less(t, delta, DefaultTxTimeoutDefault+time.Second,
-		"delta must track the configured timeout, not the block-time lag")
+	require.Less(t, delta, DefaultTxTimeoutDefault+txNonceSpread,
+		"delta must track the configured timeout, not the block-time lag. The bound is "+
+			"the timeout plus the nonce spread, named rather than a round second: the "+
+			"offset is added after the clamp, and writing a literal here would silently "+
+			"stop bounding anything if the spread ever grew past it")
 }
 
 // TestSignAndBroadcast_FallsBackToWallClockWhenProviderNil pins the

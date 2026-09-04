@@ -4,9 +4,12 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	mathrand "math/rand/v2"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"cosmossdk.io/math"
@@ -95,7 +98,22 @@ const (
 	// under the wrong anchor (wall clock) and had to absorb arbitrary
 	// chain-lag; once the anchor is block time the margin only has to
 	// cover one-block-worth of in-flight settlement jitter.
-	DefaultTxTimeoutMax = 10*time.Minute - 10*time.Second
+	// The nonce spread is subtracted too: it is added AFTER the clamp, so a
+	// deadline sitting exactly at max would carry (max + spread) to the chain.
+	// Deriving the constant is what keeps that arithmetic from having to be
+	// re-checked by hand every time either number moves.
+	DefaultTxTimeoutMax = txTimeoutHardCeiling - txTimeoutSafetyMargin - txNonceSpread
+	// txTimeoutHardCeiling is the cosmos-sdk limit the ante handler enforces:
+	// x/auth/ante/sigverify.go rejects with "unordered tx ttl exceeds 10m0s"
+	// when timeoutTimestamp is further than this past ctx.BlockTime().
+	txTimeoutHardCeiling = 10 * time.Minute
+
+	// txTimeoutSafetyMargin is the drift budget between the block time we
+	// anchor on and the one the validator judges the tx against. It is the
+	// ONLY thing standing between us and that rejection, which is why the
+	// nonce spread is taken out of the deadline rather than out of here.
+	txTimeoutSafetyMargin = 10 * time.Second
+
 	// DefaultTxTimeoutDefault is the fallback TX deadline when no window-based value is injected.
 	DefaultTxTimeoutDefault = 2 * time.Minute
 
@@ -257,6 +275,13 @@ func NewTxClient(
 	}
 	if config.TxTimeoutMax <= 0 {
 		config.TxTimeoutMax = DefaultTxTimeoutMax
+	}
+	// An operator-supplied max is clamped too. The schema allows 599s and the
+	// example suggests it, and the nonce spread is added AFTER this value, so
+	// an unclamped 599s would leave the drift budget at a few milliseconds --
+	// the budget that keeps CheckTx from rejecting the tx outright.
+	if maxAllowed := txTimeoutHardCeiling - txTimeoutSafetyMargin - txNonceSpread; config.TxTimeoutMax > maxAllowed {
+		config.TxTimeoutMax = maxAllowed
 	}
 	if config.TxTimeoutDefault <= 0 {
 		config.TxTimeoutDefault = DefaultTxTimeoutDefault
@@ -459,6 +484,84 @@ func WithTxWindowTimeout(ctx context.Context, d time.Duration) context.Context {
 // exactly at the cosmos-sdk hard limit (600s) would hand the chain a
 // timeoutTimestamp at (now + max) with zero jitter headroom. Subtract
 // first so max stays an absolute ceiling.
+// txNonceSpread bounds the offset added to every unordered transaction's
+// timeout timestamp, and it is what keeps the nonce unique.
+//
+// WHY. A cosmos-sdk unordered transaction is identified by the pair
+// (timeout.UnixNano(), sender) -- x/auth/keeper/keeper.go TryAddUnorderedNonce
+// -- and reusing that pair is rejected in CheckTx with "sender %s has already
+// used timeout %d". The anchor is the chain's latest_block_time, which does not
+// move inside a block. Measured live 2026-09-03: three sessions in
+// claim_tx_error, one EXPIRED claim (8 relays, PROOF_MISSING) and one slashing
+// event, with relays lost on EVERY transport -- which is what places the cause
+// here rather than in one transport's path.
+//
+// It separates transactions in TWO regimes, and both are real, because
+// computeEffectiveTxTimeout returns a different shape in each:
+//
+//   - CLAMPED (min_clamp / max_clamp -- all of localnet, and mainnet late in a
+//     window): the deadline is a FIXED duration, so anchor+timeout advances
+//     with the anchor. Blocks are naturally separated; what collides is several
+//     transactions inside ONE block -- two session-end groups, the retry loop,
+//     a rebroadcast landing beside a retry.
+//   - WINDOW (no clamp -- mainnet early in a window): raw is
+//     remaining_blocks * configured_block_time, so between blocks the anchor
+//     advances by the REAL interval while the duration shrinks by the
+//     CONFIGURED one. anchor+timeout is then invariant -- it points at the
+//     window close, which does not move -- so a RETRY IN A LATER BLOCK
+//     recomputes the same nonce as its original. That is the case the 0/5/7
+//     schedule produces on purpose.
+//     NOT MEASURED: the cancellation is exact only where the real block
+//     interval matches the configured one to the nanosecond, and real blocks
+//     drift. Plausible path, not a guaranteed mechanism.
+//
+// WHY ADDING IS SAFE, AND SUBTRACTING IS NOT. The ante handler makes three
+// checks and an offset that only moves the timestamp LATER can trip none of
+// them: it cannot make the deadline look already-passed. Never subtract. The
+// ceiling is handled by deriving DefaultTxTimeoutMax from it.
+//
+// THE SIZE. 10ms is 10^7 slots for a problem that needs ~10^4, and it costs
+// 0.1% of the drift budget instead of the 10% a full second cost. It must stay
+// well under the minimum block interval so the offset cannot create an overlap
+// between adjacent blocks that the clamped regime otherwise separates -- three
+// orders of magnitude of headroom against localnet's 10s.
+const txNonceSpread = 10 * time.Millisecond
+
+var (
+	// txNonceCounter separates transactions built by THIS process. Because it
+	// is monotonic and the modulo is applied to consecutive values, uniqueness
+	// within a process is EXACT, not probabilistic, for 10^7 consecutive
+	// transactions. Do not add a retry-on-collision here; there is nothing to
+	// retry against.
+	txNonceCounter atomic.Uint64
+
+	// txNonceBase separates PROCESSES, and only that part is probabilistic:
+	// each process walks a contiguous run, so two replicas emitting K1 and K2
+	// transactions overlap with probability (K1+K2-1)/10^7, not the pairwise
+	// figure.
+	//
+	// It matters far less than it looks. The nonce is keyed by SENDER, and the
+	// sender is the SUPPLIER's operator address -- so two processes can only
+	// collide while both are signing for the same supplier, which is the
+	// split-brain window. The real defence there is the lease drain, not this
+	// seed.
+	//
+	// math/rand/v2 rather than crypto/rand: the property needed is "two
+	// processes start far apart", not unpredictability, and it is seeded per
+	// process with no error to handle. crypto/rand.Read never returns an error
+	// ("It never returns an error, and always fills b entirely"), so the
+	// fallback the first version carried was unreachable -- and it degraded to
+	// zero, which would have made two replicas start at the SAME base and
+	// collide with certainty.
+	txNonceBase = mathrand.Uint64()
+)
+
+// nextTxNonceOffset returns the offset to add to one transaction's timeout.
+func nextTxNonceOffset() time.Duration {
+	n := (txNonceBase + txNonceCounter.Add(1)) % uint64(txNonceSpread)
+	return time.Duration(n) // #nosec G115 -- bounded by the modulo above
+}
+
 func computeEffectiveTxTimeout(
 	raw, skewBuffer, min, max, fallbackDefault time.Duration,
 ) (timeout time.Duration, source string) {
@@ -552,7 +655,11 @@ func (tc *TxClient) signAndBroadcast(
 			anchorSource = "block_time"
 		}
 	}
-	timeoutTimestamp := anchor.Add(timeoutDuration)
+	// The offset is what keeps the unordered nonce unique. Without it every
+	// transaction this process builds for one supplier inside one block
+	// carries the same (timeout, sender) pair -- and in the unclamped regime,
+	// so does a retry in a LATER block. See txNonceSpread.
+	timeoutTimestamp := anchor.Add(timeoutDuration).Add(nextTxNonceOffset())
 	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
 
 	// Determine gas limit and fees
@@ -628,10 +735,17 @@ func (tc *TxClient) signAndBroadcast(
 			tc.InvalidateAccount(signerAddr)
 		}
 
+		txBroadcastRejections.WithLabelValues(
+			txType,
+			res.TxResponse.Codespace,
+			strconv.FormatUint(uint64(res.TxResponse.Code), 10),
+		).Inc()
+
 		tc.logger.Warn().
 			Str("supplier", signerAddr).
 			Str("tx_type", txType).
 			Str("tx_hash", txHash).
+			Str("codespace", res.TxResponse.Codespace).
 			Uint32("code", res.TxResponse.Code).
 			Str("error", res.TxResponse.RawLog).
 			Msg("transaction CheckTx failed")

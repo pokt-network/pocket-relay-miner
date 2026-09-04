@@ -484,6 +484,66 @@ skipped_difficulty_now() {
         jq -r '.data.result[]? | "\(.metric.service_id)\t\(.value[1])"' 2>/dev/null || true
 }
 
+# UNORDERED-NONCE COLLISIONS. A cosmos-sdk unordered tx is keyed by
+# (timeout.UnixNano, sender); the anchor is the chain's latest_block_time and
+# does not move inside a block, so several txs for one supplier in one block
+# used to carry the same nonce and all but one were rejected. Measured live
+# 2026-09-03: three sessions in claim_tx_error, one EXPIRED claim, one slashing
+# event.
+#
+# The gate already fails on claim_tx_error, but that is the SYMPTOM: it says a
+# session failed, not why, and it fires just as readily for a dozen unrelated
+# causes. This reads the cause.
+#
+# It reads the METRIC and not the log on purpose. The log line is a Warn on a
+# per-request path, which this repo's logging policy may legitimately demote to
+# Debug -- a grep would then pass in silence. And matching the RawLog text would
+# be the substring classification the tx layer is being rewritten to remove.
+#
+# codespace+code, not text: code 18 in codespace "sdk" is ErrInvalidRequest,
+# which for OUR transactions means a reused unordered nonce or "ttl exceeds
+# 10m0s" -- both our own defect, so the pair is the right granularity here. A
+# deadline already passed is NOT in this bucket: that is code 42, rejected seven
+# decorators earlier. See tx/metrics.go for why, and for the version caveat.
+#
+# THE FAMILY IS ha_tx_*, NOT ha_miner_*. The tx package registers with
+# namespace "ha" and subsystem "tx", and MinerFactory adds no prefix of its own.
+# The first version of this check queried ha_miner_tx_*, which does not exist --
+# and a query for a series that does not exist returns ZERO, so the check read
+# "no collisions" forever and could never go red. Level 2 does not run this
+# file, so nothing caught it.
+nonce_rejections_now() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode 'query=sum(ha_tx_broadcast_rejections_total{codespace="sdk",code="18"})' 2>/dev/null |
+        jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || echo 0
+}
+
+# POSITIVE CONTROL. Without it a run in which every supplier sent one tx per
+# block passes VACUOUSLY: the collision needs two txs from one sender against
+# one anchor, so a run that never produced two proves nothing about the fix.
+#
+# THE THRESHOLD IS 3, AND 2 WOULD BE A LIE. Measured on localnet 2026-09-04:
+# a healthy run produced exactly 2 broadcasts per supplier -- 15 claims and 15
+# proofs across 15 suppliers -- because a supplier normally sends ONE claim and
+# ONE proof, in different windows and therefore different blocks, which can
+# never share an anchor. A control set at 2 passes on that run and proves
+# nothing. The third transaction is the one that can only come from a retry, a
+# rebroadcast, or a second session-end group ready in the same block: the shapes
+# that actually collide.
+#
+# Its limit, stated rather than hidden: it still does not PROVE two txs shared a
+# block, only that the run produced a shape that can. Inducing the collision on
+# purpose belongs to the chaos matrix, not here; this control's job is to refuse
+# to call a run evidence when it was not.
+max_broadcasts_per_supplier_now() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode 'query=max(ha_tx_broadcasts_total)' 2>/dev/null |
+        jq -r '.data.result[0].value[1] // "0"' 2>/dev/null || echo 0
+}
+
+nonce_rejections_before="$(nonce_rejections_now)"
+broadcasts_before="$(max_broadcasts_per_supplier_now)"
+
 difficulty_failures_before="${BIN_DIR}/difficulty_failures_before.tsv"
 difficulty_failures_now >"$difficulty_failures_before" || : >"$difficulty_failures_before"
 skipped_difficulty_before="${BIN_DIR}/skipped_difficulty_before.tsv"
@@ -852,6 +912,20 @@ for supplier in $suppliers; do
     "$BIN" redis sessions --supplier "$supplier" --json 2>/dev/null |
         jq -r '(if type == "array" then . else [] end)[] | .state // empty' 2>/dev/null
 done >>"$fail_states_file"
+# The unordered-nonce cause, read as a delta over this run.
+nonce_rejections_after="$(nonce_rejections_now)"
+broadcasts_after="$(max_broadcasts_per_supplier_now)"
+nonce_delta="$(awk -v a="$nonce_rejections_after" -v b="$nonce_rejections_before" 'BEGIN{printf "%d", a-b}')"
+broadcast_delta="$(awk -v a="$broadcasts_after" -v b="$broadcasts_before" 'BEGIN{printf "%d", a-b}')"
+
+if [ "$broadcast_delta" -lt 3 ]; then
+    gate_nothing_measured "busiest supplier broadcast ${broadcast_delta} transactions -- a plain claim+proof pair cannot share an anchor, so the nonce check was NOT exercised"
+elif [ "$nonce_delta" -gt 0 ]; then
+    gate_fail "${nonce_delta} transaction(s) rejected with sdk/code=18 -- a reused unordered nonce, or a ttl exceeding 10m: the only two our transactions can produce (an expired deadline is code 42, rejected earlier in the ante chain)"
+else
+    gate_pass "no sdk/code=18 rejections; busiest supplier broadcast ${broadcast_delta} transactions this run"
+fi
+
 for state in claim_missing claim_tx_error proof_tx_error proof_window_closed claim_window_closed; do
     n="$(grep -cx "$state" "$fail_states_file" 2>/dev/null || true)"
     [ "${n:-0}" -gt 0 ] && gate_fail "miner reports ${n} session(s) in failure state '${state}'"
