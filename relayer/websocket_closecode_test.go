@@ -36,7 +36,17 @@ func readCloseCodeFromRealPeer(t *testing.T, code int, text string) error {
 			websocket.FormatCloseMessage(code, text),
 			time.Now().Add(time.Second),
 		)
-		time.Sleep(50 * time.Millisecond)
+		// Synchronize on state, not on a clock: the socket must outlive the
+		// peer's read of the close frame, and this read is what says the peer
+		// got there. gorilla's default close handler echoes a close back, and
+		// a peer that rejects the code answers a protocol-error close -- both
+		// return here, so this unblocks for a pass and for a failure alike.
+		_ = c.SetReadDeadline(time.Now().Add(2 * time.Second))
+		for {
+			if _, _, err := c.ReadMessage(); err != nil {
+				return
+			}
+		}
 	}))
 	t.Cleanup(srv.Close)
 
