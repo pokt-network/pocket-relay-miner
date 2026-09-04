@@ -2476,6 +2476,21 @@ func (m *SupplierManager) ensureSharedTrackers() {
 		m.rebroadcastStore = NewRebroadcastStore(m.config.RedisClient, 0) // 0 → default TTL
 
 		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, inclusionHeight int64) error {
+			if outcome == inclusionFound {
+				// The chain holds this claim. Whatever the broadcast reported,
+				// the session must go back to `claimed` or its proof never goes
+				// out — and a claim on-chain without a proof is a SLASH,
+				// strictly worse than the lost reward the resend was meant to
+				// avoid.
+				//
+				// This runs BEFORE the counter and the tracker on purpose. A
+				// failure here keeps the pending entry, so the reconciler
+				// re-delivers this same observation on the next block; counting
+				// first would tally one claim once per retry.
+				if err := m.reactivateClaimedSession(ctx, supplier, sessionID, e); err != nil {
+					return err
+				}
+			}
 			claimInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
 			if m.sharedSubmissionTracker != nil {
 				// Claim outcome is matched by the ORIGINAL submit tx hash (the one
@@ -2492,14 +2507,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 					InclusionHeight: inclusionHeight,
 				})
 			}
-			if outcome != inclusionFound {
-				return nil
-			}
-			// The chain holds this claim. Whatever the broadcast reported, the
-			// session must go back to `claimed` or its proof never goes out —
-			// and a claim on-chain without a proof is a SLASH, strictly worse
-			// than the lost reward the resend was meant to avoid.
-			return m.reactivateClaimedSession(ctx, supplier, sessionID, e)
+			return nil
 		}
 		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error {
 			proofInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
@@ -2514,8 +2522,12 @@ func (m *SupplierManager) ensureSharedTrackers() {
 					Rebroadcasts:    e.Rebroadcasts,
 				})
 			}
-			// Proof is the last phase: there is no next state to restore, so a
-			// proof outcome is metric + tracker only and cannot fail.
+			// Metric + tracker only, and that is a GAP rather than a property:
+			// proof_tx_error has the same anatomy as claim_tx_error — the
+			// broadcast can report failure while the proof lands — and there IS
+			// a state to restore, `proved`. It does not cost a slash (the proof
+			// is on-chain), so it is not fixed here; it leaves the session in a
+			// failed state and the ledger counting it lost. Queue item 37.
 			return nil
 		}
 
@@ -2647,16 +2659,24 @@ func (m *SupplierManager) reactivateClaimedSession(
 		return nil
 	}
 
-	// The last hash we broadcast. It is the best identifier available — with
-	// every original attempt failed, OrigTxHash is empty — but the reconciler
-	// reads inclusion from module state, not from this hash, so treat it as
-	// provenance, not as a verified on-chain tx.
-	txHash := e.TxHash
-	if txHash == "" {
-		txHash = e.OrigTxHash
+	// The last hash we broadcast. Both fields are written from the same value
+	// (lifecycle_callback.go:312-313) and only a rebroadcast ever changes
+	// TxHash, so there is nothing for OrigTxHash to fall back to. The
+	// reconciler reads inclusion from module state, not from this hash, so
+	// treat it as provenance rather than as a verified on-chain tx.
+	err := state.SessionCoordinator.OnClaimObservedOnChain(ctx, sessionID, msg.RootHash, e.TxHash)
+	if errors.Is(err, ErrClaimRootUnusable) {
+		// Permanent, exactly like a payload that will not unmarshal: retrying
+		// cannot make a malformed root well-formed, and returning an error here
+		// would keep the entry and re-fire this every block until its TTL. Same
+		// level and same reasoning as the unmarshal case above.
+		m.logger.Error().Err(err).
+			Str(logging.FieldSupplier, supplier).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("claim observed on-chain but its root is unusable; session stays terminal and will be slashed")
+		return nil
 	}
-
-	return state.SessionCoordinator.OnClaimObservedOnChain(ctx, sessionID, msg.RootHash, txHash)
+	return err
 }
 
 // ResubmitMessage implements MessageResubmitter: it routes a re-broadcast to the

@@ -338,6 +338,12 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	return nil
 }
 
+// ErrClaimRootUnusable reports that a claim observed on-chain came with a root
+// that cannot be stored or proved from. It is PERMANENT — a malformed root does
+// not become well-formed on the next block — so callers must stop retrying
+// rather than hold the observation open until it times out.
+var ErrClaimRootUnusable = errors.New("claimed root hash is unusable")
+
 // OnClaimObservedOnChain is called when the InclusionReconciler has OBSERVED
 // this session's claim on-chain — which can happen after the broadcast
 // reported failure and the session was already marked claim_tx_error.
@@ -378,8 +384,8 @@ func (c *SessionCoordinator) OnClaimObservedOnChain(
 	// something that cannot produce a proof.
 	if len(claimedRootHash) != SMSTRootLen {
 		return fmt.Errorf(
-			"refusing to reactivate session %s: claimed root hash is %d bytes, want %d",
-			sessionID, len(claimedRootHash), SMSTRootLen,
+			"%w: session %s root is %d bytes, want %d",
+			ErrClaimRootUnusable, sessionID, len(claimedRootHash), SMSTRootLen,
 		)
 	}
 

@@ -374,8 +374,10 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 				// KEEP the entry. The claim IS on-chain; acting on that
 				// observation is what keeps the proof coming, so a transient
 				// failure must get another block rather than be cleared away.
-				// The rebroadcast cap still bounds resends, and the entry TTL
-				// bounds the retrying.
+				// Only the entry TTL bounds this retrying: a found outcome
+				// `continue`s and never reaches rebroadcast(), so the
+				// MaxRebroadcasts cap is not what holds it — do not read this
+				// as doubly bounded.
 				r.logger.Warn().Err(oErr).
 					Str("phase", string(rp.phase)).
 					Str("supplier", g.Supplier).

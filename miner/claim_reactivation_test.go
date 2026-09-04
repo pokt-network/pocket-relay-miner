@@ -11,7 +11,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/puzpuzpuz/xsync/v4"
+	"github.com/rs/zerolog"
+
+	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
+	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
+	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+	"github.com/pokt-network/smt"
 )
 
 // The defect these tests pin, in one sentence: a claim whose broadcast reported
@@ -329,4 +336,179 @@ func TestReactivateClaimed_ConcurrentObserversProduceExactlyOneFlip(t *testing.T
 	require.NoError(t, err)
 	require.Equal(t, SessionStateClaimed, got.State)
 	require.Equal(t, root, got.ClaimedRootHash)
+}
+
+// THE RESULT, not the halfway point.
+//
+// Every test above stops at "the session is claimed again". That is not the
+// criterion this work was written against, which is that such a session ends
+// with a proof submitted — and the half that was untested is exactly the half
+// that depends on the SMST still being in Redis. The claimed root now comes
+// from the persisted MsgCreateClaim, so it survives the tree; the PROOF does
+// not, because ProveClosest lazy-loads the node hash.
+//
+// So this drives the real edge end to end: a real tree, the real
+// MsgCreateClaim the reconciler stored, reactivateClaimedSession unmarshalling
+// it, and then a proof actually built and verified against the root the
+// reactivation wrote.
+func TestReactivation_EndsWithAProvableSession(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+
+	const supplier = "pokt1test"
+	const sessionID = "session-provable"
+
+	// 1. A real tree with real relays, flushed — the state a session is in when
+	//    its claim is built.
+	smstManager := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
+		SupplierAddress: supplier,
+		CacheTTL:        time.Hour,
+	})
+	require.NoError(t, smstManager.UpdateTree(ctx, sessionID, []byte("relay-1"), []byte("payload-1"), 100))
+	require.NoError(t, smstManager.UpdateTree(ctx, sessionID, []byte("relay-2"), []byte("payload-2"), 200))
+	rootHash, err := smstManager.FlushTree(ctx, sessionID)
+	require.NoError(t, err)
+	require.Len(t, rootHash, SMSTRootLen)
+
+	// 2. The claim message the self-heal persisted, byte for byte as the
+	//    reconciler holds it. This is the ONLY source of the root on this path.
+	claimMsg := prooftypes.MsgCreateClaim{
+		SupplierOperatorAddress: supplier,
+		SessionHeader: &sessiontypes.SessionHeader{
+			ApplicationAddress:      "pokt1app",
+			ServiceId:               "svc-test",
+			SessionId:               sessionID,
+			SessionStartBlockHeight: 100,
+			SessionEndBlockHeight:   110,
+		},
+		RootHash: rootHash,
+	}
+	msgBytes, err := claimMsg.Marshal()
+	require.NoError(t, err)
+
+	// 3. The session as the broadcast failure left it: terminal, untracked,
+	//    with NO claim fields persisted (OnSessionClaimed never ran).
+	store := NewRedisSessionStore(testLogger(), client, SessionStoreConfig{
+		SupplierAddress: supplier,
+		SessionTTL:      time.Hour,
+	})
+	defer func() { _ = store.Close() }()
+	require.NoError(t, store.Save(ctx, reactivationTestSnapshot(sessionID, SessionStateClaimTxError)))
+
+	coord := NewSessionCoordinator(testLogger(), store, SMSTRecoveryConfig{SupplierAddress: supplier})
+	defer func() { _ = coord.Close() }()
+	var tracked []*SessionSnapshot
+	coord.SetOnSessionCreatedCallback(func(_ context.Context, snap *SessionSnapshot) error {
+		tracked = append(tracked, snap)
+		return nil
+	})
+
+	// 4. The real edge, through the real manager helper.
+	m := &SupplierManager{
+		logger:    testLogger(),
+		suppliers: xsync.NewMap[string, *SupplierState](),
+	}
+	m.suppliers.Store(supplier, &SupplierState{
+		OperatorAddr:       supplier,
+		SessionCoordinator: coord,
+	})
+	require.NoError(t, m.reactivateClaimedSession(ctx, supplier, sessionID, rebroadcastEntry{
+		MsgBytes:  msgBytes,
+		TxHash:    "TX-REBROADCAST",
+		ServiceID: "svc-test",
+	}))
+
+	// 5. The session is back, tracked, and carries the root the chain accepted.
+	require.Len(t, tracked, 1, "the session must be handed back to the lifecycle")
+	require.Equal(t, SessionStateClaimed, tracked[0].State)
+	require.Equal(t, rootHash, tracked[0].ClaimedRootHash)
+
+	// 6. THE POINT: a proof can actually be built for it, and it verifies
+	//    against the root the reactivation wrote. Without this the fix is
+	//    proven only up to the state change.
+	path := protocol.GetPathForProof([]byte("relay-1"), sessionID)
+	proofBytes, err := smstManager.ProveClosest(ctx, sessionID, path)
+	require.NoError(t, err, "a reactivated session must still be provable")
+	require.NotEmpty(t, proofBytes)
+
+	compact := &smt.SparseCompactMerkleClosestProof{}
+	require.NoError(t, compact.Unmarshal(proofBytes))
+	proof, err := smt.DecompactClosestProof(compact, protocol.NewSMTSpec())
+	require.NoError(t, err)
+
+	valid, err := smt.VerifyClosestProof(proof, tracked[0].ClaimedRootHash, protocol.NewSMTSpec())
+	require.NoError(t, err)
+	require.True(t, valid, "the proof must verify against the root the reactivation persisted")
+}
+
+// The root must NOT depend on the SMST, and this is the test that discriminates
+// that choice: with the tree deleted, taking the root from the persisted
+// MsgCreateClaim still yields the value the chain accepted, while the rejected
+// alternative — rehydrating via GetTreeRoot — would yield nothing and send the
+// session to proof_tx_error.
+//
+// It also states the residual dependency plainly rather than implying it is
+// gone: the proof itself still lazy-loads the node hash, so a tree that expired
+// costs the proof even though the root survived. Under the default CacheTTL (2h,
+// sliding on every relay) that budget is roughly 2.3x the worst case measured on
+// mainnet, but it is a margin, not an invariant.
+func TestReactivation_RootSurvivesTheTree(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+
+	const supplier = "pokt1test"
+	const sessionID = "session-treeless"
+
+	smstManager := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
+		SupplierAddress: supplier,
+		CacheTTL:        time.Hour,
+	})
+	require.NoError(t, smstManager.UpdateTree(ctx, sessionID, []byte("relay-1"), []byte("payload-1"), 100))
+	rootHash, err := smstManager.FlushTree(ctx, sessionID)
+	require.NoError(t, err)
+
+	claimMsg := prooftypes.MsgCreateClaim{
+		SupplierOperatorAddress: supplier,
+		SessionHeader: &sessiontypes.SessionHeader{
+			ApplicationAddress:      "pokt1app",
+			ServiceId:               "svc-test",
+			SessionId:               sessionID,
+			SessionStartBlockHeight: 100,
+			SessionEndBlockHeight:   110,
+		},
+		RootHash: rootHash,
+	}
+	msgBytes, err := claimMsg.Marshal()
+	require.NoError(t, err)
+
+	// The tree is gone — the state a slow reactivation can find.
+	require.NoError(t, smstManager.DeleteTree(ctx, sessionID))
+
+	store := NewRedisSessionStore(testLogger(), client, SessionStoreConfig{
+		SupplierAddress: supplier,
+		SessionTTL:      time.Hour,
+	})
+	defer func() { _ = store.Close() }()
+	require.NoError(t, store.Save(ctx, reactivationTestSnapshot(sessionID, SessionStateClaimTxError)))
+
+	coord := NewSessionCoordinator(testLogger(), store, SMSTRecoveryConfig{SupplierAddress: supplier})
+	defer func() { _ = coord.Close() }()
+	coord.SetOnSessionCreatedCallback(func(context.Context, *SessionSnapshot) error { return nil })
+
+	m := &SupplierManager{logger: testLogger(), suppliers: xsync.NewMap[string, *SupplierState]()}
+	m.suppliers.Store(supplier, &SupplierState{OperatorAddr: supplier, SessionCoordinator: coord})
+
+	require.NoError(t, m.reactivateClaimedSession(ctx, supplier, sessionID, rebroadcastEntry{
+		MsgBytes: msgBytes, TxHash: "TX-1", ServiceID: "svc-test",
+	}))
+
+	got, err := store.Get(ctx, sessionID)
+	require.NoError(t, err)
+	require.Equal(t, rootHash, got.ClaimedRootHash,
+		"the root comes from the persisted claim message, so a missing tree must not lose it")
+
+	// And the honest half: the proof does still need the tree.
+	_, proveErr := smstManager.ProveClosest(ctx, sessionID, protocol.GetPathForProof([]byte("relay-1"), sessionID))
+	require.Error(t, proveErr,
+		"documented limitation: the root survives the tree, the proof does not")
 }
