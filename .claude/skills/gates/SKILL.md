@@ -25,6 +25,17 @@ that passes alone can still break its callers.
 Level 2 is the floor for "done". Level 1 proves the tree compiles and is tidy;
 it proves nothing about behaviour.
 
+**Level 1 does NOT run `internal/conventions`, and that is the trap.** Those
+checks -- no new bare `go` statements, no new `time.Sleep` in tests, no
+`sync.Map`, keys through the KeyBuilder -- live in the `tests` section, so they
+run at level 2 and later. A commit made on a green level 1 can carry a violation
+of a rule this repository enforces mechanically, and the first thing that says
+so is a level 2 or 3 run, after the commit exists. Measured 2026-09-03: a
+`time.Sleep` in a test written that same session rode through a level-1-green
+commit and was caught by `TestNoNewSleepsInTests` at level 3, tens of minutes
+later. If a commit adds or edits a `_test.go`, or adds a goroutine, run
+`go test -tags test ./internal/conventions/` before it -- it costs seconds.
+
 **Level 3 is not optional for the money path.** A change to relay, claim, proof,
 settlement or metering is not verified by unit tests. If `live.sh` does not
 exist yet, `all.sh` prints it as NOT RUN — say so in your report rather than
