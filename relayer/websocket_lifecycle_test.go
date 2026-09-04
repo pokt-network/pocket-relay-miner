@@ -233,8 +233,14 @@ func TestBridgeDoesNotCloseAConnectionThatDidSendAFrame(t *testing.T) {
 	require.NoError(t, gwClient.SetReadDeadline(time.Now().Add(4*wsFirstFrameWait)))
 	_, _, err := gwClient.ReadMessage()
 	require.Error(t, err, "expected the read to time out, not the bridge to close")
-	require.False(t, websocket.IsCloseError(err, CloseTryAgainLater),
-		"a connection that already served a relay must not be closed by the first-frame deadline")
+	// isTimeout, not IsCloseError(CloseTryAgainLater): the claim is "the bridge
+	// did not close this connection", and a close carries whatever code the
+	// teardown picked. Asserting the ABSENCE of one specific code passes for a
+	// close that used any other -- measured 2026-09-03: applying the
+	// first-frame deadline inside readLoop closes with 1001, and this test
+	// stayed green. Only "the read timed out" excludes every close.
+	require.True(t, isTimeout(err),
+		"a connection that already served a relay must not be closed at all: %v", err)
 }
 
 // TestBridgeClosesABackendDialThatLandsAfterTheBridgeClosed is the scenario the

@@ -18,11 +18,22 @@ import (
 // about close codes and metrics, which is why it took three rounds of human
 // review to find one instance and not the class.
 //
-// This is the only check here that does not depend on somebody predicting the
-// failure mode first.
+// It is the check here that depends least on somebody predicting the failure
+// mode first -- but it is not free of that dependency, and the ignore list is
+// where the dependency lives. Every ignore below names a CONCRETE goroutine.
 //
-// The ignores are the runtime's own and the shared test Redis client pool, which
-// outlives individual tests by design; nothing bridge-related is ignored.
+// Measured 2026-09-03: this list used to carry
+// runtime's own". It was neither the runtime's nor harmless. IgnoreTopFunction
+// matches the FIRST frame of the stack, and every goroutine parked in a socket
+// read has exactly that frame on top -- including a leaked bridge readLoop
+// sitting in conn.ReadMessage(), which is the canonical shape of a leaked
+// connection and the shape this file exists to catch. So the net was blind in
+// the half that mattered, in all 14 tests that use it.
+//
+// What it was actually covering, found by deleting it and reading the failure:
+// ONE goroutine, github.com/godbus/dbus (*Conn).inWorker, created by Auth in
+// goroutine 1 at process init -- it arrives through the keyring dependency, not
+// through anything this package starts. It is named directly below.
 func verifyNoBridgeGoroutines(t *testing.T) {
 	t.Helper()
 	t.Cleanup(func() {
@@ -32,7 +43,10 @@ func verifyNoBridgeGoroutines(t *testing.T) {
 		// only widens its patience for the 100ms close settle.
 		goleak.VerifyNone(t,
 			goleak.IgnoreTopFunction("github.com/redis/go-redis/v9/internal/pool.(*ConnPool).reaper"),
-			goleak.IgnoreTopFunction("internal/poll.runtime_pollWait"),
+			// The D-Bus connection the keyring dependency opens at process init.
+			// Named explicitly: a top-function ignore for its socket read
+			// would also hide every leaked bridge readLoop.
+			goleak.IgnoreAnyFunction("github.com/godbus/dbus.(*Conn).inWorker"),
 			goleak.IgnoreAnyFunction("net/http.(*persistConn).readLoop"),
 			goleak.IgnoreAnyFunction("net/http.(*persistConn).writeLoop"),
 			// A package-init timer wheel from a transitive dependency: one
