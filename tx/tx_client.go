@@ -2,14 +2,11 @@ package tx
 
 import (
 	"context"
-	cryptorand "crypto/rand"
 	"crypto/tls"
-	"encoding/binary"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"cosmossdk.io/math"
@@ -462,95 +459,6 @@ func WithTxWindowTimeout(ctx context.Context, d time.Duration) context.Context {
 // exactly at the cosmos-sdk hard limit (600s) would hand the chain a
 // timeoutTimestamp at (now + max) with zero jitter headroom. Subtract
 // first so max stays an absolute ceiling.
-// txNonceSpread bounds the disambiguating offset added to every unordered
-// transaction's timeout timestamp.
-//
-// WHY THIS EXISTS. A cosmos-sdk unordered transaction is identified by the pair
-// (timeout.UnixNano(), sender) -- x/auth/keeper/keeper.go, UnorderedNonces --
-// and re-using that pair is rejected in CheckTx with
-// "sender %s has already used timeout %d". The timeout here is anchored on the
-// chain's latest_block_time (see signAndBroadcast), which is CONSTANT for the
-// whole block. So every transaction this process builds for one supplier inside
-// one block used to compute the identical nonce:
-//
-//   - claims are grouped by session end height, so a supplier with two heights
-//     ready in one block emits two transactions;
-//   - the claim retry loop is 3 attempts 2s apart, four seconds inside a ten
-//     second block, so all three attempts recomputed the same value and could
-//     not succeed by construction;
-//   - a rebroadcast from the inclusion reconciler can land in the same block as
-//     a retry still in flight.
-//
-// Measured live 2026-09-03: the L3 gate went red with three sessions in
-// claim_tx_error, one EXPIRED claim (8 relays, PROOF_MISSING) and one slashing
-// event. Relays were lost on every transport, which is what proves the cause is
-// here and not in any one transport's path.
-//
-// WHY A SUB-SECOND OFFSET IS SAFE. The ante handler
-// (x/auth/ante/sigverify.go) makes three checks, and an offset that only moves
-// the timestamp LATER can trip none of them: it cannot make the timeout appear
-// already-passed, and one second sits far inside the headroom between
-// DefaultTxTimeoutMax and the 10 minute hard ceiling -- ten seconds today, so
-// nine remain. Never subtract.
-//
-// WHAT IT IS AND IS NOT. This is probabilistic, not an allocator. 10^9 slots
-// per (sender, block) supports about 45 transactions per sender per block at a
-// 10^-6 collision budget, and about 450 at 10^-4. With claim batching on -- the
-// default -- a supplier sends one claim transaction per block plus any proofs,
-// so k is a single digit and the margin is six orders. With batching OFF
-// (disable_claim_batching) it is one transaction per session, and at k in the
-// hundreds the budget is no longer comfortable. There are ten seconds of
-// headroom under the ceiling, so widening the spread is cheap if that day
-// comes.
-//
-// AND WHAT MAKES A COLLIDING RETRY SURVIVABLE IS NOT THIS CODE. Before the
-// offset, a rebuilt retry carried an identical nonce and the chain rejected it,
-// which was wasteful but harmless. With distinct nonces a retry can land, and
-// what keeps that safe is that poktroll's MsgCreateClaim is an UPSERT keyed by
-// (sessionId, supplier) -- x/proof/keeper/msg_server_create_claim.go -- so a
-// second identical claim is idempotent and costs a fee. That is a dependency on
-// an external module's behaviour, and it is stated here so the next reader does
-// not have to rediscover it.
-const txNonceSpread = time.Second
-
-var (
-	// txNonceCounter separates transactions built by THIS process: retries,
-	// two session-end groups, lifecycle versus reconciler.
-	txNonceCounter atomic.Uint64
-
-	// txNonceBase makes two processes UNLIKELY to walk the same counter
-	// sequence: two replicas holding one supplier across a rebalance handoff
-	// observe the same block time, and without a per-process seed they would
-	// both start at 1. Seeded once per process.
-	//
-	// It is best-effort and NOT a guarantee of anything about replicas, which
-	// an earlier version of this comment implied. Four things break that
-	// guarantee independently of the seed: the anchor itself can differ (a
-	// replica whose BlockTimeProvider is nil or has not seen a block yet falls
-	// back to wall clock, below); the two replicas need not build the same set
-	// of messages, since the batch is filtered by state read from Redis and by
-	// builds that fail locally; the root hash only converges once the first
-	// replica has flushed its tree; and the session header may come from the
-	// chain on one replica and from the snapshot on the other.
-	txNonceBase = newTxNonceBase()
-)
-
-func newTxNonceBase() uint64 {
-	var b [8]byte
-	if _, err := cryptorand.Read(b[:]); err != nil {
-		// Degrading to zero costs the inter-process separation, not the
-		// intra-process one. The counter still runs.
-		return 0
-	}
-	return binary.LittleEndian.Uint64(b[:])
-}
-
-// nextTxNonceOffset returns the offset to add to one transaction's timeout.
-func nextTxNonceOffset() time.Duration {
-	n := (txNonceBase + txNonceCounter.Add(1)) % uint64(txNonceSpread)
-	return time.Duration(n) // #nosec G115 -- bounded by the modulo above
-}
-
 func computeEffectiveTxTimeout(
 	raw, skewBuffer, min, max, fallbackDefault time.Duration,
 ) (timeout time.Duration, source string) {
@@ -644,11 +552,7 @@ func (tc *TxClient) signAndBroadcast(
 			anchorSource = "block_time"
 		}
 	}
-	// The offset is what keeps the unordered nonce unique: the anchor above is
-	// constant for the whole block, so without it every transaction this
-	// process builds for one supplier inside one block collides. See
-	// txNonceSpread.
-	timeoutTimestamp := anchor.Add(timeoutDuration).Add(nextTxNonceOffset())
+	timeoutTimestamp := anchor.Add(timeoutDuration)
 	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
 
 	// Determine gas limit and fees
