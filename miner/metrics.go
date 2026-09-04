@@ -922,6 +922,26 @@ var (
 		[]string{"supplier", "instance"},
 	)
 
+	// supplierLeaseLostTotal counts leases this instance LOST -- expired,
+	// stolen, or a renewal that stalled long enough that the key cannot still
+	// be ours. It is deliberately NOT supplier_released_total: that one counts
+	// a deliberate hand-over, this one counts the window in which two replicas
+	// can believe they own the same supplier. Folding them into one series
+	// would make an existing panel count more and be unable to say why.
+	//
+	// No supplier label on purpose: the fleet runs 500+ of them, and the
+	// question an operator asks here is "are we losing leases, and why",
+	// which trigger answers with a bounded set.
+	supplierLeaseLostTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_lease_lost_total",
+			Help:      "Total supplier leases lost by an instance, by trigger",
+		},
+		[]string{"trigger", "instance"},
+	)
+
 	// supplierClaimedGauge tracks current number of suppliers claimed by each instance.
 	supplierClaimedGauge = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -945,7 +965,8 @@ var (
 	)
 
 	// supplierDrainDecisionTotal tracks every drain decision with on-chain verification result.
-	// Labels: drain_reason (rebalance_release, key_removal, claim_expiry),
+	// Labels: drain_reason (lease_expired, lease_stolen, renew_stalled,
+	//         rebalance_release, key_removal, shutdown, claim_callback_failed),
 	//         on_chain_result (staked, not_found, error, no_query_client)
 	supplierDrainDecisionTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{

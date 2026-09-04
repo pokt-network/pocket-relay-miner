@@ -93,7 +93,6 @@ var bareGoroutineAllowlist = map[string]int{
 	"miner/supplier_manager.go: Start":                        1,
 	"miner/supplier_manager.go: addSupplierWithData":          1,
 	"miner/supplier_manager.go: handleKeyChange":              1,
-	"miner/supplier_manager.go: onSupplierReleased":           1,
 	"miner/supplier_manager.go: startReconcilerBlockLoop":     1,
 	"miner/supplier_manager.go: startWithDistributedClaiming": 1,
 	"observability/runtime_metrics.go: Start":                 1,

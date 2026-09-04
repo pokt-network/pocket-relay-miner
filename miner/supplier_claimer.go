@@ -64,6 +64,27 @@ const (
 	recentlyReleasedCooldown = 2 * RebalanceInterval
 )
 
+// Drain triggers. They are a BOUNDED set on purpose: the value reaches a
+// Prometheus label, and it is the word an operator reads first during an
+// incident. "claim_expiry" was already documented as a drain_reason in
+// metrics.go and never had a writer -- these are its writers.
+const (
+	// triggerLeaseExpired: the lease key was gone and we could not get it back.
+	triggerLeaseExpired = "lease_expired"
+	// triggerLeaseStolen: the key holds another instance's id.
+	triggerLeaseStolen = "lease_stolen"
+	// triggerRenewStalled: no renewal has succeeded for longer than ClaimTTL.
+	triggerRenewStalled = "renew_stalled"
+	// triggerRebalanceRelease: we handed the supplier to a peer on purpose.
+	triggerRebalanceRelease = "rebalance_release"
+	// triggerKeyRemoval: the operator removed the signing key.
+	triggerKeyRemoval = "key_removal"
+	// triggerShutdown: this process is stopping.
+	triggerShutdown = "shutdown"
+	// triggerClaimCallbackFailed: we claimed it but could not start it.
+	triggerClaimCallbackFailed = "claim_callback_failed"
+)
+
 // SupplierClaimerConfig contains configuration for the SupplierClaimer.
 type SupplierClaimerConfig struct {
 	// ClaimTTL is how long a supplier claim is valid before expiring.
@@ -118,9 +139,34 @@ type SupplierClaimer struct {
 	allSuppliers   []string
 	allSuppliersMu sync.RWMutex
 
+	// lastRenewedAt is when this instance last CONFIRMED it still owns each
+	// lease. It is the only lease signal that does not come from Redis, and
+	// that is the point: the branch below where the GET itself fails is the
+	// one branch reachable when the broken thing IS Redis, so it cannot ask
+	// Redis whether the lease survived. Once no renewal has succeeded for
+	// longer than ClaimTTL the key cannot still be ours, whatever Redis says.
+	lastRenewedAt   map[string]time.Time
+	lastRenewedAtMu sync.Mutex
+
+	// nowFn is a struct field rather than a direct time.Now call so a test can
+	// move the clock. It is set ONCE, in the constructor, which runs on the
+	// caller's goroutine.
+	//
+	// THE CONTRACT, stated because the obvious stronger claim is false: the
+	// renewal loop DOES read it from the goroutine Start spawns. What makes
+	// that safe is that nothing writes it after construction except a test,
+	// and a test may only write it with the loop STOPPED. Mutating it while
+	// the loop runs is a data race. (CLAUDE.md, wsFirstFrameWait: the field
+	// capture is what removes the race a package var had; it does not make
+	// later writes safe.)
+	nowFn func() time.Time
+
 	// Callbacks
-	onClaimFn   func(ctx context.Context, supplier string) error
-	onReleaseFn func(ctx context.Context, supplier string) error
+	onClaimFn func(ctx context.Context, supplier string) error
+	// onReleaseFn carries the trigger because the drain path labels a metric
+	// and an audit log with it. Passing it means an operator reading
+	// "lost a lease to a peer" is not sent to look at the rebalancer.
+	onReleaseFn func(ctx context.Context, supplier, trigger string) error
 
 	// Lifecycle
 	ctx      context.Context
@@ -168,6 +214,8 @@ func NewSupplierClaimer(
 		config:           cfg,
 		claimed:          make(map[string]time.Time),
 		recentlyReleased: make(map[string]time.Time),
+		lastRenewedAt:    make(map[string]time.Time),
+		nowFn:            time.Now,
 	}
 }
 
@@ -176,7 +224,7 @@ func NewSupplierClaimer(
 // onReleaseFn is called when a supplier is released (should drain and stop lifecycle).
 func (c *SupplierClaimer) SetCallbacks(
 	onClaimFn func(ctx context.Context, supplier string) error,
-	onReleaseFn func(ctx context.Context, supplier string) error,
+	onReleaseFn func(ctx context.Context, supplier, trigger string) error,
 ) {
 	c.onClaimFn = onClaimFn
 	c.onReleaseFn = onReleaseFn
@@ -240,7 +288,7 @@ func (c *SupplierClaimer) Stop(ctx context.Context) error {
 	c.claimedMu.Unlock()
 
 	for _, supplier := range claimed {
-		if err := c.Release(ctx, supplier); err != nil {
+		if err := c.Release(ctx, supplier, triggerShutdown); err != nil {
 			c.logger.Warn().Err(err).Str("supplier", supplier).Msg("failed to release claim on shutdown")
 		}
 	}
@@ -320,7 +368,7 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 				Str("supplier", supplier).
 				Msg("claim callback failed")
 			// Release the claim since we couldn't start lifecycle
-			_ = c.Release(ctx, supplier)
+			_ = c.Release(ctx, supplier, triggerClaimCallbackFailed)
 			return false
 		}
 	}
@@ -332,9 +380,9 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 // The release callback is invoked BEFORE the Redis claim key is deleted; if
 // it returns an error we propagate it (the claim key stays alive) but we no
 // longer treat the on-chain staked status as a veto — see issue #7.
-func (c *SupplierClaimer) Release(ctx context.Context, supplier string) error {
+func (c *SupplierClaimer) Release(ctx context.Context, supplier, trigger string) error {
 	if c.onReleaseFn != nil {
-		if err := c.onReleaseFn(ctx, supplier); err != nil {
+		if err := c.onReleaseFn(ctx, supplier, trigger); err != nil {
 			c.logger.Info().
 				Err(err).
 				Str("supplier", supplier).
@@ -382,6 +430,72 @@ func (c *SupplierClaimer) Release(ctx context.Context, supplier string) error {
 	supplierReleasedTotal.WithLabelValues(supplier, c.instanceID).Inc()
 
 	return nil
+}
+
+// releaseLost reports a lease this instance NO LONGER HOLDS.
+//
+// It is deliberately not Release. Release means "I am handing over something I
+// have": it deletes the Redis key and it aborts, keeping the claim, if the
+// callback fails. Losing a lease means "I acknowledge something that is no
+// longer mine" -- there is no key of ours to delete, and there is no claim to
+// keep. Reusing Release here would make both of those sentences false.
+//
+// The three things it does belong together, and the reason this helper exists
+// at all is that they were NOT together: the renewal loop grew three branches
+// that each dropped the supplier from the local map and told nobody, and the
+// divergence between them IS the defect. One place, one meaning.
+//
+// The cooldown write is not bookkeeping. Without it claimOrphaned can re-take
+// the supplier while the drain this call starts is still tearing it down; the
+// re-claim then returns early on onSupplierClaimed's idempotency check, and the
+// drain finishes by deleting the supplier we just re-took. That is the split
+// this fix is about, inverted. The cooldown is a fairness window, not a
+// correctness guard -- claimMore does not consult it -- so it narrows that race
+// rather than closing it; closing it belongs on the claim side, tied to the end
+// of the drain.
+//
+// CALLER CONTRACT: only call this once the caller has established that recovery
+// FAILED. Releasing first and re-claiming afterwards manufactures exactly the
+// race described above.
+func (c *SupplierClaimer) releaseLost(ctx context.Context, supplier, trigger string) {
+	c.claimedMu.Lock()
+	delete(c.claimed, supplier)
+	c.claimedMu.Unlock()
+
+	c.lastRenewedAtMu.Lock()
+	delete(c.lastRenewedAt, supplier)
+	c.lastRenewedAtMu.Unlock()
+
+	c.recentlyReleasedMu.Lock()
+	c.recentlyReleased[supplier] = c.nowFn()
+	c.recentlyReleasedMu.Unlock()
+
+	// A lease lost is a state change, not a per-request event: it fires once
+	// per change and it is what an operator reads during an incident.
+	c.logger.Warn().
+		Str("supplier", supplier).
+		Str("trigger", trigger).
+		Str("instance_id", c.instanceID).
+		Msg("lease lost; draining supplier")
+
+	// NOT supplierReleasedTotal: that series means "handed a supplier over on
+	// purpose", and a lease we lost is the opposite event. Sharing it would
+	// make every existing release panel count more with no way to say why --
+	// the exact confusion the trigger exists to prevent.
+	supplierLeaseLostTotal.WithLabelValues(trigger, c.instanceID).Inc()
+
+	if c.onReleaseFn != nil {
+		if err := c.onReleaseFn(ctx, supplier, trigger); err != nil {
+			// Nothing to roll back: the lease is gone either way. Surface it,
+			// because a failed drain leaves the supplier live in the manager,
+			// which is the very condition this call exists to end.
+			c.logger.Error().
+				Err(err).
+				Str("supplier", supplier).
+				Str("trigger", trigger).
+				Msg("drain callback failed after losing a lease; supplier may still be live")
+		}
+	}
 }
 
 // inRecentReleaseCooldown reports whether this instance released the
@@ -606,6 +720,9 @@ func (c *SupplierClaimer) renewAllClaims() {
 		Dur("ttl", c.config.ClaimTTL).
 		Msg("renewing claims")
 
+	// now is read here, on this goroutine, and passed down. See nowFn.
+	now := c.nowFn()
+
 	for _, supplier := range claimed {
 		claimKey := c.redisClient.KB().MinerClaimKey(supplier)
 
@@ -613,55 +730,95 @@ func (c *SupplierClaimer) renewAllClaims() {
 		owner, err := c.redisClient.Get(c.ctx, claimKey).Result()
 		if err != nil {
 			if err == redis.Nil {
-				// Claim expired, try to reclaim
+				// The lease expired. Try to take it back FIRST: the bool
+				// decides. Recovering means the supplier is still ours and
+				// draining it would destroy a live one; failing means a peer
+				// has it and the manager has to be told, which is the whole
+				// point of this pass.
 				c.logger.Warn().
 					Str("supplier", supplier).
 					Str("claim_key", claimKey).
 					Msg("claim expired, attempting reclaim")
-				c.claimedMu.Lock()
-				delete(c.claimed, supplier)
-				c.claimedMu.Unlock()
-				c.TryClaim(c.ctx, supplier)
-			} else {
-				c.logger.Warn().
-					Err(err).
-					Str("supplier", supplier).
-					Msg("failed to get claim owner")
+				if !c.TryClaim(c.ctx, supplier) {
+					c.releaseLost(c.ctx, supplier, triggerLeaseExpired)
+				}
+				continue
+			}
+
+			// The GET itself failed. This is the ONLY branch reachable when
+			// the broken thing is Redis, so it must not ask Redis whether the
+			// lease survived. Left alone it used to log and continue, and the
+			// supplier stayed live in the manager -- signing -- while the key
+			// quietly expired and a peer took it. The local clock settles it:
+			// once no renewal has succeeded for longer than the lease could
+			// have lived, it is not ours regardless of what Redis would say.
+			c.logger.Warn().
+				Err(err).
+				Str("supplier", supplier).
+				Msg("failed to get claim owner")
+			if c.renewStalledFor(supplier, now) >= c.config.ClaimTTL {
+				c.releaseLost(c.ctx, supplier, triggerRenewStalled)
 			}
 			continue
 		}
 
 		if owner != c.instanceID {
-			// Someone else claimed it
+			// A peer holds the key. There is nothing to recover, so unlike the
+			// expiry branch this one reports the loss immediately.
 			c.logger.Warn().
 				Str("supplier", supplier).
 				Str("owner", owner).
 				Str("expected", c.instanceID).
 				Msg("claim stolen by another instance")
-			c.claimedMu.Lock()
-			delete(c.claimed, supplier)
-			c.claimedMu.Unlock()
+			c.releaseLost(c.ctx, supplier, triggerLeaseStolen)
 			continue
 		}
 
 		// Renew the lease - check BOTH error AND result
 		// Expire returns (bool, error) - bool is false if key doesn't exist
 		renewed, err := c.redisClient.Expire(c.ctx, claimKey, c.config.ClaimTTL).Result()
-		if err != nil {
+		switch {
+		case err != nil:
 			c.logger.Warn().Err(err).Str("supplier", supplier).Msg("failed to renew claim")
-		} else if !renewed {
-			// Key didn't exist when we tried to renew - it expired between GET and EXPIRE
+			if c.renewStalledFor(supplier, now) >= c.config.ClaimTTL {
+				c.releaseLost(c.ctx, supplier, triggerRenewStalled)
+			}
+		case !renewed:
+			// The key died between GET and EXPIRE. Same shape as the expiry
+			// branch: recover first, and only report the loss if we cannot.
 			c.logger.Warn().
 				Str("supplier", supplier).
 				Str("claim_key", claimKey).
 				Msg("claim key disappeared during renewal (race condition)")
-			c.claimedMu.Lock()
-			delete(c.claimed, supplier)
-			c.claimedMu.Unlock()
-			// Try to reclaim
-			c.TryClaim(c.ctx, supplier)
+			if !c.TryClaim(c.ctx, supplier) {
+				c.releaseLost(c.ctx, supplier, triggerLeaseExpired)
+			}
+		default:
+			c.markRenewed(supplier, now)
 		}
 	}
+}
+
+// markRenewed records a CONFIRMED renewal.
+func (c *SupplierClaimer) markRenewed(supplier string, now time.Time) {
+	c.lastRenewedAtMu.Lock()
+	c.lastRenewedAt[supplier] = now
+	c.lastRenewedAtMu.Unlock()
+}
+
+// renewStalledFor reports how long it has been since this instance last
+// confirmed it still owns supplier's lease. A supplier with no record yet is
+// treated as renewed now, so a single failure never reports a loss -- only a
+// stall that outlives the lease does.
+func (c *SupplierClaimer) renewStalledFor(supplier string, now time.Time) time.Duration {
+	c.lastRenewedAtMu.Lock()
+	defer c.lastRenewedAtMu.Unlock()
+	last, ok := c.lastRenewedAt[supplier]
+	if !ok {
+		c.lastRenewedAt[supplier] = now
+		return 0
+	}
+	return now.Sub(last)
 }
 
 // rebalanceLoop periodically checks and rebalances supplier distribution.
@@ -745,7 +902,7 @@ func (c *SupplierClaimer) releaseExcess(count int) int {
 			break
 		}
 
-		if err := c.Release(c.ctx, entry.supplier); err != nil {
+		if err := c.Release(c.ctx, entry.supplier, triggerRebalanceRelease); err != nil {
 			c.logger.Warn().Err(err).Str("supplier", entry.supplier).Msg("failed to release excess supplier")
 			continue
 		}

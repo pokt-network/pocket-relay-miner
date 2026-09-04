@@ -261,6 +261,12 @@ type SupplierManagerConfig struct {
 // on-chain stake reconciler.
 const DefaultSupplierReconcileInterval = 60 * time.Second
 
+// supplierDrainAuditTimeout bounds the observational chain query the drain
+// records. It matches the 5s that verifySupplierUnstaked already applies; it is
+// named here because the drain now owns the context rather than borrowing the
+// caller's, and an unbounded one would keep a shutdown goroutine alive.
+const supplierDrainAuditTimeout = 5 * time.Second
+
 // SupplierManager manages multiple suppliers in the HA Miner.
 // It handles dynamic addition/removal of suppliers based on key changes.
 type SupplierManager struct {
@@ -277,6 +283,11 @@ type SupplierManager struct {
 
 	// Message processing callback
 	onRelay func(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error
+
+	// drainWG tracks the drain goroutines onSupplierReleased starts, so a
+	// test can await the audit without polling a clock. See waitDrains for
+	// what it deliberately does NOT do.
+	drainWG sync.WaitGroup
 
 	// Pond subpool for bounded supplier queries (prevents unbounded goroutine spawning)
 	querySubpool pond.Pool
@@ -522,7 +533,7 @@ func (m *SupplierManager) releaseUnconfigured(ctx context.Context, configured []
 		m.logger.Info().
 			Str(logging.FieldSupplier, addr).
 			Msg("releasing lease: supplier is no longer staked or no longer configured")
-		if err := m.claimer.Release(ctx, addr); err != nil {
+		if err := m.claimer.Release(ctx, addr, triggerRebalanceRelease); err != nil {
 			// Release already logged the reason and kept the claim; the next
 			// reconcile pass retries. Nothing is stranded by a single failure.
 			m.logger.Warn().
@@ -886,18 +897,50 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 // would block the claimer's rebalance loop and stall the next Lua DEL,
 // preventing other miners from seeing the released claim key. This
 // mirrors the key_removal path.
-func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier string) error {
-	_, verifyResult := m.verifySupplierUnstaked(ctx, supplier, "rebalance_release")
-	supplierDrainDecisionTotal.WithLabelValues("rebalance_release", verifyResult).Inc()
+func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier, trigger string) error {
+	reason := drainRebalance
+	if trigger == triggerShutdown {
+		reason = drainShutdown
+	}
 
-	m.logger.Info().
-		Str("supplier", supplier).
-		Str("drain_trigger", "rebalance_release").
-		Str("on_chain_result", verifyResult).
-		Str("instance_id", m.config.MinerID).
-		Msg("drain decision audit")
+	// The key-removal path already ran this exact verification one call up
+	// (see the "Key removed" branch), on a supplier an operator touched by
+	// hand. Two 5s chain queries for one decision bought nothing.
+	audit := trigger != triggerKeyRemoval
 
-	go m.removeSupplier(supplier, drainRebalance)
+	// The audit is observational: its bool is discarded and the comment on
+	// verifySupplierUnstaked says the result no longer vetoes the drain. It
+	// must therefore not sit in front of anything. It used to run inline, and
+	// the renewal loop -- which is SERIAL over every supplier -- now calls
+	// this on lease loss: K lost leases would have cost up to K*5s inside a
+	// loop with 90s of total headroom, and the event that loses leases (Redis
+	// blinking, a slow full node) is the same one that makes this query slow.
+	// One lost lease would have cascaded into more.
+	//
+	// The context is deliberately NOT inherited from a cancellable parent:
+	// Close cancels the manager context BEFORE stopping the claimer, so a
+	// drain started during shutdown would record "error" for every supplier.
+	auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), supplierDrainAuditTimeout)
+
+	m.drainWG.Add(1)
+	drain := func(context.Context) {
+		defer m.drainWG.Done()
+		defer cancelAudit()
+		if audit {
+			_, verifyResult := m.verifySupplierUnstaked(auditCtx, supplier, trigger)
+			supplierDrainDecisionTotal.WithLabelValues(trigger, verifyResult).Inc()
+
+			m.logger.Info().
+				Str("supplier", supplier).
+				Str("drain_trigger", trigger).
+				Str("on_chain_result", verifyResult).
+				Str("instance_id", m.config.MinerID).
+				Msg("drain decision audit")
+		}
+		m.removeSupplier(supplier, reason)
+	}
+
+	go logging.RecoverGoRoutine(m.logger, "supplier_drain", drain)(auditCtx)
 	return nil
 }
 
@@ -1233,11 +1276,11 @@ func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr stri
 		// any state for. No other instance could take that supplier over while
 		// the key kept being renewed.
 		//
-		// The audit above already recorded the "key_removal" decision;
-		// onSupplierReleased records its own under "rebalance_release", which
-		// costs one extra on-chain verification on a path an operator triggers by
-		// hand. Cheap, and the two entries together show the whole sequence.
-		if err := m.claimer.Release(ctx, operatorAddr); err != nil {
+		// The audit above is the ONLY one for this path: onSupplierReleased
+		// skips its own when the trigger is key_removal, because it would be
+		// the same 5s chain query about the same supplier for the same
+		// decision. There is one drain_decision entry here, not two.
+		if err := m.claimer.Release(ctx, operatorAddr, triggerKeyRemoval); err != nil {
 			m.logger.Warn().
 				Err(err).
 				Str(logging.FieldSupplier, operatorAddr).
