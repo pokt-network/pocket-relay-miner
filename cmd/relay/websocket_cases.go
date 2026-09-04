@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -37,6 +38,7 @@ var wsCases = []string{
 	"hang",
 	"garbage",
 	"abrupt-disconnect",
+	"backend-abrupt-close",
 	"supplier-change",
 	"no-session-header",
 	"oversized",
@@ -61,6 +63,8 @@ func RunWebSocketCase(ctx context.Context, logger logging.Logger, client *relay_
 		return wsCaseGarbage(logger)
 	case "abrupt-disconnect":
 		return wsCaseAbruptDisconnect(ctx, logger, client)
+	case "backend-abrupt-close":
+		return wsCaseBackendAbruptClose(ctx, logger, client)
 	case "supplier-change":
 		return wsCaseSupplierChange(ctx, logger, client)
 	case "no-session-header":
@@ -420,6 +424,106 @@ func wsCaseAbruptDisconnect(ctx context.Context, logger logging.Logger, client *
 	logger.Info().
 		Int("response_bytes", len(respBz)).
 		Msg("PASS abrupt-disconnect: the relayer served a fresh connection after a socket was dropped")
+	return nil
+}
+
+// wsCaseBackendAbruptClose proves the relayer never forwards a close code that
+// the peer it is talking to would refuse.
+//
+// The direction is the point, and it is the opposite of abrupt-disconnect. When
+// the CLIENT dies, writeToGateway fails before the relay is emitted and nothing
+// asymmetric happens. When the BACKEND dies with no close frame, the relayer's
+// gorilla reader manufactures CloseError{1006} locally -- 1006 is reserved and
+// must never be sent -- and release() then writes a close to PATH, which is
+// alive and reading. Before sanitizeCloseCode that 1006 went out raw, and a
+// gorilla peer answers a raw 1006 with a protocol error: a backend that dies
+// made PATH see a protocol violation by the RELAYER, charged to this endpoint.
+//
+// The discriminant is the TYPE of the error the client gets, not a metric.
+// ha_relayer_websocket_closes_total records the code BEFORE sanitising, so it
+// reads 1006 in both worlds and proves nothing. What separates them:
+//
+//	fixed   -> *websocket.CloseError{Code: 1001}   (a close the peer accepted)
+//	broken  -> a plain error, "bad close code 1006" (gorilla refused the frame)
+//
+// One connection, one ReadMessage, no byte race -- which is what makes this
+// gate-ready where abrupt-disconnect is not.
+func wsCaseBackendAbruptClose(ctx context.Context, logger logging.Logger, client *relay_client.RelayClient) error {
+	conn, err := dialCase()
+	if err != nil {
+		return fmt.Errorf("backend-abrupt-close: dial failed: %w", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	// First relay: ordinary, and its only job is to make the relayer dial the
+	// backend. Before a frame earns it there is no backend connection to kill.
+	firstBz, err := buildWebSocketPayload()
+	if err != nil {
+		return err
+	}
+	_, firstRelay, err := buildRelayRequest(ctx, client, RelayServiceID, RelaySupplierAddr, firstBz)
+	if err != nil {
+		return fmt.Errorf("backend-abrupt-close: could not build the first relay: %w", err)
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, firstRelay); err != nil {
+		return fmt.Errorf("backend-abrupt-close: first write failed: %w", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return err
+	}
+	if _, err := readSignedResponse(conn); err != nil {
+		return fmt.Errorf("backend-abrupt-close: the first relay was not served: %w", err)
+	}
+	logger.Info().Msg("backend connection established by a served relay")
+
+	// Second relay: instructs the test backend to drop its TCP with no close
+	// frame. tilt/backend-server honours abrupt_close the same way it honours
+	// repeat_count and delay_ms.
+	killBody, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      2,
+		"method":  "eth_blockNumber",
+		"params":  []any{map[string]any{"abrupt_close": true}},
+	})
+	if err != nil {
+		return fmt.Errorf("backend-abrupt-close: could not build the kill payload: %w", err)
+	}
+	_, killRelay, err := buildRelayRequest(ctx, client, RelayServiceID, RelaySupplierAddr, killBody)
+	if err != nil {
+		return fmt.Errorf("backend-abrupt-close: could not build the kill relay: %w", err)
+	}
+	if err := conn.WriteMessage(websocket.BinaryMessage, killRelay); err != nil {
+		return fmt.Errorf("backend-abrupt-close: kill write failed: %w", err)
+	}
+
+	if err := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
+		return err
+	}
+	_, _, readErr := conn.ReadMessage()
+	if readErr == nil {
+		return fmt.Errorf("backend-abrupt-close: the relayer kept the connection open after its backend died")
+	}
+
+	var closeErr *websocket.CloseError
+	if !errors.As(readErr, &closeErr) {
+		// This is the defect's signature. gorilla refuses to receive a reserved
+		// code and raises a plain protocol error instead of a CloseError.
+		return fmt.Errorf(
+			"backend-abrupt-close: the relayer sent a close code this peer refuses "+
+				"(a gorilla peer answers that with a protocol error, and PATH charges it "+
+				"to this endpoint): %w", readErr)
+	}
+	if closeErr.Code != relayer.CloseGoingAway {
+		return fmt.Errorf(
+			"backend-abrupt-close: expected close %d (going away) for a backend that died "+
+				"with no close frame, got %d (%q)",
+			relayer.CloseGoingAway, closeErr.Code, closeErr.Text)
+	}
+
+	logger.Info().
+		Int("close_code", closeErr.Code).
+		Str("close_text", closeErr.Text).
+		Msg("PASS backend-abrupt-close: a dead backend produced a close code the gateway accepts")
 	return nil
 }
 
