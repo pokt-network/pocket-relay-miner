@@ -80,11 +80,23 @@ type InclusionReconcilerConfig struct {
 	// Why a single mid-window resend (not per-block): txs are unordered with a
 	// block-time-anchored timeout that spans ~the whole window, so the original
 	// is valid in any later (empty) block until it times out. Re-sending every
-	// block would build a fresh tx each time (new timeout → new hash, not
-	// deduped) and flood the mempool with copies that mostly fail DeliverTx as
+	// block would flood the mempool with copies that mostly fail DeliverTx as
 	// duplicate proofs. The only failure the resend fixes is mempool eviction
 	// during the submit-block burst; one resend into a later empty block
 	// recovers it.
+	//
+	// CORRECTED 2026-09-04. This comment used to say that re-sending every
+	// block "would build a fresh tx each time (new timeout → new hash, not
+	// deduped)". That was the wrong model of the nonce, and it was written two
+	// months AFTER the timeout was anchored to latest_block_time: inside one
+	// block the anchor does not move, so two sends in the same block built the
+	// SAME timeout and therefore the same unordered nonce (the pair the chain
+	// keys on is (timeout.UnixNano(), sender)). Far from "not deduped", they
+	// collided, and the second was rejected in CheckTx with "already used
+	// timeout". Across blocks the anchor does move, so a resend one block later
+	// is genuinely a new nonce -- which is why the mid-window resend works at
+	// all, and why it is NOT deduplicated by the chain. What deduplicates it is
+	// poktroll's upsert on (sessionId, supplier).
 	MaxRebroadcasts int
 	// RebroadcastSafetyBlocks stops rebroadcasting once the chain is within this
 	// many blocks of window-close (a resend cannot land after the window).

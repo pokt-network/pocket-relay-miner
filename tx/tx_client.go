@@ -493,10 +493,24 @@ func WithTxWindowTimeout(ctx context.Context, d time.Duration) context.Context {
 // DefaultTxTimeoutMax and the 10 minute hard ceiling -- ten seconds today, so
 // nine remain. Never subtract.
 //
-// This is probabilistic, not a guarantee: 10^9 slots per (sender, block) makes
-// a collision negligible for the tens of transactions a supplier sends in one
-// block, but it is not an allocator. A hard guarantee would need shared state
-// (Redis), which is more coordination than this problem is worth.
+// WHAT IT IS AND IS NOT. This is probabilistic, not an allocator. 10^9 slots
+// per (sender, block) supports about 45 transactions per sender per block at a
+// 10^-6 collision budget, and about 450 at 10^-4. With claim batching on -- the
+// default -- a supplier sends one claim transaction per block plus any proofs,
+// so k is a single digit and the margin is six orders. With batching OFF
+// (disable_claim_batching) it is one transaction per session, and at k in the
+// hundreds the budget is no longer comfortable. There are ten seconds of
+// headroom under the ceiling, so widening the spread is cheap if that day
+// comes.
+//
+// AND WHAT MAKES A COLLIDING RETRY SURVIVABLE IS NOT THIS CODE. Before the
+// offset, a rebuilt retry carried an identical nonce and the chain rejected it,
+// which was wasteful but harmless. With distinct nonces a retry can land, and
+// what keeps that safe is that poktroll's MsgCreateClaim is an UPSERT keyed by
+// (sessionId, supplier) -- x/proof/keeper/msg_server_create_claim.go -- so a
+// second identical claim is idempotent and costs a fee. That is a dependency on
+// an external module's behaviour, and it is stated here so the next reader does
+// not have to rediscover it.
 const txNonceSpread = time.Second
 
 var (
@@ -504,9 +518,20 @@ var (
 	// two session-end groups, lifecycle versus reconciler.
 	txNonceCounter atomic.Uint64
 
-	// txNonceBase separates processes. Two replicas holding the same supplier
-	// across a rebalance handoff observe the same block time and would
-	// otherwise walk the same counter sequence. Seeded once per process.
+	// txNonceBase makes two processes UNLIKELY to walk the same counter
+	// sequence: two replicas holding one supplier across a rebalance handoff
+	// observe the same block time, and without a per-process seed they would
+	// both start at 1. Seeded once per process.
+	//
+	// It is best-effort and NOT a guarantee of anything about replicas, which
+	// an earlier version of this comment implied. Four things break that
+	// guarantee independently of the seed: the anchor itself can differ (a
+	// replica whose BlockTimeProvider is nil or has not seen a block yet falls
+	// back to wall clock, below); the two replicas need not build the same set
+	// of messages, since the batch is filtered by state read from Redis and by
+	// builds that fail locally; the root hash only converges once the first
+	// replica has flushed its tree; and the session header may come from the
+	// chain on one replica and from the snapshot on the other.
 	txNonceBase = newTxNonceBase()
 )
 
