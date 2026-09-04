@@ -614,8 +614,12 @@ func (b *WebSocketBridge) release() {
 
 	deadline := time.Now().Add(wsWriteWait)
 
-	// The gateway gets the original code -- PATH understands Pocket codes.
-	gatewayCloseMsg := websocket.FormatCloseMessage(reason.code, reason.text)
+	// The gateway keeps the Pocket code -- PATH understands those, and the
+	// private band passes whole -- but it is still sanitized: a 1006 that
+	// gorilla fabricated locally for a dead backend must not go out as a
+	// reserved code, which PATH would read as a protocol violation by us.
+	gatewayCode, gatewayText := sanitizeCloseCode(reason.code, reason.text)
+	gatewayCloseMsg := websocket.FormatCloseMessage(gatewayCode, gatewayText)
 	b.gatewayWriteMu.Lock()
 	gwErr := b.gatewayConn.WriteControl(websocket.CloseMessage, gatewayCloseMsg, deadline)
 	b.gatewayWriteMu.Unlock()
@@ -1464,21 +1468,67 @@ func extractCloseInfo(err error) (int, string) {
 // mapToRFCCloseCode converts custom Pocket close codes to standard RFC 6455 codes.
 // This is used when closing the backend connection - backends don't understand Pocket codes.
 // Pocket codes (4000-4999) are mapped to appropriate RFC codes for clean disconnection.
+// sanitizeCloseCode returns a close code a real gorilla peer will accept, and
+// the text to send beside it.
+//
+// The leak it plugs: gorilla manufactures CloseError{1006} LOCALLY for any dead
+// TCP with no close frame -- an ordinary disconnect, not something a peer sent.
+// closeInfoForReadError propagates whatever it finds, and release() used to put
+// that straight on the wire in both directions. 1006 is reserved and must not
+// be sent, so the receiving gorilla answers a protocol error: a backend that
+// dies made PATH see a protocol violation by the RELAYER, which PATH charges to
+// this endpoint's reputation.
+//
+// The accepted set is gorilla's own validReceivedCloseCodes, enumerated here
+// because it is unexported. It is enumerated and NOT written as a range: the
+// range 1000..1014 looks right and admits 1004 and 1014, which gorilla rejects.
+// TestEveryCloseCodeTheBridgeCanPickIsAcceptedByARealPeer checks this against a
+// real peer rather than against a predicate of ours, which would be circular.
+func sanitizeCloseCode(code int, text string) (int, string) {
+	// The private band passes WHOLE, never enumerated: gorilla accepts all of
+	// 3000-4999, and the codes in it that matter belong to the END CLIENT, who
+	// we cannot enumerate. Listing the Pocket codes and defaulting the rest is
+	// how a client's own close code gets flattened on its way through us.
+	if code >= 3000 && code <= 4999 {
+		return code, text
+	}
+	switch code {
+	case CloseNormalClosure, CloseGoingAway, CloseProtocolError, CloseUnsupportedData,
+		CloseInvalidPayload, ClosePolicyViolation, CloseMessageTooBig,
+		CloseMandatoryExtension, CloseInternalError, CloseServiceRestart,
+		CloseTryAgainLater:
+		return code, text
+	}
+	// 1004, 1005, 1006, 1014, 1015 and anything out of range: no endpoint may
+	// put these on the wire. Going away is the truthful residue -- we are
+	// closing, and we have nothing valid to say about why.
+	return CloseGoingAway, text
+}
+
 func mapToRFCCloseCode(code int) (int, string) {
-	// Standard RFC codes (1000-1015) pass through unchanged
-	if code >= 1000 && code <= 1015 {
-		return code, ""
+	// No pass-through for 1000..1015: that range is where the leak was, since
+	// it admits the reserved codes gorilla refuses to receive. Anything in the
+	// RFC space goes through the sanitizer, which enumerates what a peer will
+	// actually take.
+	if code < 3000 {
+		out, _ := sanitizeCloseCode(code, "")
+		return out, ""
 	}
 
-	// Map custom Pocket codes to RFC equivalents for backend
+	// Pocket codes have no meaning to a backend, so they are translated. What a
+	// code says about WHOSE fault it was matters here: 4001 and 4002 are
+	// verdicts about the CLIENT, and the backend did nothing. Sending it 1008
+	// ("you violated a policy") or 1013 ("you are overloaded") accuses it of a
+	// fault it does not have, and an operator reading its logs sees us blaming
+	// their node for someone else's bad frame.
 	switch code {
 	case CloseSessionExpired: // 4000 - session ended, clean shutdown
 		return CloseGoingAway, "session ended"
-	case CloseValidationFailed: // 4001 - protocol/validation error
-		return ClosePolicyViolation, "request rejected"
-	case CloseStakeLimitExceeded: // 4002 - rate limiting
-		return CloseTryAgainLater, "rate limited"
-	case CloseBackendConnectionFailed: // 4003 - already a backend issue
+	case CloseValidationFailed: // 4001 - the CLIENT's frame was rejected
+		return CloseGoingAway, "client frame rejected"
+	case CloseStakeLimitExceeded: // 4002 - the APPLICATION ran out of stake
+		return CloseGoingAway, "client budget exhausted"
+	case CloseBackendConnectionFailed: // 4003 - this one IS about the backend
 		return CloseInternalError, "connection failed"
 	default:
 		// Unknown custom code - use generic going away
