@@ -5,6 +5,7 @@ package relayer
 import (
 	"context"
 	"fmt"
+	"github.com/pokt-network/pocket-relay-miner/transport"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -480,4 +481,68 @@ func TestBridgeBillsEverySubscriptionPush(t *testing.T) {
 		"expected %d billed relays for %d pushes, got %d", pushes, pushes, pub.calls.Load())
 	require.Equal(t, int32(pushes), proc.calls.Load(),
 		"each push is mined with its own RelayHash over {Req, Res}")
+}
+
+// ctxWatchingPublisher answers the only question the test below asks: was the
+// context handed to Publish already dead?
+type ctxWatchingPublisher struct {
+	calls atomic.Int32
+	live  atomic.Bool
+}
+
+func (p *ctxWatchingPublisher) Publish(ctx context.Context, _ *transport.MinedRelayMessage) error {
+	p.calls.Add(1)
+	p.live.Store(ctx.Err() == nil)
+	return ctx.Err()
+}
+
+func (p *ctxWatchingPublisher) Close() error { return nil }
+
+// TestBridgePublishesARelayItAlreadyServedAfterTheBridgeWasCancelled pins the
+// accounting invariant that HTTP and gRPC already hold and the bridge did not.
+//
+// handleBackendMessage signs the response and writes it to the gateway BEFORE
+// calling emitRelay, so by the time emitRelay runs the relay is served and the
+// gateway will bill for it. Publishing it to the WAL is what turns it into an
+// SMST leaf, a claim and a reward. Those two steps used to share b.ctx, and
+// b.ctx is cancelled by closeWithReason -- which readLoop, pingLoop and the
+// SessionMonitor callback all reach from goroutines that are NOT serialised
+// with messageLoop. A cancel landing in that window made XAdd fail with
+// context.Canceled before any network I/O: served, signed, never mined.
+// Session rollover fires that cancel on every open connection at once.
+//
+// The discriminant is the STATE OF THE CONTEXT at Publish, not whether Publish
+// was reached: with the defect present Publish is still called, just with a
+// context that is already dead, and a stub publisher that ignores ctx would
+// stay green through the whole bug.
+func TestBridgePublishesARelayItAlreadyServedAfterTheBridgeWasCancelled(t *testing.T) {
+	verifyNoBridgeGoroutines(t)
+
+	backendURL, _, _ := countingWSBackend(t)
+	pipeline, _, _ := newOwnerTestPipeline(t)
+	supplier, signer := newSupplier(t)
+	relayerConn, _ := newGatewaySideHarness(t)
+
+	pub := &ctxWatchingPublisher{}
+	bridge, err := NewWebSocketBridge(
+		testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+		&recordingProcessor{}, pub, signer, http.Header{},
+		nil, pipeline, 5*time.Second, false, nil, "", nil,
+	)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = bridge.Close() })
+
+	// The frame that earned this connection already went through admission.
+	bridge.owner.Store(&supplier)
+
+	// The window: the gateway write has happened, and something outside
+	// messageLoop closes the bridge before the publish runs.
+	require.NoError(t, bridge.closeWithReason(CloseSessionExpired, "session expired", wsCloseInitiatorRelayer))
+	require.Error(t, bridge.ctx.Err(), "the bridge context must be dead for this test to mean anything")
+
+	bridge.emitRelay(ownerTestRelay("already-served", supplier), &servicetypes.RelayResponse{}, []byte(`{"ok":true}`))
+
+	require.Equal(t, int32(1), pub.calls.Load(), "the served relay must still reach the WAL")
+	require.True(t, pub.live.Load(),
+		"the publish inherited the cancelled bridge context: a served, signed relay that never becomes an SMST leaf")
 }

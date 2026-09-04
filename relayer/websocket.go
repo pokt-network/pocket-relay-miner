@@ -1198,6 +1198,15 @@ func (b *WebSocketBridge) forwardToBackend(msg wsMessage) {
 
 // emitRelay creates and publishes a mined relay for a request/response pair.
 // This is the billing mechanism - each req/resp pair becomes a relay.
+// wsPublishTimeout bounds the detached mining/WAL-publish work for one
+// websocket relay. It is deliberately NOT grpcPublishTimeout (30s): there the
+// budget is per request, here it is per open connection, and at session
+// rollover every open bridge publishes at once -- 30s each would hold N sockets
+// and their goroutines through the whole teardown. Small enough that a slow
+// Redis delays teardown rather than stalling it, large enough that a single
+// XAdd on a healthy localnet or production Redis has room to spare.
+const wsPublishTimeout = 5 * time.Second
+
 func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servicetypes.RelayResponse, respPayload []byte) {
 	if b.simulated {
 		// ACCOUNTING gated off entirely for a simulated relay: no mining
@@ -1253,8 +1262,32 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	// NewWebSocketBridge enforces b.relayProcessor != nil, so every event goes
 	// through the full ProcessRelay path: compute RelayHash over {Req, Res},
 	// attach correct CU from service config, and publish with a session ID.
+	// publishCtx detaches mining and the WAL publish from the bridge LIFETIME.
+	// Everything above this line already happened: handleBackendMessage signed
+	// the response and wrote it to the gateway before calling emitRelay, so the
+	// relay is served and billable by the gateway no matter what happens next.
+	// b.ctx is cancelled by closeWithReason, which readLoop, pingLoop and the
+	// SessionMonitor callback all reach from goroutines that are NOT serialised
+	// with messageLoop -- so a cancel landing in the window between the gateway
+	// write and this call used to make XAdd return context.Canceled before any
+	// network I/O, leaving a served, signed relay with no WAL entry and no SMST
+	// leaf: no claim, no proof, lost reward. Session rollover fires that cancel
+	// on every open connection at once.
+	//
+	// It covers ProcessRelay too, not just Publish: ProcessRelay reads the ctx
+	// to fetch compute units, and CU is what the leaf is worth -- degrading it
+	// under a dead context would change the money without changing the relay
+	// count, which is the one thing anything downstream compares.
+	//
+	// The timeout is what carries this, not WithoutCancel: b.ctx descends from
+	// context.Background (see the constructor), so WithoutCancel drops a
+	// cancellation and nothing else today. It is written this way for symmetry
+	// with the gRPC path and so the call keeps any values b.ctx gains later.
+	publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(b.ctx), wsPublishTimeout)
+	defer publishCancel()
+
 	msg, procErr := b.relayProcessor.ProcessRelay(
-		b.ctx,
+		publishCtx,
 		reqBytes,
 		respPayload,
 		supplierAddr,
@@ -1275,7 +1308,7 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 		return
 	}
 
-	if pubErr := b.publisher.Publish(b.ctx, msg); pubErr != nil {
+	if pubErr := b.publisher.Publish(publishCtx, msg); pubErr != nil {
 		relaysDropped.WithLabelValues(b.serviceID, dropReasonPublishFailed).Inc()
 		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Err(pubErr).
