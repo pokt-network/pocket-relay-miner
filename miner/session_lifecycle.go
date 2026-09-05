@@ -35,6 +35,27 @@ type SessionLifecycleConfig struct {
 	CheckInterval time.Duration
 }
 
+// ProofCycleResult names the sessions whose proof was accepted by the chain's
+// mempool during one proof cycle. A session ABSENT from Settled is not a failed
+// session: it is a session the caller must not transition, either because its
+// group failed or because the cycle stopped before reaching it.
+//
+// The distinction is the point of the type. The caller marks SessionStateProved,
+// and a proved session with no proof on-chain is a slash whose ledger says
+// everything went fine -- so "not named" has to mean "leave it alone", never
+// "assume the batch's fate applies".
+type ProofCycleResult struct {
+	// Settled holds the session IDs the caller may transition to Proved.
+	// nil is valid and means none.
+	Settled map[string]struct{}
+}
+
+// IsSettled reports whether this cycle got sessionID's proof to the chain.
+func (r ProofCycleResult) IsSettled(sessionID string) bool {
+	_, ok := r.Settled[sessionID]
+	return ok
+}
+
 // SessionLifecycleCallback defines callbacks for lifecycle events.
 type SessionLifecycleCallback interface {
 	// OnSessionActive is called when a new session starts.
@@ -45,9 +66,13 @@ type SessionLifecycleCallback interface {
 	// All sessions in the batch are submitted in a single transaction for efficiency.
 	OnSessionsNeedClaim(ctx context.Context, snapshots []*SessionSnapshot) (rootHashes [][]byte, err error)
 
-	// OnSessionsNeedProof is called when sessions need proofs submitted (batched).
-	// All sessions in the batch are submitted in a single transaction for efficiency.
-	OnSessionsNeedProof(ctx context.Context, snapshots []*SessionSnapshot) error
+	// OnSessionsNeedProof is called when sessions need proofs submitted.
+	// The returned ProofCycleResult names the sessions whose proof reached the
+	// chain; the error aggregates the groups that failed. Both carry meaning at
+	// once: one cycle can settle some sessions and fail others, and before this
+	// signature it could not say so -- a nil meant "all proved" and an error
+	// meant "none", with nothing in between.
+	OnSessionsNeedProof(ctx context.Context, snapshots []*SessionSnapshot) (ProofCycleResult, error)
 
 	// OnSessionProved is called when a session proof is successfully submitted.
 	OnSessionProved(ctx context.Context, snapshot *SessionSnapshot) error
@@ -1068,15 +1093,30 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 		Int("batch_size", len(sessions)).
 		Msg("executing batched proof transition — submitting proofs")
 
-	// Call the batched proof callback
-	if proofErr := m.callback.OnSessionsNeedProof(ctx, sessions); proofErr != nil {
-		m.logger.Error().Err(proofErr).Int("batch_size", len(sessions)).Msg("batched proof callback failed")
+	// Call the proof callback. The error and the result are BOTH read: a cycle
+	// that failed one group can still have settled another, and returning early
+	// on the error would leave those sessions in `proving` with their proof
+	// already on-chain -- forfeited at window close while the chain holds the
+	// proof that would have paid them.
+	result, proofErr := m.callback.OnSessionsNeedProof(ctx, sessions)
+	if proofErr != nil {
+		m.logger.Error().
+			Err(proofErr).
+			Int("batch_size", len(sessions)).
+			Int("settled", len(result.Settled)).
+			Msg("proof cycle reported failures — transitioning only the sessions it settled")
 		proofErrors.WithLabelValues(m.config.SupplierAddress, "callback_failed").Inc()
-		return
 	}
 
-	// Update all sessions and transition to proved
+	// Update the settled sessions and transition them to proved.
 	for _, session := range sessions {
+		// Not settled: either its group failed, or the cycle never reached it.
+		// Its state is owned by whoever did reach a verdict on it (the callback
+		// marks window-closed / tx-error / probabilistically-proved itself), or
+		// by the window closing. Touching it here is what would invent a proof.
+		if !result.IsSettled(session.SessionID) {
+			continue
+		}
 		// Update session state (pointer update, safe without mutex)
 		session.State = SessionStateProved
 		session.LastUpdatedAt = time.Now()

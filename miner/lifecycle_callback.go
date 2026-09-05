@@ -515,6 +515,43 @@ func alignProofBatch(built []proofBuildResult) (
 	return proofMsgs, interfaceProofMsgs, snapshots
 }
 
+// buildProofGroups partitions one supplier's snapshots into the groups that
+// each become one proof submission, in a DETERMINISTIC order.
+//
+// Determinism is the reason this exists as a function instead of a map literal.
+// The previous form built a map[int64][]*SessionSnapshot and ranged over it, and
+// Go randomises map iteration, so the order groups reached the chain changed
+// between runs. That is invisible while one failing group ends the cycle -- the
+// abandoned groups are abandoned either way -- and becomes a coin flip over
+// which sessions get their proof once the cycle keeps going.
+//
+// Sorting by end height alone is NOT enough, and this is the part that is easy
+// to get wrong: sessions are anchored to a global grid, so in the ordinary case
+// every group carries the SAME end height and the comparison is a tie on every
+// pair. sort.SliceStable keeps arrival order under that tie, which is what
+// actually fixes the sequence; the sort by height only puts the group whose
+// window closes first at the front when heights do differ.
+//
+// perSession mirrors the DisableProofBatching workaround: one group per session.
+func buildProofGroups(snapshots []*SessionSnapshot, perSession bool) [][]*SessionSnapshot {
+	groups := make([][]*SessionSnapshot, 0, len(snapshots))
+	byEndHeight := make(map[int64]int, len(snapshots))
+	for _, snapshot := range snapshots {
+		if !perSession {
+			if idx, ok := byEndHeight[snapshot.SessionEndHeight]; ok {
+				groups[idx] = append(groups[idx], snapshot)
+				continue
+			}
+			byEndHeight[snapshot.SessionEndHeight] = len(groups)
+		}
+		groups = append(groups, []*SessionSnapshot{snapshot})
+	}
+	sort.SliceStable(groups, func(i, j int) bool {
+		return groups[i][0].SessionEndHeight < groups[j][0].SessionEndHeight
+	})
+	return groups
+}
+
 // proofBuildCollection is the partitioned result of draining numTasks
 // proofBuildResult values from the proof worker channel. Proofs have no
 // skip path (unlike claims, which can bail early on "unprofitable" or
@@ -1362,12 +1399,24 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 	return allRootHashes, nil
 }
 
-// OnSessionsNeedProof is called when sessions need proofs submitted (batched).
-// It waits for the proper timing spread, generates proofs, and submits all proofs in a single transaction.
-func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots []*SessionSnapshot) error {
+// OnSessionsNeedProof is called when sessions need proofs submitted.
+// It waits for the proper timing spread, generates proofs, and submits them.
+//
+// One failing group no longer ends the cycle. Every group runs, the sessions
+// that reached the chain are named in the returned ProofCycleResult, and the
+// failures are aggregated into one error. Before this, ten function-level
+// returns lived in the group loop: the first to fire abandoned every group
+// behind it, and those sessions reached no verdict at all -- no state written,
+// no rebroadcast entry, and no lifecycle retry, because `proving` has a single
+// exit (proof_timeout -> ProofWindowClosed).
+func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots []*SessionSnapshot) (ProofCycleResult, error) {
+	result := ProofCycleResult{Settled: make(map[string]struct{}, len(snapshots))}
 	if len(snapshots) == 0 {
-		return nil
+		return result, nil
 	}
+	// groupErrs accumulates one entry per group that did not settle, so the
+	// caller sees every failure instead of only the first.
+	var groupErrs []error
 
 	// All sessions for a single supplier, so we can batch them
 	firstSnapshot := snapshots[0]
@@ -1393,36 +1442,35 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 	// WORKAROUND: If batching is disabled, create one group per session to avoid
 	// cross-contamination where one invalid proof (e.g., difficulty validation failure)
 	// causes the entire batch to fail.
-	sessionsByEndHeight := make(map[int64][]*SessionSnapshot)
+	//
+	// The groups are a SLICE, not a map, and that is load-bearing rather than
+	// stylistic: Go randomises map iteration, so with a map the order in which
+	// groups reach the chain differs run to run. Ordering by end height alone
+	// does not fix it either -- sessions are anchored to a global grid, so in
+	// the normal case every group shares one end height and the comparison is a
+	// tie. Building in arrival order and sorting with SliceStable makes arrival
+	// order the tiebreak, which is what stays fixed across runs.
+	groups := buildProofGroups(snapshots, lc.config.DisableProofBatching)
 	if lc.config.DisableProofBatching {
-		// No batching - each session in its own "group" using unique key
 		logger.Info().
 			Int("total_sessions", len(snapshots)).
 			Bool("batching_disabled", true).
 			Msg("PROOF_BATCHING_DISABLED: submitting each session in separate transaction (workaround for difficulty validation)")
-		for i, snapshot := range snapshots {
-			// Use negative index as key to avoid conflicts with real end heights
-			sessionsByEndHeight[int64(-i-1)] = []*SessionSnapshot{snapshot}
-		}
 	} else {
-		// Normal batching - group by session end height
 		logger.Info().
 			Int("total_sessions", len(snapshots)).
 			Bool("batching_enabled", true).
 			Msg("proof batching enabled - grouping sessions by end height")
-		for _, snapshot := range snapshots {
-			sessionsByEndHeight[snapshot.SessionEndHeight] = append(sessionsByEndHeight[snapshot.SessionEndHeight], snapshot)
-		}
 	}
 
 	logger.Info().
 		Int("total_sessions", len(snapshots)).
-		Int("num_batches", len(sessionsByEndHeight)).
+		Int("num_batches", len(groups)).
 		Bool("batching_disabled", lc.config.DisableProofBatching).
 		Msg("proof batching strategy applied")
 
 	// Process each group (same proof window) separately
-	for _, groupSnapshots := range sessionsByEndHeight {
+	for _, groupSnapshots := range groups {
 		// Get the actual session end height from the first snapshot in the group
 		// (all snapshots in a group have the same end height)
 		sessionEndHeight := groupSnapshots[0].SessionEndHeight
@@ -1432,7 +1480,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// computed with new-epoch params would resolve the wrong proof window.
 		sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 		if err != nil {
-			return fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err)
+			groupErrs = append(groupErrs,
+				fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err))
+			continue
 		}
 
 		// Wait for proof window to open
@@ -1461,7 +1511,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// Wait for proof window to open (we'll use the seed block, not this one)
 		_, blockErr := lc.waitForBlock(ctx, proofWindowOpenHeight)
 		if blockErr != nil {
-			return fmt.Errorf("failed to wait for proof window open: %w", blockErr)
+			groupErrs = append(groupErrs,
+				fmt.Errorf("failed to wait for proof window open: %w", blockErr))
+			continue
 		}
 
 		// Proof requirement seed block height.
@@ -1497,7 +1549,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				Int64("seed_height", proofRequirementSeedHeight).
 				Int64("proof_window_open_height", proofWindowOpenHeight).
 				Msg("failed to wait for proof requirement seed block")
-			return fmt.Errorf("failed to wait for proof requirement seed block: %w", seedErr)
+			groupErrs = append(groupErrs,
+				fmt.Errorf("failed to wait for proof requirement seed block: %w", seedErr))
+			continue
 		}
 
 		logger.Debug().
@@ -1628,7 +1682,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// spread is re-enabled; TestProofDistributionStillDisabled fails loudly then.
 		earliestProofHeight := earliestProofCommitHeight
 		if _, earliestErr := lc.waitForBlock(ctx, earliestProofHeight); earliestErr != nil {
-			return fmt.Errorf("failed to wait for earliest proof commit height: %w", earliestErr)
+			groupErrs = append(groupErrs,
+				fmt.Errorf("failed to wait for earliest proof commit height: %w", earliestErr))
+			continue
 		}
 
 		logger.Info().
@@ -1667,7 +1723,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				lc.markAndCountProofWindowClosed(ctx, snapshot)
 			}
 
-			return fmt.Errorf("proof window already closed at height %d (current: %d)", proofWindowClose, currentBlock.Height())
+			groupErrs = append(groupErrs,
+				fmt.Errorf("proof window already closed at height %d (current: %d)", proofWindowClose, currentBlock.Height()))
+			continue
 		}
 
 		// CRITICAL: Re-check proof requirement RIGHT before building proofs
@@ -1890,11 +1948,18 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// individually) so the caller can meter / retry on the next cycle.
 		if len(partitionedProofs.built) == 0 {
 			if len(partitionedProofs.failed) > 0 {
-				return fmt.Errorf("all proofs in batch failed to build (batch_size=%d): %w",
-					numProofTasks, partitionedProofs.failed[0].err)
+				groupErrs = append(groupErrs,
+					fmt.Errorf("all proofs in group failed to build (group_size=%d): %w",
+						numProofTasks, partitionedProofs.failed[0].err))
 			}
-			// numProofTasks was zero — nothing to do.
-			return nil
+			// numProofTasks was zero — nothing to do for THIS group. This was a
+			// bare `return nil`, which is the most dangerous shape in the loop:
+			// it abandoned every group behind it AND told the caller the cycle
+			// succeeded, and the caller answers a nil by marking every session
+			// Proved -- including ones it never processed. A session recorded as
+			// proved with no proof on-chain is a slash whose ledger says
+			// everything is fine.
+			continue
 		}
 
 		proofMsgs, interfaceProofMsgs, validProofSnapshots := alignProofBatch(partitionedProofs.built)
@@ -1918,7 +1983,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				lc.markAndCountProofWindowClosed(ctx, snapshot)
 			}
 
-			return fmt.Errorf("proof window closed while building proofs at height %d (current: %d)", proofWindowClose, currentBlock.Height())
+			groupErrs = append(groupErrs,
+				fmt.Errorf("proof window closed while building proofs at height %d (current: %d)", proofWindowClose, currentBlock.Height()))
+			continue
 		}
 
 		proofBlocksRemaining := proofWindowClose - currentBlock.Height()
@@ -2004,7 +2071,13 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				if attempt < lc.config.ProofRetryAttempts {
 					select {
 					case <-ctx.Done():
-						return ctx.Err()
+						// The ONE exit that is not a `continue`, and deliberately
+						// so: a cancelled context makes every remaining group fail
+						// too, so continuing would only burn the rest of the window
+						// producing the same error N times. It still returns the
+						// sessions already settled instead of discarding them,
+						// which is what the bare `return ctx.Err()` did.
+						return result, errors.Join(append(groupErrs, ctx.Err())...)
 					case <-time.After(lc.config.ProofRetryDelay):
 						continue
 					}
@@ -2088,6 +2161,22 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					)
 				}
 
+				// Name this group's sessions as settled so the caller transitions
+				// exactly these to Proved.
+				//
+				// It is groupSnapshots and not validProofSnapshots ON PURPOSE, and
+				// the difference matters: a session whose proof build failed, or
+				// which the chain did not require, is in the former and not the
+				// latter. Today the caller marks every session it was handed once
+				// the callback returns nil, so those sessions are already reaching
+				// Proved -- naming only the built ones here would silently change
+				// what a whole class of sessions ends up as, inside a commit whose
+				// job is to preserve behaviour. Whether Proved is the right state
+				// for them is a real question, and it is a SEPARATE one.
+				for _, snapshot := range groupSnapshots {
+					result.Settled[snapshot.SessionID] = struct{}{}
+				}
+
 				logger.Info().
 					Int("batch_size", len(proofMsgs)).
 					Str("proof_tx_hash", proofTxHash).
@@ -2159,11 +2248,13 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				)
 			}
 
-			return fmt.Errorf("batched proof submission failed after %d attempts: %w", lc.config.ProofRetryAttempts, lastErr)
+			groupErrs = append(groupErrs,
+				fmt.Errorf("proof submission failed after %d attempts: %w", lc.config.ProofRetryAttempts, lastErr))
+			continue
 		}
 	}
 
-	return nil
+	return result, errors.Join(groupErrs...)
 }
 
 // OnSessionProved is called when a session proof is successfully submitted.
