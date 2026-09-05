@@ -19,6 +19,23 @@ import (
 // InclusionOutcome values are stable strings — metric labels and
 // submission-tracker JSON depend on them.
 const (
+	// Causes for inclusionEntryDroppedTotal and inclusionGroupAbandonedTotal.
+	// Both sets are CLOSED and live here beside the code that stamps them: a
+	// Prometheus label whose value set drifts is worse than one that disappears.
+	//
+	// entry_corrupt covers the three paths that meet an entry they cannot
+	// decode. A failed clear is NOT one of these -- it has its own metric,
+	// because there the entry survives rather than being dropped.
+	dropCauseCorrupt = "entry_corrupt"
+
+	abandonCauseListFailed     = "list_failed"
+	abandonCauseParamsFailed   = "params_failed"
+	abandonCauseIndexMalformed = "index_malformed"
+	// index_unreadable is the WIDEST of these: ActiveGroups failing abandons the
+	// entire pass for that phase -- every group, not one -- and until it was
+	// counted the only trace was a log line on a per-block path.
+	abandonCauseIndexUnreadable = "index_unreadable"
+
 	inclusionFound   = "on_chain_found"
 	inclusionMissing = "on_chain_missing"
 	inclusionPollErr = "poll_error"
@@ -288,6 +305,7 @@ func (r *InclusionReconciler) runPass(rp reconcilePhase, height int64) {
 	ctx := context.Background()
 	groups, err := r.store.ActiveGroups(ctx, rp.phase)
 	if err != nil {
+		inclusionGroupAbandonedTotal.WithLabelValues(string(rp.phase), abandonCauseIndexUnreadable).Inc()
 		r.logger.Warn().Err(err).Str("phase", string(rp.phase)).Msg("inclusion reconcile: failed to list active groups")
 		return
 	}
@@ -328,6 +346,7 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 
 	pending, err := r.store.List(ctx, rp.phase, g.Supplier, g.SessionEnd)
 	if err != nil {
+		inclusionGroupAbandonedTotal.WithLabelValues(string(rp.phase), abandonCauseListFailed).Inc()
 		r.logger.Warn().Err(err).Str("phase", string(rp.phase)).Str("supplier", g.Supplier).Msg("inclusion reconcile: failed to list pending payloads")
 		return
 	}
@@ -344,6 +363,7 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 	if err != nil {
 		// Can't compute the window; retry next block. If params never resolve the
 		// payloads age out via TTL (no silent forfeit beyond observability gap).
+		inclusionGroupAbandonedTotal.WithLabelValues(string(rp.phase), abandonCauseParamsFailed).Inc()
 		r.logger.Warn().Err(err).Str("phase", string(rp.phase)).Int64("session_end", g.SessionEnd).Msg("inclusion reconcile: failed to get shared params")
 		return
 	}
@@ -362,6 +382,14 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			for sessionID, raw := range pending {
 				entry, decErr := unmarshalRebroadcastEntry(raw)
 				if decErr != nil {
+					// Was a bare continue: no log, no clear, no outcome, no
+					// metric. It leaves the entry in place, so the same
+					// undecodable payload is met again on every block for as
+					// long as the query keeps failing with the window open.
+					inclusionEntryDroppedTotal.WithLabelValues(string(rp.phase), dropCauseCorrupt).Inc()
+					r.logger.Warn().Err(decErr).Str("phase", string(rp.phase)).Str("session_id", sessionID).
+						Msg("inclusion reconcile: corrupt rebroadcast entry in degraded mode; dropping")
+					r.clear(ctx, rp.phase, g, sessionID)
 					continue
 				}
 				if r.canRebroadcast(entry, height, windowClose) {
@@ -375,6 +403,9 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 		for sessionID, raw := range pending {
 			e, decErr := unmarshalRebroadcastEntry(raw)
 			if decErr != nil {
+				inclusionEntryDroppedTotal.WithLabelValues(string(rp.phase), dropCauseCorrupt).Inc()
+				r.logger.Warn().Err(decErr).Str("phase", string(rp.phase)).Str("session_id", sessionID).
+					Msg("inclusion reconcile: corrupt rebroadcast entry with window closed; dropping")
 				r.clear(ctx, rp.phase, g, sessionID)
 				continue
 			}
@@ -387,6 +418,7 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 	for sessionID, raw := range pending {
 		entry, decErr := unmarshalRebroadcastEntry(raw)
 		if decErr != nil {
+			inclusionEntryDroppedTotal.WithLabelValues(string(rp.phase), dropCauseCorrupt).Inc()
 			r.logger.Warn().Err(decErr).Str("session_id", sessionID).Msg("inclusion reconcile: corrupt rebroadcast entry; dropping")
 			r.clear(ctx, rp.phase, g, sessionID)
 			continue
@@ -546,6 +578,11 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 
 func (r *InclusionReconciler) clear(ctx context.Context, phase RebroadcastPhase, g RebroadcastGroup, sessionID string) {
 	if err := r.store.Delete(ctx, phase, g.Supplier, g.SessionEnd, sessionID); err != nil {
+		// The entry survives, so the next block reconciles it again and emits
+		// its outcome a second time. Counting it is what makes that visible:
+		// the log alone cannot be alerted on, and a duplicated outcome is
+		// otherwise indistinguishable from two real ones.
+		inclusionClearFailedTotal.WithLabelValues(string(phase)).Inc()
 		r.logger.Warn().Err(err).Str("phase", string(phase)).Str("session_id", sessionID).Msg("inclusion reconcile: failed to clear pending entry")
 	}
 }

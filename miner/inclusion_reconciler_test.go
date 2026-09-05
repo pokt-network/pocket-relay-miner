@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -81,6 +82,9 @@ type reconcilerHarness struct {
 	rebroadcast []string
 	onChain     map[string]struct{}
 	onChainErr  error
+	// rc is the Redis client behind the store, kept so a test can close it and
+	// exercise the paths that abandon a whole group when the store is gone.
+	rc *redisutil.Client
 	// outcomeErr, when set, makes recordOutcome fail — the reconciler must
 	// then KEEP the pending entry so the observation gets another block.
 	outcomeErr  error
@@ -102,6 +106,7 @@ func newReconcilerHarness(t *testing.T, safetyBlocks int64) *reconcilerHarness {
 	rc, _ := newTestRedis(t)
 
 	h := &reconcilerHarness{
+		rc:          rc,
 		store:       NewRebroadcastStore(rc, time.Hour),
 		resub:       &mockResubmitter{},
 		onChain:     map[string]struct{}{},

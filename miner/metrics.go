@@ -566,6 +566,59 @@ var (
 		[]string{"supplier", "service_id", "outcome"},
 	)
 
+	// inclusionEntryDroppedTotal counts pending entries the reconciler removed
+	// WITHOUT the normal inclusion outcome; inclusionClearFailedTotal counts the
+	// opposite event, an entry that could NOT be removed; and
+	// inclusionGroupAbandonedTotal counts work skipped wholesale.
+	//
+	// They exist because "it never happened" and "it happens every block" were
+	// producing the same signal: those paths logged and returned, and a Warn on
+	// a per-block path is not something an operator can alert on or count. A
+	// dropped entry is a claim or a proof whose fate nobody recorded.
+	//
+	// Labels are {phase, cause} and deliberately NOT {supplier, service_id}: a
+	// corrupt entry cannot be decoded, so the service_id is precisely the field
+	// that is unavailable. Naming WHICH session is the log's job -- a session id
+	// as a label is unbounded cardinality.
+	inclusionEntryDroppedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "inclusion_entry_dropped_total",
+			Help:      "Pending inclusion entries removed without a normal outcome (labeled by phase, cause)",
+		},
+		[]string{"phase", "cause"},
+	)
+
+	// inclusionClearFailedTotal is its own vector rather than a cause of the one
+	// above, because a failed clear is the OPPOSITE event: the entry survives.
+	// Filing it under "dropped" needed a comment explaining that nothing was
+	// dropped, and a name that has to be explained is a name that will be
+	// misread by whoever reads only the series.
+	//
+	// What it means: the entry is still there, so the next block reconciles it
+	// again and emits its outcome a SECOND time. The counter does not prevent
+	// that -- it makes it attributable.
+	inclusionClearFailedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "inclusion_clear_failed_total",
+			Help:      "Pending inclusion entries whose delete failed, so their outcome is emitted again (labeled by phase)",
+		},
+		[]string{"phase"},
+	)
+
+	inclusionGroupAbandonedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "inclusion_group_abandoned_total",
+			Help:      "Reconcile passes that abandoned pending work (labeled by phase, cause)",
+		},
+		[]string{"phase", "cause"},
+	)
+
 	// proofInclusionOutcomeTotal records the real on-chain fate of each
 	// broadcast proof as observed by the inclusion reconciler. It polls
 	// GetProof(supplier, sessionID) until the proof appears or the proof
@@ -1504,4 +1557,26 @@ func StartWorkerPoolMetricsTicker(
 // client, at the supplier's expense, and then dropped.
 func RecordRelayLostToPanic(supplier, serviceID string) {
 	relaysLostTotal.WithLabelValues(supplier, serviceID, "panic_recovered").Add(1)
+}
+
+// Register every {phase, cause} series at zero.
+//
+// A counter child does not exist until it is first incremented, so before the
+// first occurrence a query for these returns NO DATA -- which an operator reads
+// as "this never happens" and which is indistinguishable from the metric not
+// existing at all. That is not hypothetical here: `poll_dropped` is documented
+// as an outcome in two files and has never had an emitter, so anyone who looked
+// for it concluded saturation does not occur.
+//
+// The sets are the closed ones declared in inclusion_reconciler.go. Registering
+// the cross product by hand rather than with EagerCounterChildren because that
+// helper takes a single label value and these vectors carry two.
+func init() {
+	for _, phase := range []string{string(RebroadcastPhaseClaim), string(RebroadcastPhaseProof)} {
+		inclusionEntryDroppedTotal.WithLabelValues(phase, dropCauseCorrupt)
+		inclusionClearFailedTotal.WithLabelValues(phase)
+		for _, cause := range []string{abandonCauseListFailed, abandonCauseParamsFailed, abandonCauseIndexMalformed, abandonCauseIndexUnreadable} {
+			inclusionGroupAbandonedTotal.WithLabelValues(phase, cause)
+		}
+	}
 }

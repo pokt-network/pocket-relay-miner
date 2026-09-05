@@ -187,12 +187,23 @@ func (s *RebroadcastStore) ActiveGroups(ctx context.Context, phase RebroadcastPh
 	for _, m := range members {
 		// member = "{supplier}:{sessionEnd}". sessionEnd is the suffix after the
 		// last ':'; supplier (bech32) contains no ':'.
+		// A member this loop cannot parse means the GROUP it names is never
+		// reconciled again -- every pending claim or proof under it stops being
+		// checked, silently, for as long as the malformed member sits in the
+		// index. Both skips were bare continues.
+		//
+		// The signal is a metric and not a log because this store carries no
+		// logger, and because a metric is what an operator can alert on: the
+		// condition is bounded by a producer defect existing, so it must be
+		// visible without turning on debug logging.
 		idx := strings.LastIndex(m, ":")
 		if idx < 0 {
+			inclusionGroupAbandonedTotal.WithLabelValues(string(phase), abandonCauseIndexMalformed).Inc()
 			continue
 		}
 		sessionEnd, convErr := strconv.ParseInt(m[idx+1:], 10, 64)
 		if convErr != nil {
+			inclusionGroupAbandonedTotal.WithLabelValues(string(phase), abandonCauseIndexMalformed).Inc()
 			continue
 		}
 		groups = append(groups, RebroadcastGroup{Supplier: m[:idx], SessionEnd: sessionEnd})
