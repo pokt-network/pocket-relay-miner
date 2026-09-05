@@ -250,6 +250,65 @@ the code did, here the prose says the right thing and the code does not follow
 it. Both are true sentences sitting next to something that does not match them,
 and neither is reachable by any gate.
 
+## Comparing against the neighbour instead of against the property
+
+When two code paths handle the same case differently, the more complete one reads
+as the correct one — and it can be violating the property just as surely.
+
+Measured 2026-09-05, twice in two days by the same pair. Enumerating the paths
+that drop work without recording it, one branch was held up as the CONTRAST for a
+worse one: it logged and it cleaned up, where its sibling did neither. Checked
+against the property — "nothing is removed without emitting its verdict" — it
+fails too, only audibly. It had been left out of the count because it was being
+measured against its neighbour. The same shape, a day earlier: a cardinality
+budget justified by comparing against zero rather than against what the process
+already emits, which was three orders of magnitude larger.
+
+The check: when you catch yourself saying one path is fine BECAUSE it does more
+than another, you have changed the denominator. State the property and evaluate
+each path against it alone. This is also the argument for scoping work by a
+property rather than a list of sites — a list makes the comparison against
+neighbours feel like the work.
+
+## A discarded error is not a defect until you follow it
+
+`_ =` on a call that returns `error` looks like a swallow every time, and reading
+it is enough to SUSPECT and never enough to assert. Three levels, measured on one
+symptom on 2026-09-05, gave three different answers:
+
+1. **Can the callee return non-nil at all?** Two `_ =` on a recording function
+   turned out to discard an error that is statically nil for those arguments —
+   the only error path was in a branch those calls never take. Not a defect. What
+   remains is that the safety depends on the implementations while the interface
+   promises an `error`, which is a defence worth writing, not a loss.
+2. **If it can, is it reachable from here?** A second `_ =` did discard a real
+   one: the callee's first statement queries a store, and that error propagates.
+3. **Does the error even reach the discard?** For the sibling call it did not —
+   the callee opened with a read whose error it turned into `return nil` under a
+   comment saying "nothing to do". The verdict was lost one level BELOW the
+   `_ =`, so a correct analysis of the discard would have cleared a function that
+   loses data. And the conflation there is its own bug: absent, unreadable and
+   corrupt all arrived as one opaque error, so "I found nothing" and "I could not
+   look" produced the same answer.
+
+The trap in the middle of this: a function's FIRST error path is not the
+function. Both reviewers concluded from one branch and generalised, one of them
+with the contradicting line in output he had already read.
+
+## Two reviewers can confirm each other's error
+
+The same session had each of two sessions verifying the other's claims, which
+catches a great deal — and it fails in exactly one shape: when both read the same
+code wrongly in the same direction, cross-checking CONFIRMS the error instead of
+breaking it. It took four readers who had not been in the conversation to catch
+it.
+
+That is a measured argument for a council that is separate from "they think
+differently": they have not inherited the mistake being passed back and forth.
+When two people agree about a piece of code they have been discussing, the
+agreement is worth less than it looks, and worth least precisely where the
+discussion has been longest.
+
 ## Merging two criteria into one: enumerate the injections on both sides
 
 A merge that replaces two criteria with one is only free if the survivor keeps
