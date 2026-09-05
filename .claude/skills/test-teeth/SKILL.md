@@ -185,6 +185,70 @@ decides.**
 - **This applies to guard tests especially** — cardinality guards, invariant
   checks, "must not contain X" assertions. They are written precisely because
   the failure is rare, which means nobody has ever seen them go red.
+- **A "not compiled" is not a red — prove the build before reading the exit
+  code.** The rule above says to prefer modifying; this says how to be sure you
+  did. Run the build as a separate step and treat its failure as "injection
+  malformed, retry", never as the test failing. Measured 2026-09-05, and by the
+  session that had just written the rule: an injection assembled with a bad
+  escape put a stray backslash in the file, the runner reported a failure, and
+  it was read as a red until the build was checked. A harness that runs
+  injections must gate on the compile, because a malformed edit and a caught
+  defect produce the same non-zero exit.
+
+## The assertion is right and it is pointed at the wrong collection
+
+Two shapes, one tell. Both were measured on 2026-09-05, on the same test, and in
+both the assertion was CORRECT — the `require` message stated the property
+accurately — and it was applied where the defect it names cannot appear.
+
+- **An assertion inside a loop is only as good as what the loop iterates.** A
+  test grew a pool from two members to five and asserted that indices stay
+  stable, inside `for i, old := range before` — the two that already existed.
+  The injection renumbered only the members being ADDED, so the assertion ran,
+  passed, and was never near the defect. The fix was one word: iterate the
+  collection AFTER the change, not the one from before it.
+- **A non-membership assertion over an empty set passes for any answer.** The
+  same test then checked that newly added members are not in the healthy set —
+  and nothing had been probed yet, so the healthy set was empty and the check
+  held for every possible index. The fix was to establish the premise: mark the
+  pre-existing members healthy BEFORE growing, so "exactly the old ones are
+  healthy" can fail.
+
+The check is mechanical and needs no injection to raise the suspicion: **for
+every assertion, name the collection it interrogates and ask whether the defect
+you are worried about can appear IN THAT collection.** A loop over the subset
+that predates the change, a set that is empty at that point, a filter applied
+before the mutation — all three answer no, and all three look like coverage.
+
+Distinguish this from the section below on counting: there the assertion is the
+wrong KIND, here it is the right kind aimed at the wrong DATA. The first is
+caught by reading what the assertion says; this one only by reading what it says
+it ABOUT.
+
+## The criterion says WHICH and the assertion says HOW MANY
+
+Writing the standard down does not apply it, and the prose that states it reads
+afterwards as evidence that it was followed.
+
+Measured 2026-09-05: a design document said, of its own six success criteria,
+"none can be satisfied by counting occurrences — all of them ask WHICH". One of
+those criteria was then implemented as ten calls each asserting `NotNil`. An
+injection that pinned the round-robin fallback to member zero left it green: ten
+calls, ten non-nil results, and no idea which connection answered. The defect
+was real — during recovery every call takes that fallback, so pinning sends
+every claim to one connection that may be the one still down.
+
+**The check, applied by reading and without running anything: for each criterion
+phrased as "which", look at whether its assertion NAMES AN IDENTITY** — an
+index, an address, an error sentinel, a specific element. `NotNil`, `len(x) > 0`,
+`err != nil` and `Empty` are quantities and negations; all four pass without
+knowing which case occurred. A criterion whose assertion counts is not
+implemented, it is described.
+
+This is the mirror of the overclaiming comment: there the prose said more than
+the code did, here the prose says the right thing and the code does not follow
+it. Both are true sentences sitting next to something that does not match them,
+and neither is reachable by any gate.
 
 ## Merging two criteria into one: enumerate the injections on both sides
 
