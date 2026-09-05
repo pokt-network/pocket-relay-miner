@@ -24,13 +24,30 @@ as coverage and hold nothing.
 3. **Run the test. It MUST fail**, and the failure must name the thing you
    broke. A failure for an unrelated reason (a panic three layers away, a
    different test) does not count — the test found chaos, not the defect.
-4. **Revert the injection**, byte for byte. Back up the file first (`cp`) and
-   restore from that backup. Do not retype it, and **never restore with
+4. **Revert the injection**, byte for byte, from a backup taken **immediately
+   before THIS injection, off the state you want back**. Not "once at the start":
+   a backup older than your own edits turns the revert into a silent undo of
+   them. Measured 2026-09-05: the backup was taken, two fixes were then written,
+   and the first revert restored the pre-fix file; the second injection reported
+   `substring not found` -- it had nothing left to remove -- and its test went
+   red anyway. That red was the tree without the fix, and it looks exactly like
+   a red that proves teeth. Do not retype the file, and **never restore with
    `git checkout -- <file>`**: the file usually holds the uncommitted change
    you are testing, so checkout throws that away along with the injection and
    the loss is silent until a gate fails. Measured 2026-08-19: it wiped a whole
-   new method mid-session; only `go build` in the level-1 gate caught it.
-5. **Re-run. It must be green again**, and `git diff` on the file must be empty.
+   new method mid-session; only `go build` in the level-1 gate caught it. The
+   two are the same loss through different doors, and closing only the
+   `git checkout` one is why the other stayed open.
+5. **Re-run, and it must be GREEN BEFORE THE NEXT INJECTION.** A gate between
+   injections, not a step at the end of the loop: in the sequence above, this is
+   the check that would have gone red on the revert and named the problem before
+   a second injection was ever applied.
+
+   **And a checksum or a `git diff` against the backup cannot do this job.** It
+   proves the file MATCHES the backup; it says nothing about whether the backup
+   was the right state, because both sides of that comparison come from the same
+   place. Two sessions verified the sequence above with matching md5s and neither
+   check could see it. Only re-running the test can.
 
 ## Before the injection: does the test even reach the fix?
 
@@ -142,9 +159,8 @@ A merge that replaces two criteria with one is only free if the survivor keeps
 the inside: **list the injections before and after, and if one lost the criterion
 that turned it red, the merge cost something.**
 
-Measured 2026-09-05, on the success criteria for `TxRejection` (the three
-versions are preserved as `DESIGN-S1-0a-v3.md`, `-v4.md`, and the v5 that undid
-it). Two criteria covered one type's `Error()`:
+Measured 2026-09-05, on the success criteria for `TxRejection`. Two criteria
+covered one type's `Error()`:
 
 - one built the value **through the real code path** and pinned the message byte
   for byte — it went red when a construction site populated a field wrongly;
