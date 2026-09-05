@@ -193,6 +193,76 @@ type mockTxServiceServer struct {
 	lastTxBytes      []byte // captured TxBytes from most recent BroadcastTx
 	broadcastBlockCh chan struct{}
 	broadcastSeen    chan struct{}
+
+	simulateCalls  int
+	simulateGas    uint64
+	simulateErrMsg string
+	simulateMsgIdx int
+	simulateHasIdx bool
+}
+
+// Simulate answers gas estimation, which is the DEFAULT production path:
+// gas_limit is commented out in config.miner.example.yaml, so it is zero, so
+// the client simulates. Without this the mock returns Unimplemented and every
+// test has to set GasLimit > 0 -- i.e. the mode production does not use.
+func (m *mockTxServiceServer) Simulate(
+	_ context.Context,
+	_ *txtypes.SimulateRequest,
+) (*txtypes.SimulateResponse, error) {
+	m.rwMu.Lock()
+	m.simulateCalls++
+	errMsg, gas := m.simulateErrMsg, m.simulateGas
+	msgIdx, hasIdx := m.simulateMsgIdx, m.simulateHasIdx
+	m.rwMu.Unlock()
+
+	if errMsg != "" {
+		return nil, simulationFailure(errMsg, msgIdx, hasIdx)
+	}
+	if gas == 0 {
+		gas = 50000
+	}
+	return &txtypes.SimulateResponse{
+		GasInfo: &cosmostypes.GasInfo{GasWanted: gas, GasUsed: gas},
+	}, nil
+}
+
+// simulationFailure reproduces the WHOLE wrapping chain a real node applies,
+// which is the point of this helper existing.
+//
+// A mock that returned the keeper's bare text would certify a needle production
+// never produces: by the time a simulation error reaches us it has been wrapped
+// by baseapp (message index), flattened by the tx service (which appends
+// "with gas used: 'N'", a number that differs every call) and carried over gRPC.
+// A classifier tested against the bare string would look correct and match
+// nothing in production.
+//
+// hasIndex false is the ante-handler shape: those decorators run in simulate
+// too and fail BEFORE runMsgs, so their errors carry no message index at all.
+func simulationFailure(serverMsg string, msgIndex int, hasIndex bool) error {
+	inner := serverMsg
+	if hasIndex {
+		// baseapp.go:1052 -- errorsmod.Wrapf puts the wrap BEFORE the cause.
+		inner = fmt.Sprintf("failed to execute message; message index: %d: %s", msgIndex, serverMsg)
+	}
+	// x/auth/tx/service.go:100 -- flattens to codes.Unknown and appends the gas.
+	return status.Errorf(codes.Unknown, "%v with gas used: '%d'", inner, 42000)
+}
+
+// SimulateCalls reports how many simulations reached the server.
+func (m *mockTxServiceServer) SimulateCalls() int {
+	m.rwMu.RLock()
+	defer m.rwMu.RUnlock()
+	return m.simulateCalls
+}
+
+// FailSimulation makes every later Simulate fail with serverMsg, wrapped the
+// way a real node wraps it. hasIndex false reproduces an ante-handler failure.
+func (m *mockTxServiceServer) FailSimulation(serverMsg string, msgIndex int, hasIndex bool) {
+	m.rwMu.Lock()
+	defer m.rwMu.Unlock()
+	m.simulateErrMsg = serverMsg
+	m.simulateMsgIdx = msgIndex
+	m.simulateHasIdx = hasIndex
 }
 
 // BlockBroadcast parks every later BroadcastTx until the returned channel is

@@ -35,8 +35,10 @@ func newBudgetClient(t *testing.T, srv *testGRPCServer, cfg TxClientConfig) *TxC
 
 	cfg.GRPCEndpoint = srv.address
 	cfg.ChainID = "test-chain"
-	cfg.GasLimit = 100000
 	cfg.GasPrice = parseGasPrice(t, "0.001upokt")
+	// GasLimit is NOT defaulted here on purpose: zero means "simulate", which
+	// is what production does, and a helper that quietly set it would force
+	// every caller into the mode production does not use.
 	cfg.ConnProbeInterval = time.Hour
 
 	tc, err := NewTxClient(logging.NewLoggerFromConfig(logging.DefaultConfig()), km, cfg)
