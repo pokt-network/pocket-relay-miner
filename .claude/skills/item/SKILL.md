@@ -233,6 +233,26 @@ double-counted metrics, language pitfalls, efficiency. Measured 2026-08-26, that
 pass over a 17-commit branch found a real defect the gates could not: a gate
 reporting its units in one mode and not the other.
 
+**After MOVING code, `diff` against `HEAD` the part you did not mean to touch.**
+Inserting a function or a branch lands it next to somebody else's comment, and
+the failure is invisible to every gate because it is syntactically fine: measured
+twice on 2026-09-05, once between a doc comment and the type it documented — so
+the new function's doc opened by describing a different symbol and the type was
+left with none — and once inside a function body, where a new branch absorbed the
+explanation belonging to the branch below it. Neither `gofmt` nor `golangci-lint`
+sees this (no `.golangci.yml` in this repo means defaults, and the linters with
+documentation rules are not among them). The check that catches it costs one
+command:
+
+```
+diff <(git show HEAD:<file> | sed -n '/<start of the untouched block>/,/<end>/p') \
+     <(sed -n '/<start>/,/<end>/p' <file>)
+```
+
+Empty output means the neighbour is untouched. It found a blank line inserted by
+the move itself, between a comment and its `if`, that had not been there before —
+and it needs no maintenance, which a scanner for the same class would.
+
 **When you change how DATA IS PRODUCED, enumerate the consumers and walk each one
 separately.** Naming the angle is not doing it: measured 2026-08-29, "the
 arithmetic of the measurement" WAS on the written angle list, and the change
