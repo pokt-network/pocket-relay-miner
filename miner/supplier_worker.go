@@ -344,6 +344,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			GRPCEndpoint:             nodeTarget.Endpoint,
 			UseTLS:                   nodeTarget.UseTLS,
 			ConnProbeInterval:        w.config.Config.GetTxConnProbeInterval(),
+			TxRPCTimeout:             w.config.Config.GetTxRPCTimeout(),
 			ChainID:                  chainID,
 			GasLimit:                 w.config.Config.GetTxGasLimit(),
 			GasPrice:                 gasPrice,

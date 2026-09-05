@@ -43,6 +43,37 @@ type mockAuthQueryServer struct {
 	paramsErr     error
 	paramsBlockCh chan struct{}
 	paramsSeen    chan struct{}
+
+	accountCalls   int
+	accountBlockCh chan struct{}
+	accountSeen    chan struct{}
+}
+
+// BlockAccount parks every later Account call until the returned channel is
+// closed. It is how a test reaches the FIRST network call of the signing path,
+// which is the one a deadline applied further down would not cover.
+func (m *mockAuthQueryServer) BlockAccount() chan struct{} {
+	ch := make(chan struct{})
+	m.paramsMu.Lock()
+	defer m.paramsMu.Unlock()
+	m.accountBlockCh = ch
+	return ch
+}
+
+// NotifyAccount returns a channel that receives once per Account call.
+func (m *mockAuthQueryServer) NotifyAccount(buf int) chan struct{} {
+	ch := make(chan struct{}, buf)
+	m.paramsMu.Lock()
+	defer m.paramsMu.Unlock()
+	m.accountSeen = ch
+	return ch
+}
+
+// AccountCalls reports how many account lookups reached the server.
+func (m *mockAuthQueryServer) AccountCalls() int {
+	m.paramsMu.Lock()
+	defer m.paramsMu.Unlock()
+	return m.accountCalls
 }
 
 func (m *mockAuthQueryServer) Params(
@@ -112,6 +143,25 @@ func (m *mockAuthQueryServer) Account(
 	req *authtypes.QueryAccountRequest,
 ) (*authtypes.QueryAccountResponse, error) {
 	m.t.Helper()
+
+	m.paramsMu.Lock()
+	block, seen := m.accountBlockCh, m.accountSeen
+	m.accountCalls++
+	m.paramsMu.Unlock()
+
+	if seen != nil {
+		select {
+		case seen <- struct{}{}:
+		default:
+		}
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 
 	account, ok := m.accounts[req.Address]
 	if !ok {

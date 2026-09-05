@@ -313,6 +313,18 @@ type TransactionConfig struct {
 	// window was still wide open but per-attempt time was small)
 	TxTimeoutMinSeconds int64 `yaml:"tx_timeout_min_seconds,omitempty"`
 
+	// TxRPCTimeoutSeconds bounds ONE broadcast attempt's network work.
+	// Default 30.
+	//
+	// It is deliberately NOT the window timeout: that one says how long the
+	// transaction is worth something on-chain (at least two minutes), while a
+	// healthy node answers a broadcast in milliseconds. A permit held for two
+	// minutes by a transaction that is already dead is a permit the inclusion
+	// reconciler's resend cannot get.
+	//
+	// Tune it from the p99 of ha_tx_broadcast_latency_seconds on your own node.
+	TxRPCTimeoutSeconds int64 `yaml:"tx_rpc_timeout_seconds,omitempty"`
+
 	// TxConnProbeIntervalSeconds is how often the miner probes its dedicated
 	// transaction connection while it is idle. Default: 60.
 	//
@@ -567,6 +579,15 @@ func (c *Config) GetTxTimeoutMin() time.Duration {
 		return time.Duration(c.Transaction.TxTimeoutMinSeconds) * time.Second
 	}
 	return 2 * time.Minute
+}
+
+// GetTxRPCTimeout returns the per-attempt broadcast timeout, or zero to let the
+// tx client apply its default.
+func (c *Config) GetTxRPCTimeout() time.Duration {
+	if c.Transaction.TxRPCTimeoutSeconds > 0 {
+		return time.Duration(c.Transaction.TxRPCTimeoutSeconds) * time.Second
+	}
+	return 0
 }
 
 // GetTxConnProbeInterval returns the idle-probe interval for the dedicated

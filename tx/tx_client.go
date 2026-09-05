@@ -157,6 +157,11 @@ type TxClientConfig struct {
 	// Only used if GRPCConn is nil.
 	GRPCEndpoint string
 
+	// TxRPCTimeout bounds ONE attempt's network work. Zero uses
+	// DefaultTxRPCTimeout. See tx_budget.go for why the window budget is the
+	// wrong clock for an RPC.
+	TxRPCTimeout time.Duration
+
 	// ConnProbeInterval is how often to probe an owned connection. Zero uses
 	// DefaultTxConnProbeInterval. Ignored when the connection is shared: the
 	// invariant belongs to whoever owns the connection.
@@ -473,12 +478,29 @@ func (tc *TxClient) SubmitProofs(
 // txWindowTimeoutKey is the context key used to carry a window-based TX deadline.
 type txWindowTimeoutKey struct{}
 
+// txWindow is the raw window duration plus the wall-clock instant it was
+// computed at.
+//
+// computedAt is what makes the budget belong to the WINDOW rather than to each
+// attempt: the caller builds this context once and reuses it across retries
+// (miner/lifecycle_callback.go), so a per-attempt WithTimeout would hand every
+// retry a fresh full budget and N attempts could spend N windows' worth of a
+// window that lasts one.
+//
+// It is wall clock at the moment the height was read, NOT the chain's block
+// time anchor -- that anchor can lag wall clock, and an absolute deadline built
+// on it can already be in the past, which would refuse to even try.
+type txWindow struct {
+	raw        time.Duration
+	computedAt time.Time
+}
+
 // WithTxWindowTimeout injects a raw window-based duration into ctx.
 // signAndBroadcast reads it, subtracts TxTimeoutClockSkewBuffer, then
 // clamps to [TxTimeoutMin, TxTimeoutMax]. If not set, signAndBroadcast
 // falls back to TxTimeoutDefault.
 func WithTxWindowTimeout(ctx context.Context, d time.Duration) context.Context {
-	return context.WithValue(ctx, txWindowTimeoutKey{}, d)
+	return context.WithValue(ctx, txWindowTimeoutKey{}, txWindow{raw: d, computedAt: time.Now()})
 }
 
 // computeEffectiveTxTimeout is the pure math of the deadline decision.
@@ -609,6 +631,19 @@ func (tc *TxClient) signAndBroadcast(
 		txBroadcastLatency.WithLabelValues(signerAddr).Observe(time.Since(startTime).Seconds())
 	}()
 
+	// The clock goes on BEFORE the first network call, not after.
+	//
+	// computeEffectiveTxTimeout used to run 23 lines below getAccount, which
+	// left the account lookup -- a real RPC, with a cache that is cold exactly
+	// after a restart or a rebalance -- with no deadline at all. A hung lookup
+	// there holds a transition-subpool worker, and that subpool is per supplier
+	// with a minimum of 10: ten hangs and the supplier stops transitioning,
+	// silently. The helper is pure, so moving it up costs nothing.
+	timeoutDuration, timeoutSource, window := tc.effectiveTxTimeout(ctx)
+
+	ctx, cancelDeadline := tc.withBroadcastDeadline(ctx, timeoutDuration, window)
+	defer cancelDeadline()
+
 	// Get signing key
 	privKey, err := tc.keyManager.GetSigner(signerAddr)
 	if err != nil {
@@ -634,18 +669,6 @@ func (tc *TxClient) signAndBroadcast(
 	// With unordered, TXs don't check sequence numbers and can be included in any order
 	txBuilder.SetUnordered(true)
 
-	// Compute the effective deadline via the shared pure helper so the
-	// skew-then-clamp pipeline is testable and consistent across code
-	// paths. See computeEffectiveTxTimeout for the algorithm and
-	// invariants.
-	raw, _ := ctx.Value(txWindowTimeoutKey{}).(time.Duration)
-	timeoutDuration, timeoutSource := computeEffectiveTxTimeout(
-		raw,
-		tc.config.TxTimeoutClockSkewBuffer,
-		tc.config.TxTimeoutMin,
-		tc.config.TxTimeoutMax,
-		tc.config.TxTimeoutDefault,
-	)
 	// Anchor timeoutTimestamp on the chain's latest_block_time, not
 	// wall clock. cosmos-sdk x/auth/ante/sigverify.go:441 checks
 	// `timeoutTimestamp - ctx.BlockTime() > 10 * time.Minute` and
