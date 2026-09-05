@@ -23,6 +23,7 @@ import (
 	accounttypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/pokt-network/poktroll/pkg/client"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
@@ -120,6 +121,25 @@ func NewQueryClients(
 	grpcConn, err := grpc.NewClient(
 		config.GRPCEndpoint,
 		grpc.WithTransportCredentials(transportCreds),
+
+		// Measure how long an RPC waits for an HTTP/2 stream. The client caps
+		// at 100 concurrent streams and, past that, PARKS the caller instead of
+		// failing -- see observability.NewGRPCStreamQueueStats for why the
+		// server never raises that cap.
+		//
+		// The label is "shared" and NOT "query", because today this connection
+		// carries the transaction traffic too -- the tx client adopts it. When
+		// the tx client gets its own connection this series stops being emitted
+		// and is replaced by conn="tx" and conn="query".
+		//
+		// Naming it "query" now would have kept one label value while its
+		// MEANING changed underneath the reader: "queries and transactions"
+		// today, "queries only" after the split, with nothing in the metric
+		// saying so. A series that stops is honest; a series that quietly means
+		// something else is not. (There is no label-to-label comparison to
+		// preserve either way: after the split the "before" is compared against
+		// tx + query summed.)
+		grpc.WithStatsHandler(observability.NewGRPCStreamQueueStats("shared")),
 
 		// Keepalive: Prevent connection timeouts and detect broken connections
 		// Note: Servers enforce minimum ping intervals (often 5 minutes).

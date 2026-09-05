@@ -872,15 +872,22 @@ func (tc *TxClient) getAccount(ctx context.Context, addr string) (*authtypes.Bas
 	}
 	tc.accountCacheMu.RUnlock()
 
-	// Query chain
-	tc.accountCacheMu.Lock()
-	defer tc.accountCacheMu.Unlock()
-
-	// Double-check after acquiring lock
-	if account, ok := tc.accountCache[addr]; ok {
-		return account, nil
-	}
-
+	// Query the chain WITHOUT holding the lock.
+	//
+	// This used to take the write lock and defer its release across the RPC, so
+	// every supplier's first signature -- a cold cache is the normal state
+	// after a restart or a rebalance -- went through the chain ONE AT A TIME,
+	// for suppliers that share nothing but this map. That serialization sits in
+	// front of everything else on the signing path, so it is also the first
+	// thing any measurement of connection concurrency would have measured:
+	// a number that says "the connection is the bottleneck" while the real
+	// bottleneck is this mutex.
+	//
+	// The cost of releasing it is that two callers can query the SAME address
+	// at once and both write the result. That is harmless -- the value is the
+	// same account and the map converges -- and it is the trade the previous
+	// shape was avoiding at the price of serializing DIFFERENT addresses, which
+	// is the case that actually happens.
 	res, err := tc.authQuerier.Account(ctx, &authtypes.QueryAccountRequest{
 		Address: addr,
 	})
@@ -896,7 +903,17 @@ func (tc *TxClient) getAccount(ctx context.Context, addr string) (*authtypes.Bas
 		}
 	}
 
+	tc.accountCacheMu.Lock()
+	// Another caller may have stored it while this RPC was in flight. Keep the
+	// stored pointer so concurrent callers share one instance rather than each
+	// holding its own copy of the same account.
+	if existing, ok := tc.accountCache[addr]; ok {
+		tc.accountCacheMu.Unlock()
+		return existing, nil
+	}
 	tc.accountCache[addr] = &account
+	tc.accountCacheMu.Unlock()
+
 	return &account, nil
 }
 
