@@ -124,6 +124,15 @@ properties:
           at scale this sends hundreds-to-thousands of txs per window and is a
           primary cause of CLAIM_MISSING forfeits; the miner logs a startup
           warning if set. Default false (batching on).
+
+          This is the only batching setting: proofs are always submitted one per
+          transaction and cannot be grouped.
+
+          Turning this on is not simply "one tx per claim": the claim cycle stops
+          at the first group it cannot submit, so the groups behind it are left
+          with no state written and no retry. More groups therefore means more
+          exposure to that, which is why splitting claims is not the safe half of
+          what was done to proofs.
         default: false
       disable_pre_proof_claim_verification:
         type: boolean

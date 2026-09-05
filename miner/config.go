@@ -816,16 +816,19 @@ const suppliersPerCPUWarnThreshold = 50
 // advisory only (never fatal) and meant to surface in the logs of operators who
 // deploy fast without reading the docs.
 func (c *Config) LogStartupCapacityAdvisory(logger logging.Logger, numSuppliers int) {
-	// Disabling batching is discouraged: at scale, per-session (unbatched)
-	// submission floods the node with thousands of txs per window and is a
-	// primary cause of forfeits. The difficulty-validation bug it once worked
-	// around is resolved.
+	// Claims only: proofs no longer have a batching setting. Disabling claim
+	// batching is discouraged for two reasons that compound -- the tx volume,
+	// and the fact that the claim cycle still abandons the groups behind the
+	// first one it cannot submit, so more groups means more sessions exposed to
+	// that. The difficulty-validation bug it once worked around is resolved.
 	if c.Transaction.DisableClaimBatching {
 		logger.Warn().
 			Bool("disable_claim_batching", c.Transaction.DisableClaimBatching).
 			Int("num_suppliers", numSuppliers).
 			Msg("DISCOURAGED CONFIG: claim batching is DISABLED — at scale this sends one tx per claim " +
-				"(hundreds-to-thousands per window) and is a primary cause of CLAIM_MISSING forfeits. " +
+				"(hundreds-to-thousands per window) and is a primary cause of CLAIM_MISSING forfeits. It also " +
+				"widens an existing gap: the claim cycle stops at the first group it cannot submit, leaving the " +
+				"groups behind it with no state written and no retry, so more groups means more sessions exposed. " +
 				"Re-enable it (remove disable_claim_batching) unless you have a specific reason.")
 	}
 
