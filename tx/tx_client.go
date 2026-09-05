@@ -763,7 +763,7 @@ func (tc *TxClient) signAndBroadcast(
 		Mode:    txtypes.BroadcastMode_BROADCAST_MODE_SYNC,
 	})
 	if err != nil {
-		return "", fmt.Errorf("failed to broadcast transaction: %w", err)
+		return "", newBroadcastRejection(err, txBytes)
 	}
 
 	txHash := res.TxResponse.TxHash
@@ -800,7 +800,7 @@ func (tc *TxClient) signAndBroadcast(
 			Str("error", res.TxResponse.RawLog).
 			Msg("transaction CheckTx failed")
 
-		return txHash, fmt.Errorf("CheckTx failed (code %d): %s", res.TxResponse.Code, res.TxResponse.RawLog)
+		return txHash, newCheckTxRejection(res.TxResponse)
 	}
 
 	// CheckTx passed! TX accepted to mempool
@@ -1051,7 +1051,7 @@ func (tc *TxClient) simulateTx(
 		TxBytes: txBytes,
 	})
 	if err != nil {
-		return 0, fmt.Errorf("simulation failed: %w", err)
+		return 0, newSimulateRejection(err)
 	}
 
 	if simRes.GasInfo == nil {
