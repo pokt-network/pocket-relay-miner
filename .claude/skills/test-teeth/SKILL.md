@@ -135,6 +135,39 @@ decides.**
   checks, "must not contain X" assertions. They are written precisely because
   the failure is rare, which means nobody has ever seen them go red.
 
+## Merging two criteria into one: enumerate the injections on both sides
+
+A merge that replaces two criteria with one is only free if the survivor keeps
+**both injections**. Check it mechanically, because the failure is invisible from
+the inside: **list the injections before and after, and if one lost the criterion
+that turned it red, the merge cost something.**
+
+Measured 2026-09-05, on the success criteria for `TxRejection` (the three
+versions are preserved as `DESIGN-S1-0a-v3.md`, `-v4.md`, and the v5 that undid
+it). Two criteria covered one type's `Error()`:
+
+- one built the value **through the real code path** and pinned the message byte
+  for byte — it went red when a construction site populated a field wrongly;
+- one built it **by literal, bypassing the constructor** — it went red when the
+  implementation *stored* the message instead of deriving it.
+
+They were merged into the literal-built one, and that read as strictly-more:
+against a stored string it is the stronger test, and a stored string was the
+defect under discussion. But the literal pins the format **given** the fields,
+and nothing was left pinning that the real construction sites **populate** those
+fields. The design document named the escaping case in its own prose — two
+nearly-identical strings in the struct, and choosing the wrong one is invisible
+to `Contains` — and the same revision deleted the only criterion that saw it.
+
+**Why it is invisible**: the merged criterion really is stronger **on the axis
+you were looking at**. That is the same shape this skill fights one level down —
+an assertion that does not distinguish what it claims to distinguish — raised
+from the content of one test to the structure of a set of them. So the remedy
+also rises: not "look harder", but a procedure. Two injections that survive the
+merge means one criterion; two injections where **neither turns the other red**
+means two criteria, and merging them is not a simplification, it is a deletion
+with a simplification's face.
+
 ## A whitelist of error cases needs a closed-set test
 
 A hand-enumerated set of cases -- which failures are permanent, which
