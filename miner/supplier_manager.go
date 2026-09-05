@@ -230,11 +230,6 @@ type SupplierManagerConfig struct {
 	// Default: false (guard enabled).
 	DisablePreProofClaimVerification bool
 
-	// DisableProofBatching disables batching of proof submissions.
-	// WORKAROUND: Set to true to avoid cross-contamination where one invalid proof
-	// (e.g., difficulty validation failure) causes the entire batch to fail.
-	DisableProofBatching bool
-
 	// SubmissionTrackingTTL is the TTL for claim/proof submission tracking records.
 	// Default: 24h
 	SubmissionTrackingTTL time.Duration
@@ -1387,7 +1382,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		lifecycleCallbackConfig := DefaultLifecycleCallbackConfig()
 		lifecycleCallbackConfig.SupplierAddress = operatorAddr
 		lifecycleCallbackConfig.DisableClaimBatching = m.config.DisableClaimBatching
-		lifecycleCallbackConfig.DisableProofBatching = m.config.DisableProofBatching
 		lifecycleCallbackConfig.BlockTimeSeconds = m.config.BlockTimeSeconds
 		lifecycleCallbackConfig.DisablePreProofClaimVerification = m.config.DisablePreProofClaimVerification
 		lifecycleCallback = NewLifecycleCallback(

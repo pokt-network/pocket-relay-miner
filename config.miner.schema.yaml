@@ -125,14 +125,6 @@ properties:
           primary cause of CLAIM_MISSING forfeits; the miner logs a startup
           warning if set. Default false (batching on).
         default: false
-      disable_proof_batching:
-        type: boolean
-        description: |
-          Disable batching of proof submissions (one tx per proof). DISCOURAGED —
-          at scale this floods the node and is a primary cause of PROOF_MISSING
-          forfeits; the miner logs a startup warning if set. Default false
-          (batching on).
-        default: false
       disable_pre_proof_claim_verification:
         type: boolean
         description: |

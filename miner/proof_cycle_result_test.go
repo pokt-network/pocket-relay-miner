@@ -110,9 +110,9 @@ func TestBuildProofGroups_StableUnderTiedEndHeights(t *testing.T) {
 		{SessionID: "s3", SessionEndHeight: 100},
 	}
 
-	// perSession=true so each snapshot is its own group and the ORDER of groups
-	// is observable; with them merged into one group there is nothing to order.
-	first := buildProofGroups(snapshots, true)
+	// Each snapshot is its own group now, so the ORDER of groups is observable;
+	// when they merged into one group there was nothing to order.
+	first := buildProofGroups(snapshots)
 	if len(first) != 3 {
 		t.Fatalf("want 3 per-session groups, got %d", len(first))
 	}
@@ -126,7 +126,7 @@ func TestBuildProofGroups_StableUnderTiedEndHeights(t *testing.T) {
 	// Repeat: a map-backed implementation randomises iteration, so the same
 	// input must keep producing the same sequence.
 	for run := 0; run < 50; run++ {
-		got := buildProofGroups(snapshots, true)
+		got := buildProofGroups(snapshots)
 		for i, id := range want {
 			if got[i][0].SessionID != id {
 				t.Fatalf("run %d, group %d: order not stable, want %q got %q", run, i, id, got[i][0].SessionID)
@@ -141,12 +141,60 @@ func TestBuildProofGroups_EarlierWindowFirst(t *testing.T) {
 	groups := buildProofGroups([]*SessionSnapshot{
 		{SessionID: "late", SessionEndHeight: 200},
 		{SessionID: "early", SessionEndHeight: 100},
-	}, false)
+	})
 
 	if len(groups) != 2 {
 		t.Fatalf("want 2 groups by end height, got %d", len(groups))
 	}
 	if groups[0][0].SessionID != "early" {
 		t.Fatalf("group with the earlier window must be first, got %q", groups[0][0].SessionID)
+	}
+}
+
+// TestBuildProofGroups_SessionsSharingAnEndHeightGetSeparateTransactions pins
+// the property the unconditional split exists for: one group is one
+// transaction, so N sessions must never share one.
+//
+// It needs its own name and its own test because the only case that
+// DISCRIMINATES is sessions at the SAME end height -- with different heights,
+// grouping and not grouping produce the same partition, so a test built from
+// distinct heights stays green while proofs are being batched again. Same
+// height is not an edge case here: it is the ordinary one, since sessions are
+// anchored to a global grid.
+//
+// Until this existed the cardinality was held by the entry guard of a test
+// named for ordering, which failed with "order not stable" -- a red that names
+// a neighbouring symptom instead of the property, in a line that is there so
+// the rest of the test makes sense rather than as the thing under test.
+func TestBuildProofGroups_SessionsSharingAnEndHeightGetSeparateTransactions(t *testing.T) {
+	const sharedEndHeight = 909320 // one height, the way the chain's grid produces them
+
+	snapshots := []*SessionSnapshot{
+		{SessionID: "s1", SessionEndHeight: sharedEndHeight},
+		{SessionID: "s2", SessionEndHeight: sharedEndHeight},
+		{SessionID: "s3", SessionEndHeight: sharedEndHeight},
+	}
+
+	groups := buildProofGroups(snapshots)
+
+	if len(groups) != len(snapshots) {
+		t.Fatalf("sessions sharing an end height must each get their own transaction: want %d groups, got %d",
+			len(snapshots), len(groups))
+	}
+	// Each group carries exactly one session: a partition of the right SIZE can
+	// still put two sessions in one group and leave another empty.
+	seen := map[string]bool{}
+	for i, g := range groups {
+		if len(g) != 1 {
+			t.Fatalf("group %d must hold exactly one session, holds %d", i, len(g))
+		}
+		seen[g[0].SessionID] = true
+	}
+	// And every session is present: three groups of one that name the same
+	// session twice would pass everything above.
+	for _, s := range snapshots {
+		if !seen[s.SessionID] {
+			t.Fatalf("session %q got no transaction of its own", s.SessionID)
+		}
 	}
 }

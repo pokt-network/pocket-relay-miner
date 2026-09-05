@@ -89,10 +89,6 @@ type LifecycleCallbackConfig struct {
 	// When true, each session's claim is submitted in a separate transaction.
 	DisableClaimBatching bool
 
-	// DisableProofBatching disables batching of proof submissions.
-	// When true, each session's proof is submitted in a separate transaction.
-	DisableProofBatching bool
-
 	// BlockTimeSeconds is the expected block time used to convert remaining window
 	// blocks into a TX broadcast deadline. The TxClient enforces hard min/max bounds
 	// regardless of this value. Default: 30.
@@ -549,35 +545,31 @@ func firstSessionIDsForLog(snapshots []*SessionSnapshot) []string {
 	return ids
 }
 
-// buildProofGroups partitions one supplier's snapshots into the groups that
-// each become one proof submission, in a DETERMINISTIC order.
+// buildProofGroups puts each of one supplier's sessions in its own group -- one
+// group is one transaction -- and returns them in a DETERMINISTIC order.
 //
-// Determinism is the reason this exists as a function instead of a map literal.
-// The previous form built a map[int64][]*SessionSnapshot and ranged over it, and
-// Go randomises map iteration, so the order groups reached the chain changed
-// between runs. That is invisible while one failing group ends the cycle -- the
-// abandoned groups are abandoned either way -- and becomes a coin flip over
-// which sessions get their proof once the cycle keeps going.
+// It still returns groups rather than a flat list, and that is deliberate: the
+// submission body downstream works on a slice of sessions, so keeping the shape
+// lets one-per-transaction be a change of PARTITION rather than a rewrite of the
+// code that builds, submits, meters and persists. Every group holds exactly one
+// session today; nothing below needs to know that.
+//
+// Determinism is the other half. The original built a map keyed by end height
+// and ranged over it, and Go randomises map iteration, so the order proofs
+// reached the chain changed between runs. That was invisible while one failing
+// group ended the cycle -- the abandoned ones were abandoned either way -- and
+// becomes a coin flip over which sessions get their proof once the cycle keeps
+// going.
 //
 // Sorting by end height alone is NOT enough, and this is the part that is easy
 // to get wrong: sessions are anchored to a global grid, so in the ordinary case
-// every group carries the SAME end height and the comparison is a tie on every
+// every session carries the SAME end height and the comparison is a tie on every
 // pair. sort.SliceStable keeps arrival order under that tie, which is what
-// actually fixes the sequence; the sort by height only puts the group whose
+// actually fixes the sequence; the sort by height only puts the session whose
 // window closes first at the front when heights do differ.
-//
-// perSession mirrors the DisableProofBatching workaround: one group per session.
-func buildProofGroups(snapshots []*SessionSnapshot, perSession bool) [][]*SessionSnapshot {
+func buildProofGroups(snapshots []*SessionSnapshot) [][]*SessionSnapshot {
 	groups := make([][]*SessionSnapshot, 0, len(snapshots))
-	byEndHeight := make(map[int64]int, len(snapshots))
 	for _, snapshot := range snapshots {
-		if !perSession {
-			if idx, ok := byEndHeight[snapshot.SessionEndHeight]; ok {
-				groups[idx] = append(groups[idx], snapshot)
-				continue
-			}
-			byEndHeight[snapshot.SessionEndHeight] = len(groups)
-		}
 		groups = append(groups, []*SessionSnapshot{snapshot})
 	}
 	sort.SliceStable(groups, func(i, j int) bool {
@@ -1467,38 +1459,27 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 
 	logger.Debug().Msg("batched sessions need proofs - starting proof process")
 
-	// Group sessions by session end height (they might have different proof windows)
-	// WORKAROUND: If batching is disabled, create one group per session to avoid
-	// cross-contamination where one invalid proof (e.g., difficulty validation failure)
-	// causes the entire batch to fail.
+	// One proof per transaction, always. There is no setting for this: a batch
+	// dies whole, so a single message the chain refuses takes every other proof
+	// in it down -- each of those a forfeited session, and the batch is largest
+	// exactly when IsProofRequired fell back to its fail-open branch, which is
+	// when its members are likeliest to be the ones refused.
 	//
 	// The groups are a SLICE, not a map, and that is load-bearing rather than
 	// stylistic: Go randomises map iteration, so with a map the order in which
-	// groups reach the chain differs run to run. Ordering by end height alone
+	// proofs reach the chain differs run to run. Ordering by end height alone
 	// does not fix it either -- sessions are anchored to a global grid, so in
-	// the normal case every group shares one end height and the comparison is a
-	// tie. Building in arrival order and sorting with SliceStable makes arrival
-	// order the tiebreak, which is what stays fixed across runs.
-	groups := buildProofGroups(snapshots, lc.config.DisableProofBatching)
-	if lc.config.DisableProofBatching {
-		logger.Info().
-			Int("total_sessions", len(snapshots)).
-			Bool("batching_disabled", true).
-			Msg("PROOF_BATCHING_DISABLED: submitting each session in separate transaction (workaround for difficulty validation)")
-	} else {
-		logger.Info().
-			Int("total_sessions", len(snapshots)).
-			Bool("batching_enabled", true).
-			Msg("proof batching enabled - grouping sessions by end height")
-	}
+	// the normal case every session shares one end height and the comparison is
+	// a tie. Building in arrival order and sorting with SliceStable makes
+	// arrival order the tiebreak, which is what stays fixed across runs.
+	groups := buildProofGroups(snapshots)
 
 	logger.Info().
 		Int("total_sessions", len(snapshots)).
-		Int("num_batches", len(groups)).
-		Bool("batching_disabled", lc.config.DisableProofBatching).
-		Msg("proof batching strategy applied")
+		Int("num_transactions", len(groups)).
+		Msg("submitting one proof per transaction")
 
-	// Process each group (same proof window) separately
+	// Process each group (one session, its own transaction) separately
 	for _, groupSnapshots := range groups {
 		// Get the actual session end height from the first snapshot in the group
 		// (all snapshots in a group have the same end height)

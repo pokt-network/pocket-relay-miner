@@ -72,6 +72,13 @@ var retiredKeys = map[string]string{
 
 	"keys_dir": "loading supplier keys from a directory is no longer supported. Use keys.keys_file or " +
 		"keys.keyring",
+
+	"disable_proof_batching": "proofs are now ALWAYS submitted one per transaction and there is no way to " +
+		"group them again. A batch dies whole, so one message the chain refuses forfeited every other proof " +
+		"riding with it. If this said \"false\" (the default), expect one transaction per proof instead of one " +
+		"per (supplier, session end height) -- a session needing a proof is the exception, so this is a small " +
+		"increase, not one transaction per session. If it said \"true\", nothing changes: that is now the only " +
+		"behaviour. Claim batching is unaffected and disable_claim_batching still exists",
 }
 
 // UnknownKeys reports every key in data that probe's type does not declare.

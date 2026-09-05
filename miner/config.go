@@ -298,14 +298,6 @@ type TransactionConfig struct {
 	// Default: false (batching enabled for gas efficiency)
 	DisableClaimBatching bool `yaml:"disable_claim_batching,omitempty"`
 
-	// DisableProofBatching disables batching of proof submissions.
-	// When true, each session's proof is submitted in a separate transaction.
-	// When false (default), proofs with the same session end height are batched.
-	// WORKAROUND: Set to true if experiencing proof failures due to difficulty validation
-	// or other issues where one invalid proof causes the entire batch to fail.
-	// Default: false (batching enabled for gas efficiency)
-	DisableProofBatching bool `yaml:"disable_proof_batching,omitempty"`
-
 	// TxTimeoutMinSeconds is the floor for window-based TX broadcast deadlines.
 	// Even when the claim/proof window is almost closed the TX still gets at least
 	// this many seconds to land on-chain before the unordered-TX TTL expires.
@@ -828,14 +820,13 @@ func (c *Config) LogStartupCapacityAdvisory(logger logging.Logger, numSuppliers 
 	// submission floods the node with thousands of txs per window and is a
 	// primary cause of forfeits. The difficulty-validation bug it once worked
 	// around is resolved.
-	if c.Transaction.DisableClaimBatching || c.Transaction.DisableProofBatching {
+	if c.Transaction.DisableClaimBatching {
 		logger.Warn().
 			Bool("disable_claim_batching", c.Transaction.DisableClaimBatching).
-			Bool("disable_proof_batching", c.Transaction.DisableProofBatching).
 			Int("num_suppliers", numSuppliers).
-			Msg("DISCOURAGED CONFIG: claim/proof batching is DISABLED — at scale this sends one tx per session " +
-				"(hundreds-to-thousands per window) and is a primary cause of CLAIM_MISSING/PROOF_MISSING forfeits. " +
-				"Re-enable batching (remove disable_claim_batching / disable_proof_batching) unless you have a specific reason.")
+			Msg("DISCOURAGED CONFIG: claim batching is DISABLED — at scale this sends one tx per claim " +
+				"(hundreds-to-thousands per window) and is a primary cause of CLAIM_MISSING forfeits. " +
+				"Re-enable it (remove disable_claim_batching) unless you have a specific reason.")
 	}
 
 	cpu := getEffectiveCPUCount()
@@ -988,14 +979,18 @@ func DefaultConfig() *Config {
 			GasLimit:      0,               // 0 = automatic gas estimation via simulation
 			GasPrice:      "0.000001upokt", // Default gas price
 			GasAdjustment: 1.7,             // Default 70% safety margin
-			// Batching is ON by default. It was previously disabled as a workaround
-			// for difficulty-validation failures; that bug is resolved, and at scale
-			// (hundreds of supplier keys) per-session (unbatched) submission floods
-			// the node with thousands of txs per window and is a primary cause of
-			// CLAIM_MISSING/PROOF_MISSING forfeits. Disabling batching is now
-			// discouraged (a startup warning fires if you do).
+			// CLAIM batching is ON by default, and it is the only batching left to
+			// configure: proofs always travel one per transaction and have no
+			// setting. Claims were once unbatched as a workaround for
+			// difficulty-validation failures; that bug is resolved, and at scale
+			// (hundreds of supplier keys) submitting one tx per claim floods the
+			// node with thousands per window and is a primary cause of
+			// CLAIM_MISSING forfeits, so disabling it is discouraged and fires a
+			// startup warning. None of that reasoning transfers to proofs: a
+			// session needing one is the exception, so splitting them costs
+			// almost no extra transactions and buys the guarantee that one
+			// refused proof cannot forfeit the others riding with it.
 			DisableClaimBatching: false,
-			DisableProofBatching: false,
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)

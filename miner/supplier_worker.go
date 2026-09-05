@@ -446,7 +446,6 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			},
 			ClaimerConfig:                    w.config.Config.GetSupplierClaimingConfig(),
 			DisableClaimBatching:             w.config.Config.Transaction.DisableClaimBatching,
-			DisableProofBatching:             w.config.Config.Transaction.DisableProofBatching,
 			DisablePreProofClaimVerification: w.config.Config.Transaction.DisablePreProofClaimVerification,
 			SubmissionTrackingTTL:            w.config.Config.GetSubmissionTrackingTTL(),
 			QueryWorkers:                     w.config.Config.GetQueryWorkers(),

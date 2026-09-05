@@ -21,7 +21,6 @@ func captureAdvisory(t *testing.T, mutate func(c *Config), numSuppliers int) str
 	c := DefaultConfig()
 	// Healthy baseline: batching ON, no master-pool override.
 	c.Transaction.DisableClaimBatching = false
-	c.Transaction.DisableProofBatching = false
 	c.WorkerPools.MasterPoolSize = 0
 	if mutate != nil {
 		mutate(c)
@@ -52,7 +51,6 @@ func TestCapacityAdvisory_BatchingDisabled_Warns(t *testing.T) {
 		name   string
 		mutate func(c *Config)
 	}{
-		{"proof batching off", func(c *Config) { c.Transaction.DisableProofBatching = true }},
 		{"claim batching off", func(c *Config) { c.Transaction.DisableClaimBatching = true }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,6 +92,6 @@ func TestCapacityAdvisory_SuppliersPerCPUOverThreshold_Warns(t *testing.T) {
 // strings import kept meaningful: guard that the JSON the logger emits is
 // non-empty when a warning fires (sanity that capture works at all).
 func TestCapacityAdvisory_CaptureSanity(t *testing.T) {
-	out := captureAdvisory(t, func(c *Config) { c.Transaction.DisableProofBatching = true }, 5)
+	out := captureAdvisory(t, func(c *Config) { c.Transaction.DisableClaimBatching = true }, 5)
 	require.True(t, strings.Contains(out, "\"level\":\"warn\""), "warning must be emitted at warn level")
 }
