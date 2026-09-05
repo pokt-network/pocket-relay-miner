@@ -313,6 +313,11 @@ type SupplierManager struct {
 	reconcilerCancel context.CancelFunc
 	reconcilerWG     sync.WaitGroup
 
+	// poolResizeCancel stops the block-subscription loop that sizes the
+	// transaction connection pool.
+	poolResizeCancel context.CancelFunc
+	poolResizeWG     sync.WaitGroup
+
 	// sharedSubmissionTracker + sharedTrackersOnce make the submission tracker,
 	// rebroadcast store, and inclusion reconciler process-wide singletons (one
 	// worker pool / one block loop) instead of one-per-supplier-key. Operators
@@ -465,6 +470,8 @@ func (m *SupplierManager) startWithDistributedClaiming(ctx context.Context, supp
 	if err := m.claimer.Start(ctx, stakedSuppliers); err != nil {
 		return fmt.Errorf("failed to start supplier claimer: %w", err)
 	}
+
+	m.startConnPoolResizeLoop()
 
 	m.logger.Info().
 		Int("claimed", m.claimer.ClaimedCount()).
@@ -2315,6 +2322,14 @@ func (m *SupplierManager) Close() error {
 		}
 	}
 
+	// Stop growing the connection pool before anything starts closing it: a
+	// resize landing during teardown would dial members that the shutdown
+	// already walked past.
+	if m.poolResizeCancel != nil {
+		m.poolResizeCancel()
+	}
+	m.poolResizeWG.Wait()
+
 	// Stop the reconciler BEFORE tearing down suppliers, so an in-flight
 	// OnBlock pass cannot reconcile / ResubmitMessage against a supplier whose
 	// client is being closed out from under it.
@@ -2615,6 +2630,67 @@ func (m *SupplierManager) ensureSharedTrackers() {
 
 		m.startReconcilerBlockLoop()
 	})
+}
+
+// startConnPoolResizeLoop keeps the transaction connection pool sized for the
+// suppliers this replica currently holds a lease on.
+//
+// It takes its OWN subscription rather than riding the reconciler's loop, which
+// looks like the obvious place to hang it. That loop returns without starting
+// when the block client cannot Subscribe, so sharing it would silently tie the
+// size of the connection pool to whether the inclusion reconciler happens to be
+// configured -- two things with no relationship to each other.
+//
+// The trigger is every block, and the resize is level-triggered, so a takeover
+// that moves leases mid-window is picked up on the next block rather than
+// whenever the previous holder's lease finally expires.
+func (m *SupplierManager) startConnPoolResizeLoop() {
+	if m.config.TxClient == nil {
+		return
+	}
+
+	subscriber, ok := m.config.BlockClient.(interface {
+		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
+	})
+	if !ok {
+		// Warn and not Error: the pool keeps the floor it was built with, which
+		// is what every replica ran with before it could grow at all. Claims
+		// still submit; a replica holding many leases just runs with fewer
+		// connections than it should.
+		m.logger.Warn().Msg("block client does not support Subscribe(); transaction connection pool will stay at its startup size")
+		return
+	}
+
+	m.mu.RLock()
+	parent := m.ctx
+	m.mu.RUnlock()
+	if parent == nil {
+		parent = context.Background()
+	}
+	loopCtx, cancel := context.WithCancel(parent)
+	m.poolResizeCancel = cancel
+	m.poolResizeWG.Add(1)
+
+	resize := func(ctx context.Context) {
+		defer m.poolResizeWG.Done()
+
+		blockCh := subscriber.Subscribe(ctx, blockEventSubscriberBuffer)
+		runCoalescingBlockLoop(ctx, blockCh, func(int64) {
+			claimer := m.claimer
+			if claimer == nil {
+				return
+			}
+			if err := m.config.TxClient.ResizeConnPool(ctx, claimer.ClaimedCount()); err != nil {
+				// Warn, not Error: this fires once per block at worst and only
+				// when a grow failed, and the pool keeps every connection it
+				// already had, so the failure costs capacity rather than
+				// correctness.
+				m.logger.Warn().Err(err).Msg("could not resize the transaction connection pool")
+			}
+		})
+	}
+
+	go logging.RecoverGoRoutine(m.logger, "conn_pool_resize", resize)(loopCtx)
 }
 
 // startReconcilerBlockLoop drives reconciler.OnBlock once per new block from the

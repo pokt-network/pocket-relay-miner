@@ -59,10 +59,16 @@ var (
 		[]string{"waited"},
 	)
 
-	// txConnVerified is 1 while the tx connection is known to carry RPCs and
-	// 0 once a probe has failed. A counter cannot answer "has this connection
-	// EVER worked since the process started", and that is the question an
-	// operator asks first when no claim has landed.
+	// txConnVerified is 1 while the transaction path is known to carry RPCs and
+	// 0 once no connection can. A counter cannot answer "has this EVER worked
+	// since the process started", and that is the question an operator asks
+	// first when no claim has landed.
+	//
+	// With a pool it aggregates: 1 means at least one member answered, which is
+	// the honest reading of "can we still submit". It deliberately does NOT say
+	// whether the pool is degraded -- conn_member_verified below is what
+	// answers which member died, and this one keeps meaning what the alerts
+	// built on it already assume.
 	txConnVerified = observability.MinerFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
@@ -72,10 +78,31 @@ var (
 		},
 	)
 
+	// txConnMemberVerified is txConnVerified per pool member, and it exists
+	// because the aggregate cannot answer "which one".
+	//
+	// With one connection a bare gauge was enough. With a pool it reads 1 or 0
+	// depending on which member happened to be probed last -- an observation
+	// that cannot distinguish the case it is watched for. The label is the
+	// member index, which is stable for the life of the process because
+	// members are appended and never removed or reordered, and its cardinality
+	// is the pool size: one series per eighty suppliers, against the many
+	// metrics in this process that already carry one series per supplier.
+	txConnMemberVerified = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "conn_member_verified",
+			Help:      "1 if the last probe of this pool connection succeeded, 0 if it failed",
+		},
+		[]string{"conn"},
+	)
+
 	// txConnProbeFailures counts failed probes. reason is bounded to
-	// startup|tick: the same failure at startup and at hour six mean different
-	// things -- one is a bad config, the other is a connection that died while
-	// idle.
+	// startup|tick|warmup: the same failure at startup and at hour six mean
+	// different things -- one is a bad config, the other is a connection that
+	// died while idle -- and warmup is a third, a connection the pool added for
+	// new leases that never came up.
 	txConnProbeFailures = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -215,6 +242,6 @@ var (
 // happened". See observability.EagerCounterChildren for the full reasoning --
 // written once there rather than repeated at each declaration.
 func init() {
-	observability.EagerCounterChildren(txConnProbeFailures, probeReasonStartup, probeReasonTick)
+	observability.EagerCounterChildren(txConnProbeFailures, probeReasonStartup, probeReasonTick, probeReasonWarmup)
 	observability.EagerCounterChildren(txPermitSaturatedTotal, permitWaited, permitDidNotWait)
 }

@@ -4,13 +4,17 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strconv"
 	"time"
+
+	"github.com/alitto/pond/v2"
 
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 )
 
 const (
@@ -36,7 +40,14 @@ const (
 	// an idle flow live. That is what idle_seconds on the failure log is for.
 	DefaultTxConnProbeInterval = 60 * time.Second
 
+	// maxProbeConcurrency bounds the probe fan-out. See probeFanOut for the
+	// arithmetic it comes from and for what happens past the point it covers.
+	// The arithmetic is asserted in conn_probe_pool_test.go against these
+	// constants rather than restated as a number.
+	maxProbeConcurrency = 64
+
 	probeReasonStartup = "startup"
+	probeReasonWarmup  = "warmup"
 	probeReasonTick    = "tick"
 )
 
@@ -59,10 +70,43 @@ var ErrTxConnMisconfigured = errors.New("tx connection is misconfigured")
 // and that is the question the window cannot afford to ask for the first time
 // while it is closing.
 func (tc *TxClient) probeConn(ctx context.Context) error {
+	if tc.pool == nil {
+		return tc.probeOne(ctx, tc.authQuerier)
+	}
+	return tc.probePool(ctx)
+}
+
+// probeFanOut is how many members are probed at once.
+//
+// The bound is not a taste: one probe is capped at txConnProbeTimeout and a
+// full sweep has to fit inside DefaultTxConnProbeInterval with slack, so n
+// members need ceil(n*5/55) workers. Solving it the other way, 64 workers cover
+// 704 members -- which is 56,320 suppliers at one connection per eighty, past
+// any fleet anyone has reported.
+//
+// It is CAPPED rather than proportional because the pool has no ceiling.
+// Sizing the fan-out to the member count would produce a burst that grows with
+// the operator's fleet, every minute, against the same full node -- and how
+// much concurrency a full node absorbs is the axis this repository has written
+// down as unmeasured.
+//
+// Past 704 members the sweep no longer fits the interval, and that degrades
+// rather than breaks: a ticker drops ticks it cannot deliver, so the probe
+// simply runs less often. Losing cadence is the acceptable failure; a burst
+// proportional to the fleet is not.
+func probeFanOut(members int) int {
+	if members < maxProbeConcurrency {
+		return members
+	}
+	return maxProbeConcurrency
+}
+
+// probeOne runs the probe RPC against one querier.
+func (tc *TxClient) probeOne(ctx context.Context, querier authtypes.QueryClient) error {
 	probeCtx, cancel := context.WithTimeout(ctx, txConnProbeTimeout)
 	defer cancel()
 
-	if _, err := tc.authQuerier.Params(probeCtx, &authtypes.QueryParamsRequest{}); err != nil {
+	if _, err := querier.Params(probeCtx, &authtypes.QueryParamsRequest{}); err != nil {
 		if isMisconfigured(err) {
 			return fmt.Errorf("%w: %w", ErrTxConnMisconfigured, err)
 		}
@@ -70,6 +114,69 @@ func (tc *TxClient) probeConn(ctx context.Context) error {
 	}
 	tc.markConnOK()
 	return nil
+}
+
+// probePool probes EVERY member, each through its own querier, and records the
+// result per member.
+//
+// One querier for the whole pool would not do: it round-robins, so a single
+// probe covers one member and leaves the rest unchecked -- and unchecked is
+// exactly the state this probe exists to end, since a middlebox dropping an
+// idle flow leaves both ends believing the connection is fine.
+//
+// The members are probed CONCURRENTLY, and that is a requirement rather than a
+// tuning choice. The probe interval is deliberately the keepalive cadence --
+// each probe opens a stream, wakes the dormant keepalive and produces one ping
+// -- so a serial walk that outruns the interval would leave later members
+// probed less often than their own keepalive, weakening the very detection this
+// buys. With a five-second timeout per probe and a sixty-second tick, serial
+// breaks at twelve members, and the pool has no ceiling.
+//
+// It returns nil if any member answered: the transaction path can still serve,
+// and pick() routes around the ones that could not.
+func (tc *TxClient) probePool(ctx context.Context) error {
+	members := tc.pool.Members()
+	if len(members) == 0 {
+		return fmt.Errorf("tx connection pool has no members")
+	}
+
+	results := make([]error, len(members))
+	pool := pond.NewPool(probeFanOut(len(members)))
+	for i, member := range members {
+		i, member := i, member
+		pool.Submit(func() {
+			results[i] = tc.probeOne(ctx, authtypes.NewQueryClient(member.Conn))
+			tc.pool.MarkHealth(member.Index, results[i] == nil)
+			if results[i] == nil {
+				txConnMemberVerified.WithLabelValues(strconv.Itoa(member.Index)).Set(1)
+			} else {
+				txConnMemberVerified.WithLabelValues(strconv.Itoa(member.Index)).Set(0)
+			}
+		})
+	}
+	pool.StopAndWait()
+
+	var firstErr error
+	for _, err := range results {
+		switch {
+		case err == nil:
+		case firstErr == nil:
+			firstErr = err
+		case errors.Is(err, ErrTxConnMisconfigured):
+			// A misconfiguration outranks a transient failure: every member
+			// dials the same endpoint with the same credentials, so one member
+			// reporting it is the whole pool reporting it, and the caller
+			// refuses to start on this error and retries on the others.
+			firstErr = err
+		}
+	}
+
+	// Ask the pool rather than the local tally: the pool is what pick() reads,
+	// so "can we still serve" has exactly one answer and it is that one.
+	if len(tc.pool.HealthyMembers()) > 0 {
+		return nil
+	}
+	return firstErr
 }
 
 // isMisconfigured classifies a probe failure BY CODE. Never by message text:
@@ -216,4 +323,66 @@ func (tc *TxClient) probeInterval() time.Duration {
 		return tc.config.ConnProbeInterval
 	}
 	return DefaultTxConnProbeInterval
+}
+
+// ResizeConnPool sizes the connection pool for the number of suppliers this
+// replica currently holds a lease on, and verifies whatever it added.
+//
+// It is safe and cheap to call on EVERY block, which is how it is driven. The
+// design called for warming one block before each claim window, but Grow is
+// level-triggered -- it compares the target against the current size and does
+// nothing when the pool is already big enough -- so resizing every block is a
+// superset of that: it costs one comparison in the common case, it is never
+// late for a window, and it needs nobody to compute where the windows are.
+// That matters because the block loop driving it COALESCES: under load it skips
+// intermediate heights, so anything keyed on seeing one specific height is lost
+// exactly when the load that needed the capacity showed up.
+//
+// A takeover is why this cannot be done once at startup. When the pool is built
+// the claimer does not exist yet -- the transaction client is constructed
+// before the supplier manager, which builds the claimer inside its own Start --
+// so the count is unavailable at construction and only becomes real after the
+// first lease distribution.
+//
+// New members are probed before they can serve: Grow adds them unhealthy, and
+// only a probe that returned makes them eligible. That is a PREFERENCE, not a
+// guarantee -- when no member is healthy the pool falls back to round-robin
+// over all of them, deliberately, because refusing to dial would invent a
+// failure the transaction classifiers cannot read. So an unverified connection
+// can still carry a claim, but only once there is nothing better.
+func (tc *TxClient) ResizeConnPool(ctx context.Context, claimed int) error {
+	if tc.pool == nil || tc.closed.Load() {
+		return nil
+	}
+
+	added, err := tc.pool.Grow(grpcconn.SizeFor(claimed))
+	if err != nil {
+		return fmt.Errorf("resizing tx connection pool: %w", err)
+	}
+	if len(added) == 0 {
+		return nil
+	}
+
+	warmPool := pond.NewPool(probeFanOut(len(added)))
+	for _, member := range added {
+		member := member
+		warmPool.Submit(func() {
+			err := tc.probeOne(ctx, authtypes.NewQueryClient(member.Conn))
+			tc.pool.MarkHealth(member.Index, err == nil)
+			if err != nil {
+				txConnMemberVerified.WithLabelValues(strconv.Itoa(member.Index)).Set(0)
+				txConnProbeFailures.WithLabelValues(probeReasonWarmup).Inc()
+				return
+			}
+			txConnMemberVerified.WithLabelValues(strconv.Itoa(member.Index)).Set(1)
+		})
+	}
+	warmPool.StopAndWait()
+
+	tc.logger.Info().
+		Int("claimed_suppliers", claimed).
+		Int("added_connections", len(added)).
+		Int("pool_size", tc.pool.Len()).
+		Msg("transaction connection pool grown for the leases this replica holds")
+	return nil
 }

@@ -27,8 +27,10 @@ import (
 	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc"
 
+	grpc1 "github.com/cosmos/gogoproto/grpc"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+
 	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
@@ -245,6 +247,12 @@ type TxClient struct {
 	grpcConn   *grpc.ClientConn
 	ownsConn   bool // true if we created the connection and should close it
 
+	// pool is this client's own set of connections, and it is nil exactly when
+	// the connection was handed in by the caller: a shared connection is
+	// somebody else's to size, probe and close, and wrapping it in a pool
+	// would claim all three.
+	pool *grpcconn.Pool
+
 	// Codec for encoding/decoding transactions
 	codec       codec.Codec
 	txConfig    client.TxConfig
@@ -329,6 +337,7 @@ func NewTxClient(
 	}
 
 	var grpcConn *grpc.ClientConn
+	var pool *grpcconn.Pool
 	var ownsConn bool
 
 	if config.GRPCConn != nil {
@@ -342,9 +351,10 @@ func NewTxClient(
 		// no backoff, no stream observer -- and it was invisible only because
 		// the miner handed it the query connection instead.
 		var err error
-		grpcConn, err = grpcconn.New(
+		pool, err = grpcconn.NewPool(
 			grpcconn.Target{Endpoint: config.GRPCEndpoint, UseTLS: config.UseTLS},
 			grpcconn.RoleTx,
+			grpcconn.DefaultPoolFloor,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gRPC connection: %w", err)
@@ -355,16 +365,25 @@ func NewTxClient(
 	// Create codec and tx config
 	cdc, txConfig := createCodecAndTxConfig()
 
+	// The stubs take gogoproto's grpc.ClientConn -- Invoke plus NewStream --
+	// so a pool goes here in place of a connection and nothing above this
+	// constructor knows the difference.
+	var stubConn grpc1.ClientConn = grpcConn
+	if pool != nil {
+		stubConn = pool
+	}
+
 	tc := &TxClient{
 		logger:       logging.ForComponent(logger, logging.ComponentTxClient),
 		config:       config,
 		keyManager:   keyManager,
 		grpcConn:     grpcConn,
+		pool:         pool,
 		ownsConn:     ownsConn,
 		codec:        cdc,
 		txConfig:     txConfig,
-		authQuerier:  authtypes.NewQueryClient(grpcConn),
-		txClient:     txtypes.NewServiceClient(grpcConn),
+		authQuerier:  authtypes.NewQueryClient(stubConn),
+		txClient:     txtypes.NewServiceClient(stubConn),
 		accountCache: make(map[string]*authtypes.BaseAccount),
 	}
 	tc.permits = newPermits(tc.maxConcurrent())
@@ -1173,6 +1192,21 @@ func (tc *TxClient) Close() error {
 	// through to grpcConn.Close() with broadcasts still running, which is the
 	// exact failure the wait exists to prevent. If anyone ever gives this a
 	// context, the error path must NOT close the connection.
+	// This error path returns BEFORE closing anything, which with a pool would
+	// strand every member rather than one connection. It is left exactly as it
+	// is, and the reason is that with context.Background() it cannot be
+	// reached: Background's Done() is nil (measured), and all three branches of
+	// semaphore.Acquire that return an error do it by receiving from that
+	// channel. The one branch that could fire here -- n greater than the
+	// semaphore's size -- receives from nil and BLOCKS FOREVER instead.
+	//
+	// So the failure this guards is not a leak, it is a silent hang at
+	// shutdown, and what prevents it is that the count asked for here is
+	// exactly the semaphore's size, which holds because both are
+	// tc.maxConcurrent(). That invariant is now load bearing: anything that
+	// makes Close ask for a different number hangs, and anything that hands
+	// this a cancellable context makes the error path reachable again, at
+	// which point the comment above applies and it must still NOT close.
 	if err := tc.permits.Acquire(context.Background(), tc.maxConcurrent()); err != nil {
 		return fmt.Errorf("failed to quiesce in-flight broadcasts: %w", err)
 	}
@@ -1183,9 +1217,15 @@ func (tc *TxClient) Close() error {
 	// lookup erroring during shutdown is acceptable; a claim erroring is not,
 	// and that is the line the permit draws.
 
-	// Only close the connection if we created it ourselves
-	if tc.ownsConn && tc.grpcConn != nil {
-		if err := tc.grpcConn.Close(); err != nil {
+	// Only close connections we created ourselves. Closing the members in
+	// series is deliberate: 626 never-dialled connections close in 3.5ms
+	// (measured), and the waits inside ClientConn.Close are on its own
+	// serializer goroutines rather than on anything the peer has to answer.
+	// A connected member does more local work than that -- NOT measured -- but
+	// nothing here waits on a network round trip, so a parallel shutdown would
+	// buy nothing an orchestrator could notice.
+	if tc.ownsConn && tc.pool != nil {
+		if err := tc.pool.Close(); err != nil {
 			return fmt.Errorf("failed to close gRPC connection: %w", err)
 		}
 	}
