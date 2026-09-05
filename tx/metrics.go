@@ -179,6 +179,25 @@ var (
 	// because we use SYNC broadcast mode which returns after CheckTx only.
 	// These metrics would require BLOCK mode which waits for TX execution.
 
+	// txProofNotRequired counts the times the chain refused a proof the local
+	// oracle had decided was required. That divergence has never been measured:
+	// until now it was swallowed and reported as a successful submission, so
+	// there is no number for how often it happens or whether it concentrates in
+	// one supplier.
+	//
+	// No EagerCounterChildren call for this one, and that is not an oversight:
+	// the label is the supplier address, which cannot be enumerated at init.
+	// Same as the three counters around it.
+	txProofNotRequired = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "proof_not_required_total",
+			Help:      "Proof submissions the chain refused as not required, which the local oracle had judged required",
+		},
+		[]string{"supplier"},
+	)
+
 	txInsufficientBalanceErrors = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

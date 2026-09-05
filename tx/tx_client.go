@@ -2,6 +2,7 @@ package tx
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	mathrand "math/rand/v2"
 	"os"
@@ -468,12 +469,17 @@ func (tc *TxClient) SubmitProofs(
 	if err != nil {
 		// Check if error is "proof not required" - this is benign (claim already settled without proof)
 		if isProofNotRequiredError(err) {
+			txProofNotRequired.WithLabelValues(supplierOperatorAddr).Inc()
 			tc.logger.Info().
 				Str("supplier", supplierOperatorAddr).
 				Int("num_proofs", len(proofs)).
 				Msg("proof submission skipped: blockchain indicates proof not required (claim already settled)")
-			// Return empty hash to indicate success without submission
-			return "", nil
+			// Reporting this as a successful submission is what hid it: the batch
+			// travels as ONE transaction, so a single not-required proof fails the
+			// whole tx and the other N-1 were never transmitted. Returning the
+			// sentinel keeps the fact askable with errors.Is and the rejection
+			// readable with errors.As; both wrap so neither is lost.
+			return "", fmt.Errorf("%w: %w", ErrTxProofNotRequired, err)
 		}
 		txProofErrors.WithLabelValues(supplierOperatorAddr).Inc()
 		return "", fmt.Errorf("failed to broadcast proofs: %w", err)
@@ -1081,18 +1087,42 @@ func isInsufficientBalanceError(errorMsg string) bool {
 	return false
 }
 
-// isProofNotRequiredError checks if the error indicates proof is not required for the claim.
-// This happens when:
-// - The claim didn't meet the ProofRequestProbability threshold (probabilistic proof selection)
-// - The claim was already settled without requiring proof
-// - There's a timing race where the miner thinks proof is required but blockchain says it's not
-// This is a benign condition - no proof submission needed, claim already settled.
+// ErrTxProofNotRequired reports that the CHAIN refused a proof because none was
+// required -- the claim did not meet the probabilistic threshold, or it had
+// already settled without one.
+//
+// It exists so a caller can ask the FACT with errors.Is and read the DATUM with
+// errors.As, instead of matching substrings on a message that grows a wrapper at
+// every frame. The two are different questions: "was it this condition" and
+// "which message of the batch, and what did the server actually say".
+var ErrTxProofNotRequired = errors.New("chain reports no proof was required")
+
+// isProofNotRequiredError recognises that refusal.
+//
+// The needle is DERIVED FROM THE SYMBOL: prooftypes.ErrProofNotRequired.Error()
+// is its registered description verbatim (cosmossdk.io/errors renders a
+// registered error as its desc), so deleting or renaming the symbol upstream
+// breaks this build instead of silently un-matching. That is the only defence
+// available, because every exit of poktroll's proof msg server flattens its
+// error to text -- the registered object, its code and its codespace are all
+// destroyed before it reaches us.
+//
+// It matches on RawLog, the server's own text, and NEVER on err.Error(): ours
+// keeps growing wrappers, and Contains over a moving string is how a classifier
+// starts matching something it was never meant to. No case folding, and that is
+// safe only because BOTH sides come from the same symbol -- the description we
+// look for and the description the server echoed. Replace the needle with a
+// hand-typed literal and case starts mattering again with nothing to catch it.
+//
+// This is also NARROWER than the text match it replaces: it requires a
+// TxRejection in the chain, so it fires on an actual chain refusal rather than
+// on anything that happens to carry the phrase.
 func isProofNotRequiredError(err error) bool {
-	if err == nil {
+	var rejection *TxRejection
+	if !errors.As(err, &rejection) {
 		return false
 	}
-	errorMsg := strings.ToLower(err.Error())
-	return strings.Contains(errorMsg, "proof not required")
+	return strings.Contains(rejection.RawLog, prooftypes.ErrProofNotRequired.Error())
 }
 
 // isSequenceMismatchError checks if the error message indicates account sequence mismatch.
@@ -1412,7 +1442,23 @@ func (c *HASupplierClient) SubmitProofsReturningHash(
 	// Call TxClient and capture TX hash for deduplication
 	txHash, err := c.txClient.SubmitProofs(ctx, c.operatorAddr, timeoutHeight, proofs)
 	if err != nil {
-		return "", err
+		// SCAFFOLDING, and the next commit is what removes it. SubmitProofs now
+		// reports "the chain says no proof was required" instead of swallowing
+		// it, but nothing upstream can yet turn that into a per-session state --
+		// that decision needs the batch size and the message index. Until then
+		// this maps the sentinel back onto the exact behaviour it replaced: an
+		// empty hash and a successful return, including the two things that
+		// happen below because of it (the stashed empty hash, and the fee-cache
+		// refresh taken from a submission that did not occur).
+		//
+		// It lives HERE and not in the lifecycle because both callers reach the
+		// chain through this function -- the lifecycle's SubmitProofs delegates
+		// to it, and so does the reconciler's self-heal resend. An adapter one
+		// frame up would cover one of them and silently drop the two effects.
+		if !errors.Is(err, ErrTxProofNotRequired) {
+			return "", err
+		}
+		txHash = ""
 	}
 
 	// Store TX hash for retrieval by caller (1 line after broadcast)
