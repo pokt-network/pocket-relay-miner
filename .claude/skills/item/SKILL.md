@@ -223,6 +223,14 @@ not for the file you remember.
 
 ## Step 5 — the gates, bare
 
+**Bring your own test Redis DOWN first (`scripts/gates/redis.sh down`).** The gate
+starts its own on the same port with the same name, and one you left running from
+a targeted test run collides with it. What makes this worth a line rather than a
+footnote: the gate then fails on RACE, so the symptom names a category — a data
+race in the code just written — that has nothing to do with the cause. It does not
+merely fail to point at the problem, it points away from it. Measured 2026-09-05,
+one review away from reporting a race that did not exist.
+
 Use `gates`. Level 2 is the floor for "done"; level 3 is not optional for relay,
 claim, proof, settlement or metering. Report what did NOT run.
 
@@ -232,6 +240,19 @@ Name the angles in writing BEFORE reading: removed behaviour, cross-file callers
 double-counted metrics, language pitfalls, efficiency. Measured 2026-08-26, that
 pass over a 17-commit branch found a real defect the gates could not: a gate
 reporting its units in one mode and not the other.
+
+**INSERTING is the trigger, not moving — and it is mechanical.** Four orphaned
+comments in one session, and all four came from the same act: putting something
+new immediately BEFORE a declaration. The new code lands between a comment and
+the thing it documents, so the comment now heads the wrong symbol and the right
+one has none. The fourth was the sharpest: the displaced comment carried the very
+example being cited in the new code's own rationale, so the explanation ended up
+attached to the fix and torn off the metric that suffers the problem.
+
+No gate sees any of this — the result is syntactically fine, gofmt has no opinion,
+and this repo's linters run with documentation rules excluded. So it is not a care
+to remember, it is a command to run: after any insertion, diff the untouched
+region against HEAD and expect ZERO removed lines.
 
 **After MOVING code, `diff` against `HEAD` the part you did not mean to touch.**
 Inserting a function or a branch lands it next to somebody else's comment, and
