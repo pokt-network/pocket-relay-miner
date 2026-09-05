@@ -125,6 +125,25 @@ before it.
   and passing: if the code under test would have had to run for the assertion
   to mean anything, prove it ran. A timing window closed by a duration is a
   window you are guessing at; close it with a channel the test controls.
+- **Passed, the injection was the named defect, and the test DID reach it** —
+  then the code is fine and something you WROTE about it is not. Measured
+  2026-09-05: a range check on an index parsed out of a server's text was
+  documented as protecting against an out-of-range value; injecting `if true`
+  stayed green, because the loop COMPARES against the index rather than indexing
+  with it, so out-of-range was already harmless. The check was not useless — it
+  makes a nonsense index audible instead of silently settling a whole batch as
+  errors — but the comment claimed a different job than the one it did.
+
+  This one is worth naming separately because no gate can reach it: the code
+  compiles, runs, and behaves identically. The claim is a property of the
+  EXPLANATION, not of the program, and the damage is deferred — the next reader
+  deletes the guard believing it redundant, or keeps it believing they are
+  protected from something they are not. The repair is both halves: fix the
+  sentence, and add the assertion for what the guard actually buys. Fixing only
+  the sentence leaves the guard with no owner.
+
+  It is also why injecting against something that "obviously" holds is worth the
+  minute it costs. **An unexpected green is a question, not a result.**
 - **Printed the failure and still exited 0** — the harness around the test is
   broken, and the test itself may be fine. Read the exit status, never the
   output: a red you can see and the runner cannot is worth nothing, because the
@@ -148,6 +167,21 @@ decides.**
   the assertion runs, which was never in doubt.
 - **One defect at a time.** Two injections and you cannot tell which one the red
   belongs to.
+- **Scope the edit to the SYMBOL, not the file, and refuse to guess.** Cut the
+  segment between the function's `func` and its close, assert it contains
+  EXACTLY ONE occurrence of what you are replacing, and edit inside that. A
+  common token — `continue`, `return nil`, `break`, `err != nil` — identifies
+  nothing in a two-thousand-line file: measured 2026-09-05, a `continue` meant
+  for line 471 landed on line 307 and produced a green that was not about the
+  code under test at all. An injection that could match twice must abort rather
+  than pick for you.
+- **Prefer MODIFYING to DELETING.** Removing a line orphans identifiers, and the
+  compiler then objects to something that is not the defect: "does not compile"
+  is not a red, so the attempt buys nothing and reads like evidence. Measured
+  twice in one session — deleting a sort left its import unused, deleting an
+  assertion left its variable and helper unused. Inverting a comparison,
+  swapping `Index` for `LastIndex`, forcing a condition to `true`: each exercises
+  the same defect and still builds.
 - **This applies to guard tests especially** — cardinality guards, invariant
   checks, "must not contain X" assertions. They are written precisely because
   the failure is rare, which means nobody has ever seen them go red.
