@@ -515,6 +515,40 @@ func alignProofBatch(built []proofBuildResult) (
 	return proofMsgs, interfaceProofMsgs, snapshots
 }
 
+// sessionIDLogPrefix is how much of a session ID goes into a log line.
+const sessionIDLogPrefix = 16
+
+// firstSessionIDsForLog renders up to five session IDs for one log line,
+// truncating each to sessionIDLogPrefix characters.
+//
+// The length check is the reason this exists. Both call sites sliced
+// SessionID[:16] bare, which PANICS on any shorter ID -- and both sit inside
+// the group loop of a submission cycle, so such a panic does not cost one
+// session, it takes every session of that supplier: the same "one proof's fate
+// is not the others'" property this cycle is being built to buy, broken by
+// another door.
+//
+// Not reachable from a relay on the path that was checked: relayer/validator.go
+// rejects a request whose session ID does not match the chain's, and
+// chain-issued IDs are 64 hex characters. NOT VERIFIED for every producer --
+// the miner reads these IDs back from its own store, and nothing on that path
+// enforces a length.
+func firstSessionIDsForLog(snapshots []*SessionSnapshot) []string {
+	const maxIDs = 5
+	ids := make([]string, 0, min(maxIDs, len(snapshots)))
+	for _, s := range snapshots {
+		if len(ids) == maxIDs {
+			break
+		}
+		if len(s.SessionID) > sessionIDLogPrefix {
+			ids = append(ids, s.SessionID[:sessionIDLogPrefix]+"...")
+			continue
+		}
+		ids = append(ids, s.SessionID)
+	}
+	return ids
+}
+
 // buildProofGroups partitions one supplier's snapshots into the groups that
 // each become one proof submission, in a DETERMINISTIC order.
 //
@@ -712,12 +746,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		currentHeight := lc.blockClient.LastBlock(ctx).Height()
 
 		// Build session IDs list for logging (truncate if too many)
-		sessionIDs := make([]string, 0, len(groupSnapshots))
-		for _, s := range groupSnapshots {
-			if len(sessionIDs) < 5 { // Show first 5 session IDs
-				sessionIDs = append(sessionIDs, s.SessionID[:16]+"...")
-			}
-		}
+		sessionIDs := firstSessionIDsForLog(groupSnapshots)
 
 		logger.Debug().
 			Int64("claim_window_open_height", claimWindowOpenHeight).
@@ -1491,12 +1520,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		currentHeight := lc.blockClient.LastBlock(ctx).Height()
 
 		// Build session IDs list for logging (truncate if too many)
-		proofSessionIDs := make([]string, 0, len(groupSnapshots))
-		for _, s := range groupSnapshots {
-			if len(proofSessionIDs) < 5 { // Show first 5 session IDs
-				proofSessionIDs = append(proofSessionIDs, s.SessionID[:16]+"...")
-			}
-		}
+		proofSessionIDs := firstSessionIDsForLog(groupSnapshots)
 
 		logger.Debug().
 			Int64("proof_window_open_height", proofWindowOpenHeight).
