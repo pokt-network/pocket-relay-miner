@@ -464,6 +464,28 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	}
 	newHash, err := r.resubmitter.ResubmitMessage(ctx, rp.phase, g.Supplier, entry.MsgBytes, windowClose)
 
+	// The chain says this proof is not required. Mirror image of the saturation
+	// case below: that one never reached the network, this one did and can never
+	// succeed -- the requirement is seeded from a fixed block hash and read with
+	// params at the session's own heights, so every future resend asks the same
+	// question. There is no inclusion left to verify, so the entry is DROPPED
+	// rather than counted. Counting would happen to work only because
+	// MaxRebroadcasts defaults to 1; the entry would still be re-read on every
+	// block until the window closes.
+	//
+	// A context of its own, for the same reason the persist below has one: the
+	// group context may already be expired by the send. And if the delete fails
+	// it is logged and dropped -- what keeps the proof from being re-sent then is
+	// that the next block walks the same path to the same verdict, not the
+	// delete having succeeded.
+	if errors.Is(err, tx.ErrTxProofNotRequired) {
+		clearCtx, cancelClear := context.WithTimeout(context.WithoutCancel(ctx), rebroadcastPersistTimeout)
+		r.clear(clearCtx, rp.phase, g, sessionID)
+		cancelClear()
+		rp.recordRebroadcast(g.Supplier, entry.ServiceID, "not_required")
+		return
+	}
+
 	// Count this attempt and persist it, so MaxRebroadcasts bounds the total
 	// number of resend tries. Without counting failures, a persistently failing
 	// resend (e.g. a CUPR-doomed claim whose gas simulation always fails) would

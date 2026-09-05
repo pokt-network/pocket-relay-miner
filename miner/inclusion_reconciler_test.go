@@ -735,3 +735,47 @@ func TestReconciler_PoolIsCappedByTxConcurrency(t *testing.T) {
 		})
 	}
 }
+
+// A resend that meets "the chain says no proof was required" must DROP the
+// entry, not count it. Mirror image of the saturation exemption above: that one
+// never reached the network, this one did and can never succeed, because the
+// requirement is seeded from a fixed block hash and read with params at the
+// session's own heights.
+//
+// Counting instead would happen to look right -- MaxRebroadcasts is 1, so the
+// storm is capped anyway -- while leaving the entry to be re-read on every block
+// until the window closes. The assertion is therefore on the STORE, not on the
+// attempt count: the attempt count cannot tell "dropped" from "capped".
+func TestReconciler_NotRequiredDropsTheEntryInsteadOfCountingIt(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.resub.failWith = fmt.Errorf("%w: %w", tx.ErrTxProofNotRequired, &tx.TxRejection{
+		Stage:  tx.TxStageSimulate,
+		RawLog: "proof not required",
+	})
+	h.seedNeverSent(t, hSupplier, hEnd, "s1", testSubmit)
+
+	h.r.OnBlock(testSubmit + 1) // past the one-block grace: resend fires
+
+	require.Equal(t, 1, h.resub.attemptCount(), "the resend must have been attempted once")
+	require.Zero(t, h.pendingCount(t, hSupplier, hEnd),
+		"a proof the chain refused as not required has no inclusion left to verify: the entry must be gone")
+}
+
+// Driving every remaining block must not resurrect it, which is the property a
+// counted-but-kept entry would fail.
+func TestReconciler_NotRequiredEntryStaysGone(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.resub.failWith = fmt.Errorf("%w: %w", tx.ErrTxProofNotRequired, &tx.TxRejection{
+		Stage:  tx.TxStageSimulate,
+		RawLog: "proof not required",
+	})
+	h.seedNeverSent(t, hSupplier, hEnd, "s1", testSubmit)
+
+	for height := testSubmit; height < testWindowClose; height++ {
+		h.r.OnBlock(height)
+	}
+
+	require.Equal(t, 1, h.resub.attemptCount(),
+		"one doomed attempt is one too many to repeat: the entry was dropped after the first")
+	require.Zero(t, h.pendingCount(t, hSupplier, hEnd))
+}

@@ -410,6 +410,77 @@ type proofBuildResult struct {
 	err      error
 }
 
+// settleNotRequiredBatch records the per-session outcome of a batch the chain
+// refused because one of its proofs was not required.
+//
+// The message the chain NAMED is settled, not failed: its claim settles without
+// a proof, and that answer is stable across a retry because the requirement is
+// seeded from a fixed block hash and read with params at the session's own
+// heights. The others were never transmitted -- the batch is one transaction --
+// so their loss is real and they take the error. Marking the named one an error
+// too would record a false fact about the one session the chain actually told us
+// about, and throw away the only datum it offered.
+//
+// Without an index every message is indistinguishable and all of them take the
+// error. That is not a second policy; it is this one with nothing to split on.
+// A fee, nonce or TTL failure arrives that way: the ante handler runs in
+// simulation too and fails before any message executes.
+//
+// It deliberately persists NO rebroadcast entry. An empty OrigTxHash is not a
+// missing value to the reconciler, it is an instruction -- "never broadcast,
+// resend promptly" -- so a proof the chain just refused would be re-sent a block
+// later, doomed, burning a permit and a simulation.
+func (lc *LifecycleCallback) settleNotRequiredBatch(
+	ctx context.Context,
+	logger logging.Logger,
+	submitErr error,
+	snapshots []*SessionSnapshot,
+) {
+	named := -1
+	var rejection *tx.TxRejection
+	if errors.As(submitErr, &rejection) && rejection.HasMsgIndex {
+		// The index is parsed out of the server's text, which can carry a second
+		// "message index:" of its own. An out-of-range value is already harmless
+		// here -- the loop below COMPARES against named rather than indexing
+		// with it -- so this check buys audibility, not safety: without it a
+		// nonsense index would settle every session as an error in silence,
+		// which is indistinguishable from a batch that legitimately had none.
+		if rejection.MsgIndex >= 0 && rejection.MsgIndex < len(snapshots) {
+			named = rejection.MsgIndex
+		} else {
+			logger.Warn().
+				Int("msg_index", rejection.MsgIndex).
+				Int("batch_size", len(snapshots)).
+				Msg("proof not required: message index outside the batch, settling every session as an error")
+		}
+	}
+
+	for i, snapshot := range snapshots {
+		if i == named {
+			logger.Info().
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Int("batch_size", len(snapshots)).
+				Msg("proof not required: the chain named this session, settling it as probabilistically proved")
+			RecordRevenueProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
+			if lc.sessionCoordinator != nil {
+				if err := lc.sessionCoordinator.OnProbabilisticProved(ctx, snapshot.SessionID); err != nil {
+					logger.Warn().Err(err).Str(logging.FieldSessionID, snapshot.SessionID).
+						Msg("failed to mark session as probabilistic_proved")
+				}
+			}
+			continue
+		}
+
+		RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+		if lc.sessionCoordinator != nil {
+			if err := lc.sessionCoordinator.OnProofTxError(ctx, snapshot.SessionID); err != nil {
+				logger.Warn().Err(err).Str(logging.FieldSessionID, snapshot.SessionID).
+					Msg("failed to mark session as proof_tx_error in Redis")
+			}
+		}
+	}
+}
+
 // alignProofBatch turns the built proof results into the three parallel slices
 // the submission path needs, and it is the ONLY place they are built.
 //
@@ -1881,11 +1952,26 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// for one session -- and overwrites the accurate window-closed state in
 		// Redis with the vaguer tx_error one.
 		windowClosed := false
+		// notRequired exists for the same reason windowClosed does: the batch
+		// settled itself per session inside the loop, so the block after it must
+		// not settle them a second time with a vaguer verdict.
+		notRequired := false
 		var proofTxHash string
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
 			submitErr := lc.supplierClient.SubmitProofs(proofCtx, proofWindowClose, interfaceProofMsgs...)
 			if submitErr != nil {
 				lastErr = submitErr
+
+				// The chain refused a proof it says was not required. Terminal
+				// for the batch, like the window branch below: the requirement
+				// is seeded from a fixed block hash and read at the session's
+				// own heights, so a retry asks the same question and gets the
+				// same answer while the window burns.
+				if errors.Is(submitErr, tx.ErrTxProofNotRequired) {
+					lc.settleNotRequiredBatch(ctx, logger, submitErr, validProofSnapshots)
+					notRequired = true
+					break
+				}
 
 				// Check if error is due to proof window being closed (permanent failure - don't retry)
 				errorMsg := submitErr.Error()
@@ -2012,7 +2098,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			}
 		}
 
-		if lastErr != nil && !windowClosed {
+		if lastErr != nil && !windowClosed && !notRequired {
 			// Mark sessions that entered the tx as failed (the ones that did
 			// not build are already counted as build_failed via RecordProofSkipped).
 			for _, snapshot := range validProofSnapshots {

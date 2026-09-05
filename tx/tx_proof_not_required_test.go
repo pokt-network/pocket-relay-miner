@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
@@ -104,16 +105,16 @@ func TestTheEmptyBatchIsUntouched(t *testing.T) {
 	require.Zero(t, srv.txServer.SimulateCalls(), "nothing should have reached the chain")
 }
 
-// The observable behaviour does not change in this commit, and that is the
-// point: the sentinel exists, and the scaffolding maps it back onto exactly what
-// happened before. The next commit is what turns it into a per-session state.
+// The inverse of the assertion the previous commit made, and it is written as a
+// replacement rather than a deletion: there the scaffolding mapped the sentinel
+// back onto today's behaviour and this test pinned that it did; here the
+// scaffolding is gone and the same two effects must NOT happen.
 //
-// The red this guards against is specific. Without the adapter the sentinel
-// escapes to the lifecycle's generic error path, which persists rebroadcast
-// entries with OrigTxHash="" -- and the inclusion reconciler reads that empty
-// string not as a missing value but as "never broadcast, resend promptly". A
-// proof the chain just refused would be re-sent one block later.
-func TestTheObservableBehaviourIsUnchanged(t *testing.T) {
+// Both were side effects of reporting a refusal as a success. The stashed hash
+// overwrote whatever a concurrent submission had recorded, with an empty string.
+// The fee-cache refresh took its estimate "from the most recent successful
+// submission" -- one that never occurred.
+func TestTheRefusalEscapesAndLeavesTheClientUntouched(t *testing.T) {
 	srv := setupMockGRPCServer(t)
 	t.Cleanup(srv.cleanup)
 	armNotRequired(srv)
@@ -121,13 +122,39 @@ func TestTheObservableBehaviourIsUnchanged(t *testing.T) {
 	tc := newBudgetClient(t, srv, TxClientConfig{})
 	client := NewHASupplierClient(tc, budgetTestSupplier, logging.NewLoggerFromConfig(logging.DefaultConfig()))
 
+	// State a real submission would have left behind.
+	client.lastProofTxMu.Lock()
+	client.lastProofTxHash = "PRIOR-HASH"
+	client.lastProofTxMu.Unlock()
+	client.feeCacheMu.Lock()
+	client.feeCacheUpokt = 9999
+	client.feeCacheTime = time.Now()
+	client.feeCacheMu.Unlock()
+
 	hash, err := client.SubmitProofsReturningHash(context.Background(), 1000,
 		generateTestProof(t, budgetTestSupplier, "session-1"))
 
-	require.NoError(t, err, "this commit must not change what the lifecycle sees")
 	require.Empty(t, hash)
-	require.Equal(t, "", client.GetLastProofTxHash(),
-		"the stashed empty hash is today's behaviour, and the next commit is what removes it")
-	require.Equal(t, 1, srv.txServer.SimulateCalls(),
-		"exactly one attempt: a refusal that cannot succeed must never be retried")
+	require.ErrorIs(t, err, ErrTxProofNotRequired, "the refusal must reach the caller that can decide per session")
+
+	require.Equal(t, "PRIOR-HASH", client.GetLastProofTxHash(),
+		"a refusal overwrote another submission's hash with an empty string")
+
+	client.feeCacheMu.RLock()
+	defer client.feeCacheMu.RUnlock()
+	require.Equal(t, uint64(9999), client.feeCacheUpokt,
+		"the fee estimate was refreshed from a submission that never happened")
+	require.False(t, client.feeCacheTime.IsZero())
+}
+
+// Exactly one attempt: a refusal that can never succeed must not be retried.
+func TestTheRefusalIsNotRetried(t *testing.T) {
+	srv := setupMockGRPCServer(t)
+	t.Cleanup(srv.cleanup)
+	armNotRequired(srv)
+
+	tc := newBudgetClient(t, srv, TxClientConfig{})
+	_, err := submitOneProof(t, tc)
+	require.ErrorIs(t, err, ErrTxProofNotRequired)
+	require.Equal(t, 1, srv.txServer.SimulateCalls())
 }

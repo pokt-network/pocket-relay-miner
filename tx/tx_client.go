@@ -1442,23 +1442,7 @@ func (c *HASupplierClient) SubmitProofsReturningHash(
 	// Call TxClient and capture TX hash for deduplication
 	txHash, err := c.txClient.SubmitProofs(ctx, c.operatorAddr, timeoutHeight, proofs)
 	if err != nil {
-		// SCAFFOLDING, and the next commit is what removes it. SubmitProofs now
-		// reports "the chain says no proof was required" instead of swallowing
-		// it, but nothing upstream can yet turn that into a per-session state --
-		// that decision needs the batch size and the message index. Until then
-		// this maps the sentinel back onto the exact behaviour it replaced: an
-		// empty hash and a successful return, including the two things that
-		// happen below because of it (the stashed empty hash, and the fee-cache
-		// refresh taken from a submission that did not occur).
-		//
-		// It lives HERE and not in the lifecycle because both callers reach the
-		// chain through this function -- the lifecycle's SubmitProofs delegates
-		// to it, and so does the reconciler's self-heal resend. An adapter one
-		// frame up would cover one of them and silently drop the two effects.
-		if !errors.Is(err, ErrTxProofNotRequired) {
-			return "", err
-		}
-		txHash = ""
+		return "", err
 	}
 
 	// Store TX hash for retrieval by caller (1 line after broadcast)
