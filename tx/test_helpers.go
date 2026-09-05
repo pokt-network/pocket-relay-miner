@@ -32,6 +32,79 @@ type mockAuthQueryServer struct {
 	authtypes.UnimplementedQueryServer
 	accounts map[string]*authtypes.BaseAccount
 	t        *testing.T
+
+	// Params is what the connection probe calls, so the test server has to
+	// answer it: embedding UnimplementedQueryServer alone returns
+	// codes.Unimplemented, which the probe classifies as a misconfigured
+	// connection -- correctly, since that is what an endpoint that does not
+	// serve the auth module looks like.
+	paramsMu      sync.Mutex
+	paramsCalls   int
+	paramsErr     error
+	paramsBlockCh chan struct{}
+	paramsSeen    chan struct{}
+}
+
+func (m *mockAuthQueryServer) Params(
+	ctx context.Context,
+	_ *authtypes.QueryParamsRequest,
+) (*authtypes.QueryParamsResponse, error) {
+	m.paramsMu.Lock()
+	m.paramsCalls++
+	err, block, seen := m.paramsErr, m.paramsBlockCh, m.paramsSeen
+	m.paramsMu.Unlock()
+
+	if seen != nil {
+		select {
+		case seen <- struct{}{}:
+		default:
+		}
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &authtypes.QueryParamsResponse{Params: authtypes.DefaultParams()}, nil
+}
+
+// ParamsCalls reports how many probes have reached the server.
+func (m *mockAuthQueryServer) ParamsCalls() int {
+	m.paramsMu.Lock()
+	defer m.paramsMu.Unlock()
+	return m.paramsCalls
+}
+
+// SetParamsErr makes every later Params call fail with err.
+func (m *mockAuthQueryServer) SetParamsErr(err error) {
+	m.paramsMu.Lock()
+	defer m.paramsMu.Unlock()
+	m.paramsErr = err
+}
+
+// BlockParams makes every later Params call wait until the returned channel is
+// closed, or until the caller's context expires.
+func (m *mockAuthQueryServer) BlockParams() chan struct{} {
+	ch := make(chan struct{})
+	m.paramsMu.Lock()
+	defer m.paramsMu.Unlock()
+	m.paramsBlockCh = ch
+	return ch
+}
+
+// NotifyParams returns a channel that receives once per Params call, so a test
+// can wait for a probe instead of sleeping for one.
+func (m *mockAuthQueryServer) NotifyParams(buf int) chan struct{} {
+	ch := make(chan struct{}, buf)
+	m.paramsMu.Lock()
+	defer m.paramsMu.Unlock()
+	m.paramsSeen = ch
+	return ch
 }
 
 func (m *mockAuthQueryServer) Account(
@@ -68,6 +141,27 @@ type mockTxServiceServer struct {
 	broadcastCounter int
 	getTxCounter     int    // number of GetTx (post-broadcast inclusion) calls
 	lastTxBytes      []byte // captured TxBytes from most recent BroadcastTx
+	broadcastBlockCh chan struct{}
+	broadcastSeen    chan struct{}
+}
+
+// BlockBroadcast parks every later BroadcastTx until the returned channel is
+// closed, so a test can hold a broadcast in flight.
+func (m *mockTxServiceServer) BlockBroadcast() chan struct{} {
+	ch := make(chan struct{})
+	m.rwMu.Lock()
+	defer m.rwMu.Unlock()
+	m.broadcastBlockCh = ch
+	return ch
+}
+
+// NotifyBroadcast returns a channel that receives once per BroadcastTx.
+func (m *mockTxServiceServer) NotifyBroadcast(buf int) chan struct{} {
+	ch := make(chan struct{}, buf)
+	m.rwMu.Lock()
+	defer m.rwMu.Unlock()
+	m.broadcastSeen = ch
+	return ch
 }
 
 func (m *mockTxServiceServer) BroadcastTx(
@@ -86,7 +180,22 @@ func (m *mockTxServiceServer) BroadcastTx(
 	// Copy so later test assertions don't race with in-flight reuse of
 	// the request buffer by the grpc server.
 	m.lastTxBytes = append([]byte(nil), req.TxBytes...)
+	block, seen := m.broadcastBlockCh, m.broadcastSeen
 	m.rwMu.Unlock()
+
+	if seen != nil {
+		select {
+		case seen <- struct{}{}:
+		default:
+		}
+	}
+	if block != nil {
+		select {
+		case <-block:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 
 	if broadcastErr != nil {
 		return nil, broadcastErr

@@ -23,6 +23,33 @@ var (
 		[]string{"supplier"},
 	)
 
+	// txConnVerified is 1 while the tx connection is known to carry RPCs and
+	// 0 once a probe has failed. A counter cannot answer "has this connection
+	// EVER worked since the process started", and that is the question an
+	// operator asks first when no claim has landed.
+	txConnVerified = observability.MinerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "conn_verified",
+			Help:      "1 if the last transaction-connection probe succeeded, 0 if it failed",
+		},
+	)
+
+	// txConnProbeFailures counts failed probes. reason is bounded to
+	// startup|tick: the same failure at startup and at hour six mean different
+	// things -- one is a bad config, the other is a connection that died while
+	// idle.
+	txConnProbeFailures = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "conn_probe_failures_total",
+			Help:      "Failed transaction-connection probes, by when the probe ran",
+		},
+		[]string{"reason"},
+	)
+
 	txBroadcastLatency = observability.MinerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,

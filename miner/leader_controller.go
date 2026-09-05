@@ -15,6 +15,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
+	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
@@ -134,6 +135,11 @@ func (c *LeaderController) Start(ctx context.Context) error {
 			GRPCEndpoint: c.config.QueryNodeGRPCUrl,
 			QueryTimeout: c.config.Config.GetQueryTimeout(),
 			UseTLS:       !c.config.GRPCInsecure,
+			// The miner runs this controller AND the supplier worker in one
+			// process, so both connections would report as conn="query" and
+			// their queueing would be summed. This one is mostly idle; the
+			// worker's is not.
+			ConnRole: grpcconn.RoleQueryLeader,
 		},
 	)
 	if err != nil {

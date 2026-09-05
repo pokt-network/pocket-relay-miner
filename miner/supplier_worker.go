@@ -3,6 +3,7 @@ package miner
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	stdhttp "net/http"
 	"runtime"
@@ -18,6 +19,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/transport"
+	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 
@@ -143,14 +145,22 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// Start worker pool metrics ticker for Prometheus monitoring
 	StartWorkerPoolMetricsTicker(w.ctx, w.logger, w.masterPool, "supplier_worker", masterPoolSize)
 
+	// Where this process dials the full node, derived ONCE. This worker opens
+	// two connections to the same node -- queries and transactions -- and
+	// deriving UseTLS separately for each is how they end up disagreeing.
+	nodeTarget := grpcconn.Target{
+		Endpoint: w.config.QueryNodeGRPCUrl,
+		UseTLS:   !w.config.GRPCInsecure,
+	}
+
 	// Create query clients
 	var err error
 	w.queryClients, err = query.NewQueryClients(
 		w.logger,
 		query.ClientConfig{
-			GRPCEndpoint: w.config.QueryNodeGRPCUrl,
+			GRPCEndpoint: nodeTarget.Endpoint,
 			QueryTimeout: w.config.Config.GetQueryTimeout(),
-			UseTLS:       !w.config.GRPCInsecure,
+			UseTLS:       nodeTarget.UseTLS,
 		},
 	)
 	if err != nil {
@@ -325,7 +335,15 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.logger,
 		w.config.KeyManager,
 		tx.TxClientConfig{
-			GRPCConn:                 w.queryClients.GRPCConnection(),
+			// Its OWN connection, not the query one. Transactions and
+			// queries share a per-connection ceiling of 100 concurrent
+			// HTTP/2 streams, and past it grpc-go parks the caller with no
+			// error and no log -- so a burst of queries could stall a claim
+			// silently. They also have opposite shapes: queries never stop,
+			// transactions only move inside windows.
+			GRPCEndpoint:             nodeTarget.Endpoint,
+			UseTLS:                   nodeTarget.UseTLS,
+			ConnProbeInterval:        w.config.Config.GetTxConnProbeInterval(),
 			ChainID:                  chainID,
 			GasLimit:                 w.config.Config.GetTxGasLimit(),
 			GasPrice:                 gasPrice,
@@ -349,6 +367,24 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.cleanup()
 		return fmt.Errorf("failed to create tx client: %w", err)
 	}
+	// grpc.NewClient is lazy, so nothing above proves the connection works.
+	// Without this, a wrong endpoint or wrong credentials stays quiet until
+	// the first claim -- which happens inside a closing window.
+	if verifyErr := w.txClient.VerifyConn(ctx); verifyErr != nil {
+		if errors.Is(verifyErr, tx.ErrTxConnMisconfigured) {
+			w.cleanup()
+			return fmt.Errorf("transaction connection is misconfigured: %w", verifyErr)
+		}
+		// Anything else is the node being unreachable right now. Starting
+		// anyway is deliberate: a full node that is briefly down at miner
+		// startup is not a reason to stay down with it, and the probe keeps
+		// checking.
+		w.logger.Warn().
+			Err(verifyErr).
+			Str("endpoint", nodeTarget.Endpoint).
+			Msg("transaction connection unverified at startup; starting anyway and probing")
+	}
+
 	w.logger.Info().Msg("transaction client initialized")
 
 	// Create supplier registry

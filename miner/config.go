@@ -313,6 +313,19 @@ type TransactionConfig struct {
 	// window was still wide open but per-attempt time was small)
 	TxTimeoutMinSeconds int64 `yaml:"tx_timeout_min_seconds,omitempty"`
 
+	// TxConnProbeIntervalSeconds is how often the miner probes its dedicated
+	// transaction connection while it is idle. Default: 60.
+	//
+	// The connection only carries traffic inside claim and proof windows, and
+	// a flow dropped by a middlebox in between leaves both ends believing it
+	// is healthy -- there are no keepalive pings without streams. The probe is
+	// what turns that into a log line before the window instead of a lost
+	// claim inside it.
+	//
+	// Lower it if probe failures show a small idle_seconds on your network:
+	// that value is how long the connection had been silent when it broke.
+	TxConnProbeIntervalSeconds int64 `yaml:"tx_conn_probe_interval_seconds,omitempty"`
+
 	// TxTimeoutMaxSeconds is the cap for window-based TX broadcast deadlines.
 	// Defaults to 500 ms below the cosmos-sdk 10-minute hard limit for
 	// unordered TXs so clock jitter cannot push the TX over the edge and
@@ -554,6 +567,15 @@ func (c *Config) GetTxTimeoutMin() time.Duration {
 		return time.Duration(c.Transaction.TxTimeoutMinSeconds) * time.Second
 	}
 	return 2 * time.Minute
+}
+
+// GetTxConnProbeInterval returns the idle-probe interval for the dedicated
+// transaction connection, or zero to let the tx client apply its default.
+func (c *Config) GetTxConnProbeInterval() time.Duration {
+	if c.Transaction.TxConnProbeIntervalSeconds > 0 {
+		return time.Duration(c.Transaction.TxConnProbeIntervalSeconds) * time.Second
+	}
+	return 0
 }
 
 // GetTxTimeoutMax returns the maximum TX broadcast deadline with defaults.

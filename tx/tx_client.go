@@ -2,7 +2,6 @@ package tx
 
 import (
 	"context"
-	"crypto/tls"
 	"fmt"
 	mathrand "math/rand/v2"
 	"os"
@@ -25,11 +24,10 @@ import (
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
@@ -159,6 +157,11 @@ type TxClientConfig struct {
 	// Only used if GRPCConn is nil.
 	GRPCEndpoint string
 
+	// ConnProbeInterval is how often to probe an owned connection. Zero uses
+	// DefaultTxConnProbeInterval. Ignored when the connection is shared: the
+	// invariant belongs to whoever owns the connection.
+	ConnProbeInterval time.Duration
+
 	// GRPCConn is an existing gRPC connection to reuse.
 	// If provided, GRPCEndpoint and UseTLS are ignored.
 	// The caller is responsible for closing this connection.
@@ -240,9 +243,22 @@ type TxClient struct {
 	accountCache   map[string]*authtypes.BaseAccount
 	accountCacheMu sync.RWMutex
 
+	// lastConnOKUnixNano is when an RPC last completed on this connection.
+	lastConnOKUnixNano atomic.Int64
+
+	// Connection probe (only when this client owns its connection)
+	probeCancel context.CancelFunc
+	probeDone   chan struct{}
+
 	// Lifecycle
 	closed bool
 	mu     sync.RWMutex
+
+	// inFlight counts broadcasts that passed the closed check. Close() waits
+	// for them before closing the connection: the check and the broadcast are
+	// not atomic, so without this a Close() landing in between would pull the
+	// connection out from under a claim already on its way.
+	inFlight sync.WaitGroup
 }
 
 // NewTxClient creates a new transaction client.
@@ -301,20 +317,15 @@ func NewTxClient(
 		grpcConn = config.GRPCConn
 		ownsConn = false
 	} else {
-		// Create our own connection
-		var transportCreds credentials.TransportCredentials
-		if config.UseTLS {
-			transportCreds = credentials.NewTLS(&tls.Config{
-				MinVersion: tls.VersionTLS12,
-			})
-		} else {
-			transportCreds = insecure.NewCredentials()
-		}
-
+		// Build our own, through the one constructor every outbound node
+		// connection goes through. Before this the tx client dialled with
+		// transport credentials and nothing else -- no keepalive, no windows,
+		// no backoff, no stream observer -- and it was invisible only because
+		// the miner handed it the query connection instead.
 		var err error
-		grpcConn, err = grpc.NewClient(
-			config.GRPCEndpoint,
-			grpc.WithTransportCredentials(transportCreds),
+		grpcConn, err = grpcconn.New(
+			grpcconn.Target{Endpoint: config.GRPCEndpoint, UseTLS: config.UseTLS},
+			grpcconn.RoleTx,
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gRPC connection: %w", err)
@@ -336,6 +347,12 @@ func NewTxClient(
 		authQuerier:  authtypes.NewQueryClient(grpcConn),
 		txClient:     txtypes.NewServiceClient(grpcConn),
 		accountCache: make(map[string]*authtypes.BaseAccount),
+	}
+
+	// The probe is the owner's job: a shared connection is somebody else's to
+	// keep alive, and two probes on one connection is one too many.
+	if ownsConn {
+		tc.startConnProbe()
 	}
 
 	tc.logger.Info().
@@ -374,12 +391,10 @@ func (tc *TxClient) CreateClaims(
 	timeoutHeight int64,
 	claims []*prooftypes.MsgCreateClaim,
 ) (string, error) {
-	tc.mu.RLock()
-	if tc.closed {
-		tc.mu.RUnlock()
+	if !tc.enter() {
 		return "", fmt.Errorf("tx client is closed")
 	}
-	tc.mu.RUnlock()
+	defer tc.inFlight.Done()
 
 	if len(claims) == 0 {
 		return "", nil
@@ -415,12 +430,10 @@ func (tc *TxClient) SubmitProofs(
 	timeoutHeight int64,
 	proofs []*prooftypes.MsgSubmitProof,
 ) (string, error) {
-	tc.mu.RLock()
-	if tc.closed {
-		tc.mu.RUnlock()
+	if !tc.enter() {
 		return "", fmt.Errorf("tx client is closed")
 	}
-	tc.mu.RUnlock()
+	defer tc.inFlight.Done()
 
 	if len(proofs) == 0 {
 		return "", nil
@@ -768,6 +781,9 @@ func (tc *TxClient) signAndBroadcast(
 	// NOTE: We don't increment sequence for unordered TXs (they don't use sequence numbers)
 
 	txBroadcastsTotal.WithLabelValues(signerAddr).Inc()
+	// Real traffic counts as proof the connection is alive, so idle_seconds on
+	// a probe failure measures silence and not merely time.
+	tc.markConnOK()
 	return txHash, nil
 }
 
@@ -1060,16 +1076,50 @@ func isSequenceMismatchError(errorMsg string) bool {
 	return false
 }
 
+// enter registers a broadcast as in flight, or reports that the client is
+// closed. Every caller that gets true owes an inFlight.Done(), and Close()
+// waits for all of them.
+//
+// The registration happens under the SAME read lock that reads closed, which
+// is what makes it safe: Close() sets closed under the write lock, so no
+// caller can register after that, and every caller that did register was
+// already counted when Close() starts waiting.
+func (tc *TxClient) enter() bool {
+	tc.mu.RLock()
+	defer tc.mu.RUnlock()
+
+	if tc.closed {
+		return false
+	}
+	tc.inFlight.Add(1)
+	return true
+}
+
 // Close closes the transaction client.
 // If the client was created with a shared gRPC connection, it will not be closed.
 func (tc *TxClient) Close() error {
 	tc.mu.Lock()
-	defer tc.mu.Unlock()
-
 	if tc.closed {
+		tc.mu.Unlock()
 		return nil
 	}
 	tc.closed = true
+	cancelProbe, probeDone := tc.probeCancel, tc.probeDone
+	// Released before waiting: a caller blocked on the read lock would only be
+	// delayed, but holding a lock across two waits is how the next change to
+	// this function introduces a deadlock.
+	tc.mu.Unlock()
+
+	// Stop the probe and wait for the broadcasts that already passed the
+	// closed check. Both must finish before the connection goes: closing it
+	// underneath either is the failure this client is being taught to survive.
+	if cancelProbe != nil {
+		cancelProbe()
+	}
+	if probeDone != nil {
+		<-probeDone
+	}
+	tc.inFlight.Wait()
 
 	// Only close the connection if we created it ourselves
 	if tc.ownsConn && tc.grpcConn != nil {

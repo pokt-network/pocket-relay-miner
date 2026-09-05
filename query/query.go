@@ -3,16 +3,12 @@ package query
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"google.golang.org/grpc/backoff"
-	"google.golang.org/grpc/keepalive"
 
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -23,7 +19,7 @@ import (
 	accounttypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	"github.com/pokt-network/pocket-relay-miner/observability"
+	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	"github.com/pokt-network/poktroll/pkg/client"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
@@ -35,8 +31,6 @@ import (
 	"github.com/puzpuzpuz/xsync/v4"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -70,6 +64,13 @@ type ClientConfig struct {
 	// Set to true when connecting to endpoints on port 443 or with TLS enabled.
 	// Default: false (insecure connection)
 	UseTLS bool
+
+	// ConnRole labels this connection in ha_grpc_stream_queue_seconds.
+	// Empty means "query". The miner runs TWO of these in one process --
+	// the supplier worker's and the leader controller's, the second one
+	// mostly idle -- so a single value would merge two connections whose
+	// queueing means different things. The leader's passes "query_leader".
+	ConnRole grpcconn.Role
 }
 
 // Clients provide access to all on-chain query clients.
@@ -107,70 +108,16 @@ func NewQueryClients(
 		config.QueryTimeout = defaultQueryTimeout
 	}
 
-	// Establish gRPC connection with appropriate credentials
-	var transportCreds credentials.TransportCredentials
-	if config.UseTLS {
-		transportCreds = credentials.NewTLS(&tls.Config{
-			MinVersion: tls.VersionTLS12,
-		})
-	} else {
-		transportCreds = insecure.NewCredentials()
+	connRole := config.ConnRole
+	if connRole == "" {
+		connRole = grpcconn.RoleQuery
 	}
 
-	// Production-optimized gRPC connection for high-volume queries
-	grpcConn, err := grpc.NewClient(
-		config.GRPCEndpoint,
-		grpc.WithTransportCredentials(transportCreds),
-
-		// Measure how long an RPC waits for an HTTP/2 stream. The client caps
-		// at 100 concurrent streams and, past that, PARKS the caller instead of
-		// failing -- see observability.NewGRPCStreamQueueStats for why the
-		// server never raises that cap.
-		//
-		// The label is "shared" and NOT "query", because today this connection
-		// carries the transaction traffic too -- the tx client adopts it. When
-		// the tx client gets its own connection this series stops being emitted
-		// and is replaced by conn="tx" and conn="query".
-		//
-		// Naming it "query" now would have kept one label value while its
-		// MEANING changed underneath the reader: "queries and transactions"
-		// today, "queries only" after the split, with nothing in the metric
-		// saying so. A series that stops is honest; a series that quietly means
-		// something else is not. (There is no label-to-label comparison to
-		// preserve either way: after the split the "before" is compared against
-		// tx + query summed.)
-		grpc.WithStatsHandler(observability.NewGRPCStreamQueueStats("shared")),
-
-		// Keepalive: Prevent connection timeouts and detect broken connections
-		// Note: Servers enforce minimum ping intervals (often 5 minutes).
-		// Pinging too frequently triggers ENHANCE_YOUR_CALM / GoAway.
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                60 * time.Second, // Send keepalive ping every 60s if no activity
-			Timeout:             10 * time.Second, // Wait 10s for ping ack before considering connection dead
-			PermitWithoutStream: false,            // Only ping when there are active RPCs
-		}),
-
-		// Initial window size: Improve throughput for large query responses
-		grpc.WithInitialWindowSize(1<<20), // 1MB (default 64KB)
-
-		// Connection window size: Control flow control for the connection
-		grpc.WithInitialConnWindowSize(1<<20), // 1MB
-
-		// Max message size: Allow larger responses for bulk queries
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(10*1024*1024), // 10MB max receive
-		),
-
-		// Connection backoff: Graceful reconnection on network issues
-		grpc.WithConnectParams(grpc.ConnectParams{
-			Backoff: backoff.Config{
-				BaseDelay:  1.0 * time.Second,
-				Multiplier: 1.6,
-				Jitter:     0.2,
-				MaxDelay:   30 * time.Second,
-			},
-			MinConnectTimeout: 5 * time.Second, // Fail fast on dead nodes
-		}),
+	// One constructor for every outbound node connection: see transport/grpcconn
+	// for why the tx path may not build its own.
+	grpcConn, err := grpcconn.New(
+		grpcconn.Target{Endpoint: config.GRPCEndpoint, UseTLS: config.UseTLS},
+		connRole,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC connection: %w", err)
