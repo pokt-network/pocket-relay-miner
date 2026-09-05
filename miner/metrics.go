@@ -9,6 +9,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/observability"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 )
 
 const (
@@ -564,6 +565,47 @@ var (
 			Help:      "Post-broadcast on-chain claim inclusion outcome (labeled by supplier, service_id, outcome)",
 		},
 		[]string{"supplier", "service_id", "outcome"},
+	)
+
+	// inclusionMissingCauseTotal splits on_chain_missing by what the chain says
+	// about the transaction itself.
+	//
+	// The module-state query answers one question -- is this session's claim in
+	// the state -- and its negative answer covers a transaction that never
+	// landed, one that landed and whose messages failed, and one that is sitting
+	// in the mempool right now. Those need different responses from an operator
+	// and produced the same line.
+	//
+	// The cause set is closed and comes from TxInclusion.String(). The chain's
+	// codespace and code are NOT labels: they come from the chain, so their
+	// value set is unbounded. They go in the log line beside this.
+	inclusionMissingCauseTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "inclusion_missing_cause_total",
+			Help:      "on_chain_missing split by what the chain says about the tx (labeled by phase, cause)",
+		},
+		[]string{"phase", "cause"},
+	)
+
+	// inclusionReadState is 1 on the state this node's post-inclusion read is
+	// in, 0 on the others. All three series exist from startup.
+	//
+	// Registering them eagerly is the whole point rather than a detail: if the
+	// state were only published once a read failed, then before the first read
+	// there would be no series at all, and "I have not looked yet" would be
+	// indistinguishable from "it works". That is precisely how poll_dropped
+	// misleads, one level further in -- a signal that exists to reveal an
+	// absence, having an absence of its own.
+	inclusionReadState = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "inclusion_read_state",
+			Help:      "1 on the current state of the post-inclusion read (available|unavailable|unknown)",
+		},
+		[]string{"state"},
 	)
 
 	// inclusionEntryDroppedTotal counts pending entries the reconciler removed
@@ -1572,11 +1614,48 @@ func RecordRelayLostToPanic(supplier, serviceID string) {
 // the cross product by hand rather than with EagerCounterChildren because that
 // helper takes a single label value and these vectors carry two.
 func init() {
+	for _, state := range []string{
+		string(tx.InclusionReadAvailable),
+		string(tx.InclusionReadUnavailable),
+		string(tx.InclusionReadUnknown),
+	} {
+		inclusionReadState.WithLabelValues(state)
+	}
+	for _, cause := range []string{
+		tx.TxInclusionUnknown.String(),
+		tx.TxInclusionNotInBlock.String(),
+		tx.TxInclusionIncludedOK.String(),
+		tx.TxInclusionIncludedFailed.String(),
+	} {
+		for _, phase := range []string{string(RebroadcastPhaseClaim), string(RebroadcastPhaseProof)} {
+			inclusionMissingCauseTotal.WithLabelValues(phase, cause)
+		}
+	}
 	for _, phase := range []string{string(RebroadcastPhaseClaim), string(RebroadcastPhaseProof)} {
 		inclusionEntryDroppedTotal.WithLabelValues(phase, dropCauseCorrupt)
 		inclusionClearFailedTotal.WithLabelValues(phase)
 		for _, cause := range []string{abandonCauseListFailed, abandonCauseParamsFailed, abandonCauseIndexMalformed, abandonCauseIndexUnreadable} {
 			inclusionGroupAbandonedTotal.WithLabelValues(phase, cause)
 		}
+	}
+}
+
+// SetInclusionReadState publishes which state the post-inclusion read is in,
+// leaving the other two series at zero rather than deleting them.
+//
+// Keeping them is what makes the signal readable: a state whose series vanishes
+// cannot be told from one that was never registered, and the whole reason this
+// gauge exists is that "I have not looked" and "it works" must not look alike.
+func SetInclusionReadState(state tx.InclusionReadState) {
+	for _, s := range []tx.InclusionReadState{
+		tx.InclusionReadAvailable,
+		tx.InclusionReadUnavailable,
+		tx.InclusionReadUnknown,
+	} {
+		v := 0.0
+		if s == state {
+			v = 1.0
+		}
+		inclusionReadState.WithLabelValues(string(s)).Set(v)
 	}
 }

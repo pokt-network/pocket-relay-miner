@@ -189,7 +189,20 @@ type mockTxServiceServer struct {
 	broadcastRawLog  string
 	broadcastTxHash  string
 	broadcastCounter int
-	getTxCounter     int    // number of GetTx (post-broadcast inclusion) calls
+	getTxCounter     int // number of GetTx (post-broadcast inclusion) calls
+	// getTxErr, when set, makes GetTx fail with it instead of echoing the
+	// broadcast. Until it existed this mock could only ever answer "included and
+	// this is its response", so a test wired to it could not exercise a tx that
+	// is absent from the index, or a node whose indexer is off -- the two
+	// answers the post-inclusion read exists to tell apart. Criteria written
+	// against it were green by construction.
+	getTxErr error
+
+	// getTxByHash overrides the answer PER HASH. Without it this mock answers
+	// the same thing for every hash, so the precedence between an entry's
+	// original and resent hashes -- which one wins when they disagree -- could
+	// not be exercised at all: any ordering would pass.
+	getTxByHash      map[string]mockGetTxAnswer
 	lastTxBytes      []byte // captured TxBytes from most recent BroadcastTx
 	broadcastBlockCh chan struct{}
 	broadcastSeen    chan struct{}
@@ -336,6 +349,37 @@ func (m *mockTxServiceServer) BroadcastTx(
 	}, nil
 }
 
+// mockGetTxAnswer is what the mock replies for one hash: an error, or a code.
+type mockGetTxAnswer struct {
+	err    error
+	code   uint32
+	rawLog string
+}
+
+// SetGetTxForHash makes GetTx answer this hash specifically.
+func (m *mockTxServiceServer) SetGetTxForHash(hash string, answer mockGetTxAnswer) {
+	m.rwMu.Lock()
+	defer m.rwMu.Unlock()
+	if m.getTxByHash == nil {
+		m.getTxByHash = map[string]mockGetTxAnswer{}
+	}
+	m.getTxByHash[hash] = answer
+}
+
+// SetGetTxErr makes every later GetTx fail with err. A nil err restores the
+// echoing behaviour.
+//
+// The errors worth passing are the two a real node produces and the third that
+// neither describes: status.Error(codes.NotFound, ...) for a hash the index does
+// not hold, a plain error carrying "transaction indexing is disabled" for a node
+// with tx_index=null, and anything else for the case the classifier must refuse
+// to interpret.
+func (m *mockTxServiceServer) SetGetTxErr(err error) {
+	m.rwMu.Lock()
+	defer m.rwMu.Unlock()
+	m.getTxErr = err
+}
+
 // GetTx implements the GetTx method for testing TX commit verification
 func (m *mockTxServiceServer) GetTx(
 	ctx context.Context,
@@ -347,7 +391,19 @@ func (m *mockTxServiceServer) GetTx(
 	m.getTxCounter++
 	code := m.broadcastCode
 	rawLog := m.broadcastRawLog
+	getTxErr := m.getTxErr
+	perHash, hasPerHash := m.getTxByHash[req.Hash]
 	m.rwMu.Unlock()
+
+	if hasPerHash {
+		if perHash.err != nil {
+			return nil, perHash.err
+		}
+		code = perHash.code
+		rawLog = perHash.rawLog
+	} else if getTxErr != nil {
+		return nil, getTxErr
+	}
 
 	// Return the same response as broadcast - simulates successful TX execution
 	// In production, this would query the blockchain for the TX by hash

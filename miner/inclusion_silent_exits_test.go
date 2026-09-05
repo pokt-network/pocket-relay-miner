@@ -9,6 +9,8 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/tx"
 )
 
 // dropped and abandoned read the counters this file exists to pin. They take
@@ -174,4 +176,35 @@ func TestSilentExitSeriesExistBeforeAnythingHappens(t *testing.T) {
 		"one series per phase must exist before any delete fails")
 	require.Equal(t, phases*4, testutil.CollectAndCount(inclusionGroupAbandonedTotal),
 		"one series per phase per abandonment cause must exist before any pass is abandoned")
+}
+
+// TestInclusionReadStateSeriesExistBeforeAnyProbe is C3's other half: the signal
+// that says whether the post-inclusion read works must not itself be missing
+// before the first read.
+//
+// If the state were only published once a read had happened, then "I have not
+// looked yet" and "it works" would be the same absence of data — which is the
+// exact way poll_dropped misleads, one level further in: a signal that exists to
+// reveal an absence, having an absence of its own.
+//
+// It counts SERIES, because the values are zero either way before a probe runs.
+func TestInclusionReadStateSeriesExistBeforeAnyProbe(t *testing.T) {
+	require.Equal(t, 3, testutil.CollectAndCount(inclusionReadState),
+		"available, unavailable and unknown must all exist before anything is probed")
+
+	require.Equal(t, 2*4, testutil.CollectAndCount(inclusionMissingCauseTotal),
+		"every phase/cause pair must exist before the first missing session is classified")
+}
+
+// TestSetInclusionReadState_LeavesTheOtherStatesVisible pins that publishing one
+// state does not delete the others: a state whose series vanishes cannot be told
+// from one that was never registered.
+func TestSetInclusionReadState_LeavesTheOtherStatesVisible(t *testing.T) {
+	SetInclusionReadState(tx.InclusionReadUnavailable)
+	t.Cleanup(func() { SetInclusionReadState(tx.InclusionReadUnknown) })
+
+	require.Equal(t, 3, testutil.CollectAndCount(inclusionReadState))
+	require.Equal(t, 1.0, testutil.ToFloat64(inclusionReadState.WithLabelValues(string(tx.InclusionReadUnavailable))))
+	require.Equal(t, 0.0, testutil.ToFloat64(inclusionReadState.WithLabelValues(string(tx.InclusionReadAvailable))),
+		"the state we are NOT in must read zero, not disappear")
 }

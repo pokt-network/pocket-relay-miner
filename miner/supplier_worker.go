@@ -387,6 +387,23 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			Msg("transaction connection unverified at startup; starting anyway and probing")
 	}
 
+	// Resolve, once and now, whether this node can answer the post-inclusion
+	// read -- the query that says WHY a claim or proof is missing from the
+	// chain rather than only that it is.
+	//
+	// It runs at startup and NOT lazily on the first failure, because a signal
+	// that only appears once something has gone wrong is a signal the operator
+	// meets during the incident it exists to explain. And it never blocks
+	// startup, unlike VerifyConn above: without the transaction connection
+	// nothing can be mined, while this read is optional by construction -- a
+	// node without a transaction index costs its operator the CAUSE of a
+	// verdict, not the ability to mine.
+	readState := w.txClient.ProbeInclusionRead(ctx)
+	SetInclusionReadState(readState)
+	w.logger.Info().
+		Str("state", string(readState)).
+		Msg("post-inclusion read state resolved")
+
 	w.logger.Info().Msg("transaction client initialized")
 
 	// Create supplier registry

@@ -2550,6 +2550,9 @@ func (m *SupplierManager) ensureSharedTrackers() {
 				}
 			}
 			claimInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
+			if outcome == inclusionMissing {
+				m.recordMissingCause(ctx, RebroadcastPhaseClaim, e, supplier, sessionID)
+			}
 			if m.sharedSubmissionTracker != nil {
 				// Claim outcome is matched by the ORIGINAL submit tx hash (the one
 				// stored on the submission record); a rebroadcast changes the
@@ -2569,6 +2572,9 @@ func (m *SupplierManager) ensureSharedTrackers() {
 		}
 		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error {
 			proofInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
+			if outcome == inclusionMissing {
+				m.recordMissingCause(ctx, RebroadcastPhaseProof, e, supplier, sessionID)
+			}
 			if m.sharedSubmissionTracker != nil {
 				_ = m.sharedSubmissionTracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
 					Supplier:        supplier,
@@ -2742,6 +2748,42 @@ func (m *SupplierManager) startReconcilerBlockLoop() {
 			m.logger.Debug().Msg("inclusion reconciler block loop stopped")
 		}
 	}()
+}
+
+// recordMissingCause splits an on_chain_missing verdict by what the chain says
+// about the transaction itself, and changes NOTHING else.
+//
+// It is deliberately an instrument and not a decision. The read cannot authorise
+// acting differently, because its own negative answer -- the index does not hold
+// this hash -- still covers a transaction sitting in the mempool, and resending
+// on that would sign a second one while the first is alive. So the resend gate
+// above is untouched: this only says WHY the session was missing.
+//
+// The chain's codespace and code go in the LOG, never in a label: they come from
+// the chain, so their value set is unbounded.
+func (m *SupplierManager) recordMissingCause(
+	ctx context.Context,
+	phase RebroadcastPhase,
+	e rebroadcastEntry,
+	supplier, sessionID string,
+) {
+	if m.config.TxClient == nil {
+		return
+	}
+
+	cause, res := m.config.TxClient.ReadInclusionForEntry(ctx, e.OrigTxHash, e.TxHash)
+	inclusionMissingCauseTotal.WithLabelValues(string(phase), cause.String()).Inc()
+
+	event := m.logger.Debug()
+	if res != nil {
+		event = event.Uint32("tx_code", res.Code).Str("tx_codespace", res.Codespace).Str("raw_log", res.RawLog)
+	}
+	event.
+		Str("phase", string(phase)).
+		Str(logging.FieldSupplier, supplier).
+		Str(logging.FieldSessionID, sessionID).
+		Str("cause", cause.String()).
+		Msg("inclusion reconcile: missing session classified by post-inclusion read")
 }
 
 // reactivateClaimedSession returns a session to `claimed` after the reconciler
