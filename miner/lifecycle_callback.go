@@ -410,6 +410,40 @@ type proofBuildResult struct {
 	err      error
 }
 
+// alignProofBatch turns the built proof results into the three parallel slices
+// the submission path needs, and it is the ONLY place they are built.
+//
+// Their alignment is load-bearing and invisible. When the chain refuses one
+// message of a batch it names it by INDEX, and that index only means anything
+// because proofMsgs[i], interfaceProofMsgs[i] and validProofSnapshots[i] all
+// describe the same session. Built inline as three separate loops, that identity
+// held because nobody had reordered anything yet -- with nothing asserting it,
+// and with the consequence of getting it wrong being that the WRONG session is
+// recorded as proved. Silently, on the money path.
+//
+// The sort is part of the invariant rather than preparation for it: results come
+// back from the worker pool in completion order, and index is the position the
+// caller handed them in.
+func alignProofBatch(built []proofBuildResult) (
+	[]*prooftypes.MsgSubmitProof,
+	[]pocktclient.MsgSubmitProof,
+	[]*SessionSnapshot,
+) {
+	sorted := make([]proofBuildResult, len(built))
+	copy(sorted, built)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].index < sorted[j].index })
+
+	proofMsgs := make([]*prooftypes.MsgSubmitProof, len(sorted))
+	interfaceProofMsgs := make([]pocktclient.MsgSubmitProof, len(sorted))
+	snapshots := make([]*SessionSnapshot, len(sorted))
+	for i, result := range sorted {
+		proofMsgs[i] = result.proofMsg
+		interfaceProofMsgs[i] = result.proofMsg
+		snapshots[i] = result.snapshot
+	}
+	return proofMsgs, interfaceProofMsgs, snapshots
+}
+
 // proofBuildCollection is the partitioned result of draining numTasks
 // proofBuildResult values from the proof worker channel. Proofs have no
 // skip path (unlike claims, which can bail early on "unprofitable" or
@@ -1792,26 +1826,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			return nil
 		}
 
-		// Preserve input ordering so later metric/state iterations and the
-		// submitted tx payload line up with sessionsNeedingProof.
-		proofBuildResultsSorted := make([]proofBuildResult, 0, len(partitionedProofs.built))
-		proofBuildResultsSorted = append(proofBuildResultsSorted, partitionedProofs.built...)
-		sort.SliceStable(proofBuildResultsSorted, func(i, j int) bool {
-			return proofBuildResultsSorted[i].index < proofBuildResultsSorted[j].index
-		})
-
-		proofMsgs := make([]*prooftypes.MsgSubmitProof, 0, len(proofBuildResultsSorted))
-		validProofSnapshots := make([]*SessionSnapshot, 0, len(proofBuildResultsSorted))
-		for _, result := range proofBuildResultsSorted {
-			proofMsgs = append(proofMsgs, result.proofMsg)
-			validProofSnapshots = append(validProofSnapshots, result.snapshot)
-		}
-
-		// Convert to interface types for variadic call
-		interfaceProofMsgs := make([]pocktclient.MsgSubmitProof, len(proofMsgs))
-		for i, msg := range proofMsgs {
-			interfaceProofMsgs[i] = msg
-		}
+		proofMsgs, interfaceProofMsgs, validProofSnapshots := alignProofBatch(partitionedProofs.built)
 
 		// CRITICAL: Re-check window is still open RIGHT before submission
 		// Building proofs (proof generation, headers) takes time - blocks may have advanced!
