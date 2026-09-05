@@ -270,6 +270,65 @@ each path against it alone. This is also the argument for scoping work by a
 property rather than a list of sites — a list makes the comparison against
 neighbours feel like the work.
 
+## The discriminating case is rarely the one that motivated the rule
+
+A rule written against a specific failure gets tested against that failure, and
+that test cannot tell the rule from a cheaper wrong version of it.
+
+Measured 2026-09-05. A classifier was required to read a gRPC CODE rather than
+the error's text, and the reason was a node whose message says "transaction
+indexing is disabled". Replacing the code check with a substring match on "not
+found" left every test green — because the not-found error's own message
+contains that phrase and the indexer's does not, so both implementations answer
+identically on every case anyone had thought to write.
+
+The case that separates them is one nobody was thinking about: an error of a
+DIFFERENT category whose text happens to contain the phrase — a transport
+failure reading "backend not found in pool". The text version calls that
+absence; the code version does not. And absence was the verdict that authorised
+a retry, so the cheap version was wrong in the expensive direction.
+
+So when a rule says "classify by X and not by Y", the test has to contain a case
+where X and Y DISAGREE. The example that motivated the rule almost never is one:
+it is where they agree, which is why it looked safe to write the rule about it.
+
+## A value that exists in the type and cannot be reached
+
+No injection finds this one, because there is no defect to inject: there is a
+distinction that was stated and not implemented. It is found by reading what the
+prose promises and asking whether the code can deliver it.
+
+Measured 2026-09-05, and it had three layers pointing the same wrong way. A type
+carried three states, with a comment arguing carefully that the third existed
+because folding it into the second "would assert something nobody measured". The
+function's `switch` then returned the second from its `default`, so every
+unclassified failure — a timeout, a dropped connection — asserted exactly that,
+and the third state was reachable only through a case the author's own comment
+called something a real node does not do. The comment said A, the code did B.
+
+The third layer is the one to look for, because it is the loudest: the TEST
+consecrated B **under a name that said A**. The case was called "anything else is
+not evidence either way" and asserted the value meaning "this node cannot serve
+it". The author had the right answer, wrote it in the name, and asked for the
+other one in the assertion.
+
+The check: for every value in a closed set, name the input that produces it. A
+value whose only path is one the code itself describes as impossible is not a
+state, it is a comment.
+
+## A red you expected can still be true of something else
+
+The rule about unexpected greens has a twin nobody applies, because a red that
+arrives on schedule feels like the end of the check rather than the middle of it.
+
+Measured 2026-09-05: an injection went red exactly as predicted, and reading WHY
+it went red — rather than recording the red and moving on — is what surfaced the
+unreachable state above. The assertion that failed was not failing for the reason
+the injection assumed.
+
+Cheap version: when an injection goes red, read the failure message and confirm
+it names the property you were testing. It costs one line of output.
+
 ## A discarded error is not a defect until you follow it
 
 `_ =` on a call that returns `error` looks like a swallow every time, and reading
