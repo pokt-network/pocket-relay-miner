@@ -7,6 +7,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
@@ -18,6 +19,13 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/observability"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
+
+// minerShutdownTimeout bounds the graceful shutdown of the supplier worker.
+// Mirrors the relayer's GracefulShutdownTimeout rather than introducing a
+// second number. NOT calibrated against the deployment's own grace period --
+// that manifest is not in this tree -- but any finite ceiling beats a wait
+// with none.
+const minerShutdownTimeout = 30 * time.Second
 
 const (
 	flagMinerConfig  = "config"
@@ -327,8 +335,26 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("failed to start supplier worker: %w", err)
 	}
 	defer func() {
-		if closeErr := supplierWorker.Close(); closeErr != nil {
-			logger.Error().Err(closeErr).Msg("failed to close supplier worker")
+		// Bounded, because Close() now quiesces: it waits for every in-flight
+		// broadcast before the transaction connection goes. That wait is what
+		// keeps a claim from being cut off mid-flight, and it is also what
+		// makes an unbounded shutdown dangerous -- if the supervisor's SIGKILL
+		// arrives first, the broadcast Close() was protecting is lost anyway.
+		// The relayer already bounds its own shutdown; this mirrors it.
+		done := make(chan error, 1)
+		go logging.RecoverGoRoutine(logger, "miner_shutdown", func(context.Context) {
+			done <- supplierWorker.Close()
+		})(context.Background())
+
+		select {
+		case closeErr := <-done:
+			if closeErr != nil {
+				logger.Error().Err(closeErr).Msg("failed to close supplier worker")
+			}
+		case <-time.After(minerShutdownTimeout):
+			logger.Error().
+				Dur("timeout", minerShutdownTimeout).
+				Msg("supplier worker did not shut down in time; in-flight transactions may be lost")
 		}
 	}()
 

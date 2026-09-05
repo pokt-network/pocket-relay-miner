@@ -191,7 +191,7 @@ func TestTxClient_Close_Success(t *testing.T) {
 
 	err = tc.Close()
 	require.NoError(t, err)
-	require.True(t, tc.closed)
+	require.True(t, tc.closed.Load())
 }
 
 func TestTxClient_Close_AlreadyClosed(t *testing.T) {

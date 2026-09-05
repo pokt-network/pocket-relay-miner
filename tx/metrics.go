@@ -23,6 +23,42 @@ var (
 		[]string{"supplier"},
 	)
 
+	// txPermitWait is how long a broadcast waited for a concurrency permit.
+	//
+	// This -- not broadcast latency -- is the metric that would justify moving
+	// MaxConcurrent: if nobody waits, the cap costs nothing and raising it buys
+	// nothing. A wait in the tail is the evidence, and it is also the moment to
+	// ask whether the answer is a bigger cap or a healthier node.
+	txPermitWait = observability.MinerFactory.NewHistogram(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "permit_wait_seconds",
+			Help:      "Time a broadcast waited for a transaction-concurrency permit",
+			// From 100us (an uncontended acquire is immediate) outwards: a
+			// contended one waits for a whole broadcast to finish.
+			Buckets: prometheus.ExponentialBuckets(0.0001, 3, 12),
+		},
+	)
+
+	// txPermitSaturatedTotal counts calls that never reached the chain because
+	// no broadcast permit was free.
+	//
+	// It exists because the alternative was silence. The permit-wait histogram
+	// cannot carry this: a caller that refuses to queue -- the reconciler's
+	// resend -- waits zero, so it would land in the same bucket as a healthy
+	// uncontended acquire. Saturation is exactly the condition the resend
+	// exists for, and a starving safety net has to be audible.
+	txPermitSaturatedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "permit_saturated_total",
+			Help:      "Broadcasts that never reached the chain because no concurrency permit was free",
+		},
+		[]string{"waited"},
+	)
+
 	// txConnVerified is 1 while the tx connection is known to carry RPCs and
 	// 0 once a probe has failed. A counter cannot answer "has this connection
 	// EVER worked since the process started", and that is the question an
@@ -153,3 +189,13 @@ var (
 		[]string{"supplier"},
 	)
 )
+
+// The failure counters above exist to make a silent failure audible, so they
+// must not be silent themselves: a *Vec with no children exports nothing, and
+// "the series is absent" reads as "not instrumented" rather than "it never
+// happened". See observability.EagerCounterChildren for the full reasoning --
+// written once there rather than repeated at each declaration.
+func init() {
+	observability.EagerCounterChildren(txConnProbeFailures, probeReasonStartup, probeReasonTick)
+	observability.EagerCounterChildren(txPermitSaturatedTotal, permitWaited, permitDidNotWait)
+}

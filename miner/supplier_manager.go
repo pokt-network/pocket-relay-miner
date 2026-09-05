@@ -2744,6 +2744,13 @@ func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	}
 	ctx = tx.WithTxWindowTimeout(ctx, time.Duration(remaining)*time.Duration(blkTime)*time.Second)
 
+	// A resend must not queue for a broadcast permit. Its budget is the
+	// reconciler's per-group timeout, and spending that budget waiting means
+	// leaving without reaching the chain -- in saturation, which is exactly
+	// when the resend exists. Failing fast costs one block: the payload stays
+	// in the store and the reconciler runs again next block.
+	ctx = tx.WithoutPermitWait(ctx)
+
 	switch phase {
 	case RebroadcastPhaseClaim:
 		var msg prooftypes.MsgCreateClaim

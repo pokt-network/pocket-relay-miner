@@ -23,6 +23,7 @@ import (
 	authsigning "github.com/cosmos/cosmos-sdk/x/auth/signing"
 	authtx "github.com/cosmos/cosmos-sdk/x/auth/tx"
 	authtypes "github.com/cosmos/cosmos-sdk/x/auth/types"
+	"golang.org/x/sync/semaphore"
 	"google.golang.org/grpc"
 
 	"github.com/pokt-network/pocket-relay-miner/keys"
@@ -157,6 +158,11 @@ type TxClientConfig struct {
 	// Only used if GRPCConn is nil.
 	GRPCEndpoint string
 
+	// MaxConcurrent caps concurrent broadcasts on this connection. Zero uses
+	// DefaultTxMaxConcurrent. See tx_permits.go for what it bounds and what
+	// evidence would move it.
+	MaxConcurrent int
+
 	// TxRPCTimeout bounds ONE attempt's network work. Zero uses
 	// DefaultTxRPCTimeout. See tx_budget.go for why the window budget is the
 	// wrong clock for an RPC.
@@ -255,15 +261,22 @@ type TxClient struct {
 	probeCancel context.CancelFunc
 	probeDone   chan struct{}
 
-	// Lifecycle
-	closed bool
-	mu     sync.RWMutex
+	// Lifecycle.
+	//
+	// closed is an atomic and not a mutex-guarded bool because a caller waiting
+	// for a permit must not hold a lock -- see acquirePermit.
+	closed atomic.Bool
 
-	// inFlight counts broadcasts that passed the closed check. Close() waits
-	// for them before closing the connection: the check and the broadcast are
-	// not atomic, so without this a Close() landing in between would pull the
-	// connection out from under a claim already on its way.
-	inFlight sync.WaitGroup
+	// permits bounds concurrent broadcasts AND is the quiesce mechanism:
+	// nobody broadcasts without one, and Close() takes them all. There is no
+	// second WaitGroup; two things waiting for the same thing is how the next
+	// change to Close() writes a deadlock.
+	//
+	// The invariant is about BROADCASTS, not about the connection: the probe
+	// and the fee query use it without a permit, deliberately, and Close()
+	// documents what that leaves unguarded.
+	permits       *semaphore.Weighted
+	permitWaiters atomic.Int64
 }
 
 // NewTxClient creates a new transaction client.
@@ -353,6 +366,7 @@ func NewTxClient(
 		txClient:     txtypes.NewServiceClient(grpcConn),
 		accountCache: make(map[string]*authtypes.BaseAccount),
 	}
+	tc.permits = newPermits(tc.maxConcurrent())
 
 	// The probe is the owner's job: a shared connection is somebody else's to
 	// keep alive, and two probes on one connection is one too many.
@@ -396,10 +410,10 @@ func (tc *TxClient) CreateClaims(
 	timeoutHeight int64,
 	claims []*prooftypes.MsgCreateClaim,
 ) (string, error) {
-	if !tc.enter() {
-		return "", fmt.Errorf("tx client is closed")
+	if err := tc.acquirePermit(ctx); err != nil {
+		return "", err
 	}
-	defer tc.inFlight.Done()
+	defer tc.releasePermit()
 
 	if len(claims) == 0 {
 		return "", nil
@@ -435,10 +449,10 @@ func (tc *TxClient) SubmitProofs(
 	timeoutHeight int64,
 	proofs []*prooftypes.MsgSubmitProof,
 ) (string, error) {
-	if !tc.enter() {
-		return "", fmt.Errorf("tx client is closed")
+	if err := tc.acquirePermit(ctx); err != nil {
+		return "", err
 	}
-	defer tc.inFlight.Done()
+	defer tc.releasePermit()
 
 	if len(proofs) == 0 {
 		return "", nil
@@ -1099,50 +1113,45 @@ func isSequenceMismatchError(errorMsg string) bool {
 	return false
 }
 
-// enter registers a broadcast as in flight, or reports that the client is
-// closed. Every caller that gets true owes an inFlight.Done(), and Close()
-// waits for all of them.
-//
-// The registration happens under the SAME read lock that reads closed, which
-// is what makes it safe: Close() sets closed under the write lock, so no
-// caller can register after that, and every caller that did register was
-// already counted when Close() starts waiting.
-func (tc *TxClient) enter() bool {
-	tc.mu.RLock()
-	defer tc.mu.RUnlock()
-
-	if tc.closed {
-		return false
-	}
-	tc.inFlight.Add(1)
-	return true
-}
-
 // Close closes the transaction client.
 // If the client was created with a shared gRPC connection, it will not be closed.
 func (tc *TxClient) Close() error {
-	tc.mu.Lock()
-	if tc.closed {
-		tc.mu.Unlock()
+	if !tc.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	tc.closed = true
 	cancelProbe, probeDone := tc.probeCancel, tc.probeDone
-	// Released before waiting: a caller blocked on the read lock would only be
-	// delayed, but holding a lock across two waits is how the next change to
-	// this function introduces a deadlock.
-	tc.mu.Unlock()
 
-	// Stop the probe and wait for the broadcasts that already passed the
-	// closed check. Both must finish before the connection goes: closing it
-	// underneath either is the failure this client is being taught to survive.
+	// Stop the probe and quiesce the broadcasts. Both must finish before the
+	// connection goes: closing it underneath either is the failure this client
+	// is being taught to survive.
 	if cancelProbe != nil {
 		cancelProbe()
 	}
 	if probeDone != nil {
 		<-probeDone
 	}
-	tc.inFlight.Wait()
+
+	// Taking every permit IS waiting for the in-flight broadcasts -- one
+	// mechanism, two invariants. Marking closed first is what lets a caller
+	// already queued behind these permits wake up, see the flag and hand its
+	// permit back instead of broadcasting into a connection about to shut.
+	//
+	// context.Background() and not a cancellable context, deliberately: this
+	// call is the only thing standing between a live broadcast and a closed
+	// connection, and Acquire -- unlike the WaitGroup it replaces -- HAS an
+	// error path. A context that can be cancelled would return early and fall
+	// through to grpcConn.Close() with broadcasts still running, which is the
+	// exact failure the wait exists to prevent. If anyone ever gives this a
+	// context, the error path must NOT close the connection.
+	if err := tc.permits.Acquire(context.Background(), tc.maxConcurrent()); err != nil {
+		return fmt.Errorf("failed to quiesce in-flight broadcasts: %w", err)
+	}
+
+	// What this does NOT cover, said rather than hidden: the fee query
+	// (queryLastTxFeeUpokt, called from HASupplierClient) reads on this
+	// connection without a permit, so it can race a Close and fail. A fee
+	// lookup erroring during shutdown is acceptable; a claim erroring is not,
+	// and that is the line the permit draws.
 
 	// Only close the connection if we created it ourselves
 	if tc.ownsConn && tc.grpcConn != nil {

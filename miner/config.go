@@ -14,6 +14,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 )
 
 // Config is the configuration for the HA Miner service.
@@ -313,6 +314,18 @@ type TransactionConfig struct {
 	// window was still wide open but per-attempt time was small)
 	TxTimeoutMinSeconds int64 `yaml:"tx_timeout_min_seconds,omitempty"`
 
+	// TxMaxConcurrent caps how many claim/proof broadcasts may be in flight on
+	// the transaction connection at once. Default 32.
+	//
+	// What it bounds is the FULL NODE, not a stream ceiling: with gas
+	// estimation on, each transaction costs a Simulate — which executes the
+	// messages — plus a broadcast. Nobody has measured how much concurrent
+	// simulation a node absorbs, so the default is conservative on purpose.
+	//
+	// Raise it only with evidence, and the evidence is ha_tx_permit_wait_seconds:
+	// if nothing ever waits, the cap costs nothing and raising it buys nothing.
+	TxMaxConcurrent int `yaml:"tx_max_concurrent,omitempty"`
+
 	// TxRPCTimeoutSeconds bounds ONE broadcast attempt's network work.
 	// Default 30.
 	//
@@ -426,7 +439,20 @@ func (c TransactionConfig) InclusionReconcilerConfig() InclusionReconcilerConfig
 	if c.InclusionReconcilerPerGroupTimeoutMs > 0 {
 		cfg.PerGroupTimeout = time.Duration(c.InclusionReconcilerPerGroupTimeoutMs) * time.Millisecond
 	}
+	// The pool is capped by the transaction client's permit count, from the
+	// same config field rather than a second constant: a worker above that
+	// number can only start in order to park.
+	cfg.TxMaxConcurrent = c.txMaxConcurrent()
 	return cfg
+}
+
+// txMaxConcurrent is the configured broadcast concurrency, or the tx package's
+// default when unset.
+func (c TransactionConfig) txMaxConcurrent() int {
+	if c.TxMaxConcurrent > 0 {
+		return c.TxMaxConcurrent
+	}
+	return int(tx.DefaultTxMaxConcurrent)
 }
 
 // Validate validates the configuration.
@@ -579,6 +605,11 @@ func (c *Config) GetTxTimeoutMin() time.Duration {
 		return time.Duration(c.Transaction.TxTimeoutMinSeconds) * time.Second
 	}
 	return 2 * time.Minute
+}
+
+// GetTxMaxConcurrent returns the broadcast concurrency cap.
+func (c *Config) GetTxMaxConcurrent() int {
+	return c.Transaction.txMaxConcurrent()
 }
 
 // GetTxRPCTimeout returns the per-attempt broadcast timeout, or zero to let the

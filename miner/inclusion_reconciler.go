@@ -3,6 +3,7 @@ package miner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -10,6 +11,7 @@ import (
 	"github.com/alitto/pond/v2"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -72,6 +74,14 @@ type InclusionReconcilerConfig struct {
 	// Disabled turns the reconciler off entirely.
 	Disabled bool
 	// MaxConcurrent bounds the per-block group-reconcile worker pool. Default 64.
+	//
+	// It is capped by the transaction client's concurrency limit at
+	// construction: workers above that number can only ever start in order to
+	// park, and a parked worker spends the group's budget without reaching the
+	// chain. Sizing the pool from the semaphore removes the contention this
+	// process inflicts on itself; what remains is contention against the
+	// lifecycle, which is bounded by PerGroupTimeout and costs a delay of one
+	// block, not a lost resend -- the payloads stay in the store.
 	MaxConcurrent int
 	// MaxRebroadcasts caps how many times a still-missing claim/proof is
 	// re-submitted within its window. Default 1 (a single resend at mid-window
@@ -105,7 +115,17 @@ type InclusionReconcilerConfig struct {
 	// PerGroupTimeout bounds a single group's reconcile (query + rebroadcasts).
 	// Default 10s.
 	PerGroupTimeout time.Duration
+
+	// TxMaxConcurrent is the transaction client's permit count. It caps
+	// MaxConcurrent so the pool cannot be wider than the number of broadcasts
+	// that can actually be in flight. Zero leaves MaxConcurrent alone.
+	TxMaxConcurrent int
 }
+
+// rebroadcastPersistTimeout bounds the write that records a resend attempt.
+// Short on purpose: it runs on a context detached from the group's, so it must
+// not become a way for shutdown to hang.
+const rebroadcastPersistTimeout = 3 * time.Second
 
 // DefaultInclusionReconcilerConfig returns sensible defaults.
 func DefaultInclusionReconcilerConfig() InclusionReconcilerConfig {
@@ -200,6 +220,9 @@ func NewInclusionReconciler(
 ) *InclusionReconciler {
 	if cfg.MaxConcurrent <= 0 {
 		cfg.MaxConcurrent = 64
+	}
+	if cfg.TxMaxConcurrent > 0 && cfg.MaxConcurrent > cfg.TxMaxConcurrent {
+		cfg.MaxConcurrent = cfg.TxMaxConcurrent
 	}
 	if cfg.MaxRebroadcasts < 0 {
 		cfg.MaxRebroadcasts = 0
@@ -441,19 +464,35 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	}
 	newHash, err := r.resubmitter.ResubmitMessage(ctx, rp.phase, g.Supplier, entry.MsgBytes, windowClose)
 
-	// Count this attempt regardless of outcome and persist it, so MaxRebroadcasts
-	// bounds the total number of resend tries. Without counting failures, a
-	// persistently failing resend (e.g. a CUPR-doomed claim whose gas simulation
-	// always fails) would re-fire — and re-log — on every block until the window
-	// closes. Persisting also keeps the cap across leader failover.
-	entry.Rebroadcasts++
+	// Count this attempt and persist it, so MaxRebroadcasts bounds the total
+	// number of resend tries. Without counting failures, a persistently failing
+	// resend (e.g. a CUPR-doomed claim whose gas simulation always fails) would
+	// re-fire — and re-log — on every block until the window closes. Persisting
+	// also keeps the cap across leader failover.
+	//
+	// EXCEPT when we never reached the network. MaxRebroadcasts defaults to 1 —
+	// ONE resend — so counting an attempt that never left the process burns the
+	// only resend a claim had, on nothing. The sentinel is the only thing that
+	// can tell "the chain rejected it" from "we never asked": saturation means
+	// no permit was free, the message was never signed and never sent, and the
+	// next block will find the payload exactly where it was.
+	if !errors.Is(err, tx.ErrTxConcurrencySaturated) {
+		entry.Rebroadcasts++
+	}
 	if err == nil && newHash != "" {
 		entry.TxHash = newHash
 	}
 	if b, mErr := marshalRebroadcastEntry(entry); mErr == nil {
-		if pErr := r.store.Put(ctx, rp.phase, g.Supplier, g.SessionEnd, sessionID, b); pErr != nil {
+		// Persist with a context of its own. The group context may already be
+		// expired by the send above -- PerGroupTimeout bounds the whole group --
+		// and reusing it means the attempt happens but is never recorded, so the
+		// next block resends again and the cap does not hold from the other
+		// side either. The counter has to reflect what actually happened.
+		putCtx, cancelPut := context.WithTimeout(context.WithoutCancel(ctx), rebroadcastPersistTimeout)
+		if pErr := r.store.Put(putCtx, rp.phase, g.Supplier, g.SessionEnd, sessionID, b); pErr != nil {
 			r.logger.Warn().Err(pErr).Str("session_id", sessionID).Msg("inclusion reconcile: failed to persist resend count/hash")
 		}
+		cancelPut()
 	}
 
 	if err != nil {

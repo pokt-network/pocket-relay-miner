@@ -12,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -22,12 +23,29 @@ type mockResubmitter struct {
 	calls    []string
 	attempts int
 	failNext bool
+	// failWith replaces the generic failure, so a test can distinguish a chain
+	// rejection from never having reached the chain at all.
+	failWith error
+	// burnGroupBudget makes the resend consume the caller's whole context
+	// instead of returning at once — the shape of a slow node, and the only way
+	// to reach the code that persists the attempt with an expired context.
+	burnGroupBudget bool
 }
 
-func (m *mockResubmitter) ResubmitMessage(_ context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, _ int64) (string, error) {
+func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, _ int64) (string, error) {
+	m.mu.Lock()
+	burn := m.burnGroupBudget
+	m.mu.Unlock()
+	if burn {
+		<-ctx.Done()
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.attempts++
+	if m.failWith != nil {
+		return "", m.failWith
+	}
 	if m.failNext {
 		return "", fmt.Errorf("resubmit boom")
 	}
@@ -616,4 +634,104 @@ func TestReconciler_HA_NonOwnerPeerDoesNotDoubleSubmit(t *testing.T) {
 
 	require.Equal(t, 1, resubB.count(), "the owner resends exactly once")
 	require.Equal(t, 0, resubC.count(), "a non-owner must never resend another replica's supplier (no double-submit)")
+}
+
+// TestReconciler_SaturatedResendDoesNotBurnTheAttempt is the assertion that
+// makes the named sentinel load-bearing rather than decorative.
+//
+// MaxRebroadcasts defaults to ONE. The counter is incremented regardless of
+// outcome, for a good reason -- a doomed claim must not re-fire every block --
+// but "the chain rejected it" and "we never reached the chain" are not the same
+// thing, and only the sentinel can tell them apart. A resend that died waiting
+// for a broadcast permit never signed anything and never sent anything; counting
+// it burns the single resend the claim had, on nothing.
+func TestReconciler_SaturatedResendDoesNotBurnTheAttempt(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+	h.resub.failWith = fmt.Errorf("resend: %w", tx.ErrTxConcurrencySaturated)
+
+	h.r.OnBlock(testMid)
+	require.Equal(t, 1, h.resub.attemptCount(), "the reconciler should have tried")
+
+	// The entry survives AND keeps its budget: the next block finds it exactly
+	// where it was, with its one resend unspent.
+	require.Equal(t, 1, h.pendingCount(t, hSupplier, hEnd), "entry retained for the next block")
+
+	h.resub.failWith = nil
+	h.r.OnBlock(testMid + 1)
+	require.Equal(t, 1, h.resub.count(),
+		"the saturated attempt burned the only resend: the claim can never be retried")
+}
+
+// TestReconciler_RejectedResendDoesBurnTheAttempt is the other half, and the
+// pair is what proves the exemption discriminates rather than simply never
+// counting. A chain rejection MUST consume the budget, or a doomed claim
+// re-fires on every block until the window closes.
+func TestReconciler_RejectedResendDoesBurnTheAttempt(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+	h.resub.failWith = fmt.Errorf("chain said no")
+
+	h.r.OnBlock(testMid)
+	require.Equal(t, 1, h.resub.attemptCount())
+
+	h.resub.failWith = nil
+	h.r.OnBlock(testMid + 1)
+	require.Equal(t, 0, h.resub.count(),
+		"a rejected resend did not consume its attempt: a doomed claim would re-fire every block")
+}
+
+// TestReconciler_AttemptIsRecordedEvenWhenTheGroupBudgetIsSpent closes the
+// resend cap from its other side.
+//
+// The send and the write that records it used to share the group's context. A
+// resend slow enough to spend PerGroupTimeout therefore happened AND went
+// unrecorded, so the next block resent again -- the cap held from neither
+// direction: over-counting attempts that never reached the chain, under-counting
+// the ones that did.
+func TestReconciler_AttemptIsRecordedEvenWhenTheGroupBudgetIsSpent(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.r.cfg.PerGroupTimeout = 50 * time.Millisecond
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+	h.resub.burnGroupBudget = true
+
+	h.r.OnBlock(testMid)
+	require.Equal(t, 1, h.resub.attemptCount(), "the resend should have run")
+
+	// The attempt must be on record, so the next block does NOT resend.
+	h.resub.burnGroupBudget = false
+	h.r.OnBlock(testMid + 1)
+	require.Equal(t, 1, h.resub.attemptCount(),
+		"the attempt was not persisted: the cap does not survive a resend that spends the group budget")
+}
+
+// TestReconciler_PoolIsCappedByTxConcurrency: a worker above the transaction
+// client's permit count can only ever start in order to park, and a parked
+// worker spends the group's budget without reaching the chain. The pool is
+// sized from the same number rather than from a constant that can drift.
+func TestReconciler_PoolIsCappedByTxConcurrency(t *testing.T) {
+	tests := []struct {
+		name            string
+		maxConcurrent   int
+		txMaxConcurrent int
+		want            int
+	}{
+		{"capped by the semaphore", 64, 32, 32},
+		{"already below it", 8, 32, 8},
+		{"unset tx limit leaves it alone", 64, 0, 64},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultInclusionReconcilerConfig()
+			cfg.MaxConcurrent = tt.maxConcurrent
+			cfg.TxMaxConcurrent = tt.txMaxConcurrent
+
+			r := NewInclusionReconciler(
+				logging.NewLoggerFromConfig(logging.DefaultConfig()),
+				nil, nil, nil, reconcilePhase{}, reconcilePhase{}, cfg,
+			)
+			require.Equal(t, tt.want, r.cfg.MaxConcurrent)
+		})
+	}
 }
