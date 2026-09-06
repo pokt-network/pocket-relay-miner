@@ -402,6 +402,84 @@ type proofBuildResult struct {
 	err      error
 }
 
+// settleEjectedClaim gives ONE ejected message its own verdict, at the moment
+// the chain names it, so that the batch it was holding back can go on.
+//
+// It persists a rebroadcast entry, and that is the load-bearing decision. The
+// proof-side precedent (settleNotRequiredBatch) deliberately persists NOTHING,
+// but its verdict is terminal BY NATURE -- the proof requirement is seeded from
+// a fixed block hash, so every future resend asks the same question. No claim
+// verdict is demonstrated terminal that way, and one of them is provably
+// TRANSIENT: poktroll x/proof/keeper/session.go rejects a claim that arrives
+// BEFORE the supplier's earliest commit height, which the next block fixes. An
+// ejected message with no entry would be forfeited for a condition that heals
+// itself, so the default is to keep it and there is no enumeration of "terminal"
+// verdicts to maintain -- classifying chain behaviour by text is exactly what
+// goes stale. Keeping one too many costs a single capped resend; keeping one too
+// few costs a claim.
+//
+// OrigTxHash is empty because nothing was transmitted, which is TRUE: to the
+// reconciler that is the order to resend at SubmitHeight+1 rather than at the
+// window midpoint.
+func (lc *LifecycleCallback) settleEjectedClaim(
+	ctx context.Context,
+	logger logging.Logger,
+	ejected claimBuildResult,
+	submitErr error,
+	earliestClaimHeight int64,
+) {
+	snapshot := ejected.snapshot
+
+	RecordClaimTxError(
+		snapshot.SupplierOperatorAddress,
+		snapshot.ServiceID,
+		snapshot.RelayCount,
+		int64(snapshot.TotalComputeUnits),
+	)
+
+	if lc.sessionCoordinator != nil {
+		if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil {
+			logger.Warn().Err(err).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Msg("failed to mark ejected session as claim_tx_error in Redis")
+		}
+	}
+
+	if lc.submissionTracker != nil {
+		if trackErr := lc.submissionTracker.TrackClaimSubmission(
+			ctx,
+			snapshot.SupplierOperatorAddress,
+			snapshot.ServiceID,
+			snapshot.ApplicationAddress,
+			snapshot.SessionID,
+			snapshot.SessionStartHeight,
+			snapshot.SessionEndHeight,
+			hex.EncodeToString(ejected.rootHash),
+			"",    // no TX hash: this message never travelled
+			false, // failed
+			submitErr.Error(),
+			earliestClaimHeight,
+			lc.blockClient.LastBlock(ctx).Height(),
+			snapshot.RelayCount,
+			int64(snapshot.TotalComputeUnits),
+			false, // proof_required unknown at claim time
+			"",    // proof_requirement_seed unknown at claim time
+		); trackErr != nil {
+			logger.Warn().Err(trackErr).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Msg("failed to track ejected claim submission")
+		}
+	}
+
+	if lc.rebroadcastStore != nil {
+		lc.persistRebroadcastEntries(
+			ctx, RebroadcastPhaseClaim, []*SessionSnapshot{snapshot},
+			lc.blockClient.LastBlock(ctx).Height(), "",
+			func(int) ([]byte, error) { return ejected.claimMsg.Marshal() },
+		)
+	}
+}
+
 // settleNotRequiredBatch records the per-session outcome of a batch the chain
 // refused because one of its proofs was not required.
 //
@@ -471,6 +549,71 @@ func (lc *LifecycleCallback) settleNotRequiredBatch(
 			}
 		}
 	}
+}
+
+// alignClaimBatch derives, from ONE slice of build results, every parallel view
+// the submission path needs. It returns FOUR, and the fourth is the one that
+// actually travels: re-deriving three and reusing a stale interfaceClaimMsgs
+// would send a batch whose contents disagree with the bookkeeping, attributing
+// each outcome to the wrong session. Deriving them together in one pass is what
+// makes that disagreement unrepresentable.
+func alignClaimBatch(built []claimBuildResult) (
+	[]*prooftypes.MsgCreateClaim,
+	[][]byte,
+	[]*SessionSnapshot,
+	[]pocktclient.MsgCreateClaim,
+) {
+	claimMsgs := make([]*prooftypes.MsgCreateClaim, len(built))
+	rootHashes := make([][]byte, len(built))
+	snapshots := make([]*SessionSnapshot, len(built))
+	iface := make([]pocktclient.MsgCreateClaim, len(built))
+	for i, r := range built {
+		claimMsgs[i] = r.claimMsg
+		rootHashes[i] = r.rootHash
+		snapshots[i] = r.snapshot
+		iface[i] = r.claimMsg
+	}
+	return claimMsgs, rootHashes, snapshots, iface
+}
+
+// namedMessageIndex reports WHICH message of the batch the chain rejected, and
+// whether it named one at all.
+//
+// This is the entire trigger for degradation, and it is narrow by CONSTRUCTION
+// rather than by an enumeration someone has to keep correct: HasMsgIndex is set
+// only by newSimulateRejection, the one constructor that calls parseMsgIndex.
+// A transport failure, a CheckTx rejection, a saturated permit, an expired
+// context, and every ante-handler failure (fee, nonce, TTL -- the ante runs in
+// simulation too and fails BEFORE any message executes) all arrive without one,
+// and all of them must retry the batch AS A BATCH. A trigger any wider means a
+// network hiccup breaks the group into singles forever.
+//
+// An out-of-range index is reported as "not named": the value is parsed out of
+// server text that can carry a second "message index:" of its own, and it is
+// about to decide which session takes a verdict.
+func namedMessageIndex(err error, batchSize int) (int, bool) {
+	var rejection *tx.TxRejection
+	if !errors.As(err, &rejection) || !rejection.HasMsgIndex {
+		return 0, false
+	}
+	if rejection.MsgIndex < 0 || rejection.MsgIndex >= batchSize {
+		return 0, false
+	}
+	return rejection.MsgIndex, true
+}
+
+// withoutSession returns snapshots minus the one with this session ID. The
+// ejected session is settled at the moment of ejection, so it must also leave
+// the group: every later use of groupSnapshots is a verdict, and a session that
+// stayed would receive a second one.
+func withoutSession(snapshots []*SessionSnapshot, sessionID string) []*SessionSnapshot {
+	out := make([]*SessionSnapshot, 0, len(snapshots))
+	for _, s := range snapshots {
+		if s.SessionID != sessionID {
+			out = append(out, s)
+		}
+	}
+	return out
 }
 
 // alignProofBatch turns the built proof results into the three parallel slices
@@ -1158,10 +1301,10 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				Msg("session claim build failed - dropping from batch, other sessions continue")
 		}
 
-		// Valid claims — collect for submission.
-		claimMsgs := make([]*prooftypes.MsgCreateClaim, 0, len(partitioned.built))
-		groupRootHashes := make([][]byte, 0, len(partitioned.built))
-		validSnapshots := make([]*SessionSnapshot, 0, len(partitioned.built))
+		// Valid claims — collect for submission. The scheduled-height metric is
+		// recorded here and NOT inside alignClaimBatch: the batch is re-derived
+		// after every ejection, and a metric inside would be re-recorded for the
+		// sessions that stayed.
 		for _, r := range partitioned.built {
 			SetClaimScheduledHeight(
 				r.snapshot.SupplierOperatorAddress,
@@ -1169,16 +1312,13 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				r.snapshot.SessionID,
 				float64(earliestClaimHeight),
 			)
-			claimMsgs = append(claimMsgs, r.claimMsg)
-			groupRootHashes = append(groupRootHashes, r.rootHash)
-			validSnapshots = append(validSnapshots, r.snapshot)
 		}
 
-		// Convert to interface types for variadic call
-		interfaceClaimMsgs := make([]pocktclient.MsgCreateClaim, len(claimMsgs))
-		for i, msg := range claimMsgs {
-			interfaceClaimMsgs[i] = msg
-		}
+		// `remaining` is the batch as it stands, and it SHRINKS when the chain
+		// names a message. The four views below are derived from it and
+		// re-derived together on every change.
+		remaining := partitioned.built
+		claimMsgs, groupRootHashes, validSnapshots, interfaceClaimMsgs := alignClaimBatch(remaining)
 
 		// CRITICAL: Re-check window is still open RIGHT before submission
 		// Building claims (SMST flush, headers) takes time - blocks may have advanced!
@@ -1233,7 +1373,11 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// Redis with the vaguer tx_error one.
 		windowClosed := false
 		var claimTxHash string
-		for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; attempt++ {
+		// The increment lives in the BODY because an ejection is not a retry: the
+		// batch changed, so the next send asks a different question. What bounds
+		// the ejections instead is that each one strictly shrinks `remaining`,
+		// and the loop refuses to go below one message.
+		for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; {
 			submitErr := lc.supplierClient.CreateClaims(claimCtx, claimWindowClose, interfaceClaimMsgs...)
 			if submitErr != nil {
 				lastErr = submitErr
@@ -1257,6 +1401,43 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					break // Don't retry - this is a permanent failure
 				}
 
+				// DEGRADATION: the chain executed the messages and told us WHICH
+				// one it refused. Eject exactly that message and re-send the
+				// rest; tying the fate of healthy claims to one bad message
+				// costs them their window for no reason.
+				//
+				// `len(remaining) > 1` is not defensive. CreateClaims returns
+				// SUCCESS for an empty batch (tx_client.go:438-440) and the tx
+				// hash is read from a field shared across groups, so ejecting the
+				// last message would report "submitted successfully" carrying the
+				// PREVIOUS group's hash, for a claim that never travelled.
+				if named, ok := namedMessageIndex(submitErr, len(remaining)); ok && len(remaining) > 1 {
+					ejected := remaining[named]
+					remaining = append(remaining[:named:named], remaining[named+1:]...)
+					claimMsgs, groupRootHashes, validSnapshots, interfaceClaimMsgs = alignClaimBatch(remaining)
+					groupSnapshots = withoutSession(groupSnapshots, ejected.snapshot.SessionID)
+
+					lc.settleEjectedClaim(ctx, logger, ejected, submitErr, earliestClaimHeight)
+
+					logger.Warn().
+						Err(submitErr).
+						Str(logging.FieldSessionID, ejected.snapshot.SessionID).
+						Int("remaining_batch_size", len(remaining)).
+						Msg("the chain named this claim; ejecting it and re-sending the rest")
+
+					// Re-check the window on every round: an ejection costs a
+					// round-trip, and the batch must not be re-sent into a window
+					// that closed while we were splitting it.
+					if lc.blockClient.LastBlock(ctx).Height() >= claimWindowClose {
+						for _, snapshot := range groupSnapshots {
+							lc.markAndCountClaimWindowClosed(ctx, snapshot)
+						}
+						windowClosed = true
+						break
+					}
+					continue
+				}
+
 				logger.Warn().
 					Err(submitErr).
 					Int(logging.FieldAttempt, attempt).
@@ -1264,7 +1445,8 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					Int("batch_size", len(claimMsgs)).
 					Msg("batched claim submission failed, retrying")
 
-				if attempt < lc.config.ClaimRetryAttempts {
+				attempt++
+				if attempt <= lc.config.ClaimRetryAttempts {
 					select {
 					case <-ctx.Done():
 						// The one exit that is not a continue: a cancelled context
