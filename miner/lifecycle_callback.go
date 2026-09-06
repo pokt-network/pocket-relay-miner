@@ -1277,6 +1277,23 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					}
 				}
 			} else {
+				// The batch SUCCEEDED, so there is no error left to report.
+				// Clearing is the whole fix: lastErr is set on every failed
+				// attempt and was never unset, so a batch that failed once and
+				// then succeeded still entered the `lastErr != nil` block below
+				// -- counting the group as lost, rewriting the tracker as a
+				// failure, and overwriting the good rebroadcast entry with
+				// OrigTxHash="" (that persist has no `claimTxHash != ""` guard,
+				// unlike the one in this branch), which burns the single
+				// MaxRebroadcasts resend on a claim already on its way.
+				//
+				// `windowClosed` is NOT the model to copy here: it exists
+				// because in that case lastErr must STAY set (the submission did
+				// fail, and the tracker and the returned error both need it).
+				// Here the submission did not fail, so the error itself is what
+				// is wrong.
+				lastErr = nil
+
 				// SUCCESS: Claim TX broadcast accepted to mempool
 				// Retrieve TX hash from HA client (stored immediately after broadcast)
 				if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
@@ -2114,6 +2131,17 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					}
 				}
 			} else {
+				// The batch SUCCEEDED -- same fix, same reason as the claim
+				// cycle. The two loops are twins by construction, lastErr is
+				// written in exactly two places in this file and was cleared in
+				// neither, so the defect existed on both sides.
+				//
+				// It lands HARDER here: the success branch below fills
+				// result.Settled, so without this the same session is named
+				// settled to the caller AND written proof_tx_error in Redis --
+				// two contradictory verdicts for one session in one cycle.
+				lastErr = nil
+
 				// SUCCESS: Proof TX broadcast accepted to mempool
 				// Retrieve TX hash from HA client (stored immediately after broadcast)
 				if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
