@@ -73,6 +73,12 @@ var retiredKeys = map[string]string{
 	"keys_dir": "loading supplier keys from a directory is no longer supported. Use keys.keys_file or " +
 		"keys.keyring",
 
+	"disable_claim_batching": "claims are now ALWAYS batched by session end height and there is no way to " +
+		"submit them one per transaction. If this said \"true\", expect one transaction per (supplier, session " +
+		"end height) instead of one per claim -- fewer transactions per window, which is what the startup " +
+		"warning used to ask for. Batching is no longer a choice on either side: proofs always travel one per " +
+		"transaction and claims always travel grouped",
+
 	"disable_proof_batching": "proofs are now ALWAYS submitted one per transaction and there is no way to " +
 		"group them again. A batch dies whole, so one message the chain refuses forfeited every other proof " +
 		"riding with it. If this said \"false\" (the default), expect one transaction per proof instead of one " +

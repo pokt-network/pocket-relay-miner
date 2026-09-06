@@ -291,13 +291,6 @@ type TransactionConfig struct {
 	// Default: 1.7
 	GasAdjustment float64 `yaml:"gas_adjustment,omitempty"`
 
-	// DisableClaimBatching disables batching of claim submissions.
-	// When true, each session's claim is submitted in a separate transaction.
-	// When false (default), claims with the same session end height are batched.
-	// WORKAROUND: Set to true if experiencing claim failures due to one invalid claim in a batch.
-	// Default: false (batching enabled for gas efficiency)
-	DisableClaimBatching bool `yaml:"disable_claim_batching,omitempty"`
-
 	// TxTimeoutMinSeconds is the floor for window-based TX broadcast deadlines.
 	// Even when the claim/proof window is almost closed the TX still gets at least
 	// this many seconds to land on-chain before the unordered-TX TTL expires.
@@ -816,22 +809,6 @@ const suppliersPerCPUWarnThreshold = 50
 // advisory only (never fatal) and meant to surface in the logs of operators who
 // deploy fast without reading the docs.
 func (c *Config) LogStartupCapacityAdvisory(logger logging.Logger, numSuppliers int) {
-	// Claims only: proofs no longer have a batching setting. Disabling claim
-	// batching is discouraged for two reasons that compound -- the tx volume,
-	// and the fact that the claim cycle still abandons the groups behind the
-	// first one it cannot submit, so more groups means more sessions exposed to
-	// that. The difficulty-validation bug it once worked around is resolved.
-	if c.Transaction.DisableClaimBatching {
-		logger.Warn().
-			Bool("disable_claim_batching", c.Transaction.DisableClaimBatching).
-			Int("num_suppliers", numSuppliers).
-			Msg("DISCOURAGED CONFIG: claim batching is DISABLED — at scale this sends one tx per claim " +
-				"(hundreds-to-thousands per window) and is a primary cause of CLAIM_MISSING forfeits. It also " +
-				"widens an existing gap: the claim cycle stops at the first group it cannot submit, leaving the " +
-				"groups behind it with no state written and no retry, so more groups means more sessions exposed. " +
-				"Re-enable it (remove disable_claim_batching) unless you have a specific reason.")
-	}
-
 	cpu := getEffectiveCPUCount()
 	if cpu > 0 && numSuppliers > cpu*suppliersPerCPUWarnThreshold {
 		logger.Warn().
@@ -982,18 +959,6 @@ func DefaultConfig() *Config {
 			GasLimit:      0,               // 0 = automatic gas estimation via simulation
 			GasPrice:      "0.000001upokt", // Default gas price
 			GasAdjustment: 1.7,             // Default 70% safety margin
-			// CLAIM batching is ON by default, and it is the only batching left to
-			// configure: proofs always travel one per transaction and have no
-			// setting. Claims were once unbatched as a workaround for
-			// difficulty-validation failures; that bug is resolved, and at scale
-			// (hundreds of supplier keys) submitting one tx per claim floods the
-			// node with thousands per window and is a primary cause of
-			// CLAIM_MISSING forfeits, so disabling it is discouraged and fires a
-			// startup warning. None of that reasoning transfers to proofs: a
-			// session needing one is the exception, so splitting them costs
-			// almost no extra transactions and buys the guarantee that one
-			// refused proof cannot forfeit the others riding with it.
-			DisableClaimBatching: false,
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)

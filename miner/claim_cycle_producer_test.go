@@ -184,52 +184,40 @@ func TestOnSessionsNeedClaim_AFailingGroupDoesNotTakeTheNextOneWithIt(t *testing
 
 // TestOnSessionsNeedClaim_GroupsAtTheCallSite is the twin of the proof path's
 // call-site test, and it exists because in this file every fix has a twin: the
-// two cycles are built alike, so an arrangement pinned on one side is unpinned on
-// the other until someone looks. Measured before writing it: swapping the two
-// branches below left the whole package green.
+// two cycles are built alike, so an arrangement pinned on one side stays unpinned
+// on the other until someone looks.
 //
-// Inverting them is the expensive direction. Batched is the DEFAULT, so the swap
-// makes claims go out one per transaction — which is what the startup advisory
-// calls a primary cause of CLAIM_MISSING forfeits — while the flag meant to turn
-// that off would turn it on.
+// It used to need two cases, one per branch of a flag. The flag is gone, and with
+// it the branch -- so the injection that motivated this test (swapping the two
+// branches, which made batched-by-default send one claim per transaction while
+// the flag meant to stop that started it) is no longer WRITABLE. What is left to
+// pin is that this path groups by end height at all, which is one case.
 //
-// Both cases are needed. One alone pins half an arrangement, and half is what
-// lets an inversion pass. The count comes from the params spy: it fails every
-// height, so each group dies at the loop's first hop and the number of heights
-// asked for IS the number of groups.
+// The count comes from the params spy: it fails every height, so each group dies
+// at the loop's first hop and the number of heights asked for IS the number of
+// groups -- a cheap way to ask about the PARTITION without reaching submission.
 func TestOnSessionsNeedClaim_GroupsAtTheCallSite(t *testing.T) {
 	const sharedEndHeight = 909320 // one height, the way the chain's grid produces them
 
-	for _, tc := range []struct {
-		name            string
-		disableBatching bool
-		wantGroups      int
-	}{
-		{"batched by default: sessions sharing an end height ride one transaction", false, 1},
-		{"batching disabled: each session gets its own transaction", true, 3},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			spy := &heightSpyShared{failWi: errors.New("params unavailable at this height")}
-			lc := &LifecycleCallback{
-				logger:       logging.NewLoggerFromConfig(logging.DefaultConfig()),
-				sharedClient: spy,
-				config:       LifecycleCallbackConfig{DisableClaimBatching: tc.disableBatching},
-			}
+	spy := &heightSpyShared{failWi: errors.New("params unavailable at this height")}
+	lc := &LifecycleCallback{
+		logger:       logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sharedClient: spy,
+	}
 
-			snapshots := []*SessionSnapshot{
-				{SessionID: "claim-session-alpha", SessionEndHeight: sharedEndHeight},
-				{SessionID: "claim-session-bravo", SessionEndHeight: sharedEndHeight},
-				{SessionID: "claim-session-delta", SessionEndHeight: sharedEndHeight},
-			}
+	snapshots := []*SessionSnapshot{
+		{SessionID: "claim-session-alpha", SessionEndHeight: sharedEndHeight},
+		{SessionID: "claim-session-bravo", SessionEndHeight: sharedEndHeight},
+		{SessionID: "claim-session-delta", SessionEndHeight: sharedEndHeight},
+	}
 
-			if _, err := lc.OnSessionsNeedClaim(context.Background(), snapshots); err == nil {
-				t.Fatal("every group failed, so the cycle must report it")
-			}
+	if _, err := lc.OnSessionsNeedClaim(context.Background(), snapshots); err == nil {
+		t.Fatal("every group failed, so the cycle must report it")
+	}
 
-			asked := spy.askedHeights()
-			if len(asked) != tc.wantGroups {
-				t.Fatalf("want %d group(s), got %d (heights asked: %v)", tc.wantGroups, len(asked), asked)
-			}
-		})
+	asked := spy.askedHeights()
+	if len(asked) != 1 {
+		t.Fatalf("sessions sharing an end height must ride one transaction: want 1 group, got %d (heights asked: %v)",
+			len(asked), asked)
 	}
 }

@@ -85,10 +85,6 @@ type LifecycleCallbackConfig struct {
 	// ProofRetryDelay is the delay between retry attempts.
 	ProofRetryDelay time.Duration
 
-	// DisableClaimBatching disables batching of claim submissions.
-	// When true, each session's claim is submitted in a separate transaction.
-	DisableClaimBatching bool
-
 	// BlockTimeSeconds is the expected block time used to convert remaining window
 	// blocks into a TX broadcast deadline. The TxClient enforces hard min/max bounds
 	// regardless of this value. Default: 30.
@@ -727,26 +723,11 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 	// either, because sessions share one end height in the ordinary case; the
 	// stable sort keeps arrival order under that tie.
 	groups := groupByEndHeight(snapshots)
-	if lc.config.DisableClaimBatching {
-		groups = groupOnePerSession(snapshots)
-	}
-	if lc.config.DisableClaimBatching {
-		logger.Info().
-			Int("total_sessions", len(snapshots)).
-			Bool("batching_disabled", true).
-			Msg("CLAIM_BATCHING_DISABLED: submitting each session in separate transaction (workaround for difficulty validation)")
-	} else {
-		logger.Info().
-			Int("total_sessions", len(snapshots)).
-			Bool("batching_enabled", true).
-			Msg("claim batching enabled - grouping sessions by end height")
-	}
 
 	logger.Info().
 		Int("total_sessions", len(snapshots)).
-		Int("num_batches", len(groups)).
-		Bool("batching_disabled", lc.config.DisableClaimBatching).
-		Msg("claim batching strategy applied")
+		Int("num_transactions", len(groups)).
+		Msg("grouping claims by session end height")
 
 	// Process each group (same claim window) separately
 	for _, groupSnapshots := range groups {

@@ -220,11 +220,6 @@ type SupplierManagerConfig struct {
 	// Used for distributed supplier claiming across multiple miners via Redis leases.
 	ClaimerConfig SupplierClaimerConfig
 
-	// DisableClaimBatching disables batching of claim submissions.
-	// WORKAROUND: Set to true to avoid cross-contamination where one invalid claim
-	// causes the entire batch to fail.
-	DisableClaimBatching bool
-
 	// DisablePreProofClaimVerification turns off the pre-proof GetClaim guard.
 	// See LifecycleCallbackConfig.DisablePreProofClaimVerification for details.
 	// Default: false (guard enabled).
@@ -1381,7 +1376,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Create lifecycle callback for claim/proof submission
 		lifecycleCallbackConfig := DefaultLifecycleCallbackConfig()
 		lifecycleCallbackConfig.SupplierAddress = operatorAddr
-		lifecycleCallbackConfig.DisableClaimBatching = m.config.DisableClaimBatching
 		lifecycleCallbackConfig.BlockTimeSeconds = m.config.BlockTimeSeconds
 		lifecycleCallbackConfig.DisablePreProofClaimVerification = m.config.DisablePreProofClaimVerification
 		lifecycleCallback = NewLifecycleCallback(
