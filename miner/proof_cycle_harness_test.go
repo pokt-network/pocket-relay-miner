@@ -43,7 +43,7 @@ func (s *heightSpyShared) askedHeights() []int64 {
 
 // TestOnSessionsNeedProof_AGroupFailingDoesNotAbandonTheGroupsBehindIt is the
 // harness the earlier tests did not have: it enters OnSessionsNeedProof itself,
-// whose control flow IS the fix. buildProofGroups is a pure function and the
+// whose control flow IS the fix. groupOnePerSession is a pure function and the
 // caller was covered with a double; neither reaches the ten aborts that decide
 // whether a failing group ends the cycle.
 //
@@ -86,5 +86,46 @@ func TestOnSessionsNeedProof_AGroupFailingDoesNotAbandonTheGroupsBehindIt(t *tes
 	}
 	if !strings.Contains(msg, "100") || !strings.Contains(msg, "200") {
 		t.Fatalf("the aggregated error must identify which heights failed, got: %s", msg)
+	}
+}
+
+// TestOnSessionsNeedProof_GroupsOnePerSessionAtTheCallSite pins the cardinality
+// where it is DECIDED, not where it is implemented.
+//
+// The three grouping tests next to this one call the grouping function directly,
+// so they prove the function behaves; none of them proves the proof path CALLS
+// the one-per-session entry. Measured while the grouping took a bool: pointing
+// this call site at the claim path's batching flag left all three green, because
+// nothing tested the call itself. The structure now carries most of that -- the
+// entry takes no flag, so re-batching proofs means writing code -- and this test
+// covers the rest: that this path uses that entry.
+//
+// It reads the count through the shared-params spy: one call per group, and the
+// spy fails every one, so every group dies at the first hop and the number of
+// heights asked for IS the number of groups. Three sessions sharing an end
+// height must therefore produce three asks, not one.
+func TestOnSessionsNeedProof_GroupsOnePerSessionAtTheCallSite(t *testing.T) {
+	const sharedEndHeight = 909320 // one height, the way the chain's grid produces them
+
+	spy := &heightSpyShared{failWi: errors.New("params unavailable at this height")}
+	lc := &LifecycleCallback{
+		logger:       logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sharedClient: spy,
+	}
+
+	snapshots := []*SessionSnapshot{
+		{SessionID: "proof-session-alpha", SessionEndHeight: sharedEndHeight},
+		{SessionID: "proof-session-bravo", SessionEndHeight: sharedEndHeight},
+		{SessionID: "proof-session-delta", SessionEndHeight: sharedEndHeight},
+	}
+
+	if _, err := lc.OnSessionsNeedProof(context.Background(), snapshots); err == nil {
+		t.Fatal("every group failed, so the cycle must report it")
+	}
+
+	asked := spy.askedHeights()
+	if len(asked) != len(snapshots) {
+		t.Fatalf("sessions sharing an end height must each get their own proof transaction: "+
+			"want %d groups, got %d (heights asked: %v)", len(snapshots), len(asked), asked)
 	}
 }

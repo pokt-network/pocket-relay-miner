@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
+	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
@@ -113,4 +114,122 @@ func keysOf(m map[string]struct{}) []string {
 	return out
 }
 
-var _ = sync.Mutex{}
+// failingShared fails params for the FIRST height it is asked about and answers
+// normally afterwards, so the first group aborts and the second must still run.
+type failingShared struct {
+	pocktclient.SharedQueryClient
+	mu     sync.Mutex
+	failed map[int64]bool
+}
+
+func (s *failingShared) GetParamsAtHeight(_ context.Context, height int64) (*sharedtypes.Params, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.failed == nil {
+		s.failed = map[int64]bool{}
+	}
+	if height == 99 {
+		s.failed[height] = true
+		return nil, errors.New("params unavailable for this height")
+	}
+	p := sharedtypes.DefaultParams()
+	return &p, nil
+}
+
+// TestOnSessionsNeedClaim_AFailingGroupDoesNotTakeTheNextOneWithIt pins the
+// second half: the claim cycle used to have six function-level returns inside
+// its group loop, so the first group that could not submit abandoned every group
+// behind it -- those sessions reaching no verdict, with `claiming` having a
+// single exit and no retry.
+//
+// The assertion is that the SECOND group's session is claimed, by name, while
+// the first group's is not. "One session was claimed" is true of both the fixed
+// and the broken code when the wrong one is claimed.
+func TestOnSessionsNeedClaim_AFailingGroupDoesNotTakeTheNextOneWithIt(t *testing.T) {
+	blocks := &heightedBlocks{}
+	blocks.currentHeight = 103
+
+	lc := &LifecycleCallback{
+		logger:         logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sharedClient:   &failingShared{},
+		blockClient:    blocks,
+		smstManager:    smstStub{},
+		supplierClient: acceptingSupplier{},
+		serviceClient:  erroringService{},
+		config:         LifecycleCallbackConfig{ClaimRetryAttempts: 1},
+	}
+
+	// Two groups, both inside their claim window at this height. The one that
+	// fails is end height 99, which sorts FIRST -- so a cycle that abandons the
+	// rest on the first failure never reaches the other one.
+	result, err := lc.OnSessionsNeedClaim(context.Background(), []*SessionSnapshot{
+		{SessionID: "doomed-group-00000", SessionEndHeight: 99, SessionStartHeight: 80,
+			SupplierOperatorAddress: "pokt1aborts", ServiceID: "svc", RelayCount: 10,
+			TotalComputeUnits: 100, State: SessionStateClaiming},
+		{SessionID: "behind-it-0000000", SessionEndHeight: 100, SessionStartHeight: 81,
+			SupplierOperatorAddress: "pokt1aborts", ServiceID: "svc", RelayCount: 10,
+			TotalComputeUnits: 100, State: SessionStateClaiming},
+	})
+
+	if err == nil {
+		t.Fatal("the first group failed, so the cycle must report it")
+	}
+	if !result.IsClaimed("behind-it-0000000") {
+		t.Fatalf("the group behind the failing one must still be claimed; claimed = %v", keysOf(result.Claimed))
+	}
+	if result.IsClaimed("doomed-group-00000") {
+		t.Fatal("the group whose params failed never submitted and must not be claimed")
+	}
+}
+
+// TestOnSessionsNeedClaim_GroupsAtTheCallSite is the twin of the proof path's
+// call-site test, and it exists because in this file every fix has a twin: the
+// two cycles are built alike, so an arrangement pinned on one side is unpinned on
+// the other until someone looks. Measured before writing it: swapping the two
+// branches below left the whole package green.
+//
+// Inverting them is the expensive direction. Batched is the DEFAULT, so the swap
+// makes claims go out one per transaction — which is what the startup advisory
+// calls a primary cause of CLAIM_MISSING forfeits — while the flag meant to turn
+// that off would turn it on.
+//
+// Both cases are needed. One alone pins half an arrangement, and half is what
+// lets an inversion pass. The count comes from the params spy: it fails every
+// height, so each group dies at the loop's first hop and the number of heights
+// asked for IS the number of groups.
+func TestOnSessionsNeedClaim_GroupsAtTheCallSite(t *testing.T) {
+	const sharedEndHeight = 909320 // one height, the way the chain's grid produces them
+
+	for _, tc := range []struct {
+		name            string
+		disableBatching bool
+		wantGroups      int
+	}{
+		{"batched by default: sessions sharing an end height ride one transaction", false, 1},
+		{"batching disabled: each session gets its own transaction", true, 3},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			spy := &heightSpyShared{failWi: errors.New("params unavailable at this height")}
+			lc := &LifecycleCallback{
+				logger:       logging.NewLoggerFromConfig(logging.DefaultConfig()),
+				sharedClient: spy,
+				config:       LifecycleCallbackConfig{DisableClaimBatching: tc.disableBatching},
+			}
+
+			snapshots := []*SessionSnapshot{
+				{SessionID: "claim-session-alpha", SessionEndHeight: sharedEndHeight},
+				{SessionID: "claim-session-bravo", SessionEndHeight: sharedEndHeight},
+				{SessionID: "claim-session-delta", SessionEndHeight: sharedEndHeight},
+			}
+
+			if _, err := lc.OnSessionsNeedClaim(context.Background(), snapshots); err == nil {
+				t.Fatal("every group failed, so the cycle must report it")
+			}
+
+			asked := spy.askedHeights()
+			if len(asked) != tc.wantGroups {
+				t.Fatalf("want %d group(s), got %d (heights asked: %v)", tc.wantGroups, len(asked), asked)
+			}
+		})
+	}
+}

@@ -545,33 +545,54 @@ func firstSessionIDsForLog(snapshots []*SessionSnapshot) []string {
 	return ids
 }
 
-// buildProofGroups puts each of one supplier's sessions in its own group -- one
-// group is one transaction -- and returns them in a DETERMINISTIC order.
+// groupOnePerSession puts every session in its own group -- one group is one
+// transaction -- in the deterministic order orderGroupsByWindow defines.
 //
-// It still returns groups rather than a flat list, and that is deliberate: the
-// submission body downstream works on a slice of sessions, so keeping the shape
-// lets one-per-transaction be a change of PARTITION rather than a rewrite of the
-// code that builds, submits, meters and persists. Every group holds exactly one
-// session today; nothing below needs to know that.
-//
-// Determinism is the other half. The original built a map keyed by end height
-// and ranged over it, and Go randomises map iteration, so the order proofs
-// reached the chain changed between runs. That was invisible while one failing
-// group ended the cycle -- the abandoned ones were abandoned either way -- and
-// becomes a coin flip over which sessions get their proof once the cycle keeps
-// going.
-//
-// Sorting by end height alone is NOT enough, and this is the part that is easy
-// to get wrong: sessions are anchored to a global grid, so in the ordinary case
-// every session carries the SAME end height and the comparison is a tie on every
-// pair. sort.SliceStable keeps arrival order under that tie, which is what
-// actually fixes the sequence; the sort by height only puts the session whose
-// window closes first at the front when heights do differ.
-func buildProofGroups(snapshots []*SessionSnapshot) [][]*SessionSnapshot {
+// It takes no flag, and that is the point: proofs are never batched, and while
+// this was a bool parameter shared with the claim path, restoring the batching
+// S4 removed took changing one argument. A guarantee that costs one character to
+// undo is not one. Grouping proofs again now requires writing code.
+func groupOnePerSession(snapshots []*SessionSnapshot) [][]*SessionSnapshot {
 	groups := make([][]*SessionSnapshot, 0, len(snapshots))
 	for _, snapshot := range snapshots {
 		groups = append(groups, []*SessionSnapshot{snapshot})
 	}
+	return orderGroupsByWindow(groups)
+}
+
+// groupByEndHeight puts the sessions that share a session end height -- and so
+// share a submission window -- in one group, so they travel in one transaction.
+// Claims are batched this way by default.
+func groupByEndHeight(snapshots []*SessionSnapshot) [][]*SessionSnapshot {
+	groups := make([][]*SessionSnapshot, 0, len(snapshots))
+	byEndHeight := make(map[int64]int, len(snapshots))
+	for _, snapshot := range snapshots {
+		if idx, ok := byEndHeight[snapshot.SessionEndHeight]; ok {
+			groups[idx] = append(groups[idx], snapshot)
+			continue
+		}
+		byEndHeight[snapshot.SessionEndHeight] = len(groups)
+		groups = append(groups, []*SessionSnapshot{snapshot})
+	}
+	return orderGroupsByWindow(groups)
+}
+
+// orderGroupsByWindow puts the group whose window closes first at the front, and
+// is DETERMINISTIC even when it cannot tell two groups apart.
+//
+// Both paths used to range over a map keyed by end height, and Go randomises map
+// iteration, so the order in which groups reached the chain changed between
+// runs. That is invisible while one failing group ends the cycle -- the abandoned
+// ones are abandoned either way -- and becomes a coin flip over which sessions
+// get through once the cycle keeps going.
+//
+// Sorting by end height alone is NOT enough, and this is the part that is easy to
+// get wrong: sessions are anchored to a global grid, so in the ordinary case
+// every group carries the SAME end height and the comparison is a tie on every
+// pair. sort.SliceStable keeps arrival order under that tie, which is what
+// actually fixes the sequence; the sort by height only matters when heights
+// differ.
+func orderGroupsByWindow(groups [][]*SessionSnapshot) [][]*SessionSnapshot {
 	sort.SliceStable(groups, func(i, j int) bool {
 		return groups[i][0].SessionEndHeight < groups[j][0].SessionEndHeight
 	})
@@ -682,6 +703,10 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 	if len(snapshots) == 0 {
 		return result, nil
 	}
+	// groupErrs accumulates one entry per group that did not submit, so the
+	// caller sees every failure instead of only the first -- and so a group
+	// that fails does not take the groups behind it with it.
+	var groupErrs []error
 
 	// All sessions for a single supplier, so we can batch them
 	firstSnapshot := snapshots[0]
@@ -692,39 +717,39 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 	logger.Debug().Msg("batched sessions need claims - starting claim process")
 
-	// Group sessions by session end height (they might have different claim windows)
-	// WORKAROUND: If batching is disabled, create one group per session to avoid
-	// cross-contamination where one invalid claim causes the entire batch to fail.
-	sessionsByEndHeight := make(map[int64][]*SessionSnapshot)
+	// Group sessions by session end height (they might have different claim
+	// windows), or one per session when the operator disabled claim batching.
+	//
+	// A SLICE, not a map: Go randomises map iteration, so the order in which
+	// groups reached the chain changed between runs -- and once a failing group
+	// no longer ends the cycle, that order decides which sessions get through
+	// when the window runs out. Sorting by end height alone does not settle it
+	// either, because sessions share one end height in the ordinary case; the
+	// stable sort keeps arrival order under that tie.
+	groups := groupByEndHeight(snapshots)
 	if lc.config.DisableClaimBatching {
-		// No batching - each session in its own "group" using unique key
+		groups = groupOnePerSession(snapshots)
+	}
+	if lc.config.DisableClaimBatching {
 		logger.Info().
 			Int("total_sessions", len(snapshots)).
 			Bool("batching_disabled", true).
 			Msg("CLAIM_BATCHING_DISABLED: submitting each session in separate transaction (workaround for difficulty validation)")
-		for i, snapshot := range snapshots {
-			// Use negative index as key to avoid conflicts with real end heights
-			sessionsByEndHeight[int64(-i-1)] = []*SessionSnapshot{snapshot}
-		}
 	} else {
-		// Normal batching - group by session end height
 		logger.Info().
 			Int("total_sessions", len(snapshots)).
 			Bool("batching_enabled", true).
 			Msg("claim batching enabled - grouping sessions by end height")
-		for _, snapshot := range snapshots {
-			sessionsByEndHeight[snapshot.SessionEndHeight] = append(sessionsByEndHeight[snapshot.SessionEndHeight], snapshot)
-		}
 	}
 
 	logger.Info().
 		Int("total_sessions", len(snapshots)).
-		Int("num_batches", len(sessionsByEndHeight)).
+		Int("num_batches", len(groups)).
 		Bool("batching_disabled", lc.config.DisableClaimBatching).
 		Msg("claim batching strategy applied")
 
 	// Process each group (same claim window) separately
-	for _, groupSnapshots := range sessionsByEndHeight {
+	for _, groupSnapshots := range groups {
 		// Get the actual session end height from the first snapshot in the group
 		// (all snapshots in a group have the same end height)
 		sessionEndHeight := groupSnapshots[0].SessionEndHeight
@@ -734,7 +759,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// computed with new-epoch params would resolve the wrong claim window.
 		sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 		if err != nil {
-			return result, fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err)
+			groupErrs = append(groupErrs,
+				fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err))
+			continue
 		}
 
 		// Wait for claim window to open and get the block hash for timing spread
@@ -756,7 +783,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			Msg("waiting for claim window to open")
 
 		if _, blockErr := lc.waitForBlock(ctx, claimWindowOpenHeight); blockErr != nil {
-			return result, fmt.Errorf("failed to wait for claim window open: %w", blockErr)
+			groupErrs = append(groupErrs,
+				fmt.Errorf("failed to wait for claim window open: %w", blockErr))
+			continue
 		}
 
 		// NOTE: Timing spread DISABLED - submit claims immediately when window opens
@@ -794,8 +823,10 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				lc.markAndCountClaimWindowClosed(ctx, snapshot)
 			}
 
-			return result, fmt.Errorf("insufficient time to build claims: %d blocks remaining, %d required (window closes at %d, current: %d)",
-				blocksRemaining, minBlocksRequired, claimWindowClose, currentBlock.Height())
+			groupErrs = append(groupErrs,
+				fmt.Errorf("insufficient time to build claims: %d blocks remaining, %d required (window closes at %d, current: %d)",
+					blocksRemaining, minBlocksRequired, claimWindowClose, currentBlock.Height()))
+			continue
 		}
 
 		logger.Debug().
@@ -1184,7 +1215,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				lc.markAndCountClaimWindowClosed(ctx, snapshot)
 			}
 
-			return result, fmt.Errorf("claim window closed while building claims at height %d (current: %d)", claimWindowClose, currentBlock.Height())
+			groupErrs = append(groupErrs,
+				fmt.Errorf("claim window closed while building claims at height %d (current: %d)", claimWindowClose, currentBlock.Height()))
+			continue
 		}
 
 		claimBlocksLeft := claimWindowClose - currentBlock.Height()
@@ -1253,7 +1286,11 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				if attempt < lc.config.ClaimRetryAttempts {
 					select {
 					case <-ctx.Done():
-						return result, ctx.Err()
+						// The one exit that is not a continue: a cancelled context
+						// fails every remaining group too, so continuing would burn
+						// the window repeating one error. It still returns the
+						// sessions already claimed rather than discarding them.
+						return result, errors.Join(append(groupErrs, ctx.Err())...)
 					case <-time.After(lc.config.ClaimRetryDelay):
 						continue
 					}
@@ -1419,11 +1456,13 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				)
 			}
 
-			return result, fmt.Errorf("batched claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr)
+			groupErrs = append(groupErrs,
+				fmt.Errorf("claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr))
+			continue
 		}
 	}
 
-	return result, nil
+	return result, errors.Join(groupErrs...)
 }
 
 // OnSessionsNeedProof is called when sessions need proofs submitted.
@@ -1478,7 +1517,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 	// the normal case every session shares one end height and the comparison is
 	// a tie. Building in arrival order and sorting with SliceStable makes
 	// arrival order the tiebreak, which is what stays fixed across runs.
-	groups := buildProofGroups(snapshots)
+	groups := groupOnePerSession(snapshots)
 
 	logger.Info().
 		Int("total_sessions", len(snapshots)).

@@ -1042,11 +1042,18 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 	}
 
 	// Call the batched claim callback
+	// The error and the result are BOTH read: a cycle that failed one group can
+	// still have claimed another, and returning early on the error would leave
+	// those sessions in `claiming` with their claim already on-chain, to be
+	// forfeited when the window closes.
 	result, claimErr := m.callback.OnSessionsNeedClaim(ctx, sessions)
 	if claimErr != nil {
-		m.logger.Error().Err(claimErr).Int("batch_size", len(sessions)).Msg("batched claim callback failed")
+		m.logger.Error().
+			Err(claimErr).
+			Int("batch_size", len(sessions)).
+			Int("claimed", len(result.Claimed)).
+			Msg("claim cycle reported failures — transitioning only the sessions it claimed")
 		claimErrors.WithLabelValues(m.config.SupplierAddress, "callback_failed").Inc()
-		return
 	}
 
 	// Transition the sessions the cycle named, and only those. A session it did

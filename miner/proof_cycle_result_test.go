@@ -112,7 +112,7 @@ func TestBuildProofGroups_StableUnderTiedEndHeights(t *testing.T) {
 
 	// Each snapshot is its own group now, so the ORDER of groups is observable;
 	// when they merged into one group there was nothing to order.
-	first := buildProofGroups(snapshots)
+	first := groupOnePerSession(snapshots)
 	if len(first) != 3 {
 		t.Fatalf("want 3 per-session groups, got %d", len(first))
 	}
@@ -126,7 +126,7 @@ func TestBuildProofGroups_StableUnderTiedEndHeights(t *testing.T) {
 	// Repeat: a map-backed implementation randomises iteration, so the same
 	// input must keep producing the same sequence.
 	for run := 0; run < 50; run++ {
-		got := buildProofGroups(snapshots)
+		got := groupOnePerSession(snapshots)
 		for i, id := range want {
 			if got[i][0].SessionID != id {
 				t.Fatalf("run %d, group %d: order not stable, want %q got %q", run, i, id, got[i][0].SessionID)
@@ -138,7 +138,7 @@ func TestBuildProofGroups_StableUnderTiedEndHeights(t *testing.T) {
 // TestBuildProofGroups_EarlierWindowFirst covers the other half: when end
 // heights DIFFER, the group whose proof window closes first must go first.
 func TestBuildProofGroups_EarlierWindowFirst(t *testing.T) {
-	groups := buildProofGroups([]*SessionSnapshot{
+	groups := groupOnePerSession([]*SessionSnapshot{
 		{SessionID: "late", SessionEndHeight: 200},
 		{SessionID: "early", SessionEndHeight: 100},
 	})
@@ -175,7 +175,7 @@ func TestBuildProofGroups_SessionsSharingAnEndHeightGetSeparateTransactions(t *t
 		{SessionID: "s3", SessionEndHeight: sharedEndHeight},
 	}
 
-	groups := buildProofGroups(snapshots)
+	groups := groupOnePerSession(snapshots)
 
 	if len(groups) != len(snapshots) {
 		t.Fatalf("sessions sharing an end height must each get their own transaction: want %d groups, got %d",
