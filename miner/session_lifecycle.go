@@ -35,6 +35,29 @@ type SessionLifecycleConfig struct {
 	CheckInterval time.Duration
 }
 
+// ClaimCycleResult names, BY SESSION ID, the sessions whose claim reached the
+// chain during one claim cycle. A session absent from Claimed is one the caller
+// must not transition: it was skipped, it failed, or the cycle never reached it.
+//
+// It replaces a [][]byte returned parallel to the caller's own slice. That shape
+// carried the answer in a POSITION while the callback also wrote the same fact
+// into the session itself, by identity -- two truths about one thing, and the
+// positional one drifted: it was filled through a counter that advanced only for
+// sessions that actually submitted, so it left-packed, and the caller then
+// transitioned the first k sessions of its slice whatever they happened to be.
+// Naming the sessions removes the position, and with it the possibility.
+type ClaimCycleResult struct {
+	// Claimed holds the session IDs the caller may transition to Claimed.
+	// nil is valid and means none.
+	Claimed map[string]struct{}
+}
+
+// IsClaimed reports whether this cycle got sessionID's claim to the chain.
+func (r ClaimCycleResult) IsClaimed(sessionID string) bool {
+	_, ok := r.Claimed[sessionID]
+	return ok
+}
+
 // ProofCycleResult names the sessions whose proof was accepted by the chain's
 // mempool during one proof cycle. A session ABSENT from Settled is not a failed
 // session: it is a session the caller must not transition, either because its
@@ -62,9 +85,11 @@ type SessionLifecycleCallback interface {
 	OnSessionActive(ctx context.Context, snapshot *SessionSnapshot) error
 
 	// OnSessionsNeedClaim is called when sessions need claims submitted (batched).
-	// The callback should trigger claim submission and return root hashes in the same order.
 	// All sessions in the batch are submitted in a single transaction for efficiency.
-	OnSessionsNeedClaim(ctx context.Context, snapshots []*SessionSnapshot) (rootHashes [][]byte, err error)
+	// The returned ClaimCycleResult names the sessions whose claim reached the
+	// chain; the claimed root hash itself is written into the session, so it is
+	// not returned alongside and cannot disagree with it.
+	OnSessionsNeedClaim(ctx context.Context, snapshots []*SessionSnapshot) (ClaimCycleResult, error)
 
 	// OnSessionsNeedProof is called when sessions need proofs submitted.
 	// The returned ProofCycleResult names the sessions whose proof reached the
@@ -1017,41 +1042,36 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 	}
 
 	// Call the batched claim callback
-	rootHashes, claimErr := m.callback.OnSessionsNeedClaim(ctx, sessions)
+	result, claimErr := m.callback.OnSessionsNeedClaim(ctx, sessions)
 	if claimErr != nil {
 		m.logger.Error().Err(claimErr).Int("batch_size", len(sessions)).Msg("batched claim callback failed")
 		claimErrors.WithLabelValues(m.config.SupplierAddress, "callback_failed").Inc()
 		return
 	}
 
-	if len(rootHashes) != len(sessions) {
-		m.logger.Error().
-			Int("expected", len(sessions)).
-			Int("got", len(rootHashes)).
-			Msg("root hash count mismatch")
-		return
-	}
-
-	// Update all sessions with their root hashes and transition to claimed.
-	// OnSessionsNeedClaim pre-allocates rootHashes with len(sessions) and leaves
-	// nil entries for sessions it decided NOT to claim (economic skip, zero
-	// relays, zero compute units, dedup hit). Those sessions must not be
-	// flipped to Claimed — they have their own terminal state set by the
-	// callback's own cleanup path.
+	// Transition the sessions the cycle named, and only those. A session it did
+	// not name decided its own outcome inside the callback (economic skip, zero
+	// relays, zero compute units, dedup hit) and already carries a terminal
+	// state; UpdateState does not check IsTerminal, so writing Claimed over one
+	// of them resurrects a session whose SMST is already gone.
+	//
+	// The claimed root hash is NOT read back from the callback: it is written
+	// into the session by identity while the claim is built, and into Redis by
+	// OnSessionClaimed. There is nothing to copy here, and nothing that can
+	// disagree with it.
 	claimedCount := 0
 	skippedCount := 0
-	for i, session := range sessions {
-		if rootHashes[i] == nil {
+	for _, session := range sessions {
+		if !result.IsClaimed(session.SessionID) {
 			skippedCount++
 			m.logger.Info().
 				Str(logging.FieldSessionID, session.SessionID).
 				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
 				Str(logging.FieldServiceID, session.ServiceID).
-				Msg("claim callback returned nil root hash — session was skipped (economic/empty/dedup)")
+				Msg("claim cycle did not claim this session — it was skipped (economic/empty/dedup) or never reached")
 			continue
 		}
 		claimedCount++
-		session.ClaimedRootHash = rootHashes[i]
 
 		// Update session state (pointer update, safe without mutex)
 		session.State = SessionStateClaimed

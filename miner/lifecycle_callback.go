@@ -670,9 +670,17 @@ func (lc *LifecycleCallback) OnSessionActive(_ context.Context, snapshot *Sessio
 
 // OnSessionsNeedClaim is called when sessions need claims submitted (batched).
 // It waits for the proper timing spread, flushes SMSTs, and submits all claims in a single transaction.
-func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots []*SessionSnapshot) (rootHashes [][]byte, err error) {
+//
+// It reports WHICH sessions were claimed, by session ID. It used to return the
+// root hashes in a slice parallel to snapshots, filled through a counter that
+// only advanced for sessions that submitted -- so the slice left-packed and the
+// caller transitioned the first k sessions whatever they were. The root hash was
+// never needed there: it is written into the session itself while the claim is
+// built, so returning it a second time was a duplicate that could disagree.
+func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots []*SessionSnapshot) (ClaimCycleResult, error) {
+	result := ClaimCycleResult{Claimed: make(map[string]struct{}, len(snapshots))}
 	if len(snapshots) == 0 {
-		return nil, nil
+		return result, nil
 	}
 
 	// All sessions for a single supplier, so we can batch them
@@ -716,9 +724,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		Msg("claim batching strategy applied")
 
 	// Process each group (same claim window) separately
-	allRootHashes := make([][]byte, len(snapshots))
-	sessionIndex := 0
-
 	for _, groupSnapshots := range sessionsByEndHeight {
 		// Get the actual session end height from the first snapshot in the group
 		// (all snapshots in a group have the same end height)
@@ -729,7 +734,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// computed with new-epoch params would resolve the wrong claim window.
 		sharedParams, err := lc.sharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
 		if err != nil {
-			return nil, fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err)
+			return result, fmt.Errorf("failed to get shared params at height %d: %w", sessionEndHeight, err)
 		}
 
 		// Wait for claim window to open and get the block hash for timing spread
@@ -751,7 +756,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			Msg("waiting for claim window to open")
 
 		if _, blockErr := lc.waitForBlock(ctx, claimWindowOpenHeight); blockErr != nil {
-			return nil, fmt.Errorf("failed to wait for claim window open: %w", blockErr)
+			return result, fmt.Errorf("failed to wait for claim window open: %w", blockErr)
 		}
 
 		// NOTE: Timing spread DISABLED - submit claims immediately when window opens
@@ -789,7 +794,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				lc.markAndCountClaimWindowClosed(ctx, snapshot)
 			}
 
-			return nil, fmt.Errorf("insufficient time to build claims: %d blocks remaining, %d required (window closes at %d, current: %d)",
+			return result, fmt.Errorf("insufficient time to build claims: %d blocks remaining, %d required (window closes at %d, current: %d)",
 				blocksRemaining, minBlocksRequired, claimWindowClose, currentBlock.Height())
 		}
 
@@ -1179,7 +1184,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				lc.markAndCountClaimWindowClosed(ctx, snapshot)
 			}
 
-			return nil, fmt.Errorf("claim window closed while building claims at height %d (current: %d)", claimWindowClose, currentBlock.Height())
+			return result, fmt.Errorf("claim window closed while building claims at height %d (current: %d)", claimWindowClose, currentBlock.Height())
 		}
 
 		claimBlocksLeft := claimWindowClose - currentBlock.Height()
@@ -1248,7 +1253,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				if attempt < lc.config.ClaimRetryAttempts {
 					select {
 					case <-ctx.Done():
-						return nil, ctx.Err()
+						return result, ctx.Err()
 					case <-time.After(lc.config.ClaimRetryDelay):
 						continue
 					}
@@ -1289,14 +1294,15 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// OnSessionsNeedProof properly checks if proof is required.
 
 				// Record metrics for all sessions in the batch
-				for i, snapshot := range validSnapshots {
+				for _, snapshot := range validSnapshots {
 					RecordClaimSubmitted(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 					RecordClaimSubmissionLatency(snapshot.SupplierOperatorAddress, blocksAfterWindowOpen)
 					RecordRevenueClaimed(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.TotalComputeUnits, snapshot.RelayCount)
 
-					// Copy root hash to result (maintain order)
-					allRootHashes[sessionIndex] = groupRootHashes[i]
-					sessionIndex++
+					// Name the session as claimed. By ID, not by position: the
+					// root hash it just received is already on the snapshot
+					// (set above) and in Redis via OnSessionClaimed.
+					result.Claimed[snapshot.SessionID] = struct{}{}
 				}
 
 				// Track claim submissions to Redis for debugging
@@ -1413,11 +1419,11 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				)
 			}
 
-			return nil, fmt.Errorf("batched claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr)
+			return result, fmt.Errorf("batched claim submission failed after %d attempts: %w", lc.config.ClaimRetryAttempts, lastErr)
 		}
 	}
 
-	return allRootHashes, nil
+	return result, nil
 }
 
 // OnSessionsNeedProof is called when sessions need proofs submitted.
