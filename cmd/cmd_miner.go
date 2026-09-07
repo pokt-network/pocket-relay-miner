@@ -119,6 +119,19 @@ Example:
 					len(unknown), strings.Join(unknown, "\n  "))
 			}
 
+			// Not a failure and deliberately NOT part of Warnings(), which exits
+			// non-zero: the config is fine, the ENVIRONMENT is degraded, and a
+			// config check should not go red for that. Reported because this
+			// command's job is pre-flight -- staying silent would hand back a
+			// green for a deployment whose process identity will fall back.
+			//
+			// The limit, so nobody reads this as a guarantee: run on a laptop,
+			// this reproduces the laptop's hostname, not the pod's. It catches
+			// the case where the host cannot be read HERE, not there.
+			if miner.ProcessIdentityUsedFallback() {
+				fmt.Printf("NOTE: hostname unavailable here; process identity would fall back to a random discriminator\n")
+			}
+
 			configPath, _ := cmd.Flags().GetString(flagMinerConfig)
 			fmt.Printf("config OK: %s would start\n", configPath)
 			return nil
@@ -272,9 +285,22 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Int("count", len(keyManager.ListSuppliers())).
 		Msg("loaded supplier keys")
 
-	// Generate unique instance ID for global leader election
-	hostname, _ := os.Hostname()
-	instanceID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	// The leader-lock value and the Redis consumer name are the SAME identity,
+	// computed once in miner.ProcessIdentity(). The hostname used to be read
+	// here with its error discarded, which mattered because the renew script is
+	// "extend only if the value is still mine": two replicas with equal values
+	// renew against each other's key and neither learns it lost the lease.
+	instanceID := miner.ProcessIdentity()
+	if miner.ProcessIdentityUsedFallback() {
+		// Warn, not Error: it happens once at startup and the process is
+		// correct afterwards -- the random fallback is what makes the
+		// degradation safe. It is reported because a degradation that leaves no
+		// trace is one nobody can act on; the identity itself carries the
+		// marker, this says why.
+		logger.Warn().
+			Str("instance_id", instanceID).
+			Msg("hostname unavailable: process identity fell back to a random discriminator")
+	}
 
 	// Create global leader elector FIRST to determine replica status before other components start
 	leaderConfig := leader.GlobalLeaderElectorConfig{

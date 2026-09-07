@@ -1049,16 +1049,10 @@ func UniqueConsumerName(configured string) string {
 	if prefix == "" {
 		prefix = "miner"
 	}
-	return fmt.Sprintf("%s-%s-%d", prefix, hostnameOrUnknown(), os.Getpid())
-}
-
-// hostnameOrUnknown never fails: the pid still discriminates within a host, and
-// refusing to start over an unreadable hostname would be worse than a slightly
-// less readable name.
-func hostnameOrUnknown() string {
-	hostname, err := os.Hostname()
-	if err != nil || hostname == "" {
-		return "unknown-host"
-	}
-	return hostname
+	// The discriminator is ProcessIdentity(), shared with the leader-lock value:
+	// one identity with two uses, so they cannot drift apart. It replaced a
+	// local helper whose comment claimed "the pid still discriminates within a
+	// host" -- true as written and false in the deployment this repo has, where
+	// every replica is PID 1 in its own namespace.
+	return fmt.Sprintf("%s-%s", prefix, ProcessIdentity())
 }
