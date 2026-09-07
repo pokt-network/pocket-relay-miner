@@ -86,6 +86,11 @@ lint: ## Run golangci-lint
 	@golangci-lint run
 	@cd $(BACKEND_DIR) && golangci-lint run
 
+lint-blank: ## Report discarded errors (`_ = f()`); informational, never fails the build
+	@echo "Reporting discarded errors..."
+	@golangci-lint run --config .golangci-blank.yml --issues-exit-code=0
+	@cd $(BACKEND_DIR) && golangci-lint run --config ../../.golangci-blank.yml --issues-exit-code=0
+
 check-tracked-files: ## Verify no local-only files (planning docs, IDE config, secrets) are tracked
 	@./scripts/check-tracked-files.sh
 
