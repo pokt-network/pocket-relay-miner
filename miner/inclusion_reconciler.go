@@ -332,7 +332,34 @@ func (r *InclusionReconciler) runPass(rp reconcilePhase, height int64) {
 		submitted++
 	}
 	if submitted > 0 {
-		_ = group.Wait()
+		// Discarding this error made a panic in reconcileGroup vanish -- no log, no
+		// metric, no crash -- because pond recovers panics by default (pool.go:534)
+		// and hands them back through this channel, against the repo's convention
+		// that a recovered panic is counted AND logged (logging/recovery.go).
+		//
+		// The rule below is deliberately a rule and not a list. Tasks go in as
+		// func(), so no task error is possible, but the channel still carries
+		// ErrPoolStopped for a Submit made after the pool stopped (result.go:77-83),
+		// ErrGroupStopped for a stopped group (group.go:12), and the context error if
+		// the pool's context is cancelled -- and Close() marks the reconciler closed
+		// BEFORE stopping the pool, so a pass already past that check can be
+		// submitting while the pool goes down. Only a recovered panic is counted and
+		// raised; anything else here is shutdown, and shutdown at Error would spend
+		// the very signal this handling exists to create on every rollout.
+		//
+		// PanicRecoveriesTotal is enough and no loss-specific counter is added,
+		// because the work is retried: a task that panicked never reached clear(), so
+		// its entry stays pending and the next block's pass picks it up.
+		if err := group.Wait(); err != nil {
+			if errors.Is(err, pond.ErrPanic) {
+				logging.PanicRecoveriesTotal.WithLabelValues("inclusion_reconcile_group").Inc()
+				r.logger.Error().Err(err).Str("phase", string(rp.phase)).
+					Msg("inclusion reconcile: a pass task panicked")
+			} else {
+				r.logger.Debug().Err(err).Str("phase", string(rp.phase)).
+					Msg("inclusion reconcile: pass abandoned (pool shutting down)")
+			}
+		}
 	}
 }
 

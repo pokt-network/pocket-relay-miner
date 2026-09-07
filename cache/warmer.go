@@ -2,6 +2,7 @@ package cache
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -194,9 +195,38 @@ func (w *CacheWarmer) warmAppsParallel(ctx context.Context, apps []string) *Warm
 		})
 	}
 
-	// Wait for all warmup tasks to complete
-	// We track errors manually in result struct, so discard pond's error
-	_ = group.Wait()
+	// Wait for all warmup tasks to complete.
+	//
+	// "We track errors manually in the result struct" was true for errors and
+	// false for panics: pond recovers them by default (pool.go:534) and returns
+	// them here, and a panicking task updates neither WarmedApps nor FailedApps.
+	// The old `_ =` therefore lost it twice -- no log, no metric, and a summary
+	// where WarmedApps+FailedApps silently falls short of TotalApps.
+	//
+	// The rule below is deliberately a rule and not a list. Tasks go in as func(),
+	// so no task error is possible, but the channel still carries ErrPoolStopped
+	// for a Submit made after the pool stopped (result.go:77-83), ErrGroupStopped
+	// for a stopped group (group.go:12), and the context error if the context is
+	// cancelled -- and Stop() stops this pool (:263). Only a recovered panic is
+	// counted and raised; anything else here is shutdown.
+	//
+	// Unlike the reconciler and the stream trimmer, this work is NOT retried:
+	// warmup is one-shot at startup. What bounds the loss instead is that the
+	// caches populate on demand during relays, so the cost is first-use latency for
+	// the apps whose task died, not missing data -- which is why the panic counter
+	// is enough and no loss-specific counter is added.
+	if err := group.Wait(); err != nil {
+		if errors.Is(err, pond.ErrPanic) {
+			logging.PanicRecoveriesTotal.WithLabelValues("cache_warmup_app").Inc()
+			w.logger.Error().Err(err).
+				Int("total_apps", result.TotalApps).
+				Int("warmed", result.WarmedApps).
+				Int("failed", result.FailedApps).
+				Msg("cache warmup: a warm task panicked; the counts on this line do not add up to total")
+		} else {
+			w.logger.Debug().Err(err).Msg("cache warmup: abandoned (pool shutting down)")
+		}
+	}
 
 	return result
 }

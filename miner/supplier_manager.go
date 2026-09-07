@@ -2469,14 +2469,35 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 
 	// Wait for all trim operations to complete.
 	//
-	// Every task submitted above absorbs its own error and returns nil
-	// (failures are logged inline per-supplier and the outer loop must not
-	// abort the remaining trims for one bad supplier). As a result
-	// group.Wait() is invariant-nil, and the explicit `_ =` discards the
-	// zero-value interface by design. If you change a submitted task to
-	// propagate an error, replace this with a Warn/Debug log of the Wait
-	// result rather than silently dropping it.
-	_ = group.Wait()
+	// The previous comment called this Wait invariant-nil and it was not. It
+	// reasoned only about task errors -- tasks go in via SubmitErr(func() error)
+	// and the only one that exists swallows its own with `return nil // Don't fail
+	// the group for individual stream errors`, so that half was right -- and never
+	// mentioned panics: pond recovers them by default (pool.go:534) and delivers
+	// them through this same channel, so the old `_ =` made a panic in TrimStream
+	// vanish with no log, no metric and no crash, against the repo's convention
+	// that a recovered panic is counted AND logged (logging/recovery.go).
+	//
+	// The rule below is deliberately a rule and not a list, because this channel
+	// carries more than those two: ErrPoolStopped for a Submit made after the pool
+	// stopped (result.go:77-83), ErrGroupStopped for a stopped group (group.go:12),
+	// and the context error if the pool's context is cancelled -- and this pool is
+	// stopped on shutdown (StopAndWait, :2375). Enumerating them ages badly. Only a
+	// recovered panic is counted and raised; anything else this channel brings is
+	// shutdown, and shutdown at Error would spend the very signal this handling
+	// exists to create on every rollout that lands in that window.
+	//
+	// PanicRecoveriesTotal is enough and no loss-specific counter is added, because
+	// the work is retried: trimming runs off a ticker, so the next tick covers
+	// whatever this pass dropped.
+	if err := group.Wait(); err != nil {
+		if errors.Is(err, pond.ErrPanic) {
+			logging.PanicRecoveriesTotal.WithLabelValues("supplier_stream_trim").Inc()
+			m.logger.Error().Err(err).Msg("stream trimming: a trim task panicked")
+		} else {
+			m.logger.Debug().Err(err).Msg("stream trimming: pass abandoned (pool shutting down)")
+		}
+	}
 
 	if totalTrimmed > 0 {
 		m.logger.Info().
