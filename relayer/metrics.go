@@ -11,6 +11,21 @@ const (
 	metricsSubsystem = "relayer"
 )
 
+// statusCodeNoHTTP is the status_code value for transports that HAVE no HTTP
+// status: gRPC and WebSocket. It is deliberately NOT a gRPC code -- this repo
+// already decided not to mix two numbering systems in one field (see
+// tx/tx_rejection.go, which keeps ABCICode and GRPCCode in two differently typed
+// fields and says why), and a numeric value here would be read as an HTTP status
+// when grouping. It is not "200" either: a padded HTTP code would be a false
+// value in a label operators group by.
+//
+// It asserts success, and that is true BY CONSTRUCTION at both sites that use
+// it: the gRPC increment sits after a successful SendMsg on the success branch,
+// and the WebSocket one at the top of emitRelay, which is reached only after the
+// response was written to the gateway. A future non-success site on those
+// transports needs its own value, not this one.
+const statusCodeNoHTTP = "ok"
+
 var (
 	// Request metrics
 	relaysReceived = observability.RelayerFactory.NewCounterVec(
@@ -458,16 +473,6 @@ var (
 	)
 
 	// Streaming metrics
-	streamingRelaysServed = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "streaming_relays_served_total",
-			Help:      "Total number of streaming relay requests served (SSE/NDJSON)",
-		},
-		[]string{"service_id"},
-	)
-
 	streamingChunksForwarded = observability.RelayerFactory.NewCounter(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -606,16 +611,6 @@ var (
 	)
 
 	// gRPC Relay Service metrics (for proper relay protocol over gRPC)
-	grpcRelaysTotal = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "grpc_relays_total",
-			Help:      "Total number of gRPC relay requests processed",
-		},
-		[]string{"service_id"},
-	)
-
 	grpcRelayErrors = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

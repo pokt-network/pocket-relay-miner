@@ -1326,11 +1326,6 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		Bool("is_streaming", isStreaming).
 		Msg("relay served")
 
-	// Track streaming metrics
-	if isStreaming {
-		streamingRelaysServed.WithLabelValues(serviceID).Inc()
-	}
-
 	// For optimistic validation, validate after serving (in background using pond subpool)
 	if validationMode == ValidationModeOptimistic {
 		// Capture variables for closure (avoid race conditions)

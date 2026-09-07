@@ -455,6 +455,17 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		return status.Errorf(codes.Internal, "failed to send response: %v", err)
 	}
 
+	// SERVED: the client has the response. Counted here and not after the
+	// publish below, for the same reason as every other transport -- a relay
+	// served but not published must land in the drop rate's denominator.
+	//
+	// The other two SendMsg sites in this file deliberately do NOT count:
+	// the one on the forward-error branch is the REJECTED path (HTTP does the
+	// same, relaysRejected + return before its own relaysServed at
+	// proxy.go:1302), and the one in serveSimulatedGRPC must leave this counter
+	// flat -- docs/simulated-relays.md states that as the isolation contract.
+	relaysServed.WithLabelValues(serviceID, BackendTypeGRPC, statusCodeNoHTTP).Inc()
+
 	// Use RelayProcessor for consistent relay processing (mining difficulty, deduplication, publishing)
 	if s.relayProcessor != nil {
 		// Marshal request and response for ProcessRelay
@@ -525,7 +536,6 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	}
 
 	// Update metrics
-	grpcRelaysTotal.WithLabelValues(serviceID).Inc()
 	grpcRelayLatency.WithLabelValues(serviceID).Observe(time.Since(arrivalTime).Seconds())
 
 	logging.WithSessionContext(s.logger.Debug(), sessionCtx).

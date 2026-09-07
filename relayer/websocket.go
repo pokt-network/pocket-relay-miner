@@ -1224,6 +1224,24 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 		return
 	}
 
+	// SERVED, and this is the only honest place to say so. handleBackendMessage
+	// writes the signed response to the gateway and calls this on the next line
+	// (websocket.go:1173), returning early if that write failed -- so reaching
+	// here means the client HAS the response. Counting later, after the publish,
+	// would put a relay that was served and failed to publish outside BOTH sides
+	// of the drop rate the metric exists to feed: relaysDropped would rise while
+	// its own denominator never counted the relay.
+	//
+	// AFTER the simulated guard above and BEFORE everything below it. Both
+	// halves are load-bearing: docs/simulated-relays.md is explicit that a
+	// simulated relay "never touches the counters that measure real traffic",
+	// which HTTP gets structurally (proxy.go:903 diverts to another function)
+	// and gRPC gets by placement -- so WebSocket has to get it here. And it
+	// stays ahead of the difficulty filter and of the nil-publisher return,
+	// because relays_served_total is everything SERVED, not everything mined
+	// and not everything published.
+	relaysServed.WithLabelValues(b.serviceID, BackendTypeWebSocket, statusCodeNoHTTP).Inc()
+
 	if b.publisher == nil {
 		return
 	}
