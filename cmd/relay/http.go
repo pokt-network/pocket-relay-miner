@@ -392,7 +392,7 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body) //nolint:errcheck // the body only enriches an error that is returned either way; on failure it is empty and the status still names the failure
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 

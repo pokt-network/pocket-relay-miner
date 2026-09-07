@@ -183,7 +183,7 @@ func NewLoggerFromConfig(config Config) Logger {
 			// makes dropped logs invisible to alerting.
 			if missed > 0 {
 				LogMessagesDroppedTotal.Add(float64(missed))
-				_, _ = os.Stderr.WriteString("WARN: dropped log messages due to full buffer\n")
+				_, _ = os.Stderr.WriteString("WARN: dropped log messages due to full buffer\n") //nolint:errcheck // last-resort output: the logger cannot be used here (recursion) and the loss is ALREADY counted in LogMessagesDroppedTotal on the line above, so discarding this does not make it silent
 			}
 		})
 	}

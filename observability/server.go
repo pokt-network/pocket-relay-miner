@@ -122,7 +122,7 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 	mux.Handle("/metrics", metricsHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK")) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -139,7 +139,7 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("Ready"))
+		_, _ = w.Write([]byte("Ready")) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 	})
 
 	s.metricsServer = &http.Server{

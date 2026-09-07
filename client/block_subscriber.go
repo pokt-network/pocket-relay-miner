@@ -488,7 +488,7 @@ func (bs *BlockSubscriber) LastBlock(ctx context.Context) client.Block {
 	block := bs.lastBlock.Load()
 	if block == nil {
 		// If no block yet, try to fetch one
-		_ = bs.fetchLatestBlock(ctx)
+		_ = bs.fetchLatestBlock(ctx) //nolint:errcheck // redundant: the two lines below re-read lastBlock and answer a zero block if it is still nil, which is the same outcome this error would have predicted
 		block = bs.lastBlock.Load()
 		if block == nil {
 			// Return a zero block if still nil

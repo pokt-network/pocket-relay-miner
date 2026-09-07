@@ -481,10 +481,17 @@ func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessio
 				store:       store,
 				claimedRoot: claimedRoot,
 			}
-			// Restore count/sum from stats for observability; trie itself knows them.
+			// Restore count/sum from stats, for observability only. The previous
+			// wording here said "the trie itself knows them", which is not true
+			// on this path: GetTreeStats returns these CACHED fields when
+			// claimedRoot != nil and never asks the trie.
 			if statsVal, statsErr := m.redisClient.Get(ctx,
 				m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)).Result(); statsErr == nil {
-				_, _ = fmt.Sscanf(statsVal, "%d:%d", &tree.claimedCount, &tree.claimedSum)
+				// nolint reason: a malformed stats value leaves both fields at
+				// zero, which is what they already are here -- this only ever
+				// fills them in. Nothing decides on them: GetTreeStats has no
+				// production caller: 17 call sites, all in _test.go, plus its own declaration.
+				_, _ = fmt.Sscanf(statsVal, "%d:%d", &tree.claimedCount, &tree.claimedSum) //nolint:errcheck // observability-only; on failure the fields keep their zero value
 			}
 			m.logger.Info().
 				Str(logging.FieldSessionID, sessionID).

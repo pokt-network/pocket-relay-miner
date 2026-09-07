@@ -79,7 +79,7 @@ func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayCli
 		defer func() {
 			// Send close message for graceful shutdown
 			closeMessage := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "")
-			_ = conn.WriteMessage(websocket.CloseMessage, closeMessage)
+			_ = conn.WriteMessage(websocket.CloseMessage, closeMessage) //nolint:errcheck // best-effort courtesy frame on a connection that is going away; the close below does not depend on it
 			_ = conn.Close()
 		}()
 
@@ -89,7 +89,7 @@ func runWebSocketDiagnostic(ctx context.Context, logger logging.Logger, relayCli
 		}
 
 		// Receive relay response
-		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second)) //nolint:errcheck // redundant: the very next line checks the outcome this error would have predicted
 		// The frame type is whatever the relayer echoed back from the backend, so
 		// it carries no information about the response and is deliberately ignored.
 		_, responseData, err := conn.ReadMessage()

@@ -208,7 +208,7 @@ func (m *MultiProviderKeyManager) reloadPeriodically(ctx context.Context) {
 			// Not logged here: Reload already reports a failure at Error with
 			// which sources failed and how many keys it kept. Logging again
 			// would double every line for as long as a source stays broken.
-			_ = m.Reload(ctx)
+			_ = m.Reload(ctx) //nolint:errcheck // Reload logs the failure at Error ("keeping the previous signing keys...") before returning it
 		}
 	}
 }

@@ -211,7 +211,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		if err := obsServer.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start observability server: %w", err)
 		}
-		defer func() { _ = obsServer.Stop() }()
+		defer func() { _ = obsServer.Stop() }() //nolint:errcheck // Stop logs every shutdown failure at Error before returning the last one; this deferred caller has nobody to hand it to
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
 
 		// Start runtime metrics collector (not started automatically when using custom registry)

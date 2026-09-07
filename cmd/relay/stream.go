@@ -110,7 +110,7 @@ func runStreamDiagnostic(ctx context.Context, logger logging.Logger, relayClient
 		// Try to pretty-print JSON
 		var payloadData interface{}
 		if err := json.Unmarshal(combinedPayload, &payloadData); err == nil {
-			prettyJSON, _ := json.MarshalIndent(payloadData, "", "  ")
+			prettyJSON, _ := json.MarshalIndent(payloadData, "", "  ") //nolint:errcheck // Marshal fails only on channels, funcs, complex, NaN/Inf or cycles (encoding/json); none is reachable from this value
 			fmt.Printf("Payload:\n%s\n", string(prettyJSON))
 		} else {
 			fmt.Printf("Payload: %s\n", string(combinedPayload))
@@ -156,7 +156,7 @@ func sendStreamingRelay(ctx context.Context, relayRequestBz []byte) ([][]byte, e
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body) //nolint:errcheck // the body only enriches an error that is returned either way; on failure it is empty and the status still names the failure
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 

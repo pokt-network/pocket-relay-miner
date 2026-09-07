@@ -166,7 +166,7 @@ func (c *wsClient) connect() error {
 func (c *wsClient) close() {
 	if c.conn != nil {
 		closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "client closing")
-		_ = c.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(time.Second))
+		_ = c.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(time.Second)) //nolint:errcheck // best-effort courtesy frame on a connection that is going away; the close below does not depend on it
 		_ = c.conn.Close()
 		c.conn = nil
 	}

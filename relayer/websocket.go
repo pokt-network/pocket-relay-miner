@@ -1585,7 +1585,7 @@ func (b *WebSocketBridge) recordCloseReason(code int, text string, initiator wsC
 func (b *WebSocketBridge) closeWithReason(code int, reason string, initiator wsCloseInitiator) error {
 	b.recordCloseReason(code, reason, initiator)
 	b.cancelFn()
-	_ = b.gatewayConn.SetReadDeadline(time.Now())
+	_ = b.gatewayConn.SetReadDeadline(time.Now()) //nolint:errcheck // expiring the read deadline is a nudge so a blocked ReadMessage returns; if it cannot be set the socket is already unusable and that read fails on its own
 	return nil
 }
 

@@ -1919,7 +1919,7 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 
 	if serviceID == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(readyServiceResponse{
+		_ = json.NewEncoder(w).Encode(readyServiceResponse{ //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 			Error: "service_id path parameter is required",
 		})
 		return
@@ -1928,7 +1928,7 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 	svcCfg, exists := p.config.Services[serviceID]
 	if !exists {
 		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(readyServiceResponse{
+		_ = json.NewEncoder(w).Encode(readyServiceResponse{ //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 			ServiceID: serviceID,
 			Ready:     false,
 			Error:     "unknown service",
@@ -1999,7 +1999,7 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 		status = http.StatusServiceUnavailable
 	}
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 }
 
 // gaugeValue reads the current value of a prometheus Gauge. The prom

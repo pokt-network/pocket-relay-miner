@@ -343,11 +343,11 @@ func wsCaseOversized(logger logging.Logger) error {
 
 	// One byte over the relayer's 15MiB cap.
 	oversized := bytes.Repeat([]byte{0xFF}, 15*1024*1024+1)
-	_ = conn.SetWriteDeadline(time.Now().Add(60 * time.Second))
+	_ = conn.SetWriteDeadline(time.Now().Add(60 * time.Second)) //nolint:errcheck // a deadline that cannot be set is collected by the write below, which is already allowed to fail
 	// The write may fail: the relayer stops reading and closes as soon as the
 	// limit is passed, so a broken pipe mid-write is the SAME verdict. Only the
 	// close code is asserted.
-	_ = conn.WriteMessage(websocket.BinaryMessage, oversized)
+	_ = conn.WriteMessage(websocket.BinaryMessage, oversized) //nolint:errcheck // see above: a broken pipe mid-write is the same verdict, only the close code is asserted
 
 	if err := expectClose(conn, relayer.CloseMessageTooBig, 60*time.Second, "oversized"); err != nil {
 		return err

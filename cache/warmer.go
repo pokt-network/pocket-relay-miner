@@ -258,7 +258,7 @@ func (w *CacheWarmer) warmApp(ctx context.Context, appAddr string) error {
 	}
 
 	// 4. Warm shared params (only once, but safe to call multiple times)
-	_, _ = w.sharedClient.GetParams(ctx)
+	_, _ = w.sharedClient.GetParams(ctx) //nolint:errcheck // warmup only: the value is unused by construction and the callee's only effect is populating its own params cache (query/query.go)
 
 	return nil
 }

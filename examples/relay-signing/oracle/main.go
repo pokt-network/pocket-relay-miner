@@ -225,12 +225,12 @@ func verify() {
 		reject("ring-go deserialized the signature but rejected it: the challenge chain does not close")
 	}
 
-	out, _ := json.Marshal(verifyOut{Valid: true})
+	out, _ := json.Marshal(verifyOut{Valid: true}) //nolint:errcheck // Marshal fails only on channels, funcs, complex, NaN/Inf or cycles (encoding/json); none is reachable from this value
 	fmt.Println(string(out))
 }
 
 func reject(format string, args ...any) {
-	out, _ := json.Marshal(verifyOut{Valid: false, Reason: fmt.Sprintf(format, args...)})
+	out, _ := json.Marshal(verifyOut{Valid: false, Reason: fmt.Sprintf(format, args...)}) //nolint:errcheck // Marshal fails only on channels, funcs, complex, NaN/Inf or cycles (encoding/json); none is reachable from this value
 	fmt.Println(string(out))
 	os.Exit(1)
 }
@@ -265,7 +265,7 @@ func emitSignature() {
 		fatal("build ring: %v", err)
 	}
 
-	gwPrivBz, _ := hex.DecodeString(gwPrivHex)
+	gwPrivBz, _ := hex.DecodeString(gwPrivHex) //nolint:errcheck // redundant: the very next line checks the outcome this error would have predicted
 	priv, err := curve.DecodeToScalar(gwPrivBz)
 	if err != nil {
 		fatal("decode gateway scalar: %v", err)

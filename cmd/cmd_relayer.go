@@ -472,7 +472,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		if err := obsServer.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start observability server: %w", err)
 		}
-		defer func() { _ = obsServer.Stop() }()
+		defer func() { _ = obsServer.Stop() }() //nolint:errcheck // Stop logs every shutdown failure at Error before returning the last one; this deferred caller has nobody to hand it to
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
 
 		// Start runtime metrics collector
@@ -1130,7 +1130,7 @@ func startHealthServer(
 	// /health - liveness probe (always returns OK if server is running)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK")) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 	})
 
 	// /ready - readiness probe (checks if supplier cache has data)
@@ -1140,7 +1140,7 @@ func startHealthServer(
 			return
 		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("READY"))
+		_, _ = w.Write([]byte("READY")) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 	})
 
 	// /ready/{service} - per-service readiness with pool + backend state.
