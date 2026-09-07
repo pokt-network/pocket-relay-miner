@@ -141,6 +141,56 @@ separate statement after capturing the status**: the runner prints
 `<red>FAIL<reset> level 2`, so no fixed-string match spans it (budgetkit paid for
 that one, 2026-08-26).
 
+## A live run needs TWO controls: what it measured, and whether it measured ONE thing
+
+`Running` pods do not say which binary they serve, and a green level 3 attributed
+to the wrong code is the most expensive kind. Two separate questions, and a run
+needs both answered:
+
+- **Content — "which binary is this?"** Ask the container for the path
+  (`command -v`), never hard-code it: a stale path yields "no such file", and a
+  `2>/dev/null` turns that into "the marker is absent", which reads like a
+  legitimate wait. Use a CONTROL string present in every version alongside the
+  freshness marker, so "does not match" and "could not measure" exit differently.
+  Measured 2026-09-07: seventeen pods `Running` served a binary built from a DIRTY
+  TREE — no commit at all — and only content said so.
+- **Time — "was it the same binary all the way through?"** Record the pod names
+  BEFORE the run and compare them after. Without this, a rebuild midway gives a
+  run that measured two binaries and reports one result: the hardest false green
+  to suspect, because everything else looks right. What makes it a control rather
+  than an observation is that the answer is known in advance.
+
+**The freshness marker AGES, and that is a false green of its own.** A marker
+taken from one commit keeps saying FRESH after the next one lands, because
+"fresh" quietly becomes "has THAT commit" instead of "has HEAD". Give the script a
+guard that compares the commit which INTRODUCED the marker against the newest
+commit touching `.go`, and exit with its own status when they differ — "I cannot
+answer" must not look like "no". Find the introducing commit with
+`git log -S '<literal>' | tail -1`; `head -1` returns the commit that REMOVED it,
+which is the wrong end and has cost time before.
+
+**And when the gate cannot attribute, build the attribution yourself.** A run over
+a dirty tree is reported as NOT attributable to any commit — correctly, because
+the gate reasons about the TREE. You can still state which BINARY it measured,
+which the gate does not know. Do not discard the run; report what it measured and
+how you know.
+
+## Reporting a live result: three parts, and the second is what makes the first mean anything
+
+1. **What it exercised** — with the numbers.
+2. **What it did NOT exercise**, explicitly, naming this change's paths that the
+   run never enters, plus every check the gate itself declares skipped.
+3. **What would have broken had we been wrong** — the only question a
+   non-regression run actually answers.
+
+Measured 2026-09-07: a level 3 passed with 384 relays billed and served == billed
+exact across ten services, and **none of the day's four fixes was exercised** —
+they live on panic, shutdown and failed-hostname paths, none of which occurs in a
+healthy run. Without part 2 that green reads as "the day is validated". What it
+validated is that the happy path did not break, which is worth saying plainly:
+one fix had changed the ORDER of a shutdown and another the NAME under which the
+miner registers in a consumer group, and either one wrong does not yield 384/384.
+
 ## The one-line test for whether this ran
 
 Name the gate that did NOT run, in those exact words, before anything else.

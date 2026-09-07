@@ -367,6 +367,70 @@ If any gate fails, fix it before reporting completion. Do NOT report "done" with
 
 **No "pre-existing" excuses.** If a quality gate fails, fix it. Do not dismiss failures as "pre-existing" or "not related to my changes." If something fails now, either your change broke it or it was already broken -- either way, diagnose and fix it.
 
+## Measuring, and when a result is evidence — earned 2026-09-07
+
+Every rule here has its measured case attached, deliberately: a rule with a case
+fires when it is needed, an enunciated one does not. Measured the same day, twice
+in opposite directions — the rule about a var a test overrides fired on its own
+while writing the var, because it carries the `wsFirstFrameWait` case; the rule
+about the test Redis, written as a bare fact, bit its own author twenty minutes
+after he wrote it.
+
+**AN EMPTY RESULT IS NOT EVIDENCE UNTIL A CONTROL SAYS THE TOOL LOOKED.** Ask the
+same tool, at the same moment, something whose answer you already know. Without a
+control, "nothing found" and "asked wrong" are the same signal. Four ways it
+happened in one day, all silent:
+
+- A probe under a directory whose name starts with `_` — the Go toolchain ignores
+  it, so the linter reported nothing and it read as "the linter does not catch
+  this".
+- A `grep` for a phrase in a wrapped document: the line break splits the phrase,
+  the grep is empty, and someone nearly EDITED A CORRECT TEXT to match the broken
+  measurement. That direction is the worst: it introduces a defect through the
+  act of verifying.
+- A count taken with a narrower filter than the question. `max-issues-per-linter`
+  defaults to 50 and `max-same-issues` to 3, so a lint total of exactly 50 is a
+  cap, not a count — the real number was 294. **A total equal to a well-known
+  default is a claim about tooling.** And the fix is not "widen the filter":
+  widening turned counting imports into counting mentions, which is a different
+  question. Ask what your filter counts.
+- **A file with NUL bytes: `grep` prints NOTHING, not even the `0` of no matches.**
+  A retention file had 1448 contiguous NULs from an interrupted write, and every
+  search in it came back silent. `file` said `data`, not text. This one is worse
+  than the others because the question was right and the TOOL chose to go quiet.
+
+**A COUNT IN A COMMIT MESSAGE IS COUNTED IN THE TREE, ALL OF THEM.** Twice in one
+day a message said "four" where there were five, both times a total that was true
+before the last edit: a member was added, the sentence describing it was updated,
+and the old total stayed in front of it. The tell is that **the sentence adding
+the new member is the one still saying the old number**. When corrected on one
+number, verify the others — the second time, that is how the wrapped-grep trap
+above surfaced.
+
+**A GATE WRITES TO A FILE, AND THE FILE CARRIES ITS OWN `EXIT=$?`.** Never a
+`tail` with a fixed count: one ate the NAME of the failing check, which sat in
+the MIDDLE of the output, not at the end. And the harness's own completion notice
+reports the exit code of the LAST command in the pipeline, not the gate's — a
+gate that exited 2 was announced as `exit code 0`. Writing `EXIT=$?` inside the
+log makes the artefact self-sufficient instead of depending on the reader
+remembering to distrust the notice.
+
+**TILT IS THE WATCHER AND THE PROXY, SO IT IS A TURN TO SHARE, NOT A NUISANCE.**
+With Tilt up the live gate can reach the relayer and nobody may edit `.go`
+(a rebuild competes for the machine and killed a gate by OOM); with Tilt down you
+may edit and the live gate fails preflight because the port-forwards are gone —
+and `kubectl port-forward` is not the way out, it is forbidden here for this
+reason. Killing the watcher does not resolve the conflict, it swaps one
+impossibility for the other. Whoever holds the turn says so, and the other writes
+docs, reads code or drafts a commit message meanwhile.
+
+**BETWEEN TWO SESSIONS THE TREE IS THE ARTEFACT AND THE MESSAGE IS THE REPORT.**
+Both sessions once waited on each other: one had announced "I am re-running the
+gate" and never sent the second message, the other had the diff on disk and was
+waiting for permission that did not exist. If the work is in the tree it is ready
+to read. And when finishing something, the message to the peer goes IMMEDIATELY
+after verifying it, before reporting to anyone else.
+
 ## Redis Architecture
 
 **ALL session state is in Redis - no local disk storage.**

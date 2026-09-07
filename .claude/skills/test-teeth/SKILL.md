@@ -540,6 +540,88 @@ be derived from having opened the files, never the other way round.
 so editing a `.sh` with a gate run in flight poisons that run exactly the way
 editing a `.go` does.
 
+## An injection that did not APPLY gives a green that means the opposite
+
+Measured 2026-09-07, twice in one session. A replacement demanded `count == 1`
+and there were TWO identical blocks, so it aborted — and the test ran against the
+INTACT tree and said `ok`. That `ok` does not say "my test misses the defect", it
+says "there was no defect", and read quickly it sends you to rewrite a test that
+was fine, chasing a ghost. The second time Go answered `ok (cached)`: a green from
+another tree.
+
+**Verify the injection APPLIED — by counting in the file — BEFORE reading the
+result, and run with `-count=1`.** And APPLYING IS NOT ENOUGH: `go build` must be
+green before you read anything. A `[build failed]` proves you broke compilation,
+not that the test bites; it happened to both sessions the same day, each shortly
+after warning the other about it. Applied and compiled are two conditions.
+
+## Reading a test tells you what it MEANS to cover; only injection tells you what it DOES
+
+A supervisor asserted, from reading the test and its comment, that
+`TestUniqueConsumerName_IsStableWithinAProcess` was the only thing holding a
+`sync.Once`, and dictated it confidently enough that it was written into a code
+comment. Measured: remove the `Once` and the test still passes, because in the
+test environment `os.Hostname()` WORKS, so the value is deterministic anyway. The
+`Once` only carries weight on the fallback path, where no test went.
+
+It is the family of "the test covers the happy path and the property lives in the
+other one", with the twist that here **the happy path PRODUCES the property**, so
+nothing looks wrong. And note the transport: **an assertion dictated by whoever is
+reviewing gets copied without measuring, because it arrives wrapped in a finding**
+— and the finding was correct. It travelled in both directions that day.
+
+## Narrow the injection: a red in a NEIGHBOURING assertion proves something else
+
+To test whether a count pinned a guard, `s.running = false` was removed. Red — but
+in the `Eventually` on `IsRunning`, which sits EARLIER in the test's path, not in
+the count. Narrowed to `if false` on the guard alone, leaving the bookkeeping
+intact, the red landed where it belonged: `expected: 1, actual: 3`. **Before
+believing a red, read WHICH assertion caught it.** It is the injector-side sibling
+of the accidental witness.
+
+## An injection validates that the test detects the defect; it does not validate the TEST
+
+Three injections passed and none caught that the test itself **copied a
+`sync.Once` by value** while saving and restoring it. `go vet -tags test` caught
+it. And it was not style: a copied `Once` has its own `done` flag, so the
+save-and-restore written to PRESERVE state could run the body twice and break the
+very property the test measured — with the test green.
+
+Injections attack PRODUCTION logic. A test can carry defects no injection to
+production reveals, and the defence is not more injection: it is that the gate
+runs vet and lint OVER TEST CODE. Worth remembering on the day someone says the
+gates see nothing — they see nothing of what they do not look at, and exactly what
+they do.
+
+## A strong claim in a comment is a promise, and a promise with no test is what you keep removing from OTHER people's comments
+
+A new comment said a log line "is never the misleading half of a pair". Injection:
+move the line above the guard it depends on. **Green** — nothing held the promise.
+The weight came from context: that commit existed BECAUSE two log lines lied, so
+its replacement could lie again one line away. Two exits: write the test, or lower
+the prose to describe without promising. **A looser true sentence beats a strong
+one nothing holds.**
+
+## Verifying PARTIALLY and presenting it as verified whole
+
+The same shape three times in one day, on three different axes, all by the
+reviewer:
+
+- **Reachability**: read a `return err` and asserted a regression, without asking
+  whether that return could execute. It could not — the sibling function's only
+  return is `nil`.
+- **Coverage**: read a test and asserted what it held, without injecting.
+- **Exhaustiveness**: read a callee to its FIRST error exit and classified the
+  discard as "the callee already reported it". It had two exits and only one
+  logged.
+
+So: **"the callee already reported it" is verified by reading the callee to its
+LAST error return.** And a corollary that bit the same day: **a reason verified
+against a callee that later changes is unverified again, and nothing warns** — the
+`Stop()` behind one such reason was rewritten by a later commit in the same
+series. It held, but by luck. In an item spanning several commits, re-verify the
+reason when the callee is touched.
+
 ## The one-line test for whether this ran
 
 The report names the defect that was injected, quotes the failure showing it named
