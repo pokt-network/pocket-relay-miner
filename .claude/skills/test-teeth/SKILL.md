@@ -496,6 +496,45 @@ was reproduced with a stubbed transport, number for number. Ask what the next
 line actually relies on, and certify that. The gap is invisible in a happy-path
 test, so the injection has to be the ugly success: the 200 that is not an answer.
 
+**A BROKEN instrument fails loudly; a DISABLED one leaves by the same door as
+success.** The injections that come to mind attack the instrument that cannot
+run -- a malformed config, a missing file, a dead binary -- and those exit
+non-zero, so they are the easy half. The dangerous half is an instrument that is
+perfectly well-formed and simply not looking: it prints the same clean zero that
+the finished work will print, and exits zero doing it. Measured 2026-09-07: a
+reporting target built on `errcheck` with `check-blank: true` was injected with a
+broken config (exit 3) and a missing config (exit 3), both correct. With
+`check-blank: false` -- a VALID config -- it printed `0 issues` and exited 0,
+which is exactly what it will print the day the 304 sites are fixed. The
+acceptance criterion for that work was "the target reports zero", so a disabled
+flag would have closed it.
+
+**The defence is a CONTROL MARKER, and it has to be executable.** Ask the same
+instrument, at the same moment, something whose answer you already know: run the
+real config against a file that DOES contain the defect and confirm it is
+reported. A criterion written as prose does not run -- the closing session will
+be looking at a zero, not at a design document -- so it ships as a script that
+exits non-zero when the control fails and says what to re-check. Without a
+control, "nothing left to find" and "the flag is off" are the same signal.
+
+**A total that is a well-known round number is a claim about your tooling, not a
+measurement.** Same day, same task: a lint run reported "50 issues" twice under
+different configurations, and 50 is `max-issues-per-linter`'s default, with
+`max-same-issues` capping at 3 underneath it. The real count was 294. The tell
+was available before the contradiction: the number was suspiciously round, and
+two different configurations produced the identical total. Set the caps to zero
+before reading any count, and treat an exactly-default total as unmeasured.
+
+**The general shape behind both: an instrument that hands back LESS than there is,
+presented as all there is.** A default issue cap and a glob in a classification do
+the same thing. Measured the same day, by both sessions: `cmd/relay/*` written as
+one row of a triage read -- to its own author -- as though those files had been
+opened, and the row's stated reason turned out false for most of them and
+dangerous for two, which were `ReadString` calls guarding destructive-command
+confirmations. Writing the scope by PROPERTY instead of by list does not protect
+you here, because the property itself came from not looking. The property has to
+be derived from having opened the files, never the other way round.
+
 **And a machine trap that comes with it:** a test may READ a gate script
 (`internal/conventions/metric_coverage_test.go` reads `scripts/gates/live.sh`),
 so editing a `.sh` with a gate run in flight poisons that run exactly the way
