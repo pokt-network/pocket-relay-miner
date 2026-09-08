@@ -254,6 +254,44 @@ and this repo's linters run with documentation rules excluded. So it is not a ca
 to remember, it is a command to run: after any insertion, diff the untouched
 region against HEAD and expect ZERO removed lines.
 
+**AND IT RECURRED ON 2026-09-08, from a session with this paragraph in context.**
+A type was inserted immediately before `func (qc *Clients) Proof()`, so godoc
+showed the new type's documentation opening with "Proof returns the proof module
+query client." and `Proof()` had none. The peer session found it by reading the
+diff; the command above was never run. **A rule that says "run this" and is
+enforced by nobody is read, not obeyed** — the same finding this repository has
+already paid for twice.
+
+It is also MECHANICAL, which is the part nobody had measured. Go's own convention
+is that a doc comment begins with the name of the thing it documents, so an
+orphaned comment is detectable by AST: parse every exported declaration that has
+a doc, compare the first word to the declared name. Measured that day across this
+tree: **17 violations out of 1077 documented exported declarations** — small
+enough to fix rather than freeze — and two of them are exactly this defect still
+live (`miner/metrics.go:1199` documents `RecordShutdownDrainedRelay` above
+`RecordRelayDroppedNoKey`; `miner/supplier_worker.go:854` documents
+`GetSupplierManager` above `GetSupplierCache`). The probe is kept at
+`scripts/localonly/probes/doccheck.go.txt`. Until it is wired into
+`internal/conventions`, this remains a paragraph, and the paragraph has now
+failed three times.
+
+**REPLACING A RUNTIME CHECK WITH A TYPE: enumerate what the check was ALSO
+doing.** A static type is stronger than a runtime assertion at the one question
+it answers, and it silently answers FEWER questions. Measured 2026-09-08: a
+`x.(interface{ Subscribe(...) })` assertion was replaced by declaring the field's
+type to require `Subscribe`, which is a real improvement — a drift now fails the
+build instead of disabling a subsystem at runtime. But a type-assert on a NIL
+interface returns `ok=false`, so that one `if !ok` had been covering two cases,
+and a nil interface satisfies any interface field. The replacement shipped with
+build, vet and targeted tests green, and died under the full gate with a
+`SIGSEGV` that took the whole package binary down reporting ZERO failed tests.
+
+The check is cheap and it is a question, not a habit: **write down every input
+the old check rejected, then confirm the type rejects each one.** For an
+interface the list always includes nil, and nil is the one a compiler cannot help
+with. The same shape applies to a `switch` replaced by a map, a validated string
+replaced by an enum, a runtime range check replaced by an unsigned type.
+
 **After MOVING code, `diff` against `HEAD` the part you did not mean to touch.**
 Inserting a function or a branch lands it next to somebody else's comment, and
 the failure is invisible to every gate because it is syntactically fine: measured

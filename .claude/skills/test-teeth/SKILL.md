@@ -700,3 +700,36 @@ is not a result here — the result is that it FAILED for the right reason first
 A guard asserting a Prometheus counter carries no `application` label: the
 injection is to add `"application"` back to the metric's label set. The test
 must go red. Reverting the label must return it to green with an empty diff.
+
+## An assertion cannot see a panic on another goroutine
+
+`require.NotPanics`, and every `recover()`, only sees the goroutine it runs on.
+If the code under test SPAWNS the goroutine that dies, the assertion is
+decoration: it passes whether or not the defect is present, and the only reason
+the suite goes red is that the process itself is killed.
+
+Measured 2026-09-08. A guard was added so a manager wired without a block client
+would decline to build its reconciler instead of dereferencing nil, and the test
+written for it opened with:
+
+```go
+require.NotPanics(t, m.ensureSharedTrackers,
+    "a manager with no block client must decline to build the reconciler, not die building it")
+```
+
+The dereference happens inside a goroutine that `ensureSharedTrackers` spawns.
+Removing the guard DID turn the package red — with `SIGSEGV`, zero tests marked
+failed, and the binary gone. The injection therefore looked like a pass for the
+assertion, and it was not: the assertion never ran.
+
+Two things follow, and the second is the one that generalises:
+
+- **Assert on STATE, not on panicking**, whenever the failure lives on a
+  goroutine you did not start. Here: the reconciler is nil, the store is nil, the
+  independent tracker is not. Those are readable from the test's own goroutine.
+- **A red is not proof the assertion works.** Read WHICH line the red came from.
+  A package that dies mid-run and a package with one failed assertion both print
+  FAIL, and only one of them means your test detected anything. This is the same
+  family as "a red you expected can still be true of something else", one level
+  meaner, because here nothing failed at all.
+
