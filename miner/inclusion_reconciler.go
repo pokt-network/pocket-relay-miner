@@ -107,21 +107,6 @@ func unmarshalRebroadcastEntry(b []byte) (rebroadcastEntry, error) {
 	return e, err
 }
 
-// InclusionQueryClient is the per-supplier inclusion signal the reconciler
-// needs. *query.proofQueryClient satisfies it. Kept narrow for unit testing.
-//
-// Both signals read x/proof module state via the AllClaims supplier secondary
-// index, NOT proofs: a submitted proof is validated and removed in the
-// EndBlocker of its submission block, so proof inclusion is read from the
-// claim's ProofValidationStatus (see query.GetSupplierProvenSessions), which is
-// durable until settlement.
-type InclusionQueryClient interface {
-	// GetSupplierClaimSessions: sessions with a claim on-chain (claim phase).
-	GetSupplierClaimSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
-	// GetSupplierProvenSessions: sessions whose claim is proof-VALIDATED (proof phase).
-	GetSupplierProvenSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
-}
-
 // MessageResubmitter re-broadcasts a previously-built claim/proof message for a
 // supplier with the given window-close timeout, returning the new tx hash. The
 // concrete implementation (wiring layer) unmarshals the bytes into the right

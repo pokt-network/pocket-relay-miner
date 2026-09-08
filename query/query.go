@@ -167,7 +167,33 @@ func (qc *Clients) Supplier() SupplierQueryClient {
 }
 
 // Proof returns the proof module query client.
-func (qc *Clients) Proof() client.ProofQueryClient {
+// ProofQueryClient is the proof query client THIS project requires: poktroll's,
+// plus the two supplier-indexed inclusion reads the inclusion reconciler runs
+// once per block. It is declared here because poktroll's interface belongs to
+// poktroll and cannot grow methods from our side.
+//
+// It exists as a TYPE rather than a runtime check on purpose. The reconciler
+// used to activate by type-asserting this client to a miner-layer interface,
+// guarded by a hand-copied mirror of that interface in this package -- and the
+// mirror could not do what its comment promised: it pinned the signatures of
+// *proofQueryClient, so it caught a signature drift, but a method ADDED on the
+// miner side left the mirror compiling and green while the runtime assert
+// failed and the miner ran fire-once with one Error line as its only notice.
+// Naming the requirement in the field's type moves that failure to the build,
+// at the single place the client is wired (miner/supplier_worker.go).
+// Both inclusion signals read x/proof module state via the AllClaims supplier
+// secondary index, NOT proofs: a submitted proof is validated and REMOVED in the
+// EndBlocker of its submission block, so proof inclusion has to be read from the
+// claim's ProofValidationStatus, which is durable until settlement.
+type ProofQueryClient interface {
+	client.ProofQueryClient
+	// GetSupplierClaimSessions: sessions with a claim on-chain (claim phase).
+	GetSupplierClaimSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
+	// GetSupplierProvenSessions: sessions whose claim is proof-VALIDATED (proof phase).
+	GetSupplierProvenSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
+}
+
+func (qc *Clients) Proof() ProofQueryClient {
 	return qc.proofClient
 }
 
@@ -1129,19 +1155,6 @@ func (c *proofQueryClient) GetClaim(ctx context.Context, supplierOperatorAddress
 	}
 	return claim, nil
 }
-
-// supplierInclusionQuerier mirrors the miner-layer InclusionQueryClient
-// interface that the inclusion reconciler type-asserts ProofQueryClient to. The
-// reconciler activates via a runtime assertion (interfaces can't cross the
-// miner→query import boundary the other way); this compile-time check ensures
-// *proofQueryClient keeps the exact method set + signatures, so a signature
-// drift fails the build instead of silently disabling the reconciler at runtime.
-type supplierInclusionQuerier interface {
-	GetSupplierClaimSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
-	GetSupplierProvenSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
-}
-
-var _ supplierInclusionQuerier = (*proofQueryClient)(nil)
 
 // inclusionPageLimit bounds each AllProofs/AllClaims page. A supplier serves at
 // most a few dozen sessions per window (NumSuppliersPerSession-bounded across a

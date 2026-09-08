@@ -194,11 +194,16 @@ type SupplierManagerConfig struct {
 
 	// ProofQueryClient is used by the pre-proof GetClaim guard to verify each
 	// session's claim exists on-chain before proof submission, and by the
-	// the inclusion reconciler to record the real on-chain outcome after each claim
+	// inclusion reconciler to record the real on-chain outcome after each claim
 	// broadcast. If nil, the guard is skipped (legacy behavior, unsafe in
 	// production — sessions whose claim tx was evicted from mempool will
 	// trigger "claim not found" FailedPrecondition storms).
-	ProofQueryClient client.ProofQueryClient
+	//
+	// The type is query.ProofQueryClient and not poktroll's: the reconciler
+	// needs the two supplier-indexed inclusion reads as well, and requiring them
+	// HERE is what makes a client that lacks them a build failure at the wiring
+	// site instead of a reconciler that silently does not start.
+	ProofQueryClient query.ProofQueryClient
 
 	// InclusionReconcilerConfig controls the block-driven claim+proof inclusion
 	// reconciler + rebroadcaster. See miner.InclusionReconcilerConfig for fields.
@@ -2527,15 +2532,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			m.logger.Warn().Msg("no proof query client; inclusion reconciler disabled (fire-once claim/proof, no rebroadcast)")
 			return
 		}
-		inclusionQuery, ok := m.config.ProofQueryClient.(InclusionQueryClient)
-		if !ok {
-			// Misconfiguration, not a benign default: without this the silent
-			// CLAIM_MISSING/PROOF_MISSING forfeits the reconciler exists to fix
-			// go unobserved and unrecovered. Error, not Warn.
-			m.logger.Error().
-				Msg("proof query client does not expose AllProofs/AllClaims by supplier; inclusion reconciler DISABLED — claims/proofs are fire-once with no verification or rebroadcast")
-			return
-		}
+		inclusionQuery := m.config.ProofQueryClient
 		m.rebroadcastStore = NewRebroadcastStore(m.config.RedisClient, 0) // 0 → default TTL
 
 		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, inclusionHeight int64) error {
