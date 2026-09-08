@@ -179,8 +179,11 @@ type SupplierManagerConfig struct {
 	// This is a shared client for all suppliers
 	TxClient *tx.TxClient
 
-	// BlockClient for monitoring block heights (claim/proof timing)
-	BlockClient client.BlockClient
+	// BlockClient for monitoring block heights (claim/proof timing) and for the
+	// per-block stream the inclusion reconciler runs on. The type demands
+	// Subscribe so a client that cannot deliver blocks fails the build at the
+	// wiring site rather than leaving a constructed reconciler with no trigger.
+	BlockClient localclient.SubscribingBlockClient
 
 	// SharedClient for querying shared parameters (claim/proof windows)
 	SharedClient client.SharedQueryClient
@@ -2739,16 +2742,6 @@ func (m *SupplierManager) startConnPoolResizeLoop() {
 // every replica; the reconciler's per-supplier ownership filter ensures each
 // replica only acts on its own suppliers.
 func (m *SupplierManager) startReconcilerBlockLoop() {
-	subscriber, ok := m.config.BlockClient.(interface {
-		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
-	})
-	if !ok {
-		// Without a per-block trigger the reconciler never verifies/rebroadcasts —
-		// the forfeits it exists to fix go unrecovered. Error, not Warn.
-		m.logger.Error().Msg("block client does not support Subscribe(); inclusion reconciler will NOT run (no per-block trigger)")
-		return
-	}
-
 	// Derive from the manager lifecycle ctx so the loop also stops if the parent
 	// is canceled (not only via Close); fall back to Background if unset.
 	m.mu.RLock()
@@ -2771,7 +2764,7 @@ func (m *SupplierManager) startReconcilerBlockLoop() {
 		// checks pending claims/proofs against the current height), so coalescing
 		// redundant ticks never skips work, and the single processor matches
 		// OnBlock's own single-flight guard.
-		blockCh := subscriber.Subscribe(loopCtx, blockEventSubscriberBuffer)
+		blockCh := m.config.BlockClient.Subscribe(loopCtx, blockEventSubscriberBuffer)
 		runCoalescingBlockLoop(loopCtx, blockCh, m.inclusionReconciler.OnBlock)
 		// A return with the loop context still live means the block channel closed
 		// under us: the reconciler loses its per-block trigger, so the claim/proof

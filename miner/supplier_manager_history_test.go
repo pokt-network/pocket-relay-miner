@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
+	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -63,6 +64,11 @@ func (b *fakeBlockClient) CommittedBlocksSequence(context.Context) client.BlockR
 func (b *fakeBlockClient) GetChainVersion() *version.Version { return nil }
 
 func (b *fakeBlockClient) Close() {}
+
+// Subscribe delivers no blocks; see mockBlockClient.Subscribe.
+func (b *fakeBlockClient) Subscribe(context.Context, int) <-chan *localclient.SimpleBlock {
+	return make(chan *localclient.SimpleBlock)
+}
 
 type fakeBlock struct{ h int64 }
 

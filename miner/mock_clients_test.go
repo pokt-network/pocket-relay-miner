@@ -5,15 +5,16 @@ import (
 	"sync"
 
 	"github.com/hashicorp/go-version"
+	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
 // Compile-time interface assertions so the unused linter counts these types as used.
 var (
-	_ client.SharedQueryClient = (*mockSharedQueryClient)(nil)
-	_ client.BlockClient       = (*mockBlockClient)(nil)
-	_ client.Block             = (*mockBlock)(nil)
+	_ client.SharedQueryClient           = (*mockSharedQueryClient)(nil)
+	_ localclient.SubscribingBlockClient = (*mockBlockClient)(nil)
+	_ client.Block                       = (*mockBlock)(nil)
 )
 
 // mockSharedQueryClient implements client.SharedQueryClient for testing.
@@ -92,6 +93,14 @@ func (m *mockBlockClient) CommittedBlocksSequence(ctx context.Context) client.Bl
 }
 
 func (m *mockBlockClient) Close() {}
+
+// Subscribe delivers no blocks: these tests do not drive the block-driven loops.
+// The channel is left open rather than closed because a closed one makes the
+// coalescing loop report its trigger as lost, which would be a lie here; the
+// loop's own ctx.Done() case is what ends it.
+func (m *mockBlockClient) Subscribe(context.Context, int) <-chan *localclient.SimpleBlock {
+	return make(chan *localclient.SimpleBlock)
+}
 
 func (m *mockBlockClient) GetChainVersion() *version.Version {
 	v, _ := version.NewVersion("0.1.0")

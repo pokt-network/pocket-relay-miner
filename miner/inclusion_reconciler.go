@@ -302,12 +302,17 @@ func NewInclusionReconciler(
 // new block is skipped — the next block catches up. Driven by the miner's block
 // event stream.
 func (r *InclusionReconciler) OnBlock(height int64) {
-	// Nothing reaches this nil check today, in either direction: production binds
-	// the method value after the reconciler is assigned, and every test receiver
-	// is constructed. It stays only until the wiring settles whether any path can
-	// leave the miner alive with a nil reconciler -- if none can, it goes. The
-	// guards that actually work are r.closed under the mutex and the
-	// single-flight below.
+	// Settled by the wiring change, and the answer is narrower than the question
+	// it was left open for. ONE path does leave m.inclusionReconciler nil -- a
+	// manager built without a ProofQueryClient -- but that same path returns
+	// before the block loop is ever started, so OnBlock is never CALLED on a nil
+	// receiver; production binds the method value only after the assignment, and
+	// every test receiver is constructed. So nothing reaches this, and it is not
+	// deleted for one reason that is about blast radius rather than coverage: the
+	// goroutine driving this loop is a bare `go func()` with no panic recovery,
+	// so a future caller that did reach it would take the process down instead of
+	// losing a reconcile pass. The guards that actually work are r.closed under
+	// the mutex and the single-flight below.
 	if r == nil {
 		return
 	}

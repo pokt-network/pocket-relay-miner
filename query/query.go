@@ -166,7 +166,6 @@ func (qc *Clients) Supplier() SupplierQueryClient {
 	return qc.supplierClient
 }
 
-// Proof returns the proof module query client.
 // ProofQueryClient is the proof query client THIS project requires: poktroll's,
 // plus the two supplier-indexed inclusion reads the inclusion reconciler runs
 // once per block. It is declared here because poktroll's interface belongs to
@@ -181,6 +180,7 @@ func (qc *Clients) Supplier() SupplierQueryClient {
 // failed and the miner ran fire-once with one Error line as its only notice.
 // Naming the requirement in the field's type moves that failure to the build,
 // at the single place the client is wired (miner/supplier_worker.go).
+//
 // Both inclusion signals read x/proof module state via the AllClaims supplier
 // secondary index, NOT proofs: a submitted proof is validated and REMOVED in the
 // EndBlocker of its submission block, so proof inclusion has to be read from the
@@ -193,6 +193,7 @@ type ProofQueryClient interface {
 	GetSupplierProvenSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
 }
 
+// Proof returns the proof module query client.
 func (qc *Clients) Proof() ProofQueryClient {
 	return qc.proofClient
 }
