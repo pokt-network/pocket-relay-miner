@@ -185,19 +185,24 @@ func TestProbeTickKeepsProbingWhileIdle(t *testing.T) {
 	tc := newProbeClient(t, srv.address, 5*time.Millisecond)
 
 	require.NoError(t, tc.VerifyConn(context.Background()))
-	<-seen // the startup verification's own call
+	<-seen // at least one call has reached the server
 	afterStartup := srv.authServer.ParamsCalls()
 
-	// Two more, without this test issuing a single RPC of its own.
-	for range 2 {
-		select {
-		case <-seen:
-		case <-time.After(5 * time.Second):
-			t.Fatal("no probe reached the server while idle: the tick is not running")
-		}
-	}
-
-	require.Greater(t, srv.authServer.ParamsCalls(), afterStartup,
+	// The wait is on the COUNTER, never on more notifications. A queued
+	// notification can be OLDER than the snapshot: the tick fires every 5ms, so
+	// a call landing between the channel read and the counter read is already
+	// inside afterStartup while its notification still waits in the buffer.
+	// Draining two of those then proved nothing and compared 4 against 4.
+	//
+	// Measured rather than argued, because the flake is rare enough to look
+	// absent: 0 failures in 25 plain runs here, yet widening that window with a
+	// 30ms sleep between the two reads turned the OLD assertion red 15 times
+	// out of 15, and leaves this one green. Growth past the snapshot is still
+	// what is asserted -- "at least one call" would pass with the tick deleted,
+	// which is the shape three earlier injections in this branch survived.
+	require.Eventually(t, func() bool {
+		return srv.authServer.ParamsCalls() > afterStartup
+	}, 5*time.Second, 5*time.Millisecond,
 		"probes did not grow past what startup verification left: the tick is not probing")
 }
 
