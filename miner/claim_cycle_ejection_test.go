@@ -4,10 +4,15 @@ package miner
 
 import (
 	"context"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	"github.com/redis/go-redis/v9"
+
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
@@ -352,6 +357,289 @@ func TestOnSessionsNeedClaim_AnEjectedSessionKeepsItsVerdictWhenTheWindowCloses(
 			"the ejected session %q was already settled claim_tx_error; the window-closed sweep "+
 				"must not re-judge it, got %q",
 			ejectedID, got,
+		)
+	}
+}
+
+// cmdOrder records, in order, every Redis command a client issues. It exists
+// because the property under test is an ORDERING between two writes that both
+// succeed: nothing in the resulting state distinguishes the two orders, so the
+// only place the difference is visible is the wire.
+//
+// Both hooks are needed and neither is redundant: RebroadcastStore.Put issues
+// its HSet inside a TxPipeline (MULTI/EXEC), which reaches ProcessPipelineHook
+// and never ProcessHook, while UpdateState runs a Lua script through
+// ProcessHook. A recorder with only one of the two would see one of the writes
+// and silently rank it against nothing.
+type cmdOrder struct {
+	mu   sync.Mutex
+	seen []string
+}
+
+// argString keeps the command name and its STRING arguments only. The numeric
+// key count of EVALSHA and the marshalled payload of HSET are both dropped --
+// the payload because it is binary and would swamp the record, the numbers
+// because nothing here matches on them.
+func argString(cmd redis.Cmder) string {
+	var b strings.Builder
+	b.WriteString(cmd.Name())
+	for _, a := range cmd.Args() {
+		if s, ok := a.(string); ok {
+			b.WriteString(" ")
+			b.WriteString(s)
+		}
+	}
+	return b.String()
+}
+
+func (r *cmdOrder) record(cmds ...redis.Cmder) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for _, cmd := range cmds {
+		r.seen = append(r.seen, argString(cmd))
+	}
+}
+
+func (r *cmdOrder) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (r *cmdOrder) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		err := next(ctx, cmd)
+		r.record(cmd)
+		return err
+	}
+}
+
+func (r *cmdOrder) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		err := next(ctx, cmds)
+		r.record(cmds...)
+		return err
+	}
+}
+
+// indexOf returns the position of the first recorded command containing every
+// one of want, or -1.
+func (r *cmdOrder) indexOf(want ...string) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i, line := range r.seen {
+		all := true
+		for _, w := range want {
+			if !strings.Contains(line, w) {
+				all = false
+				break
+			}
+		}
+		if all {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestOnSessionsNeedClaim_TheEjectedSessionGetsItsWayBackBeforeItsVerdict pins
+// the ORDER of the two writes settleEjectedClaim makes, which is the only thing
+// standing between a crash mid-settlement and a claim that no longer exists for
+// anybody.
+//
+// The two orders are indistinguishable once both writes land, so this asserts on
+// the wire rather than on the state. What it protects: `claim_tx_error` is
+// terminal, loadExistingSessions never loads a terminal session back into
+// activeSessions, and the reconciler only ever looks at PERSISTED entries -- so
+// a process that dies holding the terminal verdict and no entry has put the
+// claim beyond the reach of both recovery paths, and this message never
+// travelled, so there is nothing on-chain either.
+//
+// Injection: move the persist block back below the OnClaimTxError block in
+// settleEjectedClaim. Red, naming which write came first.
+func TestOnSessionsNeedClaim_TheEjectedSessionGetsItsWayBackBeforeItsVerdict(t *testing.T) {
+	spy := &batchSpy{errs: []error{namedRejection(1)}}
+	lc, sessionStore, rebroadcast, _, snapshots := ejectionFixture(t, spy, "sess-aaa", "sess-bbb", "sess-ccc")
+
+	redisStore, ok := sessionStore.(*RedisSessionStore)
+	if !ok {
+		t.Fatalf("the fixture must hand back a Redis-backed store to compute its keys, got %T", sessionStore)
+	}
+
+	// Installed AFTER seeding, so the record holds the cycle's writes only.
+	rec := &cmdOrder{}
+	redisStore.redisClient.AddHook(rec)
+
+	if _, err := lc.OnSessionsNeedClaim(context.Background(), snapshots); err != nil {
+		t.Fatalf("the surviving batch was accepted, so the cycle must not error: %v", err)
+	}
+	if len(spy.calls) == 0 {
+		t.Fatalf("nothing was sent")
+	}
+	ejectedID := spy.calls[0][1]
+
+	groupKey := rebroadcast.groupKey(RebroadcastPhaseClaim, "pokt1eject", 100)
+	entryAt := rec.indexOf("hset", groupKey, ejectedID)
+	verdictAt := rec.indexOf("evalsha", redisStore.sessionKey(ejectedID))
+	if verdictAt < 0 {
+		// EVAL is the fallback go-redis takes the first time a script has not
+		// been cached by the server; asserting only on EVALSHA would make this
+		// test's meaning depend on which test ran first.
+		verdictAt = rec.indexOf("eval ", redisStore.sessionKey(ejectedID))
+	}
+
+	if entryAt < 0 {
+		t.Fatalf("the ejected session %q never got a rebroadcast entry; recorded: %v", ejectedID, rec.seen)
+	}
+	if verdictAt < 0 {
+		t.Fatalf("the ejected session %q never got its terminal verdict; recorded: %v", ejectedID, rec.seen)
+	}
+	if entryAt > verdictAt {
+		t.Errorf(
+			"the ejected session %q was marked terminal (position %d) BEFORE its rebroadcast entry landed (position %d): "+
+				"a crash in between leaves the claim unreachable by the lifecycle and by the reconciler",
+			ejectedID, verdictAt, entryAt,
+		)
+	}
+}
+
+// TestOnSessionsNeedClaim_AnEjectedClaimWithNoWayBackSaysSo covers the half the
+// ordering cannot: a rebroadcast store that is reachable and REFUSES the write.
+// No ordering helps there -- the entry does not exist whichever write went
+// first -- so the requirement is that the verdict stop claiming a retry that
+// will never come.
+//
+// The store is given its OWN client so the failure lands on the rebroadcast
+// write and nowhere else; failing the shared client would take the session
+// state write down with it and test a different, wider outage.
+//
+// Injection: call RecordClaimTxError unconditionally in settleEjectedClaim.
+// Red, because the unrecoverable series never moves.
+func TestOnSessionsNeedClaim_AnEjectedClaimWithNoWayBackSaysSo(t *testing.T) {
+	spy := &batchSpy{errs: []error{namedRejection(1)}}
+	lc, _, _, _, snapshots := ejectionFixture(t, spy, "sess-aaa", "sess-bbb", "sess-ccc")
+
+	deadClient, _ := newTestRedis(t)
+	testredis.NewFailSwitch(deadClient).Fail("rebroadcast store is unreachable")
+	lc.rebroadcastStore = NewRebroadcastStore(deadClient, time.Hour)
+
+	// Which session is ejected is only known from what travelled, so both
+	// series are sampled for every session and read back afterwards.
+	beforeLost := map[string]float64{}
+	beforePending := map[string]float64{}
+	for _, snap := range snapshots {
+		beforeLost[snap.SessionID] = testutil.ToFloat64(
+			sessionsFailedTotal.WithLabelValues(snap.SupplierOperatorAddress, snap.ServiceID, "claim_ejected_unrecoverable"),
+		)
+		beforePending[snap.SessionID] = testutil.ToFloat64(
+			sessionsFailedTotal.WithLabelValues(snap.SupplierOperatorAddress, snap.ServiceID, "claim_tx_error"),
+		)
+	}
+
+	if _, err := lc.OnSessionsNeedClaim(context.Background(), snapshots); err != nil {
+		t.Fatalf("the surviving batch was accepted, so the cycle must not error: %v", err)
+	}
+	if len(spy.calls) == 0 {
+		t.Fatalf("nothing was sent")
+	}
+	ejected := snapshots[0]
+	ejectedID := spy.calls[0][1]
+	for _, snap := range snapshots {
+		if snap.SessionID == ejectedID {
+			ejected = snap
+		}
+	}
+
+	lost := testutil.ToFloat64(
+		sessionsFailedTotal.WithLabelValues(ejected.SupplierOperatorAddress, ejected.ServiceID, "claim_ejected_unrecoverable"),
+	) - beforeLost[ejectedID]
+	if lost != 1 {
+		t.Errorf(
+			"the ejected session %q got no rebroadcast entry, so its loss is FINAL and must be counted as such: "+
+				"claim_ejected_unrecoverable moved by %v, want 1",
+			ejectedID, lost,
+		)
+	}
+
+	// The teeth of the distinction: counting it under the ordinary reason is
+	// what makes a permanent loss look like one the reconciler still owes.
+	pending := testutil.ToFloat64(
+		sessionsFailedTotal.WithLabelValues(ejected.SupplierOperatorAddress, ejected.ServiceID, "claim_tx_error"),
+	) - beforePending[ejectedID]
+	if pending != 0 {
+		t.Errorf(
+			"the ejected session %q must NOT be counted as a retryable claim_tx_error when nothing can retry it, moved by %v",
+			ejectedID, pending,
+		)
+	}
+}
+
+// TestOnSessionsNeedClaim_AnEjectionWithTheReconcilerOffIsAnOrdinaryLoss pins the
+// OTHER half of the verdict condition, which the two tests above leave inert: a
+// nil rebroadcast store means there is no reconciler configured at all, and that
+// is NOT the same event as a store that was asked and refused.
+//
+// Both end with no entry and no retry, which is exactly why the distinction has
+// to be asserted rather than argued: an operator who turned the reconciler off
+// already knows nothing will resend, so stamping every ejection as a final loss
+// would bury the case that IS a surprise -- a store that was there and failed --
+// under a stream of losses they configured on purpose.
+//
+// Injection: drop `|| lc.rebroadcastStore == nil` from the condition in
+// settleEjectedClaim. Red, because a configured absence starts being reported as
+// an unrecoverable failure.
+func TestOnSessionsNeedClaim_AnEjectionWithTheReconcilerOffIsAnOrdinaryLoss(t *testing.T) {
+	spy := &batchSpy{errs: []error{namedRejection(1)}}
+	lc, _, _, _, snapshots := ejectionFixture(t, spy, "sess-aaa", "sess-bbb", "sess-ccc")
+
+	// The reconciler is not wired at all -- the shape an operator gets by
+	// disabling it, not a store that failed.
+	lc.rebroadcastStore = nil
+
+	beforeFinal := map[string]float64{}
+	beforeOrdinary := map[string]float64{}
+	for _, snap := range snapshots {
+		beforeFinal[snap.SessionID] = testutil.ToFloat64(
+			sessionsFailedTotal.WithLabelValues(snap.SupplierOperatorAddress, snap.ServiceID, "claim_ejected_unrecoverable"),
+		)
+		beforeOrdinary[snap.SessionID] = testutil.ToFloat64(
+			sessionsFailedTotal.WithLabelValues(snap.SupplierOperatorAddress, snap.ServiceID, "claim_tx_error"),
+		)
+	}
+
+	if _, err := lc.OnSessionsNeedClaim(context.Background(), snapshots); err != nil {
+		t.Fatalf("the surviving batch was accepted, so the cycle must not error: %v", err)
+	}
+	if len(spy.calls) == 0 {
+		t.Fatalf("nothing was sent")
+	}
+	ejectedID := spy.calls[0][1]
+	ejected := snapshots[0]
+	for _, snap := range snapshots {
+		if snap.SessionID == ejectedID {
+			ejected = snap
+		}
+	}
+
+	// Asserted FIRST: without it the test could pass because the ejection never
+	// happened at all, which is the way this assertion would rot.
+	ordinary := testutil.ToFloat64(
+		sessionsFailedTotal.WithLabelValues(ejected.SupplierOperatorAddress, ejected.ServiceID, "claim_tx_error"),
+	) - beforeOrdinary[ejectedID]
+	// Errorf and not Fatalf: when this one fails the NEXT assertion is what says
+	// where the count went instead, and stopping here would leave the reader
+	// hunting for a missing increment rather than reading the misplaced one.
+	if ordinary != 1 {
+		t.Errorf(
+			"the ejected session %q must still be counted lost exactly once under the ordinary reason, moved by %v",
+			ejectedID, ordinary,
+		)
+	}
+
+	final := testutil.ToFloat64(
+		sessionsFailedTotal.WithLabelValues(ejected.SupplierOperatorAddress, ejected.ServiceID, "claim_ejected_unrecoverable"),
+	) - beforeFinal[ejectedID]
+	if final != 0 {
+		t.Errorf(
+			"a reconciler the operator disabled is a configured absence, not a failure to report: "+
+				"claim_ejected_unrecoverable moved by %v for %q, want 0",
+			final, ejectedID,
 		)
 	}
 }

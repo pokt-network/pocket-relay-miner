@@ -266,7 +266,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "sessions_failed_total",
-			Help:      "Total sessions failed by specific reason (claim_window_closed, claim_tx_error, proof_window_closed, proof_tx_error)",
+			Help:      "Total sessions failed by specific reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, proof_window_closed, proof_tx_error)",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -1312,6 +1312,19 @@ func recordSessionFailure(supplier, serviceID, reason string, relays, computeUni
 // RecordClaimWindowClosed records a claim window timeout failure.
 func RecordClaimWindowClosed(supplier, serviceID string, relays, computeUnits int64) {
 	recordSessionFailure(supplier, serviceID, "claim_window_closed", relays, computeUnits)
+}
+
+// RecordClaimEjectedUnrecoverable records a claim the chain named inside a batch
+// whose rebroadcast entry did NOT land, so nothing will ever re-send it.
+//
+// It is deliberately a separate reason from claim_tx_error rather than a second
+// counter. Both are the same event to the revenue totals -- the relays and
+// compute units are lost either way -- but claim_tx_error carries an implicit
+// promise that the reconciler will retry, and here that promise is false. An
+// operator reading sessions_failed_total has to be able to tell a loss that is
+// still pending from one that is already final.
+func RecordClaimEjectedUnrecoverable(supplier, serviceID string, relays, computeUnits int64) {
+	recordSessionFailure(supplier, serviceID, "claim_ejected_unrecoverable", relays, computeUnits)
 }
 
 // RecordClaimTxError records a claim transaction error failure.

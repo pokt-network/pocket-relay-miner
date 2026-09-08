@@ -298,26 +298,48 @@ func (lc *LifecycleCallback) persistRebroadcastEntries(
 				Msg("failed to marshal message for rebroadcast persistence")
 			continue
 		}
-		entryBytes, eErr := marshalRebroadcastEntry(rebroadcastEntry{
-			MsgBytes:     msgBytes,
-			SubmitHeight: submitHeight,
-			TxHash:       txHash,
-			OrigTxHash:   txHash,
-			ServiceID:    snapshot.ServiceID,
-		})
-		if eErr != nil {
-			lc.logger.Warn().Err(eErr).
-				Str(logging.FieldSessionID, snapshot.SessionID).
-				Msg("failed to encode rebroadcast entry")
-			continue
-		}
-		if pErr := lc.rebroadcastStore.Put(ctx, phase, snapshot.SupplierOperatorAddress, snapshot.SessionEndHeight, snapshot.SessionID, entryBytes); pErr != nil {
+		if pErr := lc.persistRebroadcastEntry(ctx, phase, snapshot, submitHeight, txHash, msgBytes); pErr != nil {
 			lc.logger.Warn().Err(pErr).
 				Str(logging.FieldSessionID, snapshot.SessionID).
 				Str("phase", string(phase)).
 				Msg("failed to persist rebroadcast entry")
 		}
 	}
+}
+
+// persistRebroadcastEntry stores ONE session's message and REPORTS whether it
+// landed. It is the single-session half of persistRebroadcastEntries, split out
+// rather than inlined because exactly one caller needs the answer: on the
+// ejection path the message being stored never travelled, so a failure here is
+// not "this session loses its retry", it is "this session loses its claim".
+// Every other caller stores a message that was already broadcast, and for those
+// a failure really does degrade to the pre-reconciler fire-once behaviour.
+func (lc *LifecycleCallback) persistRebroadcastEntry(
+	ctx context.Context,
+	phase RebroadcastPhase,
+	snapshot *SessionSnapshot,
+	submitHeight int64,
+	txHash string,
+	msgBytes []byte,
+) error {
+	entryBytes, eErr := marshalRebroadcastEntry(rebroadcastEntry{
+		MsgBytes:     msgBytes,
+		SubmitHeight: submitHeight,
+		TxHash:       txHash,
+		OrigTxHash:   txHash,
+		ServiceID:    snapshot.ServiceID,
+	})
+	if eErr != nil {
+		return fmt.Errorf("encoding rebroadcast entry: %w", eErr)
+	}
+	if pErr := lc.rebroadcastStore.Put(
+		ctx, phase,
+		snapshot.SupplierOperatorAddress, snapshot.SessionEndHeight, snapshot.SessionID,
+		entryBytes,
+	); pErr != nil {
+		return fmt.Errorf("storing rebroadcast entry: %w", pErr)
+	}
+	return nil
 }
 
 // removeSessionLock removes a per-session lock.
@@ -429,13 +451,69 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 	earliestClaimHeight int64,
 ) {
 	snapshot := ejected.snapshot
+	currentHeight := lc.blockClient.LastBlock(ctx).Height()
 
-	RecordClaimTxError(
-		snapshot.SupplierOperatorAddress,
-		snapshot.ServiceID,
-		snapshot.RelayCount,
-		int64(snapshot.TotalComputeUnits),
-	)
+	// THE RECOVERY PATH IS PERSISTED FIRST, AND THE ORDER IS THE POINT.
+	//
+	// These four writes are not atomic, so the process can die between any two
+	// of them. Marking the session terminal first is the one order that loses
+	// the claim outright: `claim_tx_error` is terminal (SessionState.IsTerminal)
+	// and loadExistingSessions refuses to load a terminal session back into
+	// activeSessions, so nothing re-forms a batch containing it -- while the
+	// reconciler's entire universe is the set of PERSISTED entries (it iterates
+	// `pending`, the store listing). Terminal-without-an-entry is reachable by
+	// neither path, and this message never travelled, so nothing is on-chain
+	// either: the claim is simply gone.
+	//
+	// With the entry first, every intermediate death is benign instead. The
+	// session stays non-terminal AND has an entry, so it is either re-formed
+	// into the batch and ejected again -- Put is an HSet keyed by session ID, so
+	// the second persist overwrites rather than duplicating -- or re-sent alone
+	// by the reconciler.
+	//
+	// It does NOT close a death BEFORE the first write: there the ejection
+	// happened for nobody, which is the ordinary loss of a whole in-flight group
+	// and not specific to ejection.
+	recoverable := false
+	if lc.rebroadcastStore != nil {
+		msgBytes, mErr := ejected.claimMsg.Marshal()
+		if mErr != nil {
+			logger.Error().Err(mErr).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Msg("ejected claim will never be retried: its message cannot be marshalled")
+		} else if pErr := lc.persistRebroadcastEntry(
+			ctx, RebroadcastPhaseClaim, snapshot, currentHeight, "", msgBytes,
+		); pErr != nil {
+			logger.Error().Err(pErr).
+				Str(logging.FieldSessionID, snapshot.SessionID).
+				Msg("ejected claim will never be retried: its rebroadcast entry did not land")
+		} else {
+			recoverable = true
+		}
+	}
+
+	// The verdict has to say WHICH loss this is. An ordinary `claim_tx_error`
+	// promises a retry that the reconciler will actually make; with no entry
+	// there is no such retry, and counting both under the same reason makes a
+	// permanent loss indistinguishable from a pending one on the only surface an
+	// operator watches. A nil store is deliberately NOT counted as unrecoverable:
+	// an operator who disabled the reconciler already knows no retry is coming,
+	// and stamping every ejection would drown the case that is a surprise.
+	if recoverable || lc.rebroadcastStore == nil {
+		RecordClaimTxError(
+			snapshot.SupplierOperatorAddress,
+			snapshot.ServiceID,
+			snapshot.RelayCount,
+			int64(snapshot.TotalComputeUnits),
+		)
+	} else {
+		RecordClaimEjectedUnrecoverable(
+			snapshot.SupplierOperatorAddress,
+			snapshot.ServiceID,
+			snapshot.RelayCount,
+			int64(snapshot.TotalComputeUnits),
+		)
+	}
 
 	if lc.sessionCoordinator != nil {
 		if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil {
@@ -459,7 +537,7 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 			false, // failed
 			submitErr.Error(),
 			earliestClaimHeight,
-			lc.blockClient.LastBlock(ctx).Height(),
+			currentHeight,
 			snapshot.RelayCount,
 			int64(snapshot.TotalComputeUnits),
 			false, // proof_required unknown at claim time
@@ -471,13 +549,6 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 		}
 	}
 
-	if lc.rebroadcastStore != nil {
-		lc.persistRebroadcastEntries(
-			ctx, RebroadcastPhaseClaim, []*SessionSnapshot{snapshot},
-			lc.blockClient.LastBlock(ctx).Height(), "",
-			func(int) ([]byte, error) { return ejected.claimMsg.Marshal() },
-		)
-	}
 }
 
 // settleNotRequiredBatch records the per-session outcome of a batch the chain
