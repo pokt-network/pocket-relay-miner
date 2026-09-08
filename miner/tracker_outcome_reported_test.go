@@ -11,6 +11,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/query"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 )
 
@@ -21,12 +22,8 @@ type inclusionProbe struct {
 	pocktclient.ProofQueryClient
 }
 
-func (inclusionProbe) GetSupplierClaimSessions(_ context.Context, _ string) (map[string]struct{}, error) {
-	return map[string]struct{}{}, nil
-}
-
-func (inclusionProbe) GetSupplierProvenSessions(_ context.Context, _ string) (map[string]struct{}, error) {
-	return map[string]struct{}{}, nil
+func (inclusionProbe) GetSupplierSessionStates(_ context.Context, _ string) (map[string]query.SessionProofState, error) {
+	return map[string]query.SessionProofState{}, nil
 }
 
 // The submission tracker's error does not rise: recordClaimOutcome returns nil

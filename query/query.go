@@ -187,10 +187,11 @@ func (qc *Clients) Supplier() SupplierQueryClient {
 // claim's ProofValidationStatus, which is durable until settlement.
 type ProofQueryClient interface {
 	client.ProofQueryClient
-	// GetSupplierClaimSessions: sessions with a claim on-chain (claim phase).
-	GetSupplierClaimSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
-	// GetSupplierProvenSessions: sessions whose claim is proof-VALIDATED (proof phase).
-	GetSupplierProvenSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
+	// GetSupplierSessionStates: every session with a claim on-chain for this
+	// supplier, mapped to what the chain says about that claim's proof. One walk
+	// answers both phases -- presence is the claim signal, the value is the proof
+	// signal.
+	GetSupplierSessionStates(ctx context.Context, supplier string) (map[string]SessionProofState, error)
 }
 
 // Proof returns the proof module query client.
@@ -1169,60 +1170,81 @@ const inclusionPageLimit = 100
 // far above any legitimate response.
 const maxInclusionPages = 10000
 
-// GetSupplierProvenSessions returns the set of session IDs for which the given
-// supplier's claim has been PROVEN — i.e. a proof was submitted and validated
-// on-chain (the claim's ProofValidationStatus == VALIDATED). It is the
-// per-supplier PROOF inclusion signal for the block-driven inclusion reconciler.
+// SessionProofState is what the chain says about ONE session's claim, in this
+// project's vocabulary rather than poktroll's. The mapping happens here, at the
+// query->miner boundary, for two reasons and the second is the one that matters:
+// the reconciler stops depending on poktroll's enum numbering, and a status this
+// build does not recognise becomes SessionProofUnknown -- which every caller must
+// treat as "not proven, keep trying" and never as a rejection. A fourth value
+// added upstream and read as a rejection by elimination would silently stop
+// resending something that was still worth resending.
+type SessionProofState uint8
+
+const (
+	// SessionProofUnknown is a status this build does not recognise. Zero on
+	// purpose: it is also what a lookup of an absent session yields, and both
+	// mean the same thing to a caller -- nothing here justifies giving up.
+	SessionProofUnknown SessionProofState = iota
+	// SessionProofPending is PENDING_VALIDATION, which does NOT distinguish "no
+	// proof was ever submitted" from "a proof is submitted and not yet judged":
+	// it is the enum's zero value on chain too.
+	SessionProofPending
+	// SessionProofValidated is VALIDATED: the proof landed and the EndBlocker
+	// accepted it. The only state that confirms proof inclusion.
+	SessionProofValidated
+	// SessionProofRejected is INVALID: a proof reached the chain and the
+	// EndBlocker condemned it. Note this is NOT sticky on chain -- validateProof
+	// overwrites the status without reading the previous one, so a different,
+	// valid proof inside the window still flips it to VALIDATED.
+	SessionProofRejected
+)
+
+// GetSupplierSessionStates returns, for one supplier, every session that has a
+// claim on chain, mapped to what the chain says about that claim's proof.
 //
-// Why this reads CLAIMS, not proofs: in poktroll a submitted proof is validated
-// and then DELETED from module state in the EndBlocker of its submission height
-// (x/proof/module/abci.go EndBlocker → ValidateSubmittedProofs → RemoveProof,
-// every block). A proof therefore lives in queryable state for less than one
-// block, so AllProofs/GetProof by supplier almost always returns empty even for
-// a proof that landed and validated successfully — querying proofs to confirm
-// proof inclusion produces a false "missing" for every proof. The durable record
-// of proof inclusion is the CLAIM: the EndBlocker sets ProofValidationStatus to
-// VALIDATED (or INVALID), and the claim persists until settlement. A claim still
-// in PENDING_VALIDATION after the proof window opened means the proof is
-// genuinely missing and should be (re)submitted.
+// It replaces the pair of queries that used to answer the claim side and the
+// proof side separately. Both walked THIS SAME index and differed only in a
+// predicate, so the reconciler was paginating identical bytes once per group per
+// phase -- and groups are keyed by (supplier, session end), so a supplier with
+// pending entries at several session ends paid for each of them. One walk now
+// answers every question: presence of the key is the claim signal, and the value
+// is the proof signal.
 //
 // Intentionally uncached, index-safe (reads module state via the AllClaims
 // supplier secondary index, NOT the Tendermint tx indexer, so it works on
-// tx_index=null / pruned nodes), and pagination-complete — same properties as
-// GetSupplierClaimSessions.
-func (c *proofQueryClient) GetSupplierProvenSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
-	// Only a VALIDATED claim confirms the proof landed. PENDING_VALIDATION (proof not
-	// yet submitted/validated) and INVALID (proof rejected) are both "not proven" —
-	// the accept predicate rejects them so the reconciler treats them as missing.
-	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims (proven)",
-		func(claim *prooftypes.Claim) bool {
-			return claim.GetProofValidationStatus() == prooftypes.ClaimProofStatus_VALIDATED
-		})
+// tx_index=null / pruned nodes), and pagination-complete.
+//
+// Both signals come from the CLAIM. A submitted proof is validated and REMOVED in
+// the EndBlocker of its own block, so proof inclusion cannot be read from proofs;
+// the claim's ProofValidationStatus is what survives until settlement.
+func (c *proofQueryClient) GetSupplierSessionStates(ctx context.Context, supplierOperatorAddress string) (map[string]SessionProofState, error) {
+	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims")
 }
 
-// GetSupplierClaimSessions returns the set of session IDs for which a claim
-// exists on-chain for the given supplier, read from x/proof module state via the
-// AllClaims supplier secondary index. Proof-side analogue is
-// GetSupplierProvenSessions (which also reads claims — see that method for why
-// proof inclusion can't be read from proofs); same uncached + index-safe
-// (tx_index=null) + full-pagination semantics. It is the per-supplier inclusion
-// signal for the claim phase of the block-driven inclusion reconciler.
-func (c *proofQueryClient) GetSupplierClaimSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
-	// Every claim counts for the claim-inclusion signal (no status filter).
-	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims",
-		func(*prooftypes.Claim) bool { return true })
+// stateFromClaimStatus maps poktroll's enum into ours. The default arm is load
+// bearing: an unrecognised value must land on Unknown, which callers read as "not
+// proven", never on Rejected.
+func stateFromClaimStatus(st prooftypes.ClaimProofStatus) SessionProofState {
+	switch st {
+	case prooftypes.ClaimProofStatus_VALIDATED:
+		return SessionProofValidated
+	case prooftypes.ClaimProofStatus_INVALID:
+		return SessionProofRejected
+	case prooftypes.ClaimProofStatus_PENDING_VALIDATION:
+		return SessionProofPending
+	default:
+		return SessionProofUnknown
+	}
 }
 
 // paginateSupplierClaims walks the AllClaims supplier secondary index to completion
-// and returns the set of session IDs whose claim satisfies accept. It is the shared
-// pagination body for GetSupplierProvenSessions and GetSupplierClaimSessions, which
-// differ ONLY in their accept predicate (and the human-readable desc used in errors).
+// and returns every session it carries, mapped to its claim's proof state.
 //
-// CRITICAL: the VALIDATED-only proof-inclusion filter lives entirely in the caller's
-// accept predicate — paginateSupplierClaims itself applies no status filter and only
-// skips nil SessionHeaders, exactly as both original loops did. A claim is included
-// iff accept(claim) is true AND it carries a non-nil SessionHeader; the proof-inclusion
-// reconciler depends on the proven variant passing accept = (status == VALIDATED).
+// It applies NO status filter, and that is the change: it used to take an accept
+// predicate, and the two callers differed only in theirs -- one accepting every
+// claim, one accepting VALIDATED only -- which meant walking identical bytes twice
+// to classify them differently. Discrimination moved to the value, so one walk
+// serves both questions.
 //
 // Index-safe (reads module state via the AllClaims supplier index, NOT the Tendermint
 // tx indexer, so it works on tx_index=null / pruned nodes), pagination-complete, and
@@ -1231,9 +1253,8 @@ func (c *proofQueryClient) paginateSupplierClaims(
 	ctx context.Context,
 	supplierOperatorAddress string,
 	desc string,
-	accept func(claim *prooftypes.Claim) bool,
-) (map[string]struct{}, error) {
-	sessions := make(map[string]struct{})
+) (map[string]SessionProofState, error) {
+	sessions := make(map[string]SessionProofState)
 	var nextKey []byte
 	for page := 0; page < maxInclusionPages; page++ {
 		queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
@@ -1248,11 +1269,12 @@ func (c *proofQueryClient) paginateSupplierClaims(
 			return nil, fmt.Errorf("failed to query %s for supplier %s: %w", desc, supplierOperatorAddress, err)
 		}
 		for i := range res.Claims {
-			if !accept(&res.Claims[i]) {
-				continue
-			}
+			// A claim with no session header cannot be keyed, so it is skipped --
+			// unchanged from the two loops this replaced. There is no status
+			// filter here on purpose: filtering is what forced two walks, and the
+			// callers now discriminate on the value instead of on membership.
 			if sh := res.Claims[i].GetSessionHeader(); sh != nil {
-				sessions[sh.GetSessionId()] = struct{}{}
+				sessions[sh.GetSessionId()] = stateFromClaimStatus(res.Claims[i].GetProofValidationStatus())
 			}
 		}
 		if res.Pagination == nil || len(res.Pagination.NextKey) == 0 {

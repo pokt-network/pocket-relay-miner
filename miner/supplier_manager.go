@@ -2647,8 +2647,16 @@ func (m *SupplierManager) ensureSharedTrackers() {
 		claimPhase := reconcilePhase{
 			phase:             RebroadcastPhaseClaim,
 			windowCloseHeight: sharedtypes.GetClaimWindowCloseHeight,
-			onChainSessions:   inclusionQuery.GetSupplierClaimSessions,
-			recordOutcome:     recordClaimOutcome,
+			// A claim that exists is found, whatever its proof status says. This
+			// phase asks only whether the claim landed, so it reads PRESENCE and
+			// deliberately ignores the value the proof phase discriminates on.
+			verdict: func(_ query.SessionProofState, present bool) inclusionVerdict {
+				if present {
+					return verdictFound
+				}
+				return verdictMissing
+			},
+			recordOutcome: recordClaimOutcome,
 			recordRebroadcast: func(supplier, serviceID, result string) {
 				claimRebroadcastsTotal.WithLabelValues(supplier, serviceID, result).Inc()
 			},
@@ -2659,9 +2667,20 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			// Proof inclusion is read from the claim's ProofValidationStatus
 			// (VALIDATED), not from proofs: a submitted proof is validated and
 			// deleted in the EndBlocker of its submission block, so it is not
-			// queryable afterwards. See query.GetSupplierProvenSessions.
-			onChainSessions: inclusionQuery.GetSupplierProvenSessions,
-			recordOutcome:   recordProofOutcome,
+			// queryable afterwards. See query.GetSupplierSessionStates.
+			//
+			// Only VALIDATED counts as found. Every other state -- pending,
+			// rejected, absent, or one this build does not recognise -- takes the
+			// existing missing path, which is exactly what the VALIDATED-only
+			// predicate did before this read was unified. Splitting rejection out
+			// of that set is a separate change.
+			verdict: func(state query.SessionProofState, _ bool) inclusionVerdict {
+				if state == query.SessionProofValidated {
+					return verdictFound
+				}
+				return verdictMissing
+			},
+			recordOutcome: recordProofOutcome,
 			recordRebroadcast: func(supplier, serviceID, result string) {
 				proofRebroadcastsTotal.WithLabelValues(supplier, serviceID, result).Inc()
 			},
@@ -2674,6 +2693,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			m, // SupplierManager implements MessageResubmitter
 			claimPhase,
 			proofPhase,
+			inclusionQuery.GetSupplierSessionStates,
 			m.config.InclusionReconcilerConfig,
 		)
 		// Per-supplier ownership: only reconcile suppliers this replica controls

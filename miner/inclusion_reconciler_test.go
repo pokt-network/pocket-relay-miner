@@ -6,6 +6,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -81,8 +83,14 @@ type reconcilerHarness struct {
 	mu          sync.Mutex
 	outcomes    []capturedOutcome
 	rebroadcast []string
-	onChain     map[string]struct{}
-	onChainErr  error
+	// onChain is what the chain reports for the supplier, in the same shape the
+	// unified read returns: presence answers the claim phase, the value answers
+	// the proof phase.
+	onChain    map[string]query.SessionProofState
+	onChainErr error
+	// fetchCalls counts trips to the chain. The reconciler must make ONE per
+	// (supplier, height) however many groups and phases want the answer.
+	fetchCalls atomic.Int64
 	// onChainWaitForDeadline makes the inclusion query block until the group
 	// context expires. It waits for the CONDITION, not for a duration, so the
 	// deadline is guaranteed to have fired when the loop below it runs -- no
@@ -107,6 +115,49 @@ const (
 	testMid         = int64(120)
 )
 
+// phaseVerdict returns the SAME interpretation production wires, so a test that
+// passes here is a test about the reconciler and not about a stand-in. Keeping a
+// second copy would let the two drift, and the drift would be invisible: both
+// phases would still answer found/missing, just not the way the miner does.
+func phaseVerdict(p RebroadcastPhase) func(query.SessionProofState, bool) inclusionVerdict {
+	if p == RebroadcastPhaseClaim {
+		return func(_ query.SessionProofState, present bool) inclusionVerdict {
+			if present {
+				return verdictFound
+			}
+			return verdictMissing
+		}
+	}
+	return func(state query.SessionProofState, _ bool) inclusionVerdict {
+		if state == query.SessionProofValidated {
+			return verdictFound
+		}
+		return verdictMissing
+	}
+}
+
+// fetchStates is the single on-chain read both phases share, so a test that makes
+// it fail or hang exercises the one query the reconciler really makes.
+func (h *reconcilerHarness) fetchStates(ctx context.Context, _ string) (map[string]query.SessionProofState, error) {
+	h.fetchCalls.Add(1)
+	h.mu.Lock()
+	wait := h.onChainWaitForDeadline
+	h.mu.Unlock()
+	if wait {
+		<-ctx.Done()
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.onChainErr != nil {
+		return nil, h.onChainErr
+	}
+	cp := make(map[string]query.SessionProofState, len(h.onChain))
+	for k, v := range h.onChain {
+		cp[k] = v
+	}
+	return cp, nil
+}
+
 func newReconcilerHarness(t *testing.T, safetyBlocks int64) *reconcilerHarness {
 	t.Helper()
 	rc, _ := newTestRedis(t)
@@ -115,7 +166,7 @@ func newReconcilerHarness(t *testing.T, safetyBlocks int64) *reconcilerHarness {
 		rc:          rc,
 		store:       NewRebroadcastStore(rc, time.Hour),
 		resub:       &mockResubmitter{},
-		onChain:     map[string]struct{}{},
+		onChain:     map[string]query.SessionProofState{},
 		windowClose: testWindowClose,
 	}
 
@@ -123,24 +174,7 @@ func newReconcilerHarness(t *testing.T, safetyBlocks int64) *reconcilerHarness {
 		return reconcilePhase{
 			phase:             p,
 			windowCloseHeight: func(_ *sharedtypes.Params, _ int64) int64 { return h.windowClose },
-			onChainSessions: func(ctx context.Context, _ string) (map[string]struct{}, error) {
-				h.mu.Lock()
-				wait := h.onChainWaitForDeadline
-				h.mu.Unlock()
-				if wait {
-					<-ctx.Done()
-				}
-				h.mu.Lock()
-				defer h.mu.Unlock()
-				if h.onChainErr != nil {
-					return nil, h.onChainErr
-				}
-				cp := make(map[string]struct{}, len(h.onChain))
-				for k := range h.onChain {
-					cp[k] = struct{}{}
-				}
-				return cp, nil
-			},
+			verdict:           phaseVerdict(p),
 			recordOutcome: func(_ context.Context, _ rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, height int64) error {
 				h.mu.Lock()
 				defer h.mu.Unlock()
@@ -167,6 +201,7 @@ func newReconcilerHarness(t *testing.T, safetyBlocks int64) *reconcilerHarness {
 		h.resub,
 		mkPhase(RebroadcastPhaseClaim),
 		mkPhase(RebroadcastPhaseProof),
+		h.fetchStates,
 		cfg,
 	)
 	t.Cleanup(func() { _ = h.r.Close() })
@@ -235,7 +270,7 @@ const (
 func TestReconciler_Found(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]struct{}{"s1": {}}
+	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofValidated}
 
 	h.r.OnBlock(testMid)
 
@@ -258,7 +293,7 @@ func TestReconciler_Found(t *testing.T) {
 func TestReconciler_FoundButNotRecorded_KeepsEntryForRetry(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]struct{}{"s1": {}}
+	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofValidated}
 	h.outcomeErr = fmt.Errorf("redis unavailable while reactivating")
 
 	h.r.OnBlock(testMid)
@@ -469,7 +504,7 @@ func TestReconciler_MixedFoundAndMissing(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit) // found
 	h.seed(t, hSupplier, hEnd, "s2", testSubmit) // missing
-	h.onChain = map[string]struct{}{"s1": {}}
+	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofValidated}
 
 	h.r.OnBlock(testMid)
 
@@ -485,7 +520,7 @@ func TestReconciler_MixedFoundAndMissing(t *testing.T) {
 func TestReconciler_FoundAfterWindowClose(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]struct{}{"s1": {}}
+	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofValidated}
 
 	h.r.OnBlock(testWindowClose + 1)
 
@@ -533,9 +568,7 @@ func TestReconciler_ObserveOnly(t *testing.T) {
 		return reconcilePhase{
 			phase:             p,
 			windowCloseHeight: func(_ *sharedtypes.Params, _ int64) int64 { return h.windowClose },
-			onChainSessions: func(_ context.Context, _ string) (map[string]struct{}, error) {
-				return map[string]struct{}{}, nil
-			},
+			verdict:           phaseVerdict(p),
 			recordOutcome: func(_ context.Context, _ rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, height int64) error {
 				h.mu.Lock()
 				defer h.mu.Unlock()
@@ -546,7 +579,10 @@ func TestReconciler_ObserveOnly(t *testing.T) {
 		}
 	}
 	h.r = NewInclusionReconciler(logging.NewLoggerFromConfig(logging.DefaultConfig()), &mockSharedQueryClient{}, h.store, h.resub,
-		mkPhase(RebroadcastPhaseClaim), mkPhase(RebroadcastPhaseProof), cfg)
+		mkPhase(RebroadcastPhaseClaim), mkPhase(RebroadcastPhaseProof),
+		func(context.Context, string) (map[string]query.SessionProofState, error) {
+			return map[string]query.SessionProofState{}, nil
+		}, cfg)
 	t.Cleanup(func() { _ = h.r.Close() })
 
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
@@ -623,19 +659,13 @@ func TestReconciler_MultipleGroups(t *testing.T) {
 // with the harness — no shared in-memory state. It models a different replica
 // taking over a supplier after the original owner died. onChain controls what
 // that replica sees on-chain; ownsAll gates the ownership filter.
-func (h *reconcilerHarness) newPeerReconciler(t *testing.T, resub *mockResubmitter, onChain map[string]struct{}, owns func(string) bool) *InclusionReconciler {
+func (h *reconcilerHarness) newPeerReconciler(t *testing.T, resub *mockResubmitter, onChain map[string]query.SessionProofState, owns func(string) bool) *InclusionReconciler {
 	t.Helper()
 	mkPhase := func(p RebroadcastPhase) reconcilePhase {
 		return reconcilePhase{
 			phase:             p,
 			windowCloseHeight: func(_ *sharedtypes.Params, _ int64) int64 { return h.windowClose },
-			onChainSessions: func(_ context.Context, _ string) (map[string]struct{}, error) {
-				cp := make(map[string]struct{}, len(onChain))
-				for k := range onChain {
-					cp[k] = struct{}{}
-				}
-				return cp, nil
-			},
+			verdict:           phaseVerdict(p),
 			recordOutcome:     func(context.Context, rebroadcastEntry, string, int64, string, string, int64) error { return nil },
 			recordRebroadcast: func(string, string, string) {},
 		}
@@ -647,7 +677,14 @@ func (h *reconcilerHarness) newPeerReconciler(t *testing.T, resub *mockResubmitt
 	peer := NewInclusionReconciler(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		&mockSharedQueryClient{}, h.store, resub,
-		mkPhase(RebroadcastPhaseClaim), mkPhase(RebroadcastPhaseProof), cfg,
+		mkPhase(RebroadcastPhaseClaim), mkPhase(RebroadcastPhaseProof),
+		func(context.Context, string) (map[string]query.SessionProofState, error) {
+			cp := make(map[string]query.SessionProofState, len(onChain))
+			for k, v := range onChain {
+				cp[k] = v
+			}
+			return cp, nil
+		}, cfg,
 	)
 	peer.SetOwnershipFilter(owns)
 	t.Cleanup(func() { _ = peer.Close() })
@@ -668,7 +705,7 @@ func TestReconciler_HA_PeerRecoversNeverSentFromRedis(t *testing.T) {
 	// "Replica B": fresh reconciler, shares only Redis, took over the supplier,
 	// still sees the proof missing on-chain.
 	resubB := &mockResubmitter{}
-	b := h.newPeerReconciler(t, resubB, map[string]struct{}{}, func(s string) bool { return s == hSupplier })
+	b := h.newPeerReconciler(t, resubB, map[string]query.SessionProofState{}, func(s string) bool { return s == hSupplier })
 
 	// B recovers A's persisted entry from Redis and self-heals it (never-sent →
 	// resend at submit+1, before the midpoint).
@@ -693,10 +730,10 @@ func TestReconciler_HA_NonOwnerPeerDoesNotDoubleSubmit(t *testing.T) {
 
 	// Owner B resends.
 	resubB := &mockResubmitter{}
-	b := h.newPeerReconciler(t, resubB, map[string]struct{}{}, func(s string) bool { return s == hSupplier })
+	b := h.newPeerReconciler(t, resubB, map[string]query.SessionProofState{}, func(s string) bool { return s == hSupplier })
 	// Non-owner C sees the same Redis entry but owns nothing.
 	resubC := &mockResubmitter{}
-	c := h.newPeerReconciler(t, resubC, map[string]struct{}{}, func(string) bool { return false })
+	c := h.newPeerReconciler(t, resubC, map[string]query.SessionProofState{}, func(string) bool { return false })
 
 	b.OnBlock(testSubmit + 1)
 	c.OnBlock(testSubmit + 1)
@@ -798,7 +835,7 @@ func TestReconciler_PoolIsCappedByTxConcurrency(t *testing.T) {
 
 			r := NewInclusionReconciler(
 				logging.NewLoggerFromConfig(logging.DefaultConfig()),
-				nil, nil, nil, reconcilePhase{}, reconcilePhase{}, cfg,
+				nil, nil, nil, reconcilePhase{}, reconcilePhase{}, nil, cfg,
 			)
 			require.Equal(t, tt.want, r.cfg.MaxConcurrent)
 		})
@@ -1047,4 +1084,61 @@ func TestReconciler_ABudgetSpentByTheQueryStopsTheGroupAndSaysSo(t *testing.T) {
 			"running out, not each entry meeting the consequence")
 
 	require.Equal(t, 0, h.resub.attemptCount(), "no attempt may be spent once the budget is gone")
+}
+
+// TestReconciler_OneChainReadPerSupplierPerBlock is what makes the unified read a
+// CHANGE and not a translation of types. The two phases used to query separately,
+// and the unit of the query was the GROUP -- keyed by (supplier, session end) --
+// so a supplier with entries at two session ends in both phases walked the same
+// AllClaims index four times in one block, for identical bytes.
+//
+// Four groups here, one supplier: two session ends x two phases. The chain must
+// be asked ONCE. Asserting the exact count and not "fewer than four" is what
+// separates deduplication from luck in scheduling: the groups run concurrently on
+// the pool, so a weaker assertion would pass on a build where two of them simply
+// raced to the same answer.
+func TestReconciler_OneChainReadPerSupplierPerBlock(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+
+	for _, end := range []int64{hEnd, hEnd + 20} {
+		h.put(t, RebroadcastPhaseClaim, hSupplier, end, fmt.Sprintf("c-%d", end), testSubmit, "tx-c")
+		h.put(t, RebroadcastPhaseProof, hSupplier, end, fmt.Sprintf("p-%d", end), testSubmit, "tx-p")
+	}
+
+	h.r.OnBlock(testMid)
+
+	require.Equal(t, int64(1), h.fetchCalls.Load(),
+		"four groups across both phases asked the same question at the same height; "+
+			"the chain must be walked once")
+
+	// A LATER block is a different question and must be asked again -- a cache
+	// that outlived the pass would answer the next block with last block's chain.
+	h.r.OnBlock(testMid + 1)
+	require.Equal(t, int64(2), h.fetchCalls.Load(),
+		"the answer is per height: a new block must re-read the chain")
+}
+
+// TestReconciler_ClaimPhaseIgnoresTheProofStatus pins D4, and it only became
+// possible to break when the two phases started reading the SAME map. Before
+// that, the claim side had its own query that returned every claim, so no edit
+// could accidentally teach it to filter; now both phases receive a state and one
+// of them is supposed to ignore it.
+//
+// A claim whose proof the chain REJECTED is still a claim that landed. The claim
+// phase must call it found and stop resending it -- reading the rejection as
+// "claim missing" would resend a claim that is already on chain, and pay for it.
+func TestReconciler_ClaimPhaseIgnoresTheProofStatus(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.put(t, RebroadcastPhaseClaim, hSupplier, hEnd, "s1", testSubmit, "tx-s1")
+	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofRejected}
+
+	h.r.OnBlock(testMid)
+
+	require.Equal(t, 0, h.resub.count(),
+		"the claim is on chain: whatever the chain thinks of its PROOF, the claim "+
+			"phase has nothing left to resend")
+	outcomes := h.getOutcomes()
+	require.Len(t, outcomes, 1)
+	require.Equal(t, inclusionFound, outcomes[0].outcome,
+		"a claim present with a rejected proof is FOUND for the claim phase")
 }

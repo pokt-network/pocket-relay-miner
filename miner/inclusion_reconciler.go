@@ -11,6 +11,7 @@ import (
 	"github.com/alitto/pond/v2"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/tx"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -187,10 +188,32 @@ func DefaultInclusionReconcilerConfig() InclusionReconcilerConfig {
 // reconcilePhase holds the phase-specific behaviour, so the reconciler core is
 // shared between claims and proofs (one mechanism, not two near-duplicate
 // trackers). Built once in NewInclusionReconciler from the injected deps.
+// inclusionVerdict is what ONE phase concludes about one session from what the
+// chain says. The phases read the same map and disagree on purpose: a claim that
+// exists is found for the claim phase whatever its proof status, while the proof
+// phase only counts a VALIDATED one.
+type inclusionVerdict uint8
+
+const (
+	// verdictMissing: not on chain in the sense THIS phase cares about. The
+	// existing path -- resend while the window is open, record missing when it
+	// closes. Every state a build does not recognise lands here, never on a
+	// terminal one, so an enum value added upstream cannot silence a resend that
+	// was still worth making.
+	verdictMissing inclusionVerdict = iota
+	// verdictFound: on chain in the sense this phase cares about.
+	verdictFound
+)
+
 type reconcilePhase struct {
 	phase             RebroadcastPhase
 	windowCloseHeight func(p *sharedtypes.Params, sessionEnd int64) int64
-	onChainSessions   func(ctx context.Context, supplier string) (map[string]struct{}, error)
+	// verdict interprets one session's on-chain state FOR THIS PHASE. present is
+	// false when the supplier has no claim for that session at all, which the
+	// state alone cannot express -- the zero state is Unknown, and "absent" and
+	// "unrecognised" must stay distinguishable for the claim phase even though
+	// both mean "keep going" for the proof phase.
+	verdict func(state query.SessionProofState, present bool) inclusionVerdict
 	// recordOutcome persists the terminal outcome + emits the phase's outcome
 	// metric. inclusionHeight is the poll-granularity height for a found outcome.
 	//
@@ -202,6 +225,66 @@ type reconcilePhase struct {
 	recordOutcome func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error
 	// recordRebroadcast emits the phase's rebroadcast metric.
 	recordRebroadcast func(supplier, serviceID, result string)
+}
+
+// inclusionOracle answers "what does the chain say about this supplier" ONCE per
+// (supplier, height), for every group of BOTH phases in a single OnBlock pass.
+//
+// It exists because the two phases used to ask separately, walking the same
+// AllClaims index for identical bytes and differing only in how they filtered
+// them -- and the unit of that walk was the GROUP, keyed by (supplier, session
+// end), so a supplier with pending entries at several session ends paid the walk
+// once for each, per phase, per block. The deduplication key is therefore the
+// supplier and the height, not the phase.
+//
+// The gate is a one-slot channel rather than a mutex so a waiter still honours
+// its OWN deadline: groups each carry PerGroupTimeout, and blocking one group
+// past its budget on another group's query is the shape that already cost this
+// reconciler a burned retry budget. A waiter whose context expires leaves with
+// its own error and takes the degraded path, exactly as a failed query does.
+type inclusionOracle struct {
+	height  int64
+	fetch   func(ctx context.Context, supplier string) (map[string]query.SessionProofState, error)
+	mu      sync.Mutex
+	entries map[string]*oracleEntry
+}
+
+type oracleEntry struct {
+	gate   chan struct{} // capacity 1: a context-aware mutex
+	done   bool
+	states map[string]query.SessionProofState
+	err    error
+}
+
+func newInclusionOracle(height int64, fetch func(context.Context, string) (map[string]query.SessionProofState, error)) *inclusionOracle {
+	return &inclusionOracle{height: height, fetch: fetch, entries: make(map[string]*oracleEntry)}
+}
+
+// states returns the supplier's session states for this pass, querying at most
+// once however many groups and phases ask. A failed query is REMEMBERED for the
+// pass: re-asking would send the same failing request to the same node in the
+// same second, which is precisely when it is least affordable.
+func (o *inclusionOracle) states(ctx context.Context, supplier string) (map[string]query.SessionProofState, error) {
+	o.mu.Lock()
+	e, ok := o.entries[supplier]
+	if !ok {
+		e = &oracleEntry{gate: make(chan struct{}, 1)}
+		o.entries[supplier] = e
+	}
+	o.mu.Unlock()
+
+	select {
+	case e.gate <- struct{}{}:
+		defer func() { <-e.gate }()
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if e.done {
+		return e.states, e.err
+	}
+	e.states, e.err = o.fetch(ctx, supplier)
+	e.done = true
+	return e.states, e.err
 }
 
 // InclusionReconciler verifies on-chain inclusion of submitted claims/proofs and
@@ -221,8 +304,9 @@ type InclusionReconciler struct {
 	resubmitter  MessageResubmitter
 	cfg          InclusionReconcilerConfig
 
-	claimPhase reconcilePhase
-	proofPhase reconcilePhase
+	claimPhase  reconcilePhase
+	proofPhase  reconcilePhase
+	fetchStates func(ctx context.Context, supplier string) (map[string]query.SessionProofState, error)
 
 	pool pond.Pool
 
@@ -263,6 +347,10 @@ func NewInclusionReconciler(
 	resubmitter MessageResubmitter,
 	claimPhase reconcilePhase,
 	proofPhase reconcilePhase,
+	// fetchStates is the single on-chain read both phases share. It is one
+	// argument and not one per phase deliberately: two of them is what the pair
+	// of queries this replaced looked like.
+	fetchStates func(ctx context.Context, supplier string) (map[string]query.SessionProofState, error),
 	cfg InclusionReconcilerConfig,
 ) *InclusionReconciler {
 	if cfg.MaxConcurrent <= 0 {
@@ -289,6 +377,7 @@ func NewInclusionReconciler(
 		cfg:          cfg,
 		claimPhase:   claimPhase,
 		proofPhase:   proofPhase,
+		fetchStates:  fetchStates,
 	}
 	// Blocking submit (no non-blocking drop): the active-group count is
 	// bounded by #suppliers, so the pool drains within a block; we never
@@ -320,13 +409,16 @@ func (r *InclusionReconciler) OnBlock(height int64) {
 	r.lastHeight.Store(height)
 	defer r.passInFlight.Store(false)
 
-	r.runPass(r.claimPhase, height)
-	r.runPass(r.proofPhase, height)
+	// ONE oracle for the whole pass, so both phases and every group of a supplier
+	// share a single walk of the AllClaims index at this height.
+	oracle := newInclusionOracle(height, r.fetchStates)
+	r.runPass(r.claimPhase, height, oracle)
+	r.runPass(r.proofPhase, height, oracle)
 }
 
 // runPass reconciles every active group for one phase at the given height,
 // fanning out across the bounded worker pool and waiting for the pass to finish.
-func (r *InclusionReconciler) runPass(rp reconcilePhase, height int64) {
+func (r *InclusionReconciler) runPass(rp reconcilePhase, height int64, oracle *inclusionOracle) {
 	ctx := context.Background()
 	groups, err := r.store.ActiveGroups(ctx, rp.phase)
 	if err != nil {
@@ -352,7 +444,7 @@ func (r *InclusionReconciler) runPass(rp reconcilePhase, height int64) {
 		}
 		g := g
 		group.Submit(func() {
-			r.reconcileGroup(rp, g, height)
+			r.reconcileGroup(rp, g, height, oracle)
 		})
 		submitted++
 	}
@@ -392,7 +484,7 @@ func (r *InclusionReconciler) runPass(rp reconcilePhase, height int64) {
 // height: query inclusion once, then for each still-pending session either
 // record a terminal outcome (found / window-closed-missing) and clear it, or
 // rebroadcast it (missing, window open, past the grace + safety gates).
-func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGroup, height int64) {
+func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGroup, height int64, oracle *inclusionOracle) {
 	ctx, cancel := context.WithTimeout(context.Background(), r.cfg.PerGroupTimeout)
 	defer cancel()
 
@@ -422,7 +514,7 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 	windowClose := rp.windowCloseHeight(params, g.SessionEnd)
 	windowClosed := height > windowClose
 
-	onChain, qErr := rp.onChainSessions(ctx, g.Supplier)
+	onChain, qErr := oracle.states(ctx, g.Supplier)
 	if qErr != nil {
 		if !windowClosed {
 			// Window still open but we can't compute `missing` without a successful
@@ -505,7 +597,8 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			continue
 		}
 
-		if _, ok := onChain[sessionID]; ok {
+		state, present := onChain[sessionID]
+		if rp.verdict(state, present) == verdictFound {
 			if oErr := rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionFound, height); oErr != nil {
 				// KEEP the entry. The claim IS on-chain; acting on that
 				// observation is what keeps the proof coming, so a transient

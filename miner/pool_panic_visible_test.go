@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/query"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -24,7 +25,7 @@ import (
 // trace at all: no log, no metric, no crash. The pass still "succeeds" and the
 // entry stays pending, which is exactly what makes the loss invisible.
 //
-// The panic is injected through the phase's onChainSessions hook rather than by
+// The panic is injected through the shared on-chain read rather than by
 // submitting a panicking task to a fresh pool: a fresh pool would prove that
 // pond recovers panics, which is pond's property, not ours. Going through
 // runPass exercises the line under test.
@@ -48,9 +49,7 @@ func TestInclusionReconciler_PanicInPassTaskIsCountedAndLogged(t *testing.T) {
 		return reconcilePhase{
 			phase:             p,
 			windowCloseHeight: func(_ *sharedtypes.Params, _ int64) int64 { return testWindowClose },
-			onChainSessions: func(_ context.Context, _ string) (map[string]struct{}, error) {
-				panic("injected: inclusion query blew up")
-			},
+			verdict:           phaseVerdict(p),
 			recordOutcome: func(_ context.Context, _ rebroadcastEntry, _ string, _ int64, _, _ string, _ int64) error {
 				return nil
 			},
@@ -63,7 +62,10 @@ func TestInclusionReconciler_PanicInPassTaskIsCountedAndLogged(t *testing.T) {
 	cfg.PerGroupTimeout = 2 * time.Second
 
 	r := NewInclusionReconciler(logger, &mockSharedQueryClient{}, store, &mockResubmitter{},
-		panicking(RebroadcastPhaseClaim), panicking(RebroadcastPhaseProof), cfg)
+		panicking(RebroadcastPhaseClaim), panicking(RebroadcastPhaseProof),
+		func(context.Context, string) (map[string]query.SessionProofState, error) {
+			panic("injected: inclusion query blew up")
+		}, cfg)
 	t.Cleanup(func() { _ = r.Close() })
 
 	before := testutil.ToFloat64(logging.PanicRecoveriesTotal.WithLabelValues("inclusion_reconcile_group"))
@@ -137,9 +139,7 @@ func TestInclusionReconciler_PoolStoppedIsNotReportedAsAPanic(t *testing.T) {
 		return reconcilePhase{
 			phase:             p,
 			windowCloseHeight: func(_ *sharedtypes.Params, _ int64) int64 { return testWindowClose },
-			onChainSessions: func(_ context.Context, _ string) (map[string]struct{}, error) {
-				return map[string]struct{}{}, nil
-			},
+			verdict:           phaseVerdict(p),
 			recordOutcome: func(_ context.Context, _ rebroadcastEntry, _ string, _ int64, _, _ string, _ int64) error {
 				return nil
 			},
@@ -152,7 +152,10 @@ func TestInclusionReconciler_PoolStoppedIsNotReportedAsAPanic(t *testing.T) {
 	cfg.PerGroupTimeout = 2 * time.Second
 
 	r := NewInclusionReconciler(logger, &mockSharedQueryClient{}, store, &mockResubmitter{},
-		phase(RebroadcastPhaseClaim), phase(RebroadcastPhaseProof), cfg)
+		phase(RebroadcastPhaseClaim), phase(RebroadcastPhaseProof),
+		func(context.Context, string) (map[string]query.SessionProofState, error) {
+			return map[string]query.SessionProofState{}, nil
+		}, cfg)
 	t.Cleanup(func() { _ = r.Close() })
 
 	// The window: pool down, r.closed still false, so OnBlock does NOT return early.
