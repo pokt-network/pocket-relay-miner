@@ -645,6 +645,28 @@ every test GREEN.
 says so when it comes back green.** Then someone else writes the test, because the
 author of a proposal writing its only proof is the same failure one step later.
 
+## An EXACT assertion covers criteria its author was not thinking about
+
+A loose assertion does not even cover its own claim; an exact one covers claims
+nobody had in mind when it was written. That asymmetry is why exactness is the
+default and not a case-by-case choice.
+
+Measured 2026-09-07, both halves in the same file. The loose half:
+`require.LessOrEqual(count, cap)` is satisfied by **zero** attempts, so it could
+not tell a cap that held from a resend that never fired -- it did not cover the
+thing it was written for. The exact half: a resend calendar asserted as
+`[]int64{128}` rather than `>= 128`, chosen purely for readability so nobody
+would have to derive the arithmetic. It turned out to be the only thing standing
+between a new "compress instead of abandon" rule and the SEPARATE guard that
+forbids resending inside the safety margin -- with `>=`, a floor pushing to 129
+would have passed. The author was not protecting that guard and had not thought
+about it.
+
+So: assert the value, not a bound, wherever a value exists. And when a coverage
+table credits a test, check WHICH property of that test does the work -- here it
+was the exactness, and a well-meaning later edit relaxing it to `>=` would have
+silently uncovered a criterion listed as covered.
+
 ## The one-line test for whether this ran
 
 The report names the defect that was injected, quotes the failure showing it named
