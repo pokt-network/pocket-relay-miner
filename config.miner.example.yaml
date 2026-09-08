@@ -148,8 +148,13 @@ pocket_node:
   # claim/proof while its window is open. Outcomes land in submission-tracker
   # records (claim_on_chain_outcome / proof_on_chain_outcome) and the
   # {claim,proof}_inclusion_outcome_total / {claim,proof}_rebroadcasts_total
-  # metrics. All fields are optional; defaults shown.
-  # disable_inclusion_reconciler: false               # Master switch (default: enabled)
+  # metrics. Reconciliation itself is MANDATORY: there is no switch that turns
+  # it off, because a claim that misses its block with no retry is a forfeit the
+  # operator never sees. The fields below only TUNE it and are all optional,
+  # defaults shown. To cut its cost -- one chain query per owned supplier per
+  # block, plus gas on every re-send -- set max_rebroadcasts: 0, which is
+  # observe-only: it still verifies and records the outcome, it just never
+  # re-sends.
   # inclusion_reconciler_max_concurrent: 64           # Per-block group-reconcile pool size (default: 64)
   # max_rebroadcasts: 2                                # In-window re-submits, spaced 2 blocks apart; 0 = observe-only (default: 2)
   # rebroadcast_safety_blocks: 1                       # Stop rebroadcasting within N blocks of window close (default: 1)

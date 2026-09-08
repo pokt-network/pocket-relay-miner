@@ -2536,10 +2536,6 @@ func (m *SupplierManager) ensureSharedTrackers() {
 				Msg("proof query client does not expose AllProofs/AllClaims by supplier; inclusion reconciler DISABLED — claims/proofs are fire-once with no verification or rebroadcast")
 			return
 		}
-		if m.config.InclusionReconcilerConfig.Disabled {
-			m.logger.Info().Msg("inclusion reconciler disabled by config; claims/proofs are fire-once (no verification or rebroadcast)")
-			return
-		}
 		m.rebroadcastStore = NewRebroadcastStore(m.config.RedisClient, 0) // 0 → default TTL
 
 		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, inclusionHeight int64) error {

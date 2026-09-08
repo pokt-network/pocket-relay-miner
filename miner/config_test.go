@@ -187,6 +187,53 @@ func TestLoadConfig_RetiredKeysAreNamedWithWhatTheyChanged(t *testing.T) {
 		"a retired key must read as removed, not merely unknown")
 }
 
+// TestLoadConfig_TheInclusionReconcilerSwitchIsRetired is the tooth on S11: the
+// reconciler is CORE, so `disable_inclusion_reconciler` must reach the operator
+// as a REMOVED key and not be quietly accepted. It drives the real path rather
+// than the retiredKeys map, which is what makes it fail if anyone reintroduces
+// the field: a struct that declares the key again stops UnknownKeys from
+// reporting it, and every assertion below goes red at once.
+//
+// It must still not fail the load. A deployment that set this ran fire-once,
+// and refusing to boot would turn its rolling deploy into an outage at exactly
+// the moment the new binary is the one that would have saved its claims.
+func TestLoadConfig_TheInclusionReconcilerSwitchIsRetired(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "miner.yaml")
+
+	require.NoError(t, os.WriteFile(path, []byte(
+		"redis:\n"+
+			"  url: redis://localhost:6379\n"+
+			"  consumer_name: miner-1\n"+
+			"pocket_node:\n"+
+			"  query_node_rpc_url: http://localhost:26657\n"+
+			"  query_node_grpc_url: localhost:9090\n"+
+			"keys:\n"+
+			"  keys_file: /path/to/keys.yaml\n"+
+			"transaction:\n"+
+			"  disable_inclusion_reconciler: true\n"), 0o600))
+
+	cfg, err := LoadConfig(path)
+	require.NoError(t, err, "a retired key must NOT fail the load: warn-and-start is deliberate")
+
+	warnings := strings.Join(cfg.Warnings(), "\n")
+
+	require.Contains(t, warnings, "disable_inclusion_reconciler")
+	require.Contains(t, warnings, "REMOVED",
+		"the switch is gone, not merely unrecognised")
+	require.Contains(t, warnings, "fire-once",
+		"the sentence has to name what that deployment WAS doing -- an operator who "+
+			"set this to true was running without verification or rebroadcast, and "+
+			"telling them only that a key vanished hides the loss it was causing")
+	require.Contains(t, warnings, "gas",
+		"removing a switch IMPOSES a cost the operator did not choose -- the resends "+
+			"pay gas and the verification queries their node once per supplier per "+
+			"block. A tombstone that only lists what they gain is an advert")
+	require.Contains(t, warnings, "max_rebroadcasts",
+		"an operator who wanted the reconciler quiet needs the surviving knob that "+
+			"gets closest to it, or the warning leaves them with no move")
+}
+
 // TestLoadConfig_AnUnknownKeyIsReportedButDoesNotFailTheLoad covers the case no
 // tombstone could ever have covered: a key that was never a field. This is the
 // shape that cost real money -- config.miner.example.yaml shipped a `suppliers:`

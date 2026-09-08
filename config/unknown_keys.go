@@ -86,6 +86,16 @@ var retiredKeys = map[string]string{
 		"increase, not one transaction per session. If it said \"true\", nothing changes: that is now the only " +
 		"behaviour. Claims went the other way and lost their switch too: they are ALWAYS batched by " +
 		"session end height, and disable_claim_batching is retired -- see its own entry above",
+
+	"disable_inclusion_reconciler": "inclusion reconciliation is now MANDATORY and there is no way to " +
+		"turn it off. If this said \"true\", that deployment was running fire-once: a claim or proof accepted " +
+		"into the mempool but never included in a block was never verified and never re-sent, which is exactly " +
+		"how a CLAIM_MISSING / PROOF_MISSING forfeit happens in silence. Two costs arrive with the switch and " +
+		"were NOT chosen by whoever set it: the reconciler queries the chain once per owned supplier per block " +
+		"(AllClaims/AllProofs), and every re-broadcast is a transaction that pays gas. If that is why it was " +
+		"off, max_rebroadcasts: 0 is the surviving knob -- observe-only, it verifies and records the outcome " +
+		"but never re-sends. If this said \"false\" (the default), nothing changes: that is now the only " +
+		"behaviour",
 }
 
 // UnknownKeys reports every key in data that probe's type does not declare.

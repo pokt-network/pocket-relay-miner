@@ -371,17 +371,6 @@ type TransactionConfig struct {
 	// (guard enabled — recommended for production).
 	DisablePreProofClaimVerification bool `yaml:"disable_pre_proof_claim_verification,omitempty"`
 
-	// DisableInclusionReconciler turns off the block-driven inclusion
-	// reconciler (claim + proof on-chain verification + in-window rebroadcast).
-	// When enabled (the default) the miner persists each built claim/proof,
-	// verifies inclusion via x/proof module state once per block (works on
-	// nodes with tx_index=null), records claim/proof_on_chain_outcome on
-	// submission tracker records, emits the inclusion-outcome / rebroadcast
-	// metrics, and re-broadcasts a still-missing claim/proof while its window
-	// is open. This is the fix for silent CLAIM_MISSING / PROOF_MISSING
-	// forfeits. Default: false (reconciler enabled).
-	DisableInclusionReconciler bool `yaml:"disable_inclusion_reconciler,omitempty"`
-
 	// InclusionReconcilerMaxConcurrent bounds the per-block group-reconcile
 	// worker pool (one task per owned supplier per block). Default: 64.
 	InclusionReconcilerMaxConcurrent int `yaml:"inclusion_reconciler_max_concurrent,omitempty"`
@@ -410,7 +399,6 @@ type TransactionConfig struct {
 // operator set. Callers pass the result to NewInclusionReconciler.
 func (c TransactionConfig) InclusionReconcilerConfig() InclusionReconcilerConfig {
 	cfg := DefaultInclusionReconcilerConfig()
-	cfg.Disabled = c.DisableInclusionReconciler
 	if c.InclusionReconcilerMaxConcurrent > 0 {
 		cfg.MaxConcurrent = c.InclusionReconcilerMaxConcurrent
 	}

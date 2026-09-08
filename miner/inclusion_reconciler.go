@@ -132,8 +132,6 @@ type MessageResubmitter interface {
 
 // InclusionReconcilerConfig configures the block-driven inclusion reconciler.
 type InclusionReconcilerConfig struct {
-	// Disabled turns the reconciler off entirely.
-	Disabled bool
 	// MaxConcurrent bounds the per-block group-reconcile worker pool. Default 64.
 	//
 	// It is capped by the transaction client's concurrency limit at
@@ -307,12 +305,10 @@ func NewInclusionReconciler(
 		claimPhase:   claimPhase,
 		proofPhase:   proofPhase,
 	}
-	if !cfg.Disabled {
-		// Blocking submit (no non-blocking drop): the active-group count is
-		// bounded by #suppliers, so the pool drains within a block; we never
-		// want to drop a group silently.
-		r.pool = pond.NewPool(cfg.MaxConcurrent)
-	}
+	// Blocking submit (no non-blocking drop): the active-group count is
+	// bounded by #suppliers, so the pool drains within a block; we never
+	// want to drop a group silently.
+	r.pool = pond.NewPool(cfg.MaxConcurrent)
 	return r
 }
 
@@ -321,7 +317,13 @@ func NewInclusionReconciler(
 // new block is skipped — the next block catches up. Driven by the miner's block
 // event stream.
 func (r *InclusionReconciler) OnBlock(height int64) {
-	if r == nil || r.cfg.Disabled || r.pool == nil {
+	// Nothing reaches this nil check today, in either direction: production binds
+	// the method value after the reconciler is assigned, and every test receiver
+	// is constructed. It stays only until the wiring settles whether any path can
+	// leave the miner alive with a nil reconciler -- if none can, it goes. The
+	// guards that actually work are r.closed under the mutex and the
+	// single-flight below.
+	if r == nil {
 		return
 	}
 	r.mu.Lock()
@@ -791,8 +793,6 @@ func (r *InclusionReconciler) Close() error {
 		return nil
 	}
 	r.closed = true
-	if r.pool != nil {
-		r.pool.StopAndWait()
-	}
+	r.pool.StopAndWait()
 	return nil
 }
