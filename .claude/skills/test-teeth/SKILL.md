@@ -625,6 +625,26 @@ against a callee that later changes is unverified again, and nothing warns** —
 series. It held, but by luck. In an item spanning several commits, re-verify the
 reason when the callee is touched.
 
+## A line that entered by the SUPERVISOR's suggestion has nobody to inject against it
+
+"The one who writes does not audit alone" has an axis nobody had written down:
+**proposing.** A line suggested by whoever supervises arrives wrapped in their
+authority, and then neither side injects against it. The implementer does not --
+it is not their code and not their idea. The supervisor cannot ask for it without
+that being, in effect, auditing themselves through someone else.
+
+Measured 2026-09-07, on the money path. A floor was added to a resend schedule so
+a delayed first attempt would compress into the last allowed block instead of
+dropping the second attempt entirely. The reasoning was checked by arithmetic and
+is right. Four injections ran against that function that night and **not one
+touched the floor**, because none of them was aimed at a line the supervisor had
+proposed. Deleting the whole block -- restoring "abandon the attempt" -- left
+every test GREEN.
+
+**The rule: whoever proposes runs the injection against their own proposal, and
+says so when it comes back green.** Then someone else writes the test, because the
+author of a proposal writing its only proof is the same failure one step later.
+
 ## The one-line test for whether this ran
 
 The report names the defect that was injected, quotes the failure showing it named
