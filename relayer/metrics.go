@@ -65,8 +65,10 @@ var (
 	// rpc_type endpoint). The relay is still served and is claimable — the chain
 	// keys claims by (supplier, session) and never sees the transport — so this
 	// is a visibility signal, not a rejection: declare the endpoint on-chain so
-	// PATH routes it deliberately. Fires only when the miner has published the
-	// per-transport stake view (StakedEndpoints); silent on an old miner.
+	// PATH routes it deliberately. It also fires for every relay of a supplier
+	// whose miner is too old to publish the per-transport stake view, because an
+	// empty view now declares nothing; the deduped warn names which of the two
+	// cases it is.
 	// Cardinality is service_id × rpc_type (bounded); the supplier is in the
 	// deduped warn log, not a label.
 	undeclaredTransportServed = observability.RelayerFactory.NewCounterVec(
@@ -99,7 +101,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_published_total",
-			Help:      "Total number of mined relays published to Redis",
+			Help:      "Total number of mined relays published to the store",
 		},
 		[]string{"service_id", "supplier"},
 	)
@@ -249,12 +251,31 @@ var (
 		[]string{"service_id", "mode"}, // mode: eager, optimistic
 	)
 
+	// relayMeterUnbilled counts relays that were SERVED and submitted for mining
+	// without their stake being metered, because the meter could not answer.
+	//
+	// It exists because that outcome has no other signal. In optimistic mode the
+	// meter runs after the response is out, so refusing is not an option -- the
+	// relay is gone -- and dropping it, which is what happened until
+	// 2026-08-31, threw away work whose backend call was already paid for. What
+	// is left is over-servicing, bounded by the application's stake and settled
+	// by the chain, and this is the series that says how much of it happened.
+	relayMeterUnbilled = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_meter_unbilled_total",
+			Help:      "Relays served and submitted for mining without being metered (the meter could not answer)",
+		},
+		[]string{"service_id"},
+	)
+
 	relayMeterLatency = observability.RelayerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relay_meter_latency_seconds",
-			Help:      "Latency of relay meter check and consume operations (Redis calls)",
+			Help:      "Latency of relay meter check and consume operations (store calls)",
 			Buckets:   observability.FineGrainedLatencyBuckets,
 		},
 		[]string{"service_id", "mode"}, // mode: eager, optimistic
@@ -601,7 +622,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "grpc_relays_published_total",
-			Help:      "Total number of gRPC relays published to Redis",
+			Help:      "Total number of gRPC relays published to the store",
 		},
 		[]string{"service_id"},
 	)
@@ -637,12 +658,12 @@ var (
 		[]string{"supplier", "service_id"},
 	)
 
-	relayMeterRedisErrors = observability.RelayerFactory.NewCounterVec(
+	relayMeterErrors = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "relay_meter_redis_errors_total",
-			Help:      "Total relay meter Redis errors",
+			Name:      "relay_meter_errors_total",
+			Help:      "Total relay meter errors, whether the meter's own store or a chain query it depends on",
 		},
 		[]string{"operation"},
 	)

@@ -46,10 +46,31 @@ This file (CLAUDE.md) provides AI-specific guidance. For general contribution ru
 - When reporting a fix: show the before/after and the test that proves it.
 - When reporting "no issues found": explain what you checked and how.
 
-## Before the First Edit — State the Success Criterion
+## Before the First Edit — THE COUNCIL, then the Success Criterion
 
-**Invoke the `andrej-karpathy-skills:karpathy-guidelines` skill before the first
-edit of any coding task.** Not conditional on the task looking small.
+**Invoke the council before choosing the approach to ANY fix or feature, and
+invoke the `andrej-karpathy-skills:karpathy-guidelines` skill before the first
+edit.** Both, in that order, and neither conditional on the task looking small.
+
+The council reads the SPACE OF APPROACHES before you pick one. A code review
+afterwards does NOT fill its slot: a review reads code you already wrote, so the
+approach it critiques is the one you already committed to. If no external
+provider is configured, run the local council (`claude-council:local-council-execution`)
+and say in the report that its members share a model, so their agreement is a
+common prior to stress-test, not corroboration.
+
+Measured 2026-08-30, and it is why this paragraph moved here: the council rule
+lived only in `.claude/skills/item/SKILL.md`, and `CLAUDE.md` did not mention the
+council at all. That session invoked karpathy -- because THIS file demands it
+unconditionally -- edited `relayer/config.go`, committed, and only then ran the
+council. The council immediately found that the fix touched one of THREE
+forwarding paths (`relayer/proxy.go` and `relayer/healthcheck.go` never normalize
+a backend URL), so the commit turned "invalid config that fails on the first
+relay" into "config certified valid by `relayer validate` that fails on the first
+relay" -- worse than not fixing it. The commit was reverted. A `feedback_*` memory
+saying exactly this was auto-loaded in that session's context and did not fire
+either: **a rule only executes from the place that is read before anyone chooses
+what to invoke.**
 
 Its rule 4 is the load-bearing one here: **write the success criterion down
 before starting, as something checkable.** "It works" is not one. "Level 2 passes
@@ -368,11 +389,15 @@ If any gate fails, fix it before reporting completion. Do NOT report "done" with
 - ✅ Tests: golden-string tests pin each KB method's default output
   (changing a constant is a breaking cross-version change — mixed fleets stop
   hearing each other), and a pattern test asserts every SCAN pattern matches
-  only its own family. **There is NO collision test** — this file claimed one
-  until 2026-08-28 and a grep of `transport/redis/` and `internal/` found none;
-  `allKeyBuilderOutputs` feeds only the golden-string and partial-namespace
-  tests. It is worth writing: with `supplier_prefix: suppliers`,
-  `SupplierStateKey` and `SupplierRegistryKey` produce the same key, two writers
+  only its own family. **The collision test now EXISTS** — measured 2026-09-01:
+  `TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace`
+  (`transport/redis/namespace_test.go:285`) walks the KeyBuilder by reflection,
+  and `TestKeyBuilder_PatternsMatchOnlyTheirOwnFamily` (`:401`) is its glob half.
+  This file said the opposite until today, because the test landed inside the
+  stack and nobody came back to the sentence. What it CANNOT see, by
+  construction, is a collision that only appears with specific arguments: it
+  passes uniform ones. The case that motivated it — `SupplierStateKey` and
+  `SupplierRegistryKey` colliding under `supplier_prefix: suppliers`, two writers
   and mutually unparseable readers.
 
 ### Key Patterns
@@ -863,7 +888,13 @@ on known working-doc paths. If it fires, untrack with
 
 ### Failure Scenarios
 
-- **Redis Unavailable**: Relayer degrades gracefully (fail-open or fail-closed based on config)
+- **Redis Unavailable**: the relayer FAILS CLOSED on admission — there is no
+  setting for this any more. The knob that existed (`relay_meter.fail_behavior`)
+  was erased on 2026-08-31 and left a tombstone that warns; a relay whose budget
+  the meter cannot verify is refused, because the store holds what the session
+  already consumed. A CHAIN query blinking is the other half and is NOT the same:
+  that one is served and the miner arbitrates. See `relayer/relay_meter.go`,
+  `ErrMeterStoreUnavailable`.
 - **Blockchain Unreachable**: Miner retries with exponential backoff
 - **Leader Failure**: Standby takes over within 5 seconds
 - **High Latency**: Circuit breaker prevents cascading failures

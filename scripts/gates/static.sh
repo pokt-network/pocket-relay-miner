@@ -222,4 +222,49 @@ else
 fi
 gate_exercised coverage skill_contracts "$skill_count"
 
+gate_step "unreachable functions"
+
+# A function nobody calls is not merely clutter here: it is how an assertion
+# stops running without anything going red. Measured 2026-08-30:
+# RecordClaimLeafStats compared the leaves we claim against the relays we
+# counted and bumped claim_leaf_collapse_total on a shortfall -- money we served
+# and will not be billed for. Its only caller was deleted with claim_pipeline.go
+# on 2026-06-24. For four months golangci-lint passed (its `unused` check does
+# not report EXPORTED identifiers), CI passed, and the repo's own metric check
+# passed (it counts REFERENCES to the metric variable, and the dead recorder
+# mentions it). docs/CLAIM_LEAF_MODEL.md meanwhile told operators to watch a
+# counter that could not move.
+#
+# Roots are the production mains, and TEST FILES ARE NOT ROOTS. That is the
+# whole point: a function alive only because its own unit test calls it is the
+# self-deception this check exists to catch, and it is precisely the shape that
+# survived above.
+if ! command -v deadcode >/dev/null 2>&1 && [ ! -x "$(go env GOPATH)/bin/deadcode" ]; then
+    gate_skip "deadcode not installed -- go install golang.org/x/tools/cmd/deadcode@latest"
+else
+    deadcode_bin="$(command -v deadcode || echo "$(go env GOPATH)/bin/deadcode")"
+    allowlist="scripts/gates/deadcode-allowlist.txt"
+    dc_out="$(mktemp)"; dc_allowed="$(mktemp)"; dc_new="$(mktemp)"
+    trap 'rm -f "$dc_out" "$dc_allowed" "$dc_new"' RETURN 2>/dev/null || true
+
+    # "file.go Func", no line numbers: the allowlist must not churn on every edit.
+    "$deadcode_bin" -filter 'pocket-relay-miner' ./... 2>/dev/null |
+        sed 's/^\(.*\):[0-9]*:[0-9]*: unreachable func: \(.*\)$/\1 \2/' | sort -u > "$dc_out"
+    grep -v '^#' "$allowlist" 2>/dev/null | grep -v '^[[:space:]]*$' |
+        sed 's/[[:space:]]*#.*$//' | sed 's/[[:space:]]*$//' | sort -u > "$dc_allowed"
+    comm -23 "$dc_out" "$dc_allowed" > "$dc_new"
+
+    dc_total="$(wc -l < "$dc_out" | tr -d " ")"
+    dc_newcount="$(wc -l < "$dc_new" | tr -d " ")"
+    if [ "${dc_newcount:-0}" -gt 0 ]; then
+        gate_fail "$dc_newcount function(s) unreachable from the production mains and not in $allowlist"
+        sed 's/^/         /' "$dc_new"
+        printf '         Either wire it up, delete it, or add it with the reason why it stays.\n'
+    else
+        gate_pass "no new unreachable functions ($dc_total known, frozen in the allowlist)"
+    fi
+    gate_exercised coverage unreachable_known "$dc_total"
+    rm -f "$dc_out" "$dc_allowed" "$dc_new"
+fi
+
 gate_verdict "static"

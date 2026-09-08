@@ -74,7 +74,8 @@ Examples:
   # Hot-safe cleanup of ALL regenerable cache keys (safe with live traffic):
   # deletes ha:cache:* (except repopulation locks) plus contaminated
   # ha:supplier:* entries, preserves healthy supplier entries (deleting them
-  # would 503 relays until the miner reconcile rewrites them), then publishes
+  # would serve that supplier UNVERIFIED until the miner reconcile rewrites
+  # them), then publishes
   # a clear-all event so every instance drops its L1 immediately.
   # State keys (sessions, SMST, WAL, registry) are never touched.
   pocket-relay-miner redis cache --type all --invalidate --all [--dry-run|--yes]`,
@@ -298,19 +299,25 @@ func confirmProceed() bool {
 	return strings.TrimSpace(resp) == "y"
 }
 
-// supplierWipeWarning is shown before ANY supplier-state invalidation:
-// relayers return 503 on a supplier cache miss (fail-open covers Redis
-// errors only), so deleting a healthy entry rejects that supplier's relays
-// until the miner reconcile rewrites it.
+// supplierWipeWarning is shown before ANY supplier-state invalidation.
+//
+// Deleting a healthy entry does not reject that supplier's relays: an absent
+// entry reads as the boot window, and decideSupplierServe serves it
+// OPTIMISTICALLY for a supplier whose key this relayer holds. What it does is
+// remove the check -- until the miner rewrites the entry, relays are served
+// against state nobody verified, including for a supplier that is unstaked or
+// jailed, and those are not claimable. Corrected 2026-08-31: this said the
+// relayer returns 503, which stopped being true when optimistic serve landed.
 func supplierWipeWarning() {
-	fmt.Printf("WARNING: relayers return 503 on supplier cache misses; wiping healthy\n")
-	fmt.Printf("supplier entries rejects their relays until the miner reconcile rewrites\n")
-	fmt.Printf("them (up to ~60s). For a hot-safe cleanup use --type all instead.\n")
+	fmt.Printf("WARNING: wiping a healthy supplier entry does not stop its relays -- it makes them\n")
+	fmt.Printf("         served UNVERIFIED until the miner rewrites the entry (up to ~60s),\n")
+	fmt.Printf("         unstaked and jailed suppliers included, and those relays are not\n")
+	fmt.Printf("         claimable. For a hot-safe cleanup use --type all instead.\n")
 }
 
 // confirmSupplierInvalidation gates every non---all supplier invalidation
-// path behind the 503 warning + prompt (unless --yes). Returns false when
-// the operator aborted.
+// path behind the unverified-serve warning + prompt (unless --yes). Returns
+// false when the operator aborted.
 func confirmSupplierInvalidation(cacheType string, count int, yes bool) bool {
 	if cacheType != "supplier" || yes {
 		return true
@@ -349,7 +356,7 @@ func invalidationPayload(cacheType, key string) string {
 
 // invalidateCache is the single-key invalidate path. Output is preserved
 // byte-identical to prior releases for backward compatibility (except the
-// supplier confirmation gate, which guards a real 503 window).
+// supplier confirmation gate, which guards a real unverified-serve window).
 func invalidateCache(ctx context.Context, client *DebugRedisClient, cacheType, key string, yes bool) error {
 	if !confirmSupplierInvalidation(cacheType, 1, yes) {
 		return nil
@@ -428,8 +435,9 @@ func invalidateAll(ctx context.Context, client *DebugRedisClient, cacheType stri
 	}
 
 	// Suppliers always require confirmation regardless of count: wiping even
-	// one healthy supplier entry rejects that supplier's relays (503) until
-	// the miner reconcile rewrites it. Other types only prompt above the
+	// one healthy supplier entry makes that supplier's relays be served
+	// against unverified state until the miner reconcile rewrites it, and
+	// those relays are not claimable. Other types only prompt above the
 	// bulk threshold.
 	needsConfirm := total > bulkConfirmThreshold || cacheType == "supplier"
 	if needsConfirm && !yes {

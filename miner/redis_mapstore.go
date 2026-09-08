@@ -111,7 +111,7 @@ func NewRedisMapStore(
 func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	start := time.Now()
 	defer func() {
-		observability.SMSTRedisOperationDuration.WithLabelValues("get").Observe(time.Since(start).Seconds())
+		observability.SMSTStoreOperationDuration.WithLabelValues("get").Observe(time.Since(start).Seconds())
 	}()
 
 	// Convert key to hex string for Redis field name
@@ -119,23 +119,23 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 
 	val, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
 	if err == redis.Nil {
-		observability.SMSTRedisOperations.WithLabelValues("get", "not_found").Inc()
+		observability.SMSTStoreOperations.WithLabelValues("get", "not_found").Inc()
 		return nil, fmt.Errorf("%w: field=%s hash=%s", ErrSMSTNodeMissing, field, s.hashKey)
 	}
 	if err != nil {
-		observability.SMSTRedisOperations.WithLabelValues("get", "error").Inc()
-		observability.SMSTRedisErrors.WithLabelValues("get", "redis_error").Inc()
+		observability.SMSTStoreOperations.WithLabelValues("get", "error").Inc()
+		observability.SMSTStoreErrors.WithLabelValues("get", "store_error").Inc()
 		return nil, err
 	}
 	// Defense-in-depth: a zero-length payload would also panic the smt
 	// library (data[:1] in isLeafNode). Reject explicitly so we never
 	// hand an empty slice up the stack.
 	if len(val) == 0 {
-		observability.SMSTRedisOperations.WithLabelValues("get", "not_found").Inc()
+		observability.SMSTStoreOperations.WithLabelValues("get", "not_found").Inc()
 		return nil, fmt.Errorf("%w: empty payload for field=%s hash=%s",
 			ErrSMSTNodeMissing, field, s.hashKey)
 	}
-	observability.SMSTRedisOperations.WithLabelValues("get", "success").Inc()
+	observability.SMSTStoreOperations.WithLabelValues("get", "success").Inc()
 	return val, nil
 }
 
@@ -179,16 +179,16 @@ func (s *RedisMapStore) Set(key, value []byte) error {
 	// Not in pipeline mode, execute immediately
 	start := time.Now()
 	defer func() {
-		observability.SMSTRedisOperationDuration.WithLabelValues("set").Observe(time.Since(start).Seconds())
+		observability.SMSTStoreOperationDuration.WithLabelValues("set").Observe(time.Since(start).Seconds())
 	}()
 
 	err := s.redisClient.HSet(s.ctx, s.hashKey, field, value).Err()
 	if err != nil {
-		observability.SMSTRedisOperations.WithLabelValues("set", "error").Inc()
-		observability.SMSTRedisErrors.WithLabelValues("set", "redis_error").Inc()
+		observability.SMSTStoreOperations.WithLabelValues("set", "error").Inc()
+		observability.SMSTStoreErrors.WithLabelValues("set", "store_error").Inc()
 		return err
 	}
-	observability.SMSTRedisOperations.WithLabelValues("set", "success").Inc()
+	observability.SMSTStoreOperations.WithLabelValues("set", "success").Inc()
 	return nil
 }
 
@@ -229,16 +229,16 @@ func (s *RedisMapStore) Delete(key []byte) error {
 
 	start := time.Now()
 	defer func() {
-		observability.SMSTRedisOperationDuration.WithLabelValues("delete").Observe(time.Since(start).Seconds())
+		observability.SMSTStoreOperationDuration.WithLabelValues("delete").Observe(time.Since(start).Seconds())
 	}()
 
 	err := s.redisClient.HDel(s.ctx, s.hashKey, field).Err()
 	if err != nil {
-		observability.SMSTRedisOperations.WithLabelValues("delete", "error").Inc()
-		observability.SMSTRedisErrors.WithLabelValues("delete", "redis_error").Inc()
+		observability.SMSTStoreOperations.WithLabelValues("delete", "error").Inc()
+		observability.SMSTStoreErrors.WithLabelValues("delete", "store_error").Inc()
 		return err
 	}
-	observability.SMSTRedisOperations.WithLabelValues("delete", "success").Inc()
+	observability.SMSTStoreOperations.WithLabelValues("delete", "success").Inc()
 	return nil
 }
 
@@ -248,16 +248,16 @@ func (s *RedisMapStore) Delete(key []byte) error {
 func (s *RedisMapStore) Len() (int, error) {
 	start := time.Now()
 	defer func() {
-		observability.SMSTRedisOperationDuration.WithLabelValues("len").Observe(time.Since(start).Seconds())
+		observability.SMSTStoreOperationDuration.WithLabelValues("len").Observe(time.Since(start).Seconds())
 	}()
 
 	count, err := s.redisClient.HLen(s.ctx, s.hashKey).Result()
 	if err != nil {
-		observability.SMSTRedisOperations.WithLabelValues("len", "error").Inc()
-		observability.SMSTRedisErrors.WithLabelValues("len", "redis_error").Inc()
+		observability.SMSTStoreOperations.WithLabelValues("len", "error").Inc()
+		observability.SMSTStoreErrors.WithLabelValues("len", "store_error").Inc()
 		return 0, err
 	}
-	observability.SMSTRedisOperations.WithLabelValues("len", "success").Inc()
+	observability.SMSTStoreOperations.WithLabelValues("len", "success").Inc()
 	return int(count), nil
 }
 
@@ -268,16 +268,16 @@ func (s *RedisMapStore) Len() (int, error) {
 func (s *RedisMapStore) ClearAll() error {
 	start := time.Now()
 	defer func() {
-		observability.SMSTRedisOperationDuration.WithLabelValues("clear_all").Observe(time.Since(start).Seconds())
+		observability.SMSTStoreOperationDuration.WithLabelValues("clear_all").Observe(time.Since(start).Seconds())
 	}()
 
 	err := s.redisClient.Del(s.ctx, s.hashKey).Err()
 	if err != nil {
-		observability.SMSTRedisOperations.WithLabelValues("clear_all", "error").Inc()
-		observability.SMSTRedisErrors.WithLabelValues("clear_all", "redis_error").Inc()
+		observability.SMSTStoreOperations.WithLabelValues("clear_all", "error").Inc()
+		observability.SMSTStoreErrors.WithLabelValues("clear_all", "store_error").Inc()
 		return err
 	}
-	observability.SMSTRedisOperations.WithLabelValues("clear_all", "success").Inc()
+	observability.SMSTStoreOperations.WithLabelValues("clear_all", "success").Inc()
 	return nil
 }
 
@@ -319,7 +319,7 @@ func (s *RedisMapStore) FlushPipeline() error {
 
 	start := time.Now()
 	defer func() {
-		observability.SMSTRedisOperationDuration.WithLabelValues("flush_pipeline").Observe(time.Since(start).Seconds())
+		observability.SMSTStoreOperationDuration.WithLabelValues("flush_pipeline").Observe(time.Since(start).Seconds())
 	}()
 
 	// Build field-value pairs for HSET
@@ -332,15 +332,15 @@ func (s *RedisMapStore) FlushPipeline() error {
 	// Execute batched HSET
 	err := s.redisClient.HSet(s.ctx, s.hashKey, args...).Err()
 	if err != nil {
-		observability.SMSTRedisOperations.WithLabelValues("flush_pipeline", "error").Inc()
-		observability.SMSTRedisErrors.WithLabelValues("flush_pipeline", "redis_error").Inc()
+		observability.SMSTStoreOperations.WithLabelValues("flush_pipeline", "error").Inc()
+		observability.SMSTStoreErrors.WithLabelValues("flush_pipeline", "store_error").Inc()
 		s.pipelineEnabled = false
 		return fmt.Errorf("failed to flush pipeline: %w", err)
 	}
 
 	// Track metrics (count as bulk operation)
-	observability.SMSTRedisOperations.WithLabelValues("flush_pipeline", "success").Inc()
-	observability.SMSTRedisOperations.WithLabelValues("set", "success").Add(float64(len(s.pipelineBuffer)))
+	observability.SMSTStoreOperations.WithLabelValues("flush_pipeline", "success").Inc()
+	observability.SMSTStoreOperations.WithLabelValues("set", "success").Add(float64(len(s.pipelineBuffer)))
 
 	// Clear buffer and disable pipeline mode
 	s.pipelineBuffer = make(map[string][]byte)
@@ -386,7 +386,7 @@ func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 
 	start := time.Now()
 	defer func() {
-		observability.SMSTRedisOperationDuration.
+		observability.SMSTStoreOperationDuration.
 			WithLabelValues("flush_orphans_live_root").Observe(time.Since(start).Seconds())
 	}()
 
@@ -412,18 +412,18 @@ func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 	}
 
 	if _, err := pipe.Exec(ctx); err != nil {
-		observability.SMSTRedisOperations.
+		observability.SMSTStoreOperations.
 			WithLabelValues("flush_orphans_live_root", "error").Inc()
-		observability.SMSTRedisErrors.
-			WithLabelValues("flush_orphans_live_root", "redis_error").Inc()
+		observability.SMSTStoreErrors.
+			WithLabelValues("flush_orphans_live_root", "store_error").Inc()
 		// Preserve orphanBuffer so the next checkpoint can retry.
 		return fmt.Errorf("atomic orphan+live_root flush: %w", err)
 	}
 
-	observability.SMSTRedisOperations.
+	observability.SMSTStoreOperations.
 		WithLabelValues("flush_orphans_live_root", "success").Inc()
 	if orphanCount > 0 {
-		observability.SMSTRedisOperations.
+		observability.SMSTStoreOperations.
 			WithLabelValues("delete", "success").Add(float64(orphanCount))
 	}
 

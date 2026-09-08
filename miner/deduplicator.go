@@ -131,7 +131,7 @@ func (d *RedisDeduplicator) IsDuplicate(ctx context.Context, relayHash []byte, s
 		return false, fmt.Errorf("failed to check Redis: %w", err)
 	}
 	if exists {
-		dedupRedisCacheHits.Inc()
+		dedupCacheHits.Inc()
 		return true, nil
 	}
 	dedupMisses.Inc()

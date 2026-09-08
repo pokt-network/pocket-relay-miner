@@ -256,10 +256,6 @@ relay_meter:
   enabled: true
 
 
-  # Fail behavior when Redis is unavailable
-  # - "open": Allow relays when Redis down (prioritize availability)
-  # - "closed": Reject relays when Redis down (prioritize safety)
-  fail_behavior: "open"
 
   # Cache TTL for all Redis data (streams, params, app stakes, meters)
   # Redis TTL handles automatic expiration - no cleanup goroutines needed.

@@ -69,9 +69,26 @@ Three metrics in `miner/metrics.go` partition the question:
 A healthy service has `claim_leaf_collapse_total == 0`. When it ticks up,
 the matching session also emits a `WARN` with `claim_leaf_count` and
 `coordinator_relay_count` so you can find the culprit without a PromQL
-excursion. If you're testing from the CLI and see a collapse, the tester
-is the cause — this is what made the "1000 → 3 on-chain" gap look like a
-miner bug in April 2026; it wasn't.
+excursion.
+
+**A tick means one thing for certain and does not say why: the claim carries
+fewer leaves than the relays we counted while serving, so some of that work
+will not be billed.** There are at least two causes and they need opposite
+responses:
+
+- **Byte-identical relays collapsing onto one SMST key.** Benign, and the case
+  this counter was originally written for: a load generator replaying the same
+  payload, or a `ping`/`pong` subscription, produces relays that share a
+  RelayHash. This is what made the "1000 → 3 on-chain" gap look like a miner
+  bug in April 2026; it wasn't.
+- **Relays that reached the coordinator's counter but not the flushed tree.**
+  Real unbilled work. Measured 2026-08-19: five claims where the coordinator
+  had counted 4 and the root held 1, during a supplier-lease handoff right
+  after a fleet bring-up. Fifteen relays served and never paid, with
+  `claim_success` and `proof_success` both true on all 94 claims.
+
+So do not assume the tester. Check whether the run had distinct payloads: if it
+did, the collapse is unbilled work, not dedup.
 
 ## Future options (not in this repo alone)
 

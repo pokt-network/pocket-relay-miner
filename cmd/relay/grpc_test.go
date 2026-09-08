@@ -77,7 +77,7 @@ func TestVerifyGRPCRelayPayload_OK(t *testing.T) {
 	// {field 1 (height): varint 42}
 	resp := makeGRPCRelayResponse(t, 200, "0", makeGRPCFrame(t, []byte{0x08, 0x2a}))
 
-	require.NoError(t, verifyGRPCRelayPayload(resp))
+	require.NoError(t, verifyGRPCRelayPayload(resp, true))
 }
 
 // TestVerifyGRPCRelayPayload_GrpcStatusNonZero verifies a non-zero grpc-status
@@ -85,7 +85,7 @@ func TestVerifyGRPCRelayPayload_OK(t *testing.T) {
 func TestVerifyGRPCRelayPayload_GrpcStatusNonZero(t *testing.T) {
 	resp := makeGRPCRelayResponse(t, 200, "12", makeGRPCFrame(t, []byte{0x08, 0x2a}))
 
-	err := verifyGRPCRelayPayload(resp)
+	err := verifyGRPCRelayPayload(resp, true)
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "grpc-status")
@@ -96,7 +96,7 @@ func TestVerifyGRPCRelayPayload_GrpcStatusNonZero(t *testing.T) {
 func TestVerifyGRPCRelayPayload_MissingGrpcStatus(t *testing.T) {
 	resp := makeGRPCRelayResponse(t, 200, "", makeGRPCFrame(t, []byte{0x08, 0x2a}))
 
-	err := verifyGRPCRelayPayload(resp)
+	err := verifyGRPCRelayPayload(resp, true)
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "grpc-status")
@@ -116,7 +116,7 @@ func TestVerifyGRPCRelayPayload_CaseInsensitiveGrpcStatus(t *testing.T) {
 	require.NoError(t, err)
 	resp := &servicetypes.RelayResponse{Payload: payloadBz}
 
-	require.NoError(t, verifyGRPCRelayPayload(resp))
+	require.NoError(t, verifyGRPCRelayPayload(resp, true))
 }
 
 // TestVerifyGRPCRelayPayload_BadFrame verifies a body too short to be a gRPC
@@ -124,7 +124,7 @@ func TestVerifyGRPCRelayPayload_CaseInsensitiveGrpcStatus(t *testing.T) {
 func TestVerifyGRPCRelayPayload_BadFrame(t *testing.T) {
 	resp := makeGRPCRelayResponse(t, 200, "0", []byte{0x00, 0x00, 0x00})
 
-	err := verifyGRPCRelayPayload(resp)
+	err := verifyGRPCRelayPayload(resp, true)
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "frame")
@@ -135,7 +135,7 @@ func TestVerifyGRPCRelayPayload_BadFrame(t *testing.T) {
 func TestVerifyGRPCRelayPayload_HTTPError(t *testing.T) {
 	resp := makeGRPCRelayResponse(t, 415, "0", makeGRPCFrame(t, []byte{0x08, 0x2a}))
 
-	err := verifyGRPCRelayPayload(resp)
+	err := verifyGRPCRelayPayload(resp, true)
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "415")
@@ -143,7 +143,7 @@ func TestVerifyGRPCRelayPayload_HTTPError(t *testing.T) {
 
 // TestVerifyGRPCRelayPayload_NilResponse verifies the nil guard.
 func TestVerifyGRPCRelayPayload_NilResponse(t *testing.T) {
-	err := verifyGRPCRelayPayload(nil)
+	err := verifyGRPCRelayPayload(nil, true)
 
 	require.Error(t, err)
 	require.ErrorContains(t, err, "nil relay response")

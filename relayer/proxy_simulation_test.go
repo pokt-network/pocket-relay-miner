@@ -117,7 +117,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 		clientPool:         clients,
 		clientPoolFallback: fallback,
 		responseSigner:     signer,
-		supplierCache:      cache.NewSupplierCache(logger, rc, cache.SupplierCacheConfig{FailOpen: true}),
+		supplierCache:      cache.NewSupplierCache(logger, rc, cache.SupplierCacheConfig{}),
 		publisher:          pub,
 		metricRecorder:     NewMetricRecorder(logger, pool),
 		bufferPool:         NewBufferPool(1 << 20),

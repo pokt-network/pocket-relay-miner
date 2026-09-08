@@ -3,6 +3,7 @@ package relayer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"math/big"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
-	"github.com/pokt-network/poktroll/app/pocket"
 	"github.com/pokt-network/poktroll/pkg/client"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -48,16 +48,17 @@ type ServiceFactorProvider interface {
 	GetServiceFactor(ctx context.Context, serviceID string) (float64, bool)
 }
 
-// FailBehavior determines how the relay meter behaves when Redis is unavailable.
-type FailBehavior string
-
-const (
-	// FailOpen allows relays when Redis is unavailable (higher availability, risk of over-servicing).
-	FailOpen FailBehavior = "open"
-
-	// FailClosed rejects relays when Redis is unavailable (safer, lower availability).
-	FailClosed FailBehavior = "closed"
-)
+// ErrMeterStoreUnavailable marks a metering failure whose cause is the meter's
+// own store, as opposed to a chain query it also depends on.
+//
+// The distinction decides whether a relay is served, so it is derived rather
+// than guessed: it is attached at the call that failed, never inferred from the
+// error text. CheckAndConsumeRelay reaches the store directly AND reaches the
+// chain through getAppStake and the session/shared param clients, so an
+// unclassified failure could be either -- and an unclassified failure is
+// treated as the chain's, because the miner is the final arbiter and a relay it
+// cannot bill is cheaper than a relay never served.
+var ErrMeterStoreUnavailable = errors.New("relay meter store unavailable")
 
 // RelayMeterConfig contains configuration for the relay meter.
 //
@@ -67,22 +68,10 @@ const (
 // namespace config. A second prefix owned by this component is what made
 // `redis meter --session` read a key nothing writes.
 type RelayMeterConfig struct {
-	// FailBehavior determines behavior when Redis is unavailable.
-	// "open" = allow relays (risk over-servicing)
-	// "closed" = reject relays (safer)
-	FailBehavior FailBehavior
 
 	// CacheTTL is the TTL for all cached Redis data (params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	CacheTTL time.Duration
-}
-
-// DefaultRelayMeterConfig returns sensible defaults.
-func DefaultRelayMeterConfig() RelayMeterConfig {
-	return RelayMeterConfig{
-		FailBehavior: FailOpen,      // Default to availability
-		CacheTTL:     2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
-	}
 }
 
 // SessionMeterMeta contains metadata for a session meter stored in Redis.
@@ -180,9 +169,6 @@ func NewRelayMeter(
 	serviceFactorProvider ServiceFactorProvider,
 	config RelayMeterConfig,
 ) *RelayMeter {
-	if config.FailBehavior == "" {
-		config.FailBehavior = FailOpen
-	}
 	if config.CacheTTL == 0 {
 		config.CacheTTL = 2 * time.Hour
 	}
@@ -233,13 +219,21 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 	go m.activeSessionsMetricTicker(m.ctx)
 
 	m.logger.Info().
-		Str("fail_behavior", string(m.config.FailBehavior)).
 		Dur("cache_ttl", m.config.CacheTTL).
 		Msg("relay meter started")
 
 	return nil
 }
 
+// There is deliberately no revert. A relay that misses the mining-difficulty
+// target never becomes a leaf, which looks like something to refund -- it is
+// not. The protocol pays leaves TIMES the difficulty multiplier
+// (poktroll x/tokenomics settle_pending_claims.go: numEstimatedComputeUnits =
+// GetNumEstimatedComputeUnits(relayMiningDifficulty)), so a relay that missed
+// the tree is already represented in what gets paid. Consuming at serve time is
+// correct, and a RevertRelayConsumption existed here for years without a single
+// caller because the case it was written for does not exist.
+//
 // CheckAndConsumeRelay checks if a relay can be served and consumes stake if so.
 // Uses atomic Redis INCRBY for distributed state.
 // Returns:
@@ -267,7 +261,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldServiceID, serviceID).
 			Msg("failed to get relay cost")
-		return m.handleRedisError("get relay cost")
+		return m.handleMeterError("get relay cost", err)
 	}
 
 	// Get or create session meter
@@ -275,7 +269,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
-		return m.handleRedisError("get session meter")
+		return m.handleMeterError("get session meter", err)
 	}
 
 	// Atomically increment consumed stake in Redis. Key is
@@ -286,7 +280,7 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to increment consumed stake")
-		return m.handleRedisError("increment consumed")
+		return m.handleMeterError("increment consumed", fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err))
 	}
 
 	// Check if within limits
@@ -372,61 +366,6 @@ func (m *RelayMeter) CheckRelayHealth(ctx context.Context, serviceID string) err
 	return nil
 }
 
-// RevertRelayConsumption reverts the stake consumption for a relay that wasn't mined.
-//
-// sessionStartHeight MUST be the same value passed to the CheckAndConsumeRelay
-// being reverted. The refund is recomputed rather than remembered, so pricing the
-// revert at a different height refunds a different amount than was charged and
-// permanently desynchronises the session's consumed counter.
-func (m *RelayMeter) RevertRelayConsumption(
-	ctx context.Context,
-	sessionID string,
-	supplierAddress string,
-	serviceID string,
-	sessionStartHeight int64,
-) error {
-	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
-	if err != nil {
-		return nil // Can't calculate, skip revert
-	}
-
-	consumedKey := m.consumedKey(sessionID, supplierAddress)
-	newVal, err := m.redisClient.DecrBy(ctx, consumedKey, relayCostUpokt).Result()
-	if err != nil {
-		return fmt.Errorf("failed to revert consumption: %w", err)
-	}
-
-	// Ensure we don't go negative
-	if newVal < 0 {
-		m.redisClient.Set(ctx, consumedKey, 0, 0)
-	}
-
-	return nil
-}
-
-// GetSessionMeterState returns the current meter state for a session and
-// supplier. The meter is per-(session, supplier); callers that held a
-// prior "per-session" mental model must now specify which supplier's
-// portion they want.
-func (m *RelayMeter) GetSessionMeterState(ctx context.Context, sessionID, supplierAddress string) *SessionMeterState {
-	meta, err := m.getSessionMeta(ctx, sessionID, supplierAddress)
-	if err != nil || meta == nil {
-		return nil
-	}
-
-	consumed, _ := m.redisClient.Get(ctx, m.consumedKey(sessionID, supplierAddress)).Int64()
-
-	return &SessionMeterState{
-		SessionID:        meta.SessionID,
-		AppAddress:       meta.AppAddress,
-		ServiceID:        meta.ServiceID,
-		MaxStake:         cosmostypes.NewInt64Coin(pocket.DenomuPOKT, meta.MaxStakeUpokt),
-		ConsumedStake:    cosmostypes.NewInt64Coin(pocket.DenomuPOKT, consumed),
-		SessionEndHeight: meta.SessionEndHeight,
-		LastUpdated:      time.Unix(meta.CreatedAt, 0),
-	}
-}
-
 // ClearSessionMeter clears all metering data for a (session, supplier)
 // pair. Called by miners when claims for that supplier's portion of the
 // session are processed, to free Redis space. The meter is per-supplier,
@@ -465,17 +404,6 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 		Msg("cleared session meter")
 
 	return nil
-}
-
-// PublishCleanupSignal publishes a cleanup signal for a (session, supplier)
-// pair. Miners call this after processing claims to notify all relayers
-// that this supplier's portion of the session meter can be released.
-// The payload format is "sessionID|supplierAddress"; subscribers parse on
-// the '|' separator.
-func (m *RelayMeter) PublishCleanupSignal(ctx context.Context, sessionID, supplierAddress string) error {
-	channel := m.redisClient.KB().MeterCleanupChannel()
-	payload := sessionID + "|" + supplierAddress
-	return m.redisClient.Publish(ctx, channel, payload).Err()
 }
 
 // getOrCreateSessionMeter gets or creates a session meter in Redis.
@@ -531,7 +459,16 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 
 	// Check Redis (L2)
 	meta, err := m.getSessionMeta(ctx, sessionID, supplierAddress)
-	if err == nil && meta != nil {
+	if err != nil {
+		// The error is RETURNED, not discarded. It arrives already marked, and
+		// dropping it here had two costs: the store-unavailable marking never
+		// reached the policy from this call, and an unreadable meta fell
+		// through to the create path below -- where SetNX reports the key
+		// already exists and the function calls itself again, unbounded, on
+		// every relay of that session.
+		return nil, 0, err
+	}
+	if meta != nil {
 		if fresh(meta) {
 			// Cache locally
 			m.localCacheMu.Lock()
@@ -596,7 +533,7 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 	metaKey := m.metaKey(sessionID, supplierAddress)
 	set, err := m.redisClient.SetNX(ctx, metaKey, metaBytes, m.config.CacheTTL).Result()
 	if err != nil {
-		return nil, 0, fmt.Errorf("failed to create session meter: %w", err)
+		return nil, 0, fmt.Errorf("failed to create session meter: %w: %w", ErrMeterStoreUnavailable, err)
 	}
 
 	if !set {
@@ -635,12 +572,32 @@ func (m *RelayMeter) getSessionMeta(ctx context.Context, sessionID, supplierAddr
 		if err == redis.Nil {
 			return nil, nil
 		}
-		return nil, err
+		// Marked at the call that failed, not sniffed from the error later:
+		// this is the store, and handleMeterError refuses admission on it.
+		return nil, fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err)
 	}
 
 	var meta SessionMeterMeta
 	if err := json.Unmarshal(data, &meta); err != nil {
-		return nil, err
+		// Our own blob, in our own store, and unreadable: what this session is
+		// allowed to spend is unknown, which is the store-unavailable case and
+		// not the chain's. Unmarked it would count as the chain's and be SERVED.
+		//
+		// The key is DELETED, and that is what keeps this from being permanent.
+		// Refusing without deleting bricks the (session, supplier) for the whole
+		// key TTL: getOrCreateSessionMeter repairs by SetNX, which cannot write
+		// over a key that exists, so every later relay would be refused too.
+		// Deleting is safe because this blob holds only the derived allowance
+		// (MaxStakeUpokt and the inputs it came from) -- the consumed counter is
+		// a SEPARATE key, so nothing about what was already spent is lost, and
+		// the next relay re-derives the allowance.
+		if delErr := m.redisClient.Del(ctx, m.metaKey(sessionID, supplierAddress)).Err(); delErr != nil {
+			m.logger.Debug().
+				Err(delErr).
+				Str("session_id", sessionID).
+				Msg("could not drop a corrupt session meter meta; it will keep refusing until its TTL")
+		}
+		return nil, fmt.Errorf("%w: corrupt session meter meta: %w", ErrMeterStoreUnavailable, err)
 	}
 
 	return &meta, nil
@@ -968,24 +925,38 @@ func (m *RelayMeter) getServiceComputeUnits(ctx context.Context, serviceID strin
 	return computeUnits, nil
 }
 
-// handleRedisError handles Redis errors based on fail behavior.
-func (m *RelayMeter) handleRedisError(operation string) (allowed bool, err error) {
-	relayMeterRedisErrors.WithLabelValues(operation).Inc()
+// handleMeterError decides what a metering failure means for THIS relay, and
+// the answer depends only on what failed -- there is no operator knob, because
+// the one that existed (relay_meter.fail_behavior) let a deployment choose to
+// serve relays it could not budget.
+//
+// The store is ours and is required: if it cannot be read we do not know what
+// this session has already consumed, so admission refuses. The chain is a
+// dependency we tolerate blinking: the miner re-derives what it needs when it
+// claims, and it retries, so a relay we could not price here is still worth
+// serving and passing on. That asymmetry is the whole rule -- the relayer fails
+// fast on what it owns, and never throws away work the miner can still resolve.
+//
+// An UNCLASSIFIED failure counts as the chain's. Guessing the other way would
+// turn any unrecognised error into a fleet-wide refusal.
+func (m *RelayMeter) handleMeterError(operation string, cause error) (allowed bool, err error) {
+	relayMeterErrors.WithLabelValues(operation).Inc()
 
-	// Per-relay under a Redis outage (one line per relay per instance); the
-	// outage itself is logged by the transport reconnect loop, and
-	// relay_meter_redis_errors_total carries the alertable rate.
-	if m.config.FailBehavior == FailOpen {
-		m.logger.Debug().
-			Str("operation", operation).
-			Msg("Redis error, fail-open: allowing relay")
-		return true, nil
-	}
+	storeDown := errors.Is(cause, ErrMeterStoreUnavailable)
 
+	// Per-relay under an outage (one line per relay per instance); the outage
+	// itself is logged by the transport reconnect loop, and
+	// relay_meter_errors_total carries the alertable rate.
 	m.logger.Debug().
+		Err(cause).
 		Str("operation", operation).
-		Msg("Redis error, fail-closed: rejecting relay")
-	return false, fmt.Errorf("redis unavailable and fail-closed configured")
+		Bool("store_unavailable", storeDown).
+		Msg("relay metering failed")
+
+	if storeDown {
+		return false, fmt.Errorf("%w: %s", ErrMeterStoreUnavailable, operation)
+	}
+	return true, fmt.Errorf("could not meter relay (%s): %w", operation, cause)
 }
 
 // cleanupSubscriber subscribes to cleanup signals from miners.
@@ -1137,19 +1108,6 @@ func localCacheKey(sessionID, supplierAddress string) string {
 // RelayMeterSnapshot captures the current state for monitoring/debugging.
 type RelayMeterSnapshot struct {
 	ActiveSessions int
-	FailBehavior   FailBehavior
-}
-
-// GetSnapshot returns a snapshot of the relay meter state.
-func (m *RelayMeter) GetSnapshot(ctx context.Context) RelayMeterSnapshot {
-	m.localCacheMu.RLock()
-	activeLocal := len(m.localCache)
-	m.localCacheMu.RUnlock()
-
-	return RelayMeterSnapshot{
-		ActiveSessions: activeLocal,
-		FailBehavior:   m.config.FailBehavior,
-	}
 }
 
 // calculateAppStakePerSessionSupplier calculates the portion of app stake

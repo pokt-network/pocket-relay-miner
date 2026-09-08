@@ -53,6 +53,44 @@ var (
 		[]string{"type"}, // type: added, removed
 	)
 
+	// keyringUndecodableRecords is the count of .info records the keyring listed
+	// but could not decode. It exists because load_errors_total cannot answer
+	// the question an operator has here: that counter moves for every kind of
+	// key failure, and it is a COUNTER, so "three records are broken right now"
+	// and "three transient blips happened this hour" look the same. This is the
+	// standing condition, and a supplier is losing service for every unit of it
+	// until someone removes or repairs the file.
+	keyringUndecodableRecords = observability.SharedFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "undecodable_records",
+			Help:      "Key records present on disk that the keyring could not decode",
+		},
+		[]string{"provider"},
+	)
+
+	// keysLastSuccessfulReload is the wall-clock time of the last reload that
+	// completed. Without it a FROZEN key manager and a healthy idle one have the
+	// same signature: Reload returns before it touches supplier_keys_active, so
+	// that gauge holds its last good value, and reloads_total counts only
+	// reloads that CHANGED something, which is flat on a quiet fleet either way.
+	// The staleness of this series is the only thing that separates them.
+	//
+	// It is only alertable where reloads actually happen: with hot reload
+	// disabled nothing drives Reload on a timer, so the series is stamped once
+	// at startup and then stands still forever, which is indistinguishable from
+	// the freeze. An alert on its age has to be scoped to fleets that run with
+	// hot reload on.
+	keysLastSuccessfulReload = observability.SharedFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "last_successful_reload_timestamp_seconds",
+			Help:      "Unix timestamp of the last key reload that completed without abandoning",
+		},
+	)
+
 	keyLoadErrors = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

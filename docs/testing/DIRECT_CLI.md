@@ -104,8 +104,26 @@ Notes per protocol:
 - **grpc** — by default the CLI sends a *real* unary gRPC request
   (`demo.DemoService/GetBlockHeight`) so it exercises the relayer's native
   gRPC (h2c) forwarding end to end, and prints the decoded `Block Height`.
-  Passing `--payload '<json>'` instead sends a JSON-RPC body, which
-  deliberately drives the relayer's REST fallback for gRPC relays.
+  That method only exists on the localnet demo backend, so **against any other
+  backend the default returns `grpc-status 12` (UNIMPLEMENTED)** — use
+  `--grpc-method` to name a method the backend actually serves:
+
+  ```bash
+  # a cosmos full node: GetLatestBlock takes a request with no fields
+  pocket-relay-miner relay grpc --service <svc> --relayer-url http://<relayer>:8180 \
+    --grpc-method /cosmos.base.tendermint.v1beta1.Service/GetLatestBlock
+
+  # a request WITH fields: hex-encoded protobuf, here demo.BlockRequest{number:42}
+  pocket-relay-miner relay grpc --localnet --service develop-grpc \
+    --grpc-method /demo.DemoService/GetBlock --grpc-request-hex 082a
+  ```
+
+  `--grpc-request-hex` defaults to empty, which is the correct body for any
+  request message with no fields, so most methods need only `--grpc-method`.
+  A non-zero `grpc-status` prints the backend's own `grpc-message`, which is
+  usually the line that says which method or field was wrong. Neither flag can
+  be combined with `--payload`: a custom payload drives the relayer's REST
+  fallback, which never builds a gRPC request.
 - **stream** — the CLI reads the SSE stream until the **server closes it** (EOF)
   or the client `--timeout` (default 120s) fires, collecting *every* signed batch
   the service sends. This mirrors mainnet/beta, where the client cannot know how
@@ -141,11 +159,15 @@ signature verifies **and** the decoded response carries no error — a signed
 backend error (e.g. HTTP 500/415) is correctly counted as a failure with the
 reason shown in the error breakdown.
 
-### `--all-suppliers`: round-robin across the session
+### `--all-suppliers`: do not pin one supplier
 
 A single supplier exhausts *its* per-session claimable budget quickly while the
-other session suppliers sit idle. `--all-suppliers` spreads relays across every
-supplier in the current session, matching how a gateway distributes traffic:
+other session suppliers sit idle. `--all-suppliers` says "any of them, do not
+make me name one":
+
+- in a **load test** it round-robins across every supplier in the current
+  session, matching how a gateway distributes traffic;
+- for a **single relay** it picks one of the session's suppliers at random.
 
 ```bash
 # 60 relays fanned out across all session suppliers, per protocol
@@ -249,7 +271,8 @@ and `--app-priv-key`/`--gateway-priv-key` is rejected.
 A relay is addressed to one supplier operator in the (app, service) session:
 
 - `--all-suppliers` queries the current session and round-robins across every
-  supplier in it — the easiest option, and it adapts as sessions roll over.
+  supplier in it (a single relay picks one at random) — the easiest option, and
+  it adapts as sessions roll over.
 - `--supplier <operatorAddr>` pins one supplier. Find valid operators by
   querying the session for your (app, service), or just start with
   `--all-suppliers` and read the addresses it logs.

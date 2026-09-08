@@ -16,31 +16,16 @@ import (
 // TestNewServer creates a new observability server.
 func TestNewServer(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := DefaultServerConfig()
-	config.MetricsAddr = ":0" // Use random available port
+	config := ServerConfig{
+		MetricsEnabled: false,
+		MetricsAddr:    ":0", // random available port
+		PprofEnabled:   false,
+		PprofAddr:      ":6060",
+	}
 
 	server := NewServer(logger, config)
 	require.NotNil(t, server, "Server should not be nil")
 	require.False(t, server.IsRunning(), "Server should not be running initially")
-}
-
-// TestDefaultServerConfig tests default configuration values.
-func TestDefaultServerConfig(t *testing.T) {
-	config := DefaultServerConfig()
-	// OFF, and the assertion below is why: this constructor cannot supply the
-	// Registry that metrics now require, so returning them enabled produced a
-	// config whose only outcome was an error at Start.
-	require.False(t, config.MetricsEnabled, "Metrics should be off by default, since the default carries no Registry")
-	require.Equal(t, ":9090", config.MetricsAddr, "Default metrics address should be :9090")
-	require.False(t, config.PprofEnabled, "Pprof should be disabled by default")
-	require.Equal(t, ":6060", config.PprofAddr, "Default pprof address should be :6060")
-
-	// The defaults must START. Before this, the same call returned metrics
-	// enabled with a nil Registry and Start could only fail.
-	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	srv := NewServer(logger, config)
-	require.NoError(t, srv.Start(context.Background()), "the default config must be startable")
-	require.NoError(t, srv.Stop())
 }
 
 // TestServer_Start_MetricsWithoutRegistry pins the error path the nil-Registry
@@ -49,7 +34,12 @@ func TestDefaultServerConfig(t *testing.T) {
 // metrics.
 func TestServer_Start_MetricsWithoutRegistry(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := DefaultServerConfig()
+	config := ServerConfig{
+		MetricsEnabled: false,
+		MetricsAddr:    ":9090",
+		PprofEnabled:   false,
+		PprofAddr:      ":6060",
+	}
 	config.MetricsEnabled = true
 	config.MetricsAddr = ":0"
 
@@ -114,7 +104,12 @@ func TestServer_Start_AlreadyRunning(t *testing.T) {
 // TestServer_Stop_NotRunning tests that stopping a non-running server is safe.
 func TestServer_Stop_NotRunning(t *testing.T) {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	config := DefaultServerConfig()
+	config := ServerConfig{
+		MetricsEnabled: false,
+		MetricsAddr:    ":9090",
+		PprofEnabled:   false,
+		PprofAddr:      ":6060",
+	}
 	config.MetricsAddr = ":0"
 	config.Registry = prometheus.NewRegistry() // Use isolated registry for tests
 
