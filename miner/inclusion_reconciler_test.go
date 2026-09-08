@@ -87,7 +87,7 @@ type reconcilerHarness struct {
 	// onChain is what the chain reports for the supplier, in the same shape the
 	// unified read returns: presence answers the claim phase, the value answers
 	// the proof phase.
-	onChain    map[string]query.SessionProofState
+	onChain    map[string]query.SessionClaim
 	onChainErr error
 	// fetchCalls counts trips to the chain. The reconciler must make ONE per
 	// (supplier, height) however many groups and phases want the answer.
@@ -130,7 +130,7 @@ func phaseVerdict(p RebroadcastPhase) func(query.SessionProofState, bool) inclus
 
 // fetchStates is the single on-chain read both phases share, so a test that makes
 // it fail or hang exercises the one query the reconciler really makes.
-func (h *reconcilerHarness) fetchStates(ctx context.Context, _ string) (map[string]query.SessionProofState, error) {
+func (h *reconcilerHarness) fetchStates(ctx context.Context, _ string) (map[string]query.SessionClaim, error) {
 	h.fetchCalls.Add(1)
 	h.mu.Lock()
 	wait := h.onChainWaitForDeadline
@@ -143,7 +143,7 @@ func (h *reconcilerHarness) fetchStates(ctx context.Context, _ string) (map[stri
 	if h.onChainErr != nil {
 		return nil, h.onChainErr
 	}
-	cp := make(map[string]query.SessionProofState, len(h.onChain))
+	cp := make(map[string]query.SessionClaim, len(h.onChain))
 	for k, v := range h.onChain {
 		cp[k] = v
 	}
@@ -158,7 +158,7 @@ func newReconcilerHarness(t *testing.T, safetyBlocks int64) *reconcilerHarness {
 		rc:          rc,
 		store:       NewRebroadcastStore(rc, time.Hour),
 		resub:       &mockResubmitter{},
-		onChain:     map[string]query.SessionProofState{},
+		onChain:     map[string]query.SessionClaim{},
 		windowClose: testWindowClose,
 	}
 
@@ -262,7 +262,7 @@ const (
 func TestReconciler_Found(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofValidated}
+	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofValidated}}
 
 	h.r.OnBlock(testMid)
 
@@ -285,7 +285,7 @@ func TestReconciler_Found(t *testing.T) {
 func TestReconciler_FoundButNotRecorded_KeepsEntryForRetry(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofValidated}
+	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofValidated}}
 	h.outcomeErr = fmt.Errorf("redis unavailable while reactivating")
 
 	h.r.OnBlock(testMid)
@@ -496,7 +496,7 @@ func TestReconciler_MixedFoundAndMissing(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit) // found
 	h.seed(t, hSupplier, hEnd, "s2", testSubmit) // missing
-	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofValidated}
+	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofValidated}}
 
 	h.r.OnBlock(testMid)
 
@@ -512,7 +512,7 @@ func TestReconciler_MixedFoundAndMissing(t *testing.T) {
 func TestReconciler_FoundAfterWindowClose(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofValidated}
+	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofValidated}}
 
 	h.r.OnBlock(testWindowClose + 1)
 
@@ -572,8 +572,8 @@ func TestReconciler_ObserveOnly(t *testing.T) {
 	}
 	h.r = NewInclusionReconciler(logging.NewLoggerFromConfig(logging.DefaultConfig()), &mockSharedQueryClient{}, h.store, h.resub,
 		mkPhase(RebroadcastPhaseClaim), mkPhase(RebroadcastPhaseProof),
-		func(context.Context, string) (map[string]query.SessionProofState, error) {
-			return map[string]query.SessionProofState{}, nil
+		func(context.Context, string) (map[string]query.SessionClaim, error) {
+			return map[string]query.SessionClaim{}, nil
 		}, cfg)
 	t.Cleanup(func() { _ = h.r.Close() })
 
@@ -651,7 +651,7 @@ func TestReconciler_MultipleGroups(t *testing.T) {
 // with the harness — no shared in-memory state. It models a different replica
 // taking over a supplier after the original owner died. onChain controls what
 // that replica sees on-chain; ownsAll gates the ownership filter.
-func (h *reconcilerHarness) newPeerReconciler(t *testing.T, resub *mockResubmitter, onChain map[string]query.SessionProofState, owns func(string) bool) *InclusionReconciler {
+func (h *reconcilerHarness) newPeerReconciler(t *testing.T, resub *mockResubmitter, onChain map[string]query.SessionClaim, owns func(string) bool) *InclusionReconciler {
 	t.Helper()
 	mkPhase := func(p RebroadcastPhase) reconcilePhase {
 		return reconcilePhase{
@@ -670,8 +670,8 @@ func (h *reconcilerHarness) newPeerReconciler(t *testing.T, resub *mockResubmitt
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		&mockSharedQueryClient{}, h.store, resub,
 		mkPhase(RebroadcastPhaseClaim), mkPhase(RebroadcastPhaseProof),
-		func(context.Context, string) (map[string]query.SessionProofState, error) {
-			cp := make(map[string]query.SessionProofState, len(onChain))
+		func(context.Context, string) (map[string]query.SessionClaim, error) {
+			cp := make(map[string]query.SessionClaim, len(onChain))
 			for k, v := range onChain {
 				cp[k] = v
 			}
@@ -697,7 +697,7 @@ func TestReconciler_HA_PeerRecoversNeverSentFromRedis(t *testing.T) {
 	// "Replica B": fresh reconciler, shares only Redis, took over the supplier,
 	// still sees the proof missing on-chain.
 	resubB := &mockResubmitter{}
-	b := h.newPeerReconciler(t, resubB, map[string]query.SessionProofState{}, func(s string) bool { return s == hSupplier })
+	b := h.newPeerReconciler(t, resubB, map[string]query.SessionClaim{}, func(s string) bool { return s == hSupplier })
 
 	// B recovers A's persisted entry from Redis and self-heals it (never-sent →
 	// resend at submit+1, before the midpoint).
@@ -722,10 +722,10 @@ func TestReconciler_HA_NonOwnerPeerDoesNotDoubleSubmit(t *testing.T) {
 
 	// Owner B resends.
 	resubB := &mockResubmitter{}
-	b := h.newPeerReconciler(t, resubB, map[string]query.SessionProofState{}, func(s string) bool { return s == hSupplier })
+	b := h.newPeerReconciler(t, resubB, map[string]query.SessionClaim{}, func(s string) bool { return s == hSupplier })
 	// Non-owner C sees the same Redis entry but owns nothing.
 	resubC := &mockResubmitter{}
-	c := h.newPeerReconciler(t, resubC, map[string]query.SessionProofState{}, func(string) bool { return false })
+	c := h.newPeerReconciler(t, resubC, map[string]query.SessionClaim{}, func(string) bool { return false })
 
 	b.OnBlock(testSubmit + 1)
 	c.OnBlock(testSubmit + 1)
@@ -1122,7 +1122,7 @@ func TestReconciler_OneChainReadPerSupplierPerBlock(t *testing.T) {
 func TestReconciler_ClaimPhaseIgnoresTheProofStatus(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.put(t, RebroadcastPhaseClaim, hSupplier, hEnd, "s1", testSubmit, "tx-s1")
-	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofRejected}
+	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofRejected}}
 
 	h.r.OnBlock(testMid)
 
@@ -1147,7 +1147,7 @@ func TestReconciler_ClaimPhaseIgnoresTheProofStatus(t *testing.T) {
 func TestReconciler_ARejectedProofIsNotResentAndSaysWhy(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofRejected}
+	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofRejected}}
 
 	h.r.OnBlock(testMid) // the calendar WOULD resend here if it were merely missing
 
@@ -1182,7 +1182,7 @@ func TestReconciler_ARejectedProofIsNotResentAndSaysWhy(t *testing.T) {
 func TestReconciler_ARejectedProofStaysGoneWhenTheOracleFails(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofRejected}
+	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofRejected}}
 
 	h.r.OnBlock(testMid)
 	require.Equal(t, 0, h.resub.count(), "precondition: the rejection was seen and acted on")
@@ -1204,7 +1204,7 @@ func TestReconciler_ARejectedProofStaysGoneWhenTheOracleFails(t *testing.T) {
 func TestReconciler_TheDegradedPathStillResendsWhatWasNotRejected(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
-	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofPending}
+	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofPending}}
 
 	h.r.OnBlock(testMid)
 	require.Equal(t, 1, h.resub.count(), "pending is still missing: the calendar resends at mid-window")

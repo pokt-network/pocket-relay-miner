@@ -191,7 +191,7 @@ type ProofQueryClient interface {
 	// supplier, mapped to what the chain says about that claim's proof. One walk
 	// answers both phases -- presence is the claim signal, the value is the proof
 	// signal.
-	GetSupplierSessionStates(ctx context.Context, supplier string) (map[string]SessionProofState, error)
+	GetSupplierSessionStates(ctx context.Context, supplier string) (map[string]SessionClaim, error)
 }
 
 // Proof returns the proof module query client.
@@ -1199,6 +1199,25 @@ const (
 	SessionProofRejected
 )
 
+// SessionClaim is what the chain holds for ONE session's claim: the proof verdict
+// and the root that claim committed to.
+//
+// The root travels WITH the state, from the same read, and that is the point.
+// Fetching it later when a rejection is seen would be a second observation at a
+// different instant, and INVALID is not sticky on chain -- validateProof
+// overwrites the status without reading the previous one -- so a corrected proof
+// landing in between would leave us comparing the root of a claim whose verdict
+// is no longer the one that prompted the comparison. Two observations presented
+// as one. It costs no extra request either: the root is already in the paginated
+// response and was being discarded.
+type SessionClaim struct {
+	ProofState SessionProofState
+	// RootHash is the claim's committed SMST root. Compared against the root the
+	// miner stored for that session, it separates "what we hold is not what we
+	// claimed" from the construction and signature causes.
+	RootHash []byte
+}
+
 // GetSupplierSessionStates returns, for one supplier, every session that has a
 // claim on chain, mapped to what the chain says about that claim's proof.
 //
@@ -1217,7 +1236,7 @@ const (
 // Both signals come from the CLAIM. A submitted proof is validated and REMOVED in
 // the EndBlocker of its own block, so proof inclusion cannot be read from proofs;
 // the claim's ProofValidationStatus is what survives until settlement.
-func (c *proofQueryClient) GetSupplierSessionStates(ctx context.Context, supplierOperatorAddress string) (map[string]SessionProofState, error) {
+func (c *proofQueryClient) GetSupplierSessionStates(ctx context.Context, supplierOperatorAddress string) (map[string]SessionClaim, error) {
 	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims")
 }
 
@@ -1253,8 +1272,8 @@ func (c *proofQueryClient) paginateSupplierClaims(
 	ctx context.Context,
 	supplierOperatorAddress string,
 	desc string,
-) (map[string]SessionProofState, error) {
-	sessions := make(map[string]SessionProofState)
+) (map[string]SessionClaim, error) {
+	sessions := make(map[string]SessionClaim)
 	var nextKey []byte
 	for page := 0; page < maxInclusionPages; page++ {
 		queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
@@ -1274,7 +1293,10 @@ func (c *proofQueryClient) paginateSupplierClaims(
 			// filter here on purpose: filtering is what forced two walks, and the
 			// callers now discriminate on the value instead of on membership.
 			if sh := res.Claims[i].GetSessionHeader(); sh != nil {
-				sessions[sh.GetSessionId()] = stateFromClaimStatus(res.Claims[i].GetProofValidationStatus())
+				sessions[sh.GetSessionId()] = SessionClaim{
+					ProofState: stateFromClaimStatus(res.Claims[i].GetProofValidationStatus()),
+					RootHash:   res.Claims[i].GetRootHash(),
+				}
 			}
 		}
 		if res.Pagination == nil || len(res.Pagination.NextKey) == 0 {

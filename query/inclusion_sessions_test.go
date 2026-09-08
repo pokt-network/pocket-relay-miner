@@ -27,11 +27,15 @@ func newProofClientForTest(t *testing.T, address string) *proofQueryClient {
 	return pc
 }
 
+// The root is derived from the session id so an assertion can tell WHICH claim's
+// root travelled. A shared literal would pass even if every entry carried the
+// same root, which is the mistake the reconciler would then make silently: it
+// compares that root against the one the miner stored for that session.
 func claimWithSession(supplier, sessionID string) prooftypes.Claim {
 	return prooftypes.Claim{
 		SupplierOperatorAddress: supplier,
 		SessionHeader:           &sessiontypes.SessionHeader{SessionId: sessionID},
-		RootHash:                []byte("root"),
+		RootHash:                []byte("root-" + sessionID),
 	}
 }
 
@@ -73,11 +77,11 @@ func TestGetSupplierSessionStates_EachStatusKeepsItsOwnMeaning(t *testing.T) {
 	got, err := pc.GetSupplierSessionStates(context.Background(), supplier)
 	require.NoError(t, err)
 
-	require.Equal(t, map[string]SessionProofState{
-		"sess-validated": SessionProofValidated,
-		"sess-pending":   SessionProofPending,
-		"sess-invalid":   SessionProofRejected,
-	}, got, "every claim is carried, and each keeps the status the chain gave it")
+	require.Equal(t, map[string]SessionClaim{
+		"sess-validated": {ProofState: SessionProofValidated, RootHash: []byte("root-sess-validated")},
+		"sess-pending":   {ProofState: SessionProofPending, RootHash: []byte("root-sess-pending")},
+		"sess-invalid":   {ProofState: SessionProofRejected, RootHash: []byte("root-sess-invalid")},
+	}, got, "every claim is carried, and each keeps the status AND the root the chain gave it")
 }
 
 // An unrecognised status must become Unknown, NEVER Rejected. This is the whole
@@ -128,10 +132,10 @@ func TestGetSupplierSessionStates_FollowsPagination(t *testing.T) {
 	got, err := pc.GetSupplierSessionStates(context.Background(), supplier)
 	require.NoError(t, err)
 	require.Equal(t, 2, calls, "pagination must be followed across both pages")
-	require.Equal(t, map[string]SessionProofState{
-		"p1": SessionProofValidated,
-		"p2": SessionProofRejected,
-	}, got)
+	require.Equal(t, map[string]SessionClaim{
+		"p1": {ProofState: SessionProofValidated, RootHash: []byte("root-p1")},
+		"p2": {ProofState: SessionProofRejected, RootHash: []byte("root-p2")},
+	}, got, "state and root both survive the page boundary")
 }
 
 // Errors from the chain are surfaced, so the reconciler takes its degraded path
@@ -202,10 +206,12 @@ func TestPaginateSupplierClaims_AppliesNoStatusFilter(t *testing.T) {
 	pc := newProofClientForTest(t, address)
 	all, err := pc.paginateSupplierClaims(context.Background(), supplier, "all claims")
 	require.NoError(t, err)
-	require.Equal(t, map[string]SessionProofState{
-		"sess-validated": SessionProofValidated,
-		"sess-pending":   SessionProofPending,
-		"sess-invalid":   SessionProofRejected,
-		"sess-default":   SessionProofPending,
-	}, all, "the loop keeps every claim with a header and applies no status filter of its own")
+	require.Equal(t, map[string]SessionClaim{
+		"sess-validated": {ProofState: SessionProofValidated, RootHash: []byte("root-sess-validated")},
+		"sess-pending":   {ProofState: SessionProofPending, RootHash: []byte("root-sess-pending")},
+		"sess-invalid":   {ProofState: SessionProofRejected, RootHash: []byte("root-sess-invalid")},
+		"sess-default":   {ProofState: SessionProofPending, RootHash: []byte("root-sess-default")},
+	}, all, "the loop keeps every claim with a header, applies no status filter of its own, "+
+		"and carries each claim's OWN root -- the rejection diagnosis compares that root "+
+		"against what the miner stored, so a shared or dropped one would misdiagnose")
 }

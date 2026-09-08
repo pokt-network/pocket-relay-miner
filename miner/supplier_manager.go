@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -2653,6 +2654,82 @@ func (m *SupplierManager) ensureSharedTrackers() {
 				claimRebroadcastsTotal.WithLabelValues(supplier, serviceID, result).Inc()
 			},
 		}
+		// diagnoseProofRejection answers the one question about a rejection that
+		// can be answered from here, and says so when it cannot.
+		//
+		// The chain does not expose WHY it refused a proof: the reason lives in
+		// the FailureReason of an EndBlocker event, the claim itself carries four
+		// fields and none of them is the reason, and reading events would require
+		// the transaction indexer this whole reconciler exists to work without.
+		// What IS available is the root the claim committed to, which came back
+		// from the same read that produced the verdict. Comparing it against the
+		// root this miner stored separates one cause from the other six: a
+		// mismatch means what we hold is not what we claimed and no proof built
+		// from it can ever pass, while a match means the claim was right and the
+		// proof failed on construction or a signature.
+		//
+		// Warn and not Debug: it fires once per rejected session -- the entry is
+		// cleared immediately after -- so it is bounded by the defect existing,
+		// and it is money.
+		diagnoseProofRejection := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID string, height int64, onChainRoot []byte) {
+			cause := rejectionRootUnknown
+			// The session store is per supplier, held on the SupplierState this
+			// replica owns -- the same map the reconciler's ownership filter
+			// reads, so a supplier whose rejection reaches this closure always
+			// has one.
+			st, owned := m.suppliers.Load(supplier)
+			if owned && st.SessionStore != nil && len(onChainRoot) > 0 {
+				// A missing snapshot is EXPECTED, not exceptional. Nothing
+				// deletes a session record -- there is no production caller of
+				// the store's Delete -- so it lives until SessionTTL expires it,
+				// refreshed on every write. Two hours against a proof window of
+				// minutes is comfortable with mainnet parameters, and both of
+				// those numbers are configurable, so the margin is a bound and
+				// never a guarantee. When the snapshot is gone the honest answer
+				// is that the comparison could not be made, which is why
+				// root_unknown is a first-class cause and not an error.
+				snapshot, sErr := st.SessionStore.Get(ctx, sessionID)
+				switch {
+				case sErr != nil:
+					m.logger.Debug().Err(sErr).Str("session_id", sessionID).
+						Msg("proof rejected: could not read the session to compare roots")
+				case snapshot == nil || len(snapshot.ClaimedRootHash) == 0:
+					// Nothing to compare against; cause stays root_unknown.
+				case bytes.Equal(snapshot.ClaimedRootHash, onChainRoot):
+					cause = rejectionRootMatch
+				default:
+					cause = rejectionRootMismatch
+				}
+			}
+			proofRejectionDiagnosisTotal.WithLabelValues(cause).Inc()
+
+			m.logger.Warn().
+				Str("supplier", supplier).
+				Str("session_id", sessionID).
+				Int64("session_end", sessionEnd).
+				Int64("observed_at_height", height).
+				Str("tx_hash", e.TxHash).
+				Str("cause", cause).
+				Msg("proof rejected on-chain: it reached the chain and the EndBlocker refused it; it will not be re-sent")
+
+			if m.sharedSubmissionTracker == nil {
+				return
+			}
+			if err := m.sharedSubmissionTracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
+				Supplier:        supplier,
+				SessionEnd:      sessionEnd,
+				SessionID:       sessionID,
+				Outcome:         inclusionRejected,
+				InclusionHeight: height,
+				RejectionCause:  cause,
+			}); err != nil {
+				// Same shape as its siblings: the error does not rise, so this
+				// line is the only record of it.
+				m.logger.Warn().Err(err).Str("session_id", sessionID).
+					Msg("proof rejection diagnosis not recorded in the submission tracker")
+			}
+		}
+
 		proofPhase := reconcilePhase{
 			phase:             RebroadcastPhaseProof,
 			windowCloseHeight: sharedtypes.GetProofWindowCloseHeight,
@@ -2661,8 +2738,9 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			// deleted in the EndBlocker of its submission block, so it is not
 			// queryable afterwards. See query.GetSupplierSessionStates.
 			//
-			verdict:       proofPhaseVerdict,
-			recordOutcome: recordProofOutcome,
+			verdict:           proofPhaseVerdict,
+			diagnoseRejection: diagnoseProofRejection,
+			recordOutcome:     recordProofOutcome,
 			recordRebroadcast: func(supplier, serviceID, result string) {
 				proofRebroadcastsTotal.WithLabelValues(supplier, serviceID, result).Inc()
 			},

@@ -64,7 +64,10 @@ type SubmissionTrackingRecord struct {
 	// proof was indistinguishable from a settled one (silent PROOF_MISSING).
 	ProofOnChainOutcome  string `json:"proof_on_chain_outcome,omitempty"`
 	ProofInclusionHeight int64  `json:"proof_inclusion_height,omitempty"`
-	ProofRebroadcasts    int    `json:"proof_rebroadcasts,omitempty"` // # of in-window re-submissions attempted
+	// ProofRejectionCause accompanies a proof_on_chain_outcome of
+	// on_chain_rejected: root_mismatch, root_match or root_unknown.
+	ProofRejectionCause string `json:"proof_rejection_cause,omitempty"`
+	ProofRebroadcasts   int    `json:"proof_rebroadcasts,omitempty"` // # of in-window re-submissions attempted
 
 	// Metadata
 	NumRelays            int64  `json:"num_relays"`
@@ -380,6 +383,10 @@ type ProofOnChainUpdate struct {
 	InclusionHeight int64
 	NewProofTxHash  string // set when a rebroadcast produced a fresh hash; "" to leave unchanged
 	Rebroadcasts    int
+	// RejectionCause is set only when Outcome is on_chain_rejected: it says
+	// whether the root the chain holds matches the one this miner stored, which
+	// is the only part of a rejection readable from here.
+	RejectionCause string
 }
 
 // UpdateProofOnChainOutcome overwrites the proof-on-chain fields of the record
@@ -408,6 +415,9 @@ func (t *SubmissionTracker) UpdateProofOnChainOutcome(ctx context.Context, u Pro
 
 	record.ProofOnChainOutcome = u.Outcome
 	record.ProofInclusionHeight = u.InclusionHeight
+	if u.RejectionCause != "" {
+		record.ProofRejectionCause = u.RejectionCause
+	}
 	if u.Rebroadcasts > 0 {
 		record.ProofRebroadcasts = u.Rebroadcasts
 	}

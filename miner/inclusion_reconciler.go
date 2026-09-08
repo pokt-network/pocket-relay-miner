@@ -60,6 +60,16 @@ const (
 	inclusionFound   = "on_chain_found"
 	inclusionMissing = "on_chain_missing"
 	inclusionPollErr = "poll_error"
+	// Causes for proofRejectionDiagnosisTotal. CLOSED set, and the third member
+	// is not a filler: the comparison needs a session snapshot that outlives the
+	// SMST, and nothing deletes that snapshot -- it expires on SessionTTL, which
+	// is CONFIGURABLE, as is the block time that decides how long a proof window
+	// lasts. So "the snapshot was still there" is a bound and never a guarantee,
+	// and root_unknown is the answer when it was not.
+	rejectionRootMismatch = "root_mismatch"
+	rejectionRootMatch    = "root_match"
+	rejectionRootUnknown  = "root_unknown"
+
 	// on_chain_rejected is NOT a flavour of missing, and separating them is the
 	// whole point: missing says the message never landed, rejected says it landed
 	// and the EndBlocker condemned it. Reported as missing, the operator reads a
@@ -267,6 +277,15 @@ type reconcilePhase struct {
 	recordOutcome func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error
 	// recordRebroadcast emits the phase's rebroadcast metric.
 	recordRebroadcast func(supplier, serviceID, result string)
+	// diagnoseRejection runs ONCE when the chain refuses a message, carrying the
+	// root the chain holds for that claim so the caller can compare it against
+	// the one this miner stored. Nil for the claim phase, which has no rejection
+	// to diagnose -- a claim that exists is found whatever its proof status.
+	//
+	// Separate from recordOutcome rather than an eighth argument to it: only one
+	// phase has anything to say here, and widening the shared signature for it
+	// would put a parameter that is always nil in front of every other caller.
+	diagnoseRejection func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID string, height int64, onChainRoot []byte)
 }
 
 // inclusionOracle answers "what does the chain say about this supplier" ONCE per
@@ -286,7 +305,7 @@ type reconcilePhase struct {
 // its own error and takes the degraded path, exactly as a failed query does.
 type inclusionOracle struct {
 	height  int64
-	fetch   func(ctx context.Context, supplier string) (map[string]query.SessionProofState, error)
+	fetch   func(ctx context.Context, supplier string) (map[string]query.SessionClaim, error)
 	mu      sync.Mutex
 	entries map[string]*oracleEntry
 }
@@ -294,11 +313,11 @@ type inclusionOracle struct {
 type oracleEntry struct {
 	gate   chan struct{} // capacity 1: a context-aware mutex
 	done   bool
-	states map[string]query.SessionProofState
+	states map[string]query.SessionClaim
 	err    error
 }
 
-func newInclusionOracle(height int64, fetch func(context.Context, string) (map[string]query.SessionProofState, error)) *inclusionOracle {
+func newInclusionOracle(height int64, fetch func(context.Context, string) (map[string]query.SessionClaim, error)) *inclusionOracle {
 	return &inclusionOracle{height: height, fetch: fetch, entries: make(map[string]*oracleEntry)}
 }
 
@@ -306,7 +325,7 @@ func newInclusionOracle(height int64, fetch func(context.Context, string) (map[s
 // once however many groups and phases ask. A failed query is REMEMBERED for the
 // pass: re-asking would send the same failing request to the same node in the
 // same second, which is precisely when it is least affordable.
-func (o *inclusionOracle) states(ctx context.Context, supplier string) (map[string]query.SessionProofState, error) {
+func (o *inclusionOracle) states(ctx context.Context, supplier string) (map[string]query.SessionClaim, error) {
 	o.mu.Lock()
 	e, ok := o.entries[supplier]
 	if !ok {
@@ -348,7 +367,7 @@ type InclusionReconciler struct {
 
 	claimPhase  reconcilePhase
 	proofPhase  reconcilePhase
-	fetchStates func(ctx context.Context, supplier string) (map[string]query.SessionProofState, error)
+	fetchStates func(ctx context.Context, supplier string) (map[string]query.SessionClaim, error)
 
 	pool pond.Pool
 
@@ -392,7 +411,7 @@ func NewInclusionReconciler(
 	// fetchStates is the single on-chain read both phases share. It is one
 	// argument and not one per phase deliberately: two of them is what the pair
 	// of queries this replaced looked like.
-	fetchStates func(ctx context.Context, supplier string) (map[string]query.SessionProofState, error),
+	fetchStates func(ctx context.Context, supplier string) (map[string]query.SessionClaim, error),
 	cfg InclusionReconcilerConfig,
 ) *InclusionReconciler {
 	if cfg.MaxConcurrent <= 0 {
@@ -639,8 +658,8 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			continue
 		}
 
-		state, present := onChain[sessionID]
-		if rp.verdict(state, present) == verdictFound {
+		claim, present := onChain[sessionID]
+		if rp.verdict(claim.ProofState, present) == verdictFound {
 			if oErr := rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionFound, height); oErr != nil {
 				// KEEP the entry. The claim IS on-chain; acting on that
 				// observation is what keeps the proof coming, so a transient
@@ -660,7 +679,7 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			continue
 		}
 
-		if rp.verdict(state, present) == verdictRejected {
+		if rp.verdict(claim.ProofState, present) == verdictRejected {
 			// The chain executed this proof and refused it. Resending the SAME
 			// bytes cannot change that: none of the seven rejection causes
 			// depends on WHEN the message is sent -- the ring is built at the
@@ -697,11 +716,20 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			// is open, and a record that arrives after it closes arrives after
 			// anything could be done.
 			//
-			// The attempt is not counted. Like the "no proof was required" case,
+			// The attempt is not counted, and it is worth saying exactly what
+			// holds that today: this branch records, diagnoses, clears and
+			// continues, so it never writes the entry back. The count does not
+			// survive because nothing persists it -- it is a property of the
+			// path, not a decision to skip an increment. The reason it SHOULD
+			// stay uncounted is the same as its "no proof was required" sibling:
 			// this one reached the network and can never succeed, so spending a
 			// resend from the budget would charge the session for a decision the
-			// chain already made.
+			// chain already made. Anyone adding a persist here has to make that
+			// reason explicit, because the guarantee will stop being free.
 			_ = rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionRejected, height) //nolint:errcheck // invariantly nil: recordOutcome only errors inside its inclusionFound branch
+			if rp.diagnoseRejection != nil {
+				rp.diagnoseRejection(ctx, entry, g.Supplier, g.SessionEnd, sessionID, height, claim.RootHash)
+			}
 			r.clear(ctx, rp.phase, g, sessionID)
 			continue
 		}

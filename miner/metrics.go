@@ -589,6 +589,30 @@ var (
 		[]string{"phase", "cause"},
 	)
 
+	// proofRejectionDiagnosisTotal splits on_chain_rejected by the ONE thing the
+	// miner can decide locally: whether the root the chain holds for that claim
+	// is the root this miner stored for that session.
+	//
+	// It exists because the rejection reason is NOT readable from here. The
+	// chain records it in the FailureReason of an EndBlocker event, and the
+	// claim itself carries only four fields, none of them the reason -- so no
+	// query returns it, and reading events would need the tx indexer this
+	// reconciler exists to avoid. What the roots CAN separate is the one cause
+	// with no remedy (what we hold is not what we claimed) from the six that
+	// are construction or signature faults.
+	//
+	// No supplier label: three series is the whole point, and the operator who
+	// needs the supplier has the Warn log and the submission-tracker record.
+	proofRejectionDiagnosisTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "proof_rejection_diagnosis_total",
+			Help:      "on_chain_rejected split by whether the on-chain claim root matches the root this miner stored",
+		},
+		[]string{"cause"},
+	)
+
 	// inclusionReadState is 1 on the state this node's post-inclusion read is
 	// in, 0 on the others. All three series exist from startup.
 	//
@@ -1658,6 +1682,9 @@ func init() {
 		for _, phase := range []string{string(RebroadcastPhaseClaim), string(RebroadcastPhaseProof)} {
 			inclusionMissingCauseTotal.WithLabelValues(phase, cause)
 		}
+	}
+	for _, cause := range []string{rejectionRootMismatch, rejectionRootMatch, rejectionRootUnknown} {
+		proofRejectionDiagnosisTotal.WithLabelValues(cause)
 	}
 	for _, phase := range []string{string(RebroadcastPhaseClaim), string(RebroadcastPhaseProof)} {
 		inclusionEntryDroppedTotal.WithLabelValues(phase, dropCauseCorrupt)

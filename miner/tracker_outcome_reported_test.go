@@ -22,8 +22,8 @@ type inclusionProbe struct {
 	pocktclient.ProofQueryClient
 }
 
-func (inclusionProbe) GetSupplierSessionStates(_ context.Context, _ string) (map[string]query.SessionProofState, error) {
-	return map[string]query.SessionProofState{}, nil
+func (inclusionProbe) GetSupplierSessionStates(_ context.Context, _ string) (map[string]query.SessionClaim, error) {
+	return map[string]query.SessionClaim{}, nil
 }
 
 // The submission tracker's error does not rise: recordClaimOutcome returns nil

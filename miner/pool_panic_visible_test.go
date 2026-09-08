@@ -63,7 +63,7 @@ func TestInclusionReconciler_PanicInPassTaskIsCountedAndLogged(t *testing.T) {
 
 	r := NewInclusionReconciler(logger, &mockSharedQueryClient{}, store, &mockResubmitter{},
 		panicking(RebroadcastPhaseClaim), panicking(RebroadcastPhaseProof),
-		func(context.Context, string) (map[string]query.SessionProofState, error) {
+		func(context.Context, string) (map[string]query.SessionClaim, error) {
 			panic("injected: inclusion query blew up")
 		}, cfg)
 	t.Cleanup(func() { _ = r.Close() })
@@ -153,8 +153,8 @@ func TestInclusionReconciler_PoolStoppedIsNotReportedAsAPanic(t *testing.T) {
 
 	r := NewInclusionReconciler(logger, &mockSharedQueryClient{}, store, &mockResubmitter{},
 		phase(RebroadcastPhaseClaim), phase(RebroadcastPhaseProof),
-		func(context.Context, string) (map[string]query.SessionProofState, error) {
-			return map[string]query.SessionProofState{}, nil
+		func(context.Context, string) (map[string]query.SessionClaim, error) {
+			return map[string]query.SessionClaim{}, nil
 		}, cfg)
 	t.Cleanup(func() { _ = r.Close() })
 
