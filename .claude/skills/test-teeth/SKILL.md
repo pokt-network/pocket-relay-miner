@@ -667,6 +667,28 @@ table credits a test, check WHICH property of that test does the work -- here it
 was the exactness, and a well-meaning later edit relaxing it to `>=` would have
 silently uncovered a criterion listed as covered.
 
+## A fixture of ONE cannot tell "once per group" from "once per member"
+
+An assertion can be exact, aimed at the right counter, and still be unable to see
+the defect -- not because it is loose, but because the POPULATION is too small for
+the difference to exist.
+
+Measured 2026-09-08. A counter was moved deliberately from the per-member loop to
+the per-group level, because incrementing per member would have turned ONE fact
+into N events and changed what a series shared with four sibling causes means. The
+comment explaining that decision was written first and is right. The test seeded
+**one** session: per-group increments once and breaks; per-member increments once
+and continues. **Both produce 1.** `moved by exactly 1` cannot separate them, and
+the injection that swaps the units comes back GREEN.
+
+The fix is one line of the FIXTURE, not of the assertion: seed two members. Then
+per-group gives 1 and per-member gives 2, and the same test also covers the break,
+which is what its author believed it did.
+
+**The rule: whenever a metric counts aggregates, the fixture needs a group with
+more than one member, or the test does not know what it is counting.** Ask it of
+any counter whose name is a plural of something that contains things.
+
 ## The one-line test for whether this ran
 
 The report names the defect that was injected, quotes the failure showing it named
