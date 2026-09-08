@@ -367,8 +367,24 @@ func (c *SupplierClaimer) TryClaim(ctx context.Context, supplier string) bool {
 				Err(err).
 				Str("supplier", supplier).
 				Msg("claim callback failed")
-			// Release the claim since we couldn't start lifecycle
-			_ = c.Release(ctx, supplier, triggerClaimCallbackFailed)
+			// Release the claim since we couldn't start lifecycle.
+			//
+			// Read Release to its END before deciding this discard is harmless.
+			// Its FIRST error return -- the release callback failing -- logs at
+			// Info first, and stopping there is what had this site filed as an
+			// acceptable discard. Its SECOND does not: a failure in the Lua
+			// check-and-delete returns a wrapped error and says nothing.
+			//
+			// That path costs something concrete. The claim key is left behind,
+			// so no replica takes this supplier until the key's TTL expires,
+			// while this one has already given up on it. Silent, it looks like
+			// a supplier nobody wanted.
+			if relErr := c.Release(ctx, supplier, triggerClaimCallbackFailed); relErr != nil {
+				c.logger.Warn().
+					Err(relErr).
+					Str("supplier", supplier).
+					Msg("could not release the claim after a failed callback; it stays held until its TTL expires")
+			}
 			return false
 		}
 	}
