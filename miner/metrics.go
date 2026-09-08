@@ -1662,7 +1662,11 @@ func init() {
 	for _, phase := range []string{string(RebroadcastPhaseClaim), string(RebroadcastPhaseProof)} {
 		inclusionEntryDroppedTotal.WithLabelValues(phase, dropCauseCorrupt)
 		inclusionClearFailedTotal.WithLabelValues(phase)
-		for _, cause := range []string{abandonCauseListFailed, abandonCauseParamsFailed, abandonCauseIndexMalformed, abandonCauseIndexUnreadable} {
+		for _, cause := range []string{
+			abandonCauseListFailed, abandonCauseParamsFailed,
+			abandonCauseIndexMalformed, abandonCauseIndexUnreadable,
+			abandonCauseBudgetExhausted,
+		} {
 			inclusionGroupAbandonedTotal.WithLabelValues(phase, cause)
 		}
 	}

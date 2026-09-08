@@ -174,7 +174,12 @@ func TestSilentExitSeriesExistBeforeAnythingHappens(t *testing.T) {
 		"one series per phase per drop cause must exist before any entry is dropped")
 	require.Equal(t, phases*1, testutil.CollectAndCount(inclusionClearFailedTotal),
 		"one series per phase must exist before any delete fails")
-	require.Equal(t, phases*4, testutil.CollectAndCount(inclusionGroupAbandonedTotal),
+	// Five causes: list_failed, params_failed, index_malformed, index_unreadable
+	// and budget_exhausted. The number is written by hand ON PURPOSE — the other
+	// side of the comparison is the live registry, so a cause added to the
+	// constants and forgotten in the init() loop fails here instead of shipping
+	// a series that only appears once the defect has already happened.
+	require.Equal(t, phases*5, testutil.CollectAndCount(inclusionGroupAbandonedTotal),
 		"one series per phase per abandonment cause must exist before any pass is abandoned")
 }
 

@@ -35,6 +35,18 @@ const (
 	// entire pass for that phase -- every group, not one -- and until it was
 	// counted the only trace was a log line on a per-block path.
 	abandonCauseIndexUnreadable = "index_unreadable"
+	// budget_exhausted is the only one of these that is not a failure of a
+	// dependency: PerGroupTimeout covers the listing, the inclusion query and
+	// every resend in the group IN SERIES, so a large group or a slow query
+	// spends it and the entries still queued get nothing. It is counted per
+	// GROUP like its siblings -- the loop stops on the first one, because once
+	// the budget is gone every remaining entry would take the same exit.
+	//
+	// It answers a question inclusion_resend_cap_unused_total cannot: that one
+	// measures the DAMAGE (budget left at window close) without saying whether
+	// the cause was a window too short, which an operator cannot change, or a
+	// group budget too small, which they can. Two causes, opposite actions.
+	abandonCauseBudgetExhausted = "budget_exhausted"
 
 	// resendSpacingBlocks is the minimum gap between two resends of the same
 	// entry: one block for the resend to be included, one for the oracle to
@@ -63,9 +75,15 @@ type rebroadcastEntry struct {
 	Rebroadcasts int    `json:"n,omitempty"` // # of resends so far (persisted → HA-safe cap across failover)
 	// LastAttemptHeight is the height the last resend ACTUALLY went out at, and
 	// it is what makes the spacing real rather than nominal: the reconciler does
-	// not run on every block -- OnBlock skips a whole block whose previous pass
-	// is still in flight -- so an attempt can leave later than the threshold
-	// that released it.
+	// not run at every height -- its only production caller feeds it through a
+	// coalescing loop that keeps just the LATEST height, so while one pass is
+	// running the heights that go by are never passed to it -- and an attempt
+	// can therefore leave later than the threshold that released it.
+	//
+	// The single-flight guard inside OnBlock is NOT what does this: that caller
+	// is a serial processor, so the guard has no concurrent entry to refuse. It
+	// is said here because the guard is the obvious place to look, and a reader
+	// who stops there concludes the skipping cannot happen.
 	//
 	// Zero means "not known" and every reader falls back to the nominal
 	// schedule. That is not a defensive default, it is the mixed-fleet contract,
@@ -482,6 +500,25 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 	}
 
 	for sessionID, raw := range pending {
+		// Stop on the first entry that finds the budget gone. Continuing would
+		// walk the rest of the group taking the same exit on every one, and
+		// nothing below this point can succeed on an expired context -- the
+		// outcome writes and the clears use it too.
+		//
+		// Debug and not Warn, unlike its four siblings: those report a failing
+		// dependency and are rare, while this one fires once per group per block
+		// for as long as the timeout stays too small. The metric is the
+		// alertable signal here, which is the rule this repo already applies to
+		// anything that can repeat per cycle.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			inclusionGroupAbandonedTotal.WithLabelValues(string(rp.phase), abandonCauseBudgetExhausted).Inc()
+			r.logger.Debug().Err(ctxErr).
+				Str("phase", string(rp.phase)).
+				Str("supplier", g.Supplier).
+				Msg("inclusion reconcile: group budget spent; the rest of this group waits for the next block")
+			break
+		}
+
 		entry, decErr := unmarshalRebroadcastEntry(raw)
 		if decErr != nil {
 			inclusionEntryDroppedTotal.WithLabelValues(string(rp.phase), dropCauseCorrupt).Inc()
@@ -619,6 +656,29 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	if r.resubmitter == nil {
 		return
 	}
+
+	// The group's whole budget -- PerGroupTimeout -- covers the listing, the
+	// inclusion query AND every resend in this group, in series. Once it is
+	// spent, the entries still queued behind it would each get a resend that
+	// fails with a context error, and the counter does NOT exempt that: the
+	// sentinel only exempts a saturated permit. Each of those would burn one of
+	// the few attempts a claim has, without a message ever being signed or sent,
+	// and the persist below (deliberately on its own context) would make the
+	// burn survive.
+	//
+	// Checked BEFORE the call rather than inferred from the error afterwards,
+	// because the two are not the same question. A deadline that expires DURING
+	// the broadcast leaves a signed message that may well be in the network, and
+	// that IS an attempt -- counting it is correct. Only "I never got to try" is
+	// exempt, and the only way to know that is to ask before trying.
+	if err := ctx.Err(); err != nil {
+		r.logger.Debug().Err(err).
+			Str("phase", string(rp.phase)).
+			Str("session_id", sessionID).
+			Msg("inclusion reconcile: group budget spent before this resend; leaving the entry untouched")
+		return
+	}
+
 	newHash, err := r.resubmitter.ResubmitMessage(ctx, rp.phase, g.Supplier, entry.MsgBytes, windowClose)
 
 	// The chain says this proof is not required. Mirror image of the saturation

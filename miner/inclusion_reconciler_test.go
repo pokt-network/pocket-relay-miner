@@ -83,6 +83,11 @@ type reconcilerHarness struct {
 	rebroadcast []string
 	onChain     map[string]struct{}
 	onChainErr  error
+	// onChainWaitForDeadline makes the inclusion query block until the group
+	// context expires. It waits for the CONDITION, not for a duration, so the
+	// deadline is guaranteed to have fired when the loop below it runs -- no
+	// sleep, no timing race.
+	onChainWaitForDeadline bool
 	// rc is the Redis client behind the store, kept so a test can close it and
 	// exercise the paths that abandon a whole group when the store is gone.
 	rc *redisutil.Client
@@ -118,7 +123,13 @@ func newReconcilerHarness(t *testing.T, safetyBlocks int64) *reconcilerHarness {
 		return reconcilePhase{
 			phase:             p,
 			windowCloseHeight: func(_ *sharedtypes.Params, _ int64) int64 { return h.windowClose },
-			onChainSessions: func(_ context.Context, _ string) (map[string]struct{}, error) {
+			onChainSessions: func(ctx context.Context, _ string) (map[string]struct{}, error) {
+				h.mu.Lock()
+				wait := h.onChainWaitForDeadline
+				h.mu.Unlock()
+				if wait {
+					<-ctx.Done()
+				}
 				h.mu.Lock()
 				defer h.mu.Unlock()
 				if h.onChainErr != nil {
@@ -956,4 +967,84 @@ func TestReconciler_ASpacingThatNoLongerFitsIsCompressedNotAbandoned(t *testing.
 	require.Equal(t, []int64{testWindowClose - 2}, got,
 		"a resend whose spacing no longer fits must be compressed to the last height the guard allows, not abandoned: "+
 			"the guard decides whether a send can still land, the spacing only prefers when")
+}
+
+// TestReconciler_AnExpiredBudgetDoesNotBurnAnAttempt pins the money half of the
+// budget fix: a resend that never happened must not spend one of the few
+// attempts a claim has.
+//
+// PerGroupTimeout covers the listing, the inclusion query and every resend in
+// the group IN SERIES. When it runs out, the entries still queued would each
+// call ResubmitMessage, fail with a context error — which the counter does NOT
+// exempt, the sentinel covers only a saturated permit — and have the burn
+// persisted. Nothing was signed and nothing was sent.
+//
+// Called directly rather than through OnBlock because the property is about one
+// entry meeting an expired context, and a direct call states exactly that.
+//
+// Injection: remove the ctx.Err() guard from rebroadcast. Red — the resubmitter
+// is called and the attempt is counted.
+func TestReconciler_AnExpiredBudgetDoesNotBurnAnAttempt(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+
+	entry := h.entry(t, RebroadcastPhaseProof, hSupplier, hEnd, "s1")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the budget is already gone
+
+	h.r.rebroadcast(ctx, h.r.proofPhase, RebroadcastGroup{Supplier: hSupplier, SessionEnd: hEnd},
+		"s1", entry, testMid, testWindowClose)
+
+	require.Equal(t, 0, h.resub.attemptCount(),
+		"a resend that never left the process must not spend an attempt")
+
+	after := h.entry(t, RebroadcastPhaseProof, hSupplier, hEnd, "s1")
+	require.Equal(t, 0, after.Rebroadcasts,
+		"the persisted counter must be untouched, or the burn survives the block")
+	require.Equal(t, 0, h.resub.count(), "ResubmitMessage must not be reached at all")
+}
+
+// TestReconciler_ABudgetSpentByTheQueryStopsTheGroupAndSaysSo covers the other
+// half: the group stops on the first entry that finds the budget gone, and the
+// operator can tell WHY.
+//
+// inclusion_resend_cap_unused_total measures the damage — budget left at window
+// close — but not its cause, and the two causes call for opposite actions: a
+// window too short is not something an operator can change, a group budget too
+// small is. This is the same argument as S8's criterion 9, applied one level
+// down.
+//
+// The query waits for the deadline rather than sleeping: it blocks on the
+// context's own Done channel, so the expiry is a fact when the loop runs
+// instead of a duration the test hopes is long enough.
+//
+// Injection: delete the Inc, or the break. Red on the counter.
+func TestReconciler_ABudgetSpentByTheQueryStopsTheGroupAndSaysSo(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	// TWO sessions, and that is the whole reason the assertion below can mean
+	// anything. The counter is per GROUP: the loop stops on the first entry that
+	// finds the budget gone. With a single session, "once per group" and "once
+	// per entry" both produce 1, so an exact assertion on 1 separates nothing —
+	// the population is too small for the difference to exist, not the assertion
+	// too loose. Measured: with one session, moving the Inc into rebroadcast
+	// leaves this test green.
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+	h.seed(t, hSupplier, hEnd, "s2", testSubmit)
+	h.onChainWaitForDeadline = true
+
+	before := testutil.ToFloat64(
+		inclusionGroupAbandonedTotal.WithLabelValues(string(RebroadcastPhaseProof), abandonCauseBudgetExhausted),
+	)
+
+	h.r.OnBlock(testMid)
+
+	require.Equal(t, float64(1),
+		testutil.ToFloat64(
+			inclusionGroupAbandonedTotal.WithLabelValues(string(RebroadcastPhaseProof), abandonCauseBudgetExhausted),
+		)-before,
+		"a group whose budget the query spent must be reported ONCE, under its own cause: the event is the group "+
+			"running out, not each entry meeting the consequence")
+
+	require.Equal(t, 0, h.resub.attemptCount(), "no attempt may be spent once the budget is gone")
 }
