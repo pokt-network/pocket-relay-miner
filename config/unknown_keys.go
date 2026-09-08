@@ -84,7 +84,8 @@ var retiredKeys = map[string]string{
 		"riding with it. If this said \"false\" (the default), expect one transaction per proof instead of one " +
 		"per (supplier, session end height) -- a session needing a proof is the exception, so this is a small " +
 		"increase, not one transaction per session. If it said \"true\", nothing changes: that is now the only " +
-		"behaviour. Claim batching is unaffected and disable_claim_batching still exists",
+		"behaviour. Claims went the other way and lost their switch too: they are ALWAYS batched by " +
+		"session end height, and disable_claim_batching is retired -- see its own entry above",
 }
 
 // UnknownKeys reports every key in data that probe's type does not declare.

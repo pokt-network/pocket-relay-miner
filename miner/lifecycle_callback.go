@@ -772,7 +772,12 @@ func groupOnePerSession(snapshots []*SessionSnapshot) [][]*SessionSnapshot {
 
 // groupByEndHeight puts the sessions that share a session end height -- and so
 // share a submission window -- in one group, so they travel in one transaction.
-// Claims are batched this way by default.
+//
+// This is the ONLY shape a claim group takes. It read "by default" until the
+// operator switch was retired (config/unknown_keys.go), and that phrasing
+// outlived the choice it described: it tells the reader to look for the other
+// form, and there is none. Ejection narrows a group's CONTENTS when the chain
+// names one message, but never its shape -- the rest keeps travelling batched.
 func groupByEndHeight(snapshots []*SessionSnapshot) [][]*SessionSnapshot {
 	groups := make([][]*SessionSnapshot, 0, len(snapshots))
 	byEndHeight := make(map[int64]int, len(snapshots))
@@ -928,7 +933,9 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 	logger.Debug().Msg("batched sessions need claims - starting claim process")
 
 	// Group sessions by session end height (they might have different claim
-	// windows), or one per session when the operator disabled claim batching.
+	// windows). There is no other shape: the operator switch that used to make
+	// this one-per-session is retired (config/unknown_keys.go), so claims are
+	// always grouped and groupOnePerSession belongs to the proof path alone.
 	//
 	// A SLICE, not a map: Go randomises map iteration, so the order in which
 	// groups reached the chain changed between runs -- and once a failing group
