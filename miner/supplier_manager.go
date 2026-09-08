@@ -2814,6 +2814,8 @@ func (m *SupplierManager) recordMissingCause(
 	}
 
 	cause, res := m.config.TxClient.ReadInclusionForEntry(ctx, e.OrigTxHash, e.TxHash)
+
+	cause = resolveMissingCause(cause, e.Rebroadcasts)
 	inclusionMissingCauseTotal.WithLabelValues(string(phase), cause.String()).Inc()
 
 	event := m.logger.Debug()
@@ -2826,6 +2828,29 @@ func (m *SupplierManager) recordMissingCause(
 		Str(logging.FieldSessionID, sessionID).
 		Str("cause", cause.String()).
 		Msg("inclusion reconcile: missing session classified by post-inclusion read")
+}
+
+// resolveMissingCause refuses to name a cause the entry's hashes cannot justify.
+//
+// The entry remembers two hashes -- the original and the LATEST resend -- so
+// past one resend the hash of every middle attempt has been overwritten. The
+// read is then answering about a strict subset of the transactions that were
+// actually broadcast, and only one of its verdicts is unsafe under that: a
+// NotInBlock derived from hashes that are all absent says nothing about the
+// one it was never given, which may well have been included and failed. That
+// would not be an incomplete label, it would be an INVERTED one, pointing the
+// operator at "it never reached a block" when the truth is "it did and was
+// rejected" -- the opposite diagnosis.
+//
+// Unknown already means exactly this ("did not answer in a way that can be
+// decided"), and the cause only feeds a label and a Debug log, so declining
+// to name it costs no behaviour. Preferring not to know over knowing wrong is
+// the cheaper error here. With a cap of 1 the condition is unreachable.
+func resolveMissingCause(cause tx.TxInclusion, rebroadcasts int) tx.TxInclusion {
+	if cause == tx.TxInclusionNotInBlock && rebroadcasts > 1 {
+		return tx.TxInclusionUnknown
+	}
+	return cause
 }
 
 // reactivateClaimedSession returns a session to `claimed` after the reconciler
