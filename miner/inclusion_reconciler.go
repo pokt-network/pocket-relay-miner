@@ -60,6 +60,11 @@ const (
 	inclusionFound   = "on_chain_found"
 	inclusionMissing = "on_chain_missing"
 	inclusionPollErr = "poll_error"
+	// on_chain_rejected is NOT a flavour of missing, and separating them is the
+	// whole point: missing says the message never landed, rejected says it landed
+	// and the EndBlocker condemned it. Reported as missing, the operator reads a
+	// delivery problem and looks at the network.
+	inclusionRejected = "on_chain_rejected"
 )
 
 // rebroadcastEntry is the per-session payload stored in the RebroadcastStore.
@@ -203,7 +208,44 @@ const (
 	verdictMissing inclusionVerdict = iota
 	// verdictFound: on chain in the sense this phase cares about.
 	verdictFound
+	// verdictRejected: the message reached the chain and the chain refused it.
+	// Only the proof phase can reach this -- a claim that exists is found for the
+	// claim phase whatever its proof status. Terminal FOR RESENDING THE SAME
+	// BYTES, which is a narrower statement than it looks: see the branch that
+	// handles it.
+	verdictRejected
 )
+
+// claimPhaseVerdict and proofPhaseVerdict are the ONLY interpretations of an
+// on-chain state, named here so production and tests share one copy. A hand copy
+// in a test file is the shape this repository has already paid for: it compiles,
+// it agrees with the original on the day it is written, and it stops agreeing
+// silently -- the test then measures the copy and reports on the code.
+//
+// A claim that exists is found, whatever the chain thinks of its proof. This
+// phase asks only whether the claim landed.
+func claimPhaseVerdict(_ query.SessionProofState, present bool) inclusionVerdict {
+	if present {
+		return verdictFound
+	}
+	return verdictMissing
+}
+
+// Three answers, not two. VALIDATED is found; REJECTED reached the chain and was
+// refused, so resending the same bytes is pointless; everything else -- pending,
+// absent, or a status this build does not recognise -- keeps the missing path.
+// Unknown lands with missing and NEVER with rejected: a value poktroll adds later
+// must not be inferred to be a refusal and used to abandon a live session.
+func proofPhaseVerdict(state query.SessionProofState, _ bool) inclusionVerdict {
+	switch state {
+	case query.SessionProofValidated:
+		return verdictFound
+	case query.SessionProofRejected:
+		return verdictRejected
+	default:
+		return verdictMissing
+	}
+}
 
 type reconcilePhase struct {
 	phase             RebroadcastPhase
@@ -614,6 +656,52 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 					Msg("inclusion reconcile: on-chain outcome observed but not fully recorded; keeping entry for retry")
 				continue
 			}
+			r.clear(ctx, rp.phase, g, sessionID)
+			continue
+		}
+
+		if rp.verdict(state, present) == verdictRejected {
+			// The chain executed this proof and refused it. Resending the SAME
+			// bytes cannot change that: none of the seven rejection causes
+			// depends on WHEN the message is sent -- the ring is built at the
+			// session end height, the closest path from a block hash anchored to
+			// the session, and the root comes from the claim -- so the same bytes
+			// against the same claim produce the same verdict with certainty.
+			// That is determinism, not caution.
+			//
+			// It does NOT mean the chain closed the door. validateProof
+			// overwrites ProofValidationStatus without reading the previous one,
+			// so a DIFFERENT, valid proof inside the same window still flips this
+			// to VALIDATED. What closes the door is us: OnSessionProved deletes
+			// the SMST as soon as the proof transaction goes out, before the
+			// EndBlocker rules, so by the time we read INVALID the tree the proof
+			// was built from no longer exists. Read "terminal" as "we have
+			// nothing left to build a better proof from", never as "impossible".
+			//
+			// The clear is not hygiene, it is half the fix. When the on-chain
+			// read FAILS with the window still open, this loop is skipped
+			// entirely and a degraded path blind-rebroadcasts everything still
+			// pending -- deliberately, because a forfeit is worse than a wasted
+			// resend. That path never consults the oracle, so a rejection it
+			// cannot see would be resent on the first block whose query fails.
+			// Deleting the entry is what makes the verdict outlive the oracle.
+			//
+			// Which is also why a FAILED clear matters more here than in the
+			// sibling case below it. There, the comment can say the next block
+			// walks the same path to the same verdict; here that is only true
+			// while queries succeed, so inclusionClearFailedTotal stops being
+			// observability and becomes the only remaining net.
+			//
+			// Recorded at the height it was OBSERVED rather than at window close:
+			// this is the one verdict a human could still act on while the window
+			// is open, and a record that arrives after it closes arrives after
+			// anything could be done.
+			//
+			// The attempt is not counted. Like the "no proof was required" case,
+			// this one reached the network and can never succeed, so spending a
+			// resend from the budget would charge the session for a decision the
+			// chain already made.
+			_ = rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionRejected, height) //nolint:errcheck // invariantly nil: recordOutcome only errors inside its inclusionFound branch
 			r.clear(ctx, rp.phase, g, sessionID)
 			continue
 		}

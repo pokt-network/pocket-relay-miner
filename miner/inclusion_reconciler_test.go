@@ -4,6 +4,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -115,25 +116,16 @@ const (
 	testMid         = int64(120)
 )
 
-// phaseVerdict returns the SAME interpretation production wires, so a test that
-// passes here is a test about the reconciler and not about a stand-in. Keeping a
-// second copy would let the two drift, and the drift would be invisible: both
-// phases would still answer found/missing, just not the way the miner does.
+// phaseVerdict hands back the PRODUCTION verdict for a phase -- it does not
+// reimplement one. An earlier draft of this harness copied both functions here,
+// which is the mirror shape this branch already removed once: the copy agrees on
+// the day it is written and then drifts in silence, and the tests go on measuring
+// the copy while reporting on the code.
 func phaseVerdict(p RebroadcastPhase) func(query.SessionProofState, bool) inclusionVerdict {
 	if p == RebroadcastPhaseClaim {
-		return func(_ query.SessionProofState, present bool) inclusionVerdict {
-			if present {
-				return verdictFound
-			}
-			return verdictMissing
-		}
+		return claimPhaseVerdict
 	}
-	return func(state query.SessionProofState, _ bool) inclusionVerdict {
-		if state == query.SessionProofValidated {
-			return verdictFound
-		}
-		return verdictMissing
-	}
+	return proofPhaseVerdict
 }
 
 // fetchStates is the single on-chain read both phases share, so a test that makes
@@ -1141,4 +1133,85 @@ func TestReconciler_ClaimPhaseIgnoresTheProofStatus(t *testing.T) {
 	require.Len(t, outcomes, 1)
 	require.Equal(t, inclusionFound, outcomes[0].outcome,
 		"a claim present with a rejected proof is FOUND for the claim phase")
+}
+
+// A proof the chain REFUSED must stop being resent, and must stop being called
+// missing. Those are two different claims and the test makes both: the resend
+// counter is the behaviour, the outcome string is what an operator reads. Told
+// "missing", they go looking at the network for a delivery problem that does not
+// exist -- the message arrived, it was executed, and it was condemned.
+//
+// The height matters too. This is the only verdict a human could still act on
+// while the window is open, so it is recorded at the block it was OBSERVED and
+// not at window close like its missing sibling.
+func TestReconciler_ARejectedProofIsNotResentAndSaysWhy(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofRejected}
+
+	h.r.OnBlock(testMid) // the calendar WOULD resend here if it were merely missing
+
+	require.Equal(t, 0, h.resub.count(),
+		"the same bytes against the same claim get the same verdict: resending buys a fee")
+
+	outcomes := h.getOutcomes()
+	require.Len(t, outcomes, 1)
+	require.Equal(t, inclusionRejected, outcomes[0].outcome,
+		"rejected is not a flavour of missing: one says it never arrived, the other that it did")
+	require.Equal(t, testMid, outcomes[0].height,
+		"recorded at the block it was observed, while the window is still open and a human could act")
+
+	pending, err := h.store.List(context.Background(), RebroadcastPhaseProof, hSupplier, hEnd)
+	require.NoError(t, err)
+	require.Empty(t, pending, "the entry must be gone, not left for the next block to re-judge")
+}
+
+// THE OTHER HALF OF THE FIX, and the one a green suite would not have missed by
+// accident: the terminal decision has to outlive the oracle that made it.
+//
+// When the on-chain read fails with the window still open, the reconciler skips
+// the whole verdict loop and blind-rebroadcasts everything still pending -- on
+// purpose, because a forfeit costs more than a wasted resend. That path never
+// consults the chain, so a rejection it cannot see would go back out on the first
+// block whose query fails. Clearing the entry is what stops it: there is nothing
+// left to blind-rebroadcast.
+//
+// A version of this fix that only cut the resend inside the verdict loop would
+// pass every other test in this file and still resend condemned bytes in exactly
+// the conditions the reconciler is least able to afford it.
+func TestReconciler_ARejectedProofStaysGoneWhenTheOracleFails(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofRejected}
+
+	h.r.OnBlock(testMid)
+	require.Equal(t, 0, h.resub.count(), "precondition: the rejection was seen and acted on")
+
+	// Now the chain goes dark with the window still open: the degraded path runs.
+	h.onChainErr = errors.New("node unreachable")
+	h.r.OnBlock(testMid + resendSpacingBlocks)
+
+	require.Equal(t, 0, h.resub.count(),
+		"the degraded path blind-rebroadcasts what is still pending, and a rejected "+
+			"proof must no longer be pending: without the clear, the verdict lives "+
+			"only as long as the queries do")
+}
+
+// The control for the test above: with the SAME degraded path and a session that
+// was never rejected, the blind rebroadcast still happens. Without this, a fix
+// that cleared every entry -- or a degraded path that silently stopped resending
+// at all -- would look identical to the one that works.
+func TestReconciler_TheDegradedPathStillResendsWhatWasNotRejected(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+	h.onChain = map[string]query.SessionProofState{"s1": query.SessionProofPending}
+
+	h.r.OnBlock(testMid)
+	require.Equal(t, 1, h.resub.count(), "pending is still missing: the calendar resends at mid-window")
+
+	h.onChainErr = errors.New("node unreachable")
+	h.r.OnBlock(testMid + resendSpacingBlocks)
+
+	require.Equal(t, 2, h.resub.count(),
+		"with the chain dark and the window open, a still-pending proof is blind-rebroadcast")
 }
