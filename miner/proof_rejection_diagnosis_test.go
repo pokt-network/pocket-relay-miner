@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/puzpuzpuz/xsync/v4"
@@ -43,8 +44,12 @@ func TestDiagnoseProofRejection_TheRootsSplitTheCauses(t *testing.T) {
 		name        string
 		storedRoot  []byte // nil = no snapshot written at all
 		onChainRoot []byte
-		wantCause   string
-		why         string
+		// breakRedis makes the snapshot READ fail, which is a different thing
+		// from the snapshot being absent: one is "there is nothing to compare
+		// against", the other is "I could not find out".
+		breakRedis bool
+		wantCause  string
+		why        string
 	}{
 		{
 			name:        "roots agree",
@@ -70,6 +75,18 @@ func TestDiagnoseProofRejection_TheRootsSplitTheCauses(t *testing.T) {
 				"mismatch here would be inventing one",
 		},
 		{
+			name:        "the snapshot could not be read",
+			storedRoot:  ourRoot,
+			onChainRoot: ourRoot,
+			breakRedis:  true,
+			wantCause:   rejectionRootUnknown,
+			why: "a FAILED read is not a mismatch. The roots here are identical, so anything " +
+				"but root_unknown would be inventing a verdict out of an outage -- and " +
+				"root_mismatch specifically would send the operator to audit a tree that is " +
+				"perfectly fine. That is the same shape S10 exists to remove, one level in: a " +
+				"thing we do not know, reported as a thing we found out",
+		},
+		{
 			name:        "the chain carried no root",
 			storedRoot:  ourRoot,
 			onChainRoot: nil,
@@ -81,6 +98,7 @@ func TestDiagnoseProofRejection_TheRootsSplitTheCauses(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			rc, _ := newTestRedis(t)
+			failRedis := testredis.NewFailSwitch(rc)
 			buf := &syncBuf{}
 
 			lg := logging.NewLoggerFromConfig(logging.DefaultConfig())
@@ -115,6 +133,13 @@ func TestDiagnoseProofRejection_TheRootsSplitTheCauses(t *testing.T) {
 			}
 
 			before := testutil.ToFloat64(proofRejectionDiagnosisTotal.WithLabelValues(tt.wantCause))
+
+			if tt.breakRedis {
+				// Break every command AFTER the snapshot is written, so the read
+				// is what fails and not the setup.
+				failRedis.Fail("LOADING Redis is loading the dataset in memory")
+				t.Cleanup(failRedis.Clear)
+			}
 
 			diagnose := m.inclusionReconciler.proofPhase.diagnoseRejection
 			require.NotNil(t, diagnose, "the proof phase must carry the diagnosis, or nothing runs it")
