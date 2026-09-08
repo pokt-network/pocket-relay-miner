@@ -41,6 +41,40 @@ settlement or metering is not verified by unit tests. If `live.sh` does not
 exist yet, `all.sh` prints it as NOT RUN — say so in your report rather than
 letting level 2's green stand in for it.
 
+## WHO runs it: never the session that wrote the code
+
+When two sessions work one tree, the gate is not a turn to share. It belongs to
+the session that did NOT write the change, and it does not rotate.
+
+The reason is not the resource conflict -- that is a side effect. **A gate run by
+the author measures what the author exercised; the same gate run by the other
+measures the tree.** Sharing the turn leaves verification in the hands of the
+verified half the time, which is the one thing two sessions exist to prevent.
+
+Measured 2026-09-08, and it paid for itself the same afternoon: an author handed
+over a commit with `go build`, `go vet` and their own targeted tests green -- all
+three correctly run. The full package under the gate died with a SIGSEGV in a
+goroutine, taking the whole test binary with it and reporting **zero failed
+tests**, so the failure named nothing. Targeted tests could not have seen it.
+
+The split, and the second half matters as much as the first:
+
+- **The verifier owns**: `make gate LEVEL=*` entire, the run on a clean HEAD after
+  every commit, and the injections that verify committed work.
+- **The author keeps**: `go build`, `go vet`, a `go test -run <Test>` for the test
+  being written, and injections against their own uncommitted tree. None of those
+  is a gate -- they are how you avoid committing something that does not compile.
+
+Leaving the author blind is not the goal, and an author who is told only "you do
+not run gates" will run them anyway.
+
+Same day, same tree: two gates share ONE Redis container on a fixed port, and the
+`down` of whichever finishes first deletes it under the other -- 20 failures, all
+connection-refused, in a run whose result was therefore NULL and not red. One
+runner makes that impossible. The ownership marker does not save you: it answers
+"did I start it?", and ownership TRANSFERS to whoever recreates a container that
+died on its own.
+
 ## Read the result
 
 Each gate's last line is its verdict; `all.sh` prints a summary. Three outcomes,
