@@ -3,10 +3,13 @@ package miner
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/redis/go-redis/v9"
+
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -386,8 +389,21 @@ type ProofOnChainUpdate struct {
 func (t *SubmissionTracker) UpdateProofOnChainOutcome(ctx context.Context, u ProofOnChainUpdate) error {
 	record, err := t.GetRecord(ctx, u.Supplier, u.SessionEnd, u.SessionID)
 	if err != nil {
-		// No record to annotate — nothing to do.
-		return nil
+		// The previous version returned nil on ANY error here, under "no record
+		// to annotate — nothing to do". That reads as a decision and merges two
+		// different answers: "there is no record" and "I could not read whether
+		// there is a record". Only the first is nothing to do; the second is a
+		// failure, and swallowing it made a Redis outage indistinguishable from
+		// a session that was never tracked.
+		//
+		// redis.Nil is what tells them apart, and it is the ONLY case that keeps
+		// the old behaviour. Everything else now reaches the caller, which logs
+		// it -- without this, that log was unreachable for the failure that
+		// actually happens.
+		if errors.Is(err, redis.Nil) {
+			return nil
+		}
+		return err
 	}
 
 	record.ProofOnChainOutcome = u.Outcome

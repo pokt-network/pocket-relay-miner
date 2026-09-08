@@ -1,0 +1,97 @@
+//go:build test
+
+package miner
+
+import (
+	"context"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/rs/zerolog"
+	"github.com/stretchr/testify/require"
+
+	pocktclient "github.com/pokt-network/poktroll/pkg/client"
+)
+
+// The big ProofQueryClient interface is embedded as nil on purpose: only the two
+// methods the reconciler needs are defined, so any OTHER method this path
+// reached would panic naming itself instead of quietly returning a zero value.
+type inclusionProbe struct {
+	pocktclient.ProofQueryClient
+}
+
+func (inclusionProbe) GetSupplierClaimSessions(_ context.Context, _ string) (map[string]struct{}, error) {
+	return map[string]struct{}{}, nil
+}
+
+func (inclusionProbe) GetSupplierProvenSessions(_ context.Context, _ string) (map[string]struct{}, error) {
+	return map[string]struct{}{}, nil
+}
+
+// The submission tracker's error does not rise: recordClaimOutcome returns nil
+// after updating it, so no caller can see the failure and none can act on it.
+// Discarding it therefore made the loss total -- the chain remembers the claim,
+// our ledger simply never learned its outcome, and nothing said so.
+//
+// The assertion is on the log because the log is the only record that exists on
+// this path by construction. Reaching the closure directly is deliberate: it is
+// what reconcilePhase.recordOutcome is wired to, so this exercises the real one
+// rather than a stand-in.
+func TestRecordOutcome_TrackerFailureIsReported(t *testing.T) {
+	rc, _ := newTestRedis(t)
+	buf := &syncBuf{}
+
+	m := &SupplierManager{
+		logger: zerolog.New(buf).Level(zerolog.TraceLevel),
+		config: SupplierManagerConfig{
+			RedisClient:           rc,
+			ProofQueryClient:      inclusionProbe{},
+			SubmissionTrackingTTL: time.Hour,
+		},
+	}
+	m.ensureSharedTrackers()
+	require.NotNil(t, m.inclusionReconciler, "the reconciler must exist, or the phases were never built")
+
+	// Take Redis away so the tracker update is the thing that fails.
+	require.NoError(t, rc.Close())
+
+	err := m.inclusionReconciler.claimPhase.recordOutcome(
+		context.Background(), rebroadcastEntry{TxHash: "hash-1", OrigTxHash: "hash-1"},
+		"supplier-1", 100, "session-1", inclusionMissing, 0)
+	require.NoError(t, err, "the closure absorbs the tracker error by design; that is WHY it has to log it")
+
+	require.True(t, strings.Contains(buf.String(), "not recorded in the submission tracker"),
+		"a submission outcome that never reached the tracker must say so: no caller sees this error, so the log is the only record; got: %s", buf.String())
+}
+
+// The proof twin, and it exists because its absence was found by injection: with
+// only the claim test above, disabling the Warn on the proof side left every
+// test green. Two sites written together drift apart the moment only one of them
+// is held, which is the shape this whole commit is about -- introducing it here
+// would have been the sixth instance of it today.
+func TestRecordOutcome_TrackerFailureIsReportedOnTheProofSideToo(t *testing.T) {
+	rc, _ := newTestRedis(t)
+	buf := &syncBuf{}
+
+	m := &SupplierManager{
+		logger: zerolog.New(buf).Level(zerolog.TraceLevel),
+		config: SupplierManagerConfig{
+			RedisClient:           rc,
+			ProofQueryClient:      inclusionProbe{},
+			SubmissionTrackingTTL: time.Hour,
+		},
+	}
+	m.ensureSharedTrackers()
+	require.NotNil(t, m.inclusionReconciler, "the reconciler must exist, or the phases were never built")
+
+	require.NoError(t, rc.Close())
+
+	err := m.inclusionReconciler.proofPhase.recordOutcome(
+		context.Background(), rebroadcastEntry{TxHash: "hash-1", OrigTxHash: "hash-1"},
+		"supplier-1", 100, "session-1", inclusionMissing, 0)
+	require.NoError(t, err, "recordProofOutcome has no error path at all; the log is the ONLY record")
+
+	require.True(t, strings.Contains(buf.String(), "proof on-chain outcome observed but not recorded"),
+		"the proof side must report its own tracker failure, not rely on the claim side being tested; got: %s", buf.String())
+}

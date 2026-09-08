@@ -436,7 +436,17 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 				r.clear(ctx, rp.phase, g, sessionID)
 				continue
 			}
-			_ = rp.recordOutcome(ctx, e, g.Supplier, g.SessionEnd, sessionID, inclusionPollErr, 0)
+			// The discard is safe by STRUCTURE, not by luck, and there is no test holding
+			// it -- so this says what it rests on. recordOutcome returns a non-nil error
+			// only from reactivateClaimedSession, which sits inside `if outcome ==
+			// inclusionFound` in recordClaimOutcome; recordProofOutcome has no error path at
+			// all. This call passes inclusionPollErr, so the value is invariantly nil. The one
+			// caller that DOES pass inclusionFound checks it, keeps the entry and retries.
+			//
+			// Three edits break that, and none of them would fail a test: moving the
+			// `return err` out of the inclusionFound branch, giving recordProofOutcome an
+			// error path (item 37 would), or a new caller passing inclusionFound here.
+			_ = rp.recordOutcome(ctx, e, g.Supplier, g.SessionEnd, sessionID, inclusionPollErr, 0) //nolint:errcheck // invariantly nil here; see above
 			r.clear(ctx, rp.phase, g, sessionID)
 		}
 		return
@@ -473,7 +483,17 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 
 		// Missing on-chain.
 		if windowClosed {
-			_ = rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionMissing, 0)
+			// The discard is safe by STRUCTURE, not by luck, and there is no test holding
+			// it -- so this says what it rests on. recordOutcome returns a non-nil error
+			// only from reactivateClaimedSession, which sits inside `if outcome ==
+			// inclusionFound` in recordClaimOutcome; recordProofOutcome has no error path at
+			// all. This call passes inclusionMissing, so the value is invariantly nil. The one
+			// caller that DOES pass inclusionFound checks it, keeps the entry and retries.
+			//
+			// Three edits break that, and none of them would fail a test: moving the
+			// `return err` out of the inclusionFound branch, giving recordProofOutcome an
+			// error path (item 37 would), or a new caller passing inclusionFound here.
+			_ = rp.recordOutcome(ctx, entry, g.Supplier, g.SessionEnd, sessionID, inclusionMissing, 0) //nolint:errcheck // invariantly nil here; see above
 			r.clear(ctx, rp.phase, g, sessionID)
 			continue
 		}

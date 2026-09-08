@@ -2570,12 +2570,35 @@ func (m *SupplierManager) ensureSharedTrackers() {
 				if origHash == "" {
 					origHash = e.TxHash
 				}
-				_ = m.sharedSubmissionTracker.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
+				// Logged HERE because the error does NOT rise: this closure returns
+				// nil after this block, so a caller cannot see it and cannot decide
+				// on it. Reporting is all that is left, and a submission outcome
+				// that goes unrecorded with nothing said is a gap an operator can
+				// never reconstruct -- the chain remembers the claim, not our
+				// ledger's opinion of it.
+				//
+				// Warn, and the volume is bounded: the reconciler runs one pass per
+				// block over the sessions THIS replica owns, so the ceiling is
+				// pending-sessions-per-block, not per relay. A flood needs a
+				// PARTIAL Redis failure -- reads working, tracker writes failing --
+				// because a total outage fails ActiveGroups first and the pass
+				// returns after a single line.
+				//
+				// If item 37 ever gives this closure an error path, look at the
+				// caller before adding a second line: today there is none to
+				// double up with.
+				if err := m.sharedSubmissionTracker.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
 					Supplier:        supplier,
 					TxHash:          origHash,
 					Outcome:         outcome,
 					InclusionHeight: inclusionHeight,
-				})
+				}); err != nil {
+					m.logger.Warn().Err(err).
+						Str("supplier", supplier).
+						Str(logging.FieldSessionID, sessionID).
+						Str("outcome", outcome).
+						Msg("claim on-chain outcome observed but not recorded in the submission tracker")
+				}
 			}
 			return nil
 		}
@@ -2585,7 +2608,11 @@ func (m *SupplierManager) ensureSharedTrackers() {
 				m.recordMissingCause(ctx, RebroadcastPhaseProof, e, supplier, sessionID)
 			}
 			if m.sharedSubmissionTracker != nil {
-				_ = m.sharedSubmissionTracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
+				// Same as the claim side above: the error does not rise, so this
+				// line is the only record of it. Bounded the same way, per block
+				// and per owned session, and a flood needs a PARTIAL Redis failure
+				// because a total one fails ActiveGroups first.
+				if err := m.sharedSubmissionTracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
 					Supplier:        supplier,
 					SessionEnd:      sessionEnd,
 					SessionID:       sessionID,
@@ -2593,7 +2620,13 @@ func (m *SupplierManager) ensureSharedTrackers() {
 					InclusionHeight: inclusionHeight,
 					NewProofTxHash:  e.TxHash,
 					Rebroadcasts:    e.Rebroadcasts,
-				})
+				}); err != nil {
+					m.logger.Warn().Err(err).
+						Str("supplier", supplier).
+						Str(logging.FieldSessionID, sessionID).
+						Str("outcome", outcome).
+						Msg("proof on-chain outcome observed but not recorded in the submission tracker")
+				}
 			}
 			// Metric + tracker only, and that is a GAP rather than a property:
 			// proof_tx_error has the same anatomy as claim_tx_error — the
