@@ -536,7 +536,10 @@ you here, because the property itself came from not looking. The property has to
 be derived from having opened the files, never the other way round.
 
 **And a machine trap that comes with it:** a test may READ a gate script
-(`internal/conventions/metric_coverage_test.go` reads `scripts/gates/live.sh`),
+(`tx/metrics_names_test.go` reads `scripts/gates/live.sh` -- verified 2026-09-07;
+the path this line named until then, `internal/conventions/metric_coverage_test.go`,
+does not exist, so anyone following it found nothing and read that as "no such
+guard"),
 so editing a `.sh` with a gate run in flight poisons that run exactly the way
 editing a `.go` does.
 
