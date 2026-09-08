@@ -47,10 +47,21 @@ func TestRecordOutcome_TrackerFailureIsReported(t *testing.T) {
 		config: SupplierManagerConfig{
 			RedisClient:           rc,
 			ProofQueryClient:      inclusionProbe{},
+			BlockClient:           &mockBlockClient{},
 			SubmissionTrackingTTL: time.Hour,
 		},
 	}
+	// A block client is REQUIRED for the reconciler to be built at all: without
+	// a per-block trigger it would persist rebroadcast entries nothing ever
+	// reads, so the manager declines to build it. This one delivers no blocks;
+	// the loop it starts is stopped by the cleanup below.
 	m.ensureSharedTrackers()
+	t.Cleanup(func() {
+		if m.reconcilerCancel != nil {
+			m.reconcilerCancel()
+		}
+		m.reconcilerWG.Wait()
+	})
 	require.NotNil(t, m.inclusionReconciler, "the reconciler must exist, or the phases were never built")
 
 	// Take Redis away so the tracker update is the thing that fails.
@@ -79,10 +90,21 @@ func TestRecordOutcome_TrackerFailureIsReportedOnTheProofSideToo(t *testing.T) {
 		config: SupplierManagerConfig{
 			RedisClient:           rc,
 			ProofQueryClient:      inclusionProbe{},
+			BlockClient:           &mockBlockClient{},
 			SubmissionTrackingTTL: time.Hour,
 		},
 	}
+	// A block client is REQUIRED for the reconciler to be built at all: without
+	// a per-block trigger it would persist rebroadcast entries nothing ever
+	// reads, so the manager declines to build it. This one delivers no blocks;
+	// the loop it starts is stopped by the cleanup below.
 	m.ensureSharedTrackers()
+	t.Cleanup(func() {
+		if m.reconcilerCancel != nil {
+			m.reconcilerCancel()
+		}
+		m.reconcilerWG.Wait()
+	})
 	require.NotNil(t, m.inclusionReconciler, "the reconciler must exist, or the phases were never built")
 
 	require.NoError(t, rc.Close())
@@ -94,4 +116,46 @@ func TestRecordOutcome_TrackerFailureIsReportedOnTheProofSideToo(t *testing.T) {
 
 	require.True(t, strings.Contains(buf.String(), "proof on-chain outcome observed but not recorded"),
 		"the proof side must report its own tracker failure, not rely on the claim side being tested; got: %s", buf.String())
+}
+
+// TestEnsureSharedTrackers_NoBlockClientBuildsNothing is the assertion whose
+// absence let a SIGSEGV reach a gate. Making Subscribe a compile-time
+// requirement removed a runtime type-assert that had been doing TWO jobs: it
+// asked whether the client could subscribe, and — because a type-assert on a
+// nil interface returns ok=false — it also asked whether there WAS one. The
+// type covers the first and cannot cover the second, so the loop dereferenced
+// nil one line in and took the whole test binary down: no test was marked
+// failed, the package simply died.
+//
+// The assertion that carries the reason is the one on the STORE. Declining to
+// build the reconciler is not about avoiding a panic — it is that a store
+// without a per-block loop keeps persisting rebroadcast entries nothing will
+// ever read, which age out at their TTL. That is the state this whole change
+// set exists to make impossible, and a nil block client reaches it by a
+// different door than the missing-capability one it closed.
+func TestEnsureSharedTrackers_NoBlockClientBuildsNothing(t *testing.T) {
+	rc, _ := newTestRedis(t)
+
+	m := &SupplierManager{
+		logger: zerolog.New(&syncBuf{}).Level(zerolog.TraceLevel),
+		config: SupplierManagerConfig{
+			RedisClient:           rc,
+			ProofQueryClient:      inclusionProbe{},
+			SubmissionTrackingTTL: time.Hour,
+		},
+	}
+
+	// Called bare, and NOT wrapped in require.NotPanics, which could not see
+	// this failure anyway: the dereference happens inside the goroutine
+	// startReconcilerBlockLoop spawns, and no recover on this goroutine reaches
+	// it. The failure signal is the binary dying -- which is precisely why the
+	// assertions below are about state and not about panicking.
+	m.ensureSharedTrackers()
+
+	require.Nil(t, m.inclusionReconciler,
+		"without a per-block trigger the reconciler cannot verify or rebroadcast anything")
+	require.Nil(t, m.rebroadcastStore,
+		"a live store with no loop to read it writes entries that only expire: leaving it nil is what keeps those writes from happening at all")
+	require.NotNil(t, m.sharedSubmissionTracker,
+		"the submission tracker is independent of the reconciler and must still be built")
 }

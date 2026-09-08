@@ -2535,6 +2535,17 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			m.logger.Warn().Msg("no proof query client; inclusion reconciler disabled (fire-once claim/proof, no rebroadcast)")
 			return
 		}
+		// The TYPE guarantees a block client can Subscribe; it cannot guarantee
+		// there IS one, and a nil interface satisfies any interface field. This
+		// check is not defensive padding: without it the reconciler is built with
+		// a live store and its loop dereferences nil one line into the goroutine,
+		// which is a SIGSEGV rather than a missing feature. It belongs here and
+		// not in the loop for the reason the comment above gives -- a reconciler
+		// with no trigger still writes rebroadcast entries nothing will ever read.
+		if m.config.BlockClient == nil {
+			m.logger.Warn().Msg("no block client; inclusion reconciler disabled (fire-once claim/proof, no rebroadcast)")
+			return
+		}
 		inclusionQuery := m.config.ProofQueryClient
 		m.rebroadcastStore = NewRebroadcastStore(m.config.RedisClient, 0) // 0 → default TTL
 
@@ -2680,10 +2691,11 @@ func (m *SupplierManager) ensureSharedTrackers() {
 // suppliers this replica currently holds a lease on.
 //
 // It takes its OWN subscription rather than riding the reconciler's loop, which
-// looks like the obvious place to hang it. That loop returns without starting
-// when the block client cannot Subscribe, so sharing it would silently tie the
-// size of the connection pool to whether the inclusion reconciler happens to be
-// configured -- two things with no relationship to each other.
+// looks like the obvious place to hang it. That loop never starts when the
+// reconciler was not built -- no proof query client, or no block client at all --
+// so sharing it would silently tie the size of the connection pool to whether
+// the inclusion reconciler happens to be configured, two things with no
+// relationship to each other.
 //
 // The trigger is every block, and the resize is level-triggered, so a takeover
 // that moves leases mid-window is picked up on the next block rather than
@@ -2693,15 +2705,16 @@ func (m *SupplierManager) startConnPoolResizeLoop() {
 		return
 	}
 
-	subscriber, ok := m.config.BlockClient.(interface {
-		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
-	})
-	if !ok {
-		// Warn and not Error: the pool keeps the floor it was built with, which
-		// is what every replica ran with before it could grow at all. Claims
-		// still submit; a replica holding many leases just runs with fewer
-		// connections than it should.
-		m.logger.Warn().Msg("block client does not support Subscribe(); transaction connection pool will stay at its startup size")
+	// Presence only: the field's type already guarantees Subscribe, so what is
+	// left to check is whether a client was wired at all -- a nil one is a
+	// supported configuration for tooling and tests.
+	//
+	// Warn and not Error: the pool keeps the floor it was built with, which is
+	// what every replica ran with before it could grow at all. Claims still
+	// submit; a replica holding many leases just runs with fewer connections
+	// than it should.
+	if m.config.BlockClient == nil {
+		m.logger.Warn().Msg("no block client; transaction connection pool will stay at its startup size")
 		return
 	}
 
@@ -2718,7 +2731,7 @@ func (m *SupplierManager) startConnPoolResizeLoop() {
 	resize := func(ctx context.Context) {
 		defer m.poolResizeWG.Done()
 
-		blockCh := subscriber.Subscribe(ctx, blockEventSubscriberBuffer)
+		blockCh := m.config.BlockClient.Subscribe(ctx, blockEventSubscriberBuffer)
 		runCoalescingBlockLoop(ctx, blockCh, func(int64) {
 			claimer := m.claimer
 			if claimer == nil {
