@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -274,9 +275,59 @@ func TestReconciler_SentResendsAtMidWindow(t *testing.T) {
 	require.Equal(t, 1, h.resub.count(), "sent entry resends at midpoint")
 	require.Equal(t, 1, h.pendingCount(t, hSupplier, hEnd), "entry retained for continued tracking")
 
-	// Bounded: a later block does not resend again (MaxRebroadcasts=1).
+	// The block right after the midpoint is the one that used to be a storm: the
+	// release condition `height >= threshold` stays true on every later block, so
+	// what holds the second attempt back is the SPACING and not the cap. Before
+	// the spacing existed this assertion passed too -- for the other reason -- so
+	// the message names which one is doing the work.
 	h.r.OnBlock(testMid + 1)
-	require.Equal(t, 1, h.resub.count(), "resend is capped at MaxRebroadcasts (1)")
+	require.Equal(t, 1, h.resub.count(),
+		"the second resend waits for its spacing, it is not blocked by the cap")
+
+	h.r.OnBlock(testMid + 2)
+	require.Equal(t, 2, h.resub.count(),
+		"the second resend goes out two blocks after the first: one to be included, one for the oracle to see it")
+
+	// Now it IS the cap.
+	h.r.OnBlock(testMid + 3)
+	h.r.OnBlock(testMid + 4)
+	require.Equal(t, 2, h.resub.count(), "resends are capped at MaxRebroadcasts")
+}
+
+// resendHeights drives every block in [from, to] and returns the heights at
+// which a resend actually went out. It is only meaningful for a harness holding
+// ONE session: two sessions resending in the same block would show up once.
+func resendHeights(h *reconcilerHarness, from, to int64) []int64 {
+	var out []int64
+	prev := h.resub.attemptCount()
+	for height := from; height <= to; height++ {
+		h.r.OnBlock(height)
+		if n := h.resub.attemptCount(); n > prev {
+			out = append(out, height)
+			prev = n
+		}
+	}
+	return out
+}
+
+// TestReconciler_ResendCalendarOnTheClaimPhase pins the whole schedule at once,
+// by the heights the resends actually left at rather than by a count.
+//
+// It runs on the CLAIM phase deliberately: every other test in this file seeds
+// the proof phase, and the two window widths are INDEPENDENT governance
+// parameters (poktroll x/shared: claim and proof close offsets are separate
+// fields), so a calendar proven on one says nothing about the other.
+func TestReconciler_ResendCalendarOnTheClaimPhase(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+	h.put(t, RebroadcastPhaseClaim, hSupplier, hEnd, "s1", testSubmit, "tx-s1")
+
+	got := resendHeights(h, testSubmit, testWindowClose)
+
+	// testMid is the midpoint for a tx that WAS broadcast; the second follows
+	// two blocks later. Nothing at testMid+1, and nothing at all once the guard
+	// closes -- the last permitted height is windowClose-safety-1.
+	require.Equal(t, []int64{testMid, testMid + 2}, got,
+		"the claim-phase calendar must be the midpoint and two blocks later, and nothing else")
 }
 
 // A persistently FAILING resend (e.g. a CUPR-doomed claim whose gas simulation
@@ -288,13 +339,15 @@ func TestReconciler_FailingResendIsBounded_NoPerBlockStorm(t *testing.T) {
 	h.resub.failNext = true // every resend fails
 	h.seedNeverSent(t, hSupplier, hEnd, "s1", testSubmit)
 
-	// Drive every block across the whole resend window.
-	for height := testSubmit; height < testWindowClose; height++ {
-		h.r.OnBlock(height)
-	}
+	// Asserted as the exact heights and not as a bound. `LessOrEqual(n, cap)`
+	// is satisfied by ZERO attempts, so it cannot tell "the cap held" from "the
+	// resend never fired at all" -- and the second is the failure that costs the
+	// claim. The heights say both things at once: how many, and spaced how.
+	got := resendHeights(h, testSubmit, testWindowClose)
 
-	require.LessOrEqual(t, h.resub.attemptCount(), 1,
-		"a persistently failing resend must be capped at MaxRebroadcasts (1), not retried every block")
+	require.Equal(t, []int64{testSubmit + 1, testSubmit + 3}, got,
+		"a never-broadcast entry resends after a 1-block grace and again two blocks later, then stops: "+
+			"a persistently failing resend must be bounded by MaxRebroadcasts, not retried every block")
 }
 
 // A never-broadcast (submit-failed) entry resends EARLY (submit+1), not at mid.
@@ -783,4 +836,124 @@ func TestReconciler_NotRequiredEntryStaysGone(t *testing.T) {
 	require.Equal(t, 1, h.resub.attemptCount(),
 		"one doomed attempt is one too many to repeat: the entry was dropped after the first")
 	require.Zero(t, h.pendingCount(t, hSupplier, hEnd))
+}
+
+// TestReconciler_AnEntryWithoutTheAttemptHeightStillSpaces covers the mixed-fleet
+// entry: one written by a binary that had no LastAttemptHeight, or one an older
+// binary read and rewrote, dropping the field it cannot see. Either way the
+// entry arrives with a resend already made and no record of when.
+//
+// The fallback has to keep SPACING, from the nominal schedule, because the
+// alternative is not a weaker guarantee: with a bare `base` the release
+// condition is already satisfied for such an entry, so the next resend leaves on
+// the very next block -- the exact back-to-back send this change exists to
+// prevent, re-opened during every rolling deploy.
+//
+// Injection: return `base` when LastAttemptHeight is unset. Red, because the
+// resend arrives at the midpoint instead of two blocks later.
+func TestReconciler_AnEntryWithoutTheAttemptHeightStillSpaces(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+
+	// Written by hand, not through put(): the shape under test is one no current
+	// binary produces -- a resend already counted, its height unknown.
+	b, err := marshalRebroadcastEntry(rebroadcastEntry{
+		MsgBytes:     []byte("s1"),
+		SubmitHeight: testSubmit,
+		TxHash:       "tx-s1",
+		OrigTxHash:   "tx-s1",
+		Rebroadcasts: 1,
+		// LastAttemptHeight deliberately absent.
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.store.Put(context.Background(), RebroadcastPhaseProof, hSupplier, hEnd, "s1", b))
+
+	got := resendHeights(h, testSubmit, testWindowClose)
+
+	require.Equal(t, []int64{testMid + 2}, got,
+		"an entry that has already resent once must be spaced from the nominal schedule, not released at the midpoint")
+}
+
+// TestReconciler_CapLeftUnspentAtWindowCloseIsCounted pins the signal that tells
+// an operator WHY they configured a cap of 2 and saw one resend.
+//
+// The short window is not hypothetical: the chain's own default claim/proof
+// close offset is 4 blocks (mainnet and localnet configure 10), and at 4 the
+// first resend lands on the last height the guard allows, so there is no block
+// left for a second. Without this counter that is indistinguishable from "a
+// second resend was never needed", and the two call for opposite actions.
+//
+// The long-window half is the control: it proves the counter is not simply
+// always firing.
+//
+// Injection: delete the Inc. Red on the short window.
+func TestReconciler_CapLeftUnspentAtWindowCloseIsCounted(t *testing.T) {
+	read := func() float64 {
+		return testutil.ToFloat64(inclusionResendCapUnusedTotal.WithLabelValues(string(RebroadcastPhaseProof)))
+	}
+
+	t.Run("a window too short for the spacing reports the unspent budget", func(t *testing.T) {
+		h := newReconcilerHarness(t, 1)
+		h.windowClose = testSubmit + 4 // the chain's default offset
+		h.seed(t, hSupplier, hEnd, "s1", testSubmit)
+
+		before := read()
+		got := resendHeights(h, testSubmit, h.windowClose+1)
+
+		require.Len(t, got, 1, "a 4-block window has room for exactly one resend")
+		require.Equal(t, float64(1), read()-before,
+			"budget left unspent at window close must be reported, or it reads as a resend that was not needed")
+	})
+
+	t.Run("a window that fits both resends reports nothing", func(t *testing.T) {
+		h := newReconcilerHarness(t, 1)
+		h.seed(t, hSupplier, hEnd, "s2", testSubmit)
+
+		before := read()
+		got := resendHeights(h, testSubmit, testWindowClose+1)
+
+		require.Len(t, got, 2, "the default harness window fits the whole calendar")
+		require.Equal(t, float64(0), read()-before,
+			"a cap that was fully spent must not be reported as unspent")
+	})
+}
+
+// TestReconciler_ASpacingThatNoLongerFitsIsCompressedNotAbandoned pins the
+// floor, which is the one rule in resendThreshold that nothing else asserts:
+// when the spacing would push a resend past the last height the guard allows,
+// the threshold is compressed to that height instead of the attempt being
+// dropped.
+//
+// The arithmetic, written out so nobody has to re-derive it: with
+// RebroadcastSafetyBlocks=1 the guard is `height < windowClose-1`, so the last
+// height a resend can leave at is windowClose-2. Seeding LastAttemptHeight at
+// windowClose-3 makes the spaced threshold windowClose-1 -- one past that. With
+// the floor it becomes windowClose-2 and the resend goes out; without it the
+// threshold stays at windowClose-1, which the guard can never satisfy, and the
+// second attempt is lost in full.
+//
+// That is the failure mode the floor exists for, and it is not exotic: it is
+// what happens whenever the first resend was itself late, which is exactly when
+// the reconciler is busy and a second attempt matters most.
+//
+// Injection: drop the compression branch from resendThreshold. Red, with an
+// empty result -- no resend at all rather than a late one.
+func TestReconciler_ASpacingThatNoLongerFitsIsCompressedNotAbandoned(t *testing.T) {
+	h := newReconcilerHarness(t, 1)
+
+	b, err := marshalRebroadcastEntry(rebroadcastEntry{
+		MsgBytes:          []byte("s1"),
+		SubmitHeight:      testSubmit,
+		TxHash:            "tx-s1",
+		OrigTxHash:        "tx-s1",
+		Rebroadcasts:      1,
+		LastAttemptHeight: testWindowClose - 3,
+	})
+	require.NoError(t, err)
+	require.NoError(t, h.store.Put(context.Background(), RebroadcastPhaseProof, hSupplier, hEnd, "s1", b))
+
+	got := resendHeights(h, testSubmit, testWindowClose)
+
+	require.Equal(t, []int64{testWindowClose - 2}, got,
+		"a resend whose spacing no longer fits must be compressed to the last height the guard allows, not abandoned: "+
+			"the guard decides whether a send can still land, the spacing only prefers when")
 }

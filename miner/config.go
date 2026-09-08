@@ -389,7 +389,7 @@ type TransactionConfig struct {
 	// MaxRebroadcasts caps how many times a still-missing claim/proof is
 	// re-submitted within its window. Pointer so an explicit 0 (observe-only:
 	// verify + record outcomes but never resend) is distinguishable from unset
-	// (default 1: a single mid-window self-try; emergency resends of
+	// (default 2, spaced 2 blocks apart, the first at mid-window; emergency resends of
 	// never-broadcast messages fire earlier).
 	MaxRebroadcasts *int `yaml:"max_rebroadcasts,omitempty"`
 

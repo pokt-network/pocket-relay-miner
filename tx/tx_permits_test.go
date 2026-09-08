@@ -198,7 +198,7 @@ func TestResendNeverQueuesForAPermit(t *testing.T) {
 }
 
 // TestSaturationIsDistinguishableFromRejection: the sentinel carries the one
-// distinction the resend counter depends on. MaxRebroadcasts defaults to ONE,
+// distinction the resend counter depends on. MaxRebroadcasts is a small number,
 // so counting an attempt that never left the process burns the only resend a
 // claim had, on nothing.
 func TestSaturationIsDistinguishableFromRejection(t *testing.T) {

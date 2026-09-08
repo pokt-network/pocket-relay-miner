@@ -622,6 +622,21 @@ var (
 	// corrupt entry cannot be decoded, so the service_id is precisely the field
 	// that is unavailable. Naming WHICH session is the log's job -- a session id
 	// as a label is unbounded cardinality.
+	// inclusionResendCapUnusedTotal counts entries that reached window close
+	// still missing WITH resend budget left. It exists because "the cap was not
+	// needed" and "the cap could not be spent" are indistinguishable from the
+	// resend counter alone, and with a cap above 1 the second becomes routine:
+	// a window shorter than the spacing simply cannot hold the second attempt.
+	inclusionResendCapUnusedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "inclusion_resend_cap_unused_total",
+			Help:      "Entries missing at window close that still had resend budget (labeled by phase)",
+		},
+		[]string{"phase"},
+	)
+
 	inclusionEntryDroppedTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

@@ -36,6 +36,14 @@ const (
 	// counted the only trace was a log line on a per-block path.
 	abandonCauseIndexUnreadable = "index_unreadable"
 
+	// resendSpacingBlocks is the minimum gap between two resends of the same
+	// entry: one block for the resend to be included, one for the oracle to
+	// observe it. Without it the release condition stays true on every later
+	// block, so a cap above 1 spends its attempts back to back and buys only
+	// fees -- which is why the design says the cap and the spacing are ONE
+	// change, not two.
+	resendSpacingBlocks = 2
+
 	inclusionFound   = "on_chain_found"
 	inclusionMissing = "on_chain_missing"
 	inclusionPollErr = "poll_error"
@@ -53,6 +61,24 @@ type rebroadcastEntry struct {
 	OrigTxHash   string `json:"o,omitempty"` // original submit tx hash (immutable) — claim outcome is keyed by it
 	ServiceID    string `json:"s,omitempty"` // for the outcome/rebroadcast metric label
 	Rebroadcasts int    `json:"n,omitempty"` // # of resends so far (persisted → HA-safe cap across failover)
+	// LastAttemptHeight is the height the last resend ACTUALLY went out at, and
+	// it is what makes the spacing real rather than nominal: the reconciler does
+	// not run on every block -- OnBlock skips a whole block whose previous pass
+	// is still in flight -- so an attempt can leave later than the threshold
+	// that released it.
+	//
+	// Zero means "not known" and every reader falls back to the nominal
+	// schedule. That is not a defensive default, it is the mixed-fleet contract,
+	// and it holds in BOTH directions: an entry written by a binary without this
+	// field reads as 0 here, and an entry written with it and then rewritten by
+	// an older binary LOSES it, because the older struct has no such field and
+	// its re-marshal drops what it cannot see. Both directions degrade to the
+	// NOMINAL schedule -- spacing counted from where each attempt was due rather
+	// than from where it landed -- which is a weaker guarantee and still a
+	// spacing. It is deliberately not a fallback to the bare base: that would
+	// re-open, during any rolling deploy, exactly the back-to-back resend this
+	// change exists to prevent.
+	LastAttemptHeight int64 `json:"l,omitempty"`
 }
 
 func marshalRebroadcastEntry(e rebroadcastEntry) ([]byte, error) { return json.Marshal(e) }
@@ -101,16 +127,19 @@ type InclusionReconcilerConfig struct {
 	// block, not a lost resend -- the payloads stay in the store.
 	MaxConcurrent int
 	// MaxRebroadcasts caps how many times a still-missing claim/proof is
-	// re-submitted within its window. Default 1 (a single resend at mid-window
-	// — worst case gas x2). 0 = observe-only (record outcomes, never resend).
+	// re-submitted within its window: 2 by default, the first due at mid-window
+	// and each one spaced resendSpacingBlocks after the last attempt that
+	// actually went out. Worst case is that many times the gas. 0 = observe-only
+	// (record outcomes, never resend).
 	//
-	// Why a single mid-window resend (not per-block): txs are unordered with a
-	// block-time-anchored timeout that spans ~the whole window, so the original
-	// is valid in any later (empty) block until it times out. Re-sending every
-	// block would flood the mempool with copies that mostly fail DeliverTx as
-	// duplicate proofs. The only failure the resend fixes is mempool eviction
-	// during the submit-block burst; one resend into a later empty block
-	// recovers it.
+	// Why spaced resends from mid-window, and not one per block: txs are
+	// unordered with a block-time-anchored timeout that spans ~the whole window,
+	// so the original is valid in any later (empty) block until it times out.
+	// Re-sending every block would flood the mempool with copies that mostly
+	// fail DeliverTx as duplicates. The failure a resend fixes is mempool
+	// eviction during the submit-block burst, and a resend into a later empty
+	// block recovers it — the spacing is what gives each one a block to be
+	// included and a block to be observed before the next is considered.
 	//
 	// CORRECTED 2026-09-04. This comment used to say that re-sending every
 	// block "would build a fresh tx each time (new timeout → new hash, not
@@ -148,7 +177,7 @@ const rebroadcastPersistTimeout = 3 * time.Second
 func DefaultInclusionReconcilerConfig() InclusionReconcilerConfig {
 	return InclusionReconcilerConfig{
 		MaxConcurrent:           64,
-		MaxRebroadcasts:         1,
+		MaxRebroadcasts:         2,
 		RebroadcastSafetyBlocks: 1,
 		PerGroupTimeout:         10 * time.Second,
 	}
@@ -483,6 +512,19 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 
 		// Missing on-chain.
 		if windowClosed {
+			// The window is over and this session never landed, so a resend was
+			// always warranted -- a session found on-chain `continue`s above and
+			// never reaches here. Budget left over therefore says the schedule
+			// could not spend it, not that it was not needed, and those two have
+			// to give different signals: an operator who configures a cap of 2
+			// and observes one resend can otherwise only guess which happened.
+			// The common cause is a window too short to hold the spacing (the
+			// chain's own default close offset is 4 blocks, not the 10 mainnet
+			// and localnet use), and a claim submitted late by the retry loop
+			// shortens it further.
+			if entry.Rebroadcasts < r.cfg.MaxRebroadcasts {
+				inclusionResendCapUnusedTotal.WithLabelValues(string(rp.phase)).Inc()
+			}
 			// The discard is safe by STRUCTURE, not by luck, and there is no test holding
 			// it -- so this says what it rests on. recordOutcome returns a non-nil error
 			// only from reactivateClaimedSession, which sits inside `if outcome ==
@@ -498,39 +540,75 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			continue
 		}
 
-		// Window still open → single resend at mid-window if still missing.
+		// Window still open → resend on the calendar if still missing.
 		if r.canRebroadcast(entry, height, windowClose) {
 			r.rebroadcast(ctx, rp, g, sessionID, entry, height, windowClose)
 		}
 	}
 }
 
-// canRebroadcast is the resend gate: a single resend at the window midpoint.
-// The original tx is unordered with a block-time-anchored timeout spanning ~the
-// whole window, so it is valid in any later (empty) block until it times out —
-// re-sending earlier or repeatedly just floods the mempool with duplicates that
-// fail DeliverTx. We wait until the midpoint (giving the original maximal chance
-// to land on its own), then, if still missing and the resend can still land
-// before window-close (safety margin), re-send exactly once (MaxRebroadcasts,
-// default 1). The count is persisted on the entry, so the cap survives failover.
+// canRebroadcast is the resend gate: at most MaxRebroadcasts resends, each no
+// earlier than its threshold and none close enough to window-close that it could
+// not land. The count is persisted on the entry, so the cap survives failover.
 func (r *InclusionReconciler) canRebroadcast(entry rebroadcastEntry, height, windowClose int64) bool {
 	if entry.Rebroadcasts >= r.cfg.MaxRebroadcasts {
 		return false
 	}
-	var threshold int64
+	return height >= r.resendThreshold(entry, windowClose) && height < windowClose-r.cfg.RebroadcastSafetyBlocks
+}
+
+// resendThreshold is the earliest height this entry's NEXT resend may go out.
+//
+// Two rules compose it, and the second is the one that makes a cap above 1 mean
+// anything:
+//
+//  1. The BASE, which depends on whether anything is in flight. A tx that was
+//     broadcast OK is unordered with a window-spanning timeout, so it may still
+//     land in any later (empty) block: it gets until the window midpoint on its
+//     own, because re-sending earlier just floods the mempool with duplicates
+//     that fail DeliverTx. A tx that never reached the network (OrigTxHash empty:
+//     gap, lazyload-at-submit, transient error) has nothing in flight, so waiting
+//     buys nothing and it resends after a 1-block grace.
+//  2. The SPACING: resendSpacingBlocks after the attempt that actually went out.
+//     `height >= base` alone stays true on every later block, so without this the
+//     second attempt leaves in the block after the first.
+//
+// When the spacing no longer fits, the threshold is COMPRESSED to the last height
+// the guard allows rather than the attempt being abandoned. The reason is a
+// division of authority: the guard decides whether a send can still land, the
+// spacing is only a preference about when it is worth sending, and a preference
+// must not veto what the authority permits. A compressed resend costs a duplicate
+// fee on an idempotent upsert (§0 of the design accepts exactly that trade);
+// dropping the attempt costs the claim. The compression never reaches below the
+// base, so a first resend is timed exactly as it was before this rule existed.
+//
+// With LastAttemptHeight unset -- an entry written by a binary that did not have
+// the field, or one an older binary rewrote and stripped -- rule 2 does not
+// apply and the schedule is the nominal one.
+func (r *InclusionReconciler) resendThreshold(entry rebroadcastEntry, windowClose int64) int64 {
+	base := entry.SubmitHeight + (windowClose-entry.SubmitHeight)/2
 	if entry.OrigTxHash == "" {
-		// The original submit FAILED (build-OK but tx never accepted: gap,
-		// lazyload-at-submit, transient error). Nothing is in flight, so this is
-		// an emergency self-heal — resend as soon as past a 1-block grace rather
-		// than waiting for the midpoint.
-		threshold = entry.SubmitHeight + 1
-	} else {
-		// The original was broadcast OK and is unordered with a window-spanning
-		// timeout, so it may still land in any later (empty) block. Give it until
-		// the window midpoint before a single self-try resend.
-		threshold = entry.SubmitHeight + (windowClose-entry.SubmitHeight)/2
+		base = entry.SubmitHeight + 1
 	}
-	return height >= threshold && height < windowClose-r.cfg.RebroadcastSafetyBlocks
+	// Spaced from the height the last attempt REALLY went out at when the entry
+	// carries it, and from the nominal schedule when it does not. The nominal
+	// form assumes each previous attempt left at its own threshold, which is the
+	// assumption LastAttemptHeight exists to remove -- but it still spaces, and
+	// that is the whole point: falling back to a bare `base` would leave
+	// `height >= base` already satisfied for an entry that has resent once, so
+	// the next attempt would go out on the very next block. That is not a weaker
+	// schedule, it is the defect this function was written to close.
+	spaced := base + resendSpacingBlocks*int64(entry.Rebroadcasts)
+	if entry.LastAttemptHeight > 0 {
+		spaced = entry.LastAttemptHeight + resendSpacingBlocks
+	}
+	if spaced <= base {
+		return base
+	}
+	if lastAllowed := windowClose - r.cfg.RebroadcastSafetyBlocks - 1; spaced > lastAllowed && lastAllowed > base {
+		return lastAllowed
+	}
+	return spaced
 }
 
 // rebroadcast resends one session's stored message once, incrementing and
@@ -549,7 +627,7 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	// params at the session's own heights, so every future resend asks the same
 	// question. There is no inclusion left to verify, so the entry is DROPPED
 	// rather than counted. Counting would happen to work only because
-	// MaxRebroadcasts defaults to 1; the entry would still be re-read on every
+	// MaxRebroadcasts is small; the entry would still be re-read on every
 	// block until the window closes.
 	//
 	// A context of its own, for the same reason the persist below has one: the
@@ -571,14 +649,22 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	// re-fire — and re-log — on every block until the window closes. Persisting
 	// also keeps the cap across leader failover.
 	//
-	// EXCEPT when we never reached the network. MaxRebroadcasts defaults to 1 —
-	// ONE resend — so counting an attempt that never left the process burns the
-	// only resend a claim had, on nothing. The sentinel is the only thing that
+	// EXCEPT when we never reached the network. The budget is a handful of
+	// resends, so counting an attempt that never left the process burns one of
+	// the few a claim had, on nothing — and it would move the calendar too,
+	// pushing the next real attempt two blocks later for a send that did not
+	// happen. The sentinel is the only thing that
 	// can tell "the chain rejected it" from "we never asked": saturation means
 	// no permit was free, the message was never signed and never sent, and the
 	// next block will find the payload exactly where it was.
 	if !errors.Is(err, tx.ErrTxConcurrencySaturated) {
 		entry.Rebroadcasts++
+		// Inside this guard and NOT beside the TxHash assignment below, which
+		// sits outside it: a saturated attempt never left the process, so moving
+		// the calendar for it would spend two blocks of the window on a send
+		// that did not happen. The two fields move together for that reason --
+		// the count and the schedule answer the same question.
+		entry.LastAttemptHeight = height
 	}
 	if err == nil && newHash != "" {
 		entry.TxHash = newHash

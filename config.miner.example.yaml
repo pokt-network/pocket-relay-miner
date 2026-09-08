@@ -151,7 +151,7 @@ pocket_node:
   # metrics. All fields are optional; defaults shown.
   # disable_inclusion_reconciler: false               # Master switch (default: enabled)
   # inclusion_reconciler_max_concurrent: 64           # Per-block group-reconcile pool size (default: 64)
-  # max_rebroadcasts: 1                                # In-window re-submits; 0 = observe-only (default: 1)
+  # max_rebroadcasts: 2                                # In-window re-submits, spaced 2 blocks apart; 0 = observe-only (default: 2)
   # rebroadcast_safety_blocks: 1                       # Stop rebroadcasting within N blocks of window close (default: 1)
   # inclusion_reconciler_per_group_timeout_ms: 10000  # Per-supplier reconcile timeout per block (default: 10s)
 

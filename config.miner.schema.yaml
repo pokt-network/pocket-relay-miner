@@ -148,12 +148,16 @@ properties:
       max_rebroadcasts:
         type: integer
         description: |
-          Max in-window re-submissions of a still-missing claim/proof. Default 1
-          (a single self-try: at the window midpoint for an accepted-but-evicted
-          tx; promptly for a build-OK-but-submit-failed tx that was never
-          broadcast). Set to 0 for observe-only (verify + record outcomes but
-          never resend). Omit to use the default.
-        default: 1
+          Max in-window re-submissions of a still-missing claim/proof. Default 2,
+          spaced 2 blocks apart (one block for a resend to be included, one for
+          the inclusion read to observe it). The first is due at the window
+          midpoint for an accepted-but-evicted tx, or promptly for a build-OK-
+          but-submit-failed tx that was never broadcast. A window too short to
+          hold the spacing simply yields fewer resends -- watch
+          ha_miner_inclusion_resend_cap_unused_total to tell that apart from a
+          cap that was never needed. Set to 0 for observe-only (verify + record
+          outcomes but never resend). Omit to use the default.
+        default: 2
         minimum: 0
       rebroadcast_safety_blocks:
         type: integer
