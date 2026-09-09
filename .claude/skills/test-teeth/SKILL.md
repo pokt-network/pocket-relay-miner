@@ -689,6 +689,49 @@ which is what its author believed it did.
 more than one member, or the test does not know what it is counting.** Ask it of
 any counter whose name is a plural of something that contains things.
 
+## A CHECK CAN BE RIGHT IN EVERY INJECTION AND STILL BREAK THE GATE
+
+The loop above asks one question: does this check go red when it should. There is
+a second one, and it is not the same: **what does the check do to the VERDICT when
+it does not go red?**
+
+Measured 2026-09-09. A new live-gate cell reporting the in-window resend path was
+written with `gate_nothing_measured`, injected against eight fabricated inputs, and
+all eight were correct -- Prometheus down, series absent, counter mismatch, each
+producing exactly the right outcome. It was still wrong. `gate_nothing_measured`
+drops the whole LEVEL, and a healthy localnet loses no transaction, so the resend
+path never runs and the cell could never be satisfied. The level came back
+`EXIT=2` on a clean run, and the red was the cell's own.
+
+**A gate that is always red stops being read, exactly like one that is always
+green.** Both are ways of no longer measuring, and the injection loop cannot see
+either: it exercises the check in isolation, where the verdict does not exist.
+
+So, for a check whose HEALTHY value is zero or absent, ask before writing it:
+
+- Can this ever be satisfied on the run the gate actually performs? If the answer
+  is "only if something goes wrong", it is not an assertion -- it is a report.
+- Which primitive matches? `gate_fail` for a defect. `gate_nothing_measured` for
+  an instrument that failed to measure something it SHOULD have measured.
+  `gate_pass` with the limit stated in its own message for a capability that is
+  wired but was legitimately not exercised. The third one is the one that gets
+  skipped, and it is usually the right one.
+- And run the gate END TO END after adding it. The unit-level injection proves
+  the cell; only the full run proves the level.
+
+**An absent series has two causes that lead opposite ways**, and this is where the
+fix came from rather than the mistake: nothing happened (normal), or nobody wired
+the counter (a regression that would go silent forever). Prometheus answers the
+same for both. They are told apart by asking the BINARY under test -- the metric
+name is compiled in whether or not it ever fires -- so a missing NAME fails and a
+missing SERIES is a note. It is the same rule as the KeyBuilder corollary and the
+batch-limit case: **ask the PRODUCER, not the property**.
+
+The comment that solves this already lived twenty lines further down the same
+file, on the settlement breakdown: *"a non-zero would be the finding while a zero
+proves nothing"*. It had been read two hours earlier, as history rather than as
+an instruction.
+
 ## The one-line test for whether this ran
 
 The report names the defect that was injected, quotes the failure showing it named
