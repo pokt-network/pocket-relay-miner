@@ -344,9 +344,16 @@ type TransactionConfig struct {
 
 	// MaxRebroadcasts caps how many times a still-missing claim/proof is
 	// re-submitted within its window. Pointer so an explicit 0 (observe-only:
-	// verify + record outcomes but never resend) is distinguishable from unset
-	// (default 2, spaced 2 blocks apart, the first at mid-window; emergency resends of
-	// never-broadcast messages fire earlier).
+	// verify + record outcomes but never resend) is distinguishable from unset.
+	//
+	// UNSET NOW MEANS NO CAP, and that is a change for every deployment that
+	// never configured this: it used to inherit a cap of 2 with the resends
+	// spaced two blocks apart, and now a still-missing claim is re-sent on every
+	// block its window allows. Setting an explicit number restores a cap; 0
+	// still means observe-only and is unaffected.
+	//
+	// The cost of the new default is one transaction fee per resend (1 upokt),
+	// against a claim that pays nothing at all if it never lands.
 	MaxRebroadcasts *int `yaml:"max_rebroadcasts,omitempty"`
 
 	// RebroadcastSafetyBlocks stops rebroadcasting once the chain is within this
@@ -371,7 +378,7 @@ func (c TransactionConfig) InclusionReconcilerConfig() InclusionReconcilerConfig
 	}
 	// Pointers: nil keeps the default; an explicit value (including 0) is honored.
 	if c.MaxRebroadcasts != nil {
-		cfg.MaxRebroadcasts = *c.MaxRebroadcasts
+		cfg.MaxRebroadcasts = c.MaxRebroadcasts
 	}
 	if c.RebroadcastSafetyBlocks != nil {
 		cfg.RebroadcastSafetyBlocks = *c.RebroadcastSafetyBlocks
