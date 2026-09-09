@@ -934,6 +934,118 @@ else
     gate_pass "no sdk/code=18 rejections; busiest supplier broadcast ${broadcast_delta} transactions this run"
 fi
 
+# --- The transaction DEADLINE, and who decided it ----------------------------
+#
+# WHY THIS BLOCK EXISTS. Four commits changed how a claim/proof transaction
+# reaches the chain -- it now carries a timeout_height, that height is derived
+# from the window instead of configured, a node that already holds the tx is not
+# a failed resend, and a missing claim is re-sent on every block its window
+# allows. Measured 2026-09-09: this gate observed NONE of them. The three
+# metrics they emit had ZERO readers here, and code=30 and code=19 were unread
+# because the only rejection query filters code="18". A run would have gone
+# green without touching a line of it.
+#
+# READ THREE STATES, NEVER ONE. Every other Prometheus read in this file ends in
+# `// "0"` with a `|| echo 0` behind it, so ABSENT, GENUINELY-ZERO, BAD-JSON and
+# PROMETHEUS-DOWN all arrive as the same 0. Those three sites are each protected
+# by a positive control downstream (the >=3 broadcast floor, and the
+# published-series guard), so they are not defects today -- but this block adds
+# assertions whose healthy value IS zero, and a zero that cannot be told from a
+# dead instrument is exactly the false green the nonce check documents above.
+prom_scalar() {
+    # <query> -> the value, or ABSENT (no series), or UNREADABLE (no answer).
+    local q="$1" body rows
+    body="$(curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode "query=$q" 2>/dev/null)" || { printf 'UNREADABLE'; return 0; }
+    printf '%s' "$body" | jq -e '.status == "success"' >/dev/null 2>&1 ||
+        { printf 'UNREADABLE'; return 0; }
+    rows="$(printf '%s' "$body" | jq -r '.data.result | length' 2>/dev/null)" ||
+        { printf 'UNREADABLE'; return 0; }
+    [ "${rows:-0}" -eq 0 ] 2>/dev/null && { printf 'ABSENT'; return 0; }
+    printf '%s' "$body" | jq -r '.data.result[0].value[1] // "UNREADABLE"' 2>/dev/null ||
+        printf 'UNREADABLE'
+}
+
+gate_step "assert: every transaction got a deadline, and the window rule set it"
+
+regime_total="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total)')"
+broadcasts_total="$(prom_scalar 'sum(ha_tx_broadcasts_total)')"
+regime_unknown="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{regime="unknown"})')"
+regime_ceiling="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{regime="ceiling"})')"
+
+# THE POSITIVE CONTROL, and it is the whole point: regime="unknown" == 0 is the
+# healthy reading, and a zero proves nothing unless the family was populated.
+# Measured on a healthy localnet 2026-09-09: 109 broadcasts, 109 regimes
+# (claim=15, proof=94), unknown=0, ceiling=0. The equality across two counters
+# in two different packages is what makes the zero non-vacuous.
+if [ "$regime_total" = "UNREADABLE" ] || [ "$broadcasts_total" = "UNREADABLE" ]; then
+    gate_nothing_measured "Prometheus did not answer for the timeout-regime or broadcast families -- the deadline rule cannot be read, so this run proves nothing about it"
+elif [ "$regime_total" = "ABSENT" ] || [ "$broadcasts_total" = "ABSENT" ]; then
+    gate_nothing_measured "no ha_miner_tx_timeout_regime_total / ha_tx_broadcasts_total series exist after a run that settled claims -- either nothing was broadcast or the counter is not wired; NOT evidence that the deadline rule ran"
+elif [ "${regime_total%%.*}" -ne "${broadcasts_total%%.*}" ] 2>/dev/null; then
+    gate_fail "${broadcasts_total} transaction(s) broadcast but ${regime_total} got a timeout regime -- every transaction must pass the deadline derivation exactly once, so a mismatch means one path skips it"
+elif [ "$regime_unknown" != "ABSENT" ] && [ "${regime_unknown%%.*}" -gt 0 ] 2>/dev/null; then
+    gate_fail "${regime_unknown} transaction(s) fell to regime=unknown -- the window could not be derived, so the deadline came from the SDK ceiling instead of the claim/proof window"
+elif [ "$regime_ceiling" != "ABSENT" ] && [ "${regime_ceiling%%.*}" -gt 0 ] 2>/dev/null; then
+    gate_fail "${regime_ceiling} transaction(s) fell to regime=ceiling -- on localnet the window is far shorter than the SDK ceiling, so this means block_time_seconds or the window length is not reaching the derivation"
+else
+    gate_pass "all ${regime_total} transaction(s) took their deadline from the window rule (unknown=0, ceiling=0)"
+    gate_exercised coverage timeout_regime "${regime_total%%.*}"
+fi
+
+gate_step "assert: nobody missed their window (sdk/code=30)"
+
+# code=30 is ErrTxTimeoutHeight: the chain refused the transaction because the
+# timeout_height had already passed. It is the failure mode the timeout_height
+# work can INTRODUCE, so a run that sets deadlines and never trips one is the
+# evidence that the deadlines are not too tight. Conditioned on broadcasts > 0
+# for the same reason as everything else here.
+window_expired="$(prom_scalar 'sum(ha_tx_broadcast_rejections_total{codespace="sdk",code="30"})')"
+if [ "$broadcasts_total" = "ABSENT" ] || [ "$broadcasts_total" = "UNREADABLE" ]; then
+    gate_nothing_measured "no broadcasts to judge -- a zero code=30 count says nothing when nothing was sent"
+elif [ "$window_expired" = "UNREADABLE" ]; then
+    gate_nothing_measured "Prometheus did not answer for the rejection family -- code=30 cannot be read"
+elif [ "$window_expired" != "ABSENT" ] && [ "${window_expired%%.*}" -gt 0 ] 2>/dev/null; then
+    gate_fail "${window_expired} transaction(s) rejected with sdk/code=30 -- the deadline had already passed when the chain saw them, so the window derivation is leaving no room"
+else
+    gate_pass "no sdk/code=30 rejections across ${broadcasts_total} broadcast(s) -- no deadline arrived expired"
+fi
+
+gate_step "report: the in-window resend path"
+
+# THIS BLOCK REPORTS, IT DOES NOT JUDGE -- the same rule as the settlement
+# breakdown below, and for the same reason: a healthy localnet loses no
+# transaction, so the resend path never runs and its counters never come into
+# existence. A non-zero would be the finding; a zero proves nothing.
+#
+# Measured 2026-09-09, and it is why this block was rewritten: as a
+# gate_nothing_measured it turned the whole level RED on a clean run, which is
+# the other way to stop measuring -- a gate that is always red stops being read.
+#
+# BUT AN ABSENT SERIES HAS TWO CAUSES AND THEY LEAD OPPOSITE WAYS: nothing was
+# resent (normal), or nobody wired the counter (a regression that would go
+# silent forever). They are told apart by asking the BINARY UNDER TEST, not
+# Prometheus: the metric name is compiled in whether or not it ever fires. So a
+# missing name is a FAILURE and a missing series is a note.
+if ! grep -q 'claim_rebroadcasts_total' "$BIN" 2>/dev/null ||
+    ! grep -q 'proof_rebroadcasts_total' "$BIN" 2>/dev/null; then
+    gate_fail "the binary under test does not contain claim_rebroadcasts_total / proof_rebroadcasts_total -- the in-window resend counters are not wired, so a resend could never be seen by anything"
+else
+    claim_rb="$(prom_scalar 'sum(ha_miner_claim_rebroadcasts_total)')"
+    proof_rb="$(prom_scalar 'sum(ha_miner_proof_rebroadcasts_total)')"
+    rb_failed="$(prom_scalar 'sum(ha_miner_claim_rebroadcasts_total{result="failure"}) + sum(ha_miner_proof_rebroadcasts_total{result="failure"})')"
+    if [ "$claim_rb" = "UNREADABLE" ] || [ "$proof_rb" = "UNREADABLE" ]; then
+        gate_nothing_measured "Prometheus did not answer for the rebroadcast families -- this is the instrument failing, not a quiet run"
+    elif [ "$claim_rb" = "ABSENT" ] && [ "$proof_rb" = "ABSENT" ]; then
+        gate_pass "resend counters wired; no resend happened this run -- the resend BEHAVIOUR is therefore NOT observed live, and inducing it belongs to the chaos matrix"
+    elif [ "$rb_failed" != "ABSENT" ] && [ "$rb_failed" != "UNREADABLE" ] && [ "${rb_failed%%.*}" -gt 0 ] 2>/dev/null; then
+        gate_fail "${rb_failed} in-window resend(s) came back failed (claim=${claim_rb}, proof=${proof_rb}) -- a resend that fails inside its own window is a claim or proof heading for forfeit"
+    else
+        gate_pass "in-window resends ran and none failed (claim=${claim_rb}, proof=${proof_rb})"
+        gate_exercised coverage rebroadcasts "1"
+    fi
+fi
+
 for state in claim_missing claim_tx_error proof_tx_error proof_window_closed claim_window_closed; do
     n="$(grep -cx "$state" "$fail_states_file" 2>/dev/null || true)"
     [ "${n:-0}" -gt 0 ] && gate_fail "miner reports ${n} session(s) in failure state '${state}'"
