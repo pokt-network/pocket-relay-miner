@@ -89,6 +89,20 @@ type rebroadcastEntry struct {
 	OrigTxHash   string `json:"o,omitempty"` // original submit tx hash (immutable) — claim outcome is keyed by it
 	ServiceID    string `json:"s,omitempty"` // for the outcome/rebroadcast metric label
 	Rebroadcasts int    `json:"n,omitempty"` // # of resends so far (persisted → HA-safe cap across failover)
+	// TimeoutSeconds and TimeoutRegime carry the broadcast budget the ORIGINAL
+	// submission was born with, so a resend inherits it instead of deriving its
+	// own. That is what keeps the budget constant within a window: this side
+	// cannot recompute it -- supplier_manager has no access to shared params, so
+	// it does not know the window length -- and a resend that guessed would hand
+	// the chain a different deadline than the attempt it is replacing, without
+	// anything failing.
+	//
+	// Absent (an entry written before this field existed, or by an older binary
+	// that dropped what its struct could not see) means "no inherited budget":
+	// the resend falls back to the chain's ceiling under the "unknown" regime,
+	// which the regime counter shows rather than hides.
+	TimeoutSeconds int64  `json:"ts,omitempty"`
+	TimeoutRegime  string `json:"tr,omitempty"`
 	// LastAttemptHeight is the height the last resend ACTUALLY went out at, and
 	// it is what makes the spacing real rather than nominal: the reconciler does
 	// not run at every height -- its only production caller feeds it through a
@@ -128,7 +142,7 @@ func unmarshalRebroadcastEntry(b []byte) (rebroadcastEntry, error) {
 // concrete implementation (wiring layer) unmarshals the bytes into the right
 // proto type and routes to that supplier's client.
 type MessageResubmitter interface {
-	ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, timeoutHeight int64) (newTxHash string, err error)
+	ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, timeoutHeight int64, timeout time.Duration, regime string) (newTxHash string, err error)
 }
 
 // InclusionReconcilerConfig configures the block-driven inclusion reconciler.
@@ -866,7 +880,8 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 		return
 	}
 
-	newHash, err := r.resubmitter.ResubmitMessage(ctx, rp.phase, g.Supplier, entry.MsgBytes, windowClose)
+	newHash, err := r.resubmitter.ResubmitMessage(ctx, rp.phase, g.Supplier, entry.MsgBytes, windowClose,
+		time.Duration(entry.TimeoutSeconds)*time.Second, entry.TimeoutRegime)
 
 	// The chain says this proof is not required. Mirror image of the saturation
 	// case below: that one never reached the network, this one did and can never

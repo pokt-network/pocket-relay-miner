@@ -31,16 +31,26 @@ const DefaultTxRPCTimeout = 30 * time.Second
 
 // effectiveTxTimeout resolves the window budget for this broadcast and returns
 // the window it came from, so the caller can build an absolute deadline.
+// There is no arithmetic left here. The value and its regime are decided ONCE by
+// WindowTimeout, at the caller, and carried in the context -- which is what makes
+// every attempt inside one window share a single number instead of each one
+// re-deriving its own. A resend that recomputed would produce a different budget
+// from the attempt it replaces, and "constant within the window" would quietly
+// stop being true.
+//
+// An empty context is no longer a fallback to a configured default, because
+// there is no configuration left to fall back to: it means a caller reached the
+// broadcast path without deciding a budget, which is a defect. The ceiling is
+// used, since it is the safest value that still lets the transaction land and
+// timeout_height is what actually bounds it -- and the regime says so out loud,
+// so the counter shows a defect instead of hiding it behind a plausible number.
 func (tc *TxClient) effectiveTxTimeout(ctx context.Context) (time.Duration, string, txWindow) {
 	window, _ := ctx.Value(txWindowTimeoutKey{}).(txWindow)
-	timeout, source := computeEffectiveTxTimeout(
-		window.raw,
-		tc.config.TxTimeoutClockSkewBuffer,
-		tc.config.TxTimeoutMin,
-		tc.config.TxTimeoutMax,
-		tc.config.TxTimeoutDefault,
-	)
-	return timeout, source, window
+	if window.raw <= 0 {
+		timeout, regime := WindowTimeout(0, 0)
+		return timeout, regime, window
+	}
+	return window.raw, window.regime, window
 }
 
 // withBroadcastDeadline puts a clock on the whole broadcast: the account

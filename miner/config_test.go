@@ -44,6 +44,9 @@ func TestConfig_Validate_Valid(t *testing.T) {
 		Keys: config.KeysConfig{
 			KeysFile: "/path/to/keys.yaml",
 		},
+		// Required since the transaction deadline became derived: there is no
+		// default block time to fall back on, so a config without it is invalid.
+		BlockTimeSeconds: 60,
 	}
 
 	err := cfg.Validate()
@@ -168,6 +171,7 @@ func TestLoadConfig_RetiredKeysAreNamedWithWhatTheyChanged(t *testing.T) {
 			"keys:\n"+
 			"  keys_file: /path/to/keys.yaml\n"+
 			"  keys_dir: /etc/pocket/keys\n"+
+			"block_time_seconds: 60\n"+
 			"hot_reload_enabled: true\n"), 0o600))
 
 	cfg, err := LoadConfig(path)
@@ -210,6 +214,7 @@ func TestLoadConfig_TheInclusionReconcilerSwitchIsRetired(t *testing.T) {
 			"  query_node_grpc_url: localhost:9090\n"+
 			"keys:\n"+
 			"  keys_file: /path/to/keys.yaml\n"+
+			"block_time_seconds: 60\n"+
 			"transaction:\n"+
 			"  disable_inclusion_reconciler: true\n"), 0o600))
 
@@ -253,6 +258,7 @@ func TestLoadConfig_AnUnknownKeyIsReportedButDoesNotFailTheLoad(t *testing.T) {
 			"  query_node_grpc_url: localhost:9090\n"+
 			"keys:\n"+
 			"  keys_file: /path/to/keys.yaml\n"+
+			"block_time_seconds: 60\n"+
 			"suppliers:\n"+
 			"  - operator_address: pokt1abc\n"), 0o600))
 
@@ -283,7 +289,8 @@ func TestLoadConfig_AGoodConfigWarnsAboutNothing(t *testing.T) {
 			"  query_node_rpc_url: http://localhost:26657\n"+
 			"  query_node_grpc_url: localhost:9090\n"+
 			"keys:\n"+
-			"  keys_file: /path/to/keys.yaml\n"), 0o600))
+			"  keys_file: /path/to/keys.yaml\n"+
+			"block_time_seconds: 60\n"), 0o600))
 
 	cfg, err := LoadConfig(path)
 	require.NoError(t, err)
@@ -483,4 +490,56 @@ func TestConfig_Validate_RejectsBadLoggingLevel(t *testing.T) {
 	err := cfg.Validate()
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "logging.level")
+}
+
+// A config that cannot say how fast its chain produces blocks must not start.
+//
+// This is the only protection left after the four tx_timeout knobs were retired.
+// Before them there was a default of 30 seconds to fall back on, which at least
+// produced a number; now an absent block time means WindowTimeout is called with
+// zero, falls to the chain ceiling under the "unknown" regime, and every claim
+// and proof carries a deadline nobody chose. Jorge's decision was explicit --
+// "nada de move to defaults, no arranca, para que lo arreglen" -- and without a
+// test a later refactor can delete the guard with nothing turning red.
+//
+// The fixtures are valid in EVERY other respect on purpose. The guard sits at
+// the END of Validate, because putting it first masked the real first problem of
+// a config with several errors, so a fixture with a second defect would pass
+// this test for the wrong reason: it would be failing on the other one.
+func TestConfig_Validate_BlockTimeSecondsIsRequired(t *testing.T) {
+	otherwiseValid := func(blockTime int64) *Config {
+		return &Config{
+			Redis: RedisConfig{
+				RedisConfig:  config.RedisConfig{URL: "redis://localhost:6379"},
+				ConsumerName: "miner-1",
+			},
+			PocketNode: config.PocketNodeConfig{
+				QueryNodeRPCUrl:  "http://localhost:26657",
+				QueryNodeGRPCUrl: "localhost:9090",
+			},
+			Keys:             config.KeysConfig{KeysFile: "/path/to/keys.yaml"},
+			BlockTimeSeconds: blockTime,
+		}
+	}
+
+	for _, tc := range []struct {
+		name      string
+		blockTime int64
+	}{
+		{name: "absent", blockTime: 0},
+		{name: "negative", blockTime: -1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := otherwiseValid(tc.blockTime).Validate()
+			require.Error(t, err,
+				"a config without a usable block time must refuse to start, not fall back to a default")
+			require.Contains(t, err.Error(), "block_time_seconds",
+				"the error must NAME the field: an operator reading it has to know what to fix")
+		})
+	}
+
+	// The control. Without it, a Validate() that rejected everything would
+	// satisfy both cases above.
+	require.NoError(t, otherwiseValid(60).Validate(),
+		"the same config with a positive block time must be valid")
 }

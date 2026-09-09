@@ -80,12 +80,6 @@ const (
 	// DefaultChainID for the pocket network.
 	DefaultChainID = "pocket"
 
-	// DefaultTxTimeoutMin is the minimum TX broadcast deadline. Reverted
-	// to 2 minutes (the original pre-dynamic-timeout value) because the
-	// intermediate 30s default starved real claims whose submission
-	// window still had 5+ minutes left but small per-attempt time.
-	DefaultTxTimeoutMin = 2 * time.Minute
-
 	// DefaultTxTimeoutMax is the maximum TX broadcast deadline. It is
 	// anchored to the chain's latest_block_time (what the cosmos-sdk
 	// ante handler checks against via ctx.BlockTime), so the relevant
@@ -115,23 +109,6 @@ const (
 	// ONLY thing standing between us and that rejection, which is why the
 	// nonce spread is taken out of the deadline rather than out of here.
 	txTimeoutSafetyMargin = 10 * time.Second
-
-	// DefaultTxTimeoutDefault is the fallback TX deadline when no window-based value is injected.
-	DefaultTxTimeoutDefault = 2 * time.Minute
-
-	// DefaultTxTimeoutClockSkewBuffer is subtracted from every
-	// window-based raw deadline BEFORE clamping to [min, max]. It only
-	// affects the window path (raw > 0 in computeEffectiveTxTimeout):
-	// it trims a safety margin off a session-window-derived deadline so
-	// that min/max clamping is applied to an already-conservative value.
-	//
-	// It is NOT what saves us from `unordered tx ttl exceeds 10m0s`:
-	// that rejection is driven by the chain's latest_block_time drifting
-	// from wall clock, not by host clock skew. The fix for that is
-	// anchoring timeoutTimestamp on block time (see signAndBroadcast).
-	// This buffer remains useful as a window-path cushion for operators
-	// who want to leave extra headroom above the min clamp.
-	DefaultTxTimeoutClockSkewBuffer = 60 * time.Second
 )
 
 // BlockTimeProvider returns the timestamp of the most recent block the
@@ -198,28 +175,6 @@ type TxClientConfig struct {
 	// Actual gas = simulated_gas * GasAdjustment
 	// Default: 1.7 (adds 70% safety margin)
 	GasAdjustment float64
-
-	// TxTimeoutMin is the floor for window-based TX broadcast deadlines.
-	// Prevents a near-expired window from producing an unreasonably short deadline.
-	// Default: 2min
-	TxTimeoutMin time.Duration
-
-	// TxTimeoutMax is the cap for window-based TX broadcast deadlines.
-	// See DefaultTxTimeoutMax for why the margin below the cosmos-sdk
-	// 10-minute unordered-TX ceiling is one block interval, not clock jitter.
-	// Default: 10min - 10s
-	TxTimeoutMax time.Duration
-
-	// TxTimeoutDefault is used when no window-based deadline is injected via context.
-	// Matches the pre-existing hardcoded behaviour.
-	// Default: 2min
-	TxTimeoutDefault time.Duration
-
-	// TxTimeoutClockSkewBuffer is subtracted from the raw window-based
-	// deadline BEFORE clamping to [TxTimeoutMin, TxTimeoutMax]. Tune
-	// higher if the miner host's clock drifts from the validator,
-	// lower if both hosts are tightly synced. Default: 60s.
-	TxTimeoutClockSkewBuffer time.Duration
 
 	// UseTLS enables TLS for the gRPC connection.
 	// Set to true when connecting to endpoints on port 443 or with TLS enabled.
@@ -312,28 +267,6 @@ func NewTxClient(
 	}
 	if config.GasAdjustment == 0 {
 		config.GasAdjustment = DefaultGasAdjustment
-	}
-	if config.TxTimeoutMin <= 0 {
-		config.TxTimeoutMin = DefaultTxTimeoutMin
-	}
-	if config.TxTimeoutMax <= 0 {
-		config.TxTimeoutMax = DefaultTxTimeoutMax
-	}
-	// An operator-supplied max is clamped too. The schema allows 599s and the
-	// example suggests it, and the nonce spread is added AFTER this value, so
-	// an unclamped 599s would leave the drift budget at a few milliseconds --
-	// the budget that keeps CheckTx from rejecting the tx outright.
-	if maxAllowed := txTimeoutHardCeiling - txTimeoutSafetyMargin - txNonceSpread; config.TxTimeoutMax > maxAllowed {
-		config.TxTimeoutMax = maxAllowed
-	}
-	if config.TxTimeoutDefault <= 0 {
-		config.TxTimeoutDefault = DefaultTxTimeoutDefault
-	}
-	// Zero means "no buffer" — but operators almost never want 0.
-	// `< 0` is nonsensical (would extend the deadline past the raw window).
-	// Treat zero/negative as "unset" and apply the default.
-	if config.TxTimeoutClockSkewBuffer <= 0 {
-		config.TxTimeoutClockSkewBuffer = DefaultTxTimeoutClockSkewBuffer
 	}
 
 	var grpcConn *grpc.ClientConn
@@ -532,14 +465,27 @@ type txWindowTimeoutKey struct{}
 type txWindow struct {
 	raw        time.Duration
 	computedAt time.Time
+	// regime records WHY raw has the value it has -- see WindowTimeout. It
+	// travels with the value rather than being re-derived at the broadcast,
+	// because re-deriving needs the window length and block time, which the
+	// resend path does not have: supplier_manager has no access to shared
+	// params at all. Carrying it is also what keeps the label honest when the
+	// budget was inherited rather than computed.
+	regime string
 }
 
-// WithTxWindowTimeout injects a raw window-based duration into ctx.
-// signAndBroadcast reads it, subtracts TxTimeoutClockSkewBuffer, then
-// clamps to [TxTimeoutMin, TxTimeoutMax]. If not set, signAndBroadcast
-// falls back to TxTimeoutDefault.
-func WithTxWindowTimeout(ctx context.Context, d time.Duration) context.Context {
-	return context.WithValue(ctx, txWindowTimeoutKey{}, txWindow{raw: d, computedAt: time.Now()})
+// WithTxWindowTimeout injects the window budget into ctx, together with the
+// regime that produced it. Both come from WindowTimeout, and signAndBroadcast
+// uses the value as given: there is no adjustment left on the broadcast side.
+//
+// Pass the SAME context to every attempt for one window -- that is what makes
+// the budget belong to the window rather than to each try.
+func WithTxWindowTimeout(ctx context.Context, d time.Duration, regime string) context.Context {
+	return context.WithValue(ctx, txWindowTimeoutKey{}, txWindow{
+		raw:        d,
+		computedAt: time.Now(),
+		regime:     regime,
+	})
 }
 
 // computeEffectiveTxTimeout is the pure math of the deadline decision.
@@ -636,21 +582,62 @@ func nextTxNonceOffset() time.Duration {
 	return time.Duration(n) // #nosec G115 -- bounded by the modulo above
 }
 
-func computeEffectiveTxTimeout(
-	raw, skewBuffer, min, max, fallbackDefault time.Duration,
-) (timeout time.Duration, source string) {
-	if raw <= 0 {
-		return fallbackDefault, "default"
+// Timeout regimes, and the label values of the regime counter. The set is
+// closed and small on purpose: it is a Prometheus label.
+const (
+	// TimeoutRegimeWindow -- the window fits under the chain's ceiling, which is
+	// every network whose window is shorter than ~590 s of wall time.
+	TimeoutRegimeWindow = "window"
+	// TimeoutRegimeCeiling -- the window is longer than the chain will accept,
+	// so the ceiling decides. Mainnet lives here: 10 blocks x 60 s is 600 s
+	// against a ceiling of 589.99 s.
+	TimeoutRegimeCeiling = "ceiling"
+	// TimeoutRegimeUnknown -- the window could not be measured (non-positive
+	// block time or window length). The ceiling is used, because it is the
+	// safest value that still lets a transaction land, and timeout_height is
+	// what actually bounds it. It should never be seen, which is exactly why it
+	// is counted rather than logged.
+	TimeoutRegimeUnknown = "unknown"
+)
+
+// WindowTimeout is the broadcast deadline for ONE claim or proof window:
+// min(window length in blocks x block time, the chain's ceiling).
+//
+// It replaced a skew-then-clamp pipeline fed by four operator knobs, and the
+// reason none of them survived is that the timestamp stopped being a decision:
+// now that the transaction carries a timeout_height the chain enforces, the
+// timestamp only has to be unique (the unordered nonce) and stay under the SDK's
+// ceiling. Neither is something an operator can know better than the code.
+//
+// It takes the WHOLE window, not the blocks left in it, and that is what makes
+// it constant: every attempt inside one window is born with the same number in
+// front of it, so a retry at block 8 of 10 is not handed a shrinking budget.
+// What kills a late transaction is the height, at the close -- the one place the
+// decision belongs.
+//
+// It is min, NOT max. Taking the larger of the two would hand mainnet 600 s,
+// precisely the value the chain refuses with "unordered tx ttl exceeds 10m0s".
+//
+// The window length is the CALLER'S to supply because it is a chain parameter,
+// not a constant: poktroll ships defaults of 3 blocks for the claim window and 4
+// for the proof window, while mainnet governs both to 10. Writing 10 here would
+// be a number calibrated for one network applied to all of them, wearing the
+// word "constant" -- the very defect this change exists to remove.
+func WindowTimeout(windowBlocks, blockTimeSeconds int64) (time.Duration, string) {
+	// DefaultTxTimeoutMax, not the same arithmetic written out again. The
+	// subtraction already exists as a derived constant, and re-deriving it here
+	// would create a second copy of a number this repository has already watched
+	// drift into four different values across its comments, its getter, its test
+	// and production.
+	ceiling := DefaultTxTimeoutMax
+	if windowBlocks <= 0 || blockTimeSeconds <= 0 {
+		return ceiling, TimeoutRegimeUnknown
 	}
-	adjusted := raw - skewBuffer
-	switch {
-	case adjusted < min:
-		return min, "min_clamp"
-	case adjusted > max:
-		return max, "max_clamp"
-	default:
-		return adjusted, "window"
+	window := time.Duration(windowBlocks) * time.Duration(blockTimeSeconds) * time.Second
+	if window > ceiling {
+		return ceiling, TimeoutRegimeCeiling
 	}
+	return window, TimeoutRegimeWindow
 }
 
 // signAndBroadcast signs and broadcasts a transaction.

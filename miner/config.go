@@ -291,14 +291,6 @@ type TransactionConfig struct {
 	// Default: 1.7
 	GasAdjustment float64 `yaml:"gas_adjustment,omitempty"`
 
-	// TxTimeoutMinSeconds is the floor for window-based TX broadcast deadlines.
-	// Even when the claim/proof window is almost closed the TX still gets at least
-	// this many seconds to land on-chain before the unordered-TX TTL expires.
-	// Default: 120 (2 minutes — restored to the original pre-dynamic-timeout
-	// value; the earlier 30s intermediate default starved claims whose
-	// window was still wide open but per-attempt time was small)
-	TxTimeoutMinSeconds int64 `yaml:"tx_timeout_min_seconds,omitempty"`
-
 	// TxMaxConcurrent caps how many claim/proof broadcasts may be in flight on
 	// the transaction connection at once. Default 32.
 	//
@@ -335,31 +327,6 @@ type TransactionConfig struct {
 	// Lower it if probe failures show a small idle_seconds on your network:
 	// that value is how long the connection had been silent when it broke.
 	TxConnProbeIntervalSeconds int64 `yaml:"tx_conn_probe_interval_seconds,omitempty"`
-
-	// TxTimeoutMaxSeconds is the cap for window-based TX broadcast deadlines.
-	// Defaults to 500 ms below the cosmos-sdk 10-minute hard limit for
-	// unordered TXs so clock jitter cannot push the TX over the edge and
-	// trigger `unordered tx ttl exceeds 10m0s` CheckTx rejections.
-	// Operators who set this explicitly should stay strictly below 600;
-	// setting exactly 600 will intermittently fail CheckTx. If set to 0
-	// (unset), the default DefaultTxTimeoutMax in tx/tx_client.go is used
-	// (10min - 500ms, sub-second precision).
-	// Default: 600 (and unset falls back to 599.5s internally)
-	TxTimeoutMaxSeconds int64 `yaml:"tx_timeout_max_seconds,omitempty"`
-
-	// TxTimeoutDefaultSeconds is the fallback deadline when no window-based value
-	// can be computed (e.g. block client unavailable, legacy code paths).
-	// Matches the pre-existing hardcoded 2-minute behaviour.
-	// Default: 120
-	TxTimeoutDefaultSeconds int64 `yaml:"tx_timeout_default_seconds,omitempty"`
-
-	// TxTimeoutClockSkewBufferSeconds is subtracted from the raw
-	// window-based TX deadline BEFORE clamping to [Min, Max]. Tune
-	// higher if the miner host's clock drifts from the validator (NTP
-	// glitches, VM steal, large-region topology), lower if hosts are
-	// tightly co-located and synced. Zero/negative picks up the default.
-	// Default: 60
-	TxTimeoutClockSkewBufferSeconds int64 `yaml:"tx_timeout_clock_skew_buffer_seconds,omitempty"`
 
 	// DisablePreProofClaimVerification disables the pre-proof GetClaim guard.
 	// The guard queries the chain for each session's claim before proof
@@ -514,6 +481,32 @@ func (c *Config) Validate() error {
 
 	// Note: Storage validation removed - all session trees now use Redis
 
+	// block_time_seconds is REQUIRED, and refusing to start is the point rather
+	// than an inconvenience.
+	//
+	// It became load-bearing when the transaction deadline stopped being
+	// configurable: the deadline is now the window in blocks times this number,
+	// so a wrong value is a wrong deadline on every claim and every proof. There
+	// used to be a default of 30 to fall back on, and falling back is exactly
+	// what must not happen here -- 30 is right for no network we run on. An
+	// operator on mainnet who set nothing would have had every deadline computed
+	// at half the real block time, and nothing would have looked wrong: the
+	// number is plausible, the transactions still broadcast, and the loss only
+	// shows up as claims that stopped landing late in the window.
+	//
+	// A config that cannot say how fast its chain produces blocks is a config
+	// that cannot be reasoned about, so it stops the process while somebody is
+	// watching, instead of quietly picking a number.
+	if c.BlockTimeSeconds <= 0 {
+		return fmt.Errorf(
+			"block_time_seconds is required and must be positive (got %d): it is the "+
+				"basis of every claim and proof transaction deadline, and there is no "+
+				"safe default -- set it to the measured block time of the network this "+
+				"miner runs against",
+			c.BlockTimeSeconds,
+		)
+	}
+
 	return nil
 }
 
@@ -568,18 +561,6 @@ func (c *Config) GetTxGasAdjustment() float64 {
 	return 1.7 // Default: 1.7 (adds 70% safety margin to simulated gas)
 }
 
-// GetTxTimeoutMin returns the minimum TX broadcast deadline with defaults.
-// Unset (<= 0) falls back to the canonical default from tx/tx_client.go
-// (2 minutes). A misconfigured tiny value would starve the TX; 2min is
-// the smallest duration that reliably lets a claim/proof land under
-// normal mempool + network latency.
-func (c *Config) GetTxTimeoutMin() time.Duration {
-	if c.Transaction.TxTimeoutMinSeconds > 0 {
-		return time.Duration(c.Transaction.TxTimeoutMinSeconds) * time.Second
-	}
-	return 2 * time.Minute
-}
-
 // GetTxMaxConcurrent returns the broadcast concurrency cap.
 func (c *Config) GetTxMaxConcurrent() int {
 	return c.Transaction.txMaxConcurrent()
@@ -601,41 +582,6 @@ func (c *Config) GetTxConnProbeInterval() time.Duration {
 		return time.Duration(c.Transaction.TxConnProbeIntervalSeconds) * time.Second
 	}
 	return 0
-}
-
-// GetTxTimeoutMax returns the maximum TX broadcast deadline with defaults.
-// Unset (<= 0) falls back to 10s below the cosmos-sdk unordered-TX
-// hard limit (10 minutes). The 10s margin is tuned to the block-time
-// anchor regime: signAndBroadcast anchors timeoutTimestamp on the
-// chain's latest_block_time (see tx.BlockTimeProvider) rather than
-// wall clock, so the only jitter we need to absorb is the race where
-// a new block commits between our anchor read and the validator's
-// CheckTx. See tx.DefaultTxTimeoutMax for the full rationale — this
-// literal duplicates it because importing tx from miner/config would
-// create a cycle.
-func (c *Config) GetTxTimeoutMax() time.Duration {
-	if c.Transaction.TxTimeoutMaxSeconds > 0 {
-		return time.Duration(c.Transaction.TxTimeoutMaxSeconds) * time.Second
-	}
-	return 10*time.Minute - 10*time.Second
-}
-
-// GetTxTimeoutDefault returns the fallback TX broadcast deadline with defaults.
-func (c *Config) GetTxTimeoutDefault() time.Duration {
-	if c.Transaction.TxTimeoutDefaultSeconds > 0 {
-		return time.Duration(c.Transaction.TxTimeoutDefaultSeconds) * time.Second
-	}
-	return 2 * time.Minute
-}
-
-// GetTxTimeoutClockSkewBuffer returns the duration to subtract from the
-// raw window-based TX deadline before clamping. Unset (<= 0) returns
-// 60s, which covers typical NTP drift across regions.
-func (c *Config) GetTxTimeoutClockSkewBuffer() time.Duration {
-	if c.Transaction.TxTimeoutClockSkewBufferSeconds > 0 {
-		return time.Duration(c.Transaction.TxTimeoutClockSkewBufferSeconds) * time.Second
-	}
-	return 60 * time.Second
 }
 
 // GetDeduplicationTTL returns the deduplication TTL in blocks.

@@ -78,7 +78,7 @@ func TestBroadcastGivesEveryTxItsOwnNonce(t *testing.T) {
 	// TxTimeoutDefault. base is therefore the deadline the tx would carry with
 	// NO offset at all, which is what makes the direction of the offset
 	// assertable rather than merely its existence.
-	base := anchor.Add(DefaultTxTimeoutDefault)
+	base := anchor.Add(DefaultTxTimeoutMax)
 	stamps := broadcastTimeouts(t, 64)
 
 	seen := make(map[int64]struct{}, len(stamps))
@@ -120,27 +120,6 @@ func TestTxTimeoutMaxLeavesRoomForTheNonceSpread(t *testing.T) {
 	require.GreaterOrEqual(t, txTimeoutHardCeiling-(DefaultTxTimeoutMax+txNonceSpread), txTimeoutSafetyMargin,
 		"the whole safety margin must survive the spread: it is the only budget against "+
 			"drift between our anchor and the validator's block time")
-}
-
-// TestConfiguredTxTimeoutMaxIsClamped: the schema allows tx_timeout_max_seconds
-// up to 599 and the example suggests exactly that. Unclamped, 599s plus the
-// spread would leave the drift budget at milliseconds.
-func TestConfiguredTxTimeoutMaxIsClamped(t *testing.T) {
-	km := setupTestKeyManager(t, "pokt1supplier123")
-	defer func() { _ = km.Close() }()
-
-	tc, err := NewTxClient(logging.NewLoggerFromConfig(logging.DefaultConfig()), km, TxClientConfig{
-		GRPCEndpoint: "127.0.0.1:1",
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
-		TxTimeoutMax: 599 * time.Second,
-	})
-	require.NoError(t, err)
-	defer func() { _ = tc.Close() }()
-
-	require.Equal(t, DefaultTxTimeoutMax, tc.config.TxTimeoutMax,
-		"an operator-supplied max above the derived ceiling must be clamped down to it")
 }
 
 // TestNonceOffsetAppliesUnderWallClockAnchoring: the offset must not be

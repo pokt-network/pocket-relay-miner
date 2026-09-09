@@ -35,9 +35,16 @@ type mockResubmitter struct {
 	// instead of returning at once — the shape of a slow node, and the only way
 	// to reach the code that persists the attempt with an expired context.
 	burnGroupBudget bool
+	// lastTimeout and lastRegime record the budget the resend was CALLED with.
+	// Without capturing them nothing distinguishes a resend that inherited the
+	// original submission's deadline from one that fell back to the ceiling --
+	// both reach the chain, and only one keeps the budget constant across a
+	// window.
+	lastTimeout time.Duration
+	lastRegime  string
 }
 
-func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, _ int64) (string, error) {
+func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, _ int64, timeout time.Duration, regime string) (string, error) {
 	m.mu.Lock()
 	burn := m.burnGroupBudget
 	m.mu.Unlock()
@@ -48,6 +55,7 @@ func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.attempts++
+	m.lastTimeout, m.lastRegime = timeout, regime
 	if m.failWith != nil {
 		return "", m.failWith
 	}

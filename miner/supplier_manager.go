@@ -2990,23 +2990,38 @@ func (m *SupplierManager) reactivateClaimedSession(
 // owning supplier's tx client. Returns an error (not a panic) for suppliers this
 // replica does not control — the reconciler's ownership filter normally prevents
 // reaching here for non-owned suppliers.
-func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, timeoutHeight int64) (string, error) {
+func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, timeoutHeight int64, timeout time.Duration, regime string) (string, error) {
 	state, ok := m.suppliers.Load(supplier)
 	if !ok || state.SupplierClient == nil {
 		return "", fmt.Errorf("no tx client for supplier %s (not owned by this replica)", supplier)
 	}
 
-	// Replicate the lifecycle's window-anchored tx deadline: a resend must carry
-	// a timeout that keeps it inside the remaining window.
-	blkTime := m.config.BlockTimeSeconds
-	if blkTime <= 0 {
-		blkTime = cache.DefaultBlockTimeSeconds
+	// The resend INHERITS the budget its original submission was born with; it
+	// does not derive one. Recomputing here meant "the blocks left in the
+	// window", which shrank on every attempt -- so the transaction replacing a
+	// lost one carried LESS time than the one it replaced, precisely when more
+	// was wanted. It cannot be recomputed correctly on this side anyway: the
+	// window length is a chain parameter and this type has no access to shared
+	// params.
+	//
+	// A missing budget means an entry written before the field existed, or one
+	// an older binary rewrote and stripped. The ceiling is used, with the regime
+	// saying so out loud.
+	//
+	// THAT FALLBACK IS ONLY SAFE BECAUSE THE TRANSACTION CARRIES A
+	// timeout_height. A timestamp longer than the window is inert once the chain
+	// enforces a height: the height cuts first, at the close. Without it this
+	// same fallback would hand a resend a deadline that OUTLIVES its own window
+	// -- precisely the defect the window budget exists to prevent -- so a change
+	// that stops setting timeout_height must revisit this line, not just the one
+	// that sets it. The ceiling also sits below the SDK's 600 s limit, so it
+	// cannot be rejected as an over-long unordered TTL either.
+	resendTimeout, resendRegime := timeout, regime
+	if resendTimeout <= 0 {
+		resendTimeout, resendRegime = tx.WindowTimeout(0, 0)
 	}
-	remaining := timeoutHeight - m.config.BlockClient.LastBlock(ctx).Height()
-	if remaining < 1 {
-		remaining = 1
-	}
-	ctx = tx.WithTxWindowTimeout(ctx, time.Duration(remaining)*time.Duration(blkTime)*time.Second)
+	RecordTxTimeoutRegime("resend", resendRegime)
+	ctx = tx.WithTxWindowTimeout(ctx, resendTimeout, resendRegime)
 
 	// A resend must not queue for a broadcast permit. Its budget is the
 	// reconciler's per-group timeout, and spending that budget waiting means

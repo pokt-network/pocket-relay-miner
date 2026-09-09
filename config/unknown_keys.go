@@ -87,6 +87,32 @@ var retiredKeys = map[string]string{
 		"behaviour. Claims went the other way and lost their switch too: they are ALWAYS batched by " +
 		"session end height, and disable_claim_batching is retired -- see its own entry above",
 
+	"tx_timeout_min_seconds": "the transaction broadcast deadline is no longer configurable. It is derived " +
+		"per network as the claim or proof window in blocks times block_time_seconds, capped just below the " +
+		"cosmos-sdk unordered-TX ceiling, and it is the same for every attempt inside one window. This key " +
+		"was the most dangerous of the four: the floor was applied WITHOUT being capped against that " +
+		"ceiling, so a value above 600 made the chain reject every claim and proof with \"unordered tx ttl " +
+		"exceeds 10m0s\" -- no revenue, and PROOF_MISSING forfeits. Expect the deadline to follow the " +
+		"window instead of whatever was set here",
+
+	"tx_timeout_max_seconds": "the transaction broadcast deadline is no longer configurable; see " +
+		"tx_timeout_min_seconds. The protection this one carried is KEPT and is no longer optional: the " +
+		"derived deadline is still capped below the cosmos-sdk unordered-TX ceiling, which is what prevents " +
+		"\"unordered tx ttl exceeds 10m0s\" rejections. Expect no change unless this was set above the " +
+		"ceiling, which the cap was already correcting silently",
+
+	"tx_timeout_default_seconds": "the transaction broadcast deadline is no longer configurable; see " +
+		"tx_timeout_min_seconds. This key configured a branch production never took: it applied only when " +
+		"no window was supplied, and all three submission paths -- claim, proof and reconciler resend -- " +
+		"always supply one. Expect no change in behaviour",
+
+	"tx_timeout_clock_skew_buffer_seconds": "the transaction broadcast deadline is no longer configurable; " +
+		"see tx_timeout_min_seconds. Nothing is subtracted for clock drift any more, because there is none " +
+		"left to absorb: the deadline is anchored on the chain's own latest_block_time rather than on this " +
+		"host's wall clock, and the transaction also carries a timeout_height the chain enforces against " +
+		"its own block height. Expect deadlines longer than before by whatever this was set to, and still " +
+		"inside the window",
+
 	"disable_inclusion_reconciler": "inclusion reconciliation is now MANDATORY and there is no way to " +
 		"turn it off. If this said \"true\", that deployment was running fire-once: a claim or proof accepted " +
 		"into the mempool but never included in a block was never verified and never re-sent, which is exactly " +

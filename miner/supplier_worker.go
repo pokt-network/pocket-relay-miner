@@ -341,19 +341,15 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			// error and no log -- so a burst of queries could stall a claim
 			// silently. They also have opposite shapes: queries never stop,
 			// transactions only move inside windows.
-			GRPCEndpoint:             nodeTarget.Endpoint,
-			UseTLS:                   nodeTarget.UseTLS,
-			ConnProbeInterval:        w.config.Config.GetTxConnProbeInterval(),
-			MaxConcurrent:            w.config.Config.GetTxMaxConcurrent(),
-			TxRPCTimeout:             w.config.Config.GetTxRPCTimeout(),
-			ChainID:                  chainID,
-			GasLimit:                 w.config.Config.GetTxGasLimit(),
-			GasPrice:                 gasPrice,
-			GasAdjustment:            w.config.Config.GetTxGasAdjustment(),
-			TxTimeoutMin:             w.config.Config.GetTxTimeoutMin(),
-			TxTimeoutMax:             w.config.Config.GetTxTimeoutMax(),
-			TxTimeoutDefault:         w.config.Config.GetTxTimeoutDefault(),
-			TxTimeoutClockSkewBuffer: w.config.Config.GetTxTimeoutClockSkewBuffer(),
+			GRPCEndpoint:      nodeTarget.Endpoint,
+			UseTLS:            nodeTarget.UseTLS,
+			ConnProbeInterval: w.config.Config.GetTxConnProbeInterval(),
+			MaxConcurrent:     w.config.Config.GetTxMaxConcurrent(),
+			TxRPCTimeout:      w.config.Config.GetTxRPCTimeout(),
+			ChainID:           chainID,
+			GasLimit:          w.config.Config.GetTxGasLimit(),
+			GasPrice:          gasPrice,
+			GasAdjustment:     w.config.Config.GetTxGasAdjustment(),
 			// Anchor tx timeoutTimestamp on the chain's latest_block_time.
 			// The RedisBlockSubscriber is already wired and tracking
 			// block events for every replica (leader and standby), so

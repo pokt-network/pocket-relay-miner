@@ -158,39 +158,6 @@ properties:
         description: Wall-clock cap on one supplier-group reconcile per block (the AllProofs/AllClaims query plus rebroadcasts).
         default: 10000
         minimum: 1000
-      tx_timeout_min_seconds:
-        type: integer
-        description: |
-          Floor for the window-based TX broadcast deadline (seconds). Prevents a
-          near-expired window from producing an unreasonably short deadline.
-        default: 120
-        minimum: 1
-      tx_timeout_max_seconds:
-        type: integer
-        description: |
-          Cap for the window-based TX broadcast deadline (seconds). The cosmos-sdk
-          hard-rejects unordered TXs whose timeoutTimestamp is >10 minutes ahead of
-          validator time. Stay strictly below 600; setting exactly 600 will
-          intermittently fail CheckTx due to clock jitter. When unset, the default
-          is the hard limit minus a 10s drift budget minus the nonce spread that
-          is added after clamping. A larger value is CLAMPED DOWN to that same
-          derived ceiling: the drift budget is what keeps CheckTx from rejecting
-          the transaction outright, so it is not an operator's to spend.
-        maximum: 590
-        minimum: 1
-      tx_timeout_default_seconds:
-        type: integer
-        description: Fallback TX broadcast deadline when no window info is available (seconds).
-        default: 120
-        minimum: 1
-      tx_timeout_clock_skew_buffer_seconds:
-        type: integer
-        description: |
-          Subtracted from the raw window-based TX deadline BEFORE clamping to
-          [min, max]. Tune up on hosts with known NTP drift or VM steal; tune
-          down on tightly synced co-located deployments.
-        default: 60
-        minimum: 0
 
   keys:
     type: object

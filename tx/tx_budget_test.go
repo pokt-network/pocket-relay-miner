@@ -94,13 +94,11 @@ func TestRetriesShareTheWindowBudget(t *testing.T) {
 	seen := srv.authServer.NotifyAccount(8)
 
 	tc := newBudgetClient(t, srv, TxClientConfig{
-		TxTimeoutMin: 200 * time.Millisecond,
-		TxTimeoutMax: 200 * time.Millisecond,
 		TxRPCTimeout: time.Hour, // the window has to be the binding cap
 	})
 
 	// One context, reused -- exactly what the lifecycle does across retries.
-	ctx := WithTxWindowTimeout(context.Background(), 200*time.Millisecond)
+	ctx := WithTxWindowTimeout(context.Background(), 200*time.Millisecond, TimeoutRegimeWindow)
 
 	require.Error(t, claim(tc, ctx, t), "the first attempt should have run out of window")
 	select {

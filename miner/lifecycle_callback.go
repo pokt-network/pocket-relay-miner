@@ -1418,19 +1418,29 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			continue
 		}
 
-		claimBlocksLeft := claimWindowClose - currentBlock.Height()
-		claimBlockTimeSec := lc.config.BlockTimeSeconds
-		if claimBlockTimeSec <= 0 {
-			claimBlockTimeSec = 30
-		}
-		rawClaimTimeout := time.Duration(claimBlocksLeft) * time.Duration(claimBlockTimeSec) * time.Second
-		claimCtx := tx.WithTxWindowTimeout(ctx, rawClaimTimeout)
+		// The budget is the WHOLE claim window, not the blocks left in it, so
+		// every attempt for this batch is born with the same number in front of
+		// it -- a retry at block 8 of 10 is not handed a shrinking deadline.
+		// What stops a late transaction is timeout_height, at the close.
+		//
+		// The length comes from the chain's own parameters rather than from a
+		// constant: poktroll's defaults give a 3-block claim window while
+		// mainnet governs it to 10, so a literal here would be one network's
+		// number applied to all of them.
+		claimWindowOpen := sharedtypes.GetClaimWindowOpenHeight(sharedParams, sessionEndHeight)
+		claimTimeout, claimTimeoutRegime := tx.WindowTimeout(
+			claimWindowClose-claimWindowOpen,
+			lc.config.BlockTimeSeconds,
+		)
+		RecordTxTimeoutRegime("claim", claimTimeoutRegime)
+		claimCtx := tx.WithTxWindowTimeout(ctx, claimTimeout, claimTimeoutRegime)
 
 		logger.Info().
 			Int64("current_height", currentBlock.Height()).
 			Int64("claim_window_close", claimWindowClose).
-			Int64("blocks_remaining", claimBlocksLeft).
-			Dur("tx_deadline", rawClaimTimeout).
+			Int64("blocks_remaining", claimWindowClose-currentBlock.Height()).
+			Dur("tx_deadline", claimTimeout).
+			Str("tx_deadline_regime", claimTimeoutRegime).
 			Int("batch_size", len(claimMsgs)).
 			Msg("submitting claims")
 
@@ -2308,18 +2318,23 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		}
 
 		proofBlocksRemaining := proofWindowClose - currentBlock.Height()
-		proofBlockTimeSec := lc.config.BlockTimeSeconds
-		if proofBlockTimeSec <= 0 {
-			proofBlockTimeSec = 30
-		}
-		rawProofTimeout := time.Duration(proofBlocksRemaining) * time.Duration(proofBlockTimeSec) * time.Second
-		proofCtx := tx.WithTxWindowTimeout(ctx, rawProofTimeout)
+
+		// The whole proof window, for the reason spelled out on the claim side.
+		// The two windows are NOT the same length -- poktroll's defaults give 3
+		// blocks for claims and 4 for proofs -- so each phase measures its own.
+		proofWindowOpen := sharedtypes.GetProofWindowOpenHeight(sharedParams, sessionEndHeight)
+		proofTimeout, proofTimeoutRegime := tx.WindowTimeout(
+			proofWindowClose-proofWindowOpen,
+			lc.config.BlockTimeSeconds,
+		)
+		RecordTxTimeoutRegime("proof", proofTimeoutRegime)
+		proofCtx := tx.WithTxWindowTimeout(ctx, proofTimeout, proofTimeoutRegime)
 
 		logger.Info().
 			Int64("current_height", currentBlock.Height()).
 			Int64("proof_window_close", proofWindowClose).
 			Int64("blocks_remaining", proofBlocksRemaining).
-			Dur("tx_deadline", rawProofTimeout).
+			Dur("tx_deadline", proofTimeout).
 			Int("batch_size", len(proofMsgs)).
 			Msg("submitting proofs")
 
