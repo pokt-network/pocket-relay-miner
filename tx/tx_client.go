@@ -877,6 +877,11 @@ func (tc *TxClient) signAndBroadcast(
 			// ErrTxProofNotRequired uses at its own call site.
 			return txHash, fmt.Errorf("%w: %w", ErrTxWindowExpired, rejection)
 		}
+		if isAlreadyQueuedRejection(res.TxResponse.Codespace, res.TxResponse.Code) {
+			// Same shape, opposite meaning: the window one says the work can
+			// never land, this one says it is already on its way.
+			return txHash, fmt.Errorf("%w: %w", ErrTxAlreadyQueued, rejection)
+		}
 		return txHash, rejection
 	}
 
@@ -1185,6 +1190,37 @@ var ErrTxProofNotRequired = errors.New("chain reports no proof was required")
 // The pair is what discriminates, not the number: codes are per-codespace, so a
 // module of its own may well register a 30 that means something unrelated.
 var ErrTxWindowExpired = errors.New("chain rejected transaction: timeout height already passed")
+
+// ErrTxAlreadyQueued reports that the chain refused the transaction because it
+// is ALREADY IN THE NODE'S MEMPOOL. It is not a failure: the work is done and
+// the only correct response is to stop and be satisfied.
+//
+// It exists for the resend path. Re-sending the same transaction to the same
+// node while it still sits in that node's mempool answers code 19 without
+// transmitting anything, which is the cheapest possible outcome -- and, once
+// resends happen on every block, the MOST FREQUENT one. Read as a generic
+// rejection it would be the opposite: an attempt consumed, an entry in the error
+// bucket, and a Warn per session per block, turning the operational signal into
+// noise exactly when the resend loop is working as designed.
+//
+// Its guarantee is weaker than ErrTxWindowExpired's and the difference matters:
+// the mempool cache is a bounded LRU, LOCAL to one node, that evicts by age
+// without regard to validity. So "already queued" means "this node has it now",
+// not "the chain will include it" -- which is why seeing this must not settle a
+// session, only decline to count the attempt against it.
+var ErrTxAlreadyQueued = errors.New("chain reports the transaction is already in the mempool")
+
+// abciCodeTxInMempoolCache is cosmos-sdk's ErrTxInMempoolCache
+// (types/errors/errors.go:66 in v0.53.7). It arrives through the same CheckTx
+// path as any other rejection: client/broadcast.go turns CometBFT's own
+// duplicate error into a synthetic TxResponse carrying this code and codespace.
+const abciCodeTxInMempoolCache = 19
+
+// isAlreadyQueuedRejection reports whether a CheckTx response is the node saying
+// it already holds this transaction.
+func isAlreadyQueuedRejection(codespace string, code uint32) bool {
+	return code == abciCodeTxInMempoolCache && codespace == abciCodespaceSDK
+}
 
 // abciCodeTxTimeoutHeight is cosmos-sdk's ErrTxTimeoutHeight, registered in the
 // root codespace (types/errors/errors.go:100 in v0.53.7). Its sibling in the

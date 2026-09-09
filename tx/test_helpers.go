@@ -182,14 +182,20 @@ func (m *mockAuthQueryServer) Account(
 // mockTxServiceServer implements txtypes.ServiceServer for testing
 type mockTxServiceServer struct {
 	txtypes.UnimplementedServiceServer
-	t                *testing.T
-	rwMu             sync.RWMutex // protects mutable fields below
-	broadcastError   error
-	broadcastCode    uint32
-	broadcastRawLog  string
-	broadcastTxHash  string
-	broadcastCounter int
-	getTxCounter     int // number of GetTx (post-broadcast inclusion) calls
+	t               *testing.T
+	rwMu            sync.RWMutex // protects mutable fields below
+	broadcastError  error
+	broadcastCode   uint32
+	broadcastRawLog string
+	// broadcastCodespace overrides the codespace of a synthetic CheckTx
+	// rejection. It defaults to "sdk" because that is where every code this
+	// client classifies is registered -- but the codespace is HALF of what
+	// identifies an error, so a test has to be able to send the same number from
+	// somewhere else.
+	broadcastCodespace string
+	broadcastTxHash    string
+	broadcastCounter   int
+	getTxCounter       int // number of GetTx (post-broadcast inclusion) calls
 	// getTxErr, when set, makes GetTx fail with it instead of echoing the
 	// broadcast. Until it existed this mock could only ever answer "included and
 	// this is its response", so a test wired to it could not exercise a tx that
@@ -320,6 +326,10 @@ func (m *mockTxServiceServer) BroadcastTx(
 	txHash := m.broadcastTxHash
 	code := m.broadcastCode
 	rawLog := m.broadcastRawLog
+	codespace := m.broadcastCodespace
+	if codespace == "" {
+		codespace = "sdk"
+	}
 	// Copy so later test assertions don't race with in-flight reuse of
 	// the request buffer by the grpc server.
 	m.lastTxBytes = append([]byte(nil), req.TxBytes...)
@@ -354,7 +364,7 @@ func (m *mockTxServiceServer) BroadcastTx(
 			TxHash:    txHash,
 			Code:      code,
 			RawLog:    rawLog,
-			Codespace: "sdk",
+			Codespace: codespace,
 		},
 	}, nil
 }
@@ -401,6 +411,10 @@ func (m *mockTxServiceServer) GetTx(
 	m.getTxCounter++
 	code := m.broadcastCode
 	rawLog := m.broadcastRawLog
+	codespace := m.broadcastCodespace
+	if codespace == "" {
+		codespace = "sdk"
+	}
 	getTxErr := m.getTxErr
 	perHash, hasPerHash := m.getTxByHash[req.Hash]
 	m.rwMu.Unlock()
@@ -423,7 +437,7 @@ func (m *mockTxServiceServer) GetTx(
 			TxHash:    req.Hash,
 			Code:      code,
 			RawLog:    rawLog,
-			Codespace: "sdk",
+			Codespace: codespace,
 		},
 	}, nil
 }
@@ -499,6 +513,16 @@ func (s *testGRPCServer) setBroadcastError(err error) {
 func (s *testGRPCServer) setBroadcastFailure(code uint32, rawLog string) {
 	s.txServer.broadcastCode = code
 	s.txServer.broadcastRawLog = rawLog
+}
+
+// setBroadcastFailureFrom is setBroadcastFailure with the codespace named.
+// Needed because an ABCI code means nothing on its own: codes are registered
+// PER CODESPACE, so the same number from another module is a different error,
+// and a classifier that ignored the codespace would swallow it.
+func (s *testGRPCServer) setBroadcastFailureFrom(codespace string, code uint32, rawLog string) {
+	s.txServer.broadcastCode = code
+	s.txServer.broadcastRawLog = rawLog
+	s.txServer.broadcastCodespace = codespace
 }
 
 // getBroadcastCount returns the number of times BroadcastTx was called

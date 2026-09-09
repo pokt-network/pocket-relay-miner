@@ -911,15 +911,26 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	// re-fire — and re-log — on every block until the window closes. Persisting
 	// also keeps the cap across leader failover.
 	//
-	// EXCEPT when we never reached the network. The budget is a handful of
-	// resends, so counting an attempt that never left the process burns one of
-	// the few a claim had, on nothing — and it would move the calendar too,
-	// pushing the next real attempt two blocks later for a send that did not
-	// happen. The sentinel is the only thing that
-	// can tell "the chain rejected it" from "we never asked": saturation means
-	// no permit was free, the message was never signed and never sent, and the
-	// next block will find the payload exactly where it was.
-	if !errors.Is(err, tx.ErrTxConcurrencySaturated) {
+	// EXCEPT for the two answers that mean NOTHING WAS SPENT. The budget is a
+	// handful of resends, so counting an attempt that changed nothing burns one
+	// of the few a claim had — and it moves the calendar too, pushing the next
+	// real attempt further out for a send that did not happen. A sentinel is the
+	// only thing that can tell these apart from a genuine rejection, because on
+	// the wire they look like any other refusal.
+	//
+	//   - SATURATION: no permit was free, so the message was never signed and
+	//     never sent. The next block finds the payload exactly where it was.
+	//   - ALREADY QUEUED: the node answered "I already hold this transaction"
+	//     without transmitting anything. Nothing was consumed and nothing
+	//     changed, so the previous send is still the one in flight.
+	//
+	// The second one is not an edge case: re-sending to the same node while its
+	// mempool still holds the transaction is the EXPECTED answer, and the
+	// commonest one once resends happen on every block. Counting it would spend
+	// the whole budget on a claim whose transaction was already on its way,
+	// silently and without a single packet leaving for the chain -- which is the
+	// most expensive way to be wrong here, because it looks like progress.
+	if !errors.Is(err, tx.ErrTxConcurrencySaturated) && !errors.Is(err, tx.ErrTxAlreadyQueued) {
 		entry.Rebroadcasts++
 		// Inside this guard and NOT beside the TxHash assignment below, which
 		// sits outside it: a saturated attempt never left the process, so moving
@@ -961,8 +972,16 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 		// RebroadcastSafetyBlocks defaults to 1, so canRebroadcast authorises a
 		// resend up to windowClose-2 and the transaction has two blocks to land.
 		result := "error"
-		if errors.Is(err, tx.ErrTxWindowExpired) {
+		switch {
+		case errors.Is(err, tx.ErrTxWindowExpired):
 			result = "window_closed"
+		case errors.Is(err, tx.ErrTxAlreadyQueued):
+			// Not an error at all: the node already holds the transaction. It
+			// gets its own value rather than sharing "error" because once
+			// resends run every block this becomes the commonest outcome, and
+			// leaving it in the error bucket would bury a real failure under a
+			// rate that only says the loop is working.
+			result = "already_queued"
 		}
 		rp.recordRebroadcast(g.Supplier, entry.ServiceID, result)
 		// Debug, not Warn: the failure is already captured by the
