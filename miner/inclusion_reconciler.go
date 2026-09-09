@@ -904,10 +904,37 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 		},
 		windowClose, time.Duration(entry.TimeoutSeconds)*time.Second, entry.TimeoutRegime)
 
-	// Keep what actually went out. When the resend re-injected, this is the same
-	// payload it was handed; when it had to sign, these are the new bytes, and
-	// the entry must carry them or the NEXT resend signs again for nothing.
-	if len(sent.Bytes) > 0 {
+	// Keep what went out -- but ONLY while there is reason to think it can still
+	// land.
+	//
+	// A REJECTED transaction must never be re-injected. The bytes carry the same
+	// everything, so whatever the chain refused it refuses again: with resends
+	// running every block that is one wasted attempt per block until the window
+	// closes, and the resend NEVER signs a valid replacement because it keeps
+	// finding a cached transaction to send. Worse, the answer to a re-injected
+	// duplicate can be code 19, which is exempt from counting -- so the budget
+	// that should stop it is never spent either. Discarding costs one signature
+	// and puts a valid transaction back in flight.
+	//
+	// The two sentinels below are the exception because NOTHING HAPPENED TO THE
+	// BYTES -- the same pair exempt from counting an attempt, one line above,
+	// for the same reason. Saturation means it was never signed nor sent, so the
+	// cached transaction is untouched. Already-queued means the node holds THESE
+	// EXACT BYTES right now, so discarding them would make the next resend sign
+	// a second transaction while the first is still in that mempool: precisely
+	// the duplicate this whole mechanism exists to avoid.
+	//
+	// Deliberately CONSERVATIVE beyond those two: every other failure discards
+	// without asking why. Telling apart a rejection that spares the bytes from
+	// one that kills them requires classifying what the chain answered, which is
+	// its own change; until then the answer that costs a signature is the safe
+	// one.
+	switch {
+	case err != nil && !nothingWasSpent(err):
+		entry.SignedBytes = nil
+		entry.SignedTimeoutAt = 0
+		entry.SignedTimeoutHeight = 0
+	case len(sent.Bytes) > 0:
 		entry.SignedBytes = sent.Bytes
 		entry.SignedTimeoutAt = sent.TimeoutAt.UnixNano()
 		entry.SignedTimeoutHeight = sent.TimeoutHeight
@@ -960,7 +987,7 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	// the whole budget on a claim whose transaction was already on its way,
 	// silently and without a single packet leaving for the chain -- which is the
 	// most expensive way to be wrong here, because it looks like progress.
-	if !errors.Is(err, tx.ErrTxConcurrencySaturated) && !errors.Is(err, tx.ErrTxAlreadyQueued) {
+	if !nothingWasSpent(err) {
 		entry.Rebroadcasts++
 		// Inside this guard and NOT beside the TxHash assignment below, which
 		// sits outside it: an attempt that never left the process must not be
@@ -1043,6 +1070,16 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 // clear removes a settled entry. The cached transaction bytes go with it,
 // because they live ON it: nothing survives the record they belonged to, so
 // there is no orphan to collect and no TTL to outlive.
+// nothingWasSpent reports the two answers that mean the attempt cost nothing:
+// no permit was free so it was never signed or sent, and the node already holds
+// the transaction so nothing was transmitted. Both the attempt counter and the
+// cached bytes ask this same question, and they must not drift apart -- an
+// answer treated as "nothing happened" for the budget and as a failure for the
+// cache would spend a signature the counter says was never spent.
+func nothingWasSpent(err error) bool {
+	return errors.Is(err, tx.ErrTxConcurrencySaturated) || errors.Is(err, tx.ErrTxAlreadyQueued)
+}
+
 func (r *InclusionReconciler) clear(ctx context.Context, phase RebroadcastPhase, g RebroadcastGroup, sessionID string, _ rebroadcastEntry) {
 	if err := r.store.Delete(ctx, phase, g.Supplier, g.SessionEnd, sessionID); err != nil {
 		// The entry survives, so the next block reconciles it again and emits
