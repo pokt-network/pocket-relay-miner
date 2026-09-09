@@ -503,8 +503,16 @@ skipped_difficulty_now() {
 # codespace+code, not text: code 18 in codespace "sdk" is ErrInvalidRequest,
 # which for OUR transactions means a reused unordered nonce or "ttl exceeds
 # 10m0s" -- both our own defect, so the pair is the right granularity here. A
-# deadline already passed is NOT in this bucket: that is code 42, rejected seven
-# decorators earlier. See tx/metrics.go for why, and for the version caveat.
+# deadline already passed is NOT in this bucket: it is rejected seven decorators
+# earlier, under code 30 when the timeout HEIGHT passed and code 42 when the
+# timeout TIMESTAMP did. See tx/metrics.go for why, and for the version caveat.
+#
+# NEITHER OF THOSE TWO IS COUNTED BY ANY CHECK IN THIS FILE. The 30 in
+# particular only became reachable once the client started setting a timeout
+# height, and it means a claim or proof window closed before the node saw the
+# transaction -- lost work, which is precisely what a live gate ought to see.
+# Extending this check is a decision of its own and is recorded in the queue;
+# it is named here so the absence is not read as coverage.
 #
 # THE FAMILY IS ha_tx_*, NOT ha_miner_*. The tx package registers with
 # namespace "ha" and subsystem "tx", and MinerFactory adds no prefix of its own.

@@ -202,10 +202,14 @@ type mockTxServiceServer struct {
 	// the same thing for every hash, so the precedence between an entry's
 	// original and resent hashes -- which one wins when they disagree -- could
 	// not be exercised at all: any ordering would pass.
-	getTxByHash      map[string]mockGetTxAnswer
-	lastTxBytes      []byte // captured TxBytes from most recent BroadcastTx
-	broadcastBlockCh chan struct{}
-	broadcastSeen    chan struct{}
+	getTxByHash map[string]mockGetTxAnswer
+	lastTxBytes []byte // captured TxBytes from most recent BroadcastTx
+	// captured TxBytes from the most recent Simulate. Its twin above is not
+	// enough on its own: the two differ by design, and only comparing them can
+	// show which fields a decision deliberately keeps out of the estimate.
+	lastSimulateTxBytes []byte
+	broadcastBlockCh    chan struct{}
+	broadcastSeen       chan struct{}
 
 	simulateCalls  int
 	simulateGas    uint64
@@ -220,10 +224,16 @@ type mockTxServiceServer struct {
 // test has to set GasLimit > 0 -- i.e. the mode production does not use.
 func (m *mockTxServiceServer) Simulate(
 	_ context.Context,
-	_ *txtypes.SimulateRequest,
+	req *txtypes.SimulateRequest,
 ) (*txtypes.SimulateResponse, error) {
 	m.rwMu.Lock()
 	m.simulateCalls++
+	// Captured for the same reason BroadcastTx captures its own: the simulated
+	// transaction and the broadcast one are NOT the same bytes, and WHICH fields
+	// differ is a deliberate decision rather than an accident. Until this
+	// existed, only half the pair could be inspected -- a test could assert what
+	// we send and had no way to assert what we simulated.
+	m.lastSimulateTxBytes = append([]byte(nil), req.TxBytes...)
 	errMsg, gas := m.simulateErrMsg, m.simulateGas
 	msgIdx, hasIdx := m.simulateMsgIdx, m.simulateHasIdx
 	m.rwMu.Unlock()
@@ -503,6 +513,22 @@ func (s *testGRPCServer) getGetTxCount() int {
 	s.txServer.rwMu.RLock()
 	defer s.txServer.rwMu.RUnlock()
 	return s.txServer.getTxCounter
+}
+
+// getLastSimulateTxBytes returns a copy of the TxBytes from the most recent
+// Simulate call, or nil when nothing was simulated.
+//
+// Nil is a meaningful answer and callers must check it: with an explicit
+// GasLimit the client never simulates, so a test that forgot to leave the limit
+// at zero would find nothing here and any assertion about the simulated
+// transaction would pass by vacuity.
+func (s *testGRPCServer) getLastSimulateTxBytes() []byte {
+	s.txServer.rwMu.RLock()
+	defer s.txServer.rwMu.RUnlock()
+	if s.txServer.lastSimulateTxBytes == nil {
+		return nil
+	}
+	return append([]byte(nil), s.txServer.lastSimulateTxBytes...)
 }
 
 // getLastTxBytes returns a copy of the most recently broadcast TxBytes.

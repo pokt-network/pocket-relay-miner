@@ -930,15 +930,35 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	}
 
 	if err != nil {
-		rp.recordRebroadcast(g.Supplier, entry.ServiceID, "error")
+		// A window that closed under us is not a transport failure, and until
+		// now both landed here as result="error" -- one bucket holding "the node
+		// was unreachable", which the next block may fix, together with "these
+		// bytes can never be accepted again", which nothing fixes. Separating
+		// them costs one label value, and it is the only way an operator can
+		// tell a flapping endpoint from a resend calendar that runs too late.
+		//
+		// It changes no control flow. The attempt was already counted and the
+		// entry already persisted above, both deliberately: a doomed resend must
+		// still spend its attempt or it re-fires on every block until the window
+		// closes, which is the policy written where that counter lives.
+		//
+		// The margin being reported on is thin by construction --
+		// RebroadcastSafetyBlocks defaults to 1, so canRebroadcast authorises a
+		// resend up to windowClose-2 and the transaction has two blocks to land.
+		result := "error"
+		if errors.Is(err, tx.ErrTxWindowExpired) {
+			result = "window_closed"
+		}
+		rp.recordRebroadcast(g.Supplier, entry.ServiceID, result)
 		// Debug, not Warn: the failure is already captured by the
-		// claimRebroadcastsTotal{result="error"} metric, and the attempt is now
+		// claimRebroadcastsTotal{result=...} metric, and the attempt is now
 		// capped above, so this no longer repeats every block. Expected-transient
 		// (mempool reject / doomed claim) — not something needing an operator alert.
 		r.logger.Debug().Err(err).
 			Str("phase", string(rp.phase)).
 			Str("supplier", g.Supplier).
 			Str("session_id", sessionID).
+			Str("result", result).
 			Int("attempt", entry.Rebroadcasts).
 			Msg("inclusion reconcile: rebroadcast failed")
 		return

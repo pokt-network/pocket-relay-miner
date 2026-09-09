@@ -548,7 +548,6 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 				Msg("failed to track ejected claim submission")
 		}
 	}
-
 }
 
 // settleNotRequiredBatch records the per-session outcome of a batch the chain
@@ -1461,8 +1460,20 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				lastErr = submitErr
 
 				// Check if error is due to claim window being closed (permanent failure - don't retry)
+				//
+				// TWO LAYERS refuse a closed window and they speak different
+				// languages. x/proof refuses by TEXT, during the gas simulation
+				// that executes the messages, and that is what the substrings
+				// below match. The SDK's ante handler refuses by CODE, in
+				// CheckTx, now that the transaction carries a timeout height --
+				// and its text ("block height: N, timeout height: M") contains
+				// neither substring, so without the sentinel that rejection
+				// falls through to the generic retry, burns the attempts, and
+				// settles the session as claim_tx_error instead of
+				// claim_window_closed. Same fact, opposite diagnosis.
 				errorMsg := submitErr.Error()
-				if strings.Contains(errorMsg, "claim window") || strings.Contains(errorMsg, "claim_window") {
+				if errors.Is(submitErr, tx.ErrTxWindowExpired) ||
+					strings.Contains(errorMsg, "claim window") || strings.Contains(errorMsg, "claim_window") {
 					logger.Error().
 						Err(submitErr).
 						Int64("current_height", lc.blockClient.LastBlock(ctx).Height()).
@@ -2349,8 +2360,14 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				}
 
 				// Check if error is due to proof window being closed (permanent failure - don't retry)
+				//
+				// The claim path carries the same two-layer check and the same
+				// reasoning; see the comment there. Both twins are edited
+				// together deliberately: in this file a fix applied to one cycle
+				// and not the other has been the recurring defect.
 				errorMsg := submitErr.Error()
-				if strings.Contains(errorMsg, "proof window") || strings.Contains(errorMsg, "proof_window") {
+				if errors.Is(submitErr, tx.ErrTxWindowExpired) ||
+					strings.Contains(errorMsg, "proof window") || strings.Contains(errorMsg, "proof_window") {
 					logger.Error().
 						Err(submitErr).
 						Int64("current_height", lc.blockClient.LastBlock(ctx).Height()).

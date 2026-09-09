@@ -149,13 +149,29 @@ var (
 	//
 	// It is NOT three. The obvious third -- a deadline already passed -- never
 	// reaches code 18: TxTimeoutHeightDecorator sits at position 4 of the ante
-	// chain (x/auth/ante/ante.go:48) and rejects that with ErrTxTimeout, which
-	// is code 42 (types/errors/errors.go:147); sigverify's equivalent check is
-	// seven decorators later and is never reached. And the fourth -- a sequence
-	// set on an unordered tx -- cannot happen here: signTx forces sequence 0.
+	// chain (x/auth/ante/ante.go:48), and sigverify's equivalent check is seven
+	// decorators later and is never reached. And the fourth -- a sequence set on
+	// an unordered tx -- cannot happen here: signTx forces sequence 0.
+	//
+	// That decorator makes TWO checks, which are two different clocks, so a
+	// deadline arrives here under one of two codes:
+	//
+	//   - the timeout HEIGHT passed -> ErrTxTimeoutHeight, code 30
+	//     (basic.go:212-216, types/errors/errors.go:100);
+	//   - the timeout TIMESTAMP passed -> ErrTxTimeout, code 42
+	//     (basic.go:220-223, :147).
+	//
+	// Both are in codespace "sdk". The 30 only became reachable when we started
+	// setting a timeout height at all; while that field stayed 0 the height
+	// check could not fire, which is why an earlier version of this comment
+	// named only the 42 and was correct when it was written. The two remedies
+	// differ -- a height expiry means the window closed and the work is lost,
+	// while a timestamp expiry means our own broadcast deadline elapsed and a
+	// resend may still land -- so collapsing them into "the deadline passed"
+	// discards the distinction an operator needs.
 	//
 	// DURABILITY: this holds GIVEN the decorator order of the cosmos-sdk this
-	// module pins. A version that reorders them turns the 42 back into an 18,
+	// module pins. A version that reorders them turns 30 and 42 back into an 18,
 	// and this comment is then wrong rather than merely stale.
 	//
 	// Cardinality is bounded by the chain's own registry, not by our input.

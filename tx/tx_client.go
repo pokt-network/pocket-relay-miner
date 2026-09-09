@@ -445,7 +445,7 @@ func (tc *TxClient) CreateClaims(
 		msgs[i] = claim
 	}
 
-	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, uint64(timeoutHeight), "claim", msgs...)
+	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, timeoutHeight, "claim", msgs...)
 	if err != nil {
 		txClaimErrors.WithLabelValues(supplierOperatorAddr).Inc()
 		return "", fmt.Errorf("failed to broadcast claims: %w", err)
@@ -484,7 +484,7 @@ func (tc *TxClient) SubmitProofs(
 		msgs[i] = proof
 	}
 
-	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, uint64(timeoutHeight), "proof", msgs...)
+	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, timeoutHeight, "proof", msgs...)
 	if err != nil {
 		// Check if error is "proof not required" - this is benign (claim already settled without proof)
 		if isProofNotRequiredError(err) {
@@ -655,10 +655,23 @@ func computeEffectiveTxTimeout(
 
 // signAndBroadcast signs and broadcasts a transaction.
 // txType should be "claim" or "proof" for proper metrics labeling.
+//
+// timeoutHeight is the height past which the CHAIN stops accepting this
+// transaction, and it stays int64 all the way down here on purpose. Every
+// caller computes a window close, which is a signed quantity; converting at the
+// call site -- which is what this code did -- turns a non-positive value into a
+// number near 2^64 that reads as a perfectly valid far-future height, so the
+// guard below could no longer tell "no timeout wanted" from "the arithmetic
+// went wrong". One cast, after the sign has been checked.
+//
+// This is a DIFFERENT CLOCK from the timeoutTimestamp set below, and the two
+// are easy to conflate because both are called a timeout. This one the chain
+// enforces against its own block height; that one is our client-side broadcast
+// deadline.
 func (tc *TxClient) signAndBroadcast(
 	ctx context.Context,
 	signerAddr string,
-	_ uint64,
+	timeoutHeight int64,
 	txType string,
 	msgs ...cosmostypes.Msg,
 ) (string, error) {
@@ -768,6 +781,41 @@ func (tc *TxClient) signAndBroadcast(
 	txBuilder.SetGasLimit(gasLimit)
 	txBuilder.SetFeeAmount(feeAmount)
 
+	// The chain's own expiry, and it is set HERE -- after the simulation above,
+	// not beside SetTimeoutTimestamp where its sibling lives.
+	//
+	// The tempting placement is next to the timestamp, so that "the simulation
+	// reflects the transaction we send". That reason does not survive reading
+	// the order: the gas limit and the fee are decided AFTER simulating and the
+	// signature comes after that, so the simulated bytes were never the final
+	// ones. What placement actually decides is WHICH LAYER refuses an expired
+	// window, and the two answers are not equally good.
+	//
+	// Set before the simulation, the ante handler rejects during Simulate --
+	// which runs the ante handler too, and whose decorator ignores its own
+	// simulate flag. That reply is flattened to codes.Unknown by the SDK's tx
+	// service, arrives with no ABCI code at all, and would displace the failure
+	// that the callers already classify today. Set here, Simulate keeps
+	// executing the messages and keeps failing inside x/proof, whose registered
+	// errors read "claim attempted outside of the session's claim window" and
+	// its proof twin (poktroll x/proof/types/errors.go:32-33) -- the substrings
+	// the callers already match. The height rejection is then confined to
+	// CheckTx, where it carries code 30 and where nothing classified anything
+	// before. So this ADDS a covered case instead of replacing a covered one.
+	//
+	// The cost is that the gas estimate, taken before this field exists, does
+	// not account for its few bytes of varint. DefaultGasAdjustment is 1.7 --
+	// a 70% margin over the simulated figure, orders of magnitude more than the
+	// field can consume. The exact gas delta was not measured.
+	//
+	// The guard is defensive, not reachable today: all three callers pass a
+	// window close they have already compared against the current height. It
+	// earns its place by being the last point where the value still has a sign
+	// -- past the cast, a negative height is a far-future one.
+	if timeoutHeight > 0 {
+		txBuilder.SetTimeoutHeight(uint64(timeoutHeight))
+	}
+
 	// Sign the transaction (unordered=true means sequence=0)
 	err = tc.signTx(ctx, txBuilder, privKey, account, true)
 	if err != nil {
@@ -816,16 +864,33 @@ func (tc *TxClient) signAndBroadcast(
 			strconv.FormatUint(uint64(res.TxResponse.Code), 10),
 		).Inc()
 
+		// timeout_height is logged for EVERY CheckTx rejection, not just the
+		// height one. Code 30 says the NODE considered the window closed, which
+		// is not the same statement as "the window closed": the ante handler
+		// compares against that node's last committed height, while our number
+		// comes from window arithmetic over cached params. Without both, an
+		// incident cannot separate "we were late" from "our number was wrong",
+		// and by then the transaction is gone. The node's own height travels
+		// inside RawLog, which this line already carries, so the field that has
+		// to be added is ours.
 		tc.logger.Warn().
 			Str("supplier", signerAddr).
 			Str("tx_type", txType).
 			Str("tx_hash", txHash).
 			Str("codespace", res.TxResponse.Codespace).
 			Uint32("code", res.TxResponse.Code).
+			Int64("timeout_height", timeoutHeight).
 			Str("error", res.TxResponse.RawLog).
 			Msg("transaction CheckTx failed")
 
-		return txHash, newCheckTxRejection(res.TxResponse)
+		rejection := newCheckTxRejection(res.TxResponse)
+		if isWindowExpiredRejection(res.TxResponse.Codespace, res.TxResponse.Code) {
+			// Both wrap, so the fact stays askable with errors.Is and the
+			// rejection stays readable with errors.As -- the same shape
+			// ErrTxProofNotRequired uses at its own call site.
+			return txHash, fmt.Errorf("%w: %w", ErrTxWindowExpired, rejection)
+		}
+		return txHash, rejection
 	}
 
 	// CheckTx passed! TX accepted to mempool
@@ -1115,6 +1180,40 @@ func isInsufficientBalanceError(errorMsg string) bool {
 // every frame. The two are different questions: "was it this condition" and
 // "which message of the batch, and what did the server actually say".
 var ErrTxProofNotRequired = errors.New("chain reports no proof was required")
+
+// ErrTxWindowExpired reports that the CHAIN refused the transaction because its
+// timeout height had already passed -- the claim or proof window closed before
+// the node saw it. It is terminal: the same bytes can never be accepted later,
+// so a caller that retries is spending attempts and fees on nothing.
+//
+// It is recognised by CODE, not by text, and that is not a departure from the
+// rule stated on TxRejection ("classify those by text"). That rule is about
+// x/proof errors, where codes.FailedPrecondition alone covers the window check,
+// a missing claim, a malformed address, two fee failures and "proof not
+// required" -- six conditions behind one code, which therefore decides nothing.
+// This rejection comes from a different layer: the SDK's own ante handler, where
+// code 30 in codespace "sdk" means this and only this. One rule -- classify by
+// whatever discriminates -- landing differently in two layers.
+//
+// The pair is what discriminates, not the number: codes are per-codespace, so a
+// module of its own may well register a 30 that means something unrelated.
+var ErrTxWindowExpired = errors.New("chain rejected transaction: timeout height already passed")
+
+// abciCodeTxTimeoutHeight is cosmos-sdk's ErrTxTimeoutHeight, registered in the
+// root codespace (types/errors/errors.go:100 in v0.53.7). Its sibling in the
+// SAME decorator is code 42, ErrTxTimeout, which is the timeout TIMESTAMP
+// expiring -- a different clock and a different remedy, which is why the two
+// must not be collapsed into "the deadline passed".
+const (
+	abciCodeTxTimeoutHeight = 30
+	abciCodespaceSDK        = "sdk"
+)
+
+// isWindowExpiredRejection reports whether a CheckTx response is the chain
+// refusing a transaction whose timeout height had passed.
+func isWindowExpiredRejection(codespace string, code uint32) bool {
+	return code == abciCodeTxTimeoutHeight && codespace == abciCodespaceSDK
+}
 
 // isProofNotRequiredError recognises that refusal.
 //
