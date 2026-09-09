@@ -306,7 +306,7 @@ type SupplierManager struct {
 	inclusionReconciler *InclusionReconciler
 
 	// rebroadcastStore persists built claim/proof messages for the reconciler.
-	rebroadcastStore *RebroadcastStore
+	rebroadcastStore RebroadcastStorage
 
 	// reconcilerCancel stops the block-subscription loop driving the reconciler.
 	reconcilerCancel context.CancelFunc

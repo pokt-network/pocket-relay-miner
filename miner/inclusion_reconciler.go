@@ -380,7 +380,7 @@ func (o *inclusionOracle) states(ctx context.Context, supplier string) (map[stri
 type InclusionReconciler struct {
 	logger       logging.Logger
 	sharedClient pocktclient.SharedQueryClient
-	store        *RebroadcastStore
+	store        RebroadcastStorage
 	resubmitter  MessageResubmitter
 	cfg          InclusionReconcilerConfig
 
@@ -423,7 +423,7 @@ func (r *InclusionReconciler) SetOwnershipFilter(ownsSupplier func(supplier stri
 func NewInclusionReconciler(
 	logger logging.Logger,
 	sharedClient pocktclient.SharedQueryClient,
-	store *RebroadcastStore,
+	store RebroadcastStorage,
 	resubmitter MessageResubmitter,
 	claimPhase reconcilePhase,
 	proofPhase reconcilePhase,

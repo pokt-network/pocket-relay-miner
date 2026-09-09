@@ -173,7 +173,7 @@ type LifecycleCallback struct {
 	// window is open (HA-safe: survives leader failover). If nil, the built
 	// messages are not persisted and the reconciler has nothing to verify —
 	// fire-once-at-window-open behavior (silent CLAIM_MISSING/PROOF_MISSING).
-	rebroadcastStore *RebroadcastStore
+	rebroadcastStore RebroadcastStorage
 
 	// Per-session locks to prevent concurrent claim/proof operations
 	sessionLocks   map[string]*sync.Mutex
@@ -259,7 +259,16 @@ func (lc *LifecycleCallback) SetProofQueryClient(client pocktclient.ProofQueryCl
 // SetRebroadcastStore wires the store that persists built claim/proof messages
 // for the InclusionReconciler. Optional — without it, messages are not persisted
 // and the reconciler has nothing to verify/rebroadcast (fire-once behavior).
-func (lc *LifecycleCallback) SetRebroadcastStore(store *RebroadcastStore) {
+// SetRebroadcastStore installs the persistence. It takes the INTERFACE, so a
+// different backing is a wiring change.
+//
+// Pass a genuine nil to disable it, never a nil *RebroadcastStore: a typed nil
+// pointer assigned into an interface produces a value that is NOT nil, so the
+// six `rebroadcastStore != nil` guards downstream would all pass and then call
+// through a nil receiver. Today's only caller hands over a store built by
+// NewRebroadcastStore, so the trap is not reachable -- it is named because
+// switching this parameter from a pointer to an interface is what created it.
+func (lc *LifecycleCallback) SetRebroadcastStore(store RebroadcastStorage) {
 	lc.rebroadcastStore = store
 }
 
