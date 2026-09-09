@@ -3,132 +3,85 @@
 package miner
 
 import (
-	"context"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
-)
 
-// managerWithStore builds the smallest SupplierManager that can answer the
-// re-injection question: a store and a logger, nothing else.
-func managerWithStore(t *testing.T, store RebroadcastStorage) *SupplierManager {
-	t.Helper()
-	return &SupplierManager{logger: testLogger(), rebroadcastStore: store}
-}
+	"github.com/pokt-network/pocket-relay-miner/tx"
+)
 
 // The decision that stands between re-injecting and signing again.
 //
 // Getting it wrong is not symmetric. Signing when we could have re-injected
-// costs a signature and puts a second live transaction for one claim into the
-// gossip -- which behind a load balancer can land on a node that saw neither of
-// the others. Re-injecting bytes that have EXPIRED costs the attempt outright:
-// the ante handler refuses them, and the resend that could have landed did not
-// happen. So the table below is the feature, and every row is a different way
-// of not knowing.
-func TestSupplierManager_ReusableSignedTx(t *testing.T) {
-	ctx := context.Background()
-	const hash = "TX-REUSE"
+// costs a signature AND puts a second live transaction for one claim into the
+// gossip -- behind a load balancer each attempt can reach a node that saw none
+// of the others, so the network's own de-duplication, which is free, is exactly
+// what re-signing throws away. Re-injecting bytes that have EXPIRED costs the
+// attempt outright: the ante handler refuses them, and the resend that could
+// have landed did not happen. So every row below is a different way of not
+// knowing, and the default in each is to sign.
+func TestReusable(t *testing.T) {
 	deadline := time.Unix(1_700_000_600, 0)
+	alive := tx.SignedTxPayload{Bytes: []byte("signed"), Hash: "H", TimeoutAt: deadline, TimeoutHeight: 4321}
 
 	for _, tt := range []struct {
-		name      string
-		store     func(t *testing.T) RebroadcastStorage
-		chainNow  time.Time
-		txHash    string
-		wantReuse bool
+		name     string
+		cached   tx.SignedTxPayload
+		chainNow time.Time
+		want     bool
 	}{
 		{
-			name: "alive: the chain clock is still before the sealed deadline",
-			store: func(t *testing.T) RebroadcastStorage {
-				s := newMemRebroadcastStore()
-				require.NoError(t, s.PutSignedTx(ctx, hash, []byte("signed"), deadline, 4321))
-				return s
-			},
-			chainNow: deadline.Add(-time.Minute), txHash: hash, wantReuse: true,
+			name:   "alive: the chain clock is still before the sealed deadline",
+			cached: alive, chainNow: deadline.Add(-time.Minute), want: true,
 		},
 		{
 			// The ordinary end of a window rather than an edge case: the derived
 			// budget sits just under the SDK ceiling while the window is barely
 			// longer, so bytes expire BEFORE their window closes.
-			name: "expired: the deadline is sealed in the bytes and cannot be moved",
-			store: func(t *testing.T) RebroadcastStorage {
-				s := newMemRebroadcastStore()
-				require.NoError(t, s.PutSignedTx(ctx, hash, []byte("signed"), deadline, 4321))
-				return s
-			},
-			chainNow: deadline.Add(time.Second), txHash: hash, wantReuse: false,
+			name:   "expired: the deadline is sealed in the bytes and cannot be moved",
+			cached: alive, chainNow: deadline.Add(time.Second), want: false,
 		},
 		{
-			name: "exactly at the deadline is NOT alive",
-			store: func(t *testing.T) RebroadcastStorage {
-				s := newMemRebroadcastStore()
-				require.NoError(t, s.PutSignedTx(ctx, hash, []byte("signed"), deadline, 4321))
-				return s
-			},
-			chainNow: deadline, txHash: hash, wantReuse: false,
+			name:   "exactly at the deadline is NOT alive",
+			cached: alive, chainNow: deadline, want: false,
 		},
 		{
-			// An unknown clock must never authorise re-injection: nobody can say
-			// whether these bytes are alive, and guessing spends the attempt.
-			name: "unknown chain clock: sign rather than guess",
-			store: func(t *testing.T) RebroadcastStorage {
-				s := newMemRebroadcastStore()
-				require.NoError(t, s.PutSignedTx(ctx, hash, []byte("signed"), deadline, 4321))
-				return s
-			},
-			chainNow: time.Time{}, txHash: hash, wantReuse: false,
+			// Nobody can say whether these bytes are still alive, and guessing
+			// spends the attempt. The opposite mistake costs one signature.
+			name:   "unknown chain clock: sign rather than guess",
+			cached: alive, chainNow: time.Time{}, want: false,
 		},
 		{
-			name:     "nothing cached: the first attempt always signs",
-			store:    func(t *testing.T) RebroadcastStorage { return newMemRebroadcastStore() },
-			chainNow: deadline.Add(-time.Minute), txHash: hash, wantReuse: false,
+			name:   "no bytes: an entry written before this existed, or by an older binary",
+			cached: tx.SignedTxPayload{Hash: "H", TimeoutAt: deadline}, chainNow: deadline.Add(-time.Minute), want: false,
 		},
 		{
-			// An entry that never reached the network has no original hash, so
-			// there is nothing to look bytes up by.
-			name: "no hash: nothing to look up",
-			store: func(t *testing.T) RebroadcastStorage {
-				s := newMemRebroadcastStore()
-				require.NoError(t, s.PutSignedTx(ctx, hash, []byte("signed"), deadline, 4321))
-				return s
-			},
-			chainNow: deadline.Add(-time.Minute), txHash: "", wantReuse: false,
+			// Bytes with no deadline cannot be checked, and an unchecked
+			// re-injection is the one failure this must never produce.
+			name:   "bytes without a deadline are not usable",
+			cached: tx.SignedTxPayload{Bytes: []byte("signed")}, chainNow: deadline.Add(-time.Minute), want: false,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			m := managerWithStore(t, tt.store(t))
-			payload, ok := m.reusableSignedTx(ctx, tt.chainNow, tt.txHash)
-			require.Equal(t, tt.wantReuse, ok)
-			if !tt.wantReuse {
-				require.Empty(t, payload.Bytes, "a refusal must hand back nothing to send")
-				return
-			}
-			require.Equal(t, []byte("signed"), payload.Bytes,
-				"the bytes must be handed back UNCHANGED: anything else is a "+
-					"different transaction with a different nonce")
-			require.Equal(t, hash, payload.Hash)
-			require.Equal(t, int64(4321), payload.TimeoutHeight,
-				"the height sealed into the bytes travels with them, so the "+
-					"rejection log names what the transaction actually holds")
+			require.Equal(t, tt.want, reusable(tt.cached, tt.chainNow))
 		})
 	}
 }
 
-// A store that cannot be read is not the same as an empty one.
+// Bytes and NO hash is a legal, meaningful state -- not a contradiction.
 //
-// Both end in signing, so the behaviour is identical and the DISTINCTION is the
-// point: an outage reported as "nothing cached" would hide itself behind extra
-// signatures forever, which is the same failure as a metric that reads zero
-// because nobody is publishing it.
-func TestSupplierManager_AnUnreadableStoreSignsRatherThanReinjects(t *testing.T) {
-	m := managerWithStore(t, failingSignedTxStore{newMemRebroadcastStore()})
-	_, ok := m.reusableSignedTx(context.Background(), time.Now().Add(time.Hour), "ANY")
-	require.False(t, ok, "an unreadable cache must fall back to signing, never re-inject blindly")
-}
+// It is what a submission whose broadcast never answered leaves behind: the
+// transaction was built and signed, so the bytes exist; nothing confirmed it,
+// so there is no hash. That pair is the case the whole mechanism exists for,
+// and a resend must re-inject rather than sign, because signing would produce a
+// second live transaction for a send that may well have arrived.
+func TestReusable_BytesWithoutAHashAreStillUsable(t *testing.T) {
+	deadline := time.Unix(1_700_000_600, 0)
+	neverConfirmed := tx.SignedTxPayload{Bytes: []byte("signed"), TimeoutAt: deadline, TimeoutHeight: 4321}
 
-type failingSignedTxStore struct{ RebroadcastStorage }
-
-func (failingSignedTxStore) GetSignedTx(context.Context, string) ([]byte, time.Time, int64, error) {
-	return nil, time.Time{}, 0, context.DeadlineExceeded
+	require.True(t, reusable(neverConfirmed, deadline.Add(-time.Minute)),
+		"a transaction we never got an answer for is exactly the one worth "+
+			"re-injecting: the hash is missing because nothing confirmed it, not "+
+			"because the bytes are unusable")
 }

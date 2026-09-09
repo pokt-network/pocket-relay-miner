@@ -2,8 +2,6 @@ package miner
 
 import (
 	"context"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -70,26 +68,6 @@ type RebroadcastStorage interface {
 	Delete(ctx context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64, sessionID string) error
 	CleanupIfEmpty(ctx context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64) error
 	ActiveGroups(ctx context.Context, phase RebroadcastPhase) ([]RebroadcastGroup, error)
-
-	// The signed-transaction cache. It is part of THIS interface and not a
-	// second one beside it: a backing that implemented one and not the other
-	// would leave the reconciler running two stores for one object, which is
-	// the half-abstraction this contract exists to prevent.
-	//
-	// Three semantics are load-bearing and easy to lose when reimplementing:
-	// a MISS is not an error (nothing stored and store-unreachable both end in
-	// signing, but only the second is worth reporting); the deadline comes back
-	// WITH the bytes, because a signed transaction seals its own expiry and
-	// nothing outside it can reconstruct that moment; and discarding what was
-	// never stored is a no-op, because the caller invalidates on every failure
-	// without first asking whether there is anything to discard.
-	//
-	// An implementation may REFUSE a payload -- the Redis one refuses those over
-	// a size cap -- and that is not an error either: the next resend finds
-	// nothing and signs, exactly as it does today.
-	PutSignedTx(ctx context.Context, txHash string, txBytes []byte, timeoutAt time.Time, timeoutHeight int64) error
-	GetSignedTx(ctx context.Context, txHash string) (txBytes []byte, timeoutAt time.Time, timeoutHeight int64, err error)
-	DeleteSignedTx(ctx context.Context, txHash string) error
 }
 
 // The Redis implementation. The assertion sits here so that changing either the
@@ -262,145 +240,4 @@ func (s *RebroadcastStore) ActiveGroups(ctx context.Context, phase RebroadcastPh
 		groups = append(groups, RebroadcastGroup{Supplier: m[:idx], SessionEnd: sessionEnd})
 	}
 	return groups, nil
-}
-
-// maxSignedTxCacheBytes is the largest payload cached for re-injection.
-//
-// WHY A CAP AT ALL. Caching doubles the payload: the entry already holds
-// MsgBytes, and this holds the signed transaction built around them. A proof
-// message carries one whole relay verbatim -- request, response and both
-// signatures -- so its size is the size of that service's traffic, and the
-// relayer's own configured ceiling for a body is 10 MB by default (200 MB as
-// the unconfigured fallback). One relay per proof transaction and 94 proof
-// transactions in one measured window make the worst case large enough that
-// nobody should discover it in production.
-//
-// AND THE DAMAGE IS SHARED, WHICH IS THE REAL ARGUMENT. This cache is
-// discardable; the SMST nodes and the rebroadcast entries beside it are not.
-// docs/REDIS.md recommends `maxmemory-policy: noeviction`, so a full instance
-// does not quietly evict the cheap thing -- it REFUSES WRITES, including the
-// ones that cost a claim. Under any eviction policy instead, the cache competes
-// with the authority for survival. Either way an unbounded discardable cache
-// spends a budget it does not own.
-//
-// WHERE THE NUMBER COMES FROM, and what was NOT measured. The only figure in
-// hand is a floor: proof payloads of 1254-1340 bytes on localnet (n≈40, from
-// the `proof_len` the miner already logs). The production distribution was NOT
-// measured, on any network. 1 MiB admits roughly 800x that floor and excludes
-// anything approaching a tenth of the default body ceiling. It is deliberately
-// a constant and not a setting: this repository prefers a commit that changes a
-// number over a knob that can be turned until it means something else, and the
-// counter beside it is what makes the number reviewable.
-const maxSignedTxCacheBytes = 1 << 20 // 1 MiB
-
-// signedTxRecord is what the cache holds: the bytes, and the deadline that is
-// already sealed inside them.
-//
-// The timestamp travels WITH the bytes and not on the rebroadcast entry, and
-// that is not a filing preference. A signed transaction carries its own
-// timeout_timestamp, which cannot be moved without signing a new one, so those
-// bytes stop being usable at a moment fixed when they were built. Nothing on
-// the entry can reconstruct it: the entry knows the budget it was given and the
-// height it was submitted at, but the deadline is anchored to the chain's block
-// time AT SIGNING plus a per-transaction nonce offset, and neither is recorded
-// anywhere else. Reading it back out of the bytes would mean decoding a
-// transaction on every resend to answer a question we already knew the answer
-// to when we wrote them.
-//
-// Storing them together also makes the pair impossible to half-lose: one key,
-// one TTL, so a reader never gets bytes whose expiry it cannot check.
-type signedTxRecord struct {
-	Bytes           []byte `json:"b"`
-	TimeoutUnixNano int64  `json:"t"`
-	// TimeoutHeight is the height the chain enforces, sealed into the same
-	// bytes. It is stored rather than recomputed for the same reason as the
-	// timestamp: a re-injection cannot change it, so a later pass deriving its
-	// own would describe a transaction that does not exist.
-	TimeoutHeight int64 `json:"h,omitempty"`
-}
-
-// PutSignedTx stores the signed, encoded bytes of one broadcast transaction so
-// a later resend can re-inject them instead of signing a new transaction.
-//
-// Keyed by the transaction hash and NOT by the entry, which is the whole reason
-// this lives beside the entries rather than inside them: one claim transaction
-// carries a batch and produces one rebroadcast entry per session, all sharing
-// that hash, so storing the blob per entry would keep N copies of one payload
-// and turn discarding it into N writes that can disagree. One write settles it
-// here.
-//
-// These bytes are a CACHE and never the authority. The entry's own MsgBytes
-// remain the source of truth: losing this key -- to the TTL, to an eviction, to
-// an older binary that never wrote it -- costs a signature, not a claim, and
-// the resend falls back to signing exactly as it does today. That is why there
-// is no error path here that a caller must handle differently from any other
-// Redis failure.
-func (s *RebroadcastStore) PutSignedTx(ctx context.Context, txHash string, txBytes []byte, timeoutAt time.Time, timeoutHeight int64) error {
-	if s == nil || s.redisClient == nil || txHash == "" || len(txBytes) == 0 {
-		return nil
-	}
-	// Above the cap the payload is simply not cached, and that is a decision
-	// rather than a failure: the resend signs a fresh transaction, which is
-	// exactly what it does today, so the caller has nothing different to do.
-	if len(txBytes) > maxSignedTxCacheBytes {
-		signedTxCacheSkippedTotal.Inc()
-		return nil
-	}
-	blob, err := json.Marshal(signedTxRecord{Bytes: txBytes, TimeoutUnixNano: timeoutAt.UnixNano(), TimeoutHeight: timeoutHeight})
-	if err != nil {
-		return fmt.Errorf("failed to encode signed tx record (%s): %w", txHash, err)
-	}
-	k := s.redisClient.KB().TxSignedBytesKey(txHash)
-	if err := s.redisClient.Set(ctx, k, blob, s.ttl).Err(); err != nil {
-		return fmt.Errorf("failed to persist signed tx bytes (%s): %w", txHash, err)
-	}
-	return nil
-}
-
-// GetSignedTx returns the stored bytes for a transaction hash, or nil when
-// there are none.
-//
-// A miss is NOT an error and the two are deliberately not conflated: "nobody
-// stored these" and "Redis is unreachable" lead to the same action -- sign a
-// fresh transaction -- but only the second is worth reporting, so the error is
-// returned separately rather than folded into an empty result.
-func (s *RebroadcastStore) GetSignedTx(ctx context.Context, txHash string) ([]byte, time.Time, int64, error) {
-	if s == nil || s.redisClient == nil || txHash == "" {
-		return nil, time.Time{}, 0, nil
-	}
-	k := s.redisClient.KB().TxSignedBytesKey(txHash)
-	blob, err := s.redisClient.Get(ctx, k).Bytes()
-	if err != nil {
-		if errors.Is(err, redis.Nil) {
-			return nil, time.Time{}, 0, nil
-		}
-		return nil, time.Time{}, 0, fmt.Errorf("failed to read signed tx bytes (%s): %w", txHash, err)
-	}
-	var rec signedTxRecord
-	if uErr := json.Unmarshal(blob, &rec); uErr != nil {
-		// A record that will not decode is treated as absent rather than as an
-		// outage: the bytes are a cache, so the resend signs and moves on. It is
-		// still reported, because the only way to write one is a defect on this
-		// side -- nothing else writes this key.
-		return nil, time.Time{}, 0, fmt.Errorf("failed to decode signed tx record (%s): %w", txHash, uErr)
-	}
-	return rec.Bytes, time.Unix(0, rec.TimeoutUnixNano), rec.TimeoutHeight, nil
-}
-
-// DeleteSignedTx discards the stored bytes for a transaction hash, so the next
-// resend signs a fresh transaction instead of re-injecting bytes that cannot
-// land.
-//
-// Deleting bytes that were never stored is a no-op, which matters because the
-// caller invalidates on every failure without first asking whether anything is
-// there to invalidate.
-func (s *RebroadcastStore) DeleteSignedTx(ctx context.Context, txHash string) error {
-	if s == nil || s.redisClient == nil || txHash == "" {
-		return nil
-	}
-	k := s.redisClient.KB().TxSignedBytesKey(txHash)
-	if err := s.redisClient.Del(ctx, k).Err(); err != nil {
-		return fmt.Errorf("failed to discard signed tx bytes (%s): %w", txHash, err)
-	}
-	return nil
 }

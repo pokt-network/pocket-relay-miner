@@ -121,6 +121,35 @@ type rebroadcastEntry struct {
 	// height 0" -- it is the absence of the datum, and any future reader owes it
 	// a branch of its own.
 	LastAttemptHeight int64 `json:"l,omitempty"`
+
+	// SignedBytes is the transaction this entry's message was broadcast in,
+	// signed and encoded, kept so a resend can re-inject it instead of signing
+	// a new one. SignedTimeoutAt and SignedTimeoutHeight are the two deadlines
+	// sealed INSIDE those bytes.
+	//
+	// They live on the ENTRY and not under a key of their own, and the reason is
+	// that the entry is the identity that always exists: what a resend sends is
+	// this supplier's message for this window, which is exactly what this record
+	// names. Keying the bytes by transaction hash instead made the lookup depend
+	// on a value that is deliberately EMPTY in the case the whole mechanism
+	// exists for -- a submission whose broadcast never answered -- and produced a
+	// separate key with its own TTL, its own orphans, and a rule for when the
+	// last sibling of a batch may free it. None of that buys anything the entry
+	// did not already provide.
+	//
+	// The cost, accepted: a batched claim writes one entry per session, so the
+	// same bytes are repeated once per session of the batch. That is small
+	// exactly where it happens -- a claim message carries roots, not relays --
+	// and it does not happen at all on the proof path, where one transaction
+	// carries one session. NOT MEASURED against production traffic.
+	//
+	// Absent means "no cached transaction": the resend signs, which is what it
+	// did before this existed. That is the mixed-fleet degradation and it holds
+	// in both directions, since an older binary re-marshalling this entry drops
+	// what its struct cannot see.
+	SignedBytes         []byte `json:"sb,omitempty"`
+	SignedTimeoutAt     int64  `json:"sa,omitempty"`
+	SignedTimeoutHeight int64  `json:"sh,omitempty"`
 }
 
 func marshalRebroadcastEntry(e rebroadcastEntry) ([]byte, error) { return json.Marshal(e) }
@@ -136,11 +165,11 @@ func unmarshalRebroadcastEntry(b []byte) (rebroadcastEntry, error) {
 // concrete implementation (wiring layer) unmarshals the bytes into the right
 // proto type and routes to that supplier's client.
 type MessageResubmitter interface {
-	// origTxHash names the transaction whose signed bytes may still be cached.
-	// It is the ORIGINAL hash and not the latest: the cache is keyed by what was
-	// first broadcast, so a resend that once signed anew must still ask under
-	// the original name.
-	ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, origTxHash string, timeoutHeight int64, timeout time.Duration, regime string) (newTxHash string, err error)
+	// cached carries the transaction this entry was last broadcast in, when one
+	// is still held. Empty means "sign a new one", which is what happened before
+	// this existed. The implementation returns what it ACTUALLY sent, so an
+	// attempt that had to sign hands its bytes back for the caller to keep.
+	ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, cached tx.SignedTxPayload, timeoutHeight int64, timeout time.Duration, regime string) (newTxHash string, sent tx.SignedTxPayload, err error)
 }
 
 // InclusionReconcilerConfig configures the block-driven inclusion reconciler.
@@ -866,8 +895,23 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 		return
 	}
 
-	newHash, err := r.resubmitter.ResubmitMessage(ctx, rp.phase, g.Supplier, entry.MsgBytes, entry.OrigTxHash, windowClose,
-		time.Duration(entry.TimeoutSeconds)*time.Second, entry.TimeoutRegime)
+	newHash, sent, err := r.resubmitter.ResubmitMessage(ctx, rp.phase, g.Supplier, entry.MsgBytes,
+		tx.SignedTxPayload{
+			Bytes:         entry.SignedBytes,
+			Hash:          entry.TxHash,
+			TimeoutAt:     time.Unix(0, entry.SignedTimeoutAt),
+			TimeoutHeight: entry.SignedTimeoutHeight,
+		},
+		windowClose, time.Duration(entry.TimeoutSeconds)*time.Second, entry.TimeoutRegime)
+
+	// Keep what actually went out. When the resend re-injected, this is the same
+	// payload it was handed; when it had to sign, these are the new bytes, and
+	// the entry must carry them or the NEXT resend signs again for nothing.
+	if len(sent.Bytes) > 0 {
+		entry.SignedBytes = sent.Bytes
+		entry.SignedTimeoutAt = sent.TimeoutAt.UnixNano()
+		entry.SignedTimeoutHeight = sent.TimeoutHeight
+	}
 
 	// The chain says this proof is not required. Mirror image of the saturation
 	// case below: that one never reached the network, this one did and can never
@@ -996,70 +1040,10 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 		Msg("rebroadcast (accepted to mempool but not yet on-chain)")
 }
 
-// releaseSignedTx discards the cached transaction bytes for an entry that has
-// just reached a terminal state -- but ONLY once no sibling still needs them.
-//
-// A claim transaction carries a batch and produces one rebroadcast entry per
-// session, every one of them holding the SAME tx hash, so those bytes belong to
-// the transaction and not to any single entry. Discarding them when the first
-// session settles would strip the cache from the six still pending on the very
-// same transaction: not dangerous -- they fall back to signing, which is what
-// they do today -- but it would give up the saving exactly on the batched path,
-// where one transaction covers the most sessions.
-//
-// The question is asked of the STORE and after the entry is already gone, so it
-// reads "is anyone else still pending on this transaction", not "was anyone else
-// pending a moment ago". A snapshot taken earlier in the pass would answer the
-// second, and the two differ precisely when another entry settles in between.
-//
-// SAFE BECAUSE A GROUP HAS ONE OWNER. This decision is only correct while no
-// other replica is settling entries of the same group underneath it:
-// SetOwnershipFilter makes runPass skip groups whose supplier this replica does
-// not own, and passInFlight keeps a single pass in this process. If ownsSupplier
-// is ever left unwired, two replicas process the same group and this check can
-// see a sibling that the other replica is deleting -- the cost is a cache freed
-// early, so it degrades to signing rather than to a wrong answer, but the
-// dependency is real and it is why this comment names it.
-func (r *InclusionReconciler) releaseSignedTx(ctx context.Context, phase RebroadcastPhase, g RebroadcastGroup, e rebroadcastEntry) {
-	hash := e.OrigTxHash
-	if hash == "" {
-		hash = e.TxHash
-	}
-	if hash == "" {
-		return
-	}
-
-	remaining, err := r.store.List(ctx, phase, g.Supplier, g.SessionEnd)
-	if err != nil {
-		// Leaving the bytes is the safe half of this: the TTL still collects
-		// them, and a resend that finds them re-injects a transaction that is
-		// still valid. Freeing them on a failed read would be the unsafe half.
-		r.logger.Debug().Err(err).Str("phase", string(phase)).
-			Msg("inclusion reconcile: could not check for siblings; leaving cached tx bytes to the TTL")
-		return
-	}
-	for _, raw := range remaining {
-		sibling, uErr := unmarshalRebroadcastEntry(raw)
-		if uErr != nil {
-			// An entry we cannot read might be a sibling, so it counts as one.
-			return
-		}
-		if sibling.OrigTxHash == hash || sibling.TxHash == hash {
-			return
-		}
-	}
-
-	if err := r.store.DeleteSignedTx(ctx, hash); err != nil {
-		r.logger.Debug().Err(err).Str("phase", string(phase)).
-			Msg("inclusion reconcile: failed to discard cached tx bytes; the TTL will")
-	}
-}
-
-// clear removes a settled entry and, when it was the last one holding its
-// transaction, discards the cached bytes with it. The entry is a parameter for
-// exactly that second half: the bytes are keyed by transaction hash, which only
-// the entry knows.
-func (r *InclusionReconciler) clear(ctx context.Context, phase RebroadcastPhase, g RebroadcastGroup, sessionID string, e rebroadcastEntry) {
+// clear removes a settled entry. The cached transaction bytes go with it,
+// because they live ON it: nothing survives the record they belonged to, so
+// there is no orphan to collect and no TTL to outlive.
+func (r *InclusionReconciler) clear(ctx context.Context, phase RebroadcastPhase, g RebroadcastGroup, sessionID string, _ rebroadcastEntry) {
 	if err := r.store.Delete(ctx, phase, g.Supplier, g.SessionEnd, sessionID); err != nil {
 		// The entry survives, so the next block reconciles it again and emits
 		// its outcome a second time. Counting it is what makes that visible:
@@ -1067,12 +1051,8 @@ func (r *InclusionReconciler) clear(ctx context.Context, phase RebroadcastPhase,
 		// otherwise indistinguishable from two real ones.
 		inclusionClearFailedTotal.WithLabelValues(string(phase)).Inc()
 		r.logger.Warn().Err(err).Str("phase", string(phase)).Str("session_id", sessionID).Msg("inclusion reconcile: failed to clear pending entry")
-		// The entry survives, so it is still a sibling of its own transaction:
-		// releasing the bytes here would free them while an entry that will be
-		// reconciled again next block still points at them.
 		return
 	}
-	r.releaseSignedTx(ctx, phase, g, e)
 }
 
 // Close drains the worker pool. Idempotent.

@@ -381,7 +381,12 @@ func (tc *TxClient) CreateClaims(
 	txHash, signed, err := tc.signAndBroadcastReturningSigned(ctx, supplierOperatorAddr, timeoutHeight, "claim", msgs...)
 	if err != nil {
 		txClaimErrors.WithLabelValues(supplierOperatorAddr).Inc()
-		return "", SignedTxPayload{}, fmt.Errorf("failed to broadcast claims: %w", err)
+		// The payload travels WITH the error, and that is the case the whole
+		// cache exists for: a broadcast that got no answer is the one where we
+		// never learned whether it arrived, so those bytes are exactly the ones
+		// worth re-injecting. Dropping them here would leave the first row of
+		// the resend table with nothing to re-send.
+		return "", signed, fmt.Errorf("failed to broadcast claims: %w", err)
 	}
 
 	tc.logger.Info().
@@ -434,7 +439,9 @@ func (tc *TxClient) SubmitProofs(
 			return "", SignedTxPayload{}, fmt.Errorf("%w: %w", ErrTxProofNotRequired, err)
 		}
 		txProofErrors.WithLabelValues(supplierOperatorAddr).Inc()
-		return "", SignedTxPayload{}, fmt.Errorf("failed to broadcast proofs: %w", err)
+		// Same as the claim path: the bytes of a send whose answer never
+		// arrived are the ones a resend must re-inject.
+		return "", signed, fmt.Errorf("failed to broadcast proofs: %w", err)
 	}
 
 	tc.logger.Info().
@@ -1546,10 +1553,18 @@ type HASupplierClient struct {
 
 	// lastClaimTxHash stores the TX hash of the last claim submission (for deduplication)
 	lastClaimTxHash string
+	// lastClaimSigned stores the payload that produced that hash, stashed in
+	// the SAME critical section so the two can never describe different
+	// transactions. The original submission is where re-injection has to start:
+	// the failure it exists for is the send whose answer never arrived, and by
+	// then there is nothing left to sign from.
+	lastClaimSigned SignedTxPayload
 	lastClaimTxMu   sync.RWMutex
 
 	// lastProofTxHash stores the TX hash of the last proof submission (for deduplication)
 	lastProofTxHash string
+	// lastProofSigned is the claim field's twin, and stashed the same way.
+	lastProofSigned SignedTxPayload
 	lastProofTxMu   sync.RWMutex
 
 	// feeCacheUpokt is the cached sum of the most recently observed claim
@@ -1714,12 +1729,21 @@ func (c *HASupplierClient) CreateClaimsReturningHash(
 	// Call TxClient and capture TX hash for deduplication
 	txHash, signed, err := c.txClient.CreateClaims(ctx, c.operatorAddr, timeoutHeight, claims)
 	if err != nil {
-		return "", SignedTxPayload{}, err
+		// Stash the PAYLOAD but not a hash. A send that got no answer is
+		// precisely the one whose bytes a resend must re-inject, and this is
+		// the only place they still exist -- while the hash stays empty because
+		// nothing confirmed it, which is the sentinel the reconciler reads as
+		// "never broadcast" and resends promptly for.
+		c.lastClaimTxMu.Lock()
+		c.lastClaimSigned = signed
+		c.lastClaimTxMu.Unlock()
+		return "", signed, err
 	}
 
 	// Store TX hash for retrieval by caller (1 line after broadcast)
 	c.lastClaimTxMu.Lock()
 	c.lastClaimTxHash = txHash
+	c.lastClaimSigned = signed
 	c.lastClaimTxMu.Unlock()
 
 	// The fee we just paid is now the freshest observation available.
@@ -1782,12 +1806,17 @@ func (c *HASupplierClient) SubmitProofsReturningHash(
 	// Call TxClient and capture TX hash for deduplication
 	txHash, signed, err := c.txClient.SubmitProofs(ctx, c.operatorAddr, timeoutHeight, proofs)
 	if err != nil {
-		return "", SignedTxPayload{}, err
+		// Same as the claim path: keep the bytes, leave the hash empty.
+		c.lastProofTxMu.Lock()
+		c.lastProofSigned = signed
+		c.lastProofTxMu.Unlock()
+		return "", signed, err
 	}
 
 	// Store TX hash for retrieval by caller (1 line after broadcast)
 	c.lastProofTxMu.Lock()
 	c.lastProofTxHash = txHash
+	c.lastProofSigned = signed
 	c.lastProofTxMu.Unlock()
 
 	// Same rationale as CreateClaims — refresh the cached estimate from the
@@ -1808,6 +1837,28 @@ func (c *HASupplierClient) GetLastClaimTxHash() string {
 	c.lastClaimTxMu.RLock()
 	defer c.lastClaimTxMu.RUnlock()
 	return c.lastClaimTxHash
+}
+
+// GetLastClaimSignedTx returns the payload of the last claim submission,
+// alongside GetLastClaimTxHash and read under the same lock, so a caller that
+// takes both gets one transaction rather than two halves of different ones.
+func (c *HASupplierClient) GetLastClaimSignedTx() SignedTxPayload {
+	if c == nil {
+		return SignedTxPayload{}
+	}
+	c.lastClaimTxMu.RLock()
+	defer c.lastClaimTxMu.RUnlock()
+	return c.lastClaimSigned
+}
+
+// GetLastProofSignedTx is the proof twin of GetLastClaimSignedTx.
+func (c *HASupplierClient) GetLastProofSignedTx() SignedTxPayload {
+	if c == nil {
+		return SignedTxPayload{}
+	}
+	c.lastProofTxMu.RLock()
+	defer c.lastProofTxMu.RUnlock()
+	return c.lastProofSigned
 }
 
 // LatestBlockTime exposes the chain clock this client anchors its deadlines to.

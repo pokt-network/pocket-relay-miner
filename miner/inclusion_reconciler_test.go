@@ -24,14 +24,16 @@ import (
 // --- mocks -------------------------------------------------------------------
 
 type mockResubmitter struct {
-	// lastOrigTxHash records what the reconciler handed over to find cached
-	// bytes with. Nothing else can see that the ORIGINAL hash travels rather
-	// than the latest one.
-	lastOrigTxHash string
-	mu             sync.Mutex
-	calls          []string
-	attempts       int
-	failNext       bool
+	// lastCached records the transaction the reconciler handed over. Nothing
+	// else can see whether the entry's stored bytes actually reach the resend.
+	lastCached tx.SignedTxPayload
+	// sends is what the resend reports having sent back; the reconciler writes
+	// it onto the entry, so an empty one must leave the entry untouched.
+	sends    tx.SignedTxPayload
+	mu       sync.Mutex
+	calls    []string
+	attempts int
+	failNext bool
 	// failWith replaces the generic failure, so a test can distinguish a chain
 	// rejection from never having reached the chain at all.
 	failWith error
@@ -48,9 +50,9 @@ type mockResubmitter struct {
 	lastRegime  string
 }
 
-func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, origTxHash string, _ int64, timeout time.Duration, regime string) (string, error) {
+func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, cached tx.SignedTxPayload, _ int64, timeout time.Duration, regime string) (string, tx.SignedTxPayload, error) {
 	m.mu.Lock()
-	m.lastOrigTxHash = origTxHash
+	m.lastCached = cached
 	burn := m.burnGroupBudget
 	m.mu.Unlock()
 	if burn {
@@ -62,13 +64,13 @@ func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	m.attempts++
 	m.lastTimeout, m.lastRegime = timeout, regime
 	if m.failWith != nil {
-		return "", m.failWith
+		return "", tx.SignedTxPayload{}, m.failWith
 	}
 	if m.failNext {
-		return "", fmt.Errorf("resubmit boom")
+		return "", tx.SignedTxPayload{}, fmt.Errorf("resubmit boom")
 	}
 	m.calls = append(m.calls, fmt.Sprintf("%s/%s/%s", phase, supplier, string(msgBytes)))
-	return "newhash-" + string(msgBytes), nil
+	return "newhash-" + string(msgBytes), m.sends, nil
 }
 
 func (m *mockResubmitter) count() int {

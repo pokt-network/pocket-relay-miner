@@ -471,36 +471,6 @@ func (kb *KeyBuilder) RebroadcastIndexKey(phase string) string {
 	return fmt.Sprintf("%s:%s:rebroadcast:{%s}:index", kb.ns.BasePrefix, segmentMiner, phase)
 }
 
-// TxSignedBytesKey builds the key holding the SIGNED, ENCODED bytes of one
-// broadcast transaction, so a resend can re-inject the same bytes instead of
-// signing a new transaction with a new unordered nonce.
-//
-// Keyed by the transaction hash, and that choice is load-bearing. One claim
-// transaction carries a whole batch, and the reconciler persists ONE
-// REBROADCAST ENTRY PER SESSION all sharing that transaction's hash -- so
-// keying these bytes by the entry instead would store the same blob once per
-// session and turn discarding it into N writes that can disagree with each
-// other. Keyed by the hash, N entries reference one blob and one write settles
-// it.
-//
-// The hash is computed from the encoded bytes on this side rather than taken
-// from the broadcast reply (it is tmhash.Sum over exactly those bytes), which
-// is why the key can exist BEFORE the transaction is sent -- and it must, since
-// the failure this whole mechanism exists for is the one where the node never
-// answers and there is nothing to learn a hash from.
-//
-// Deliberately NOT hash-tagged for Redis Cluster. Co-locating it with the
-// rebroadcast entries would be meaningless: those are tagged by PHASE and this
-// blob is shared by every session in one transaction, so no single slot can
-// hold it together with all of its referents. It is therefore always touched
-// on its own, never inside their MULTI.
-//
-// Format: {base}:{miner}:txbytes:{txHash}
-// Example: "ha:miner:txbytes:9F2C...":
-func (kb *KeyBuilder) TxSignedBytesKey(txHash string) string {
-	return fmt.Sprintf("%s:%s:txbytes:%s", kb.ns.BasePrefix, segmentMiner, txHash)
-}
-
 // MinerDedupSessionKey builds the per-session relay deduplication set key.
 // Format: {base}:{miner}:dedup:session:{sessionID}
 // Example: "ha:miner:dedup:session:sess1"

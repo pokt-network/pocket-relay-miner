@@ -272,6 +272,35 @@ func (lc *LifecycleCallback) SetRebroadcastStore(store RebroadcastStorage) {
 	lc.rebroadcastStore = store
 }
 
+// lastClaimSignedOf / lastProofSignedOf read the payload of the last submission
+// from the concrete client, answering with an empty one when the client is not
+// the HA type. The assertion is the same one the hash readers already use.
+func lastClaimSignedOf(c pocktclient.SupplierClient) tx.SignedTxPayload {
+	if ha, ok := c.(*tx.HASupplierClient); ok {
+		return ha.GetLastClaimSignedTx()
+	}
+	return tx.SignedTxPayload{}
+}
+
+func lastProofSignedOf(c pocktclient.SupplierClient) tx.SignedTxPayload {
+	if ha, ok := c.(*tx.HASupplierClient); ok {
+		return ha.GetLastProofSignedTx()
+	}
+	return tx.SignedTxPayload{}
+}
+
+// signedTimeoutNanos converts the sealed deadline for storage, keeping ZERO as
+// "not known" rather than as the Unix epoch: an entry with no cached
+// transaction and one whose deadline happens to be time.Time{} must both read
+// back as absent, or a resend would compare against 1970 and re-inject bytes
+// the chain refused long ago.
+func signedTimeoutNanos(p tx.SignedTxPayload) int64 {
+	if p.TimeoutAt.IsZero() {
+		return 0
+	}
+	return p.TimeoutAt.UnixNano()
+}
+
 // isClaimNotFoundError returns true only when the chain has definitively answered
 // that no claim exists for this (supplier, session).
 //
@@ -296,6 +325,10 @@ func (lc *LifecycleCallback) persistRebroadcastEntries(
 	snapshots []*SessionSnapshot,
 	submitHeight int64,
 	txHash string,
+	// signed is the transaction the messages went out in. It is stored ON each
+	// entry so a resend re-injects it rather than signing a new one; empty means
+	// the resend signs, which is what it did before this existed.
+	signed tx.SignedTxPayload,
 	marshalAt func(i int) ([]byte, error),
 ) {
 	for i, snapshot := range snapshots {
@@ -307,7 +340,7 @@ func (lc *LifecycleCallback) persistRebroadcastEntries(
 				Msg("failed to marshal message for rebroadcast persistence")
 			continue
 		}
-		if pErr := lc.persistRebroadcastEntry(ctx, phase, snapshot, submitHeight, txHash, msgBytes); pErr != nil {
+		if pErr := lc.persistRebroadcastEntry(ctx, phase, snapshot, submitHeight, txHash, signed, msgBytes); pErr != nil {
 			lc.logger.Warn().Err(pErr).
 				Str(logging.FieldSessionID, snapshot.SessionID).
 				Str("phase", string(phase)).
@@ -329,14 +362,18 @@ func (lc *LifecycleCallback) persistRebroadcastEntry(
 	snapshot *SessionSnapshot,
 	submitHeight int64,
 	txHash string,
+	signed tx.SignedTxPayload,
 	msgBytes []byte,
 ) error {
 	entryBytes, eErr := marshalRebroadcastEntry(rebroadcastEntry{
-		MsgBytes:     msgBytes,
-		SubmitHeight: submitHeight,
-		TxHash:       txHash,
-		OrigTxHash:   txHash,
-		ServiceID:    snapshot.ServiceID,
+		MsgBytes:            msgBytes,
+		SubmitHeight:        submitHeight,
+		TxHash:              txHash,
+		OrigTxHash:          txHash,
+		ServiceID:           snapshot.ServiceID,
+		SignedBytes:         signed.Bytes,
+		SignedTimeoutAt:     signedTimeoutNanos(signed),
+		SignedTimeoutHeight: signed.TimeoutHeight,
 	})
 	if eErr != nil {
 		return fmt.Errorf("encoding rebroadcast entry: %w", eErr)
@@ -491,7 +528,11 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 				Str(logging.FieldSessionID, snapshot.SessionID).
 				Msg("ejected claim will never be retried: its message cannot be marshalled")
 		} else if pErr := lc.persistRebroadcastEntry(
-			ctx, RebroadcastPhaseClaim, snapshot, currentHeight, "", msgBytes,
+			// No signed transaction: this claim was ejected from its batch and
+			// never broadcast, so there is nothing to re-inject and the resend
+			// will sign. That is the same state as an entry written before this
+			// field existed.
+			ctx, RebroadcastPhaseClaim, snapshot, currentHeight, "", tx.SignedTxPayload{}, msgBytes,
 		); pErr != nil {
 			logger.Error().Err(pErr).
 				Str(logging.FieldSessionID, snapshot.SessionID).
@@ -1469,6 +1510,10 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// Redis with the vaguer tx_error one.
 		windowClosed := false
 		var claimTxHash string
+		// claimSigned is the transaction the batch actually went out in, read
+		// from the client under the same lock as the hash above so the two
+		// cannot describe different transactions.
+		var claimSigned tx.SignedTxPayload
 		// The increment lives in the BODY because an ejection is not a retry: the
 		// batch changed, so the next send asks a different question. What bounds
 		// the ejections instead is that each one strictly shrinks `remaining`,
@@ -1588,6 +1633,14 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// Retrieve TX hash from HA client (stored immediately after broadcast)
 				if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
 					claimTxHash = haClient.GetLastClaimTxHash()
+					// Cache what was signed, keyed by the hash just read: the
+					// two come from one critical section, so they describe one
+					// transaction. This is the ORIGINAL submission, which is
+					// where re-injection has to begin -- the failure it exists
+					// for is the send whose answer never arrived, and a resend
+					// that had to sign again would be a second live transaction
+					// for one claim.
+					claimSigned = haClient.GetLastClaimSignedTx()
 				}
 
 				currentBlock := lc.blockClient.LastBlock(ctx)
@@ -1668,7 +1721,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// ordered set). Survives leader failover (state lives in Redis).
 				if lc.rebroadcastStore != nil && claimTxHash != "" {
 					lc.persistRebroadcastEntries(
-						ctx, RebroadcastPhaseClaim, validSnapshots, currentBlock.Height(), claimTxHash,
+						ctx, RebroadcastPhaseClaim, validSnapshots, currentBlock.Height(), claimTxHash, claimSigned,
 						func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
 					)
 				}
@@ -1739,7 +1792,13 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			// broadcast", so the reconciler resends promptly (not at mid-window).
 			if lc.rebroadcastStore != nil {
 				lc.persistRebroadcastEntries(
+					// Hash empty, BYTES PRESENT: the transaction was built and
+					// signed, the send just never answered. That pair is not a
+					// contradiction, it is the case this whole mechanism exists
+					// for -- nobody knows whether it arrived, so re-injecting
+					// the same bytes is the only reply that cannot duplicate it.
 					ctx, RebroadcastPhaseClaim, validSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
+					lastClaimSignedOf(lc.supplierClient),
 					func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
 				)
 			}
@@ -2367,6 +2426,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// not settle them a second time with a vaguer verdict.
 		notRequired := false
 		var proofTxHash string
+		var proofSigned tx.SignedTxPayload
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
 			submitErr := lc.supplierClient.SubmitProofs(proofCtx, proofWindowClose, interfaceProofMsgs...)
 			if submitErr != nil {
@@ -2447,6 +2507,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				// Retrieve TX hash from HA client (stored immediately after broadcast)
 				if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
 					proofTxHash = haClient.GetLastProofTxHash()
+					proofSigned = haClient.GetLastProofSignedTx()
 				}
 
 				currentBlock := lc.blockClient.LastBlock(ctx)
@@ -2516,7 +2577,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				// ordered set). Survives leader failover (state lives in Redis).
 				if lc.rebroadcastStore != nil && proofTxHash != "" {
 					lc.persistRebroadcastEntries(
-						ctx, RebroadcastPhaseProof, validProofSnapshots, currentBlock.Height(), proofTxHash,
+						ctx, RebroadcastPhaseProof, validProofSnapshots, currentBlock.Height(), proofTxHash, proofSigned,
 						func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
 					)
 				}
@@ -2604,6 +2665,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			if lc.rebroadcastStore != nil {
 				lc.persistRebroadcastEntries(
 					ctx, RebroadcastPhaseProof, validProofSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
+					lastProofSignedOf(lc.supplierClient),
 					func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
 				)
 			}

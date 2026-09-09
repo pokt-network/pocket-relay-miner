@@ -80,6 +80,7 @@ func TestRebroadcastEntry_WireTagsAreTheContract(t *testing.T) {
 	require.Equal(t, []string{
 		"m", "h", "t", "o,omitempty", "s,omitempty", "n,omitempty",
 		"ts,omitempty", "tr,omitempty", "l,omitempty",
+		"sb,omitempty", "sa,omitempty", "sh,omitempty",
 	}, tags,
 		"a field added to or removed from the persisted entry changes what the "+
 			"other binary in a rolling deploy sees; update this list in the same "+
