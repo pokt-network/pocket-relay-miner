@@ -558,6 +558,22 @@ green before you read anything. A `[build failed]` proves you broke compilation,
 not that the test bites; it happened to both sessions the same day, each shortly
 after warning the other about it. Applied and compiled are two conditions.
 
+**PUT THE CHECK IN THE DRIVER, NOT IN YOUR HEAD — this paragraph did not stop it
+happening again.** Measured 2026-09-09: a teeth script whose injections were
+string replacements ran seven of them against a file whose signatures had since
+changed. TWO no longer matched anything. Both printed a green that reads as "the
+test is weak", and the first was diagnosed that way before the second was even
+suspected. The fix is four lines — after each injection, `cmp` the file against a
+pristine copy taken at the start and refuse to print a colour when they are
+identical — and it found the second dead injection instantly, one that had been
+silently dead for an unknown number of runs.
+
+The shape is worth keeping: **a string-replacement injection ROTS with the code
+it targets, and it rots silently.** Every refactor of the file under test is a
+chance for the driver to stop measuring while still reporting. So the check is
+not a step to remember before reading the result; it is a function the driver
+calls, and the run is worthless without it.
+
 ## Reading a test tells you what it MEANS to cover; only injection tells you what it DOES
 
 A supervisor asserted, from reading the test and its comment, that
