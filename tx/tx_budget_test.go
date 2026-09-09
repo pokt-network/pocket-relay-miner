@@ -19,7 +19,7 @@ const budgetTestSupplier = "pokt1supplier123"
 // whether the call reached the chain.
 func claim(tc *TxClient, ctx context.Context, t *testing.T) error {
 	t.Helper()
-	_, err := tc.CreateClaims(ctx, budgetTestSupplier, 1000,
+	_, _, err := tc.CreateClaims(ctx, budgetTestSupplier, 1000,
 		[]*prooftypes.MsgCreateClaim{generateTestClaim(t, budgetTestSupplier, "session-1")})
 	return err
 }

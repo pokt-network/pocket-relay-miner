@@ -143,8 +143,12 @@ func TestClear_FailureIsCountedSoAReEmissionIsAttributable(t *testing.T) {
 	beforeCorrupt := dropped(RebroadcastPhaseProof, dropCauseCorrupt)
 	require.NoError(t, h.rc.Close())
 
+	// The entry is empty because this case is about the DELETE failing, and a
+	// failed delete returns before the cache is consulted at all -- an entry that
+	// survives is still a sibling of its own transaction, so its bytes must not
+	// be freed.
 	h.r.clear(context.Background(), RebroadcastPhaseProof,
-		RebroadcastGroup{Supplier: hSupplier, SessionEnd: hEnd}, "s1")
+		RebroadcastGroup{Supplier: hSupplier, SessionEnd: hEnd}, "s1", rebroadcastEntry{})
 
 	require.Equal(t, before+1, clearFailed(RebroadcastPhaseProof),
 		"a delete that failed leaves the entry, so the next block emits its outcome again")

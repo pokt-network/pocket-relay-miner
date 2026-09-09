@@ -24,8 +24,9 @@ func armNotRequired(srv *testGRPCServer) {
 
 func submitOneProof(t *testing.T, tc *TxClient) (string, error) {
 	t.Helper()
-	return tc.SubmitProofs(context.Background(), budgetTestSupplier, 1000,
+	hash, _, err := tc.SubmitProofs(context.Background(), budgetTestSupplier, 1000,
 		[]*prooftypes.MsgSubmitProof{generateTestProof(t, budgetTestSupplier, "session-1")})
+	return hash, err
 }
 
 // The fact and the datum are two different questions, and this is the whole
@@ -98,7 +99,7 @@ func TestTheEmptyBatchIsUntouched(t *testing.T) {
 	before := testutil.ToFloat64(txProofNotRequired.WithLabelValues(budgetTestSupplier))
 	tc := newBudgetClient(t, srv, TxClientConfig{})
 
-	hash, err := tc.SubmitProofs(context.Background(), budgetTestSupplier, 1000, nil)
+	hash, _, err := tc.SubmitProofs(context.Background(), budgetTestSupplier, 1000, nil)
 	require.NoError(t, err, "an empty batch is not a refusal")
 	require.Empty(t, hash)
 	require.Equal(t, before, testutil.ToFloat64(txProofNotRequired.WithLabelValues(budgetTestSupplier)))
@@ -131,7 +132,7 @@ func TestTheRefusalEscapesAndLeavesTheClientUntouched(t *testing.T) {
 	client.feeCacheTime = time.Now()
 	client.feeCacheMu.Unlock()
 
-	hash, err := client.SubmitProofsReturningHash(context.Background(), 1000,
+	hash, _, err := client.SubmitProofsReturningHash(context.Background(), 1000,
 		generateTestProof(t, budgetTestSupplier, "session-1"))
 
 	require.Empty(t, hash)

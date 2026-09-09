@@ -104,7 +104,7 @@ func TestSignAndBroadcast_TimeoutHeightIsNotInTheSimulatedTx(t *testing.T) {
 	claims := []*prooftypes.MsgCreateClaim{
 		generateTestClaim(t, supplierAddr, "session-simulated-tx"),
 	}
-	_, err = tc.CreateClaims(context.Background(), supplierAddr, windowClose, claims)
+	_, _, err = tc.CreateClaims(context.Background(), supplierAddr, windowClose, claims)
 	require.NoError(t, err)
 
 	simulated := testServer.getLastSimulateTxBytes()
@@ -139,7 +139,7 @@ func TestSignAndBroadcast_SetsTimeoutHeightFromWindowClose(t *testing.T) {
 	claims := []*prooftypes.MsgCreateClaim{
 		generateTestClaim(t, supplierAddr, "session-timeout-height"),
 	}
-	_, err := tc.CreateClaims(context.Background(), supplierAddr, windowClose, claims)
+	_, _, err := tc.CreateClaims(context.Background(), supplierAddr, windowClose, claims)
 	require.NoError(t, err)
 
 	got := decodeBroadcastTxTimeoutHeight(t, testServer.getLastTxBytes())
@@ -161,7 +161,7 @@ func TestSignAndBroadcast_SetsTimeoutHeightForProofs(t *testing.T) {
 	proofs := []*prooftypes.MsgSubmitProof{
 		generateTestProof(t, supplierAddr, "session-timeout-height-proof"),
 	}
-	_, err := tc.SubmitProofs(context.Background(), supplierAddr, windowClose, proofs)
+	_, _, err := tc.SubmitProofs(context.Background(), supplierAddr, windowClose, proofs)
 	require.NoError(t, err)
 
 	got := decodeBroadcastTxTimeoutHeight(t, testServer.getLastTxBytes())
@@ -198,7 +198,7 @@ func TestSignAndBroadcast_NonPositiveTimeoutHeightLeavesFieldUnset(t *testing.T)
 			claims := []*prooftypes.MsgCreateClaim{
 				generateTestClaim(t, supplierAddr, "session-timeout-height-zero"),
 			}
-			_, err := tc.CreateClaims(context.Background(), supplierAddr, testCase.height, claims)
+			_, _, err := tc.CreateClaims(context.Background(), supplierAddr, testCase.height, claims)
 			require.NoError(t, err)
 
 			got := decodeBroadcastTxTimeoutHeight(t, testServer.getLastTxBytes())
@@ -257,7 +257,7 @@ func TestCheckTxRejection_TimeoutHeightIsClassifiedAsWindowExpired(t *testing.T)
 			claims := []*prooftypes.MsgCreateClaim{
 				generateTestClaim(t, supplierAddr, "session-window-expired"),
 			}
-			_, err := tc.CreateClaims(context.Background(), supplierAddr, 4321, claims)
+			_, _, err := tc.CreateClaims(context.Background(), supplierAddr, 4321, claims)
 			require.Error(t, err, "a non-zero CheckTx code must surface as an error")
 
 			require.Equal(t, testCase.expired, errors.Is(err, ErrTxWindowExpired),

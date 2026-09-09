@@ -37,6 +37,14 @@ type memRebroadcastStore struct {
 	// record of what it was.
 	meta map[string]RebroadcastGroup
 	kind map[string]RebroadcastPhase
+
+	// The signed-transaction half of the same contract. It lives on this type
+	// and not on a second one BECAUSE the interface is one: a substitute that
+	// could implement the entries and not the cache would put the reconciler
+	// back on two backings for one object, and the compiler is what prevents it.
+	txBytes    map[string][]byte
+	txDeadline map[string]time.Time
+	txHeight   map[string]int64
 }
 
 func newMemRebroadcastStore() *memRebroadcastStore {
@@ -44,6 +52,10 @@ func newMemRebroadcastStore() *memRebroadcastStore {
 		groups: map[string]map[string][]byte{},
 		meta:   map[string]RebroadcastGroup{},
 		kind:   map[string]RebroadcastPhase{},
+
+		txBytes:    map[string][]byte{},
+		txDeadline: map[string]time.Time{},
+		txHeight:   map[string]int64{},
 	}
 }
 
@@ -103,6 +115,35 @@ func (m *memRebroadcastStore) ActiveGroups(_ context.Context, phase RebroadcastP
 		}
 	}
 	return out, nil
+}
+
+func (m *memRebroadcastStore) PutSignedTx(_ context.Context, txHash string, txBytes []byte, timeoutAt time.Time, timeoutHeight int64) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.txBytes[txHash] = txBytes
+	m.txDeadline[txHash] = timeoutAt
+	m.txHeight[txHash] = timeoutHeight
+	return nil
+}
+
+// A miss answers with no bytes and NO error, which is the contract detail most
+// likely to be got wrong by a reimplementation: returning an error here would
+// make every first resend look like a store outage.
+func (m *memRebroadcastStore) GetSignedTx(_ context.Context, txHash string) ([]byte, time.Time, int64, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.txBytes[txHash], m.txDeadline[txHash], m.txHeight[txHash], nil
+}
+
+// Discarding what was never stored is a no-op: the caller invalidates on every
+// failure without first asking whether anything is there.
+func (m *memRebroadcastStore) DeleteSignedTx(_ context.Context, txHash string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.txBytes, txHash)
+	delete(m.txDeadline, txHash)
+	delete(m.txHeight, txHash)
+	return nil
 }
 
 // The reconciler completes a resend against a store with no Redis in it.

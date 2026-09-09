@@ -105,7 +105,7 @@ func TestNewTxClient_InvalidEndpoint(t *testing.T) {
 		generateTestClaim(t, "pokt1supplier123", "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, "pokt1supplier123", 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, "pokt1supplier123", 1000, claims)
 	require.Error(t, err)
 }
 
@@ -276,7 +276,7 @@ func TestTxClient_OperationsAfterClose(t *testing.T) {
 	}
 
 	// Operations should fail after close
-	_, err = tc.CreateClaims(ctx, "pokt1supplier123", 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, "pokt1supplier123", 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "closed")
 
@@ -284,7 +284,7 @@ func TestTxClient_OperationsAfterClose(t *testing.T) {
 		generateTestProof(t, "pokt1supplier123", "session-1"),
 	}
 
-	_, err = tc.SubmitProofs(ctx, "pokt1supplier123", 1000, proofs)
+	_, _, err = tc.SubmitProofs(ctx, "pokt1supplier123", 1000, proofs)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "closed")
 }
@@ -490,7 +490,7 @@ func TestCreateClaims_Success(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-2"),
 	}
 
-	txHash, err := tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	txHash, _, err := tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.NoError(t, err)
 	require.NotEmpty(t, txHash)
 
@@ -521,7 +521,7 @@ func TestCreateClaims_EmptyList(t *testing.T) {
 	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, nil)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, nil)
 	require.NoError(t, err)
 
 	// No broadcast should have occurred
@@ -555,7 +555,7 @@ func TestSubmitProofs_Success(t *testing.T) {
 		generateTestProof(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.SubmitProofs(ctx, supplierAddr, 1000, proofs)
+	_, _, err = tc.SubmitProofs(ctx, supplierAddr, 1000, proofs)
 	require.NoError(t, err)
 
 	// Verify broadcast was called
@@ -585,7 +585,7 @@ func TestSubmitProofs_EmptyList(t *testing.T) {
 	defer func() { _ = tc.Close() }()
 
 	ctx := context.Background()
-	_, err = tc.SubmitProofs(ctx, supplierAddr, 1000, nil)
+	_, _, err = tc.SubmitProofs(ctx, supplierAddr, 1000, nil)
 	require.NoError(t, err)
 
 	// No broadcast should have occurred
@@ -625,7 +625,7 @@ func TestSignAndBroadcast_GasEstimation(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.NoError(t, err)
 
 	// Verify fee calculation matches our expectation
@@ -667,7 +667,7 @@ func TestSubmitTx_NetworkTimeout(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "deadline exceeded")
 }
@@ -701,7 +701,7 @@ func TestSubmitTx_InvalidSequence(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "sequence mismatch")
 }
@@ -735,7 +735,7 @@ func TestSubmitTx_InsufficientGas(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "out of gas")
 }
@@ -766,7 +766,7 @@ func TestSubmitTx_AccountNotFound(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "not found")
 }
@@ -798,7 +798,7 @@ func TestSubmitTx_KeyNotFound(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "no key found")
 }
@@ -832,7 +832,7 @@ func TestSubmitTx_BroadcastError(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "network error")
 }
@@ -878,7 +878,7 @@ func TestConcurrentSubmissions_SameSupplier(t *testing.T) {
 				generateTestClaim(t, supplierAddr, fmt.Sprintf("session-%d", idx)),
 			}
 
-			_, err := tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+			_, _, err := tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 			if err != nil {
 				errors <- err
 			}
@@ -947,7 +947,7 @@ func TestConcurrentSubmissions_DifferentSuppliers(t *testing.T) {
 					generateTestClaim(t, addr, fmt.Sprintf("session-%s-%d", addr, idx)),
 				}
 
-				_, err := tc.CreateClaims(ctx, addr, 1000, claims)
+				_, _, err := tc.CreateClaims(ctx, addr, 1000, claims)
 				if err != nil {
 					errors <- err
 				}
@@ -1205,7 +1205,7 @@ func TestCreateClaims_ContextCanceled(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 }
 
@@ -1240,6 +1240,6 @@ func TestCreateClaims_ContextTimeout(t *testing.T) {
 		generateTestClaim(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.Error(t, err)
 }

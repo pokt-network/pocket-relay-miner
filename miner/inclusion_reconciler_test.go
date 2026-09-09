@@ -24,10 +24,14 @@ import (
 // --- mocks -------------------------------------------------------------------
 
 type mockResubmitter struct {
-	mu       sync.Mutex
-	calls    []string
-	attempts int
-	failNext bool
+	// lastOrigTxHash records what the reconciler handed over to find cached
+	// bytes with. Nothing else can see that the ORIGINAL hash travels rather
+	// than the latest one.
+	lastOrigTxHash string
+	mu             sync.Mutex
+	calls          []string
+	attempts       int
+	failNext       bool
 	// failWith replaces the generic failure, so a test can distinguish a chain
 	// rejection from never having reached the chain at all.
 	failWith error
@@ -44,8 +48,9 @@ type mockResubmitter struct {
 	lastRegime  string
 }
 
-func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, _ int64, timeout time.Duration, regime string) (string, error) {
+func (m *mockResubmitter) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, origTxHash string, _ int64, timeout time.Duration, regime string) (string, error) {
 	m.mu.Lock()
+	m.lastOrigTxHash = origTxHash
 	burn := m.burnGroupBudget
 	m.mu.Unlock()
 	if burn {

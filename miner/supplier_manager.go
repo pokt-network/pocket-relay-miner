@@ -2990,7 +2990,7 @@ func (m *SupplierManager) reactivateClaimedSession(
 // owning supplier's tx client. Returns an error (not a panic) for suppliers this
 // replica does not control — the reconciler's ownership filter normally prevents
 // reaching here for non-owned suppliers.
-func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, timeoutHeight int64, timeout time.Duration, regime string) (string, error) {
+func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, origTxHash string, timeoutHeight int64, timeout time.Duration, regime string) (string, error) {
 	state, ok := m.suppliers.Load(supplier)
 	if !ok || state.SupplierClient == nil {
 		return "", fmt.Errorf("no tx client for supplier %s (not owned by this replica)", supplier)
@@ -3030,21 +3030,98 @@ func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	// in the store and the reconciler runs again next block.
 	ctx = tx.WithoutPermitWait(ctx)
 
+	// RE-INJECT before signing anything.
+	//
+	// The same bytes carry the same unordered nonce, so the node recognises the
+	// duplicate and discards it by itself; signing again would put a SECOND live
+	// transaction for one claim into the gossip, and behind a load balancer each
+	// attempt can land on a different node that never saw the others. Signing is
+	// the fallback, not the default.
+	if payload, ok := m.reusableSignedTx(ctx, state.SupplierClient.LatestBlockTime(), origTxHash); ok {
+		return state.SupplierClient.BroadcastRawReturningHash(ctx, string(phase), payload)
+	}
+
 	switch phase {
 	case RebroadcastPhaseClaim:
 		var msg prooftypes.MsgCreateClaim
 		if err := msg.Unmarshal(msgBytes); err != nil {
 			return "", fmt.Errorf("unmarshal MsgCreateClaim: %w", err)
 		}
-		return state.SupplierClient.CreateClaimsReturningHash(ctx, timeoutHeight, &msg)
+		hash, signed, err := state.SupplierClient.CreateClaimsReturningHash(ctx, timeoutHeight, &msg)
+		m.cacheSignedTx(ctx, signed)
+		return hash, err
 	case RebroadcastPhaseProof:
 		var msg prooftypes.MsgSubmitProof
 		if err := msg.Unmarshal(msgBytes); err != nil {
 			return "", fmt.Errorf("unmarshal MsgSubmitProof: %w", err)
 		}
-		return state.SupplierClient.SubmitProofsReturningHash(ctx, timeoutHeight, &msg)
+		hash, signed, err := state.SupplierClient.SubmitProofsReturningHash(ctx, timeoutHeight, &msg)
+		m.cacheSignedTx(ctx, signed)
+		return hash, err
 	default:
 		return "", fmt.Errorf("unknown rebroadcast phase %q", phase)
+	}
+}
+
+// reusableSignedTx answers whether we still hold bytes that are worth sending
+// again for this transaction.
+//
+// The deadline check is the precondition the whole re-injection rests on and it
+// cannot be skipped: a signed transaction seals its own timeout_timestamp, so
+// after that instant the bytes are refused by the ante handler no matter how
+// healthy everything else is. On mainnet the derived budget sits just under the
+// SDK ceiling while the window is barely longer, so bytes expiring BEFORE their
+// window closes is the ordinary end of a window rather than an edge case.
+//
+// It compares against the chain's clock and not the wall clock, for the same
+// reason the timestamp was anchored there when it was signed: the two disagree
+// whenever the chain is behind, and using the wrong one here would re-inject
+// transactions the chain already considers dead.
+func (m *SupplierManager) reusableSignedTx(ctx context.Context, chainNow time.Time, txHash string) (tx.SignedTxPayload, bool) {
+	if m.rebroadcastStore == nil || txHash == "" {
+		return tx.SignedTxPayload{}, false
+	}
+	bytes, timeoutAt, timeoutHeight, err := m.rebroadcastStore.GetSignedTx(ctx, txHash)
+	if err != nil {
+		// Unreadable is not empty: report it, then sign. Treating a store
+		// failure as "nothing cached" silently would hide an outage behind
+		// extra signatures.
+		m.logger.Debug().Err(err).Str("tx_hash", txHash).
+			Msg("could not read cached tx bytes; signing a fresh transaction")
+		return tx.SignedTxPayload{}, false
+	}
+	if len(bytes) == 0 {
+		return tx.SignedTxPayload{}, false
+	}
+	if chainNow.IsZero() || !chainNow.Before(timeoutAt) {
+		// Expired, or the chain's clock is UNKNOWN. Both cost one signature and
+		// both are the right answer: a zero clock means nobody can say whether
+		// these bytes are still alive, and re-injecting on a guess would send a
+		// transaction the ante handler already refuses. Note the comparison is
+		// against the CHAIN's clock, the same one that produced the deadline
+		// when this was signed -- the wall clock disagrees with it exactly when
+		// the chain runs behind, which is when the answer matters most.
+		return tx.SignedTxPayload{}, false
+	}
+	return tx.SignedTxPayload{
+		Bytes:         bytes,
+		Hash:          txHash,
+		TimeoutAt:     timeoutAt,
+		TimeoutHeight: timeoutHeight,
+	}, true
+}
+
+// cacheSignedTx stores what was just signed so the NEXT attempt can re-inject
+// it. Failures are reported and never propagated: the cache is an optimisation
+// and losing it costs a signature, so a caller that treated this as fatal would
+// turn a saving into an outage.
+func (m *SupplierManager) cacheSignedTx(ctx context.Context, p tx.SignedTxPayload) {
+	if m.rebroadcastStore == nil || p.Hash == "" || len(p.Bytes) == 0 {
+		return
+	}
+	if err := m.rebroadcastStore.PutSignedTx(ctx, p.Hash, p.Bytes, p.TimeoutAt, p.TimeoutHeight); err != nil {
+		m.logger.Debug().Err(err).Str("tx_hash", p.Hash).
+			Msg("could not cache signed tx bytes; the next resend will sign again")
 	}
 }
 

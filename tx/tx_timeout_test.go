@@ -113,7 +113,7 @@ func TestSignAndBroadcast_AnchorsOnBlockTime_NotWallClock(t *testing.T) {
 	claims := []*prooftypes.MsgCreateClaim{
 		generateTestClaim(t, supplierAddr, "session-anchor"),
 	}
-	_, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
+	_, _, err = tc.CreateClaims(ctx, supplierAddr, 1000, claims)
 	require.NoError(t, err)
 
 	ts := decodeBroadcastTxTimeoutTimestamp(t, testServer.getLastTxBytes())
@@ -172,7 +172,7 @@ func TestSignAndBroadcast_FallsBackToWallClockWhenProviderNil(t *testing.T) {
 	defer func() { _ = tc.Close() }()
 
 	before := time.Now()
-	_, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
+	_, _, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
 		[]*prooftypes.MsgCreateClaim{generateTestClaim(t, supplierAddr, "session-nil")})
 	require.NoError(t, err)
 	after := time.Now()
@@ -218,7 +218,7 @@ func TestSignAndBroadcast_FallsBackToWallClockWhenProviderReturnsZero(t *testing
 	defer func() { _ = tc.Close() }()
 
 	before := time.Now()
-	_, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
+	_, _, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
 		[]*prooftypes.MsgCreateClaim{generateTestClaim(t, supplierAddr, "session-zero")})
 	require.NoError(t, err)
 	after := time.Now()

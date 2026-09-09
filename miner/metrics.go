@@ -589,6 +589,26 @@ var (
 		[]string{"phase", "cause"},
 	)
 
+	// signedTxCacheSkippedTotal counts payloads NOT cached for re-injection
+	// because they exceed maxSignedTxCacheBytes.
+	//
+	// It exists so the cap is auditable instead of permanent. The number was
+	// chosen without production data (see the constant), so the only way it ever
+	// gets corrected is if an operator can see how often it bites -- a cap that
+	// silently excludes every proof on a busy service would look exactly like a
+	// cap that never fires.
+	//
+	// No size label: the payload size is unbounded and would be a cardinality
+	// bomb. The size goes in the log line beside this.
+	signedTxCacheSkippedTotal = observability.MinerFactory.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "signed_tx_cache_skipped_total",
+			Help:      "signed transaction payloads not cached for re-injection because they exceed the size cap",
+		},
+	)
+
 	// proofRejectionDiagnosisTotal splits on_chain_rejected by the ONE thing the
 	// miner can decide locally: whether the root the chain holds for that claim
 	// is the root this miner stored for that session.

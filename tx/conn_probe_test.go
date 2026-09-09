@@ -263,7 +263,7 @@ func TestCloseWaitsForAnInFlightBroadcast(t *testing.T) {
 	broadcastDone := make(chan struct{})
 	go func() {
 		defer close(broadcastDone)
-		_, _ = tc.CreateClaims(context.Background(), supplierAddr, 1000,
+		_, _, _ = tc.CreateClaims(context.Background(), supplierAddr, 1000,
 			[]*prooftypes.MsgCreateClaim{generateTestClaim(t, supplierAddr, "session-1")})
 	}()
 

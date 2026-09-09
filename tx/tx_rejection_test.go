@@ -308,7 +308,7 @@ func TestTheRejectionSurvivesTheProofWrapperToo(t *testing.T) {
 	srv.setBroadcastFailure(11, "out of gas")
 
 	tc := newBudgetClient(t, srv, TxClientConfig{})
-	_, err := tc.SubmitProofs(context.Background(), budgetTestSupplier, 1000,
+	_, _, err := tc.SubmitProofs(context.Background(), budgetTestSupplier, 1000,
 		[]*prooftypes.MsgSubmitProof{generateTestProof(t, budgetTestSupplier, "session-1")})
 	require.Error(t, err)
 

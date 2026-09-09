@@ -85,7 +85,7 @@ func TestCheckTxRejectionClassification(t *testing.T) {
 			claims := []*prooftypes.MsgCreateClaim{
 				generateTestClaim(t, supplierAddr, "session-classification"),
 			}
-			_, err := tc.CreateClaims(context.Background(), supplierAddr, 4321, claims)
+			_, _, err := tc.CreateClaims(context.Background(), supplierAddr, 4321, claims)
 			require.Error(t, err, "a non-zero CheckTx code must surface as an error")
 
 			if tt.wantErr != nil {

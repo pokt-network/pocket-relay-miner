@@ -55,7 +55,7 @@ func broadcastTimeouts(t *testing.T, n int) []time.Time {
 
 	out := make([]time.Time, 0, n)
 	for i := 0; i < n; i++ {
-		_, err := tc.CreateClaims(context.Background(), supplierAddr, 1000,
+		_, _, err := tc.CreateClaims(context.Background(), supplierAddr, 1000,
 			[]*prooftypes.MsgCreateClaim{generateTestClaim(t, supplierAddr, "session-1")})
 		require.NoError(t, err)
 		out = append(out, decodeBroadcastTxTimeoutTimestamp(t, testServer.getLastTxBytes()))
@@ -147,7 +147,7 @@ func TestNonceOffsetAppliesUnderWallClockAnchoring(t *testing.T) {
 	defer func() { _ = tc.Close() }()
 
 	before := txNonceCounter.Load()
-	_, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
+	_, _, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
 		[]*prooftypes.MsgCreateClaim{generateTestClaim(t, supplierAddr, "session-1")})
 	require.NoError(t, err)
 

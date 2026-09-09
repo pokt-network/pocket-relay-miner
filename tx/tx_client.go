@@ -362,14 +362,14 @@ func (tc *TxClient) CreateClaims(
 	supplierOperatorAddr string,
 	timeoutHeight int64,
 	claims []*prooftypes.MsgCreateClaim,
-) (string, error) {
+) (string, SignedTxPayload, error) {
 	if err := tc.acquirePermit(ctx); err != nil {
-		return "", err
+		return "", SignedTxPayload{}, err
 	}
 	defer tc.releasePermit()
 
 	if len(claims) == 0 {
-		return "", nil
+		return "", SignedTxPayload{}, nil
 	}
 
 	// Convert claims to Msg interface
@@ -378,10 +378,10 @@ func (tc *TxClient) CreateClaims(
 		msgs[i] = claim
 	}
 
-	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, timeoutHeight, "claim", msgs...)
+	txHash, signed, err := tc.signAndBroadcastReturningSigned(ctx, supplierOperatorAddr, timeoutHeight, "claim", msgs...)
 	if err != nil {
 		txClaimErrors.WithLabelValues(supplierOperatorAddr).Inc()
-		return "", fmt.Errorf("failed to broadcast claims: %w", err)
+		return "", SignedTxPayload{}, fmt.Errorf("failed to broadcast claims: %w", err)
 	}
 
 	tc.logger.Info().
@@ -391,7 +391,7 @@ func (tc *TxClient) CreateClaims(
 		Msg("claims submitted")
 
 	txClaimsSubmitted.WithLabelValues(supplierOperatorAddr).Add(float64(len(claims)))
-	return txHash, nil
+	return txHash, signed, nil
 }
 
 // SubmitProofs submits proof transactions for a supplier.
@@ -401,14 +401,14 @@ func (tc *TxClient) SubmitProofs(
 	supplierOperatorAddr string,
 	timeoutHeight int64,
 	proofs []*prooftypes.MsgSubmitProof,
-) (string, error) {
+) (string, SignedTxPayload, error) {
 	if err := tc.acquirePermit(ctx); err != nil {
-		return "", err
+		return "", SignedTxPayload{}, err
 	}
 	defer tc.releasePermit()
 
 	if len(proofs) == 0 {
-		return "", nil
+		return "", SignedTxPayload{}, nil
 	}
 
 	// Convert proofs to Msg interface
@@ -417,7 +417,7 @@ func (tc *TxClient) SubmitProofs(
 		msgs[i] = proof
 	}
 
-	txHash, err := tc.signAndBroadcast(ctx, supplierOperatorAddr, timeoutHeight, "proof", msgs...)
+	txHash, signed, err := tc.signAndBroadcastReturningSigned(ctx, supplierOperatorAddr, timeoutHeight, "proof", msgs...)
 	if err != nil {
 		// Check if error is "proof not required" - this is benign (claim already settled without proof)
 		if isProofNotRequiredError(err) {
@@ -431,10 +431,10 @@ func (tc *TxClient) SubmitProofs(
 			// whole tx and the other N-1 were never transmitted. Returning the
 			// sentinel keeps the fact askable with errors.Is and the rejection
 			// readable with errors.As; both wrap so neither is lost.
-			return "", fmt.Errorf("%w: %w", ErrTxProofNotRequired, err)
+			return "", SignedTxPayload{}, fmt.Errorf("%w: %w", ErrTxProofNotRequired, err)
 		}
 		txProofErrors.WithLabelValues(supplierOperatorAddr).Inc()
-		return "", fmt.Errorf("failed to broadcast proofs: %w", err)
+		return "", SignedTxPayload{}, fmt.Errorf("failed to broadcast proofs: %w", err)
 	}
 
 	tc.logger.Info().
@@ -444,7 +444,7 @@ func (tc *TxClient) SubmitProofs(
 		Msg("proofs submitted")
 
 	txProofsSubmitted.WithLabelValues(supplierOperatorAddr).Add(float64(len(proofs)))
-	return txHash, nil
+	return txHash, signed, nil
 }
 
 // txWindowTimeoutKey is the context key used to carry a window-based TX deadline.
@@ -640,65 +640,180 @@ func WindowTimeout(windowBlocks, blockTimeSeconds int64) (time.Duration, string)
 	return window, TimeoutRegimeWindow
 }
 
-// signAndBroadcast signs and broadcasts a transaction.
-// txType should be "claim" or "proof" for proper metrics labeling.
+// signAndBroadcastReturningSigned builds, signs, broadcasts, and hands back the
+// payload it signed so a caller can cache it for re-injection.
 //
-// timeoutHeight is the height past which the CHAIN stops accepting this
-// transaction, and it stays int64 all the way down here on purpose. Every
-// caller computes a window close, which is a signed quantity; converting at the
-// call site -- which is what this code did -- turns a non-positive value into a
-// number near 2^64 that reads as a perfectly valid far-future height, so the
-// guard below could no longer tell "no timeout wanted" from "the arithmetic
-// went wrong". One cast, after the sign has been checked.
+// It is the only place the broadcast budget is derived and the deadline
+// installed, so both halves of one submission share a single clock. The variant
+// that dropped the payload was deleted rather than kept beside it: two entry
+// points into the same sequence is how they start disagreeing about how long an
+// attempt has.
 //
-// This is a DIFFERENT CLOCK from the timeoutTimestamp set below, and the two
-// are easy to conflate because both are called a timeout. This one the chain
-// enforces against its own block height; that one is our client-side broadcast
-// deadline.
-func (tc *TxClient) signAndBroadcast(
+// TWO THINGS HERE ARE CALLED A TIMEOUT AND THEY ARE DIFFERENT CLOCKS.
+// timeoutHeight is what the CHAIN enforces against its own block height; the
+// deadline installed below is our client-side broadcast budget, a wall-clock
+// limit on how long we wait for a reply. Neither bounds the other, and reading
+// one for the other is how a transaction ends up with a deadline that outlives
+// its own window.
+func (tc *TxClient) signAndBroadcastReturningSigned(
 	ctx context.Context,
 	signerAddr string,
 	timeoutHeight int64,
 	txType string,
 	msgs ...cosmostypes.Msg,
-) (string, error) {
-	// NOTE: No global mutex needed - unordered transactions (SetUnordered(true))
-	// use sequence=0, eliminating sequence number conflicts between concurrent TXs.
-
+) (string, SignedTxPayload, error) {
 	startTime := time.Now()
 	defer func() {
 		txBroadcastLatency.WithLabelValues(signerAddr).Observe(time.Since(startTime).Seconds())
 	}()
 
-	// The clock goes on BEFORE the first network call, not after.
-	//
-	// computeEffectiveTxTimeout used to run 23 lines below getAccount, which
-	// left the account lookup -- a real RPC, with a cache that is cold exactly
-	// after a restart or a rebalance -- with no deadline at all. A hung lookup
-	// there holds a transition-subpool worker, and that subpool is per supplier
-	// with a minimum of 10: ten hangs and the supplier stops transitioning,
-	// silently. The helper is pure, so moving it up costs nothing.
 	timeoutDuration, timeoutSource, window := tc.effectiveTxTimeout(ctx)
-
 	ctx, cancelDeadline := tc.withBroadcastDeadline(ctx, timeoutDuration, window)
 	defer cancelDeadline()
+
+	return tc.signEncodeAndBroadcast(ctx, signerAddr, timeoutHeight, txType, timeoutDuration, timeoutSource, msgs...)
+}
+
+// signEncodeAndBroadcast is signAndBroadcast that also hands back WHAT IT
+// SIGNED, so a caller can cache it and re-inject the same bytes instead of
+// signing a second transaction for the same intent.
+//
+// The payload is returned even when the broadcast FAILS, and that is the point
+// rather than an accident: the failure this cache exists for is the one where
+// the node never answered, so the attempt whose outcome is unknown is exactly
+// the one whose bytes are worth keeping.
+func (tc *TxClient) signEncodeAndBroadcast(
+	ctx context.Context,
+	signerAddr string,
+	timeoutHeight int64,
+	txType string,
+	timeoutDuration time.Duration,
+	timeoutSource string,
+	msgs ...cosmostypes.Msg,
+) (string, SignedTxPayload, error) {
+	st, err := tc.signAndEncode(ctx, signerAddr, timeoutHeight, timeoutDuration, timeoutSource, msgs...)
+	if err != nil {
+		return "", SignedTxPayload{}, err
+	}
+	hash, bErr := tc.broadcastRaw(ctx, signerAddr, txType, st)
+	return hash, st.payload(), bErr
+}
+
+// BroadcastRawReturningHash re-injects bytes that were signed earlier.
+//
+// It never signs, so the unordered nonce is the ORIGINAL one and the network
+// recognises the duplicate on its own -- which is the whole reason to keep the
+// bytes. The caller owns the budget: the deadline check lives here only as the
+// guard inside broadcastRaw, while deciding whether these bytes are still
+// VALID (their own timeout has not passed) belongs to whoever stored them,
+// because only that side knows the chain's clock.
+func (tc *TxClient) BroadcastRawReturningHash(
+	ctx context.Context,
+	signerAddr, txType string,
+	p SignedTxPayload,
+) (string, error) {
+	return tc.broadcastRaw(ctx, signerAddr, txType, signedTx{
+		bytes:         p.Bytes,
+		hash:          p.Hash,
+		timeoutHeight: p.TimeoutHeight,
+		// The provenance fields stay zero deliberately: this attempt derived
+		// nothing, so the accepted-to-mempool log reports no anchor and no
+		// regime rather than inventing ones that would describe this pass
+		// instead of the signing it is replaying.
+	})
+}
+
+// SignedTxPayload is what a caller needs to re-inject a transaction later: the
+// exact bytes, the hash the chain reports for them, and the two deadlines
+// sealed inside them.
+//
+// Both deadlines travel because neither can be recomputed later and they answer
+// different questions. TimeoutAt is the unordered nonce's expiry and decides
+// whether these bytes are still usable at all; TimeoutHeight is what the chain
+// enforces against its own block height, and it is carried so a re-injection's
+// rejection log names the height the transaction ACTUALLY holds rather than one
+// the current pass derived.
+type SignedTxPayload struct {
+	Bytes         []byte
+	Hash          string
+	TimeoutAt     time.Time
+	TimeoutHeight int64
+}
+
+// payload converts the internal form into the exported one.
+func (st signedTx) payload() SignedTxPayload {
+	return SignedTxPayload{
+		Bytes:         st.bytes,
+		Hash:          st.hash,
+		TimeoutAt:     st.timeoutTimestamp,
+		TimeoutHeight: st.timeoutHeight,
+	}
+}
+
+// signedTx is one transaction after signing and encoding, carried from the
+// signing half to the broadcasting half.
+//
+// It exists because those halves stopped being one function: a resend now
+// re-injects bytes it signed earlier instead of building a new transaction, so
+// broadcasting has to be reachable WITHOUT signing. Everything here except the
+// bytes and the hash is provenance for the accepted-to-mempool log, and it is
+// carried rather than recomputed on purpose -- for a re-injection those values
+// describe the ORIGINAL signing, which is the honest thing for that log to say.
+type signedTx struct {
+	bytes []byte
+	// hash is computed from the bytes on THIS side, so it exists before the
+	// transaction is sent -- which is what lets a send that never got an answer
+	// still name what it sent. The node reports the same value; broadcastRaw
+	// asserts it.
+	hash string
+	// timeoutHeight is the height SEALED INTO these bytes, not the one the
+	// current pass would compute. A re-injection cannot change it without
+	// signing again -- that immutability is the whole premise of deciding what
+	// to re-inject -- so the caller's freshly derived height would describe a
+	// transaction that does not exist. It is carried for the same reason as the
+	// four fields below, and it matters more than they do: it is read by the
+	// REJECTION log, the one somebody opens after a failure to decide whether
+	// the window was closing.
+	timeoutHeight    int64
+	anchor           time.Time
+	timeoutTimestamp time.Time
+	timeoutDuration  time.Duration
+	timeoutSource    string
+	anchorSource     string
+}
+
+// signAndEncode builds, signs and encodes the transaction without sending it.
+//
+// The deadline and the broadcast budget are the CALLER's: both halves of a
+// single submission must share one clock, and a re-injection reaching
+// broadcastRaw directly brings its own. Passing them in rather than deriving
+// them here is what keeps the two entry points from disagreeing about how long
+// this attempt has.
+func (tc *TxClient) signAndEncode(
+	ctx context.Context,
+	signerAddr string,
+	timeoutHeight int64,
+	timeoutDuration time.Duration,
+	timeoutSource string,
+	msgs ...cosmostypes.Msg,
+) (signedTx, error) {
 
 	// Get signing key
 	privKey, err := tc.keyManager.GetSigner(signerAddr)
 	if err != nil {
-		return "", fmt.Errorf("failed to get signing key: %w", err)
+		return signedTx{}, fmt.Errorf("failed to get signing key: %w", err)
 	}
 
 	// Get account info
 	account, err := tc.getAccount(ctx, signerAddr)
 	if err != nil {
-		return "", fmt.Errorf("failed to get account: %w", err)
+		return signedTx{}, fmt.Errorf("failed to get account: %w", err)
 	}
 
 	// Build the transaction
 	txBuilder := tc.txConfig.NewTxBuilder()
 	if setMsgsErr := txBuilder.SetMsgs(msgs...); setMsgsErr != nil {
-		return "", fmt.Errorf("failed to set messages: %w", setMsgsErr)
+		return signedTx{}, fmt.Errorf("failed to set messages: %w", setMsgsErr)
 	}
 
 	// Set memo (optional)
@@ -746,7 +861,7 @@ func (tc *TxClient) signAndBroadcast(
 		simGas, simErr := tc.simulateTx(ctx, txBuilder, privKey, account)
 		if simErr != nil {
 			// Simulation failed and no fallback gas limit configured
-			return "", fmt.Errorf("gas simulation failed (gas_limit=0 requires successful simulation): %w", simErr)
+			return signedTx{}, fmt.Errorf("gas simulation failed (gas_limit=0 requires successful simulation): %w", simErr)
 		}
 
 		// Apply gas adjustment for safety margin
@@ -806,27 +921,90 @@ func (tc *TxClient) signAndBroadcast(
 	// Sign the transaction (unordered=true means sequence=0)
 	err = tc.signTx(ctx, txBuilder, privKey, account, true)
 	if err != nil {
-		return "", fmt.Errorf("failed to sign transaction: %w", err)
+		return signedTx{}, fmt.Errorf("failed to sign transaction: %w", err)
 	}
 
 	// Encode the transaction
 	txBytes, err := tc.txConfig.TxEncoder()(txBuilder.GetTx())
 	if err != nil {
-		return "", fmt.Errorf("failed to encode transaction: %w", err)
+		return signedTx{}, fmt.Errorf("failed to encode transaction: %w", err)
+	}
+
+	return signedTx{
+		bytes:            txBytes,
+		hash:             txHashOf(txBytes),
+		timeoutHeight:    timeoutHeight,
+		anchor:           anchor,
+		timeoutTimestamp: timeoutTimestamp,
+		timeoutDuration:  timeoutDuration,
+		timeoutSource:    timeoutSource,
+		anchorSource:     anchorSource,
+	}, nil
+}
+
+// broadcastRaw sends bytes that are ALREADY signed and classifies the reply.
+//
+// It never builds or signs, which is the whole point: a resend that re-injects
+// the same bytes keeps the same unordered nonce, so the node recognises the
+// duplicate and discards it on its own instead of the network carrying several
+// live transactions for one claim.
+func (tc *TxClient) broadcastRaw(
+	ctx context.Context,
+	signerAddr, txType string,
+	st signedTx,
+) (string, error) {
+	// The broadcast budget is the CALLER's, and this refuses to run without one.
+	//
+	// Every path here is meant to arrive with a deadline already on the context:
+	// the original submission derives it from the window, and a re-injection
+	// inherits the reconciler's per-group budget. Saying so in a comment is what
+	// the previous version did, and a contract in prose is one a caller can
+	// forget silently -- a resend with no deadline waits instead of failing
+	// fast, which is precisely what the budget exists to prevent, and it fails
+	// by being LATE rather than by erroring. So the machine checks.
+	if _, ok := ctx.Deadline(); !ok {
+		return "", fmt.Errorf("broadcast attempted with no deadline on the context: "+
+			"the caller owns the budget (supplier %s, tx_type %s)", signerAddr, txType)
 	}
 
 	// Broadcast in SYNC mode (returns after CheckTx, fast)
 	// Using unordered eliminates sequence mismatch issues
 	// Duplicate protection handled by caller via Redis tracking
 	res, err := tc.txClient.BroadcastTx(ctx, &txtypes.BroadcastTxRequest{
-		TxBytes: txBytes,
+		TxBytes: st.bytes,
 		Mode:    txtypes.BroadcastMode_BROADCAST_MODE_SYNC,
 	})
 	if err != nil {
-		return "", newBroadcastRejection(err, txBytes)
+		return "", newBroadcastRejection(err, st.bytes)
 	}
 
 	txHash := res.TxResponse.TxHash
+
+	// The hash we computed and the hash the node reports must be the same, and
+	// nothing but this line says so.
+	//
+	// They are the same function of the same bytes, so a difference does not
+	// mean "two names for one transaction": it means the bytes that reached the
+	// chain are NOT the ones we signed. Everything downstream is keyed by our
+	// number -- the stored bytes a resend re-injects, the submission record a
+	// claim outcome is matched against, the inclusion query that decides whether
+	// a session is paid -- so the failure would be silent and total: we would be
+	// asking the chain about a transaction that does not exist while a different
+	// one carries our messages.
+	//
+	// Error rather than Warn, and without a metric on purpose. This cannot
+	// happen unless something is broken between our encoder and the node, so it
+	// is not a per-request condition that could flood: it is bounded by the
+	// defect existing, and if it ever fires it is the first thing an operator
+	// must see.
+	if st.hash != "" && txHash != "" && st.hash != txHash {
+		tc.logger.Error().
+			Str("supplier", signerAddr).
+			Str("tx_type", txType).
+			Str("computed_tx_hash", st.hash).
+			Str("reported_tx_hash", txHash).
+			Msg("tx hash mismatch: the bytes that reached the chain are not the ones we signed")
+	}
 
 	// Check result (SYNC mode returns CheckTx result only)
 	if res.TxResponse.Code != 0 {
@@ -866,7 +1044,7 @@ func (tc *TxClient) signAndBroadcast(
 			Str("tx_hash", txHash).
 			Str("codespace", res.TxResponse.Codespace).
 			Uint32("code", res.TxResponse.Code).
-			Int64("timeout_height", timeoutHeight).
+			Int64("timeout_height", st.timeoutHeight).
 			Str("error", res.TxResponse.RawLog).
 			Msg("transaction CheckTx failed")
 
@@ -890,11 +1068,11 @@ func (tc *TxClient) signAndBroadcast(
 		Str("supplier", signerAddr).
 		Str("tx_type", txType).
 		Str("tx_hash", txHash).
-		Str("timeout_source", timeoutSource).
-		Str("anchor_source", anchorSource).
-		Time("anchor", anchor).
-		Dur("timeout_duration", timeoutDuration).
-		Time("timeout_timestamp", timeoutTimestamp).
+		Str("timeout_source", st.timeoutSource).
+		Str("anchor_source", st.anchorSource).
+		Time("anchor", st.anchor).
+		Dur("timeout_duration", st.timeoutDuration).
+		Time("timeout_timestamp", st.timeoutTimestamp).
 		Msg("transaction accepted to mempool (unordered)")
 
 	// NOTE: We don't increment sequence for unordered TXs (they don't use sequence numbers)
@@ -1502,7 +1680,7 @@ func (c *HASupplierClient) CreateClaims(
 	timeoutHeight int64,
 	claimMsgs ...pocktclient.MsgCreateClaim,
 ) error {
-	_, err := c.CreateClaimsReturningHash(ctx, timeoutHeight, claimMsgs...)
+	_, _, err := c.CreateClaimsReturningHash(ctx, timeoutHeight, claimMsgs...)
 	return err
 }
 
@@ -1515,28 +1693,28 @@ func (c *HASupplierClient) CreateClaimsReturningHash(
 	ctx context.Context,
 	timeoutHeight int64,
 	claimMsgs ...pocktclient.MsgCreateClaim,
-) (string, error) {
+) (string, SignedTxPayload, error) {
 	// DEBUG/TEST: Force claim TX error to test claim_tx_error state transition
 	// Set environment variable TEST_FORCE_CLAIM_TX_ERROR=true to enable
 	if testCfg := getTestConfig(); testCfg.ForceClaimTxError {
 		c.logger.Warn().
 			Msg("TEST MODE: TEST_FORCE_CLAIM_TX_ERROR detected - forcing claim TX error")
-		return "", fmt.Errorf("TEST MODE: simulated claim transaction error")
+		return "", SignedTxPayload{}, fmt.Errorf("TEST MODE: simulated claim transaction error")
 	}
 
 	claims := make([]*prooftypes.MsgCreateClaim, len(claimMsgs))
 	for i, msg := range claimMsgs {
 		claim, ok := msg.(*prooftypes.MsgCreateClaim)
 		if !ok {
-			return "", fmt.Errorf("invalid claim message type: %T", msg)
+			return "", SignedTxPayload{}, fmt.Errorf("invalid claim message type: %T", msg)
 		}
 		claims[i] = claim
 	}
 
 	// Call TxClient and capture TX hash for deduplication
-	txHash, err := c.txClient.CreateClaims(ctx, c.operatorAddr, timeoutHeight, claims)
+	txHash, signed, err := c.txClient.CreateClaims(ctx, c.operatorAddr, timeoutHeight, claims)
 	if err != nil {
-		return "", err
+		return "", SignedTxPayload{}, err
 	}
 
 	// Store TX hash for retrieval by caller (1 line after broadcast)
@@ -1550,7 +1728,7 @@ func (c *HASupplierClient) CreateClaimsReturningHash(
 	// possibly-stale spike.
 	c.InvalidateFeeCache()
 
-	return txHash, nil
+	return txHash, signed, nil
 }
 
 // SubmitProofs implements client.SupplierClient. The resulting tx hash is
@@ -1570,7 +1748,7 @@ func (c *HASupplierClient) SubmitProofs(
 		c.logger.Warn().Msg("TEST MODE: TEST_FAIL_ORIGINAL_PROOF_SUBMIT - failing original proof submit (reconciler resend will recover)")
 		return fmt.Errorf("TEST MODE: simulated original proof submit error")
 	}
-	_, err := c.SubmitProofsReturningHash(ctx, timeoutHeight, proofMsgs...)
+	_, _, err := c.SubmitProofsReturningHash(ctx, timeoutHeight, proofMsgs...)
 	return err
 }
 
@@ -1583,28 +1761,28 @@ func (c *HASupplierClient) SubmitProofsReturningHash(
 	ctx context.Context,
 	timeoutHeight int64,
 	proofMsgs ...pocktclient.MsgSubmitProof,
-) (string, error) {
+) (string, SignedTxPayload, error) {
 	// DEBUG/TEST: Force proof TX error to test proof_tx_error state transition
 	// Set environment variable TEST_FORCE_PROOF_TX_ERROR=true to enable
 	if testCfg := getTestConfig(); testCfg.ForceProofTxError {
 		c.logger.Warn().
 			Msg("TEST MODE: TEST_FORCE_PROOF_TX_ERROR detected - forcing proof TX error")
-		return "", fmt.Errorf("TEST MODE: simulated proof transaction error")
+		return "", SignedTxPayload{}, fmt.Errorf("TEST MODE: simulated proof transaction error")
 	}
 
 	proofs := make([]*prooftypes.MsgSubmitProof, len(proofMsgs))
 	for i, msg := range proofMsgs {
 		proof, ok := msg.(*prooftypes.MsgSubmitProof)
 		if !ok {
-			return "", fmt.Errorf("invalid proof message type: %T", msg)
+			return "", SignedTxPayload{}, fmt.Errorf("invalid proof message type: %T", msg)
 		}
 		proofs[i] = proof
 	}
 
 	// Call TxClient and capture TX hash for deduplication
-	txHash, err := c.txClient.SubmitProofs(ctx, c.operatorAddr, timeoutHeight, proofs)
+	txHash, signed, err := c.txClient.SubmitProofs(ctx, c.operatorAddr, timeoutHeight, proofs)
 	if err != nil {
-		return "", err
+		return "", SignedTxPayload{}, err
 	}
 
 	// Store TX hash for retrieval by caller (1 line after broadcast)
@@ -1616,7 +1794,7 @@ func (c *HASupplierClient) SubmitProofsReturningHash(
 	// most recent successful submission.
 	c.InvalidateFeeCache()
 
-	return txHash, nil
+	return txHash, signed, nil
 }
 
 // OperatorAddress implements client.SupplierClient.
@@ -1630,6 +1808,30 @@ func (c *HASupplierClient) GetLastClaimTxHash() string {
 	c.lastClaimTxMu.RLock()
 	defer c.lastClaimTxMu.RUnlock()
 	return c.lastClaimTxHash
+}
+
+// LatestBlockTime exposes the chain clock this client anchors its deadlines to.
+//
+// It is the SAME clock that produced the timeout_timestamp inside a signed
+// transaction, which is what makes it the right one to ask whether those bytes
+// have expired: comparing against the wall clock would disagree with the ante
+// handler exactly when the chain runs behind, and that is when a re-injection
+// most needs the answer. Zero means unknown, and every caller must read that as
+// "do not re-inject" rather than as "not expired".
+func (c *HASupplierClient) LatestBlockTime() time.Time {
+	if c == nil || c.txClient == nil || c.txClient.config.BlockTimeProvider == nil {
+		return time.Time{}
+	}
+	return c.txClient.config.BlockTimeProvider.LatestBlockTime()
+}
+
+// BroadcastRawReturningHash re-injects previously signed bytes for this
+// supplier, without building or signing anything.
+func (c *HASupplierClient) BroadcastRawReturningHash(ctx context.Context, txType string, p SignedTxPayload) (string, error) {
+	if c == nil || c.txClient == nil {
+		return "", fmt.Errorf("no tx client")
+	}
+	return c.txClient.BroadcastRawReturningHash(ctx, c.operatorAddr, txType, p)
 }
 
 // GetLastProofTxHash returns the TX hash of the last proof submission.

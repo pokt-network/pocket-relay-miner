@@ -185,18 +185,31 @@ func newCheckTxRejection(res *cosmostypes.TxResponse) *TxRejection {
 	}
 }
 
+// txHashOf returns the hash the chain will report for these encoded bytes.
+//
+// The node derives it as the uppercase hex of the full sha256 of exactly these
+// bytes (cometbft types.Tx.Hash is tmhash.Sum; cosmos formats it with %X).
+// tmhash.SumTruncated is the neighbour that yields 20 bytes -- plausible and
+// wrong.
+//
+// It is a function rather than two copies of the expression because the answer
+// has to be IDENTICAL in both places that need it: the rejection below, which
+// recovers the hash of a send that got no answer, and the signing path, which
+// needs it before sending at all. Two copies that drifted would not fail
+// loudly -- they would name two different transactions and each look right.
+func txHashOf(txBytes []byte) string {
+	return strings.ToUpper(hex.EncodeToString(tmhash.Sum(txBytes)))
+}
+
 // newBroadcastRejection covers a BroadcastTx that never returned a response.
-// The hash is recovered rather than lost: the node derives it as the uppercase
-// hex of the full sha256 of these same bytes (cometbft types.Tx.Hash is
-// tmhash.Sum; cosmos formats it with %X). tmhash.SumTruncated is the neighbour
-// that yields 20 bytes -- plausible and wrong.
+// The hash is recovered rather than lost.
 //
 // The caller's return value is unchanged; the hash is recoverable through
 // errors.As, not returned.
 func newBroadcastRejection(err error, txBytes []byte) *TxRejection {
 	return &TxRejection{
 		Stage:    TxStageBroadcast,
-		TxHash:   strings.ToUpper(hex.EncodeToString(tmhash.Sum(txBytes))),
+		TxHash:   txHashOf(txBytes),
 		GRPCCode: status.Code(err),
 		RawLog:   statusMessage(err),
 		wrapped:  err,
