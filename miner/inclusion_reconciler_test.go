@@ -1052,7 +1052,7 @@ func TestReconciler_ARejectedProofIsNotResentAndSaysWhy(t *testing.T) {
 	h.seed(t, hSupplier, hEnd, "s1", testSubmit)
 	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofRejected}}
 
-	h.r.OnBlock(testMid) // the calendar WOULD resend here if it were merely missing
+	h.r.OnBlock(testMid) // a merely-missing entry WOULD resend here: the window is open
 
 	require.Equal(t, 0, h.resub.count(),
 		"the same bytes against the same claim get the same verdict: resending buys a fee")
@@ -1110,7 +1110,7 @@ func TestReconciler_TheDegradedPathStillResendsWhatWasNotRejected(t *testing.T) 
 	h.onChain = map[string]query.SessionClaim{"s1": {ProofState: query.SessionProofPending}}
 
 	h.r.OnBlock(testMid)
-	require.Equal(t, 1, h.resub.count(), "pending is still missing: the calendar resends at mid-window")
+	require.Equal(t, 1, h.resub.count(), "pending is still missing, and the window is open: it resends")
 
 	h.onChainErr = errors.New("node unreachable")
 	h.r.OnBlock(testMid + 2)

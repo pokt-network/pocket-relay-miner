@@ -57,9 +57,9 @@ func TestReconciler_AlreadyQueuedDoesNotSpendAResend(t *testing.T) {
 		"a transaction the node already holds must not consume one of the few resends "+
 			"a claim gets: nothing was transmitted and nothing changed")
 	require.Zero(t, entry.LastAttemptHeight,
-		"and the calendar must not move either -- the count and the schedule answer "+
-			"the same question, so exempting one and not the other would push the next "+
-			"real attempt out for a send that never happened")
+		"and the height of the last counted attempt must not move either: it "+
+			"records when the budget was last spent, so marking a send that never "+
+			"left would date an attempt that did not happen")
 
 	require.Equal(t, []string{hSupplier + "/already_queued"}, rebroadcastResults(t, h),
 		"and it must not land in the error bucket, which would bury real failures "+
@@ -84,6 +84,6 @@ func TestReconciler_AnOrdinaryRejectionStillSpendsAResend(t *testing.T) {
 		"a genuine failure must still spend its attempt, or a persistently failing "+
 			"resend re-fires on every block until the window closes")
 	require.Equal(t, testSubmit+1, entry.LastAttemptHeight,
-		"and it must move the calendar with it")
+		"and it must date the entry at the height that attempt went out")
 	require.Equal(t, []string{hSupplier + "/error"}, rebroadcastResults(t, h))
 }

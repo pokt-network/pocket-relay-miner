@@ -95,29 +95,31 @@ type rebroadcastEntry struct {
 	// which the regime counter shows rather than hides.
 	TimeoutSeconds int64  `json:"ts,omitempty"`
 	TimeoutRegime  string `json:"tr,omitempty"`
-	// LastAttemptHeight is the height the last resend ACTUALLY went out at, and
-	// it is what makes the spacing real rather than nominal: the reconciler does
-	// not run at every height -- its only production caller feeds it through a
-	// coalescing loop that keeps just the LATEST height, so while one pass is
-	// running the heights that go by are never passed to it -- and an attempt
-	// can therefore leave later than the threshold that released it.
+	// LastAttemptHeight is the height the last COUNTED resend actually went out
+	// at. It is written on every attempt that spends the budget and left alone on
+	// every attempt that does not, which is the same test the counter beside it
+	// uses.
 	//
-	// The single-flight guard inside OnBlock is NOT what does this: that caller
-	// is a serial processor, so the guard has no concurrent entry to refuse. It
-	// is said here because the guard is the obvious place to look, and a reader
-	// who stops there concludes the skipping cannot happen.
+	// IT HAS NO READER TODAY, and that is stated plainly rather than implied: the
+	// resend spacing that consumed it was removed along with the resend calendar,
+	// so nothing currently branches on this value. It is still written, still
+	// persisted, and deliberately kept.
 	//
-	// Zero means "not known" and every reader falls back to the nominal
-	// schedule. That is not a defensive default, it is the mixed-fleet contract,
-	// and it holds in BOTH directions: an entry written by a binary without this
-	// field reads as 0 here, and an entry written with it and then rewritten by
-	// an older binary LOSES it, because the older struct has no such field and
-	// its re-marshal drops what it cannot see. Both directions degrade to the
-	// NOMINAL schedule -- spacing counted from where each attempt was due rather
-	// than from where it landed -- which is a weaker guarantee and still a
-	// spacing. It is deliberately not a fallback to the bare base: that would
-	// re-open, during any rolling deploy, exactly the back-to-back resend this
-	// change exists to prevent.
+	// What keeps it is a constraint the counter cannot express. A resend that the
+	// chain answers with "I already hold this transaction" is exempt from
+	// counting -- correctly, since nothing was transmitted -- so an entry can
+	// retry for an unbounded number of blocks with Rebroadcasts frozen at its
+	// starting value. Any bound of the form "I have been retrying since height H
+	// and it still has not appeared" therefore needs a HEIGHT; the count is
+	// structurally unable to carry it. This field is that height.
+	//
+	// Zero means "not known", and the mixed-fleet contract holds in both
+	// directions: an entry written by a binary without the field reads as 0 here,
+	// and an entry written with it and rewritten by an older binary LOSES it,
+	// because the older struct has no such field and its re-marshal drops what it
+	// cannot see. Zero must therefore never be read as "the last attempt was at
+	// height 0" -- it is the absence of the datum, and any future reader owes it
+	// a branch of its own.
 	LastAttemptHeight int64 `json:"l,omitempty"`
 }
 
@@ -758,14 +760,14 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 		if windowClosed {
 			// The window is over and this session never landed, so a resend was
 			// always warranted -- a session found on-chain `continue`s above and
-			// never reaches here. Budget left over therefore says the schedule
-			// could not spend it, not that it was not needed, and those two have
-			// to give different signals: an operator who configures a cap of 2
-			// and observes one resend can otherwise only guess which happened.
-			// The common cause is a window too short to hold the spacing (the
-			// chain's own default close offset is 4 blocks, not the 10 mainnet
-			// and localnet use), and a claim submitted late by the retry loop
-			// shortens it further.
+			// never reaches here. Budget left over therefore says the window ran
+			// out before the attempts did, not that they were not needed, and
+			// those two have to give different signals: an operator who
+			// configures a cap of 2 and observes one resend can otherwise only
+			// guess which happened. The common cause is a window with too few
+			// blocks left to spend the cap in (the chain's own default close
+			// offset is 4 blocks, not the 10 mainnet and localnet use), and a
+			// claim submitted late by the retry loop shortens it further.
 			// Only meaningful when a cap exists. With no cap there is no unused
 			// budget to report -- every entry would qualify, and a metric that
 			// fires on everything says nothing.
@@ -787,7 +789,7 @@ func (r *InclusionReconciler) reconcileGroup(rp reconcilePhase, g RebroadcastGro
 			continue
 		}
 
-		// Window still open → resend on the calendar if still missing.
+		// Window still open → resend if still missing.
 		if r.canRebroadcast(entry, height, windowClose) {
 			r.rebroadcast(ctx, rp, g, sessionID, entry, height, windowClose)
 		}
@@ -893,10 +895,10 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	//
 	// EXCEPT for the two answers that mean NOTHING WAS SPENT. The budget is a
 	// handful of resends, so counting an attempt that changed nothing burns one
-	// of the few a claim had — and it moves the calendar too, pushing the next
-	// real attempt further out for a send that did not happen. A sentinel is the
-	// only thing that can tell these apart from a genuine rejection, because on
-	// the wire they look like any other refusal.
+	// of the few a claim had — and it dates the entry as though a send had left,
+	// for one that did not. A sentinel is the only thing that can tell these
+	// apart from a genuine rejection, because on the wire they look like any
+	// other refusal.
 	//
 	//   - SATURATION: no permit was free, so the message was never signed and
 	//     never sent. The next block finds the payload exactly where it was.
@@ -913,10 +915,10 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	if !errors.Is(err, tx.ErrTxConcurrencySaturated) && !errors.Is(err, tx.ErrTxAlreadyQueued) {
 		entry.Rebroadcasts++
 		// Inside this guard and NOT beside the TxHash assignment below, which
-		// sits outside it: a saturated attempt never left the process, so moving
-		// the calendar for it would spend two blocks of the window on a send
-		// that did not happen. The two fields move together for that reason --
-		// the count and the schedule answer the same question.
+		// sits outside it: an attempt that never left the process must not be
+		// dated as though it had. The two fields move together because they
+		// answer the same question -- how much of the budget this entry has
+		// spent, and when it last spent it.
 		entry.LastAttemptHeight = height
 	}
 	if err == nil && newHash != "" {
@@ -941,7 +943,7 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 		// was unreachable", which the next block may fix, together with "these
 		// bytes can never be accepted again", which nothing fixes. Separating
 		// them costs one label value, and it is the only way an operator can
-		// tell a flapping endpoint from a resend calendar that runs too late.
+		// tell a flapping endpoint from bytes the chain will never accept.
 		//
 		// It changes no control flow. The attempt was already counted and the
 		// entry already persisted above, both deliberately: a doomed resend must
