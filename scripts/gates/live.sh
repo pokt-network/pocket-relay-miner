@@ -1013,10 +1013,11 @@ fi
 
 gate_step "report: the in-window resend path"
 
-# THIS BLOCK REPORTS, IT DOES NOT JUDGE -- the same rule as the settlement
-# breakdown below, and for the same reason: a healthy localnet loses no
-# transaction, so the resend path never runs and its counters never come into
-# existence. A non-zero would be the finding; a zero proves nothing.
+# THIS BLOCK REPORTS AN ABSENCE AND JUDGES WHAT IT CAN READ. A healthy localnet
+# loses no transaction, so the resend path never runs and its counters never
+# come into existence: a missing series is a note, not a verdict. What is read
+# is judged -- a binary without the counter names, a resend that came back
+# failed, and a Prometheus that did not answer.
 #
 # Measured 2026-09-09, and it is why this block was rewritten: as a
 # gate_nothing_measured it turned the whole level RED on a clean run, which is
@@ -1033,12 +1034,25 @@ if ! grep -q 'claim_rebroadcasts_total' "$BIN" 2>/dev/null ||
 else
     claim_rb="$(prom_scalar 'sum(ha_miner_claim_rebroadcasts_total)')"
     proof_rb="$(prom_scalar 'sum(ha_miner_proof_rebroadcasts_total)')"
-    rb_failed="$(prom_scalar 'sum(ha_miner_claim_rebroadcasts_total{result="failure"}) + sum(ha_miner_proof_rebroadcasts_total{result="failure"})')"
-    if [ "$claim_rb" = "UNREADABLE" ] || [ "$proof_rb" = "UNREADABLE" ]; then
+    # FAILED IS EVERYTHING NOT KNOWN TO BE HEALTHY, not a list of failures: a
+    # result value added later counts as failed until someone names it healthy,
+    # so the gate fails closed instead of reading zero for a value it never
+    # heard of. TestLiveGateHealthyRebroadcastResultsAreEmitted (miner/) pins
+    # every healthy name here to a literal the reconciler emits.
+    #
+    # ONE vector, not two sums added: `sum(A) + sum(B)` is empty whenever either
+    # side has no series, so failed claim resends with no proof series at all
+    # would read as nothing failed.
+    #
+    # rb_failed UNREADABLE sits in the FIRST branch, beside the families: when
+    # any of the three queries went unanswered, the other two saying "nothing
+    # was resent" cannot be told from an instrument that half failed.
+    rb_failed="$(prom_scalar 'sum({__name__=~"ha_miner_(claim|proof)_rebroadcasts_total",result!~"success|already_queued|not_required"})')"
+    if [ "$claim_rb" = "UNREADABLE" ] || [ "$proof_rb" = "UNREADABLE" ] || [ "$rb_failed" = "UNREADABLE" ]; then
         gate_nothing_measured "Prometheus did not answer for the rebroadcast families -- this is the instrument failing, not a quiet run"
     elif [ "$claim_rb" = "ABSENT" ] && [ "$proof_rb" = "ABSENT" ]; then
         gate_pass "resend counters wired; no resend happened this run -- the resend BEHAVIOUR is therefore NOT observed live, and inducing it belongs to the chaos matrix"
-    elif [ "$rb_failed" != "ABSENT" ] && [ "$rb_failed" != "UNREADABLE" ] && [ "${rb_failed%%.*}" -gt 0 ] 2>/dev/null; then
+    elif [ "$rb_failed" != "ABSENT" ] && [ "${rb_failed%%.*}" -gt 0 ] 2>/dev/null; then
         gate_fail "${rb_failed} in-window resend(s) came back failed (claim=${claim_rb}, proof=${proof_rb}) -- a resend that fails inside its own window is a claim or proof heading for forfeit"
     else
         gate_pass "in-window resends ran and none failed (claim=${claim_rb}, proof=${proof_rb})"
