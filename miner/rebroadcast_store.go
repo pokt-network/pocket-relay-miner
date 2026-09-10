@@ -29,20 +29,6 @@ type RebroadcastGroup struct {
 	SessionEnd int64
 }
 
-// RebroadcastStore persists the already-built MsgCreateClaim / MsgSubmitProof
-// bytes so the inclusion reconciler can re-broadcast an accepted-but-not-yet
-// included claim/proof while its window is open — without rebuilding from the
-// SMST (which is deleted at submit) and surviving a leader failover (the bytes
-// live in Redis, not an in-memory closure).
-//
-// Layout (per phase):
-//   - payload hash:  ha:miner:rebroadcast:{phase}:{supplier}:{sessionEnd}
-//     field = sessionID, value = marshaled proto message. TTL = ttl.
-//   - group index:   ha:miner:rebroadcast:{phase}:index
-//     set of "{supplier}:{sessionEnd}" members, for leader-failover recovery.
-//
-// All entries carry a TTL (≈ one window plus margin) so a missed terminal
-// cleanup cannot leak Redis memory.
 // RebroadcastStorage is the persistence the inclusion reconciler needs, stated
 // as a contract instead of as a Redis client.
 //
@@ -74,6 +60,20 @@ type RebroadcastStorage interface {
 // interface or this type fails at compile time rather than at wiring.
 var _ RebroadcastStorage = (*RebroadcastStore)(nil)
 
+// RebroadcastStore persists the already-built MsgCreateClaim / MsgSubmitProof
+// bytes so the inclusion reconciler can re-broadcast an accepted-but-not-yet
+// included claim/proof while its window is open — without rebuilding from the
+// SMST (which is deleted at submit) and surviving a leader failover (the bytes
+// live in Redis, not an in-memory closure).
+//
+// Layout (per phase):
+//   - payload hash:  ha:miner:rebroadcast:{phase}:{supplier}:{sessionEnd}
+//     field = sessionID, value = marshaled proto message. TTL = ttl.
+//   - group index:   ha:miner:rebroadcast:{phase}:index
+//     set of "{supplier}:{sessionEnd}" members, for leader-failover recovery.
+//
+// All entries carry a TTL (≈ one window plus margin) so a missed terminal
+// cleanup cannot leak Redis memory.
 type RebroadcastStore struct {
 	redisClient *redistransport.Client
 	ttl         time.Duration

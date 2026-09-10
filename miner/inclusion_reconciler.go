@@ -252,9 +252,6 @@ func DefaultInclusionReconcilerConfig() InclusionReconcilerConfig {
 	}
 }
 
-// reconcilePhase holds the phase-specific behaviour, so the reconciler core is
-// shared between claims and proofs (one mechanism, not two near-duplicate
-// trackers). Built once in NewInclusionReconciler from the injected deps.
 // inclusionVerdict is what ONE phase concludes about one session from what the
 // chain says. The phases read the same map and disagree on purpose: a claim that
 // exists is found for the claim phase whatever its proof status, while the proof
@@ -309,6 +306,9 @@ func proofPhaseVerdict(state query.SessionProofState, _ bool) inclusionVerdict {
 	}
 }
 
+// reconcilePhase holds the phase-specific behaviour, so the reconciler core is
+// shared between claims and proofs (one mechanism, not two near-duplicate
+// trackers). Built once in NewInclusionReconciler from the injected deps.
 type reconcilePhase struct {
 	phase             RebroadcastPhase
 	windowCloseHeight func(p *sharedtypes.Params, sessionEnd int64) int64

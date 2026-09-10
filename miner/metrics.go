@@ -1241,7 +1241,6 @@ var (
 // METRICS HELPER FUNCTIONS FOR OPERATORS
 // =============================================
 
-// RecordRelayConsumedFromStream records a relay consumed from Redis Stream.
 // RecordTxTimeoutRegime records which rule decided a broadcast deadline.
 // phase is "claim", "proof" or "resend"; regime comes from tx.WindowTimeout and
 // is one of its three exported constants. Both sets are closed -- see
@@ -1250,6 +1249,7 @@ func RecordTxTimeoutRegime(phase, regime string) {
 	txTimeoutRegimeTotal.WithLabelValues(phase, regime).Inc()
 }
 
+// RecordRelayConsumedFromStream records a relay consumed from Redis Stream.
 func RecordRelayConsumedFromStream(supplier, serviceID string) {
 	relaysConsumedFromStream.WithLabelValues(supplier, serviceID).Inc()
 }
