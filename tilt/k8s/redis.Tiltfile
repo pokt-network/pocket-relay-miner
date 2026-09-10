@@ -83,8 +83,12 @@ data:
     rdbcompression yes
     rdbchecksum no
     # === MEMORY MANAGEMENT ===
-    maxmemory 1887436800
-    maxmemory-policy allkeys-lru
+    # Sale del config (gitignored) porque un tope fijo con allkeys-lru DESALOJA
+    # en silencio: todo el estado vive aca (nodos SMST, meter, tracking), asi que
+    # un desalojo se ve como claims perdidos, no como "Redis lleno". Poner 0 para
+    # medir cuanta memoria PIDE Redis en vez de cuanta le dejamos.
+    maxmemory {maxmemory}
+    maxmemory-policy {maxmemory_policy}
     # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
     io-threads 4
     io-threads-do-reads yes
@@ -98,8 +102,15 @@ data:
     timeout 0
     tcp-keepalive 300
     activerehashing yes
-    slowlog-log-slower-than -1
-"""
+    # -1 apaga el slowlog: `SLOWLOG GET` devuelve vacio y se lee como "no hubo
+    # comandos lentos" sin haber mirado. Configurable para poder nombrar a Redis
+    # como cuello en vez de inferirlo del timeout del que lo llama.
+    slowlog-log-slower-than {slowlog_us}
+""".format(
+        maxmemory=redis_config.get("maxmemory", "1887436800"),
+        maxmemory_policy=redis_config.get("maxmemory_policy", "allkeys-lru"),
+        slowlog_us=redis_config.get("slowlog_log_slower_than_us", "-1"),
+    )
 
     # Redis CR for standalone
     redis_cr = """
@@ -116,8 +127,8 @@ spec:
         cpu: 100m
         memory: 256Mi
       limits:
-        cpu: 2000m
-        memory: 2Gi
+        cpu: {cpu_limit}
+        memory: {memory_limit}
     serviceType: ClusterIP
   redisConfig:
     additionalRedisConfig: redis-standalone-config
@@ -131,7 +142,10 @@ spec:
   redisExporter:
     enabled: true
     image: quay.io/opstree/redis-exporter:v1.44.0
-"""
+""".format(
+        cpu_limit=redis_config.get("cpu_limit", "2000m"),
+        memory_limit=redis_config.get("memory_limit", "2Gi"),
+    )
 
     k8s_yaml(blob(redis_configmap))
     k8s_yaml(blob(redis_cr))
