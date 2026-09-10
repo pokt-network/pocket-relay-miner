@@ -88,6 +88,33 @@ const (
 	drainKeyRemoved
 )
 
+// SupplierTxClient is what this manager needs from a supplier's tx client, and
+// it is declared so the manager can be exercised without one.
+//
+// The reason is a specific test that could not be written: the resend budget
+// degrades inside ResubmitMessage -- an absent budget falls to the ceiling under
+// the `unknown` regime -- and NOTHING asserted it. The proof is that forcing
+// that branch to always fall through left ./miner/ entirely green. It could not
+// be asserted because the method returns early when the supplier has no client,
+// so the branch is unreachable without one, and *tx.HASupplierClient is a
+// concrete struct whose fields belong to another package: there was nothing to
+// substitute. Not a missing test -- a missing seam.
+//
+// FOUR METHODS, WHICH IS ALL OF THE THIRTEEN THAT miner/ ACTUALLY CALLS. The
+// count is the point: an interface holding the whole surface would declare
+// capability nobody uses, and the next reader could not tell what this manager
+// depends on from what the client happens to offer.
+type SupplierTxClient interface {
+	CreateClaimsReturningHash(ctx context.Context, timeoutHeight int64, claimMsgs ...client.MsgCreateClaim) (string, tx.SignedTxPayload, error)
+	SubmitProofsReturningHash(ctx context.Context, timeoutHeight int64, proofMsgs ...client.MsgSubmitProof) (string, tx.SignedTxPayload, error)
+	BroadcastRawReturningHash(ctx context.Context, txType string, p tx.SignedTxPayload) (string, error)
+	LatestBlockTime() time.Time
+}
+
+// The production implementation. The assertion sits here so that changing either
+// side fails at compile time rather than at wiring.
+var _ SupplierTxClient = (*tx.HASupplierClient)(nil)
+
 type SupplierState struct {
 	OperatorAddr string
 
@@ -110,7 +137,7 @@ type SupplierState struct {
 	// Lifecycle management (for claim/proof submission with timing spread)
 	LifecycleManager  *SessionLifecycleManager
 	LifecycleCallback *LifecycleCallback
-	SupplierClient    *tx.HASupplierClient
+	SupplierClient    SupplierTxClient
 
 	// Lifecycle
 	cancelFn context.CancelFunc
