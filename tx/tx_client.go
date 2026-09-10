@@ -495,6 +495,29 @@ func WithTxWindowTimeout(ctx context.Context, d time.Duration, regime string) co
 	})
 }
 
+// TxWindowFrom reports the window budget a context carries, and whether it
+// carries one at all.
+//
+// The writer above has been public since it existed; the reader was not, and the
+// key is private, so a budget could be PUT INTO a context from anywhere and read
+// back from nowhere. A value that is writable from outside and unreadable from
+// outside makes "the budget travelled" unobservable by construction -- not hard
+// to check, impossible to express -- which is why nothing outside this package
+// ever asserted it. Declaring the missing half of the pair is the fix; the
+// asymmetry was the defect.
+//
+// It is honest about its readers: `effectiveTxTimeout` does NOT call it, because
+// that one needs the whole txWindow including computedAt, and bending it to go
+// through here would be dressing up a seam as a refactor. Today the caller is a
+// test in another package, and that is the point -- there was no way to write one.
+func TxWindowFrom(ctx context.Context) (time.Duration, string, bool) {
+	window, ok := ctx.Value(txWindowTimeoutKey{}).(txWindow)
+	if !ok {
+		return 0, "", false
+	}
+	return window.raw, window.regime, true
+}
+
 // computeEffectiveTxTimeout is the pure math of the deadline decision.
 // Extracted so the skew→clamp pipeline can be tested directly without
 // building a full TxClient. source is one of:

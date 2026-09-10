@@ -24,6 +24,16 @@
 # The honest alternative is to move them behind `//go:build test`. They are kept
 # here instead because the move is a bigger change than the problem, and because
 # a seam that is DECLARED is not a seam that deceives.
+# TxWindowFrom is not a seam added FOR a test: it is the missing half of a pair
+# that shipped half-declared. WithTxWindowTimeout has been exported since it
+# existed and the context key is private, so a budget could be written into a
+# context from anywhere and read back from nowhere. That made "the budget
+# travelled" impossible to EXPRESS outside tx, not merely hard to check -- which
+# is why nothing ever asserted it. effectiveTxTimeout cannot be its production
+# caller: it needs the whole txWindow including computedAt, and routing it through
+# here to look wired would be dressing a seam up as a refactor. That today's only
+# caller lives in another package is the consequence of the defect, not its cause.
+tx/tx_client.go TxWindowFrom                                    # reads the window budget a context carries; the writer was always public and the reader was not (tx/tx_window_from_test.go)
 keys/keyring_provider.go NewKeyringProviderWithKeyring          # injects a prepared keyring; production builds its own (keys/keyring_provider_test.go)
 observability/runtime_metrics.go RuntimeMetricsCollector.CollectNow  # forces a collection that production does on a ticker (observability/runtime_metrics_test.go)
 observability/runtime_metrics.go RuntimeMetricsCollector.LastMallocs # reads collector state a test asserts on (observability/runtime_metrics_test.go)
