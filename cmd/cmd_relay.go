@@ -76,7 +76,6 @@ const (
 
 	// Network endpoints
 	localnetGRPCEndpoint = "localhost:9090"
-	localnetRPCEndpoint  = "http://localhost:26657"
 	localnetChainID      = "poktroll"
 	localnetRelayerURL   = "http://localhost:8180"
 )
@@ -184,8 +183,13 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().StringVar(&relay.RelayServiceID, "service", "", "Service ID (e.g., develop-http, develop-websocket, develop-stream, develop-grpc)")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayNodeGRPC, "node", "", "gRPC endpoint for chain queries (e.g., localhost:9090)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayGRPCTLS, "grpc-tls", false, "Use TLS for the --node gRPC connection (required for beta/mainnet endpoints on :443)")
-	relayCmd.PersistentFlags().StringVar(&relay.RelayNodeRPC, "node-rpc", "", "CometBFT RPC endpoint for block subscription (e.g., http://localhost:26657)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayNodeRPC, "node-rpc", "", "Unused: the chain height is read over the --node gRPC connection")
 	relayCmd.PersistentFlags().StringVar(&relay.RelayChainID, "chain-id", "", "Chain ID (e.g., poktroll)")
+
+	// --node-rpc has no reader: the relay client reads the chain height over the
+	// --node gRPC connection. It stays accepted so existing invocations keep
+	// working, and says so when used.
+	_ = relayCmd.PersistentFlags().MarkDeprecated("node-rpc", "it is unused: the chain height is now read over the --node gRPC connection")
 
 	// Optional flags
 	relayCmd.PersistentFlags().StringVar(&relay.RelayRelayerURL, "relayer-url", "", "Relayer endpoint URL")
@@ -272,9 +276,6 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 		if relay.RelayNodeGRPC == "" {
 			relay.RelayNodeGRPC = localnetGRPCEndpoint
 		}
-		if relay.RelayNodeRPC == "" {
-			relay.RelayNodeRPC = localnetRPCEndpoint
-		}
 		if relay.RelayChainID == "" {
 			relay.RelayChainID = localnetChainID
 		}
@@ -310,18 +311,9 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 		relay.RelayRelayerURL = "http://localhost:8080"
 	}
 
-	// Default RPC endpoint to gRPC endpoint with different port if not provided
-	if relay.RelayNodeRPC == "" {
-		// Try to infer from gRPC endpoint (e.g., localhost:9090 -> http://localhost:26657)
-		relay.RelayNodeRPC = "http://localhost:26657"
-	}
-
 	// Validate URLs (security: prevent SSRF, ensure valid schemes)
 	if err := validateURL(relay.RelayRelayerURL, []string{"http", "https", "ws", "wss"}); err != nil {
 		return fmt.Errorf("invalid relayer URL: %w", err)
-	}
-	if err := validateURL(relay.RelayNodeRPC, []string{"http", "https"}); err != nil {
-		return fmt.Errorf("invalid node RPC URL: %w", err)
 	}
 
 	// Validate mode

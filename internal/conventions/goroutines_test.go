@@ -77,7 +77,6 @@ var bareGoroutineAllowlist = map[string]int{
 	"cmd/cmd_relayer.go: runHARelayer":                        1,
 	"cmd/cmd_relayer.go: startHealthServer":                   2,
 	"cmd/relay/common.go: runLoadTest":                        1,
-	"cmd/relay/http.go: runHTTPLoadTest":                      1,
 	"keys/manager.go: Start":                                  1,
 	"keys/supplier_keys_file.go: WatchForChanges":             1,
 	"leader/global_leader.go: Start":                          1,

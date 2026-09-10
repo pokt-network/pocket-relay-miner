@@ -204,7 +204,6 @@ substitutes, and what to pass instead:
 | app key, auto-selected per service | YOUR staked app's key — via `--app-key <name>` (keyring) or `--keys-file` (see below), or `--app-priv-key <hex>` for throwaway testing |
 | gateway key | the gateway's key — `--gateway-key <name>` / `--keys-file`, or `--gateway-priv-key <hex>` — only if you sign via a delegated gateway |
 | `--node localhost:9090` | `--node <host:port>` — a Shannon full node gRPC endpoint (add `--grpc-tls` for a TLS endpoint on `:443`, e.g. beta/mainnet) |
-| `--node-rpc http://localhost:26657` | `--node-rpc <url>` — that node's CometBFT RPC endpoint |
 | `--chain-id poktroll` | `--chain-id <id>` — the target network's chain id (Shannon mainnet: `pocket`) |
 | `--relayer-url http://localhost:8180` | `--relayer-url <url>` — your own relayer deployment |
 | `--supplier <localnet supplier>` | `--supplier <addr>` or `--all-suppliers` (see below) |
@@ -284,7 +283,6 @@ pocket-relay-miner relay jsonrpc \
   --service <your-service-id> \
   --keys-file keys.yaml \
   --node <fullnode-grpc-host:port> --grpc-tls \
-  --node-rpc <cometbft-rpc-url> \
   --chain-id pocket \
   --relayer-url <your-relayer-url> \
   --all-suppliers --load-test -n 100 --concurrency 10
@@ -293,9 +291,8 @@ pocket-relay-miner relay jsonrpc \
 Here `keys.yaml` carries both the app and gateway keys (see above); swap it for
 `--app-key`/`--gateway-key` if the keys live in a keyring. Only `--service`, a key
 source, `--node`, and `--chain-id` are strictly required (the CLI errors without
-them). `--relayer-url` and `--node-rpc` default to localhost, so set them for a
-remote target; `--supplier` / `--all-suppliers` is needed for the relay to reach a
-real supplier.
+them). `--relayer-url` defaults to localhost, so set it for a remote target;
+`--supplier` / `--all-suppliers` is needed for the relay to reach a real supplier.
 
 > **Handling real keys.** Prefer `--keys-file` or `--app-key`/`--gateway-key`
 > (keyring) so private keys never appear in your shell history or in `ps`; raw
