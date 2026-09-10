@@ -107,7 +107,26 @@ func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTermin
 	c.onSessionTerminal = callback
 }
 
+// SessionRead is what a caller already learned about a session from the store,
+// handed to EnsureSession so it does not read the same session again.
+//
+// The zero value means the caller learned nothing -- it did not read, or its
+// read failed -- and EnsureSession reads for itself. The two must not be
+// confused: "the read failed" says nothing about the session, while "the store
+// answered and there is no snapshot" means it does not exist and is created.
+type SessionRead struct {
+	// Snapshot is what the store returned; nil with Answered means absent.
+	Snapshot *SessionSnapshot
+	// Answered is true when the store answered the read without an error.
+	Answered bool
+}
+
 // EnsureSession creates the session snapshot if it does not exist yet.
+//
+// read carries the caller's own read of the session, when it made one; see
+// SessionRead. The relay path reads the session to check its state just before
+// calling this, so reading it here again cost a second TYPE+HGETALL per relay
+// for the same data.
 //
 // It is separate from OnRelayProcessed because the two have different gates.
 // Counting a relay must happen exactly once — a relay counted twice inflates
@@ -127,6 +146,7 @@ func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTermin
 // and must be ACKed either way.
 func (c *SessionCoordinator) EnsureSession(
 	ctx context.Context,
+	read SessionRead,
 	sessionID string,
 	supplierAddress, serviceID, applicationAddress string,
 	sessionStartHeight, sessionEndHeight int64,
@@ -142,15 +162,19 @@ func (c *SessionCoordinator) EnsureSession(
 		return
 	}
 
-	// The Get is an optimisation that skips the CreateIfAbsent round-trip on
+	// The read is an optimisation that skips the CreateIfAbsent round-trip on
 	// the hot path where the session already exists; correctness does not
-	// depend on it.
-	snapshot, err := c.sessionStore.Get(ctx, sessionID)
-	if err != nil {
-		c.logger.Warn().
-			Err(err).
-			Str(logging.FieldSessionID, sessionID).
-			Msg("failed to check session existence")
+	// depend on it. It is made here only when the caller did not make one.
+	snapshot := read.Snapshot
+	if !read.Answered {
+		var err error
+		snapshot, err = c.sessionStore.Get(ctx, sessionID)
+		if err != nil {
+			c.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to check session existence")
+		}
 	}
 	if snapshot != nil {
 		return

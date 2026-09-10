@@ -493,8 +493,17 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Check session state BEFORE updating SMST. A store error falls through on
 	// purpose: it says nothing about the session, and dropping a relay on a
 	// Redis hiccup is the expensive direction.
+	//
+	// The read is kept for EnsureSession below, which would otherwise read the
+	// same session again. Only an ANSWERED read is kept: after a store error
+	// EnsureSession reads for itself, because "the read failed" is not "the
+	// session does not exist".
+	var sessionRead SessionRead
 	if state.SessionStore != nil {
 		snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
+		if storeErr == nil {
+			sessionRead = SessionRead{Snapshot: snapshot, Answered: true}
+		}
 
 		// Hoisted because it is STORE-INDEPENDENT: the claim window is decided by
 		// the message's own session end height against the observed block height,
@@ -588,10 +597,11 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// the tree. Unpaid work, on the one path the fix exists for.
 	//
 	// Running it on every delivery is safe: OnSessionCreated goes through
-	// CreateIfAbsent, a first-write-wins gate, so it costs one round-trip and
-	// cannot double-create.
+	// CreateIfAbsent, a first-write-wins gate, so it cannot double-create. With
+	// the read above handed over it costs no round-trip when the session exists.
 	state.SessionCoordinator.EnsureSession(
 		ctx,
+		sessionRead,
 		msg.Message.SessionId,
 		msg.Message.SupplierOperatorAddress,
 		msg.Message.ServiceId,
