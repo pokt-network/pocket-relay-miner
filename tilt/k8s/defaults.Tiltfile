@@ -9,6 +9,13 @@ def get_defaults():
 
             "debug": True,
         },
+        "localnet": {
+            # Which genesis and keys the stack starts from: "default" is
+            # tilt/config, "scale" is what scripts/localnet/gen-genesis.go writes
+            # to tilt/config/scale. Switching it on a running chain needs a
+            # fresh validator.
+            "profile": "default",
+        },
         "validator": {
             "enabled": True,
             "image": "ghcr.io/pokt-network/pocketd",

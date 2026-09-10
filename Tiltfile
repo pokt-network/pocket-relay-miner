@@ -78,8 +78,17 @@ docker_build(
     ],
 )
 
+# localnet.profile picks the genesis and keys everything below starts from.
+localnet_config_dirs = {"default": "tilt/config", "scale": "tilt/config/scale"}
+localnet_profile = config["localnet"]["profile"]
+if localnet_profile not in localnet_config_dirs:
+    fail("localnet.profile must be one of {}, got {}".format(sorted(localnet_config_dirs.keys()), localnet_profile))
+localnet_config_dir = localnet_config_dirs[localnet_profile]
+if localnet_profile != "default" and not os.path.exists(localnet_config_dir + "/genesis.json"):
+    fail("localnet.profile={} but {}/genesis.json does not exist -- generate it with: go run scripts/localnet/gen-genesis.go".format(localnet_profile, localnet_config_dir))
+
 # Load all-keys.yaml to extract supplier keys and application addresses
-all_keys_path = "tilt/config/all-keys.yaml"
+all_keys_path = localnet_config_dir + "/all-keys.yaml"
 supplier_keys = []
 known_applications = []
 if os.path.exists(all_keys_path):
@@ -96,8 +105,8 @@ if os.path.exists(all_keys_path):
 # Add known_applications to config for miner to use
 config["miner"]["known_applications"] = known_applications
 
-# Create genesis ConfigMap from tilt/config/genesis.json
-genesis_path = "tilt/config/genesis.json"
+# Create genesis ConfigMap from the profile's genesis.json
+genesis_path = localnet_config_dir + "/genesis.json"
 if os.path.exists(genesis_path):
     genesis_configmap = """
 apiVersion: v1
@@ -187,7 +196,7 @@ stringData:
 print("Deploying infrastructure...")
 deploy_redis(config)
 deploy_validator(config)
-deploy_account_init(config)
+deploy_account_init(config, all_keys_path, genesis_path)
 
 # Deploy relay-miner components
 # IMPORTANT: Miners MUST start before Relayers (cache population dependency)

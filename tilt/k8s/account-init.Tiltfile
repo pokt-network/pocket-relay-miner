@@ -4,11 +4,14 @@
 # transactions in PARALLEL for fast startup (~5 seconds vs ~60 seconds).
 
 load("./ports.Tiltfile", "get_port")
+load("./accounts.star", "staked_account_names")
 
-def deploy_account_init(config):
+def deploy_account_init(config, all_keys_path = "tilt/config/all-keys.yaml", genesis_path = "tilt/config/genesis.json"):
     """Deploy job to initialize account public keys"""
     if not config["validator"]["enabled"]:
         return
+
+    accounts = " ".join(staked_account_names(read_yaml(all_keys_path), read_json(genesis_path)))
 
     # Job to initialize all accounts by sending a tx
     # This registers their public keys on-chain
@@ -65,7 +68,7 @@ spec:
           cd /keys
 
           # All accounts that need pubkey initialization
-          ACCOUNTS="app1 app2 app3 app4 app5 app_develop-http-eager app_develop-websocket-optimistic app_develop-grpc-optimistic app_develop-stream-optimistic app_develop-cometbft-optimistic supplier1 supplier2 supplier3 supplier4 supplier5 supplier6 supplier7 supplier8 supplier9 supplier10 supplier11 supplier12 supplier13 supplier14 supplier15 gateway1"
+          ACCOUNTS="{}"
 
           echo "================================================"
           echo "PHASE 1: Importing all accounts to keyring"
@@ -247,7 +250,8 @@ spec:
             path: client.toml
 """.format(
         config["validator"]["image"],
-        config["validator"]["tag"]
+        config["validator"]["tag"],
+        accounts,
     )
 
     k8s_yaml(blob(init_job))
