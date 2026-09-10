@@ -930,8 +930,35 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	// unjudged. Everything else discards. The predicate keeps that reading in
 	// tx, beside the codes it reads, rather than spreading ABCI numbers into
 	// this file.
+	// AND a bound on re-injecting forever, which the two rules above cannot
+	// provide between them.
+	//
+	// CometBFT's mempool keeps a transaction in its cache after it COMMITS
+	// SUCCESSFULLY, so re-sending those bytes answers "I already hold this" for
+	// as long as the entry lives. That answer preserves the bytes and is exempt
+	// from counting an attempt -- both correct in isolation -- so an entry whose
+	// inclusion we cannot read re-injects on every block with the budget frozen
+	// at its starting value. Nothing else stops it: the counter never moves, so
+	// MaxRebroadcasts never bites.
+	//
+	// The bound therefore has to be a HEIGHT, not a count, and that is why
+	// LastAttemptHeight is kept: it is written only on attempts that spent
+	// budget, so it stands still exactly while this is happening and measures
+	// how long we have been getting nowhere. Falling back to SubmitHeight covers
+	// an entry that never had a counted attempt at all.
+	//
+	// Discarding here costs one signature and produces a transaction with a new
+	// nonce, which the node has no cached answer for -- so the next block gets a
+	// real reply instead of the same echo.
+	stuckSince := entry.LastAttemptHeight
+	if stuckSince == 0 {
+		stuckSince = entry.SubmitHeight
+	}
+	stuckTooLong := height-stuckSince >= reinjectionStallBlocks
+
 	switch {
-	case err != nil && !nothingWasSpent(err) && !tx.RejectionPreservesBytes(err):
+	case err != nil && !nothingWasSpent(err) && !tx.RejectionPreservesBytes(err),
+		err != nil && stuckTooLong:
 		entry.SignedBytes = nil
 		entry.SignedTimeoutAt = 0
 		entry.SignedTimeoutHeight = 0
@@ -1077,6 +1104,20 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 // cached bytes ask this same question, and they must not drift apart -- an
 // answer treated as "nothing happened" for the budget and as a failure for the
 // cache would spend a signature the counter says was never spent.
+// reinjectionStallBlocks is how many blocks of getting nowhere end a
+// re-injection.
+//
+// It is a CONSTANT and not a setting, the way this repository prefers: a commit
+// that changes a number is reviewable, a knob that can be turned until it means
+// something else is not. The value is reasoned, NOT measured against production:
+// a transaction the network accepts is normally included within a block or two,
+// so three blocks of the node answering "I already hold this" while the chain
+// still does not show it means the answer is an echo -- most likely from a
+// mempool cache holding a transaction that already committed -- and not a queue
+// we are waiting in. On a window of about ten blocks it also leaves room to sign
+// a replacement and have it land.
+const reinjectionStallBlocks = 3
+
 func nothingWasSpent(err error) bool {
 	return errors.Is(err, tx.ErrTxConcurrencySaturated) || errors.Is(err, tx.ErrTxAlreadyQueued)
 }
