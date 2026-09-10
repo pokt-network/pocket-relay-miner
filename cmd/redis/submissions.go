@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pokt-network/pocket-relay-miner/miner"
 	"os"
 	"sort"
 	"text/tabwriter"
@@ -314,32 +315,16 @@ func printSubmissionDetail(r *submissionRecord) {
 	fmt.Println("================================================================================")
 }
 
-// submissionRecord mirrors the SubmissionTrackingRecord from miner/submission_tracker.go
-type submissionRecord struct {
-	Supplier             string `json:"supplier"`
-	Service              string `json:"service"`
-	Application          string `json:"application"`
-	SessionID            string `json:"session_id"`
-	SessionStart         int64  `json:"session_start"`
-	SessionEnd           int64  `json:"session_end"`
-	ClaimHash            string `json:"claim_hash"`
-	ClaimTxHash          string `json:"claim_tx_hash"`
-	ClaimSuccess         bool   `json:"claim_success"`
-	ClaimErrorReason     string `json:"claim_error_reason,omitempty"`
-	ClaimSubmitHeight    int64  `json:"claim_submit_height"`
-	ClaimSubmitTimestamp int64  `json:"claim_submit_timestamp"`
-	ClaimSubmitTimeUTC   string `json:"claim_submit_time_utc"`
-	ClaimCurrentHeight   int64  `json:"claim_current_height"`
-	ProofHash            string `json:"proof_hash,omitempty"`
-	ProofTxHash          string `json:"proof_tx_hash,omitempty"`
-	ProofSuccess         bool   `json:"proof_success"`
-	ProofErrorReason     string `json:"proof_error_reason,omitempty"`
-	ProofSubmitHeight    int64  `json:"proof_submit_height,omitempty"`
-	ProofSubmitTimestamp int64  `json:"proof_submit_timestamp,omitempty"`
-	ProofSubmitTimeUTC   string `json:"proof_submit_time_utc,omitempty"`
-	ProofCurrentHeight   int64  `json:"proof_current_height,omitempty"`
-	NumRelays            int64  `json:"num_relays"`
-	ComputeUnits         int64  `json:"compute_units"`
-	ProofRequired        bool   `json:"proof_required"`
-	ProofRequirementSeed string `json:"proof_requirement_seed,omitempty"`
-}
+// The record IS the miner's, aliased rather than copied. It used to be a
+// hand-maintained mirror whose comment said "mirrors ..." and never said WHY,
+// and an unexplained duplication cannot be reviewed: nobody could judge whether
+// it was still necessary, because nobody had said it ever was. It drifted by
+// five fields — both on-chain outcomes, both inclusion heights and the proof
+// rejection cause — so this command could not show whether a claim had reached
+// a block, which is most of what the inclusion reconciler exists to determine.
+//
+// Sharing the type IS the check. There is no cycle to justify a copy: miner
+// imports nothing from cmd/, and streams.go in this very package already
+// imports miner. A field added to the record now reaches this command by
+// compiling, not by someone remembering.
+type submissionRecord = miner.SubmissionTrackingRecord
