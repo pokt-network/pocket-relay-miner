@@ -100,10 +100,10 @@ type rebroadcastEntry struct {
 	// every attempt that does not, which is the same test the counter beside it
 	// uses.
 	//
-	// IT HAS NO READER TODAY, and that is stated plainly rather than implied: the
-	// resend spacing that consumed it was removed along with the resend calendar,
-	// so nothing currently branches on this value. It is still written, still
-	// persisted, and deliberately kept.
+	// Its one reader is the re-injection stall bound in rebroadcast (stuckSince
+	// / stuckTooLong). The resend spacing that first read it went with the resend
+	// calendar; the field was kept for the constraint below, and that bound is
+	// the reader it was kept for.
 	//
 	// What keeps it is a constraint the counter cannot express. A resend that the
 	// chain answers with "I already hold this transaction" is exempt from

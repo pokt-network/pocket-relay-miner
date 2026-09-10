@@ -7,13 +7,14 @@ import (
 
 // DefaultTxRPCTimeout bounds ONE broadcast attempt's network work.
 //
-// It exists because the window budget is the wrong clock for an RPC.
-// DefaultTxTimeoutMin is 2 minutes and the minimum clamp is unconditional, so
-// the effective window timeout is never under two minutes -- while BroadcastTx
-// runs in BROADCAST_MODE_SYNC and returns after CheckTx, in milliseconds. Two
-// minutes on an RPC that healthily takes milliseconds is not a bound in any
-// useful sense: it measures how long the transaction is worth something
-// on-chain, not how long a healthy node may take to answer.
+// It exists because the window budget is the wrong clock for an RPC. That
+// budget is the whole window in wall time, capped at the chain's ceiling
+// (WindowTimeout) -- on mainnet the ceiling itself, DefaultTxTimeoutMax, just
+// under ten minutes -- while BroadcastTx runs in BROADCAST_MODE_SYNC and
+// returns after CheckTx, in milliseconds. Minutes on an RPC that healthily
+// takes milliseconds is not a bound in any useful sense: it measures how long
+// the transaction is worth something on-chain, not how long a healthy node may
+// take to answer.
 //
 // The consequence is not academic: a broadcast that cannot finish keeps a
 // transition-subpool worker for the whole window, and that subpool is per
@@ -22,8 +23,8 @@ import (
 // WHY 30s, AND IT IS A JUDGEMENT: an order of magnitude above the 5s the
 // operator already declares for chain queries (miner.Config.GetQueryTimeout),
 // leaving room for a Simulate of a batched claim -- Simulate EXECUTES the
-// messages, so it is legitimately heavier than a read -- and an order of
-// magnitude below the two-minute floor it replaces. Nobody measured it.
+// messages, so it is legitimately heavier than a read -- and about twenty times
+// below mainnet's window budget, the clock it replaces. Nobody measured it.
 // The evidence to move it is already wired: ha_tx_broadcast_latency_seconds is
 // this exact path's histogram, per supplier, so an operator reads their own p99
 // and chooses.

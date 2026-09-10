@@ -2952,7 +2952,9 @@ func (m *SupplierManager) recordMissingCause(
 // Unknown already means exactly this ("did not answer in a way that can be
 // decided"), and the cause only feeds a label and a Debug log, so declining
 // to name it costs no behaviour. Preferring not to know over knowing wrong is
-// the cheaper error here. With a cap of 1 the condition is unreachable.
+// the cheaper error here. The default sets no cap (MaxRebroadcasts nil), so any
+// entry with two counted resends reaches it; only an explicit cap of 1 makes it
+// unreachable.
 func resolveMissingCause(cause tx.TxInclusion, rebroadcasts int) tx.TxInclusion {
 	if cause == tx.TxInclusionNotInBlock && rebroadcasts > 1 {
 		return tx.TxInclusionUnknown

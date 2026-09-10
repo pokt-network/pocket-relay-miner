@@ -556,7 +556,6 @@ var (
 	//   on_chain_found   — claim is on-chain
 	//   on_chain_missing — claim window closed without the claim landing
 	//   poll_error       — GetClaim kept erroring through the poll horizon
-	//   poll_dropped     — inclusion pool queue saturated; no record taken
 	claimInclusionOutcomeTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -620,7 +619,7 @@ var (
 	// state were only published once a read failed, then before the first read
 	// there would be no series at all, and "I have not looked yet" would be
 	// indistinguishable from "it works". That is precisely how poll_dropped
-	// misleads, one level further in -- a signal that exists to reveal an
+	// misled, one level further in -- a signal that exists to reveal an
 	// absence, having an absence of its own.
 	inclusionReadState = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -709,7 +708,6 @@ var (
 	//   on_chain_found   — proof is on-chain (possibly after a rebroadcast)
 	//   on_chain_missing — proof window closed without the proof landing
 	//   poll_error       — GetProof kept erroring through the poll horizon
-	//   poll_dropped     — inclusion pool queue saturated; no record taken
 	proofInclusionOutcomeTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -1698,8 +1696,8 @@ func RecordRelayLostToPanic(supplier, serviceID string) {
 // A counter child does not exist until it is first incremented, so before the
 // first occurrence a query for these returns NO DATA -- which an operator reads
 // as "this never happens" and which is indistinguishable from the metric not
-// existing at all. That is not hypothetical here: `poll_dropped` is documented
-// as an outcome in two files and has never had an emitter, so anyone who looked
+// existing at all. That is not hypothetical here: `poll_dropped` was documented
+// as an outcome in two files and never had an emitter, so anyone who looked
 // for it concluded saturation does not occur.
 //
 // The sets are the closed ones declared in inclusion_reconciler.go. Registering

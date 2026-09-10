@@ -41,7 +41,7 @@ type SubmissionTrackingRecord struct {
 
 	// Claim on-chain outcome (populated by the inclusion reconciler after polling
 	// GetClaim). One of: "", "on_chain_found", "on_chain_missing",
-	// "poll_error", "poll_dropped". Empty string = poll hasn't resolved yet
+	// "poll_error". Empty string = poll hasn't resolved yet
 	// (or the tracker was disabled).
 	ClaimOnChainOutcome  string `json:"claim_on_chain_outcome,omitempty"`
 	ClaimInclusionHeight int64  `json:"claim_inclusion_height,omitempty"`
@@ -69,7 +69,7 @@ type SubmissionTrackingRecord struct {
 
 	// Proof on-chain outcome (populated by the inclusion reconciler after polling
 	// GetProof). One of: "", "on_chain_found", "on_chain_missing",
-	// "poll_error", "poll_dropped". Empty string = poll hasn't resolved yet
+	// "poll_error". Empty string = poll hasn't resolved yet
 	// (or the tracker was disabled). This is the proof-side analogue of
 	// ClaimOnChainOutcome — without it, a CheckTx-accepted-but-never-included
 	// proof was indistinguishable from a settled one (silent PROOF_MISSING).

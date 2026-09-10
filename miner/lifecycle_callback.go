@@ -483,12 +483,17 @@ type proofBuildResult struct {
 // ejected message with no entry would be forfeited for a condition that heals
 // itself, so the default is to keep it and there is no enumeration of "terminal"
 // verdicts to maintain -- classifying chain behaviour by text is exactly what
-// goes stale. Keeping one too many costs a single capped resend; keeping one too
-// few costs a claim.
+// goes stale. Keeping one too many costs up to one resend per block the window
+// has left: the default sets no cap, and the entry holds no signed bytes, so the
+// reconciler signs a fresh transaction each block, the chain refuses it again
+// and the attempt is counted, until the window closes and the entry is recorded
+// missing and cleared. Each one is a signature and a permit, plus a simulation
+// under automatic gas; whether the chain also charges a fee depends on where it
+// refuses, which is not walked here. Keeping one too few costs a claim.
 //
-// OrigTxHash is empty because nothing was transmitted, which is TRUE: to the
-// reconciler that is the order to resend at SubmitHeight+1 rather than at the
-// window midpoint.
+// OrigTxHash is empty because nothing was transmitted, which is TRUE. The
+// reconciler resends it from SubmitHeight+1, as it does every stored entry
+// (canRebroadcast); the empty hash does not decide that.
 func (lc *LifecycleCallback) settleEjectedClaim(
 	ctx context.Context,
 	logger logging.Logger,
@@ -616,10 +621,10 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 // A fee, nonce or TTL failure arrives that way: the ante handler runs in
 // simulation too and fails before any message executes.
 //
-// It deliberately persists NO rebroadcast entry. An empty OrigTxHash is not a
-// missing value to the reconciler, it is an instruction -- "never broadcast,
-// resend promptly" -- so a proof the chain just refused would be re-sent a block
-// later, doomed, burning a permit and a simulation.
+// It deliberately persists NO rebroadcast entry. The reconciler resends every
+// stored entry from the block after its submit (canRebroadcast), so a proof the
+// chain just refused would be re-sent a block later, doomed, burning a permit
+// and a simulation.
 func (lc *LifecycleCallback) settleNotRequiredBatch(
 	ctx context.Context,
 	logger logging.Logger,
@@ -1619,8 +1624,14 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// -- counting the group as lost, rewriting the tracker as a
 				// failure, and overwriting the good rebroadcast entry with
 				// OrigTxHash="" (that persist has no `claimTxHash != ""` guard,
-				// unlike the one in this branch), which burns the single
-				// MaxRebroadcasts resend on a claim already on its way.
+				// unlike the one in this branch). With a single-resend cap that
+				// overwrite burned the one resend on a claim already on its way.
+				// There is no such cap now, and the overwrite keeps the bytes of
+				// the attempt that succeeded, so a resend re-injects them while
+				// they are still valid. What it would cost today is the record:
+				// with both hashes empty, UpdateClaimOnChainOutcome returns
+				// without writing, so the "failure" the block below records is
+				// never corrected to found.
 				//
 				// `windowClosed` is NOT the model to copy here: it exists
 				// because in that case lastErr must STAY set (the submission did
@@ -1789,7 +1800,8 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			// state with no lifecycle retry, so without this a build-OK-but-
 			// submit-failed claim (gap / lazyload-at-submit / transient error) is
 			// silently forfeited. No tx hash — OrigTxHash="" marks "never
-			// broadcast", so the reconciler resends promptly (not at mid-window).
+			// confirmed". It does not change when the reconciler resends: every
+			// stored entry goes from the block after its submit (canRebroadcast).
 			if lc.rebroadcastStore != nil {
 				lc.persistRebroadcastEntries(
 					// Hash empty, BYTES PRESENT: the transaction was built and
@@ -2660,8 +2672,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			// window is open. The session is now in a terminal proof_tx_error
 			// state with no lifecycle retry, so without this a build-OK-but-
 			// submit-failed proof (gap / lazyload-at-submit / transient error) is
-			// silently forfeited. OrigTxHash="" marks "never broadcast", so the
-			// reconciler resends promptly (not at mid-window).
+			// silently forfeited. OrigTxHash="" marks "never confirmed". It does
+			// not change when the reconciler resends: every stored entry goes from
+			// the block after its submit (canRebroadcast).
 			if lc.rebroadcastStore != nil {
 				lc.persistRebroadcastEntries(
 					ctx, RebroadcastPhaseProof, validProofSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",

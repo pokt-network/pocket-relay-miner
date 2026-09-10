@@ -518,22 +518,6 @@ func TxWindowFrom(ctx context.Context) (time.Duration, string, bool) {
 	return window.raw, window.regime, true
 }
 
-// computeEffectiveTxTimeout is the pure math of the deadline decision.
-// Extracted so the skew→clamp pipeline can be tested directly without
-// building a full TxClient. source is one of:
-//
-//	"default"   — no raw window in context; fallbackDefault used
-//	"min_clamp" — raw - skew fell below min
-//	"max_clamp" — raw - skew exceeded max
-//	"window"    — raw - skew fit inside [min, max]
-//
-// skew MUST be subtracted BEFORE clamping: if we clamped first and then
-// subtracted, a raw value close to max would end up between max and
-// max-skew, but a raw value AT max would get clamped to max and then
-// land at max-skew — fine — but then the edge case where raw sits
-// exactly at the cosmos-sdk hard limit (600s) would hand the chain a
-// timeoutTimestamp at (now + max) with zero jitter headroom. Subtract
-// first so max stays an absolute ceiling.
 // txNonceSpread bounds the offset added to every unordered transaction's
 // timeout timestamp, and it is what keeps the nonce unique.
 //
@@ -546,24 +530,22 @@ func TxWindowFrom(ctx context.Context) (time.Duration, string, bool) {
 // event, with relays lost on EVERY transport -- which is what places the cause
 // here rather than in one transport's path.
 //
-// It separates transactions in TWO regimes, and both are real, because
-// computeEffectiveTxTimeout returns a different shape in each:
+// It only has to separate transactions inside ONE block. The duration added to
+// the anchor is constant for a whole window -- WindowTimeout takes the window's
+// full length, not the blocks left in it, and a resend reuses the budget stored
+// with its original (the ceiling, if an older binary stripped it) -- so
+// anchor+timeout moves with the anchor, and the chain
+// only accepts a block whose time is strictly after the previous one. Two
+// transactions of one window built against different latest blocks are
+// therefore apart by the interval between those blocks. What collides is
+// several built against the SAME latest block: two session-end groups, the
+// retry loop, a rebroadcast landing beside a retry.
 //
-//   - CLAMPED (min_clamp / max_clamp -- all of localnet, and mainnet late in a
-//     window): the deadline is a FIXED duration, so anchor+timeout advances
-//     with the anchor. Blocks are naturally separated; what collides is several
-//     transactions inside ONE block -- two session-end groups, the retry loop,
-//     a rebroadcast landing beside a retry.
-//   - WINDOW (no clamp -- mainnet early in a window): raw is
-//     remaining_blocks * configured_block_time, so between blocks the anchor
-//     advances by the REAL interval while the duration shrinks by the
-//     CONFIGURED one. anchor+timeout is then invariant -- it points at the
-//     window close, which does not move -- so a RETRY IN A LATER BLOCK
-//     recomputes the same nonce as its original. That is the case the 0/5/7
-//     schedule produces on purpose.
-//     NOT MEASURED: the cancellation is exact only where the real block
-//     interval matches the configured one to the nanosecond, and real blocks
-//     drift. Plausible path, not a guaranteed mechanism.
+// A retry in a LATER block used to recompute its original's nonce, when the
+// duration was the blocks left and shrank as the anchor advanced. That went
+// with the arithmetic. NOT MEASURED: a claim and a proof can carry different
+// window lengths, and could then still meet across blocks if the real block
+// interval matched that difference to the nanosecond.
 //
 // WHY ADDING IS SAFE, AND SUBTRACTING IS NOT. The ante handler makes three
 // checks and an offset that only moves the timestamp LATER can trip none of
@@ -573,7 +555,7 @@ func TxWindowFrom(ctx context.Context) (time.Duration, string, bool) {
 // THE SIZE. 10ms is 10^7 slots for a problem that needs ~10^4, and it costs
 // 0.1% of the drift budget instead of the 10% a full second cost. It must stay
 // well under the minimum block interval so the offset cannot create an overlap
-// between adjacent blocks that the clamped regime otherwise separates -- three
+// between adjacent blocks that the constant duration otherwise separates -- three
 // orders of magnitude of headroom against localnet's 10s.
 const txNonceSpread = 10 * time.Millisecond
 
@@ -876,9 +858,9 @@ func (tc *TxClient) signAndEncode(
 		}
 	}
 	// The offset is what keeps the unordered nonce unique. Without it every
-	// transaction this process builds for one supplier inside one block
-	// carries the same (timeout, sender) pair -- and in the unclamped regime,
-	// so does a retry in a LATER block. See txNonceSpread.
+	// transaction this process builds for one supplier and one window against
+	// one latest block carries the same (timeout, sender) pair. See
+	// txNonceSpread.
 	timeoutTimestamp := anchor.Add(timeoutDuration).Add(nextTxNonceOffset())
 	txBuilder.SetTimeoutTimestamp(timeoutTimestamp)
 
@@ -1815,8 +1797,9 @@ func (c *HASupplierClient) CreateClaimsReturningHash(
 		// Stash the PAYLOAD but not a hash. A send that got no answer is
 		// precisely the one whose bytes a resend must re-inject, and this is
 		// the only place they still exist -- while the hash stays empty because
-		// nothing confirmed it, which is the sentinel the reconciler reads as
-		// "never broadcast" and resends promptly for.
+		// nothing confirmed it. The empty hash does not change WHEN the
+		// reconciler resends: every stored entry goes from the block after its
+		// submit (canRebroadcast).
 		c.lastClaimTxMu.Lock()
 		c.lastClaimSigned = signed
 		c.lastClaimTxMu.Unlock()

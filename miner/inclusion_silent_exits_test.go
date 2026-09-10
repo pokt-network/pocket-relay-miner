@@ -164,7 +164,7 @@ func TestClear_FailureIsCountedSoAReEmissionIsAttributable(t *testing.T) {
 // A counter child does not exist until its first increment, so without the
 // init() a query for these returns no data before the first occurrence, and no
 // data reads as "this never happens". That is not a hypothetical: poll_dropped
-// is documented as an outcome in two files and has never had an emitter, so
+// was documented as an outcome in two files and never had an emitter, so
 // anyone who went looking concluded that saturation does not occur.
 //
 // It counts SERIES, not values, and that is the point: the values are zero
@@ -193,7 +193,7 @@ func TestSilentExitSeriesExistBeforeAnythingHappens(t *testing.T) {
 //
 // If the state were only published once a read had happened, then "I have not
 // looked yet" and "it works" would be the same absence of data — which is the
-// exact way poll_dropped misleads, one level further in: a signal that exists to
+// exact way poll_dropped misled, one level further in: a signal that exists to
 // reveal an absence, having an absence of its own.
 //
 // It counts SERIES, because the values are zero either way before a probe runs.
