@@ -924,6 +924,20 @@ redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
 return old_state
 `)
 
+// luaIsTerminal defines is_terminal(state), the Lua twin of
+// SessionState.IsTerminal(), for every script that must refuse a terminal
+// session. One copy for all of them: a state added to IsTerminal() and missed
+// here would let a script count relays into a finished session.
+const luaIsTerminal = `
+local function is_terminal(state)
+	return state == 'proved' or state == 'probabilistic_proved'
+		or state == 'claim_window_closed' or state == 'claim_tx_error'
+		or state == 'claim_missing'
+		or state == 'proof_window_closed' or state == 'proof_tx_error'
+		or state == 'claim_skipped'
+end
+`
+
 // incrementRelayCountScript atomically increments relay_count and
 // total_compute_units on a session hash key, guarded by the terminal-state
 // check. This is a single Redis round-trip with no cjson parsing.
@@ -939,19 +953,15 @@ return old_state
 //	1 = session not found
 //	2 = session in terminal state
 //
-// Terminal states MUST match SessionState.IsTerminal() in Go. When adding
-// a new terminal state, update both places.
-var incrementRelayCountScript = redis.NewScript(`
+// The terminal check is luaIsTerminal, shared with relayBatchScript;
+// TestLuaIsTerminalMatchesIsTerminal fails if it and IsTerminal() diverge.
+var incrementRelayCountScript = redis.NewScript(luaIsTerminal + `
 if redis.call('EXISTS', KEYS[1]) == 0 then
 	return 1
 end
 
 local state = redis.call('HGET', KEYS[1], 'state')
-if state == 'proved' or state == 'probabilistic_proved'
-	or state == 'claim_window_closed' or state == 'claim_tx_error'
-	or state == 'claim_missing'
-	or state == 'proof_window_closed' or state == 'proof_tx_error'
-	or state == 'claim_skipped' then
+if is_terminal(state) then
 	return 2
 end
 

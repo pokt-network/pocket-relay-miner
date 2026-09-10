@@ -34,6 +34,15 @@ properties:
         description: Timeout for reclaiming idle messages from crashed consumers
         default: 60000
         minimum: 1000
+      relay_batch_flush_interval_ms:
+        type: integer
+        description: >-
+          How often each supplier marks, counts and acknowledges, in one Redis
+          script per session, the relays it already added to the session tree.
+          Their stream entries stay pending until then, so it must be at most
+          claim_idle_timeout_ms / 4; startup fails otherwise.
+        default: 15000
+        minimum: 0
       pool_size:
         type: integer
         description: Maximum number of socket connections (0 = use default 20 × GOMAXPROCS)

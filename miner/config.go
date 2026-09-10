@@ -270,6 +270,36 @@ type RedisConfig struct {
 	// ClaimIdleTimeoutMs is how long a message can be pending before being claimed.
 	// Default: 60000 (1 minute)
 	ClaimIdleTimeoutMs int64 `yaml:"claim_idle_timeout_ms,omitempty"`
+
+	// RelayBatchFlushIntervalMs is how often each supplier marks, counts and
+	// acknowledges, in one script per session, the relays it already put in
+	// the SMST. Until then those stream entries stay pending, so it must be at
+	// most a quarter of claim_idle_timeout_ms: another miner's reclaim takes an
+	// entry idle past that timeout without asking whether its owner is alive.
+	// Default: 15000 (15 seconds), exactly the ceiling for the default 60 s.
+	RelayBatchFlushIntervalMs int64 `yaml:"relay_batch_flush_interval_ms,omitempty"`
+}
+
+// DefaultRelayBatchFlushInterval is the relay batch flush interval when
+// redis.relay_batch_flush_interval_ms is unset.
+const DefaultRelayBatchFlushInterval = 15 * time.Second
+
+// validateRelayBatchFlushInterval refuses a flush interval longer than a
+// quarter of the reclaim's idle timeout. A batched entry stays pending until
+// its flush, and its idle time also includes the wait in the delivery channel;
+// the quarter keeps the whole of it under the timeout.
+func validateRelayBatchFlushInterval(interval, claimIdleTimeout time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("redis.relay_batch_flush_interval_ms must be positive (got %s)", interval)
+	}
+	if interval > claimIdleTimeout/4 {
+		return fmt.Errorf(
+			"redis.relay_batch_flush_interval_ms (%s) must be at most a quarter of redis.claim_idle_timeout_ms (%s): "+
+				"relays wait unacknowledged until the flush, and an entry idle past the timeout is "+
+				"reclaimed by another miner while this one is still processing it",
+			interval, claimIdleTimeout)
+	}
+	return nil
 }
 
 // TransactionConfig contains configuration for claim/proof transaction submission.
@@ -439,6 +469,12 @@ func (c *Config) Validate() error {
 	if c.Redis.ConnMaxIdleTimeSeconds < 0 {
 		return fmt.Errorf("redis.conn_max_idle_time_seconds must be >= 0 (0 = use default)")
 	}
+	if c.Redis.RelayBatchFlushIntervalMs < 0 {
+		return fmt.Errorf("redis.relay_batch_flush_interval_ms must be >= 0 (0 = use default)")
+	}
+	if err := validateRelayBatchFlushInterval(c.GetRelayBatchFlushInterval(), c.GetClaimIdleTimeout()); err != nil {
+		return err
+	}
 
 	if c.PocketNode.QueryNodeRPCUrl == "" {
 		return fmt.Errorf("pocket_node.query_node_rpc_url is required")
@@ -534,6 +570,14 @@ func (c *Config) GetClaimIdleTimeout() time.Duration {
 		return time.Duration(c.Redis.ClaimIdleTimeoutMs) * time.Millisecond
 	}
 	return time.Minute // Default
+}
+
+// GetRelayBatchFlushInterval returns the relay batch flush interval as a duration.
+func (c *Config) GetRelayBatchFlushInterval() time.Duration {
+	if c.Redis.RelayBatchFlushIntervalMs > 0 {
+		return time.Duration(c.Redis.RelayBatchFlushIntervalMs) * time.Millisecond
+	}
+	return DefaultRelayBatchFlushInterval
 }
 
 // GetBatchSize returns the batch size with defaults.

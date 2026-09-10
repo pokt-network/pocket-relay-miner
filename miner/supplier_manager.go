@@ -134,6 +134,11 @@ type SupplierState struct {
 	// SMST management (for building and managing session trees)
 	SMSTManager *RedisSMSTManager
 
+	// relayBatch finishes, per session, the relays already in the SMST: dedup
+	// mark, counters and stream acknowledgement in one script. nil means every
+	// relay is finished on its own.
+	relayBatch *relayBatch
+
 	// Lifecycle management (for claim/proof submission with timing spread)
 	LifecycleManager  *SessionLifecycleManager
 	LifecycleCallback *LifecycleCallback
@@ -192,6 +197,11 @@ type SupplierManagerConfig struct {
 	// Note: stream consumption blocks for one block interval per XREADGROUP
 	// (not BLOCK 0, which could not be interrupted on shutdown) - not configurable
 	ClaimIdleTimeout time.Duration // How long a message can be pending before being claimed
+
+	// RelayBatchFlushInterval is how often each supplier flushes its relay
+	// batch. Zero disables the tick, leaving the size cap, the claim transition
+	// and the supplier's exit as the only flushes (tests construct it that way).
+	RelayBatchFlushInterval time.Duration
 
 	// SupplierCache for publishing supplier state to relayers
 	SupplierCache *cache.SupplierCache
@@ -1386,6 +1396,12 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		},
 	)
 
+	// Built before the lifecycle manager, whose claim transition flushes it.
+	relayBatch := newRelayBatch(
+		m.logger, m.config.RedisClient, operatorAddr,
+		sessionStore, m.deduplicator, smstManager, sessionCoordinator, consumer,
+	)
+
 	// SMST trees are lazy-loaded from Redis on-demand:
 	//   - UpdateTree (relay path) → GetOrCreateTree creates/loads tree from Redis
 	//   - ProveClosest / GetTreeRoot → loadTreeFromRedis for HA failover recovery
@@ -1508,6 +1524,13 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		)
 		lifecycleManager.SetMeterCleanupPublisher(meterCleanupPublisher)
 
+		// A session about to be claimed gets its batched relays counted first,
+		// so the relay_count the claim transition refreshes includes them.
+		// Set before Start: the transitions read it on their own goroutines.
+		if relayBatch != nil {
+			lifecycleManager.SetPendingRelayFlusher(relayBatch.FlushSessions)
+		}
+
 		// Start lifecycle manager
 		if startErr := lifecycleManager.Start(supplierCtx); startErr != nil {
 			m.logger.Warn().
@@ -1545,6 +1568,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		SessionStore:       sessionStore,
 		SessionCoordinator: sessionCoordinator,
 		SMSTManager:        smstManager,
+		relayBatch:         relayBatch,
 		LifecycleManager:   lifecycleManager,
 		LifecycleCallback:  lifecycleCallback,
 		SupplierClient:     supplierClient,
@@ -1794,16 +1818,32 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 
 	msgChan := state.Consumer.Consume(ctx)
 
+	// The flush tick runs on this goroutine, between deliveries, so a flush
+	// never races the relays being added: the lifecycle's claim transition is
+	// the only other caller, and the batch serialises it.
+	var flushTick <-chan time.Time
+	if state.relayBatch != nil && m.config.RelayBatchFlushInterval > 0 {
+		ticker := time.NewTicker(m.config.RelayBatchFlushInterval)
+		defer ticker.Stop()
+		flushTick = ticker.C
+	}
+
 	for {
 		select {
 		case msg, ok := <-msgChan:
 			if !ok {
 				// Channel closed, exit
+				m.releaseRelayBatchOnExit(ctx, state)
 				return
 			}
 			m.handleStreamMessage(ctx, state, msg)
 
+		case <-flushTick:
+			state.relayBatch.FlushAll(ctx)
+
 		case <-ctx.Done():
+			// The batch goes back first, while the exit budget is whole.
+			m.releaseRelayBatchOnExit(ctx, state)
 			// Do NOT abandon what is already in the delivery buffer. Those
 			// relays were handed over by XREADGROUP, so they are in this
 			// consumer's pending list under a name that embeds the pid and
@@ -1814,16 +1854,44 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 	}
 }
 
+// releaseRelayBatchOnExit hands the supplier's relay batch back to the group,
+// unflushed, as its consume loop ends -- shutdown, rebalance or key removal --
+// which is before removeSupplier and Close close the consumer, so the releases
+// can still be sent. It releases rather than flushes because flushing every
+// held session does not fit the exit window (Jorge, 2026-09-10); the relays are
+// already in the tree and were never marked, so the next consumer counts them
+// once.
+//
+// The exception is a removed key, decided the way drainDeliveryBuffer decides
+// it: nobody in this fleet can claim those relays, so the batch is acknowledged
+// and counted as dropped for want of a key instead of left pending forever.
+//
+// Like drainDeliveryBuffer it detaches from the supplier's context, which is
+// already cancelled, and bounds itself by shutdownDrainWindow.
+func (m *SupplierManager) releaseRelayBatchOnExit(ctx context.Context, state *SupplierState) {
+	if state.relayBatch == nil {
+		return
+	}
+	exitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownDrainWindow)
+	defer cancel()
+	if drainReason(state.drainReason.Load()) == drainKeyRemoved {
+		state.relayBatch.AckAllAsLost(exitCtx)
+		return
+	}
+	state.relayBatch.ReleaseAll(exitCtx)
+}
+
 // handleStreamMessage runs one delivered relay to completion: process, release
 // the pooled message, and acknowledge on success. Returns whether the message
 // was actually acknowledged -- true when the relay was processed, and also when
 // it was LOST to a recovered panic (deterministic, so it is acked and counted
 // rather than retried forever); false on any other processing failure, where the
-// entry is handed back for a later delivery, OR on an AckMessage error (Redis
-// hiccup, connection reset), which a caller MUST check before treating the
-// relay as done rather than assuming success from "handleStreamMessage
-// returned" (review 2026-08-21: the shutdown drain's metric used to do
-// exactly that).
+// entry is handed back for a later delivery, for a relay handed to the relay
+// batch (acknowledged when the batch flushes, not by this call), OR on an
+// AckMessage error (Redis hiccup, connection reset), which a caller MUST check
+// before treating the relay as done rather than assuming success from
+// "handleStreamMessage returned" (review 2026-08-21: the shutdown drain's
+// metric used to do exactly that).
 //
 // It takes its own ctx rather than closing over the supplier's, because the
 // graceful-shutdown drain calls it with a context that is deliberately still
@@ -1858,6 +1926,7 @@ func (m *SupplierManager) handleStreamMessage(
 	serviceID := msg.Message.ServiceId
 	sessionID := msg.Message.SessionId
 	var processErr error
+	batched := false
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -1874,6 +1943,12 @@ func (m *SupplierManager) handleStreamMessage(
 		if m.onRelay != nil {
 			startTime := time.Now()
 			processErr = m.onRelay(ctx, state.OperatorAddr, &msg)
+			// Processed, and its acknowledgement belongs to the relay batch:
+			// a success, not a failure to hand back.
+			if errors.Is(processErr, ErrRelayBatched) {
+				batched = true
+				processErr = nil
+			}
 			status := "success"
 			if processErr != nil {
 				status = "error"
@@ -1947,6 +2022,10 @@ func (m *SupplierManager) handleStreamMessage(
 				Msg("failed to release a relay after a processing error; it stays pending until this process restarts")
 		}
 		return false
+	}
+
+	if batched {
+		return false // not acknowledged by this call: the batch acknowledges it when it flushes
 	}
 
 	// ACK immediately after successful processing

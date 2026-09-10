@@ -32,10 +32,6 @@ func (m *mockDeduplicator) MarkProcessed(_ context.Context, _ []byte, _ string) 
 	return true, nil
 }
 
-func (m *mockDeduplicator) MarkProcessedBatch(_ context.Context, _ [][]byte, _ string) error {
-	return nil
-}
-
 func (m *mockDeduplicator) CleanupSession(_ context.Context, sessionID string) error {
 	m.cleanedSessions = append(m.cleanedSessions, sessionID)
 	return m.cleanupErr

@@ -840,6 +840,21 @@ func (c *StreamsConsumer) AckMessage(ctx context.Context, msg transport.StreamMe
 	return nil
 }
 
+// StreamName is the one stream this consumer reads, and so the stream every
+// message it delivers must be acknowledged on.
+func (c *StreamsConsumer) StreamName() string { return c.streamName }
+
+// ConsumerGroup is the group this consumer reads and acknowledges in.
+func (c *StreamsConsumer) ConsumerGroup() string { return c.config.ConsumerGroup }
+
+// RecordAcked counts n messages acknowledged outside AckMessage -- by a script
+// that deletes them in the same call as other writes -- on the same series
+// AckMessage counts on, so the metric keeps meaning "acknowledged" whichever
+// path did it.
+func (c *StreamsConsumer) RecordAcked(n int) {
+	ackedTotal.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(n))
+}
+
 // TrimStream removes entries older than the specified duration using MINID.
 // NOTE: With XAckDel, messages are deleted on ack, so this is now a backup safety net
 // for any orphaned messages that weren't properly acknowledged.

@@ -1,6 +1,7 @@
 package miner
 
 import (
+	"bytes"
 	"context"
 	"crypto/tls"
 	"errors"
@@ -424,6 +425,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			SMSTLiveRootCheckpointInterval: w.config.Config.SMSTLiveRootCheckpointInterval,
 			BatchSize:                      w.config.Config.BatchSize,
 			ClaimIdleTimeout:               w.config.Config.GetClaimIdleTimeout(),
+			RelayBatchFlushInterval:        w.config.Config.GetRelayBatchFlushInterval(),
 			SupplierCache:                  w.supplierCache,
 			MinerID:                        w.config.Config.Redis.ConsumerName,
 			SupplierQueryClient:            w.queryClients.Supplier(),
@@ -681,43 +683,12 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		return nil // ACK and discard - unknown errors shouldn't block processing
 	}
 
-	// Mark relay hash as processed in the deduplicator. This runs on every
-	// relay (not only reclaims) because if the current consumer crashes
-	// after the SMST update but before the stream ACK, the next consumer
-	// will reclaim the message and needs the dedup set to recognize it as
-	// already processed. The SADD result is the correctness gate for
-	// OnRelayProcessed below: the reclaim skips entries this consumer owns
-	// and takes only those idle past the timeout, but idleness cannot
-	// distinguish a dead consumer from a slow-but-alive one — so the
-	// duplicate can be the ORIGINAL copy arriving with IsReclaim=false after
-	// another consumer already processed the reclaimed one, and this is the
-	// only place that catches that ordering.
-	// Ordering matters: MarkProcessed runs BEFORE OnRelayProcessed
-	// (IncrementRelayCount) below so that a crash between them leaves the
-	// counter under-counted rather than over-counted — under-count is the
-	// safe direction (economic viability predicts lower rewards and skips
-	// marginal sessions instead of claiming unprofitable ones).
-	firstProcessing := true
-	if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
-		added, markErr := dedup.MarkProcessed(ctx, msg.Message.RelayHash, msg.Message.SessionId)
-		switch {
-		case markErr != nil:
-			// Fail-open: count the relay anyway. Better to risk a rare
-			// double-count during Redis degradation than to drop billing
-			// for a valid relay.
-			w.logger.Debug().
-				Err(markErr).
-				Str("session_id", msg.Message.SessionId).
-				Msg("deduplicator mark_processed failed")
-		case !added:
-			firstProcessing = false
-			w.logger.Debug().
-				Str("session_id", msg.Message.SessionId).
-				Str("supplier", supplierAddr).
-				Msg("relay already marked processed - skipping session counter increment")
-			RecordRelayRejected(supplierAddr, "duplicate", msg.Message.ServiceId)
-		}
-	}
+	// Track relay successfully added to SMST
+	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId)
+
+	session := relaySessionOf(msg.Message)
+	relayHash := msg.Message.RelayHash
+	computeUnits := msg.Message.ComputeUnitsPerRelay
 
 	// MEMORY OPTIMIZATION: Clear RelayBytes and RelayHash after SMST update
 	// The SMST has copied the data to Redis - these fields are no longer needed.
@@ -725,43 +696,92 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	msg.Message.RelayBytes = nil
 	msg.Message.RelayHash = nil
 
-	// Track relay successfully added to SMST
-	RecordRelayAddedToSMST(supplierAddr, msg.Message.ServiceId)
-
-	// Track relay in session coordinator, gated by the MarkProcessed result
-	// above: only the FIRST processing of a relay increments the COUNTERS.
-	// Counting one relay twice inflates the claim, so this half stays gated
-	// while the creation above does not.
-	//
-	// ACK-and-log on failure: SMST + dedup are the sources of truth for
-	// the claim; SessionCoordinator (snapshot.TotalComputeUnits) is
-	// derived state used for economic-viability decisions and operator
-	// observability. Returning an error here would leave the stream
-	// message un-ACK'd and the reclaim would take it on idle timeout;
-	// the dedup gate above rejects the duplicate increment on that
-	// redelivery (unless the dedup set entry already expired — treat the
-	// call as best-effort). Log at WARN for operator visibility, then ACK.
-	if !firstProcessing {
-		return nil // ACK: SMST already holds the relay; counters already incremented once
+	// The relay is in the tree. What is left -- dedup mark, counters, stream
+	// acknowledgement -- goes to the supplier's batch, which does it for the
+	// whole session in one script (see relayBatch). A relay with no hash has
+	// nothing to deduplicate by and is finished here, as is any relay the batch
+	// refuses.
+	if state.relayBatch != nil && len(relayHash) > 0 &&
+		state.relayBatch.Add(ctx, session, batchedRelay{id: msg.ID, hash: bytes.Clone(relayHash), computeUnits: computeUnits}) {
+		return ErrRelayBatched
 	}
-	if err := state.SessionCoordinator.OnRelayProcessed(
+
+	countRelayOnce(ctx, w.logger, w.supplierManager.Deduplicator(), state.SessionCoordinator, supplierAddr, session, relayHash, computeUnits)
+	return nil // ACK
+}
+
+// countRelayOnce is how a relay is finished one at a time: mark it processed in
+// the deduplicator and, only on its FIRST processing, increment the session
+// counters. The caller acknowledges it afterwards. handleRelay uses it for a
+// relay the batch does not take, and the batch for its per-relay fallback.
+//
+// The mark runs on every relay (not only reclaims) because if the consumer
+// crashes after the SMST update but before the stream ACK, the next consumer
+// will reclaim the message and needs the dedup set to recognize it as already
+// processed. The SADD result is the correctness gate for OnRelayProcessed: the
+// reclaim skips entries this consumer owns and takes only those idle past the
+// timeout, but idleness cannot distinguish a dead consumer from a slow-but-alive
+// one — so the duplicate can be the ORIGINAL copy arriving with IsReclaim=false
+// after another consumer already processed the reclaimed one, and this is the
+// only place that catches that ordering.
+//
+// Ordering matters: the mark runs BEFORE the counters so that a crash between
+// them leaves the counter under-counted rather than over-counted. Neither
+// direction moves money -- the claim and its economic viability come from the
+// SMST root -- but the counter feeds the relay metrics and the claim-time
+// comparison of leaves against relays counted, and an over-count there would
+// hide real loss.
+//
+// ACK on a counter failure: SMST + dedup are the sources of truth for the claim,
+// and returning an error would leave the entry pending for the reclaim, whose
+// dedup check rejects the increment anyway (unless the set already expired).
+func countRelayOnce(
+	ctx context.Context,
+	logger logging.Logger,
+	dedup Deduplicator,
+	coordinator *SessionCoordinator,
+	supplierAddr string,
+	s relaySession,
+	relayHash []byte,
+	computeUnits uint64,
+) {
+	if dedup != nil && len(relayHash) > 0 {
+		added, markErr := dedup.MarkProcessed(ctx, relayHash, s.sessionID)
+		switch {
+		case markErr != nil:
+			// Fail-open: count the relay anyway. Better to risk a rare
+			// double-count during Redis degradation than to drop billing
+			// for a valid relay.
+			logger.Debug().
+				Err(markErr).
+				Str("session_id", s.sessionID).
+				Msg("deduplicator mark_processed failed")
+		case !added:
+			logger.Debug().
+				Str("session_id", s.sessionID).
+				Str("supplier", supplierAddr).
+				Msg("relay already marked processed - skipping session counter increment")
+			RecordRelayRejected(supplierAddr, "duplicate", s.serviceID)
+			return // SMST already holds the relay; counters already incremented once
+		}
+	}
+
+	if err := coordinator.OnRelayProcessed(
 		ctx,
-		msg.Message.SessionId,
-		msg.Message.ComputeUnitsPerRelay,
-		msg.Message.SupplierOperatorAddress,
-		msg.Message.ServiceId,
-		msg.Message.ApplicationAddress,
-		msg.Message.SessionStartHeight,
-		msg.Message.SessionEndHeight,
+		s.sessionID,
+		computeUnits,
+		s.supplier,
+		s.serviceID,
+		s.application,
+		s.startHeight,
+		s.endHeight,
 	); err != nil {
-		w.logger.Debug().
+		logger.Debug().
 			Err(err).
-			Str("session_id", msg.Message.SessionId).
+			Str("session_id", s.sessionID).
 			Str("supplier", supplierAddr).
 			Msg("session coordinator update failed — ACKing relay (SMST and dedup already committed)")
 	}
-
-	return nil
 }
 
 // refineSupplierCacheTTL fetches shared params via qc and, on success, sets

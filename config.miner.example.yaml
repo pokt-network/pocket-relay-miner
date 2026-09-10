@@ -24,6 +24,11 @@ redis:
   # Note: XREADGROUP blocks for one block interval per read (not BLOCK 0, which
   # could not be interrupted on shutdown) - not configurable
   claim_idle_timeout_ms: 60000  # Reclaim idle messages after 60s (crashed consumer recovery)
+  # How often each supplier marks, counts and acknowledges the relays it already
+  # added to the session tree, in one Redis script per session. Until then their
+  # stream entries stay pending, so it must be at most claim_idle_timeout_ms / 4
+  # (startup fails otherwise).
+  relay_batch_flush_interval_ms: 15000
 
   # Connection pool settings
   # Pool size must accommodate blocked + non-blocked connections:

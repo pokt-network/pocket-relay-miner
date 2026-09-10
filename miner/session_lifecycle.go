@@ -170,6 +170,10 @@ type SessionLifecycleManager struct {
 	// Optional meter cleanup publisher for notifying relayers when sessions leave active state
 	meterCleanupPublisher MeterCleanupPublisher
 
+	// Optional: flushes relays already in the tree but not yet counted, for
+	// sessions about to be claimed (the supplier's relayBatch).
+	flushPendingRelays func(ctx context.Context, sessionIDs []string)
+
 	// Active sessions being monitored (lock-free concurrent map)
 	activeSessions *xsync.Map[string, *SessionSnapshot]
 
@@ -225,6 +229,12 @@ func NewSessionLifecycleManager(
 // when sessions leave active state. This should be called before Start().
 func (m *SessionLifecycleManager) SetMeterCleanupPublisher(publisher MeterCleanupPublisher) {
 	m.meterCleanupPublisher = publisher
+}
+
+// SetPendingRelayFlusher sets what the claim transition calls before it reads
+// its sessions' counters. This should be called before Start().
+func (m *SessionLifecycleManager) SetPendingRelayFlusher(flush func(ctx context.Context, sessionIDs []string)) {
+	m.flushPendingRelays = flush
 }
 
 // Start begins monitoring sessions and triggering lifecycle transitions.
@@ -977,6 +987,19 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 	//   2. Relays sent within grace_period_end_offset_blocks are still valid
 	//      for the closing session and should be consumed normally before the
 	//      SMST flush.
+
+	// Relays of these sessions that are in the tree but still batched get
+	// counted now, so the refresh below reads a relay_count that includes them.
+	// Money does not depend on it -- the claim is built from the tree -- but the
+	// leaves-versus-relays comparison at claim time does. A relay that reaches
+	// the tree after this and before the seal is counted by the next flush.
+	if m.flushPendingRelays != nil {
+		sessionIDs := make([]string, len(sessions))
+		for i, session := range sessions {
+			sessionIDs[i] = session.SessionID
+		}
+		m.flushPendingRelays(ctx, sessionIDs)
+	}
 
 	// CRITICAL: Refresh session snapshots from Redis to get latest relay counts
 	// AND claim deduplication state (ClaimTxHash, State).

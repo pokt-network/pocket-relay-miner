@@ -119,37 +119,6 @@ func TestDeduplicator_DifferentHashesIsolated(t *testing.T) {
 	assert.False(t, isDup)
 }
 
-func TestDeduplicator_MarkProcessedBatch(t *testing.T) {
-	d, _, _ := setupTestDeduplicator(t)
-	ctx := context.Background()
-
-	batch := [][]byte{hashOf("r1"), hashOf("r2"), hashOf("r3")}
-	require.NoError(t, d.MarkProcessedBatch(ctx, batch, "sess-1"))
-
-	for i, h := range batch {
-		isDup, err := d.IsDuplicate(ctx, h, "sess-1")
-		require.NoError(t, err)
-		assert.True(t, isDup, "batch entry %d should be duplicate", i)
-	}
-
-	// unrelated hash must not be flagged
-	isDup, err := d.IsDuplicate(ctx, hashOf("r4"), "sess-1")
-	require.NoError(t, err)
-	assert.False(t, isDup)
-}
-
-func TestDeduplicator_MarkProcessedBatch_Empty(t *testing.T) {
-	d, _, _ := setupTestDeduplicator(t)
-	ctx := context.Background()
-
-	// empty batch should be a no-op, no error
-	err := d.MarkProcessedBatch(ctx, nil, "sess-1")
-	require.NoError(t, err)
-
-	err = d.MarkProcessedBatch(ctx, [][]byte{}, "sess-1")
-	require.NoError(t, err)
-}
-
 func TestDeduplicator_CleanupSession(t *testing.T) {
 	d, client, _ := setupTestDeduplicator(t)
 	ctx := context.Background()

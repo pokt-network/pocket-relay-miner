@@ -129,8 +129,9 @@ type SessionRead struct {
 // for the same data.
 //
 // It is separate from OnRelayProcessed because the two have different gates.
-// Counting a relay must happen exactly once — a relay counted twice inflates
-// the claim — so the caller gates it on the deduplicator. Creating the session
+// Counting a relay must happen exactly once — a relay counted twice skews the
+// relay_count the claim-time comparison with the tree's leaves reads — so the
+// caller gates it on the deduplicator. Creating the session
 // must happen on EVERY delivery, because a redelivery can be the only chance
 // left to do it: the consumer that first processed the relay can die between
 // MarkProcessed and telling the coordinator anything, and then the consumer

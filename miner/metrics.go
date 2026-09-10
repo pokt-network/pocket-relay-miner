@@ -368,6 +368,20 @@ var (
 		[]string{"supplier", "service_id", "reason"},
 	)
 
+	// relayBatchPanicsTotal counts relay batches whose flush panicked and were
+	// finished one relay at a time instead. It counts BATCHES, not relays: the
+	// relays of such a batch are still counted and acknowledged by that path,
+	// and the one whose own processing panics there lands in relays_lost_total.
+	relayBatchPanicsTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_batch_panics_total",
+			Help:      "Relay batches whose flush panicked and fell back to the per-relay path",
+		},
+		[]string{"supplier"},
+	)
+
 	// claimsSkippedTotal tracks claim submissions that were intentionally
 	// dropped before going to the chain. reason values (extend as new skip
 	// paths land):
@@ -427,7 +441,7 @@ var (
 			Name:      "dedup_errors_total",
 			Help:      "Total number of deduplication errors",
 		},
-		// session_id excluded; operation is bounded (redis_check/redis_mark/redis_batch_mark).
+		// session_id excluded; operation is bounded (redis_check/redis_mark).
 		[]string{"operation"},
 	)
 
@@ -1689,6 +1703,17 @@ func StartWorkerPoolMetricsTicker(
 // client, at the supplier's expense, and then dropped.
 func RecordRelayLostToPanic(supplier, serviceID string) {
 	relaysLostTotal.WithLabelValues(supplier, serviceID, "panic_recovered").Add(1)
+}
+
+// RecordRelayBatchPanic counts one relay batch whose flush panicked.
+func RecordRelayBatchPanic(supplier string) {
+	relayBatchPanicsTotal.WithLabelValues(supplier).Inc()
+}
+
+// RecordRelaysRejected is RecordRelayRejected for n relays at once, on the same
+// series, for a batch that learns about its rejections together.
+func RecordRelaysRejected(supplier, reason, serviceID string, n int) {
+	relaysRejected.WithLabelValues(supplier, reason, serviceID).Add(float64(n))
 }
 
 // Register every {phase, cause} series at zero.

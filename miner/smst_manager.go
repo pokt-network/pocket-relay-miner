@@ -719,6 +719,45 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 	return nil
 }
 
+// CheckpointLiveRoot writes the session tree's current root as its live_root,
+// so that every relay UpdateTree has already put in this tree is covered by it.
+// A relay whose stream entry is acknowledged must be reachable from a stored
+// root: acknowledged, it will never be delivered again, and a tree resumed from
+// an older live_root would not contain it.
+//
+// resident is false when this manager holds no tree for the session -- deleted
+// after the session ended, or evicted after corruption. Nothing is written then,
+// on purpose: GetOrCreateTree would create an empty tree, and a live_root of an
+// empty tree covers nothing. The caller must not acknowledge on that answer.
+func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID string) (resident bool, err error) {
+	m.treesMu.RLock()
+	tree, exists := m.trees[sessionID]
+	m.treesMu.RUnlock()
+	if !exists {
+		return false, nil
+	}
+
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+
+	var rootBytes []byte
+	if err := m.runSMSTSafely(sessionID, "root", func() error {
+		rootBytes = []byte(tree.trie.Root())
+		return nil
+	}); err != nil {
+		return true, err
+	}
+	if !isValidSMSTRoot(rootBytes) {
+		return true, fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(rootBytes), SMSTRootLen)
+	}
+
+	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
+	if redisStore, ok := tree.store.(*RedisMapStore); ok {
+		return true, redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes, m.config.CacheTTL)
+	}
+	return true, m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err()
+}
+
 // FlushTree flushes the SMST for a session and returns the root hash.
 // After flushing, no more updates can be made to the tree.
 // Uses two-phase sealing to prevent race conditions with late relays.
