@@ -286,3 +286,40 @@ func TestLatencyPercentiles(t *testing.T) {
 	require.Contains(t, summary, "p99:")
 	require.Contains(t, summary, "max:")
 }
+
+// TestErrorBreakdown_SaysWhenEachErrorHappened: a breakdown line carries the
+// first and last time its error was seen, in UTC to the millisecond, whatever
+// zone the clock is in.
+func TestErrorBreakdown_SaysWhenEachErrorHappened(t *testing.T) {
+	zone := time.FixedZone("UTC-4", -4*60*60)
+	clock := time.Date(2026, 9, 10, 10, 3, 5, 123_000_000, zone)
+	metrics := NewRelayMetrics()
+	metrics.now = func() time.Time { return clock }
+
+	metrics.Start()
+	t1 := clock
+	metrics.RecordError(errors.New("dial tcp 127.0.0.1:8180: connect: connection refused"))
+	clock = clock.Add(90*time.Second + 7*time.Millisecond)
+	t2 := clock
+	metrics.RecordError(errors.New("dial tcp 127.0.0.1:8180: connect: connection refused"))
+	clock = clock.Add(time.Minute)
+	t3 := clock
+	metrics.RecordError(errors.New("EOF"))
+	metrics.End()
+
+	refused := metrics.errors["dial tcp 127.0.0.1:8180: connect: connection refused"]
+	require.NotNil(t, refused)
+	require.Equal(t, 2, refused.count)
+	require.True(t, refused.first.Equal(t1), "first: got %s, want %s", refused.first, t1)
+	require.True(t, refused.last.Equal(t2), "last seen must move with every repeat: got %s, want %s", refused.last, t2)
+	eof := metrics.errors["EOF"]
+	require.NotNil(t, eof)
+	require.Equal(t, 1, eof.count)
+	require.True(t, eof.first.Equal(t3) && eof.last.Equal(t3))
+
+	summary := metrics.GetSummary()
+	require.Contains(t, summary,
+		"  2: dial tcp 127.0.0.1:8180: connect: connection refused (first 2026-09-10T14:03:05.123Z, last 2026-09-10T14:04:35.130Z)\n")
+	require.Contains(t, summary, "  1: EOF (first 2026-09-10T14:05:35.130Z, last 2026-09-10T14:05:35.130Z)\n")
+	require.Contains(t, summary, "Duration: 2m30.007s", "Start and End read the same clock")
+}
