@@ -2600,6 +2600,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 					TxHash:          origHash,
 					Outcome:         outcome,
 					InclusionHeight: inclusionHeight,
+					Rebroadcasts:    e.Rebroadcasts,
 				}); err != nil {
 					m.logger.Warn().Err(err).
 						Str("supplier", supplier).

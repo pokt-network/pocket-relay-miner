@@ -281,6 +281,12 @@ func printSubmissionDetail(r *submissionRecord) {
 	}
 	fmt.Printf("Claim Height:      %d\n", r.ClaimSubmitHeight)
 	fmt.Printf("Current Height:    %d\n", r.ClaimCurrentHeight)
+	// Printed only when non-zero, like every other optional field here: a zero
+	// would read as "measured, and it was none" on the far more common record
+	// that was never resent at all.
+	if r.ClaimRebroadcasts > 0 {
+		fmt.Printf("Claim Resends:     %d\n", r.ClaimRebroadcasts)
+	}
 	if r.ClaimSubmitTimeUTC != "" {
 		fmt.Printf("Claim Time (UTC):  %s\n", r.ClaimSubmitTimeUTC)
 	} else if r.ClaimSubmitTimestamp > 0 {
@@ -304,6 +310,9 @@ func printSubmissionDetail(r *submissionRecord) {
 		if r.ProofSubmitHeight > 0 {
 			fmt.Printf("Proof Height:      %d\n", r.ProofSubmitHeight)
 			fmt.Printf("Current Height:    %d\n", r.ProofCurrentHeight)
+		}
+		if r.ProofRebroadcasts > 0 {
+			fmt.Printf("Proof Resends:     %d\n", r.ProofRebroadcasts)
 		}
 		if r.ProofSubmitTimeUTC != "" {
 			fmt.Printf("Proof Time (UTC):  %s\n", r.ProofSubmitTimeUTC)

@@ -45,6 +45,17 @@ type SubmissionTrackingRecord struct {
 	// (or the tracker was disabled).
 	ClaimOnChainOutcome  string `json:"claim_on_chain_outcome,omitempty"`
 	ClaimInclusionHeight int64  `json:"claim_inclusion_height,omitempty"`
+	// ClaimRebroadcasts is the claim-side analogue of ProofRebroadcasts. The
+	// counter and its metric (claim_rebroadcasts_total) already existed; what did
+	// not was writing it down, so `redis submissions` reported zero resends for a
+	// claim that had been resent, and an operator reading the ledger concluded
+	// none had happened.
+	//
+	// MIXED FLEET: an older binary that re-marshals this record drops the field
+	// its struct cannot see, so a resend counted by a new miner and re-written by
+	// an old one comes back zero. The degradation is benign on purpose — this is
+	// a diagnostic counter, never money, and nothing reads it to make a decision.
+	ClaimRebroadcasts int `json:"claim_rebroadcasts,omitempty"`
 
 	// Proof tracking
 	ProofHash            string `json:"proof_hash,omitempty"`
@@ -318,6 +329,7 @@ type ClaimOnChainUpdate struct {
 	TxHash          string
 	Outcome         string
 	InclusionHeight int64
+	Rebroadcasts    int
 }
 
 // UpdateClaimOnChainOutcome finds every submission record for the given
@@ -344,6 +356,9 @@ func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u Cla
 		}
 		record.ClaimOnChainOutcome = u.Outcome
 		record.ClaimInclusionHeight = u.InclusionHeight
+		if u.Rebroadcasts > 0 {
+			record.ClaimRebroadcasts = u.Rebroadcasts
+		}
 
 		key := t.makeKey(record.Supplier, record.SessionEnd, record.SessionID)
 		data, marshalErr := json.Marshal(record)
