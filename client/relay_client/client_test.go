@@ -3,14 +3,20 @@ package relay_client
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
+	nodeservice "github.com/cosmos/cosmos-sdk/client/grpc/node"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/stretchr/testify/require"
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
@@ -226,3 +232,63 @@ func TestLatestHeight_FailedRead(t *testing.T) {
 //
 // These would be better suited as integration tests with a test network.
 // The core signing logic is tested in signer_test.go.
+
+// fakeCometBFT and fakeNodeStatus are one node's two answers to "what height
+// is it", taken while a block is being committed: its latest block is already
+// H, its committed state still H-1.
+type fakeCometBFT struct {
+	cmtservice.UnimplementedServiceServer
+	latestBlock int64
+}
+
+func (f fakeCometBFT) GetLatestBlock(context.Context, *cmtservice.GetLatestBlockRequest) (*cmtservice.GetLatestBlockResponse, error) {
+	return &cmtservice.GetLatestBlockResponse{SdkBlock: &cmtservice.Block{Header: cmtservice.Header{Height: f.latestBlock}}}, nil
+}
+
+type fakeNodeStatus struct {
+	nodeservice.UnimplementedServiceServer
+	committed uint64
+}
+
+func (f fakeNodeStatus) Status(context.Context, *nodeservice.StatusRequest) (*nodeservice.StatusResponse, error) {
+	return &nodeservice.StatusResponse{Height: f.committed}, nil
+}
+
+// hydratingSessions refuses a height above the node's committed state, the
+// check poktroll's session hydrator makes (x/session/keeper/session_hydrator.go
+// hydrateSessionMetadata).
+type hydratingSessions struct{ committed int64 }
+
+func (h hydratingSessions) GetSession(_ context.Context, _, serviceID string, height int64) (*sessiontypes.Session, error) {
+	if height > h.committed {
+		return nil, fmt.Errorf("block height %d is ahead of the last committed block height %d: error during session hydration", height, h.committed)
+	}
+	return &sessiontypes.Session{Header: &sessiontypes.SessionHeader{ServiceId: serviceID}}, nil
+}
+
+// TestCurrentSession_AsksAtTheNodesCommittedHeight is a relay built while the
+// node commits a block: the height the client reads must be one the session
+// query accepts, through the fetch NewRelayClient wires, over real gRPC.
+func TestCurrentSession_AsksAtTheNodesCommittedHeight(t *testing.T) {
+	const latestBlock, committed = 413, 412
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	server := grpc.NewServer()
+	cmtservice.RegisterServiceServer(server, &fakeCometBFT{latestBlock: latestBlock})
+	nodeservice.RegisterServiceServer(server, &fakeNodeStatus{committed: committed})
+	go func() { _ = server.Serve(listener) }()
+	t.Cleanup(server.Stop)
+
+	conn, err := grpc.NewClient(listener.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	c := &RelayClient{
+		appAddress: "pokt1app",
+		sessions:   hydratingSessions{committed: committed},
+		height:     &latestHeight{fetch: committedHeight(conn), maxAge: 0},
+	}
+	session, err := c.currentSession(context.Background(), "svc")
+	require.NoError(t, err, "the session was asked for at a height the node has not committed yet")
+	require.Equal(t, "svc", session.Header.ServiceId)
+}

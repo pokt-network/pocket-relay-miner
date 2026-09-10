@@ -3,10 +3,12 @@ package relay_client
 import (
 	"context"
 	"fmt"
+	"math"
 	"sync"
 	"time"
 
-	"github.com/cosmos/cosmos-sdk/client/grpc/cmtservice"
+	nodeservice "github.com/cosmos/cosmos-sdk/client/grpc/node"
+	"google.golang.org/grpc"
 
 	"github.com/pokt-network/ring-go"
 
@@ -183,8 +185,6 @@ func NewRelayClient(config Config, logger logging.Logger) (*RelayClient, error) 
 		config.QueryClients.Shared(),
 	)
 
-	blocks := cmtservice.NewServiceClient(config.QueryClients.GRPCConnection())
-
 	return &RelayClient{
 		ringCache:    xsync.NewMap[ringCacheKey, *ring.Ring](),
 		simRingCache: xsync.NewMap[string, *simPinnedRing](),
@@ -194,18 +194,28 @@ func NewRelayClient(config Config, logger logging.Logger) (*RelayClient, error) 
 		appAddress:   appAddress,
 		gatewayMode:  gatewayMode,
 		sessions:     config.QueryClients.Session(),
-		height: &latestHeight{
-			maxAge: heightMaxAge,
-			fetch: func(ctx context.Context) (int64, error) {
-				res, err := blocks.GetLatestBlock(ctx, &cmtservice.GetLatestBlockRequest{})
-				if err != nil {
-					return 0, err
-				}
-				header := res.GetSdkBlock().GetHeader()
-				return header.GetHeight(), nil
-			},
-		},
+		height:       &latestHeight{maxAge: heightMaxAge, fetch: committedHeight(config.QueryClients.GRPCConnection())},
 	}, nil
+}
+
+// committedHeight reads the height of the node's last committed state
+// (cosmos.base.node.v1beta1.Service/Status answers sdkCtx.BlockHeight()). That
+// is the height the chain's session query checks a requested height against,
+// and it only grows, so a session asked for at it is never ahead of the node.
+// The node's latest BLOCK is not: while a block is being committed it is
+// already one ahead, and a session asked for there is refused.
+func committedHeight(conn *grpc.ClientConn) func(ctx context.Context) (int64, error) {
+	node := nodeservice.NewServiceClient(conn)
+	return func(ctx context.Context) (int64, error) {
+		res, err := node.Status(ctx, &nodeservice.StatusRequest{})
+		if err != nil {
+			return 0, err
+		}
+		if res.GetHeight() > math.MaxInt64 {
+			return 0, fmt.Errorf("the node reported height %d, beyond int64", res.GetHeight())
+		}
+		return int64(res.GetHeight()), nil
+	}
 }
 
 // heightMaxAge is how long a read of the chain's height is reused: a load test
