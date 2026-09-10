@@ -924,13 +924,14 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 	// a second transaction while the first is still in that mempool: precisely
 	// the duplicate this whole mechanism exists to avoid.
 	//
-	// Deliberately CONSERVATIVE beyond those two: every other failure discards
-	// without asking why. Telling apart a rejection that spares the bytes from
-	// one that kills them requires classifying what the chain answered, which is
-	// its own change; until then the answer that costs a signature is the safe
-	// one.
+	// Which other failures spare the bytes is now the chain's answer to decide,
+	// not a blanket rule: a send that never got a reply, and a node that either
+	// already holds the transaction or had no room for it, all leave it
+	// unjudged. Everything else discards. The predicate keeps that reading in
+	// tx, beside the codes it reads, rather than spreading ABCI numbers into
+	// this file.
 	switch {
-	case err != nil && !nothingWasSpent(err):
+	case err != nil && !nothingWasSpent(err) && !tx.RejectionPreservesBytes(err):
 		entry.SignedBytes = nil
 		entry.SignedTimeoutAt = 0
 		entry.SignedTimeoutHeight = 0

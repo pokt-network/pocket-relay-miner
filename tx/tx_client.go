@@ -1423,6 +1423,66 @@ func isWindowExpiredRejection(codespace string, code uint32) bool {
 	return code == abciCodeTxTimeoutHeight && codespace == abciCodespaceSDK
 }
 
+// abciCodeMempoolIsFull is cosmos-sdk's ErrMempoolIsFull
+// (types/errors/errors.go:69 in v0.53.7). It is the OPPOSITE of code 19 and the
+// pair is easy to collapse: 19 says the node already holds this transaction,
+// 20 says it could not take it at all. Both leave the bytes usable, for
+// different reasons -- one because it is already in flight, the other because
+// it was refused for space rather than for validity -- so a later attempt on a
+// node with room is worth making with the SAME transaction.
+const abciCodeMempoolIsFull = 20
+
+// RejectionPreservesBytes reports whether a failed send leaves the signed
+// transaction still worth re-injecting.
+//
+// The default is NO, and that asymmetry is deliberate: preserving bytes the
+// chain will refuse again re-sends them on every block until the window closes,
+// while discarding usable ones costs a single signature. An unbounded repeat
+// against one extra signature is not a close call.
+//
+// It answers YES in three cases, all of them "the transaction was not judged
+// invalid":
+//
+//   - TRANSPORT: the send never got an answer, so nobody knows whether it
+//     arrived. Signing a replacement here is how one claim ends up with two
+//     live transactions, which is the failure re-injection exists to avoid.
+//   - CODE 19: the node already holds these exact bytes.
+//   - CODE 20: the mempool was full. The transaction was not read, let alone
+//     refused.
+//
+// WHAT IT DELIBERATELY DOES NOT DECIDE: code 18. It is ErrInvalidRequest,
+// GENERIC, and one of the things it can mean is that our OWN earlier
+// transaction already took this unordered nonce -- in which case these bytes
+// are the ones in flight and re-signing duplicates them. Telling that apart
+// from every other invalid request needs a discriminator this package does not
+// have, so 18 falls to the default and is discarded. That is the safe direction
+// and it is NOT the whole answer; the case is named here so the next reader
+// finds a decision rather than an omission.
+func RejectionPreservesBytes(err error) bool {
+	if err == nil {
+		return true
+	}
+	var rejection *TxRejection
+	if !errors.As(err, &rejection) {
+		// Not a chain rejection at all -- a local failure, a cancelled context.
+		// Nothing judged the transaction, so its bytes are untouched.
+		return true
+	}
+	if rejection.Stage == TxStageBroadcast {
+		return true
+	}
+	// The codes below only mean what they say when they come from CheckTx. The
+	// STAGE is part of the identity, not decoration: simulation runs the
+	// messages, so a failure there is a judgement about the transaction no
+	// matter which number it carries. Reading the code without the stage let a
+	// simulate-stage 20 preserve bytes the chain had already refused.
+	if rejection.Stage != TxStageCheckTx || rejection.Codespace != abciCodespaceSDK {
+		return false
+	}
+	return rejection.ABCICode == abciCodeTxInMempoolCache ||
+		rejection.ABCICode == abciCodeMempoolIsFull
+}
+
 // isProofNotRequiredError recognises that refusal.
 //
 // The needle is DERIVED FROM THE SYMBOL: prooftypes.ErrProofNotRequired.Error()

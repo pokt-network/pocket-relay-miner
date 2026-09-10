@@ -46,7 +46,16 @@ func seedWithCachedTx(t *testing.T, h *reconcilerHarness, sessionID string) {
 // what got written down, and only the next block reads that.
 func TestReconciler_AFailedResendDiscardsTheCachedTx(t *testing.T) {
 	h := newReconcilerHarness(t, 1)
-	h.resub.failWith = fmt.Errorf("CheckTx refused: invalid signature")
+	// A REAL chain rejection, not a bare error. The distinction is the
+	// predicate's whole point and this fixture must not blur it: a local
+	// failure -- a cancelled context, a refused dial -- judged nothing, so it
+	// keeps the bytes. Only the chain saying no discards them.
+	h.resub.failWith = fmt.Errorf("resend: %w", &tx.TxRejection{
+		Stage:     tx.TxStageCheckTx,
+		Codespace: "sdk",
+		ABCICode:  4, // unauthorized: a judgement, and not one of the sparing codes
+		RawLog:    "signature verification failed",
+	})
 	seedWithCachedTx(t, h, "s1")
 
 	h.r.OnBlock(testSubmit + 1)
