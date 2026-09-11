@@ -408,7 +408,7 @@ func pushingWSBackend(t *testing.T, pushes int) string {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			mt, _, err := conn.ReadMessage()
 			if err != nil {

@@ -70,7 +70,7 @@ func newSimWSBackendServer(t *testing.T) (wsURL string, hits *atomic.Int32, gotT
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			mt, _, err := conn.ReadMessage()
 			if err != nil {
