@@ -784,8 +784,8 @@ func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID str
 // redelivered before the session is sealed (L3 of df5441c, 2026-09-11).
 //
 // It differs from CheckpointLiveRoot in two ways, both because the next owner
-// may already be running when this one leaves -- the lease is released before
-// the consume loop ends:
+// may already be running when this one leaves -- the lease is kept until the
+// drain ends, but a drain that outruns its lease budget loses it first:
 //   - it deletes no orphans. The new owner may have imported the old live_root
 //     and still walk its nodes; the orphans stay until the TTL or DeleteTree.
 //   - it writes only if live_root still holds what this manager last wrote or

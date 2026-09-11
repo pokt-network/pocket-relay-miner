@@ -41,7 +41,7 @@ func (h *beforeCmd) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.Pr
 }
 
 // afterReleaseScript runs action ONCE, right after the check-and-delete script
-// Release runs on key succeeds -- EVALSHA or, on NOSCRIPT, the EVAL go-redis
+// FinishRelease runs on key succeeds -- EVALSHA or, on NOSCRIPT, the EVAL go-redis
 // falls back to. KEYS[1] sits at argument 3.
 type afterReleaseScript struct {
 	key    string
@@ -79,6 +79,14 @@ func countClaims(f *leaseFixture) *atomic.Int32 {
 	return &claims
 }
 
+// releaseAndDrain releases the supplier and then finishes the release, as the
+// manager's drain does once the teardown is over: Release alone keeps the lease.
+func (f *leaseFixture) releaseAndDrain(t *testing.T) {
+	t.Helper()
+	require.NoError(t, f.claimer.Release(context.Background(), f.supplier, triggerRebalanceRelease))
+	require.NoError(t, f.claimer.FinishRelease(context.Background(), f.supplier))
+}
+
 func (f *leaseFixture) keyExists(t *testing.T) bool {
 	t.Helper()
 	n, err := f.client.Exists(context.Background(), f.claimKey).Result()
@@ -92,8 +100,9 @@ func (f *leaseFixture) keyExists(t *testing.T) bool {
 // key as an expired lease and took it back. The next rebalance released it
 // again, and each cycle tore the supplier down and handed its relays back.
 
-// TestRenewAllClaims_DoesNotRetakeASupplierReleasedBeforeTheGet: the release
-// lands between the snapshot and the GET, so the GET finds no key.
+// TestRenewAllClaims_DoesNotRetakeASupplierReleasedBeforeTheGet: the release,
+// and the drain that deletes its lease, land between the snapshot and the GET,
+// so the GET finds no key.
 func TestRenewAllClaims_DoesNotRetakeASupplierReleasedBeforeTheGet(t *testing.T) {
 	const instance = "instance-release-before-get"
 	f := newLeaseFixture(t, instance)
@@ -101,9 +110,7 @@ func TestRenewAllClaims_DoesNotRetakeASupplierReleasedBeforeTheGet(t *testing.T)
 	claimed := supplierClaimedTotal.WithLabelValues(f.supplier, instance)
 	before := testutil.ToFloat64(claimed)
 
-	f.client.AddHook(&beforeCmd{name: "get", key: f.claimKey, action: func() {
-		require.NoError(t, f.claimer.Release(context.Background(), f.supplier, triggerRebalanceRelease))
-	}})
+	f.client.AddHook(&beforeCmd{name: "get", key: f.claimKey, action: func() { f.releaseAndDrain(t) }})
 
 	f.claimer.renewAllClaims()
 
@@ -114,7 +121,8 @@ func TestRenewAllClaims_DoesNotRetakeASupplierReleasedBeforeTheGet(t *testing.T)
 }
 
 // TestRenewAllClaims_DoesNotRetakeASupplierReleasedBetweenGetAndExpire: the
-// release lands after the GET saw the lease as ours, so EXPIRE finds no key.
+// release and its drain land after the GET saw the lease as ours, so EXPIRE
+// finds no key.
 func TestRenewAllClaims_DoesNotRetakeASupplierReleasedBetweenGetAndExpire(t *testing.T) {
 	const instance = "instance-release-before-expire"
 	f := newLeaseFixture(t, instance)
@@ -122,9 +130,7 @@ func TestRenewAllClaims_DoesNotRetakeASupplierReleasedBetweenGetAndExpire(t *tes
 	claimed := supplierClaimedTotal.WithLabelValues(f.supplier, instance)
 	before := testutil.ToFloat64(claimed)
 
-	f.client.AddHook(&afterCmd{name: "get", key: f.claimKey, action: func() {
-		require.NoError(t, f.claimer.Release(context.Background(), f.supplier, triggerRebalanceRelease))
-	}})
+	f.client.AddHook(&afterCmd{name: "get", key: f.claimKey, action: func() { f.releaseAndDrain(t) }})
 
 	f.claimer.renewAllClaims()
 
@@ -135,17 +141,18 @@ func TestRenewAllClaims_DoesNotRetakeASupplierReleasedBetweenGetAndExpire(t *tes
 }
 
 // TestRelease_ARenewalRightAfterTheDeleteLeavesNoOrphanLease is the other
-// window: a renewal that runs between Release's DEL and its local bookkeeping.
-// With the key deleted first, the renewal re-took the supplier and Release then
-// erased the re-take from the map -- a lease held in Redis that nothing renews,
-// which the peer reads as "already claimed by another instance" for its TTL.
+// window: a renewal that runs right after the lease is deleted. With the key
+// deleted before the local bookkeeping, the renewal re-took the supplier and
+// Release then erased the re-take from the map -- a lease held in Redis that
+// nothing renews, which the peer reads as "already claimed by another instance"
+// for its TTL. The delete now comes last of all, when the drain finishes.
 func TestRelease_ARenewalRightAfterTheDeleteLeavesNoOrphanLease(t *testing.T) {
 	f := newLeaseFixture(t, "instance-renew-after-del")
 	claims := countClaims(f)
 
 	f.client.AddHook(&afterReleaseScript{key: f.claimKey, action: func() { f.claimer.renewAllClaims() }})
 
-	require.NoError(t, f.claimer.Release(context.Background(), f.supplier, triggerRebalanceRelease))
+	f.releaseAndDrain(t)
 
 	require.False(t, f.keyExists(t),
 		"no lease may survive the release: one that exists while IsClaimed is false is renewed by nobody and blocks the peer")
@@ -167,7 +174,7 @@ func TestRenewAllClaims_RecoversALeaseRetakenInsideTheReleaseCooldown(t *testing
 		func(context.Context, string, string) error { lost.Add(1); return nil },
 	)
 
-	require.NoError(t, f.claimer.Release(ctx, f.supplier, triggerRebalanceRelease))
+	f.releaseAndDrain(t)
 	require.True(t, f.claimer.TryClaim(ctx, f.supplier), "taken back legitimately, as claimMore does")
 	require.True(t, f.claimer.inRecentReleaseCooldown(f.supplier), "premise: still inside the release cooldown")
 	lost.Store(0)

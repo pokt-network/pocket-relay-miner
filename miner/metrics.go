@@ -1120,6 +1120,22 @@ var (
 		[]string{"trigger", "instance"},
 	)
 
+	// supplierDrainLeaseOverrunTotal counts drains that outlived the lease
+	// budget their supplier was released with. The lease is kept until the
+	// drain ends so the old consume loop is its only writer; past the budget the
+	// key may have expired and a peer taken the supplier while this instance
+	// still wrote -- the window the budget exists to close. Same labels as
+	// supplier_lease_lost_total, for the same reason.
+	supplierDrainLeaseOverrunTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_drain_lease_overrun_total",
+			Help:      "Total supplier drains that outlived their lease budget, by release trigger",
+		},
+		[]string{"trigger", "instance"},
+	)
+
 	// supplierClaimedGauge tracks current number of suppliers claimed by each instance.
 	supplierClaimedGauge = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -1144,7 +1160,7 @@ var (
 
 	// supplierDrainDecisionTotal tracks every drain decision with on-chain verification result.
 	// Labels: drain_reason (lease_expired, lease_stolen, renew_stalled,
-	//         rebalance_release, key_removal, shutdown, claim_callback_failed),
+	//         rebalance_release, key_removal, claim_callback_failed),
 	//         on_chain_result (staked, not_found, error, no_query_client)
 	supplierDrainDecisionTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{

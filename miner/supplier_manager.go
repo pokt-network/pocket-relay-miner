@@ -303,6 +303,23 @@ const DefaultSupplierReconcileInterval = 60 * time.Second
 // caller's, and an unbounded one would keep a shutdown goroutine alive.
 const supplierDrainAuditTimeout = 5 * time.Second
 
+// drainLeaseCallTimeout bounds each lease call a drain makes -- extending the
+// lease at its start, deleting it at its end. Detached from the caller's
+// context, which Close may already have cancelled.
+const drainLeaseCallTimeout = 5 * time.Second
+
+// drainLeaseBudget is how long a released supplier's lease is kept while its
+// drain runs: the audit, the batch release and the delivery-buffer drain (each
+// bounded by shutdownDrainWindow), the consumer's blocked read, which returns
+// within one block interval (transport/redis blockInterval, 5 s), and a margin.
+// A drain that outlives it gives the lease up when the key expires. A func
+// because shutdownDrainWindow is a var a test may shrink.
+func drainLeaseBudget() time.Duration {
+	const consumerBlockInterval = 5 * time.Second
+	const margin = 10 * time.Second
+	return supplierDrainAuditTimeout + 2*shutdownDrainWindow + consumerBlockInterval + margin
+}
+
 // SupplierManager manages multiple suppliers in the HA Miner.
 // It handles dynamic addition/removal of suppliers based on key changes.
 type SupplierManager struct {
@@ -550,10 +567,10 @@ func (m *SupplierManager) reconcile(ctx context.Context) {
 // cannot target a specific dropped address, and it only fires when the instance
 // holds MORE than its share.
 //
-// Release is cheap here and does not serialise: onSupplierReleased hands the
-// actual teardown to its own goroutine, so this loop does a Lua CAS-delete per
-// supplier and returns. The drain window each teardown then spends is paid in
-// parallel, not one after another.
+// Release is cheap here and does not serialise: it makes no Redis call, and
+// onSupplierReleased hands the actual teardown -- and the delete of the lease at
+// its end -- to its own goroutine. The drain window each teardown then spends is
+// paid in parallel, not one after another.
 //
 // Suppliers with pending sessions are NOT dropped by the filter in the first
 // place (it keeps them so claim and proof can finish), so nothing here can cut
@@ -914,6 +931,15 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 		Str("supplier", supplier).
 		Msg("claimed supplier, starting handoff validation")
 
+	// Added now, the supplier would start after Close collected the others,
+	// and nothing would tear it down.
+	m.mu.RLock()
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
+		return fmt.Errorf("supplier manager is closed")
+	}
+
 	// Check if we already have this supplier
 	if _, exists := m.suppliers.Load(supplier); exists {
 		m.logger.Debug().Str("supplier", supplier).Msg("supplier already initialized")
@@ -934,7 +960,7 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 // onSupplierReleased is called when a supplier claim is released.
 //
 // All callsites of SupplierClaimer.Release that invoke this callback
-// (rebalance, shutdown, claim-callback-failure) operate on suppliers that
+// (rebalance, claim-callback-failure) operate on suppliers that
 // are expected to remain staked on-chain — the release is an internal
 // handoff between miner instances, not a chain-level unstake. Issue #7:
 // vetoing drains here when the supplier is still staked permanently
@@ -943,18 +969,19 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 // drain-decision metric retains its observability value, but the result
 // no longer vetoes the drain.
 //
-// The drain itself runs in its own goroutine because Consumer.Close can
-// sit on a blocked XREAD for tens of seconds while the consumer
-// goroutine notices ctx cancellation; running drains synchronously here
-// would block the claimer's rebalance loop and stall the next Lua DEL,
-// preventing other miners from seeing the released claim key. This
-// mirrors the key_removal path.
+// The supplier leaves the map and its consume loop is cancelled HERE, before
+// the release returns -- both local and instant -- so the old loop stops
+// writing now. The rest of the drain runs in its own goroutine because
+// Consumer.Close can sit on a blocked XREAD for tens of seconds while the
+// consumer goroutine notices ctx cancellation; running it synchronously here
+// would block the claimer's rebalance and renewal loops. The lease stays this
+// instance's until that goroutine ends and deletes it (FinishRelease), so no
+// peer writes the supplier's tree or acknowledges its relays while the old loop
+// still does.
 func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier, trigger string) error {
+	// No release is a shutdown: Close tears its suppliers down itself.
 	reason := drainRebalance
-	switch trigger {
-	case triggerShutdown:
-		reason = drainShutdown
-	case triggerKeyRemoval:
+	if trigger == triggerKeyRemoval {
 		// With a claimer -- every manager past Start -- this is how the key-change
 		// callback takes a removed key to the teardown. Mapped to a rebalance, the
 		// batch and the delivery buffer were RELEASED to a fleet that cannot sign
@@ -977,14 +1004,31 @@ func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier, trig
 	// One lost lease would have cascaded into more.
 	//
 	// The context is deliberately NOT inherited from a cancellable parent:
-	// Close cancels the manager context BEFORE stopping the claimer, so a
-	// drain started during shutdown would record "error" for every supplier.
+	// Close cancels the manager context while drains started before it may
+	// still be running, and every one of them would record "error".
 	auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), supplierDrainAuditTimeout)
 
+	// Checked and added under the lock Close takes to set closed: no drain is
+	// added once Close is waiting for them. A release refused here is undone
+	// by the claimer, and Close tears the supplier down and deletes its lease.
+	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		cancelAudit()
+		return fmt.Errorf("supplier manager is closed")
+	}
 	m.drainWG.Add(1)
+	m.mu.RUnlock()
+
+	state, exists := m.stopSupplier(supplier, reason)
+
 	drain := func(context.Context) {
 		defer m.drainWG.Done()
 		defer cancelAudit()
+		// Deferred so it runs even if the teardown panics: a supplier left
+		// draining could never be claimed by this instance again.
+		defer m.finishDrainLease(ctx, supplier)
+		m.extendDrainLease(ctx, supplier)
 		if audit {
 			_, verifyResult := m.verifySupplierUnstaked(auditCtx, supplier, trigger)
 			supplierDrainDecisionTotal.WithLabelValues(trigger, verifyResult).Inc()
@@ -996,11 +1040,43 @@ func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier, trig
 				Str("instance_id", m.config.MinerID).
 				Msg("drain decision audit")
 		}
-		m.removeSupplier(supplier, reason)
+		if exists {
+			m.teardownSupplier(state)
+		}
 	}
 
 	go logging.RecoverGoRoutine(m.logger, "supplier_drain", drain)(auditCtx)
 	return nil
+}
+
+// extendDrainLease keeps a released supplier's lease for the drain budget.
+func (m *SupplierManager) extendDrainLease(ctx context.Context, supplier string) {
+	if m.claimer == nil {
+		return
+	}
+	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainLeaseCallTimeout)
+	defer cancel()
+	if err := m.claimer.ExtendDrainLease(callCtx, supplier, drainLeaseBudget()); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, supplier).
+			Msg("failed to extend the lease of a draining supplier; it keeps its current TTL")
+	}
+}
+
+// finishDrainLease deletes a released supplier's lease once its drain is over.
+func (m *SupplierManager) finishDrainLease(ctx context.Context, supplier string) {
+	if m.claimer == nil {
+		return
+	}
+	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainLeaseCallTimeout)
+	defer cancel()
+	if err := m.claimer.FinishRelease(callCtx, supplier); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, supplier).
+			Msg("failed to delete the lease of a drained supplier; it expires on its drain budget")
+	}
 }
 
 // warmupSingleSupplier queries chain data for a single supplier.
@@ -1328,12 +1404,13 @@ func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr stri
 
 		// Release rather than calling removeSupplier directly. Both tear the
 		// pipeline down -- Release reaches it through onSupplierReleased -- but
-		// only Release deletes this instance's claim key and drops the address
-		// from the leased set. Going straight to removeSupplier left the lease
-		// behind, and renewAllClaims iterates the leased set, so the miner kept
-		// EXPIREing ha:miner:claim:{addr} forever for a supplier it no longer had
-		// any state for. No other instance could take that supplier over while
-		// the key kept being renewed.
+		// only Release, through the drain it starts, deletes this instance's
+		// claim key and drops the address from the leased set. Going straight
+		// to removeSupplier left the lease behind, and renewAllClaims iterates
+		// the leased set, so the miner kept EXPIREing ha:miner:claim:{addr}
+		// forever for a supplier it no longer had any state for. No other
+		// instance could take that supplier over while the key kept being
+		// renewed.
 		//
 		// The audit above is the ONLY one for this path: onSupplierReleased
 		// skips its own when the trigger is key_removal, because it would be
@@ -2249,14 +2326,13 @@ func (m *SupplierManager) publishUnstakingState(ctx context.Context, state *Supp
 //
 // Drain-window semantics (post commit 8eb604c):
 //
-//  1. We cancel the supplier's context (state.cancelFn) BEFORE removing
-//     it from m.suppliers. This ordering is deliberate: the cancel
-//     signal must reach every in-flight handleRelay/UpdateTree before
-//     the map delete, otherwise a goroutine that still holds a pointer
-//     to SupplierState could race with cleanup below (Consumer.Close,
-//     SMSTManager.Close, etc.).
+//  1. The state leaves m.suppliers and its context (state.cancelFn) is
+//     cancelled in one synchronous step, stopSupplier, before anything
+//     slow: the cancel signal must reach every in-flight
+//     handleRelay/UpdateTree before the cleanup in teardownSupplier
+//     (Consumer.Close, SMSTManager.Close, etc.).
 //
-//  2. Between cancelFn() firing and the map delete, a concurrent
+//  2. Once cancelFn() fires, a concurrent
 //     handleRelay call may already be mid-way through a Redis write
 //     (UpdateTree, ACK, dedup set insert). Those calls now operate
 //     with a cancelled context. Each such Redis operation returns a
@@ -2288,6 +2364,35 @@ func (m *SupplierManager) publishUnstakingState(ctx context.Context, state *Supp
 // supplier — no mid-flight writer can resurrect state after the map
 // delete.
 func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason) {
+	if state, ok := m.stopSupplier(operatorAddr, reason); ok {
+		m.teardownSupplier(state)
+	}
+}
+
+// stopSupplier takes the supplier out of the map and cancels its consume loop.
+// It makes no network call, so a release can run it before returning.
+//
+// Atomic remove-and-take: the state leaves the map FIRST so the slow
+// per-supplier teardown (Consumer.Close -> wg.Wait can sit on a blocked XREAD
+// for tens of seconds) holds no map coordination at all. A later claim of the
+// same supplier on this miner sees an empty slot and constructs a fresh state;
+// the old state's resources are private to its teardown.
+func (m *SupplierManager) stopSupplier(operatorAddr string, reason drainReason) (*SupplierState, bool) {
+	state, exists := m.suppliers.LoadAndDelete(operatorAddr)
+	if !exists {
+		return nil, false
+	}
+	state.drainReason.Store(int32(reason))
+	state.StoreStatus(SupplierStatusDraining)
+	state.cancelFn()
+	return state, true
+}
+
+// teardownSupplier waits for a stopped supplier's consume loop and closes
+// everything it owned.
+func (m *SupplierManager) teardownSupplier(state *SupplierState) {
+	operatorAddr := state.OperatorAddr
+
 	// Capture the lifecycle context once under m.mu.RLock. removeSupplier
 	// can run concurrently with Close() (Close() writes m.ctx under m.mu),
 	// so every direct `m.ctx` read inside this function would be a data
@@ -2302,20 +2407,6 @@ func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason
 		// runs on a best-effort basis rather than panicking downstream.
 		ctx = context.Background()
 	}
-
-	// Atomic remove-and-take. We pull the state out of the map FIRST so the
-	// slow per-supplier teardown below (Consumer.Close → wg.Wait can sit on
-	// a blocked XREAD for tens of seconds) holds no map coordination at all.
-	// A subsequent claim of the same supplier on this miner will see an
-	// empty slot and construct a fresh state — the old state's resources
-	// are private to this goroutine and torn down independently.
-	state, exists := m.suppliers.LoadAndDelete(operatorAddr)
-	if !exists {
-		return
-	}
-
-	state.drainReason.Store(int32(reason))
-	state.StoreStatus(SupplierStatusDraining)
 
 	m.publishUnstakingState(ctx, state)
 
@@ -2332,8 +2423,8 @@ func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason
 
 	// Wait for pending work (TODO: implement proper tracking)
 	// For now, just wait for consumer to finish.
-	// No global lock — the state was already atomically removed from the map.
-	state.cancelFn()
+	// No global lock — the state was already atomically removed from the map,
+	// and its context cancelled, by stopSupplier.
 	state.wg.Wait()
 
 	if state.LifecycleManager != nil {
@@ -2433,11 +2524,12 @@ func (m *SupplierManager) Close() error {
 	}
 	m.mu.Unlock()
 
-	// Stop the claimer first (releases all claims)
+	// Stop the claimer's loops first -- no rebalance, renewal or orphan claim
+	// may change the supplier set under the teardown -- but release NOTHING yet:
+	// every lease stays ours until its supplier's consume loop has stopped
+	// writing, and FinishShutdown deletes them at the end.
 	if m.claimer != nil {
-		if err := m.claimer.Stop(context.Background()); err != nil {
-			m.logger.Warn().Err(err).Msg("failed to stop supplier claimer")
-		}
+		m.claimer.StopLoops()
 	}
 
 	// Stop growing the connection pool before anything starts closing it: a
@@ -2499,6 +2591,13 @@ func (m *SupplierManager) Close() error {
 		_ = state.SessionStore.Close()
 		return true
 	})
+
+	// Drains released before Close delete their own leases when they end;
+	// only then is every writer gone and the rest of the leases safe to delete.
+	m.drainWG.Wait()
+	if m.claimer != nil {
+		m.claimer.FinishShutdown(context.Background())
+	}
 
 	// Stop query subpool gracefully (drains queued tasks)
 	if m.querySubpool != nil {
