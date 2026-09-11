@@ -59,6 +59,7 @@ import (
 	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -325,6 +326,11 @@ type redisSMST struct {
 	// rolled back.
 	liveRoot []byte
 
+	// gen is this tree's generation (see addTreeLocked). Set once, before the
+	// tree is published in the manager's map, and never written again, so it
+	// is read without tree.mu.
+	gen uint64
+
 	mu sync.Mutex
 }
 
@@ -358,6 +364,9 @@ type RedisSMSTManager struct {
 	// by evictCorruptSessionLocked, reset to 0 on every successful
 	// UpdateTree. Protected by treesMu.
 	evictionCounts map[string]int
+
+	// treeGen numbers the trees this manager makes resident (addTreeLocked).
+	treeGen atomic.Uint64
 }
 
 // NewRedisSMSTManager creates a new Redis-backed SMST manager.
@@ -397,7 +406,7 @@ func (m *RedisSMSTManager) GetOrCreateTree(ctx context.Context, sessionID string
 	// Try to resume an existing tree from Redis before creating a fresh one.
 	// Prefer claimed_root (post-flush, sealed) over live_root (mid-session).
 	if resumed := m.resumeTreeFromRedisLocked(ctx, sessionID); resumed != nil {
-		m.trees[sessionID] = resumed
+		m.addTreeLocked(sessionID, resumed)
 		return resumed, nil
 	}
 
@@ -413,7 +422,7 @@ func (m *RedisSMSTManager) GetOrCreateTree(ctx context.Context, sessionID string
 		store:     store,
 	}
 
-	m.trees[sessionID] = tree
+	m.addTreeLocked(sessionID, tree)
 
 	// Set TTL on the SMST hash key at creation time (not per-relay).
 	// This is a backup safety net; manual deletion happens in OnSessionProved.
@@ -559,12 +568,49 @@ func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessio
 	return nil
 }
 
+// addTreeLocked makes tree the session's resident tree, as a new generation.
+// A tree that replaces an evicted one -- resumed from a live_root that may not
+// cover every relay the evicted tree held -- gets a number of its own:
+// UpdateTreeGen hands it to the relays it takes and CheckpointLiveRoot reports
+// it, so a relay batch can tell a relay that went into a tree the session no
+// longer has. Every tree enters m.trees through here. The caller holds
+// m.treesMu.
+func (m *RedisSMSTManager) addTreeLocked(sessionID string, tree *redisSMST) {
+	tree.gen = m.treeGen.Add(1)
+	m.trees[sessionID] = tree
+}
+
 // UpdateTree adds a relay to the SMST for a session.
-func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key, value []byte, weight uint64) (err error) {
+func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key, value []byte, weight uint64) error {
+	_, err := m.UpdateTreeGen(ctx, sessionID, key, value, weight)
+	return err
+}
+
+// UpdateTreeGen is UpdateTree, and returns the generation of the tree the
+// relay went into. A caller that acknowledges the relay later -- the relay
+// batch -- keeps it, to tell whether the tree it checkpoints then is still the
+// one holding the relay.
+func (m *RedisSMSTManager) UpdateTreeGen(
+	ctx context.Context,
+	sessionID string,
+	key, value []byte,
+	weight uint64,
+) (gen uint64, err error) {
 	tree, err := m.GetOrCreateTree(ctx, sessionID)
 	if err != nil {
-		return err
+		return 0, err
 	}
+	return tree.gen, m.updateTree(ctx, sessionID, tree, key, value, weight)
+}
+
+// updateTree is UpdateTree's work on the session's resident tree.
+func (m *RedisSMSTManager) updateTree(
+	ctx context.Context,
+	sessionID string,
+	tree *redisSMST,
+	key, value []byte,
+	weight uint64,
+) (err error) {
 
 	// Ensure any corruption detected inside this call results in the
 	// session being evicted so the next relay starts from a consistent
@@ -742,12 +788,15 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 // after the session ended, or evicted after corruption. Nothing is written then,
 // on purpose: GetOrCreateTree would create an empty tree, and a live_root of an
 // empty tree covers nothing. The caller must not acknowledge on that answer.
-func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID string) (resident bool, err error) {
+//
+// gen is the generation of the tree checkpointed (see addTreeLocked). A relay
+// UpdateTreeGen put in a tree of another generation is not covered by it.
+func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID string) (resident bool, gen uint64, err error) {
 	m.treesMu.RLock()
 	tree, exists := m.trees[sessionID]
 	m.treesMu.RUnlock()
 	if !exists {
-		return false, nil
+		return false, 0, nil
 	}
 
 	tree.mu.Lock()
@@ -758,10 +807,10 @@ func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID str
 		rootBytes = []byte(tree.trie.Root())
 		return nil
 	}); err != nil {
-		return true, err
+		return true, tree.gen, err
 	}
 	if !isValidSMSTRoot(rootBytes) {
-		return true, fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(rootBytes), SMSTRootLen)
+		return true, tree.gen, fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(rootBytes), SMSTRootLen)
 	}
 
 	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
@@ -773,7 +822,7 @@ func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID str
 	if err == nil {
 		tree.liveRoot = rootBytes
 	}
-	return true, err
+	return true, tree.gen, err
 }
 
 // CheckpointLiveRootOnExit is the checkpoint a supplier's exit writes before it
@@ -949,7 +998,7 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 		if existing, ok := m.trees[sessionID]; ok {
 			tree = existing
 		} else if resumed := m.resumeTreeFromRedisLocked(ctx, sessionID); resumed != nil {
-			m.trees[sessionID] = resumed
+			m.addTreeLocked(sessionID, resumed)
 			tree = resumed
 		}
 		m.treesMu.Unlock()
@@ -1374,7 +1423,7 @@ func (m *RedisSMSTManager) loadTreeFromRedis(ctx context.Context, sessionID stri
 		m.treesMu.Unlock()
 		return existing, nil
 	}
-	m.trees[sessionID] = tree
+	m.addTreeLocked(sessionID, tree)
 	m.treesMu.Unlock()
 
 	return tree, nil
@@ -1518,7 +1567,7 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 			}
 
 			if resumed := m.resumeTreeFromRedisLocked(ctx, sessionID); resumed != nil {
-				m.trees[sessionID] = resumed
+				m.addTreeLocked(sessionID, resumed)
 				m.treesMu.Unlock()
 				loadedCount++
 				m.logger.Debug().
@@ -1534,11 +1583,11 @@ func (m *RedisSMSTManager) WarmupFromRedis(ctx context.Context) (int, error) {
 			// This matches GetOrCreateTree's final branch.
 			store := NewRedisMapStore(ctx, m.redisClient, m.config.SupplierAddress, sessionID)
 			trie := smt.NewSparseMerkleSumTrie(store, protocol.NewTrieHasher(), protocol.SMTValueHasher())
-			m.trees[sessionID] = &redisSMST{
+			m.addTreeLocked(sessionID, &redisSMST{
 				sessionID: sessionID,
 				trie:      trie,
 				store:     store,
-			}
+			})
 			m.treesMu.Unlock()
 
 			loadedCount++

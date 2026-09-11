@@ -794,21 +794,26 @@ func TestRelayBatch_AtTheCapAFailedFlushSendsTheNewRelayOnItsOwn(t *testing.T) {
 	const supplier, sessionID = "pokt1batch_cap", "sess-cap"
 	w := newBatchWorker(t, client, supplier, "a")
 
-	// One real relay makes the tree resident; the rest only fill the batch.
+	// One real relay makes the tree resident; the rest only fill the batch,
+	// as relays of that tree -- of its generation -- or the flush would hand
+	// them back as relays of a tree the session no longer has.
 	w.deliver(w.msg(w.publish(1)[0], sessionID, "cap-real", 100))
+	w.smst.treesMu.RLock()
+	gen := w.smst.trees[sessionID].gen
+	w.smst.treesMu.RUnlock()
 	s := relaySession{sessionID: sessionID, supplier: supplier, serviceID: "svc-1"}
 	for i := 1; i < relayBatchCap; i++ {
-		require.True(t, w.batch.Add(w.ctx, s, batchedRelay{id: fmt.Sprintf("1-%d", i), hash: []byte(fmt.Sprintf("cap-%d", i)), computeUnits: 1}))
+		require.True(t, w.batch.Add(w.ctx, s, batchedRelay{id: fmt.Sprintf("1-%d", i), hash: []byte(fmt.Sprintf("cap-%d", i)), computeUnits: 1, gen: gen}))
 	}
 	require.Equal(t, relayBatchCap, w.held(sessionID))
 
 	fail.Fail("redis unreachable")
-	took := w.batch.Add(w.ctx, s, batchedRelay{id: "2-1", hash: []byte("cap-over"), computeUnits: 1})
+	took := w.batch.Add(w.ctx, s, batchedRelay{id: "2-1", hash: []byte("cap-over"), computeUnits: 1, gen: gen})
 	fail.Clear()
 	require.False(t, took, "at the cap with a failing flush the batch must refuse, not grow")
 	require.Equal(t, relayBatchCap, w.held(sessionID))
 
-	require.True(t, w.batch.Add(w.ctx, s, batchedRelay{id: "2-2", hash: []byte("cap-next"), computeUnits: 1}),
+	require.True(t, w.batch.Add(w.ctx, s, batchedRelay{id: "2-2", hash: []byte("cap-next"), computeUnits: 1, gen: gen}),
 		"at the cap with a working flush it flushes and takes the relay")
 	require.Equal(t, 1, w.held(sessionID))
 	require.Equal(t, int64(relayBatchCap), w.snapshot(sessionID).RelayCount)

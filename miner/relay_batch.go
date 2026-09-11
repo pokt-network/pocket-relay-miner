@@ -57,7 +57,33 @@ type batchedRelay struct {
 	id           string // stream entry ID
 	hash         []byte // relay hash; hashMember turns it into the dedup set's member
 	computeUnits uint64
+	gen          uint64 // generation of the tree UpdateTreeGen put the relay in
 }
+
+// takeOtherGenerations removes from the batch, and returns, the relays put in
+// a tree of a generation other than gen.
+func (sb *sessionBatch) takeOtherGenerations(gen uint64) (other []batchedRelay) {
+	kept := sb.relays[:0]
+	for _, r := range sb.relays {
+		if r.gen == gen {
+			kept = append(kept, r)
+		} else {
+			other = append(other, r)
+		}
+	}
+	sb.relays = kept
+	return other
+}
+
+// Why a batch hands relays back unacknowledged; the reason label of
+// relay_batch_released_total.
+const (
+	// relayBatchReleasedNotResident: the session's tree is not resident here.
+	relayBatchReleasedNotResident = "tree_not_resident"
+	// relayBatchReleasedTreeReplaced: the relays went into a tree that was
+	// evicted and replaced since.
+	relayBatchReleasedTreeReplaced = "tree_replaced"
+)
 
 type sessionBatch struct {
 	session relaySession
@@ -260,6 +286,7 @@ func (b *relayBatch) flushLocked(ctx context.Context, sb *sessionBatch) (retaine
 	case flushRetry:
 		return true
 	case flushRelease:
+		RecordRelayBatchReleased(b.supplierAddr, relayBatchReleasedNotResident, len(sb.relays))
 		b.release(ctx, sb)
 	case flushPerRelay:
 		b.finishOneByOne(ctx, sb)
@@ -292,7 +319,7 @@ func (b *relayBatch) flushSession(ctx context.Context, sb *sessionBatch) (outcom
 		}
 	}()
 
-	resident, err := b.smst.CheckpointLiveRoot(ctx, sessionID)
+	resident, gen, err := b.smst.CheckpointLiveRoot(ctx, sessionID)
 	if err != nil {
 		b.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("relay batch: live_root checkpoint failed, keeping the batch for the next flush")
@@ -306,6 +333,20 @@ func (b *relayBatch) flushSession(ctx context.Context, sb *sessionBatch) (outcom
 		b.logger.Debug().Str(logging.FieldSessionID, sessionID).Int("relays", len(sb.relays)).
 			Msg("relay batch: session tree not resident, handing the batch back unacknowledged")
 		return flushRelease
+	}
+
+	// A relay that went into an earlier tree of this session -- evicted after
+	// corruption, then replaced by one resumed from a live_root that may not
+	// cover it -- is not in the tree just checkpointed. Acknowledged, it would
+	// be gone; handed back, its redelivery puts it in this tree.
+	if stale := sb.takeOtherGenerations(gen); len(stale) > 0 {
+		b.logger.Debug().Str(logging.FieldSessionID, sessionID).Int("relays", len(stale)).
+			Msg("relay batch: relays of a replaced session tree, handing them back unacknowledged")
+		b.releaseRelays(ctx, sessionID, stale)
+		RecordRelayBatchReleased(b.supplierAddr, relayBatchReleasedTreeReplaced, len(stale))
+		if len(sb.relays) == 0 {
+			return flushDone
+		}
 	}
 
 	if b.hook != nil {
@@ -399,15 +440,21 @@ func (b *relayBatch) recordFlushed(sb *sessionBatch, res relayBatchResult) {
 // release hands every entry of the batch back to the group unacknowledged,
 // the way drainDeliveryBuffer does.
 func (b *relayBatch) release(ctx context.Context, sb *sessionBatch) {
+	b.releaseRelays(ctx, sb.session.sessionID, sb.relays)
+}
+
+// releaseRelays hands the given entries of a session's batch back to the group
+// unacknowledged.
+func (b *relayBatch) releaseRelays(ctx context.Context, sessionID string, relays []batchedRelay) {
 	failed := 0
-	for _, r := range sb.relays {
+	for _, r := range relays {
 		msg := transport.StreamMessage{ID: r.id, StreamName: b.consumer.StreamName()}
 		if err := b.consumer.ReleaseMessage(ctx, msg); err != nil {
 			failed++
 		}
 	}
 	if failed > 0 {
-		b.logger.Debug().Str(logging.FieldSessionID, sb.session.sessionID).Int("failed", failed).
+		b.logger.Debug().Str(logging.FieldSessionID, sessionID).Int("failed", failed).
 			Msg("relay batch: some entries could not be released; they stay pending until this process restarts")
 	}
 }

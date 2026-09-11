@@ -632,14 +632,16 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		}
 	}
 
-	// Update SMST with relay bytes
-	if err := state.SMSTManager.UpdateTree(
+	// Update SMST with relay bytes. The generation of the tree it went into
+	// goes with the relay to the batch (see relayBatch.flushSession).
+	gen, err := state.SMSTManager.UpdateTreeGen(
 		ctx,
 		msg.Message.SessionId,
 		msg.Message.RelayHash,
 		msg.Message.RelayBytes,
 		msg.Message.ComputeUnitsPerRelay,
-	); err != nil {
+	)
+	if err != nil {
 		// Shutdown-origin cancellations: ACK-and-discard. The worker is
 		// about to exit and will not process a retry; the stream message
 		// is re-delivered by XREADGROUP to the next consumer after
@@ -702,7 +704,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// nothing to deduplicate by and is finished here, as is any relay the batch
 	// refuses.
 	if state.relayBatch != nil && len(relayHash) > 0 &&
-		state.relayBatch.Add(ctx, session, batchedRelay{id: msg.ID, hash: bytes.Clone(relayHash), computeUnits: computeUnits}) {
+		state.relayBatch.Add(ctx, session, batchedRelay{id: msg.ID, hash: bytes.Clone(relayHash), computeUnits: computeUnits, gen: gen}) {
 		return ErrRelayBatched
 	}
 

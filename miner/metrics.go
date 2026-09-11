@@ -382,6 +382,19 @@ var (
 		[]string{"supplier"},
 	)
 
+	// relayBatchReleasedTotal counts relays a batch handed back unacknowledged
+	// at a flush instead of settling them, by why: they stay pending for a
+	// redelivery that puts them in the session's current tree.
+	relayBatchReleasedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_batch_released_total",
+			Help:      "Relays a relay batch handed back unacknowledged at a flush, by reason (tree_not_resident, tree_replaced)",
+		},
+		[]string{"supplier", "reason"},
+	)
+
 	// claimsSkippedTotal tracks claim submissions that were intentionally
 	// dropped before going to the chain. reason values (extend as new skip
 	// paths land):
@@ -1735,6 +1748,14 @@ func StartWorkerPoolMetricsTicker(
 // client, at the supplier's expense, and then dropped.
 func RecordRelayLostToPanic(supplier, serviceID string) {
 	relaysLostTotal.WithLabelValues(supplier, serviceID, "panic_recovered").Add(1)
+}
+
+// RecordRelayBatchReleased counts n relays a batch handed back at a flush.
+func RecordRelayBatchReleased(supplier, reason string, n int) {
+	if n <= 0 {
+		return
+	}
+	relayBatchReleasedTotal.WithLabelValues(supplier, reason).Add(float64(n))
 }
 
 // RecordRelayBatchPanic counts one relay batch whose flush panicked.
