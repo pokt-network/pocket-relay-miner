@@ -309,15 +309,16 @@ const supplierDrainAuditTimeout = 5 * time.Second
 const drainLeaseCallTimeout = 5 * time.Second
 
 // drainLeaseBudget is how long a released supplier's lease is kept while its
-// drain runs: the audit, the batch release and the delivery-buffer drain (each
-// bounded by shutdownDrainWindow), the consumer's blocked read, which returns
-// within one block interval (transport/redis blockInterval, 5 s), and a margin.
+// drain runs: the audit, the batch release, the delivery-buffer drain and the
+// exit checkpoint of its trees (each bounded by shutdownDrainWindow), the
+// consumer's blocked read, which returns within one block interval
+// (transport/redis blockInterval, 5 s), and a margin.
 // A drain that outlives it gives the lease up when the key expires. A func
 // because shutdownDrainWindow is a var a test may shrink.
 func drainLeaseBudget() time.Duration {
 	const consumerBlockInterval = 5 * time.Second
 	const margin = 10 * time.Second
-	return supplierDrainAuditTimeout + 2*shutdownDrainWindow + consumerBlockInterval + margin
+	return supplierDrainAuditTimeout + 3*shutdownDrainWindow + consumerBlockInterval + margin
 }
 
 // SupplierManager manages multiple suppliers in the HA Miner.
@@ -2433,6 +2434,8 @@ func (m *SupplierManager) teardownSupplier(state *SupplierState) {
 		}
 	}
 
+	m.checkpointTreesOnExit(state)
+
 	if state.SMSTManager != nil {
 		if err := state.SMSTManager.Close(); err != nil {
 			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing SMST manager")
@@ -2493,6 +2496,38 @@ func (m *SupplierManager) teardownSupplier(state *SupplierState) {
 	m.logger.Info().
 		Str(logging.FieldSupplier, operatorAddr).
 		Msg("supplier gracefully removed")
+}
+
+// checkpointTreesOnExit writes the covering live_root of every tree a stopped
+// supplier still holds, once its consume loop and its lifecycle have stopped
+// and before this instance deletes its lease. The next owner resumes from live_root, and the
+// relays finished one at a time since the last checkpoint are already
+// acknowledged: nothing redelivers them. On a context of its own, because the
+// supplier's is cancelled, and during Close so is the manager's.
+func (m *SupplierManager) checkpointTreesOnExit(state *SupplierState) {
+	if state.SMSTManager == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainWindow)
+	defer cancel()
+	written, failed, err := state.SMSTManager.CheckpointAllOnExit(ctx)
+	// Added even when zero, so a supplier that has been torn down exports the
+	// series and a query can tell "none failed" from "not exported".
+	smstExitCheckpointFailedTotal.WithLabelValues(state.OperatorAddr).Add(float64(failed))
+	if err != nil {
+		// Once per supplier torn down, not per relay.
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Int("written", written).
+			Int("failed", failed).
+			Msg("could not checkpoint every tree on exit; the next owner may resume without relays this one acknowledged")
+		return
+	}
+	m.logger.Debug().
+		Str(logging.FieldSupplier, state.OperatorAddr).
+		Int("written", written).
+		Msg("checkpointed trees on exit")
 }
 
 // GetSupplierState returns the state for a specific supplier.
@@ -2583,6 +2618,7 @@ func (m *SupplierManager) Close() error {
 		if state.LifecycleManager != nil {
 			_ = state.LifecycleManager.Close()
 		}
+		m.checkpointTreesOnExit(state)
 		if state.SMSTManager != nil {
 			_ = state.SMSTManager.Close()
 		}

@@ -1136,6 +1136,21 @@ var (
 		[]string{"trigger", "instance"},
 	)
 
+	// smstExitCheckpointFailedTotal counts the trees whose live_root could not
+	// be written as their supplier was torn down. Relays finished one at a time
+	// since the tree's last checkpoint are already acknowledged, so each such
+	// tree may resume at the next owner without some of them. No session_id:
+	// a Counter's series are never deleted.
+	smstExitCheckpointFailedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "smst_exit_checkpoint_failed_total",
+			Help:      "Total session trees whose live_root could not be checkpointed when their supplier was torn down",
+		},
+		[]string{"supplier"},
+	)
+
 	// supplierClaimedGauge tracks current number of suppliers claimed by each instance.
 	supplierClaimedGauge = observability.MinerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{

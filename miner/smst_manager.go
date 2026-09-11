@@ -804,17 +804,81 @@ func (m *RedisSMSTManager) CheckpointLiveRootOnExit(ctx context.Context, session
 	tree.mu.Lock()
 	defer tree.mu.Unlock()
 
+	rootBytes, err := m.exitRootLocked(sessionID, tree)
+	if err != nil {
+		return false, err
+	}
+	return m.writeExitLiveRootLocked(ctx, sessionID, tree, rootBytes)
+}
+
+// CheckpointAllOnExit is CheckpointLiveRootOnExit for every tree this manager
+// still holds, run as a supplier is torn down. Relays finished one at a time
+// are acknowledged as they arrive, while live_root is written only at a tree's
+// first update and every LiveRootCheckpointInterval after; torn down without
+// this, the trees went with up to interval-1 of those relays uncovered, and the
+// next owner resumed without them. A tree that is sealing or claimed, or unchanged since its
+// live_root, is left alone.
+//
+// written counts the live_roots set and failed the trees that returned an
+// error. Every tree is tried; the errors are joined.
+func (m *RedisSMSTManager) CheckpointAllOnExit(ctx context.Context) (written, failed int, err error) {
+	m.treesMu.RLock()
+	trees := make([]*redisSMST, 0, len(m.trees))
+	for _, tree := range m.trees {
+		trees = append(trees, tree)
+	}
+	m.treesMu.RUnlock()
+
+	var errs []error
+	for _, tree := range trees {
+		set, treeErr := m.checkpointTreeOnExit(ctx, tree)
+		if treeErr != nil {
+			errs = append(errs, fmt.Errorf("session %s: %w", tree.sessionID, treeErr))
+		}
+		if set {
+			written++
+		}
+	}
+	return written, len(errs), errors.Join(errs...)
+}
+
+// checkpointTreeOnExit is one tree of CheckpointAllOnExit.
+func (m *RedisSMSTManager) checkpointTreeOnExit(ctx context.Context, tree *redisSMST) (bool, error) {
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+
+	if tree.sealing || tree.claimedRoot != nil {
+		return false, nil // its root is the claim's now, stored by FlushTree
+	}
+	rootBytes, err := m.exitRootLocked(tree.sessionID, tree)
+	if err != nil {
+		return false, err
+	}
+	if bytes.Equal(rootBytes, tree.liveRoot) {
+		return false, nil // live_root already covers it
+	}
+	return m.writeExitLiveRootLocked(ctx, tree.sessionID, tree, rootBytes)
+}
+
+// exitRootLocked returns the tree's current root, checked. The caller holds
+// tree.mu.
+func (m *RedisSMSTManager) exitRootLocked(sessionID string, tree *redisSMST) ([]byte, error) {
 	var rootBytes []byte
 	if err := m.runSMSTSafely(sessionID, "root", func() error {
 		rootBytes = []byte(tree.trie.Root())
 		return nil
 	}); err != nil {
-		return false, err
+		return nil, err
 	}
 	if !isValidSMSTRoot(rootBytes) {
-		return false, fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(rootBytes), SMSTRootLen)
+		return nil, fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(rootBytes), SMSTRootLen)
 	}
+	return rootBytes, nil
+}
 
+// writeExitLiveRootLocked sets live_root to rootBytes with exitLiveRootScript
+// and records it. The caller holds tree.mu.
+func (m *RedisSMSTManager) writeExitLiveRootLocked(ctx context.Context, sessionID string, tree *redisSMST, rootBytes []byte) (bool, error) {
 	keys := []string{
 		m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID),
 		m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID),
