@@ -1175,7 +1175,8 @@ var (
 
 	// supplierDrainDecisionTotal tracks every drain decision with on-chain verification result.
 	// Labels: drain_reason (lease_expired, lease_stolen, renew_stalled,
-	//         rebalance_release, key_removal, claim_callback_failed),
+	//         rebalance_release, key_removal, claim_callback_failed,
+	//         consume_loop_panicked),
 	//         on_chain_result (staked, not_found, error, no_query_client)
 	supplierDrainDecisionTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{

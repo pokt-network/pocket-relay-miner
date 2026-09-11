@@ -81,6 +81,8 @@ const (
 	triggerKeyRemoval = "key_removal"
 	// triggerClaimCallbackFailed: we claimed it but could not start it.
 	triggerClaimCallbackFailed = "claim_callback_failed"
+	// triggerConsumeLoopPanicked: its consume loop used up its panic budget.
+	triggerConsumeLoopPanicked = "consume_loop_panicked"
 )
 
 // SupplierClaimerConfig contains configuration for the SupplierClaimer.

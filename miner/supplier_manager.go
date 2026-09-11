@@ -339,6 +339,14 @@ type SupplierManager struct {
 	// Message processing callback
 	onRelay func(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error
 
+	// consumeLoopFlushHook, when set, runs at every flush tick of every
+	// supplier's consume loop, before the flush. For tests only: nil in
+	// production. It is how a test makes the loop itself panic -- no path known
+	// today reaches the loop's recover, because handleStreamMessage and
+	// relayBatch.flushSession recover what they call. The restart and the
+	// panic budget are a defence against a defect that is not there yet.
+	consumeLoopFlushHook func()
+
 	// drainWG tracks the drain goroutines onSupplierReleased starts, so a
 	// test can await the audit without polling a clock. See waitDrains for
 	// what it deliberately does NOT do.
@@ -1873,17 +1881,6 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 	return ownerAddr, services, endpoints
 }
 
-// consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
-// Each message is ACK'd immediately after successful processing to prevent race conditions
-// with the reclaim taking messages that were already processed but not yet ACK'd.
-//
-// Belt-and-suspenders defense: even though every SMT boundary inside
-// handleRelay is wrapped with runSMSTSafely, any panic from unrelated
-// code paths (nil pointer, map corruption, pool misuse) must not kill
-// this consumer goroutine — losing it stops every relay for the
-// supplier until a restart. We cannot use logging.RecoverGoRoutine
-// directly because this loop must keep running after a single relay
-// panics, not exit. Instead we recover *per iteration* below.
 // shutdownDrainWindow bounds how long a supplier's graceful shutdown spends
 // finishing relays already sitting in its delivery buffer.
 //
@@ -1897,21 +1894,59 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 // A var, not a const, only so a test can shrink it: nothing in production writes it.
 var shutdownDrainWindow = 5 * time.Second
 
+// consumeLoopPanicBudget is the consume-loop panic at which a supplier is let
+// go for another instance to take: the panics before it are recovered and the
+// loop runs again on the same delivery channel, and at this one it stops, since
+// a loop that keeps panicking here would keep its lease and consume nothing.
+// The count is not replenished: a supplier that panics this often has a
+// defect, and restarting it forever would hide it.
+const consumeLoopPanicBudget = 3
+
+// consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
+// Each message is ACK'd immediately after successful processing to prevent race conditions
+// with the reclaim taking messages that were already processed but not yet ACK'd.
+//
+// A panic in the loop must not end this goroutine: with it gone, the supplier
+// stays in the map and its lease keeps being renewed while nothing reads its
+// stream, and no other instance can take it -- until a restart. A relay's
+// processing and a batch's flush recover their own panics (handleStreamMessage,
+// relayBatch.flushSession); runConsumeLoop recovers whatever reaches the loop
+// itself, and this runs it again until the consumeLoopPanicBudget-th panic.
 func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *SupplierState) {
 	defer state.wg.Done()
 
+	msgChan := state.Consumer.Consume(ctx)
+	for panics := 1; ; panics++ {
+		if !m.runConsumeLoop(ctx, state, msgChan) {
+			return
+		}
+		// The panic may have left the batch half-built: it goes back before
+		// the loop runs again. A panic while it goes back ends the restarts.
+		if !m.releaseBatchAfterPanic(ctx, state) || panics >= consumeLoopPanicBudget {
+			m.letGoAfterPanics(ctx, state)
+			return
+		}
+	}
+}
+
+// runConsumeLoop consumes until the delivery channel closes or ctx ends, and
+// reports whether it stopped on a recovered panic instead.
+func (m *SupplierManager) runConsumeLoop(
+	ctx context.Context,
+	state *SupplierState,
+	msgChan <-chan transport.StreamMessage,
+) (panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {
+			panicked = true
 			logging.PanicRecoveriesTotal.WithLabelValues("supplier_consume_loop").Inc()
 			m.logger.Error().
 				Str(logging.FieldSupplier, state.OperatorAddr).
 				Str("panic_value", fmt.Sprintf("%v", r)).
 				Str("stack_trace", string(debug.Stack())).
-				Msg("PANIC RECOVERED in consumeForSupplier — consumer goroutine would have died")
+				Msg("PANIC RECOVERED in the consume loop -- running it again")
 		}
 	}()
-
-	msgChan := state.Consumer.Consume(ctx)
 
 	// The flush tick runs on this goroutine, between deliveries, so a flush
 	// never races the relays being added: the lifecycle's claim transition is
@@ -1929,11 +1964,14 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 			if !ok {
 				// Channel closed, exit
 				m.releaseRelayBatchOnExit(ctx, state)
-				return
+				return false
 			}
 			m.handleStreamMessage(ctx, state, msg)
 
 		case <-flushTick:
+			if m.consumeLoopFlushHook != nil {
+				m.consumeLoopFlushHook()
+			}
 			state.relayBatch.FlushAll(ctx)
 
 		case <-ctx.Done():
@@ -1944,8 +1982,51 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 			// consumer's pending list under a name that embeds the pid and
 			// will not exist after a restart.
 			m.drainDeliveryBuffer(ctx, state, msgChan)
-			return
+			return false
 		}
+	}
+}
+
+// releaseBatchAfterPanic hands the supplier's relay batch back after a
+// recovered consume-loop panic, and reports whether it got through without
+// panicking itself.
+func (m *SupplierManager) releaseBatchAfterPanic(ctx context.Context, state *SupplierState) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			ok = false
+			logging.PanicRecoveriesTotal.WithLabelValues("supplier_consume_loop").Inc()
+			m.logger.Error().
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str("panic_value", fmt.Sprintf("%v", r)).
+				Str("stack_trace", string(debug.Stack())).
+				Msg("PANIC RECOVERED handing the relay batch back after a consume-loop panic")
+		}
+	}()
+	m.releaseRelayBatchOnExit(ctx, state)
+	return true
+}
+
+// letGoAfterPanics lets a supplier whose consume loop keeps panicking go, for
+// another instance to take: through the claimer, which keeps the lease until
+// the drain ends, or, with no claimer, straight to the drain. It is called on
+// the loop's own goroutine and does not wait: onSupplierReleased cancels the
+// supplier and runs the teardown on a goroutine of its own, which waits for
+// this one to return. removeSupplier would wait for it here, on itself.
+func (m *SupplierManager) letGoAfterPanics(ctx context.Context, state *SupplierState) {
+	m.logger.Error().
+		Str(logging.FieldSupplier, state.OperatorAddr).
+		Msg("the consume loop keeps panicking; letting the supplier go for another instance to take")
+	var err error
+	if m.claimer != nil {
+		err = m.claimer.Release(ctx, state.OperatorAddr, triggerConsumeLoopPanicked)
+	} else {
+		err = m.onSupplierReleased(ctx, state.OperatorAddr, triggerConsumeLoopPanicked)
+	}
+	if err != nil {
+		m.logger.Error().
+			Err(err).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Msg("could not let go of a supplier whose consume loop keeps panicking")
 	}
 }
 
