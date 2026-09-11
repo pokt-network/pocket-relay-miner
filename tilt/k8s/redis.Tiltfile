@@ -120,7 +120,7 @@ metadata:
   name: redis-standalone
 spec:
   kubernetesConfig:
-    image: redis:8.4-alpine
+    image: redis:8.10.1-alpine
     imagePullPolicy: IfNotPresent
     resources:
       requests:
@@ -229,7 +229,7 @@ spec:
   clusterVersion: v7
   persistenceEnabled: true
   kubernetesConfig:
-    image: redis:8.4-alpine
+    image: redis:8.10.1-alpine
     imagePullPolicy: IfNotPresent
     resources:
       requests:
