@@ -576,7 +576,16 @@ func (m *SupplierManager) releaseUnconfigured(ctx context.Context, configured []
 		m.logger.Info().
 			Str(logging.FieldSupplier, addr).
 			Msg("releasing lease: supplier is no longer staked or no longer configured")
-		if err := m.claimer.Release(ctx, addr, triggerRebalanceRelease); err != nil {
+		// Two causes arrive here and only one is a removed key: a supplier that
+		// unstaked still has its key, and the fleet can still sign its pending
+		// work, so it is handed over. One whose key is gone is torn down as a key
+		// removal -- this is also where a key-change release that kept its claim
+		// is retried.
+		trigger := triggerRebalanceRelease
+		if !m.teardownCanFinishWork(addr) {
+			trigger = triggerKeyRemoval
+		}
+		if err := m.claimer.Release(ctx, addr, trigger); err != nil {
 			// Release already logged the reason and kept the claim; the next
 			// reconcile pass retries. Nothing is stranded by a single failure.
 			m.logger.Warn().
@@ -942,8 +951,15 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 // mirrors the key_removal path.
 func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier, trigger string) error {
 	reason := drainRebalance
-	if trigger == triggerShutdown {
+	switch trigger {
+	case triggerShutdown:
 		reason = drainShutdown
+	case triggerKeyRemoval:
+		// With a claimer -- every manager past Start -- this is how the key-change
+		// callback takes a removed key to the teardown. Mapped to a rebalance, the
+		// batch and the delivery buffer were RELEASED to a fleet that cannot sign
+		// them, and relays_dropped_no_key never counted.
+		reason = drainKeyRemoved
 	}
 
 	// The key-removal path already ran this exact verification one call up
@@ -2164,11 +2180,10 @@ func (m *SupplierManager) reportDrain(state *SupplierState, drained, abandoned i
 // happen. That line is what an operator reads mid-incident.
 //
 // It asks the key manager instead of taking the caller's word, because the
-// caller does not always know which case it is: in distributed mode an operator
-// removing a key tears the supplier down through the claimer's release path
-// (onSupplierReleased), the very same path a plain rebalance uses, so a reason
-// threaded down from there would report a key removal as a rebalance in exactly
-// the mode production runs. The key manager is local and authoritative.
+// caller's reason names what STARTED the teardown, not whether the key still
+// exists: a rebalance or a lost lease can tear down a supplier whose key the
+// operator removed meanwhile (not observed, but nothing orders the two). The key
+// manager is local and authoritative.
 //
 // A nil key manager (tests only) answers true, which keeps the message it had
 // before this distinction existed.
