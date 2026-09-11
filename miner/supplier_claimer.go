@@ -54,14 +54,6 @@ const (
 	// RebalanceInterval is how often to check for rebalancing.
 	// When new miners join, suppliers are redistributed within this interval.
 	RebalanceInterval = 30 * time.Second
-
-	// recentlyReleasedCooldown is how long this instance must wait before
-	// re-claiming a supplier it just released. Must be greater than one
-	// RebalanceInterval so peer miners have time to observe the freed
-	// claim key and pick it up; otherwise this instance's own next tick
-	// would race them via claimOrphaned. 2× gives a full peer cycle of
-	// headroom plus jitter buffer.
-	recentlyReleasedCooldown = 2 * RebalanceInterval
 )
 
 // Drain triggers. They are a BOUNDED set on purpose: the value reaches a
@@ -697,6 +689,18 @@ func (c *SupplierClaimer) releaseLost(ctx context.Context, supplier, trigger str
 	}
 }
 
+// recentlyReleasedCooldown is how long this instance must wait before
+// re-claiming a supplier it just released. Must be greater than one
+// rebalance interval so peer miners have time to observe the freed claim key
+// and pick it up; otherwise this instance's own next tick would race them via
+// claimOrphaned. 2x gives a full peer cycle of headroom plus jitter buffer. It
+// is the CONFIGURED interval's: derived from the default, a miner configured
+// with a longer interval re-claimed before its peers had a tick to take the
+// supplier.
+func (c *SupplierClaimer) recentlyReleasedCooldown() time.Duration {
+	return 2 * c.config.RebalanceInterval
+}
+
 // inRecentReleaseCooldown reports whether this instance released the
 // supplier within the last recentlyReleasedCooldown window. Side effect:
 // prunes the entry if it has aged out, so the map stays bounded by the
@@ -708,7 +712,7 @@ func (c *SupplierClaimer) inRecentReleaseCooldown(supplier string) bool {
 	if !ok {
 		return false
 	}
-	if time.Since(releasedAt) >= recentlyReleasedCooldown {
+	if time.Since(releasedAt) >= c.recentlyReleasedCooldown() {
 		delete(c.recentlyReleased, supplier)
 		return false
 	}
@@ -1052,6 +1056,16 @@ func (c *SupplierClaimer) renewStalledFor(supplier string, now time.Time) time.D
 // rebalanceLoop periodically checks and rebalances supplier distribution.
 func (c *SupplierClaimer) rebalanceLoop() {
 	defer c.wg.Done()
+
+	// Half a renewal period out of step with the renewal loop, which starts
+	// with this one: with the default rebalance interval a multiple of the
+	// renewal rate, every rebalance tick would otherwise land on a renewal
+	// pass over the same claims.
+	select {
+	case <-c.ctx.Done():
+		return
+	case <-time.After(c.config.RenewRate / 2):
+	}
 
 	ticker := time.NewTicker(c.config.RebalanceInterval)
 	defer ticker.Stop()
