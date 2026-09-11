@@ -75,10 +75,6 @@ type StreamsConsumer struct {
 	// Message channel
 	msgCh chan transport.StreamMessage
 
-	// Claiming rate limit (prevent excessive claiming when stream is idle)
-	lastClaimTime time.Time
-	claimMu       sync.Mutex
-
 	// Lifecycle management
 	mu       sync.RWMutex
 	closed   bool
@@ -172,9 +168,8 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 	// real server, so it was unreachable: a relay
 	// delivered to a consumer whose pod died before acking sat in that dead
 	// consumer's PEL forever, and its supplier's whole claim silently vanished
-	// (issue #25). The ticker runs regardless of what the read loop is doing;
-	// the lastClaimTime guard inside claimPendingMessages' caller path keeps
-	// the two triggers from stacking.
+	// (issue #25). The ticker runs regardless of what the read loop is doing,
+	// and it is the only trigger.
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -213,25 +208,39 @@ func (c *StreamsConsumer) ensureConsumerGroup(ctx context.Context) error {
 // reclaimLoop periodically recovers messages stuck in dead consumers' PELs.
 // It runs as a producer on msgCh alongside consumeLoop; the channel close is
 // owned by the coordinator in Consume, never by either producer.
+//
+// It sweeps as soon as it starts and then every quarter of the idle timeout.
+// The first sweep used to come one full idle timeout after start, so a consumer
+// that lived less than that -- a supplier claimed and released every ~32 s, as
+// the L3 of df5441c saw on 2026-09-11 -- never swept at all, and entries released
+// to it (parked idle under the "released" sentinel, or unowned) waited for
+// whoever outlived the timeout. Sweeping more often takes nothing younger: the
+// sweep itself only claims entries idle past ClaimIdleTimeout. Reaping dead
+// consumers stays on the full timeout.
 func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
-	interval := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	idle := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
+
+	// The read loop creates the group too, on its own goroutine, and may not
+	// have yet: a sweep against a missing group fails as "stream not found",
+	// which claimPendingMessages skips in silence, so the first sweep would do
+	// nothing. Creating it is idempotent.
+	if err := c.ensureConsumerGroup(ctx); err != nil && ctx.Err() == nil {
+		c.logger.Debug().Err(err).Msg("failed to ensure consumer group before the first reclaim sweep")
+	}
+	c.claimPendingMessages(ctx)
+
+	sweep := time.NewTicker(idle / 4)
+	defer sweep.Stop()
+	reap := time.NewTicker(idle)
+	defer reap.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			c.claimMu.Lock()
-			due := time.Since(c.lastClaimTime) >= interval
-			if due {
-				c.lastClaimTime = time.Now()
-			}
-			c.claimMu.Unlock()
-			if due {
-				c.claimPendingMessages(ctx)
-				c.reapDeadConsumers(ctx)
-			}
+		case <-sweep.C:
+			c.claimPendingMessages(ctx)
+		case <-reap.C:
+			c.reapDeadConsumers(ctx)
 		}
 	}
 }
