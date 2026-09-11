@@ -238,6 +238,37 @@ expect 16 "$(gate_counter_delta 0 16)"     "counter started at zero"
 expect 4  "$(gate_counter_delta 10 4)"     "RESET: after < before, the honest delta is what it has seen since"
 expect 0  "$(gate_counter_delta 10 0)"     "reset with no traffic since -- zero, never -10"
 
+# sent billed dropped -> the verdict BOTH the settlement wait and the final
+# assertion of live.sh read. The L3 of df5441c (2026-09-11) is the 59/60 row:
+# with its redelivered drops no longer announced, nothing explains the missing
+# relay, so the wait keeps it pending and the end reports it LOST.
+expect settled   "$(gate_exact_cell_state 60 60 0)" "every relay billed"
+expect settled   "$(gate_exact_cell_state 60 60 3)" "billed in full: drops elsewhere do not matter"
+expect over      "$(gate_exact_cell_state 60 61 0)" "billed more than sent"
+expect accounted "$(gate_exact_cell_state 60 58 2)" "every missing relay announced: the wait may stop"
+expect accounted "$(gate_exact_cell_state 60 58 9)" "more announced than missing"
+expect short     "$(gate_exact_cell_state 60 59 0)" "the L3 of df5441c: one relay missing, nothing announced"
+expect short     "$(gate_exact_cell_state 60 57 2)" "announced drops explain only part of it"
+expect short     "$(gate_exact_cell_state 5 0 0)"   "everything lost, nothing said"
+expect settled   "$(gate_exact_cell_state 0 0 0)"   "empty cell"
+
+# One verdict, two readers: the wait (services_pending) and the final assertion
+# must both call gate_exact_cell_state, or they drift apart again -- a wait that
+# stops on a rule the assertion does not accept, or waits on one it does.
+live_sh="$(dirname "${BASH_SOURCE[0]}")/live.sh"
+# shellcheck disable=SC2016 # the pattern is the literal call text, not an expansion
+uses="$(grep -c '$(gate_exact_cell_state ' "$live_sh" 2>/dev/null || true)"
+expect 2 "${uses:-0}" "live.sh must read gate_exact_cell_state in the wait AND in the final assertion"
+
+# The reasons live.sh accepts as announced, matched the way PromQL matches a
+# label regex (anchored): a redelivered copy must never explain a missing relay.
+reasons="$(sed -n "s/^announced_drop_reasons='\(.*\)'$/\1/p" "$live_sh")"
+accepts() { [[ "$1" =~ ^(${reasons})$ ]] && printf yes || printf no; }
+expect yes "$(accepts session_sealed)"                  "a relay late from its client is announced"
+expect yes "$(accepts claim_window_closed)"             "so is one past its claim window"
+expect no  "$(accepts session_sealed_redelivered)"      "a redelivered copy is not an announcement"
+expect no  "$(accepts claim_window_closed_redelivered)" "nor past the window"
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1

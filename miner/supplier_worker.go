@@ -529,7 +529,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 				Str("supplier", supplierAddr).
 				Str("session_state", string(snapshot.State)).
 				Msg("LATE_RELAY: dropping relay - session already in terminal state")
-			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
+			RecordRelayRejected(supplierAddr, dropReason("session_sealed", msg.IsReclaim), msg.Message.ServiceId)
 			return nil
 
 		case windowClosed:
@@ -561,7 +561,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 				Str("session_state", sessionState).
 				Int64("session_end_height", msg.Message.SessionEndHeight).
 				Msg("LATE_RELAY: dropping relay - claim window already closed")
-			RecordRelayRejected(supplierAddr, "claim_window_closed", msg.Message.ServiceId)
+			RecordRelayRejected(supplierAddr, dropReason("claim_window_closed", msg.IsReclaim), msg.Message.ServiceId)
 			return nil
 		}
 	}
@@ -669,7 +669,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 				Str("session_id", msg.Message.SessionId).
 				Str("supplier", supplierAddr).
 				Msg("dropping relay - permanent SMST error (session sealed/claimed)")
-			RecordRelayRejected(supplierAddr, "session_sealed", msg.Message.ServiceId)
+			RecordRelayRejected(supplierAddr, dropReason("session_sealed", msg.IsReclaim), msg.Message.ServiceId)
 			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, "session_sealed")
 			return nil // ACK and discard - no point retrying
 		}
@@ -708,6 +708,22 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 
 	countRelayOnce(ctx, w.logger, w.supplierManager.Deduplicator(), state.SessionCoordinator, supplierAddr, session, relayHash, computeUnits)
 	return nil // ACK
+}
+
+// dropReason names why a relay was dropped as unpayable -- its tree sealed, its
+// claim window closed -- and says whether the copy dropped was a REDELIVERY.
+// The difference is who can be blamed: a relay that reaches the miner late the
+// first time was late from its client, and the drop accounts for it. A
+// redelivered copy was delivered before, to a consumer that did not finish it:
+// either the relay is already in the tree, and nothing is missing, or it was
+// lost in a handoff, and the drop must not explain the loss away. The live gate
+// excuses a missing relay only by the reason without the suffix. Bounded: two
+// reasons, two values each.
+func dropReason(reason string, redelivered bool) string {
+	if redelivered {
+		return reason + "_redelivered"
+	}
+	return reason
 }
 
 // countRelayOnce is how a relay is finished one at a time: mark it processed in

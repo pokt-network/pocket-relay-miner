@@ -425,6 +425,30 @@ gate_unexplained_shortfall() {
     printf '%s' "$unexplained"
 }
 
+# gate_exact_cell_state SENT BILLED ANNOUNCED_DROPS
+#
+# The ONE verdict on a cell whose model is one request = one billed relay. The
+# settlement wait and the final assertion both call it, so they cannot disagree:
+# they used to, and a shortfall that was fully announced kept the wait going
+# until its timeout while the final assertion would have accepted it.
+#   settled    billed == sent
+#   over       billed > sent (foreign traffic or a double count)
+#   accounted  every missing relay was announced by the miner
+#   short      relays are missing that nobody announced: still pending while
+#              the wait runs, LOST once it is over
+gate_exact_cell_state() {
+    local sent="${1:-0}" billed="${2:-0}" dropped="${3:-0}"
+    if [ "$billed" -eq "$sent" ]; then
+        printf 'settled'
+    elif [ "$billed" -gt "$sent" ]; then
+        printf 'over'
+    elif [ "$(gate_unexplained_shortfall "$sent" "$billed" "$dropped")" -eq 0 ]; then
+        printf 'accounted'
+    else
+        printf 'short'
+    fi
+}
+
 # gate_served_shortfall EXPECTED SERVED
 #
 # Prints how many relays a cell asked for and did not get. A relay that never

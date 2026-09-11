@@ -446,6 +446,11 @@ matrix_ledger="${BIN_DIR}/matrix.tsv"
 # against the snapshot taken before the load. Prints 0 when Prometheus cannot be
 # reached, on purpose: the shortfall then stays unexplained and the assertion
 # fails, because a scrape failure must never excuse a real loss.
+#
+# The regex is anchored, so it does NOT match session_sealed_redelivered or
+# claim_window_closed_redelivered: a REDELIVERED copy dropped late was delivered
+# before, to a consumer that did not finish it, so it cannot explain a missing
+# relay (L3 of df5441c, 2026-09-11: a relay lost in a handoff read as accounted).
 announced_drop_reasons='session_sealed|claim_window_closed'
 
 announced_drops_now() {
@@ -788,7 +793,9 @@ services_pending() {
         local proven_n relays_n
         read -r proven_n relays_n <<<"$(billed_relays "$svc")"
         if [ "$exact" = "1" ]; then
-            [ "${relays_n:-0}" -lt "${sent:-0}" ] && missing="${missing} ${svc}(${relays_n:-0}/${sent})"
+            # The same verdict the final assertion reads (gate_exact_cell_state).
+            [ "$(gate_exact_cell_state "${sent:-0}" "${relays_n:-0}" "$(announced_drops "$svc")")" = "short" ] &&
+                missing="${missing} ${svc}(${relays_n:-0}/${sent})"
         else
             [ "${proven_n:-0}" -eq 0 ] && missing="${missing} ${svc}"
         fi
@@ -833,28 +840,31 @@ while IFS=$'\t' read -r mode svc sent exact; do
         # relay (fresh ring signature per request, so no dedup collapse).
         # Anything less than equality is silent partial loss: relays served to
         # clients that never reached a claim.
-        if [ "${relays_n:-0}" -eq "${sent:-0}" ]; then
+        # A shortfall is only acceptable to the extent the miner ANNOUNCED it. A
+        # relay that arrives after its tree was sealed, or after its claim
+        # window closed, cannot be paid and there is nothing to recover -- but
+        # it must have been counted. Anything the counters do not account for is
+        # the silent loss this gate exists to catch, and still fails. The
+        # verdict is the one the settlement wait used (gate_exact_cell_state).
+        dropped="$(announced_drops "$svc")"
+        case "$(gate_exact_cell_state "${sent:-0}" "${relays_n:-0}" "${dropped:-0}")" in
+        settled)
             gate_pass "${svc} (${mode}): ${sent}/${sent} relays billed across ${proven_n} proven claim(s)"
-        elif [ "${relays_n:-0}" -gt "${sent:-0}" ]; then
+            ;;
+        over)
             gate_fail "${svc} (${mode}): billed MORE than sent (${relays_n}/${sent}) -- foreign traffic or double count"
-        else
-            # A shortfall is only acceptable to the extent the miner ANNOUNCED
-            # it. A relay that arrives after its tree was sealed, or after its
-            # claim window closed, cannot be paid and there is nothing to
-            # recover -- but it must have been counted. Anything the counters do
-            # not account for is the silent loss this gate exists to catch, and
-            # still fails.
-            dropped="$(announced_drops "$svc")"
+            ;;
+        accounted)
+            gate_pass "${svc} (${mode}): ${relays_n}/${sent} relays billed across ${proven_n} proven claim(s)"
+            printf '         + %s dropped, announced as %s (accounted)\n' \
+                "$dropped" "$(printf '%s' "$announced_drop_reasons" | tr '|' '/')"
+            ;;
+        *)
             unexplained="$(gate_unexplained_shortfall "$sent" "${relays_n:-0}" "${dropped:-0}")"
-            if [ "$unexplained" -eq 0 ] && [ "${dropped:-0}" -gt 0 ]; then
-                gate_pass "${svc} (${mode}): ${relays_n}/${sent} relays billed across ${proven_n} proven claim(s)"
-                printf '         + %s dropped, announced as %s (accounted)\n' \
-                    "$dropped" "$(printf '%s' "$announced_drop_reasons" | tr '|' '/')"
-            else
-                gate_fail "${svc} (${mode}): served ${sent}, billed ${relays_n:-0}, announced drops ${dropped:-0} -- ${unexplained} relay(s) LOST with no counter"
-                printf '         check the WAL (redis streams) and submissions for this service\n'
-            fi
-        fi
+            gate_fail "${svc} (${mode}): served ${sent}, billed ${relays_n:-0}, announced drops ${dropped:-0} -- ${unexplained} relay(s) LOST with no counter"
+            printf '         check the WAL (redis streams) and submissions for this service\n'
+            ;;
+        esac
     else
         if [ "${proven_n:-0}" -gt 0 ] && [ "${relays_n:-0}" -gt 0 ]; then
             gate_pass "${svc} (${mode}): ${proven_n} claim(s) PROVEN, sent=${sent} billed=${relays_n} (model unpinned: reported, not asserted)"
