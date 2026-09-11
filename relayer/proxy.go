@@ -114,6 +114,9 @@ const (
 	dropReasonMarshalFailed    = "marshal_failed"
 	dropReasonProcessFailed    = "process_failed"
 	dropReasonPublishFailed    = "publish_failed"
+	// dropReasonNoPublisher: mined, but this relayer has no publisher to hand
+	// it to the store.
+	dropReasonNoPublisher = "no_publisher"
 )
 
 // defaultGzipMinCompressSize is the fallback minimum response size worth
@@ -290,7 +293,7 @@ func NewProxyServer(
 	proxy := &ProxyServer{
 		logger:             logging.ForComponent(logger, logging.ComponentProxyServer),
 		config:             config,
-		publisher:          publisher,
+		publisher:          countPublished(publisher),
 		clientPool:         clientPool,
 		clientPoolFallback: clientPoolFallback,
 		bufferPool:         bufferPool,
@@ -2511,6 +2514,7 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 	)
 
 	if p.publisher == nil {
+		relaysDropped.WithLabelValues(task.serviceID, dropReasonNoPublisher).Inc()
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("no publisher configured, skipping relay publication")
 		return
@@ -2550,7 +2554,6 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 			return
 		}
 
-		relaysPublished.WithLabelValues(task.serviceID, task.supplierAddr).Inc()
 		relaysMinedSuccessfully.WithLabelValues(task.serviceID).Inc()
 		return
 	}
@@ -2581,7 +2584,6 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 		return
 	}
 
-	relaysPublished.WithLabelValues(task.serviceID, task.supplierAddr).Inc()
 }
 
 // sendServiceUnavailable sends a 503 fast-fail response when all backends are unhealthy.

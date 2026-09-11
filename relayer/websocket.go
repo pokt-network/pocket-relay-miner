@@ -384,7 +384,7 @@ func NewWebSocketBridge(
 		dialTimeout:      dialTimeout,
 		firstFrameWait:   wsFirstFrameWait,
 		relayProcessor:   relayProcessor,
-		publisher:        publisher,
+		publisher:        countPublished(publisher),
 		responseSigner:   responseSigner,
 		relayPipeline:    relayPipeline,
 		msgChan:          make(chan wsMessage, 100),

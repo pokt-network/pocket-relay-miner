@@ -116,7 +116,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_published_total",
-			Help:      "Total number of mined relays published to the store",
+			Help:      "Total number of mined relays published to the store, over any transport",
 		},
 		[]string{"service_id", "supplier"},
 	)

@@ -178,7 +178,7 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		logger:             logger.With().Str(logging.FieldComponent, "grpc_relay_service").Logger(),
 		serviceConfigs:     config.ServiceConfigs,
 		responseSigner:     config.ResponseSigner,
-		publisher:          config.Publisher,
+		publisher:          countPublished(config.Publisher),
 		relayProcessor:     config.RelayProcessor,
 		relayPipeline:      config.RelayPipeline,
 		simVerifier:        config.SimVerifier,
@@ -519,6 +519,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 					Msg("gRPC relay skipped (did not meet mining difficulty)")
 			} else if s.publisher == nil {
+				relaysDropped.WithLabelValues(serviceID, dropReasonNoPublisher).Inc()
 				logging.WithSessionContext(s.logger.Warn(), sessionCtx).
 					Msg("no publisher configured, skipping relay publication")
 			} else if pubErr := s.publisher.Publish(publishCtx, msg); pubErr != nil {
