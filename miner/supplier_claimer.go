@@ -409,6 +409,23 @@ func (c *SupplierClaimer) Release(ctx context.Context, supplier, trigger string)
 
 	claimKey := c.redisClient.KB().MinerClaimKey(supplier)
 
+	// Give the supplier up LOCALLY before the key goes. renewAllClaims runs on
+	// its own goroutine and reads a missing key as a lease that expired, which
+	// it takes back -- unless the map and the cooldown say this instance let
+	// it go. With the key deleted first, a renewal landing between the DEL and
+	// these writes re-took the supplier and then had the re-take erased from
+	// the map: a lease held in Redis that nobody renewed, blocking every peer
+	// for its TTL (L3 of df5441c, 2026-09-11: one supplier re-taken and
+	// released 31 times). Also the reason claimOrphaned must not race the peer
+	// that is supposed to pick it up.
+	c.claimedMu.Lock()
+	delete(c.claimed, supplier)
+	c.claimedMu.Unlock()
+
+	c.recentlyReleasedMu.Lock()
+	c.recentlyReleased[supplier] = time.Now()
+	c.recentlyReleasedMu.Unlock()
+
 	// Only delete if we own it (atomic check-and-delete)
 	// Use Lua script to ensure atomicity
 	script := redis.NewScript(`
@@ -425,19 +442,9 @@ func (c *SupplierClaimer) Release(ctx context.Context, supplier, trigger string)
 	}
 
 	if result == 0 {
-		// We didn't own it, but still update local state
+		// We didn't own it; the local state was already updated above.
 		c.logger.Debug().Str("supplier", supplier).Msg("claim was not owned by us")
 	}
-
-	c.claimedMu.Lock()
-	delete(c.claimed, supplier)
-	c.claimedMu.Unlock()
-
-	// Record the release so our own claimOrphaned does not race the
-	// peer miner who's supposed to pick this supplier up.
-	c.recentlyReleasedMu.Lock()
-	c.recentlyReleased[supplier] = time.Now()
-	c.recentlyReleasedMu.Unlock()
 
 	c.logger.Info().
 		Str("supplier", supplier).
@@ -751,6 +758,9 @@ func (c *SupplierClaimer) renewAllClaims() {
 				// draining it would destroy a live one; failing means a peer
 				// has it and the manager has to be told, which is the whole
 				// point of this pass.
+				if c.releasedSinceSnapshot(supplier) {
+					continue // this instance gave it up during the pass: the key is gone on purpose
+				}
 				c.logger.Warn().
 					Str("supplier", supplier).
 					Str("claim_key", claimKey).
@@ -802,6 +812,9 @@ func (c *SupplierClaimer) renewAllClaims() {
 		case !renewed:
 			// The key died between GET and EXPIRE. Same shape as the expiry
 			// branch: recover first, and only report the loss if we cannot.
+			if c.releasedSinceSnapshot(supplier) {
+				continue // released by this instance between the GET and the EXPIRE
+			}
 			c.logger.Warn().
 				Str("supplier", supplier).
 				Str("claim_key", claimKey).
@@ -813,6 +826,22 @@ func (c *SupplierClaimer) renewAllClaims() {
 			c.markRenewed(supplier, now)
 		}
 	}
+}
+
+// releasedSinceSnapshot reports whether this instance gave the supplier up after
+// renewAllClaims took its snapshot of the claimed map: Release (rebalance, key
+// removal) runs on another goroutine and deletes the key on purpose. A missing
+// key is then not a lease to take back -- re-taking it undoes the release, and
+// the next rebalance releases it again. A lease that really expired (a slow
+// Redis) is still in the map and is recovered.
+//
+// The map alone decides, because Release takes the supplier out of it before
+// the key goes. The release cooldown must NOT be consulted: nothing clears it
+// when claimMore legitimately takes the supplier back, so a lease that then
+// really expired inside the cooldown would be neither recovered nor reported --
+// the supplier left signing without a lease until the cooldown ran out.
+func (c *SupplierClaimer) releasedSinceSnapshot(supplier string) bool {
+	return !c.IsClaimed(supplier)
 }
 
 // markRenewed records a CONFIRMED renewal.
