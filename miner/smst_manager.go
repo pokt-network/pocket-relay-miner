@@ -64,6 +64,7 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/smt"
 	"github.com/pokt-network/smt/kvstore"
+	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/observability"
@@ -317,6 +318,13 @@ type redisSMST struct {
 	// resume the tree with at most interval-1 relays lost.
 	updateCount uint64
 
+	// liveRoot is the live_root this manager last wrote for the tree, or the
+	// one it resumed the tree from; nil when there is neither. The exit
+	// checkpoint only overwrites a live_root that still holds this value, so
+	// a miner that has taken the supplier over and written its own is not
+	// rolled back.
+	liveRoot []byte
+
 	mu sync.Mutex
 }
 
@@ -539,6 +547,7 @@ func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessio
 			sessionID: sessionID,
 			trie:      trie,
 			store:     store,
+			liveRoot:  liveRoot,
 		}
 		m.logger.Info().
 			Str(logging.FieldSessionID, sessionID).
@@ -701,6 +710,8 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 					Str(logging.FieldSessionID, sessionID).
 					Uint64("update_count", tree.updateCount).
 					Msg("failed to atomically flush orphans + live_root (HA resume degraded, orphans retained for next checkpoint)")
+			} else {
+				tree.liveRoot = rootBytes
 			}
 		} else {
 			// Non-Redis store path (test doubles etc.) — preserve old behaviour.
@@ -710,6 +721,8 @@ func (m *RedisSMSTManager) UpdateTree(ctx context.Context, sessionID string, key
 					Str(logging.FieldSessionID, sessionID).
 					Uint64("update_count", tree.updateCount).
 					Msg("failed to checkpoint live root (HA resume degraded)")
+			} else {
+				tree.liveRoot = rootBytes
 			}
 		}
 	}
@@ -753,10 +766,92 @@ func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID str
 
 	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
 	if redisStore, ok := tree.store.(*RedisMapStore); ok {
-		return true, redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes, m.config.CacheTTL)
+		err = redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes, m.config.CacheTTL)
+	} else {
+		err = m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err()
 	}
-	return true, m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err()
+	if err == nil {
+		tree.liveRoot = rootBytes
+	}
+	return true, err
 }
+
+// CheckpointLiveRootOnExit is the checkpoint a supplier's exit writes before it
+// hands its batched relays back. Those relays are in this tree but their
+// entries were never acknowledged; the miner that takes the supplier next
+// resumes from live_root, and without this a relay this miner inserted after
+// its last checkpoint is missing there -- recovered only if its entry is
+// redelivered before the session is sealed (L3 of df5441c, 2026-09-11).
+//
+// It differs from CheckpointLiveRoot in two ways, both because the next owner
+// may already be running when this one leaves -- the lease is released before
+// the consume loop ends:
+//   - it deletes no orphans. The new owner may have imported the old live_root
+//     and still walk its nodes; the orphans stay until the TTL or DeleteTree.
+//   - it writes only if live_root still holds what this manager last wrote or
+//     resumed from, so a newer live_root from the new owner is not overwritten.
+//
+// written reports whether live_root was set; false with a nil error means
+// another writer got there first, or there was no tree to checkpoint.
+func (m *RedisSMSTManager) CheckpointLiveRootOnExit(ctx context.Context, sessionID string) (written bool, err error) {
+	m.treesMu.RLock()
+	tree, exists := m.trees[sessionID]
+	m.treesMu.RUnlock()
+	if !exists {
+		return false, nil
+	}
+
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+
+	var rootBytes []byte
+	if err := m.runSMSTSafely(sessionID, "root", func() error {
+		rootBytes = []byte(tree.trie.Root())
+		return nil
+	}); err != nil {
+		return false, err
+	}
+	if !isValidSMSTRoot(rootBytes) {
+		return false, fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(rootBytes), SMSTRootLen)
+	}
+
+	keys := []string{
+		m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID),
+		m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID),
+	}
+	set, err := exitLiveRootScript.Run(ctx, m.redisClient, keys,
+		rootBytes, tree.liveRoot, int64(m.config.CacheTTL.Seconds())).Int64()
+	if err != nil {
+		return false, err
+	}
+	if set == 1 {
+		tree.liveRoot = rootBytes
+	}
+	return set == 1, nil
+}
+
+// exitLiveRootScript sets live_root only if it still holds the expected value
+// ("" meaning absent), and refreshes the TTL of it and of the nodes hash the way
+// FlushOrphansWithLiveRoot does -- without deleting any node.
+//
+// KEYS[1] = live_root, KEYS[2] = nodes hash
+// ARGV[1] = new root, ARGV[2] = expected current root or "", ARGV[3] = TTL s (0 = none)
+var exitLiveRootScript = redis.NewScript(`
+local cur = redis.call('GET', KEYS[1])
+if cur == false then
+	cur = ''
+end
+if cur ~= ARGV[2] then
+	return 0
+end
+redis.call('SET', KEYS[1], ARGV[1])
+local ttl = tonumber(ARGV[3])
+if ttl > 0 then
+	redis.call('EXPIRE', KEYS[1], ttl)
+	redis.call('EXPIRE', KEYS[2], ttl)
+end
+return 1
+`)
 
 // FlushTree flushes the SMST for a session and returns the root hash.
 // After flushing, no more updates can be made to the tree.

@@ -216,10 +216,19 @@ func (b *relayBatch) FlushSessions(ctx context.Context, sessionIDs []string) {
 // exit window). Nothing is lost: the relays are in the tree, the dedup set never
 // saw them, so the next consumer redelivers them into the tree and counts them
 // once.
+//
+// Before letting go, it writes the live_root that covers them
+// (CheckpointLiveRootOnExit): the next owner resumes from live_root, and a
+// relay missing there comes back only if its entry is redelivered before the
+// session is sealed. A checkpoint that fails does not hold the release.
 func (b *relayBatch) ReleaseAll(ctx context.Context) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for id, sb := range b.sessions {
+		if _, err := b.smst.CheckpointLiveRootOnExit(ctx, id); err != nil {
+			b.logger.Debug().Err(err).Str(logging.FieldSessionID, id).
+				Msg("relay batch: exit live_root checkpoint failed, releasing anyway")
+		}
 		b.release(ctx, sb)
 		delete(b.sessions, id)
 	}
