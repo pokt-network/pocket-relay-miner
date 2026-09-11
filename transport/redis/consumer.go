@@ -72,6 +72,12 @@ type StreamsConsumer struct {
 	config     transport.ConsumerConfig
 	streamName string // Single stream per supplier: ha:relays:{supplierAddr}
 
+	// ownPendingAfter and ownPendingDone are the read loop's progress through
+	// the entries pending under this consumer's name when it started (see
+	// deliverOwnPending). Only the read loop's goroutine touches them.
+	ownPendingAfter string
+	ownPendingDone  bool
+
 	// Message channel
 	msgCh chan transport.StreamMessage
 
@@ -259,8 +265,12 @@ func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
 		func(ctx context.Context) error {
 			return c.ensureConsumerGroup(ctx)
 		},
-		// runFn: Consume messages until error or context cancellation
+		// runFn: hand over what is already pending under this consumer's
+		// name, once, then consume new messages until error or cancellation
 		func(ctx context.Context) error {
+			if err := c.deliverOwnPending(ctx); err != nil {
+				return err
+			}
 			return c.consumeMessagesUntilError(ctx)
 		},
 	)
@@ -391,6 +401,8 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			select {
 			case c.msgCh <- msg:
 			case <-ctx.Done():
+				// Parsed from the pool and never handed over.
+				transport.ReleaseMinedRelayMessage(msg.Message)
 				return ctx.Err()
 			}
 		}
@@ -656,6 +668,8 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 			select {
 			case c.msgCh <- msg:
 			case <-ctx.Done():
+				// Parsed from the pool and never handed over.
+				transport.ReleaseMinedRelayMessage(msg.Message)
 				return
 			}
 		}
@@ -677,6 +691,117 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 			Int("count", totalClaimed).
 			Str("stream", c.streamName).
 			Msg("claimed idle messages")
+	}
+}
+
+// deliverOwnPending hands the read loop, once, every entry already pending under
+// this consumer's name when it starts, before it reads anything new.
+//
+// The name is per process (miner.UniqueConsumerName), so a supplier this
+// process releases and takes again gets a consumer with the SAME name, and what
+// the previous one could not hand back on its way out is this one's. Nothing
+// else reads it: ">" returns only new entries, and the reclaim skips an entry
+// its own consumer owns as an in-flight delivery. It waited for the process to
+// restart under another name.
+//
+// Once, not on every reconnection: past the first pass, what is pending under
+// the name is what this consumer delivered itself -- in the buffer, or being
+// processed. A pass cut short by an error resumes after the last entry it
+// handed over, so none is handed over twice.
+func (c *StreamsConsumer) deliverOwnPending(ctx context.Context) error {
+	if c.ownPendingDone {
+		return nil
+	}
+	after, err := c.eachOwnPending(ctx, c.ownPendingAfter, func(msg transport.StreamMessage) error {
+		select {
+		case c.msgCh <- msg:
+			return nil
+		case <-ctx.Done():
+			transport.ReleaseMinedRelayMessage(msg.Message)
+			return ctx.Err()
+		}
+	})
+	c.ownPendingAfter = after
+	if err != nil {
+		return err
+	}
+	c.ownPendingDone = true
+	return nil
+}
+
+// EachOwnPending calls fn with every entry pending under this consumer's name,
+// oldest first, parsed and marked a reclaim; fn owns the message. Each entry is
+// visited once, whatever fn does with it. It is meant for a consumer whose
+// producers have stopped (Stop): with nothing adding to the list, what it
+// visits is all that is left there.
+func (c *StreamsConsumer) EachOwnPending(ctx context.Context, fn func(transport.StreamMessage)) error {
+	_, err := c.eachOwnPending(ctx, "0", func(msg transport.StreamMessage) error {
+		fn(msg)
+		return nil
+	})
+	return err
+}
+
+// eachOwnPending pages through the entries pending under this consumer's name
+// with IDs after the given one ("" meaning from the start), calling fn with
+// each one that parses; one no longer in the stream is acknowledged, and one
+// that does not parse is acknowledged and deleted, as the read loop does. It stops at fn's first error and returns it, with the ID of
+// the last entry finished -- the point to resume from.
+func (c *StreamsConsumer) eachOwnPending(
+	ctx context.Context,
+	after string,
+	fn func(transport.StreamMessage) error,
+) (string, error) {
+	if after == "" {
+		after = "0"
+	}
+	for {
+		// An ID instead of ">" reads this consumer's own pending list and hands
+		// over nothing new. No BLOCK: go-redis sends one only for Block >= 0.
+		streams, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    c.config.ConsumerGroup,
+			Consumer: c.config.ConsumerName,
+			Streams:  []string{c.streamName, after},
+			Count:    pendingPageSize,
+			Block:    -1,
+		}).Result()
+		if err == redis.Nil {
+			return after, nil
+		}
+		if err != nil {
+			return after, fmt.Errorf("failed to read the pending entries of consumer %s: %w", c.config.ConsumerName, err)
+		}
+		if len(streams) == 0 || len(streams[0].Messages) == 0 {
+			return after, nil
+		}
+		for _, message := range streams[0].Messages {
+			if len(message.Values) == 0 {
+				// Deleted from the stream while still pending -- TrimStream's
+				// XTRIM leaves the pending entry behind. Nothing to hand over,
+				// and no producer's defect: the trim is where it went.
+				if ackErr := c.client.XAck(ctx, c.streamName, c.config.ConsumerGroup, message.ID).Err(); ackErr != nil {
+					c.logger.Debug().Err(ackErr).Str(logging.FieldMessageID, message.ID).Msg("failed to XAck a pending entry no longer in the stream")
+				} else {
+					c.logger.Debug().Str(logging.FieldMessageID, message.ID).Msg("dropped a pending entry no longer in the stream")
+				}
+				after = message.ID
+				continue
+			}
+			msg, parseErr := c.parseMessage(message, c.streamName)
+			if parseErr != nil {
+				deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
+				if delErr := c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID).Err(); delErr != nil {
+					c.logger.Debug().Err(delErr).Str(logging.FieldMessageID, message.ID).Msg("failed to XAckDel bad message")
+				}
+				after = message.ID
+				continue
+			}
+			msg.IsReclaim = true // the worker runs its duplicate check: it may have been processed
+			if fnErr := fn(msg); fnErr != nil {
+				return after, fnErr
+			}
+			after = message.ID
+		}
 	}
 }
 
@@ -903,24 +1028,31 @@ func (c *StreamsConsumer) TrimStream(ctx context.Context, maxAge time.Duration) 
 	return trimmed, nil
 }
 
+// Stop ends the consumer's producers -- the read loop and the reclaim -- and
+// waits for them, without closing it: AckMessage and ReleaseMessage still work
+// afterwards, which is what a teardown needs to hand back what is left under
+// this consumer's name once nothing can add to it. Idempotent; Close calls it.
+func (c *StreamsConsumer) Stop() {
+	c.mu.RLock()
+	cancel := c.cancelFn
+	c.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+	c.wg.Wait()
+}
+
 // Close gracefully shuts down the consumer.
 func (c *StreamsConsumer) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
-
 	c.closed = true
+	c.mu.Unlock()
 
-	// Cancel context to stop goroutines
-	if c.cancelFn != nil {
-		c.cancelFn()
-	}
-
-	// Wait for goroutines to finish
-	c.wg.Wait()
+	c.Stop()
 
 	c.logger.Info().Msg("Redis Streams consumer closed")
 	return nil

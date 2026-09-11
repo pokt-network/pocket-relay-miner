@@ -91,7 +91,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "shutdown_drained_relays_total",
-			Help:      "Relays drained from the delivery buffer and processed during graceful shutdown",
+			Help:      "Relays a supplier's exit handed back to the group unprocessed -- from its delivery buffer or from under its consumer's name -- for another consumer to finish",
 		},
 		[]string{"supplier"},
 	)
@@ -101,7 +101,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "shutdown_abandoned_relays_total",
-			Help:      "Relays still buffered when the graceful drain window closed; they stay pending and are recovered by the reclaim, not lost",
+			Help:      "Relays a supplier's exit could not hand back -- still buffered when the drain window closed, or refused when released from under its consumer's name; they stay pending, not lost",
 		},
 		[]string{"supplier"},
 	)
@@ -1321,8 +1321,8 @@ func RecordShutdownDrainedRelay(supplier string) {
 	shutdownDrainedRelays.WithLabelValues(supplier).Inc()
 }
 
-// RecordShutdownAbandonedRelays records relays still buffered when the drain
-// window closed. They remain in the pending list for the reclaim to recover.
+// RecordShutdownAbandonedRelays records relays a supplier's exit could not hand
+// back. They remain in the pending list.
 func RecordShutdownAbandonedRelays(supplier string, n int) {
 	if n <= 0 {
 		return

@@ -309,16 +309,17 @@ const supplierDrainAuditTimeout = 5 * time.Second
 const drainLeaseCallTimeout = 5 * time.Second
 
 // drainLeaseBudget is how long a released supplier's lease is kept while its
-// drain runs: the audit, the batch release, the delivery-buffer drain and the
-// exit checkpoint of its trees (each bounded by shutdownDrainWindow), the
-// consumer's blocked read, which returns within one block interval
-// (transport/redis blockInterval, 5 s), and a margin.
+// drain runs: the audit, the batch release, the delivery-buffer drain, the
+// entries left under the consumer's name and the exit checkpoint of its trees
+// (each bounded by shutdownDrainWindow), the consumer's blocked read, which
+// returns within one block interval (transport/redis blockInterval, 5 s), and a
+// margin.
 // A drain that outlives it gives the lease up when the key expires. A func
 // because shutdownDrainWindow is a var a test may shrink.
 func drainLeaseBudget() time.Duration {
 	const consumerBlockInterval = 5 * time.Second
 	const margin = 10 * time.Second
-	return supplierDrainAuditTimeout + 3*shutdownDrainWindow + consumerBlockInterval + margin
+	return supplierDrainAuditTimeout + 4*shutdownDrainWindow + consumerBlockInterval + margin
 }
 
 // SupplierManager manages multiple suppliers in the HA Miner.
@@ -1975,6 +1976,72 @@ func (m *SupplierManager) releaseRelayBatchOnExit(ctx context.Context, state *Su
 	state.relayBatch.ReleaseAll(exitCtx)
 }
 
+// handBackOnExit settles one entry a stopping supplier holds and will not
+// process, and reports whether Redis took it. With the key removed nobody in
+// this fleet can build an SMST, a claim or a proof for the relay, so it is
+// acknowledged deliberately and counted as LOSS: left pending, the next
+// consumer would only rediscover the same dead end. Otherwise someone else can
+// still finish it, so it is RELEASED, never acknowledged -- acknowledging
+// deletes it from the stream and takes it out of reach of the reclaim. Either
+// way the pooled message goes back.
+func (m *SupplierManager) handBackOnExit(ctx context.Context, state *SupplierState, msg transport.StreamMessage) bool {
+	defer transport.ReleaseMinedRelayMessage(msg.Message)
+	if drainReason(state.drainReason.Load()) == drainKeyRemoved {
+		if err := state.Consumer.AckMessage(ctx, msg); err != nil {
+			return false
+		}
+		RecordRelayDroppedNoKey(state.OperatorAddr, msg.Message.ServiceId)
+		return true
+	}
+	if err := state.Consumer.ReleaseMessage(ctx, msg); err != nil {
+		return false
+	}
+	RecordShutdownDrainedRelay(state.OperatorAddr)
+	return true
+}
+
+// releaseOwnPendingOnExit stops the supplier's consumer and settles, with
+// handBackOnExit, every entry still pending under its name: what the consume
+// loop's exit did not reach -- the relay being processed when the supplier was
+// cancelled, if settling it failed on that context; the rest of a read batch
+// or of a reclaim page the consumer's producers were handing over when they
+// stopped; whatever a delivery-buffer drain cut short by its window left in
+// the channel. The name belongs to this process, so an entry left there waits
+// until the process takes the supplier again or restarts. Stopped first, the
+// producers add nothing after the pass. On a context of its own, bounded by
+// shutdownDrainWindow like the rest of the exit.
+func (m *SupplierManager) releaseOwnPendingOnExit(state *SupplierState) {
+	state.Consumer.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainWindow)
+	defer cancel()
+	settled, failed := 0, 0
+	err := state.Consumer.EachOwnPending(ctx, func(msg transport.StreamMessage) {
+		if m.handBackOnExit(ctx, state, msg) {
+			settled++
+		} else {
+			failed++
+		}
+	})
+	RecordShutdownAbandonedRelays(state.OperatorAddr, failed)
+	if err != nil || failed > 0 {
+		// Once per supplier torn down, not per relay.
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Int("settled", settled).
+			Int("failed", failed).
+			Msg("could not settle every entry left under this consumer's name; they stay pending until this process takes the supplier again or restarts")
+		return
+	}
+	if settled > 0 {
+		m.logger.Info().
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Int("settled", settled).
+			Msg("settled the entries left under this consumer's name")
+	}
+}
+
 // handleStreamMessage runs one delivered relay to completion: process, release
 // the pooled message, and acknowledge on success. Returns whether the message
 // was actually acknowledged -- true when the relay was processed, and also when
@@ -2193,32 +2260,12 @@ func (m *SupplierManager) drainDeliveryBuffer(
 				continue
 			default:
 			}
-			// The key is gone: no SMST, no claim, no proof is possible for
-			// this relay by anyone in this fleet, so it is acknowledged
-			// deliberately -- and counted as LOSS. Leaving it pending would
-			// only make the next consumer rediscover the same dead end.
-			if drainReason(state.drainReason.Load()) == drainKeyRemoved {
-				if ackErr := state.Consumer.AckMessage(drainCtx, msg); ackErr == nil {
-					RecordRelayDroppedNoKey(state.OperatorAddr, msg.Message.ServiceId)
-					drained++
-				} else {
-					abandoned++
-				}
-				continue
-			}
-
-			// Shutdown or rebalance: someone else can still finish this, so it
-			// is RELEASED, never acknowledged. Acknowledging deletes it from the
-			// stream and takes it out of reach of the reclaim.
-			if relErr := state.Consumer.ReleaseMessage(drainCtx, msg); relErr == nil {
-				RecordShutdownDrainedRelay(state.OperatorAddr)
+			if m.handBackOnExit(drainCtx, state, msg) {
 				drained++
 			} else {
-				// Processing failed, or it succeeded but AckMessage itself
-				// did not (Redis hiccup near the deadline): either way the
-				// entry is still PENDING, same as anything the window ran
-				// out on -- counting it as drained would tell an operator
-				// this finished when Redis says otherwise.
+				// The entry is still PENDING, same as anything the window ran
+				// out on -- counting it as drained would tell an operator this
+				// finished when Redis says otherwise.
 				abandoned++
 			}
 
@@ -2434,6 +2481,7 @@ func (m *SupplierManager) teardownSupplier(state *SupplierState) {
 		}
 	}
 
+	m.releaseOwnPendingOnExit(state)
 	m.checkpointTreesOnExit(state)
 
 	if state.SMSTManager != nil {
@@ -2618,6 +2666,7 @@ func (m *SupplierManager) Close() error {
 		if state.LifecycleManager != nil {
 			_ = state.LifecycleManager.Close()
 		}
+		m.releaseOwnPendingOnExit(state)
 		m.checkpointTreesOnExit(state)
 		if state.SMSTManager != nil {
 			_ = state.SMSTManager.Close()
