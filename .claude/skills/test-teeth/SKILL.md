@@ -574,6 +574,62 @@ chance for the driver to stop measuring while still reporting. So the check is
 not a step to remember before reading the result; it is a function the driver
 calls, and the run is worthless without it.
 
+## A tooth that KILLS THE BINARY is neither red nor green, and only the count says so
+
+Measured 2026-09-12, on the drain. An injection meant to restore
+`defer p.mu.Unlock()` in `ProxyServer.Close` matched its anchor (`count == 1`),
+compiled clean, and ran. It was still wrong: the anchor stopped one line short of
+the explicit `p.mu.Unlock()` below, so the injected code unlocked twice. Go
+answers a double unlock with `fatal error: sync: unlock of unlocked mutex`, which
+is not recoverable and not a test failure -- it kills the process on the FIRST of
+five runs.
+
+What it printed: `FAIL` on stdout and exit 1. Read through a driver that greps
+for `FAIL`, that is a biting tooth. Read with the count it is
+`RUN=1 PASS=0 FAIL=0` -- one run started, no verdict reached -- which is a third
+outcome the two colours do not cover, and the only signal that the tooth never
+exercised anything.
+
+So the applied-and-compiled pair from the section above is not sufficient; there
+is a third condition, and it is **the test reached a verdict**:
+
+- **`RUN` must equal the `-count`**, and `PASS + FAIL` must equal `RUN`. Anything
+  less is a binary that died, and it says nothing about the defect.
+- A driver that cannot print those three numbers cannot tell you this. `sort -u`
+  collapses five identical `--- FAIL` lines into one, so 1-of-5 and 5-of-5 look
+  the same; without `-v` a passing test prints nothing at all, so `PASS=0` cannot
+  distinguish "passed" from "never ran". Both were live in a driver the same day,
+  hiding two non-conclusive teeth underneath a green-looking summary.
+- The same shape has an honest version worth naming: a defect whose failure mode
+  is a HANG makes the test binary die on the package timeout, also on run 1. There
+  5/5 is not reachable, and the right move is to say so in writing rather than to
+  report a number the run cannot produce.
+
+### And the count you choose BOUNDS what you can see
+
+Same day, one level in. A tooth was closed at `-count=5` -- 5/5 red, criterion
+met, written down before the work as the rule demands. The supervisor re-ran it
+at `-count=20` and got PASS=1 FAIL=19: the window was still escaping about once
+in twenty, and five counts cannot tell that apart from a fix. The escape passed
+in the CONTROL's own time, which is the tell that it took the other branch rather
+than running slowly.
+
+So `-count=5` is the floor for "not green by luck", not a ceiling, and it is the
+wrong count for two cases:
+
+- **A test that has EVER been seen non-deterministic.** Five reds after a fix are
+  the expected outcome whether the fix works or the rate merely dropped. Pick the
+  count from the rate you are trying to exclude: at 1-in-20, five runs are silent
+  ~77% of the time.
+- **A tooth whose fix is a SYNCHRONISATION.** Rewriting a window from a duration
+  to a channel either closes it or narrows it, and narrowing looks exactly like
+  closing at a small count. That is precisely what happened: the first rewrite
+  pinned three of the four orderings and left one write racing.
+
+The cheap discipline: when a tooth goes from flaky to red, say which count you
+measured at, and raise it once. It cost one run to find and would have shipped a
+"5/5" that was not one.
+
 ## Reading a test tells you what it MEANS to cover; only injection tells you what it DOES
 
 A supervisor asserted, from reading the test and its comment, that
