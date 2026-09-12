@@ -38,8 +38,22 @@ keys/keyring_provider.go NewKeyringProviderWithKeyring          # injects a prep
 observability/runtime_metrics.go RuntimeMetricsCollector.CollectNow  # forces a collection that production does on a ticker (observability/runtime_metrics_test.go)
 observability/runtime_metrics.go RuntimeMetricsCollector.LastMallocs # reads collector state a test asserts on (observability/runtime_metrics_test.go)
 observability/server.go Server.IsRunning                        # lets a test observe lifecycle without racing on the listener (observability/server_test.go)
+# KEPT ON PURPOSE THOUGH IT IS NO LONGER REPORTED (2026-09-12, item 224). deadcode
+# stopped listing this one when the shutdown drain landed, and `deadcode -whylive`
+# answers why: "reachable only through reflection". That is a category deadcode
+# excludes from its dead list, so the function was NOT wired up -- a reflection edge
+# now reaches it and the scan simply stops mentioning it. Its only real caller is
+# still a test (relayer/proxy_simulation_test.go), and the gate runs deadcode
+# without -test.
+#
+# Kept because that edge is incidental: if it goes, the function is reported again,
+# and an allowlist missing its entry turns that into a gate failure reading "new
+# unreachable function" -- a confusing failure for whoever receives it. Keeping it
+# costs the gate nothing. Note the general shape, which is worth more than this one
+# entry: deadcode's dead list SHRINKS SILENTLY when a reflection edge appears, so a
+# genuinely dead function can stop being reported without anyone touching it. The
+# check that sees that drift is `comm -13`, which static.sh does not run (item 209).
 relayer/simulation.go SimulationVerifier.Reload                 # reconfigures the verifier between cases; production wires it once via SetSimulationVerifier and has NO hot-reload path, so changing simulation config needs a restart (relayer/simulation_test.go, 6 uses)
-relayer/websocket.go WebSocketBridge.Close                      # closes a bridge in-test; production closes with closeWithReason and a specific cause, 13 call sites (relayer/websocket_simulation_test.go)
 
 # --- TRANSITIONAL: the I4 BatchingPublisher arrives UNWIRED on purpose ---
 # These entries are not permanently dead code: they are the batch mechanism, written and verified

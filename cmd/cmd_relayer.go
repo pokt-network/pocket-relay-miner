@@ -1187,10 +1187,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	_ = proxy.Close()
+	// The 30s budget above is the deadline the drain actually runs under. It used
+	// to be built and thrown away with a comment saying it was "used for graceful
+	// shutdown timing", while the real deadline was a second, hardcoded 30s
+	// inside the proxy that nothing could reach.
+	_ = proxy.Close(shutdownCtx)
 	_ = healthChecker.Close()
-
-	_ = shutdownCtx // Used for graceful shutdown timing
 
 	logger.Info().Msg("HA Relayer stopped")
 	return nil

@@ -226,6 +226,22 @@ type ProxyServer struct {
 	closed   bool
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
+
+	// Live WebSocket bridges, and the count of them still running.
+	//
+	// They need their own registry and their own counter because they are
+	// HIJACKED connections: http.Server.Shutdown does not track them, so the
+	// drain that covers every other request covers none of them. And they are
+	// the transport that publishes LAST -- a bridge keeps serving relays for as
+	// long as its client stays connected.
+	//
+	// Not SessionMonitor's map, which is the obvious candidate and the wrong
+	// one: RegisterBridge sits behind two guards (websocket.go, sessionEndHeight
+	// == 0 && SessionHeader != nil), so a bridge whose first frame carries no
+	// session header never enters it, and one still parked in awaitFirstFrame
+	// has not reached it yet. Those are exactly the bridges a shutdown finds.
+	bridges  *xsync.Map[*WebSocketBridge, struct{}]
+	bridgeWG sync.WaitGroup
 }
 
 // NewProxyServer creates a new HTTP proxy server.
@@ -308,6 +324,7 @@ func NewProxyServer(
 		metricRecorder:     metricRecorder,
 
 		warnedUndeclaredTransport: xsync.NewMap[string, struct{}](),
+		bridges:                   xsync.NewMap[*WebSocketBridge, struct{}](),
 	}
 
 	// Log pool summary at startup for visibility into backend configuration
@@ -2627,20 +2644,36 @@ func (p *ProxyServer) SetBlockHeight(height int64) {
 	currentBlockHeight.Set(float64(height))
 }
 
-// Close gracefully shuts down the proxy server.
-func (p *ProxyServer) Close() error {
+// Close drains the proxy and shuts it down, bounded by ctx.
+//
+// It used to return without waiting for anything in flight. p.wg covers only the
+// ListenAndServe goroutine, and ListenAndServe returns IMMEDIATELY when Shutdown
+// is called -- the standard library says so and warns about exactly this: "Make
+// sure the program doesn't exit and waits instead for Shutdown to return." So a
+// relay already being served could still reach Publish after the caller had gone
+// on to close the publisher and the Redis client beneath it.
+//
+// ctx is the shutdown budget and it is the ONLY deadline here. There used to be
+// a second one, a hardcoded 30s inside the goroutine that calls Shutdown, while
+// the 30s context built for this in cmd_relayer was discarded with a comment
+// claiming it was "used for graceful shutdown timing".
+func (p *ProxyServer) Close(ctx context.Context) error {
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
 	if p.closed {
+		p.mu.Unlock()
 		return nil
 	}
-
 	p.closed = true
+	// Unlocked EXPLICITLY, not deferred: the WebSocket handler takes this same
+	// mutex to join the bridge counter, so waiting on that counter while holding
+	// it deadlocks against a handshake that is in flight right now.
+	p.mu.Unlock()
 
 	if p.cancelFn != nil {
 		p.cancelFn()
 	}
+
+	_ = p.drain(ctx)
 
 	// Stop global session monitor
 	if p.sessionMonitor != nil {
@@ -2663,10 +2696,148 @@ func (p *ProxyServer) Close() error {
 		p.metricsSubpool.StopAndWait()
 	}
 
+	// Fast by now: the only goroutine in here is ListenAndServe, which returned
+	// when Shutdown closed the listeners.
 	p.wg.Wait()
 
 	p.logger.Info().Msg("proxy server closed")
 	return nil
+}
+
+// drain stops accepting work and waits for what is already in flight, bounded by
+// ctx.
+//
+// The two waits run CONCURRENTLY and share one deadline. In sequence the first
+// one can spend the whole budget and the second starts with none, so the cut at
+// the end would take bridges that were about to finish on their own.
+// It reports whether it had to CUT, which is the one thing about a shutdown a
+// test can ask without reaching into the clock.
+func (p *ProxyServer) drain(ctx context.Context) (cut bool) {
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go logging.RecoverGoRoutine(p.logger, "proxy_drain_http", func(ctx context.Context) {
+		defer wg.Done()
+		// Called HERE rather than through the goroutine in Start: that one exists
+		// to react to the context being cancelled by somebody else, and it brings
+		// a deadline of its own that nobody chose. Both may run at once --
+		// net/http's Shutdown closes no channel, it sets a flag, closes the
+		// listeners under its mutex and polls until the connections are idle.
+		//
+		// For HTTP/1 this drains the handlers. For gRPC it also drains, because
+		// the h2c here is the standard library's own (SetUnencryptedHTTP2) and not
+		// the x/net shim that hijacks: Shutdown tracks these connections and sends
+		// the GOAWAY that stops new streams from being created on them.
+		// The returned error is logged and NOT used to decide anything. It can
+		// be non-nil on a drain that finished perfectly: Shutdown ends with
+		// `if s.closeIdleConns() { return lnerr }`, and lnerr comes from closing
+		// every listener still in s.listeners -- a listener is removed from that
+		// map only when Serve returns, so the goroutine in Start racing this call
+		// can close the same one twice and collect "use of closed network
+		// connection". Cutting live gRPC streams over that would be cutting them
+		// because a listener closed twice.
+		if err := p.server.Shutdown(ctx); err != nil {
+			p.logger.Debug().Err(err).Msg("http shutdown returned an error")
+		}
+	})(ctx)
+
+	wg.Add(1)
+	go logging.RecoverGoRoutine(p.logger, "proxy_drain_bridges", func(context.Context) {
+		defer wg.Done()
+		p.signalBridges()
+		p.bridgeWG.Wait()
+	})(ctx)
+
+	done := make(chan struct{})
+	go logging.RecoverGoRoutine(p.logger, "proxy_drain_join", func(context.Context) {
+		wg.Wait()
+		close(done)
+	})(ctx)
+	select {
+	case <-done:
+		// Everything in flight finished inside the budget. Nothing to cut.
+		return false
+	case <-ctx.Done():
+	}
+
+	// Past the budget: from here everything is a CUT, and it is reached only once
+	// the deadline has already expired, so anything it interrupts was over budget
+	// anyway.
+	p.logger.Warn().
+		Err(ctx.Err()).
+		Msg("shutdown budget expired with work still in flight; cutting what is left")
+
+	// The bridges first. A signal asks a bridge to wind down and a bridge that
+	// does not answer holds the drain open forever -- WaitGroup.Wait cannot be
+	// cancelled, so the two goroutines above stay parked on it for the life of
+	// the process.
+	//
+	// Close() only SIGNALS, like every other caller: it cancels the bridge's
+	// context, messageLoop selects on exactly that, Run returns, and Run's
+	// deferred release is what tears the connections down. Closing them unblocks
+	// the read loops release then WAITS for -- a step inside the teardown, not
+	// the thing that triggers it. Said the other way round, as it was here, the
+	// close inside release reads as redundant to the next person cleaning up.
+	p.bridges.Range(func(b *WebSocketBridge, _ struct{}) bool {
+		_ = b.Close()
+		return true
+	})
+
+	// Then the gRPC streams that ignored the GOAWAY: over this h2c transport
+	// GracefulStop's Drain is Close(closedCh), which ends the stream rather than
+	// waiting it out.
+	p.grpcMu.RLock()
+	grpcServer := p.grpcRelayServer
+	p.grpcMu.RUnlock()
+	if grpcServer != nil {
+		grpcServer.GracefulStop()
+	}
+	return true
+}
+
+// signalBridges tells every live bridge to wind down, without waiting for any of
+// them.
+//
+// The signal is what makes a bridge cost a shutdown budget instead of its own:
+// left alone, one parked in awaitFirstFrame is bounded only by wsFirstFrameWait,
+// four times this whole budget. closeWithReason cancels the bridge's context and
+// expires its read deadline, which is what unblocks a ReadMessage that observes
+// no context at all.
+//
+// Signalling is not waiting on purpose: each bridge's teardown runs on its own
+// handler goroutine, so the settles overlap and the cost is one settle, not N.
+func (p *ProxyServer) signalBridges() {
+	p.bridges.Range(func(b *WebSocketBridge, _ struct{}) bool {
+		_ = b.closeWithReason(CloseGoingAway, "relayer shutting down", wsCloseInitiatorRelayer)
+		return true
+	})
+}
+
+// trackBridge joins a bridge to the shutdown drain, and reports whether it was
+// admitted. A false means the proxy is already closing and the caller must not
+// run the bridge.
+//
+// The Add happens under p.mu while reading p.closed, which is not a style
+// choice: an Add that races a Wait which has already reached zero is documented
+// misuse of sync.WaitGroup and panics. Holding the mutex makes "we are still
+// open" and "you are counted" one decision.
+func (p *ProxyServer) trackBridge(b *WebSocketBridge) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.bridges.Store(b, struct{}{})
+	p.bridgeWG.Add(1)
+	return true
+}
+
+// untrackBridge is the other half, called when the bridge's Run returns -- which
+// is after release() and its b.wg.Wait(), so after the last relay that bridge
+// could publish.
+func (p *ProxyServer) untrackBridge(b *WebSocketBridge) {
+	p.bridges.Delete(b)
+	p.bridgeWG.Done()
 }
 
 // compressGzip compresses data using gzip compression.

@@ -543,6 +543,16 @@ func (b *WebSocketBridge) awaitFirstFrame() bool {
 		return false
 	}
 
+	// A shutdown that signalled this bridge BEFORE the line above would have
+	// been erased by it: closeWithReason nudges the read deadline to now, and
+	// the deadline just set is firstFrameWait away -- two minutes in production,
+	// four times the whole shutdown budget. The signal is durable in the CONTEXT,
+	// so re-reading it here makes the two orders equivalent: signalled first and
+	// we leave now, signalled after and the nudge lands on a parked read.
+	if b.ctx.Err() != nil {
+		return false
+	}
+
 	messageType, data, err := b.gatewayConn.ReadMessage()
 	if err != nil {
 		code, text := closeInfoForReadError(err)
@@ -1591,8 +1601,14 @@ func (b *WebSocketBridge) closeWithReason(code int, reason string, initiator wsC
 
 // Close asks the bridge to shut down. Like every other caller it only SIGNALS:
 // Run's deferred release does the work, so a bridge that was never Run is not
-// released by this either. In production that state does not exist -- the
-// handler owns the connection until it hands it to a bridge it then Runs.
+// released by this either -- not its sockets, not its close frames.
+//
+// That state DOES exist in production, in exactly one place: the WebSocket
+// handler builds a bridge and then refuses it when the proxy is already
+// draining. It is safe there only because ownership of the gateway connection
+// is transferred AFTER that refusal, so the handler's own defer still closes
+// it. This paragraph used to say the state could not arise; the shutdown drain
+// created it, and the refusal leaked a connection until the transfer moved.
 func (b *WebSocketBridge) Close() error {
 	return b.closeWithReason(CloseNormalClosure, "bridge closing", wsCloseInitiatorRelayer)
 }
@@ -1806,8 +1822,36 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			return
 		}
 
-		// Ownership transfers here: from now on the bridge closes it.
+		// Join the shutdown drain BEFORE running, with no I/O in between: a
+		// bridge that is running and not counted is one the drain cannot wait
+		// for, and it is the transport that publishes last.
+		//
+		// Ownership is transferred AFTER this and not before, because the
+		// refusal below releases NOTHING: Run never starts, so its deferred
+		// release -- the only code that closes these connections -- never runs,
+		// and closeWithReason only signals. The connection has to fall through
+		// to this function's own defer, and that defer fires only while
+		// bridgeOwnsConn is still false. Setting it above this guard left the
+		// client holding an open socket until the process died: the fifth
+		// instance of the early-return-after-hijack shape, and the first to
+		// reach it from the far side of the ownership transfer.
+		if !p.trackBridge(bridge) {
+			// The proxy is already draining. Refusing here rather than running
+			// is what keeps the counter honest: an Add after the drain's Wait
+			// reached zero is misuse of sync.WaitGroup, not a lost connection.
+			// Signalled anyway so the bridge's context is cancelled rather than
+			// leaked, and so the close reason is recorded once.
+			_ = bridge.closeWithReason(CloseGoingAway, "relayer shutting down", wsCloseInitiatorRelayer)
+			return
+		}
+
+		// Ownership transfers here: from now on the bridge closes it, because
+		// from here it is Run and release() is what tears the connections down.
 		bridgeOwnsConn = true
+
+		// Run returns after release() and its b.wg.Wait(), so this fires after
+		// the last relay this bridge could publish.
+		defer p.untrackBridge(bridge)
 
 		// Run bridge (blocking)
 		bridge.Run()
