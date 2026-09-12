@@ -40,3 +40,28 @@ observability/runtime_metrics.go RuntimeMetricsCollector.LastMallocs # reads col
 observability/server.go Server.IsRunning                        # lets a test observe lifecycle without racing on the listener (observability/server_test.go)
 relayer/simulation.go SimulationVerifier.Reload                 # reconfigures the verifier between cases; production wires it once via SetSimulationVerifier and has NO hot-reload path, so changing simulation config needs a restart (relayer/simulation_test.go, 6 uses)
 relayer/websocket.go WebSocketBridge.Close                      # closes a bridge in-test; production closes with closeWithReason and a specific cause, 13 call sites (relayer/websocket_simulation_test.go)
+
+# --- TRANSITORIO: el BatchingPublisher del I4 llega SIN CABLEAR a proposito ---
+# Estas doce entradas NO son codigo muerto permanente: son el mecanismo del batch, escrito y
+# verificado con teeth propias (TxPipelined contra Pipelined, y el reintento del trozo tras un
+# timeout de pool agotado), commiteado ANTES de su cableado porque el cableado es un cambio de
+# comportamiento en el camino de datos que necesita sus propias teeth -- la migracion de los cuatro
+# contadores de "publicado", el orden del flush antes del Close() del cliente, y una regla de
+# cableado que congele ese orden. Commitear las dos mitades juntas habria dado un commit que
+# enciende una perilla cuya metrica MIENTE: con el batch andando, los tres contadores del relayer
+# contarian encolados y seguirian llamandose publicados, asi que "servidos - publicados" daria 0
+# aunque se perdiera un trozo entero de 256 relays.
+# ESTAS LINEAS SE BORRAN en el commit que cablea el BatchingPublisher en cmd/cmd_relayer.go. Si
+# siguen aca y el publisher ya esta cableado, el deadcode las va a reportar como sobrantes.
+transport/redis/batching_publisher.go NewBatchingPublisher            # lo construye el cableado, que llega en el commit siguiente
+transport/redis/batching_publisher.go BatchingPublisher.Publish       # implementa transport.MinedRelayPublisher; lo llaman los cuatro sitios via la interfaz una vez cableado
+transport/redis/batching_publisher.go BatchingPublisher.Close         # flushea lo encolado en el shutdown; lo llama el defer del cableado
+transport/redis/batching_publisher.go BatchingPublisher.run           # el loop del despachador, arrancado por NewBatchingPublisher
+transport/redis/batching_publisher.go BatchingPublisher.dispatchAll   # vacia la cola en trozos; lo llama run y el flush final
+transport/redis/batching_publisher.go BatchingPublisher.finalFlush    # el flush del cierre, en un ctx desacoplado de la cancelacion del proceso
+transport/redis/batching_publisher.go BatchingPublisher.takeChunk     # corta el proximo trozo sin partir un stream entre dos
+transport/redis/batching_publisher.go BatchingPublisher.writeChunk    # el TxPipelined; revisa el error de CADA XADD y no solo el del EXEC
+transport/redis/batching_publisher.go BatchingPublisher.requeueFront  # devuelve un trozo fallado a la cabeza, preservando el orden de llegada
+transport/redis/batching_publisher.go approxBytes                     # el tamano retenido por una entrada, para el umbral en bytes del commit de admision
+transport/redis/batching_publisher.go bytes0                          # idem, para un campo vacio
+transport/redis/batching_publisher.go streamStart                     # la clave del stream de un supplier, via el KeyBuilder

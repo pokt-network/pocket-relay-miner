@@ -61,33 +61,42 @@ func NewStreamsPublisher(
 // as it acknowledges it (XACKDEL/DELREF), and a periodic XTRIM MINID sweeps whatever
 // slipped past. What ends the stream's life is the supplier's own lifecycle, not a
 // timer.
-func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRelayMessage) error {
-	p.mu.RLock()
-	if p.closed {
-		p.mu.RUnlock()
-		return fmt.Errorf("publisher is closed")
-	}
-	p.mu.RUnlock()
-
+// prepareXAdd validates a mined relay and turns it into the XADD that carries
+// it, WITHOUT issuing anything.
+//
+// Extracted so the one-at-a-time publisher and the batching one share it rather
+// than keeping two copies. Two copies of a validation drift, and this one is not
+// cosmetic: these checks are what rejected 1412 served relays in the 2026-09-11
+// load, so a batching publisher that validated differently would reject a
+// different set.
+//
+// It is also WHERE the validation happens that decides how big the poison-message
+// problem is. Running it at ENQUEUE means an invalid message never reaches a
+// batch; running it at dispatch would let one into a chunk, where the EXEC
+// rejects it and the chunk becomes permanently undispatchable -- head-of-line
+// blocking invented for a message we already knew how to reject.
+func prepareXAdd(streamPrefix string, msg *transport.MinedRelayMessage) (string, *redis.XAddArgs, string, error) {
 	if msg == nil {
-		return fmt.Errorf("message is nil")
+		return "", nil, rejectReasonNilMessage, fmt.Errorf("message is nil")
 	}
 
 	// Validate required fields for TTL calculation
 	if msg.SessionId == "" {
-		return fmt.Errorf("session_id is required")
+		return "", nil, rejectReasonNoSessionID, fmt.Errorf("session_id is required")
 	}
 	if msg.SessionEndHeight <= 0 {
-		return fmt.Errorf("session_end_height is required")
+		return "", nil, rejectReasonBadEndHeight, fmt.Errorf("session_end_height is required")
 	}
 
-	// Set published timestamp if not already set
+	// Set published timestamp if not already set. At ENQUEUE for the batching
+	// publisher, which is the honest reading: it is when the relayer handed the
+	// relay over, and the gap to the dispatch is the queue's own latency.
 	if msg.PublishedAtUnixNano == 0 {
 		msg.SetPublishedAt()
 	}
 
 	// Use single stream per supplier (simplified architecture)
-	streamName := transport.SupplierStreamName(p.streamPrefix, msg.SupplierOperatorAddress)
+	streamName := transport.SupplierStreamName(streamPrefix, msg.SupplierOperatorAddress)
 
 	// Serialize message to protobuf for Redis Stream
 	// Protobuf binary format is 3-5× smaller than JSON and eliminates JSON decoder
@@ -95,15 +104,31 @@ func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRela
 	// Performance: protobuf Marshal is ~2× faster than json.Marshal
 	data, err := msg.Marshal()
 	if err != nil {
-		return fmt.Errorf("failed to serialize message: %w", err)
+		return "", nil, "serialize_failed", fmt.Errorf("failed to serialize message: %w", err)
 	}
 
 	// Build XADD arguments (NO MaxLen - use TTL instead)
-	args := &redis.XAddArgs{
+	return streamName, &redis.XAddArgs{
 		Stream: streamName,
 		Values: map[string]interface{}{
 			"data": data,
 		},
+	}, "", nil
+}
+
+func (p *StreamsPublisher) Publish(ctx context.Context, msg *transport.MinedRelayMessage) error {
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		recordPublishReject(p.logger, rejectReasonPublisherShut, serviceOf(msg), "publisher already closed")
+		return fmt.Errorf("publisher is closed")
+	}
+	p.mu.RUnlock()
+
+	streamName, args, reason, err := prepareXAdd(p.streamPrefix, msg)
+	if err != nil {
+		recordPublishReject(p.logger, reason, serviceOf(msg), err.Error())
+		return err
 	}
 
 	// Publish to stream
@@ -140,4 +165,12 @@ func (p *StreamsPublisher) Close() error {
 	p.closed = true
 	p.logger.Info().Msg("Redis Streams publisher closed")
 	return nil
+}
+
+// serviceOf is the service label for a message that may be nil.
+func serviceOf(msg *transport.MinedRelayMessage) string {
+	if msg == nil {
+		return ""
+	}
+	return msg.ServiceId
 }
