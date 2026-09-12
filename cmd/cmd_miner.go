@@ -252,6 +252,18 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Str("consumer_name", config.Redis.ConsumerName).
 		Msg("connected to Redis")
 
+	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
+	// files and the redis CLI build clients, and a repeated MustRegister panics.
+	// The collector is also the registry of pools, so a client per supplier can
+	// be added and removed as suppliers are adopted and released.
+	//
+	// The miner is where this is most needed: checkPoolSize only WARNS about a
+	// short pool, once, at startup -- and that warning sat in Loki through a
+	// whole load run with nobody reading it.
+	redisPools := redistransport.NewPoolCollector("miner")
+	redisPools.Add("shared", redisClient)
+	observability.SharedRegistry.MustRegister(redisPools)
+
 	// Set readiness check to verify Redis connectivity via PING
 	if obsServer != nil {
 		obsServer.SetReadinessCheck(func(ctx context.Context) error {

@@ -509,6 +509,14 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = redisClient.Close() }()
 	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
 
+	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
+	// files and the redis CLI build clients, and a repeated MustRegister panics.
+	// The collector is also the registry of pools, so a client per supplier can
+	// be added and removed as suppliers are adopted and released.
+	redisPools := redistransport.NewPoolCollector("relayer")
+	redisPools.Add("shared", redisClient)
+	observability.SharedRegistry.MustRegister(redisPools)
+
 	// Create supplier cache for checking supplier staking state
 	supplierCache := cache.NewSupplierCache(
 		logger,
