@@ -192,11 +192,6 @@ spec:
         - containerPort: 6060
           name: pprof
         env:
-        # GOMAXPROCS and the CPU limit below are rendered from ONE number,
-        # relayer.cpu_cores. They were two literals under a comment claiming
-        # they matched, and they had stopped matching.
-        - name: GOMAXPROCS
-          value: "{gomaxprocs}"
         - name: LOG_LEVEL
           value: "{log_level}"
         - name: POD_NAME
@@ -217,8 +212,10 @@ spec:
             cpu: "2000m"
             memory: "1Gi"
           limits:
-            # Same relayer.cpu_cores as GOMAXPROCS above. Handles relay
-            # validation and signing at high RPS.
+            # From relayer.cpu_cores. GOMAXPROCS is NOT set: automaxprocs
+            # (main.go:7) derives it from THIS limit, and a present env would make
+            # it return without touching anything (maxprocs.go:105-111). Handles
+            # relay validation and signing at high RPS.
             cpu: "{cpu_limit}"
             memory: "4Gi"
         readinessProbe:
@@ -274,7 +271,6 @@ spec:
         config_hash=relayer_config_hash,
         image=config["global"]["image"],
         log_level="debug" if config["global"]["debug"] else "info",
-        gomaxprocs=config["relayer"]["cpu_cores"],
         cpu_limit="{}000m".format(config["relayer"]["cpu_cores"]),
     )
 

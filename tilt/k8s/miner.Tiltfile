@@ -192,10 +192,6 @@ spec:
         - containerPort: 6060
           name: pprof
         env:
-        # GOMAXPROCS and the CPU limit below are rendered from ONE number,
-        # miner.cpu_cores -- see relayer.Tiltfile for the divergence that is.
-        - name: GOMAXPROCS
-          value: "{gomaxprocs}"
         - name: LOG_LEVEL
           value: "{log_level}"
         - name: POD_NAME
@@ -216,8 +212,10 @@ spec:
             cpu: "500m"
             memory: "512Mi"
           limits:
-            # Same miner.cpu_cores as GOMAXPROCS above. The miner is the core
-            # component doing SMST, claims and proofs.
+            # From miner.cpu_cores. GOMAXPROCS is NOT set: automaxprocs
+            # (main.go:7) derives it from THIS limit, and a present env would make
+            # it return without touching anything (maxprocs.go:105-111). The miner
+            # is the core component doing SMST, claims and proofs.
             cpu: "{cpu_limit}"
             memory: "2Gi"
         readinessProbe:
@@ -261,7 +259,6 @@ spec:
         config_hash=miner_config_hash,
         image=config["global"]["image"],
         log_level="debug" if config["global"]["debug"] else "info",
-        gomaxprocs=config["miner"]["cpu_cores"],
         cpu_limit="{}000m".format(config["miner"]["cpu_cores"]),
     )
 
