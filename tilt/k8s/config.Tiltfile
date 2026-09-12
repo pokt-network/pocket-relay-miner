@@ -92,4 +92,16 @@ def validate_config(config):
     if block_time < 2 or block_time > 600:
         fail("localnet.block_time_seconds must be between 2 and 600, got {}".format(block_time))
 
+    # Validate the per-binary CPU. It renders GOMAXPROCS, which the Go runtime
+    # reads as a count of schedulable processors: a non-integer or a zero would
+    # be rendered into the pod and only surface as a runtime that behaves
+    # nothing like the limit says.
+    for component in ["relayer", "miner"]:
+        cores = config[component]["cpu_cores"]
+        if type(cores) != "int":
+            fail("{}.cpu_cores must be an integer number of cores, got {}: {}".format(
+                component, type(cores), cores))
+        if cores < 1 or cores > 64:
+            fail("{}.cpu_cores must be between 1 and 64, got {}".format(component, cores))
+
     return True

@@ -49,7 +49,7 @@ metadata:
   labels:
     app: relayer
 spec:
-  replicas: {}
+  replicas: {replicas}
   selector:
     matchLabels:
       app: relayer
@@ -62,7 +62,7 @@ spec:
         # pods on its own, and the relayer reads its config only at startup, so
         # without this a config edit would update the ConfigMap and leave the
         # running relayers on the old one.
-        pocket-relay-miner/config-hash: "{}"
+        pocket-relay-miner/config-hash: "{config_hash}"
     spec:
       initContainers:
       # Build a cosmos keyring from the SAME hex keys the keys_file holds, so the
@@ -176,7 +176,7 @@ spec:
           mountPath: /keyring-pass
       containers:
       - name: relayer
-        image: {}
+        image: {image}
         imagePullPolicy: Never
         command:
         - pocket-relay-miner
@@ -192,10 +192,13 @@ spec:
         - containerPort: 6060
           name: pprof
         env:
+        # GOMAXPROCS and the CPU limit below are rendered from ONE number,
+        # relayer.cpu_cores. They were two literals under a comment claiming
+        # they matched, and they had stopped matching.
         - name: GOMAXPROCS
-          value: "4"  # Match CPU limit - makes runtime.NumCPU() return 4
+          value: "{gomaxprocs}"
         - name: LOG_LEVEL
-          value: "{}"
+          value: "{log_level}"
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -214,7 +217,9 @@ spec:
             cpu: "2000m"
             memory: "1Gi"
           limits:
-            cpu: "8000m"  # 8 cores - handles relay validation and signing at high RPS
+            # Same relayer.cpu_cores as GOMAXPROCS above. Handles relay
+            # validation and signing at high RPS.
+            cpu: "{cpu_limit}"
             memory: "4Gi"
         readinessProbe:
           httpGet:
@@ -265,10 +270,12 @@ spec:
     targetPort: 6060
     name: pprof
 """.format(
-        config["relayer"]["count"],
-        relayer_config_hash,
-        config["global"]["image"],
-        "debug" if config["global"]["debug"] else "info"
+        replicas=config["relayer"]["count"],
+        config_hash=relayer_config_hash,
+        image=config["global"]["image"],
+        log_level="debug" if config["global"]["debug"] else "info",
+        gomaxprocs=config["relayer"]["cpu_cores"],
+        cpu_limit="{}000m".format(config["relayer"]["cpu_cores"]),
     )
 
     k8s_yaml(blob(relayer_yaml))

@@ -55,7 +55,7 @@ metadata:
   labels:
     app: miner
 spec:
-  replicas: {}
+  replicas: {replicas}
   selector:
     matchLabels:
       app: miner
@@ -66,7 +66,7 @@ spec:
       annotations:
         # See config_hash in utils.Tiltfile: a mounted ConfigMap change does not
         # roll pods by itself, and the miner reads its config only at startup.
-        pocket-relay-miner/config-hash: "{}"
+        pocket-relay-miner/config-hash: "{config_hash}"
     spec:
       initContainers:
       # Build a cosmos keyring from the SAME hex keys the keys_file holds, so the
@@ -180,7 +180,7 @@ spec:
           mountPath: /keyring-pass
       containers:
       - name: miner
-        image: {}
+        image: {image}
         imagePullPolicy: Never
         command:
         - pocket-relay-miner
@@ -192,10 +192,12 @@ spec:
         - containerPort: 6060
           name: pprof
         env:
+        # GOMAXPROCS and the CPU limit below are rendered from ONE number,
+        # miner.cpu_cores -- see relayer.Tiltfile for the divergence that is.
         - name: GOMAXPROCS
-          value: "4"  # Match CPU limit - makes runtime.NumCPU() return 4
+          value: "{gomaxprocs}"
         - name: LOG_LEVEL
-          value: "{}"
+          value: "{log_level}"
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -214,7 +216,9 @@ spec:
             cpu: "500m"
             memory: "512Mi"
           limits:
-            cpu: "4000m"  # 4 cores - miner is the core component doing SMST, claims, proofs
+            # Same miner.cpu_cores as GOMAXPROCS above. The miner is the core
+            # component doing SMST, claims and proofs.
+            cpu: "{cpu_limit}"
             memory: "2Gi"
         readinessProbe:
           httpGet:
@@ -253,10 +257,12 @@ spec:
     targetPort: 6060
     name: pprof
 """.format(
-        config["miner"]["count"],
-        miner_config_hash,
-        config["global"]["image"],
-        "debug" if config["global"]["debug"] else "info"
+        replicas=config["miner"]["count"],
+        config_hash=miner_config_hash,
+        image=config["global"]["image"],
+        log_level="debug" if config["global"]["debug"] else "info",
+        gomaxprocs=config["miner"]["cpu_cores"],
+        cpu_limit="{}000m".format(config["miner"]["cpu_cores"]),
     )
 
     k8s_yaml(blob(miner_yaml))

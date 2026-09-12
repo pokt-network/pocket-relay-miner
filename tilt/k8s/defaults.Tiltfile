@@ -59,6 +59,20 @@ def get_defaults():
         },
         "relayer": {
             "count": 2,
+
+            # THE relayer's CPU. One integer renders both the container's CPU
+            # limit and GOMAXPROCS, so they cannot drift apart -- which is
+            # exactly what had happened: the limit was raised to 8 cores and the
+            # GOMAXPROCS literal stayed at 4, under a comment that claimed they
+            # matched. The pod was allowed 8 cores and the Go runtime scheduled
+            # on 4, so a load ramp hitting that ceiling would have reported the
+            # runtime's limit as this software's.
+            #
+            # Cores, not a k8s quantity: GOMAXPROCS is an integer >= 1, so
+            # "500m" has no honest rendering, while an integer renders "8" and
+            # "8000m" with no arithmetic. requests.cpu stays a literal in the
+            # template -- it serves the scheduler, not the runtime.
+            "cpu_cores": 8,
             "base_port": 8180,  # Avoid conflict with redis_commander (8081)
             "metrics_base_port": 9190,  # Avoid conflict with validator_grpc (9090)
             "health_base_port": 8280,
@@ -73,6 +87,12 @@ def get_defaults():
         },
         "miner": {
             "count": 2,
+
+            # THE miner's CPU -- see relayer.cpu_cores above for why this is one
+            # number. 4 is what the miner already had in BOTH places, so this
+            # changes nothing about how it runs: it only removes the second
+            # place that could have gone stale.
+            "cpu_cores": 4,
             "metrics_base_port": 9092,
             "pprof_port": 6065,  # Start at 6065 to avoid conflict with relayer pprof (6060-6064)
             "config": {},  # Config loaded from example file, overridden by tilt_config.yaml
