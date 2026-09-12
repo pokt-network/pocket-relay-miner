@@ -608,7 +608,10 @@ func (s *RedisSessionStore) CreateIfAbsent(ctx context.Context, snapshot *Sessio
 func (s *RedisSessionStore) getHash(ctx context.Context, key string) (*SessionSnapshot, error) {
 	fields, err := s.redisClient.HGetAll(ctx, key).Result()
 	if err != nil {
-		return nil, fmt.Errorf("failed to hgetall session snapshot: %w", err)
+		// The key is in the message on purpose: without the TYPE probe that
+		// used to run first, a bare WRONGTYPE from go-redis no longer says
+		// which key was the wrong type, and that is what an operator needs.
+		return nil, fmt.Errorf("failed to hgetall session snapshot %s: %w", key, err)
 	}
 	return decodeSnapshot(fields)
 }
@@ -623,7 +626,7 @@ func (s *RedisSessionStore) getLegacyJSON(ctx context.Context, key string) (*Ses
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get legacy session snapshot: %w", err)
+		return nil, fmt.Errorf("failed to get legacy session snapshot %s: %w", key, err)
 	}
 	var snapshot SessionSnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
@@ -636,25 +639,33 @@ func (s *RedisSessionStore) getLegacyJSON(ctx context.Context, key string) (*Ses
 // both the new Hash layout and the legacy JSON string layout during rolling
 // upgrade (Option B in HANDOFF-WAVE-3-HINCRBY.md). Remove the legacy branch
 // in a follow-up PR after breeze has cycled through one session window.
+//
+// ONE round trip, not two. This used to ask TYPE first and then read whatever
+// the type said. It runs once per relay (supplier_worker.go), on a consumer
+// that handles its supplier's relays ONE AT A TIME (the per-supplier consume
+// loop in supplier_manager.go), so a supplier's ceiling is roughly its relay
+// latency inverted -- every trip taken off this path raises it. Measured under
+// load on 2026-09-11: of the miner goroutines parked on a Redis command inside
+// the relay path, TYPE was between a third and a half of them.
+//
+// HGETALL carries the "key does not exist" case by itself: it answers with an
+// empty map rather than an error, and decodeSnapshot returns (nil, nil) for an
+// empty map. So only a legacy STRING key costs a second trip.
 func (s *RedisSessionStore) Get(ctx context.Context, sessionID string) (*SessionSnapshot, error) {
 	key := s.sessionKey(sessionID)
 
-	keyType, err := s.redisClient.Type(ctx, key).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to check session key type: %w", err)
+	snapshot, err := s.getHash(ctx, key)
+	if err == nil {
+		return snapshot, nil
 	}
-
-	switch keyType {
-	case "none":
-		return nil, nil
-	case "hash":
-		return s.getHash(ctx, key)
-	case "string":
-		// Legacy JSON blob, written by pre-Wave-3 miners.
-		return s.getLegacyJSON(ctx, key)
-	default:
-		return nil, fmt.Errorf("unexpected redis type for session key %s: %s", key, keyType)
+	// ONLY a WRONGTYPE means "this key holds the legacy JSON string". Anything
+	// else -- a dead connection, a read timeout, a pool timeout -- must not be
+	// retried as a legacy read: that turns one failed trip into two and reports
+	// the second error, hiding the first.
+	if !isWrongTypeErr(err) {
+		return nil, err
 	}
+	return s.getLegacyJSON(ctx, key)
 }
 
 // GetBySupplier retrieves all sessions for a supplier.

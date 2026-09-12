@@ -14,10 +14,18 @@ import (
 )
 
 // sessionReadCounter counts SessionStore.Get calls for ONE session by counting
-// the TYPE command each Get opens with (session_store.go Get), on the real
-// Redis the fixture uses. INFO commandstats would count the whole server,
-// which other packages share while `go test ./...` runs, so a hook on this
-// test's own client is the only count that is this test's alone.
+// the HGETALL each Get issues against that session's key (session_store.go
+// getHash), on the real Redis the fixture uses. INFO commandstats would count
+// the whole server, which other packages share while `go test ./...` runs, so a
+// hook on this test's own client is the only count that is this test's alone.
+//
+// It used to count the TYPE that Get opened with, until Get stopped asking TYPE.
+// HGETALL is the honest replacement for BOTH halves of this hook -- the count
+// and the failure injection -- because exactly one HGETALL reaches this key per
+// Get: getHash is its only caller (the legacy fallback issues GET, not a second
+// HGETALL), CreateIfAbsent writes through a TxPipeline, which lands in
+// ProcessPipelineHook rather than here, and the other HGETALL in this package
+// (rebroadcast_store.go) uses a different key, which the key filter drops.
 type sessionReadCounter struct {
 	key string
 
@@ -38,7 +46,7 @@ func (c *sessionReadCounter) DialHook(next redis.DialHook) redis.DialHook { retu
 func (c *sessionReadCounter) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
 		args := cmd.Args()
-		if cmd.Name() == "type" && len(args) == 2 && fmt.Sprint(args[1]) == c.key {
+		if cmd.Name() == "hgetall" && len(args) == 2 && fmt.Sprint(args[1]) == c.key {
 			c.reads.Add(1)
 			if c.failNext.Load() > 0 {
 				c.failNext.Add(-1)
@@ -55,8 +63,8 @@ func (c *sessionReadCounter) ProcessPipelineHook(next redis.ProcessPipelineHook)
 
 // TestHandleRelay_ReadsAnExistingSessionOncePerRelay pins the read handleRelay
 // hands to EnsureSession. handleRelay reads the session to check its state; if
-// EnsureSession read it again, every relay would pay a second TYPE+HGETALL for
-// the same data -- two of the ~11.5 Redis commands a relay cost under load.
+// EnsureSession read it again, every relay would pay a second HGETALL for the
+// same data -- one more of the ~11.5 Redis commands a relay cost under load.
 func TestHandleRelay_ReadsAnExistingSessionOncePerRelay(t *testing.T) {
 	f := newHandlerTestFixture(t, "pokt1read_once")
 	const (
@@ -147,6 +155,9 @@ func TestHandleRelay_AFailedSessionReadIsNotTakenAsAbsent(t *testing.T) {
 	require.NoError(t, f.worker.handleRelay(f.ctx, f.supplierAddr, msg),
 		"a failed session read is not a reason to drop the relay")
 
+	require.Equal(t, int64(0), reads.failNext.Load(),
+		"the injected failure must have been applied to a real command: if the hook matches "+
+			"nothing, this test proves nothing")
 	require.Equal(t, int64(2), reads.reads.Load(),
 		"after handleRelay's read of %s failed, EnsureSession must read the session itself: "+
 			"1 read means it took the failure as an answer ('absent' or 'exists')", sessionID)
