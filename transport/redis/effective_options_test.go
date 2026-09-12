@@ -71,3 +71,14 @@ func TestMinIdleConnsDefaultsToAQuarterOfThePool(t *testing.T) {
 			"has always promised, and until 2026-09-12 the value arrived as 0 and go-redis "+
 			"held no warm connections at all")
 }
+
+// testRedisURLBench is testRedisURL for a benchmark: testing.B has no Skip on
+// the same receiver type, so the helper takes testing.TB.
+func testRedisURLBench(tb testing.TB) string {
+	tb.Helper()
+	url := os.Getenv("REDIS_TEST_URL")
+	if url == "" {
+		tb.Skip("REDIS_TEST_URL not set; start one with: eval \"$(scripts/gates/redis.sh up)\"")
+	}
+	return url
+}
