@@ -6,10 +6,13 @@ import (
 	"context"
 	"crypto/sha256"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/puzpuzpuz/xsync/v4"
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -320,4 +323,109 @@ func TestHandleRelay_EmptyRelayHash_RecomputedFromBytes(t *testing.T) {
 	isDupB, dupErrB := f.dedup.IsDuplicate(f.ctx, expectedB[:], "sess-recompute")
 	require.NoError(t, dupErrB)
 	assert.True(t, isDupB, "dedup must have recorded the recomputed hash of RelayBytes B")
+}
+
+// poolTimeoutOnNodesFlush fails the first N HSETs against ONE session's SMST
+// node hash with redis.ErrPoolTimeout -- by identity, not by message -- and
+// counts that it actually fired.
+//
+// Scoped rather than testredis.FailSwitch, for two independent reasons. Fail
+// builds a fresh errors.New (internal/testredis/inject.go:117-120), so the
+// injected value would not satisfy errors.Is against the sentinel and the test
+// would be asserting on go-redis's wording; and it fails EVERY command, so the
+// session read and the deduplicator would break too and the relay could die
+// before it ever reaches the flush.
+//
+// Exactly one HSET per relay reaches this key on this path: updateTree calls
+// BeginPipeline (smst_manager.go:660-662), which makes RedisMapStore.Set buffer
+// (redis_mapstore.go:150-166) instead of issuing its own HSET, leaving
+// FlushPipeline's single multi-field HSET (redis_mapstore.go:333) as the only
+// one. fired checks that rather than trusting it.
+type poolTimeoutOnNodesFlush struct {
+	key      string
+	failNext atomic.Int64
+	fired    atomic.Int64
+}
+
+func (h *poolTimeoutOnNodesFlush) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (h *poolTimeoutOnNodesFlush) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		args := cmd.Args()
+		if cmd.Name() == "hset" && len(args) > 1 && fmt.Sprint(args[1]) == h.key &&
+			h.failNext.Add(-1) >= 0 {
+			h.fired.Add(1)
+			// Client.Process puts this on the Cmd, so HSet(...).Err()
+			// returns it (go-redis v9.22.0 redis.go, Client.Process).
+			return redis.ErrPoolTimeout
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func (h *poolTimeoutOnNodesFlush) ProcessPipelineHook(
+	next redis.ProcessPipelineHook,
+) redis.ProcessPipelineHook {
+	return next
+}
+
+// TestHandleRelay_APoolTimeoutIsRetriedNotDiscarded is the I2b defect, walked
+// end to end: a relay that was already served, signed and answered to the
+// client must not be thrown away because every pooled connection happened to be
+// busy when its tree was written.
+//
+// redis.ErrPoolTimeout is a bare errors.New (go-redis v9.22.0
+// internal/pool/pool.go:65), so it is not a net.Error, not a context error and
+// not ErrClosed. Before the fix IsRetryableError said false, the flush error's
+// ErrSMSTCommitFailed wrapper (smst_manager.go:679) made IsPermanentSMSTError
+// say true, and handleRelay returned nil -- an ACK, which is XAckDel with
+// DELREF, so the entry is DELETED and no replica can rescue it. It was counted
+// as "session_sealed": arrived late. It did not arrive late.
+//
+// The assertions are the consequence, not the classification: the return value
+// decides between AckMessage and ReleaseMessage in handleStreamMessage
+// (supplier_manager.go:2248-2280), and the reason label decides what the
+// operator is told it cost.
+func TestHandleRelay_APoolTimeoutIsRetriedNotDiscarded(t *testing.T) {
+	const sessionID = "sess-pool-timeout"
+	f := newHandlerTestFixture(t, "pokt1poolto")
+
+	nodesKey := f.redisClient.KB().SMSTNodesKey(f.supplierAddr, sessionID)
+	hook := &poolTimeoutOnNodesFlush{key: nodesKey}
+	hook.failNext.Store(1)
+	f.redisClient.AddHook(hook)
+
+	// Child series with this test's own supplier label: relays_failed_smst is
+	// touched by other tests in this binary, and the whole vec would count
+	// their traffic.
+	sealed := relaysFailedSMST.WithLabelValues(f.supplierAddr, "svc-1", "session_sealed")
+	transient := relaysFailedSMST.WithLabelValues(f.supplierAddr, "svc-1", "transient_error")
+	rejected := relaysRejected.WithLabelValues(f.supplierAddr, "session_sealed", "svc-1")
+	sealedBefore := testutil.ToFloat64(sealed)
+	transientBefore := testutil.ToFloat64(transient)
+	rejectedBefore := testutil.ToFloat64(rejected)
+
+	msg := newStreamMessage(f.supplierAddr, sessionID, "relay-pool-timeout", 100)
+	err := f.worker.handleRelay(f.ctx, f.supplierAddr, msg)
+
+	// The control comes first: without it a hook that matched nothing looks
+	// exactly like a fix that works, and every assertion below would pass on
+	// a relay that never met the injected failure.
+	require.Equal(t, int64(1), hook.fired.Load(),
+		"the injected pool timeout must have hit a real command: if the hook matched "+
+			"nothing, this test proves nothing")
+
+	require.Error(t, err,
+		"a pool timeout must be handed back for another delivery; returning nil ACKs the "+
+			"relay and XAckDel deletes it from the stream")
+	require.ErrorIs(t, err, redis.ErrPoolTimeout,
+		"and it must still carry the cause, so handleStreamMessage's release is traceable")
+
+	assert.Equal(t, sealedBefore, testutil.ToFloat64(sealed),
+		"a busy pool is not a sealed session: counting it as session_sealed tells the "+
+			"operator the relay arrived late when it arrived on time")
+	assert.Equal(t, rejectedBefore, testutil.ToFloat64(rejected),
+		"and it must not be counted as a rejected relay either")
+	assert.Equal(t, transientBefore+1, testutil.ToFloat64(transient),
+		"it is the transient class, and it has to be visible as such")
 }

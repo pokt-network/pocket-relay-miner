@@ -81,13 +81,34 @@ func IsRetryableError(err error) bool {
 		return true
 	}
 
+	// A pool timeout means every connection was busy for longer than
+	// PoolTimeout. It is transient by construction -- the next delivery
+	// finds a free connection -- but nothing else in this function can see
+	// it: redis.ErrPoolTimeout is a bare errors.New (go-redis v9.22.0
+	// internal/pool/pool.go:65), so it implements neither net.Error nor
+	// Timeout(), and it wraps no context error. Without this check the flush
+	// error reaches IsPermanentSMSTError through its ErrSMSTCommitFailed
+	// wrapper (smst_manager.go:679) and handleRelay ACKs a relay that was
+	// already served and signed, deleting it from the stream with DELREF and
+	// counting it as "session_sealed" -- money lost, labelled "arrived late".
+	//
+	// go-redis itself classifies this error as retryable in its own retry
+	// loop (v9.22.0 error.go:107-111, "connection pool timeout, increase
+	// retries. #3289"), so treating it as permanent here disagrees with the
+	// library that produces it.
+	if errors.Is(err, redis.ErrPoolTimeout) {
+		return true
+	}
+
 	// Redis OOM is transient — it clears when TTL-bearing keys expire
 	if redisutil.IsOOMError(err) {
 		return true
 	}
 
-	// Note: go-redis v9 may not export all pool errors directly,
-	// but connection-related errors typically wrap net.Error
+	// Network errors reach us as net.Error. This does NOT cover the pool
+	// sentinels -- those are bare errors.New values and are checked by
+	// identity above -- so a new pool error class needs its own errors.Is,
+	// not a hope that it wraps net.Error.
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		// Network errors (timeout, connection refused, etc.) are transient
