@@ -46,7 +46,7 @@ func TestCountPublished_WrapsOnceAndLeavesNilAlone(t *testing.T) {
 
 func TestCountingPublisher_CountsOnlyWhatTheStoreAccepted(t *testing.T) {
 	msg := &transport.MinedRelayMessage{ServiceId: "svc-count", SupplierOperatorAddress: "pokt1count"}
-	published := relaysPublished.WithLabelValues("svc-count", "pokt1count")
+	published := relaysPublished.WithLabelValues("svc-count", "pokt1count", metricLabelUnknown)
 	before := testutil.ToFloat64(published)
 
 	require.Error(t, countPublished(failingPublisher{}).Publish(context.Background(), msg))
@@ -54,6 +54,12 @@ func TestCountingPublisher_CountsOnlyWhatTheStoreAccepted(t *testing.T) {
 
 	require.NoError(t, countPublished(&recordingPublisher{}).Publish(context.Background(), msg))
 	require.Equal(t, before+1, testutil.ToFloat64(published))
+
+	typed := relaysPublished.WithLabelValues("svc-count", "pokt1count", BackendTypeJSONRPC)
+	typedBefore := testutil.ToFloat64(typed)
+	require.NoError(t, countPublished(&recordingPublisher{}).Publish(WithRPCType(context.Background(), BackendTypeJSONRPC), msg))
+	require.Equal(t, typedBefore+1, testutil.ToFloat64(typed), "the transport on the context labels the count")
+	require.Equal(t, before+1, testutil.ToFloat64(published), "a labelled publish must not also count as unknown")
 }
 
 // TestRelaysPublished_AWebSocketRelayCountsOnce: the bridge gets the proxy's
@@ -73,7 +79,7 @@ func TestRelaysPublished_AWebSocketRelayCountsOnce(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bridge.Close() })
 	bridge.owner.Store(&supplier)
-	published := relaysPublished.WithLabelValues(simWSTestService, supplier)
+	published := relaysPublished.WithLabelValues(simWSTestService, supplier, BackendTypeWebSocket)
 	before := testutil.ToFloat64(published)
 
 	bridge.emitRelay(ownerTestRelay("ws-published", supplier), &servicetypes.RelayResponse{}, []byte(`{"ok":true}`))
@@ -97,7 +103,7 @@ func newOKBackend(t *testing.T) *httptest.Server {
 // TestRelaysPublished_AGRPCRelayCountsOnce goes through the real handler.
 func TestRelaysPublished_AGRPCRelayCountsOnce(t *testing.T) {
 	fx := newGRPCPublishFixture(t, newOKBackend(t).URL)
-	published := relaysPublished.WithLabelValues("develop-http", "pokt1testsupplieroperator")
+	published := relaysPublished.WithLabelValues("develop-http", "pokt1testsupplieroperator", BackendTypeGRPC)
 	before := testutil.ToFloat64(published)
 
 	require.NoError(t, fx.svc.handleSendRelay(fx.stream))
@@ -112,7 +118,7 @@ func TestRelaysPublished_AGRPCRelayCountsOnce(t *testing.T) {
 func TestRelaysPublished_AGRPCRelayWithNoPublisherIsADrop(t *testing.T) {
 	fx := newGRPCPublishFixture(t, newOKBackend(t).URL)
 	fx.svc.publisher = nil
-	dropped := relaysDropped.WithLabelValues("develop-http", dropReasonNoPublisher)
+	dropped := relaysDropped.WithLabelValues("develop-http", BackendTypeGRPC, dropReasonNoPublisher)
 	before := testutil.ToFloat64(dropped)
 
 	require.NoError(t, fx.svc.handleSendRelay(fx.stream))
@@ -124,10 +130,10 @@ func TestRelaysPublished_AGRPCRelayWithNoPublisherIsADrop(t *testing.T) {
 // its own Publish; the decorator counts now, and only the decorator.
 func TestRelaysPublished_AnHTTPRelayCountsOnce(t *testing.T) {
 	p := &ProxyServer{logger: testLogger(), relayProcessor: &recordingProcessor{}, publisher: countPublished(&recordingPublisher{})}
-	published := relaysPublished.WithLabelValues("svc-http-once", "pokt1httponce")
+	published := relaysPublished.WithLabelValues("svc-http-once", "pokt1httponce", BackendTypeJSONRPC)
 	before := testutil.ToFloat64(published)
 
-	p.executePublish(context.Background(), publishTask{serviceID: "svc-http-once", supplierAddr: "pokt1httponce"})
+	p.executePublish(context.Background(), publishTask{serviceID: "svc-http-once", supplierAddr: "pokt1httponce", rpcType: BackendTypeJSONRPC})
 
 	require.Equal(t, before+1, testutil.ToFloat64(published),
 		"an HTTP relay reaching the store counts in relays_published_total, once")
@@ -137,10 +143,10 @@ func TestRelaysPublished_AnHTTPRelayCountsOnce(t *testing.T) {
 // up on a relay with no publisher before mining it, and counts it the same way.
 func TestRelaysPublished_AnHTTPRelayWithNoPublisherIsADrop(t *testing.T) {
 	p := &ProxyServer{logger: testLogger()}
-	dropped := relaysDropped.WithLabelValues("svc-http-nopub", dropReasonNoPublisher)
+	dropped := relaysDropped.WithLabelValues("svc-http-nopub", BackendTypeJSONRPC, dropReasonNoPublisher)
 	before := testutil.ToFloat64(dropped)
 
-	p.executePublish(context.Background(), publishTask{serviceID: "svc-http-nopub", supplierAddr: "pokt1nopub"})
+	p.executePublish(context.Background(), publishTask{serviceID: "svc-http-nopub", supplierAddr: "pokt1nopub", rpcType: BackendTypeJSONRPC})
 
 	require.Equal(t, before+1, testutil.ToFloat64(dropped), "a relay with no publisher is counted as dropped")
 }

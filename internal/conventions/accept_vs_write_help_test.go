@@ -6,9 +6,10 @@ import (
 	"testing"
 )
 
-// The relayer has four counters that move when a mined relay is ACCEPTED by the
-// publisher, and one drop reason that moves when it is refused. None of them
-// means the relay reached Redis: with redis.batch_publish_interval_ms set,
+// The relayer has one counter that moves when a mined relay is ACCEPTED by the
+// publisher, relays_published_total, and one drop reason that moves when it is
+// refused. Neither means the relay reached Redis: with
+// redis.batch_publish_interval_ms set,
 // accepting is enqueuing and the XADD happens later on the dispatcher's
 // goroutine. The counter that means "written" is ha_transport_published_total,
 // and the errors on that side are ha_transport_publish_errors_total.
@@ -25,11 +26,8 @@ import (
 // what you think" leaves them with no next step, which is the difference between
 // a correction and a useful one.
 var acceptTimeCounterHelp = map[string]string{
-	"relays_published_total":         "ha_transport_published_total",
-	"grpc_relays_published_total":    "ha_transport_published_total",
-	"websocket_relays_emitted_total": "ha_transport_published_total",
-	"relays_mined_total":             "ha_transport_published_total",
-	"relays_dropped_total":           "ha_transport_publish_errors_total",
+	"relays_published_total": "ha_transport_published_total",
+	"relays_dropped_total":   "ha_transport_publish_errors_total",
 }
 
 // counterHelpByName returns Name -> Help for every prometheus *Opts composite

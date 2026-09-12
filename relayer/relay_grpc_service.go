@@ -223,13 +223,13 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	// Receive the RelayRequest message (typed proto message)
 	relayRequest := &servicetypes.RelayRequest{}
 	if err := stream.RecvMsg(relayRequest); err != nil {
-		grpcRelayErrors.WithLabelValues("unknown", "recv_error").Inc()
+		relaysRejected.WithLabelValues(metricLabelUnknown, BackendTypeGRPC, rejectReasonRecvError).Inc()
 		return status.Errorf(codes.InvalidArgument, "failed to receive request: %v", err)
 	}
 
 	// Extract metadata from RelayRequest.Meta
 	if relayRequest.Meta.SessionHeader == nil {
-		grpcRelayErrors.WithLabelValues("unknown", "missing_session_header").Inc()
+		relaysRejected.WithLabelValues(metricLabelUnknown, BackendTypeGRPC, rejectReasonInvalidRelayRequest).Inc()
 		return status.Error(codes.InvalidArgument, "missing session header in RelayRequest")
 	}
 
@@ -243,12 +243,12 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	sessionCtx := logging.SessionContextPartial(sessionID, serviceID, supplierOperatorAddr, applicationAddr, sessionEndHeight)
 
 	if serviceID == "" {
-		grpcRelayErrors.WithLabelValues("unknown", "missing_service_id").Inc()
+		relaysRejected.WithLabelValues(metricLabelUnknown, BackendTypeGRPC, rejectReasonMissingServiceID).Inc()
 		return status.Error(codes.InvalidArgument, "missing service ID in session header")
 	}
 
 	if supplierOperatorAddr == "" {
-		grpcRelayErrors.WithLabelValues(serviceID, "missing_supplier_address").Inc()
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonMissingSupplierAddress).Inc()
 		return status.Error(codes.InvalidArgument, "missing supplier operator address in RelayRequest")
 	}
 
@@ -257,14 +257,14 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 	// Verify we have a signer for this supplier
 	if s.responseSigner == nil || !s.responseSigner.HasSigner(supplierOperatorAddr) {
-		grpcRelayErrors.WithLabelValues(serviceID, "no_signer").Inc()
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonNoLocalSigner).Inc()
 		return status.Errorf(codes.FailedPrecondition, "no signer for supplier %s", supplierOperatorAddr)
 	}
 
 	// Get service configuration
 	svcConfig, ok := s.serviceConfigs[serviceID]
 	if !ok {
-		grpcRelayErrors.WithLabelValues(serviceID, "unknown_service").Inc()
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonUnknownService).Inc()
 		return status.Errorf(codes.NotFound, "unknown service: %s", serviceID)
 	}
 
@@ -296,7 +296,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 		// Validate relay request (ring signature + session)
 		if err := s.relayPipeline.ValidateRelay(ctx, relayCtx); err != nil {
-			grpcRelayErrors.WithLabelValues(serviceID, "validation_failed").Inc()
+			relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonValidationFailed).Inc()
 			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("relay validation failed")
@@ -318,14 +318,14 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 			// The meter's own store is unreadable, so what this session has
 			// already consumed is unknown. This is admission: it is refused,
 			// and the message says nothing about which store or why.
-			grpcRelayErrors.WithLabelValues(serviceID, "meter_unavailable").Inc()
+			relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonMeterError).Inc()
 			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(meterErr).
 				Msg("relay rejected - unable to verify session budget")
 			return status.Error(codes.Unavailable, "unable to process relay request")
 		} else if !allowed {
 			// Stake limit exceeded - reject relay
-			grpcRelayErrors.WithLabelValues(serviceID, "meter_rejected").Inc()
+			relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonStakeExhausted).Inc()
 			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Msg("relay rejected - stake limit exceeded")
 			return status.Error(codes.ResourceExhausted, "relay rejected - stake limit exceeded")
@@ -335,7 +335,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	// Deserialize the POKTHTTPRequest from the relay payload
 	poktHTTPRequest, err := sdktypes.DeserializeHTTPRequest(relayRequest.Payload)
 	if err != nil {
-		grpcRelayErrors.WithLabelValues(serviceID, "payload_deserialize_error").Inc()
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonInvalidRelayRequest).Inc()
 		return status.Errorf(codes.InvalidArgument, "failed to deserialize POKTHTTPRequest: %v", err)
 	}
 
@@ -389,7 +389,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	}
 
 	if err != nil {
-		grpcRelayErrors.WithLabelValues(serviceID, "backend_error").Inc()
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, classifyGRPCBackendError(stream.Context(), err)).Inc()
 		// Per-request; the state change (backend down) is the circuit
 		// breaker transition logged above.
 		logging.WithSessionContext(s.logger.Debug(), sessionCtx).
@@ -429,7 +429,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	// 2xx-4xx are valid relays (client/backend logic errors that should be paid)
 	// 5xx are infrastructure/backend failures (supplier should not be compensated)
 	if respStatus >= http.StatusInternalServerError {
-		grpcRelayErrors.WithLabelValues(serviceID, "backend_5xx").Inc()
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonBackend5xx).Inc()
 		logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 			Int("status_code", respStatus).
 			Msg("backend returned 5xx error - relay not mined")
@@ -445,13 +445,13 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		respStatus,
 	)
 	if err != nil {
-		grpcRelayErrors.WithLabelValues(serviceID, "sign_error").Inc()
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonSigningError).Inc()
 		return status.Errorf(codes.Internal, "failed to build/sign response: %v", err)
 	}
 
 	// Send the response (typed proto message)
 	if err := stream.SendMsg(relayResponse); err != nil {
-		grpcRelayErrors.WithLabelValues(serviceID, "send_error").Inc()
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonSendError).Inc()
 		return status.Errorf(codes.Internal, "failed to send response: %v", err)
 	}
 
@@ -466,12 +466,18 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	// flat -- docs/simulated-relays.md states that as the isolation contract.
 	relaysServed.WithLabelValues(serviceID, BackendTypeGRPC, statusCodeNoHTTP).Inc()
 
+	// Latency ends HERE, where the client has the response and before the
+	// publish below: the same span relay_latency_seconds measures for HTTP, which
+	// records it before submitting the publish task. Observed after the publish,
+	// a slow store would show up as a slow gRPC relay the client never waited for.
+	relayLatency.WithLabelValues(serviceID, BackendTypeGRPC).Observe(time.Since(arrivalTime).Seconds())
+
 	// Use RelayProcessor for consistent relay processing (mining difficulty, deduplication, publishing)
 	if s.relayProcessor != nil {
 		// Marshal request and response for ProcessRelay
 		reqBz, err := relayRequest.Marshal()
 		if err != nil {
-			relaysDropped.WithLabelValues(serviceID, dropReasonMarshalFailed).Inc()
+			relaysDropped.WithLabelValues(serviceID, BackendTypeGRPC, dropReasonMarshalFailed).Inc()
 			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("failed to marshal relay request for processing")
@@ -487,7 +493,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 			// request/backend deadline (already spent) while keeping publication
 			// alive past client cancellation. Mirrors the HTTP path, which
 			// publishes on a fresh detached context created at publish time.
-			publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(ctx), grpcPublishTimeout)
+			publishCtx, publishCancel := context.WithTimeout(WithRPCType(context.WithoutCancel(ctx), BackendTypeGRPC), grpcPublishTimeout)
 			defer publishCancel()
 
 			// Mine the RAW backend response body, exactly like the HTTP path
@@ -510,7 +516,7 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				arrivalHeight,
 			)
 			if err != nil {
-				relaysDropped.WithLabelValues(serviceID, dropReasonProcessFailed).Inc()
+				relaysDropped.WithLabelValues(serviceID, BackendTypeGRPC, dropReasonProcessFailed).Inc()
 				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 					Err(err).
 					Msg("failed to process relay")
@@ -519,11 +525,11 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 					Msg("gRPC relay skipped (did not meet mining difficulty)")
 			} else if s.publisher == nil {
-				relaysDropped.WithLabelValues(serviceID, dropReasonNoPublisher).Inc()
+				relaysDropped.WithLabelValues(serviceID, BackendTypeGRPC, dropReasonNoPublisher).Inc()
 				logging.WithSessionContext(s.logger.Warn(), sessionCtx).
 					Msg("no publisher configured, skipping relay publication")
 			} else if pubErr := s.publisher.Publish(publishCtx, msg); pubErr != nil {
-				relaysDropped.WithLabelValues(serviceID, dropReasonPublishFailed).Inc()
+				relaysDropped.WithLabelValues(serviceID, BackendTypeGRPC, dropReasonPublishFailed).Inc()
 				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 					Err(pubErr).
 					Msg("failed to publish mined relay")
@@ -531,13 +537,9 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				// Relay was successfully processed and published
 				logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 					Msg("gRPC relay processed and published")
-				grpcRelaysPublished.WithLabelValues(serviceID).Inc()
 			}
 		}
 	}
-
-	// Update metrics
-	grpcRelayLatency.WithLabelValues(serviceID).Observe(time.Since(arrivalTime).Seconds())
 
 	logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 		Int("response_size", len(relayResponseBz)).
@@ -885,4 +887,36 @@ func NewGRPCServerForRelayService(service *RelayGRPCService) *grpc.Server {
 		grpc.StreamInterceptor(StreamPanicRecoveryInterceptor(service.logger)),
 	)
 	return server
+}
+
+// Rejections of the stream itself: the request could not be read off it, or the
+// signed response could not be written back to it.
+const (
+	rejectReasonRecvError = "recv_error"
+	rejectReasonSendError = "send_error"
+)
+
+// classifyGRPCBackendError names a failed backend forward with the three reasons
+// HTTP uses (classifyBackendOutcome), in the same precedence: the client going
+// away first, then our own deadline, then everything else.
+//
+// It reads the errors and not their text, because nothing on the gRPC path wraps
+// them with the reason strings HTTP's matcher looks for. What makes errors.Is
+// enough, read in the go1.26.5 source: net/http returns context.Cause(ctx) for a
+// request whose context ended (transport.go:677), its own timeout error reports
+// itself as context.DeadlineExceeded (timeoutError.Is, transport.go:2775), and
+// url.Error unwraps (net/url/url.go:38).
+//
+// clientCtx is the STREAM's context, not the per-service timeout derived from
+// it: that one is cancelled by our own deadline too, so it cannot tell the two
+// apart.
+func classifyGRPCBackendError(clientCtx context.Context, err error) string {
+	switch {
+	case clientCtx.Err() != nil:
+		return rejectReasonClientDisconnected
+	case errors.Is(err, context.DeadlineExceeded):
+		return rejectReasonBackendTimeout
+	default:
+		return rejectReasonBackendNetworkError
+	}
 }

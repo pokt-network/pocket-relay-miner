@@ -36,10 +36,13 @@ func countPublished(p transport.MinedRelayPublisher) transport.MinedRelayPublish
 // redis.batch_publish_interval_ms set, accepting is enqueuing, and the write
 // happens later on the dispatcher's own goroutine. ha_transport_published_total
 // is the counter that moves after the XADD.
+//
+// rpc_type comes from ctx (WithRPCType) and not from this wrapper, because one
+// wrapper is shared by every transport.
 func (c *countingPublisher) Publish(ctx context.Context, msg *transport.MinedRelayMessage) error {
 	if err := c.MinedRelayPublisher.Publish(ctx, msg); err != nil {
 		return err
 	}
-	relaysPublished.WithLabelValues(msg.ServiceId, msg.SupplierOperatorAddress).Inc()
+	relaysPublished.WithLabelValues(msg.ServiceId, msg.SupplierOperatorAddress, RPCTypeFrom(ctx)).Inc()
 	return nil
 }

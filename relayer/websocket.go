@@ -1275,7 +1275,7 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	}
 
 	if supplierAddr == "" {
-		relaysDropped.WithLabelValues(b.serviceID, dropReasonNoSupplier).Inc()
+		relaysDropped.WithLabelValues(b.serviceID, BackendTypeWebSocket, dropReasonNoSupplier).Inc()
 		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Msg("no supplier address available for websocket relay")
 		return
@@ -1284,7 +1284,7 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	// Marshal the original request body for relay processing
 	reqBytes, err := req.Marshal()
 	if err != nil {
-		relaysDropped.WithLabelValues(b.serviceID, dropReasonMarshalFailed).Inc()
+		relaysDropped.WithLabelValues(b.serviceID, BackendTypeWebSocket, dropReasonMarshalFailed).Inc()
 		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Err(err).
 			Msg("failed to marshal relay request")
@@ -1315,7 +1315,7 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	// context.Background (see the constructor), so WithoutCancel drops a
 	// cancellation and nothing else today. It is written this way for symmetry
 	// with the gRPC path and so the call keeps any values b.ctx gains later.
-	publishCtx, publishCancel := context.WithTimeout(context.WithoutCancel(b.ctx), wsPublishTimeout)
+	publishCtx, publishCancel := context.WithTimeout(WithRPCType(context.WithoutCancel(b.ctx), BackendTypeWebSocket), wsPublishTimeout)
 	defer publishCancel()
 
 	msg, procErr := b.relayProcessor.ProcessRelay(
@@ -1327,7 +1327,7 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 		b.arrivalHeight,
 	)
 	if procErr != nil {
-		relaysDropped.WithLabelValues(b.serviceID, dropReasonProcessFailed).Inc()
+		relaysDropped.WithLabelValues(b.serviceID, BackendTypeWebSocket, dropReasonProcessFailed).Inc()
 		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Err(procErr).
 			Msg("failed to process websocket relay")
@@ -1341,13 +1341,12 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	}
 
 	if pubErr := b.publisher.Publish(publishCtx, msg); pubErr != nil {
-		relaysDropped.WithLabelValues(b.serviceID, dropReasonPublishFailed).Inc()
+		relaysDropped.WithLabelValues(b.serviceID, BackendTypeWebSocket, dropReasonPublishFailed).Inc()
 		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Err(pubErr).
 			Msg("failed to publish websocket relay")
 		return
 	}
-	wsRelaysEmitted.WithLabelValues(b.serviceID).Inc()
 	logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 		Uint64("relay_count", count).
 		Msg("websocket relay published")

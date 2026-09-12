@@ -151,6 +151,10 @@ type publishTask struct {
 	supplierAddr       string
 	sessionID          string
 	applicationAddr    string
+	// rpcType labels this relay's counters: the drops read it from here, and
+	// executePublish puts it on the context (WithRPCType) for the publish and
+	// difficulty counters, which are shared by every transport.
+	rpcType string
 }
 
 // ProxyServer handles incoming relay requests and forwards them to backends.
@@ -1361,6 +1365,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		copy(capturedRespBody, respBody)
 		capturedBlockHeight := arrivalBlockHeight
 		capturedServiceID := serviceID
+		capturedRPCType := rpcType
 		capturedSessionCtx := sessionCtx
 
 		// Submit to validation subpool (non-blocking, unbounded queue)
@@ -1382,7 +1387,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			optimisticStart := time.Now()
 			if err := p.validateRelayRequest(context.Background(), capturedHTTPReq, capturedReqBody, capturedBlockHeight); err != nil {
 				validationFailures.WithLabelValues(capturedServiceID, "signature").Inc()
-				relaysDropped.WithLabelValues(capturedServiceID, dropReasonValidationFailed).Inc()
+				relaysDropped.WithLabelValues(capturedServiceID, capturedRPCType, dropReasonValidationFailed).Inc()
 				logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 					Err(err).
 					Str("validation_mode", "optimistic").
@@ -1442,7 +1447,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 						Str("validation_mode", "optimistic").
 						Msg("relay served and submitted without being metered; the miner arbitrates")
 				} else if !allowed {
-					relaysDropped.WithLabelValues(capturedServiceID, dropReasonStakeExhausted).Inc()
+					relaysDropped.WithLabelValues(capturedServiceID, capturedRPCType, dropReasonStakeExhausted).Inc()
 					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 						Str("validation_mode", "optimistic").
 						Msg("relay served but NOT mined: session relay limit reached, relay dropped after serving")
@@ -1455,12 +1460,12 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			// Submit publish task to worker pool (after successful validation AND metering)
 			// Only publish relays that are within stake limits
 			// Note: relaysServed already incremented when we sent response
-			p.submitPublishTask(capturedRequest, capturedHTTPReq, capturedReqBody, capturedRespBody, capturedBlockHeight, capturedServiceID)
+			p.submitPublishTask(capturedRequest, capturedHTTPReq, capturedReqBody, capturedRespBody, capturedBlockHeight, capturedServiceID, capturedRPCType)
 		})
 	} else {
 		// For eager validation, submit publish task to worker pool
 		// If we reached here, the relay was allowed by the meter (stake not exhausted)
-		p.submitPublishTask(relayRequest, r, body, respBody, arrivalBlockHeight, serviceID)
+		p.submitPublishTask(relayRequest, r, body, respBody, arrivalBlockHeight, serviceID, rpcType)
 	}
 }
 
@@ -1472,6 +1477,7 @@ func (p *ProxyServer) submitPublishTask(
 	reqBody, respBody []byte,
 	arrivalBlockHeight int64,
 	serviceID string,
+	rpcType string,
 ) {
 	// Get supplier address from relay request if available
 	var supplierAddr string
@@ -1493,7 +1499,7 @@ func (p *ProxyServer) submitPublishTask(
 	if supplierAddr == "" {
 		// Create minimal session context from what we have
 		sessionCtx := logging.SessionContextPartial("", serviceID, "", "", 0)
-		relaysDropped.WithLabelValues(serviceID, dropReasonNoSupplier).Inc()
+		relaysDropped.WithLabelValues(serviceID, rpcType, dropReasonNoSupplier).Inc()
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("no supplier address available, skipping relay publication")
 		return
@@ -1530,6 +1536,7 @@ func (p *ProxyServer) submitPublishTask(
 			supplierAddr:       supplierAddr,
 			sessionID:          sessionID,
 			applicationAddr:    applicationAddr,
+			rpcType:            rpcType,
 		}
 		p.executePublish(context.Background(), task)
 	})
@@ -2540,6 +2547,10 @@ func (p *ProxyServer) validateRelayRequest(
 // executePublish processes a publish task and publishes the relay to Redis.
 // This is called by worker goroutines with the server context.
 func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
+	// ProcessRelay and the counting publisher are shared by every transport and
+	// read the transport label from the context.
+	ctx = WithRPCType(ctx, task.rpcType)
+
 	// Create session context from task metadata
 	sessionCtx := logging.SessionContextPartial(
 		task.sessionID,
@@ -2550,7 +2561,7 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 	)
 
 	if p.publisher == nil {
-		relaysDropped.WithLabelValues(task.serviceID, dropReasonNoPublisher).Inc()
+		relaysDropped.WithLabelValues(task.serviceID, task.rpcType, dropReasonNoPublisher).Inc()
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("no publisher configured, skipping relay publication")
 		return
@@ -2567,7 +2578,7 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 			task.arrivalBlockHeight,
 		)
 		if err != nil {
-			relaysDropped.WithLabelValues(task.serviceID, dropReasonProcessFailed).Inc()
+			relaysDropped.WithLabelValues(task.serviceID, task.rpcType, dropReasonProcessFailed).Inc()
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("failed to process relay")
@@ -2583,14 +2594,13 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 
 		// Publish the mined relay
 		if err := p.publisher.Publish(ctx, msg); err != nil {
-			relaysDropped.WithLabelValues(task.serviceID, dropReasonPublishFailed).Inc()
+			relaysDropped.WithLabelValues(task.serviceID, task.rpcType, dropReasonPublishFailed).Inc()
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("failed to publish mined relay")
 			return
 		}
 
-		relaysMinedSuccessfully.WithLabelValues(task.serviceID).Inc()
 		return
 	}
 
@@ -2613,7 +2623,7 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 	msg.SetPublishedAt()
 
 	if err := p.publisher.Publish(ctx, msg); err != nil {
-		relaysDropped.WithLabelValues(task.serviceID, dropReasonPublishFailed).Inc()
+		relaysDropped.WithLabelValues(task.serviceID, task.rpcType, dropReasonPublishFailed).Inc()
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Err(err).
 			Msg("failed to publish mined relay")

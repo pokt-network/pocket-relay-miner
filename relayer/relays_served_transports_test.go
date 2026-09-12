@@ -100,9 +100,15 @@ func TestRelaysServed_GRPCCountsUnderItsOwnTransport(t *testing.T) {
 // It is an allowlist and not a pattern, because no textual property separates
 // the good from the bad: several legitimate families say "served" in their help
 // (undeclared transport, boot-window optimistic, dropped, unmetered,
-// reward-ineligible), and two per-transport families are deliberately KEPT --
-// grpc_relays_published_total and websocket_relays_emitted_total count the
-// PUBLISHED hop, the other end of the drop rate, not a duplicate of served.
+// reward-ineligible). Three per-transport PUBLISHED families that used to be
+// allowed here are gone on purpose. grpc_relays_published_total and
+// websocket_relays_emitted_total were kept while relays_published_total counted
+// only HTTP, so each was the only count of its transport's publish hop;
+// relays_mined_total counted HTTP beside relays_published_total from the start.
+// Once the counting publisher put all three transports into
+// relays_published_total, each of the three was a second count of the same
+// event, incremented right after the same successful Publish. Published follows
+// the rule served follows -- one series, rpc_type as a label (Jorge, 2026-09-12).
 // Freezing the set with a reason per entry is the idiom internal/conventions
 // already uses for the bare `go` statements.
 //
@@ -115,16 +121,13 @@ func TestRelaysServed_NoParallelPerTransportCounter(t *testing.T) {
 	allowed := map[string]string{
 		"relays_served_total":                "THE canonical served counter; rpc_type is a label ON it, not a series beside it",
 		"relays_served_optimistically_total": "a SUBSET of served (owned supplier not yet in the registry), not a second total",
-		"grpc_relays_published_total":        "PUBLISHED hop, not served: the other end of the drop rate",
-		"websocket_relays_emitted_total":     "PUBLISHED hop for WebSocket, same reason",
-		"relays_published_total":             "mined relays reaching the store: a later hop still",
+		"relays_published_total":             "mined relays ACCEPTED by the publisher, every transport, rpc_type as a label: a later hop",
 		"simulated_relays_total":             "simulated traffic, isolated from every real counter by contract (docs/simulated-relays.md)",
 		"relays_received_total":              "inbound, a different event from served",
 		"relays_rejected_total":              "refused BEFORE serving",
 		"relays_dropped_total":               "served but not mined",
 		"relays_not_rewardable_total":        "served but past the session grace period",
 		"relays_skipped_difficulty_total":    "served and below mining difficulty",
-		"relays_mined_total":                 "met difficulty and was mined",
 	}
 
 	src, err := os.ReadFile("metrics.go")

@@ -120,9 +120,9 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_published_total",
-			Help:      "Mined relays ACCEPTED by the publisher, over any transport. Accepted is not written: with redis.batch_publish_interval_ms set, a relay is counted here the moment it is queued. ha_transport_published_total is the one that means it reached the stream, and this counter minus that one is what is queued and not yet dispatched",
+			Help:      "Mined relays ACCEPTED by the publisher, over any transport. Accepted is not written: with redis.batch_publish_interval_ms set, a relay is counted here the moment it is queued. ha_transport_published_total is the one that means it reached the stream, and this counter minus that one is what is queued and not yet dispatched. rpc_type is the transport that published it",
 		},
-		[]string{"service_id", "supplier"},
+		[]string{"service_id", "supplier", "rpc_type"},
 	)
 
 	relaysDropped = observability.RelayerFactory.NewCounterVec(
@@ -134,7 +134,7 @@ var (
 		},
 		// application excluded: on-chain bech32 address is unbounded on a
 		// Counter → TSDB OOM. Per-app detail is in the drop logs.
-		[]string{"service_id", "reason"},
+		[]string{"service_id", "rpc_type", "reason"},
 	)
 
 	// simulatedRelaysTotal counts SIMULATED relays only. It is deliberately
@@ -584,17 +584,7 @@ var (
 			Name:      "relays_skipped_difficulty_total",
 			Help:      "Total number of relays skipped due to not meeting mining difficulty",
 		},
-		[]string{"service_id"},
-	)
-
-	relaysMinedSuccessfully = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relays_mined_total",
-			Help:      "Relays that met mining difficulty and were ACCEPTED by the publisher. With redis.batch_publish_interval_ms set, accepted means queued -- ha_transport_published_total is the counter that means the relay reached the stream",
-		},
-		[]string{"service_id"},
+		[]string{"service_id", "rpc_type"},
 	)
 
 	// WebSocket metrics
@@ -628,19 +618,9 @@ var (
 		[]string{"service_id", "direction"}, // direction: gateway_to_backend, backend_to_gateway
 	)
 
-	wsRelaysEmitted = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "websocket_relays_emitted_total",
-			Help:      "WebSocket relays ACCEPTED by the publisher for billing. With redis.batch_publish_interval_ms set this counts queued, not written -- ha_transport_published_total is the counter that means the relay reached the stream",
-		},
-		[]string{"service_id"},
-	)
-
 	// wsClosesTotal is what separates "clients we refused" from "the backend is
 	// down" during an incident. Without it the only WebSocket counters are
-	// active/total/forwarded/emitted, so a flood of refused connections and a
+	// active/total/forwarded, so a flood of refused connections and a
 	// dead backend produce the same shape: connections_total climbing and
 	// connections_active flat.
 	//
@@ -658,38 +638,8 @@ var (
 		[]string{"service_id", "close_code", "initiated_by"},
 	)
 
-	// gRPC Relay Service metrics (for proper relay protocol over gRPC)
-	grpcRelayErrors = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "grpc_relay_errors_total",
-			Help:      "Total number of gRPC relay request errors",
-		},
-		[]string{"service_id", "reason"},
-	)
-
-	grpcRelayLatency = observability.RelayerFactory.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "grpc_relay_latency_seconds",
-			Help:      "Latency of gRPC relay requests",
-			Buckets:   observability.FineGrainedLatencyBuckets,
-		},
-		[]string{"service_id"},
-	)
-
-	grpcRelaysPublished = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "grpc_relays_published_total",
-			Help:      "gRPC relays ACCEPTED by the publisher. With redis.batch_publish_interval_ms set this counts queued, not written -- ha_transport_published_total is the counter that means the relay reached the stream",
-		},
-		[]string{"service_id"},
-	)
-
+	// gRPC-Web metrics. gRPC relays themselves count in the same series as every
+	// other transport, under rpc_type="grpc".
 	grpcWebRequestsTotal = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
