@@ -120,7 +120,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_published_total",
-			Help:      "Total number of mined relays published to the store, over any transport",
+			Help:      "Mined relays ACCEPTED by the publisher, over any transport. Accepted is not written: with redis.batch_publish_interval_ms set, a relay is counted here the moment it is queued. ha_transport_published_total is the one that means it reached the stream, and this counter minus that one is what is queued and not yet dispatched",
 		},
 		[]string{"service_id", "supplier"},
 	)
@@ -130,7 +130,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_dropped_total",
-			Help:      "Total number of relays served but not mined (optimistic mode: validation failed, meter error, stake exhausted)",
+			Help:      "Total number of relays served but not mined (optimistic mode: validation failed, meter error, stake exhausted). With redis.batch_publish_interval_ms set, reason=publish_failed narrows to a REJECTION at enqueue -- a malformed message, or a closed publisher -- because a failing XADD no longer reaches the caller; those are counted in ha_transport_publish_errors_total",
 		},
 		// application excluded: on-chain bech32 address is unbounded on a
 		// Counter → TSDB OOM. Per-app detail is in the drop logs.
@@ -592,7 +592,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_mined_total",
-			Help:      "Total number of relays that met mining difficulty and were mined",
+			Help:      "Relays that met mining difficulty and were ACCEPTED by the publisher. With redis.batch_publish_interval_ms set, accepted means queued -- ha_transport_published_total is the counter that means the relay reached the stream",
 		},
 		[]string{"service_id"},
 	)
@@ -633,7 +633,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "websocket_relays_emitted_total",
-			Help:      "Total number of relays emitted for billing from WebSocket connections",
+			Help:      "WebSocket relays ACCEPTED by the publisher for billing. With redis.batch_publish_interval_ms set this counts queued, not written -- ha_transport_published_total is the counter that means the relay reached the stream",
 		},
 		[]string{"service_id"},
 	)
@@ -685,7 +685,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "grpc_relays_published_total",
-			Help:      "Total number of gRPC relays published to the store",
+			Help:      "gRPC relays ACCEPTED by the publisher. With redis.batch_publish_interval_ms set this counts queued, not written -- ha_transport_published_total is the counter that means the relay reached the stream",
 		},
 		[]string{"service_id"},
 	)
