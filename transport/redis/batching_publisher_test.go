@@ -4,6 +4,8 @@ package redis
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -295,4 +297,247 @@ func TestRejectionLoggingIsRateLimited(t *testing.T) {
 	require.False(t, shouldLogReject("r", "s"), "an immediate repeat must not")
 	require.True(t, shouldLogReject("r", "other-service"),
 		"a different service is a different signal and must not be suppressed by the first")
+}
+
+// TestBatchingPublisherWritesTheGoodHalfOnceAndDiscardsThePoison covers the
+// PARTIAL failure, which is the case neither of the core's two teeth touched:
+// both of them failed the whole EXEC, where no XADD succeeds and nothing can be
+// counted or written twice.
+//
+// An EXEC reports per-command errors and does NOT roll back the commands that
+// succeeded beside the failing one, so a chunk can be half written. Requeueing
+// all of it -- what this used to do -- wrote the successful half a SECOND time
+// on the next tick and counted it a second time, so published climbed above
+// served: the goal's invariant 1 breaking in the direction nobody was watching.
+//
+// The poison is a string sitting where a stream should be, which is the real
+// shape of the failure: XADD on it returns WRONGTYPE, permanently.
+func TestBatchingPublisherWritesTheGoodHalfOnceAndDiscardsThePoison(t *testing.T) {
+	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
+	ctx := context.Background()
+
+	const good, poisoned = "pokt1partialgood", "pokt1partialbad"
+	goodStream := transport.SupplierStreamName(prefix, good)
+	require.NoError(t,
+		client.Set(ctx, transport.SupplierStreamName(prefix, poisoned), "not a stream", 0).Err(),
+		"the poisoned stream must hold a wrong-typed value before anything is published")
+
+	publishedBefore := testutil.ToFloat64(publishedTotal.WithLabelValues(good, "svc"))
+	poisonPublishedBefore := testutil.ToFloat64(publishedTotal.WithLabelValues(poisoned, "svc"))
+	discardedBefore := testutil.ToFloat64(
+		publishDiscardedTotal.WithLabelValues(poisoned, "svc", discardReasonWrongType))
+
+	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, 50*time.Millisecond)
+	t.Cleanup(func() { _ = p.Close() })
+
+	// One chunk: well under maxChunkCommands, so takeChunk does not cut.
+	const n = 6
+	for i := 0; i < n-1; i++ {
+		require.NoError(t, p.Publish(ctx, mined(good, "s1", i)))
+	}
+	require.NoError(t, p.Publish(ctx, mined(poisoned, "s1", 99)))
+
+	// Waited on the COUNTER and not on len(p.queue): takeChunk removes a chunk
+	// before writing it, so an empty queue also means "a write is in flight", and
+	// polling for it catches that window and proves nothing.
+	//
+	// Before the discard decision the poisoned entry went back to the head
+	// forever, and because dispatchAll stops at the first failed chunk that
+	// blocked every other supplier's relays too.
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(
+			publishDiscardedTotal.WithLabelValues(poisoned, "svc", discardReasonWrongType))-discardedBefore == 1
+	}, 5*time.Second, 10*time.Millisecond,
+		"the unwritable relay must be given up on and counted: it was served and answered, "+
+			"and a stream nobody can write must not hold every other supplier hostage")
+
+	// A sentinel proves the dispatcher kept ticking AFTER the drain, so a
+	// re-write of the good half would have had somewhere to show up.
+	require.NoError(t, p.Publish(ctx, mined(good, "s1", 1000)))
+	require.Eventually(t, func() bool {
+		return client.XLen(ctx, goodStream).Val() == int64(n)
+	}, 5*time.Second, 10*time.Millisecond, "the dispatcher must still be writing after the discard")
+
+	require.Equal(t, int64(n), client.XLen(ctx, goodStream).Val(),
+		"the relays that already reached the stream must not be written again: a second copy "+
+			"is a relay the miner counts twice and a leaf that does not exist")
+
+	published := testutil.ToFloat64(publishedTotal.WithLabelValues(good, "svc")) - publishedBefore
+	require.Equal(t, float64(n), published,
+		"published must equal what is in the stream: counting a re-write puts published above served")
+
+	require.Equal(t, float64(0),
+		testutil.ToFloat64(publishedTotal.WithLabelValues(poisoned, "svc"))-poisonPublishedBefore,
+		"nothing reached the poisoned stream, so nothing may be counted as published for it: "+
+			"published is the ONLY counter in this repository that means 'reached the stream', "+
+			"and an increment here is the invariant lying about a relay that is lost")
+}
+
+// alwaysFails fails every pipeline with an error the classifier does not know,
+// which is the case the attempt cap exists for.
+type alwaysFails struct {
+	err   error
+	fired atomic.Int64
+}
+
+func (h *alwaysFails) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+
+func (h *alwaysFails) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook { return next }
+
+func (h *alwaysFails) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error {
+		h.fired.Add(1)
+		for _, cmd := range cmds {
+			cmd.SetErr(h.err)
+		}
+		return h.err
+	}
+}
+
+// TestBatchingPublisherDoesNotDiscardATransientFailureOnItsFirstAttempt is the
+// half of the discard decision that protects served work.
+//
+// A pool timeout that outlived go-redis's own retries is the ORDINARY failure
+// and it passes. e0667eb on this branch exists because dropping a relay there
+// lost work that had already been served, so a discard policy that fires on the
+// first failure would undo it.
+func TestBatchingPublisherDoesNotDiscardATransientFailureOnItsFirstAttempt(t *testing.T) {
+	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
+	ctx := context.Background()
+
+	hook := &exhaustedPoolTimeout{}
+	hook.failNext.Store(1) // exactly one dispatch fails; the next must succeed
+	client.AddHook(hook)
+
+	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, 50*time.Millisecond)
+	t.Cleanup(func() { _ = p.Close() })
+
+	const supplier = "pokt1transient"
+	discardedBefore := testutil.ToFloat64(
+		publishDiscardedTotal.WithLabelValues(supplier, "svc", discardReasonAttemptsExhausted))
+
+	const n = 4
+	for i := 0; i < n; i++ {
+		require.NoError(t, p.Publish(ctx, mined(supplier, "s1", i)))
+	}
+	stream := transport.SupplierStreamName(prefix, supplier)
+
+	require.Eventually(t, func() bool {
+		return client.XLen(ctx, stream).Val() == int64(n)
+	}, 5*time.Second, 20*time.Millisecond,
+		"a transient failure must be retried, not given up on: every one of these was served")
+
+	require.Equal(t, float64(0),
+		testutil.ToFloat64(publishDiscardedTotal.WithLabelValues(supplier, "svc", discardReasonAttemptsExhausted))-discardedBefore,
+		"nothing may be discarded on a first failure")
+	require.Equal(t, int64(1), hook.fired.Load(),
+		"the injected failure must have hit a real dispatch, or this proves nothing")
+}
+
+// TestBatchingPublisherGivesUpOnAnUnknownErrorAfterTheCap is the net under the
+// classifier.
+//
+// Recognising a permanent failure by the text of its error is fragile by
+// construction: an error nobody anticipated, that also never passes, would sit
+// at the head of the queue forever and stop every supplier from draining -- the
+// exact defect the discard decision closes. The cap bounds it without needing to
+// know what the error was.
+func TestBatchingPublisherGivesUpOnAnUnknownErrorAfterTheCap(t *testing.T) {
+	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
+	ctx := context.Background()
+
+	hook := &alwaysFails{err: errors.New("ERR something no classifier has ever seen")}
+	client.AddHook(hook)
+
+	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, 10*time.Millisecond)
+	t.Cleanup(func() { _ = p.Close() })
+
+	const supplier = "pokt1unknown"
+	discardedBefore := testutil.ToFloat64(
+		publishDiscardedTotal.WithLabelValues(supplier, "svc", discardReasonAttemptsExhausted))
+
+	const n = 3
+	for i := 0; i < n; i++ {
+		require.NoError(t, p.Publish(ctx, mined(supplier, "s1", i)))
+	}
+
+	require.Eventually(t, func() bool {
+		return testutil.ToFloat64(
+			publishDiscardedTotal.WithLabelValues(supplier, "svc", discardReasonAttemptsExhausted))-discardedBefore == float64(n)
+	}, 10*time.Second, 10*time.Millisecond,
+		"the cap must drain a queue whose error nobody classified, or it is not a net -- "+
+			"and every relay given up on must be counted, whatever made it unwritable")
+
+	require.GreaterOrEqual(t, hook.fired.Load(), int64(maxPublishAttempts),
+		"giving up must take maxPublishAttempts dispatches: discarding sooner would drop "+
+			"work a transient failure would have delivered")
+}
+
+// TestBatchingPublisherCountsWhatTheFinalFlushAbandoned is the other half of the
+// same defect: the dispatch could not tell written from unwritten, and the
+// shutdown could not tell drained from abandoned.
+//
+// When the final flush fails, dispatchAll puts the chunk back on a queue that
+// nothing will ever read again. Until this counter existed, Close logged
+// "batching publisher closed" and returned nil -- the same line, byte for byte,
+// that it logs after draining everything.
+func TestBatchingPublisherCountsWhatTheFinalFlushAbandoned(t *testing.T) {
+	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
+	ctx := context.Background()
+
+	hook := &exhaustedPoolTimeout{}
+	hook.failNext.Store(1 << 20) // every dispatch fails, the final flush included
+	client.AddHook(hook)
+
+	// An interval long enough that nothing dispatches on its own: the only write
+	// attempted is the final flush, and it is the one that fails.
+	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour)
+
+	const supplier = "pokt1abandoned"
+	abandonedBefore := testutil.ToFloat64(shutdownAbandonedRelays.WithLabelValues(supplier, "svc"))
+
+	const n = 7
+	for i := 0; i < n; i++ {
+		require.NoError(t, p.Publish(ctx, mined(supplier, "s1", i)))
+	}
+
+	err := p.Close()
+	require.Error(t, err,
+		"Close must report that it did not write what it was holding: returning nil "+
+			"is what made this silent")
+
+	abandoned := testutil.ToFloat64(shutdownAbandonedRelays.WithLabelValues(supplier, "svc")) - abandonedBefore
+	require.Equal(t, float64(n), abandoned,
+		"every relay the flush could not write must be counted: they were served, "+
+			"signed and answered, and nothing downstream will ever see them")
+
+	require.Positive(t, hook.fired.Load(),
+		"the injected failure must have hit a real dispatch, or this proves nothing")
+}
+
+// TestIsWrongTypeErrorReadsTheRawServerError pins the classifier, including the
+// way it can be defeated.
+//
+// writeChunk wraps the failing command's error as "XADD to <stream>: %w" before
+// returning it, and HasPrefix does not see through a wrapper -- so classifying
+// the WRAPPED error would never match and every poisoned stream would be
+// retried forever, which is the defect the discard decision closes. The
+// classifier is fed cmd.Err() straight from go-redis, and this says so.
+func TestIsWrongTypeErrorReadsTheRawServerError(t *testing.T) {
+	raw := errors.New("WRONGTYPE Operation against a key holding the wrong kind of value")
+	require.True(t, IsWrongTypeError(raw), "the server's own reply must classify")
+
+	require.False(t, IsWrongTypeError(fmt.Errorf("XADD to s: %w", raw)),
+		"a wrapped error must NOT match: this is why writeChunk classifies cmd.Err() and "+
+			"not the error it builds from it")
+
+	require.False(t, IsWrongTypeError(nil))
+	require.False(t, IsWrongTypeError(errors.New("wrongtype operation against a key")),
+		"Redis sends the code upper-case; matching lower-case would be matching something else")
+	require.False(t, IsWrongTypeError(errors.New("ERR the value is WRONGTYPE somewhere inside")),
+		"anchored at the start on purpose, for the reason IsOOMError matches \"OOM command\"")
 }

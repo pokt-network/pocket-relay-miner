@@ -37,6 +37,22 @@ var (
 		[]string{"supplier_addr", "service_id"},
 	)
 
+	// shutdownAbandonedRelays MUST stay at zero. The final flush runs on a
+	// context detached from the shutdown, with its own 30s budget, so anything
+	// counted here is a relay that was served, signed and answered to a client
+	// and that the process then exited without writing. Until this existed the
+	// shutdown logged "batching publisher closed" and returned nil in exactly
+	// that case, which is the same line it logs when it drained everything.
+	shutdownAbandonedRelays = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "shutdown_abandoned_relays_total",
+			Help:      "Mined relays still queued when the publisher's final flush gave up. Any non-zero value is served work that was never written to the stream",
+		},
+		[]string{"supplier_addr", "service_id"},
+	)
+
 	// Consumer metrics
 
 	consumedTotal = observability.SharedFactory.NewCounterVec(
