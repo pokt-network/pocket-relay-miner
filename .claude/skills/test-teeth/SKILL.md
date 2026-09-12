@@ -630,6 +630,45 @@ The cheap discipline: when a tooth goes from flaky to red, say which count you
 measured at, and raise it once. It cost one run to find and would have shipped a
 "5/5" that was not one.
 
+### The exit status the driver PRINTS is not always the test's
+
+Measured 2026-09-12, by the supervisor, on a driver written the same night by the
+author of the section above. The line was:
+
+```sh
+go test ... > "$log" 2>&1
+printf 'RUN=%s PASS=%s FAIL=%s exit=%s\n' \
+  "$(grep -c '^=== RUN' "$log")" "$(grep -c '^--- PASS' "$log")" \
+  "$(grep -c '^--- FAIL' "$log")" "$?"
+```
+
+`$?` there is not the test's. It expands after the three `$(grep -c ...)` have
+run, so it is the LAST grep's -- and `grep -c` exits 0 when it FINDS and 1 when
+it does not. The field therefore read `exit=0` exactly when the tooth bit, and
+would have read `exit=1` when it did not. Inverted, in the one field a reader is
+told to trust.
+
+**Capture it into its own variable on the line immediately after the command,
+before anything else runs.** `local rc=$?`, then the greps, then print `$rc`.
+
+### The three conditions, and none of them is sufficient alone
+
+Each one covers a hole the other two leave open, and all three have now been
+measured in this repository within a single night:
+
+1. **The real exit status**, captured as above. Otherwise the driver prints a
+   number with the right shape that measures another command.
+2. **`RUN` equals the `-count`.** `go test -run` with a pattern that matches
+   nothing exits 0, so a green exit can mean "nothing ran". The pattern rots
+   with every rename.
+3. **`PASS + FAIL` equals `RUN`.** A binary that dies -- a `fatal error`, a
+   package timeout -- reaches no verdict, and prints `FAIL` on stdout while
+   exercising nothing.
+
+Take any one away and a driver can report a colour it did not measure. That is
+worse than reporting nothing, because a number with the right shape does not
+invite the check that an empty result does.
+
 ## Reading a test tells you what it MEANS to cover; only injection tells you what it DOES
 
 A supervisor asserted, from reading the test and its comment, that
