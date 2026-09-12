@@ -54,36 +54,3 @@ observability/server.go Server.IsRunning                        # lets a test ob
 # genuinely dead function can stop being reported without anyone touching it. The
 # check that sees that drift is `comm -13`, which static.sh does not run (item 209).
 relayer/simulation.go SimulationVerifier.Reload                 # reconfigures the verifier between cases; production wires it once via SetSimulationVerifier and has NO hot-reload path, so changing simulation config needs a restart (relayer/simulation_test.go, 6 uses)
-
-# --- TRANSITIONAL: the I4 BatchingPublisher arrives UNWIRED on purpose ---
-# These entries are not permanently dead code: they are the batch mechanism, written and verified
-# with teeth of its own, committed BEFORE its wiring because the wiring is a behaviour change on
-# the data path that needs its own -- the order of the final flush against the Redis client's
-# Close(), a convention rule that freezes that order, and the knob's validation. Committing both
-# halves together would have produced a commit that turns on a switch whose metrics LIE.
-#
-# No count is written here on purpose: the sentence that adds an entry is exactly the one that
-# keeps stating the old total, and this header already said "twelve" while listing sixteen.
-#
-# THESE LINES ARE DELETED by the commit that wires the BatchingPublisher into cmd/cmd_relayer.go.
-# It has to be remembered, because NOTHING will say so: static.sh runs `comm -23 scan allowlist`,
-# which reports what is in the scan and not in the allowlist -- an entry that has stopped being
-# unreachable is tolerated in silence. This comment used to assert the opposite ("deadcode will
-# report them as leftovers") and that was false, which is the worst kind of wrong to leave here:
-# it tells the next reader not to look.
-transport/redis/batching_publisher.go NewBatchingPublisher            # built by the wiring, which lands in the next commit
-transport/redis/batching_publisher.go BatchingPublisher.Publish       # implements transport.MinedRelayPublisher; the four publish sites reach it through the interface once wired
-transport/redis/batching_publisher.go BatchingPublisher.Close         # flushes what is queued at shutdown; called by the wiring's defer
-transport/redis/batching_publisher.go BatchingPublisher.run           # the dispatcher loop, started by NewBatchingPublisher
-transport/redis/batching_publisher.go BatchingPublisher.dispatchAll   # empties the queue chunk by chunk; called by run and by the final flush
-transport/redis/batching_publisher.go BatchingPublisher.finalFlush    # the shutdown flush, on a context detached from the process cancellation
-transport/redis/batching_publisher.go BatchingPublisher.takeChunk     # cuts the next chunk without splitting a stream across two
-transport/redis/batching_publisher.go BatchingPublisher.writeChunk    # the TxPipelined; reads EVERY XADD's own error, not just the EXEC's
-transport/redis/batching_publisher.go BatchingPublisher.requeueFront  # returns unwritten entries to the head, preserving arrival order
-transport/redis/batching_publisher.go BatchingPublisher.drainAbandoned # empties the queue at Close, to count what the final flush could not write
-transport/redis/batching_publisher.go approxBytes                     # the payload one queued entry retains, which is what maxChunkBytes bounds
-transport/redis/batching_publisher.go bytes0                          # sums that payload over a whole chunk, for the queue's byte accounting
-transport/redis/batching_publisher.go streamStart                     # the index where the chunk's LAST stream begins, so no stream is split across chunks
-transport/redis/publish_discard.go BatchingPublisher.recordDiscard    # counts and reports a relay being given up on; called by dispatchAll
-transport/redis/publish_discard.go noteDiscard                        # the per-stream bound on the discard log, carrying its count since the last report
-transport/redis/errors.go IsWrongTypeError                            # classifies WRONGTYPE as permanent; called by writeChunk

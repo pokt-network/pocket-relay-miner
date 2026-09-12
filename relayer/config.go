@@ -411,6 +411,18 @@ type RedisConfig struct {
 	// Set to 0 to disable (connections never closed due to idle time)
 	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
 
+	// BatchPublishIntervalMs turns on batched relay publishing and sets how
+	// often the batch is written.
+	//
+	// 0 (the default) keeps the one-round-trip-per-relay publisher, so turning
+	// this on is an operator decision and not something a deploy changes
+	// underneath them. When set, mined relays go out with MULTI/EXEC, which
+	// wakes the miner's blocked reader ONCE per batch instead of once per relay.
+	//
+	// Bounds: 500ms to 10s. Below that a batch stops being a batch; above it the
+	// added delay starts to matter against the chain's block time.
+	BatchPublishIntervalMs int `yaml:"batch_publish_interval_ms,omitempty"`
+
 	// Namespace configures Redis key prefixes for all data types.
 	// All components (miner, relayer, cache) read from this config to build keys.
 	// Must match miner configuration for proper operation.
@@ -817,6 +829,12 @@ func (c *Config) Validate() error {
 	}
 	if c.Redis.MinIdleConns < 0 {
 		return fmt.Errorf("redis.min_idle_conns must be >= 0 (0 = use default)")
+	}
+	if c.Redis.BatchPublishIntervalMs != 0 &&
+		(c.Redis.BatchPublishIntervalMs < 500 || c.Redis.BatchPublishIntervalMs > 10000) {
+		return fmt.Errorf(
+			"redis.batch_publish_interval_ms must be 0 (disabled) or between 500 and 10000, got %d",
+			c.Redis.BatchPublishIntervalMs)
 	}
 	if c.Redis.PoolTimeoutSeconds < 0 {
 		return fmt.Errorf("redis.pool_timeout_seconds must be >= 0 (0 = use default)")
