@@ -50,10 +50,13 @@ VALIDATOR_RPC="${VALIDATOR_RPC:-http://localhost:26657}"
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9091}"
 # How long to wait for the claim and proof windows to close and the settlement
 # to land. The localnet mirrors mainnet block proportions (20-block sessions,
-# grace 10, claim +11..+21, proof +22..+32) at 10s blocks, so a session settles
-# ~5.5 minutes after it ends; polling rather than sleeping means this is an
-# upper bound, not a fixed cost.
-SETTLE_TIMEOUT_MIN="${SETTLE_TIMEOUT_MIN:-25}"
+# grace 10, claim +11..+21, proof +22..+32) at the clock in
+# localnet.block_time_seconds, 30s by default, so a session settles ~33 blocks
+# -- about 16.5 minutes -- after it ends, and a whole 20-block session may have
+# to end first. Polling rather than sleeping means this is an upper bound, not a
+# fixed cost. Raise it (or pass --timeout-min) when the localnet runs at
+# mainnet's 60s clock, where every number here doubles.
+SETTLE_TIMEOUT_MIN="${SETTLE_TIMEOUT_MIN:-45}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-15}"
 
 preflight_only=0
@@ -421,8 +424,8 @@ esac
 # session that is still open when this run starts (or one that closes right
 # at the boundary) shares its session_end with this run's relays and is
 # counted -- the billed>sent failure then reads "foreign traffic", which is
-# accurate. Leave at least one full session (~200s on this localnet) between
-# a previous load and a gate run.
+# accurate. Leave at least one full session (20 blocks: ~10 min at the 30s
+# default of localnet.block_time_seconds) between a previous load and a gate run.
 load_start_height="$(curl -fsS --max-time 5 "${VALIDATOR_RPC}/status" 2>/dev/null |
     jq -r '.result.sync_info.latest_block_height // empty')"
 if [ -z "$load_start_height" ]; then
@@ -880,8 +883,9 @@ gate_exercised coverage billed_relays "$billed_total"
 # session_end_block_height >= load_start_height filter the billed counter
 # uses (every one of these event types carries the field -- verified against
 # poktroll x/tokenomics event.pb.go). Without it, a claim from an EARLIER
-# run expiring while this gate polls fails THIS run: proof windows close up
-# to ~5.5 min after their session ends, well inside our scan window, and the
+# run expiring while this gate polls fails THIS run: proof windows close 32
+# blocks (~16 min at the 30s default) after their session ends, well inside
+# our scan window, and the
 # supplier filter alone matches all localnet traffic. A missing attribute
 # counts as in-window: for a gate, a false red beats a silent pass.
 count_terminal_events() {

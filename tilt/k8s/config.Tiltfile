@@ -81,4 +81,15 @@ def validate_config(config):
     if config["redis"]["mode"] not in ["standalone", "cluster"]:
         fail("redis.mode must be 'standalone' or 'cluster'")
 
+    # Validate the localnet clock. It becomes the validator's timeout_commit as
+    # block_time_seconds - 1, so anything below 2 renders a non-positive
+    # timeout, which CometBFT reads as "commit as fast as possible" -- the
+    # opposite of what someone setting this asked for.
+    block_time = config["localnet"]["block_time_seconds"]
+    if type(block_time) != "int":
+        fail("localnet.block_time_seconds must be an integer number of seconds, got {}: {}".format(
+            type(block_time), block_time))
+    if block_time < 2 or block_time > 600:
+        fail("localnet.block_time_seconds must be between 2 and 600, got {}".format(block_time))
+
     return True

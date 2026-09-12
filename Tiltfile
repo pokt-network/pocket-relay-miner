@@ -19,6 +19,7 @@ load("ext://secret", "secret_create_generic")
 
 # Load local modules
 load("./tilt/k8s/config.Tiltfile", "load_config")
+load("./tilt/k8s/utils.Tiltfile", "render_validator_config_toml", "config_hash")
 load("./tilt/k8s/redis.Tiltfile", "deploy_redis")
 load("./tilt/k8s/validator.Tiltfile", "deploy_validator")
 load("./tilt/k8s/account-init.Tiltfile", "deploy_account_init")
@@ -136,12 +137,15 @@ data:
 """.format(all_keys_content)
     k8s_yaml(blob(all_keys_configmap))
 
-# Create Secrets for validator config files
+# Create Secrets for validator config files.
+#
+# config.toml is NOT here: it carries the localnet CLOCK, and the clock is a
+# knob (localnet.block_time_seconds), not a number edited into a tracked file.
+# It is rendered from the tracked file into the ConfigMap below.
 validator_config_files = [
     "tilt/config/priv_validator_key.json",
     "tilt/config/node_key.json",
     "tilt/config/app.toml",
-    "tilt/config/config.toml",
     "tilt/config/client.toml",
 ]
 from_files = []
@@ -154,7 +158,44 @@ if len(from_files) >= 2:  # At minimum need priv_validator_key.json and node_key
     secret_create_generic("validator-keys", from_file=from_files)
 else:
     print("WARNING: Validator config files not found in tilt/config/")
-    print("         Expected: priv_validator_key.json, node_key.json, app.toml, config.toml, client.toml")
+    print("         Expected: priv_validator_key.json, node_key.json, app.toml, client.toml")
+
+# The validator's config.toml, with THE clock layered on top of the tracked
+# file. One number -- localnet.block_time_seconds -- sets the validator's
+# timeout_commit here and the miner's block_time_seconds in
+# generate_miner_config, so the two cannot drift: the miner derives its claim
+# and proof deadlines from its value, and a divergence would miscompute them
+# with no error anywhere.
+#
+# A ConfigMap and not the Secret above because this file is not secret, and
+# because generated config already travels that way here (miner-config,
+# relayer-config). config["validator"]["config_hash"] rolls the validator pod
+# when the clock changes: Kubernetes does not restart a pod when a mounted
+# ConfigMap changes, so without it a new clock would sit in the ConfigMap while
+# the validator kept running the old one, silently.
+config["validator"]["config_hash"] = ""
+validator_config_toml_path = "tilt/config/config.toml"
+if os.path.exists(validator_config_toml_path):
+    validator_config_toml = render_validator_config_toml(
+        read_file(validator_config_toml_path),
+        config["localnet"]["block_time_seconds"],
+    )
+    k8s_yaml(blob("""
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: validator-config
+data:
+  config.toml: |
+    {}
+""".format(validator_config_toml.replace("\n", "\n    "))))
+    config["validator"]["config_hash"] = config_hash(validator_config_toml)
+    print("  Localnet clock: validator timeout_commit {}s, for ~{}s blocks under load".format(
+        config["localnet"]["block_time_seconds"] - 1,
+        config["localnet"]["block_time_seconds"]))
+else:
+    print("WARNING: {} not found; the validator will run pocketd's default clock".format(
+        validator_config_toml_path))
 
 # Create supplier-keys Secret from extracted supplier keys
 # Format: keys: ["hex1", "hex2", ...] (simple array of private key hex strings)

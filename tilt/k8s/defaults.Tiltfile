@@ -15,6 +15,26 @@ def get_defaults():
             # to tilt/config/scale. Switching it on a running chain needs a
             # fresh validator.
             "profile": "default",
+
+            # THE localnet clock. One number feeds both the validator's
+            # timeout_commit and the miner's block_time_seconds, so they cannot
+            # drift apart -- and the miner derives its claim and proof deadlines
+            # from its value, so a divergence would miscompute them silently.
+            #
+            # 30s is beta's clock, and that is the reason it is the default
+            # (Jorge): beta is the fastest clock this software has to cope with,
+            # so the localnet runs there rather than somewhere no deployment
+            # lives. NOT VERIFIED, and offered only as a second reason: at 10s a
+            # load is believed never to have crossed target_num_relays (100k per
+            # service and session, the same number here and on mainnet), so the
+            # difficulty would never have been exercised -- nobody measured that.
+            #
+            # Loads that measure against mainnet raise it to 60 in
+            # tilt_config.yaml, which is gitignored -- that is the point of the
+            # knob: changing the clock for a run leaves the tree clean, and
+            # scripts/localonly/_state/loadgen/run-base111.sh refuses to run on
+            # a dirty tree.
+            "block_time_seconds": 30,
         },
         "validator": {
             "enabled": True,

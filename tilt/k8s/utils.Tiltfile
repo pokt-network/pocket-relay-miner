@@ -20,6 +20,39 @@ def read_relayer_example_config():
     """Read relayer example config as base - the example file is the single source of truth for defaults"""
     return read_yaml("config.relayer.example.yaml")
 
+def render_validator_config_toml(base_toml, block_time_seconds):
+    """Return tilt/config/config.toml with its clock set to block_time_seconds.
+
+    The tracked file is the BASE, exactly like config.miner.example.yaml is the
+    base of the miner's config: the clock is layered on top here instead of
+    being edited into the file. Editing it is what made every run at a
+    non-default block time dirty the tree, and a dirty tree makes a load run
+    unattributable -- scripts/localonly/_state/loadgen/run-base111.sh refuses to
+    start on one.
+
+    timeout_commit is the knob that sets the clock: it is a fixed sleep AFTER a
+    block commits, so the block time is it plus the consensus round, and that
+    round costs what the validator is busy with. Both regimes were measured on
+    this localnet: UNDER LOAD, timeout_commit 10s gave ~11s blocks; IDLE,
+    timeout_commit 29s gave 29.05s blocks (three identical deltas, 2026-09-11).
+    The -1 is calibrated for the loaded regime, because that is where the loads
+    that this clock exists for actually run; idle it overshoots by 0.95s, so an
+    idle localnet ticks a second under its nominal block time. timeout_propose
+    is a MAXIMUM wait for a proposal, not a delay, so it is left alone.
+    """
+    want = 'timeout_commit = "{}s"'.format(block_time_seconds - 1)
+    out = []
+    hits = 0
+    for line in str(base_toml).split("\n"):
+        if line.startswith("timeout_commit ="):
+            out.append(want)
+            hits += 1
+        else:
+            out.append(line)
+    if hits != 1:
+        fail("expected exactly 1 timeout_commit line in tilt/config/config.toml, found {}".format(hits))
+    return "\n".join(out)
+
 def get_redis_host(redis_mode):
     """Get Redis host based on mode (standalone/cluster)"""
     if redis_mode == "standalone":

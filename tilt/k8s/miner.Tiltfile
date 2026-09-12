@@ -279,6 +279,7 @@ def generate_miner_config(config):
     1. Base: config.miner.example.yaml (single source of truth for defaults)
     2. User overrides: tilt_config.yaml miner.config section
     3. K8s overrides: Redis URL, validator URL, keys path, metrics addr
+    4. The localnet clock, which is not the miner's to hold on its own
     """
     # 1. Read example config as base
     base_config = read_miner_example_config()
@@ -290,6 +291,19 @@ def generate_miner_config(config):
     # 3. Apply k8s-specific overrides (service names, paths)
     redis_host = get_redis_host(config.get("redis", {}).get("mode", "standalone"))
     final_config = apply_k8s_overrides_miner(merged_config, redis_host)
+
+    # 4. THE clock, from localnet.block_time_seconds -- the same number that
+    # becomes the validator's timeout_commit. It is forced rather than merged
+    # because two places holding one clock is how they drift, and the miner
+    # derives its claim and proof deadlines from this value: a divergence
+    # miscomputes them with no error anywhere. Forcing an operator's value is
+    # announced, the way the mode matrix in utils.Tiltfile announces its own.
+    block_time = config["localnet"]["block_time_seconds"]
+    stored = final_config.get("block_time_seconds")
+    if stored != block_time:
+        print("localnet clock: forcing miner block_time_seconds {!r} -> {!r} (set localnet.block_time_seconds instead)".format(
+            stored, block_time))
+    final_config["block_time_seconds"] = block_time
 
     return final_config
 
