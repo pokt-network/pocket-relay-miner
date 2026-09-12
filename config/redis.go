@@ -6,6 +6,18 @@ import (
 	"strings"
 )
 
+// DefaultPoolTimeoutSeconds is how long a caller waits for a pooled connection
+// when nothing sets pool_timeout_seconds.
+//
+// It reproduces EXACTLY the value go-redis v9.22.0 was silently applying
+// (ReadTimeout + 1s, with ReadTimeout defaulting to 5s), so making it explicit
+// changed no behaviour on the day it landed. That is the only reason it is 6:
+// nobody has chosen it against evidence yet, and choosing a better one needs the
+// per-command latency this commit starts collecting. A shorter deadline fails
+// faster but spends the client's retry budget sooner -- go-redis retries a pool
+// timeout on its own, so the real worst case is MaxRetries+1 times this value.
+const DefaultPoolTimeoutSeconds = 6
+
 // RedisConfig contains Redis connection configuration shared between miner and relayer.
 type RedisConfig struct {
 	// URL is the Redis connection URL.
@@ -19,13 +31,23 @@ type RedisConfig struct {
 
 	// MinIdleConns is the minimum number of idle connections to maintain.
 	// Keeping idle connections warm eliminates connection dial latency (~1-5ms).
-	// Default: PoolSize / 4
-	// Set to 0 to disable (connections created on demand)
+	// Unset (0) means PoolSize / 4, which is what both binaries' validation
+	// messages have always said ("0 = use default") and what this field did NOT
+	// do until 2026-09-12: the value was passed through raw, arrived as 0, and
+	// every burst paid the dial. There is no "disable" any more -- the previous
+	// comment claimed 0 disabled pre-warming, which contradicted the validation
+	// beside it and described the bug rather than the intent.
 	MinIdleConns int `yaml:"min_idle_conns,omitempty"`
 
-	// PoolTimeout is the amount of time to wait for a connection from the pool.
-	// Default: 4 seconds
-	// Set to 0 to wait indefinitely
+	// PoolTimeout is how long a caller waits for a connection before failing.
+	//
+	// Unset (0) means DefaultPoolTimeoutSeconds. The previous comment here said
+	// "Default: 4 seconds" and "Set to 0 to wait indefinitely", and BOTH were
+	// false against go-redis v9.22.0: leaving this at 0 made go-redis substitute
+	// ReadTimeout+1s, and ReadTimeout itself defaults to 5s, so every relay ran
+	// against a 6-second deadline that nobody in this repository had chosen and
+	// no comment described. It is ours now, and the effective value is published
+	// as ha_transport_redis_pool_timeout_seconds_effective, read from the client.
 	PoolTimeoutSeconds int `yaml:"pool_timeout_seconds,omitempty"`
 
 	// ConnMaxIdleTime is the maximum amount of time a connection can be idle.

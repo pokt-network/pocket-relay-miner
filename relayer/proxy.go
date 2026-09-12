@@ -238,28 +238,32 @@ func NewProxyServer(
 	// Build HTTP client pool (one client per service, plus fallback).
 	clientPool, clientPoolFallback := buildClientPool(config, &config.HTTPTransport)
 
-	// Create subpools with dynamic worker allocation based on master pool size
-	// This scales with available hardware
-	// Note: Master pool is NumCPU * 8 for high concurrency
+	// The subpool split comes from the SAME function that sized the Redis pool
+	// at startup (relayer/sizing.go), derived here from the capacity of the pool
+	// this proxy was handed. A second copy of the 70/20/10 split is exactly how
+	// the split and the pool size would drift apart again.
 	masterPoolSize := workerPool.MaxConcurrency()
-	validationWorkers := int(float64(masterPoolSize) * 0.7) // 70% for CPU-intensive ring signatures
-	publishWorkers := int(float64(masterPoolSize) * 0.2)    // 20% for I/O-bound Redis writes
-	metricsWorkers := int(float64(masterPoolSize) * 0.1)    // 10% for low-priority observability
-
-	// Ensure at least 1 worker per subpool
-	if validationWorkers < 1 {
-		validationWorkers = 1
-	}
-	if publishWorkers < 1 {
-		publishWorkers = 1
-	}
-	if metricsWorkers < 1 {
-		metricsWorkers = 1
-	}
+	sizing := SizingFromMaster(masterPoolSize)
+	validationWorkers := sizing.Validation
+	publishWorkers := sizing.Publish
+	metricsWorkers := sizing.Metrics
 
 	validationSubpool := workerPool.NewSubpool(validationWorkers)
 	publishSubpool := workerPool.NewSubpool(publishWorkers)
 	metricsSubpool := workerPool.NewSubpool(metricsWorkers)
+
+	// The subpools had no metrics at all until now, which is why a relayer
+	// queueing thousands of tasks looked identical to an idle one.
+	workerPoolMaxWorkers.WithLabelValues("validation").Set(float64(validationWorkers))
+	workerPoolMaxWorkers.WithLabelValues("publish").Set(float64(publishWorkers))
+	workerPoolMaxWorkers.WithLabelValues("metrics").Set(float64(metricsWorkers))
+	if qErr := registerWorkerQueueDepth(map[string]pond.Pool{
+		"validation": validationSubpool,
+		"publish":    publishSubpool,
+		"metrics":    metricsSubpool,
+	}); qErr != nil {
+		return nil, qErr
+	}
 
 	logger.Info().
 		Int("validation_workers", validationWorkers).
@@ -1490,9 +1494,17 @@ func (p *ProxyServer) submitPublishTask(
 		return
 	}
 
+	// Bodies this task will hold until it runs. Counted BEFORE the submit and
+	// released when the task finishes, so the gauge reflects what the queue is
+	// retaining rather than what it has processed. Task COUNT cannot stand in
+	// for this: the queue is unbounded and a task's cost is its payload.
+	retained := int64(len(reqBody) + len(respBody))
+	publishQueueBytes.Add(float64(retained))
+
 	// Submit publish task to pond worker pool (non-blocking, unbounded queue)
 	// Uses context.Background() since publish should complete even if request context is cancelled
-	p.publishSubpool.Submit(func() {
+	_, submitted := p.publishSubpool.TrySubmit(func() {
+		defer publishQueueBytes.Sub(float64(retained))
 		task := publishTask{
 			reqBody:            reqBody,
 			respBody:           respBody,
@@ -1504,6 +1516,13 @@ func (p *ProxyServer) submitPublishTask(
 		}
 		p.executePublish(context.Background(), task)
 	})
+	// TrySubmit and not Submit, for the bool: a refused task never runs, so its
+	// defer never fires and the bytes would be counted forever -- a gauge that
+	// only ever climbs. Submit returns a Task interface whose nil-ness is not a
+	// reliable signal; this one says so outright.
+	if !submitted {
+		publishQueueBytes.Sub(float64(retained))
+	}
 }
 
 // parseRelayRequest parses the relay request protobuf body and extracts the service ID

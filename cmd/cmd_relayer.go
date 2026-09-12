@@ -488,6 +488,22 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		logger.Info().Msg("runtime metrics collector started")
 	}
 
+	// The relayer's concurrency budget, computed ONCE here and read by both the
+	// Redis pool below and the master worker pool further down. They describe
+	// the same thing -- how much of this process can be inside a Redis call at
+	// once -- and computing them separately is how they drifted apart.
+	//
+	// GOMAXPROCS(0), not NumCPU(): NumCPU reports the machine's cores and
+	// ignores the container's CPU limit. automaxprocs sets GOMAXPROCS from the
+	// cgroup quota at startup, so this is what the runtime will schedule on.
+	sizing := relayer.ComputeWorkerSizingForProcess()
+
+	// An operator value wins; otherwise the pool follows the workers.
+	redisPoolSize := config.Redis.PoolSize
+	if redisPoolSize <= 0 {
+		redisPoolSize = sizing.RedisPoolSize()
+	}
+
 	// Use Redis URL from config, allow flag override
 	redisURL := config.Redis.URL
 	if cmd.Flags().Changed(flagRedisURL) {
@@ -497,7 +513,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create wrapped Redis client with KeyBuilder for namespace-aware key construction
 	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
 		URL:                    redisURL,
-		PoolSize:               config.Redis.PoolSize,
+		PoolSize:               redisPoolSize,
 		MinIdleConns:           config.Redis.MinIdleConns,
 		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
 		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
@@ -513,6 +529,52 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// files and the redis CLI build clients, and a repeated MustRegister panics.
 	// The collector is also the registry of pools, so a client per supplier can
 	// be added and removed as suppliers are adopted and released.
+	// What the pool ACTUALLY holds, published from the client. See
+	// RegisterEffectivePoolGauges: reading the config here would certify the
+	// request rather than what runs, and the pool timeout is precisely the
+	// value nobody sets and go-redis defaults behind our backs.
+	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
+		observability.SharedRegistry, "relayer", redisClient,
+	); gaugeErr != nil {
+		return fmt.Errorf("failed to register effective Redis pool gauges: %w", gaugeErr)
+	}
+
+	// The pool has to cover the workers that will use it. This compares the
+	// EFFECTIVE size -- what the client holds, not what we asked for -- against
+	// the bounded users, and refuses to start rather than discovering it under
+	// load as a queue nobody can explain.
+	//
+	// WHAT THIS GUARD DOES NOT COVER: in eager validation mode the relay meter
+	// runs inline in the HTTP handler, not inside a subpool, so its concurrency
+	// is whatever the HTTP server admits and no startup number can bound it.
+	// This guard covers the BOUNDED users; the pool metrics show the rest. Read
+	// it as "the floor is right", never as "the pool is sufficient".
+	if eff, ok := redisClient.EffectivePoolOptions(); ok {
+		needed := sizing.Validation + sizing.Publish
+		if eff.PoolSize < needed {
+			return fmt.Errorf(
+				"redis pool too small: the client holds %d connections but the bounded workers that use it "+
+					"need %d (validation %d + publish %d); raise redis.pool_size or lower the worker count",
+				eff.PoolSize, needed, sizing.Validation, sizing.Publish)
+		}
+		logger.Info().
+			Int("pool_size_effective", eff.PoolSize).
+			Int("min_idle_conns_effective", eff.MinIdleConns).
+			Dur("pool_timeout_effective", eff.PoolTimeout).
+			Int("bounded_workers", needed).
+			Msg("Redis pool covers the bounded workers (the eager meter path is NOT bounded by this)")
+	} else {
+		logger.Warn().
+			Msg("could not read the effective Redis pool settings from this client type: " +
+				"the startup pool guard did NOT run")
+	}
+
+	// How long each Redis command really takes from here, pool wait and
+	// go-redis retries included. The pool's own wait series cannot answer that:
+	// they count only waits that ended in a connection, so their mean improves
+	// as the pool starts failing.
+	redisClient.AddHook(redistransport.NewCommandLatencyHook("relayer"))
+
 	redisPools := redistransport.NewPoolCollector("relayer")
 	redisPools.Add("shared", redisClient)
 	observability.SharedRegistry.MustRegister(redisPools)
@@ -730,18 +792,26 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Create master worker pool for controlled concurrency
 	// Uses unbounded queue with non-blocking submission to prevent goroutine explosion
-	numCPU := runtime.NumCPU()
-	masterPoolSize := numCPU * 8
+	masterPoolSize := sizing.Master
 	masterPool := pond.NewPool(
 		masterPoolSize,
 		pond.WithQueueSize(pond.Unbounded),
 		pond.WithNonBlocking(true),
 	)
 	defer masterPool.StopAndWait()
+	// Both numbers on purpose: when they differ, the pod has a CPU limit below
+	// the node's cores and gomaxprocs is the one that decided the workers. An
+	// operator reading only num_cpu would compute a pool size this process is
+	// not using.
 	logger.Info().
 		Int("max_workers", masterPoolSize).
-		Int("num_cpu", numCPU).
-		Msg("created master worker pool (unbounded, non-blocking, 8x CPU)")
+		Int("validation_workers", sizing.Validation).
+		Int("publish_workers", sizing.Publish).
+		Int("metrics_workers", sizing.Metrics).
+		Int("redis_pool_size", redisPoolSize).
+		Int("gomaxprocs", runtime.GOMAXPROCS(0)).
+		Int("num_cpu", runtime.NumCPU()).
+		Msg("created master worker pool (unbounded, non-blocking, 8x GOMAXPROCS)")
 
 	// Create proxy server
 	proxy, err := relayer.NewProxyServer(
@@ -818,7 +888,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		signerSync.Lock()
 		defer signerSync.Unlock()
 		responseSigner.ReplaceKeys(supplierSigningKeys(keyManager))
-		return len(responseSigner.GetOperatorAddresses())
+		n := len(responseSigner.GetOperatorAddresses())
+		// Set here rather than in the OnKeyChange callback so the STARTUP
+		// resync publishes it too: a gauge that only appears after the first
+		// reload reads as zero keys on a fleet that never changes.
+		relayer.SetSigningKeysLoaded(n)
+		return n
 	}
 
 	keyManager.OnKeyChange(func(operatorAddr string, added bool) {

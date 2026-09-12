@@ -1,6 +1,10 @@
 package relayer
 
 import (
+	"errors"
+	"fmt"
+
+	"github.com/alitto/pond/v2"
 	"github.com/prometheus/client_golang/prometheus"
 
 	"github.com/pokt-network/pocket-relay-miner/observability"
@@ -218,6 +222,50 @@ var (
 	// saturation: in_flight / max_conns. If saturation stays near 1.0, the
 	// service is pool-bound and needs a bigger profile (or a faster
 	// backend).
+	// workerPoolMaxWorkers is each subpool's capacity, so the depth above can be
+	// read against something. It changes only with the CPU limit.
+	workerPoolMaxWorkers = observability.RelayerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "worker_pool_max_workers",
+			Help:      "Concurrent workers a subpool is allowed",
+		},
+		[]string{"subpool"},
+	)
+
+	// publishQueueBytes is the request AND response bodies the publish queue is
+	// holding. Task COUNT is not a proxy for it: a hundred tasks carrying 100 KB
+	// each are 10 MB of retained heap and a hundred carrying ten bytes are
+	// nothing, and it is the bytes that end a process, not the count.
+	publishQueueBytes = observability.RelayerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "publish_queue_bytes",
+			Help:      "Request and response bodies currently retained by queued publish tasks",
+		},
+	)
+
+	// signingKeysLoaded is how many supplier signing keys this relayer holds
+	// right now. It moves on every hot reload.
+	//
+	// It is an OBSERVABLE and deliberately not a guard. The Redis pool is sized
+	// from the bounded workers and carries no supplier term, because what a
+	// supplier costs depends on how many applications relay through it -- demand
+	// we neither choose nor can read at startup. So there is no "expected"
+	// number to compare this against, and a guard would need a threshold
+	// somebody invented. What this gives an operator is the correlation instead:
+	// the moment latency changed is the moment the set went from 52 to 300.
+	signingKeysLoaded = observability.RelayerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "signing_keys_loaded",
+			Help:      "Supplier signing keys the relayer currently holds (changes on key hot reload)",
+		},
+	)
+
 	httpPoolInFlight = observability.RelayerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
@@ -683,3 +731,44 @@ var (
 		[]string{"operation"},
 	)
 )
+
+// registerWorkerQueueDepth publishes each subpool's waiting-task count, read at
+// scrape time so it cannot go stale.
+//
+// GaugeFunc and not a value written from the submit path: a queue drains when
+// tasks COMPLETE, and nothing on the submit path runs then, so a gauge updated
+// only on submit would report the depth at the last submission rather than now
+// -- worst exactly when submissions stop because everything is stuck.
+//
+// AlreadyRegisteredError is tolerated because a process may build more than one
+// proxy (tests do). The first registration wins and keeps reading a live pool;
+// failing here would turn an observability detail into a startup error.
+func registerWorkerQueueDepth(subpools map[string]pond.Pool) error {
+	for name, sp := range subpools {
+		sp := sp
+		g := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Namespace:   metricsNamespace,
+			Subsystem:   metricsSubsystem,
+			Name:        "worker_queue_depth",
+			Help:        "Tasks waiting in a worker subpool right now (the queues are unbounded)",
+			ConstLabels: prometheus.Labels{"subpool": name},
+		}, func() float64 {
+			return float64(sp.WaitingTasks())
+		})
+		if err := observability.RelayerRegistry.Register(g); err != nil {
+			var already prometheus.AlreadyRegisteredError
+			if !errors.As(err, &already) {
+				return fmt.Errorf("registering worker_queue_depth for subpool %q: %w", name, err)
+			}
+		}
+	}
+	return nil
+}
+
+// SetSigningKeysLoaded publishes how many supplier signing keys are loaded.
+//
+// Exported because the key manager is wired in package cmd, which is also the
+// only place that learns of a reload.
+func SetSigningKeysLoaded(n int) {
+	signingKeysLoaded.Set(float64(n))
+}

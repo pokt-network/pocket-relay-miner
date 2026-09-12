@@ -1,6 +1,7 @@
 package redis
 
 import (
+	"math"
 	"sync"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -45,6 +46,39 @@ func (t *poolTotals) fold(prev *redis.PoolStats, cur *redis.PoolStats) {
 	t.staleConns += uint64(cur.StaleConns - prev.StaleConns)
 	t.waitNanos += cur.WaitDurationNs - prev.WaitDurationNs
 	*prev = *cur
+}
+
+// addAllPools sums the instantaneous gauges over the THREE pools a client can
+// hold, not just the main one.
+//
+// PoolStats() carries all three: the main pool's fields inline, PubSubStats
+// always, and PipelineStats when a pipeline pool exists. Reading only the main
+// pool made pub/sub connections invisible -- and this process holds several,
+// because block events and cache invalidation are pub/sub.
+//
+// PipelineStats is nil in this repository today, and that is the interesting
+// part rather than an omission: go-redis builds a separate pipeline pool only
+// when PipelineReadBufferSize OR PipelineWriteBufferSize is set, and nothing
+// here sets either. So pipelined writes -- including every TxPipelined batch --
+// take their connections from the MAIN pool and are already counted below. If
+// somebody sets either field, pipelines move to their own pool and this is what
+// keeps them visible.
+// PubSubStats contributes to the CONNECTION COUNT only. Its shape is
+// {Created, Untracked, Active} -- a pub/sub connection is held by a subscriber
+// for as long as the subscription lives, so there is no idle list to report and
+// nothing queues for one. Adding Active to the total is what makes those
+// connections stop being invisible; inventing an idle or pending term for them
+// would be reporting a number the pool does not have.
+func addAllPools(cur *redis.PoolStats) (total, idle, pending float64) {
+	total = float64(cur.TotalConns) + float64(cur.PubSubStats.Active)
+	idle = float64(cur.IdleConns)
+	pending = float64(cur.PendingRequests)
+	if cur.PipelineStats != nil {
+		total += float64(cur.PipelineStats.TotalConns)
+		idle += float64(cur.PipelineStats.IdleConns)
+		pending += float64(cur.PipelineStats.PendingRequests)
+	}
+	return total, idle, pending
 }
 
 // livePool is a pool being counted, plus the last reading taken from it.
@@ -100,13 +134,24 @@ func NewPoolCollector(component string) *PoolCollector {
 	return &PoolCollector{
 		live: make(map[string]*livePool),
 
-		hits:       desc("hits_total", "Total times a free connection was found in the pool"),
-		misses:     desc("misses_total", "Total times a free connection was NOT found in the pool"),
-		timeouts:   desc("timeouts_total", "Total times waiting for a connection timed out"),
-		waitCount:  desc("wait_count_total", "Total times a caller had to wait for a connection"),
+		hits:     desc("hits_total", "Total times a free connection was found in the pool"),
+		misses:   desc("misses_total", "Total times a free connection was NOT found in the pool"),
+		timeouts: desc("timeouts_total", "Total times waiting for a connection timed out"),
+		// The two wait series below count ONLY waits that ENDED IN A CONNECTION.
+		// go-redis returns early when the wait times out (internal/pool/pool.go,
+		// the `if err != nil { return err }` before waitDurationNs.Add and
+		// WaitCount), so an expired wait lands in neither. Two consequences an
+		// operator has to know at 3am: the mean is biased low, because the
+		// longest waits are the ones excluded; and it IMPROVES when the pool
+		// starts timing out, because those waits stop being counted while
+		// timeouts_total climbs. Read them beside timeouts_total, which has no
+		// such bias, and never alone.
+		waitCount: desc("wait_count_total",
+			"Total times a caller waited for a connection AND GOT ONE (expired waits are not counted -- see timeouts_total)"),
 		unusable:   desc("unusable_total", "Total times a connection was found to be unusable"),
 		staleConns: desc("stale_conns_total", "Total stale connections removed from the pool"),
-		waitSecs:   desc("wait_seconds_total", "Total time spent waiting for a connection, in seconds"),
+		waitSecs: desc("wait_seconds_total",
+			"Total seconds spent on waits THAT GOT A CONNECTION (expired waits are not counted, so this mean falls as the pool starts failing -- read with timeouts_total)"),
 
 		totalConns: desc("total_conns", "Connections held right now, summed over live pools"),
 		idleConns:  desc("idle_conns", "Idle connections right now, summed over live pools"),
@@ -114,6 +159,53 @@ func NewPoolCollector(component string) *PoolCollector {
 		pendingMax: desc("pending_requests_max", "Callers waiting on the WORST single pool right now"),
 		pools:      desc("pools", "Pools being counted right now"),
 	}
+}
+
+// RegisterEffectivePoolGauges publishes what the RUNNING client's pool is set
+// to, read from the client on every scrape rather than captured from config at
+// startup.
+//
+// Two series and not one: the pool SIZE is what every capacity conversation is
+// about, and the pool TIMEOUT is the deadline a saturated pool fails against --
+// and it is the one nobody set, so it is go-redis's 6s while this repo's
+// comments said 4s and "waits forever". Publishing them from the client is what
+// makes the number in a dashboard the number the process runs on.
+//
+// When the client type cannot be asked, both publish NaN rather than 0. A zero
+// pool timeout reads as "no limit" and a zero pool size reads as "unbounded",
+// so a failed read would look like the safest possible configuration. NaN
+// leaves a gap in the graph, which is what not knowing looks like.
+func RegisterEffectivePoolGauges(reg prometheus.Registerer, component string, c *Client) error {
+	labels := prometheus.Labels{"component": component}
+
+	size := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "ha_transport_redis_pool_size_effective",
+		Help:        "Pool size the running client holds (NaN when the client type cannot be asked)",
+		ConstLabels: labels,
+	}, func() float64 {
+		eff, ok := c.EffectivePoolOptions()
+		if !ok {
+			return math.NaN()
+		}
+		return float64(eff.PoolSize)
+	})
+
+	timeout := prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+		Name:        "ha_transport_redis_pool_timeout_seconds_effective",
+		Help:        "Seconds a caller waits for a connection before failing, as the running client holds it (NaN when it cannot be asked)",
+		ConstLabels: labels,
+	}, func() float64 {
+		eff, ok := c.EffectivePoolOptions()
+		if !ok {
+			return math.NaN()
+		}
+		return eff.PoolTimeout.Seconds()
+	})
+
+	if err := reg.Register(size); err != nil {
+		return err
+	}
+	return reg.Register(timeout)
 }
 
 // Add starts counting a pool under id.
@@ -179,10 +271,11 @@ func (c *PoolCollector) Collect(ch chan<- prometheus.Metric) {
 			continue
 		}
 		c.total.fold(&lp.prev, cur)
-		totalConns += float64(cur.TotalConns)
-		idleConns += float64(cur.IdleConns)
-		pending += float64(cur.PendingRequests)
-		if p := float64(cur.PendingRequests); p > pendingMax {
+		t, i, p := addAllPools(cur)
+		totalConns += t
+		idleConns += i
+		pending += p
+		if p > pendingMax {
 			pendingMax = p
 		}
 	}

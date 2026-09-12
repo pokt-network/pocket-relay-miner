@@ -260,6 +260,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// The miner is where this is most needed: checkPoolSize only WARNS about a
 	// short pool, once, at startup -- and that warning sat in Loki through a
 	// whole load run with nobody reading it.
+	// See the relayer for why this is a hook and not go-redis's own wait
+	// callback: the callback has the same survivorship bias as the pool's
+	// counters, and a hook sits outside the retry loop so it sees the whole cost.
+	redisClient.AddHook(redistransport.NewCommandLatencyHook("miner"))
+
 	redisPools := redistransport.NewPoolCollector("miner")
 	redisPools.Add("shared", redisClient)
 	observability.SharedRegistry.MustRegister(redisPools)

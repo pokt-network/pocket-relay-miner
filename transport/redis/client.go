@@ -53,8 +53,8 @@ type ClientConfig struct {
 	// Default: 10 connections per CPU
 	PoolSize int
 
-	// MinIdleConns is the minimum number of idle connections.
-	// Default: 0
+	// MinIdleConns is the minimum number of idle connections kept warm.
+	// Default: PoolSize / 4 (see the assignment in NewClient).
 	MinIdleConns int
 
 	// PoolTimeout is the amount of time to wait for a connection from the pool (seconds).
@@ -121,6 +121,24 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		poolSize = 50
 	}
 
+	// Keep a quarter of the pool warm. This is the default config/redis.go has
+	// always promised and both binaries' validation messages have always
+	// described; until 2026-09-12 the value travelled here raw, arrived as 0,
+	// and go-redis kept no idle connections at all -- so every burst after a
+	// quiet moment paid a TCP dial (~1-5ms) per connection it needed.
+	minIdleConns := cfg.MinIdleConns
+	if minIdleConns <= 0 {
+		minIdleConns = poolSize / 4
+	}
+
+	// A pool timeout this repository chose, instead of the one go-redis applies
+	// when the field is left at zero. See config.DefaultPoolTimeoutSeconds: the
+	// implicit value was 6s, described nowhere and contradicted by two comments.
+	poolTimeoutSeconds := cfg.PoolTimeoutSeconds
+	if poolTimeoutSeconds <= 0 {
+		poolTimeoutSeconds = config.DefaultPoolTimeoutSeconds
+	}
+
 	var client redis.UniversalClient
 
 	switch u.Scheme {
@@ -132,12 +150,11 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		}
 		opts.MaxRetries = maxRetries
 		opts.PoolSize = poolSize
-		opts.MinIdleConns = cfg.MinIdleConns
+		opts.MinIdleConns = minIdleConns
 
-		// Apply timeout settings
-		if cfg.PoolTimeoutSeconds > 0 {
-			opts.PoolTimeout = time.Duration(cfg.PoolTimeoutSeconds) * time.Second
-		}
+		// Always set, never left at zero: a zero here is not "no timeout", it is
+		// go-redis substituting its own (options.go, ReadTimeout+1s).
+		opts.PoolTimeout = time.Duration(poolTimeoutSeconds) * time.Second
 		if cfg.ConnMaxIdleTimeSeconds > 0 {
 			opts.ConnMaxIdleTime = time.Duration(cfg.ConnMaxIdleTimeSeconds) * time.Second
 		}
@@ -146,14 +163,14 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 
 	case "redis-sentinel":
 		// Redis Sentinel
-		client, err = newSentinelClient(u, maxRetries, poolSize, cfg.MinIdleConns, cfg.PoolTimeoutSeconds, cfg.ConnMaxIdleTimeSeconds)
+		client, err = newSentinelClient(u, maxRetries, poolSize, minIdleConns, poolTimeoutSeconds, cfg.ConnMaxIdleTimeSeconds)
 		if err != nil {
 			return nil, err
 		}
 
 	case "redis-cluster":
 		// Redis Cluster
-		client, err = newClusterClient(u, maxRetries, poolSize, cfg.MinIdleConns, cfg.PoolTimeoutSeconds, cfg.ConnMaxIdleTimeSeconds)
+		client, err = newClusterClient(u, maxRetries, poolSize, minIdleConns, poolTimeoutSeconds, cfg.ConnMaxIdleTimeSeconds)
 		if err != nil {
 			return nil, err
 		}
@@ -181,6 +198,47 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 		keyBuilder:      NewKeyBuilder(cfg.Namespace),
 		poolSize:        poolSize,
 	}, nil
+}
+
+// EffectivePoolOptions reports the pool size and the pool timeout the RUNNING
+// client holds, read from the client rather than from the configuration it was
+// built with.
+//
+// The difference is not academic, and this repo has the scar: PoolTimeoutSeconds
+// arrives as 0 whenever nobody sets it, NewClient then leaves opts.PoolTimeout at
+// 0, and go-redis substitutes its own default of ReadTimeout+1s -- with
+// ReadTimeout itself defaulting to 5s. The deadline every relay actually runs
+// against is 6 seconds, while config/redis.go claimed 4 and claimed that 0 waits
+// forever. A gauge fed from the config would have published 0 and certified the
+// request instead of what runs, which is the same mistake as a GOMAXPROCS
+// literal sitting under a comment claiming it matched the CPU limit.
+//
+// A type switch and not a plain call because redis.UniversalClient does NOT
+// expose Options() -- its interface carries PoolStats and no accessor for the
+// options. NewClient and NewFailoverClient both return *redis.Client, so
+// standalone and sentinel share a branch; cluster has its own options type.
+//
+// ok is false for a client type this cannot ask. Callers must report that
+// rather than publish a zero: a zero pool timeout reads as "no limit", which is
+// the opposite of the truth.
+func (c *Client) EffectivePoolOptions() (EffectivePool, bool) {
+	switch cl := c.UniversalClient.(type) {
+	case *redis.Client:
+		o := cl.Options()
+		return EffectivePool{PoolSize: o.PoolSize, MinIdleConns: o.MinIdleConns, PoolTimeout: o.PoolTimeout}, true
+	case *redis.ClusterClient:
+		o := cl.Options()
+		return EffectivePool{PoolSize: o.PoolSize, MinIdleConns: o.MinIdleConns, PoolTimeout: o.PoolTimeout}, true
+	default:
+		return EffectivePool{}, false
+	}
+}
+
+// EffectivePool is what a running client's connection pool is actually set to.
+type EffectivePool struct {
+	PoolSize     int
+	MinIdleConns int
+	PoolTimeout  time.Duration
 }
 
 // newSentinelClient creates a Redis Sentinel client.
