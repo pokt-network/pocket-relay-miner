@@ -172,34 +172,28 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		Str("grpc_endpoint", w.config.QueryNodeGRPCUrl).
 		Msg("query clients initialized")
 
-	// Advisory: warn once if the chain runs shared params that poktroll's own validation
-	// would reject (genesis skips it, MsgUpdateParams does not).
-	//
-	// Runs on the master pool rather than inline: Start() holds w.mu and still has to
-	// build the RPC client, block client and session pipeline, and this is a blocking
-	// gRPC round trip bounded only by the operator-configurable query timeout. Nothing
-	// downstream reads its result — it only logs — so an unreachable node must not
-	// lengthen every miner start.
-	sharedForAdvisory := w.queryClients.Shared()
-	if advisoryErr := w.masterPool.Go(func() {
-		advisoryCtx, cancelAdvisory := context.WithTimeout(w.ctx, sharedParamsAdvisoryTimeout)
-		defer cancelAdvisory()
-
-		sharedParams, sharedErr := sharedForAdvisory.GetParams(advisoryCtx)
-		if sharedErr != nil {
-			// Warn, not Debug: "the params are fine" and "we never looked" must not
-			// produce the same silence, and an unreachable node is exactly the case
-			// this advisory exists to surface.
-			w.logger.Warn().Err(sharedErr).
-				Msg("shared params advisory skipped: could not read shared params from the chain")
-			return
-		}
+	// Shared params, read ONCE and synchronously: cache_ttl validation below
+	// needs the result before Start() can return (it can abort startup by
+	// returning an error), and the shared-params advisory that used to make
+	// its own round trip here now reads this SAME result instead. An
+	// unreachable node costs at most sharedParamsAdvisoryTimeout, once, with a
+	// Warn and neither check performed -- never a reason to fail startup on
+	// its own.
+	sharedParamsCtx, cancelSharedParams := context.WithTimeout(w.ctx, sharedParamsAdvisoryTimeout)
+	sharedParams, sharedErr := w.queryClients.Shared().GetParams(sharedParamsCtx)
+	cancelSharedParams()
+	if err := checkCacheTTL(w.config.Config, w.logger, sharedParams, sharedErr); err != nil {
+		w.cleanup()
+		return err
+	}
+	if sharedErr != nil {
+		// Warn, not Debug: "the params are fine" and "we never looked" must not
+		// produce the same silence, and an unreachable node is exactly the case
+		// this advisory exists to surface.
+		w.logger.Warn().Err(sharedErr).
+			Msg("shared params advisory skipped: could not read shared params from the chain")
+	} else {
 		LogSharedParamsAdvisory(w.logger, sharedParams)
-	}); advisoryErr != nil {
-		// The pool refused the task (already stopped). Advisory only — never a reason
-		// to fail startup, but say so rather than letting it vanish.
-		w.logger.Warn().Err(advisoryErr).
-			Msg("shared params advisory skipped: worker pool would not accept the task")
 	}
 
 	// Create RPC client for querying specific block heights (needed for proof generation)
