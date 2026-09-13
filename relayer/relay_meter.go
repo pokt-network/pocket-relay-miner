@@ -574,12 +574,17 @@ func (m *RelayMeter) loadSeen(ctx context.Context, key string) error {
 }
 
 // chargeWritten is the ledger's report of a written charge. The counter's new
-// value replaces the view only while the pair is still viewed, so a write that
+// value updates the view only while the pair is still viewed, so a write that
 // lands after ClearSessionMeter does not bring the pair back.
+//
+// The view only moves up. Two writes of one pair can be in flight at once and
+// their replies can be applied in either order; taking the older reply last
+// would lower the view below what Redis already holds and admit past the
+// budget until the next write.
 func (m *RelayMeter) chargeWritten(key string, amount, consumed int64) {
 	m.accMu.Lock()
 	defer m.accMu.Unlock()
-	if _, viewed := m.seen[key]; viewed {
+	if current, viewed := m.seen[key]; viewed && consumed > current {
 		m.seen[key] = consumed
 	}
 	m.ledger.FinishWrite(key, amount)

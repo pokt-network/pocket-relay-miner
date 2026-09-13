@@ -450,6 +450,28 @@ func (c *commandCounter) ProcessPipelineHook(next goredis.ProcessPipelineHook) g
 	}
 }
 
+// TestAnOlderWriteReplyDoesNotLowerTheView: two writes of one pair are answered
+// out of order, the newer counter value first. The view keeps the higher one; a
+// view lowered to the older reply would admit what Redis already counts.
+func TestAnOlderWriteReplyDoesNotLowerTheView(t *testing.T) {
+	meter, _ := newChargeTestMeter(t, false)
+	meter.SetDispatcherHeartbeat(time.Now)
+	const sessionID = "sess-replies"
+	reservation, allowed, err := meter.Admit(context.Background(), sessionID, chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
+	require.NoError(t, err)
+	require.True(t, allowed, "premise: the pair is in the view")
+	meter.Release(reservation)
+	key := meter.consumedKey(sessionID, chargeTestSupplier)
+
+	meter.chargeWritten(key, 50, 150)
+	meter.chargeWritten(key, 50, 100)
+
+	meter.accMu.Lock()
+	seen := meter.seen[key]
+	meter.accMu.Unlock()
+	require.Equal(t, int64(150), seen, "the reply of the older write must not lower the view")
+}
+
 // TestAViewedPairIsAdmittedAndChargedWithoutTouchingRedis: once a replica has
 // seen a pair, admitting and charging a relay is memory only. The writes are the
 // dispatcher's, one round trip per tick, not one per relay.
