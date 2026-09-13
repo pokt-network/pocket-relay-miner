@@ -312,6 +312,22 @@ else
         "nonce spread: tx_client.go's 10 * time.Millisecond vs lib.sh's copy"
 fi
 
+# gate_settle_timeout_min: this localnet's own shared params (20 session
+# blocks, 11/10 claim open/close, 1/10 proof open/close) at two clocks. The
+# derived minutes must MOVE with the clock, not sit fixed.
+expect 39 "$(gate_settle_timeout_min 20 11 10 1 10 30)" \
+    "this localnet's params at 30s: (20+11+10+1+10)*30=1560s, x1.5=2340s -> 39min"
+expect 78 "$(gate_settle_timeout_min 20 11 10 1 10 60)" \
+    "same params at 60s: 3120s, x1.5=4680s -> 78min"
+expect 2 "$(gate_settle_timeout_min 20 11 10 1 10 1)" \
+    "a 1s clock: 52s, x1.5=78s -> rounds UP to 2min, never down into the window"
+expect '' "$(gate_settle_timeout_min 20 11 10 1 10 '60.0')" \
+    "a non-integer block_time reaches bash arithmetic as 0 unless rejected first -- must come back empty, not a wrong number"
+expect '' "$(gate_settle_timeout_min 20 11 10 1 10 'abc')" \
+    "same for a non-numeric block_time"
+expect '' "$(gate_settle_timeout_min '' 11 10 1 10 60)" \
+    "an unreadable session-length param must also come back empty, not silently treated as 0 blocks"
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1

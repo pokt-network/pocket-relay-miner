@@ -526,3 +526,30 @@ gate_expected_timeout_regime() {
         printf 'window'
     fi
 }
+
+# gate_settle_timeout_min SESSION_BLOCKS CLAIM_OPEN CLAIM_CLOSE PROOF_OPEN PROOF_CLOSE BLOCK_TIME_S
+#
+# Prints, in whole minutes rounded UP, how long the live gate should wait for
+# a session to settle -- or an empty string if any input is not a positive
+# integer (same validation as gate_expected_timeout_regime, and for the same
+# reason: an un-numeric argument reaching bash arithmetic silently resolves to
+# 0 instead of erroring). Worst case: a session that has JUST started must
+# first run its full length (SESSION_BLOCKS), then wait out the claim window
+# (CLAIM_OPEN + CLAIM_CLOSE blocks after session end) and the proof window
+# that follows it (PROOF_OPEN + PROOF_CLOSE more) before an EndBlocker settles
+# it. A fixed default in minutes was only ever right at the clock it was
+# written against; the number MUST MOVE WITH THE CLOCK. 50% headroom on top
+# of the worst case absorbs poll granularity and the occasional slow block
+# without hard-coding a second clock-specific number.
+gate_settle_timeout_min() {
+    local session_blocks="${1:-}" claim_open="${2:-}" claim_close="${3:-}"
+    local proof_open="${4:-}" proof_close="${5:-}" block_time_s="${6:-}"
+    local v
+    for v in "$session_blocks" "$claim_open" "$claim_close" "$proof_open" "$proof_close" "$block_time_s"; do
+        case "$v" in '' | *[!0-9]* | 0) printf ''; return ;; esac
+    done
+    local worst_case_blocks=$(( session_blocks + claim_open + claim_close + proof_open + proof_close ))
+    local worst_case_seconds=$(( worst_case_blocks * block_time_s ))
+    local with_margin_seconds=$(( worst_case_seconds * 3 / 2 ))
+    printf '%s' $(( (with_margin_seconds + 59) / 60 ))
+}

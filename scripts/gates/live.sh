@@ -49,14 +49,14 @@ VALIDATOR_RPC="${VALIDATOR_RPC:-http://localhost:26657}"
 # safe direction (a real loss must never be excused by a scrape failure).
 PROMETHEUS_URL="${PROMETHEUS_URL:-http://localhost:9091}"
 # How long to wait for the claim and proof windows to close and the settlement
-# to land. The localnet mirrors mainnet block proportions (20-block sessions,
-# grace 10, claim +11..+21, proof +22..+32) at the clock in
-# localnet.block_time_seconds, 30s by default, so a session settles ~33 blocks
-# -- about 16.5 minutes -- after it ends, and a whole 20-block session may have
-# to end first. Polling rather than sleeping means this is an upper bound, not a
-# fixed cost. Raise it (or pass --timeout-min) when the localnet runs at
-# mainnet's 60s clock, where every number here doubles.
-SETTLE_TIMEOUT_MIN="${SETTLE_TIMEOUT_MIN:-45}"
+# to land. Left empty here on purpose -- SETTLE_TIMEOUT_MIN or --timeout-min
+# (checked below, in the arg loop) both win outright if given; otherwise it is
+# DERIVED, later, from the chain's own session/claim/proof block counts and
+# the miner's block_time_seconds (see gate_settle_timeout_min in lib.sh, right
+# before it is first used) -- a fixed number in minutes was only ever right at
+# whatever clock it was written against.
+SETTLE_TIMEOUT_MIN_DEFAULT=45
+SETTLE_TIMEOUT_MIN="${SETTLE_TIMEOUT_MIN:-}"
 POLL_INTERVAL_S="${POLL_INTERVAL_S:-15}"
 
 preflight_only=0
@@ -745,6 +745,31 @@ else
         gate_fail "difficulty filter: ${skipped_difficulty} relay(s) were filtered out as non-applicable, so this chain is NOT at base difficulty -- the exact served==billed assertions below do not hold across a filter and this gate does not yet cover that regime"
     else
         gate_pass "difficulty filter: base difficulty, 0 relays filtered -- served==billed is the right assertion for this run"
+    fi
+fi
+
+# SETTLE_TIMEOUT_MIN was left empty above unless SETTLE_TIMEOUT_MIN or
+# --timeout-min was given explicitly -- either one wins outright and skips
+# this. Otherwise derive it from the same chain params and validated
+# block_time_seconds the phase-regime assert above already knows how to read
+# (gate_settle_timeout_min in lib.sh). A run with illegible params falls back
+# to the historical default and SAYS SO -- it must never end up waiting on a
+# zero-minute deadline.
+if [ -z "$SETTLE_TIMEOUT_MIN" ]; then
+    settle_params_json="$(kubectl exec deploy/validator -c validator -- pocketd query shared params -o json 2>/dev/null)"
+    settle_session_blocks="$(printf '%s' "$settle_params_json" | jq -r '.params.num_blocks_per_session | tonumber? // empty' 2>/dev/null)"
+    settle_claim_open="$(printf '%s' "$settle_params_json" | jq -r '.params.claim_window_open_offset_blocks | tonumber? // empty' 2>/dev/null)"
+    settle_claim_close="$(printf '%s' "$settle_params_json" | jq -r '.params.claim_window_close_offset_blocks | tonumber? // empty' 2>/dev/null)"
+    settle_proof_open="$(printf '%s' "$settle_params_json" | jq -r '.params.proof_window_open_offset_blocks | tonumber? // empty' 2>/dev/null)"
+    settle_proof_close="$(printf '%s' "$settle_params_json" | jq -r '.params.proof_window_close_offset_blocks | tonumber? // empty' 2>/dev/null)"
+    settle_block_time="$(kubectl get configmap miner-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null |
+        python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; v=c.get("block_time_seconds"); print(v if v is not None else "")' 2>/dev/null || true)"
+    SETTLE_TIMEOUT_MIN="$(gate_settle_timeout_min "$settle_session_blocks" "$settle_claim_open" "$settle_claim_close" \
+        "$settle_proof_open" "$settle_proof_close" "$settle_block_time")"
+    if [ -z "$SETTLE_TIMEOUT_MIN" ]; then
+        printf 'WARNING: could not derive SETTLE_TIMEOUT_MIN from the chain shared params and block_time_seconds -- falling back to the %s-minute default (pass --timeout-min to set it explicitly)\n' \
+            "$SETTLE_TIMEOUT_MIN_DEFAULT" >&2
+        SETTLE_TIMEOUT_MIN="$SETTLE_TIMEOUT_MIN_DEFAULT"
     fi
 fi
 
