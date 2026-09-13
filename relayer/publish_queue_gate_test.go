@@ -131,10 +131,11 @@ func TestGRPCQueueFullRefusesBeforeTheBackend(t *testing.T) {
 // copied at init: set after InitGRPCHandler, the service still sees it.
 func TestGRPCServiceSeesTheProxyQueueGate(t *testing.T) {
 	p := &ProxyServer{
-		logger: testLogger(),
-		config: &Config{Services: map[string]ServiceConfig{"svc": {}}},
+		logger:        testLogger(),
+		config:        &Config{Services: map[string]ServiceConfig{"svc": {}}},
+		relayPipeline: NewRelayPipeline(acceptAnyValidator{}, nil, testLogger()),
 	}
-	p.InitGRPCHandler()
+	require.NoError(t, p.InitGRPCHandler())
 	require.NotNil(t, p.grpcRelayService.publishQueueFull, "InitGRPCHandler must wire the queue gate")
 	require.False(t, p.grpcRelayService.publishQueueFull(), "no gate set admits everything")
 

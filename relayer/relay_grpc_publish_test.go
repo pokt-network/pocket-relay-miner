@@ -109,9 +109,10 @@ func (m *mockServerStream) RecvMsg(msg interface{}) error {
 }
 
 // grpcPublishFixture wires a RelayGRPCService with a real signer, a recording
-// processor and publisher, and a pool that resolves to backendURL. relayPipeline
-// is left nil so ring-signature validation and metering are skipped -- the
-// publish routing under test runs regardless.
+// processor and publisher, a pool that resolves to backendURL, and a relay
+// pipeline whose validator accepts and whose meter is real: the service refuses
+// every relay without one. The request names ownerTestAppAddr, the only app that
+// meter knows, so relays are charged rather than served unmetered.
 type grpcPublishFixture struct {
 	svc       *RelayGRPCService
 	proc      *recordingProcessor
@@ -143,11 +144,14 @@ func newGRPCPublishFixture(t *testing.T, backendURL string) *grpcPublishFixture 
 		"first_healthy(test)",
 	)
 
+	pipeline, _, _ := newOwnerTestPipeline(t)
+
 	svc := NewRelayGRPCService(testLogger(), RelayGRPCServiceConfig{
 		ServiceConfigs: map[string]ServiceConfig{serviceID: {}},
 		ResponseSigner: rs,
 		Publisher:      pub,
 		RelayProcessor: proc,
+		RelayPipeline:  pipeline,
 		GetPool: func(string, string) *pool.Pool {
 			return healthyPool
 		},
@@ -165,7 +169,7 @@ func newGRPCPublishFixture(t *testing.T, backendURL string) *grpcPublishFixture 
 	relayRequest := &servicetypes.RelayRequest{
 		Meta: servicetypes.RelayRequestMetadata{
 			SessionHeader: &sessiontypes.SessionHeader{
-				ApplicationAddress:      "pokt1testapplication",
+				ApplicationAddress:      ownerTestAppAddr,
 				ServiceId:               serviceID,
 				SessionId:               "test-session-id",
 				SessionStartBlockHeight: 100,

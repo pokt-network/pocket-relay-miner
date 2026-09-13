@@ -1056,6 +1056,12 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 			_ = b.closeWithReason(CloseStakeLimitExceeded, "stake limit exceeded", wsCloseInitiatorRelayer)
 			return
 		}
+	} else {
+		// Nothing would validate or charge this frame: refuse it rather than serve it free.
+		relaysRejected.WithLabelValues(b.serviceID, BackendTypeWebSocket, rejectReasonMeteringNotConfigured).Inc()
+		b.logger.Debug().Msg("relay rejected - relay pipeline not configured, closing connection")
+		_ = b.closeWithReason(CloseInternalError, "relayer is not admitting relays right now", wsCloseInitiatorRelayer)
+		return
 	}
 
 	// PAST THIS LINE THE FRAME HAS PASSED ADMISSION, and only now does the

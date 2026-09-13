@@ -1144,10 +1144,15 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	logger.Info().
 		Msg("relay meter initialized and wired")
 
+	// Initialize unified relay pipeline (validation + metering + signing + publishing).
+	// BEFORE the gRPC handler, which copies the pipeline when it is built.
+	if err := proxy.InitializeRelayPipeline(); err != nil {
+		return fmt.Errorf("failed to initialize relay pipeline: %w", err)
+	}
 	// Initialize gRPC handler for gRPC and gRPC-Web requests
-	proxy.InitGRPCHandler()
-	// Initialize unified relay pipeline (validation + metering + signing + publishing)
-	proxy.InitializeRelayPipeline()
+	if err := proxy.InitGRPCHandler(); err != nil {
+		return fmt.Errorf("failed to initialize gRPC handler: %w", err)
+	}
 
 	// Set supplier cache for checking supplier state before accepting relays
 	proxy.SetSupplierCache(supplierCache)

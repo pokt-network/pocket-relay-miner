@@ -286,14 +286,21 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		return s.serveSimulatedGRPC(stream, ctx, relayRequest, serviceID, svcConfig, supplierOperatorAddr, directive.KeyID, md)
 	}
 
-	// Stop admitting while the batch queue is full. It does not depend on the relay
-	// pipeline, which production builds nil for this service today (queue item 231).
+	// Nothing would validate or charge this relay: refuse it rather than serve it free.
+	// Before the queue gate, as in HTTP: a process wired without a pipeline says so.
+	if s.relayPipeline == nil {
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonMeteringNotConfigured).Inc()
+		return status.Error(codes.Internal, "relayer is not admitting relays right now")
+	}
+
+	// Stop admitting while the batch queue is full.
 	if s.publishQueueFull != nil && s.publishQueueFull() {
 		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonPublishQueueFull).Inc()
 		return status.Error(codes.Unavailable, "relayer is not admitting relays right now")
 	}
 
-	// Validate and meter the relay if pipeline is available
+	// The pipeline is non-nil past the guard above; the check stays so the block
+	// reads as its own scope.
 	if s.relayPipeline != nil {
 
 		// Build relay context for validation/metering
@@ -307,6 +314,13 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 
 		// Validate relay request (ring signature + session)
 		if err := s.relayPipeline.ValidateRelay(ctx, relayCtx); err != nil {
+			// A client that left while the relay was being checked is a disconnect, not a
+			// failed check. The stream's context, as in classifyGRPCBackendError: ctx here
+			// also carries this service's own timeout.
+			if stream.Context().Err() != nil {
+				relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonClientDisconnected).Inc()
+				return status.Error(codes.Canceled, "client disconnected")
+			}
 			relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonValidationFailed).Inc()
 			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(err).
@@ -326,6 +340,13 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				Err(meterErr).
 				Msg("relay served unmetered; the miner arbitrates")
 		} else if meterErr != nil {
+			// A client that left while the meter read its store fails that read too, and
+			// the meter reports it as its store being down. Count the disconnect instead,
+			// so meter_error keeps meaning the store.
+			if stream.Context().Err() != nil {
+				relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonClientDisconnected).Inc()
+				return status.Error(codes.Canceled, "client disconnected")
+			}
 			// The meter's own store is unreadable, so what this session has
 			// already consumed is unknown. This is admission: it is refused,
 			// and the message says nothing about which store or why.

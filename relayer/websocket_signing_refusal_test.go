@@ -3,6 +3,7 @@
 package relayer
 
 import (
+	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -49,10 +50,11 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 	backendURL, _, _ := newSimWSBackendServer(t)
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	proc, pub := &recordingProcessor{}, &recordingPublisher{}
+	pipeline, redisClient, _ := newOwnerTestPipeline(t)
 
 	bridge, err := NewWebSocketBridge(
 		logger, relayerConn, backendURL, simWSTestService, supplierAddr, 1,
-		proc, pub, signer, http.Header{}, nil, nil,
+		proc, pub, signer, http.Header{}, nil, pipeline,
 		2*time.Second, false, nil, "", nil,
 	)
 	require.NoError(t, err)
@@ -66,7 +68,7 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 		Payload: []byte(`{"jsonrpc":"2.0","method":"eth_subscribe","params":["newHeads"],"id":1}`),
 		Meta: servicetypes.RelayRequestMetadata{
 			SessionHeader: &sessiontypes.SessionHeader{
-				ApplicationAddress:      otherAddr,
+				ApplicationAddress:      ownerTestAppAddr,
 				ServiceId:               simWSTestService,
 				SessionId:               "sign-refusal",
 				SessionStartBlockHeight: 1,
@@ -98,4 +100,11 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 	require.Equal(t, before+1, testutil.ToFloat64(relaysRejected.WithLabelValues(
 		simWSTestService, "websocket", rejectReasonSigningError)),
 		"the refusal is a per-connection event with a bounded reason, so it is counted")
+
+	// The frame went through the real meter before the backend: a relay served
+	// unmetered would reach the same refusal with no consumed counter at all.
+	consumed, err := redisClient.Get(context.Background(),
+		pipeline.relayMeter.consumedKey("sign-refusal", supplierAddr)).Int64()
+	require.NoError(t, err, "the frame must have been charged by the meter before the backend")
+	require.Positive(t, consumed)
 }

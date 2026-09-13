@@ -2472,15 +2472,14 @@ func (p *ProxyServer) serveSimulatedHTTP(
 // InitializeRelayPipeline initializes the unified relay processing pipeline.
 // This should be called AFTER all dependencies are set (validator, relayMeter, responseSigner, relayProcessor).
 // The pipeline consolidates validation, metering, signing, and publishing logic for all relay protocols.
-func (p *ProxyServer) InitializeRelayPipeline() {
+//
+// A missing dependency is an error, not a warning: without the pipeline the gRPC and
+// WebSocket transports have nothing to validate or charge a relay with, and a
+// relayer that starts anyway refuses every relay on them.
+func (p *ProxyServer) InitializeRelayPipeline() error {
 	if p.validator == nil || p.relayMeter == nil || p.responseSigner == nil || p.relayProcessor == nil {
-		p.logger.Warn().
-			Bool("has_validator", p.validator != nil).
-			Bool("has_meter", p.relayMeter != nil).
-			Bool("has_signer", p.responseSigner != nil).
-			Bool("has_processor", p.relayProcessor != nil).
-			Msg("cannot initialize relay pipeline - missing dependencies")
-		return
+		return fmt.Errorf("cannot initialize relay pipeline: has_validator=%t has_meter=%t has_signer=%t has_processor=%t",
+			p.validator != nil, p.relayMeter != nil, p.responseSigner != nil, p.relayProcessor != nil)
 	}
 
 	p.relayPipeline = NewRelayPipeline(
@@ -2490,11 +2489,18 @@ func (p *ProxyServer) InitializeRelayPipeline() {
 	)
 
 	p.logger.Info().Msg("relay pipeline initialized successfully")
+	return nil
 }
 
 // InitGRPCHandler initializes the gRPC proxy handler for handling gRPC and gRPC-Web requests.
-// This should be called after SetRelayProcessor and SetResponseSigner.
-func (p *ProxyServer) InitGRPCHandler() {
+// It must be called after InitializeRelayPipeline: the service copies the pipeline
+// when it is built, so building it first leaves every gRPC relay without validation
+// or metering. It refuses to build the service without one.
+func (p *ProxyServer) InitGRPCHandler() error {
+	if p.relayPipeline == nil {
+		return fmt.Errorf("cannot initialize gRPC handler: the relay pipeline is not initialized")
+	}
+
 	p.grpcMu.Lock()
 	defer p.grpcMu.Unlock()
 
@@ -2533,6 +2539,7 @@ func (p *ProxyServer) InitGRPCHandler() {
 	)
 
 	p.logger.Info().Msg("gRPC relay service and handlers initialized")
+	return nil
 }
 
 // validateRelayRequest validates the relay request.
