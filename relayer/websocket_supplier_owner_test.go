@@ -18,6 +18,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/transport"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -94,12 +95,25 @@ func newSageShapedBridge(
 	pipeline *RelayPipeline,
 ) *websocket.Conn {
 	t.Helper()
+	return newPublishingSageBridge(t, backendURL, signer, pipeline, &recordingPublisher{})
+}
+
+// newPublishingSageBridge is newSageShapedBridge with the publisher the test
+// observes.
+func newPublishingSageBridge(
+	t *testing.T,
+	backendURL string,
+	signer *ResponseSigner,
+	pipeline *RelayPipeline,
+	publisher transport.MinedRelayPublisher,
+) *websocket.Conn {
+	t.Helper()
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService,
 		"", // sage sends no Pocket-Supplier-Address
 		100,
-		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
+		&recordingProcessor{}, publisher, signer, http.Header{},
 		nil, pipeline, 2*time.Second, false, nil, "", nil,
 	)
 	require.NoError(t, err)
@@ -133,9 +147,10 @@ func sendRelay(t *testing.T, conn *websocket.Conn, req *servicetypes.RelayReques
 
 // readServedResponse reads the signed RelayResponse the bridge writes back, and
 // is the synchronisation point for everything that had to happen first:
-// MeterRelay charges the frame before it is forwarded, and the frame is
-// forwarded before the backend can reply. No sleep, and no poll -- a response on
-// the wire IS the proof the meter ran.
+// MeterRelay checks the frame before it is forwarded, and the frame is forwarded
+// before the backend can reply. No sleep, and no poll -- a response on the wire
+// IS the proof the check ran. It is not the proof the response was charged: that
+// happens after the write, so a test reading charges waits for the publish.
 func readServedResponse(t *testing.T, conn *websocket.Conn) {
 	t.Helper()
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))
@@ -165,13 +180,19 @@ func TestWebSocketMetersAgainstTheSupplierThatOwnsTheConnection(t *testing.T) {
 	supplierA, signerA := newSupplier(t)
 	supplierB, signerB := newSupplier(t)
 
-	connA := newSageShapedBridge(t, backendURL, signerA, pipeline)
+	// The response is charged after it is written, so the charge is waited for on
+	// the publish that follows it, not on the read.
+	publishedA := newPublishSignal()
+	connA := newPublishingSageBridge(t, backendURL, signerA, pipeline, publishedA)
 	sendRelay(t, connA, ownerTestRelay(sessionID, supplierA))
 	readServedResponse(t, connA)
+	publishedA.await(t, 1)
 
-	connB := newSageShapedBridge(t, backendURL, signerB, pipeline)
+	publishedB := newPublishSignal()
+	connB := newPublishingSageBridge(t, backendURL, signerB, pipeline, publishedB)
 	sendRelay(t, connB, ownerTestRelay(sessionID, supplierB))
 	readServedResponse(t, connB)
+	publishedB.await(t, 1)
 	charges.flush()
 
 	// Two suppliers, two budgets. Before the fix this pattern matched ONE key.

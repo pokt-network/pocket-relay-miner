@@ -3,7 +3,6 @@
 package relayer
 
 import (
-	"context"
 	"net/http"
 	"testing"
 	"time"
@@ -63,6 +62,8 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 
 	before := testutil.ToFloat64(relaysRejected.WithLabelValues(
 		simWSTestService, "websocket", rejectReasonSigningError))
+	checked := relayMeterConsumptions.WithLabelValues(simWSTestService, "within_limit")
+	checksBefore := testutil.ToFloat64(checked)
 
 	req := &servicetypes.RelayRequest{
 		Payload: []byte(`{"jsonrpc":"2.0","method":"eth_subscribe","params":["newHeads"],"id":1}`),
@@ -101,11 +102,13 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 		simWSTestService, "websocket", rejectReasonSigningError)),
 		"the refusal is a per-connection event with a bounded reason, so it is counted")
 
-	// The frame went through the real meter before the backend: a relay served
-	// unmetered would reach the same refusal with no consumed counter at all.
+	// The frame went through the real budget check before the backend, and the
+	// response that could not be signed was not charged: the close frame is
+	// written after the message loop returned, so the charge would already be in
+	// the ledger.
+	require.Equal(t, checksBefore+1, testutil.ToFloat64(checked),
+		"the frame must have been checked by the meter before the backend")
 	charges.flush()
-	consumed, err := redisClient.Get(context.Background(),
-		pipeline.relayMeter.consumedKey("sign-refusal", supplierAddr)).Int64()
-	require.NoError(t, err, "the frame must have been charged by the meter before the backend")
-	require.Positive(t, consumed)
+	require.Zero(t, consumedIn(t, redisClient, pipeline.relayMeter.consumedKey("sign-refusal", supplierAddr)),
+		"a response that was never served must not be charged")
 }

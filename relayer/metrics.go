@@ -52,6 +52,23 @@ var (
 		[]string{"service_id", "rpc_type", "status_code"},
 	)
 
+	// relaysServedOverBudget counts relays that were served and charged and left
+	// their session at or over its budget. A WebSocket backend message is charged
+	// after it is served, so the one that reaches the budget is served and then
+	// closes the connection: at most one per connection. It is apart from
+	// relays_rejected_total because the relay WAS served, and apart from
+	// websocket_closes_total because that series does not say whether anything
+	// was served past the budget. reason is a constant.
+	relaysServedOverBudget = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_served_over_budget_total",
+			Help:      "Relays served and charged that left their session at or over its budget",
+		},
+		[]string{"service_id", "rpc_type", "reason"},
+	)
+
 	// backendMissing counts relays that resolved no backend pool for their
 	// requested transport type on a service that exists. Under the strict
 	// backend contract (no cross-transport fallback) this is the signal an

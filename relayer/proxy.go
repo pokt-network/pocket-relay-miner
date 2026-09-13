@@ -117,6 +117,10 @@ const (
 	// dropReasonNoPublisher: mined, but this relayer has no publisher to hand
 	// it to the store.
 	dropReasonNoPublisher = "no_publisher"
+
+	// overBudgetReasonPushAtBudget: a WebSocket backend message, charged after it
+	// was served, left its session at or over the budget.
+	overBudgetReasonPushAtBudget = "push_at_budget"
 )
 
 // defaultGzipMinCompressSize is the fallback minimum response size worth

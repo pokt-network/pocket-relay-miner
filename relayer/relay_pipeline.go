@@ -80,8 +80,8 @@ func (p *RelayPipeline) ValidateRelay(
 	return nil
 }
 
-// MeterRelay checks and consumes relay stake (rate limiting).
-// Returns (allowed, error).
+// MeterRelay checks a relay against its budget without reserving or charging
+// anything. Returns (allowed, error).
 func (p *RelayPipeline) MeterRelay(
 	ctx context.Context,
 	relayCtx *RelayContext,
@@ -100,8 +100,8 @@ func (p *RelayPipeline) MeterRelay(
 	sessionStartHeight := sessionHeader.SessionStartBlockHeight
 	sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
-	// Check and consume relay stake
-	allowed, err := p.relayMeter.CheckAndConsumeRelay(
+	// Check the relay stake, reserving and charging nothing
+	allowed, err := p.relayMeter.CheckBudget(
 		ctx,
 		sessionID,
 		appAddress,
@@ -173,4 +173,21 @@ func (p *RelayPipeline) SettleRelay(reservation Reservation) {
 // ReleaseRelay gives back the reservation of a relay that was not served.
 func (p *RelayPipeline) ReleaseRelay(reservation Reservation) {
 	p.relayMeter.Release(reservation)
+}
+
+// ChargeServedRelay charges a relay served without an admission of its own and
+// reports whether its pair is now at or over the budget.
+func (p *RelayPipeline) ChargeServedRelay(
+	ctx context.Context,
+	sessionID string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+) (bool, error) {
+	return p.relayMeter.ChargeServed(ctx, sessionID, serviceID, supplierAddress, sessionStartHeight)
+}
+
+// DispatcherAlive reports whether a relay served now would be charged.
+func (p *RelayPipeline) DispatcherAlive() bool {
+	return p.relayMeter.DispatcherAlive()
 }

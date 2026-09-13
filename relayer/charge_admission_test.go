@@ -361,25 +361,68 @@ func TestAnOptimisticRelayOverTheBudgetAddsNothingToTheLedger(t *testing.T) {
 	require.Zero(t, inFlightOf(meter, key))
 }
 
-// TestAWebSocketFrameIsChargedOnceHoweverManyMessagesFollow: the WebSocket meter
-// charges each client frame once; the messages the backend pushes after it are
-// not charged here.
-func TestAWebSocketFrameIsChargedOnceHoweverManyMessagesFollow(t *testing.T) {
+// TestAWebSocketChargesEachBackendMessageAndNotTheFrame: a client frame is only
+// checked against the budget. Each message the backend answers it with is a
+// relay and is charged, and a frame the backend never answers costs nothing.
+func TestAWebSocketChargesEachBackendMessageAndNotTheFrame(t *testing.T) {
 	verifyNoBridgeGoroutines(t)
-	const sessionID = "ws-pushes"
 	const pushes = 4
 	pipeline, rc, _, charges := newOwnerTestPipelineWithCharges(t)
+	meter := pipeline.relayMeter
 	supplier, signer := newSupplier(t)
 
-	conn := newSageShapedBridge(t, pushingWSBackend(t, pushes), signer, pipeline)
-	sendRelay(t, conn, ownerTestRelay(sessionID, supplier))
+	answered := newPublishSignal()
+	conn := newPublishingSageBridge(t, pushingWSBackend(t, pushes), signer, pipeline, answered)
+	sendRelay(t, conn, ownerTestRelay("ws-answered", supplier))
 	for i := 0; i < pushes; i++ {
 		readServedResponse(t, conn)
 	}
+	answered.await(t, pushes)
+
+	checked := relayMeterConsumptions.WithLabelValues(simWSTestService, "within_limit")
+	checksBefore := testutil.ToFloat64(checked)
+	silentURL, received := silentWSBackend(t)
+	silent := newSageShapedBridge(t, silentURL, signer, pipeline)
+	sendRelay(t, silent, ownerTestRelay("ws-unanswered", supplier))
+	awaitSignal(t, received, "the unanswered frame reaching the backend")
 	charges.flush()
 
-	require.Equal(t, int64(1), consumedIn(t, rc, rc.KB().MeterConsumedKey(sessionID, supplier)),
-		"one client frame is charged once, however many messages it was answered with")
+	require.Equal(t, int64(pushes), consumedIn(t, rc, rc.KB().MeterConsumedKey("ws-answered", supplier)),
+		"every message the backend answered with is charged, and the frame is not")
+	require.Equal(t, checksBefore+1, testutil.ToFloat64(checked),
+		"premise: the unanswered frame went through the budget check")
+	require.Zero(t, consumedIn(t, rc, rc.KB().MeterConsumedKey("ws-unanswered", supplier)),
+		"a frame the backend never answered costs nothing")
+	require.Zero(t, inFlightOf(meter, meter.consumedKey("ws-unanswered", supplier)),
+		"and holds nothing against the budget")
+}
+
+// TestAChargeWithoutAdmissionDoesNotBringAClearedPairBack: a WebSocket backend
+// message is charged without reading the pair's counter. After the session is
+// cleared it is charged and reported under budget, whatever Redis holds, and the
+// pair stays out of the view.
+func TestAChargeWithoutAdmissionDoesNotBringAClearedPairBack(t *testing.T) {
+	meter, rc := newChargeTestMeter(t, true)
+	newChargeWriter(t, meter, rc)
+	const sessionID = "sess-push-after-clear"
+	ctx := context.Background()
+	key := meter.consumedKey(sessionID, chargeTestSupplier)
+
+	allowed, err := meter.CheckBudget(ctx, sessionID, chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
+	require.NoError(t, err)
+	require.True(t, allowed, "premise: the frame brought the pair into the view")
+	require.NoError(t, meter.ClearSessionMeter(ctx, sessionID, chargeTestSupplier))
+	require.NoError(t, rc.Set(ctx, key, chargeTestCap, time.Hour).Err())
+
+	atBudget, err := meter.ChargeServed(ctx, sessionID, chargeTestService, chargeTestSupplier, 91)
+
+	require.NoError(t, err)
+	require.False(t, atBudget, "a pair outside the view is charged without checking its budget")
+	require.Equal(t, int64(1), meter.ChargeLedger().Pending(key), "the served message is charged")
+	meter.accMu.Lock()
+	_, viewed := meter.seen[key]
+	meter.accMu.Unlock()
+	require.False(t, viewed, "charging must not read the counter back and revive the cleared pair")
 }
 
 // commandCounter counts every command the client sends, inside a pipeline or not.

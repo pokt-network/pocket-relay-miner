@@ -273,7 +273,7 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 //
 // CheckAndConsumeRelay admits a relay and charges it in one step, for the
 // callers that charge as they decide: optimistic HTTP, after the relay was
-// served, and WebSocket, once per client message.
+// served.
 // Returns:
 // - allowed: true if the relay should be served
 // - err: any error that occurred
@@ -322,6 +322,37 @@ func (m *RelayMeter) Admit(
 	sessionEndHeight int64,
 	currentHeight int64,
 ) (Reservation, bool, error) {
+	return m.admit(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionStartHeight, sessionEndHeight, currentHeight, true)
+}
+
+// CheckBudget answers what Admit would, and reserves nothing. A WebSocket client
+// frame is checked this way: the frame itself is not a relay, each backend
+// message that answers it is, and those are charged by ChargeServed.
+func (m *RelayMeter) CheckBudget(
+	ctx context.Context,
+	sessionID string,
+	appAddress string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+	sessionEndHeight int64,
+	currentHeight int64,
+) (bool, error) {
+	_, allowed, err := m.admit(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionStartHeight, sessionEndHeight, currentHeight, false)
+	return allowed, err
+}
+
+func (m *RelayMeter) admit(
+	ctx context.Context,
+	sessionID string,
+	appAddress string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+	sessionEndHeight int64,
+	currentHeight int64,
+	reserve bool,
+) (Reservation, bool, error) {
 	m.mu.RLock()
 	if m.closed {
 		m.mu.RUnlock()
@@ -364,10 +395,14 @@ func (m *RelayMeter) Admit(
 	m.accMu.Lock()
 	total := m.seen[consumedKey] + m.inFlight[consumedKey] + m.ledger.Pending(consumedKey) + relayCostUpokt
 	if total <= maxStakeUpokt {
-		m.inFlight[consumedKey] += relayCostUpokt
+		var reservation Reservation
+		if reserve {
+			m.inFlight[consumedKey] += relayCostUpokt
+			reservation = Reservation{key: consumedKey, supplier: supplierAddress, cost: relayCostUpokt}
+		}
 		m.accMu.Unlock()
 		relayMeterConsumptions.WithLabelValues(serviceID, "within_limit").Inc()
-		return Reservation{key: consumedKey, supplier: supplierAddress, cost: relayCostUpokt}, true, nil
+		return reservation, true, nil
 	}
 	m.accMu.Unlock()
 
@@ -442,6 +477,55 @@ func (m *RelayMeter) releaseLocked(r Reservation) {
 		return
 	}
 	m.inFlight[r.key] = left
+}
+
+// ChargeServed charges a relay that was served without an admission of its own,
+// a backend message on a WebSocket, and reports whether the pair is now at or
+// over its budget, so the caller stops serving it.
+//
+// The pair's counter is NOT read here. A pair outside the view, because its
+// session was cleared, is charged and reported under budget: reading the counter
+// back would bring the cleared pair back into the view. An error means nothing
+// was charged.
+func (m *RelayMeter) ChargeServed(
+	ctx context.Context,
+	sessionID string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+) (atBudget bool, err error) {
+	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		return false, fmt.Errorf("relay meter is closed")
+	}
+	m.mu.RUnlock()
+
+	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
+	if err != nil {
+		return false, err
+	}
+
+	m.localCacheMu.RLock()
+	meta, metaKnown := m.localCache[localCacheKey(sessionID, supplierAddress)]
+	m.localCacheMu.RUnlock()
+
+	consumedKey := m.consumedKey(sessionID, supplierAddress)
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	m.ledger.Add(consumedKey, supplierAddress, relayCostUpokt, m.config.CacheTTL)
+	seen, viewed := m.seen[consumedKey]
+	if !viewed || !metaKnown {
+		return false, nil
+	}
+	total := seen + m.inFlight[consumedKey] + m.ledger.Pending(consumedKey)
+	return total >= meta.MaxStakeUpokt, nil
+}
+
+// DispatcherAlive reports whether a relay served now would be charged: the
+// batch dispatcher that writes charges has reached Redis recently.
+func (m *RelayMeter) DispatcherAlive() bool {
+	return m.dispatcherAlive()
 }
 
 // dispatcherAlive reports whether the batch dispatcher reached Redis recently

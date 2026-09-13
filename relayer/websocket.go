@@ -1110,6 +1110,15 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 // handleBackendMessage handles messages from the backend.
 // Each backend message is billed as part of a relay.
 func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
+	// A message still queued when the bridge closed is neither written nor
+	// charged. closeWithReason only cancels the context, and messageLoop's select
+	// picks at random when both the context and a queued message are ready, so a
+	// connection closed at its budget would otherwise serve and charge what the
+	// backend had already sent.
+	if b.ctx.Err() != nil {
+		return
+	}
+
 	wsMessagesForwarded.WithLabelValues(b.serviceID, "backend_to_gateway").Inc()
 
 	b.logger.Debug().
@@ -1126,6 +1135,18 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 			b.logger.Debug().Err(err).Msg("failed to forward to client (PATH)")
 			_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		}
+		return
+	}
+
+	// This message is about to be served as a relay and charged, and the charge
+	// is written by the batch dispatcher. When that dispatcher has stopped
+	// reaching Redis the charge may never be written, so the connection closes
+	// instead, the answer a client frame gets at admission. A subscription whose
+	// backend sends nothing more stays open, and serves nothing meanwhile.
+	if !b.simulated && !b.relayPipeline.DispatcherAlive() {
+		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonMeterError).Inc()
+		b.logger.Debug().Msg("backend message not served - relay charges are not being written, closing connection")
+		_ = b.closeWithReason(CloseTryAgainLater, "unable to process relay request", wsCloseInitiatorRelayer)
 		return
 	}
 
@@ -1185,14 +1206,54 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 
 	b.logger.Debug().Msg("forwarded signed response to gateway successfully")
 
+	atBudget := b.chargeServedMessage(latestReq)
+
 	// Emit relay for this request/response pair
 	b.emitRelay(latestReq, relayResp, msg.data)
+
+	if atBudget {
+		relaysServedOverBudget.WithLabelValues(b.serviceID, BackendTypeWebSocket, overBudgetReasonPushAtBudget).Inc()
+		b.logger.Debug().
+			Str("session_id", latestReq.Meta.GetSessionHeader().GetSessionId()).
+			Msg("relay served at the session budget - closing connection")
+		_ = b.closeWithReason(CloseStakeLimitExceeded, "stake limit exceeded", wsCloseInitiatorRelayer)
+		return
+	}
 
 	b.logger.Debug().Msg("handleBackendMessage completed - latestRequest preserved for next message")
 
 	// NOTE: latestRequest is NOT cleared here - it's reused for subsequent backend messages
 	// This allows subscription-based APIs (eth_subscribe) to bill for each update
 	// The request will be cleared when the client sends a new request (in handleGatewayMessage)
+}
+
+// chargeServedMessage charges a backend message already written to the client
+// and reports whether its session is now at or over the budget. The client frame
+// that asked for it was only checked against the budget, so each message the
+// backend answers with is a charge, and a frame the backend never answers costs
+// nothing.
+//
+// The message is served whatever this says. A charge that fails is counted as
+// unbilled and left to the miner, like a client frame whose chain query blinked. The context is detached from the bridge's: a close landing
+// between the write and this call must not leave a served relay uncharged.
+func (b *WebSocketBridge) chargeServedMessage(req *servicetypes.RelayRequest) bool {
+	if b.simulated {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(b.ctx), wsPublishTimeout)
+	defer cancel()
+	header := req.Meta.GetSessionHeader()
+	atBudget, err := b.relayPipeline.ChargeServedRelay(ctx,
+		header.GetSessionId(), b.serviceID, b.ownerAddress(), header.GetSessionStartBlockHeight())
+	if err != nil {
+		relayMeterUnbilled.WithLabelValues(b.serviceID).Inc()
+		b.logger.Debug().
+			Err(err).
+			Str("session_id", header.GetSessionId()).
+			Msg("relay served uncharged; the miner arbitrates")
+		return false
+	}
+	return atBudget
 }
 
 // forwardToBackend forwards a raw message to the backend.
@@ -1219,7 +1280,7 @@ func (b *WebSocketBridge) forwardToBackend(msg wsMessage) {
 // emitRelay creates and publishes a mined relay for a request/response pair.
 // This is the billing mechanism - each req/resp pair becomes a relay.
 // wsPublishTimeout bounds the detached mining/WAL-publish work for one
-// websocket relay. It is deliberately NOT grpcPublishTimeout (30s): there the
+// websocket relay, and the charge that precedes it. It is deliberately NOT grpcPublishTimeout (30s): there the
 // budget is per request, here it is per open connection, and at session
 // rollover every open bridge publishes at once -- 30s each would hold N sockets
 // and their goroutines through the whole teardown. Small enough that a slow
