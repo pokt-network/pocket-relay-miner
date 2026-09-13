@@ -57,7 +57,7 @@ func TestBatchingPublisherValidatesAtEnqueue(t *testing.T) {
 			"1412 served relays, and carrying it into a chunk would block the queue's head")
 
 	p.mu.Lock()
-	queued := len(p.queue)
+	queued := len(p.queue) - p.head
 	p.mu.Unlock()
 	require.Zero(t, queued, "nothing invalid may sit in the queue")
 }
@@ -192,7 +192,7 @@ func TestBatchingPublisherKeepsAStreamWhole(t *testing.T) {
 	// start a different stream than the chunk's last entry, or the stream was
 	// split.
 	p.mu.Lock()
-	rest := p.queue
+	rest := p.queue[p.head:]
 	p.mu.Unlock()
 	if len(rest) > 0 {
 		require.NotEqual(t, chunk[len(chunk)-1].stream, rest[0].stream,

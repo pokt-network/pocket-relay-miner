@@ -786,17 +786,51 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Always batched: one MULTI/EXEC per interval instead of one round trip per
 	// relay, which wakes the miner's blocked reader once per batch. Only the
 	// interval is configurable.
+	//
+	// The batches write through a Redis client of their own, so a busy cache or
+	// meter cannot hold the dispatch back on a shared pool: one connection per
+	// dispatch worker, plus one for the heartbeat PING sent while the queue is
+	// empty.
+	batchWorkers := relayer.BatchDispatchWorkersForProcess()
+	batchRedisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
+		URL:                    redisURL,
+		PoolSize:               batchWorkers + 1,
+		MinIdleConns:           batchWorkers + 1,
+		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
+		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		Namespace:              config.Redis.Namespace,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create the batch dispatch Redis client: %w", err)
+	}
+	// Declared before the publisher's deferred Close, so it runs after it: the
+	// final flush writes through this client.
+	defer func() { _ = batchRedisClient.Close() }()
+	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
+		observability.SharedRegistry, "relayer_batch", batchRedisClient,
+	); gaugeErr != nil {
+		return fmt.Errorf("failed to register effective Redis pool gauges for the batch client: %w", gaugeErr)
+	}
+	if eff, ok := batchRedisClient.EffectivePoolOptions(); ok && eff.PoolSize < batchWorkers+1 {
+		return fmt.Errorf(
+			"batch dispatch redis pool too small: the client holds %d connections but %d dispatch workers need %d",
+			eff.PoolSize, batchWorkers, batchWorkers+1)
+	}
+	batchRedisClient.AddHook(redistransport.NewCommandLatencyHook("relayer_batch"))
+	redisPools.Add("batch", batchRedisClient)
+
 	batcher := redistransport.NewBatchingPublisher(
 		logger,
-		redisClient.UniversalClient,     // Embedded go-redis client
-		redisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
+		batchRedisClient.UniversalClient, // the dispatch's own client, not the shared pool
+		redisClient.KB().StreamPrefix(),  // Namespace-aware stream prefix (e.g., "ha:relays")
 		config.Redis.BatchPublishInterval(),
+		redistransport.WithDispatchWorkers(batchWorkers),
 	)
 	var publisher transport.MinedRelayPublisher = batcher
 	logger.Info().Dur("interval", config.Redis.BatchPublishInterval()).Msg("batched relay publishing")
-	// Before the Redis client's own deferred Close (declared earlier, so it runs
-	// after this one): the final flush writes through that client, and closing it
-	// first would lose whatever the batch still held.
+	// Before both Redis clients' deferred Close (declared earlier, so they run
+	// after this one): the final flush writes through the batch client, and
+	// closing it first would lose whatever the batch still held.
 	defer func() { _ = publisher.Close() }()
 
 	// Create health checker

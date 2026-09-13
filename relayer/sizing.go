@@ -92,6 +92,22 @@ func SizingFromMaster(master int) WorkerSizing {
 	return s
 }
 
+// BatchDispatchWorkers is how many workers write the mined-relay batches to Redis
+// at once, derived from the schedulable processors and bounded on both sides.
+// At least two, so one slow write does not stall the whole dispatch. At most
+// eight, because every batch is a MULTI that runs on Redis' single thread: more
+// batches in flight lengthen every other command the relayer and the miner send
+// to the same Redis.
+func BatchDispatchWorkers(procs int) int {
+	return min(max(procs/4, 2), 8)
+}
+
+// BatchDispatchWorkersForProcess is BatchDispatchWorkers for THIS process, read
+// from GOMAXPROCS for the same reason ComputeWorkerSizingForProcess is.
+func BatchDispatchWorkersForProcess() int {
+	return BatchDispatchWorkers(runtime.GOMAXPROCS(0))
+}
+
 // RedisPoolSize is how many Redis connections the relayer's BOUNDED users can
 // need at once.
 //
