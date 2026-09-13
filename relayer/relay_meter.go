@@ -585,6 +585,96 @@ func (m *RelayMeter) chargeWritten(key string, amount, consumed int64) {
 	m.ledger.FinishWrite(key, amount)
 }
 
+// meterWarmupPairsPerRound bounds how many pairs one pipeline reads at startup.
+const meterWarmupPairsPerRound = 100
+
+// WarmFromRedis fills the admission view with the pairs Redis already meters for
+// the suppliers this replica signs for, so the first relay of each after a
+// restart admits from memory instead of reading the pair's meta and consumed
+// counter. It changes speed, not correctness: a pair it misses is read on its
+// first admission, as before.
+//
+// A pair already in the view keeps its value, because the view may have moved
+// past what was read here. A pair whose meta is gone is skipped. A cleanup that
+// lands between the read and the fill leaves that pair in the view as it was
+// read: the memory of one pair, holding a counter no lower than the zero a read
+// after the cleanup would find. It returns how many pairs it added to the view.
+func (m *RelayMeter) WarmFromRedis(ctx context.Context, signsFor func(supplier string) bool) (int, error) {
+	members, err := m.redisClient.SMembers(ctx, m.redisClient.KB().MeterActiveSessionsKey()).Result()
+	if err != nil {
+		return 0, fmt.Errorf("%w: read active meters: %w", ErrMeterStoreUnavailable, err)
+	}
+
+	type pair struct{ sessionID, supplier string }
+	pairs := make([]pair, 0, len(members))
+	for _, member := range members {
+		sessionID, supplier, ok := strings.Cut(member, "|")
+		if !ok || sessionID == "" || supplier == "" || !signsFor(supplier) {
+			continue
+		}
+		pairs = append(pairs, pair{sessionID: sessionID, supplier: supplier})
+	}
+
+	warmed := 0
+	for start := 0; start < len(pairs); start += meterWarmupPairsPerRound {
+		round := pairs[start:min(start+meterWarmupPairsPerRound, len(pairs))]
+		pipe := m.redisClient.Pipeline()
+		metas := make([]*redis.StringCmd, len(round))
+		consumed := make([]*redis.StringCmd, len(round))
+		for i, p := range round {
+			metas[i] = pipe.Get(ctx, m.metaKey(p.sessionID, p.supplier))
+			consumed[i] = pipe.Get(ctx, m.consumedKey(p.sessionID, p.supplier))
+		}
+		// A missing key is a redis.Nil on its own command and is read per pair
+		// below; any other error means the store did not answer.
+		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+			return warmed, fmt.Errorf("%w: read active meters: %w", ErrMeterStoreUnavailable, err)
+		}
+		for i, p := range round {
+			if m.warmPair(p.sessionID, p.supplier, metas[i], consumed[i]) {
+				warmed++
+			}
+		}
+	}
+	return warmed, nil
+}
+
+// warmPair puts one pair read by WarmFromRedis into the view, unless the view
+// already holds it, and reports whether it did.
+func (m *RelayMeter) warmPair(sessionID, supplier string, metaCmd, consumedCmd *redis.StringCmd) bool {
+	metaBytes, err := metaCmd.Bytes()
+	if err != nil {
+		return false
+	}
+	var meta SessionMeterMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return false
+	}
+	consumed, err := consumedCmd.Int64()
+	if errors.Is(err, redis.Nil) {
+		consumed, err = 0, nil
+	}
+	if err != nil {
+		return false
+	}
+
+	cacheKey := localCacheKey(sessionID, supplier)
+	m.localCacheMu.Lock()
+	if _, known := m.localCache[cacheKey]; !known {
+		m.localCache[cacheKey] = &meta
+	}
+	m.localCacheMu.Unlock()
+
+	consumedKey := m.consumedKey(sessionID, supplier)
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	if _, known := m.seen[consumedKey]; known {
+		return false
+	}
+	m.seen[consumedKey] = consumed
+	return true
+}
+
 // CheckRelayHealth is a non-mutating probe of the metering subsystem, used by
 // the simulated-relay path (which must NOT consume stake). It proves two
 // things without writing any state: (1) the service's relay cost is resolvable

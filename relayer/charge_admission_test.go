@@ -41,6 +41,13 @@ const (
 func newChargeTestMeter(t *testing.T, start bool) (*RelayMeter, *redisutil.Client) {
 	t.Helper()
 	redisClient, _ := newTestRedis(t)
+	return newChargeMeterOn(t, redisClient, start), redisClient
+}
+
+// newChargeMeterOn is newChargeTestMeter on a given client, for tests where two
+// meters share one namespace.
+func newChargeMeterOn(t *testing.T, redisClient *redisutil.Client, start bool) *RelayMeter {
+	t.Helper()
 	app := &fakeAppClient{addr: chargeTestApp}
 	app.stakeUpokt.Store(1000)
 	meter := NewRelayMeter(
@@ -57,7 +64,7 @@ func newChargeTestMeter(t *testing.T, start bool) (*RelayMeter, *redisutil.Clien
 		require.NoError(t, meter.Start(context.Background()))
 	}
 	t.Cleanup(func() { _ = meter.Close() })
-	return meter, redisClient
+	return meter
 }
 
 func admitCharge(t *testing.T, meter *RelayMeter, sessionID string) (Reservation, bool) {

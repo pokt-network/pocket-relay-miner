@@ -1149,6 +1149,23 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	logger.Info().
 		Msg("relay meter initialized and wired")
 
+	// Fill the meter's view with the pairs this replica already meters, so the
+	// first relay of each after a restart does not wait on Redis. Speed only: a
+	// pair it misses is read on its first admission, and a failure here does not
+	// stop the relayer, whose admission stays fail-closed without Redis.
+	if config.CacheWarmup.Enabled {
+		const meterWarmupTimeout = 10 * time.Second
+		warmCtx, cancelWarm := context.WithTimeout(ctx, meterWarmupTimeout)
+		warmed, warmErr := relayMeter.WarmFromRedis(warmCtx, responseSigner.HasSigner)
+		cancelWarm()
+		if warmErr != nil {
+			logger.Warn().Err(warmErr).Int("warmed_pairs", warmed).
+				Msg("relay meter warmup incomplete (continuing)")
+		} else {
+			logger.Info().Int("warmed_pairs", warmed).Msg("relay meter warmed from redis")
+		}
+	}
+
 	// Initialize unified relay pipeline (validation + metering + signing + publishing).
 	// BEFORE the gRPC handler, which copies the pipeline when it is built.
 	if err := proxy.InitializeRelayPipeline(); err != nil {
