@@ -65,6 +65,7 @@ func TestHTTPQueueFullRefusesBeforeTheEagerMeterCharges(t *testing.T) {
 	)
 	require.NoError(t, meter.Start(ctx))
 	t.Cleanup(func() { _ = meter.Close() })
+	newChargeWriter(t, meter, meterRedis)
 	f.proxy.SetRelayMeter(meter)
 
 	// Rejects every relay that reaches it, so the control stops right after the
@@ -78,14 +79,14 @@ func TestHTTPQueueFullRefusesBeforeTheEagerMeterCharges(t *testing.T) {
 
 	const sessionID = "sess-publish-queue-full"
 	body := f.buildSignedSimBody(t, f.appAddr, simTestService, sessionID)
-	consumedKey := meter.consumedKey(sessionID, f.supplierAddr)
+	admitted := eagerAdmissions(simTestService)
 	before := queueFullRejections(simTestService, BackendTypeJSONRPC)
 
 	w := f.post(t, body, false)
 
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, "body=%s", w.Body.String())
 	require.Equal(t, before+1, queueFullRejections(simTestService, BackendTypeJSONRPC))
-	require.False(t, keyExists(t, meterRedis, consumedKey), "a relay refused by the queue gate must not be charged")
+	require.Equal(t, admitted, eagerAdmissions(simTestService), "a relay refused by the queue gate must not reach the meter")
 	require.Equal(t, int32(0), validator.calls.Load(), "a refused relay must not reach validation")
 	require.Equal(t, int32(0), backendHits.Load(), "a refused relay must not reach the backend")
 	require.Equal(t, int32(0), f.pub.calls.Load())
@@ -93,11 +94,9 @@ func TestHTTPQueueFullRefusesBeforeTheEagerMeterCharges(t *testing.T) {
 	full.Store(false)
 	w = f.post(t, body, false)
 
-	require.Equal(t, http.StatusForbidden, w.Code, "control: the relay passes the gate, is charged, then fails validation; body=%s", w.Body.String())
+	require.Equal(t, http.StatusForbidden, w.Code, "control: the relay passes the gate, is admitted by the meter, then fails validation; body=%s", w.Body.String())
 	require.Equal(t, int32(1), validator.calls.Load())
-	consumed, err := meterRedis.Get(ctx, consumedKey).Int64()
-	require.NoError(t, err, "control: with the queue drained the same relay must reach the eager meter")
-	require.Positive(t, consumed)
+	require.Equal(t, admitted+1, eagerAdmissions(simTestService), "control: with the queue drained the same relay must reach the eager meter")
 	require.Equal(t, before+1, queueFullRejections(simTestService, BackendTypeJSONRPC), "control: the gate must not count an admitted relay")
 }
 
@@ -183,4 +182,11 @@ func TestWebSocketQueueFullRefusesTheUpgrade(t *testing.T) {
 	_ = resp.Body.Close()
 	require.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
 	require.Equal(t, before+1, queueFullRejections("develop-websocket", BackendTypeWebSocket))
+}
+
+// eagerAdmissions counts the relays the meter admitted within their budget. A
+// relay that fails validation after admission gives its reservation back, so the
+// consumed counter cannot show that it reached the meter; this series can.
+func eagerAdmissions(serviceID string) float64 {
+	return testutil.ToFloat64(relayMeterConsumptions.WithLabelValues(serviceID, "within_limit"))
 }

@@ -299,6 +299,16 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		return status.Error(codes.Unavailable, "relayer is not admitting relays right now")
 	}
 
+	// What the relay holds against its budget between admission and serving. Every
+	// exit that does not serve it gives the reservation back.
+	var reservation Reservation
+	settled := false
+	defer func() {
+		if !settled {
+			s.relayPipeline.ReleaseRelay(reservation)
+		}
+	}()
+
 	// The pipeline is non-nil past the guard above; the check stays so the block
 	// reads as its own scope.
 	if s.relayPipeline != nil {
@@ -329,7 +339,8 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		}
 
 		// Meter relay (check stake before serving)
-		allowed, meterErr := s.relayPipeline.MeterRelay(ctx, relayCtx)
+		res, allowed, meterErr := s.relayPipeline.AdmitRelay(ctx, relayCtx)
+		reservation = res
 		if meterErr != nil && allowed {
 			// The meter could not answer, but not because OUR store was
 			// unreadable -- a chain query it depends on blinked. The relay is
@@ -486,6 +497,10 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonSendError).Inc()
 		return status.Errorf(codes.Internal, "failed to send response: %v", err)
 	}
+
+	// Served: the reservation becomes a charge.
+	s.relayPipeline.SettleRelay(reservation)
+	settled = true
 
 	// SERVED: the client has the response. Counted here and not after the
 	// publish below, for the same reason as every other transport -- a relay

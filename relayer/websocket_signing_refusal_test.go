@@ -50,7 +50,7 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 	backendURL, _, _ := newSimWSBackendServer(t)
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	proc, pub := &recordingProcessor{}, &recordingPublisher{}
-	pipeline, redisClient, _ := newOwnerTestPipeline(t)
+	pipeline, redisClient, _, charges := newOwnerTestPipelineWithCharges(t)
 
 	bridge, err := NewWebSocketBridge(
 		logger, relayerConn, backendURL, simWSTestService, supplierAddr, 1,
@@ -103,6 +103,7 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 
 	// The frame went through the real meter before the backend: a relay served
 	// unmetered would reach the same refusal with no consumed counter at all.
+	charges.flush()
 	consumed, err := redisClient.Get(context.Background(),
 		pipeline.relayMeter.consumedKey("sign-refusal", supplierAddr)).Int64()
 	require.NoError(t, err, "the frame must have been charged by the meter before the backend")

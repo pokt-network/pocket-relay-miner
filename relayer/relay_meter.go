@@ -148,6 +148,18 @@ type RelayMeter struct {
 	localCache   map[string]*SessionMeterMeta
 	localCacheMu sync.RWMutex
 
+	// Admission view, per consumed counter. seen is the counter's value as this
+	// replica last read or wrote it, inFlight is what admitted relays hold until
+	// they are served or released, and the ledger holds what was served and not
+	// written yet. accMu guards seen, inFlight and heartbeat, and it is taken
+	// BEFORE the ledger's lock, never while holding it.
+	ledger    *redisutil.ChargeLedger
+	accMu     sync.Mutex
+	seen      map[string]int64
+	inFlight  map[string]int64
+	heartbeat func() time.Time
+	now       func() time.Time
+
 	// Lifecycle
 	ctx      context.Context
 	cancelFn context.CancelFunc
@@ -173,7 +185,7 @@ func NewRelayMeter(
 		config.CacheTTL = 2 * time.Hour
 	}
 
-	return &RelayMeter{
+	m := &RelayMeter{
 		logger:                logging.ForComponent(logger, logging.ComponentRelayMeter),
 		config:                config,
 		redisClient:           redisClient,
@@ -185,7 +197,32 @@ func NewRelayMeter(
 		serviceCache:          serviceCache,
 		serviceFactorProvider: serviceFactorProvider,
 		localCache:            make(map[string]*SessionMeterMeta),
+		ledger:                redisutil.NewChargeLedger(),
+		seen:                  make(map[string]int64),
+		inFlight:              make(map[string]int64),
+		now:                   time.Now,
 	}
+	m.ledger.OnWritten(m.chargeWritten)
+	return m
+}
+
+// dispatcherHeartbeatMaxAge is how long admission stays open without the batch
+// dispatcher reaching Redis. That dispatcher is what writes served charges, so
+// past this age a relay admitted now may never be charged.
+const dispatcherHeartbeatMaxAge = 3 * time.Second
+
+// ChargeLedger returns the ledger served relays are charged into. The batching
+// publisher writes it to Redis; without that wiring nothing served is charged.
+func (m *RelayMeter) ChargeLedger() *redisutil.ChargeLedger {
+	return m.ledger
+}
+
+// SetDispatcherHeartbeat wires the time the batch dispatcher last reached Redis.
+// Until it is set admission refuses, because nothing would write what is served.
+func (m *RelayMeter) SetDispatcherHeartbeat(lastSuccess func() time.Time) {
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	m.heartbeat = lastSuccess
 }
 
 // SetServiceComputeUnitsProvider wires the session-start CUPR provider so the
@@ -234,8 +271,9 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 // correct, and a RevertRelayConsumption existed here for years without a single
 // caller because the case it was written for does not exist.
 //
-// CheckAndConsumeRelay checks if a relay can be served and consumes stake if so.
-// Uses atomic Redis INCRBY for distributed state.
+// CheckAndConsumeRelay admits a relay and charges it in one step, for the
+// callers that charge as they decide: optimistic HTTP, after the relay was
+// served, and WebSocket, once per client message.
 // Returns:
 // - allowed: true if the relay should be served
 // - err: any error that occurred
@@ -249,46 +287,89 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	sessionEndHeight int64,
 	currentHeight int64,
 ) (allowed bool, err error) {
+	reservation, allowed, err := m.Admit(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionStartHeight, sessionEndHeight, currentHeight)
+	if err != nil || !allowed {
+		return allowed, err
+	}
+	m.Settle(reservation)
+	return true, nil
+}
+
+// Reservation is the cost an admitted relay holds against its pair's budget
+// until the relay is served (Settle) or not (Release). The zero value holds
+// nothing, so releasing or settling it is a no-op.
+type Reservation struct {
+	key      string
+	supplier string
+	cost     int64
+}
+
+// Admit decides whether a relay may be served and, if so, reserves its cost
+// against the (session, supplier) budget. The caller must Settle the
+// reservation once the relay is served and Release it on every other exit.
+//
+// A pair is admitted while its counter as last seen, plus what admitted relays
+// hold, plus what was served and not written yet, plus this relay's cost, fits
+// the budget. Nothing is written here: the batch dispatcher writes what Settle
+// hands to the ledger.
+func (m *RelayMeter) Admit(
+	ctx context.Context,
+	sessionID string,
+	appAddress string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+	sessionEndHeight int64,
+	currentHeight int64,
+) (Reservation, bool, error) {
 	m.mu.RLock()
 	if m.closed {
 		m.mu.RUnlock()
-		return false, fmt.Errorf("relay meter is closed")
+		return Reservation{}, false, fmt.Errorf("relay meter is closed")
 	}
 	m.mu.RUnlock()
 
-	// Get relay cost first
+	if !m.dispatcherAlive() {
+		allowed, meterErr := m.handleMeterError("dispatcher heartbeat",
+			fmt.Errorf("%w: batch dispatcher has not reached redis within %s", ErrMeterStoreUnavailable, dispatcherHeartbeatMaxAge))
+		return Reservation{}, allowed, meterErr
+	}
+
 	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldServiceID, serviceID).
 			Msg("failed to get relay cost")
-		return m.handleMeterError("get relay cost", err)
+		allowed, meterErr := m.handleMeterError("get relay cost", err)
+		return Reservation{}, allowed, meterErr
 	}
 
-	// Get or create session meter
 	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight, currentHeight)
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
-		return m.handleMeterError("get session meter", err)
+		allowed, meterErr := m.handleMeterError("get session meter", err)
+		return Reservation{}, allowed, meterErr
 	}
 
-	// Atomically increment consumed stake in Redis. Key is
-	// per-(session, supplier) so a second supplier serving the same
+	// Per-(session, supplier) key, so a second supplier serving the same
 	// session does not inherit the first supplier's consumed amount.
 	consumedKey := m.consumedKey(sessionID, supplierAddress)
-	newConsumed, err := m.redisClient.IncrBy(ctx, consumedKey, relayCostUpokt).Result()
-	if err != nil {
+	if err := m.loadSeen(ctx, consumedKey); err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
-			Msg("failed to increment consumed stake")
-		return m.handleMeterError("increment consumed", fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err))
+			Msg("failed to read consumed stake")
+		allowed, meterErr := m.handleMeterError("read consumed", err)
+		return Reservation{}, allowed, meterErr
 	}
 
-	// Check if within limits
-	if newConsumed <= maxStakeUpokt {
-		// Within limits
+	m.accMu.Lock()
+	total := m.seen[consumedKey] + m.inFlight[consumedKey] + m.ledger.Pending(consumedKey) + relayCostUpokt
+	if total <= maxStakeUpokt {
+		m.inFlight[consumedKey] += relayCostUpokt
+		m.accMu.Unlock()
 		relayMeterConsumptions.WithLabelValues(serviceID, "within_limit").Inc()
-		return true, nil
+		return Reservation{key: consumedKey, supplier: supplierAddress, cost: relayCostUpokt}, true, nil
 	}
+	m.accMu.Unlock()
 
 	// Over the limit - reject the relay
 	relayMeterConsumptions.WithLabelValues(serviceID, "over_limit").Inc()
@@ -320,17 +401,99 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 			Str(logging.FieldServiceID, serviceID).
 			Str(logging.FieldSessionID, sessionID).
 			Int64("session_end_height", sessionEndHeight).
-			Int64("consumed_upokt", newConsumed).
+			Int64("consumed_upokt", total).
 			Int64("max_stake_upokt", maxStakeUpokt).
 			Int64("app_stake_upokt", appStakeUpokt).
 			Int64("app_min_stake_upokt", minStakeUpokt).
 			Uint64("num_suppliers_in_session", numSuppliers)
 	}).Msg("session relay limit reached: this supplier's claimable portion for the session is fully consumed")
 
-	// Revert the increment since we're rejecting
-	m.redisClient.DecrBy(ctx, consumedKey, relayCostUpokt)
+	return Reservation{}, false, nil
+}
 
-	return false, nil
+// Settle charges a served relay: its reservation moves into the ledger, which
+// the batch dispatcher writes to the pair's counter.
+func (m *RelayMeter) Settle(r Reservation) {
+	if r.cost == 0 {
+		return
+	}
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	m.releaseLocked(r)
+	m.ledger.Add(r.key, r.supplier, r.cost, m.config.CacheTTL)
+}
+
+// Release returns the reservation of a relay that was admitted and then not
+// served. It is not a refund for a served relay; see the note above
+// CheckAndConsumeRelay.
+func (m *RelayMeter) Release(r Reservation) {
+	if r.cost == 0 {
+		return
+	}
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	m.releaseLocked(r)
+}
+
+func (m *RelayMeter) releaseLocked(r Reservation) {
+	left := m.inFlight[r.key] - r.cost
+	if left <= 0 {
+		delete(m.inFlight, r.key)
+		return
+	}
+	m.inFlight[r.key] = left
+}
+
+// dispatcherAlive reports whether the batch dispatcher reached Redis recently
+// enough for a relay admitted now to be charged.
+func (m *RelayMeter) dispatcherAlive() bool {
+	m.accMu.Lock()
+	lastSuccess := m.heartbeat
+	m.accMu.Unlock()
+	if lastSuccess == nil {
+		return false
+	}
+	return m.now().Sub(lastSuccess()) <= dispatcherHeartbeatMaxAge
+}
+
+// loadSeen reads the pair's consumed counter the first time this replica sees
+// the pair. The read is synchronous: admitting before it would start the pair at
+// zero and let it spend again what another replica, or this one before a
+// restart, already charged.
+func (m *RelayMeter) loadSeen(ctx context.Context, key string) error {
+	m.accMu.Lock()
+	_, known := m.seen[key]
+	m.accMu.Unlock()
+	if known {
+		return nil
+	}
+
+	consumed, err := m.redisClient.Get(ctx, key).Int64()
+	if errors.Is(err, redis.Nil) {
+		consumed, err = 0, nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err)
+	}
+
+	m.accMu.Lock()
+	if _, known := m.seen[key]; !known {
+		m.seen[key] = consumed
+	}
+	m.accMu.Unlock()
+	return nil
+}
+
+// chargeWritten is the ledger's report of a written charge. The counter's new
+// value replaces the view only while the pair is still viewed, so a write that
+// lands after ClearSessionMeter does not bring the pair back.
+func (m *RelayMeter) chargeWritten(key string, amount, consumed int64) {
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	if _, viewed := m.seen[key]; viewed {
+		m.seen[key] = consumed
+	}
+	m.ledger.FinishWrite(key, amount)
 }
 
 // CheckRelayHealth is a non-mutating probe of the metering subsystem, used by
@@ -379,6 +542,13 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 	delete(m.localCache, cacheKey)
 	m.localCacheMu.Unlock()
 
+	consumedKey := m.consumedKey(sessionID, supplierAddress)
+	m.accMu.Lock()
+	delete(m.seen, consumedKey)
+	delete(m.inFlight, consumedKey)
+	m.ledger.Drop(consumedKey)
+	m.accMu.Unlock()
+
 	// Remove from active sessions tracking set
 	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
 	if err := m.redisClient.SRem(ctx, activeKey, cacheKey).Err(); err != nil {
@@ -391,7 +561,7 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 	// Delete from Redis (shared L2 cache)
 	keys := []string{
 		m.metaKey(sessionID, supplierAddress),
-		m.consumedKey(sessionID, supplierAddress),
+		consumedKey,
 	}
 
 	if err := m.redisClient.Del(ctx, keys...).Err(); err != nil {
@@ -541,9 +711,9 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 		return m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight, currentHeight)
 	}
 
-	// Initialize consumed counter
-	consumedKey := m.consumedKey(sessionID, supplierAddress)
-	m.redisClient.Set(ctx, consumedKey, 0, m.config.CacheTTL)
+	// The consumed counter is NOT initialized here. A meta can be recreated while
+	// the counter still holds what was charged, and zeroing it would let the pair
+	// spend that again; the first charge creates the counter with its TTL.
 
 	// Track in active sessions set (O(1) counting via SCARD). Use the
 	// per-(session, supplier) cache key so SCARD reflects the number of

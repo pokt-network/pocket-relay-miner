@@ -1429,9 +1429,10 @@ func (r RedisConfig) BatchPublishInterval() time.Duration {
 }
 
 // DefaultBatchMaxQueuedMiB is the batch queue bound used when the config leaves
-// redis.batch_max_queued_mib at 0 or omits it. Sized as about 3 s of a 1000 rps
-// relayer at 100 KB per relay (~300 MB), so it trips only on a Redis that is up and
-// slow for a sustained period.
+// redis.batch_max_queued_mib at 0 or omits it. The dispatcher's heartbeat closes
+// admission after 3 s without Redis answering, so an outage alone fits: a 1000 rps
+// relayer for 3 s at 100 KB per relay is about 300 MB. The bound trips only on a
+// Redis that is up and slow for a sustained period.
 const DefaultBatchMaxQueuedMiB = 512
 
 // BatchMaxQueuedBytes is the effective queue bound in bytes: BatchMaxQueuedMiB, or

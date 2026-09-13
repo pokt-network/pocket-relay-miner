@@ -40,10 +40,18 @@ func (acceptAnyValidator) SetCurrentBlockHeight(int64)  {}
 const ownerTestAppAddr = "pokt1app"
 
 // newOwnerTestPipeline wires a RelayPipeline whose meter is real and backed by
-// the test Redis, so the KEY the meter writes is observable. Everything the
+// the test Redis, so the KEY its charges land on is observable. Everything the
 // meter needs from the chain is faked; the app has enough stake that the budget
 // never runs out inside a test.
 func newOwnerTestPipeline(t *testing.T) (*RelayPipeline, *redisutil.Client, string) {
+	t.Helper()
+	pipeline, redisClient, prefix, _ := newOwnerTestPipelineWithCharges(t)
+	return pipeline, redisClient, prefix
+}
+
+// newOwnerTestPipelineWithCharges is newOwnerTestPipeline plus the writer that
+// puts the meter's served charges in Redis, for the tests that read them.
+func newOwnerTestPipelineWithCharges(t *testing.T) (*RelayPipeline, *redisutil.Client, string, *chargeWriter) {
 	t.Helper()
 	logger := testLogger()
 	redisClient, prefix := newTestRedis(t)
@@ -61,8 +69,9 @@ func newOwnerTestPipeline(t *testing.T) (*RelayPipeline, *redisutil.Client, stri
 	)
 	require.NoError(t, meter.Start(context.Background()))
 	t.Cleanup(func() { _ = meter.Close() })
+	charges := newChargeWriter(t, meter, redisClient)
 
-	return NewRelayPipeline(acceptAnyValidator{}, meter, logger), redisClient, prefix
+	return NewRelayPipeline(acceptAnyValidator{}, meter, logger), redisClient, prefix, charges
 }
 
 // newSupplier returns a fresh supplier address and a signer that holds its key.
@@ -124,7 +133,7 @@ func sendRelay(t *testing.T, conn *websocket.Conn, req *servicetypes.RelayReques
 
 // readServedResponse reads the signed RelayResponse the bridge writes back, and
 // is the synchronisation point for everything that had to happen first:
-// MeterRelay writes its counter before the frame is forwarded, and the frame is
+// MeterRelay charges the frame before it is forwarded, and the frame is
 // forwarded before the backend can reply. No sleep, and no poll -- a response on
 // the wire IS the proof the meter ran.
 func readServedResponse(t *testing.T, conn *websocket.Conn) {
@@ -150,7 +159,7 @@ func readServedResponse(t *testing.T, conn *websocket.Conn) {
 func TestWebSocketMetersAgainstTheSupplierThatOwnsTheConnection(t *testing.T) {
 	verifyNoBridgeGoroutines(t)
 	const sessionID = "owner-metering"
-	pipeline, rc, prefix := newOwnerTestPipeline(t)
+	pipeline, rc, prefix, charges := newOwnerTestPipelineWithCharges(t)
 	backendURL, _, _ := newSimWSBackendServer(t)
 
 	supplierA, signerA := newSupplier(t)
@@ -163,6 +172,7 @@ func TestWebSocketMetersAgainstTheSupplierThatOwnsTheConnection(t *testing.T) {
 	connB := newSageShapedBridge(t, backendURL, signerB, pipeline)
 	sendRelay(t, connB, ownerTestRelay(sessionID, supplierB))
 	readServedResponse(t, connB)
+	charges.flush()
 
 	// Two suppliers, two budgets. Before the fix this pattern matched ONE key.
 	keys, err := rc.Keys(context.Background(), prefix+":meter:"+sessionID+":*:consumed").Result()

@@ -53,6 +53,21 @@ var (
 		[]string{"supplier_addr", "service_id"},
 	)
 
+	// chargeWriteFailures counts consumed-counter writes that did not land as
+	// intended. reason is bounded: exec_unknown (the EXEC's outcome never came back;
+	// the charge is dropped rather than risk billing twice), attempts_exhausted
+	// (Redis kept refusing the INCRBY; the charge is dropped), expire_failed (the
+	// INCRBY landed and its EXPIRE NX did not).
+	chargeWriteFailures = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "charge_write_failures_total",
+			Help:      "Consumed-counter writes that did not land as intended, by bounded reason",
+		},
+		[]string{"reason"},
+	)
+
 	// Consumer metrics
 
 	consumedTotal = observability.SharedFactory.NewCounterVec(

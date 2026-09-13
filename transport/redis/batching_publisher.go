@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -71,6 +72,14 @@ type BatchingPublisher struct {
 	queue  []queued
 	bytes  int
 	closed bool
+	// ledger holds the served cost written with the XADDs; nil writes none.
+	ledger *ChargeLedger
+
+	// lastSuccess is the UnixNano of the last round trip Redis answered: a PING
+	// on the heartbeat tick or an EXEC. Admission reads it to stop when the
+	// dispatcher can no longer write.
+	lastSuccess atomic.Int64
+	now         func() time.Time
 
 	// stop ends the dispatch loop; done reports that it has ended.
 	stop context.CancelFunc
@@ -102,7 +111,9 @@ func NewBatchingPublisher(
 		interval:     interval,
 		stop:         stop,
 		done:         make(chan struct{}),
+		now:          time.Now,
 	}
+	p.markSuccess()
 	go logging.RecoverGoRoutine(p.logger, "batching_publisher_dispatch", func(c context.Context) {
 		defer close(p.done)
 		p.run(c)
@@ -162,16 +173,51 @@ func approxBytes(args *redis.XAddArgs) int {
 	return 0
 }
 
+// heartbeatInterval is how often the dispatcher proves Redis answers it. Fixed
+// and independent of the batch interval: admission closes after a few of these
+// without an answer, and tying it to a 10 s batch interval would keep serving
+// blind for 30 s.
+const heartbeatInterval = time.Second
+
+// SetChargeLedger makes every dispatch write the ledger's charges alongside the
+// XADDs.
+func (p *BatchingPublisher) SetChargeLedger(ledger *ChargeLedger) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.ledger = ledger
+}
+
+// LastSuccess is when Redis last answered the dispatcher.
+func (p *BatchingPublisher) LastSuccess() time.Time {
+	return time.Unix(0, p.lastSuccess.Load())
+}
+
+func (p *BatchingPublisher) markSuccess() {
+	p.lastSuccess.Store(p.now().UnixNano())
+}
+
+// heartbeat marks success when Redis answers a PING. It runs on the dispatcher's
+// goroutine, so a dispatch stuck on a slow Redis also stops the marks.
+func (p *BatchingPublisher) heartbeat(ctx context.Context) {
+	if err := p.client.Ping(ctx).Err(); err == nil {
+		p.markSuccess()
+	}
+}
+
 // run dispatches on a fixed interval until ctx ends, then flushes what is left.
 func (p *BatchingPublisher) run(ctx context.Context) {
 	ticker := time.NewTicker(p.interval)
 	defer ticker.Stop()
+	beat := time.NewTicker(heartbeatInterval)
+	defer beat.Stop()
 
 	for {
 		select {
 		case <-ctx.Done():
 			p.finalFlush()
 			return
+		case <-beat.C:
+			p.heartbeat(ctx)
 		case <-ticker.C:
 			p.dispatchAll(ctx)
 		}
@@ -197,14 +243,35 @@ func (p *BatchingPublisher) finalFlush() {
 // of being too long is a slower shutdown.
 const finalFlushTimeout = 30 * time.Second
 
-// dispatchAll writes every queued relay, one chunk per round trip.
+// dispatchAll writes every queued relay and every pending charge, one chunk per
+// round trip.
+//
+// A charge rides in the first chunk that carries XADDs of its supplier and has
+// room for its two commands; what does not fit, or whose supplier mined nothing
+// this tick, goes in chunks of charges alone at the end. A charge's INCRBY and
+// EXPIRE NX are never split across two EXECs.
 func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
+	p.mu.Lock()
+	ledger := p.ledger
+	p.mu.Unlock()
+	var charges chargesBySupplier
+	if ledger != nil {
+		charges = groupCharges(ledger.takeAll())
+	}
+	// Charges taken and never sent go back when the tick stops early.
+	defer func() {
+		for _, c := range charges.rest() {
+			ledger.untake(c)
+		}
+	}()
+
 	for {
 		chunk := p.takeChunk()
 		if len(chunk) == 0 {
-			return
+			break
 		}
-		retry, discard, err := p.writeChunk(ctx, chunk)
+		attached := charges.attach(chunk, maxChunkCommands-len(chunk))
+		retry, discard, err := p.writeChunk(ctx, chunk, attached, ledger)
 		for _, q := range discard {
 			p.recordDiscard(ctx, q, err)
 		}
@@ -232,6 +299,80 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 			return
 		}
 	}
+
+	for {
+		part := charges.take(maxChunkCommands / 2)
+		if len(part) == 0 {
+			return
+		}
+		if _, _, err := p.writeChunk(ctx, nil, part, ledger); err != nil {
+			p.logger.Warn().Err(err).Int("charges", len(part)).
+				Msg("charge dispatch failed; the charges not sent stay pending")
+			return
+		}
+	}
+}
+
+// chargesBySupplier keeps charges grouped by the supplier whose stream they
+// prefer, in the order suppliers were first seen.
+type chargesBySupplier struct {
+	order []string
+	by    map[string][]Charge
+}
+
+func groupCharges(all []Charge) chargesBySupplier {
+	g := chargesBySupplier{by: make(map[string][]Charge)}
+	for _, c := range all {
+		if _, seen := g.by[c.Supplier]; !seen {
+			g.order = append(g.order, c.Supplier)
+		}
+		g.by[c.Supplier] = append(g.by[c.Supplier], c)
+	}
+	return g
+}
+
+// attach removes and returns the charges of the chunk's suppliers that fit in
+// room commands, two per charge.
+func (g *chargesBySupplier) attach(chunk []queued, room int) []Charge {
+	var out []Charge
+	for _, q := range chunk {
+		for room >= 2 && len(g.by[q.supplier]) > 0 {
+			out = append(out, g.by[q.supplier][0])
+			g.by[q.supplier] = g.by[q.supplier][1:]
+			room -= 2
+		}
+		if room < 2 {
+			break
+		}
+	}
+	return out
+}
+
+// take removes and returns up to n charges, whatever their supplier.
+func (g *chargesBySupplier) take(n int) []Charge {
+	var out []Charge
+	for _, s := range g.order {
+		for len(out) < n && len(g.by[s]) > 0 {
+			out = append(out, g.by[s][0])
+			g.by[s] = g.by[s][1:]
+		}
+	}
+	return out
+}
+
+func (g *chargesBySupplier) rest() []Charge {
+	return g.take(int(^uint(0) >> 1))
+}
+
+// transportFailure reports an error that did not come back from Redis, so the
+// command's outcome is unknown. go-redis stamps a pipeline's transport error on
+// every command in it; an error Redis returned for one command is a redis.Error.
+func transportFailure(err error) bool {
+	if err == nil || errors.Is(err, redis.Nil) {
+		return false
+	}
+	var redisErr redis.Error
+	return !errors.As(err, &redisErr)
 }
 
 // takeChunk removes the next chunk from the queue, WITHOUT splitting a stream
@@ -320,16 +461,54 @@ func (p *BatchingPublisher) requeueFront(chunk []queued) {
 // XADD inside it failed -- a WRONGTYPE on one stream does not abort the rest --
 // so trusting the EXEC's error alone would report a chunk as written while some
 // of its relays never landed.
-func (p *BatchingPublisher) writeChunk(ctx context.Context, chunk []queued) (retry, discard []queued, err error) {
+func (p *BatchingPublisher) writeChunk(ctx context.Context, chunk []queued, charges []Charge, ledger *ChargeLedger) (retry, discard []queued, err error) {
 	cmds := make([]*redis.StringCmd, len(chunk))
+	incrs := make([]*redis.IntCmd, len(charges))
+	expires := make([]*redis.BoolCmd, len(charges))
 	// The pipeline's own error is deliberately discarded; the paragraph below
 	// says why it cannot be used to decide anything here.
 	_, _ = p.client.TxPipelined(ctx, func(pipe redis.Pipeliner) error {
 		for i, q := range chunk {
 			cmds[i] = pipe.XAdd(ctx, q.args)
 		}
+		for i, c := range charges {
+			incrs[i] = pipe.IncrBy(ctx, c.Key, c.Amount)
+			expires[i] = pipe.ExpireNX(ctx, c.Key, c.TTL)
+		}
 		return nil
 	})
+
+	answered := false
+	for _, cmd := range cmds {
+		answered = answered || !transportFailure(cmd.Err())
+	}
+	for i, c := range charges {
+		incrErr := incrs[i].Err()
+		switch {
+		case incrErr == nil:
+			answered = true
+			if expErr := expires[i].Err(); expErr != nil {
+				chargeWriteFailures.WithLabelValues("expire_failed").Inc()
+			}
+			ledger.commit(c, incrs[i].Val())
+		case transportFailure(incrErr):
+			chargeWriteFailures.WithLabelValues("exec_unknown").Inc()
+			ledger.forget(c)
+			if err == nil {
+				err = fmt.Errorf("INCRBY %s: %w", c.Key, incrErr)
+			}
+		default:
+			answered = true
+			if !ledger.retry(c) {
+				chargeWriteFailures.WithLabelValues("attempts_exhausted").Inc()
+				p.logger.Warn().Err(incrErr).Str("key", c.Key).
+					Msg("consumed counter refused every INCRBY; its charge is dropped")
+			}
+		}
+	}
+	if answered {
+		p.markSuccess()
+	}
 
 	// Everything is decided per COMMAND, including a failure of the EXEC itself:
 	// when the pipeline fails at transport level, go-redis stamps that error onto
@@ -347,7 +526,7 @@ func (p *BatchingPublisher) writeChunk(ctx context.Context, chunk []queued) (ret
 	// it writes twice. That is the at-least-once edge of writing over a network,
 	// declared rather than solved.
 
-	var firstErr error
+	firstErr := err
 	for i, cmd := range cmds {
 		cmdErr := cmd.Err()
 		if cmdErr == nil || errors.Is(cmdErr, redis.Nil) {

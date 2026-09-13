@@ -135,3 +135,42 @@ func (p *RelayPipeline) MeterRelay(
 
 	return allowed, nil
 }
+
+// AdmitRelay reserves a relay's cost before it is served. The caller must
+// SettleRelay the reservation once the relay is served and ReleaseRelay it on
+// every other exit. Errors carry the same allowed as MeterRelay.
+func (p *RelayPipeline) AdmitRelay(
+	ctx context.Context,
+	relayCtx *RelayContext,
+) (Reservation, bool, error) {
+	sessionHeader := relayCtx.Request.Meta.SessionHeader
+	reservation, allowed, err := p.relayMeter.Admit(
+		ctx,
+		sessionHeader.SessionId,
+		sessionHeader.ApplicationAddress,
+		relayCtx.ServiceID,
+		relayCtx.SupplierAddress,
+		sessionHeader.SessionStartBlockHeight,
+		sessionHeader.SessionEndBlockHeight,
+		relayCtx.ArrivalBlockHeight,
+	)
+	if err != nil {
+		p.logger.Debug().
+			Err(err).
+			Str("service_id", relayCtx.ServiceID).
+			Str("session_id", relayCtx.SessionID).
+			Msg("relay metering failed")
+		return reservation, allowed, fmt.Errorf("metering failed: %w", err)
+	}
+	return reservation, allowed, nil
+}
+
+// SettleRelay charges a served relay's reservation.
+func (p *RelayPipeline) SettleRelay(reservation Reservation) {
+	p.relayMeter.Settle(reservation)
+}
+
+// ReleaseRelay gives back the reservation of a relay that was not served.
+func (p *RelayPipeline) ReleaseRelay(reservation Reservation) {
+	p.relayMeter.Release(reservation)
+}

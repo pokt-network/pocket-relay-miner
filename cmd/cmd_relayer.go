@@ -1141,6 +1141,11 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = relayMeter.Close() }()
 
 	proxy.SetRelayMeter(relayMeter)
+	// Served relays are charged by the batch dispatcher, and admission closes when
+	// that dispatcher stops reaching Redis. Both come from the concrete batcher,
+	// and until they are wired the meter refuses every relay.
+	batcher.SetChargeLedger(relayMeter.ChargeLedger())
+	relayMeter.SetDispatcherHeartbeat(batcher.LastSuccess)
 	logger.Info().
 		Msg("relay meter initialized and wired")
 

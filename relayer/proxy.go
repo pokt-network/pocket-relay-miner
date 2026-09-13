@@ -1060,6 +1060,17 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// What an eager relay holds against its budget between admission and serving.
+	// Every exit that does not serve it gives the reservation back; serving it
+	// turns it into a charge.
+	var reservation Reservation
+	settled := false
+	defer func() {
+		if !settled {
+			p.relayMeter.Release(reservation)
+		}
+	}()
+
 	// For eager validation, validate before forwarding
 	if validationMode == ValidationModeEager {
 		// Set when the meter could not answer for a reason that still allows
@@ -1076,7 +1087,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 			meterStart := time.Now()
-			allowed, meterErr := p.relayMeter.CheckAndConsumeRelay(
+			res, allowed, meterErr := p.relayMeter.Admit(
 				r.Context(),
 				sessionID,
 				appAddress,
@@ -1086,6 +1097,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				sessionEndHeight,
 				arrivalBlockHeight,
 			)
+			reservation = res
 			meterDuration := time.Since(meterStart)
 
 			// Record relay meter latency asynchronously
@@ -1343,6 +1355,11 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			Bool("compressed", len(responseData) != len(signedResponseBz)).
 			Msg("sent signed relay response")
 	}
+
+	// Served: the eager reservation becomes a charge. Optimistic holds none; it is
+	// charged by its own meter call after the response.
+	p.relayMeter.Settle(reservation)
+	settled = true
 
 	// ALWAYS increment relaysServed when we send a response to the client
 	// Use actual backend status code (200, 400, etc.) for visibility into backend behavior
