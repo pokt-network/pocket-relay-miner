@@ -331,7 +331,11 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 				relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonClientDisconnected).Inc()
 				return status.Error(codes.Canceled, "client disconnected")
 			}
-			relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonValidationFailed).Inc()
+			reason := rejectReasonValidationFailed
+			if errors.Is(err, ErrSessionExpired) {
+				reason = rejectReasonSessionExpired
+			}
+			relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, reason).Inc()
 			logging.WithSessionContext(s.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("relay validation failed")

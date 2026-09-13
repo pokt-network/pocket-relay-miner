@@ -2,6 +2,7 @@ package relayer
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -14,6 +15,12 @@ import (
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
+// ErrSessionExpired is returned by getTargetSessionBlockHeight when a relay
+// arrives after its session's grace period has elapsed. Wrapped with %w up to
+// the transport-level rejection classifier, so it can be told apart from a
+// generic validation failure without matching on error text.
+var ErrSessionExpired = errors.New("session expired")
+
 // RelayValidator is responsible for validating relay requests.
 // It verifies ring signatures and session validity using cached data
 // to minimize on-chain queries.
@@ -21,10 +28,6 @@ type RelayValidator interface {
 	// ValidateRelayRequest validates a relay request.
 	// Returns nil if the request is valid, or an error describing the validation failure.
 	ValidateRelayRequest(ctx context.Context, relayRequest *servicetypes.RelayRequest) error
-
-	// CheckRewardEligibility checks if a relay is still eligible for rewards.
-	// Returns nil if eligible, or an error if the relay is past the claim window.
-	CheckRewardEligibility(ctx context.Context, relayRequest *servicetypes.RelayRequest) error
 
 	// GetCurrentBlockHeight returns the current block height used for validation.
 	GetCurrentBlockHeight() int64
@@ -287,100 +290,6 @@ func compareSessionHeaders(onchainSessionHeader, requestSessionHeader *sessionty
 	return nil
 }
 
-// CheckRewardEligibility checks if a relay is still eligible for rewards.
-// Returns nil if eligible, or an error if the relay is past the acceptance deadline.
-//
-// CRITICAL TIMING: Relays must be rejected 1 block BEFORE grace period ends to allow
-// processing time (validation → Redis publish → miner consume → SMST insert).
-// The grace period is a PROCESSING BUFFER, not extended acceptance time.
-func (rv *relayValidator) CheckRewardEligibility(
-	ctx context.Context,
-	relayRequest *servicetypes.RelayRequest,
-) error {
-	currentHeight := rv.GetCurrentBlockHeight()
-	if currentHeight == 0 {
-		// If we don't have block height info, assume it's eligible
-		return nil
-	}
-
-	sessionStartHeight := relayRequest.Meta.SessionHeader.GetSessionStartBlockHeight()
-	sessionEndHeight := relayRequest.Meta.SessionHeader.GetSessionEndBlockHeight()
-	serviceID := relayRequest.Meta.SessionHeader.GetServiceId()
-	applicationAddress := relayRequest.Meta.SessionHeader.GetApplicationAddress()
-
-	// Resolve the window under the params epoch effective at THIS session's end
-	// height, matching x/proof's claim-window validation. Measuring an old-epoch
-	// session against live offsets rejects relays the chain would still have
-	// rewarded after governance shortens grace_period_end_offset_blocks, and
-	// accepts relays past the chain's real cutoff — served unpaid — after it
-	// lengthens. Mirrors poktroll's CheckRelayRewardEligibility.
-	//
-	// For an ACTIVE session the end height is in the FUTURE. poktroll resolves a
-	// future projection against the LIVE grid (settlement_context.go GetSharedParamsAtHeight
-	// godoc), and an at-height query there would only pin today's live value under a
-	// future cache key. Read the live params directly for active sessions; use the
-	// immutable at-height value only once the session has ended (a past height).
-	var sharedParams *sharedtypes.Params
-	var err error
-	if sessionEndHeight >= currentHeight {
-		sharedParams, err = rv.sharedParamCache.GetLatestSharedParams(ctx)
-	} else {
-		sharedParams, err = rv.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
-	}
-	if err != nil {
-		return fmt.Errorf("failed to get shared params: %w", err)
-	}
-
-	gracePeriodEndOffset := int64(sharedParams.GetGracePeriodEndOffsetBlocks())
-
-	// CRITICAL: Stop accepting 1 block BEFORE grace period ends to allow processing time
-	// Pipeline: Validate → Redis → Miner → SMST can take 1-2 blocks
-	gracePeriodLastAcceptBlock := sessionEndHeight + gracePeriodEndOffset - 1
-
-	blocksLate := currentHeight - gracePeriodLastAcceptBlock
-	sessionLength := sessionEndHeight - sessionStartHeight
-
-	// REJECT: Relay arrived too late (at or after grace period processing buffer).
-	// This is a gateway/application issue: the relay was sent after the session's
-	// grace period cutoff. Our relayer received it on time, but the session window
-	// has already closed on-chain. The relay is served (200 OK) but NOT rewarded.
-	if currentHeight >= gracePeriodLastAcceptBlock {
-		rv.logger.Debug().
-			Str("application", applicationAddress).
-			Str("service_id", serviceID).
-			Int64("session_start", sessionStartHeight).
-			Int64("session_end", sessionEndHeight).
-			Int64("session_length_blocks", sessionLength).
-			Int64("current_height", currentHeight).
-			Int64("grace_period_last_accept", gracePeriodLastAcceptBlock).
-			Int64("grace_period_end_offset", gracePeriodEndOffset).
-			Int64("blocks_late", blocksLate).
-			Msg("LATE RELAY: gateway/application sent relay after grace period cutoff, relay served but NOT rewarded")
-
-		return fmt.Errorf(
-			"relay too late: session ended at block %d, grace period cutoff at block %d, current height %d (late by %d blocks) - gateway/application must send relays before grace period ends",
-			sessionEndHeight,
-			gracePeriodLastAcceptBlock,
-			currentHeight,
-			blocksLate,
-		)
-	}
-
-	// WARN: Relay arrived in last block before cutoff (risky timing)
-	blocksUntilCutoff := gracePeriodLastAcceptBlock - currentHeight
-	if blocksUntilCutoff <= 1 && currentHeight >= sessionEndHeight {
-		rv.logger.Debug().
-			Str("application", applicationAddress).
-			Str("service_id", serviceID).
-			Int64("session_end", sessionEndHeight).
-			Int64("current_height", currentHeight).
-			Int64("blocks_until_cutoff", blocksUntilCutoff).
-			Msg("TIGHT RELAY TIMING: gateway/application sending relay very close to grace period cutoff")
-	}
-
-	return nil
-}
-
 // GetCurrentBlockHeight returns the current block height.
 func (rv *relayValidator) GetCurrentBlockHeight() int64 {
 	rv.blockHeightMu.RLock()
@@ -418,25 +327,26 @@ func (rv *relayValidator) getTargetSessionBlockHeight(
 	//
 	// grace_period_end_offset_blocks is session TIMING, so it resolves at the
 	// session END height, mirroring the chain (x/session's hydrator and x/proof
-	// both resolve it at-height) and poktroll's getTargetSessionBlockHeight.
-	// Reading live params here disagrees with CheckRewardEligibility above the
-	// moment governance moves the offset.
+	// both resolve it at-height) and poktroll's getTargetSessionBlockHeight. A
+	// live read here would disagree with itself the moment governance moves the
+	// offset: this same at-height value is what the chain measured the session
+	// against, not whatever the offset is today.
 	sharedParams, err := rv.sharedParamCache.GetSharedParams(ctx, sessionEndHeight)
 	if err != nil {
 		return 0, fmt.Errorf("failed to get shared params: %w", err)
 	}
 
 	// Check if still within grace period (using on-chain params only)
-	// NOTE: grace_period_extra_blocks was removed - it created inconsistency between
-	// getTargetSessionBlockHeight() and CheckRewardEligibility() causing relays to be
-	// accepted but marked as ineligible for rewards.
+	// NOTE: grace_period_extra_blocks was removed - it created a second,
+	// disagreeing resolution of the same params epoch.
 	if !sharedtypes.IsGracePeriodElapsed(sharedParams, sessionEndHeight, currentHeight) {
 		// Within grace period, use session end height for lookup
 		return sessionEndHeight, nil
 	}
 
 	return 0, fmt.Errorf(
-		"session expired, session end height: %d, current height: %d (grace period elapsed)",
+		"%w, session end height: %d, current height: %d (grace period elapsed)",
+		ErrSessionExpired,
 		sessionEndHeight,
 		currentHeight,
 	)

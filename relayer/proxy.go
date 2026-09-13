@@ -106,6 +106,10 @@ const (
 	rejectReasonBackendNetworkError = "backend_network_error"
 	rejectReasonBackend5xx          = "backend_5xx"
 	rejectReasonSigningError        = "signing_error"
+	// rejectReasonSessionExpired marks a relay that arrived after its
+	// session's grace period elapsed -- see relayer.ErrSessionExpired.
+	// Previously folded into the generic validation_failed reason.
+	rejectReasonSessionExpired = "session_expired"
 
 	// Drop reasons (for relaysDropped metric)
 	dropReasonValidationFailed = "validation_failed"
@@ -1148,7 +1152,11 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		eagerStart := time.Now()
 		if validationErr := p.validateRelayRequest(r.Context(), r, body, arrivalBlockHeight); validationErr != nil {
 			p.sendError(w, http.StatusForbidden, validationErr.Error())
-			relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonValidationFailed).Inc()
+			reason := rejectReasonValidationFailed
+			if errors.Is(validationErr, ErrSessionExpired) {
+				reason = rejectReasonSessionExpired
+			}
+			relaysRejected.WithLabelValues(serviceID, rpcType, reason).Inc()
 			validationFailures.WithLabelValues(serviceID, "signature").Inc()
 			return
 		}
@@ -2594,23 +2602,6 @@ func (p *ProxyServer) validateRelayRequest(
 		return fmt.Errorf("relay validation failed: %w", err)
 	}
 
-	// Check reward eligibility (for eager validation, we do this now)
-	if err := p.validator.CheckRewardEligibility(ctx, relayRequest); err != nil {
-		// Served but unclaimable: backend capacity spent for no reward. The
-		// line is Debug (per-request), so this counter is the only signal an
-		// operator gets that a gateway is sending past the grace-period
-		// cutoff.
-		svcID := metricLabelUnknown
-		if relayRequest.Meta.SessionHeader != nil && relayRequest.Meta.SessionHeader.ServiceId != "" {
-			svcID = relayRequest.Meta.SessionHeader.ServiceId
-		}
-		relaysNotRewardable.WithLabelValues(svcID).Inc()
-		p.logger.Debug().
-			Err(err).
-			Msg("relay not eligible for rewards (continuing to serve)")
-		// Don't return error - we still serve the relay, just won't get rewards
-	}
-
 	return nil
 }
 
@@ -2699,7 +2690,6 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 			Msg("failed to publish mined relay")
 		return
 	}
-
 }
 
 // sendServiceUnavailable sends a 503 fast-fail response when all backends are unhealthy.

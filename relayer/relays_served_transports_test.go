@@ -127,7 +127,6 @@ func TestRelaysServed_NoParallelPerTransportCounter(t *testing.T) {
 		"relays_received_total":              "inbound, a different event from served",
 		"relays_rejected_total":              "refused BEFORE serving",
 		"relays_dropped_total":               "served but not mined",
-		"relays_not_rewardable_total":        "served but past the session grace period",
 		"relays_skipped_difficulty_total":    "served and below mining difficulty",
 	}
 

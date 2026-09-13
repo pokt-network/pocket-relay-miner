@@ -48,10 +48,6 @@ func (v *neverCallValidator) ValidateRelayRequest(context.Context, *servicetypes
 	return errors.New("ValidateRelay must never be called for a simulated websocket relay")
 }
 
-func (v *neverCallValidator) CheckRewardEligibility(context.Context, *servicetypes.RelayRequest) error {
-	return nil
-}
-
 func (v *neverCallValidator) GetCurrentBlockHeight() int64 { return 0 }
 func (v *neverCallValidator) SetCurrentBlockHeight(int64)  {}
 

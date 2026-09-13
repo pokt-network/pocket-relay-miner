@@ -1002,7 +1002,11 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 
 		// Validate relay request (ring signature + session)
 		if err := b.relayPipeline.ValidateRelay(b.ctx, relayCtx); err != nil {
-			relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonValidationFailed).Inc()
+			reason := rejectReasonValidationFailed
+			if errors.Is(err, ErrSessionExpired) {
+				reason = rejectReasonSessionExpired
+			}
+			relaysRejected.WithLabelValues(b.serviceID, "websocket", reason).Inc()
 			b.logger.Debug().
 				Err(err).
 				Str("session_id", relayCtx.SessionID).

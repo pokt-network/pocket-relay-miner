@@ -897,8 +897,8 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 	// at-height value once the session has ended (a past height).
 	//
 	// currentHeight <= 0 means no block has been observed yet (boot window): the
-	// session cannot be PROVEN to have ended, so read live — the same choice
-	// CheckRewardEligibility makes, and the two must not disagree.
+	// session cannot be PROVEN to have ended, so read live rather than pin an
+	// at-height value the boot window cannot justify.
 	var sharedParams *sharedtypes.Params
 	if currentHeight <= 0 || sessionEndHeight >= currentHeight {
 		sharedParams, err = m.sharedParamCache.GetLatestSharedParams(ctx)

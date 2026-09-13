@@ -324,9 +324,6 @@ func (panickingValidator) ValidateRelayRequest(context.Context, *servicetypes.Re
 	panic("induced panic on the gateway message path")
 }
 
-func (panickingValidator) CheckRewardEligibility(context.Context, *servicetypes.RelayRequest) error {
-	return nil
-}
 func (panickingValidator) GetCurrentBlockHeight() int64 { return 100 }
 func (panickingValidator) SetCurrentBlockHeight(int64)  {}
 

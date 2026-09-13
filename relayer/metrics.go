@@ -565,20 +565,6 @@ var (
 		},
 	)
 
-	// relaysNotRewardable counts relays that were SERVED but are not
-	// claimable (late relay past the grace-period cutoff, and anything else
-	// CheckRewardEligibility rejects). Backend capacity spent for no reward;
-	// the per-request detail is a Debug line, so this is the operator signal.
-	relaysNotRewardable = observability.RelayerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "relays_not_rewardable_total",
-			Help:      "Relays served that are not eligible for rewards (e.g. past the session grace period)",
-		},
-		[]string{"service_id"},
-	)
-
 	// difficultyQueryFailures counts failures to resolve a service's mining
 	// difficulty. The path FAILS OPEN (the relay is treated as applicable), so
 	// without this counter a broken difficulty query silently mines every

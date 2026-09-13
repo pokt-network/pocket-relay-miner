@@ -31,10 +31,6 @@ func (acceptAnyValidator) ValidateRelayRequest(context.Context, *servicetypes.Re
 	return nil
 }
 
-func (acceptAnyValidator) CheckRewardEligibility(context.Context, *servicetypes.RelayRequest) error {
-	return nil
-}
-
 func (acceptAnyValidator) GetCurrentBlockHeight() int64 { return 100 }
 func (acceptAnyValidator) SetCurrentBlockHeight(int64)  {}
 
