@@ -278,6 +278,8 @@ func TestAStaleDispatcherClosesAnOpenWebSocketOnItsNextBackendMessage(t *testing
 	key := rc.KB().MeterConsumedKey(sessionID, supplier)
 	rejected := relaysRejected.WithLabelValues(simWSTestService, "websocket", rejectReasonMeterError)
 	before := testutil.ToFloat64(rejected)
+	heartbeatErrors := relayMeterErrors.WithLabelValues(meterOperationDispatcherHeartbeat)
+	heartbeatErrorsBefore := testutil.ToFloat64(heartbeatErrors)
 
 	bridge, gwClient := newUnstartedOwnerBridge(t, signer, pipeline, supplier)
 	admitFrame(t, pipeline, bridge, ownerTestRelay(sessionID, supplier))
@@ -292,4 +294,6 @@ func TestAStaleDispatcherClosesAnOpenWebSocketOnItsNextBackendMessage(t *testing
 	require.Equal(t, "sentinel", readRaw(t, gwClient), "a message was served while its charge could not be written")
 	require.Zero(t, pipeline.relayMeter.ChargeLedger().Pending(key), "and nothing was charged")
 	require.Equal(t, before+1, testutil.ToFloat64(rejected))
+	require.Equal(t, heartbeatErrorsBefore+1, testutil.ToFloat64(heartbeatErrors),
+		"relay_meter_errors_total{operation=\"dispatcher heartbeat\"} counts the close, as it counts HTTP and gRPC refusals")
 }

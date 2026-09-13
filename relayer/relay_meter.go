@@ -211,6 +211,11 @@ func NewRelayMeter(
 // past this age a relay admitted now may never be charged.
 const dispatcherHeartbeatMaxAge = 3 * time.Second
 
+// meterOperationDispatcherHeartbeat is the relay_meter_errors_total operation of
+// a relay refused because the batch dispatcher stopped reaching Redis, on every
+// transport.
+const meterOperationDispatcherHeartbeat = "dispatcher heartbeat"
+
 // ChargeLedger returns the ledger served relays are charged into. The batching
 // publisher writes it to Redis; without that wiring nothing served is charged.
 func (m *RelayMeter) ChargeLedger() *redisutil.ChargeLedger {
@@ -361,7 +366,7 @@ func (m *RelayMeter) admit(
 	m.mu.RUnlock()
 
 	if !m.dispatcherAlive() {
-		allowed, meterErr := m.handleMeterError("dispatcher heartbeat",
+		allowed, meterErr := m.handleMeterError(meterOperationDispatcherHeartbeat,
 			fmt.Errorf("%w: batch dispatcher has not reached redis within %s", ErrMeterStoreUnavailable, dispatcherHeartbeatMaxAge))
 		return Reservation{}, allowed, meterErr
 	}

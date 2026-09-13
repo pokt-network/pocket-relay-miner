@@ -1145,6 +1145,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	// backend sends nothing more stays open, and serves nothing meanwhile.
 	if !b.simulated && !b.relayPipeline.DispatcherAlive() {
 		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonMeterError).Inc()
+		relayMeterErrors.WithLabelValues(meterOperationDispatcherHeartbeat).Inc()
 		b.logger.Debug().Msg("backend message not served - relay charges are not being written, closing connection")
 		_ = b.closeWithReason(CloseTryAgainLater, "unable to process relay request", wsCloseInitiatorRelayer)
 		return
@@ -1234,8 +1235,9 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 // nothing.
 //
 // The message is served whatever this says. A charge that fails is counted as
-// unbilled and left to the miner, like a client frame whose chain query blinked. The context is detached from the bridge's: a close landing
-// between the write and this call must not leave a served relay uncharged.
+// unbilled and left to the miner, like a client frame whose chain query blinked.
+// The context is detached from the bridge's: a close landing between the write
+// and this call must not leave a served relay uncharged.
 func (b *WebSocketBridge) chargeServedMessage(req *servicetypes.RelayRequest) bool {
 	if b.simulated {
 		return false
@@ -1280,12 +1282,13 @@ func (b *WebSocketBridge) forwardToBackend(msg wsMessage) {
 // emitRelay creates and publishes a mined relay for a request/response pair.
 // This is the billing mechanism - each req/resp pair becomes a relay.
 // wsPublishTimeout bounds the detached mining/WAL-publish work for one
-// websocket relay, and the charge that precedes it. It is deliberately NOT grpcPublishTimeout (30s): there the
-// budget is per request, here it is per open connection, and at session
-// rollover every open bridge publishes at once -- 30s each would hold N sockets
-// and their goroutines through the whole teardown. Small enough that a slow
-// Redis delays teardown rather than stalling it, large enough that a single
-// XAdd on a healthy localnet or production Redis has room to spare.
+// websocket relay, and the charge that precedes it. It is deliberately NOT
+// grpcPublishTimeout (30s): there the budget is per request, here it is per open
+// connection, and at session rollover every open bridge publishes at once -- 30s
+// each would hold N sockets and their goroutines through the whole teardown.
+// Small enough that a slow Redis delays teardown rather than stalling it, large
+// enough that a single XAdd on a healthy localnet or production Redis has room
+// to spare.
 const wsPublishTimeout = 5 * time.Second
 
 func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servicetypes.RelayResponse, respPayload []byte) {
