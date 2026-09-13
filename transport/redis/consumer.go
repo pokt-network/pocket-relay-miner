@@ -981,6 +981,19 @@ func (c *StreamsConsumer) StreamName() string { return c.streamName }
 // ConsumerGroup is the group this consumer reads and acknowledges in.
 func (c *StreamsConsumer) ConsumerGroup() string { return c.config.ConsumerGroup }
 
+// LastGeneratedID returns the stream's last-generated-id (XINFO STREAM), the
+// highest ID ever appended -- including entries not yet delivered to any
+// consumer. A caller comparing it against what it has already handled uses it
+// to tell "nothing more has ever been written" from "more exists, waiting to
+// be delivered or reclaimed".
+func (c *StreamsConsumer) LastGeneratedID(ctx context.Context) (string, error) {
+	info, err := c.client.XInfoStream(ctx, c.streamName).Result()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stream info for %s: %w", c.streamName, err)
+	}
+	return info.LastGeneratedID, nil
+}
+
 // RecordAcked counts n messages acknowledged outside AckMessage -- by a script
 // that deletes them in the same call as other writes -- on the same series
 // AckMessage counts on, so the metric keeps meaning "acknowledged" whichever

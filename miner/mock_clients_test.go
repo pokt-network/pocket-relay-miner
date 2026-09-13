@@ -3,6 +3,7 @@ package miner
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hashicorp/go-version"
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
@@ -77,15 +78,30 @@ type mockBlockClient struct {
 	mu            sync.RWMutex
 	currentHeight int64
 	blockHash     []byte
+
+	// heightSequence, if non-empty, overrides currentHeight: the N-th LastBlock
+	// call returns heightSequence[N-1], clamped to the last entry once calls
+	// exceed its length. This lets a test move the height forward on a known
+	// call count instead of racing a background goroutine against a sleep.
+	heightSequence []int64
+	calls          atomic.Int32
 }
 
 func (m *mockBlockClient) LastBlock(ctx context.Context) client.Block {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return &mockBlock{
-		height: m.currentHeight,
-		hash:   m.blockHash,
+	seq := m.heightSequence
+	hash := m.blockHash
+	height := m.currentHeight
+	m.mu.RUnlock()
+
+	if len(seq) > 0 {
+		idx := int(m.calls.Add(1)) - 1
+		if idx >= len(seq) {
+			idx = len(seq) - 1
+		}
+		height = seq[idx]
 	}
+	return &mockBlock{height: height, hash: hash}
 }
 
 func (m *mockBlockClient) CommittedBlocksSequence(ctx context.Context) client.BlockReplayObservable {

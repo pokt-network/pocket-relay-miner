@@ -174,6 +174,15 @@ type SessionLifecycleManager struct {
 	// sessions about to be claimed (the supplier's relayBatch).
 	flushPendingRelays func(ctx context.Context, sessionIDs []string)
 
+	// Conditional flush delay -- optional, and the wait is a no-op unless
+	// maxNonReclaimHandledMsgIDLookup and lastGeneratedMsgIDLookup are both
+	// set (see awaitFlushWatermark). Must be wired before Start(): a session
+	// loaded already in SessionStateClaiming can reach a transition check on
+	// the very first pass.
+	maxNonReclaimHandledMsgIDLookup func() (streamMsgID, bool)
+	lastGeneratedMsgIDLookup        func(ctx context.Context) (streamMsgID, bool, error)
+	flushDelay                      FlushDelayConfig
+
 	// Active sessions being monitored (lock-free concurrent map)
 	activeSessions *xsync.Map[string, *SessionSnapshot]
 
@@ -235,6 +244,37 @@ func (m *SessionLifecycleManager) SetMeterCleanupPublisher(publisher MeterCleanu
 // its sessions' counters. This should be called before Start().
 func (m *SessionLifecycleManager) SetPendingRelayFlusher(flush func(ctx context.Context, sessionIDs []string)) {
 	m.flushPendingRelays = flush
+}
+
+// FlushDelayConfig groups the conditional-flush-delay tunables.
+// PollInterval falls back to 1s when zero. There is no BlockTime or Cap
+// field: the cap is a fixed height (the batch's earliest claim-window-open
+// height plus 2), read live from the block client, never derived from
+// elapsed wall-clock time.
+type FlushDelayConfig struct {
+	PollInterval time.Duration
+}
+
+// SetMaxNonReclaimHandledMsgIDLookup sets what the flush-delay wait polls to
+// learn how far this supplier's worker has processed live (non-reclaim)
+// deliveries. This should be called before Start().
+func (m *SessionLifecycleManager) SetMaxNonReclaimHandledMsgIDLookup(fn func() (streamMsgID, bool)) {
+	m.maxNonReclaimHandledMsgIDLookup = fn
+}
+
+// SetLastGeneratedMsgIDLookup sets what the flush-delay wait calls, once,
+// right when a claim transition fires, to capture the stream's
+// last-generated-id at that instant -- the wait targets THIS captured value,
+// never whatever arrives afterward (that belongs to a later claim or the
+// following session). This should be called before Start().
+func (m *SessionLifecycleManager) SetLastGeneratedMsgIDLookup(fn func(ctx context.Context) (streamMsgID, bool, error)) {
+	m.lastGeneratedMsgIDLookup = fn
+}
+
+// SetFlushDelayConfig sets the conditional-flush-delay tunables. This
+// should be called before Start().
+func (m *SessionLifecycleManager) SetFlushDelayConfig(cfg FlushDelayConfig) {
+	m.flushDelay = cfg
 }
 
 // Start begins monitoring sessions and triggering lifecycle transitions.
@@ -415,7 +455,8 @@ const blockEventSubscriberBuffer = 256
 // is dispatched to the unbounded transition pool, not done inline here.
 func (m *SessionLifecycleManager) lifecycleCheckerEventDriven(ctx context.Context, subscriber interface {
 	Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
-}) {
+},
+) {
 	blockCh := subscriber.Subscribe(ctx, blockEventSubscriberBuffer)
 	m.logger.Debug().Msg("using Subscribe() for block events (decoupled reader/processor)")
 
@@ -684,7 +725,7 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 	var terminalSessions []interface{}
 
 	// Counters for instrumentation
-	var redisExpired, terminalCleaned, noTransition, stateByType = 0, 0, 0, map[SessionState]int{}
+	redisExpired, terminalCleaned, noTransition, stateByType := 0, 0, 0, map[SessionState]int{}
 
 	for _, sessionID := range candidateSessionIDs {
 		// CRITICAL: Reload session from Redis to get latest state (not stale in-memory copy)
@@ -783,6 +824,19 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		// Persist state to Redis FIRST to prevent duplicate submissions
 		// If Redis update fails, we skip submitting to avoid inconsistent state
 		var validClaimingSessions []*SessionSnapshot
+		// minClaimWindowOpen anchors the flush-delay cap for this batch --
+		// the earliest opening height among its sessions, so no session in a
+		// mixed batch waits past its own cap. Params are guaranteed non-nil
+		// here: determineTransition already required them non-nil to return
+		// SessionStateClaiming for this same session, and resolveParams is
+		// memoized on session.SessionEndHeight.
+		minClaimWindowOpen := int64(-1)
+		for _, session := range claimingSessions {
+			wo := sharedtypes.GetClaimWindowOpenHeight(resolveParams(session.SessionEndHeight), session.SessionEndHeight)
+			if minClaimWindowOpen == -1 || wo < minClaimWindowOpen {
+				minClaimWindowOpen = wo
+			}
+		}
 		for _, session := range claimingSessions {
 			if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateClaiming); err != nil {
 				m.logger.Error().
@@ -825,9 +879,27 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		if len(validClaimingSessions) > 0 {
 			// Capture for closure
 			capturedSessions := validClaimingSessions
-			m.transitionSubpool.Submit(func() {
-				m.executeBatchedClaimTransition(ctx, capturedSessions)
-			})
+			capturedWindowOpen := minClaimWindowOpen
+			// The flush-delay wait runs on its own goroutine, NOT inside
+			// transitionSubpool. That pool is shared with proof/terminal
+			// transitions of every other session on this supplier; a wait
+			// sitting in one of its slots would starve them. The actual
+			// claim-building work (executeBatchedClaimTransition) still goes
+			// through transitionSubpool, only after the wait clears it.
+			// Declared without a test: no test pins the wait running outside
+			// transitionSubpool at this call site.
+			go logging.RecoverGoRoutine(m.logger, "claim_flush_delay_wait", func(waitCtx context.Context) {
+				if !m.awaitFlushWatermark(waitCtx, capturedSessions, capturedWindowOpen) {
+					m.logger.Debug().
+						Str(logging.FieldSupplier, m.config.SupplierAddress).
+						Int("batch_size", len(capturedSessions)).
+						Msg("aborting claim transition, ctx cancelled during flush-delay wait")
+					return
+				}
+				m.transitionSubpool.Submit(func() {
+					m.executeBatchedClaimTransition(ctx, capturedSessions)
+				})
+			})(ctx)
 		}
 	}
 
@@ -963,6 +1035,88 @@ func (m *SessionLifecycleManager) determineTransition(
 	}
 
 	return "", ""
+}
+
+// awaitFlushWatermark is the conditional flush delay. windowOpenHeight is
+// the earliest claim-window-open height among sessions, of this batch,
+// transitioning to Claiming. It holds off the caller (which submits the
+// actual claim transition to transitionSubpool once this returns true)
+// according to Jorge's rule, height-anchored throughout -- never wall-clock,
+// never the miner's local clock:
+//
+//  1. If the live chain height is already >= windowOpenHeight+2 (the cap),
+//     seal now. The miner picked this batch up late (restart, a skipped
+//     check, HA handoff) and no wait would help.
+//  2. Else, if there is nothing more to arrive right now -- the highest
+//     live (non-reclaim) stream ID this supplier has processed already
+//     reaches the stream's last-generated-id, read at this instant -- seal
+//     now, with zero polling.
+//  3. Else, wait for the processed watermark to reach THAT captured
+//     last-generated-id specifically (not whatever the stream generates
+//     afterward -- that belongs to a later claim or the next session),
+//     polling live height against the cap the whole time.
+//
+// It returns false only if ctx is cancelled mid-wait, telling the caller to
+// abort the transition entirely rather than flush and claim on a dying
+// context. Reclaimed and self-pending entries are outside all three rules:
+// best effort, unchanged from before this delay existed.
+//
+// A no-op (returns true immediately) unless maxNonReclaimHandledMsgIDLookup,
+// lastGeneratedMsgIDLookup and the block client are all wired -- unwired,
+// this behaves exactly as if it did not exist, rather than guessing.
+func (m *SessionLifecycleManager) awaitFlushWatermark(ctx context.Context, sessions []*SessionSnapshot, windowOpenHeight int64) (proceed bool) {
+	if m.maxNonReclaimHandledMsgIDLookup == nil || m.lastGeneratedMsgIDLookup == nil || m.blockClient == nil {
+		return true
+	}
+
+	capHeight := windowOpenHeight + 2
+	pollInterval := m.flushDelay.PollInterval
+	if pollInterval <= 0 {
+		pollInterval = time.Second
+	}
+
+	recordCapped := func() {
+		for _, s := range sessions {
+			RecordClaimFlushCapped(s.ServiceID)
+		}
+	}
+
+	// Rule 1: already at or past the cap height.
+	if m.blockClient.LastBlock(ctx).Height() >= capHeight {
+		recordCapped()
+		return true
+	}
+
+	target, hasTarget, genErr := m.lastGeneratedMsgIDLookup(ctx)
+	if genErr != nil {
+		m.logger.Warn().
+			Err(genErr).
+			Str(logging.FieldSupplier, m.config.SupplierAddress).
+			Msg("failed to read the stream's last-generated-id, skipping flush delay for this batch")
+		return true
+	}
+
+	// Rule 2: nothing captured to wait for.
+	if handled, ok := m.maxNonReclaimHandledMsgIDLookup(); !hasTarget || (ok && handled.atLeast(target)) {
+		return true
+	}
+
+	// Rule 3.
+	for {
+		select {
+		case <-ctx.Done():
+			return false
+		case <-time.After(pollInterval):
+		}
+
+		if handled, ok := m.maxNonReclaimHandledMsgIDLookup(); ok && handled.atLeast(target) {
+			return true
+		}
+		if m.blockClient.LastBlock(ctx).Height() >= capHeight {
+			recordCapped()
+			return true
+		}
+	}
 }
 
 // executeBatchedClaimTransition executes batched claim transitions.

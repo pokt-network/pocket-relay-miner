@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -139,6 +141,13 @@ type SupplierState struct {
 	// relay is finished on its own.
 	relayBatch *relayBatch
 
+	// maxNonReclaimHandledMsgID is the highest stream ID this supplier's
+	// worker has finished handling among LIVE deliveries (msg.IsReclaim ==
+	// false). It excludes reclaims and self-pending redeliveries on purpose:
+	// those can carry an older ID than one already handled, and updating on
+	// them would make the watermark go backwards.
+	maxNonReclaimHandledMsgID atomic.Pointer[streamMsgID]
+
 	// Lifecycle management (for claim/proof submission with timing spread)
 	LifecycleManager  *SessionLifecycleManager
 	LifecycleCallback *LifecycleCallback
@@ -147,6 +156,69 @@ type SupplierState struct {
 	// Lifecycle
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
+}
+
+// streamMsgID is a parsed Redis stream entry ID ("<ms>-<seq>"), kept as two
+// int64s so watermark comparisons are numeric, never lexicographic ("999-0"
+// sorts after "1000-0" as a string, backwards from its real order).
+type streamMsgID struct {
+	ms  int64
+	seq int64
+}
+
+// parseStreamMsgID parses a Redis stream entry ID of the form "<ms>-<seq>".
+func parseStreamMsgID(id string) (streamMsgID, error) {
+	dash := strings.IndexByte(id, '-')
+	if dash < 0 {
+		return streamMsgID{}, fmt.Errorf("malformed stream id %q: no '-'", id)
+	}
+	ms, err := strconv.ParseInt(id[:dash], 10, 64)
+	if err != nil {
+		return streamMsgID{}, fmt.Errorf("malformed stream id %q: %w", id, err)
+	}
+	seq, err := strconv.ParseInt(id[dash+1:], 10, 64)
+	if err != nil {
+		return streamMsgID{}, fmt.Errorf("malformed stream id %q: %w", id, err)
+	}
+	return streamMsgID{ms: ms, seq: seq}, nil
+}
+
+// before reports whether id sorts before other under Redis' stream ordering.
+func (id streamMsgID) before(other streamMsgID) bool {
+	if id.ms != other.ms {
+		return id.ms < other.ms
+	}
+	return id.seq < other.seq
+}
+
+// atLeast reports whether id is equal to or after other.
+func (id streamMsgID) atLeast(other streamMsgID) bool {
+	return !id.before(other)
+}
+
+// recordNonReclaimHandled advances the supplier's live-delivery watermark to
+// id, monotonically: a CAS loop that only ever moves it forward, so an older
+// ID arriving after a newer one cannot walk it back.
+func (s *SupplierState) recordNonReclaimHandled(id streamMsgID) {
+	for {
+		cur := s.maxNonReclaimHandledMsgID.Load()
+		if cur != nil && cur.atLeast(id) {
+			return
+		}
+		if s.maxNonReclaimHandledMsgID.CompareAndSwap(cur, &id) {
+			return
+		}
+	}
+}
+
+// loadMaxNonReclaimHandledMsgID returns the current watermark and whether
+// this supplier has handled any live delivery yet.
+func (s *SupplierState) loadMaxNonReclaimHandledMsgID() (streamMsgID, bool) {
+	p := s.maxNonReclaimHandledMsgID.Load()
+	if p == nil {
+		return streamMsgID{}, false
+	}
+	return *p, true
 }
 
 // LoadStatus returns the current supplier status.
@@ -1633,32 +1705,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		if relayBatch != nil {
 			lifecycleManager.SetPendingRelayFlusher(relayBatch.FlushSessions)
 		}
-
-		// Start lifecycle manager
-		if startErr := lifecycleManager.Start(supplierCtx); startErr != nil {
-			m.logger.Warn().
-				Err(startErr).
-				Str(logging.FieldSupplier, operatorAddr).
-				Msg("failed to start lifecycle manager, continuing without lifecycle management")
-			lifecycleManager = nil
-		} else {
-			// Wire up callback so session coordinator notifies lifecycle manager of new sessions
-			// This is critical for tracking sessions created after startup
-			lm := lifecycleManager // capture for closure
-			sessionCoordinator.SetOnSessionCreatedCallback(func(ctx context.Context, snapshot *SessionSnapshot) error {
-				return lm.TrackSession(ctx, snapshot)
-			})
-
-			// Wire up terminal state callback so in-memory state is updated atomically with Redis
-			// This prevents session leak where terminal sessions stay in activeSessions
-			sessionCoordinator.SetOnSessionTerminalCallback(func(sessionID string, state SessionState) {
-				lm.RemoveSession(sessionID)
-			})
-
-			m.logger.Info().
-				Str(logging.FieldSupplier, operatorAddr).
-				Msg("session_lifecycle_callbacks_wired: creation and terminal callbacks registered for atomic state updates")
-		}
 	} else {
 		m.logger.Warn().
 			Str(logging.FieldSupplier, operatorAddr).
@@ -1678,6 +1724,61 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		cancelFn:           cancelFn,
 	}
 	state.StoreStatus(SupplierStatusActive)
+
+	if lifecycleManager != nil {
+		// Conditional flush delay -- wired BEFORE Start(), not alongside
+		// the other lifecycleManager.Set* calls above: it needs `state`,
+		// which this function only builds once every other supplier
+		// component is ready. Wiring it AFTER Start() would race a session
+		// this instance loads already in SessionStateClaiming (an HA
+		// handoff, or a restart): its first transition check can run the
+		// moment Start's background loop begins, on another goroutine,
+		// reading these fields while this one is still writing them.
+		lifecycleManager.SetMaxNonReclaimHandledMsgIDLookup(state.loadMaxNonReclaimHandledMsgID)
+		if consumer != nil {
+			lifecycleManager.SetLastGeneratedMsgIDLookup(func(ctx context.Context) (streamMsgID, bool, error) {
+				idStr, lastGenErr := consumer.LastGeneratedID(ctx)
+				if lastGenErr != nil {
+					return streamMsgID{}, false, lastGenErr
+				}
+				if idStr == "" || idStr == "0-0" {
+					return streamMsgID{}, false, nil
+				}
+				id, parseErr := parseStreamMsgID(idStr)
+				if parseErr != nil {
+					return streamMsgID{}, false, parseErr
+				}
+				return id, true, nil
+			})
+		}
+
+		// Start lifecycle manager
+		if startErr := lifecycleManager.Start(supplierCtx); startErr != nil {
+			m.logger.Warn().
+				Err(startErr).
+				Str(logging.FieldSupplier, operatorAddr).
+				Msg("failed to start lifecycle manager, continuing without lifecycle management")
+			lifecycleManager = nil
+			state.LifecycleManager = nil
+		} else {
+			// Wire up callback so session coordinator notifies lifecycle manager of new sessions
+			// This is critical for tracking sessions created after startup
+			lm := lifecycleManager // capture for closure
+			sessionCoordinator.SetOnSessionCreatedCallback(func(ctx context.Context, snapshot *SessionSnapshot) error {
+				return lm.TrackSession(ctx, snapshot)
+			})
+
+			// Wire up terminal state callback so in-memory state is updated atomically with Redis
+			// This prevents session leak where terminal sessions stay in activeSessions
+			sessionCoordinator.SetOnSessionTerminalCallback(func(sessionID string, state SessionState) {
+				lm.RemoveSession(sessionID)
+			})
+
+			m.logger.Info().
+				Str(logging.FieldSupplier, operatorAddr).
+				Msg("session_lifecycle_callbacks_wired: creation and terminal callbacks registered for atomic state updates")
+		}
+	}
 
 	// Atomic insert. If another goroutine raced us and stored its own
 	// state, drop ours (and tear down the resources we just constructed)
@@ -2143,6 +2244,24 @@ func (m *SupplierManager) handleStreamMessage(
 	state *SupplierState,
 	msg transport.StreamMessage,
 ) (acked bool) {
+	// Advance the live-delivery watermark on every exit path (defer, not "at
+	// the end") -- this function has several early returns below, and a
+	// watermark only updated on the happy path would never move on a
+	// transient error, permanently understating what this supplier already
+	// handled. Reclaims and self-pending redeliveries (msg.IsReclaim) never
+	// touch it: see streamMsgID / recordNonReclaimHandled.
+	if !msg.IsReclaim {
+		if id, parseErr := parseStreamMsgID(msg.ID); parseErr == nil {
+			defer state.recordNonReclaimHandled(id)
+		} else {
+			m.logger.Warn().
+				Err(parseErr).
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str("message_id", msg.ID).
+				Msg("malformed stream message id, flush watermark not advanced for this message")
+		}
+	}
+
 	// Track relay consumed from Redis Stream (relayer → miner)
 	RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
 

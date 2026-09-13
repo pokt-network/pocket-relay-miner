@@ -173,6 +173,27 @@ var (
 		[]string{"supplier", "reason", "service_id"},
 	)
 
+	// claimFlushCapped counts, ONE PER SESSION, sessions whose flush delay
+	// ended by hitting the cap (2 block times past the claim window opening)
+	// instead of confirming the stream had drained. It is not the same
+	// series as relays_rejected{reason="session_sealed"}: a session counted
+	// here is a candidate to produce session_sealed downstream (a relay that
+	// arrived after the cap-forced flush), not a duplicate of it. No
+	// "supplier" label -- bounded per-supplier labeling is pending, tracked
+	// separately.
+	claimFlushCapped = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claim_flush_capped_total",
+			Help: "Sessions whose claim sealed at the height cap (claim window " +
+				"open + 2 blocks) without confirming the stream had drained; " +
+				"any live relay still undelivered or unprocessed at that " +
+				"point is dropped downstream as session_sealed.",
+		},
+		[]string{"service_id"},
+	)
+
 	relayProcessingLatency = observability.MinerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Namespace: metricsNamespace,
@@ -1377,6 +1398,12 @@ func RecordRelayFailedSMST(supplier, serviceID, reason string) {
 // RecordRelayRejected records a relay that was rejected.
 func RecordRelayRejected(supplier, reason, serviceID string) {
 	relaysRejected.WithLabelValues(supplier, reason, serviceID).Inc()
+}
+
+// RecordClaimFlushCapped records that a session's flush-delay wait exited
+// via the height cap, not by draining. See claimFlushCapped's Help.
+func RecordClaimFlushCapped(serviceID string) {
+	claimFlushCapped.WithLabelValues(serviceID).Inc()
 }
 
 // RecordRelayProcessingLatency records how long it took to mine a relay on miner side.
