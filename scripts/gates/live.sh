@@ -987,32 +987,133 @@ prom_scalar() {
         printf 'UNREADABLE'
 }
 
-gate_step "assert: every transaction got a deadline, and the window rule set it"
+# assert_timeout_regime_per_phase asserts that each phase's broadcasts follow
+# ITS OWN derived regime, not a single expectation shared across phases. A
+# gate's own assertion is exercised the same way any other test is: pulled out
+# as its own function, not inlined, so a harness can extract it with sed and
+# run it against fabricated inputs -- never copied, since a copy drifts from
+# the original and the harness would then prove something that no longer
+# exists.
+#
+# Claim and proof measure DIFFERENT windows -- the widths lifecycle_callback.go
+# feeds to tx.WindowTimeout for each phase, one derived through
+# GetClaimWindowOpenHeight/GetClaimWindowCloseHeight and their proof-window
+# counterparts in poktroll's x/shared/types (exact offsets and the module
+# version this was checked against are in the commit, not repeated here where
+# they would rot the moment either side moves). A resend inherits the
+# ORIGINAL broadcast's regime -- supplier_manager.go's fallback path only
+# fires when that inherited timeout is non-positive, and it degrades through
+# tx.WindowTimeout(0, 0) -- so a resend may legitimately carry either the
+# claim or the proof phase's regime; this gate cannot tell which broadcasts
+# were resends of which phase, so it accepts either one.
+assert_timeout_regime_per_phase() {
+    local regime_total="$1" broadcasts_total="$2" regime_unknown="$3"
+    local claim_ceiling="$4" claim_window="$5" proof_ceiling="$6" proof_window="$7"
+    local resend_ceiling="$8" resend_window="$9"
+    local claim_window_blocks="${10}" proof_window_blocks="${11}" block_time_seconds="${12}"
+    local window_source_desc="${13}"
+
+    if [ "$regime_total" = "UNREADABLE" ] || [ "$broadcasts_total" = "UNREADABLE" ]; then
+        gate_nothing_measured "Prometheus did not answer for the timeout-regime or broadcast families -- the deadline rule cannot be read, so this run proves nothing about it"
+    elif [ "$regime_total" = "ABSENT" ] || [ "$broadcasts_total" = "ABSENT" ]; then
+        gate_nothing_measured "no ha_miner_tx_timeout_regime_total / ha_tx_broadcasts_total series exist after a run that settled claims -- either nothing was broadcast or the counter is not wired; NOT evidence that the deadline rule ran"
+    elif [ -z "$claim_window_blocks" ] || [ -z "$proof_window_blocks" ] || [ -z "$block_time_seconds" ]; then
+        gate_nothing_measured "could not read the claim/proof window width from ${window_source_desc} or block_time_seconds from configmap miner-config -- the expected timeout regime cannot be derived, so this run's regime counts prove nothing about the deadline rule"
+    elif [ "${regime_total%%.*}" -ne "${broadcasts_total%%.*}" ] 2>/dev/null; then
+        gate_fail "${broadcasts_total} transaction(s) broadcast but ${regime_total} got a timeout regime -- every transaction must pass the deadline derivation exactly once, so a mismatch means one path skips it"
+    elif [ "$regime_unknown" != "ABSENT" ] && [ "${regime_unknown%%.*}" -gt 0 ] 2>/dev/null; then
+        gate_fail "${regime_unknown} transaction(s) fell to regime=unknown -- the window could not be derived, so the deadline came from the SDK ceiling instead of the claim/proof window"
+    else
+        local expected_claim expected_proof bad=""
+        expected_claim="$(gate_expected_timeout_regime "$claim_window_blocks" "$block_time_seconds")"
+        expected_proof="$(gate_expected_timeout_regime "$proof_window_blocks" "$block_time_seconds")"
+
+        if [ "$expected_claim" != "window" ] && [ "$expected_claim" != "ceiling" ]; then
+            gate_nothing_measured "could not derive the expected regime for the claim window (got: ${expected_claim}) -- the values reaching gate_expected_timeout_regime were not usable, so this run proves nothing about the deadline rule"
+            return
+        fi
+        if [ "$expected_proof" != "window" ] && [ "$expected_proof" != "ceiling" ]; then
+            gate_nothing_measured "could not derive the expected regime for the proof window (got: ${expected_proof}) -- the values reaching gate_expected_timeout_regime were not usable, so this run proves nothing about the deadline rule"
+            return
+        fi
+
+        if [ "$expected_claim" = "window" ] && [ "$claim_ceiling" != "ABSENT" ] && [ "${claim_ceiling%%.*}" -gt 0 ] 2>/dev/null; then
+            bad="${bad}claim/ceiling=${claim_ceiling} (expected window, ${claim_window_blocks} blocks x ${block_time_seconds}s); "
+        fi
+        if [ "$expected_claim" = "ceiling" ] && [ "$claim_window" != "ABSENT" ] && [ "${claim_window%%.*}" -gt 0 ] 2>/dev/null; then
+            bad="${bad}claim/window=${claim_window} (expected ceiling, ${claim_window_blocks} blocks x ${block_time_seconds}s); "
+        fi
+        if [ "$expected_proof" = "window" ] && [ "$proof_ceiling" != "ABSENT" ] && [ "${proof_ceiling%%.*}" -gt 0 ] 2>/dev/null; then
+            bad="${bad}proof/ceiling=${proof_ceiling} (expected window, ${proof_window_blocks} blocks x ${block_time_seconds}s); "
+        fi
+        if [ "$expected_proof" = "ceiling" ] && [ "$proof_window" != "ABSENT" ] && [ "${proof_window%%.*}" -gt 0 ] 2>/dev/null; then
+            bad="${bad}proof/window=${proof_window} (expected ceiling, ${proof_window_blocks} blocks x ${block_time_seconds}s); "
+        fi
+        if [ "$expected_claim" != "ceiling" ] && [ "$expected_proof" != "ceiling" ] &&
+            [ "$resend_ceiling" != "ABSENT" ] && [ "${resend_ceiling%%.*}" -gt 0 ] 2>/dev/null; then
+            bad="${bad}resend/ceiling=${resend_ceiling} (neither phase expects ceiling); "
+        fi
+        if [ "$expected_claim" != "window" ] && [ "$expected_proof" != "window" ] &&
+            [ "$resend_window" != "ABSENT" ] && [ "${resend_window%%.*}" -gt 0 ] 2>/dev/null; then
+            bad="${bad}resend/window=${resend_window} (neither phase expects window); "
+        fi
+
+        if [ -n "$bad" ]; then
+            gate_fail "regime mismatch by phase: ${bad}-- unknown=0 held, but a phase's broadcasts did not follow its own derived regime"
+        else
+            gate_pass "all ${regime_total} transaction(s) took their deadline from the expected regime per phase (unknown=0, claim ${claim_window_blocks}x${block_time_seconds}s->${expected_claim}, proof ${proof_window_blocks}x${block_time_seconds}s->${expected_proof})"
+            gate_exercised coverage timeout_regime "${regime_total%%.*}"
+        fi
+    fi
+}
+
+gate_step "assert: every transaction got a deadline, and the window rule set it, per phase"
 
 regime_total="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total)')"
 broadcasts_total="$(prom_scalar 'sum(ha_tx_broadcasts_total)')"
 regime_unknown="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{regime="unknown"})')"
-regime_ceiling="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{regime="ceiling"})')"
+claim_ceiling="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="claim",regime="ceiling"})')"
+claim_window="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="claim",regime="window"})')"
+proof_ceiling="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="proof",regime="ceiling"})')"
+proof_window="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="proof",regime="window"})')"
+resend_ceiling="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="resend",regime="ceiling"})')"
+resend_window="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="resend",regime="window"})')"
 
-# THE POSITIVE CONTROL, and it is the whole point: regime="unknown" == 0 is the
-# healthy reading, and a zero proves nothing unless the family was populated.
+# The regime a broadcast falls into is NOT fixed to "ceiling must be 0": it is
+# window_blocks x block_time_seconds against the SDK's unordered-tx ceiling
+# (gate_expected_timeout_regime in lib.sh), and localnet's own clock knob
+# (localnet.block_time_seconds) decides which side of that line it lands on --
+# 30s stays under it, 60s (mainnet's clock) goes over. A fixed expectation was
+# only ever true at the clock this gate happened to be written against.
+#
+# Read from the CHAIN, not a file on disk: the localnet can run under more
+# than one profile, each with its own genesis, and a governance param change
+# moves the chain without moving any file this gate would otherwise read
+# separately from it. The miner itself only ever sees the chain's shared
+# params, so that is what this gate reads too -- and every field in that
+# response comes back as a STRING, validated as a positive integer before use.
+window_source_desc="chain shared params (validator pod)"
+shared_params_json="$(kubectl exec deploy/validator -c validator -- pocketd query shared params -o json 2>/dev/null)"
+claim_window_blocks="$(printf '%s' "$shared_params_json" | jq -r '.params.claim_window_close_offset_blocks | tonumber? // empty' 2>/dev/null)"
+proof_window_blocks="$(printf '%s' "$shared_params_json" | jq -r '.params.proof_window_close_offset_blocks | tonumber? // empty' 2>/dev/null)"
+case "$claim_window_blocks" in '' | *[!0-9]* | 0) claim_window_blocks="" ;; esac
+case "$proof_window_blocks" in '' | *[!0-9]* | 0) proof_window_blocks="" ;; esac
+block_time_seconds="$(kubectl get configmap miner-config -o jsonpath='{.data.config\.yaml}' 2>/dev/null |
+    python3 -c 'import sys,yaml; c=yaml.safe_load(sys.stdin) or {}; v=c.get("block_time_seconds"); print(v if v is not None else "")' 2>/dev/null || true)"
+# YAML renders an integer-valued float as "60.0", not "60" -- python's own
+# str() does that, no override needed to reproduce it -- and that string
+# fails bash's arithmetic context outright. Same validation as the window
+# widths, so a value shaped like that reads as unreadable rather than
+# reaching an arithmetic bash cannot do.
+case "$block_time_seconds" in '' | *[!0-9]* | 0) block_time_seconds="" ;; esac
+
 # Measured on a healthy localnet 2026-09-09: 109 broadcasts, 109 regimes
-# (claim=15, proof=94), unknown=0, ceiling=0. The equality across two counters
-# in two different packages is what makes the zero non-vacuous.
-if [ "$regime_total" = "UNREADABLE" ] || [ "$broadcasts_total" = "UNREADABLE" ]; then
-    gate_nothing_measured "Prometheus did not answer for the timeout-regime or broadcast families -- the deadline rule cannot be read, so this run proves nothing about it"
-elif [ "$regime_total" = "ABSENT" ] || [ "$broadcasts_total" = "ABSENT" ]; then
-    gate_nothing_measured "no ha_miner_tx_timeout_regime_total / ha_tx_broadcasts_total series exist after a run that settled claims -- either nothing was broadcast or the counter is not wired; NOT evidence that the deadline rule ran"
-elif [ "${regime_total%%.*}" -ne "${broadcasts_total%%.*}" ] 2>/dev/null; then
-    gate_fail "${broadcasts_total} transaction(s) broadcast but ${regime_total} got a timeout regime -- every transaction must pass the deadline derivation exactly once, so a mismatch means one path skips it"
-elif [ "$regime_unknown" != "ABSENT" ] && [ "${regime_unknown%%.*}" -gt 0 ] 2>/dev/null; then
-    gate_fail "${regime_unknown} transaction(s) fell to regime=unknown -- the window could not be derived, so the deadline came from the SDK ceiling instead of the claim/proof window"
-elif [ "$regime_ceiling" != "ABSENT" ] && [ "${regime_ceiling%%.*}" -gt 0 ] 2>/dev/null; then
-    gate_fail "${regime_ceiling} transaction(s) fell to regime=ceiling -- on localnet the window is far shorter than the SDK ceiling, so this means block_time_seconds or the window length is not reaching the derivation"
-else
-    gate_pass "all ${regime_total} transaction(s) took their deadline from the window rule (unknown=0, ceiling=0)"
-    gate_exercised coverage timeout_regime "${regime_total%%.*}"
-fi
+# (claim=15, proof=94), unknown=0, ceiling=0 (30s clock -- both phases expect
+# "window").
+assert_timeout_regime_per_phase "$regime_total" "$broadcasts_total" "$regime_unknown" \
+    "$claim_ceiling" "$claim_window" "$proof_ceiling" "$proof_window" \
+    "$resend_ceiling" "$resend_window" \
+    "$claim_window_blocks" "$proof_window_blocks" "$block_time_seconds" "$window_source_desc"
 
 gate_step "assert: nobody missed their window (sdk/code=30)"
 

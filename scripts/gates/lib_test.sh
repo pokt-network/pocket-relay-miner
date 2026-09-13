@@ -270,6 +270,48 @@ expect yes "$(accepts claim_window_closed)"             "a relay past its claim 
 expect no  "$(accepts session_sealed_redelivered)"      "a redelivered copy is not an announcement"
 expect no  "$(accepts claim_window_closed_redelivered)" "nor past the window"
 
+# gate_expected_timeout_regime: window_blocks x block_time_seconds against the
+# SDK ceiling (589.99s). Localnet's own clock knob (localnet.block_time_seconds
+# in tilt_config.yaml) moves this boundary at runtime -- 30s stays under it,
+# 60s (mainnet's clock) goes over it -- so a fixed "ceiling must be 0"
+# expectation is wrong at exactly the clock this gate needs to pass under.
+expect window  "$(gate_expected_timeout_regime 10 30)" "10 blocks x 30s = 300s, well under the ceiling"
+expect window  "$(gate_expected_timeout_regime 10 58)" "580s, just under"
+expect ceiling "$(gate_expected_timeout_regime 10 59)" "590s > 589.99s, just over -- the boundary itself"
+expect ceiling "$(gate_expected_timeout_regime 10 60)" "600s, mainnet's clock"
+
+# The ceiling gate_expected_timeout_regime hard-codes (600000/10000/10 ms) is a
+# SECOND, independent copy of tx.DefaultTxTimeoutMax's own three numbers
+# (txTimeoutHardCeiling / txTimeoutSafetyMargin / txNonceSpread in
+# tx/tx_client.go) -- not a re-derivation from anything read at runtime. Extract
+# BOTH copies with sed and compare them: tx_window_timeout_test.go already pins
+# the Go side as a Go value, but nothing before this test would have caught the
+# two copies saying different numbers.
+tx_client_go="$(dirname "${BASH_SOURCE[0]}")/../../tx/tx_client.go"
+go_hard_ceiling_min="$(sed -n 's/^\ttxTimeoutHardCeiling = \([0-9]*\) \* time\.Minute$/\1/p' "$tx_client_go")"
+go_safety_margin_s="$(sed -n 's/^\ttxTimeoutSafetyMargin = \([0-9]*\) \* time\.Second$/\1/p' "$tx_client_go")"
+go_nonce_spread_ms="$(sed -n 's/^const txNonceSpread = \([0-9]*\) \* time\.Millisecond$/\1/p' "$tx_client_go")"
+
+lib_sh="$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+lib_hard_ceiling_ms="$(sed -n 's/^[[:space:]]*local hard_ceiling_ms=\([0-9]*\)$/\1/p' "$lib_sh")"
+lib_safety_margin_ms="$(sed -n 's/^[[:space:]]*local safety_margin_ms=\([0-9]*\)$/\1/p' "$lib_sh")"
+lib_nonce_spread_ms="$(sed -n 's/^[[:space:]]*local nonce_spread_ms=\([0-9]*\)$/\1/p' "$lib_sh")"
+
+if [ -z "$go_hard_ceiling_min" ] || [ -z "$go_safety_margin_s" ] || [ -z "$go_nonce_spread_ms" ] ||
+    [ -z "$lib_hard_ceiling_ms" ] || [ -z "$lib_safety_margin_ms" ] || [ -z "$lib_nonce_spread_ms" ]; then
+    printf '  FAIL timeout-ceiling drift check: could not extract one of the six numbers (go: %s/%s/%s, lib: %s/%s/%s) -- either side''s source changed shape and the sed pattern no longer matches\n' \
+        "$go_hard_ceiling_min" "$go_safety_margin_s" "$go_nonce_spread_ms" \
+        "$lib_hard_ceiling_ms" "$lib_safety_margin_ms" "$lib_nonce_spread_ms" >&2
+    failures=$((failures + 1))
+else
+    expect "$(( go_hard_ceiling_min * 60 * 1000 ))" "$lib_hard_ceiling_ms" \
+        "hard ceiling: tx_client.go's 10 * time.Minute vs lib.sh's copy"
+    expect "$(( go_safety_margin_s * 1000 ))" "$lib_safety_margin_ms" \
+        "safety margin: tx_client.go's 10 * time.Second vs lib.sh's copy"
+    expect "$go_nonce_spread_ms" "$lib_nonce_spread_ms" \
+        "nonce spread: tx_client.go's 10 * time.Millisecond vs lib.sh's copy"
+fi
+
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2
     exit 1

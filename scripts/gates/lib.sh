@@ -488,3 +488,41 @@ gate_counter_delta() {
     fi
     printf '%s' "$(( after - before ))"
 }
+
+# gate_expected_timeout_regime WINDOW_BLOCKS BLOCK_TIME_SECONDS
+#
+# Prints which regime (tx.TimeoutRegimeWindow or tx.TimeoutRegimeCeiling) a
+# broadcast on THIS localnet must fall into. Mirrors tx.WindowTimeout's own
+# min(window, ceiling) rule exactly, in milliseconds so no floating point
+# creeps in on either side: a fixed "ceiling must be 0" was only ever true at
+# the 30s-per-block clock this gate happened to be written against, and it is
+# FALSE by construction once block_time_seconds passes ~59s (10 blocks x 60s
+# is 600s against the ceiling below).
+#
+# The three ms constants are a SECOND copy of tx/tx_client.go's own
+# txTimeoutHardCeiling / txTimeoutSafetyMargin / txNonceSpread (which
+# tx_window_timeout_test.go already pins DefaultTxTimeoutMax to, as a Go
+# value) -- not a re-derivation from anything read at runtime. lib_test.sh
+# extracts both copies with sed and asserts they agree, so a change to either
+# side is caught there instead of drifting silently.
+gate_expected_timeout_regime() {
+    local window_blocks="${1:?window_blocks required}" block_time_s="${2:?block_time_seconds required}"
+    # Bash arithmetic treats a bare non-numeric token as a VARIABLE NAME, and
+    # an unset one as 0 -- "$(( 10 * abc * 1000 ))" is 0, not an error. A
+    # caller that passes something un-numeric (a stray "60.0", a value that
+    # never got read) would silently get a real regime back instead of
+    # anything a guard downstream could catch, so both arguments are checked
+    # here, not trusted from the caller.
+    case "$window_blocks" in '' | *[!0-9]* | 0) printf ''; return ;; esac
+    case "$block_time_s" in '' | *[!0-9]* | 0) printf ''; return ;; esac
+    local hard_ceiling_ms=600000
+    local safety_margin_ms=10000
+    local nonce_spread_ms=10
+    local ceiling_ms=$(( hard_ceiling_ms - safety_margin_ms - nonce_spread_ms ))
+    local window_ms=$(( window_blocks * block_time_s * 1000 ))
+    if [ "$window_ms" -gt "$ceiling_ms" ]; then
+        printf 'ceiling'
+    else
+        printf 'window'
+    fi
+}
