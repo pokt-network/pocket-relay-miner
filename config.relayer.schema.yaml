@@ -52,12 +52,12 @@ properties:
       batch_publish_interval_ms:
         type: integer
         description: >-
-          Batched relay publishing. 0 (the default) keeps one Redis round trip
-          per mined relay; any other value flushes a MULTI/EXEC batch that
-          often and must be between 500 and 10000. Turning it on wakes the
-          miner's blocked reader once per batch instead of once per relay, and
-          it is an operator decision -- it never arrives with a deploy.
-        default: 0
+          How often, in milliseconds, the relayer writes its batch of mined
+          relays with one MULTI/EXEC. The batch is always on; this sets only
+          its interval. 0 means the default, 1000. Any other value must be
+          between 500 and 10000. One batch wakes the miner's blocked reader
+          once instead of once per relay.
+        default: 1000
         oneOf:
           - const: 0
           - minimum: 500

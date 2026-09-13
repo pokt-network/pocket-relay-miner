@@ -8,8 +8,7 @@ import (
 
 // The relayer has one counter that moves when a mined relay is ACCEPTED by the
 // publisher, relays_published_total, and one drop reason that moves when it is
-// refused. Neither means the relay reached Redis: with
-// redis.batch_publish_interval_ms set,
+// refused. Neither means the relay reached Redis: the relayer always batches, so
 // accepting is enqueuing and the XADD happens later on the dispatcher's
 // goroutine. The counter that means "written" is ha_transport_published_total,
 // and the errors on that side are ha_transport_publish_errors_total.
@@ -123,8 +122,8 @@ func TestAcceptTimeCountersNameTheWriteCounter(t *testing.T) {
 		}
 		if !strings.Contains(help, mustName) {
 			t.Errorf("the Help of %s does not name %s.\n"+
-				"  This counter moves when the publisher ACCEPTS a relay, which with\n"+
-				"  redis.batch_publish_interval_ms set means QUEUED, not written. An operator\n"+
+				"  This counter moves when the publisher ACCEPTS a relay, which -- the relayer\n"+
+				"  always batches -- means QUEUED, not written. An operator\n"+
 				"  reading it has to be told which series does mean written, or the honest\n"+
 				"  reading of a batched run is 'served minus published = 0' while a whole\n"+
 				"  chunk was lost.\n"+

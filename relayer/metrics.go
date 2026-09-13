@@ -120,7 +120,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_published_total",
-			Help:      "Mined relays ACCEPTED by the publisher, over any transport. Accepted is not written: with redis.batch_publish_interval_ms set, a relay is counted here the moment it is queued. ha_transport_published_total is the one that means it reached the stream, and this counter minus that one is what is queued and not yet dispatched. rpc_type is the transport that published it",
+			Help:      "Mined relays ACCEPTED by the publisher, over any transport. Accepted is not written: the relayer always batches, so a relay is counted here the moment it is queued. ha_transport_published_total is the one that means it reached the stream, and this counter minus that one is what is queued and not yet dispatched. rpc_type is the transport that published it",
 		},
 		[]string{"service_id", "supplier", "rpc_type"},
 	)
@@ -130,7 +130,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_dropped_total",
-			Help:      "Total number of relays served but not mined (optimistic mode: validation failed, meter error, stake exhausted). With redis.batch_publish_interval_ms set, reason=publish_failed narrows to a REJECTION at enqueue -- a malformed message, or a closed publisher -- because a failing XADD no longer reaches the caller; those are counted in ha_transport_publish_errors_total",
+			Help:      "Total number of relays served but not mined (optimistic mode: validation failed, meter error, stake exhausted). Because the relayer always batches, reason=publish_failed is only a REJECTION at enqueue -- a malformed message, or a closed publisher -- because a failing XADD no longer reaches the caller; those are counted in ha_transport_publish_errors_total",
 		},
 		// application excluded: on-chain bech32 address is unbounded on a
 		// Counter → TSDB OOM. Per-app detail is in the drop logs.

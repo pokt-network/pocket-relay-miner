@@ -32,9 +32,9 @@ func countPublished(p transport.MinedRelayPublisher) transport.MinedRelayPublish
 }
 
 // Publish hands msg to the wrapped publisher and counts it once THAT publisher
-// has accepted it -- which is not the same as the store having it. With
-// redis.batch_publish_interval_ms set, accepting is enqueuing, and the write
-// happens later on the dispatcher's own goroutine. ha_transport_published_total
+// has accepted it -- which is not the same as the store having it. The relayer
+// always batches, so accepting is enqueuing, and the write happens later on the
+// dispatcher's own goroutine. ha_transport_published_total
 // is the counter that moves after the XADD.
 //
 // rpc_type comes from ctx (WithRPCType) and not from this wrapper, because one

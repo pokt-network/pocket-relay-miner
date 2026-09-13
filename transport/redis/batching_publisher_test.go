@@ -62,6 +62,60 @@ func TestBatchingPublisherValidatesAtEnqueue(t *testing.T) {
 	require.Zero(t, queued, "nothing invalid may sit in the queue")
 }
 
+// TestBatchingPublisherRejectsWhatTheOldPublisherRejected carries the two cases
+// only the one-relay-per-round-trip publisher's test exercised: a NEGATIVE end
+// height (prepareXAdd refuses <= 0, and only 0 was driven here) and a publish
+// after Close.
+func TestBatchingPublisherRejectsWhatTheOldPublisherRejected(t *testing.T) {
+	p, _, _ := newBatcher(t, time.Hour)
+
+	negative := mined("pokt1a", "s1", 1)
+	negative.SessionEndHeight = -1
+	require.Error(t, p.Publish(context.Background(), negative), "a negative session end height must be refused")
+
+	require.NoError(t, p.Close())
+	require.Error(t, p.Publish(context.Background(), mined("pokt1a", "s1", 2)), "a closed publisher must refuse")
+}
+
+// TestBatchingPublisherSetsNoStreamTTL is the regression test for the defect that
+// made a supplier's relay stream disappear mid-session: an EXPIRE armed on the
+// stream key deletes un-consumed relays and the pending-entries list with it,
+// silently. -1 is Redis' answer for a key with no expiry; -2 would be a key that
+// does not exist, which is why the length is checked too.
+func TestBatchingPublisherSetsNoStreamTTL(t *testing.T) {
+	p, client, prefix := newBatcher(t, time.Hour)
+	ctx := context.Background()
+	const supplier = "pokt1supplier_ttl"
+	stream := transport.SupplierStreamName(prefix, supplier)
+
+	require.NoError(t, p.Publish(ctx, mined(supplier, "s1", 1)))
+	p.dispatchAll(ctx)
+
+	ttl, err := client.TTL(ctx, stream).Result()
+	require.NoError(t, err)
+	require.Equal(t, time.Duration(-1), ttl, "the relay stream must carry NO expiry")
+	require.Equal(t, int64(1), client.XLen(ctx, stream).Val(), "the stream must actually hold the relay")
+}
+
+// TestBatchingPublisherDoesNotArmTTLAcrossManyDispatches pins the property over
+// repeated writes: a later "refresh the TTL on every write" would still leave an
+// idle stream to be deleted with its pending entries.
+func TestBatchingPublisherDoesNotArmTTLAcrossManyDispatches(t *testing.T) {
+	p, client, prefix := newBatcher(t, time.Hour)
+	ctx := context.Background()
+	const supplier = "pokt1supplier_ttl_many"
+	stream := transport.SupplierStreamName(prefix, supplier)
+
+	for i := 0; i < 5; i++ {
+		require.NoError(t, p.Publish(ctx, mined(supplier, "s1", i)))
+		p.dispatchAll(ctx)
+		ttl, err := client.TTL(ctx, stream).Result()
+		require.NoError(t, err)
+		require.Equal(t, time.Duration(-1), ttl, "no expiry may be armed on dispatch %d", i+1)
+	}
+	require.Equal(t, int64(5), client.XLen(ctx, stream).Val())
+}
+
 // TestBatchingPublisherCloseFlushesEverything is the shutdown guarantee: Close
 // must land what is queued, on a context detached from the one that ended.
 func TestBatchingPublisherCloseFlushesEverything(t *testing.T) {

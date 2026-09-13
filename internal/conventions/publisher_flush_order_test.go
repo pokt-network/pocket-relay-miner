@@ -6,7 +6,7 @@ import (
 	"testing"
 )
 
-// The relayer's mined-relay publisher may be a BatchingPublisher, which holds
+// The relayer's mined-relay publisher is always a BatchingPublisher, which holds
 // relays in memory between writes. Its Close() performs the FINAL FLUSH, and
 // that flush writes THROUGH the Redis client -- p.client.TxPipelined in
 // transport/redis/batching_publisher.go.

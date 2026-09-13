@@ -22,12 +22,12 @@ redis:
   # pool_timeout_seconds: 4          # Wait time for connection from pool
   # conn_max_idle_time_seconds: 300  # Close idle connections after 5 minutes
 
-  # Batched relay publishing -- OFF by default, and turning it on is a decision.
-  # 0 keeps one Redis round trip per mined relay, which is today's behaviour.
-  # Any other value must be between 500 and 10000: below that a batch stops
-  # being a batch, and above it the delay a served relay waits before it is
-  # written starts to matter against the chain's block time.
-  # batch_publish_interval_ms: 2000
+  # Batched relay publishing interval, in milliseconds. The batch is always on:
+  # mined relays are written with one MULTI/EXEC per interval. 0 or absent means
+  # the default, 1000. Any other value must be between 500 and 10000: below that
+  # a batch stops being a batch, and above it the delay a served relay waits
+  # before it is written starts to matter against the chain's block time.
+  # batch_publish_interval_ms: 1000
 
   # Namespace configuration (optional)
   # Only the base prefix is configurable. Every segment below it is fixed in

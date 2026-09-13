@@ -411,13 +411,12 @@ type RedisConfig struct {
 	// Set to 0 to disable (connections never closed due to idle time)
 	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
 
-	// BatchPublishIntervalMs turns on batched relay publishing and sets how
-	// often the batch is written.
-	//
-	// 0 (the default) keeps the one-round-trip-per-relay publisher, so turning
-	// this on is an operator decision and not something a deploy changes
-	// underneath them. When set, mined relays go out with MULTI/EXEC, which
+	// BatchPublishIntervalMs sets how often the relayer writes its batch of mined
+	// relays. The batch is always on: mined relays go out with MULTI/EXEC, which
 	// wakes the miner's blocked reader ONCE per batch instead of once per relay.
+	//
+	// 0 means the default (DefaultBatchPublishIntervalMs), as it does for the
+	// other optional fields of this struct. Read it through BatchPublishInterval.
 	//
 	// Bounds: 500ms to 10s. Below that a batch stops being a batch; above it the
 	// added delay starts to matter against the chain's block time.
@@ -680,7 +679,8 @@ func DefaultConfig() Config {
 	cfg := Config{
 		ListenAddr: "0.0.0.0:8080",
 		Redis: RedisConfig{
-			URL: "redis://localhost:6379",
+			URL:                    "redis://localhost:6379",
+			BatchPublishIntervalMs: DefaultBatchPublishIntervalMs,
 		},
 		Keys: config.KeysConfig{
 			HotReloadEnabled: true,
@@ -833,8 +833,8 @@ func (c *Config) Validate() error {
 	if c.Redis.BatchPublishIntervalMs != 0 &&
 		(c.Redis.BatchPublishIntervalMs < 500 || c.Redis.BatchPublishIntervalMs > 10000) {
 		return fmt.Errorf(
-			"redis.batch_publish_interval_ms must be 0 (disabled) or between 500 and 10000, got %d",
-			c.Redis.BatchPublishIntervalMs)
+			"redis.batch_publish_interval_ms must be 0 (the default, %d) or between 500 and 10000, got %d",
+			DefaultBatchPublishIntervalMs, c.Redis.BatchPublishIntervalMs)
 	}
 	if c.Redis.PoolTimeoutSeconds < 0 {
 		return fmt.Errorf("redis.pool_timeout_seconds must be >= 0 (0 = use default)")
@@ -1398,4 +1398,20 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// DefaultBatchPublishIntervalMs is the batch interval used when the config leaves
+// redis.batch_publish_interval_ms at 0 or omits it.
+const DefaultBatchPublishIntervalMs = 1000
+
+// BatchPublishInterval is the effective batch interval: BatchPublishIntervalMs, or
+// DefaultBatchPublishIntervalMs when that is 0. It is the only reader of the field,
+// so a config built without DefaultConfig -- a test, or a YAML that omits the key
+// and is decoded without defaults -- still gets a batch and never a zero interval.
+func (r RedisConfig) BatchPublishInterval() time.Duration {
+	ms := r.BatchPublishIntervalMs
+	if ms == 0 {
+		ms = DefaultBatchPublishIntervalMs
+	}
+	return time.Duration(ms) * time.Millisecond
 }

@@ -782,23 +782,17 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// No TTL is passed: relay streams do not expire. relay_meter.cache_ttl still
 	// governs the meter's own per-session keys further down; it used to double as
 	// the stream's lifetime, which deleted un-consumed relays mid-session.
-	var publisher transport.MinedRelayPublisher = redistransport.NewStreamsPublisher(
+	//
+	// Always batched: one MULTI/EXEC per interval instead of one round trip per
+	// relay, which wakes the miner's blocked reader once per batch. Only the
+	// interval is configurable.
+	var publisher transport.MinedRelayPublisher = redistransport.NewBatchingPublisher(
 		logger,
 		redisClient.UniversalClient,     // Embedded go-redis client
 		redisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
+		config.Redis.BatchPublishInterval(),
 	)
-	if ms := config.Redis.BatchPublishIntervalMs; ms > 0 {
-		// Batched writes: one MULTI/EXEC per interval instead of one round trip
-		// per relay, which wakes the miner's blocked reader once per batch.
-		// OFF by default -- this is an operator decision.
-		publisher = redistransport.NewBatchingPublisher(
-			logger,
-			redisClient.UniversalClient,
-			redisClient.KB().StreamPrefix(),
-			time.Duration(ms)*time.Millisecond,
-		)
-		logger.Info().Int("interval_ms", ms).Msg("batched relay publishing ENABLED")
-	}
+	logger.Info().Dur("interval", config.Redis.BatchPublishInterval()).Msg("batched relay publishing")
 	// Before the Redis client's own deferred Close (declared earlier, so it runs
 	// after this one): the final flush writes through that client, and closing it
 	// first would lose whatever the batch still held.
