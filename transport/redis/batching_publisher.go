@@ -141,6 +141,16 @@ func (p *BatchingPublisher) Publish(_ context.Context, msg *transport.MinedRelay
 	return nil
 }
 
+// QueuedBytes is the payload the queue retains right now: what Publish has
+// accepted and no chunk has taken yet. It carries no policy -- the relayer compares
+// it with redis.batch_max_queued_mib to stop admitting, and nothing here refuses or
+// drops a relay because of it.
+func (p *BatchingPublisher) QueuedBytes() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.bytes
+}
+
 // approxBytes is the payload a queued entry retains. Only the marshalled relay
 // is counted: it is the term that varies by orders of magnitude between a tiny
 // JSON-RPC reply and a large one, and the fixed overhead per entry is noise

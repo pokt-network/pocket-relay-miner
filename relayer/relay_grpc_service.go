@@ -58,8 +58,9 @@ type RelayGRPCService struct {
 
 	// simVerifier owns the simulated-relay Admission zone (optional). relayMeter
 	// is used only for the simulated path's non-mutating meter health probe.
-	simVerifier *SimulationVerifier
-	relayMeter  *RelayMeter
+	simVerifier      *SimulationVerifier
+	publishQueueFull func() bool
+	relayMeter       *RelayMeter
 
 	// Function to get HTTP client for a service (supports per-service timeout profiles)
 	getHTTPClient func(serviceID string) *http.Client
@@ -92,12 +93,14 @@ type RelayGRPCService struct {
 
 // RelayGRPCServiceConfig contains configuration for the relay gRPC service.
 type RelayGRPCServiceConfig struct {
-	ServiceConfigs     map[string]ServiceConfig
-	ResponseSigner     *ResponseSigner
-	Publisher          transport.MinedRelayPublisher
-	RelayProcessor     RelayProcessor
-	RelayPipeline      *RelayPipeline // Unified relay processing pipeline
-	SimVerifier        *SimulationVerifier
+	ServiceConfigs map[string]ServiceConfig
+	ResponseSigner *ResponseSigner
+	Publisher      transport.MinedRelayPublisher
+	RelayProcessor RelayProcessor
+	RelayPipeline  *RelayPipeline // Unified relay processing pipeline
+	SimVerifier    *SimulationVerifier
+	// PublishQueueFull is the batch queue admission gate (ProxyServer.queueFull).
+	PublishQueueFull   func() bool
 	RelayMeter         *RelayMeter
 	CurrentBlockHeight *atomic.Int64
 	MaxBodySize        int64
@@ -182,6 +185,7 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		relayProcessor:     config.RelayProcessor,
 		relayPipeline:      config.RelayPipeline,
 		simVerifier:        config.SimVerifier,
+		publishQueueFull:   config.PublishQueueFull,
 		relayMeter:         config.RelayMeter,
 		currentBlockHeight: config.CurrentBlockHeight,
 		maxBodySize:        maxBodySize,
@@ -280,6 +284,13 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	md, _ := metadata.FromIncomingContext(ctx)
 	if directive := SimDirectiveFromGRPC(md); directive.KeyID != "" && s.simVerifier != nil && s.simVerifier.Enabled() {
 		return s.serveSimulatedGRPC(stream, ctx, relayRequest, serviceID, svcConfig, supplierOperatorAddr, directive.KeyID, md)
+	}
+
+	// Stop admitting while the batch queue is full. It does not depend on the relay
+	// pipeline, which production builds nil for this service today (queue item 231).
+	if s.publishQueueFull != nil && s.publishQueueFull() {
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonPublishQueueFull).Inc()
+		return status.Error(codes.Unavailable, "relayer is not admitting relays right now")
 	}
 
 	// Validate and meter the relay if pipeline is available

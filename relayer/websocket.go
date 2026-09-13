@@ -1700,6 +1700,15 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		// - PATH v1: Logs INFO about legacy handshake
 		p.validateAndLogWebSocketHandshake(r, serviceID)
 
+		// Stop admitting new connections while the batch queue is full: an HTTP 503
+		// before the upgrade, like the other refusals above. A connection already open
+		// keeps admitting frames; this gate does not reach them.
+		if p.queueFull() {
+			relaysRejected.WithLabelValues(serviceID, BackendTypeWebSocket, rejectReasonPublishQueueFull).Inc()
+			p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+			return
+		}
+
 		// Upgrade HTTP connection to WebSocket
 		gatewayConn, err := WebSocketUpgrader.Upgrade(w, r, nil)
 		if err != nil {

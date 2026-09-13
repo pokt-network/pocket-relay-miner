@@ -159,14 +159,17 @@ type publishTask struct {
 
 // ProxyServer handles incoming relay requests and forwards them to backends.
 type ProxyServer struct {
-	logger         logging.Logger
-	config         *Config
-	publisher      transport.MinedRelayPublisher
-	validator      RelayValidator
-	relayProcessor RelayProcessor
-	responseSigner *ResponseSigner
-	supplierCache  *cache.SupplierCache
-	relayMeter     *RelayMeter
+	logger    logging.Logger
+	config    *Config
+	publisher transport.MinedRelayPublisher
+	// publishQueueFull reports that the batch holds more mined relays than
+	// redis.batch_max_queued_mib allows. nil admits everything.
+	publishQueueFull func() bool
+	validator        RelayValidator
+	relayProcessor   RelayProcessor
+	responseSigner   *ResponseSigner
+	supplierCache    *cache.SupplierCache
+	relayMeter       *RelayMeter
 
 	// warnedUndeclaredTransport dedups the "served a transport the supplier did
 	// not declare on-chain" warning to once per (supplier, service, transport).
@@ -1038,6 +1041,15 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 		Str("validation_mode", string(validationMode)).
 		Msg("relay received")
+
+	// Stop admitting while the batch queue is full. BEFORE the eager meter, so a
+	// refused relay is never charged, and before the backend, so it costs the
+	// operator nothing.
+	if p.queueFull() {
+		p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonPublishQueueFull).Inc()
+		return
+	}
 
 	// For eager validation, validate before forwarding
 	if validationMode == ValidationModeEager {
@@ -2296,6 +2308,22 @@ func (p *ProxyServer) SetRelayMeter(meter *RelayMeter) {
 	p.relayMeter = meter
 }
 
+// rejectReasonPublishQueueFull refuses a relay while the batch queue is over
+// redis.batch_max_queued_mib. Already queued relays are never dropped.
+const rejectReasonPublishQueueFull = "publish_queue_full"
+
+// SetPublishQueueFull wires the admission gate on the batch queue.
+func (p *ProxyServer) SetPublishQueueFull(full func() bool) {
+	p.publishQueueFull = full
+}
+
+// queueFull is the gate every transport asks before a new relay costs anything.
+// It reads the field at call time, so a transport handed the method value before
+// SetPublishQueueFull still sees the gate once it is set.
+func (p *ProxyServer) queueFull() bool {
+	return p.publishQueueFull != nil && p.publishQueueFull()
+}
+
 // SetSimulationVerifier wires the simulated-relay admission component. Optional:
 // when nil or disabled, simulation headers are ignored and all relays take the
 // normal path.
@@ -2467,6 +2495,7 @@ func (p *ProxyServer) InitGRPCHandler() {
 			RelayProcessor:     p.relayProcessor,
 			RelayPipeline:      p.relayPipeline, // Unified relay processing pipeline
 			SimVerifier:        p.simVerifier,
+			PublishQueueFull:   p.queueFull,
 			RelayMeter:         p.relayMeter,
 			CurrentBlockHeight: &p.currentBlockHeight,
 			MaxBodySize:        p.config.DefaultMaxBodySizeBytes,

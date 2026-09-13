@@ -29,6 +29,11 @@ redis:
   # before it is written starts to matter against the chain's block time.
   # batch_publish_interval_ms: 1000
 
+  # How many MiB of mined relays the batch may hold before the relayer stops
+  # admitting new relays (they are refused, never dropped once queued). 0 or
+  # absent means the default, 512. Any other value must be between 64 and 8192.
+  # batch_max_queued_mib: 512
+
   # Namespace configuration (optional)
   # Only the base prefix is configurable. Every segment below it is fixed in
   # code, so miner and relayer cannot drift apart on the key layout, and no

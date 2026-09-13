@@ -116,6 +116,25 @@ func TestBatchingPublisherDoesNotArmTTLAcrossManyDispatches(t *testing.T) {
 	require.Equal(t, int64(5), client.XLen(ctx, stream).Val())
 }
 
+// TestBatchingPublisherQueuedBytesCountsPayloadNotEntries pins what the admission
+// bound reads: three large relays must register as megabytes, which an entry count
+// (three) could never express, and a dispatch must give the bytes back.
+func TestBatchingPublisherQueuedBytesCountsPayloadNotEntries(t *testing.T) {
+	p, _, _ := newBatcher(t, time.Hour)
+	ctx := context.Background()
+	require.Zero(t, p.QueuedBytes())
+
+	for i := 0; i < 3; i++ {
+		msg := mined("pokt1big", "s1", i)
+		msg.RelayBytes = make([]byte, 1<<20)
+		require.NoError(t, p.Publish(ctx, msg))
+	}
+	require.GreaterOrEqual(t, p.QueuedBytes(), 3<<20, "three 1 MiB relays must count as at least 3 MiB")
+
+	p.dispatchAll(ctx)
+	require.Zero(t, p.QueuedBytes(), "a dispatched queue retains nothing")
+}
+
 // TestBatchingPublisherCloseFlushesEverything is the shutdown guarantee: Close
 // must land what is queued, on a context detached from the one that ended.
 func TestBatchingPublisherCloseFlushesEverything(t *testing.T) {

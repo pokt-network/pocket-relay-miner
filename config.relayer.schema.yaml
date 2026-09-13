@@ -62,6 +62,17 @@ properties:
           - const: 0
           - minimum: 500
             maximum: 10000
+      batch_max_queued_mib:
+        type: integer
+        description: >-
+          How many MiB of mined relays the batch may hold before the relayer
+          stops admitting new relays. Queued relays are never dropped. 0 means
+          the default, 512. Any other value must be between 64 and 8192.
+        default: 512
+        oneOf:
+          - const: 0
+          - minimum: 64
+            maximum: 8192
       namespace:
         type: object
         description: >-

@@ -786,12 +786,13 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Always batched: one MULTI/EXEC per interval instead of one round trip per
 	// relay, which wakes the miner's blocked reader once per batch. Only the
 	// interval is configurable.
-	var publisher transport.MinedRelayPublisher = redistransport.NewBatchingPublisher(
+	batcher := redistransport.NewBatchingPublisher(
 		logger,
 		redisClient.UniversalClient,     // Embedded go-redis client
 		redisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
 		config.Redis.BatchPublishInterval(),
 	)
+	var publisher transport.MinedRelayPublisher = batcher
 	logger.Info().Dur("interval", config.Redis.BatchPublishInterval()).Msg("batched relay publishing")
 	// Before the Redis client's own deferred Close (declared earlier, so it runs
 	// after this one): the final flush writes through that client, and closing it
@@ -834,6 +835,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create proxy server: %w", err)
 	}
+
+	// Admission stops while the batch holds more than redis.batch_max_queued_mib.
+	// The gate reads the CONCRETE batcher, never the publisher the proxy wraps in
+	// countPublished: one path, independent of decorator order.
+	maxQueuedBytes := config.Redis.BatchMaxQueuedBytes()
+	proxy.SetPublishQueueFull(func() bool { return batcher.QueuedBytes() >= maxQueuedBytes })
 
 	// Event-driven block height updates (replaces 1s polling)
 	// Receives block events from Redis pub/sub for ~1-2ms latency (vs 1s polling)

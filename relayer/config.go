@@ -422,6 +422,16 @@ type RedisConfig struct {
 	// added delay starts to matter against the chain's block time.
 	BatchPublishIntervalMs int `yaml:"batch_publish_interval_ms,omitempty"`
 
+	// BatchMaxQueuedMiB bounds the mined relays the batch may hold before the
+	// relayer STOPS ADMITTING new relays. It never drops what is already queued:
+	// every relay in the queue was served. The bound is in bytes and not in
+	// entries because each entry retains the relay's payload, and a few large
+	// responses exhaust memory long before any entry count would notice.
+	//
+	// 0 means the default (DefaultBatchMaxQueuedMiB). Read it through
+	// BatchMaxQueuedBytes. Bounds: 64 MiB to 8192 MiB.
+	BatchMaxQueuedMiB int `yaml:"batch_max_queued_mib,omitempty"`
+
 	// Namespace configures Redis key prefixes for all data types.
 	// All components (miner, relayer, cache) read from this config to build keys.
 	// Must match miner configuration for proper operation.
@@ -681,6 +691,7 @@ func DefaultConfig() Config {
 		Redis: RedisConfig{
 			URL:                    "redis://localhost:6379",
 			BatchPublishIntervalMs: DefaultBatchPublishIntervalMs,
+			BatchMaxQueuedMiB:      DefaultBatchMaxQueuedMiB,
 		},
 		Keys: config.KeysConfig{
 			HotReloadEnabled: true,
@@ -835,6 +846,12 @@ func (c *Config) Validate() error {
 		return fmt.Errorf(
 			"redis.batch_publish_interval_ms must be 0 (the default, %d) or between 500 and 10000, got %d",
 			DefaultBatchPublishIntervalMs, c.Redis.BatchPublishIntervalMs)
+	}
+	if c.Redis.BatchMaxQueuedMiB != 0 &&
+		(c.Redis.BatchMaxQueuedMiB < 64 || c.Redis.BatchMaxQueuedMiB > 8192) {
+		return fmt.Errorf(
+			"redis.batch_max_queued_mib must be 0 (the default, %d) or between 64 and 8192, got %d",
+			DefaultBatchMaxQueuedMiB, c.Redis.BatchMaxQueuedMiB)
 	}
 	if c.Redis.PoolTimeoutSeconds < 0 {
 		return fmt.Errorf("redis.pool_timeout_seconds must be >= 0 (0 = use default)")
@@ -1414,4 +1431,20 @@ func (r RedisConfig) BatchPublishInterval() time.Duration {
 		ms = DefaultBatchPublishIntervalMs
 	}
 	return time.Duration(ms) * time.Millisecond
+}
+
+// DefaultBatchMaxQueuedMiB is the batch queue bound used when the config leaves
+// redis.batch_max_queued_mib at 0 or omits it. Sized as about 3 s of a 1000 rps
+// relayer at 100 KB per relay (~300 MB), so it trips only on a Redis that is up and
+// slow for a sustained period.
+const DefaultBatchMaxQueuedMiB = 512
+
+// BatchMaxQueuedBytes is the effective queue bound in bytes: BatchMaxQueuedMiB, or
+// DefaultBatchMaxQueuedMiB when that is 0.
+func (r RedisConfig) BatchMaxQueuedBytes() int {
+	mib := r.BatchMaxQueuedMiB
+	if mib == 0 {
+		mib = DefaultBatchMaxQueuedMiB
+	}
+	return mib << 20
 }
