@@ -261,11 +261,12 @@ uses="$(grep -c '$(gate_exact_cell_state ' "$live_sh" 2>/dev/null || true)"
 expect 2 "${uses:-0}" "live.sh must read gate_exact_cell_state in the wait AND in the final assertion"
 
 # The reasons live.sh accepts as announced, matched the way PromQL matches a
-# label regex (anchored): a redelivered copy must never explain a missing relay.
+# label regex (anchored): a redelivered copy must never explain a missing relay,
+# and neither may a relay dropped because its tree was already sealed.
 reasons="$(sed -n "s/^announced_drop_reasons='\(.*\)'$/\1/p" "$live_sh")"
 accepts() { [[ "$1" =~ ^(${reasons})$ ]] && printf yes || printf no; }
-expect yes "$(accepts session_sealed)"                  "a relay late from its client is announced"
-expect yes "$(accepts claim_window_closed)"             "so is one past its claim window"
+expect no  "$(accepts session_sealed)"                  "a sealed tree with nothing late to wait for is a loss, not an announcement"
+expect yes "$(accepts claim_window_closed)"             "a relay past its claim window is announced"
 expect no  "$(accepts session_sealed_redelivered)"      "a redelivered copy is not an announcement"
 expect no  "$(accepts claim_window_closed_redelivered)" "nor past the window"
 

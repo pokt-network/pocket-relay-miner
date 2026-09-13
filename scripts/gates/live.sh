@@ -441,20 +441,27 @@ matrix_ledger="${BIN_DIR}/matrix.tsv"
 : >"$matrix_ledger"
 
 # announced_drops SERVICE -- relays the miner explicitly refused for this
-# service, summed over the reasons that mean "this relay can no longer reach a
-# claim, and we said so": a tree already sealed for its claim, or a claim window
-# already closed. Those are expected outcomes, not losses to hunt.
+# service because their claim window had already closed: such a relay can no
+# longer reach a claim, and the miner said so. That is an expected outcome, not
+# a loss to hunt.
+#
+# A relay dropped because its tree was already sealed is NOT announced. The
+# relayer stops accepting a session when its grace period ends, the claim window
+# opens after that, and the miner seals the tree only once what was delivered
+# live is processed or its height cap is reached. In a healthy run no relay is
+# dropped as sealed; one that is was served and will never be billed, so it
+# must stay unexplained.
 #
 # It reads a COUNTER, which accumulates across runs, so every call is a delta
 # against the snapshot taken before the load. Prints 0 when Prometheus cannot be
 # reached, on purpose: the shortfall then stays unexplained and the assertion
 # fails, because a scrape failure must never excuse a real loss.
 #
-# The regex is anchored, so it does NOT match session_sealed_redelivered or
-# claim_window_closed_redelivered: a REDELIVERED copy dropped late was delivered
-# before, to a consumer that did not finish it, so it cannot explain a missing
-# relay (L3 of df5441c, 2026-09-11: a relay lost in a handoff read as accounted).
-announced_drop_reasons='session_sealed|claim_window_closed'
+# The regex is anchored, so it does NOT match claim_window_closed_redelivered:
+# a REDELIVERED copy dropped late was delivered before, to a consumer that did
+# not finish it, so it cannot explain a missing relay (L3 of df5441c,
+# 2026-09-11: a relay lost in a handoff read as accounted).
+announced_drop_reasons='claim_window_closed'
 
 announced_drops_now() {
     curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
