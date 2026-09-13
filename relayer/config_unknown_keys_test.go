@@ -114,6 +114,14 @@ func TestLoadConfig_RetiredKeysAreNamedWithWhatTheyChanged(t *testing.T) {
 			mustCarry: "keys_file",
 			why:       "the advice must name the safe migration, not just the removed mechanism",
 		},
+		{
+			name:      "relay_meter.enabled",
+			anchor:    "relay_meter:\n",
+			extra:     "    enabled: false\n",
+			key:       "enabled",
+			mustCarry: "served for free",
+			why:       "an operator who had the meter off must expect rejections where relays used to be served uncharged",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := LoadConfig(writeConfigWithExtra(t, tc.anchor, tc.extra))
@@ -152,4 +160,17 @@ func TestLoadConfig_AGoodConfigWarnsAboutNothing(t *testing.T) {
 	cfg, err := LoadConfig(writeConfigWithExtra(t, "", ""))
 	require.NoError(t, err)
 	require.Empty(t, cfg.Warnings())
+}
+
+// TestLoadConfig_ARetiredLeafIsNotBlamedOnAnotherBlock is the hostile half of
+// relay_meter.enabled. "enabled" is a leaf of many blocks, so the retired sentence
+// is keyed by the type that owned it: an enabled left under a block that never had
+// one is reported as unknown, and must not tell the operator the meter was removed.
+func TestLoadConfig_ARetiredLeafIsNotBlamedOnAnotherBlock(t *testing.T) {
+	cfg, err := LoadConfig(writeConfigWithExtra(t, "redis:\n", "    enabled: true\n"))
+	require.NoError(t, err)
+
+	warnings := strings.Join(cfg.Warnings(), "\n")
+	require.Contains(t, warnings, "enabled", "control: the stray key must still be reported")
+	require.NotContains(t, warnings, "REMOVED", "redis never had an enabled setting to remove")
 }

@@ -1093,59 +1093,56 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	proxy.SetRelayProcessor(relayProcessor)
 	logger.Info().Msg("relay processor initialized")
 
-	// Create and wire relay meter for rate limiting based on app stakes
-	if config.RelayMeter.Enabled {
-		relayMeterConfig := relayer.RelayMeterConfig{
-			CacheTTL: config.RelayMeter.CacheTTL,
-		}
-
-		// Create service factor client for reading service factors from Redis
-		// Service factors are published by the miner
-		serviceFactorClient := relayer.NewServiceFactorClient(
-			logger,
-			redisClient,
-		)
-		if err := serviceFactorClient.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start service factor client: %w", err)
-		}
-		defer func() { _ = serviceFactorClient.Close() }()
-
-		// Use the cached application client so app stake changes
-		// land within RefreshIntervalBlocks via the orchestrator's
-		// invalidation pub/sub, and the hot path avoids chain
-		// round-trips on every relay. GetApplication resolves through
-		// the entity cache; GetParams is routed to the query-layer app
-		// client (90s TTL) so the meter's app_min_stake_upokt reflects
-		// the on-chain application MinStake instead of a frozen 0 — the
-		// plain cached client stubs GetParams to (nil, nil).
-		relayMeter := relayer.NewRelayMeter(
-			logger,
-			redisClient,
-			cache.NewCachedApplicationQueryClientWithParams(applicationCache, queryClients.Application()),
-			queryClients.Shared(),
-			queryClients.Session(),
-			blockSubscriber,
-			sharedParamCache,    // L1->L2->L3 cache for shared params (no Redis blocking!)
-			serviceCache,        // L1->L2->L3 cache for service data (no Redis blocking!)
-			serviceFactorClient, // Reads service factors from Redis (published by miner)
-			relayMeterConfig,
-		)
-
-		// Price relays at the session-start CUPR, matching what the relay
-		// processor stamps into the SMST and what the chain settles against.
-		relayMeter.SetServiceComputeUnitsProvider(computeUnitsProvider)
-
-		if err := relayMeter.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start relay meter: %w", err)
-		}
-		defer func() { _ = relayMeter.Close() }()
-
-		proxy.SetRelayMeter(relayMeter)
-		logger.Info().
-			Msg("relay meter initialized and wired")
-	} else {
-		logger.Info().Msg("relay meter disabled in config")
+	// Create and wire the relay meter. It is not optional: a relay the meter cannot
+	// charge is a relay served for free.
+	relayMeterConfig := relayer.RelayMeterConfig{
+		CacheTTL: config.RelayMeter.CacheTTL,
 	}
+
+	// Create service factor client for reading service factors from Redis
+	// Service factors are published by the miner
+	serviceFactorClient := relayer.NewServiceFactorClient(
+		logger,
+		redisClient,
+	)
+	if err := serviceFactorClient.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start service factor client: %w", err)
+	}
+	defer func() { _ = serviceFactorClient.Close() }()
+
+	// Use the cached application client so app stake changes
+	// land within RefreshIntervalBlocks via the orchestrator's
+	// invalidation pub/sub, and the hot path avoids chain
+	// round-trips on every relay. GetApplication resolves through
+	// the entity cache; GetParams is routed to the query-layer app
+	// client (90s TTL) so the meter's app_min_stake_upokt reflects
+	// the on-chain application MinStake instead of a frozen 0 — the
+	// plain cached client stubs GetParams to (nil, nil).
+	relayMeter := relayer.NewRelayMeter(
+		logger,
+		redisClient,
+		cache.NewCachedApplicationQueryClientWithParams(applicationCache, queryClients.Application()),
+		queryClients.Shared(),
+		queryClients.Session(),
+		blockSubscriber,
+		sharedParamCache,    // L1->L2->L3 cache for shared params (no Redis blocking!)
+		serviceCache,        // L1->L2->L3 cache for service data (no Redis blocking!)
+		serviceFactorClient, // Reads service factors from Redis (published by miner)
+		relayMeterConfig,
+	)
+
+	// Price relays at the session-start CUPR, matching what the relay
+	// processor stamps into the SMST and what the chain settles against.
+	relayMeter.SetServiceComputeUnitsProvider(computeUnitsProvider)
+
+	if err := relayMeter.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start relay meter: %w", err)
+	}
+	defer func() { _ = relayMeter.Close() }()
+
+	proxy.SetRelayMeter(relayMeter)
+	logger.Info().
+		Msg("relay meter initialized and wired")
 
 	// Initialize gRPC handler for gRPC and gRPC-Web requests
 	proxy.InitGRPCHandler()

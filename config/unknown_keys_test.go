@@ -106,3 +106,20 @@ func TestKeyFromError_UnrecognisedShapeDegradesToThePlainLine(t *testing.T) {
 	require.Equal(t, "", keyFromError("some other error entirely"))
 	require.Equal(t, "foo", keyFromError("line 42: field foo not found in type pkg.Type"))
 }
+
+// TestDescribe_AQualifiedRetiredKeyNamesOnlyItsOwnType pins both lookups. A leaf
+// shared by many blocks is retired under TYPE.field, so the sentence reaches the
+// block that lost the setting and no other; a unique leaf still matches bare.
+func TestDescribe_AQualifiedRetiredKeyNamesOnlyItsOwnType(t *testing.T) {
+	owner := "line 3: field enabled not found in type relayer.RelayMeterYAMLConfig"
+	require.Contains(t, describe(owner), "REMOVED", "the block that lost the setting must be told")
+
+	stranger := "line 7: field enabled not found in type relayer.RedisConfig"
+	require.Equal(t, stranger, describe(stranger), "a block that never had it must get the plain line")
+
+	bare := "line 9: field fail_behavior not found in type relayer.RelayMeterYAMLConfig"
+	require.Contains(t, describe(bare), "REMOVED", "a retired key keyed by its bare leaf must still match")
+
+	require.Equal(t, "relayer.RedisConfig", typeFromError(stranger))
+	require.Equal(t, "", typeFromError("some other error entirely"))
+}

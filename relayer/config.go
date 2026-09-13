@@ -653,10 +653,6 @@ type HealthCheckConfig struct {
 // RelayMeterYAMLConfig contains YAML configuration for the relay meter.
 // This is converted to relayer.RelayMeterConfig when instantiating the RelayMeter.
 type RelayMeterYAMLConfig struct {
-	// Enabled enables relay metering and rate limiting.
-	// Default: true
-	Enabled bool `yaml:"enabled"`
-
 	// CacheTTL is the TTL for all cached Redis data (streams, params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	// Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
@@ -712,7 +708,6 @@ func DefaultConfig() Config {
 			Addr:    "0.0.0.0:8081",
 		},
 		RelayMeter: RelayMeterYAMLConfig{
-			Enabled:  true,
 			CacheTTL: 2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 		},
 		HTTPTransport: HTTPTransportConfig{

@@ -50,7 +50,15 @@ import (
 // at the session edge will now be rejected instead of served for free. That
 // knowledge was paid for with incidents; the struct fields that used to hold it
 // were deleted because a field per retired key is config that configures nothing.
+//
+// A key is the bare field name, or TYPE.field with the type as yaml.v3 names it
+// ("relayer.RelayMeterYAMLConfig.enabled") when the bare name is a leaf of other
+// blocks too. The qualified form is tried first.
 var retiredKeys = map[string]string{
+	"relayer.RelayMeterYAMLConfig.enabled": "the relay meter can no longer be turned off: every relay is " +
+		"charged against the application's stake before it is served. If this said \"false\", expect relays " +
+		"beyond a session's claimable stake to be rejected where they used to be served for free",
+
 	"grace_period_extra_blocks": "it extended the serve window past the chain's grace period on the admission " +
 		"side only, so relays admitted in those extra blocks were served and then judged ineligible for " +
 		"rewards -- served for free. Grace now follows the on-chain grace_period_end_offset_blocks exactly. " +
@@ -174,10 +182,28 @@ func UnknownKeys(data []byte, probe any) []string {
 // The yaml.v3 form is: `line 42: field foo not found in type pkg.Type`.
 func describe(yamlErr string) string {
 	key := keyFromError(yamlErr)
-	if why, retired := retiredKeys[key]; retired {
+	if key == "" {
+		return yamlErr
+	}
+	why, retired := retiredKeys[typeFromError(yamlErr)+"."+key]
+	if !retired {
+		why, retired = retiredKeys[key]
+	}
+	if retired {
 		return fmt.Sprintf("%s -- this setting was REMOVED: %s", yamlErr, why)
 	}
 	return yamlErr
+}
+
+// typeFromError extracts the type name from a yaml.v3 unknown-field error, or ""
+// when the shape is not the one we expect.
+func typeFromError(yamlErr string) string {
+	const marker = " not found in type "
+	start := strings.Index(yamlErr, marker)
+	if start < 0 {
+		return ""
+	}
+	return strings.TrimSpace(yamlErr[start+len(marker):])
 }
 
 // keyFromError extracts the field name from a yaml.v3 unknown-field error, or

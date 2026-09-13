@@ -80,9 +80,6 @@ def get_defaults():
             "config": {
                 "listen_addr": "0.0.0.0:8080",
                 "validation_mode": "optimistic",
-                "relay_meter": {
-                    "enabled": True,
-                },
             },
         },
         "miner": {

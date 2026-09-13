@@ -1042,6 +1042,15 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		Str("validation_mode", string(validationMode)).
 		Msg("relay received")
 
+	// Refuse what nothing would charge. BEFORE both modes: optimistic meters after the
+	// response is sent, so its own nil check could only serve the relay for free. And
+	// before the queue gate, so a process wired without a meter says so.
+	if p.relayMeter == nil {
+		p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonMeteringNotConfigured).Inc()
+		return
+	}
+
 	// Stop admitting while the batch queue is full. BEFORE the eager meter, so a
 	// refused relay is never charged, and before the backend, so it costs the
 	// operator nothing.
@@ -2311,6 +2320,10 @@ func (p *ProxyServer) SetRelayMeter(meter *RelayMeter) {
 // rejectReasonPublishQueueFull refuses a relay while the batch queue is over
 // redis.batch_max_queued_mib. Already queued relays are never dropped.
 const rejectReasonPublishQueueFull = "publish_queue_full"
+
+// rejectReasonMeteringNotConfigured refuses a relay that nothing would charge: the
+// meter, or the pipeline that carries it, was never wired.
+const rejectReasonMeteringNotConfigured = "metering_not_configured"
 
 // SetPublishQueueFull wires the admission gate on the batch queue.
 func (p *ProxyServer) SetPublishQueueFull(full func() bool) {

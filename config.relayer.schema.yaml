@@ -467,10 +467,6 @@ properties:
     type: object
     description: Relay metering and rate limiting configuration
     properties:
-      enabled:
-        type: boolean
-        description: Enable metering and rate limiting
-        default: true
       cache_ttl:
         type: string
         description: TTL for all cached Redis data (streams, params, app stakes, meters). Redis TTL handles automatic expiration.
