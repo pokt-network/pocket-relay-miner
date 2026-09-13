@@ -169,16 +169,28 @@ func TestWebSocketLoad_SurvivesSessionRollover(t *testing.T) {
 			}
 			require.Zero(t, metrics.errorCount, "no relay should fail outright across a rollover, got %v", metrics.errors)
 			require.Equal(t, int64(srv.cut), stats.lost.Load(), "Lost must be exactly the relays the server cut")
+			require.LessOrEqual(t, stats.lost.Load(), int64(concurrency),
+				"an old connection loses at most one relay; more means it was read again after its session ended")
+			require.Positive(t, stats.lost.Load(), "the border must cut at least one connection")
 			require.Equal(t, srv.delivered, metrics.successCount, "Successful must be exactly what the server answered")
 			require.Greater(t, metrics.successCount, beforeBorder, "relays must be served again after the border")
 			require.Equal(t, count, metrics.successCount+metrics.errorCount+int(stats.lost.Load()),
 				"every relay asked for is a success, an error or lost to the rollover")
-			// Each old connection is cut once and redialed once: the pool is
-			// FIFO, and 30 relays remain for 4 slots.
-			require.Equal(t, int64(concurrency), stats.lost.Load(),
-				"each old connection must lose exactly one relay; more means a connection was read again after its session ended")
-			require.Equal(t, int64(concurrency), stats.redialsAfterRollover.Load())
-			require.Equal(t, concurrency, srv.accepted, "each redial is one new connection on the server")
+			// An old connection is cut AT MOST once (kill() takes it out of the
+			// pool until redialed, and the server only ever cuts one relay per
+			// connection instance): stats.lost.Load() <= concurrency, not
+			// necessarily equal to it. Whether a given slot is redialed at ALL
+			// depends on whether another relay is still queued for it after its
+			// cut is discovered -- with count=40 and concurrency=4 that is true
+			// almost always, but not guaranteed: if a slot's own cut lands on
+			// the LAST relay assigned to it before every other worker has
+			// already finished, that slot's dead connection returns to the pool
+			// and nothing ever pops it again to redial. Assert only what always
+			// holds, not "every slot got reused".
+			require.LessOrEqual(t, stats.redialsAfterRollover.Load(), stats.lost.Load(),
+				"a redial only happens for a connection this run killed on rollover")
+			require.Equal(t, stats.redialsAfterRollover.Load(), int64(srv.accepted),
+				"each redial after rollover is exactly one new connection on the server")
 			require.Zero(t, stats.redialsAfterError.Load())
 			require.Zero(t, stats.dialFailures.Load())
 		})
