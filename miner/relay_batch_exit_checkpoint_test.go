@@ -37,9 +37,21 @@ func TestExitCheckpoint_TheNextOwnerResumesEveryBatchedRelay(t *testing.T) {
 	}
 	w.exitAndRelease()
 
+	// Checked FIRST, before anything else that could also fail: this fixture
+	// never starts a live consume loop -- no reclaimLoop, no deliverOwnPending
+	// racing to reclaim them -- so it is the one place ownership can be
+	// checked without that race (item 263), and the test that pins
+	// releaseRelayBatchOnExit -> ReleaseAll -> ReleaseMessage actually
+	// reaching a real XNACK against Redis, not merely clearing the in-memory
+	// batch or returning nil early. A later assertion failing first would
+	// blame the wrong thing.
+	for i, id := range ids {
+		require.Emptyf(t, w.ownerOf(t, id), "relay %d (%s): released must mean unowned in Redis, not just cleared from the in-memory batch", i, id)
+	}
+
 	require.Equal(t, uint64(n), leavesAfterRestart(t, client, supplier, sessionID),
 		"the next owner must resume a tree holding every relay this one inserted before it left")
-	require.Equal(t, int64(n), w.pending(), "and the entries are released, not acknowledged")
+	require.Equal(t, int64(n), w.pending(), "and the entries are released, not acknowledged (the count alone does not prove ownership, see above)")
 }
 
 // TestExitCheckpoint_DeletesNoNodeTheNextOwnerStillWalks: the new owner has

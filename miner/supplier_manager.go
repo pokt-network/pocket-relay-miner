@@ -419,6 +419,17 @@ type SupplierManager struct {
 	// panic budget are a defence against a defect that is not there yet.
 	consumeLoopFlushHook func()
 
+	// afterReleaseAfterPanicHook, when set, runs once in consumeForSupplier
+	// right after releaseBatchAfterPanic returns and strictly before
+	// runConsumeLoop is called again. For tests only: nil in production. The
+	// point of running here, and not from inside the flush hook, is that
+	// nothing else can have called relayBatch.Add or touched this consumer's
+	// PEL between the release and this call: runConsumeLoop -- the only
+	// reader of msgChan -- has not been invoked yet, so a test observing state
+	// here sees exactly what the release left, with no race against
+	// deliverOwnPending or the reclaimLoop's own sweep (item 263).
+	afterReleaseAfterPanicHook func()
+
 	// drainWG tracks the drain goroutines onSupplierReleased starts, so a
 	// test can await the audit without polling a clock. See waitDrains for
 	// what it deliberately does NOT do.
@@ -2023,7 +2034,11 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 		}
 		// The panic may have left the batch half-built: it goes back before
 		// the loop runs again. A panic while it goes back ends the restarts.
-		if !m.releaseBatchAfterPanic(ctx, state) || panics >= consumeLoopPanicBudget {
+		ok := m.releaseBatchAfterPanic(ctx, state)
+		if m.afterReleaseAfterPanicHook != nil {
+			m.afterReleaseAfterPanicHook()
+		}
+		if !ok || panics >= consumeLoopPanicBudget {
 			m.letGoAfterPanics(ctx, state)
 			return
 		}

@@ -114,10 +114,17 @@ func (f *panicLoopFixture) addRelay(t *testing.T, sessionID, payload string) str
 	return id
 }
 
+// batchedTestRelay is one relay batchRelays put in, kept around so a test can
+// rebuild the exact same message later (e.g. to redeliver it as a reclaim).
+type batchedTestRelay struct {
+	id, payload string
+}
+
 // batchRelays puts n relays in the supplier's batch the way its loop would:
 // read under the consumer's name, processed, held unacknowledged.
-func (f *panicLoopFixture) batchRelays(t *testing.T, sessionID string, n int) {
+func (f *panicLoopFixture) batchRelays(t *testing.T, sessionID string, n int) []batchedTestRelay {
 	t.Helper()
+	relays := make([]batchedTestRelay, 0, n)
 	for i := 0; i < n; i++ {
 		payload := sessionID + "-batched-" + string(rune('a'+i))
 		id := f.addRelay(t, sessionID, payload)
@@ -127,20 +134,10 @@ func (f *panicLoopFixture) batchRelays(t *testing.T, sessionID string, n int) {
 		require.NoError(t, err)
 		require.Equal(t, id, read[0].Messages[0].ID)
 		f.w.deliver(f.w.msg(id, sessionID, payload, 100))
+		relays = append(relays, batchedTestRelay{id: id, payload: payload})
 	}
 	require.Equal(t, n, f.w.held(sessionID), "premise: the batch holds them")
-}
-
-// pendingUnderTheName asks Redis how many entries the consumer's name owns;
-// -1 if it could not.
-func (f *panicLoopFixture) pendingUnderTheName() int64 {
-	pending, err := f.w.client.XPendingExt(f.w.ctx, &redis.XPendingExtArgs{
-		Stream: f.w.stream, Group: f.w.group, Start: "-", End: "+", Count: 100, Consumer: f.w.consumerName,
-	}).Result()
-	if err != nil {
-		return -1
-	}
-	return int64(len(pending))
+	return relays
 }
 
 func loopPanics() float64 {
@@ -149,40 +146,155 @@ func loopPanics() float64 {
 
 // TestConsumeLoop_APanicHandsTheBatchBackAndTheLoopRunsAgain: one panic, with
 // two relays in the batch.
+//
+// Item 263: releasing an entry (XNACK) leaves it idle=-1 in Redis, which both
+// XPENDING's IDLE filter and XCLAIM's MinIdle treat as "always eligible" --
+// ClaimIdleTimeout gives no protection against ANY consumer, including this
+// same one, reclaiming it right back on its next sweep (measured with
+// redis-cli against a bare server: XPENDING ... IDLE 60000 still returns an
+// entry released a millisecond ago). So "pending == 0 at the exact instant
+// the loop restarts" is not a promise this design makes -- ReleaseMessage
+// says so explicitly (visible "to every consumer including the one that let
+// go"), and ReleaseAll's own contract is only that each entry is counted
+// once. This test fixes two things instead, neither tied to that instant:
+// (a) the interrupted batch was actually handed back, and (b) each of its
+// relays is still counted exactly once even when a same-instance reclaim
+// redelivers it.
+//
+// (a) here only checks the in-memory side (held(sessionID) == 0, read from a
+// hook that runs on the one instant nothing else can have added back to it --
+// see afterReleaseAfterPanicHook). The Redis side of the same release --
+// ReleaseMessage actually reaching XNACK, not merely returning nil -- is
+// TestExitCheckpoint_TheNextOwnerResumesEveryBatchedRelay
+// (relay_batch_exit_checkpoint_test.go), which runs no live consume loop and
+// so has no reclaim race to confound an ownership check.
 func TestConsumeLoop_APanicHandsTheBatchBackAndTheLoopRunsAgain(t *testing.T) {
 	const supplier, sessionID = "pokt1loop_panic_once", "sess-loop-panic-once"
-	var pendingAtRestart atomic.Int64
 	restarted := make(chan struct{})
-	var f *panicLoopFixture
-	f = newPanicLoopFixture(t, supplier, func(call int32) {
+	handedBack := make(chan bool, 1)
+	f := newPanicLoopFixture(t, supplier, func(call int32) {
 		switch call {
 		case 1:
 			panic("injected consume-loop panic")
 		case 2: // the loop is running again: the batch went back in between
-			pendingAtRestart.Store(f.pendingUnderTheName())
 			close(restarted)
 		}
 	})
-	f.batchRelays(t, sessionID, 2)
+	// afterReleaseAfterPanicHook runs on the SAME goroutine as the panic and
+	// the release, strictly between releaseBatchAfterPanic returning and
+	// runConsumeLoop being called again -- the only reader of msgChan, and the
+	// only thing that can call relayBatch.Add, is that same goroutine, and it
+	// is blocked inside this call. So nothing (not deliverOwnPending, not the
+	// reclaimLoop's own sweep) can have added anything back to the in-memory
+	// batch by the time this runs: held(sessionID) here reads exactly what the
+	// release left, with no race to argue about (item 263 -- a Redis PEL
+	// heuristic here, like RetryCount, is NOT race-free: the reclaimLoop's
+	// sweep and deliverOwnPending run on their own goroutines and can reorder
+	// around the release in ways that defeat any fixed threshold).
+	f.w.mgr.afterReleaseAfterPanicHook = func() {
+		select {
+		case handedBack <- f.w.held(sessionID) == 0:
+		default:
+		}
+	}
+	batched := f.batchRelays(t, sessionID, 2)
 	before := loopPanics()
 
 	f.start(t)
+
+	// (a) Handed back: read directly off the hook, not a poll -- there is
+	// exactly one instant this can be checked without a race, and the hook
+	// runs on it.
+	select {
+	case ok := <-handedBack:
+		require.True(t, ok, "the interrupted batch is still held in-memory right after the release attempt returned: releaseBatchAfterPanic did not hand it back")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the panic never reached the release attempt")
+	}
 	select {
 	case <-restarted:
 	case <-time.After(10 * time.Second):
 		t.Fatal("the loop did not run again after the panic")
 	}
-	require.Zero(t, pendingAtRestart.Load(),
-		"the batch the panic interrupted must be handed back, not left under the consumer's name")
 
-	fresh := f.addRelay(t, sessionID, "after-the-panic")
-	for got := ""; got != fresh; {
-		select {
-		case got = <-f.processed:
-		case <-time.After(10 * time.Second):
-			t.Fatal("a relay published after the panic was never consumed")
+	// (b) Counted exactly once, forced deterministically instead of racing the
+	// real same-instance reclaim (item 263 measured it at ~3% of runs, too rare
+	// to exercise a teeth reliably): redeliver both relays of the interrupted
+	// batch exactly as deliverOwnPending and the reclaimLoop's own sweep both
+	// do it (IsReclaim=true -- verified in the source, consumer.go:666,799:
+	// both paths set it, so there is only this one shape of second copy to
+	// prove safe, not a separate "non-reclaim" one).
+	//
+	// This has to happen in two rounds, not one: the FIRST forced copy is
+	// itself the first time these two relays are ever fully processed (the
+	// panic interrupted them before their first flush), so it proves nothing
+	// about duplicate protection by itself -- a fresh SADD member has nothing
+	// to reject. Only a SECOND copy, landing on a session whose count already
+	// includes them, tests that.
+	drained := map[string]int{}
+	drainProcessed := func() {
+		for {
+			select {
+			case id := <-f.processed:
+				drained[id]++
+			default:
+				return
+			}
 		}
 	}
+	redeliver := func(r batchedTestRelay) {
+		msg := f.w.msg(r.id, sessionID, r.payload, 100)
+		msg.IsReclaim = true
+		f.w.deliver(msg)
+	}
+	waitFor := func(want map[string]int, what string) {
+		t.Helper()
+		ok := func() bool {
+			for id, n := range want {
+				if drained[id] < n {
+					return false
+				}
+			}
+			return true
+		}
+		for !ok() {
+			select {
+			case id := <-f.processed:
+				drained[id]++
+			case <-time.After(10 * time.Second):
+				t.Fatal(what)
+			}
+		}
+	}
+
+	drainProcessed() // absorb whatever already happened before this point
+	for _, r := range batched {
+		redeliver(r)
+	}
+	fresh := f.addRelay(t, sessionID, "after-the-panic")
+	waitFor(map[string]int{batched[0].id: 1, batched[1].id: 1, fresh: 1},
+		"the first (reclaim-shaped) redelivery of the interrupted batch, or the fresh relay, was never consumed")
+	f.w.batch.FlushAll(f.w.ctx) // settle deterministically instead of waiting on the flush ticker
+
+	snap, err := f.w.store.Get(f.w.ctx, sessionID)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, snap.RelayCount, "2 batched + 1 fresh, first count")
+
+	// Now land a SECOND copy of the same two relays on a session that already
+	// counted them -- this is the one that actually exercises the SADD-based
+	// dedup gate (relayBatchScript, the real correctness gate; the per-relay
+	// IsDuplicate check upstream is only an optimisation, per its own comment).
+	for _, r := range batched {
+		redeliver(r)
+	}
+	waitFor(map[string]int{batched[0].id: 2, batched[1].id: 2},
+		"the second (duplicate) redelivery of the interrupted batch was never consumed")
+	f.w.batch.FlushAll(f.w.ctx)
+
+	snap, err = f.w.store.Get(f.w.ctx, sessionID)
+	require.NoError(t, err)
+	require.EqualValues(t, 3, snap.RelayCount,
+		"a relay already counted must not be counted again when a same-instance reclaim redelivers it")
 
 	require.Equal(t, before+1, loopPanics(), "each panic is counted")
 	require.Contains(t, f.w.logs.String(), "PANIC RECOVERED in the consume loop")

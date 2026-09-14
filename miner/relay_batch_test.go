@@ -184,6 +184,23 @@ func (w *batchWorker) marked(sessionID string) int64 {
 	return n
 }
 
+// ownerOf returns the current owner of a pending entry ("" for a modern
+// server's XNACK SILENT, which leaves it pending but unowned), or "gone" if
+// the id is no longer in the group's PEL at all (acknowledged, or expired).
+func (w *batchWorker) ownerOf(t *testing.T, id string) string {
+	t.Helper()
+	pending, err := w.client.XPendingExt(w.ctx, &redis.XPendingExtArgs{
+		Stream: w.stream, Group: w.group, Start: "-", End: "+", Count: 1000,
+	}).Result()
+	require.NoError(t, err)
+	for _, e := range pending {
+		if e.ID == id {
+			return e.Consumer
+		}
+	}
+	return "gone"
+}
+
 func (w *batchWorker) held(sessionID string) int {
 	w.batch.mu.Lock()
 	defer w.batch.mu.Unlock()
