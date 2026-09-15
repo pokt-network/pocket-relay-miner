@@ -50,8 +50,9 @@ type RedisMapStore struct {
 	ctx         context.Context
 
 	// Pipeline buffers — separated because they have different lifetimes.
-	//   pipelineBuffer is reset on every BeginPipeline and flushed by every
-	//   FlushPipeline (one round-trip per UpdateTree).
+	//   pipelineBuffer is flushed by every FlushPipeline (one round-trip per
+	//   UpdateTree) and emptied only by a write that succeeded, so the nodes
+	//   of a failed flush go with the next one.
 	//   orphanBuffer accumulates across Updates until FlushOrphansWithLiveRoot
 	//   at a checkpoint boundary, so live_root always references nodes that
 	//   are still present in the hash.
@@ -292,10 +293,18 @@ func (s *RedisMapStore) BeginPipeline() {
 	defer s.pipelineMu.Unlock()
 
 	s.pipelineEnabled = true
-	// Reset the per-Update Set buffer. The orphan buffer must persist across
-	// BeginPipeline calls — it is owned by the checkpoint cycle, not the
-	// Update cycle. Clearing it here would silently drop pending HDELs.
-	s.pipelineBuffer = make(map[string][]byte)
+	// The orphan buffer must persist across BeginPipeline calls — it is owned
+	// by the checkpoint cycle, not the Update cycle. Clearing it here would
+	// silently drop pending HDELs.
+	//
+	// The Set buffer used to be reset here too. It no longer is: a buffer that
+	// is not empty at this point holds the nodes of a FlushPipeline that
+	// failed. Commit marked those nodes persisted before handing them over, so
+	// the trie never sends them again, and compaction trusts that mark to drop
+	// a leaf's in-memory value -- reset here, that leaf ends up in neither
+	// memory nor Redis and its proof fails. Kept, they go with this Update's
+	// flush.
+	// s.pipelineBuffer = make(map[string][]byte)
 }
 
 // FlushPipeline executes all buffered Set() operations in a single Redis HSET command.
@@ -311,9 +320,29 @@ func (s *RedisMapStore) FlushPipeline() error {
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
 
-	// If no buffered operations, nothing to do
+	// Pipeline mode ends whether or not the write succeeds.
+	s.pipelineEnabled = false
+	if err := s.writePendingNodesLocked(); err != nil {
+		return fmt.Errorf("failed to flush pipeline: %w", err)
+	}
+	return nil
+}
+
+// FlushPendingNodes writes the nodes a failed FlushPipeline left buffered, and
+// is a no-op without a round trip when there are none. A writer of a root calls
+// it before storing the root: a root stored while nodes under it are only in
+// this buffer points a resumed tree at digests Redis does not have.
+func (s *RedisMapStore) FlushPendingNodes() error {
+	s.pipelineMu.Lock()
+	defer s.pipelineMu.Unlock()
+	return s.writePendingNodesLocked()
+}
+
+// writePendingNodesLocked sends pipelineBuffer as one multi-field HSET and
+// empties it only if the write succeeded; on failure the nodes stay buffered
+// for the next write. The caller holds pipelineMu.
+func (s *RedisMapStore) writePendingNodesLocked() error {
 	if len(s.pipelineBuffer) == 0 {
-		s.pipelineEnabled = false
 		return nil
 	}
 
@@ -334,18 +363,14 @@ func (s *RedisMapStore) FlushPipeline() error {
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("flush_pipeline", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("flush_pipeline", "store_error").Inc()
-		s.pipelineEnabled = false
-		return fmt.Errorf("failed to flush pipeline: %w", err)
+		return err
 	}
 
 	// Track metrics (count as bulk operation)
 	observability.SMSTStoreOperations.WithLabelValues("flush_pipeline", "success").Inc()
 	observability.SMSTStoreOperations.WithLabelValues("set", "success").Add(float64(len(s.pipelineBuffer)))
 
-	// Clear buffer and disable pipeline mode
 	s.pipelineBuffer = make(map[string][]byte)
-	s.pipelineEnabled = false
-
 	return nil
 }
 
@@ -383,6 +408,15 @@ func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 ) error {
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
+
+	// Nodes before the root. A failed FlushPipeline can have left nodes that
+	// this root references only in the buffer; they are written first, outside
+	// the MULTI below, because nodes no root points at are harmless and a root
+	// without its nodes is not. If they cannot be written, nothing else is
+	// sent: the orphans are kept and live_root stays at its previous value.
+	if err := s.writePendingNodesLocked(); err != nil {
+		return fmt.Errorf("write buffered nodes before live_root: %w", err)
+	}
 
 	start := time.Now()
 	defer func() {

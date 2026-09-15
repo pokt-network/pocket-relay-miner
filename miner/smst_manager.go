@@ -1001,6 +1001,12 @@ func (m *RedisSMSTManager) exitRootLocked(sessionID string, tree *redisSMST) ([]
 // writeExitLiveRootLocked sets live_root to rootBytes with exitLiveRootScript
 // and records it. The caller holds tree.mu.
 func (m *RedisSMSTManager) writeExitLiveRootLocked(ctx context.Context, sessionID string, tree *redisSMST, rootBytes []byte) (bool, error) {
+	// Nodes before the root, as in FlushOrphansWithLiveRoot.
+	if redisStore, ok := tree.store.(*RedisMapStore); ok {
+		if err := redisStore.FlushPendingNodes(); err != nil {
+			return false, fmt.Errorf("write buffered nodes before live_root: %w", err)
+		}
+	}
 	keys := []string{
 		m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID),
 		m.redisClient.KB().SMSTNodesKey(m.config.SupplierAddress, sessionID),
@@ -1215,7 +1221,21 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 	// The invariant claimed_root's TTL is always ≥ nodes-hash TTL is
 	// maintained by (a) writing claimed_root with CacheTTL here and (b)
 	// refreshing it on every loadTreeFromRedis.
-	if err := m.redisClient.Set(ctx, rootKey, tree.claimedRoot, m.config.CacheTTL).Err(); err != nil {
+	//
+	// Nodes before the root: claimed_root is what a resumed tree is imported
+	// at to prove, so it is not stored while nodes under it are only in the
+	// buffer a failed FlushPipeline left. A failure there is handled like a
+	// failed SET of the root: logged, and the root returned from memory.
+	var nodesErr error
+	if redisStore, ok := tree.store.(*RedisMapStore); ok {
+		nodesErr = redisStore.FlushPendingNodes()
+	}
+	if nodesErr != nil {
+		m.logger.Warn().
+			Err(nodesErr).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("failed to write buffered SMST nodes, not storing claimed root in Redis (non-fatal)")
+	} else if err := m.redisClient.Set(ctx, rootKey, tree.claimedRoot, m.config.CacheTTL).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
