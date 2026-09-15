@@ -419,35 +419,39 @@ func TestSMSTLiveRootCheckpointIntervalYAMLParsing(t *testing.T) {
 	})
 }
 
-// TestSMSTLiveRootCheckpointInterval_PropagatesToManager is the integration
-// side of the wiring check: build a RedisSMSTManagerConfig from a specific
-// operator-provided interval and verify the manager actually applies it
-// (as opposed to always using the default). This would have caught the
-// gap where the YAML key existed but nothing downstream read it.
-func TestSMSTLiveRootCheckpointInterval_PropagatesToManager(t *testing.T) {
-	// Without a miniredis harness here we exercise only the config helper,
-	// which is the single source of truth the manager consults. The
-	// end-to-end test in smst_live_root_test.go's TestLiveRoot_CustomIntervalRespected
-	// covers the behavioural side (writes respect the interval).
-	cases := []struct {
-		name     string
-		input    int
-		expected int
-	}{
-		{"explicit 1 = zero-loss mode", 1, 1},
-		{"explicit 50", 50, 50},
-		{"zero falls back to default", 0, DefaultLiveRootCheckpointInterval},
-		{"negative falls back to default (defensive)", -5, DefaultLiveRootCheckpointInterval},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			m := &RedisSMSTManager{
-				config: RedisSMSTManagerConfig{LiveRootCheckpointInterval: tc.input},
-			}
-			require.Equal(t, tc.expected, m.liveRootInterval())
-		})
-	}
-}
+// This test pinned liveRootInterval, which went with the per-update live_root
+// checkpoint: live_root is now written by the relay batch before it
+// acknowledges, and the configured interval is no longer read.
+//
+// // TestSMSTLiveRootCheckpointInterval_PropagatesToManager is the integration
+// // side of the wiring check: build a RedisSMSTManagerConfig from a specific
+// // operator-provided interval and verify the manager actually applies it
+// // (as opposed to always using the default). This would have caught the
+// // gap where the YAML key existed but nothing downstream read it.
+// func TestSMSTLiveRootCheckpointInterval_PropagatesToManager(t *testing.T) {
+// 	// Without a miniredis harness here we exercise only the config helper,
+// 	// which is the single source of truth the manager consults. The
+// 	// end-to-end test in smst_live_root_test.go's TestLiveRoot_CustomIntervalRespected
+// 	// covers the behavioural side (writes respect the interval).
+// 	cases := []struct {
+// 		name     string
+// 		input    int
+// 		expected int
+// 	}{
+// 		{"explicit 1 = zero-loss mode", 1, 1},
+// 		{"explicit 50", 50, 50},
+// 		{"zero falls back to default", 0, DefaultLiveRootCheckpointInterval},
+// 		{"negative falls back to default (defensive)", -5, DefaultLiveRootCheckpointInterval},
+// 	}
+// 	for _, tc := range cases {
+// 		t.Run(tc.name, func(t *testing.T) {
+// 			m := &RedisSMSTManager{
+// 				config: RedisSMSTManagerConfig{LiveRootCheckpointInterval: tc.input},
+// 			}
+// 			require.Equal(t, tc.expected, m.liveRootInterval())
+// 		})
+// 	}
+// }
 
 func TestWorkerPoolConfigYAMLParsing(t *testing.T) {
 	yamlData := `

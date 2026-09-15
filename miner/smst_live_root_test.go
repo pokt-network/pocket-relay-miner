@@ -2,9 +2,10 @@
 
 package miner
 
-// Tests for the live_root checkpoint mechanism: the Redis key written on
-// every Nth UpdateTree that lets an HA follower resume a mid-session SMST
-// after the previous leader dies without waiting for a flush.
+// Tests for the live_root checkpoint mechanism: the Redis key that lets an HA
+// follower resume a mid-session SMST after the previous leader dies without
+// waiting for a flush. CheckpointLiveRoot writes it, which the relay batch runs
+// before it acknowledges; an update alone writes nothing.
 //
 // Regression context: before these tests, a mid-session leader kill lost
 // ~50% of the relays the dead leader had processed (the survivor's
@@ -21,58 +22,70 @@ import (
 	"github.com/rs/zerolog"
 )
 
-// TestLiveRoot_FirstUpdateCheckpoints verifies that the VERY FIRST
-// UpdateTree call always writes live_root, even though the interval is
-// larger than 1. Without this, low-traffic sessions (fewer relays than
-// the interval) could lose the entire session on a mid-session kill.
-func (s *RedisSMSTTestSuite) TestLiveRoot_FirstUpdateCheckpoints() {
-	supplier := "pokt1live_first_update"
-	sessionID := "session_live_first"
+// The interval checkpoint UpdateTree wrote on its own -- at the first update
+// and every LiveRootCheckpointInterval updates -- is disabled: the tree is
+// committed and live_root written once per relay batch, before the batch
+// acknowledges (see TestBatchCommit_*). This test pinned that interval, and is
+// kept commented as the record of what the interval promised.
+//
+// // TestLiveRoot_FirstUpdateCheckpoints verifies that the VERY FIRST
+// // UpdateTree call always writes live_root, even though the interval is
+// // larger than 1. Without this, low-traffic sessions (fewer relays than
+// // the interval) could lose the entire session on a mid-session kill.
+// func (s *RedisSMSTTestSuite) TestLiveRoot_FirstUpdateCheckpoints() {
+// 	supplier := "pokt1live_first_update"
+// 	sessionID := "session_live_first"
+//
+// 	mgr := s.createTestRedisSMSTManager(supplier)
+//
+// 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k1"), []byte("v1"), 10))
+//
+// 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
+// 	liveRoot, err := s.redisClient.Get(s.ctx, liveKey).Bytes()
+// 	s.Require().NoError(err, "live_root MUST exist after the first update")
+// 	s.Require().NotEmpty(liveRoot, "live_root bytes must not be empty")
+// }
 
-	mgr := s.createTestRedisSMSTManager(supplier)
-
-	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k1"), []byte("v1"), 10))
-
-	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
-	liveRoot, err := s.redisClient.Get(s.ctx, liveKey).Bytes()
-	s.Require().NoError(err, "live_root MUST exist after the first update")
-	s.Require().NotEmpty(liveRoot, "live_root bytes must not be empty")
-}
-
-// TestLiveRoot_CheckpointsAtInterval verifies the batching optimisation:
-// between the first update and the next interval boundary, live_root is
-// NOT re-written on every update, but IS re-written when the interval is
-// reached.
-func (s *RedisSMSTTestSuite) TestLiveRoot_CheckpointsAtInterval() {
-	supplier := "pokt1live_interval"
-	sessionID := "session_live_interval"
-	const interval = 5
-
-	mgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
-	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
-
-	// Update #1 - first update always checkpoints.
-	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k1"), []byte("v1"), 10))
-	checkpointAfter1, _ := s.redisClient.Get(s.ctx, liveKey).Bytes()
-	s.Require().NotEmpty(checkpointAfter1, "live_root must be set after update 1")
-
-	// Updates #2, #3, #4 - no checkpoint, live_root must be byte-equal
-	// to the one written at update 1 (still reflects the first relay's
-	// root, not any subsequent updates).
-	for i := 2; i <= 4; i++ {
-		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
-			[]byte(fmt.Sprintf("k%d", i)), []byte(fmt.Sprintf("v%d", i)), uint64(10*i)))
-	}
-	checkpointAfter4, _ := s.redisClient.Get(s.ctx, liveKey).Bytes()
-	s.Require().Equal(checkpointAfter1, checkpointAfter4,
-		"live_root must NOT be re-written between interval boundaries")
-
-	// Update #5 - interval boundary, checkpoint must refresh.
-	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k5"), []byte("v5"), 50))
-	checkpointAfter5, _ := s.redisClient.Get(s.ctx, liveKey).Bytes()
-	s.Require().NotEqual(checkpointAfter1, checkpointAfter5,
-		"live_root must be refreshed at interval boundary (update 5)")
-}
+// The interval checkpoint UpdateTree wrote on its own -- at the first update
+// and every LiveRootCheckpointInterval updates -- is disabled: the tree is
+// committed and live_root written once per relay batch, before the batch
+// acknowledges (see TestBatchCommit_*). This test pinned that interval, and is
+// kept commented as the record of what the interval promised.
+//
+// // TestLiveRoot_CheckpointsAtInterval verifies the batching optimisation:
+// // between the first update and the next interval boundary, live_root is
+// // NOT re-written on every update, but IS re-written when the interval is
+// // reached.
+// func (s *RedisSMSTTestSuite) TestLiveRoot_CheckpointsAtInterval() {
+// 	supplier := "pokt1live_interval"
+// 	sessionID := "session_live_interval"
+// 	const interval = 5
+//
+// 	mgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
+// 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
+//
+// 	// Update #1 - first update always checkpoints.
+// 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k1"), []byte("v1"), 10))
+// 	checkpointAfter1, _ := s.redisClient.Get(s.ctx, liveKey).Bytes()
+// 	s.Require().NotEmpty(checkpointAfter1, "live_root must be set after update 1")
+//
+// 	// Updates #2, #3, #4 - no checkpoint, live_root must be byte-equal
+// 	// to the one written at update 1 (still reflects the first relay's
+// 	// root, not any subsequent updates).
+// 	for i := 2; i <= 4; i++ {
+// 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
+// 			[]byte(fmt.Sprintf("k%d", i)), []byte(fmt.Sprintf("v%d", i)), uint64(10*i)))
+// 	}
+// 	checkpointAfter4, _ := s.redisClient.Get(s.ctx, liveKey).Bytes()
+// 	s.Require().Equal(checkpointAfter1, checkpointAfter4,
+// 		"live_root must NOT be re-written between interval boundaries")
+//
+// 	// Update #5 - interval boundary, checkpoint must refresh.
+// 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k5"), []byte("v5"), 50))
+// 	checkpointAfter5, _ := s.redisClient.Get(s.ctx, liveKey).Bytes()
+// 	s.Require().NotEqual(checkpointAfter1, checkpointAfter5,
+// 		"live_root must be refreshed at interval boundary (update 5)")
+// }
 
 // TestLiveRoot_MidSessionResumePreservesTree is the crown-jewel regression
 // test: it simulates a leader dying mid-session after N updates, the
@@ -91,8 +104,8 @@ func (s *RedisSMSTTestSuite) TestLiveRoot_MidSessionResumePreservesTree() {
 	const leaderUpdates = 20 // at interval boundary - no relays lost
 	const followerUpdates = 15
 
-	// Phase 1: "Leader" processes 20 relays. With interval=10, live_root
-	// is checkpointed at updates 1, 10, and 20.
+	// Phase 1: "Leader" processes 20 relays, and the checkpoint its relay batch
+	// runs before acknowledging them writes live_root.
 	leaderMgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
 	for i := 1; i <= leaderUpdates; i++ {
 		s.Require().NoError(leaderMgr.UpdateTree(s.ctx, sessionID,
@@ -100,6 +113,7 @@ func (s *RedisSMSTTestSuite) TestLiveRoot_MidSessionResumePreservesTree() {
 			[]byte(fmt.Sprintf("leader_v%d", i)),
 			uint64(10)))
 	}
+	s.checkpoint(leaderMgr, sessionID)
 
 	// Phase 2: leader "dies" - we drop its in-memory tree. Redis state is
 	// unchanged (nodes hash + live_root at update 20).
@@ -135,48 +149,54 @@ func (s *RedisSMSTTestSuite) TestLiveRoot_MidSessionResumePreservesTree() {
 	s.Require().Equalf(expected*10, sum, "sum must match %d * weight=10", expected)
 }
 
-// TestLiveRoot_LossBoundedByInterval verifies the worst-case guarantee:
-// if the leader dies BETWEEN checkpoint boundaries, the follower's resume
-// will be missing at most (interval - 1) relays. Losing exactly
-// (interval - 1) is the expected trade-off for reducing write amplification.
-func (s *RedisSMSTTestSuite) TestLiveRoot_LossBoundedByInterval() {
-	supplier := "pokt1live_loss_bound"
-	sessionID := "session_live_loss"
-	const interval = 10
-	const leaderUpdates = 19 // one before the next checkpoint (at 20)
-
-	leaderMgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
-	for i := 1; i <= leaderUpdates; i++ {
-		s.Require().NoError(leaderMgr.UpdateTree(s.ctx, sessionID,
-			[]byte(fmt.Sprintf("k%d", i)),
-			[]byte(fmt.Sprintf("v%d", i)),
-			uint64(10)))
-	}
-
-	// Drop in-memory state, simulate leader kill between checkpoints.
-	leaderMgr.treesMu.Lock()
-	delete(leaderMgr.trees, sessionID)
-	leaderMgr.treesMu.Unlock()
-
-	// Resume from Redis; flush without adding anything new.
-	followerMgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
-	_, err := followerMgr.FlushTree(s.ctx, sessionID)
-	s.Require().NoError(err)
-
-	count, _, err := followerMgr.GetTreeStats(sessionID)
-	s.Require().NoError(err)
-
-	// Last checkpoint was at update 10. Updates 11-19 are "in-flight"
-	// from Redis's perspective (nodes committed, root not checkpointed).
-	// Expected count after resume is 10; loss = 9 = interval - 1.
-	s.Require().Equalf(uint64(10), count,
-		"follower must resume at last checkpoint (10), not latest update (19). "+
-			"Loss bound = interval-1 = %d relays", interval-1)
-
-	loss := leaderUpdates - int(count)
-	s.Require().LessOrEqualf(loss, interval-1,
-		"loss %d must not exceed interval-1 = %d", loss, interval-1)
-}
+// The interval checkpoint UpdateTree wrote on its own -- at the first update
+// and every LiveRootCheckpointInterval updates -- is disabled: the tree is
+// committed and live_root written once per relay batch, before the batch
+// acknowledges (see TestBatchCommit_*). This test pinned that interval, and is
+// kept commented as the record of what the interval promised.
+//
+// // TestLiveRoot_LossBoundedByInterval verifies the worst-case guarantee:
+// // if the leader dies BETWEEN checkpoint boundaries, the follower's resume
+// // will be missing at most (interval - 1) relays. Losing exactly
+// // (interval - 1) is the expected trade-off for reducing write amplification.
+// func (s *RedisSMSTTestSuite) TestLiveRoot_LossBoundedByInterval() {
+// 	supplier := "pokt1live_loss_bound"
+// 	sessionID := "session_live_loss"
+// 	const interval = 10
+// 	const leaderUpdates = 19 // one before the next checkpoint (at 20)
+//
+// 	leaderMgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
+// 	for i := 1; i <= leaderUpdates; i++ {
+// 		s.Require().NoError(leaderMgr.UpdateTree(s.ctx, sessionID,
+// 			[]byte(fmt.Sprintf("k%d", i)),
+// 			[]byte(fmt.Sprintf("v%d", i)),
+// 			uint64(10)))
+// 	}
+//
+// 	// Drop in-memory state, simulate leader kill between checkpoints.
+// 	leaderMgr.treesMu.Lock()
+// 	delete(leaderMgr.trees, sessionID)
+// 	leaderMgr.treesMu.Unlock()
+//
+// 	// Resume from Redis; flush without adding anything new.
+// 	followerMgr := s.createTestRedisSMSTManagerWithInterval(supplier, interval)
+// 	_, err := followerMgr.FlushTree(s.ctx, sessionID)
+// 	s.Require().NoError(err)
+//
+// 	count, _, err := followerMgr.GetTreeStats(sessionID)
+// 	s.Require().NoError(err)
+//
+// 	// Last checkpoint was at update 10. Updates 11-19 are "in-flight"
+// 	// from Redis's perspective (nodes committed, root not checkpointed).
+// 	// Expected count after resume is 10; loss = 9 = interval - 1.
+// 	s.Require().Equalf(uint64(10), count,
+// 		"follower must resume at last checkpoint (10), not latest update (19). "+
+// 			"Loss bound = interval-1 = %d relays", interval-1)
+//
+// 	loss := leaderUpdates - int(count)
+// 	s.Require().LessOrEqualf(loss, interval-1,
+// 		"loss %d must not exceed interval-1 = %d", loss, interval-1)
+// }
 
 // TestLiveRoot_ClaimedRootTakesPriority verifies the resume order: if
 // BOTH a claimed_root (post-flush, sealed) and a live_root exist for a
@@ -223,6 +243,7 @@ func (s *RedisSMSTTestSuite) TestLiveRoot_DeleteTreeCleansUp() {
 	mgr := s.createTestRedisSMSTManager(supplier)
 
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k"), []byte("v"), 10))
+	s.checkpoint(mgr, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
 
 	exists, _ := s.redisClient.Exists(s.ctx, liveKey).Result()
@@ -234,32 +255,38 @@ func (s *RedisSMSTTestSuite) TestLiveRoot_DeleteTreeCleansUp() {
 	s.Require().Equal(int64(0), exists, "live_root must be cleaned up by DeleteTree")
 }
 
-// TestLiveRoot_CustomIntervalRespected verifies that the config's
-// LiveRootCheckpointInterval overrides the default. interval=1 should
-// produce a fresh live_root on every update (zero-loss mode).
-func (s *RedisSMSTTestSuite) TestLiveRoot_CustomIntervalRespected() {
-	supplier := "pokt1live_custom"
-	sessionID := "session_live_custom"
-
-	mgr := s.createTestRedisSMSTManagerWithInterval(supplier, 1)
-	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
-
-	// Every update must change live_root when interval=1.
-	var prev []byte
-	for i := 1; i <= 5; i++ {
-		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
-			[]byte(fmt.Sprintf("k%d", i)),
-			[]byte(fmt.Sprintf("v%d", i)),
-			uint64(10)))
-		cur, _ := s.redisClient.Get(s.ctx, liveKey).Bytes()
-		s.Require().NotEmpty(cur, "live_root present after update %d", i)
-		if i > 1 {
-			s.Require().NotEqualf(prev, cur,
-				"live_root must change on every update when interval=1 (step %d)", i)
-		}
-		prev = cur
-	}
-}
+// The interval checkpoint UpdateTree wrote on its own -- at the first update
+// and every LiveRootCheckpointInterval updates -- is disabled: the tree is
+// committed and live_root written once per relay batch, before the batch
+// acknowledges (see TestBatchCommit_*). This test pinned that interval, and is
+// kept commented as the record of what the interval promised.
+//
+// // TestLiveRoot_CustomIntervalRespected verifies that the config's
+// // LiveRootCheckpointInterval overrides the default. interval=1 should
+// // produce a fresh live_root on every update (zero-loss mode).
+// func (s *RedisSMSTTestSuite) TestLiveRoot_CustomIntervalRespected() {
+// 	supplier := "pokt1live_custom"
+// 	sessionID := "session_live_custom"
+//
+// 	mgr := s.createTestRedisSMSTManagerWithInterval(supplier, 1)
+// 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
+//
+// 	// Every update must change live_root when interval=1.
+// 	var prev []byte
+// 	for i := 1; i <= 5; i++ {
+// 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
+// 			[]byte(fmt.Sprintf("k%d", i)),
+// 			[]byte(fmt.Sprintf("v%d", i)),
+// 			uint64(10)))
+// 		cur, _ := s.redisClient.Get(s.ctx, liveKey).Bytes()
+// 		s.Require().NotEmpty(cur, "live_root present after update %d", i)
+// 		if i > 1 {
+// 			s.Require().NotEqualf(prev, cur,
+// 				"live_root must change on every update when interval=1 (step %d)", i)
+// 		}
+// 		prev = cur
+// 	}
+// }
 
 // TestLiveRoot_FollowerUpdateAfterStaleResume reproduces the Anaski
 // production panic (2026-04-17):
@@ -304,7 +331,16 @@ func (s *RedisSMSTTestSuite) TestLiveRoot_FollowerUpdateAfterStaleResume() {
 			[]byte(fmt.Sprintf("leader_k%d", i)),
 			[]byte(fmt.Sprintf("leader_v%d", i)),
 			uint64(10)))
+		if i == 10 {
+			// The relay batch's checkpoint: live_root = R_10.
+			s.checkpoint(leaderMgr, sessionID)
+		}
 	}
+	// A commit with no new live_root: updates 11..19 reach the nodes hash and
+	// orphan nodes R_10 still references.
+	resident, commitErr := leaderMgr.CommitTree(s.ctx, sessionID)
+	s.Require().NoError(commitErr)
+	s.Require().True(resident)
 
 	// Leader dies: drop in-memory state. Redis has the nodes hash (with
 	// orphans from updates 11..19 already deleted) plus live_root = R_10.

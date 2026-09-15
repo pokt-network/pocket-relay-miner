@@ -16,11 +16,12 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-// ErrRelayBatched is what the relay handler returns when it has put the relay in
-// the SMST and handed the rest of its processing -- the duplicate mark, the
-// session counters and the stream acknowledgement -- to the supplier's
-// relayBatch. It is NOT a failure: the caller must neither acknowledge the entry
-// (the batch does, when it flushes) nor hand it back.
+// ErrRelayBatched is what the relay handler returns when it has handed the
+// relay's stream entry to the supplier's relayBatch: a relay put in the SMST,
+// whose duplicate mark, session counters and acknowledgement the batch does, or
+// a rejected relay, which the batch only acknowledges. It is NOT a failure: the
+// caller must neither acknowledge the entry (the batch does, when it flushes)
+// nor hand it back.
 var ErrRelayBatched = errors.New("relay handed to the batch: acknowledged when the batch flushes")
 
 // relayBatchCap bounds how many relays one session holds before a flush is
@@ -156,6 +157,13 @@ type relayBatch struct {
 
 	mu       sync.Mutex
 	sessions map[string]*sessionBatch
+
+	// acks are the stream entries of rejected relays -- dropped before the tree
+	// or refused by it -- waiting to be acknowledged together, in one XACKDEL
+	// (flushAcksLocked), instead of one each. Nothing about them is counted or
+	// marked, so a crash before that XACKDEL only redelivers them, and the
+	// redelivery is rejected again. Protected by mu.
+	acks []string
 }
 
 // newRelayBatch returns nil when the deduplicator is not the Redis one whose set
@@ -217,14 +225,48 @@ func (b *relayBatch) Add(ctx context.Context, s relaySession, r batchedRelay) bo
 	return true
 }
 
-// FlushAll flushes every session held. A session whose flush fails with
-// nothing known to be written stays held for the next one.
+// AddAck takes the stream entry of a rejected relay, to acknowledge with the
+// next flush. It reports false when it will not -- relayBatchCap entries are
+// already waiting and acknowledging them failed -- and the caller must then
+// acknowledge that entry itself.
+func (b *relayBatch) AddAck(ctx context.Context, id string) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if len(b.acks) >= relayBatchCap && b.flushAcksLocked(ctx) {
+		return false
+	}
+	b.acks = append(b.acks, id)
+	return true
+}
+
+// flushAcksLocked acknowledges every waiting rejected entry in one XACKDEL and
+// reports whether they are still waiting: an error keeps them for the next
+// flush. At most relayBatchCap ids go in one call, the size the flush script
+// already sends XACKDEL.
+func (b *relayBatch) flushAcksLocked(ctx context.Context) (retained bool) {
+	if len(b.acks) == 0 {
+		return false
+	}
+	if err := b.redisClient.XAckDel(ctx, b.consumer.StreamName(), b.consumer.ConsumerGroup(), "DELREF", b.acks...).Err(); err != nil {
+		b.logger.Debug().Err(err).Int("entries", len(b.acks)).
+			Msg("relay batch: acknowledging rejected relays failed, keeping them for the next flush")
+		return true
+	}
+	b.consumer.RecordAcked(len(b.acks))
+	b.acks = b.acks[:0]
+	return false
+}
+
+// FlushAll flushes every session held, and acknowledges the rejected relays
+// waiting. A session whose flush fails with nothing known to be written stays
+// held for the next one, as do rejected entries whose acknowledgement failed.
 func (b *relayBatch) FlushAll(ctx context.Context) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	for _, sb := range b.sessions {
 		b.flushLocked(ctx, sb)
 	}
+	b.flushAcksLocked(ctx)
 }
 
 // FlushSessions flushes the named sessions, for a caller about to read their
@@ -250,9 +292,13 @@ func (b *relayBatch) FlushSessions(ctx context.Context, sessionIDs []string) {
 // (CheckpointLiveRootOnExit): the next owner resumes from live_root, and a
 // relay missing there comes back only if its entry is redelivered before the
 // session is sealed. A checkpoint that fails does not hold the release.
+//
+// Rejected relays waiting are acknowledged, not released: released, they would
+// only come back to be rejected again.
 func (b *relayBatch) ReleaseAll(ctx context.Context) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.flushAcksLocked(ctx)
 	for id, sb := range b.sessions {
 		if _, err := b.smst.CheckpointLiveRootOnExit(ctx, id); err != nil {
 			b.logger.Debug().Err(err).Str(logging.FieldSessionID, id).
@@ -269,9 +315,13 @@ func (b *relayBatch) ReleaseAll(ctx context.Context) {
 // never comes. It mirrors drainDeliveryBuffer's key-removal branch -- acked,
 // counted as dropped for want of a key, dedup and counters untouched -- and an
 // entry whose acknowledgement fails stays pending, as it does there.
+//
+// Rejected relays waiting are acknowledged too, without being counted as
+// dropped for want of a key: they were rejected, and counted as such, already.
 func (b *relayBatch) AckAllAsLost(ctx context.Context) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.flushAcksLocked(ctx)
 	for id, sb := range b.sessions {
 		for _, r := range sb.relays {
 			msg := transport.StreamMessage{ID: r.id, StreamName: b.consumer.StreamName()}
@@ -476,6 +526,16 @@ func (b *relayBatch) releaseRelays(ctx context.Context, sessionID string, relays
 // acknowledged -- the same decision handleStreamMessage applies to one relay.
 func (b *relayBatch) finishOneByOne(ctx context.Context, sb *sessionBatch) {
 	s := sb.session
+	// Every relay below is acknowledged, so the tree's nodes go to Redis first.
+	// The flush that fell back here has normally committed already, which makes
+	// this send nothing; a panic before that commit is what it covers. Not
+	// written, the relays are handed back instead of acknowledged.
+	if resident, err := b.smst.CommitTree(ctx, s.sessionID); err != nil || !resident {
+		b.logger.Debug().Err(err).Str(logging.FieldSessionID, s.sessionID).Bool("resident", resident).
+			Msg("relay batch: the session tree could not be committed, handing the relays back unacknowledged")
+		b.release(ctx, sb)
+		return
+	}
 	for _, r := range sb.relays {
 		msg := transport.StreamMessage{ID: r.id, StreamName: b.consumer.StreamName()}
 		func() {

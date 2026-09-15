@@ -498,7 +498,20 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			Int64("session_end_height", msg.Message.SessionEndHeight).
 			Msg("LATE_RELAY: dropping relay - its session's claim no longer waits for it")
 		RecordRelayRejected(supplierAddr, dropReason(reason, msg.IsReclaim), msg.Message.ServiceId)
-		return nil
+		return w.ackWithBatch(ctx, state, msg)
+	}
+
+	// A relay of a session whose tree this process deleted -- the lifecycle does
+	// when the session reaches a terminal state -- is dropped here, before it
+	// touches Redis: processing on would start an empty tree under the deleted
+	// keys. It is the drop the per-relay session read below used to make.
+	if state.SMSTManager.SessionDeleted(msg.Message.SessionId) {
+		w.logger.Debug().
+			Str("session_id", msg.Message.SessionId).
+			Str("supplier", supplierAddr).
+			Msg("LATE_RELAY: dropping relay - session tree already deleted (session terminal)")
+		RecordRelayRejected(supplierAddr, dropReason("session_sealed", msg.IsReclaim), msg.Message.ServiceId)
+		return w.ackWithBatch(ctx, state, msg)
 	}
 
 	// Persist apps/services seen in relay traffic to the shared Redis known-sets
@@ -506,78 +519,100 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// after first sight).
 	w.recordDiscovered(ctx, msg.Message.ApplicationAddress, msg.Message.ServiceId)
 
-	// Check session state BEFORE updating SMST. A store error falls through on
-	// purpose: it says nothing about the session, and dropping a relay on a
-	// Redis hiccup is the expensive direction.
+	// The session read that stood here ran for every relay: one TYPE+HGETALL,
+	// used to drop the relays of a terminal session and handed to EnsureSession.
+	// It is gone. A relay of a session this process deleted is dropped before
+	// the discovery write, a sealed or claimed tree refuses the relay in
+	// UpdateTreeGen, the relay batch's script does not count relays of a
+	// terminal session, and EnsureSession asks the store only until the session
+	// is confirmed. The closed-window drop it held stays below, reading nothing.
 	//
-	// The read is kept for EnsureSession below, which would otherwise read the
-	// same session again. Only an ANSWERED read is kept: after a store error
-	// EnsureSession reads for itself, because "the read failed" is not "the
-	// session does not exist".
-	var sessionRead SessionRead
-	if state.SessionStore != nil {
-		snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
-		if storeErr == nil {
-			sessionRead = SessionRead{Snapshot: snapshot, Answered: true}
-		}
-
-		// Hoisted because it is STORE-INDEPENDENT: the claim window is decided by
-		// the message's own session end height against the observed block height,
-		// and reads nothing the store could fail to answer. Until 2026-08-28 it
-		// sat inside the switch, so a transient Redis Get error fell through to
-		// the first case and skipped it -- admitting a relay whose window had
-		// definitively closed, which then created or extended a session the sweep
-		// could only carry to claim_window_closed and delete. The store error is
-		// still a reason to keep the relay when the window is OPEN; it is not a
-		// reason to stop knowing what the height already says.
-		windowClosed := state.SessionCoordinator != nil &&
-			state.SessionCoordinator.ClaimWindowClosed(msg.Message.SessionEndHeight)
-
-		switch {
-		case storeErr != nil && !windowClosed:
-			// fall through and process the relay
-
-		case snapshot != nil && snapshot.State.IsTerminal():
-			w.logger.Debug().
-				Str("session_id", msg.Message.SessionId).
-				Str("supplier", supplierAddr).
-				Str("session_state", string(snapshot.State)).
-				Msg("LATE_RELAY: dropping relay - session already in terminal state")
-			RecordRelayRejected(supplierAddr, dropReason("session_sealed", msg.IsReclaim), msg.Message.ServiceId)
-			return nil
-
-		case windowClosed:
-			// The claim window has closed, so this relay cannot reach a claim
-			// whatever else is true. Deliberately NOT conditioned on the
-			// snapshot being absent: a session sitting in active or claiming
-			// past its window is not terminal yet -- the sweep has not reached
-			// it -- so the case above does not catch it, and without this the
-			// relay would be added to a tree nothing will ever claim.
-			//
-			// With no snapshot at all it is the same verdict for a different
-			// reason: processing on would CREATE a session the sweep could only
-			// carry to claim_window_closed and delete again.
-			//
-			// No money counter is booked here on purpose. This runs BEFORE the
-			// duplicate check, so a late copy of a relay that was already
-			// processed and paid would land in it; counting that as lost
-			// revenue would be wrong. relays_rejected says what happened
-			// without claiming the work went unpaid.
-			// Named sessionState, not state: `state` is the *SupplierState
-			// this function already holds.
-			sessionState := "absent"
-			if snapshot != nil {
-				sessionState = string(snapshot.State)
-			}
-			w.logger.Debug().
-				Str("session_id", msg.Message.SessionId).
-				Str("supplier", supplierAddr).
-				Str("session_state", sessionState).
-				Int64("session_end_height", msg.Message.SessionEndHeight).
-				Msg("LATE_RELAY: dropping relay - claim window already closed")
-			RecordRelayRejected(supplierAddr, dropReason("claim_window_closed", msg.IsReclaim), msg.Message.ServiceId)
-			return nil
-		}
+	// // Check session state BEFORE updating SMST. A store error falls through on
+	// // purpose: it says nothing about the session, and dropping a relay on a
+	// // Redis hiccup is the expensive direction.
+	// //
+	// // The read is kept for EnsureSession below, which would otherwise read the
+	// // same session again. Only an ANSWERED read is kept: after a store error
+	// // EnsureSession reads for itself, because "the read failed" is not "the
+	// // session does not exist".
+	// var sessionRead SessionRead
+	// if state.SessionStore != nil {
+	// 	snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
+	// 	if storeErr == nil {
+	// 		sessionRead = SessionRead{Snapshot: snapshot, Answered: true}
+	// 	}
+	//
+	// 	// Hoisted because it is STORE-INDEPENDENT: the claim window is decided by
+	// 	// the message's own session end height against the observed block height,
+	// 	// and reads nothing the store could fail to answer. Until 2026-08-28 it
+	// 	// sat inside the switch, so a transient Redis Get error fell through to
+	// 	// the first case and skipped it -- admitting a relay whose window had
+	// 	// definitively closed, which then created or extended a session the sweep
+	// 	// could only carry to claim_window_closed and delete. The store error is
+	// 	// still a reason to keep the relay when the window is OPEN; it is not a
+	// 	// reason to stop knowing what the height already says.
+	// 	windowClosed := state.SessionCoordinator != nil &&
+	// 		state.SessionCoordinator.ClaimWindowClosed(msg.Message.SessionEndHeight)
+	//
+	// 	switch {
+	// 	case storeErr != nil && !windowClosed:
+	// 		// fall through and process the relay
+	//
+	// 	case snapshot != nil && snapshot.State.IsTerminal():
+	// 		w.logger.Debug().
+	// 			Str("session_id", msg.Message.SessionId).
+	// 			Str("supplier", supplierAddr).
+	// 			Str("session_state", string(snapshot.State)).
+	// 			Msg("LATE_RELAY: dropping relay - session already in terminal state")
+	// 		RecordRelayRejected(supplierAddr, dropReason("session_sealed", msg.IsReclaim), msg.Message.ServiceId)
+	// 		return nil
+	//
+	// 	case windowClosed:
+	// 		// The claim window has closed, so this relay cannot reach a claim
+	// 		// whatever else is true. Deliberately NOT conditioned on the
+	// 		// snapshot being absent: a session sitting in active or claiming
+	// 		// past its window is not terminal yet -- the sweep has not reached
+	// 		// it -- so the case above does not catch it, and without this the
+	// 		// relay would be added to a tree nothing will ever claim.
+	// 		//
+	// 		// With no snapshot at all it is the same verdict for a different
+	// 		// reason: processing on would CREATE a session the sweep could only
+	// 		// carry to claim_window_closed and delete again.
+	// 		//
+	// 		// No money counter is booked here on purpose. This runs BEFORE the
+	// 		// duplicate check, so a late copy of a relay that was already
+	// 		// processed and paid would land in it; counting that as lost
+	// 		// revenue would be wrong. relays_rejected says what happened
+	// 		// without claiming the work went unpaid.
+	// 		// Named sessionState, not state: `state` is the *SupplierState
+	// 		// this function already holds.
+	// 		sessionState := "absent"
+	// 		if snapshot != nil {
+	// 			sessionState = string(snapshot.State)
+	// 		}
+	// 		w.logger.Debug().
+	// 			Str("session_id", msg.Message.SessionId).
+	// 			Str("supplier", supplierAddr).
+	// 			Str("session_state", sessionState).
+	// 			Int64("session_end_height", msg.Message.SessionEndHeight).
+	// 			Msg("LATE_RELAY: dropping relay - claim window already closed")
+	// 		RecordRelayRejected(supplierAddr, dropReason("claim_window_closed", msg.IsReclaim), msg.Message.ServiceId)
+	// 		return nil
+	// 	}
+	// }
+	if state.SessionStore != nil && state.SessionCoordinator != nil &&
+		state.SessionCoordinator.ClaimWindowClosed(msg.Message.SessionEndHeight) {
+		// The claim window has closed, so this relay cannot reach a claim
+		// whatever the session's state; processing on would add it to a tree
+		// nothing will claim, or create a session the sweep could only carry
+		// to claim_window_closed and delete again.
+		w.logger.Debug().
+			Str("session_id", msg.Message.SessionId).
+			Str("supplier", supplierAddr).
+			Int64("session_end_height", msg.Message.SessionEndHeight).
+			Msg("LATE_RELAY: dropping relay - claim window already closed")
+		RecordRelayRejected(supplierAddr, dropReason("claim_window_closed", msg.IsReclaim), msg.Message.ServiceId)
+		return w.ackWithBatch(ctx, state, msg)
 	}
 
 	// Defensive recompute: if the publisher somehow shipped a MinedRelayMessage
@@ -612,19 +647,29 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// with it, and if that relay was the session's first, nothing ever claimed
 	// the tree. Unpaid work, on the one path the fix exists for.
 	//
-	// Running it on every delivery is safe: OnSessionCreated goes through
-	// CreateIfAbsent, a first-write-wins gate, so it cannot double-create. With
-	// the read above handed over it costs no round-trip when the session exists.
-	state.SessionCoordinator.EnsureSession(
-		ctx,
-		sessionRead,
-		msg.Message.SessionId,
-		msg.Message.SupplierOperatorAddress,
-		msg.Message.ServiceId,
-		msg.Message.ApplicationAddress,
-		msg.Message.SessionStartHeight,
-		msg.Message.SessionEndHeight,
-	)
+	// Running it is safe: OnSessionCreated goes through CreateIfAbsent, a
+	// first-write-wins gate, so it cannot double-create. It runs until the store
+	// has answered that the session exists; that answer is then kept on the
+	// session's tree (ConfirmSession, after UpdateTreeGen) and later deliveries
+	// skip the round trip. Only a positive answer is kept: a session that could
+	// not be read or created is asked for again by the next delivery. The
+	// answer goes with the tree, which DeleteTree and the corruption eviction
+	// drop. NOT verified: that a session's snapshot cannot expire while its tree
+	// is resident. Its TTL is refreshed by every counted relay; a session that
+	// only receives duplicates for longer than that TTL was not tested.
+	sessionConfirmed := state.SMSTManager.SessionConfirmed(msg.Message.SessionId)
+	if !sessionConfirmed {
+		sessionConfirmed = state.SessionCoordinator.EnsureSession(
+			ctx,
+			SessionRead{},
+			msg.Message.SessionId,
+			msg.Message.SupplierOperatorAddress,
+			msg.Message.ServiceId,
+			msg.Message.ApplicationAddress,
+			msg.Message.SessionStartHeight,
+			msg.Message.SessionEndHeight,
+		)
+	}
 
 	if msg.IsReclaim {
 		if dedup := w.supplierManager.Deduplicator(); dedup != nil && len(msg.Message.RelayHash) > 0 {
@@ -641,7 +686,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 					Str("supplier", supplierAddr).
 					Msg("dropping reclaimed relay (already processed by previous consumer)")
 				RecordRelayRejected(supplierAddr, "duplicate", msg.Message.ServiceId)
-				return nil
+				return w.ackWithBatch(ctx, state, msg)
 			}
 		}
 	}
@@ -687,7 +732,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 				Msg("dropping relay - permanent SMST error (session sealed/claimed)")
 			RecordRelayRejected(supplierAddr, dropReason("session_sealed", msg.IsReclaim), msg.Message.ServiceId)
 			RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, "session_sealed")
-			return nil // ACK and discard - no point retrying
+			return w.ackWithBatch(ctx, state, msg) // ACK and discard - no point retrying
 		}
 		// Unknown/unexpected errors - log and discard (don't retry forever)
 		w.logger.Warn().
@@ -696,7 +741,10 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 			Str("supplier", supplierAddr).
 			Msg("unexpected SMST error - discarding relay")
 		RecordRelayFailedSMST(supplierAddr, msg.Message.ServiceId, "unexpected_error")
-		return nil // ACK and discard - unknown errors shouldn't block processing
+		return w.ackWithBatch(ctx, state, msg) // ACK and discard - unknown errors shouldn't block processing
+	}
+	if sessionConfirmed {
+		state.SMSTManager.ConfirmSession(msg.Message.SessionId)
 	}
 
 	// Track relay successfully added to SMST
@@ -722,8 +770,48 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		return ErrRelayBatched
 	}
 
+	// Not batched: this call's return acknowledges the relay, and an acknowledged
+	// relay is never delivered again, so its nodes go to Redis first -- the
+	// relay batch commits before it acknowledges for the same reason.
+	// Not stored, the relay is handed back rather than acknowledged, as the relay
+	// batch keeps a batch whose checkpoint fails: the redelivery puts it in the
+	// tree again and commits again. It is counted as a transient failure, which
+	// is what a retry is. A shutdown-origin cancellation keeps the rule the
+	// UpdateTreeGen error above applies to it: acknowledged and discarded.
+	resident, err := state.SMSTManager.CommitTree(ctx, session.sessionID)
+	if err != nil {
+		if IsShutdownCancelError(err) || IsShutdownCancelError(ctx.Err()) {
+			w.logger.Debug().
+				Err(err).
+				Str("session_id", session.sessionID).
+				Str("supplier", supplierAddr).
+				Msg("discarding relay on shutdown cancel (message will be redelivered on restart)")
+			RecordRelayFailedSMST(supplierAddr, session.serviceID, "shutdown_cancel")
+			return nil // ACK and discard
+		}
+		RecordRelayFailedSMST(supplierAddr, session.serviceID, "transient_error")
+		return fmt.Errorf("session %s: storing the relay's nodes before its acknowledgement failed, handing the relay back: %w", session.sessionID, err)
+	}
+	if !resident {
+		// Evicted after corruption since UpdateTreeGen: the nodes went with the
+		// tree. Handed back, the redelivery puts the relay in the next tree.
+		return fmt.Errorf("session %s: tree evicted before the relay's nodes were stored, handing the relay back", session.sessionID)
+	}
+
 	countRelayOnce(ctx, w.logger, w.supplierManager.Deduplicator(), state.SessionCoordinator, supplierAddr, session, relayHash, computeUnits)
 	return nil // ACK
+}
+
+// ackWithBatch finishes a relay that is acknowledged without being counted -- a
+// rejection -- through the relay batch, which acknowledges rejections together
+// when it flushes instead of one XACKDEL per relay. Without a batch, or when the
+// batch will not take the entry, the relay is acknowledged by this call's
+// return, as before.
+func (w *SupplierWorker) ackWithBatch(ctx context.Context, state *SupplierState, msg *transport.StreamMessage) error {
+	if state.relayBatch != nil && state.relayBatch.AddAck(ctx, msg.ID) {
+		return ErrRelayBatched
+	}
+	return nil
 }
 
 // dropReason names why a relay was dropped as unpayable -- its tree sealed, its

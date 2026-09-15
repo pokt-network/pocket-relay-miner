@@ -61,11 +61,10 @@ func (c *sessionReadCounter) ProcessPipelineHook(next redis.ProcessPipelineHook)
 	return next
 }
 
-// TestHandleRelay_ReadsAnExistingSessionOncePerRelay pins the read handleRelay
-// hands to EnsureSession. handleRelay reads the session to check its state; if
-// EnsureSession read it again, every relay would pay a second HGETALL for the
-// same data -- one more of the ~11.5 Redis commands a relay cost under load.
-func TestHandleRelay_ReadsAnExistingSessionOncePerRelay(t *testing.T) {
+// TestHandleRelay_ReadsAnExistingSessionOnce pins that an existing session is
+// read once, not once per relay: the first relay's read confirms it exists, the
+// answer stays on the session's tree, and the relays after it skip the HGETALL.
+func TestHandleRelay_ReadsAnExistingSessionOnce(t *testing.T) {
 	f := newHandlerTestFixture(t, "pokt1read_once")
 	const (
 		sessionID = "sess-read-once"
@@ -84,9 +83,9 @@ func TestHandleRelay_ReadsAnExistingSessionOncePerRelay(t *testing.T) {
 		require.NoError(t, f.worker.handleRelay(f.ctx, f.supplierAddr, msg))
 	}
 
-	require.Equal(t, int64(relays), reads.reads.Load(),
-		"%d relays read session %s %d times; %d (2N) means EnsureSession read it again "+
-			"instead of using handleRelay's read", relays, sessionID, reads.reads.Load(), 2*relays)
+	require.Equal(t, int64(1), reads.reads.Load(),
+		"%d relays read session %s %d times: the first relay's read confirms it exists, "+
+			"and the relays after it must not read it again", relays, sessionID, reads.reads.Load())
 
 	snap, err := f.sessionStore.Get(f.ctx, sessionID)
 	require.NoError(t, err)
@@ -125,7 +124,7 @@ func TestHandleRelay_FirstRelayOfANewSessionStillCreatesIt(t *testing.T) {
 	require.Equal(t, SessionStateActive, snap.State)
 	require.Equal(t, int64(1), snap.RelayCount)
 	require.Equal(t, int32(1), created.Load(), "the session-created callback must fire once")
-	// One read by handleRelay, one by the Get above.
+	// One read by EnsureSession, one by the Get above.
 	require.Equal(t, int64(2), reads.reads.Load(),
 		"an answered read that found nothing must go straight to the create, not read again")
 
@@ -134,11 +133,10 @@ func TestHandleRelay_FirstRelayOfANewSessionStillCreatesIt(t *testing.T) {
 	require.Equal(t, int32(1), created.Load(), "a second relay must not create the session again")
 }
 
-// TestHandleRelay_AFailedSessionReadIsNotTakenAsAbsent pins the zero value of
-// SessionRead. When handleRelay's read fails it has learned nothing about the
-// session, so EnsureSession must read for itself, as it did before it was
-// handed reads at all -- neither assume the session exists (and skip creating
-// it) nor assume it is absent.
+// TestHandleRelay_AFailedSessionReadIsNotTakenAsAbsent pins what EnsureSession
+// does when its own read fails: it has learned nothing about the session, so it
+// goes on to CreateIfAbsent -- it neither assumes the session exists (and skips
+// creating it) nor drops the relay.
 func TestHandleRelay_AFailedSessionReadIsNotTakenAsAbsent(t *testing.T) {
 	f := newHandlerTestFixture(t, "pokt1failed_read")
 	const sessionID = "sess-failed-read"
@@ -149,7 +147,7 @@ func TestHandleRelay_AFailedSessionReadIsNotTakenAsAbsent(t *testing.T) {
 		return nil
 	})
 	reads := countSessionReads(t, f, sessionID)
-	reads.failNext.Store(1) // handleRelay's read fails; nothing after it does
+	reads.failNext.Store(1) // EnsureSession's read fails; nothing after it does
 
 	msg := newStreamMessage(f.supplierAddr, sessionID, "relay-after-blip", 100)
 	require.NoError(t, f.worker.handleRelay(f.ctx, f.supplierAddr, msg),
@@ -158,9 +156,9 @@ func TestHandleRelay_AFailedSessionReadIsNotTakenAsAbsent(t *testing.T) {
 	require.Equal(t, int64(0), reads.failNext.Load(),
 		"the injected failure must have been applied to a real command: if the hook matches "+
 			"nothing, this test proves nothing")
-	require.Equal(t, int64(2), reads.reads.Load(),
-		"after handleRelay's read of %s failed, EnsureSession must read the session itself: "+
-			"1 read means it took the failure as an answer ('absent' or 'exists')", sessionID)
+	require.Equal(t, int64(1), reads.reads.Load(),
+		"the one read of %s is the one that failed: the create below proves the failure "+
+			"was not taken as 'exists'", sessionID)
 
 	snap, err := f.sessionStore.Get(f.ctx, sessionID)
 	require.NoError(t, err)

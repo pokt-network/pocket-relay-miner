@@ -23,11 +23,15 @@ import (
 //
 // Commit marks a node persisted BEFORE it hands the node to the store, and in
 // pipeline mode the store only buffers the write; FlushPipeline is what sends
-// it. When that flush fails, updateTree returns early -- before compaction --
+// it. When that flush fails, the commit returns early -- before compaction --
 // and the leaf stays in the resident trie marked persisted while its bytes are
 // not in Redis yet. The store must therefore keep those nodes buffered for the
-// next write: dropped, the next successful relay's compaction pass would trust
+// next write: dropped, the next successful commit's compaction pass would trust
 // the flag and release a leaf value that exists nowhere else.
+//
+// An update writes nothing: the tree is committed once per relay batch, before
+// a root is stored or a relay acknowledged. The scenarios commit where the
+// batch would.
 //
 // Each scenario walks the chain one link at a time and asserts every link on
 // its own, with compaction enabled and, as the control, with the compactor
@@ -116,9 +120,9 @@ func newFlushFailureHarness(t *testing.T, compact bool) *flushFailureHarness {
 	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
 		SupplierAddress: supplier,
 		CacheTTL:        0,
-		// Only the first update checkpoints on its own; every later
-		// checkpoint is driven explicitly, so the state between "the flush
-		// wrote X" and "the orphan HDEL ran" can be observed.
+		// No update checkpoints on its own; every checkpoint is driven
+		// explicitly, so the state between "the flush wrote X" and "the
+		// orphan HDEL ran" can be observed.
 		LiveRootCheckpointInterval: 1_000_000,
 	})
 
@@ -190,6 +194,9 @@ func (h *flushFailureHarness) seed(n int) {
 			first = r
 		}
 	}
+	resident, _, err := h.mgr.CheckpointLiveRoot(h.ctx, h.sessionID)
+	require.NoError(h.t, err)
+	require.True(h.t, resident)
 
 	require.True(h.t, h.inRedis(first),
 		"CONTROL: a cleanly written leaf must be found under the computed field; "+
@@ -199,18 +206,30 @@ func (h *flushFailureHarness) seed(n int) {
 			"if not, the in-memory probe cannot tell the two apart")
 }
 
-// failFlush makes exactly one UpdateTree's FlushPipeline fail and asserts the
-// failure came from the flush, not from anything earlier in the call.
+// failFlush puts the relay in the tree, makes the commit that follows fail on
+// its FlushPipeline, and asserts the failure came from the flush, not from
+// anything earlier in the commit.
 func (h *flushFailureHarness) failFlush(r flushFailureRelay) {
 	h.t.Helper()
+	require.NoError(h.t, r.update(h.ctx, h.mgr, h.sessionID), "LINK 1: an update writes nothing, so it cannot fail on Redis")
 	h.fail.Fail("injected: flush pipeline failed")
-	err := r.update(h.ctx, h.mgr, h.sessionID)
+	resident, err := h.mgr.CommitTree(h.ctx, h.sessionID)
 	h.fail.Clear()
 
-	require.Error(h.t, err, "LINK 1: the injected failure must surface from UpdateTree")
+	require.True(h.t, resident, "LINK 1: the tree is resident")
+	require.Error(h.t, err, "LINK 1: the injected failure must surface from the commit")
 	require.ErrorIs(h.t, err, ErrSMSTCommitFailed, "LINK 1: the failure must be classified as a commit failure")
 	require.Contains(h.t, err.Error(), "flush pipeline",
 		"LINK 1: the failure must come from FlushPipeline, not from an earlier Redis call")
+}
+
+// commit writes the tree's uncommitted nodes, as the relay batch does before it
+// stores a root or acknowledges a relay.
+func (h *flushFailureHarness) commit() {
+	h.t.Helper()
+	resident, err := h.mgr.CommitTree(h.ctx, h.sessionID)
+	require.NoError(h.t, err)
+	require.True(h.t, resident)
 }
 
 // proveAndVerify checks the relay's proof against the sealed root, through the
@@ -265,10 +284,11 @@ func TestFlushFailure_RedeliveredImmediately(t *testing.T) {
 			t.Logf("LINK 1: inRedis(A)=%v inMemory(A)=%v", h.inRedis(a), h.inMemory(a))
 			require.False(t, h.inRedis(a), "LINK 1: A's leaf must not have reached Redis")
 			require.True(t, h.inMemory(a),
-				"LINK 1: A's value must still be resident -- updateTree returns before compaction on a failed flush")
+				"LINK 1: A's value must still be resident -- the commit returns before compaction on a failed flush")
 
 			// LINK 2
 			require.NoError(t, a.update(h.ctx, h.mgr, h.sessionID), "LINK 2: the redelivered A must be accepted")
+			h.commit()
 			t.Logf("LINK 2: inRedis(A)=%v orphanPending(A)=%v", h.inRedis(a), h.orphanPending(a))
 			require.True(t, h.inRedis(a), "LINK 2: the redelivery's flush must write A's leaf")
 			require.False(t, h.orphanPending(a),
@@ -317,6 +337,7 @@ func TestFlushFailure_OtherRelaysLandFirstAndRedeliveryMissesTheSeal(t *testing.
 				b := newFlushFailureRelay(fmt.Sprintf("relay-b-%d", i), uint64(i+10))
 				require.NoError(t, b.update(h.ctx, h.mgr, h.sessionID))
 			}
+			h.commit()
 			t.Logf("LINK 2': after other relays inRedis(A)=%v", h.inRedis(a))
 			require.True(t, h.inRedis(a), "LINK 2': A's leaf travels with the next successful flush")
 
@@ -363,9 +384,11 @@ func TestFlushFailure_OtherRelaysLandFirstThenRedeliveryBeforeSeal(t *testing.T)
 				b := newFlushFailureRelay(fmt.Sprintf("relay-b-%d", i), uint64(i+10))
 				require.NoError(t, b.update(h.ctx, h.mgr, h.sessionID))
 			}
+			h.commit()
 			t.Logf("before redelivery: inMemory(A)=%v inRedis(A)=%v", h.inMemory(a), h.inRedis(a))
 
 			require.NoError(t, a.update(h.ctx, h.mgr, h.sessionID), "the redelivered A must be accepted")
+			h.commit()
 			t.Logf("after redelivery: inRedis(A)=%v orphanPending(A)=%v", h.inRedis(a), h.orphanPending(a))
 			require.True(t, h.inRedis(a), "the redelivery's flush must write A's leaf")
 

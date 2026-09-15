@@ -43,12 +43,9 @@
 //     With sliding-TTL refresh (FlushOrphansWithLiveRoot), this
 //     auto-extends while relays keep coming in, but a session
 //     that idles past cache_ttl will still expire — keep ≥ 2h.
-//     - smst_live_root_checkpoint_interval: defaults to 10. Sized
-//     against the fact that protocol difficulty bounds how many
-//     relays reach the tree, so losing up to 9 per active session
-//     on a restart is proportionally small. Lower to 1 for exact
-//     claim fidelity at the cost of 10× more TxPipeline round-trips
-//     to Redis.
+//     - smst_live_root_checkpoint_interval: no longer read by the
+//     relay path. live_root is written by the relay batch before it
+//     acknowledges, once per flush, instead of every N updates.
 package miner
 
 import (
@@ -132,14 +129,18 @@ type RedisSMSTManagerConfig struct {
 	LiveRootCheckpointInterval int
 }
 
-// liveRootInterval returns the configured checkpoint interval or the
-// default if unset. Always >= 1.
-func (m *RedisSMSTManager) liveRootInterval() int {
-	if m.config.LiveRootCheckpointInterval > 0 {
-		return m.config.LiveRootCheckpointInterval
-	}
-	return DefaultLiveRootCheckpointInterval
-}
+// liveRootInterval went with the per-update live_root checkpoint, disabled in
+// updateTree: live_root is now written by the relay batch before it
+// acknowledges, so nothing reads the configured interval any more.
+//
+// // liveRootInterval returns the configured checkpoint interval or the
+// // default if unset. Always >= 1.
+// func (m *RedisSMSTManager) liveRootInterval() int {
+// 	if m.config.LiveRootCheckpointInterval > 0 {
+// 		return m.config.LiveRootCheckpointInterval
+// 	}
+// 	return DefaultLiveRootCheckpointInterval
+// }
 
 // runSMSTSafely invokes fn at the boundary between the miner and the
 // pokt-network/smt library and converts any panic from the library
@@ -319,11 +320,12 @@ type redisSMST struct {
 	// would otherwise repeat once per relay — see updateTree.
 	compactorMissingLogged bool
 
-	// updateCount is the running tally of UpdateTree calls against this
-	// tree instance. It drives live_root checkpointing (first update and
-	// every LiveRootCheckpointInterval updates after) so HA failover can
-	// resume the tree with at most interval-1 relays lost.
-	updateCount uint64
+	// updateCount was the running tally of UpdateTree calls against this
+	// tree instance, which drove the live_root checkpoint at the first update
+	// and every LiveRootCheckpointInterval updates. That checkpoint is disabled
+	// (see updateTree), and nothing else read it.
+	//
+	// updateCount uint64
 
 	// liveRoot is the live_root this manager last wrote for the tree, or the
 	// one it resumed the tree from; nil when there is neither. The exit
@@ -331,6 +333,12 @@ type redisSMST struct {
 	// a miner that has taken the supplier over and written its own is not
 	// rolled back.
 	liveRoot []byte
+
+	// sessionConfirmed is set once the session store has answered that the
+	// session exists (see handleRelay), so later relays stop asking. It lives on
+	// the tree so it goes with it: DeleteTree and the corruption eviction both
+	// drop the tree, and the next one asks again. Only that answer sets it.
+	sessionConfirmed atomic.Bool
 
 	// gen is this tree's generation (see addTreeLocked). Set once, before the
 	// tree is published in the manager's map, and never written again, so it
@@ -371,6 +379,15 @@ type RedisSMSTManager struct {
 	// UpdateTree. Protected by treesMu.
 	evictionCounts map[string]int
 
+	// deleted holds the sessions whose tree DeleteTree removed, with when. The
+	// lifecycle calls DeleteTree when a session reaches a terminal state, and a
+	// relay that arrives afterwards must not reach GetOrCreateTree, which would
+	// start an empty tree under the deleted keys. The corruption eviction does
+	// not write it: that session keeps going. Protected by treesMu.
+	deleted map[string]time.Time
+	// deletedPrunedAt is when deleted was last pruned. Protected by treesMu.
+	deletedPrunedAt time.Time
+
 	// treeGen numbers the trees this manager makes resident (addTreeLocked).
 	treeGen atomic.Uint64
 }
@@ -388,6 +405,7 @@ func NewRedisSMSTManager(
 		config:         config,
 		trees:          make(map[string]*redisSMST),
 		evictionCounts: make(map[string]int),
+		deleted:        make(map[string]time.Time),
 	}
 }
 
@@ -660,6 +678,141 @@ func (m *RedisSMSTManager) updateTree(
 		Int("key_len", len(key)).
 		Msg("SMST updated with relay")
 
+	// The dirty nodes are not committed here any more, once per relay. They go
+	// to Redis in commitLocked, once per relay batch, before any root that
+	// covers them is stored and before any relay in them is acknowledged
+	// (CheckpointLiveRoot, the exit checkpoints, FlushTree, CommitTree). Until
+	// then the relay's stream entry is still pending, so a crash loses only
+	// nodes a redelivery puts back. What ran here -- BeginPipeline, Commit,
+	// FlushPipeline, leaf compaction and the eviction-counter reset -- is
+	// commitLocked now.
+	//
+	// The live_root checkpoint below, at the first update and every
+	// LiveRootCheckpointInterval updates, is disabled, and with it
+	// smst_live_root_checkpoint_interval no longer changes anything. Run
+	// without a commit it would store a root over nodes Redis does not have
+	// yet, and a miner resuming from it would walk into missing digests; run
+	// with one, it would put back a per-relay write the batch exists to remove.
+	// The relay batch checkpoints live_root before it acknowledges, so a relay
+	// a resumed tree lacks is one whose entry is still pending.
+	//
+	// // Checkpoint the current intermediate root to Redis so a follower
+	// // promoted mid-session can resume the tree at this point via
+	// // ImportSparseMerkleSumTrie. Without this checkpoint, the new leader's
+	// // GetOrCreateTree would start from an empty root while the dead
+	// // leader's relay nodes remain orphaned in the shared nodes hash,
+	// // producing claims that undercount by up to ~50% depending on kill
+	// // timing (see scripts/test-quantitative-failover.sh).
+	// //
+	// // Default interval is 10 — checkpointing every 10 updates instead
+	// // of every update keeps Redis write amplification low. The worst
+	// // case relay loss on a mid-session process death is (interval - 1)
+	// // relays, which is proportionally small given that protocol
+	// // difficulty bounds how many relays reach the tree in the first
+	// // place. Operators who need exact claim fidelity can lower it via
+	// // smst_live_root_checkpoint_interval.
+	// //
+	// // A failure is non-fatal: the relay is already in the nodes hash, we
+	// // just degrade HA recovery for the current checkpoint window.
+	// tree.updateCount++
+	// interval := uint64(m.liveRootInterval())
+	// if tree.updateCount == 1 || tree.updateCount%interval == 0 {
+	// 	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
+	// 	// Explicit []byte conversion: trie.Root() returns smt.MerkleSumRoot
+	// 	// which go-redis does not know how to marshal directly. Guarded
+	// 	// with runSMSTSafely because Root() hashes the (possibly
+	// 	// corrupted) dirty-child subtree and can panic on a malformed
+	// 	// encoding just like Update/Commit.
+	// 	var rootBytes []byte
+	// 	if err := m.runSMSTSafely(sessionID, "root", func() error {
+	// 		rootBytes = []byte(tree.trie.Root())
+	// 		return nil
+	// 	}); err != nil {
+	// 		// Corruption at Root() means we cannot safely persist a
+	// 		// live_root. Skip the checkpoint and let the outer deferred
+	// 		// eviction drop the session on return.
+	// 		return err
+	// 	}
+	// 	if !isValidSMSTRoot(rootBytes) {
+	// 		// Defensive: never persist a root we wouldn't be willing to read back.
+	// 		// Keeps the Redis invariant "live_root is always SMSTRootLen or absent".
+	// 		m.logger.Warn().
+	// 			Str(logging.FieldSessionID, sessionID).
+	// 			Int("got_len", len(rootBytes)).
+	// 			Int("want_len", SMSTRootLen).
+	// 			Uint64("update_count", tree.updateCount).
+	// 			Msg("trie.Root() returned unexpected length - skipping live_root checkpoint")
+	// 	} else if redisStore, ok := tree.store.(*RedisMapStore); ok {
+	// 		// Atomic: HDEL accumulated orphans + SET live_root + EXPIRE
+	// 		// on both keys, in one MULTI/EXEC. Before this: live_root
+	// 		// points to the previous checkpoint whose nodes are still
+	// 		// in the hash (orphans deferred). After: live_root points
+	// 		// to the new checkpoint whose nodes were written by the
+	// 		// FlushPipeline calls above, orphans are gone, and the
+	// 		// sliding TTL keeps both keys alive as long as the session
+	// 		// keeps receiving relays — preventing the "nodes hash
+	// 		// expires while live_root and in-memory tree still think
+	// 		// it's valid" corruption shape on long-lived sessions.
+	// 		if err := redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes, m.config.CacheTTL); err != nil {
+	// 			m.logger.Warn().
+	// 				Err(err).
+	// 				Str(logging.FieldSessionID, sessionID).
+	// 				Uint64("update_count", tree.updateCount).
+	// 				Msg("failed to atomically flush orphans + live_root (HA resume degraded, orphans retained for next checkpoint)")
+	// 		} else {
+	// 			tree.liveRoot = rootBytes
+	// 		}
+	// 	} else {
+	// 		// Non-Redis store path (test doubles etc.) — preserve old behaviour.
+	// 		if err := m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err(); err != nil {
+	// 			m.logger.Warn().
+	// 				Err(err).
+	// 				Str(logging.FieldSessionID, sessionID).
+	// 				Uint64("update_count", tree.updateCount).
+	// 				Msg("failed to checkpoint live root (HA resume degraded)")
+	// 		} else {
+	// 			tree.liveRoot = rootBytes
+	// 		}
+	// 	}
+	// }
+
+	// TTL is set once at tree creation in GetOrCreateTree (not per-relay).
+
+	return nil
+}
+
+// CommitTree writes the session tree's uncommitted nodes to Redis. A relay
+// acknowledged outside the relay batch is never delivered again, so whoever
+// acknowledges it commits first. resident is false when this manager holds no
+// tree for the session -- evicted after corruption since the relay went in --
+// and nothing is written: the caller must not acknowledge on that answer.
+func (m *RedisSMSTManager) CommitTree(ctx context.Context, sessionID string) (resident bool, err error) {
+	defer func() {
+		if isSMSTCorruption(err) {
+			m.evictCorruptSession(ctx, sessionID, "commit_tree_corruption")
+		}
+	}()
+
+	m.treesMu.RLock()
+	tree, exists := m.trees[sessionID]
+	m.treesMu.RUnlock()
+	if !exists {
+		return false, nil
+	}
+
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+	return true, m.commitLocked(sessionID, tree)
+}
+
+// commitLocked writes the tree's dirty nodes to Redis, then drops the in-memory
+// value of every leaf that write persisted. With nothing changed since the last
+// commit it sends nothing. The caller holds tree.mu.
+//
+// Commit always runs inside BeginPipeline: it deletes orphaned nodes before it
+// writes the new ones, and outside a pipeline RedisMapStore.Delete would HDEL
+// them at once, while the stored live_root still references them.
+func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error {
 	// Enable pipelining to batch Set() operations during Commit()
 	// This reduces 10-20 Redis round trips (20-40ms) to a single HSET (2-3ms)
 	if redisStore, ok := tree.store.(*RedisMapStore); ok {
@@ -715,7 +868,7 @@ func (m *RedisSMSTManager) updateTree(
 	// failed, and the caller would retry or drop a relay that was never at
 	// risk. Compaction only reclaims memory for leaves that are already
 	// safe elsewhere; skipping one pass costs a slightly higher resident
-	// set until the next relay's Commit tries again, not correctness.
+	// set until the next commit tries again, not correctness.
 	if compactor, ok := tree.trie.(interface {
 		CompactPersistedLeaves() (int, error)
 	}); ok {
@@ -726,7 +879,7 @@ func (m *RedisSMSTManager) updateTree(
 			return compactErr
 		}); err != nil {
 			observability.SMSTCompactionFailures.WithLabelValues(m.config.SupplierAddress).Inc()
-			// Debug, not Warn: this runs once per relay, and the condition
+			// Debug, not Warn: this runs once per commit, up to once per relay, and the condition
 			// (today, only a recovered panic -- CompactPersistedLeaves
 			// itself never returns a non-nil error) is not transient, so a
 			// tree stuck in this state would otherwise log once per relay
@@ -766,88 +919,6 @@ func (m *RedisSMSTManager) updateTree(
 	// was introduced to fix.
 	m.resetEvictionCount(sessionID)
 
-	// Checkpoint the current intermediate root to Redis so a follower
-	// promoted mid-session can resume the tree at this point via
-	// ImportSparseMerkleSumTrie. Without this checkpoint, the new leader's
-	// GetOrCreateTree would start from an empty root while the dead
-	// leader's relay nodes remain orphaned in the shared nodes hash,
-	// producing claims that undercount by up to ~50% depending on kill
-	// timing (see scripts/test-quantitative-failover.sh).
-	//
-	// Default interval is 10 — checkpointing every 10 updates instead
-	// of every update keeps Redis write amplification low. The worst
-	// case relay loss on a mid-session process death is (interval - 1)
-	// relays, which is proportionally small given that protocol
-	// difficulty bounds how many relays reach the tree in the first
-	// place. Operators who need exact claim fidelity can lower it via
-	// smst_live_root_checkpoint_interval.
-	//
-	// A failure is non-fatal: the relay is already in the nodes hash, we
-	// just degrade HA recovery for the current checkpoint window.
-	tree.updateCount++
-	interval := uint64(m.liveRootInterval())
-	if tree.updateCount == 1 || tree.updateCount%interval == 0 {
-		liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
-		// Explicit []byte conversion: trie.Root() returns smt.MerkleSumRoot
-		// which go-redis does not know how to marshal directly. Guarded
-		// with runSMSTSafely because Root() hashes the (possibly
-		// corrupted) dirty-child subtree and can panic on a malformed
-		// encoding just like Update/Commit.
-		var rootBytes []byte
-		if err := m.runSMSTSafely(sessionID, "root", func() error {
-			rootBytes = []byte(tree.trie.Root())
-			return nil
-		}); err != nil {
-			// Corruption at Root() means we cannot safely persist a
-			// live_root. Skip the checkpoint and let the outer deferred
-			// eviction drop the session on return.
-			return err
-		}
-		if !isValidSMSTRoot(rootBytes) {
-			// Defensive: never persist a root we wouldn't be willing to read back.
-			// Keeps the Redis invariant "live_root is always SMSTRootLen or absent".
-			m.logger.Warn().
-				Str(logging.FieldSessionID, sessionID).
-				Int("got_len", len(rootBytes)).
-				Int("want_len", SMSTRootLen).
-				Uint64("update_count", tree.updateCount).
-				Msg("trie.Root() returned unexpected length - skipping live_root checkpoint")
-		} else if redisStore, ok := tree.store.(*RedisMapStore); ok {
-			// Atomic: HDEL accumulated orphans + SET live_root + EXPIRE
-			// on both keys, in one MULTI/EXEC. Before this: live_root
-			// points to the previous checkpoint whose nodes are still
-			// in the hash (orphans deferred). After: live_root points
-			// to the new checkpoint whose nodes were written by the
-			// FlushPipeline calls above, orphans are gone, and the
-			// sliding TTL keeps both keys alive as long as the session
-			// keeps receiving relays — preventing the "nodes hash
-			// expires while live_root and in-memory tree still think
-			// it's valid" corruption shape on long-lived sessions.
-			if err := redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes, m.config.CacheTTL); err != nil {
-				m.logger.Warn().
-					Err(err).
-					Str(logging.FieldSessionID, sessionID).
-					Uint64("update_count", tree.updateCount).
-					Msg("failed to atomically flush orphans + live_root (HA resume degraded, orphans retained for next checkpoint)")
-			} else {
-				tree.liveRoot = rootBytes
-			}
-		} else {
-			// Non-Redis store path (test doubles etc.) — preserve old behaviour.
-			if err := m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err(); err != nil {
-				m.logger.Warn().
-					Err(err).
-					Str(logging.FieldSessionID, sessionID).
-					Uint64("update_count", tree.updateCount).
-					Msg("failed to checkpoint live root (HA resume degraded)")
-			} else {
-				tree.liveRoot = rootBytes
-			}
-		}
-	}
-
-	// TTL is set once at tree creation in GetOrCreateTree (not per-relay).
-
 	return nil
 }
 
@@ -864,7 +935,18 @@ func (m *RedisSMSTManager) updateTree(
 //
 // gen is the generation of the tree checkpointed (see addTreeLocked). A relay
 // UpdateTreeGen put in a tree of another generation is not covered by it.
+//
+// The tree is committed first: nodes, then the root that references them, then
+// the caller's acknowledgement. A tree found corrupt on the way is evicted, as
+// UpdateTree does, so the next flush finds it not resident and hands its relays
+// back.
 func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID string) (resident bool, gen uint64, err error) {
+	defer func() {
+		if isSMSTCorruption(err) {
+			m.evictCorruptSession(ctx, sessionID, "checkpoint_corruption")
+		}
+	}()
+
 	m.treesMu.RLock()
 	tree, exists := m.trees[sessionID]
 	m.treesMu.RUnlock()
@@ -874,6 +956,10 @@ func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID str
 
 	tree.mu.Lock()
 	defer tree.mu.Unlock()
+
+	if err := m.commitLocked(sessionID, tree); err != nil {
+		return true, tree.gen, err
+	}
 
 	var rootBytes []byte
 	if err := m.runSMSTSafely(sessionID, "root", func() error {
@@ -1001,11 +1087,10 @@ func (m *RedisSMSTManager) exitRootLocked(sessionID string, tree *redisSMST) ([]
 // writeExitLiveRootLocked sets live_root to rootBytes with exitLiveRootScript
 // and records it. The caller holds tree.mu.
 func (m *RedisSMSTManager) writeExitLiveRootLocked(ctx context.Context, sessionID string, tree *redisSMST, rootBytes []byte) (bool, error) {
-	// Nodes before the root, as in FlushOrphansWithLiveRoot.
-	if redisStore, ok := tree.store.(*RedisMapStore); ok {
-		if err := redisStore.FlushPendingNodes(); err != nil {
-			return false, fmt.Errorf("write buffered nodes before live_root: %w", err)
-		}
+	// Nodes before the root, as in CheckpointLiveRoot. The commit only buffers
+	// its orphan deletes, and this checkpoint sends none of them.
+	if err := m.commitLocked(sessionID, tree); err != nil {
+		return false, fmt.Errorf("write buffered nodes before live_root: %w", err)
 	}
 	keys := []string{
 		m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID),
@@ -1223,13 +1308,11 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 	// refreshing it on every loadTreeFromRedis.
 	//
 	// Nodes before the root: claimed_root is what a resumed tree is imported
-	// at to prove, so it is not stored while nodes under it are only in the
-	// buffer a failed FlushPipeline left. A failure there is handled like a
-	// failed SET of the root: logged, and the root returned from memory.
-	var nodesErr error
-	if redisStore, ok := tree.store.(*RedisMapStore); ok {
-		nodesErr = redisStore.FlushPendingNodes()
-	}
+	// at to prove, so it is not stored while nodes under it are not in Redis --
+	// not committed yet, or left in the buffer of a failed write. A failure
+	// there is handled like a failed SET of the root: logged, and the root
+	// returned from memory.
+	nodesErr := m.commitLocked(sessionID, tree)
 	if nodesErr != nil {
 		m.logger.Warn().
 			Err(nodesErr).
@@ -1562,6 +1645,7 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 
 	// Remove from memory
 	delete(m.trees, sessionID)
+	m.markDeletedLocked(sessionID)
 	// Drop any accumulated corruption-eviction counter for this session
 	// so the per-session map does not leak entries across the full
 	// session lifecycle for sessions that had any eviction history.
@@ -1588,6 +1672,60 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 		Msg("deleted SMST from memory and Redis")
 
 	return nil
+}
+
+// deletedSessionMemory is how long DeleteTree's mark on a session is kept.
+// Relays that still arrive for the session after that are dropped at the entry
+// by claimWindowReached, from their session end height. Not measured: the
+// lifecycle deletes a tree at the claim or later, so the entry cut drops the
+// session's relays within claimFlushCapBlocks blocks of it, well inside an hour
+// on any network this miner runs against (inferred, not verified per network).
+const deletedSessionMemory = time.Hour
+
+// markDeletedLocked records that DeleteTree removed the session's tree, and
+// forgets the marks older than deletedSessionMemory, at most once a minute.
+// The caller holds m.treesMu.
+func (m *RedisSMSTManager) markDeletedLocked(sessionID string) {
+	now := time.Now()
+	m.deleted[sessionID] = now
+	if now.Sub(m.deletedPrunedAt) < time.Minute {
+		return
+	}
+	m.deletedPrunedAt = now
+	for id, at := range m.deleted {
+		if now.Sub(at) > deletedSessionMemory {
+			delete(m.deleted, id)
+		}
+	}
+}
+
+// SessionDeleted reports whether DeleteTree removed the session's tree within
+// deletedSessionMemory.
+func (m *RedisSMSTManager) SessionDeleted(sessionID string) bool {
+	m.treesMu.RLock()
+	defer m.treesMu.RUnlock()
+	at, ok := m.deleted[sessionID]
+	return ok && time.Since(at) <= deletedSessionMemory
+}
+
+// SessionConfirmed reports whether the session's resident tree carries the
+// session store's answer that the session exists. False with no resident tree.
+func (m *RedisSMSTManager) SessionConfirmed(sessionID string) bool {
+	m.treesMu.RLock()
+	tree, ok := m.trees[sessionID]
+	m.treesMu.RUnlock()
+	return ok && tree.sessionConfirmed.Load()
+}
+
+// ConfirmSession records on the session's resident tree that the session store
+// answered the session exists. With no resident tree it does nothing.
+func (m *RedisSMSTManager) ConfirmSession(sessionID string) {
+	m.treesMu.RLock()
+	tree, ok := m.trees[sessionID]
+	m.treesMu.RUnlock()
+	if ok {
+		tree.sessionConfirmed.Store(true)
+	}
 }
 
 // GetTreeCount returns the number of trees being managed.

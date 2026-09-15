@@ -124,9 +124,8 @@ type SessionRead struct {
 // EnsureSession creates the session snapshot if it does not exist yet.
 //
 // read carries the caller's own read of the session, when it made one; see
-// SessionRead. The relay path reads the session to check its state just before
-// calling this, so reading it here again cost a second TYPE+HGETALL per relay
-// for the same data.
+// SessionRead. The relay path makes no read of its own and passes the zero
+// value; it calls this only until it reports the session exists (handleRelay).
 //
 // It is separate from OnRelayProcessed because the two have different gates.
 // Counting a relay must happen exactly once — a relay counted twice skews the
@@ -145,13 +144,19 @@ type SessionRead struct {
 //
 // Failures are logged, not returned: the caller's relay is already in the SMST
 // and must be ACKed either way.
+//
+// exists reports whether the session is known to exist when this returns: the
+// store answered with its snapshot, or CreateIfAbsent created it or found it
+// there. false says nothing about the session -- a closed coordinator, missing
+// metadata, or a read and a create that both failed -- and the caller must ask
+// again next time.
 func (c *SessionCoordinator) EnsureSession(
 	ctx context.Context,
 	read SessionRead,
 	sessionID string,
 	supplierAddress, serviceID, applicationAddress string,
 	sessionStartHeight, sessionEndHeight int64,
-) {
+) (exists bool) {
 	// Same guard as its siblings. Without it a relay still in flight at
 	// shutdown does a Redis Get, then OnSessionCreated returns "closed", and
 	// the failure is logged Warn once PER RELAY — a per-request Warn, which
@@ -160,7 +165,7 @@ func (c *SessionCoordinator) EnsureSession(
 	closed := c.closed
 	c.mu.Unlock()
 	if closed {
-		return
+		return false
 	}
 
 	// The read is an optimisation that skips the CreateIfAbsent round-trip on
@@ -178,14 +183,14 @@ func (c *SessionCoordinator) EnsureSession(
 		}
 	}
 	if snapshot != nil {
-		return
+		return true
 	}
 
 	if supplierAddress == "" || serviceID == "" {
 		c.logger.Warn().
 			Str(logging.FieldSessionID, sessionID).
 			Msg("session not found and missing metadata to create it")
-		return
+		return false
 	}
 	if err := c.OnSessionCreated(ctx, sessionID, supplierAddress, serviceID,
 		applicationAddress, sessionStartHeight, sessionEndHeight); err != nil {
@@ -193,7 +198,9 @@ func (c *SessionCoordinator) EnsureSession(
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
 			Msg("failed to create session")
+		return false
 	}
+	return true
 }
 
 // OnRelayProcessed should be called when a relay is successfully processed and

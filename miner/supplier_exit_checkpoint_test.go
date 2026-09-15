@@ -19,11 +19,10 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-// Relays finished one at a time are acknowledged as they are processed, while
-// live_root is written only at the first update and every
-// LiveRootCheckpointInterval (10) after. A supplier torn down with its trees
-// in between left the next owner resuming from a live_root that missed the
-// relays since -- and nothing delivers an acknowledged entry again. The
+// Relays finished one at a time are acknowledged as they are processed, and
+// nothing writes a live_root for them until the supplier exits. A supplier torn
+// down with its trees uncovered left the next owner resuming from a live_root
+// that missed the relays since -- and nothing delivers an acknowledged entry again. The
 // teardown now writes every tree's covering live_root before the lease goes.
 
 const exitCheckpointFailedMetric = "ha_miner_smst_exit_checkpoint_failed_total"
@@ -56,8 +55,8 @@ func (f *drainLeaseFixture) relaysOneByOne(t *testing.T, sessionID string, n int
 	w.state.relayBatch = nil // one at a time: acknowledged as processed
 	w.deliverAll(sessionID, w.publish(n))
 	require.Zero(t, w.pending(), "premise: every relay is acknowledged: nothing will deliver it again")
-	require.Equal(t, uint64(1), requireLiveRootLeaves(t, w.client, w.supplier, sessionID),
-		"premise: the per-relay checkpoint has written live_root at the first relay only")
+	require.Zero(t, requireLiveRootLeaves(t, w.client, w.supplier, sessionID),
+		"premise: relays finished one at a time write no live_root; only the exit checkpoint does")
 }
 
 // leavesWhenTheLeaseGoes records how many relays live_root covers right before
@@ -148,6 +147,8 @@ func TestCheckpointAllOnExit_DoesNotOverwriteTheNewOwnersLiveRoot(t *testing.T) 
 
 	next := NewRedisSMSTManager(zerolog.Nop(), w.client, RedisSMSTManagerConfig{SupplierAddress: supplier})
 	require.NoError(t, next.UpdateTree(w.ctx, sessionID, []byte("new-owner-key"), []byte("v"), 100))
+	_, _, cpErr := next.CheckpointLiveRoot(w.ctx, sessionID)
+	require.NoError(t, cpErr)
 	liveRootKey := w.client.KB().SMSTLiveRootKey(supplier, sessionID)
 	newOwners, err := w.client.Get(w.ctx, liveRootKey).Bytes()
 	require.NoError(t, err)
@@ -171,15 +172,18 @@ func TestCheckpointAllOnExit_DeletesNoNodeTheNextOwnerStillWalks(t *testing.T) {
 	w := newOneByOneWorker(t, supplier)
 	ids := w.publish(12)
 	var hashes [][]byte
-	for i := 0; i < 10; i++ { // the 10th update writes live_root
+	for i := 0; i < 10; i++ {
 		m := w.msg(ids[i], sessionID, fmt.Sprintf("orphan-%d", i), 100)
 		hashes = append(hashes, append([]byte(nil), m.Message.RelayHash...))
 		require.True(t, w.deliver(m))
 	}
+	_, _, cpErr := w.smst.CheckpointLiveRoot(w.ctx, sessionID) // the 10-relay live_root
+	require.NoError(t, cpErr)
 
 	next := NewRedisSMSTManager(zerolog.Nop(), w.client, RedisSMSTManagerConfig{SupplierAddress: supplier})
-	_, err := next.GetOrCreateTree(w.ctx, sessionID) // resumes from the 10-relay live_root
+	nextTree, err := next.GetOrCreateTree(w.ctx, sessionID) // resumes from the 10-relay live_root
 	require.NoError(t, err)
+	require.NotNil(t, nextTree.liveRoot, "premise: the next owner resumed from the 10-relay live_root")
 
 	w.deliverAll(sessionID, ids[10:])
 	written, _, err := w.smst.CheckpointAllOnExit(w.ctx)
@@ -216,7 +220,7 @@ func TestCheckpointAllOnExit_LeavesAloneWhatItHasNoReasonToWrite(t *testing.T) {
 				tree.mu.Unlock()
 				return w.smst
 			},
-			wantLeaves: 1,
+			wantLeaves: 0, // relays finished one at a time write no live_root
 		},
 		{
 			name:   "a tree resumed from its claim",
@@ -236,9 +240,14 @@ func TestCheckpointAllOnExit_LeavesAloneWhatItHasNoReasonToWrite(t *testing.T) {
 			wantLeaves: 0,
 		},
 		{
-			name:       "a tree its live_root already covers",
-			relays:     1, // the first update writes live_root
-			prepare:    func(_ *testing.T, w *batchWorker, _ string) *RedisSMSTManager { return w.smst },
+			name:   "a tree its live_root already covers",
+			relays: 1,
+			prepare: func(t *testing.T, w *batchWorker, sessionID string) *RedisSMSTManager {
+				resident, _, err := w.smst.CheckpointLiveRoot(w.ctx, sessionID)
+				require.NoError(t, err)
+				require.True(t, resident)
+				return w.smst
+			},
 			wantLeaves: 1,
 		},
 		{

@@ -50,6 +50,7 @@ func (s *RedisSMSTTestSuite) buildTreeWithInnerNodes(
 			uint64(10)),
 			"seed update #%d must not fail", i)
 	}
+	s.checkpoint(mgr, sessionID)
 }
 
 // forceResume drops the in-memory tree so the next UpdateTree call is

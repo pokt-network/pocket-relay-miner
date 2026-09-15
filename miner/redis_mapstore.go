@@ -328,19 +328,31 @@ func (s *RedisMapStore) FlushPipeline() error {
 	return nil
 }
 
-// FlushPendingNodes writes the nodes a failed FlushPipeline left buffered, and
-// is a no-op without a round trip when there are none. A writer of a root calls
-// it before storing the root: a root stored while nodes under it are only in
-// this buffer points a resumed tree at digests Redis does not have.
-func (s *RedisMapStore) FlushPendingNodes() error {
-	s.pipelineMu.Lock()
-	defer s.pipelineMu.Unlock()
-	return s.writePendingNodesLocked()
-}
+// FlushPendingNodes wrote the nodes a failed FlushPipeline left buffered, for a
+// writer of a root to call before storing the root. Every such writer now
+// commits the tree first (RedisSMSTManager.commitLocked), and that commit's
+// FlushPipeline writes the whole buffer, the failed write's nodes included.
+//
+// func (s *RedisMapStore) FlushPendingNodes() error {
+// 	s.pipelineMu.Lock()
+// 	defer s.pipelineMu.Unlock()
+// 	return s.writePendingNodesLocked()
+// }
 
-// writePendingNodesLocked sends pipelineBuffer as one multi-field HSET and
-// empties it only if the write succeeded; on failure the nodes stay buffered
-// for the next write. The caller holds pipelineMu.
+// nodesWriteChunkBytes bounds the bytes one HSET of a nodes write carries. A
+// relay batch commits up to relayBatchCap leaves at once, each holding the raw
+// relay bytes, and a single HSET of all of them is one command the
+// single-threaded Redis runs start to end before serving anyone else. Split,
+// other clients' commands interleave between the pieces, which still travel in
+// one round trip. The size is not measured: it was picked against relays of
+// about 1 KiB (a median measured in an earlier load, not here) times the cap.
+const nodesWriteChunkBytes = 256 << 10
+
+// writePendingNodesLocked sends pipelineBuffer to the nodes hash, as HSETs of at
+// most nodesWriteChunkBytes each in one round trip, and empties it only if every
+// piece was written; on failure the nodes stay buffered for the next write, and
+// the pieces that did land are written again, which HSET makes harmless. The
+// caller holds pipelineMu.
 func (s *RedisMapStore) writePendingNodesLocked() error {
 	if len(s.pipelineBuffer) == 0 {
 		return nil
@@ -353,13 +365,32 @@ func (s *RedisMapStore) writePendingNodesLocked() error {
 
 	// Build field-value pairs for HSET
 	// Redis HSET accepts: HSET key field1 value1 field2 value2 ...
+	var chunks [][]interface{}
 	args := make([]interface{}, 0, len(s.pipelineBuffer)*2)
+	chunkBytes := 0
 	for field, value := range s.pipelineBuffer {
+		if len(args) > 0 && chunkBytes+len(field)+len(value) > nodesWriteChunkBytes {
+			chunks = append(chunks, args)
+			args = make([]interface{}, 0, len(s.pipelineBuffer)*2-len(args))
+			chunkBytes = 0
+		}
 		args = append(args, field, value)
+		chunkBytes += len(field) + len(value)
 	}
+	chunks = append(chunks, args)
 
 	// Execute batched HSET
-	err := s.redisClient.HSet(s.ctx, s.hashKey, args...).Err()
+	var err error
+	if len(chunks) == 1 {
+		err = s.redisClient.HSet(s.ctx, s.hashKey, chunks[0]...).Err()
+	} else {
+		_, err = s.redisClient.Pipelined(s.ctx, func(pipe redis.Pipeliner) error {
+			for _, chunk := range chunks {
+				pipe.HSet(s.ctx, s.hashKey, chunk...)
+			}
+			return nil
+		})
+	}
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("flush_pipeline", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("flush_pipeline", "store_error").Inc()

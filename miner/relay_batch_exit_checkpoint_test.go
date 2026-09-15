@@ -65,15 +65,17 @@ func TestExitCheckpoint_DeletesNoNodeTheNextOwnerStillWalks(t *testing.T) {
 
 	ids := w.publish(12)
 	var hashes [][]byte
-	for i := 0; i < 10; i++ { // the 10th update writes live_root
+	for i := 0; i < 10; i++ {
 		m := w.msg(ids[i], sessionID, fmt.Sprintf("orphan-%d", i), 100)
 		hashes = append(hashes, append([]byte(nil), m.Message.RelayHash...))
 		w.deliver(m)
 	}
+	w.batch.FlushAll(w.ctx) // writes the 10-leaf live_root
 
 	next := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier})
-	_, err := next.GetOrCreateTree(w.ctx, sessionID) // resumes from the 10-leaf live_root
+	nextTree, err := next.GetOrCreateTree(w.ctx, sessionID) // resumes from the 10-leaf live_root
 	require.NoError(t, err)
+	require.NotNil(t, nextTree.liveRoot, "premise: the next owner resumed from the 10-leaf live_root")
 
 	for i := 10; i < 12; i++ {
 		w.deliver(w.msg(ids[i], sessionID, fmt.Sprintf("orphan-%d", i), 100))
@@ -102,6 +104,8 @@ func TestExitCheckpoint_DoesNotOverwriteTheNewOwnersLiveRoot(t *testing.T) {
 
 	next := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier})
 	require.NoError(t, next.UpdateTree(w.ctx, sessionID, []byte("new-owner-key"), []byte("v"), 100))
+	_, _, cpErr := next.CheckpointLiveRoot(w.ctx, sessionID)
+	require.NoError(t, cpErr)
 	liveRootKey := client.KB().SMSTLiveRootKey(supplier, sessionID)
 	newOwners, err := client.Get(w.ctx, liveRootKey).Bytes()
 	require.NoError(t, err)

@@ -43,6 +43,9 @@ func TestDropReason_TerminalSessionSplitsRedeliveries(t *testing.T) {
 	const sessionID = "sess-drop-terminal"
 	require.NoError(t, f.worker.handleRelay(f.ctx, f.supplierAddr, newStreamMessage(f.supplierAddr, sessionID, "first", 100)))
 	require.NoError(t, f.sessionStore.UpdateState(f.ctx, sessionID, SessionStateProved))
+	// What the lifecycle does once the session is proved: the deleted tree is
+	// what drops the late relays below.
+	require.NoError(t, f.smstMgr.DeleteTree(f.ctx, sessionID))
 
 	n := 0
 	requireDropReason(t, f.supplierAddr, "session_sealed", func(reclaim bool) {

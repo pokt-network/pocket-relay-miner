@@ -476,7 +476,7 @@ func TestRelayBatch_RedeliveryStillCreatesTheSession(t *testing.T) {
 	require.Nil(t, w.snapshot(sessionID), "premise: the session does not exist")
 
 	m.IsReclaim = true
-	require.True(t, w.deliver(m), "a reclaimed duplicate is acknowledged at once")
+	require.False(t, w.deliver(m), "a reclaimed duplicate is acknowledged with the flush, as every rejection")
 	w.batch.FlushAll(w.ctx)
 
 	snap := w.snapshot(sessionID)
@@ -617,8 +617,9 @@ func TestHandleStreamMessage_ABatchedRelayIsNeitherAckedNorReleasedNorAFailure(t
 
 // TestRelayBatch_ARelayForASealedTreeIsDroppedAndCountedNotBatched (Jorge,
 // 2026-09-10): a relay that arrives after its session's tree is sealed is
-// acknowledged at once and counted as rejected, exactly as before the batch --
-// it never enters the batch, which would acknowledge it without a trace.
+// counted as rejected when it arrives and acknowledged with the batch's next
+// flush, with the other rejections -- it never enters a session's batch, which
+// would count and acknowledge it without a trace.
 func TestRelayBatch_ARelayForASealedTreeIsDroppedAndCountedNotBatched(t *testing.T) {
 	client, _ := newTestRedis(t)
 	const supplier, sessionID = "pokt1batch_sealed", "sess-sealed"
@@ -635,8 +636,9 @@ func TestRelayBatch_ARelayForASealedTreeIsDroppedAndCountedNotBatched(t *testing
 
 	acked := w.deliver(w.msg(ids[1], sessionID, "after-seal", 100))
 	require.Zero(t, w.held(sessionID), "a sealed tree's relay must not wait in the batch")
-	require.True(t, acked, "acknowledged at once")
+	require.False(t, acked, "its acknowledgement goes with the flush, with the other rejections")
 	require.Equal(t, before+1, testutil.ToFloat64(sealed), "and it is counted as rejected")
+	w.batch.FlushAll(w.ctx)
 	require.Zero(t, w.pending())
 }
 
