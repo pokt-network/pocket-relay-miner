@@ -59,7 +59,7 @@ def deploy_redis_standalone(redis_config):
 
     # ConfigMap with Redis config
     # SPEED-OPTIMIZED configuration for pocket-relay-miner:
-    # - RDB snapshots every 60s (acceptable 1-2 min data loss from 40 min sessions)
+    # - RDB snapshots at 900s/1 change and 300s/10 changes
     # - AOF disabled (RDB is sufficient, avoids write amplification)
     # - IO threads enabled for parallel network I/O
     # - Lazyfree enabled for non-blocking deletions
@@ -77,8 +77,14 @@ metadata:
   name: redis-standalone-config
 data:
   redis-additional.conf: |
-    # === PERSISTENCE: RDB snapshots (1-2 min acceptable loss) ===
-    save 60 1
+    # === PERSISTENCE: RDB snapshots ===
+    # The operator's base redis.conf already declares save 900 1 / 300 10 /
+    # 60 10000, and save lines ACCUMULATE across its include of this file
+    # (config.c setConfigSaveOption), so "save 60 1" here ran four rules
+    # and forked every ~76 s under load. "" clears the inherited list only;
+    # the next line keeps snapshots on.
+    save ""
+    save 900 1 300 10
     appendonly no
     rdbcompression yes
     rdbchecksum no
@@ -90,8 +96,9 @@ data:
     maxmemory {maxmemory}
     maxmemory-policy {maxmemory_policy}
     # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
+    # Counts the main thread: 4 = main + 3 I/O threads. io-threads-do-reads
+    # is deprecated and ignored since 8.x, so it is not set.
     io-threads 4
-    io-threads-do-reads yes
     lazyfree-lazy-eviction yes
     lazyfree-lazy-expire yes
     lazyfree-lazy-server-del yes
@@ -106,6 +113,12 @@ data:
     # comandos lentos" sin haber mirado. Configurable para poder nombrar a Redis
     # como cuello en vez de inferirlo del timeout del que lo llama.
     slowlog-log-slower-than {slowlog_us}
+    # 128 entries were overwritten within seconds under load, which lost the
+    # slow commands of the window being measured.
+    slowlog-max-len 10000
+    # 0 disables LATENCY LATEST/HISTORY; 10 ms records the stalls that
+    # clients see as a slow GET without enabling it by hand after a restart.
+    latency-monitor-threshold 10
 """.format(
         maxmemory=redis_config.get("maxmemory", "1887436800"),
         maxmemory_policy=redis_config.get("maxmemory_policy", "allkeys-lru"),
@@ -124,7 +137,9 @@ spec:
     imagePullPolicy: IfNotPresent
     resources:
       requests:
-        cpu: 100m
+        # Equal to the limit: under host contention a 100m request let
+        # Redis wait for CPU while every client waited on Redis.
+        cpu: {cpu_limit}
         memory: 256Mi
       limits:
         cpu: {cpu_limit}
@@ -171,7 +186,7 @@ def deploy_redis_cluster(redis_config):
 
     # ConfigMap with Redis cluster config
     # SPEED-OPTIMIZED configuration for pocket-relay-miner:
-    # - RDB snapshots every 60s (acceptable 1-2 min data loss from 40 min sessions)
+    # - RDB snapshots at 900s/1 change and 300s/10 changes
     # - AOF disabled (RDB is sufficient, avoids write amplification)
     # - IO threads enabled for parallel network I/O
     # - Lazyfree enabled for non-blocking deletions
@@ -189,8 +204,14 @@ metadata:
   name: redis-cluster-config
 data:
   redis-additional.conf: |
-    # === PERSISTENCE: RDB snapshots (1-2 min acceptable loss) ===
-    save 60 1
+    # === PERSISTENCE: RDB snapshots ===
+    # The operator's base redis.conf (read on the standalone pod) declares save 900 1 / 300 10 /
+    # 60 10000, and save lines ACCUMULATE across its include of this file
+    # (config.c setConfigSaveOption), so "save 60 1" here ran four rules
+    # and forked every ~76 s under load. "" clears the inherited list only;
+    # the next line keeps snapshots on.
+    save ""
+    save 900 1 300 10
     appendonly no
     rdbcompression yes
     rdbchecksum no
@@ -198,8 +219,9 @@ data:
     maxmemory 471859200
     maxmemory-policy allkeys-lru
     # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
+    # Counts the main thread: 4 = main + 3 I/O threads. io-threads-do-reads
+    # is deprecated and ignored since 8.x, so it is not set.
     io-threads 4
-    io-threads-do-reads yes
     lazyfree-lazy-eviction yes
     lazyfree-lazy-expire yes
     lazyfree-lazy-server-del yes

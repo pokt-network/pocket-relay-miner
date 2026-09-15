@@ -149,7 +149,7 @@ metadata:
   labels:
     app: path
 spec:
-  replicas: 1
+  replicas: {replicas}
   selector:
     matchLabels:
       app: path
@@ -214,7 +214,7 @@ spec:
   - name: metrics
     port: {metrics_port}
     targetPort: metrics
-""".format(image=full_image, port=port, metrics_port=metrics_port)
+""".format(image=full_image, port=port, metrics_port=metrics_port, replicas=path_config.get("replicas", 0))
 
     k8s_yaml(blob(path_deployment))
 

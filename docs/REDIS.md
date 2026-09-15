@@ -215,7 +215,6 @@ maxmemory-policy: "noeviction"
 ```yaml
 # Multi-threading (+50-72% throughput)
 io-threads: 3
-io-threads-do-reads: "yes"
 
 # Lazy freeing (non-blocking deletes)
 lazyfree-lazy-eviction: "yes"

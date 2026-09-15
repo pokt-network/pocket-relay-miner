@@ -56,6 +56,11 @@ def get_defaults():
                 "redisFollower": 3,
             },
             "max_memory": "512Mi",
+            # Redis CPU, requests == limit. io-threads counts the main thread,
+            # so io-threads 4 is main + 3 I/O threads and leaves one core of
+            # this limit for the RDB fork child (redis.conf asks for one spare
+            # core). A contended host cannot take it below this.
+            "cpu_limit": "5000m",
         },
         "relayer": {
             "count": 2,
@@ -72,7 +77,7 @@ def get_defaults():
             # "500m" has no honest rendering, while an integer renders "8" and
             # "8000m" with no arithmetic. requests.cpu stays a literal in the
             # template -- it serves the scheduler, not the runtime.
-            "cpu_cores": 8,
+            "cpu_cores": 4,
             "base_port": 8180,  # Avoid conflict with redis_commander (8081)
             "metrics_base_port": 9190,  # Avoid conflict with validator_grpc (9090)
             "health_base_port": 8280,
@@ -123,5 +128,8 @@ def get_defaults():
             "tag": "feat-unified-qos",  # Configurable for speed
             "port": 3069,  # PATH HTTP port
             "metrics_port": 9096,
+            # Load and e2e go straight to the relayer, not through PATH, so it
+            # stays deployable but runs no pod unless a config asks for one.
+            "replicas": 0,
         },
     }
