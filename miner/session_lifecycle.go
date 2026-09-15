@@ -1037,6 +1037,15 @@ func (m *SessionLifecycleManager) determineTransition(
 	return "", ""
 }
 
+// claimFlushCapBlocks is how many blocks past a claim window's opening the claim
+// flush may still wait for relays already in the stream (awaitFlushWatermark,
+// rule 1). It is also where the entry stops admitting relays for that session
+// (SupplierManager.claimWindowReached): from that height the flush no longer
+// waits, so a relay handled then cannot be counted on to reach the claim. One
+// constant for both, because the two drifting apart either drops relays the
+// flush would still have taken or admits relays it no longer waits for.
+const claimFlushCapBlocks = 2
+
 // awaitFlushWatermark is the conditional flush delay. windowOpenHeight is
 // the earliest claim-window-open height among sessions, of this batch,
 // transitioning to Claiming. It holds off the caller (which submits the
@@ -1069,7 +1078,7 @@ func (m *SessionLifecycleManager) awaitFlushWatermark(ctx context.Context, sessi
 		return true
 	}
 
-	capHeight := windowOpenHeight + 2
+	capHeight := windowOpenHeight + claimFlushCapBlocks
 	pollInterval := m.flushDelay.PollInterval
 	if pollInterval <= 0 {
 		pollInterval = time.Second

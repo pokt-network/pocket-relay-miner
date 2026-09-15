@@ -3655,3 +3655,57 @@ func (m *SupplierManager) claimWindowClosedAt(ctx context.Context, sessionEndHei
 	}
 	return currentHeight >= sharedtypes.GetClaimWindowCloseHeight(params, sessionEndHeight)
 }
+
+// Why the entry drops a relay its session's claim no longer waits for. Closed is
+// kept apart because a closed claim window is also one past the flush cap, and
+// the live gate excuses a relay dropped past the close by that name.
+const (
+	claimWindowReasonOpen   = "claim_window_open"
+	claimWindowReasonClosed = "claim_window_closed"
+)
+
+// claimWindowReached reports whether a relay for a session ending at
+// sessionEndHeight arrives, at the height this miner last observed, too late
+// for that session's claim, and names why: claimWindowReasonClosed once the
+// claim window has closed, claimWindowReasonOpen from claimFlushCapBlocks past
+// its opening, when the claim flush stops waiting for relays. Before that the
+// relay is admitted, because the flush may still take it.
+//
+// It answers "" whenever it cannot tell, for the reason claimWindowClosedAt
+// does: the caller discards on the answer. A params read that fails is counted,
+// because an entry cut that silently stopped cutting looks the same as one with
+// nothing late to cut.
+//
+// It reads no Redis: the height is the observed block, and the params come from
+// the query client's height cache or one RPC shared by every caller asking for
+// the same height.
+func (m *SupplierManager) claimWindowReached(ctx context.Context, sessionEndHeight int64) string {
+	if m.config.BlockClient == nil || m.config.SharedClient == nil || sessionEndHeight <= 0 {
+		return ""
+	}
+	block := m.config.BlockClient.LastBlock(ctx)
+	if block == nil {
+		return ""
+	}
+	currentHeight := block.Height()
+
+	// A session that has not ended cannot be past its claim window, and asking
+	// for the params at a future height would cache today's params under it; see
+	// claimWindowClosedAt.
+	if sessionEndHeight >= currentHeight {
+		return ""
+	}
+
+	params, err := m.config.SharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+	if err != nil || params == nil {
+		RecordClaimWindowOpenUnchecked()
+		return ""
+	}
+	switch {
+	case currentHeight >= sharedtypes.GetClaimWindowCloseHeight(params, sessionEndHeight):
+		return claimWindowReasonClosed
+	case currentHeight >= sharedtypes.GetClaimWindowOpenHeight(params, sessionEndHeight)+claimFlushCapBlocks:
+		return claimWindowReasonOpen
+	}
+	return ""
+}

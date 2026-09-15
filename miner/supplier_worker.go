@@ -486,6 +486,21 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		return nil // ACK and discard
 	}
 
+	// Cut at the entry, before this relay touches Redis: a relay for a session
+	// whose claim flush has stopped waiting, or whose claim window has closed,
+	// is dropped from the observed height and the params at its session end
+	// height alone, without the session read below. See claimWindowReached.
+	if reason := w.supplierManager.claimWindowReached(ctx, msg.Message.SessionEndHeight); reason != "" {
+		w.logger.Debug().
+			Str("session_id", msg.Message.SessionId).
+			Str("supplier", supplierAddr).
+			Str("reason", reason).
+			Int64("session_end_height", msg.Message.SessionEndHeight).
+			Msg("LATE_RELAY: dropping relay - its session's claim no longer waits for it")
+		RecordRelayRejected(supplierAddr, dropReason(reason, msg.IsReclaim), msg.Message.ServiceId)
+		return nil
+	}
+
 	// Persist apps/services seen in relay traffic to the shared Redis known-sets
 	// so the leader's CacheOrchestrator refreshes them (dedup'd; off the hot path
 	// after first sight).

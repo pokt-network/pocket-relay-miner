@@ -173,6 +173,21 @@ var (
 		[]string{"supplier", "reason", "service_id"},
 	)
 
+	// claimWindowOpenUnchecked counts relays admitted without knowing whether
+	// their session's claim still waits for them, because the shared params at their
+	// session end height could not be read. Admitting is deliberate: dropping on
+	// an unknown is how served work stops being paid. A rate here means the entry
+	// cut is not cutting, which the rejection counter alone cannot tell apart
+	// from nothing arriving late.
+	claimWindowOpenUnchecked = observability.MinerFactory.NewCounter(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "claim_window_open_unchecked_total",
+			Help:      "Relays admitted without checking whether their session's claim still waits for them, because the shared params at the session end height could not be read",
+		},
+	)
+
 	// claimFlushCapped counts, ONE PER SESSION, sessions whose flush delay
 	// ended by hitting the cap (2 block times past the claim window opening)
 	// instead of confirming the stream had drained. It is not the same
@@ -1398,6 +1413,12 @@ func RecordRelayFailedSMST(supplier, serviceID, reason string) {
 // RecordRelayRejected records a relay that was rejected.
 func RecordRelayRejected(supplier, reason, serviceID string) {
 	relaysRejected.WithLabelValues(supplier, reason, serviceID).Inc()
+}
+
+// RecordClaimWindowOpenUnchecked records a relay admitted without the claim
+// window check. See claimWindowOpenUnchecked.
+func RecordClaimWindowOpenUnchecked() {
+	claimWindowOpenUnchecked.Inc()
 }
 
 // RecordClaimFlushCapped records that a session's flush-delay wait exited
