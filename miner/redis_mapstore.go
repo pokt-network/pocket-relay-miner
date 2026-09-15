@@ -344,9 +344,18 @@ func (s *RedisMapStore) FlushPipeline() error {
 // relay bytes, and a single HSET of all of them is one command the
 // single-threaded Redis runs start to end before serving anyone else. Split,
 // other clients' commands interleave between the pieces, which still travel in
-// one round trip. The size is not measured: it was picked against relays of
-// about 1 KiB (a median measured in an earlier load, not here) times the cap.
-const nodesWriteChunkBytes = 256 << 10
+// one round trip.
+//
+// The size is chosen against the relayer's latency, measured under load at
+// CONC=64 with the tree committed once per relay batch (smst_manager.go
+// commitLocked, this file's writePendingNodesLocked) and pieces of 256 KiB: the
+// Redis slowlog showed these HSETs at p50 13 ms and up to 97 ms, while the
+// relayer's meter GET went from p50 34 ms to 64 ms against the load before the
+// batch commit. Those pieces were the one Redis-side change between the two
+// loads; that they held the relayer's commands back is inferred, not measured.
+// 32 KiB is what a single piece may now carry; its effect has to be measured in
+// the next load.
+const nodesWriteChunkBytes = 32 << 10
 
 // writePendingNodesLocked sends pipelineBuffer to the nodes hash, as HSETs of at
 // most nodesWriteChunkBytes each in one round trip, and empties it only if every

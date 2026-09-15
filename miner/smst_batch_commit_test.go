@@ -7,8 +7,10 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"sync"
 	"testing"
 
+	"github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -175,6 +177,96 @@ func TestRedisMapStore_ALargeNodesWriteIsSplitAndFullyWritten(t *testing.T) {
 	written, err := client.HLen(ctx, client.KB().SMSTNodesKey(supplier, sessionID)).Result()
 	require.NoError(t, err)
 	require.EqualValues(t, nodes, written, "every node of every piece must be written")
+}
+
+// hsetBytesRecorder records how many field and value bytes each HSET a client
+// sends carries, piped or not.
+type hsetBytesRecorder struct {
+	mu    sync.Mutex
+	sizes []int
+}
+
+func newHSetBytesRecorder(client redis.UniversalClient) *hsetBytesRecorder {
+	r := &hsetBytesRecorder{}
+	client.AddHook(r)
+	return r
+}
+
+func (r *hsetBytesRecorder) DialHook(next redis.DialHook) redis.DialHook { return next }
+
+func (r *hsetBytesRecorder) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		r.record(cmd)
+		return next(ctx, cmd)
+	}
+}
+
+func (r *hsetBytesRecorder) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []redis.Cmder) error {
+		for _, cmd := range cmds {
+			r.record(cmd)
+		}
+		return next(ctx, cmds)
+	}
+}
+
+func (r *hsetBytesRecorder) record(cmd redis.Cmder) {
+	if cmd.Name() != "hset" {
+		return
+	}
+	size := 0
+	for _, arg := range cmd.Args()[2:] {
+		switch v := arg.(type) {
+		case string:
+			size += len(v)
+		case []byte:
+			size += len(v)
+		}
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.sizes = append(r.sizes, size)
+}
+
+// take returns the sizes recorded since the last take, and forgets them.
+func (r *hsetBytesRecorder) take() []int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	out := r.sizes
+	r.sizes = nil
+	return out
+}
+
+// A full relay batch of nodes must not reach Redis as a few large HSETs: each
+// one runs start to end on Redis's single thread while the relayer waits. The
+// bound is the 32 KiB piece chosen against the relayer's measured latency.
+func TestRedisMapStore_AFullRelayBatchOfNodesGoesInPiecesOfAtMost32KiB(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+	recorder := newHSetBytesRecorder(client)
+	const supplier, sessionID = "pokt1nodes_32k_pieces", "sess-nodes-32k-pieces"
+	store, ok := NewRedisMapStore(ctx, client, supplier, sessionID).(*RedisMapStore)
+	require.True(t, ok)
+
+	// relayBatchCap leaves of about 1 KiB each.
+	const leaves = relayBatchCap
+	value := bytes.Repeat([]byte("v"), 1024)
+	store.BeginPipeline()
+	for i := 0; i < leaves; i++ {
+		require.NoError(t, store.Set([]byte(fmt.Sprintf("node-%04d", i)), value))
+	}
+	recorder.take()
+	require.NoError(t, store.FlushPipeline())
+	sizes := recorder.take()
+
+	for i, size := range sizes {
+		require.LessOrEqual(t, size, 32<<10, "HSET %d of %d carries %d bytes, more than a 32 KiB piece", i, len(sizes), size)
+	}
+	require.Greater(t, len(sizes), 20, "a full batch of ~1 KiB nodes must go as many HSETs, sent %d", len(sizes))
+
+	written, err := client.HLen(ctx, client.KB().SMSTNodesKey(supplier, sessionID)).Result()
+	require.NoError(t, err)
+	require.EqualValues(t, leaves, written, "every node of every piece must be written")
 }
 
 func TestRelayBatch_AnAcknowledgedBatchIsReadableFromItsLiveRoot(t *testing.T) {
