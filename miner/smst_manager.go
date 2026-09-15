@@ -313,6 +313,12 @@ type redisSMST struct {
 	proofPath      []byte
 	compactProofBz []byte
 
+	// compactorMissingLogged guards the once-per-tree Error log fired when
+	// trie does not expose CompactPersistedLeaves (item 269/C8: a binary
+	// built without the local .smt-c8 replace). Without this, the absence
+	// would otherwise repeat once per relay — see updateTree.
+	compactorMissingLogged bool
+
 	// updateCount is the running tally of UpdateTree calls against this
 	// tree instance. It drives live_root checkpointing (first update and
 	// every LiveRootCheckpointInterval updates after) so HA failover can
@@ -689,6 +695,19 @@ func (m *RedisSMSTManager) updateTree(
 	// assertion against the concrete capability rather than an interface
 	// change — same pattern as the *RedisMapStore checks above.
 	//
+	// This call is deliberately MANDATORY, not an optional optimization:
+	// with only the type assertion, "built without the .smt-c8 replace" and
+	// "nothing left to compact" produced the identical silent signal (ok ==
+	// false vs. 0 leaves compacted), which is exactly what let a build
+	// without the replace run for a whole load test with zero compaction
+	// and no way to tell why. Changing tree.trie's field type to the
+	// concrete *smt.SMST would turn that absence into a build failure
+	// instead, but it would also remove the only seam a test has to make
+	// CompactPersistedLeaves fail without touching .smt-c8 (see
+	// failingCompactor in smst_compact_test.go, which wraps the interface,
+	// not the concrete type) -- so the assertion stays, and its negative
+	// branch below is made loud instead.
+	//
 	// A failed or panicking compaction is deliberately NOT propagated as an
 	// error here: by this point the relay is already durable in both the
 	// trie and Redis (Update + Commit + FlushPipeline all succeeded above),
@@ -706,25 +725,33 @@ func (m *RedisSMSTManager) updateTree(
 			compactedLeaves, compactErr = compactor.CompactPersistedLeaves()
 			return compactErr
 		}); err != nil {
+			observability.SMSTCompactionFailures.WithLabelValues(m.config.SupplierAddress).Inc()
 			// Debug, not Warn: this runs once per relay, and the condition
 			// (today, only a recovered panic -- CompactPersistedLeaves
 			// itself never returns a non-nil error) is not transient, so a
 			// tree stuck in this state would otherwise log once per relay
-			// for the rest of the session. The alertable signal is already
-			// the bounded observability.SMSTPanicsRecovered{supplier,
-			// "compact"} counter, incremented inside runSMSTSafely's own
-			// recover -- a metric, not a per-relay log line, per this
-			// repo's logging policy.
+			// for the rest of the session. The alertable signal is the
+			// bounded SMSTCompactionFailures{supplier} counter above (and
+			// SMSTPanicsRecovered{supplier,"compact"}, already incremented
+			// inside runSMSTSafely's own recover for the panic case) -- a
+			// metric, not a per-relay log line, per this repo's logging
+			// policy.
 			m.logger.Debug().
 				Err(err).
 				Str(logging.FieldSessionID, sessionID).
 				Msg("SMST leaf compaction failed, leaving persisted leaves resident")
 		} else {
+			observability.SMSTLeavesCompacted.WithLabelValues(m.config.SupplierAddress).Add(float64(compactedLeaves))
 			m.logger.Debug().
 				Str(logging.FieldSessionID, sessionID).
 				Int("compacted_leaves", compactedLeaves).
 				Msg("compacted persisted SMST leaves")
 		}
+	} else if !tree.compactorMissingLogged {
+		tree.compactorMissingLogged = true
+		m.logger.Error().
+			Str(logging.FieldSessionID, sessionID).
+			Msg("SMST tree does not expose CompactPersistedLeaves -- built without the .smt-c8 replace (item 269/C8); leaves will never be compacted for this session")
 	}
 
 	// Full write path (Update + Commit + FlushPipeline) succeeded end-to-
