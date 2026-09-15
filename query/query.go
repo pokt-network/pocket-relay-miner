@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -29,6 +30,7 @@ import (
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/puzpuzpuz/xsync/v4"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -277,6 +279,12 @@ type sharedQueryClient struct {
 	// Entries carry a fetch time so the immutableCacheTTLFloor expires them (mandate).
 	paramsAtHeightCache   map[int64]paramsAtHeightEntry
 	paramsAtHeightCacheMu sync.RWMutex
+
+	// paramsAtHeightFlight collapses concurrent misses for one height into one
+	// ParamsAtHeight RPC. Sessions of every supplier end on the same heights, so
+	// when they end every supplier asks for the same height at once, and each
+	// caller that missed the cache would otherwise send its own identical RPC.
+	paramsAtHeightFlight singleflight.Group
 }
 
 // paramsAtHeightEntry is an immutable params-at-height value plus its fetch time,
@@ -492,13 +500,10 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 	// Serve from the height-keyed cache when present and within the TTL floor
 	// (entries are immutable, see field doc; the floor only forces an occasional
 	// re-query to satisfy the cache-TTL mandate).
-	c.paramsAtHeightCacheMu.RLock()
-	if e, ok := c.paramsAtHeightCache[queryHeight]; ok && time.Since(e.cachedAt) < immutableCacheTTLFloor {
-		c.paramsAtHeightCacheMu.RUnlock()
+	if params, ok := c.cachedParamsAtHeight(queryHeight); ok {
 		queryCacheHits.WithLabelValues("shared", "params_at_height").Inc()
-		return e.params, nil
+		return params, nil
 	}
-	c.paramsAtHeightCacheMu.RUnlock()
 
 	queryCacheMisses.WithLabelValues("shared", "params_at_height").Inc()
 
@@ -511,17 +516,44 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 	// exists for. ParamsAtHeight is authoritative: the chain returns the live params for
 	// a current-epoch height (no history entry <= height) and the historical snapshot
 	// for an older-epoch height.
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
+	//
+	// Concurrent misses for one height share one RPC. It runs detached from the
+	// caller that started it, bounded by the query timeout, so one caller giving
+	// up does not fail the others waiting on the same height; each caller still
+	// stops waiting when its own context ends.
+	ch := c.paramsAtHeightFlight.DoChan(strconv.FormatInt(queryHeight, 10), func() (any, error) {
+		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.queryTimeout)
+		defer cancel()
 
-	res, err := c.queryClient.ParamsAtHeight(queryCtx, &sharedtypes.QueryParamsAtHeightRequest{Height: queryHeight})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
+		res, err := c.queryClient.ParamsAtHeight(queryCtx, &sharedtypes.QueryParamsAtHeightRequest{Height: queryHeight})
+		if err != nil {
+			return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
+		}
+		params := &res.Params
+		c.storeParamsAtHeight(queryHeight, params)
+		return params, nil
+	})
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.(*sharedtypes.Params), nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, ctx.Err())
 	}
+}
 
-	params := &res.Params
-	c.storeParamsAtHeight(queryHeight, params)
-	return params, nil
+// cachedParamsAtHeight returns the cached params at height while they are
+// inside the TTL floor.
+func (c *sharedQueryClient) cachedParamsAtHeight(height int64) (*sharedtypes.Params, bool) {
+	c.paramsAtHeightCacheMu.RLock()
+	defer c.paramsAtHeightCacheMu.RUnlock()
+	e, ok := c.paramsAtHeightCache[height]
+	if !ok || time.Since(e.cachedAt) >= immutableCacheTTLFloor {
+		return nil, false
+	}
+	return e.params, true
 }
 
 // storeParamsAtHeight caches an immutable params-at-height entry, evicting the lowest
