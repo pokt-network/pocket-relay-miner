@@ -611,7 +611,6 @@ func (m *RedisSMSTManager) updateTree(
 	key, value []byte,
 	weight uint64,
 ) (err error) {
-
 	// Ensure any corruption detected inside this call results in the
 	// session being evicted so the next relay starts from a consistent
 	// Redis state instead of the poisoned in-memory tree.
@@ -678,6 +677,53 @@ func (m *RedisSMSTManager) updateTree(
 			// Double %w so IsRetryableError can reach the underlying
 			// net.Error / Redis error through the sentinel wrapper.
 			return fmt.Errorf("%w: flush pipeline: %w", ErrSMSTCommitFailed, err)
+		}
+	}
+
+	// Drop the in-memory value of every leaf FlushPipeline just persisted:
+	// with a nil value hasher a leaf holds the raw relay bytes, and Commit
+	// already wrote those same bytes to the node store keyed by the leaf's
+	// digest, so keeping them resident too is a redundant copy. The
+	// compactor lives only on the concrete *smt.SMST (embedded via *SMT),
+	// not on the smt.SparseMerkleSumTrie interface, so this is a type
+	// assertion against the concrete capability rather than an interface
+	// change — same pattern as the *RedisMapStore checks above.
+	//
+	// A failed or panicking compaction is deliberately NOT propagated as an
+	// error here: by this point the relay is already durable in both the
+	// trie and Redis (Update + Commit + FlushPipeline all succeeded above),
+	// so returning an error would report an already-successful write as
+	// failed, and the caller would retry or drop a relay that was never at
+	// risk. Compaction only reclaims memory for leaves that are already
+	// safe elsewhere; skipping one pass costs a slightly higher resident
+	// set until the next relay's Commit tries again, not correctness.
+	if compactor, ok := tree.trie.(interface {
+		CompactPersistedLeaves() (int, error)
+	}); ok {
+		var compactedLeaves int
+		if err := m.runSMSTSafely(sessionID, "compact", func() error {
+			var compactErr error
+			compactedLeaves, compactErr = compactor.CompactPersistedLeaves()
+			return compactErr
+		}); err != nil {
+			// Debug, not Warn: this runs once per relay, and the condition
+			// (today, only a recovered panic -- CompactPersistedLeaves
+			// itself never returns a non-nil error) is not transient, so a
+			// tree stuck in this state would otherwise log once per relay
+			// for the rest of the session. The alertable signal is already
+			// the bounded observability.SMSTPanicsRecovered{supplier,
+			// "compact"} counter, incremented inside runSMSTSafely's own
+			// recover -- a metric, not a per-relay log line, per this
+			// repo's logging policy.
+			m.logger.Debug().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("SMST leaf compaction failed, leaving persisted leaves resident")
+		} else {
+			m.logger.Debug().
+				Str(logging.FieldSessionID, sessionID).
+				Int("compacted_leaves", compactedLeaves).
+				Msg("compacted persisted SMST leaves")
 		}
 	}
 
