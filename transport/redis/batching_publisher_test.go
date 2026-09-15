@@ -3,9 +3,11 @@
 package redis
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -365,11 +367,32 @@ func TestPublishRejectionsAreDistinguishable(t *testing.T) {
 // with SessionEndHeight 0, so an unbounded Warn would be one line per relay at
 // thousands per second -- the flood the logging policy exists to prevent.
 func TestRejectionLoggingIsRateLimited(t *testing.T) {
-	rejectLogLast.Delete("r\x00s")
+	// The limiter's state belongs to the process, not to this test: every
+	// rejection an earlier test published is in it, and so is this test's own
+	// previous run under -count. Emptied whole rather than key by key, so the
+	// test does not depend on how a key is spelled.
+	rejectLogLast.Clear()
+
 	require.True(t, shouldLogReject("r", "s"), "the first occurrence must be logged")
 	require.False(t, shouldLogReject("r", "s"), "an immediate repeat must not")
 	require.True(t, shouldLogReject("r", "other-service"),
 		"a different service is a different signal and must not be suppressed by the first")
+	require.True(t, shouldLogReject("other-reason", "s"),
+		"a different reason is a different signal and must not be suppressed by the first")
+
+	// Through the path the publisher takes: two rejections of one pair are both
+	// counted, and only the first is logged.
+	var logged bytes.Buffer
+	logger := zerolog.New(&logged)
+	counter := publishRejectedTotal.WithLabelValues("svc-limited", "limited-reason")
+	before := testutil.ToFloat64(counter)
+
+	recordPublishReject(logger, "limited-reason", "svc-limited", "first")
+	recordPublishReject(logger, "limited-reason", "svc-limited", "second")
+
+	require.Equal(t, before+2, testutil.ToFloat64(counter), "every rejection is counted, logged or not")
+	require.Equal(t, 1, strings.Count(logged.String(), "refused to publish a mined relay"),
+		"only the first rejection of a pair inside the interval is logged")
 }
 
 // TestBatchingPublisherWritesTheGoodHalfOnceAndDiscardsThePoison covers the
