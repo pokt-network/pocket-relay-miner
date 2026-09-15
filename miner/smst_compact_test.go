@@ -17,8 +17,8 @@ import (
 )
 
 // failingCompactor wraps a real trie and makes CompactPersistedLeaves fail,
-// so a test can exercise updateTree's error-swallowing path (item 269/C8)
-// without touching the real .smt-c8 library. Every other method is promoted
+// so a test can exercise updateTree's error-swallowing path
+// without touching the real smt library. Every other method is promoted
 // from the embedded interface unchanged.
 type failingCompactor struct {
 	smt.SparseMerkleSumTrie
@@ -29,7 +29,7 @@ func (failingCompactor) CompactPersistedLeaves() (int, error) {
 }
 
 // TestSMSTCompactsPersistedLeavesWithoutChangingTheRoot: after N relays, the
-// compactor (wired in updateTree right after FlushPipeline, item 269/C8) must
+// compactor (wired in updateTree right after FlushPipeline) must
 // have compacted every persisted leaf, and the sealed root the miner signs
 // must be identical to a twin tree that never compacts anything.
 func TestSMSTCompactsPersistedLeavesWithoutChangingTheRoot(t *testing.T) {
@@ -81,7 +81,7 @@ func TestSMSTCompactsPersistedLeavesWithoutChangingTheRoot(t *testing.T) {
 	compactor, ok := tree.trie.(interface {
 		CompactPersistedLeaves() (int, error)
 	})
-	require.True(t, ok, "the tree must expose the .smt-c8 compactor")
+	require.True(t, ok, "the tree must expose the smt compactor")
 
 	compactedAgain, err := compactor.CompactPersistedLeaves()
 	require.NoError(t, err)
@@ -106,7 +106,7 @@ func TestARelayIsNotLostWhenCompactionFails(t *testing.T) {
 	require.NoError(t, mgr.UpdateTree(ctx, sessionID, key0[:], []byte("relay-0-bytes"), 3))
 
 	// Swap the tree's compactor for one that always errors, without
-	// touching the real .smt-c8 library -- every other trie method still
+	// touching the real smt library -- every other trie method still
 	// delegates to the real tree via the embedded interface.
 	mgr.treesMu.Lock()
 	tree := mgr.trees[sessionID]

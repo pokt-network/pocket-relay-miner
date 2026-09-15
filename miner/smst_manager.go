@@ -314,8 +314,8 @@ type redisSMST struct {
 	compactProofBz []byte
 
 	// compactorMissingLogged guards the once-per-tree Error log fired when
-	// trie does not expose CompactPersistedLeaves (item 269/C8: a binary
-	// built without the local .smt-c8 replace). Without this, the absence
+	// trie does not expose CompactPersistedLeaves (an smt version without
+	// leaf compaction). Without this, the absence
 	// would otherwise repeat once per relay — see updateTree.
 	compactorMissingLogged bool
 
@@ -696,14 +696,14 @@ func (m *RedisSMSTManager) updateTree(
 	// change — same pattern as the *RedisMapStore checks above.
 	//
 	// This call is deliberately MANDATORY, not an optional optimization:
-	// with only the type assertion, "built without the .smt-c8 replace" and
+	// with only the type assertion, "an smt version without compaction" and
 	// "nothing left to compact" produced the identical silent signal (ok ==
-	// false vs. 0 leaves compacted), which is exactly what let a build
-	// without the replace run for a whole load test with zero compaction
+	// false vs. 0 leaves compacted), which is exactly what let a binary
+	// without compaction run for a whole load test with zero compaction
 	// and no way to tell why. Changing tree.trie's field type to the
 	// concrete *smt.SMST would turn that absence into a build failure
 	// instead, but it would also remove the only seam a test has to make
-	// CompactPersistedLeaves fail without touching .smt-c8 (see
+	// CompactPersistedLeaves fail without touching the smt library (see
 	// failingCompactor in smst_compact_test.go, which wraps the interface,
 	// not the concrete type) -- so the assertion stays, and its negative
 	// branch below is made loud instead.
@@ -751,7 +751,7 @@ func (m *RedisSMSTManager) updateTree(
 		tree.compactorMissingLogged = true
 		m.logger.Error().
 			Str(logging.FieldSessionID, sessionID).
-			Msg("SMST tree does not expose CompactPersistedLeaves -- built without the .smt-c8 replace (item 269/C8); leaves will never be compacted for this session")
+			Msg("SMST tree does not expose CompactPersistedLeaves -- the smt version in use has no leaf compaction; leaves will never be compacted for this session")
 	}
 
 	// Full write path (Update + Commit + FlushPipeline) succeeded end-to-

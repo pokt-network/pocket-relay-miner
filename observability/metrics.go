@@ -105,8 +105,8 @@ var (
 	)
 
 	// SMSTLeavesCompacted counts persisted SMST leaves whose in-memory
-	// value has been dropped by CompactPersistedLeaves (item 269/C8, the
-	// local .smt-c8 replace). A non-zero rate is the only way to confirm
+	// value has been dropped by CompactPersistedLeaves. A non-zero rate is
+	// the only way to confirm
 	// compaction is actually running: it is deliberately wired to be
 	// mandatory (see updateTree), so its absence is a build-time or
 	// startup-log signal, not a metric.
@@ -121,7 +121,7 @@ var (
 	)
 
 	// SMSTCompactionFailures counts a CompactPersistedLeaves call that
-	// returned an error or panicked (item 269/C8). The relay that
+	// returned an error or panicked. The relay that
 	// triggered it is never lost -- Update, Commit and FlushPipeline all
 	// already succeeded by the time compaction runs -- so this tracks a
 	// missed memory-reclaim opportunity, not a correctness failure. Alert
