@@ -172,29 +172,28 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		Str("grpc_endpoint", w.config.QueryNodeGRPCUrl).
 		Msg("query clients initialized")
 
-	// Shared params, read ONCE and synchronously: cache_ttl validation below
-	// needs the result before Start() can return (it can abort startup by
-	// returning an error), and the shared-params advisory that used to make
-	// its own round trip here now reads this SAME result instead. An
-	// unreachable node costs at most sharedParamsAdvisoryTimeout, once, with a
-	// Warn and neither check performed -- never a reason to fail startup on
-	// its own.
-	sharedParamsCtx, cancelSharedParams := context.WithTimeout(w.ctx, sharedParamsAdvisoryTimeout)
-	sharedParams, sharedErr := w.queryClients.Shared().GetParams(sharedParamsCtx)
-	cancelSharedParams()
-	if err := checkCacheTTL(w.config.Config, w.logger, sharedParams, sharedErr); err != nil {
+	// The node's network, the chain's shared params and its committed height,
+	// read synchronously and required: the miner does not start without all
+	// three. The network must be the chain ID transactions are signed for. The
+	// entry decides from the params and the height whether a relay arrives too
+	// late for its session's claim, and the height is where the block adapter
+	// starts, so the first relays are not judged against height 0 while the
+	// first block event is still on its way. cache_ttl validation and the
+	// shared-params advisory read this same result.
+	sharedParams, startHeight, err := readStartupChainState(w.ctx, w.config.ChainID, startupChainReaders{
+		network: nodeNetworkReader(w.queryClients.GRPCConnection()),
+		params:  w.queryClients.Shared().GetParams,
+		height:  committedHeightReader(w.queryClients.GRPCConnection()),
+	})
+	if err != nil {
 		w.cleanup()
 		return err
 	}
-	if sharedErr != nil {
-		// Warn, not Debug: "the params are fine" and "we never looked" must not
-		// produce the same silence, and an unreachable node is exactly the case
-		// this advisory exists to surface.
-		w.logger.Warn().Err(sharedErr).
-			Msg("shared params advisory skipped: could not read shared params from the chain")
-	} else {
-		LogSharedParamsAdvisory(w.logger, sharedParams)
+	if err := checkCacheTTL(w.config.Config, w.logger, sharedParams, nil); err != nil {
+		w.cleanup()
+		return err
 	}
+	LogSharedParamsAdvisory(w.logger, sharedParams)
 
 	// Create RPC client for querying specific block heights (needed for proof generation)
 	// This is CRITICAL - proof generation needs to query the exact block at a specific height
@@ -250,6 +249,12 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start redis block client adapter: %w", err)
 	}
 	w.logger.Info().Msg("redis block client adapter started")
+
+	// Seeded here, before the supplier manager starts and so before any relay is
+	// consumed. Not by waiting for a block event: in the process that wins the
+	// election, the leader that publishes them only starts after this Start
+	// returns.
+	w.redisBlockClientAdapter.SeedHeight(startHeight)
 
 	// NOTE: The worker does NOT build its own shared/session/proof param caches.
 	// The economic paths read the raw query clients (GetParamsAtHeight for
