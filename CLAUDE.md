@@ -221,7 +221,13 @@ newest by date.
 
 4. **Testing**
    - Use `-tags test` build constraint for test-only code
-   - Use real implementations (miniredis for Redis, not mocks)
+   - Use real implementations, not mocks. For Redis that means a REAL Redis:
+     `internal/testredis` (Redis 8 on 127.0.0.1:6399, started by
+     `scripts/gates/redis.sh up`). miniredis is erradicated since 2026-08-19 --
+     it answers a blocking XREADGROUP immediately, never ages the PEL, and
+     approximates expiry, and a consumer that could not shut down reached
+     production behind a green suite. `internal/conventions/miniredis_fake_test.go`
+     freezes the four files still on the fake and fails on any new one.
    - **Rule #1 (CANNOT BE BROKEN)**: No flaky tests, no race conditions, no exceptions
      - All tests must pass `go test -race` without warnings
      - All tests must be deterministic (no `time.Sleep()` for synchronization, no random ordering dependencies)
@@ -527,7 +533,7 @@ Reference: `miner/redis_mapstore_test.go` benchmarks
 - **HDEL** (Delete): ~29.2 µs/op (690 B/op, 27 allocs/op)
 - **HLEN** (Len): ~27.7 µs/op (400 B/op, 19 allocs/op)
 
-**Note**: Benchmarks use miniredis (in-process). Production Redis adds ~1-2ms network latency.
+**Note**: These numbers are OLD results from miniredis (in-process), which measures a Go map, not Redis. The benchmarks in `miner/redis_smst_bench_test.go` now run against a real Redis (`internal/testredis`) and give larger numbers that mean what an operator's Redis costs; re-run them before quoting a figure.
 
 ## Recent Performance Improvements (v1.0)
 
@@ -751,7 +757,7 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats  # Inspect all HA keys
 3. Wire into `CacheOrchestrator` in `cache/orchestrator.go`
 4. Add refresh logic for leader
 5. Add metrics in `cache/metrics.go`
-6. Write tests with miniredis
+6. Write tests against a real Redis (`internal/testredis`), never miniredis
 
 ### Optimizing Performance
 
