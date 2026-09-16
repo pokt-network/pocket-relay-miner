@@ -136,4 +136,61 @@ var (
 		},
 		[]string{"supplier"},
 	)
+
+	// SMSTColdCompactions counts attempts to replace a claimed tree's nodes
+	// hash with its leaves blob, by result: compacted, already_compacted,
+	// no_tree, not_ready, read_failed, set_failed, delete_failed, mismatch.
+	// Only "compacted" deleted a nodes hash. "mismatch" means the leaves read
+	// from the hash did not rebuild the claimed root: the hash was kept, and a
+	// sustained rate is a stored tree that does not match its own claim.
+	SMSTColdCompactions = MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "cold_compactions_total",
+			Help:      "Attempts to store a claimed SMST as its leaves only and delete its nodes hash, by result",
+		},
+		[]string{"supplier", "result"},
+	)
+
+	// SMSTColdCompactionBytes adds, for each compacted tree, the bytes of the
+	// nodes hash it replaced (kind="hash": field and value lengths as read, not
+	// Redis MEMORY USAGE) and of the blob that replaced it (kind="blob").
+	SMSTColdCompactionBytes = MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "cold_compaction_bytes_total",
+			Help:      "Bytes of compacted SMST nodes hashes (kind=hash) and of the leaves blobs that replaced them (kind=blob)",
+		},
+		[]string{"supplier", "kind"},
+	)
+
+	// SMSTColdRebuilds counts trees rebuilt from a leaves blob to generate a
+	// proof, by result: ok, missing (no blob), failed (unreadable or
+	// undecodable), mismatch (rebuilt root is not the claimed root; no proof).
+	SMSTColdRebuilds = MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "cold_rebuilds_total",
+			Help:      "SMSTs rebuilt from a leaves blob to generate a proof, by result",
+		},
+		[]string{"supplier", "result"},
+	)
+
+	// SMSTColdDuration is the wall time of a compaction (operation="compact":
+	// read the leaves, store the blob, read it back and rebuild, delete the
+	// hash) and of a rebuild for a proof (operation="rebuild", including the
+	// wait for a rebuild slot).
+	SMSTColdDuration = MinerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "cold_duration_seconds",
+			Help:      "Duration of SMST cold compactions and of rebuilds from a leaves blob",
+			Buckets:   FineGrainedLatencyBuckets,
+		},
+		[]string{"supplier", "operation"},
+	)
 )

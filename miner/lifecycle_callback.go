@@ -1694,6 +1694,18 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					result.Claimed[snapshot.SessionID] = struct{}{}
 				}
 
+				// The claim is sent: from here the tree only waits for its proof,
+				// and can be stored as its leaves. The compaction itself checks
+				// that FlushTree's claimed_root reached Redis. A no-op unless
+				// smst_cold_tree_compaction is on.
+				if compactor, ok := lc.smstManager.(interface {
+					ScheduleColdCompaction(ctx context.Context, sessionID string)
+				}); ok {
+					for _, snapshot := range validSnapshots {
+						compactor.ScheduleColdCompaction(ctx, snapshot.SessionID)
+					}
+				}
+
 				// Track claim submissions to Redis for debugging
 				if lc.submissionTracker != nil {
 					for i, snapshot := range validSnapshots {

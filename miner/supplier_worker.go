@@ -422,6 +422,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			SessionTTL:                     w.config.Config.GetSessionTTL(), // Uses CacheTTL if not explicitly set
 			CacheTTL:                       w.config.Config.GetCacheTTL(),
 			SMSTLiveRootCheckpointInterval: w.config.Config.SMSTLiveRootCheckpointInterval,
+			SMSTColdTreeCompaction:         w.config.Config.SMSTColdTreeCompaction,
 			BatchSize:                      w.config.Config.BatchSize,
 			ClaimIdleTimeout:               w.config.Config.GetClaimIdleTimeout(),
 			RelayBatchFlushInterval:        w.config.Config.GetRelayBatchFlushInterval(),

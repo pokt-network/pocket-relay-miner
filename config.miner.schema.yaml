@@ -498,6 +498,16 @@ properties:
     default: 10
     minimum: 0
 
+  smst_cold_tree_compaction:
+    type: boolean
+    description: |
+      Once a session's claim is sent, store its SMST as a compressed blob of
+      its leaves and delete the nodes hash; the proof rebuilds the tree in
+      memory from the blob. Turning it off stops new compactions only: trees
+      already compacted are still proved from their blob. A miner binary older
+      than this setting cannot prove a compacted tree.
+    default: false
+
   submission_tracking_ttl:
     type: string
     description: TTL for claim/proof submission tracking records. Used for debugging failed submissions and auditing via `pocket-relay-miner redis submissions`.

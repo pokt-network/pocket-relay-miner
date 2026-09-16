@@ -262,6 +262,10 @@ type SupplierManagerConfig struct {
 	// the operator-facing trade-off.
 	SMSTLiveRootCheckpointInterval int
 
+	// SMSTColdTreeCompaction turns on storing claimed trees as their leaves
+	// only. See config.Config.SMSTColdTreeCompaction.
+	SMSTColdTreeCompaction bool
+
 	// Batch configuration
 	BatchSize int64 // Number of messages to fetch per XREADGROUP
 
@@ -438,6 +442,12 @@ type SupplierManager struct {
 	// Pond subpool for bounded supplier queries (prevents unbounded goroutine spawning)
 	querySubpool pond.Pool
 
+	// Subpools shared by every supplier's SMST manager for cold tree
+	// compaction and for the rebuilds proving a compacted tree needs. Nil
+	// unless SMSTColdTreeCompaction is on.
+	coldCompactionPool pond.Pool
+	coldRebuildPool    pond.Pool
+
 	// Distributed claiming (optional)
 	claimer *SupplierClaimer
 
@@ -511,6 +521,17 @@ func NewSupplierManager(
 		registry:     registry,
 		suppliers:    xsync.NewMap[string, *SupplierState](),
 		querySubpool: querySubpool,
+	}
+
+	// Only rebuilds for proofs need a pool with the flag off (a tree compacted
+	// earlier is still proved from its blob), but a miner that never turned it
+	// on has no such tree and would run them inline, one proof at a time per
+	// session; so both are created only with the flag on. Sizes are not
+	// measured under load: a 100k-leaf rebuild took 0.34 s on a synthetic
+	// tree, and holds its leaves and every node in memory while it runs.
+	if config.SMSTColdTreeCompaction && config.WorkerPool != nil {
+		mgr.coldCompactionPool = CreateBoundedSubpool(componentLogger, config.WorkerPool, coldCompactionWorkers, "smst_cold_compaction")
+		mgr.coldRebuildPool = CreateBoundedSubpool(componentLogger, config.WorkerPool, coldRebuildWorkers, "smst_cold_rebuild")
 	}
 
 	// Construct a shared deduplicator if we have a Redis client. Falls back to
@@ -1579,6 +1600,9 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			SupplierAddress:            operatorAddr,
 			CacheTTL:                   m.config.CacheTTL,
 			LiveRootCheckpointInterval: m.config.SMSTLiveRootCheckpointInterval,
+			ColdTreeCompaction:         m.config.SMSTColdTreeCompaction,
+			ColdCompactionPool:         m.coldCompactionPool,
+			ColdRebuildPool:            m.coldRebuildPool,
 		},
 	)
 
@@ -2902,6 +2926,14 @@ func (m *SupplierManager) Close() error {
 	// Stop query subpool gracefully (drains queued tasks)
 	if m.querySubpool != nil {
 		m.querySubpool.StopAndWait()
+	}
+	// Every SMST manager is closed by now, so a queued compaction returns on
+	// its closed flag instead of starting.
+	if m.coldCompactionPool != nil {
+		m.coldCompactionPool.StopAndWait()
+	}
+	if m.coldRebuildPool != nil {
+		m.coldRebuildPool.StopAndWait()
 	}
 
 	m.logger.Info().Msg("supplier manager closed")

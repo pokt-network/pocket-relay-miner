@@ -350,6 +350,15 @@ func (kb *KeyBuilder) SMSTLiveRootKey(supplierAddress, sessionID string) string 
 	return fmt.Sprintf("%s:smst:%s:%s:live_root", kb.ns.BasePrefix, supplierAddress, sessionID)
 }
 
+// SMSTLeavesKey builds the key for a claimed SMST stored as its leaves only: a
+// versioned header and a compressed frame of every leaf, written once the claim
+// is sent so the nodes hash can be deleted. A proof rebuilds the tree from it.
+// Format: {base}:smst:{supplierAddress}:{sessionID}:leaves
+// Example: "ha:smst:pokt1abc:session123:leaves"
+func (kb *KeyBuilder) SMSTLeavesKey(supplierAddress, sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:%s:leaves", kb.ns.BasePrefix, supplierAddress, sessionID)
+}
+
 // ServiceFactorDefaultKey builds the key for the default service factor.
 // Format: {base}:service_factor:default
 // Example: "ha:service_factor:default"

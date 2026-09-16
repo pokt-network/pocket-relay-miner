@@ -59,6 +59,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/alitto/pond/v2"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/smt"
 	"github.com/pokt-network/smt/kvstore"
@@ -127,6 +128,18 @@ type RedisSMSTManagerConfig struct {
 	// loss bound per process restart is (interval - 1) relays per
 	// active session.
 	LiveRootCheckpointInterval int
+
+	// ColdTreeCompaction stores a claimed tree as its leaves only once its
+	// claim is sent, and deletes its nodes hash (see smst_cold_compaction.go).
+	// It governs writing blobs only: a tree already stored as one is proved
+	// from it either way.
+	ColdTreeCompaction bool
+
+	// ColdCompactionPool runs compactions, and ColdRebuildPool the rebuilds a
+	// proof of a compacted tree needs. Shared by every supplier's manager so
+	// the bound is per process. Nil runs the work on the caller's goroutine.
+	ColdCompactionPool pond.Pool
+	ColdRebuildPool    pond.Pool
 }
 
 // liveRootInterval went with the per-update live_root checkpoint, disabled in
@@ -247,6 +260,7 @@ func (m *RedisSMSTManager) evictCorruptSessionLocked(ctx context.Context, sessio
 		m.redisClient.KB().SMSTLiveRootKey(supplier, sessionID), // live_root
 		m.redisClient.KB().SMSTStatsKey(supplier, sessionID),    // stats
 		m.redisClient.KB().SMSTNodesKey(supplier, sessionID),    // nodes hash
+		m.redisClient.KB().SMSTLeavesKey(supplier, sessionID),   // leaves blob
 	}
 	delCount, delErr := m.redisClient.Del(ctx, keys...).Result()
 
@@ -390,6 +404,14 @@ type RedisSMSTManager struct {
 
 	// treeGen numbers the trees this manager makes resident (addTreeLocked).
 	treeGen atomic.Uint64
+
+	// closed is set by Close; a scheduled cold compaction stops on it.
+	closed atomic.Bool
+	// coldAfterFunc schedules a cold compaction retry after coldRetryDelay.
+	// Fields, set in the constructor, so a test replaces them on its own
+	// goroutine before anything reads them.
+	coldAfterFunc  func(time.Duration, func())
+	coldRetryDelay time.Duration
 }
 
 // NewRedisSMSTManager creates a new Redis-backed SMST manager.
@@ -406,6 +428,8 @@ func NewRedisSMSTManager(
 		trees:          make(map[string]*redisSMST),
 		evictionCounts: make(map[string]int),
 		deleted:        make(map[string]time.Time),
+		coldAfterFunc:  func(d time.Duration, f func()) { time.AfterFunc(d, f) },
+		coldRetryDelay: coldCompactionRetryDelay,
 	}
 }
 
@@ -1421,6 +1445,16 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 		return nil, fmt.Errorf("session %s has not been claimed yet", sessionID)
 	}
 
+	// A claimed tree may be stored as its leaves only: its nodes hash is gone,
+	// and walking the trie would find nothing under the root.
+	compacted, err := m.coldTreeCompacted(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if compacted {
+		return m.proveClosestFromLeaves(ctx, sessionID, tree.claimedRoot, path)
+	}
+
 	// CRITICAL: Verify current tree root matches claimed root. Root()
 	// traverses the tree and can panic on corrupt state, so wrap it.
 	var currentRoot []byte
@@ -1452,19 +1486,20 @@ func (m *RedisSMSTManager) ProveClosest(ctx context.Context, sessionID string, p
 		proof = p
 		return nil
 	}); err != nil {
+		// The hash can go between the check above and the walk: a tree loaded
+		// by another caller is not the one a compaction holds. A tree that is
+		// compacted by now is proved from its leaves instead.
+		if isSMSTCorruption(err) {
+			if nowCompacted, checkErr := m.coldTreeCompacted(ctx, sessionID); checkErr == nil && nowCompacted {
+				return m.proveClosestFromLeaves(ctx, sessionID, tree.claimedRoot, path)
+			}
+		}
 		return nil, fmt.Errorf("failed to prove closest: %w", err)
 	}
 
-	// Compact the proof
-	compactProof, err := smt.CompactClosestProof(proof, tree.trie.Spec())
+	proofBz, err := marshalClosestProof(proof, tree.trie.Spec())
 	if err != nil {
-		return nil, fmt.Errorf("failed to compact proof: %w", err)
-	}
-
-	// Marshal the proof
-	proofBz, err := compactProof.Marshal()
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal proof: %w", err)
+		return nil, err
 	}
 
 	// Cache the proof
@@ -1590,6 +1625,15 @@ func (m *RedisSMSTManager) loadTreeFromRedis(ctx context.Context, sessionID stri
 				Str(logging.FieldSessionID, sessionID).
 				Msg("failed to refresh nodes-hash TTL on resume (non-fatal)")
 		}
+		// A compacted tree is its leaves blob: it has to outlive claimed_root
+		// the same way the nodes hash does. EXPIRE on a missing key is a no-op.
+		leavesKey := m.redisClient.KB().SMSTLeavesKey(m.config.SupplierAddress, sessionID)
+		if err := m.redisClient.Expire(ctx, leavesKey, m.config.CacheTTL).Err(); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to refresh leaves-blob TTL on resume (non-fatal)")
+		}
 	}
 
 	// Store in local cache — use double-check pattern to avoid overwriting
@@ -1612,8 +1656,9 @@ func (m *RedisSMSTManager) SetTreeTTL(ctx context.Context, sessionID string, ttl
 	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
 	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
+	leavesKey := m.redisClient.KB().SMSTLeavesKey(m.config.SupplierAddress, sessionID)
 
-	// Set TTL on nodes hash, root, stats, and live_root
+	// Set TTL on nodes hash, root, stats, live_root and leaves blob
 	if err := m.redisClient.Expire(ctx, hashKey, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set TTL on SMST nodes: %w", err)
 	}
@@ -1628,6 +1673,10 @@ func (m *RedisSMSTManager) SetTreeTTL(ctx context.Context, sessionID string, ttl
 	// key returns 0 without erroring, so this is safe.
 	if err := m.redisClient.Expire(ctx, liveRootKey, ttl).Err(); err != nil {
 		return fmt.Errorf("failed to set TTL on SMST live_root: %w", err)
+	}
+	// Only a compacted tree has a leaves blob; EXPIRE on a missing key is safe.
+	if err := m.redisClient.Expire(ctx, leavesKey, ttl).Err(); err != nil {
+		return fmt.Errorf("failed to set TTL on SMST leaves blob: %w", err)
 	}
 
 	m.logger.Debug().
@@ -1651,7 +1700,7 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	// session lifecycle for sessions that had any eviction history.
 	delete(m.evictionCounts, sessionID)
 
-	// Remove nodes hash, root, stats, and live_root from Redis. Keys are
+	// Remove nodes hash, root, stats, live_root and leaves blob from Redis. Keys are
 	// scoped by (supplier, sessionID), so this delete only affects THIS
 	// supplier — other suppliers participating in the same session are
 	// unaffected.
@@ -1659,7 +1708,8 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 	statsKey := m.redisClient.KB().SMSTStatsKey(m.config.SupplierAddress, sessionID)
 	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
-	if err := m.redisClient.Del(ctx, hashKey, rootKey, statsKey, liveRootKey).Err(); err != nil {
+	leavesKey := m.redisClient.KB().SMSTLeavesKey(m.config.SupplierAddress, sessionID)
+	if err := m.redisClient.Del(ctx, hashKey, rootKey, statsKey, liveRootKey, leavesKey).Err(); err != nil {
 		m.logger.Warn().
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
@@ -1879,6 +1929,7 @@ func (m *RedisSMSTManager) Close() error {
 	defer m.treesMu.Unlock()
 
 	m.trees = make(map[string]*redisSMST)
+	m.closed.Store(true)
 
 	m.logger.Info().Msg("SMST manager closed")
 	return nil
