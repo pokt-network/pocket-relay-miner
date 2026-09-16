@@ -194,6 +194,20 @@ spec:
         env:
         - name: LOG_LEVEL
           value: "{log_level}"
+        # Soft limit for the Go runtime below the container limit, so the GC
+        # tightens before the kernel OOM-kills the pod. Same 7GiB/8Gi ratio the
+        # miner uses (miner.Tiltfile), which is why the miner survived the load
+        # of 2026-09-16 while Redis did not.
+        #
+        # NOTE, measured 2026-09-16: this is a SOFT limit and the relayer's live
+        # memory is its unbounded validation queue (proxy.go:1433 "non-blocking,
+        # unbounded queue"). At 3.700 rps that queue reached 580.469 tasks and
+        # 4,4 GB of heap. GOMEMLIMIT makes the GC work harder; it does NOT stop
+        # the queue from growing. The real brake is rejecting when the validation
+        # queue passes a cap -- today only the PUBLISH queue has one
+        # (queueFull(), proxy.go:2390, measured in bytes).
+        - name: GOMEMLIMIT
+          value: "7GiB"
         - name: POD_NAME
           valueFrom:
             fieldRef:
