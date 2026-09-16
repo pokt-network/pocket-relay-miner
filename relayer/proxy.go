@@ -35,6 +35,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/transport"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
@@ -178,6 +179,10 @@ type ProxyServer struct {
 	responseSigner   *ResponseSigner
 	supplierCache    *cache.SupplierCache
 	relayMeter       *RelayMeter
+
+	// storeOperable reports whether Redis can take writes (StoreHealth.Operable).
+	// nil admits everything.
+	storeOperable func() bool
 
 	// warnedUndeclaredTransport dedups the "served a transport the supplier did
 	// not declare on-chain" warning to once per (supplier, service, transport).
@@ -838,6 +843,16 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// Uses the new relay service that properly handles RelayRequest/RelayResponse protocol
 	if isGRPC && grpcRelayServer != nil {
 		grpcRelayServer.ServeHTTP(w, r)
+		return
+	}
+
+	// The FIRST gate: nothing enters while Redis cannot take writes. A relay let
+	// in now would be served and its publish and charge then refused, which is
+	// work given away. It runs before the body is read, before the meter, pricing,
+	// the queue and the backend. WebSocket and gRPC were routed above and ask the
+	// same question first thing in their own handlers.
+	if p.storeSaturated() {
+		p.rejectStorageSaturated(w, metricLabelUnknown, metricLabelUnknown)
 		return
 	}
 
@@ -2379,6 +2394,58 @@ func (p *ProxyServer) Priced() bool {
 // permanent; this one clears itself the moment the miner publishes.
 const rejectReasonPricingUnavailable = "pricing_unavailable"
 
+// rejectReasonStorageSaturated refuses a relay while Redis cannot take writes.
+const rejectReasonStorageSaturated = "storage_saturated"
+
+// errStorageSaturated is the cause a live relay is cancelled with when Redis
+// stops taking writes.
+var errStorageSaturated = errors.New("storage saturated")
+
+// SetStoreHealth makes Redis's ability to take writes the first gate of every
+// transport, and cuts every live WebSocket bridge and gRPC relay the moment it is
+// lost: a backend keeps pushing messages on an open socket, and each would have
+// to be published and charged.
+func (p *ProxyServer) SetStoreHealth(h *redisutil.StoreHealth) {
+	p.storeOperable = h.Operable
+	h.OnChange(func(operable bool) {
+		if !operable {
+			p.cutLiveConnections()
+		}
+	})
+}
+
+// storeSaturated reports that Redis cannot take writes. It reads the field at
+// call time, like queueFull.
+func (p *ProxyServer) storeSaturated() bool {
+	return p.storeOperable != nil && !p.storeOperable()
+}
+
+// rejectStorageSaturated answers 429: the relayer is not failing, it is refusing
+// work until Redis has room.
+func (p *ProxyServer) rejectStorageSaturated(w http.ResponseWriter, serviceID, rpcType string) {
+	w.Header().Set("Retry-After", "1")
+	p.sendError(w, http.StatusTooManyRequests, "relayer is not admitting relays: storage saturated")
+	relaysReceived.WithLabelValues(serviceID, rpcType).Inc()
+	relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonStorageSaturated).Inc()
+}
+
+// cutLiveConnections closes every live WebSocket bridge and cancels every gRPC
+// relay in flight. It only signals: each teardown runs on its own handler
+// goroutine, so it does not block the transition that calls it.
+func (p *ProxyServer) cutLiveConnections() {
+	p.bridges.Range(func(b *WebSocketBridge, _ struct{}) bool {
+		_ = b.closeWithReason(CloseTryAgainLater, "storage saturated", wsCloseInitiatorRelayer)
+		liveConnectionsCut.WithLabelValues(BackendTypeWebSocket).Inc()
+		return true
+	})
+	p.grpcMu.RLock()
+	svc := p.grpcRelayService
+	p.grpcMu.RUnlock()
+	if svc != nil {
+		liveConnectionsCut.WithLabelValues(BackendTypeGRPC).Add(float64(svc.cutLiveRelays(errStorageSaturated)))
+	}
+}
+
 // SetPublishQueueFull wires the admission gate on the batch queue.
 func (p *ProxyServer) SetPublishQueueFull(full func() bool) {
 	p.publishQueueFull = full
@@ -2569,6 +2636,7 @@ func (p *ProxyServer) InitGRPCHandler() error {
 			RelayPipeline:      p.relayPipeline, // Unified relay processing pipeline
 			SimVerifier:        p.simVerifier,
 			PublishQueueFull:   p.queueFull,
+			StoreSaturated:     p.storeSaturated,
 			RelayMeter:         p.relayMeter,
 			CurrentBlockHeight: &p.currentBlockHeight,
 			MaxBodySize:        p.config.DefaultMaxBodySizeBytes,

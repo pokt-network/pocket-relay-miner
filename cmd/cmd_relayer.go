@@ -884,6 +884,8 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// countPublished: one path, independent of decorator order.
 	maxQueuedBytes := config.Redis.BatchMaxQueuedBytes()
 	proxy.SetPublishQueueFull(func() bool { return batcher.QueuedBytes() >= maxQueuedBytes })
+	// Redis being able to take writes is the first gate of every transport.
+	proxy.SetStoreHealth(storeHealth)
 
 	// Event-driven block height updates (replaces 1s polling)
 	// Receives block events from Redis pub/sub for ~1-2ms latency (vs 1s polling)

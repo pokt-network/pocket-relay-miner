@@ -86,6 +86,18 @@ var (
 		[]string{"service_id", "rpc_type"},
 	)
 
+	// liveConnectionsCut counts live WebSocket bridges and in-flight gRPC relays
+	// cut because Redis stopped taking writes, by transport (websocket, grpc).
+	liveConnectionsCut = observability.RelayerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "live_connections_cut_total",
+			Help:      "Live WebSocket bridges and in-flight gRPC relays cut because Redis stopped taking writes",
+		},
+		[]string{"transport"},
+	)
+
 	relaysRejected = observability.RelayerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

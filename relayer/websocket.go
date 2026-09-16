@@ -1698,6 +1698,12 @@ func (b *WebSocketBridge) Close() error {
 func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		serviceID := p.extractServiceID(r)
+		// The first gate, before the handshake is looked at: a refused client
+		// retries, and while Redis cannot take writes a retry costs nothing here.
+		if p.storeSaturated() {
+			p.rejectStorageSaturated(w, metricLabelUnknown, BackendTypeWebSocket)
+			return
+		}
 		if serviceID == "" {
 			p.sendError(w, http.StatusBadRequest, "missing service ID")
 			return

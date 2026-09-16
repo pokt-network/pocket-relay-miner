@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -60,7 +61,14 @@ type RelayGRPCService struct {
 	// is used only for the simulated path's non-mutating meter health probe.
 	simVerifier      *SimulationVerifier
 	publishQueueFull func() bool
+	storeSaturated   func() bool
 	relayMeter       *RelayMeter
+
+	// live holds the cancel of every relay being handled, so they can all be cut
+	// at once when Redis stops taking writes.
+	liveMu  sync.Mutex
+	live    map[uint64]context.CancelCauseFunc
+	liveSeq uint64
 
 	// Function to get HTTP client for a service (supports per-service timeout profiles)
 	getHTTPClient func(serviceID string) *http.Client
@@ -101,6 +109,7 @@ type RelayGRPCServiceConfig struct {
 	SimVerifier    *SimulationVerifier
 	// PublishQueueFull is the batch queue admission gate (ProxyServer.queueFull).
 	PublishQueueFull   func() bool
+	StoreSaturated     func() bool // the storage gate (ProxyServer.storeSaturated)
 	RelayMeter         *RelayMeter
 	CurrentBlockHeight *atomic.Int64
 	MaxBodySize        int64
@@ -186,6 +195,7 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		relayPipeline:      config.RelayPipeline,
 		simVerifier:        config.SimVerifier,
 		publishQueueFull:   config.PublishQueueFull,
+		storeSaturated:     config.StoreSaturated,
 		relayMeter:         config.RelayMeter,
 		currentBlockHeight: config.CurrentBlockHeight,
 		maxBodySize:        maxBodySize,
@@ -215,9 +225,55 @@ func (s *RelayGRPCService) HandleUnknownService(srv interface{}, stream grpc.Ser
 	return s.handleSendRelay(stream)
 }
 
-// handleSendRelay processes a SendRelay gRPC call.
+// handleSendRelay processes a SendRelay gRPC call. Its first gate is Redis being
+// able to take writes; once admitted, the relay is cancelled if Redis stops
+// taking them before it finishes.
 func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
-	ctx := stream.Context()
+	if s.storeSaturated != nil && s.storeSaturated() {
+		relaysRejected.WithLabelValues(metricLabelUnknown, BackendTypeGRPC, rejectReasonStorageSaturated).Inc()
+		return status.Error(codes.ResourceExhausted, "relayer is not admitting relays: storage saturated")
+	}
+	ctx, done := s.trackLiveRelay(stream.Context())
+	defer done()
+	err := s.serveSendRelay(stream, ctx)
+	if err != nil && errors.Is(context.Cause(ctx), errStorageSaturated) {
+		return status.Error(codes.ResourceExhausted, "relay cut: storage saturated")
+	}
+	return err
+}
+
+// trackLiveRelay registers a cancellable context for one relay; done unregisters
+// and releases it.
+func (s *RelayGRPCService) trackLiveRelay(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancelCause(parent)
+	s.liveMu.Lock()
+	if s.live == nil {
+		s.live = make(map[uint64]context.CancelCauseFunc)
+	}
+	s.liveSeq++
+	id := s.liveSeq
+	s.live[id] = cancel
+	s.liveMu.Unlock()
+	return ctx, func() {
+		s.liveMu.Lock()
+		delete(s.live, id)
+		s.liveMu.Unlock()
+		cancel(nil)
+	}
+}
+
+// cutLiveRelays cancels every relay in flight with cause, and returns how many.
+func (s *RelayGRPCService) cutLiveRelays(cause error) int {
+	s.liveMu.Lock()
+	defer s.liveMu.Unlock()
+	for _, cancel := range s.live {
+		cancel(cause)
+	}
+	return len(s.live)
+}
+
+// serveSendRelay is handleSendRelay past its gate, on the relay's own context.
+func (s *RelayGRPCService) serveSendRelay(stream grpc.ServerStream, ctx context.Context) error {
 	arrivalTime := time.Now()
 	arrivalHeight := int64(0)
 	if s.currentBlockHeight != nil {
@@ -448,6 +504,11 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 	}
 
 	if err != nil {
+		// Cut because Redis stopped taking writes: the backend did not fail, so
+		// there is no backend error to count or to answer with.
+		if errors.Is(context.Cause(ctx), errStorageSaturated) {
+			return status.Error(codes.ResourceExhausted, "relay cut: storage saturated")
+		}
 		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, classifyGRPCBackendError(stream.Context(), err)).Inc()
 		// Per-request; the state change (backend down) is the circuit
 		// breaker transition logged above.
