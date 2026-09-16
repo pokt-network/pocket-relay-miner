@@ -12,6 +12,7 @@ import (
 
 	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
@@ -904,23 +905,7 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 	}
 
 	if len(provingSessions) > 0 {
-		// Persist state to Redis FIRST to prevent duplicate submissions
-		var validProvingSessions []*SessionSnapshot
-		for _, session := range provingSessions {
-			if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateProving); err != nil {
-				m.logger.Error().
-					Err(err).
-					Str(logging.FieldSessionID, session.SessionID).
-					Str(logging.FieldSupplier, session.SupplierOperatorAddress).
-					Str(logging.FieldServiceID, session.ServiceID).
-					Msg("failed to persist proving state to Redis - skipping to prevent duplicate submission")
-				sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state_proving").Inc()
-				continue
-			}
-			session.State = SessionStateProving
-			session.LastUpdatedAt = time.Now()
-			validProvingSessions = append(validProvingSessions, session)
-		}
+		validProvingSessions := m.persistProving(ctx, provingSessions)
 
 		if len(validProvingSessions) > 0 {
 			// Capture for closure
@@ -1296,6 +1281,40 @@ func (m *SessionLifecycleManager) executeBatchedClaimTransition(ctx context.Cont
 		Msg("claim batch complete — sessions now in 'claimed' state awaiting proof window")
 }
 
+// persistProving writes the proving state of each session before its proof is
+// built, and returns the sessions whose proof goes out.
+func (m *SessionLifecycleManager) persistProving(ctx context.Context, sessions []*SessionSnapshot) []*SessionSnapshot {
+	// Persist state to Redis FIRST to prevent duplicate submissions
+	var valid []*SessionSnapshot
+	for _, session := range sessions {
+		if err := m.sessionStore.UpdateState(ctx, session.SessionID, SessionStateProving); err != nil && redistransport.IsOOMError(err) {
+			// Redis is full, not the session doubtful: skipping here to avoid a
+			// duplicate loses the claim, while a duplicate proof is an upsert
+			// that costs one fee. So the proof goes out anyway. Debug: the metric
+			// below is the signal, and this fires once per session.
+			m.logger.Debug().
+				Err(err).
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+				Msg("could not persist proving state: Redis is out of memory; submitting the proof anyway")
+			sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state_proving_oom").Inc()
+		} else if err != nil {
+			m.logger.Error().
+				Err(err).
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+				Str(logging.FieldServiceID, session.ServiceID).
+				Msg("failed to persist proving state to Redis - skipping to prevent duplicate submission")
+			sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state_proving").Inc()
+			continue
+		}
+		session.State = SessionStateProving
+		session.LastUpdatedAt = time.Now()
+		valid = append(valid, session)
+	}
+	return valid
+}
+
 // executeBatchedProofTransition executes batched proof transitions.
 func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Context, sessions []*SessionSnapshot) {
 	if len(sessions) == 0 {
@@ -1343,16 +1362,20 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 				Str(logging.FieldServiceID, session.ServiceID).
 				Msg("failed to persist proved state")
 			sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state").Inc()
-			continue
+			// No continue: the proof is out, and the cleanup below frees the tree
+			// with a DEL, which Redis takes even when it refuses writes. Holding
+			// the tree until this write succeeds holds the memory the write needs;
+			// OnSessionProved deletes the tree first and writes the state again
+			// after.
+		} else {
+			// Record the transition
+			sessionStateTransitions.WithLabelValues(
+				m.config.SupplierAddress,
+				session.ServiceID,
+				string(SessionStateProving),
+				string(SessionStateProved),
+			).Inc()
 		}
-
-		// Record the transition
-		sessionStateTransitions.WithLabelValues(
-			m.config.SupplierAddress,
-			session.ServiceID,
-			string(SessionStateProving),
-			string(SessionStateProved),
-		).Inc()
 
 		// Call OnSessionProved for cleanup (stream deletion, SMST cleanup, metrics)
 		if proveErr := m.callback.OnSessionProved(ctx, session); proveErr != nil {

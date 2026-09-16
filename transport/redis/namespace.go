@@ -350,6 +350,14 @@ func (kb *KeyBuilder) SMSTLiveRootKey(supplierAddress, sessionID string) string 
 	return fmt.Sprintf("%s:smst:%s:%s:live_root", kb.ns.BasePrefix, supplierAddress, sessionID)
 }
 
+// SMSTAllPattern builds the SCAN pattern matching every key of every SMST:
+// nodes, root, stats, live_root and leaves, for all suppliers and sessions.
+// Format: {base}:smst:*
+// Example: "ha:smst:*"
+func (kb *KeyBuilder) SMSTAllPattern() string {
+	return fmt.Sprintf("%s:smst:*", kb.ns.BasePrefix)
+}
+
 // SMSTLeavesKey builds the key for a claimed SMST stored as its leaves only: a
 // versioned header and a compressed frame of every leaf, written once the claim
 // is sent so the nodes hash can be deleted. A proof rebuilds the tree from it.

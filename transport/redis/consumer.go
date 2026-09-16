@@ -81,6 +81,10 @@ type StreamsConsumer struct {
 	// Message channel
 	msgCh chan transport.StreamMessage
 
+	// health, when set, pauses reading and reclaiming while Redis cannot take
+	// writes: entries stay in the stream and in the PEL, unacked and undeleted.
+	health *StoreHealth
+
 	// Lifecycle management
 	mu       sync.RWMutex
 	closed   bool
@@ -223,6 +227,30 @@ func (c *StreamsConsumer) ensureConsumerGroup(ctx context.Context) error {
 // whoever outlived the timeout. Sweeping more often takes nothing younger: the
 // sweep itself only claims entries idle past ClaimIdleTimeout. Reaping dead
 // consumers stays on the full timeout.
+// SetStoreHealth pauses this consumer while health says Redis cannot take writes.
+// Call it before Consume.
+func (c *StreamsConsumer) SetStoreHealth(health *StoreHealth) {
+	c.health = health
+}
+
+// waitOperable returns once Redis can take writes, or with ctx's error. Reading
+// is not refused under maxmemory, but what the miner does with a read relay is a
+// write, so reading while full only moves relays from the stream into a PEL they
+// cannot leave.
+func (c *StreamsConsumer) waitOperable(ctx context.Context) error {
+	for {
+		changed := c.health.Changed()
+		if c.health.Operable() {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
 	idle := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
 
@@ -233,7 +261,9 @@ func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
 	if err := c.ensureConsumerGroup(ctx); err != nil && ctx.Err() == nil {
 		c.logger.Debug().Err(err).Msg("failed to ensure consumer group before the first reclaim sweep")
 	}
-	c.claimPendingMessages(ctx)
+	if c.health.Operable() {
+		c.claimPendingMessages(ctx)
+	}
 
 	sweep := time.NewTicker(idle / 4)
 	defer sweep.Stop()
@@ -244,9 +274,13 @@ func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-sweep.C:
-			c.claimPendingMessages(ctx)
+			if c.health.Operable() {
+				c.claimPendingMessages(ctx)
+			}
 		case <-reap.C:
-			c.reapDeadConsumers(ctx)
+			if c.health.Operable() {
+				c.reapDeadConsumers(ctx)
+			}
 		}
 	}
 }
@@ -291,6 +325,9 @@ func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
 // This is the most efficient approach - no polling, pure push.
 func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 	for {
+		if err := c.waitOperable(ctx); err != nil {
+			return err
+		}
 		// Still push, not polling: the read returns the INSTANT data arrives, so
 		// delivery latency is unchanged by the block interval. The interval only
 		// bounds how long an IDLE read sits there.
@@ -711,6 +748,9 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 func (c *StreamsConsumer) deliverOwnPending(ctx context.Context) error {
 	if c.ownPendingDone {
 		return nil
+	}
+	if err := c.waitOperable(ctx); err != nil {
+		return err
 	}
 	after, err := c.eachOwnPending(ctx, c.ownPendingAfter, func(msg transport.StreamMessage) error {
 		select {

@@ -270,6 +270,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "miner")
 	redisClient.AddHook(storeHealth.Hook())
 	storeHealth.Start(ctx)
+	miner.RecordStoreMemoryOnClose(ctx, logger, redisClient, storeHealth)
 
 	redisPools := redistransport.NewPoolCollector("miner")
 	redisPools.Add("shared", redisClient)
@@ -372,6 +373,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	supplierWorker := miner.NewSupplierWorker(miner.SupplierWorkerConfig{
 		Logger:           logger,
 		RedisClient:      redisClient,
+		StoreHealth:      storeHealth,
 		KeyManager:       keyManager,
 		Config:           config,
 		QueryNodeRPCUrl:  config.PocketNode.QueryNodeRPCUrl,

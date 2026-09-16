@@ -18,6 +18,32 @@ const (
 )
 
 var (
+	// trackingWritesSkipped counts submission tracking records not written because
+	// Redis could not take writes, by kind (claim, proof, claim_outcome,
+	// proof_outcome).
+	trackingWritesSkipped = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "tracking_writes_skipped_total",
+			Help:      "Submission tracking records not written because Redis could not take writes",
+		},
+		[]string{"kind"},
+	)
+
+	// storeMemoryAtClose is what Redis held, by key family (stream, smst, other),
+	// the last time the store closed: whether a full store is the relay backlog or
+	// the trees decides what can free it.
+	storeMemoryAtClose = observability.MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "store_memory_at_close_bytes",
+			Help:      "Redis memory by key family (stream, smst, other) measured when the store last closed",
+		},
+		[]string{"family"},
+	)
+
 	// Relay flow tracking metrics (for debugging SMST sealing issues)
 	relaysConsumedFromStream = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{

@@ -245,6 +245,10 @@ type SupplierManagerConfig struct {
 	// Redis connection
 	RedisClient *redistransport.Client
 
+	// StoreHealth pauses stream consumption and tracking writes while Redis
+	// cannot take writes. nil never pauses.
+	StoreHealth *redistransport.StoreHealth
+
 	// Stream configuration
 	StreamPrefix  string
 	ConsumerGroup string
@@ -1580,6 +1584,9 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			// Note: blocks for one block interval per read - hardcoded in consumer
 		},
 	)
+	if err == nil {
+		consumer.SetStoreHealth(m.config.StoreHealth)
+	}
 	if err != nil {
 		cancelFn()
 		return fmt.Errorf("failed to create consumer for %s: %w", operatorAddr, err)
@@ -3072,6 +3079,7 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 func (m *SupplierManager) ensureSharedTrackers() {
 	m.sharedTrackersOnce.Do(func() {
 		m.sharedSubmissionTracker = NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
+		m.sharedSubmissionTracker.SetStoreHealth(m.config.StoreHealth)
 
 		// Only build the rebroadcast store + reconciler when we can actually run
 		// it. Leaving m.rebroadcastStore nil means the lifecycle callback skips

@@ -70,6 +70,7 @@ type StoreHealth struct {
 	lastSample time.Time
 	started    bool
 	changed    chan struct{}
+	closedAt   time.Time
 	onChange   []func(operable bool)
 	noMaxWarn  bool
 }
@@ -227,8 +228,12 @@ func (h *StoreHealth) transition(operable bool, reason string) {
 		return
 	}
 	h.operable.Store(operable)
-	if !operable {
+	var closedFor time.Duration
+	if operable {
+		closedFor = h.now().Sub(h.closedAt)
+	} else {
 		h.reason = reason
+		h.closedAt = h.now()
 	}
 	close(h.changed)
 	h.changed = make(chan struct{})
@@ -242,6 +247,9 @@ func (h *StoreHealth) transition(operable bool, reason string) {
 	}
 	storeOperable.WithLabelValues(h.component).Set(value)
 	storeTransitions.WithLabelValues(h.component, state, reason).Inc()
+	if operable {
+		storeClosedSeconds.WithLabelValues(h.component, reason).Add(closedFor.Seconds())
+	}
 	if operable {
 		h.logger.Info().Str("component", h.component).Str("reason", reason).
 			Msg("Redis operable again: admitting work")

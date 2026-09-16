@@ -40,6 +40,18 @@ var (
 		[]string{"component", "state", "reason"},
 	)
 
+	// storeClosedSeconds adds, when the store reopens, how long it was closed, by
+	// why it closed. A store still closed has not added its current closure yet.
+	storeClosedSeconds = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "store_closed_seconds_total",
+			Help:      "Seconds Redis was taken as not operable, added when it reopens, by why it closed",
+		},
+		[]string{"component", "reason"},
+	)
+
 	// storeFreeBytes is maxmemory minus used_memory at the last sample, or -1 when
 	// Redis has no maxmemory.
 	storeFreeBytes = observability.SharedFactory.NewGaugeVec(

@@ -36,6 +36,9 @@ type SupplierWorkerConfig struct {
 	KeyManager  keys.KeyManager
 	Config      *Config
 
+	// StoreHealth says whether Redis can take writes; see SupplierManagerConfig.
+	StoreHealth *redistransport.StoreHealth
+
 	// Blockchain connection config
 	QueryNodeRPCUrl  string
 	QueryNodeGRPCUrl string
@@ -418,6 +421,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		w.supplierRegistry,
 		SupplierManagerConfig{
 			RedisClient:                    w.config.RedisClient,
+			StoreHealth:                    w.config.StoreHealth,
 			ConsumerName:                   w.config.Config.Redis.ConsumerName,
 			SessionTTL:                     w.config.Config.GetSessionTTL(), // Uses CacheTTL if not explicitly set
 			CacheTTL:                       w.config.Config.GetCacheTTL(),

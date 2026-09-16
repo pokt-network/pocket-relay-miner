@@ -92,6 +92,23 @@ type SubmissionTracker struct {
 	logger      logging.Logger
 	redisClient *redistransport.Client
 	ttl         time.Duration
+	// health, when set, stops every write while Redis cannot take them: these
+	// records are debugging data and the first thing not to spend its room on.
+	health *redistransport.StoreHealth
+}
+
+// SetStoreHealth stops the tracker's writes while health says Redis is full.
+func (t *SubmissionTracker) SetStoreHealth(health *redistransport.StoreHealth) {
+	t.health = health
+}
+
+// skipWrite reports, and counts, a write not made because Redis cannot take it.
+func (t *SubmissionTracker) skipWrite(kind string) bool {
+	if t.health.Operable() {
+		return false
+	}
+	trackingWritesSkipped.WithLabelValues(kind).Inc()
+	return true
 }
 
 // NewSubmissionTracker creates a new submission tracker.
@@ -127,6 +144,9 @@ func (t *SubmissionTracker) TrackClaimSubmission(
 	proofRequired bool,
 	proofRequirementSeed string,
 ) error {
+	if t.skipWrite("claim") {
+		return nil
+	}
 	key := t.makeKey(supplier, sessionEnd, sessionID)
 
 	now := time.Now()
@@ -184,6 +204,9 @@ func (t *SubmissionTracker) TrackProofSubmission(
 	proofRequired bool,
 	proofRequirementSeed string,
 ) error {
+	if t.skipWrite("proof") {
+		return nil
+	}
 	key := t.makeKey(supplier, sessionEnd, sessionID)
 
 	// Get existing record
@@ -341,6 +364,9 @@ type ClaimOnChainUpdate struct {
 // single miner's in-flight-session set is bounded and the update runs on
 // a background worker pool, so the O(N) cost is acceptable.
 func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u ClaimOnChainUpdate) error {
+	if t.skipWrite("claim_outcome") {
+		return nil
+	}
 	if u.TxHash == "" {
 		return nil
 	}
@@ -409,6 +435,9 @@ type ProofOnChainUpdate struct {
 // analogue of UpdateClaimOnChainOutcome. The TTL is preserved at t.ttl. A
 // missing record is a no-op (the proof was never tracked).
 func (t *SubmissionTracker) UpdateProofOnChainOutcome(ctx context.Context, u ProofOnChainUpdate) error {
+	if t.skipWrite("proof_outcome") {
+		return nil
+	}
 	record, err := t.GetRecord(ctx, u.Supplier, u.SessionEnd, u.SessionID)
 	if err != nil {
 		// The previous version returned nil on ANY error here, under "no record
