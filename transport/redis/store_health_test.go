@@ -26,46 +26,47 @@ func transitions(component, state, reason string) float64 {
 	return testutil.ToFloat64(storeTransitions.WithLabelValues(component, state, reason))
 }
 
-func TestStoreHealth_ClosesBelowTheReserveAndReopensOnlyWithTwiceIt(t *testing.T) {
+func TestStoreHealth_ClosesBelowOneGiBAndReopensOnlyWithTwoGiB(t *testing.T) {
 	const component = "test_hysteresis"
 	h := NewStoreHealth(zerolog.Nop(), nil, component)
-	const maxmemory = 1024 * mib // closes below 102.4 MiB free, reopens at 204.8 MiB
+	const maxmemory = 8 * 1024 * mib // the cluster's maxmemory
 	closedBefore := transitions(component, "closed", StoreReasonMemoryReserve)
 	openBefore := transitions(component, "open", StoreReasonMemoryReserve)
 	var calls []bool
 	h.OnChange(func(operable bool) { calls = append(calls, operable) })
 
-	h.observe(maxmemory-150*mib, maxmemory)
-	require.True(t, h.Operable(), "control: 150 MiB free is above the reserve")
+	h.observe(maxmemory-1100*mib, maxmemory)
+	require.True(t, h.Operable(), "control: 1.07 GiB free is above the reserve")
 
 	changed := h.Changed()
-	h.observe(maxmemory-100*mib, maxmemory)
-	require.False(t, h.Operable(), "LINK close: below the reserve the store closes")
+	h.observe(maxmemory-1000*mib, maxmemory)
+	require.False(t, h.Operable(), "LINK close: below 1 GiB free the store closes")
 	select {
 	case <-changed:
 	default:
 		t.Fatal("Changed must fire on the transition")
 	}
 
-	h.observe(maxmemory-150*mib, maxmemory)
-	require.False(t, h.Operable(), "LINK hysteresis: between the reserve and twice it the store stays closed")
+	h.observe(maxmemory-2047*mib, maxmemory)
+	require.False(t, h.Operable(), "LINK hysteresis: below 2 GiB free the store stays closed")
 
-	h.observe(maxmemory-100*mib, maxmemory)
+	h.observe(maxmemory-900*mib, maxmemory)
 	require.False(t, h.Operable())
 	require.Equal(t, closedBefore+1, transitions(component, "closed", StoreReasonMemoryReserve),
 		"staying closed is not another transition")
 
-	h.observe(maxmemory-210*mib, maxmemory)
-	require.True(t, h.Operable(), "LINK reopen: with twice the reserve free the store reopens")
+	h.observe(maxmemory-2048*mib, maxmemory)
+	require.True(t, h.Operable(), "LINK reopen: with 2 GiB free the store reopens")
 	require.Equal(t, openBefore+1, transitions(component, "open", StoreReasonMemoryReserve))
 	require.Equal(t, []bool{false, true}, calls)
 	require.Equal(t, 1.0, testutil.ToFloat64(storeOperable.WithLabelValues(component)))
-	require.Equal(t, float64(210*mib), testutil.ToFloat64(storeFreeBytes.WithLabelValues(component)))
+	require.Equal(t, float64(2048*mib), testutil.ToFloat64(storeFreeBytes.WithLabelValues(component)))
 }
 
-func TestStoreHealth_TheReserveIsATenthOfMaxmemoryCappedAt256MiB(t *testing.T) {
-	require.Equal(t, 100*mib, storeCloseBelow(1000*mib))
-	require.Equal(t, uint64(256<<20), storeCloseBelow(9*1024*mib))
+func TestStoreHealth_TheReserveIsOneGiBOrAnEighthOfASmallMaxmemory(t *testing.T) {
+	require.Equal(t, uint64(1<<30), storeCloseBelow(8*1024*mib), "LINK reserve: 1 GiB with the cluster's 8 GiB")
+	require.Equal(t, uint64(1<<30), storeCloseBelow(64*1024*mib))
+	require.Equal(t, 128*mib, storeCloseBelow(1024*mib), "an eighth of a small maxmemory")
 	require.Equal(t, uint64(0), storeCloseBelow(0))
 }
 

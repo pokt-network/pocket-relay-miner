@@ -35,11 +35,13 @@ const (
 	// storeHealthSampleMaxAge is how old the last successful sample may be before
 	// the store is treated as not operable.
 	storeHealthSampleMaxAge = 3 * time.Second
-	// storeReserveMaxBytes caps the free memory below which the store closes. Claims
-	// and proofs write ~8 MB per 1,000 sessions (measured in the 2026-09-16
-	// saturation run), so the cap leaves them room many times over; it is not a
-	// measurement of anything larger.
-	storeReserveMaxBytes = 256 << 20
+	// storeReserveMaxBytes caps the free memory below which the store closes. With
+	// 256 MiB, measured under load on 2026-09-16, the store reopened at 512 MiB free
+	// and closed again about 66 s later, over and over until the cold tree
+	// compaction freed more than 3 GiB: the band was narrower than what a minute of
+	// in-flight work writes. 1 GiB, reopening at 2 GiB, is the owner's call on that
+	// measurement, not a measurement of its own.
+	storeReserveMaxBytes = 1 << 30
 )
 
 // Reasons the store is not operable. Bounded, used as a metric label.
@@ -50,9 +52,10 @@ const (
 )
 
 // storeCloseBelow is the free memory below which a store with maxmemory closes:
-// a tenth of maxmemory, at most storeReserveMaxBytes. It reopens at twice that.
+// storeReserveMaxBytes, or an eighth of maxmemory when that is smaller, so a small
+// Redis is not closed from the start. It reopens at twice that.
 func storeCloseBelow(maxmemory uint64) uint64 {
-	return min(uint64(storeReserveMaxBytes), maxmemory/10)
+	return min(uint64(storeReserveMaxBytes), maxmemory/8)
 }
 
 // StoreHealth is safe for concurrent use. A nil *StoreHealth is always operable,
