@@ -35,14 +35,33 @@ const (
 	// storeHealthSampleMaxAge is how old the last successful sample may be before
 	// the store is treated as not operable.
 	storeHealthSampleMaxAge = 3 * time.Second
-	// storeReserveMaxBytes caps the free memory below which the store closes. With
-	// 256 MiB, measured under load on 2026-09-16, the store reopened at 512 MiB free
-	// and closed again about 66 s later, over and over until the cold tree
-	// compaction freed more than 3 GiB: the band was narrower than what a minute of
-	// in-flight work writes. 1 GiB, reopening at 2 GiB, is the owner's call on that
-	// measurement, not a measurement of its own.
-	storeReserveMaxBytes = 1 << 30
 )
+
+// StoreGate names a consumer of the same sample. Every gate closes at the same
+// amount of free memory and reopens at its own: the miner's reopens first, so it
+// starts draining what waited in the streams before the relayer admits new traffic.
+type StoreGate string
+
+const (
+	// StoreGateAdmission is the relayer's: new relays.
+	StoreGateAdmission StoreGate = "admission"
+	// StoreGateIngestion is the miner's: reading the relay streams.
+	StoreGateIngestion StoreGate = "ingestion"
+)
+
+// storeReserveMaxBytes is the free memory below which every gate closes, at most.
+// With 256 MiB, measured under load on 2026-09-16, the store reopened at 512 MiB
+// free and closed again about 66 s later, over and over until the cold tree
+// compaction freed more than 3 GiB. 1 GiB, with admission reopening 1 GiB above it
+// and ingestion 512 MiB above it, is the owner's call on that measurement.
+const storeReserveMaxBytes = 1 << 30
+
+// storeGateReopenMargin is how far above the close line each gate reopens, as a
+// fraction of it: all of it for admission (1 GiB), half for ingestion (512 MiB).
+var storeGateReopenMargin = map[StoreGate]uint64{
+	StoreGateAdmission: 1,
+	StoreGateIngestion: 2,
+}
 
 // Reasons the store is not operable. Bounded, used as a metric label.
 const (
@@ -51,79 +70,121 @@ const (
 	StoreReasonSampleStale   = "sample_stale"
 )
 
-// storeCloseBelow is the free memory below which a store with maxmemory closes:
+// storeCloseBelow is the free memory below which every gate closes:
 // storeReserveMaxBytes, or an eighth of maxmemory when that is smaller, so a small
-// Redis is not closed from the start. It reopens at twice that.
+// Redis is not closed from the start.
 func storeCloseBelow(maxmemory uint64) uint64 {
 	return min(uint64(storeReserveMaxBytes), maxmemory/8)
 }
 
-// StoreHealth is safe for concurrent use. A nil *StoreHealth is always operable,
-// so a component built without one behaves as before.
-type StoreHealth struct {
-	logger    logging.Logger
-	client    redis.UniversalClient
-	component string
-	now       func() time.Time
-
-	operable atomic.Bool
-
-	mu         sync.Mutex
-	reason     string
-	lastSample time.Time
-	started    bool
-	changed    chan struct{}
-	closedAt   time.Time
-	onChange   []func(operable bool)
-	noMaxWarn  bool
-
-	// lastUsed and lastMax are the last sample's used_memory and maxmemory, for
-	// the transition logs.
-	lastUsed uint64
-	lastMax  uint64
+// storeReopenAt is the free memory at which gate reopens: the close line plus the
+// gate's margin (2 GiB for admission, 1.5 GiB for ingestion at the full reserve).
+func storeReopenAt(gate StoreGate, maxmemory uint64) uint64 {
+	closeBelow := storeCloseBelow(maxmemory)
+	return closeBelow + closeBelow/storeGateReopenMargin[gate]
 }
 
-// NewStoreHealth returns an operable StoreHealth that samples through client
-// once Start runs. component labels its metrics ("miner", "relayer").
-func NewStoreHealth(logger logging.Logger, client redis.UniversalClient, component string) *StoreHealth {
+// storeGateState is one gate's view of the shared sample.
+type storeGateState struct {
+	gate     StoreGate
+	operable atomic.Bool
+	// Guarded by StoreHealth.mu.
+	reason   string
+	closedAt time.Time
+	changed  chan struct{}
+	onChange []func(operable bool)
+}
+
+// StoreHealth is safe for concurrent use. A nil *StoreHealth is always operable,
+// so a component built without one behaves as before. Operable, Changed and
+// OnChange answer for the gate the process was built with; Gate answers for any.
+type StoreHealth struct {
+	logger      logging.Logger
+	client      redis.UniversalClient
+	component   string
+	defaultGate StoreGate
+	now         func() time.Time
+
+	mu         sync.Mutex
+	gates      map[StoreGate]*storeGateState
+	lastSample time.Time
+	started    bool
+	noMaxWarn  bool
+	lastUsed   uint64
+	lastMax    uint64
+}
+
+// NewStoreHealth returns an operable StoreHealth that samples through client once
+// Start runs. component labels its metrics ("miner", "relayer"); gate is the
+// threshold Operable, Changed and OnChange use.
+func NewStoreHealth(logger logging.Logger, client redis.UniversalClient, component string, gate StoreGate) *StoreHealth {
 	h := &StoreHealth{
-		logger:    logging.ForComponent(logger, "store_health"),
-		client:    client,
-		component: component,
-		now:       time.Now,
-		changed:   make(chan struct{}),
+		logger:      logging.ForComponent(logger, "store_health"),
+		client:      client,
+		component:   component,
+		defaultGate: gate,
+		now:         time.Now,
+		gates:       make(map[StoreGate]*storeGateState, len(storeGateReopenMargin)),
 	}
-	h.operable.Store(true)
-	storeOperable.WithLabelValues(component).Set(1)
+	for g := range storeGateReopenMargin {
+		st := &storeGateState{gate: g, changed: make(chan struct{})}
+		st.operable.Store(true)
+		h.gates[g] = st
+		storeOperable.WithLabelValues(component, string(g)).Set(1)
+	}
 	return h
 }
 
-// Operable reports whether writes should be attempted and work admitted.
-func (h *StoreHealth) Operable() bool {
-	return h == nil || h.operable.Load()
+// StoreGateView is one gate of a StoreHealth.
+type StoreGateView struct {
+	h    *StoreHealth
+	gate StoreGate
 }
 
-// Changed returns a channel closed at the next transition, in either direction.
-// A caller waiting for the store to reopen reads Operable again after it fires.
-// A nil StoreHealth never changes.
-func (h *StoreHealth) Changed() <-chan struct{} {
-	if h == nil {
+// Gate returns the view of h at gate.
+func (h *StoreHealth) Gate(gate StoreGate) StoreGateView { return StoreGateView{h: h, gate: gate} }
+
+// Operable reports whether the gate admits work.
+func (v StoreGateView) Operable() bool {
+	return v.h == nil || v.h.gates[v.gate].operable.Load()
+}
+
+// Changed returns a channel closed at the gate's next transition. nil never changes.
+func (v StoreGateView) Changed() <-chan struct{} {
+	if v.h == nil {
 		return nil
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	return h.changed
+	v.h.mu.Lock()
+	defer v.h.mu.Unlock()
+	return v.h.gates[v.gate].changed
 }
 
-// OnChange registers fn to run at every transition, on the goroutine that caused
-// it, after the new state is visible to Operable. fn must not block.
-func (h *StoreHealth) OnChange(fn func(operable bool)) {
-	if h == nil {
+// OnChange registers fn to run at every transition of the gate, on the goroutine
+// that caused it, after the new state is visible to Operable. fn must not block.
+func (v StoreGateView) OnChange(fn func(operable bool)) {
+	if v.h == nil {
 		return
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.onChange = append(h.onChange, fn)
+	v.h.mu.Lock()
+	defer v.h.mu.Unlock()
+	st := v.h.gates[v.gate]
+	st.onChange = append(st.onChange, fn)
+}
+
+// Operable reports whether the process's gate admits work.
+func (h *StoreHealth) Operable() bool { return h.view().Operable() }
+
+// Changed is Changed of the process's gate.
+func (h *StoreHealth) Changed() <-chan struct{} { return h.view().Changed() }
+
+// OnChange is OnChange of the process's gate.
+func (h *StoreHealth) OnChange(fn func(operable bool)) { h.view().OnChange(fn) }
+
+func (h *StoreHealth) view() StoreGateView {
+	if h == nil {
+		return StoreGateView{}
+	}
+	return h.Gate(h.defaultGate)
 }
 
 // Start samples INFO memory every storeHealthPollInterval until ctx ends. The
@@ -168,22 +229,21 @@ func (h *StoreHealth) poll(ctx context.Context) {
 	h.observe(used, maxmemory)
 }
 
-// observeFailure closes the store when the last good sample is too old.
+// observeFailure closes every gate when the last good sample is too old.
 func (h *StoreHealth) observeFailure() {
 	h.mu.Lock()
 	stale := h.started && h.now().Sub(h.lastSample) > storeHealthSampleMaxAge
 	h.mu.Unlock()
 	if stale {
-		h.transition(false, StoreReasonSampleStale)
+		h.closeAll(StoreReasonSampleStale)
 	}
 }
 
-// observe applies a sample of used_memory and maxmemory.
+// observe applies a sample of used_memory and maxmemory to every gate.
 func (h *StoreHealth) observe(used, maxmemory uint64) {
 	h.mu.Lock()
 	h.lastSample = h.now()
 	h.lastUsed, h.lastMax = used, maxmemory
-	reason := h.reason
 	warnNoMax := maxmemory == 0 && !h.noMaxWarn
 	if warnNoMax {
 		h.noMaxWarn = true
@@ -195,58 +255,73 @@ func (h *StoreHealth) observe(used, maxmemory uint64) {
 			Str("process", h.component).
 			Msg("Redis has no maxmemory: the store is only closed by refused writes or a lost sample, never before Redis runs out")
 	}
-	if maxmemory == 0 {
-		storeFreeBytes.WithLabelValues(h.component).Set(-1)
-		if !h.Operable() {
-			h.transition(true, reason)
-		}
-		return
-	}
-
 	free := uint64(0)
 	if used < maxmemory {
 		free = maxmemory - used
 	}
-	storeFreeBytes.WithLabelValues(h.component).Set(float64(free))
-	closeBelow := storeCloseBelow(maxmemory)
-	switch {
-	case h.Operable() && free < closeBelow:
-		h.transition(false, StoreReasonMemoryReserve)
-	case !h.Operable() && free >= 2*closeBelow:
-		h.transition(true, reason)
-	case !h.Operable() && reason == StoreReasonSampleStale && free >= closeBelow:
-		// Closed for a lost sample, not for memory: a sample with room reopens it.
-		h.transition(true, reason)
+	if maxmemory == 0 {
+		storeFreeBytes.WithLabelValues(h.component).Set(-1)
+	} else {
+		storeFreeBytes.WithLabelValues(h.component).Set(float64(free))
+	}
+	for gate, st := range h.gates {
+		operable := st.operable.Load()
+		h.mu.Lock()
+		reason := st.reason
+		h.mu.Unlock()
+		if maxmemory == 0 {
+			if !operable {
+				h.transition(gate, true, reason)
+			}
+			continue
+		}
+		closeBelow := storeCloseBelow(maxmemory)
+		switch {
+		case operable && free < closeBelow:
+			h.transition(gate, false, StoreReasonMemoryReserve)
+		case !operable && free >= storeReopenAt(gate, maxmemory):
+			h.transition(gate, true, reason)
+		case !operable && reason == StoreReasonSampleStale && free >= closeBelow:
+			// Closed for a lost sample, not for memory: a sample with room reopens it.
+			h.transition(gate, true, reason)
+		}
 	}
 }
 
-// ReportOOM closes the store because Redis refused a write for memory.
+// ReportOOM closes every gate because Redis refused a write for memory.
 func (h *StoreHealth) ReportOOM() {
 	if h == nil {
 		return
 	}
-	h.transition(false, StoreReasonOOMReply)
+	h.closeAll(StoreReasonOOMReply)
 }
 
-// transition moves to operable, recording why the store closed, or why it was
+func (h *StoreHealth) closeAll(reason string) {
+	for gate := range h.gates {
+		h.transition(gate, false, reason)
+	}
+}
+
+// transition moves gate to operable, recording why it closed, or why it was
 // closed when it reopens. Repeating the current state does nothing.
-func (h *StoreHealth) transition(operable bool, reason string) {
+func (h *StoreHealth) transition(gate StoreGate, operable bool, reason string) {
 	h.mu.Lock()
-	if h.operable.Load() == operable {
+	st := h.gates[gate]
+	if st.operable.Load() == operable {
 		h.mu.Unlock()
 		return
 	}
-	h.operable.Store(operable)
+	st.operable.Store(operable)
 	var closedFor time.Duration
 	if operable {
-		closedFor = h.now().Sub(h.closedAt)
+		closedFor = h.now().Sub(st.closedAt)
 	} else {
-		h.reason = reason
-		h.closedAt = h.now()
+		st.reason = reason
+		st.closedAt = h.now()
 	}
-	close(h.changed)
-	h.changed = make(chan struct{})
-	callbacks := append([]func(bool){}, h.onChange...)
+	close(st.changed)
+	st.changed = make(chan struct{})
+	callbacks := append([]func(bool){}, st.onChange...)
 	used, maxmemory := h.lastUsed, h.lastMax
 	h.mu.Unlock()
 
@@ -255,10 +330,10 @@ func (h *StoreHealth) transition(operable bool, reason string) {
 	if operable {
 		state, value = "open", 1
 	}
-	storeOperable.WithLabelValues(h.component).Set(value)
-	storeTransitions.WithLabelValues(h.component, state, reason).Inc()
+	storeOperable.WithLabelValues(h.component, string(gate)).Set(value)
+	storeTransitions.WithLabelValues(h.component, string(gate), state, reason).Inc()
 	if operable {
-		storeClosedSeconds.WithLabelValues(h.component, reason).Add(closedFor.Seconds())
+		storeClosedSeconds.WithLabelValues(h.component, string(gate), reason).Add(closedFor.Seconds())
 	}
 	free := uint64(0)
 	if used < maxmemory {
@@ -268,13 +343,13 @@ func (h *StoreHealth) transition(operable bool, reason string) {
 	// "process", not "component": the logger already carries component=store_health,
 	// and a second component key made the JSON line hold the same key twice.
 	if operable {
-		h.logger.Info().Str("process", h.component).Str("reason", reason).
+		h.logger.Info().Str("process", h.component).Str("gate", string(gate)).Str("reason", reason).
 			Uint64("free_bytes", free).
-			Uint64("reopen_at_bytes", 2*closeBelow).
+			Uint64("reopen_at_bytes", storeReopenAt(gate, maxmemory)).
 			Dur("closed_for", closedFor).
 			Msg("Redis operable again: admitting work")
 	} else {
-		h.logger.Warn().Str("process", h.component).Str("reason", reason).
+		h.logger.Warn().Str("process", h.component).Str("gate", string(gate)).Str("reason", reason).
 			Uint64("used_memory", used).
 			Uint64("maxmemory", maxmemory).
 			Uint64("free_bytes", free).

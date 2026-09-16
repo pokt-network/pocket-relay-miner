@@ -26,12 +26,12 @@ const redisOOMReply = "OOM command not allowed when used memory > 'maxmemory'."
 const mib = uint64(1 << 20)
 
 func transitions(component, state, reason string) float64 {
-	return testutil.ToFloat64(storeTransitions.WithLabelValues(component, state, reason))
+	return testutil.ToFloat64(storeTransitions.WithLabelValues(component, string(StoreGateAdmission), state, reason))
 }
 
 func TestStoreHealth_ClosesBelowOneGiBAndReopensOnlyWithTwoGiB(t *testing.T) {
 	const component = "test_hysteresis"
-	h := NewStoreHealth(zerolog.Nop(), nil, component)
+	h := NewStoreHealth(zerolog.Nop(), nil, component, StoreGateAdmission)
 	const maxmemory = 8 * 1024 * mib // the cluster's maxmemory
 	closedBefore := transitions(component, "closed", StoreReasonMemoryReserve)
 	openBefore := transitions(component, "open", StoreReasonMemoryReserve)
@@ -62,7 +62,7 @@ func TestStoreHealth_ClosesBelowOneGiBAndReopensOnlyWithTwoGiB(t *testing.T) {
 	require.True(t, h.Operable(), "LINK reopen: with 2 GiB free the store reopens")
 	require.Equal(t, openBefore+1, transitions(component, "open", StoreReasonMemoryReserve))
 	require.Equal(t, []bool{false, true}, calls)
-	require.Equal(t, 1.0, testutil.ToFloat64(storeOperable.WithLabelValues(component)))
+	require.Equal(t, 1.0, testutil.ToFloat64(storeOperable.WithLabelValues(component, string(StoreGateAdmission))))
 	require.Equal(t, float64(2048*mib), testutil.ToFloat64(storeFreeBytes.WithLabelValues(component)))
 }
 
@@ -98,7 +98,7 @@ func TestStoreHealth_AnOOMReplyClosesAtOnceAndOnlyASampleWithRoomReopens(t *test
 	ctx := context.Background()
 	client := testredis.Client(t)
 	prefix := testredis.Prefix(t)
-	h := NewStoreHealth(zerolog.Nop(), client, component)
+	h := NewStoreHealth(zerolog.Nop(), client, component, StoreGateAdmission)
 	client.AddHook(h.Hook())
 	oom := &oomOnWrite{}
 	client.AddHook(oom)
@@ -125,7 +125,7 @@ func TestStoreHealth_AnOOMReplyClosesAtOnceAndOnlyASampleWithRoomReopens(t *test
 func TestStoreHealth_APipelineWithAnOOMReplyCloses(t *testing.T) {
 	ctx := context.Background()
 	client := testredis.Client(t)
-	h := NewStoreHealth(zerolog.Nop(), client, "test_oom_pipeline")
+	h := NewStoreHealth(zerolog.Nop(), client, "test_oom_pipeline", StoreGateAdmission)
 	client.AddHook(h.Hook())
 	client.AddHook(&redisRefusesForMemory{})
 
@@ -139,7 +139,7 @@ func TestStoreHealth_APipelineWithAnOOMReplyCloses(t *testing.T) {
 func TestStoreHealth_ALostSampleClosesAndASampleWithRoomReopens(t *testing.T) {
 	const component = "test_stale"
 	now := time.Unix(1_000_000, 0)
-	h := NewStoreHealth(zerolog.Nop(), nil, component)
+	h := NewStoreHealth(zerolog.Nop(), nil, component, StoreGateAdmission)
 	h.now = func() time.Time { return now }
 	h.started = true
 	h.lastSample = now
@@ -159,7 +159,7 @@ func TestStoreHealth_ALostSampleClosesAndASampleWithRoomReopens(t *testing.T) {
 
 func TestStoreHealth_WithoutMaxmemoryOnlyRefusalsOrLostSamplesClose(t *testing.T) {
 	const component = "test_no_max"
-	h := NewStoreHealth(zerolog.Nop(), nil, component)
+	h := NewStoreHealth(zerolog.Nop(), nil, component, StoreGateAdmission)
 	h.observe(8*1024*mib, 0)
 	require.True(t, h.Operable(), "no maxmemory is not a reason to close")
 	require.Equal(t, -1.0, testutil.ToFloat64(storeFreeBytes.WithLabelValues(component)))
@@ -174,7 +174,7 @@ func TestStoreHealth_StartSamplesTheRealServer(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	client := testredis.Client(t)
-	h := NewStoreHealth(zerolog.Nop(), client, component)
+	h := NewStoreHealth(zerolog.Nop(), client, component, StoreGateAdmission)
 	h.Start(ctx)
 	require.True(t, h.Operable())
 	// The gate's Redis runs without maxmemory, so a real sample reports -1; a
@@ -220,7 +220,7 @@ func logLines(t *testing.T, raw string) []map[string]any {
 func TestStoreHealth_TransitionLogsCarryTheNumbersBehindTheDecision(t *testing.T) {
 	var buf bytes.Buffer
 	now := time.Unix(2_000_000, 0)
-	h := NewStoreHealth(zerolog.New(&buf), nil, "relayer")
+	h := NewStoreHealth(zerolog.New(&buf), nil, "relayer", StoreGateAdmission)
 	h.now = func() time.Time { return now }
 	const maxmemory = 8 * 1024 * mib
 
@@ -228,8 +228,13 @@ func TestStoreHealth_TransitionLogsCarryTheNumbersBehindTheDecision(t *testing.T
 	now = now.Add(90 * time.Second)
 	h.observe(maxmemory-2100*mib, maxmemory)
 
-	lines := logLines(t, buf.String())
-	require.Len(t, lines, 2)
+	var lines []map[string]any
+	for _, l := range logLines(t, buf.String()) {
+		if l["gate"] == string(StoreGateAdmission) {
+			lines = append(lines, l)
+		}
+	}
+	require.Len(t, lines, 2, "one close and one reopen of the admission gate")
 	closed, opened := lines[0], lines[1]
 	require.Equal(t, "relayer", closed["process"])
 	require.Equal(t, float64(maxmemory-900*mib), closed["used_memory"], "LINK log-close: the close says how full Redis was")
@@ -239,4 +244,42 @@ func TestStoreHealth_TransitionLogsCarryTheNumbersBehindTheDecision(t *testing.T
 	require.Equal(t, float64(2100*mib), opened["free_bytes"], "LINK log-open: the reopen says how much room there is")
 	require.Equal(t, float64(2<<30), opened["reopen_at_bytes"])
 	require.Equal(t, float64(90*time.Second/time.Millisecond), opened["closed_for"], "and how long it was closed (ms)")
+}
+
+func TestStoreHealth_BothGatesCloseTogetherAndTheMinerReopensFirst(t *testing.T) {
+	const component = "test_two_gates"
+	h := NewStoreHealth(zerolog.Nop(), nil, component, StoreGateAdmission)
+	admission, ingestion := h.Gate(StoreGateAdmission), h.Gate(StoreGateIngestion)
+	const maxmemory = 9 * 1024 * mib // the cluster's maxmemory
+
+	h.observe(maxmemory-1100*mib, maxmemory)
+	require.True(t, admission.Operable(), "control: above 1 GiB free both gates are open")
+	require.True(t, ingestion.Operable())
+
+	h.observe(maxmemory-1000*mib, maxmemory)
+	require.False(t, admission.Operable(), "LINK gates-close: below 1 GiB free the relayer's gate closes")
+	require.False(t, ingestion.Operable(), "LINK gates-close: and the miner's with it")
+
+	h.observe(maxmemory-1535*mib, maxmemory)
+	require.False(t, admission.Operable(), "(a) between 1 and 1.5 GiB free both stay closed")
+	require.False(t, ingestion.Operable(), "LINK ingestion-band: (a) the miner still waits below 1.5 GiB")
+
+	h.observe(maxmemory-1536*mib, maxmemory)
+	require.True(t, ingestion.Operable(), "LINK ingestion-reopen: (b) at 1.5 GiB free the miner consumes")
+	require.False(t, admission.Operable(), "LINK admission-band: (b) while the relayer still refuses below 2 GiB")
+	require.Equal(t, 0.0, testutil.ToFloat64(storeOperable.WithLabelValues(component, string(StoreGateAdmission))))
+	require.Equal(t, 1.0, testutil.ToFloat64(storeOperable.WithLabelValues(component, string(StoreGateIngestion))))
+
+	h.observe(maxmemory-2048*mib, maxmemory)
+	require.True(t, admission.Operable(), "(c) at 2 GiB free both are open")
+	require.True(t, ingestion.Operable())
+
+	h.observe(maxmemory-1023*mib, maxmemory)
+	require.False(t, admission.Operable(), "(d) below 1 GiB free both close again")
+	require.False(t, ingestion.Operable())
+	require.Equal(t, 1.0, testutil.ToFloat64(storeTransitions.WithLabelValues(component, string(StoreGateIngestion), "open", StoreReasonMemoryReserve)))
+
+	require.Equal(t, uint64(2<<30), storeReopenAt(StoreGateAdmission, maxmemory))
+	require.Equal(t, uint64(1536*mib), storeReopenAt(StoreGateIngestion, maxmemory))
+	require.Equal(t, 128*mib+64*mib, storeReopenAt(StoreGateIngestion, 1024*mib), "a small maxmemory keeps the proportions")
 }

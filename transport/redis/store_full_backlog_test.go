@@ -41,7 +41,7 @@ func TestStoreHealth_RealMaxmemoryWhatFreesAFullStore(t *testing.T) {
 		return n
 	}
 	chunk := make([]byte, 256<<10)
-	health := NewStoreHealth(zerolog.Nop(), client, "test_full_store")
+	health := NewStoreHealth(zerolog.Nop(), client, "test_full_store", StoreGateAdmission)
 	client.AddHook(health.Hook())
 
 	// 32 MiB of stream backlog and 32 MiB of "tree", then a limit leaving

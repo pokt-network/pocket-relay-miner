@@ -24,7 +24,7 @@ var (
 			Name:      "store_operable",
 			Help:      "1 while Redis is taken as able to accept writes and work is admitted, 0 while it is not",
 		},
-		[]string{"component"},
+		[]string{"component", "gate"},
 	)
 
 	// storeTransitions counts StoreHealth changing state. state is open or closed;
@@ -37,7 +37,7 @@ var (
 			Name:      "store_transitions_total",
 			Help:      "Times Redis was taken as not operable (state=closed) or operable again (state=open), by why it closed",
 		},
-		[]string{"component", "state", "reason"},
+		[]string{"component", "gate", "state", "reason"},
 	)
 
 	// storeClosedSeconds adds, when the store reopens, how long it was closed, by
@@ -49,7 +49,7 @@ var (
 			Name:      "store_closed_seconds_total",
 			Help:      "Seconds Redis was taken as not operable, added when it reopens, by why it closed",
 		},
-		[]string{"component", "reason"},
+		[]string{"component", "gate", "reason"},
 	)
 
 	// storeFreeBytes is maxmemory minus used_memory at the last sample, or -1 when

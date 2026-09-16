@@ -529,7 +529,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Whether Redis can take writes, answered once for the whole relayer: every
 	// client this process writes through reports refused writes to it, and every
 	// admission path reads it.
-	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer")
+	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer", redistransport.StoreGateAdmission)
 	redisClient.AddHook(storeHealth.Hook())
 	storeHealth.Start(ctx)
 

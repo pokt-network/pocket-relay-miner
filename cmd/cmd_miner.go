@@ -267,7 +267,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 
 	// Whether Redis can take writes, answered once for the whole miner; the same
 	// component the relayer uses.
-	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "miner")
+	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "miner", redistransport.StoreGateIngestion)
 	redisClient.AddHook(storeHealth.Hook())
 	storeHealth.Start(ctx)
 	miner.RecordStoreMemoryOnClose(ctx, logger, redisClient, storeHealth)

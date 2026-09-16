@@ -67,7 +67,7 @@ func pausedConsumer(t *testing.T) (*StreamsConsumer, *StoreHealth, *commandCount
 	require.NoError(t, err)
 	c.msgCh = make(chan transport.StreamMessage, 10)
 	require.NoError(t, c.ensureConsumerGroup(ctx))
-	health := NewStoreHealth(zerolog.Nop(), client, "test_consumer_pause")
+	health := NewStoreHealth(zerolog.Nop(), client, "test_consumer_pause", StoreGateAdmission)
 	c.SetStoreHealth(health)
 	health.ReportOOM()
 	counter := &commandCounter{}

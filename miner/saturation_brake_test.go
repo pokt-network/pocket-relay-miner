@@ -83,7 +83,7 @@ func TestExecuteBatchedProofTransition_AProvedWriteThatFailsStillFreesTheTree(t 
 func TestSubmissionTracker_WritesNothingWhileTheStoreIsClosed(t *testing.T) {
 	client, _ := newTestRedis(t)
 	tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
-	health := redistransport.NewStoreHealth(zerolog.Nop(), client.UniversalClient, "test_tracker")
+	health := redistransport.NewStoreHealth(zerolog.Nop(), client.UniversalClient, "test_tracker", redistransport.StoreGateIngestion)
 	tr.SetStoreHealth(health)
 	health.ReportOOM()
 	skipped := testutil.ToFloat64(trackingWritesSkipped.WithLabelValues("claim"))
@@ -132,7 +132,7 @@ func TestRecordStoreMemoryOnClose_MeasuresWhenTheStoreCloses(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
 	require.NoError(t, client.HSet(ctx, client.KB().SMSTNodesKey("pokt1onclose", "sess"), "n", make([]byte, 128<<10)).Err())
-	health := redistransport.NewStoreHealth(zerolog.Nop(), client.UniversalClient, "test_on_close")
+	health := redistransport.NewStoreHealth(zerolog.Nop(), client.UniversalClient, "test_on_close", redistransport.StoreGateIngestion)
 	storeMemoryAtClose.WithLabelValues("smst").Set(0)
 	RecordStoreMemoryOnClose(ctx, zerolog.Nop(), client, health)
 
@@ -147,7 +147,7 @@ func TestRecordStoreMemoryOnClose_LogsEveryFamily(t *testing.T) {
 	client, _ := newTestRedis(t)
 	require.NoError(t, client.HSet(ctx, client.KB().SMSTNodesKey("pokt1logfamily", "sess"), "n", make([]byte, 64<<10)).Err())
 	var buf syncBuffer
-	health := redistransport.NewStoreHealth(zerolog.Nop(), client.UniversalClient, "test_log_family")
+	health := redistransport.NewStoreHealth(zerolog.Nop(), client.UniversalClient, "test_log_family", redistransport.StoreGateIngestion)
 	RecordStoreMemoryOnClose(ctx, zerolog.New(&buf), client, health)
 
 	health.ReportOOM()
