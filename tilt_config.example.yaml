@@ -135,10 +135,13 @@ redis:
   # datos + ~8% de allocator = 9,7 GiB de used_memory.
   #
   # Se pone tope para que Redis RECHACE escrituras en vez de morir:
-  #   - 9 GiB y no 12: `maxmemory` mide used_memory, pero el kernel mata por el
-  #     working set del CGROUP, que iba ~2 GiB por encima (10.075 vs 12.161) por
-  #     el overhead del allocator y el fork del bgsave. Un tope de 12 no evitaria
-  #     nada. 9 GiB deja ese margen.
+  #   - 8 GiB con contenedor de 10 (Jorge, 2026-09-16): 2 GiB de margen. `maxmemory`
+  #     mide used_memory, pero el kernel mata por el working set del CGROUP, que llego
+  #     a ir ~2 GiB por encima (10.075 vs 12.161) por el allocator y el fork del
+  #     bgsave. Con maxmemory puesto la brecha medida fue <= 0,33 GiB; el margen de 2
+  #     GiB cubre el peor caso medido, justo. La compactacion de arboles frios (313)
+  #     mantuvo used_memory <= 8,5 GiB a ~3.400 rps con el tope anterior de 9.
+  #   - Miner y relayer: contenedor 8 GiB, GOMEMLIMIT 7 GiB (1 GiB libre).
   #   - noeviction y NO allkeys-lru: `miner/smst_manager.go:32-34` lo EXIGE --
   #     "must be noeviction. Any *-lru, *-lfu, or *-random policy will silently
   #     evict SMST data under memory pressure and cause this exact failure mode".
@@ -146,9 +149,9 @@ redis:
   #     perdidos, no como "Redis lleno".
   #   - Es seguro porque el rechazo se REINTENTA: `IsOOMError` esta dentro de
   #     `IsRetryableError` (`miner/errors.go:104`), asi que el relay no se pierde.
-  maxmemory: "9663676416"
+  maxmemory: "8589934592"
   maxmemory_policy: "noeviction"
-  memory_limit: 12Gi
+  memory_limit: 10Gi
   # -1 (el default) apaga el slowlog y `SLOWLOG GET` sale vacio: no se puede
   # distinguir "no hubo comandos lentos" de "no miramos".
   slowlog_log_slower_than_us: 10000
