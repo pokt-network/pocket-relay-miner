@@ -5,27 +5,30 @@ package miner
 import (
 	"context"
 	"crypto/sha256"
-	"errors"
 	"fmt"
 	"testing"
 
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	"github.com/pokt-network/smt"
 	"github.com/pokt-network/smt/kvstore/simplemap"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/observability"
 )
 
 // failingCompactor wraps a real trie and makes CompactPersistedLeaves fail,
-// so a test can exercise updateTree's error-swallowing path
-// without touching the real smt library. Every other method is promoted
-// from the embedded interface unchanged.
+// so a test can exercise updateTree's failure-swallowing path without
+// touching the real smt library. CompactPersistedLeaves returns no error, so
+// the only way it fails is a panic, which runSMSTSafely recovers. Every other
+// method is promoted from the embedded interface unchanged.
 type failingCompactor struct {
 	smt.SparseMerkleSumTrie
 }
 
-func (failingCompactor) CompactPersistedLeaves() (int, error) {
-	return 0, errors.New("injected compaction failure")
+func (failingCompactor) CompactPersistedLeaves() int {
+	panic("injected compaction failure")
 }
 
 // TestSMSTCompactsPersistedLeavesWithoutChangingTheRoot: after N relays, the
@@ -78,15 +81,45 @@ func TestSMSTCompactsPersistedLeavesWithoutChangingTheRoot(t *testing.T) {
 	mgr.treesMu.RUnlock()
 	require.True(t, ok, "the sealed tree must still be resident right after FlushTree")
 
-	compactor, ok := tree.trie.(interface {
-		CompactPersistedLeaves() (int, error)
-	})
+	compactor, ok := tree.trie.(leafCompactor)
 	require.True(t, ok, "the tree must expose the smt compactor")
 
-	compactedAgain, err := compactor.CompactPersistedLeaves()
-	require.NoError(t, err)
+	compactedAgain := compactor.CompactPersistedLeaves()
 	require.Zero(t, compactedAgain,
 		"every persisted leaf should already be compacted after n relays -- updateTree runs this once per relay, right after Commit+FlushPipeline")
+}
+
+// TestCommitTreeCountsEveryCompactedLeaf: a commit must really compact, and
+// ha_smst_leaves_compacted_total is how an operator sees that it does. Were the
+// runtime assertion in commitLocked to stop matching the smt trie, CommitTree
+// would still succeed and the root would still be right -- only this counter
+// stays flat. The commit persists the n leaves the updates added and the
+// compaction right after drops every one of them, so it counts exactly n.
+func TestCommitTreeCountsEveryCompactedLeaf(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+	const supplier = "pokt1compact_counter_supplier"
+	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
+		SupplierAddress: supplier,
+		CacheTTL:        0,
+	})
+	const sessionID = "sess-compact-counter"
+	const n = 25
+
+	counter := observability.SMSTLeavesCompacted.WithLabelValues(supplier)
+	before := testutil.ToFloat64(counter)
+	for i := 0; i < n; i++ {
+		key := sha256.Sum256([]byte(fmt.Sprintf("compact-counter-relay-%d", i)))
+		require.NoError(t, mgr.UpdateTree(ctx, sessionID, key[:], []byte(fmt.Sprintf("relay-%d", i)), 1))
+	}
+	require.Zero(t, testutil.ToFloat64(counter)-before, "an update commits nothing, so it must compact nothing")
+
+	resident, err := mgr.CommitTree(ctx, sessionID)
+	require.NoError(t, err)
+	require.True(t, resident, "the tree the updates built must still be resident")
+
+	require.Equal(t, float64(n), testutil.ToFloat64(counter)-before,
+		"committing %d relays must compact %d leaves; a flat counter means the commit never reached CompactPersistedLeaves", n, n)
 }
 
 // TestARelayIsNotLostWhenCompactionFails: a compaction failure must be logged

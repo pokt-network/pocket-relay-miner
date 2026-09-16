@@ -299,11 +299,11 @@ func (s *RedisMapStore) BeginPipeline() {
 	//
 	// The Set buffer used to be reset here too. It no longer is: a buffer that
 	// is not empty at this point holds the nodes of a FlushPipeline that
-	// failed. Commit marked those nodes persisted before handing them over, so
-	// the trie never sends them again, and compaction trusts that mark to drop
-	// a leaf's in-memory value -- reset here, that leaf ends up in neither
-	// memory nor Redis and its proof fails. Kept, they go with this Update's
-	// flush.
+	// failed. Commit marked those nodes persisted once Set accepted them into
+	// this buffer, so the trie never sends them again, and compaction trusts
+	// that mark to drop a leaf's in-memory value -- reset here, that leaf ends
+	// up in neither memory nor Redis and its proof fails. Kept, they go with
+	// this Update's flush.
 	// s.pipelineBuffer = make(map[string][]byte)
 }
 

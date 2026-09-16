@@ -21,13 +21,13 @@ import (
 
 // A failed FlushPipeline leaves the trie in a state compaction can misread.
 //
-// Commit marks a node persisted BEFORE it hands the node to the store, and in
-// pipeline mode the store only buffers the write; FlushPipeline is what sends
-// it. When that flush fails, the commit returns early -- before compaction --
-// and the leaf stays in the resident trie marked persisted while its bytes are
-// not in Redis yet. The store must therefore keep those nodes buffered for the
-// next write: dropped, the next successful commit's compaction pass would trust
-// the flag and release a leaf value that exists nowhere else.
+// Commit marks a node persisted once the store's Set returns without error, and
+// in pipeline mode Set only buffers the write; FlushPipeline is what sends it.
+// When that flush fails, the commit returns early -- before compaction -- and
+// the leaf stays in the resident trie marked persisted while its bytes are not
+// in Redis yet. The store must therefore keep those nodes buffered for the next
+// write: dropped, the next successful commit's compaction pass would trust the
+// flag and release a leaf value that exists nowhere else.
 //
 // An update writes nothing: the tree is committed once per relay batch, before
 // a root is stored or a relay acknowledged. The scenarios commit where the

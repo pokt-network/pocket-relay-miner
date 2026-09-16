@@ -149,6 +149,18 @@ type RedisSMSTManagerConfig struct {
 // 	return DefaultLiveRootCheckpointInterval
 // }
 
+// leafCompactor is the smt capability commitLocked calls after every successful
+// flush to drop the in-memory value of persisted leaves.
+type leafCompactor interface {
+	CompactPersistedLeaves() int
+}
+
+// The trie the manager builds is an *smt.SMST. Should smt change the signature
+// of CompactPersistedLeaves, this stops compiling; without it, the runtime
+// assertion in commitLocked would silently stop matching and turn compaction
+// off.
+var _ leafCompactor = (*smt.SMST)(nil)
+
 // runSMSTSafely invokes fn at the boundary between the miner and the
 // pokt-network/smt library and converts any panic from the library
 // into ErrSMSTPanicRecovered. This is the defensive barrier that
@@ -323,9 +335,9 @@ type redisSMST struct {
 	compactProofBz []byte
 
 	// compactorMissingLogged guards the once-per-tree Error log fired when
-	// trie does not expose CompactPersistedLeaves (an smt version without
-	// leaf compaction). Without this, the absence
-	// would otherwise repeat once per relay — see updateTree.
+	// trie does not satisfy leafCompactor (a wrapper that hides it; the smt
+	// trie itself is checked at build time). Without this, the absence
+	// would otherwise repeat once per commit — see commitLocked.
 	compactorMissingLogged bool
 
 	// updateCount was the running tally of UpdateTree calls against this
@@ -866,18 +878,15 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 	// assertion against the concrete capability rather than an interface
 	// change — same pattern as the *RedisMapStore checks above.
 	//
-	// This call is deliberately MANDATORY, not an optional optimization:
-	// with only the type assertion, "an smt version without compaction" and
-	// "nothing left to compact" produced the identical silent signal (ok ==
-	// false vs. 0 leaves compacted), which is exactly what let a binary
-	// without compaction run for a whole load test with zero compaction
-	// and no way to tell why. Changing tree.trie's field type to the
-	// concrete *smt.SMST would turn that absence into a build failure
-	// instead, but it would also remove the only seam a test has to make
-	// CompactPersistedLeaves fail without touching the smt library (see
-	// failingCompactor in smst_compact_test.go, which wraps the interface,
-	// not the concrete type) -- so the assertion stays, and its negative
-	// branch below is made loud instead.
+	// This call is deliberately MANDATORY, not an optional optimization. A
+	// type assertion against an inline method signature fails silently when
+	// smt changes that signature: ok is false, compaction stops, and nothing
+	// breaks the build -- which is how a binary without compaction once ran a
+	// whole load test. So the signature is the leafCompactor interface, and
+	// the package-level assertion next to it makes *smt.SMST satisfying it a
+	// build-time contract. The runtime assertion stays because tests wrap the
+	// trie interface (failingCompactor, noCompactor) to make compaction fail or
+	// disappear without touching the smt library; its negative branch is loud.
 	//
 	// A failed or panicking compaction is deliberately NOT propagated as an
 	// error here: by this point the relay is already durable in both the
@@ -887,19 +896,16 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 	// risk. Compaction only reclaims memory for leaves that are already
 	// safe elsewhere; skipping one pass costs a slightly higher resident
 	// set until the next commit tries again, not correctness.
-	if compactor, ok := tree.trie.(interface {
-		CompactPersistedLeaves() (int, error)
-	}); ok {
+	if compactor, ok := tree.trie.(leafCompactor); ok {
 		var compactedLeaves int
 		if err := m.runSMSTSafely(sessionID, "compact", func() error {
-			var compactErr error
-			compactedLeaves, compactErr = compactor.CompactPersistedLeaves()
-			return compactErr
+			compactedLeaves = compactor.CompactPersistedLeaves()
+			return nil
 		}); err != nil {
 			observability.SMSTCompactionFailures.WithLabelValues(m.config.SupplierAddress).Inc()
 			// Debug, not Warn: this runs once per commit, up to once per relay, and the condition
-			// (today, only a recovered panic -- CompactPersistedLeaves
-			// itself never returns a non-nil error) is not transient, so a
+			// (a recovered panic, the only way CompactPersistedLeaves can
+			// fail: it returns no error) is not transient, so a
 			// tree stuck in this state would otherwise log once per relay
 			// for the rest of the session. The alertable signal is the
 			// bounded SMSTCompactionFailures{supplier} counter above (and
@@ -922,7 +928,7 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 		tree.compactorMissingLogged = true
 		m.logger.Error().
 			Str(logging.FieldSessionID, sessionID).
-			Msg("SMST tree does not expose CompactPersistedLeaves -- the smt version in use has no leaf compaction; leaves will never be compacted for this session")
+			Msg("SMST tree does not satisfy leafCompactor -- something wraps the trie and hides CompactPersistedLeaves; leaves will never be compacted for this session")
 	}
 
 	// Full write path (Update + Commit + FlushPipeline) succeeded end-to-
