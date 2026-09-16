@@ -60,7 +60,8 @@ func TestOptimisticRelayIsRefusedBeforeTheBackendWhileTheValidationQueueIsFull(t
 
 	f.proxy.validationQueuedBytes.Store(maxValidationQueuedBytes)
 	w := f.post(t, body, false)
-	require.Equal(t, http.StatusServiceUnavailable, w.Code, "LINK validation-queue: body=%s", w.Body.String())
+	require.Equal(t, http.StatusTooManyRequests, w.Code, "LINK validation-queue-429: a full validation queue answers 429; body=%s", w.Body.String())
+	require.Equal(t, "1", w.Header().Get("Retry-After"), "LINK validation-queue-429: with Retry-After")
 	require.Equal(t, before+1, validationQueueRejections())
 	require.Zero(t, backendHits.Load(), "LINK validation-queue: a refused optimistic relay is never served")
 

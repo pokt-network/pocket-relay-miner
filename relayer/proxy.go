@@ -1104,8 +1104,11 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// only place it can be refused without being given away is here, before the
 	// backend. Eager relays are validated before serving and never wait in that
 	// queue, so they are not refused by it.
+	// 429 with Retry-After, like storage_saturated: the relayer is not failing,
+	// it is refusing work until it has room.
 	if validationMode == ValidationModeOptimistic && p.validationQueueFull() {
-		p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+		w.Header().Set("Retry-After", "1")
+		p.sendError(w, http.StatusTooManyRequests, "relayer is not admitting relays right now")
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonValidationQueueFull).Inc()
 		return
 	}
