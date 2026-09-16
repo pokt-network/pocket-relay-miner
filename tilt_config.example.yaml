@@ -1,0 +1,395 @@
+# tilt_config.example.yaml — la referencia TRACKEADA del config de Tilt.
+#
+# `tilt_config.yaml` es gitignored (.gitignore:8), asi que los valores que se
+# ajustan en la maquina se pierden en un clon. Este archivo es la copia que SI
+# viaja con el repo: copiar a `tilt_config.yaml` y ajustar lo que sea propio.
+#
+#     cp tilt_config.example.yaml tilt_config.yaml
+#
+# Todo lo que hay aca es LOCALNET (direcciones del genesis local, pubkeys de
+# simulacion, URLs internas del cluster). No va ningun dato de operador:
+# hostnames reales, IPs publicas o alias de ssh quedan fuera, en el archivo
+# gitignored.
+#
+# Los valores de memoria de Redis (seccion `redis:`) NO son arbitrarios: salen
+# de una medicion del 2026-09-16 y su justificacion esta al lado de cada uno.
+
+# Tilt Development Configuration for Pocket RelayMiner
+# Edit this file to customize your local development environment.
+# This includes the full configuration from example files with k8s service names.
+
+backend:
+  enabled: true
+  grpc_port: 50051
+  metrics_port: 9095
+  port: 8545
+global:
+  debug: true
+  image: pocket-relay-miner
+miner:
+  config:
+    # keys_file | keyring -- mutually exclusive; see tilt/k8s/utils.Tiltfile
+    key_source: keys_file
+    # test | file -- only read when key_source is keyring. "file" is
+    # passphrase-protected and is what production uses.
+    keyring_backend: test
+    balance_monitor:
+      balance_threshold_upokt: 1000000
+      check_interval_seconds: 300
+      enabled: true
+      stake_critical_proof_threshold: 3
+      stake_warning_proof_threshold: 10
+    batch_size: 1000
+    block_health_monitor:
+      enabled: true
+      slowness_threshold: 1.5
+    block_time_seconds: 10
+    cache_ttl: 2h
+    deduplication_ttl_blocks: 10
+    default_service_factor: 0.01
+    keys:
+      # Lives under keys: in BOTH binaries. At the top level it is a startup
+      # error now -- it used to be read by nothing, which is how the miner ran
+      # with key hot reload off while its config said on.
+      hot_reload_enabled: true
+      keys_file: /keys/supplier-keys.yaml
+    known_applications:
+    - pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
+    - pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm
+    - pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex
+    - pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst
+    leader_election:
+      heartbeat_rate_seconds: 10
+      leader_ttl_seconds: 30
+    logging:
+      async: true
+      async_buffer_size: 100000
+      async_poll_interval: 100
+      enable_caller: false
+      format: json
+      level: info
+    metrics:
+      addr: 0.0.0.0:9092
+      enabled: true
+    pocket_node:
+      chain_id: pocket
+      grpc_insecure: true
+      query_node_grpc_url: validator:9090
+      query_node_rpc_url: http://validator:26657
+      query_timeout_seconds: 5
+    pprof:
+      addr: 0.0.0.0:6065
+      enabled: true
+    redis:
+      claim_idle_timeout_ms: 60000
+      consumer_name: ""
+      # N suppliers = N lecturas bloqueadas, y cada una ocupa una conexion (consumer.go:309).
+      # Sin esto el pool usa el default del repo, 50 (transport/redis/client.go:119-122; NO
+      # 40: eso fue un calculo mio de 10 x GOMAXPROCS que nunca verifique), y queda agotado:
+      # medido 2026-09-11 con 1 miner, 50 goroutines esperando conexion y el WAL drenando a
+      # 7 relays/s en reposo. Formula de config.miner.example.yaml:45 (numSuppliers + 20).
+      # 100 y no 72 porque el perfil scale ya paso de 50 a 52 suppliers y el aviso del miner
+      # salio rojo en la corrida de hoy (min_required=72): el margen evita perseguir el
+      # numero cada vez que cambia el perfil.
+      pool_size: 100
+      url: redis://redis-standalone:6379
+    session_lifecycle:
+      max_concurrent_transitions: 10
+    smst_live_root_checkpoint_interval: 10
+    submission_tracking_ttl: 24h
+    supplier_claiming:
+      claim_ttl_seconds: 30
+      rebalance_interval_seconds: 30
+      renew_rate_seconds: 10
+    supplier_reconcile_interval_seconds: 60
+  count: 1
+  metrics_base_port: 9092
+  pprof_port: 6065
+observability:
+  enabled: true
+  grafana:
+    port: 3000
+  prometheus:
+    port: 9091
+    scrape_interval: 2s
+path:
+  enabled: true
+  image: ghcr.io/pokt-network/path
+  metrics_port: 9096
+  port: 3069
+  tag: feat-unified-qos
+redis:
+  cluster:
+    redisFollower: 3
+    redisLeader: 3
+  enabled: true
+  max_memory: 512Mi
+  mode: standalone
+  # 2026-09-10 (r1): se puso SIN TOPE a proposito para MEDIR cuanta memoria pide
+  # Redis a 50 suppliers, en vez de medir el tope. **Esa medicion ya se hizo.**
+  #
+  # 2026-09-16 (r1, con Jorge): a ~3.700 rps pide MAS de 12 GiB y el 2026-09-16
+  # 04:33:07Z fue OOMKilled (exit=137) con el working set del cgroup en 12.161 MiB.
+  # Medido: 602 B por nodo SMST, 16.218.683 nodos vivos en el pico (dos cohortes:
+  # la sesion que sirve mas la que espera proof, que vive ~30 min mas) = 9,0 GB de
+  # datos + ~8% de allocator = 9,7 GiB de used_memory.
+  #
+  # Se pone tope para que Redis RECHACE escrituras en vez de morir:
+  #   - 9 GiB y no 12: `maxmemory` mide used_memory, pero el kernel mata por el
+  #     working set del CGROUP, que iba ~2 GiB por encima (10.075 vs 12.161) por
+  #     el overhead del allocator y el fork del bgsave. Un tope de 12 no evitaria
+  #     nada. 9 GiB deja ese margen.
+  #   - noeviction y NO allkeys-lru: `miner/smst_manager.go:32-34` lo EXIGE --
+  #     "must be noeviction. Any *-lru, *-lfu, or *-random policy will silently
+  #     evict SMST data under memory pressure and cause this exact failure mode".
+  #     Los nodos SMST son el preimage del proof: desalojarlos se ve como claims
+  #     perdidos, no como "Redis lleno".
+  #   - Es seguro porque el rechazo se REINTENTA: `IsOOMError` esta dentro de
+  #     `IsRetryableError` (`miner/errors.go:104`), asi que el relay no se pierde.
+  maxmemory: "9663676416"
+  maxmemory_policy: "noeviction"
+  memory_limit: 12Gi
+  # -1 (el default) apaga el slowlog y `SLOWLOG GET` sale vacio: no se puede
+  # distinguir "no hubo comandos lentos" de "no miramos".
+  slowlog_log_slower_than_us: 10000
+relayer:
+  base_port: 8180
+  config:
+    # keys_file | keyring -- mutually exclusive; see tilt/k8s/utils.Tiltfile
+    key_source: keys_file
+    # test | file -- only read when key_source is keyring. "file" is
+    # passphrase-protected and is what production uses.
+    keyring_backend: test
+    cache_warmup:
+      enabled: true
+      warmup_concurrency: 10
+      warmup_timeout_seconds: 5
+    default_max_body_size_bytes: 10485760
+    default_request_timeout_seconds: 30
+    default_validation_mode: optimistic
+    health_check:
+      addr: 0.0.0.0:8081
+      enabled: true
+    http_transport:
+      dial_timeout_seconds: 5
+      disable_compression: true
+      expect_continue_timeout_seconds: 1
+      idle_conn_timeout_seconds: 90
+      max_conns_per_host: 500
+      max_idle_conns: 500
+      max_idle_conns_per_host: 100
+      response_header_timeout_seconds: 30
+      tcp_keep_alive_seconds: 30
+      tls_handshake_timeout_seconds: 10
+    keys:
+      keys_file: /keys/supplier-keys.yaml
+    listen_addr: 0.0.0.0:8080
+    logging:
+      async: true
+      async_buffer_size: 100000
+      async_poll_interval: 100
+      enable_caller: false
+      format: json
+      level: info
+    metrics:
+      addr: 0.0.0.0:9090
+      enabled: true
+    pocket_node:
+      grpc_insecure: true
+      query_node_grpc_url: validator:9090
+      query_node_rpc_url: http://validator:26657
+    pool_profiles:
+      high:
+        idle_conn_timeout_seconds: 90
+        max_conns_per_host: 250
+        max_idle_conns_per_host: 50
+      low:
+        idle_conn_timeout_seconds: 90
+        max_conns_per_host: 10
+        max_idle_conns_per_host: 5
+      medium:
+        idle_conn_timeout_seconds: 90
+        max_conns_per_host: 100
+        max_idle_conns_per_host: 20
+    pprof:
+      addr: 0.0.0.0:6060
+      enabled: true
+    redis:
+      url: redis://redis-standalone:6379
+    relay_meter:
+      cache_ttl: 2h
+      enabled: true
+      fail_behavior: open
+    response_compression:
+      enabled: false
+      min_size_bytes: 1024
+    services:
+      develop-cometbft:
+        backends:
+          cometbft:
+            url: http://validator:26657
+        default_backend: cometbft
+        max_body_size_bytes: 10485760
+        timeout_profile: fast
+        validation_mode: eager
+      develop-cometbft-optimistic:
+        backends:
+          cometbft:
+            url: http://validator:26657
+        default_backend: cometbft
+        max_body_size_bytes: 10485760
+        timeout_profile: fast
+        validation_mode: optimistic
+      develop-grpc:
+        backends:
+          grpc:
+            url: backend:50051
+        default_backend: grpc
+        max_body_size_bytes: 10485760
+        timeout_profile: fast
+        validation_mode: eager
+      develop-grpc-optimistic:
+        backends:
+          grpc:
+            url: backend:50051
+        default_backend: grpc
+        max_body_size_bytes: 10485760
+        timeout_profile: fast
+        validation_mode: optimistic
+      develop-http:
+        backends:
+          jsonrpc:
+            load_balancing: round_robin
+            urls:
+            - http://backend:8545
+            - name: backup
+              url: http://backend-2:8545
+        default_backend: jsonrpc
+        max_body_size_bytes: 10485760
+        pool_profile: low
+        timeout_profile: fast
+        validation_mode: optimistic
+      develop-http-eager:
+        backends:
+          jsonrpc:
+            load_balancing: round_robin
+            urls:
+            - http://backend:8545
+            - name: backup
+              url: http://backend-2:8545
+        default_backend: jsonrpc
+        max_body_size_bytes: 10485760
+        pool_profile: low
+        timeout_profile: fast
+        validation_mode: eager
+      develop-stream:
+        backends:
+          rest:
+            url: http://backend:8545/stream/sse
+        default_backend: rest
+        max_body_size_bytes: 10485760
+        timeout_profile: streaming
+        validation_mode: eager
+      develop-stream-optimistic:
+        backends:
+          rest:
+            url: http://backend:8545/stream/sse
+        default_backend: rest
+        max_body_size_bytes: 10485760
+        timeout_profile: streaming
+        validation_mode: optimistic
+      develop-websocket:
+        backends:
+          websocket:
+            url: ws://backend:8545/ws
+        default_backend: websocket
+        max_body_size_bytes: 10485760
+        timeout_profile: fast
+        validation_mode: eager
+      develop-websocket-optimistic:
+        backends:
+          websocket:
+            url: ws://backend:8545/ws
+        default_backend: websocket
+        max_body_size_bytes: 10485760
+        timeout_profile: fast
+        validation_mode: optimistic
+    simulation:
+      enabled: true
+      freshness_window_seconds: 60
+      identities:
+      - allowed_services:
+        - develop-http
+        app_pubkey_hex: 0397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc5
+        enabled: true
+        gateway_pubkeys_hex:
+        - 025821a2ac597a034250ac14b772efccf9297aa7c4bea5444564059a7cfb152063
+        key_id: sim-http
+        max_rps: 100
+      - allowed_services:
+        - develop-websocket
+        app_pubkey_hex: 02ff92de294bea65988bf929d7c159be03f69c4d74dc75682c78751102febf2d8e
+        enabled: true
+        gateway_pubkeys_hex:
+        - 025821a2ac597a034250ac14b772efccf9297aa7c4bea5444564059a7cfb152063
+        key_id: sim-ws
+        max_rps: 100
+      - allowed_services:
+        - develop-stream
+        app_pubkey_hex: 0393251466c074a111fd2f6d19ca7fc956ecca512a6d4ae7a0ad6080fd1560926c
+        enabled: true
+        gateway_pubkeys_hex:
+        - 025821a2ac597a034250ac14b772efccf9297aa7c4bea5444564059a7cfb152063
+        key_id: sim-stream
+        max_rps: 100
+      - allowed_services:
+        - develop-grpc
+        app_pubkey_hex: 020499e5ebe4945576ee20a9f0524ddcd6ca7c1bcea726a6cbb2d68cbc25d369a6
+        enabled: true
+        gateway_pubkeys_hex:
+        - 025821a2ac597a034250ac14b772efccf9297aa7c4bea5444564059a7cfb152063
+        key_id: sim-grpc
+        max_rps: 100
+      - allowed_services:
+        - develop-cometbft
+        app_pubkey_hex: 0204e2c883e67ff768b9b4261ecb2ab08130ab09c41ca0f7b176f750d90092aa6a
+        enabled: true
+        gateway_pubkeys_hex:
+        - 025821a2ac597a034250ac14b772efccf9297aa7c4bea5444564059a7cfb152063
+        key_id: sim-cometbft
+        max_rps: 100
+      max_concurrent: 32
+    timeout_profiles:
+      fast:
+        dial_timeout_seconds: 5
+        request_timeout_seconds: 30
+        response_header_timeout_seconds: 30
+        tls_handshake_timeout_seconds: 10
+      streaming:
+        dial_timeout_seconds: 10
+        request_timeout_seconds: 600
+        response_header_timeout_seconds: 0
+        tls_handshake_timeout_seconds: 15
+  count: 1
+  health_base_port: 8280
+  metrics_base_port: 9190
+  pprof_port: 6060
+validator:
+  chain_id: pocket
+  enabled: true
+  image: ghcr.io/pokt-network/pocketd
+  ports:
+    grpc: 9090
+    rest: 1317
+    rpc: 26657
+  tag: 0.1.35
+
+# Perfil de escala (2026-09-10, r1): 5 apps/servicio, 50 suppliers. Volver a default al terminar.
+localnet:
+  profile: scale
+  # Reloj de MAINNET para las corridas de carga del paquete 186. El default trackeado
+  # es 30 (beta); esto lo pisa desde un archivo gitignored, que es el punto del knob:
+  # el arbol queda limpio y run-base111.sh:12 no aborta, asi que la corrida es
+  # atribuible. Medido 2026-09-12 con 30: bloques de 29,05 s (timeout_commit 29 s),
+  # o sea que el consenso agrega 0,05 s EN REPOSO.
+  block_time_seconds: 60
