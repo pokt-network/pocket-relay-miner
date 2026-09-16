@@ -184,6 +184,11 @@ type ProxyServer struct {
 	// nil admits everything.
 	storeOperable func() bool
 
+	// validationQueuedBytes is the request and response bytes held by optimistic
+	// relays served and not yet validated. Admission of optimistic relays stops at
+	// maxValidationQueuedBytes.
+	validationQueuedBytes atomic.Int64
+
 	// warnedUndeclaredTransport dedups the "served a transport the supplier did
 	// not declare on-chain" warning to once per (supplier, service, transport).
 	// The metric counts every occurrence; only the log line is deduped, so the
@@ -1095,6 +1100,16 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An optimistic relay is served BEFORE it is validated and charged, so the
+	// only place it can be refused without being given away is here, before the
+	// backend. Eager relays are validated before serving and never wait in that
+	// queue, so they are not refused by it.
+	if validationMode == ValidationModeOptimistic && p.validationQueueFull() {
+		p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonValidationQueueFull).Inc()
+		return
+	}
+
 	// What an eager relay holds against its budget between admission and serving.
 	// Every exit that does not serve it gives the reservation back; serving it
 	// turns it into a charge.
@@ -1445,8 +1460,13 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		capturedRPCType := rpcType
 		capturedSessionCtx := sessionCtx
 
-		// Submit to validation subpool (non-blocking, unbounded queue)
+		// Submit to validation subpool (non-blocking; admission bounds it by bytes).
+		retainedBytes := int64(len(capturedReqBody) + len(capturedRespBody))
+		validationQueueBytes.Set(float64(p.validationQueuedBytes.Add(retainedBytes)))
 		p.validationSubpool.Submit(func() {
+			defer func() {
+				validationQueueBytes.Set(float64(p.validationQueuedBytes.Add(-retainedBytes)))
+			}()
 			logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 				Str("validation_mode", "optimistic").
 				Msg("starting optimistic validation (background)")
@@ -2393,6 +2413,21 @@ func (p *ProxyServer) Priced() bool {
 // read. Distinct from metering_not_configured, which is a wiring defect and is
 // permanent; this one clears itself the moment the miner publishes.
 const rejectReasonPricingUnavailable = "pricing_unavailable"
+
+// rejectReasonValidationQueueFull refuses an optimistic relay while the relays
+// served and not yet validated hold maxValidationQueuedBytes.
+const rejectReasonValidationQueueFull = "validation_queue_full"
+
+// maxValidationQueuedBytes bounds the request and response bytes optimistic
+// relays hold between serving and validation. Every task copies both bodies,
+// so a count of tasks says nothing about memory. Not measured under load.
+const maxValidationQueuedBytes = 256 << 20
+
+// validationQueueFull reports that optimistic relays waiting for validation hold
+// maxValidationQueuedBytes.
+func (p *ProxyServer) validationQueueFull() bool {
+	return p.validationQueuedBytes.Load() >= maxValidationQueuedBytes
+}
 
 // rejectReasonStorageSaturated refuses a relay while Redis cannot take writes.
 const rejectReasonStorageSaturated = "storage_saturated"

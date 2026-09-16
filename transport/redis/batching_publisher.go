@@ -205,16 +205,21 @@ func (p *BatchingPublisher) QueuedBytes() int {
 	return p.bytes
 }
 
-// approxBytes is the payload a queued entry retains. Only the marshalled relay
-// is counted: it is the term that varies by orders of magnitude between a tiny
-// JSON-RPC reply and a large one, and the fixed overhead per entry is noise
-// beside it.
+// approxBytes is the heap a queued entry retains: the marshalled relay, the
+// allocator rounding it up to its size class (up to an eighth more), and a fixed
+// overhead per entry (the XADD arguments, their map and the queue slot).
+// Counting the relay alone undercounted what the queue held 5.5x for a 64 B
+// relay and 1.13x for a 64 KiB one, measured with runtime.MemStats over 4,000
+// entries (TestApproxBytesTracksTheRetainedHeap); a gate on that count admitted
+// past its limit.
 func approxBytes(args *redis.XAddArgs) int {
-	if b, ok := args.Values.(map[string]interface{})["data"].([]byte); ok {
-		return len(b)
-	}
-	return 0
+	b, _ := args.Values.(map[string]interface{})["data"].([]byte)
+	return len(b) + len(b)/8 + queuedEntryOverheadBytes
 }
+
+// queuedEntryOverheadBytes is the measured heap a queued entry retains besides its
+// relay bytes: 730-746 B at every relay size measured.
+const queuedEntryOverheadBytes = 730
 
 // heartbeatInterval is how often the dispatcher proves Redis answers it. Fixed
 // and independent of the batch interval: admission closes after a few of these

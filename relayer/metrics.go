@@ -267,6 +267,15 @@ var (
 	// holding. Task COUNT is not a proxy for it: a hundred tasks carrying 100 KB
 	// each are 10 MB of retained heap and a hundred carrying ten bytes are
 	// nothing, and it is the bytes that end a process, not the count.
+	validationQueueBytes = observability.RelayerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "validation_queue_bytes",
+			Help:      "Request and response bodies held by optimistic relays served and not yet validated",
+		},
+	)
+
 	publishQueueBytes = observability.RelayerFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
