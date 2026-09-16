@@ -503,6 +503,13 @@ default_service_factor: 0.01   # mid opt — matches poktroll upstream baseLimit
 #   eth: 0.020     # high opt — only if you have data backing it
 #   poly: 0.015    # between mid and high
 
+# How often the leader rewrites the service factor manifest in Redis.
+# The manifest carries no expiry -- relayers must be able to tell "no factor
+# configured" from "nothing published yet", and an expiring key cannot say
+# which. This rewrite is what bounds how long a miner that lost leadership
+# can leave its own config standing.
+# service_factor_republish_interval: "5m"
+
 # ==============================================================================
 # Observability Configuration
 # ==============================================================================

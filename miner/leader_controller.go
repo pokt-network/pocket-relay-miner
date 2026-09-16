@@ -340,10 +340,10 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		ServiceFactorRegistryConfig{
 			DefaultServiceFactor: c.config.Config.DefaultServiceFactor,
 			ServiceFactors:       c.config.Config.ServiceFactors,
-			CacheTTL:             c.config.Config.GetCacheTTL(),
+			RepublishInterval:    c.config.Config.GetServiceFactorRepublishInterval(),
 		},
 	)
-	if err = c.serviceFactorRegistry.PublishServiceFactors(ctx); err != nil {
+	if err = c.serviceFactorRegistry.Start(ctx); err != nil {
 		c.cleanup()
 		return fmt.Errorf("failed to publish service factors: %w", err)
 	}
@@ -465,9 +465,17 @@ func (c *LeaderController) cleanup() {
 		c.blockHealthMonitor = nil
 	}
 
-	// ServiceFactorRegistry doesn't have a Close method - it just holds config
-	// Keys will expire based on Redis TTL or stay until overwritten
-	c.serviceFactorRegistry = nil
+	// The registry runs a republish loop, and closing it is what stops this
+	// miner rewriting the manifest once it is no longer the leader. The keys it
+	// wrote stay in Redis until the next leader replaces them: they carry no
+	// TTL, because an expiring key is indistinguishable from one that was never
+	// published, which is the ambiguity the manifest exists to remove.
+	if c.serviceFactorRegistry != nil {
+		if err := c.serviceFactorRegistry.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close service factor registry")
+		}
+		c.serviceFactorRegistry = nil
+	}
 
 	if c.blockPublisher != nil {
 		if err := c.blockPublisher.Close(); err != nil {

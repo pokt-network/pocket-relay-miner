@@ -364,6 +364,20 @@ func (kb *KeyBuilder) ServiceFactorServiceKey(serviceID string) string {
 	return fmt.Sprintf("%s:service_factor:service:%s", kb.ns.BasePrefix, serviceID)
 }
 
+// ServiceFactorManifestKey builds the key for the complete service factor state.
+// Format: {base}:service_factor:manifest
+// Example: "ha:service_factor:manifest"
+//
+// One document carrying the WHOLE state, so that "the operator configured no
+// factor" is a value the relayer reads rather than a key it fails to find. The
+// two keys above cannot carry it: with nothing configured the miner writes
+// neither of them, so "not configured" and "never published" are the same
+// absent byte. This key is written without a TTL -- it is replaced, never
+// expired.
+func (kb *KeyBuilder) ServiceFactorManifestKey() string {
+	return fmt.Sprintf("%s:service_factor:manifest", kb.ns.BasePrefix)
+}
+
 // MinerClaimKey builds the key for supplier claim locks.
 // Format: {base}:{miner}:claim:{supplier}
 // Example: "ha:miner:claim:pokt1xyz..."

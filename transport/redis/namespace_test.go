@@ -66,6 +66,7 @@ func allKeyBuilderOutputs(kb *KeyBuilder) map[string]string {
 		"SMSTLiveRootKey":             kb.SMSTLiveRootKey("sup1", "sess1"),
 		"ServiceFactorDefaultKey":     kb.ServiceFactorDefaultKey(),
 		"ServiceFactorServiceKey":     kb.ServiceFactorServiceKey("svc1"),
+		"ServiceFactorManifestKey":    kb.ServiceFactorManifestKey(),
 		"MinerClaimKey":               kb.MinerClaimKey("sup1"),
 		"MinerActiveSetKey":           kb.MinerActiveSetKey(),
 		"MinerInstanceKey":            kb.MinerInstanceKey("inst1"),
@@ -183,17 +184,18 @@ func TestKeyBuilder_DefaultGoldenStrings(t *testing.T) {
 
 		// Methods the original golden map omitted (review finding): the SMST
 		// family, service factor, and miner coordination keys.
-		"SMSTNodesKey":            "ha:smst:sup1:sess1:nodes",
-		"SMSTNodesPattern":        "ha:smst:*:*:nodes",
-		"SMSTNodesPrefix":         "ha:smst:",
-		"SMSTRootKey":             "ha:smst:sup1:sess1:root",
-		"SMSTStatsKey":            "ha:smst:sup1:sess1:stats",
-		"SMSTLiveRootKey":         "ha:smst:sup1:sess1:live_root",
-		"ServiceFactorDefaultKey": "ha:service_factor:default",
-		"ServiceFactorServiceKey": "ha:service_factor:service:svc1",
-		"MinerClaimKey":           "ha:miner:claim:sup1",
-		"MinerActiveSetKey":       "ha:miner:active",
-		"MinerInstanceKey":        "ha:miner:instance:inst1",
+		"SMSTNodesKey":             "ha:smst:sup1:sess1:nodes",
+		"SMSTNodesPattern":         "ha:smst:*:*:nodes",
+		"SMSTNodesPrefix":          "ha:smst:",
+		"SMSTRootKey":              "ha:smst:sup1:sess1:root",
+		"SMSTStatsKey":             "ha:smst:sup1:sess1:stats",
+		"SMSTLiveRootKey":          "ha:smst:sup1:sess1:live_root",
+		"ServiceFactorDefaultKey":  "ha:service_factor:default",
+		"ServiceFactorServiceKey":  "ha:service_factor:service:svc1",
+		"ServiceFactorManifestKey": "ha:service_factor:manifest",
+		"MinerClaimKey":            "ha:miner:claim:sup1",
+		"MinerActiveSetKey":        "ha:miner:active",
+		"MinerInstanceKey":         "ha:miner:instance:inst1",
 
 		// Extractors (review 2026-08-21): the "output" is result|ok, not a
 		// bare key -- see allKeyBuilderOutputs' doc comment for why.

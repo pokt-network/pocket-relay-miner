@@ -481,6 +481,12 @@ properties:
     default: 2h
     pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
+  service_factor_republish_interval:
+    type: string
+    description: How often the leader rewrites the service factor manifest. The manifest has no TTL, so this is what bounds how long a miner that lost leadership can leave its own config standing.
+    default: 5m
+    pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
+
   smst_live_root_checkpoint_interval:
     type: integer
     description: |

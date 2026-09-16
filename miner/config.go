@@ -124,6 +124,17 @@ type Config struct {
 	// If a service has an override, it takes precedence over DefaultServiceFactor.
 	ServiceFactors map[string]float64 `yaml:"service_factors,omitempty"`
 
+	// ServiceFactorRepublishInterval is how often the leader rewrites the
+	// service factor manifest.
+	//
+	// The manifest carries no TTL, so a miner that wrote it while it still
+	// believed itself leader would leave its own config standing forever. The
+	// current leader rewriting on a period bounds that to one interval without
+	// giving the key an expiry -- an expiry is what made the relayer unable to
+	// tell "no factor configured" from "the key aged out".
+	// Default: 5m
+	ServiceFactorRepublishInterval time.Duration `yaml:"service_factor_republish_interval,omitempty"`
+
 	// WorkerPools configures worker pool sizing for parallel processing.
 	// Auto-sizing formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
 	WorkerPools WorkerPoolConfigYAML `yaml:"worker_pools,omitempty"`
@@ -724,6 +735,15 @@ func (c *Config) GetCacheTTL() time.Duration {
 		return c.CacheTTL
 	}
 	return 2 * time.Hour // Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
+}
+
+// GetServiceFactorRepublishInterval returns how often the leader rewrites the
+// service factor manifest.
+func (c *Config) GetServiceFactorRepublishInterval() time.Duration {
+	if c.ServiceFactorRepublishInterval > 0 {
+		return c.ServiceFactorRepublishInterval
+	}
+	return 5 * time.Minute
 }
 
 // GetSubmissionTrackingTTL returns the TTL for submission tracking records.
