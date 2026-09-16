@@ -40,6 +40,7 @@ func RecordStoreMemoryOnClose(ctx context.Context, logger logging.Logger, client
 			logger.Warn().
 				Uint64("stream_bytes", streams).
 				Uint64("smst_bytes", smst).
+				Int64("other_bytes", max(other, 0)).
 				Uint64("used_memory", used).
 				Msg("Redis memory at store close, by key family")
 		})(ctx)

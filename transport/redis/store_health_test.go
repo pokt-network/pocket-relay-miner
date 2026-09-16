@@ -3,8 +3,11 @@
 package redis
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -196,4 +199,44 @@ func TestStoreHealth_NilIsOperable(t *testing.T) {
 	h.OnChange(func(bool) {})
 	h.Start(context.Background())
 	require.True(t, h.Operable())
+}
+
+// logLines decodes every JSON line written to buf.
+func logLines(t *testing.T, raw string) []map[string]any {
+	t.Helper()
+	var out []map[string]any
+	for _, line := range strings.Split(strings.TrimSpace(raw), "\n") {
+		if line == "" {
+			continue
+		}
+		require.Equal(t, 1, strings.Count(line, `"component":`), "LINK log-key: one component key per line: %s", line)
+		var m map[string]any
+		require.NoError(t, json.Unmarshal([]byte(line), &m), line)
+		out = append(out, m)
+	}
+	return out
+}
+
+func TestStoreHealth_TransitionLogsCarryTheNumbersBehindTheDecision(t *testing.T) {
+	var buf bytes.Buffer
+	now := time.Unix(2_000_000, 0)
+	h := NewStoreHealth(zerolog.New(&buf), nil, "relayer")
+	h.now = func() time.Time { return now }
+	const maxmemory = 8 * 1024 * mib
+
+	h.observe(maxmemory-900*mib, maxmemory)
+	now = now.Add(90 * time.Second)
+	h.observe(maxmemory-2100*mib, maxmemory)
+
+	lines := logLines(t, buf.String())
+	require.Len(t, lines, 2)
+	closed, opened := lines[0], lines[1]
+	require.Equal(t, "relayer", closed["process"])
+	require.Equal(t, float64(maxmemory-900*mib), closed["used_memory"], "LINK log-close: the close says how full Redis was")
+	require.Equal(t, float64(maxmemory), closed["maxmemory"])
+	require.Equal(t, float64(900*mib), closed["free_bytes"])
+	require.Equal(t, float64(1<<30), closed["close_below_bytes"])
+	require.Equal(t, float64(2100*mib), opened["free_bytes"], "LINK log-open: the reopen says how much room there is")
+	require.Equal(t, float64(2<<30), opened["reopen_at_bytes"])
+	require.Equal(t, float64(90*time.Second/time.Millisecond), opened["closed_for"], "and how long it was closed (ms)")
 }

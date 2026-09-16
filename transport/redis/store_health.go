@@ -76,6 +76,11 @@ type StoreHealth struct {
 	closedAt   time.Time
 	onChange   []func(operable bool)
 	noMaxWarn  bool
+
+	// lastUsed and lastMax are the last sample's used_memory and maxmemory, for
+	// the transition logs.
+	lastUsed uint64
+	lastMax  uint64
 }
 
 // NewStoreHealth returns an operable StoreHealth that samples through client
@@ -177,6 +182,7 @@ func (h *StoreHealth) observeFailure() {
 func (h *StoreHealth) observe(used, maxmemory uint64) {
 	h.mu.Lock()
 	h.lastSample = h.now()
+	h.lastUsed, h.lastMax = used, maxmemory
 	reason := h.reason
 	warnNoMax := maxmemory == 0 && !h.noMaxWarn
 	if warnNoMax {
@@ -186,7 +192,7 @@ func (h *StoreHealth) observe(used, maxmemory uint64) {
 
 	if warnNoMax {
 		h.logger.Warn().
-			Str("component", h.component).
+			Str("process", h.component).
 			Msg("Redis has no maxmemory: the store is only closed by refused writes or a lost sample, never before Redis runs out")
 	}
 	if maxmemory == 0 {
@@ -241,6 +247,7 @@ func (h *StoreHealth) transition(operable bool, reason string) {
 	close(h.changed)
 	h.changed = make(chan struct{})
 	callbacks := append([]func(bool){}, h.onChange...)
+	used, maxmemory := h.lastUsed, h.lastMax
 	h.mu.Unlock()
 
 	state := "closed"
@@ -253,11 +260,25 @@ func (h *StoreHealth) transition(operable bool, reason string) {
 	if operable {
 		storeClosedSeconds.WithLabelValues(h.component, reason).Add(closedFor.Seconds())
 	}
+	free := uint64(0)
+	if used < maxmemory {
+		free = maxmemory - used
+	}
+	closeBelow := storeCloseBelow(maxmemory)
+	// "process", not "component": the logger already carries component=store_health,
+	// and a second component key made the JSON line hold the same key twice.
 	if operable {
-		h.logger.Info().Str("component", h.component).Str("reason", reason).
+		h.logger.Info().Str("process", h.component).Str("reason", reason).
+			Uint64("free_bytes", free).
+			Uint64("reopen_at_bytes", 2*closeBelow).
+			Dur("closed_for", closedFor).
 			Msg("Redis operable again: admitting work")
 	} else {
-		h.logger.Warn().Str("component", h.component).Str("reason", reason).
+		h.logger.Warn().Str("process", h.component).Str("reason", reason).
+			Uint64("used_memory", used).
+			Uint64("maxmemory", maxmemory).
+			Uint64("free_bytes", free).
+			Uint64("close_below_bytes", closeBelow).
 			Msg("Redis not operable: no new work admitted until it has room")
 	}
 	for _, fn := range callbacks {

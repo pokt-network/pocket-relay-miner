@@ -4,7 +4,9 @@ package miner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -138,4 +140,21 @@ func TestRecordStoreMemoryOnClose_MeasuresWhenTheStoreCloses(t *testing.T) {
 	require.Eventually(t, func() bool {
 		return testutil.ToFloat64(storeMemoryAtClose.WithLabelValues("smst")) >= float64(128<<10)
 	}, 10*time.Second, 10*time.Millisecond, "LINK memory-on-close: closing the store measures what Redis holds")
+}
+
+func TestRecordStoreMemoryOnClose_LogsEveryFamily(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+	require.NoError(t, client.HSet(ctx, client.KB().SMSTNodesKey("pokt1logfamily", "sess"), "n", make([]byte, 64<<10)).Err())
+	var buf syncBuffer
+	health := redistransport.NewStoreHealth(zerolog.Nop(), client.UniversalClient, "test_log_family")
+	RecordStoreMemoryOnClose(ctx, zerolog.New(&buf), client, health)
+
+	health.ReportOOM()
+	require.Eventually(t, func() bool { return strings.Contains(buf.String(), "Redis memory at store close") }, 10*time.Second, 10*time.Millisecond)
+	var line map[string]any
+	require.NoError(t, json.Unmarshal([]byte(strings.TrimSpace(buf.String())), &line))
+	for _, key := range []string{"stream_bytes", "smst_bytes", "other_bytes", "used_memory"} {
+		require.Contains(t, line, key, "LINK log-family: the close measurement logs %s", key)
+	}
 }
