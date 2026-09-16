@@ -248,6 +248,9 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 		logger.Info().Int("suppliers", len(supplierAddrs)).Msg("round-robining across session suppliers")
 	}
 	var supplierIdx atomic.Uint64
+	// Spaces relays out while the relayer refuses them (RESOURCE_EXHAUSTED,
+	// UNAVAILABLE); see loadBackoff.
+	grpcBackoff := newLoadBackoff()
 
 	runLoadTest(RelayCount, RelayConcurrency, RelayRPS, metrics,
 		func() {
@@ -286,8 +289,12 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 					Err(err).
 					Int("request_num", reqNum).
 					Msg("gRPC relay request failed (network error)")
+				if isGRPCRefusal(err) {
+					grpcBackoff.refused()
+				}
 				return
 			}
+			grpcBackoff.succeeded()
 
 			// Verify relay response signature against the supplier this relay
 			// was addressed to (round-robin aware).
@@ -333,6 +340,7 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 				Msg("gRPC relay request succeeded")
 		},
 	)
+	fmt.Printf("gRPC backoff waits: %d\n", grpcBackoff.Waits())
 
 	return nil
 }

@@ -189,6 +189,8 @@ func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClien
 type wsLoadDeps struct {
 	build  func(ctx context.Context, supplier string) ([]byte, error)
 	verify func(ctx context.Context, supplier string, responseBz []byte) (*servicetypes.RelayResponse, error)
+	// backoff spaces redials out; nil uses a real one.
+	backoff *loadBackoff
 }
 
 // wsSlot is one pooled connection and the supplier it was handshaked against.
@@ -223,14 +225,15 @@ type wsPoolStats struct {
 	redialsAfterRollover atomic.Int64
 	redialsAfterError    atomic.Int64
 	dialFailures         atomic.Int64
+	backoff              *loadBackoff
 }
 
 // summary is printed after the load test's own summary. Neither line may start
 // with "Successful:" or "Errors:": live.sh and the load drivers read those.
 func (s *wsPoolStats) summary() string {
 	after, onError := s.redialsAfterRollover.Load(), s.redialsAfterError.Load()
-	return fmt.Sprintf("Lost to session rollover: %d\nWebSocket pool: size=%d redials=%d (after rollover %d, after error %d, dial failures %d)\n",
-		s.lost.Load(), s.size, after+onError, after, onError, s.dialFailures.Load())
+	return fmt.Sprintf("Lost to session rollover: %d\nWebSocket pool: size=%d redials=%d (after rollover %d, after error %d, dial failures %d, backoff waits %d)\n",
+		s.lost.Load(), s.size, after+onError, after, onError, s.dialFailures.Load(), s.backoff.Waits())
 }
 
 // isSessionExpired reports whether a signed response is the relayer ending the
@@ -263,7 +266,11 @@ func runWebSocketLoad(ctx context.Context, logger logging.Logger, deps wsLoadDep
 	// WebSocket pins the supplier at the handshake, so round-robin is per
 	// connection: one pooled connection per assigned supplier slot.
 	poolSuppliers := assignSuppliersToPool(suppliers, RelayConcurrency)
-	stats := &wsPoolStats{size: len(poolSuppliers)}
+	backoff := deps.backoff
+	if backoff == nil {
+		backoff = newLoadBackoff()
+	}
+	stats := &wsPoolStats{size: len(poolSuppliers), backoff: backoff}
 
 	// Create connection pool as a buffered channel (thread-safe queue).
 	// Workers will pop a slot, use it exclusively, then push it back.
@@ -312,8 +319,10 @@ func runWebSocketLoad(ctx context.Context, logger logging.Logger, deps wsLoadDep
 				if err != nil {
 					stats.dialFailures.Add(1)
 					metrics.RecordError(fmt.Errorf("redial: %w", err))
+					backoff.refused()
 					return
 				}
+				backoff.succeeded()
 				conn.SetPongHandler(func(string) error { return nil })
 				if slot.diedOnRollover {
 					stats.redialsAfterRollover.Add(1)
@@ -353,6 +362,9 @@ func runWebSocketLoad(ctx context.Context, logger logging.Logger, deps wsLoadDep
 				}
 				metrics.RecordError(err)
 				slot.kill(false)
+				if isTryAgainLater(err) {
+					backoff.refused()
+				}
 				logger.Debug().
 					Err(err).
 					Int("request_num", reqNum).
