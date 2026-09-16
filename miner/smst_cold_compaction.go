@@ -11,6 +11,11 @@ package miner
 // hash deleted. A proof then rebuilds the tree in memory, checks the root again,
 // proves, and discards the rebuild; nothing is written back to Redis.
 //
+// It always runs, and a miner binary without this code cannot prove a compacted
+// tree: it has nothing that reads the blob, and walking the trie finds no nodes.
+// Rolling back past it while compacted sessions await their proof loses those
+// proofs.
+//
 // Rebuilt nodes are not always byte-identical to the originals: an extension
 // node carries path bits outside its bounds that depend on insertion order, and
 // the hash does not record that order. Measured on real claimed trees: the
@@ -422,14 +427,11 @@ func (m *RedisSMSTManager) verifyColdBlob(sessionID string, blob, claimedRoot []
 }
 
 // ScheduleColdCompaction queues the compaction of a session whose claim was
-// just sent. It does nothing unless cold tree compaction is enabled. A
-// retryable failure is tried again after coldCompactionRetryDelay, up to
+// just sent. There is no switch: every claimed tree is compacted. A retryable
+// failure is tried again after coldCompactionRetryDelay, up to
 // coldCompactionAttempts, and not once the session's tree has been deleted or
 // the manager closed.
 func (m *RedisSMSTManager) ScheduleColdCompaction(ctx context.Context, sessionID string) {
-	if !m.config.ColdTreeCompaction {
-		return
-	}
 	// The claim path's context ends with the claim; the compaction outlives
 	// it, and stops on Close instead.
 	m.submitColdCompaction(context.WithoutCancel(ctx), sessionID, 1)

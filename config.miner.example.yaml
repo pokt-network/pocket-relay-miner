@@ -342,15 +342,6 @@ cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h 
 # at most 9 relays lost per mid-session kill. Set to 1 for zero-loss mode.
 smst_live_root_checkpoint_interval: 10
 
-# Store each claimed SMST as a compressed blob of its leaves once its claim is
-# sent, and delete its nodes hash (the largest per-session key). The proof
-# rebuilds the tree in memory from the blob. Off by default. Turning it off
-# again stops new compactions only: trees already compacted are still proved
-# from their blob. A miner binary older than this setting cannot prove a
-# compacted tree, so do not roll back past it while compacted sessions await
-# their proof.
-smst_cold_tree_compaction: false
-
 # Submission tracking TTL (for debugging claim/proof submissions)
 # Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis.
 # Use `pocket-relay-miner redis submissions` to inspect tracked data.

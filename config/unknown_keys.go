@@ -70,6 +70,12 @@ var retiredKeys = map[string]string{
 		"before the miner has published now refuses relays until the manifest arrives, where it used to serve " +
 		"them priced by the protocol formula",
 
+	"smst_cold_tree_compaction": "claimed SMSTs are now ALWAYS stored as a compressed blob of their leaves " +
+		"once their claim is sent, and their nodes hash is deleted; the proof rebuilds the tree in memory from " +
+		"the blob. There is no way to turn it off. If this said \"false\", expect far less Redis memory per " +
+		"claimed session and a proof that rebuilds its tree first. Do not roll the miner back to a version " +
+		"without compaction while compacted sessions await their proof: it cannot read the blob",
+
 	"fail_behavior": "the relayer now refuses a relay whose budget it cannot verify, and never chooses to " +
 		"serve one. If this said \"open\", expect relays to be rejected during an outage of the meter's " +
 		"store that were previously served unbilled",

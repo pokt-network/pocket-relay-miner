@@ -70,6 +70,16 @@ func TestUnknownKeys_ARetiredKeyCarriesWhatItsRemovalChanged(t *testing.T) {
 			"table exists; without it the generic line would have been enough")
 }
 
+func TestUnknownKeys_TheColdCompactionSwitchIsNamedAsRemoved(t *testing.T) {
+	doc := []byte("name: ok\nsmst_cold_tree_compaction: false\n")
+
+	got := UnknownKeys(doc, &probeConfig{})
+	require.Len(t, got, 1)
+	require.Contains(t, got[0], "REMOVED")
+	require.Contains(t, got[0], "no way to turn it off",
+		"an operator who set it to false must learn compaction runs anyway")
+}
+
 func TestUnknownKeys_EveryRetiredKeyHasASentence(t *testing.T) {
 	// A retired key with an empty sentence is a tombstone that forgot its
 	// epitaph: it would render as "was REMOVED: " and say nothing.

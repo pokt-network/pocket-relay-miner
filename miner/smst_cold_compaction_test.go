@@ -180,6 +180,47 @@ func TestColdCompaction_AFailoverMinerProvesACompactedTreeAgainstTheClaimedRoot(
 	require.False(t, keyExists(t, client, kb.SMSTNodesKey(supplier, sessionID)), "nothing wrote nodes back to Redis")
 }
 
+// TestColdCompaction_ATreeClaimedBeforeCompactionExistedIsProvedFromItsHash is
+// the upgrade: a binary without compaction claimed the tree, so Redis holds its
+// nodes hash and claimed_root and no blob. The new binary must prove it from the
+// hash, and must not create a blob or delete the hash on the way.
+func TestColdCompaction_ATreeClaimedBeforeCompactionExistedIsProvedFromItsHash(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+	const supplier, sessionID = "pokt1cold_upgrade", "sess-cold-upgrade"
+	kb := client.KB()
+	old := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier, CacheTTL: time.Hour})
+	root := claimColdTree(t, ctx, old, sessionID, coldRelays(16, 400))
+	require.True(t, keyExists(t, client, kb.SMSTRootKey(supplier, sessionID)), "control: the claimed_root is stored")
+	hashKey := kb.SMSTNodesKey(supplier, sessionID)
+	lenBefore, err := client.HLen(ctx, hashKey).Result()
+	require.NoError(t, err)
+	require.Positive(t, lenBefore, "control: the nodes hash is stored")
+
+	rebuilds := testutil.ToFloat64(observability.SMSTColdRebuilds.WithLabelValues(supplier, "missing")) +
+		testutil.ToFloat64(observability.SMSTColdRebuilds.WithLabelValues(supplier, "ok"))
+	upgraded := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier, CacheTTL: time.Hour})
+	badRoot := bytes.Clone(root)
+	badRoot[7] ^= 0x01
+	for i, path := range coldPaths(17, 20) {
+		proofBz, err := upgraded.ProveClosest(ctx, sessionID, path)
+		require.NoError(t, err, "LINK upgrade: path %d of a tree without a blob proves from its hash", i)
+		ok, _ := chainVerifies(t, proofBz, root)
+		require.True(t, ok, "LINK upgrade: path %d verifies against the claimed root", i)
+		badOK, _ := chainVerifies(t, proofBz, badRoot)
+		require.False(t, badOK, "control: path %d does not verify against a root with one bit changed", i)
+	}
+
+	require.False(t, keyExists(t, client, kb.SMSTLeavesKey(supplier, sessionID)), "proving creates no blob")
+	lenAfter, err := client.HLen(ctx, hashKey).Result()
+	require.NoError(t, err)
+	require.Equal(t, lenBefore, lenAfter, "proving leaves the nodes hash whole")
+	require.Equal(t, rebuilds,
+		testutil.ToFloat64(observability.SMSTColdRebuilds.WithLabelValues(supplier, "missing"))+
+			testutil.ToFloat64(observability.SMSTColdRebuilds.WithLabelValues(supplier, "ok")),
+		"no proof went through a rebuild")
+}
+
 func TestColdCompaction_ConcurrentProofsOfACompactedTreeAllVerify(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
@@ -394,7 +435,7 @@ func TestColdCompaction_ARejectedSetKeepsTheNodesHashAndIsRetried(t *testing.T) 
 	oomClient.AddHook(oom)
 
 	mgr := NewRedisSMSTManager(zerolog.Nop(), oomClient, RedisSMSTManagerConfig{
-		SupplierAddress: supplier, CacheTTL: time.Hour, ColdTreeCompaction: true,
+		SupplierAddress: supplier, CacheTTL: time.Hour,
 	})
 	var retries []func()
 	mgr.coldAfterFunc = func(d time.Duration, f func()) {
@@ -433,7 +474,7 @@ func TestColdCompaction_RetriesStopAtTheAttemptLimit(t *testing.T) {
 	client, _ := newTestRedis(t)
 	const supplier, sessionID = "pokt1cold_limit", "sess-cold-limit"
 	// No claimed_root: every attempt is not_ready, which is retryable.
-	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier, ColdTreeCompaction: true})
+	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier})
 	var pending []func()
 	mgr.coldAfterFunc = func(_ time.Duration, f func()) { pending = append(pending, f) }
 	before := testutil.ToFloat64(observability.SMSTColdCompactions.WithLabelValues(supplier, string(coldNotReady)))
@@ -449,17 +490,19 @@ func TestColdCompaction_RetriesStopAtTheAttemptLimit(t *testing.T) {
 		testutil.ToFloat64(observability.SMSTColdCompactions.WithLabelValues(supplier, string(coldNotReady))))
 }
 
-func TestColdCompaction_DisabledSchedulesNothing(t *testing.T) {
+func TestColdCompaction_AManagerWithNoSettingsCompactsEveryClaimedTree(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
-	const supplier, sessionID = "pokt1cold_off", "sess-cold-off"
+	const supplier, sessionID = "pokt1cold_always", "sess-cold-always"
 	kb := client.KB()
-	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier, CacheTTL: time.Hour})
+	// Only what identifies the supplier: nothing in the config can turn it off.
+	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier})
 	claimColdTree(t, ctx, mgr, sessionID, coldRelays(11, 50))
 
 	mgr.ScheduleColdCompaction(ctx, sessionID)
-	require.True(t, keyExists(t, client, kb.SMSTNodesKey(supplier, sessionID)), "with the flag off the nodes hash stays")
-	require.False(t, keyExists(t, client, kb.SMSTLeavesKey(supplier, sessionID)), "with the flag off no blob is written")
+	require.False(t, keyExists(t, client, kb.SMSTNodesKey(supplier, sessionID)),
+		"LINK always: a scheduled compaction deletes the nodes hash with no setting")
+	require.True(t, keyExists(t, client, kb.SMSTLeavesKey(supplier, sessionID)), "and leaves the blob")
 }
 
 // unlinkAfterExists deletes a nodes hash right after the pipeline that checked
@@ -598,6 +641,51 @@ func (s *coldSchedulingSMST) ScheduleColdCompaction(_ context.Context, sessionID
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.scheduled = append(s.scheduled, sessionID)
+}
+
+// TestOnSessionsNeedClaim_ASentClaimCompactsItsRealTree runs the claim path
+// against a real RedisSMSTManager, so the claim's own FlushTree root is what
+// the compaction checks, and nothing but the claim asks for it.
+func TestOnSessionsNeedClaim_ASentClaimCompactsItsRealTree(t *testing.T) {
+	ctx := context.Background()
+	client, _ := newTestRedis(t)
+	const supplier = "pokt1coldrealclaim"
+	kb := client.KB()
+	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier, CacheTTL: time.Hour})
+
+	blocks := &heightedBlocks{}
+	blocks.currentHeight = 103
+	lc := &LifecycleCallback{
+		logger:         logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sharedClient:   &defaultParamsShared{},
+		blockClient:    blocks,
+		smstManager:    mgr,
+		supplierClient: acceptingSupplier{},
+		serviceClient:  erroringService{},
+		config:         LifecycleCallbackConfig{ClaimRetryAttempts: 1},
+	}
+	sessions := []string{"session-coldreal-a-0000", "session-coldreal-b-0000"}
+	snapshots := make([]*SessionSnapshot, 0, len(sessions))
+	for i, id := range sessions {
+		relays := coldRelays(uint64(30+i), 40)
+		for _, r := range relays {
+			require.NoError(t, mgr.UpdateTree(ctx, id, bytes.Clone(r.key), bytes.Clone(r.value), r.weight))
+		}
+		snapshots = append(snapshots, &SessionSnapshot{
+			SessionID: id, SessionEndHeight: 100, SessionStartHeight: 81,
+			SupplierOperatorAddress: supplier, ServiceID: "svc",
+			RelayCount: int64(len(relays)), TotalComputeUnits: 80, State: SessionStateClaiming,
+		})
+	}
+
+	result, err := lc.OnSessionsNeedClaim(ctx, snapshots)
+	require.NoError(t, err)
+	for _, id := range sessions {
+		require.True(t, result.IsClaimed(id), "control: session %s was claimed", id)
+		require.False(t, keyExists(t, client, kb.SMSTNodesKey(supplier, id)),
+			"LINK claim-compacts: the claim of %s compacts its tree", id)
+		require.True(t, keyExists(t, client, kb.SMSTLeavesKey(supplier, id)))
+	}
 }
 
 func TestOnSessionsNeedClaim_ASentClaimSchedulesItsTreeForCompaction(t *testing.T) {

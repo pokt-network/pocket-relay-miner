@@ -262,10 +262,6 @@ type SupplierManagerConfig struct {
 	// the operator-facing trade-off.
 	SMSTLiveRootCheckpointInterval int
 
-	// SMSTColdTreeCompaction turns on storing claimed trees as their leaves
-	// only. See config.Config.SMSTColdTreeCompaction.
-	SMSTColdTreeCompaction bool
-
 	// Batch configuration
 	BatchSize int64 // Number of messages to fetch per XREADGROUP
 
@@ -443,8 +439,8 @@ type SupplierManager struct {
 	querySubpool pond.Pool
 
 	// Subpools shared by every supplier's SMST manager for cold tree
-	// compaction and for the rebuilds proving a compacted tree needs. Nil
-	// unless SMSTColdTreeCompaction is on.
+	// compaction and for the rebuilds proving a compacted tree needs. Nil only
+	// without a WorkerPool (tests), where the manager runs that work inline.
 	coldCompactionPool pond.Pool
 	coldRebuildPool    pond.Pool
 
@@ -523,13 +519,10 @@ func NewSupplierManager(
 		querySubpool: querySubpool,
 	}
 
-	// Only rebuilds for proofs need a pool with the flag off (a tree compacted
-	// earlier is still proved from its blob), but a miner that never turned it
-	// on has no such tree and would run them inline, one proof at a time per
-	// session; so both are created only with the flag on. Sizes are not
-	// measured under load: a 100k-leaf rebuild took 0.34 s on a synthetic
-	// tree, and holds its leaves and every node in memory while it runs.
-	if config.SMSTColdTreeCompaction && config.WorkerPool != nil {
+	// Sizes are not measured under load: a 100k-leaf rebuild took 0.34 s on a
+	// synthetic tree, and holds its leaves and every node in memory while it
+	// runs.
+	if config.WorkerPool != nil {
 		mgr.coldCompactionPool = CreateBoundedSubpool(componentLogger, config.WorkerPool, coldCompactionWorkers, "smst_cold_compaction")
 		mgr.coldRebuildPool = CreateBoundedSubpool(componentLogger, config.WorkerPool, coldRebuildWorkers, "smst_cold_rebuild")
 	}
@@ -1600,7 +1593,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			SupplierAddress:            operatorAddr,
 			CacheTTL:                   m.config.CacheTTL,
 			LiveRootCheckpointInterval: m.config.SMSTLiveRootCheckpointInterval,
-			ColdTreeCompaction:         m.config.SMSTColdTreeCompaction,
 			ColdCompactionPool:         m.coldCompactionPool,
 			ColdRebuildPool:            m.coldRebuildPool,
 		},

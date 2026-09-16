@@ -129,12 +129,6 @@ type RedisSMSTManagerConfig struct {
 	// active session.
 	LiveRootCheckpointInterval int
 
-	// ColdTreeCompaction stores a claimed tree as its leaves only once its
-	// claim is sent, and deletes its nodes hash (see smst_cold_compaction.go).
-	// It governs writing blobs only: a tree already stored as one is proved
-	// from it either way.
-	ColdTreeCompaction bool
-
 	// ColdCompactionPool runs compactions, and ColdRebuildPool the rebuilds a
 	// proof of a compacted tree needs. Shared by every supplier's manager so
 	// the bound is per process. Nil runs the work on the caller's goroutine.

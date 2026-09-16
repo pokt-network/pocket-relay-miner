@@ -78,15 +78,6 @@ type Config struct {
 	// versions.
 	SMSTLiveRootCheckpointInterval int `yaml:"smst_live_root_checkpoint_interval,omitempty"`
 
-	// SMSTColdTreeCompaction, once a session's claim is sent, stores its SMST
-	// as a compressed blob of its leaves and deletes the nodes hash; the proof
-	// rebuilds the tree in memory from the blob. Default false. Turning it off
-	// again stops new compactions only: trees already compacted are still
-	// proved from their blob. A miner binary older than this setting cannot
-	// prove a compacted tree, so do not roll back past it with compacted
-	// sessions awaiting their proof: it has no code to read the blob.
-	SMSTColdTreeCompaction bool `yaml:"smst_cold_tree_compaction,omitempty"`
-
 	// SubmissionTrackingTTL is the TTL for claim/proof submission tracking records.
 	// These records are used for debugging failed submissions and auditing.
 	// Default: 24h (covers multiple session windows for debugging)
