@@ -82,7 +82,7 @@ spec:
       # DERIVED from the secret, so there is one source of truth for which keys
       # exist and no second place to update.
       - name: build-keyring
-        image: ghcr.io/pokt-network/pocketd:0.1.34
+        image: ghcr.io/pokt-network/pocketd:0.1.35
         # As the SAME user the app container runs as, so the keyring files are
         # born owned by it. The first attempt chowned them afterwards instead and
         # failed with "Operation not permitted": this image does not run as root,
@@ -194,6 +194,10 @@ spec:
         env:
         - name: LOG_LEVEL
           value: "{log_level}"
+        # Soft limit for the Go runtime below the container limit, so the GC
+        # tightens before the kernel OOM-kills the pod.
+        - name: GOMEMLIMIT
+          value: "7GiB"
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -217,7 +221,7 @@ spec:
             # it return without touching anything (maxprocs.go:105-111). The miner
             # is the core component doing SMST, claims and proofs.
             cpu: "{cpu_limit}"
-            memory: "2Gi"
+            memory: "8Gi"
         readinessProbe:
           httpGet:
             path: /health
