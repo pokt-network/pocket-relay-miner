@@ -21,6 +21,9 @@ func (s staticServiceFactor) GetServiceFactor(_ context.Context, _ string) (floa
 	return s.f, true
 }
 
+// Priced is always true here: a static factor is a price by construction.
+func (s staticServiceFactor) Priced() bool { return true }
+
 // TestCheckAndConsumeRelay_PerSupplierIsolation proves that two suppliers
 // serving the SAME session get INDEPENDENT meter state. The bug this
 // test guards against: a prior schema keyed the consumed counter and the

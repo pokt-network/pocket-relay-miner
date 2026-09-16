@@ -1138,7 +1138,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	serviceFactorClient := relayer.NewServiceFactorClient(
 		logger,
 		redisClient,
-		config.RelayMeter.ServiceFactorMissingTTL,
 	)
 	if err := serviceFactorClient.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start service factor client: %w", err)
@@ -1299,6 +1298,13 @@ func startHealthServer(
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		if supplierCache == nil {
 			http.Error(w, "supplier cache not initialized", http.StatusServiceUnavailable)
+			return
+		}
+		// An unpriced relayer refuses every relay it is sent, so reporting it
+		// ready would route traffic it can only reject. It clears by itself
+		// once the miner publishes the service factor manifest.
+		if !proxy.Priced() {
+			http.Error(w, "no service factor manifest: the miner has not published one yet", http.StatusServiceUnavailable)
 			return
 		}
 		w.WriteHeader(http.StatusOK)

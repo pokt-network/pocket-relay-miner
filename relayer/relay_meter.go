@@ -40,12 +40,35 @@ type ServiceCache interface {
 	Get(ctx context.Context, serviceID string, force ...bool) (*sharedtypes.Service, error)
 }
 
+// Priced reports whether this meter knows what to charge.
+//
+// A meter without a provider is NOT priced. Reading the factor through
+// GetServiceFactor cannot say this: a nil provider and a provider answering
+// "nothing configured" both yield the base formula, so a mis-wired meter used
+// to charge silently as if the operator had configured nothing. Gating
+// admission on this turns that into a refusal instead of a wrong price.
+//
+// The nil check is not dead code and must not be "simplified" away: a nil
+// provider appears only in the tests that exercise the base formula, and the
+// production wiring is frozen by pricingGateViolations in internal/conventions.
+func (m *RelayMeter) Priced() bool {
+	return m.serviceFactorProvider != nil && m.serviceFactorProvider.Priced()
+}
+
 // ServiceFactorProvider defines the interface for getting service factors.
 // The service factor controls how much of the app stake the supplier will accept for billing.
 type ServiceFactorProvider interface {
 	// GetServiceFactor returns the service factor for a service.
 	// Returns (factor, true) if configured, (0, false) if not configured.
 	GetServiceFactor(ctx context.Context, serviceID string) (float64, bool)
+
+	// Priced reports whether the provider knows what to charge at all.
+	//
+	// It is NOT the negation of GetServiceFactor's second result: (0, false)
+	// means "no factor configured, use the protocol formula", which is a price.
+	// Priced being false means the miner's manifest never arrived, so there is
+	// no price to apply and the relay must be refused instead of guessed at.
+	Priced() bool
 }
 
 // ErrMeterStoreUnavailable marks a metering failure whose cause is the meter's
@@ -68,7 +91,6 @@ var ErrMeterStoreUnavailable = errors.New("relay meter store unavailable")
 // namespace config. A second prefix owned by this component is what made
 // `redis meter --session` read a key nothing writes.
 type RelayMeterConfig struct {
-
 	// CacheTTL is the TTL for all cached Redis data (params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	CacheTTL time.Duration

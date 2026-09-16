@@ -122,6 +122,14 @@ func TestLoadConfig_RetiredKeysAreNamedWithWhatTheyChanged(t *testing.T) {
 			mustCarry: "served for free",
 			why:       "an operator who had the meter off must expect rejections where relays used to be served uncharged",
 		},
+		{
+			name:      "relay_meter.service_factor_missing_ttl",
+			anchor:    "relay_meter:\n",
+			extra:     "    service_factor_missing_ttl: 5s\n",
+			key:       "service_factor_missing_ttl",
+			mustCarry: "refuses",
+			why:       "an operator who tuned it must expect a relayer that starts before the miner to refuse relays, not price them by the protocol formula",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cfg, err := LoadConfig(writeConfigWithExtra(t, tc.anchor, tc.extra))

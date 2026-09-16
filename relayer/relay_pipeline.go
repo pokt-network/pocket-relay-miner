@@ -33,6 +33,24 @@ func NewRelayPipeline(
 	}
 }
 
+// Priced reports whether the pipeline knows what to charge.
+//
+// The gRPC and WebSocket transports reach the meter only through this pipeline,
+// so this is how their admission checks ask the same question the HTTP path asks
+// the meter directly.
+//
+// It is also the ONLY method here that tolerates a nil meter, and that is a
+// fact about the code rather than a courtesy: MeterRelay and AdmitRelay both
+// dereference p.relayMeter with no guard, and RelayMeter has 37 pointer-receiver methods of
+// which none checks m == nil -- admit takes m.mu.RLock() on its first executable
+// line. So a pipeline built without a meter does not serve relays free of
+// charge: it panics as soon as one reaches that path. A caller passing a nil
+// meter is declaring those paths unreachable for itself, which is exactly what
+// the session-expired and simulation fixtures state in their own comments.
+func (p *RelayPipeline) Priced() bool {
+	return p.relayMeter != nil && p.relayMeter.Priced()
+}
+
 // RelayContext contains all information needed to process a relay.
 type RelayContext struct {
 	// Request is the relay request from the gateway client

@@ -1059,6 +1059,18 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Refuse what cannot be priced. The miner's service factor manifest has not
+	// arrived, so this relay would be charged against state nobody published.
+	// This is NOT the boot-window optimistic serve: that one is about whether a
+	// supplier EXISTS, and the miner arbitrates it afterwards by refusing to
+	// claim a supplier that is not staked. Nothing arbitrates a price, so a
+	// relay served at the wrong one is revenue that never comes back.
+	if !p.relayMeter.Priced() {
+		p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonPricingUnavailable).Inc()
+		return
+	}
+
 	// Stop admitting while the batch queue is full. BEFORE the eager meter, so a
 	// refused relay is never charged, and before the backend, so it costs the
 	// operator nothing.
@@ -2353,6 +2365,19 @@ const rejectReasonPublishQueueFull = "publish_queue_full"
 // rejectReasonMeteringNotConfigured refuses a relay that nothing would charge: the
 // meter, or the pipeline that carries it, was never wired.
 const rejectReasonMeteringNotConfigured = "metering_not_configured"
+
+// Priced reports whether this relayer knows what to charge, for the readiness
+// probe. A relayer that is up but unpriced refuses every relay, so reporting it
+// ready would send it traffic it can only reject.
+func (p *ProxyServer) Priced() bool {
+	return p.relayMeter != nil && p.relayMeter.Priced()
+}
+
+// rejectReasonPricingUnavailable refuses a relay the relayer cannot price: the
+// miner's service factor manifest has not been published, or has never been
+// read. Distinct from metering_not_configured, which is a wiring defect and is
+// permanent; this one clears itself the moment the miner publishes.
+const rejectReasonPricingUnavailable = "pricing_unavailable"
 
 // SetPublishQueueFull wires the admission gate on the batch queue.
 func (p *ProxyServer) SetPublishQueueFull(full func() bool) {

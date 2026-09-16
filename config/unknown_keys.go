@@ -64,6 +64,12 @@ var retiredKeys = map[string]string{
 		"rewards -- served for free. Grace now follows the on-chain grace_period_end_offset_blocks exactly. " +
 		"Expect relays arriving after the grace period to be rejected as expired instead of served unpaid",
 
+	"service_factor_missing_ttl": "there is no absence left to remember: the relayer loads the miner's " +
+		"COMPLETE service factor manifest at startup, so a service the manifest does not list has no override " +
+		"as a matter of data rather than a failed lookup. Pricing is unchanged, but a relayer that starts " +
+		"before the miner has published now refuses relays until the manifest arrives, where it used to serve " +
+		"them priced by the protocol formula",
+
 	"fail_behavior": "the relayer now refuses a relay whose budget it cannot verify, and never chooses to " +
 		"serve one. If this said \"open\", expect relays to be rejected during an outage of the meter's " +
 		"store that were previously served unbilled",

@@ -342,6 +342,18 @@ func (s *RelayGRPCService) handleSendRelay(stream grpc.ServerStream) error {
 			return status.Errorf(codes.PermissionDenied, "relay validation failed: %v", err)
 		}
 
+		// Refuse what cannot be priced, immediately before the charge and not
+		// earlier: the miner's manifest has not arrived, so AdmitRelay would
+		// reserve against state nobody published. A relay that fails validation
+		// never reaches a charge, so it never needs a price -- placing this
+		// above ValidateRelay would make a process-wide condition decide the
+		// fate of relays that were going to be rejected anyway. Unavailable and
+		// not Internal: it clears itself the moment the miner publishes.
+		if !s.relayPipeline.Priced() {
+			relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonPricingUnavailable).Inc()
+			return status.Error(codes.Unavailable, "relayer is not admitting relays right now")
+		}
+
 		// Meter relay (check stake before serving)
 		res, allowed, meterErr := s.relayPipeline.AdmitRelay(ctx, relayCtx)
 		reservation = res

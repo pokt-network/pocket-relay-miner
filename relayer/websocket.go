@@ -1068,6 +1068,13 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		return
 	}
 
+	// NO price gate here, deliberately: MeterRelay above has already charged this
+	// frame, so a check at this point would be decorative -- it would appear in
+	// the diff and in review without protecting anything. This transport is
+	// covered before the socket exists, by the pre-upgrade gate in
+	// WebSocketHandler, and stays covered because Priced() never goes back to
+	// false (see ServiceFactorClient.manifest).
+
 	// PAST THIS LINE THE FRAME HAS PASSED ADMISSION, and only now does the
 	// operator's backend get dialled. Jorge, 2026-09-03: "en son de proteger el
 	// recurso valioso (backend, blockchain) no hacemos el handshake al backend
@@ -1779,6 +1786,16 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		// keeps admitting frames; this gate does not reach them.
 		if p.queueFull() {
 			relaysRejected.WithLabelValues(serviceID, BackendTypeWebSocket, rejectReasonPublishQueueFull).Inc()
+			p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+			return
+		}
+
+		// Refuse to open a connection this relayer cannot price. Frames are
+		// charged one by one once the socket is up, so admitting the upgrade
+		// without a manifest buys a whole subscription's worth of relays at a
+		// price nobody published.
+		if p.relayMeter != nil && !p.relayMeter.Priced() {
+			relaysRejected.WithLabelValues(serviceID, BackendTypeWebSocket, rejectReasonPricingUnavailable).Inc()
 			p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
 			return
 		}

@@ -12,7 +12,6 @@ import (
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
-	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 )
 
@@ -35,10 +34,17 @@ func newGetKeyCounter() *getKeyCounter {
 	return &getKeyCounter{byKey: map[string]int{}}
 }
 
-func (c *getKeyCounter) count(key string) int {
+// total is what these tests assert on: with the manifest loaded, resolving a
+// factor must issue NO Redis command at all, so the interesting number is the
+// count across every key rather than one key's.
+func (c *getKeyCounter) total() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.byKey[key]
+	sum := 0
+	for _, n := range c.byKey {
+		sum += n
+	}
+	return sum
 }
 
 func (c *getKeyCounter) record(cmd goredis.Cmder) {
@@ -74,9 +80,6 @@ func (c *getKeyCounter) ProcessPipelineHook(next goredis.ProcessPipelineHook) go
 
 // newServiceFactorTestClient returns a client on the shared real Redis, with a
 // namespace of its own and a GET counter installed.
-//
-// Start() is deliberately NOT called: it would subscribe to pub/sub and preload
-// the default, and these tests are about what GetServiceFactor itself reads.
 func newServiceFactorTestClient(t *testing.T) (*ServiceFactorClient, *getKeyCounter) {
 	t.Helper()
 
@@ -84,213 +87,193 @@ func newServiceFactorTestClient(t *testing.T) (*ServiceFactorClient, *getKeyCoun
 	counter := newGetKeyCounter()
 	redisClient.AddHook(counter)
 
-	return NewServiceFactorClient(testLogger(), redisClient, DefaultServiceFactorMissingTTL), counter
+	return NewServiceFactorClient(testLogger(), redisClient), counter
 }
 
-// writeServiceFactor writes a factor under key, the way the miner's registry does.
-func writeServiceFactor(t *testing.T, client *ServiceFactorClient, key string, factor float64) {
+// writeManifest publishes a manifest the way the miner's registry does.
+func writeManifest(t *testing.T, client *ServiceFactorClient, manifest ServiceFactorManifest) {
 	t.Helper()
 
-	bz, err := json.Marshal(ServiceFactorData{Factor: factor, UpdatedAt: 1})
+	bz, err := json.Marshal(manifest)
 	require.NoError(t, err)
-	require.NoError(t, client.redisClient.Set(context.Background(), key, bz, 0).Err())
+	require.NoError(t, client.redisClient.Set(
+		context.Background(),
+		client.redisClient.KB().ServiceFactorManifestKey(),
+		bz,
+		0,
+	).Err())
 }
 
-// TestGetServiceFactor_AMissingFactorIsReadFromRedisOnce is the defect this
-// file exists for: with neither key present, every call used to reach Redis,
-// which measured 1.858 GET/s against 1.855 relays/s in a live run. The absence
-// must be remembered like a value is.
-func TestGetServiceFactor_AMissingFactorIsReadFromRedisOnce(t *testing.T) {
+// TestGetServiceFactor_ResolvesWithoutTouchingRedis is the defect this design
+// replaces: resolving a factor used to issue a GET per relay, measured at
+// 1.858 GET/s against 1.855 relays/s on a live run. The manifest carries the
+// whole state, so after the load nothing reaches Redis at all.
+func TestGetServiceFactor_ResolvesWithoutTouchingRedis(t *testing.T) {
 	client, counter := newServiceFactorTestClient(t)
 	ctx := context.Background()
-	const serviceID = "svc-absent"
 
-	serviceKey := client.serviceFactorServiceKey(serviceID)
-	defaultKey := client.serviceFactorDefaultKey()
+	writeManifest(t, client, ServiceFactorManifest{
+		HasDefault:    true,
+		DefaultFactor: 0.01,
+		Overrides:     map[string]float64{"eth": 0.02},
+	})
+	require.NoError(t, client.loadManifest(ctx))
 
-	const calls = 5
-	for range calls {
-		factor, found := client.GetServiceFactor(ctx, serviceID)
-		require.False(t, found, "premise: neither key exists, so no factor is configured")
-		require.Zero(t, factor)
-	}
-
-	require.Equal(t, 1, counter.count(serviceKey),
-		"the missing per-service key must be read from Redis once and remembered, not once per call")
-	require.Equal(t, 1, counter.count(defaultKey),
-		"the missing default key must be read from Redis once and remembered, not once per call")
-}
-
-// TestGetServiceFactor_AMissingOverrideStillResolvesTheDefault pins the
-// two-level semantics: a remembered absence of the per-service key means "no
-// override", not "no factor". It must skip that key's GET and still answer with
-// the default.
-func TestGetServiceFactor_AMissingOverrideStillResolvesTheDefault(t *testing.T) {
-	client, counter := newServiceFactorTestClient(t)
-	ctx := context.Background()
-	const serviceID = "svc-no-override"
-
-	serviceKey := client.serviceFactorServiceKey(serviceID)
-	defaultKey := client.serviceFactorDefaultKey()
-	writeServiceFactor(t, client, defaultKey, 0.25)
-
-	const calls = 5
-	for range calls {
-		factor, found := client.GetServiceFactor(ctx, serviceID)
-		require.True(t, found, "the default must answer for a service with no override")
-		require.Equal(t, 0.25, factor)
-	}
-
-	require.Equal(t, 1, counter.count(serviceKey),
-		"the absent override must be remembered, not re-read on every call")
-	require.Equal(t, 1, counter.count(defaultKey),
-		"the default is a hit and was already cached; it must be read once")
-}
-
-// TestGetServiceFactor_APresentFactorIsUnchanged is the control: the path that
-// finds a value must behave exactly as it did before absences were cached.
-func TestGetServiceFactor_APresentFactorIsUnchanged(t *testing.T) {
-	client, counter := newServiceFactorTestClient(t)
-	ctx := context.Background()
-	const serviceID = "svc-present"
-
-	serviceKey := client.serviceFactorServiceKey(serviceID)
-	writeServiceFactor(t, client, serviceKey, 0.75)
-
-	const calls = 5
-	for range calls {
-		factor, found := client.GetServiceFactor(ctx, serviceID)
+	gets := counter.total()
+	for range 5 {
+		factor, found := client.GetServiceFactor(ctx, "eth")
 		require.True(t, found)
-		require.Equal(t, 0.75, factor)
+		require.InDelta(t, 0.02, factor, 1e-9)
+
+		factor, found = client.GetServiceFactor(ctx, "svc-without-override")
+		require.True(t, found, "a service with no override takes the default")
+		require.InDelta(t, 0.01, factor, 1e-9)
 	}
 
-	require.Equal(t, 1, counter.count(serviceKey),
-		"a present factor is cached on the first read, as it always was")
-	require.Zero(t, counter.count(client.serviceFactorDefaultKey()),
-		"an override answers the call; the default must not be consulted at all")
+	require.Equal(t, gets, counter.total(),
+		"resolving a factor must not reach Redis: the manifest already holds every case")
 }
 
-// TestGetServiceFactor_InvalidationDropsTheRememberedAbsence proves the pub/sub
-// handler clears the negative entry too, so a factor published after the
-// absence was cached is picked up at once rather than at the TTL.
-//
-// Step 3 is what keeps this test from passing without the fix: it asserts the
-// absence IS being honoured while the key already exists in Redis. Without
-// negative caching the client would re-read and find the factor there, and the
-// "must still be" assertion fails.
-func TestGetServiceFactor_InvalidationDropsTheRememberedAbsence(t *testing.T) {
-	client, counter := newServiceFactorTestClient(t)
-	ctx := context.Background()
-	const serviceID = "svc-late-factor"
-	serviceKey := client.serviceFactorServiceKey(serviceID)
-
-	_, found := client.GetServiceFactor(ctx, serviceID)
-	require.False(t, found, "premise: no factor is configured yet")
-	require.Equal(t, 1, counter.count(serviceKey))
-
-	writeServiceFactor(t, client, serviceKey, 0.5)
-
-	_, found = client.GetServiceFactor(ctx, serviceID)
-	require.False(t, found,
-		"the absence must still be honoured before the invalidation arrives")
-	require.Equal(t, 1, counter.count(serviceKey),
-		"honouring the absence means not going back to Redis")
-
-	payload, err := json.Marshal(cache.ServiceFactorInvalidationPayload{ServiceID: serviceID})
-	require.NoError(t, err)
-	require.NoError(t, client.handleInvalidation(ctx, string(payload)))
-
-	factor, found := client.GetServiceFactor(ctx, serviceID)
-	require.True(t, found,
-		"the invalidation must drop the remembered absence, not only a cached value")
-	require.Equal(t, 0.5, factor)
-	require.Equal(t, 2, counter.count(serviceKey),
-		"dropping the absence sends the next call back to Redis")
-}
-
-// TestGetServiceFactor_InvalidationDropsTheRememberedAbsenceOfTheDefault is the
-// same claim for the default key, whose invalidation payload carries no
-// service_id and clears the whole default entry.
-func TestGetServiceFactor_InvalidationDropsTheRememberedAbsenceOfTheDefault(t *testing.T) {
-	client, counter := newServiceFactorTestClient(t)
-	ctx := context.Background()
-	const serviceID = "svc-default-late"
-	defaultKey := client.serviceFactorDefaultKey()
-
-	_, found := client.GetServiceFactor(ctx, serviceID)
-	require.False(t, found, "premise: no default is configured yet")
-
-	writeServiceFactor(t, client, defaultKey, 0.1)
-
-	_, found = client.GetServiceFactor(ctx, serviceID)
-	require.False(t, found,
-		"the absent default must still be honoured before the invalidation arrives")
-	require.Equal(t, 1, counter.count(defaultKey))
-
-	payload, err := json.Marshal(cache.ServiceFactorInvalidationPayload{})
-	require.NoError(t, err)
-	require.NoError(t, client.handleInvalidation(ctx, string(payload)))
-
-	factor, found := client.GetServiceFactor(ctx, serviceID)
-	require.True(t, found, "the invalidation must drop the remembered absence of the default")
-	require.Equal(t, 0.1, factor)
-}
-
-// TestGetServiceFactor_TheRememberedAbsenceExpires proves the TTL is real: a
-// factor that appears without an invalidation ever arriving is still picked up,
-// one TTL later.
-//
-// The clock is a struct field replaced here, on this goroutine, before any call
-// reads it -- the suite forbids time.Sleep, and a package var read inside code
-// under test would race.
-func TestGetServiceFactor_TheRememberedAbsenceExpires(t *testing.T) {
-	client, counter := newServiceFactorTestClient(t)
-	ctx := context.Background()
-	const serviceID = "svc-expiring"
-	serviceKey := client.serviceFactorServiceKey(serviceID)
-
-	base := time.Now()
-	client.now = func() time.Time { return base }
-
-	_, found := client.GetServiceFactor(ctx, serviceID)
-	require.False(t, found, "premise: no factor is configured yet")
-	require.Equal(t, 1, counter.count(serviceKey))
-
-	// A factor appears, and the invalidation event is lost.
-	writeServiceFactor(t, client, serviceKey, 0.9)
-
-	_, found = client.GetServiceFactor(ctx, serviceID)
-	require.False(t, found, "within the TTL the absence stands")
-	require.Equal(t, 1, counter.count(serviceKey))
-
-	client.now = func() time.Time { return base.Add(DefaultServiceFactorMissingTTL + time.Millisecond) }
-
-	factor, found := client.GetServiceFactor(ctx, serviceID)
-	require.True(t, found, "past the TTL the absence must be re-checked against Redis")
-	require.Equal(t, 0.9, factor)
-	require.Equal(t, 2, counter.count(serviceKey))
-}
-
-// TestGetServiceFactor_ATransientRedisErrorIsNotAnAbsence: a timeout or a lost
-// connection says nothing about whether the key exists. Remembering it would
-// price every relay of this service off one blink of Redis, for a whole TTL.
-func TestGetServiceFactor_ATransientRedisErrorIsNotAnAbsence(t *testing.T) {
+// TestGetServiceFactor_NothingConfiguredIsAPriceNotAnUnknown separates the two
+// states the old format could not: an operator who configured no factor is
+// PRICED -- the protocol formula applies -- while a relayer with no manifest is
+// not, and must refuse.
+func TestGetServiceFactor_NothingConfiguredIsAPriceNotAnUnknown(t *testing.T) {
 	client, _ := newServiceFactorTestClient(t)
 	ctx := context.Background()
-	const serviceID = "svc-redis-blip"
-	serviceKey := client.serviceFactorServiceKey(serviceID)
+
+	writeManifest(t, client, ServiceFactorManifest{Overrides: map[string]float64{}})
+	require.NoError(t, client.loadManifest(ctx))
+
+	require.True(t, client.Priced(), "a published manifest is a price, even when it configures nothing")
+
+	factor, found := client.GetServiceFactor(ctx, "any-service")
+	require.False(t, found, "no factor configured means the protocol formula, reported as (0, false)")
+	require.Zero(t, factor)
+}
+
+// TestPriced_IsFalseUntilTheMinerPublishes is the admission gate's premise: with
+// no manifest in Redis the relayer does not know what to charge, and a price
+// charged wrong is not recoverable.
+func TestPriced_IsFalseUntilTheMinerPublishes(t *testing.T) {
+	client, _ := newServiceFactorTestClient(t)
+	ctx := context.Background()
+
+	require.False(t, client.Priced(), "premise: nothing published yet")
+
+	writeManifest(t, client, ServiceFactorManifest{HasDefault: true, DefaultFactor: 0.01})
+	require.NoError(t, client.loadManifest(ctx))
+
+	require.True(t, client.Priced(), "the manifest arriving must open admission")
+}
+
+// TestStart_RetriesUntilTheManifestAppears proves the relayer waits instead of
+// dying: on a cluster restart it can come up before the miner has published.
+func TestStart_RetriesUntilTheManifestAppears(t *testing.T) {
+	client, _ := newServiceFactorTestClient(t)
+	ctx := context.Background()
+
+	require.NoError(t, client.Start(ctx), "an absent manifest must not fail startup")
+	t.Cleanup(func() { _ = client.Close() })
+	require.False(t, client.Priced(), "premise: the miner has not published")
+
+	writeManifest(t, client, ServiceFactorManifest{HasDefault: true, DefaultFactor: 0.05})
+
+	require.Eventually(t, client.Priced, 10*time.Second, 100*time.Millisecond,
+		"the retry loop must pick the manifest up without a restart")
+}
+
+// TestHandleInvalidation_ReloadsTheWholeManifest keeps a factor change arriving
+// without a restart.
+func TestHandleInvalidation_ReloadsTheWholeManifest(t *testing.T) {
+	client, _ := newServiceFactorTestClient(t)
+	ctx := context.Background()
+
+	writeManifest(t, client, ServiceFactorManifest{Overrides: map[string]float64{"eth": 0.02}})
+	require.NoError(t, client.loadManifest(ctx))
+
+	factor, _ := client.GetServiceFactor(ctx, "eth")
+	require.InDelta(t, 0.02, factor, 1e-9, "premise: the first manifest is in force")
+
+	writeManifest(t, client, ServiceFactorManifest{Overrides: map[string]float64{"eth": 0.09}})
+	require.NoError(t, client.handleInvalidation(ctx, `{"service_id":"eth"}`))
+
+	factor, found := client.GetServiceFactor(ctx, "eth")
+	require.True(t, found)
+	require.InDelta(t, 0.09, factor, 1e-9, "the invalidation must replace the manifest, not keep the old value")
+}
+
+// TestHandleInvalidation_ARetiredOverrideStopsApplying is the reader's half of
+// the miner's delete: the manifest is replaced whole, so an override the
+// operator removed stops being applied instead of standing until a key expires.
+func TestHandleInvalidation_ARetiredOverrideStopsApplying(t *testing.T) {
+	client, _ := newServiceFactorTestClient(t)
+	ctx := context.Background()
+
+	writeManifest(t, client, ServiceFactorManifest{
+		HasDefault:    true,
+		DefaultFactor: 0.01,
+		Overrides:     map[string]float64{"eth": 0.02},
+	})
+	require.NoError(t, client.loadManifest(ctx))
+	factor, _ := client.GetServiceFactor(ctx, "eth")
+	require.InDelta(t, 0.02, factor, 1e-9, "premise: the override applies")
+
+	writeManifest(t, client, ServiceFactorManifest{
+		HasDefault:    true,
+		DefaultFactor: 0.01,
+		Overrides:     map[string]float64{},
+	})
+	require.NoError(t, client.handleInvalidation(ctx, `{}`))
+
+	factor, found := client.GetServiceFactor(ctx, "eth")
+	require.True(t, found)
+	require.InDelta(t, 0.01, factor, 1e-9, "with the override retired, the default applies")
+}
+
+// TestLoadManifest_ATransientRedisErrorKeepsTheLastGoodManifest is the
+// invariant carried over from the per-key client, and it matters MORE here: a
+// timeout says nothing about what Redis holds, and treating it as "no price"
+// would stop admission across the whole fleet on one blink of Redis -- a worse
+// failure than the ambiguity this design removes.
+func TestLoadManifest_ATransientRedisErrorKeepsTheLastGoodManifest(t *testing.T) {
+	client, _ := newServiceFactorTestClient(t)
+	ctx := context.Background()
+
+	writeManifest(t, client, ServiceFactorManifest{HasDefault: true, DefaultFactor: 0.01})
+	require.NoError(t, client.loadManifest(ctx))
+	require.True(t, client.Priced(), "premise: a good manifest is held")
 
 	failRedis := testredis.NewFailSwitch(client.redisClient)
 	failRedis.Fail("redis is unreachable")
 
-	_, found := client.GetServiceFactor(ctx, serviceID)
-	require.False(t, found, "premise: the failing lookup answers 'not configured'")
+	require.Error(t, client.loadManifest(ctx), "premise: the reload really failed")
+
+	require.True(t, client.Priced(),
+		"a failed reload must not unprice a relayer that already knows what to charge")
+	factor, found := client.GetServiceFactor(ctx, "any-service")
+	require.True(t, found)
+	require.InDelta(t, 0.01, factor, 1e-9, "the last good manifest still answers")
 
 	failRedis.Clear()
-	writeServiceFactor(t, client, serviceKey, 0.42)
+}
 
-	factor, found := client.GetServiceFactor(ctx, serviceID)
-	require.True(t, found,
-		"the error must not have been remembered as an absence: the factor is there to be read")
-	require.Equal(t, 0.42, factor)
+// TestLoadManifest_AnUnparseableManifestKeepsTheLastGoodOne: a document that
+// does not parse is a defect in the producer, not a statement about price.
+func TestLoadManifest_AnUnparseableManifestKeepsTheLastGoodOne(t *testing.T) {
+	client, _ := newServiceFactorTestClient(t)
+	ctx := context.Background()
+
+	writeManifest(t, client, ServiceFactorManifest{HasDefault: true, DefaultFactor: 0.01})
+	require.NoError(t, client.loadManifest(ctx))
+
+	require.NoError(t, client.redisClient.Set(
+		ctx, client.redisClient.KB().ServiceFactorManifestKey(), "not json", 0,
+	).Err())
+
+	require.Error(t, client.loadManifest(ctx))
+	require.True(t, client.Priced(), "garbage from the producer must not unprice this relayer")
+	factor, found := client.GetServiceFactor(ctx, "any-service")
+	require.True(t, found)
+	require.InDelta(t, 0.01, factor, 1e-9)
 }

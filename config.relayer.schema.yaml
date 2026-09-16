@@ -472,11 +472,6 @@ properties:
         description: TTL for all cached Redis data (streams, params, app stakes, meters). Redis TTL handles automatic expiration.
         default: 2h
         pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
-      service_factor_missing_ttl:
-        type: string
-        description: How long the relayer remembers that Redis holds no service factor (per-service or default). Backstop for a missed pub/sub invalidation; keeps the lookup off Redis on every relay.
-        default: 5s
-        pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
   http_transport:
     type: object
