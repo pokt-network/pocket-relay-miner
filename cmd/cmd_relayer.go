@@ -526,6 +526,13 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	defer func() { _ = redisClient.Close() }()
 	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
 
+	// Whether Redis can take writes, answered once for the whole relayer: every
+	// client this process writes through reports refused writes to it, and every
+	// admission path reads it.
+	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer")
+	redisClient.AddHook(storeHealth.Hook())
+	storeHealth.Start(ctx)
+
 	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
 	// files and the redis CLI build clients, and a repeated MustRegister panics.
 	// The collector is also the registry of pools, so a client per supplier can
@@ -817,6 +824,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			eff.PoolSize, batchWorkers, batchWorkers+1)
 	}
 	batchRedisClient.AddHook(redistransport.NewCommandLatencyHook("relayer_batch"))
+	batchRedisClient.AddHook(storeHealth.Hook())
 	redisPools.Add("batch", batchRedisClient)
 
 	batcher := redistransport.NewBatchingPublisher(
@@ -825,6 +833,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		redisClient.KB().StreamPrefix(),  // Namespace-aware stream prefix (e.g., "ha:relays")
 		config.Redis.BatchPublishInterval(),
 		redistransport.WithDispatchWorkers(batchWorkers),
+		redistransport.WithStoreHealth(storeHealth),
 	)
 	var publisher transport.MinedRelayPublisher = batcher
 	logger.Info().Dur("interval", config.Redis.BatchPublishInterval()).Msg("batched relay publishing")

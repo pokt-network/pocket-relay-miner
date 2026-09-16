@@ -265,6 +265,12 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// counters, and a hook sits outside the retry loop so it sees the whole cost.
 	redisClient.AddHook(redistransport.NewCommandLatencyHook("miner"))
 
+	// Whether Redis can take writes, answered once for the whole miner; the same
+	// component the relayer uses.
+	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "miner")
+	redisClient.AddHook(storeHealth.Hook())
+	storeHealth.Start(ctx)
+
 	redisPools := redistransport.NewPoolCollector("miner")
 	redisPools.Add("shared", redisClient)
 	observability.SharedRegistry.MustRegister(redisPools)

@@ -93,6 +93,9 @@ type BatchingPublisher struct {
 	inFlightSince atomic.Int64
 	now           func() time.Time
 
+	// health, when set, pauses dispatch while Redis cannot take writes.
+	health *StoreHealth
+
 	// stop ends the dispatch loop; done reports that it has ended.
 	stop context.CancelFunc
 	done chan struct{}
@@ -100,6 +103,15 @@ type BatchingPublisher struct {
 
 // BatchingPublisherOption configures a BatchingPublisher at construction.
 type BatchingPublisherOption func(*BatchingPublisher)
+
+// WithStoreHealth makes the dispatcher hold everything queued while health says
+// Redis cannot take writes: nothing is written, dropped or charged an attempt
+// until it reopens.
+func WithStoreHealth(health *StoreHealth) BatchingPublisherOption {
+	return func(p *BatchingPublisher) {
+		p.health = health
+	}
+}
 
 // WithDispatchWorkers sets how many chunks one dispatch round writes at once.
 // Values below two keep a single writer.
@@ -301,6 +313,11 @@ const finalFlushTimeout = 30 * time.Second
 // this tick, goes in chunks of charges alone at the end. A charge's INCRBY and
 // EXPIRE NX are never split across two EXECs.
 func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
+	// A write Redis refuses for memory is refused for every entry, and each
+	// refusal would spend one of an entry's attempts: the queue waits instead.
+	if !p.health.Operable() {
+		return
+	}
 	p.mu.Lock()
 	ledger := p.ledger
 	p.mu.Unlock()
@@ -650,6 +667,24 @@ func (p *BatchingPublisher) writeChunk(ctx context.Context, chunk []queued, char
 		return nil
 	})
 
+	// Redis refuses a write for memory when the command is QUEUED, and a MULTI
+	// with a refused command is discarded whole on EXEC (EXECABORT): measured
+	// against Redis 8.10.0, go-redis then reports OOM on every refused command and
+	// EXECABORT on the others, and nothing in the transaction was written. So one
+	// OOM means the chunk did not happen. It is not Redis answering the dispatcher
+	// (no markSuccess), no relay reached the stream, and no entry or charge spends
+	// an attempt: the store is full, not the entry wrong, and spending attempts is
+	// how served relays were discarded as attempts_exhausted.
+	if chunkRefusedForMemory(cmds, incrs) {
+		for _, c := range charges {
+			ledger.untake(c)
+		}
+		for _, q := range chunk {
+			publishErrorsTotal.WithLabelValues(q.supplier, q.service).Inc()
+		}
+		return chunk, nil, fmt.Errorf("redis refused the chunk for memory: %w", errStoreOutOfMemory)
+	}
+
 	answered := false
 	for _, cmd := range cmds {
 		answered = answered || !transportFailure(cmd.Err())
@@ -714,10 +749,11 @@ func (p *BatchingPublisher) writeChunk(ctx context.Context, chunk []queued, char
 			firstErr = fmt.Errorf("XADD to %s: %w", chunk[i].stream, cmdErr)
 		}
 
-		// Only THIS entry is in question. Its siblings in the same EXEC that
-		// succeeded are already in the stream: an EXEC reports per-command errors
-		// and does not roll back the commands that succeeded, which is the whole
-		// reason each cmd.Err() is read.
+		// Only THIS entry is in question. An error Redis raises while EXECUTING a
+		// command (WRONGTYPE) leaves its siblings written: EXEC does not roll back,
+		// which is why each cmd.Err() is read. An error raised while QUEUING one
+		// (OOM) discards the whole transaction instead, and never gets here: see
+		// chunkRefusedForMemory above.
 		entry := chunk[i]
 		entry.attempts++
 		switch {
@@ -736,6 +772,25 @@ func (p *BatchingPublisher) writeChunk(ctx context.Context, chunk []queued, char
 		}
 	}
 	return retry, discard, firstErr
+}
+
+// errStoreOutOfMemory marks a chunk Redis refused for memory.
+var errStoreOutOfMemory = errors.New("store out of memory")
+
+// chunkRefusedForMemory reports whether Redis refused any command of the chunk
+// for memory, which discards the whole MULTI.
+func chunkRefusedForMemory(xadds []*redis.StringCmd, incrs []*redis.IntCmd) bool {
+	for _, cmd := range xadds {
+		if redis.IsOOMError(cmd.Err()) {
+			return true
+		}
+	}
+	for _, cmd := range incrs {
+		if redis.IsOOMError(cmd.Err()) {
+			return true
+		}
+	}
+	return false
 }
 
 // Close stops the dispatcher and waits for the final flush.

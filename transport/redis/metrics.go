@@ -15,6 +15,43 @@ const (
 )
 
 var (
+	// storeOperable is 1 while StoreHealth admits work for the component and 0
+	// while it does not.
+	storeOperable = observability.SharedFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "store_operable",
+			Help:      "1 while Redis is taken as able to accept writes and work is admitted, 0 while it is not",
+		},
+		[]string{"component"},
+	)
+
+	// storeTransitions counts StoreHealth changing state. state is open or closed;
+	// reason is why the store closed (memory_reserve, oom_reply, sample_stale), on
+	// both the closing and the reopening transition.
+	storeTransitions = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "store_transitions_total",
+			Help:      "Times Redis was taken as not operable (state=closed) or operable again (state=open), by why it closed",
+		},
+		[]string{"component", "state", "reason"},
+	)
+
+	// storeFreeBytes is maxmemory minus used_memory at the last sample, or -1 when
+	// Redis has no maxmemory.
+	storeFreeBytes = observability.SharedFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "store_free_bytes",
+			Help:      "Redis maxmemory minus used_memory at the last sample; -1 when maxmemory is not set",
+		},
+		[]string{"component"},
+	)
+
 	// Publisher metrics
 
 	publishedTotal = observability.SharedFactory.NewCounterVec(
