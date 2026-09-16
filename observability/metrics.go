@@ -108,7 +108,7 @@ var (
 	// value has been dropped by CompactPersistedLeaves. A non-zero rate is
 	// the only way to confirm
 	// compaction is actually running: it is deliberately wired to be
-	// mandatory (see updateTree), so its absence is a build-time or
+	// mandatory (see commitLocked), so its absence is a build-time or
 	// startup-log signal, not a metric.
 	SMSTLeavesCompacted = MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
@@ -116,23 +116,6 @@ var (
 			Subsystem: "smst",
 			Name:      "leaves_compacted_total",
 			Help:      "Persisted SMST leaves whose in-memory value was dropped by CompactPersistedLeaves",
-		},
-		[]string{"supplier"},
-	)
-
-	// SMSTCompactionFailures counts a CompactPersistedLeaves call that
-	// returned an error or panicked. The relay that
-	// triggered it is never lost -- Update, Commit and FlushPipeline all
-	// already succeeded by the time compaction runs -- so this tracks a
-	// missed memory-reclaim opportunity, not a correctness failure. Alert
-	// on a sustained non-zero rate: a transient one is expected under the
-	// same corruption shapes SMSTPanicsRecovered already covers.
-	SMSTCompactionFailures = MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: "smst",
-			Name:      "compaction_failures_total",
-			Help:      "CompactPersistedLeaves calls that failed or panicked, without losing the relay that triggered them",
 		},
 		[]string{"supplier"},
 	)

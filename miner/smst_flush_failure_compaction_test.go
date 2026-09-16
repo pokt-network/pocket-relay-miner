@@ -37,7 +37,7 @@ import (
 // its own, with compaction enabled and, as the control, with the compactor
 // hidden from the manager.
 
-// noCompactor hides CompactPersistedLeaves from updateTree's type assertion:
+// noCompactor hides CompactPersistedLeaves from commitLocked's type assertion:
 // the method set of a struct embedding an interface is that interface's, so
 // the manager sees a trie without the capability and never compacts. Every
 // other trie method still reaches the real trie.

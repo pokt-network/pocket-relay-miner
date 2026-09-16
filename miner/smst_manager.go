@@ -340,6 +340,14 @@ type redisSMST struct {
 	// would otherwise repeat once per commit — see commitLocked.
 	compactorMissingLogged bool
 
+	// compactionDisabled is set by the first panic out of
+	// CompactPersistedLeaves on this tree, and commitLocked stops compacting
+	// it. Such a panic is a library defect, not corrupt state, so it would
+	// repeat on every commit; evicting the tree instead would resume it from
+	// Redis, panic again, and after persistentCorruptionThreshold evictions
+	// purge the session's Redis state with its relays.
+	compactionDisabled bool
+
 	// updateCount was the running tally of UpdateTree calls against this
 	// tree instance, which drove the live_root checkpoint at the first update
 	// and every LiveRootCheckpointInterval updates. That checkpoint is disabled
@@ -839,8 +847,8 @@ func (m *RedisSMSTManager) CommitTree(ctx context.Context, sessionID string) (re
 // value of every leaf that write persisted. With nothing changed since the last
 // commit it sends nothing. The caller holds tree.mu.
 //
-// Commit always runs inside BeginPipeline: it deletes orphaned nodes before it
-// writes the new ones, and outside a pipeline RedisMapStore.Delete would HDEL
+// Commit always runs inside BeginPipeline: it deletes orphaned nodes once it has
+// written the new ones, and outside a pipeline RedisMapStore.Delete would HDEL
 // them at once, while the stored live_root still references them.
 func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error {
 	// Enable pipelining to batch Set() operations during Commit()
@@ -888,41 +896,30 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 	// trie interface (failingCompactor, noCompactor) to make compaction fail or
 	// disappear without touching the smt library; its negative branch is loud.
 	//
-	// A failed or panicking compaction is deliberately NOT propagated as an
-	// error here: by this point the relay is already durable in both the
-	// trie and Redis (Update + Commit + FlushPipeline all succeeded above),
-	// so returning an error would report an already-successful write as
-	// failed, and the caller would retry or drop a relay that was never at
-	// risk. Compaction only reclaims memory for leaves that are already
-	// safe elsewhere; skipping one pass costs a slightly higher resident
-	// set until the next commit tries again, not correctness.
+	// A panicking compaction is deliberately NOT propagated as an error here:
+	// by this point the relay is already durable in both the trie and Redis
+	// (Update + Commit + FlushPipeline all succeeded above), so returning an
+	// error would report an already-successful write as failed, and the caller
+	// would retry or drop a relay that was never at risk. CompactPersistedLeaves
+	// returns no error, so a recovered panic is its only failure: runSMSTSafely
+	// logs it once and counts it in SMSTPanicsRecovered{supplier,"compact"},
+	// and the tree stops being compacted (see compactionDisabled), which costs
+	// that session its memory saving, not its relays.
 	if compactor, ok := tree.trie.(leafCompactor); ok {
-		var compactedLeaves int
-		if err := m.runSMSTSafely(sessionID, "compact", func() error {
-			compactedLeaves = compactor.CompactPersistedLeaves()
-			return nil
-		}); err != nil {
-			observability.SMSTCompactionFailures.WithLabelValues(m.config.SupplierAddress).Inc()
-			// Debug, not Warn: this runs once per commit, up to once per relay, and the condition
-			// (a recovered panic, the only way CompactPersistedLeaves can
-			// fail: it returns no error) is not transient, so a
-			// tree stuck in this state would otherwise log once per relay
-			// for the rest of the session. The alertable signal is the
-			// bounded SMSTCompactionFailures{supplier} counter above (and
-			// SMSTPanicsRecovered{supplier,"compact"}, already incremented
-			// inside runSMSTSafely's own recover for the panic case) -- a
-			// metric, not a per-relay log line, per this repo's logging
-			// policy.
-			m.logger.Debug().
-				Err(err).
-				Str(logging.FieldSessionID, sessionID).
-				Msg("SMST leaf compaction failed, leaving persisted leaves resident")
-		} else {
-			observability.SMSTLeavesCompacted.WithLabelValues(m.config.SupplierAddress).Add(float64(compactedLeaves))
-			m.logger.Debug().
-				Str(logging.FieldSessionID, sessionID).
-				Int("compacted_leaves", compactedLeaves).
-				Msg("compacted persisted SMST leaves")
+		if !tree.compactionDisabled {
+			var compactedLeaves int
+			if err := m.runSMSTSafely(sessionID, "compact", func() error {
+				compactedLeaves = compactor.CompactPersistedLeaves()
+				return nil
+			}); err != nil {
+				tree.compactionDisabled = true
+			} else {
+				observability.SMSTLeavesCompacted.WithLabelValues(m.config.SupplierAddress).Add(float64(compactedLeaves))
+				m.logger.Debug().
+					Str(logging.FieldSessionID, sessionID).
+					Int("compacted_leaves", compactedLeaves).
+					Msg("compacted persisted SMST leaves")
+			}
 		}
 	} else if !tree.compactorMissingLogged {
 		tree.compactorMissingLogged = true
