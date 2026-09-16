@@ -269,6 +269,13 @@ relay_meter:
   # Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
   cache_ttl: 2h
 
+  # How long this relayer remembers that Redis holds no service factor for a
+  # service, and none by default. Without it the lookup runs once per relay.
+  # The miner publishes an invalidation whenever it writes a factor, so this is
+  # only the backstop for an event nobody received.
+  # Default: 5s
+  service_factor_missing_ttl: 5s
+
 # HTTP transport settings (connection pooling and timeouts for backend requests)
 # These settings optimize connection reuse and prevent resource exhaustion.
 # Defaults are tuned for 1000+ RPS - override based on your backend characteristics.

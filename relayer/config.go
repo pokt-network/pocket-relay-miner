@@ -657,6 +657,12 @@ type RelayMeterYAMLConfig struct {
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	// Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
+
+	// ServiceFactorMissingTTL bounds how long this relayer remembers that Redis
+	// holds no service factor for a service, and none by default. It stops the
+	// per-relay GET that an unconfigured factor used to cost.
+	// Default: 5s -- DefaultServiceFactorMissingTTL carries why it is seconds.
+	ServiceFactorMissingTTL time.Duration `yaml:"service_factor_missing_ttl"`
 }
 
 // CacheWarmupConfig contains configuration for cache pre-warming at startup.
@@ -708,7 +714,8 @@ func DefaultConfig() Config {
 			Addr:    "0.0.0.0:8081",
 		},
 		RelayMeter: RelayMeterYAMLConfig{
-			CacheTTL: 2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
+			CacheTTL:                2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
+			ServiceFactorMissingTTL: DefaultServiceFactorMissingTTL,
 		},
 		HTTPTransport: HTTPTransportConfig{
 			MaxIdleConns:                 500,  // Total idle connections across all hosts (5x for 1000+ RPS)

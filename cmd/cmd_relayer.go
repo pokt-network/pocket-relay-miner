@@ -1138,6 +1138,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	serviceFactorClient := relayer.NewServiceFactorClient(
 		logger,
 		redisClient,
+		config.RelayMeter.ServiceFactorMissingTTL,
 	)
 	if err := serviceFactorClient.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start service factor client: %w", err)

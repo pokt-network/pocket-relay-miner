@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/redis/go-redis/v9"
@@ -21,6 +22,33 @@ type ServiceFactorData struct {
 	UpdatedAt int64   `json:"updated_at"`
 }
 
+// DefaultServiceFactorMissingTTL is how long the client remembers that Redis
+// holds no factor under a key.
+//
+// Seconds, not minutes: the factor caps what a relay may be charged, so while a
+// negative entry stands, relays for that service are priced by the conservative
+// fallback. The miner publishes an invalidation on every factor it writes and
+// handleInvalidation drops the entry at once, so this TTL is only the backstop
+// for the event that never arrived -- a dropped message, or a subscriber that
+// was reconnecting.
+const DefaultServiceFactorMissingTTL = 5 * time.Second
+
+// serviceFactorEntry is one L1 slot: either the factor read from Redis, or the
+// fact that Redis holds no key for it.
+//
+// The absence is cached because GetServiceFactor runs once per relay: with no
+// key in Redis, remembering only the hits sent one GET per relay (measured at
+// 1.858 GET/s against 1.855 relays/s on a live run).
+type serviceFactorEntry struct {
+	// data is nil on a negative entry: Redis answered that the key is absent.
+	data *ServiceFactorData
+
+	// missingUntil bounds a NEGATIVE entry and is the zero time on a positive
+	// one. A positive entry does not expire -- it is dropped by the miner's
+	// pub/sub invalidation, which is what keeps a price change immediate.
+	missingUntil time.Time
+}
+
 // ServiceFactorClient reads service factor configuration from Redis.
 // The miner publishes service factors, and relayers consume them for relay metering.
 type ServiceFactorClient struct {
@@ -28,8 +56,16 @@ type ServiceFactorClient struct {
 	redisClient *redisutil.Client
 
 	// L1 cache for service factors (lock-free)
-	defaultFactorCache *xsync.Map[string, *ServiceFactorData] // Key: "default"
-	serviceFactorCache *xsync.Map[string, *ServiceFactorData] // Key: serviceID
+	defaultFactorCache *xsync.Map[string, serviceFactorEntry] // Key: "default"
+	serviceFactorCache *xsync.Map[string, serviceFactorEntry] // Key: serviceID
+
+	// missingTTL bounds how long a negative entry is honoured.
+	missingTTL time.Duration
+
+	// now is the clock the negative entries expire against. It is captured at
+	// construction, on the caller's goroutine, so a test that replaces it is
+	// ordered with every read that follows.
+	now func() time.Time
 
 	// Lifecycle
 	ctx      context.Context
@@ -40,16 +76,31 @@ type ServiceFactorClient struct {
 }
 
 // NewServiceFactorClient creates a new service factor client.
+//
+// missingTTL bounds how long "Redis holds no factor for this key" is
+// remembered; a value of zero or less takes DefaultServiceFactorMissingTTL.
 func NewServiceFactorClient(
 	logger logging.Logger,
 	redisClient *redisutil.Client,
+	missingTTL time.Duration,
 ) *ServiceFactorClient {
+	if missingTTL <= 0 {
+		missingTTL = DefaultServiceFactorMissingTTL
+	}
+
 	return &ServiceFactorClient{
 		logger:             logging.ForComponent(logger, logging.ComponentServiceFactorClient),
 		redisClient:        redisClient,
-		defaultFactorCache: xsync.NewMap[string, *ServiceFactorData](),
-		serviceFactorCache: xsync.NewMap[string, *ServiceFactorData](),
+		defaultFactorCache: xsync.NewMap[string, serviceFactorEntry](),
+		serviceFactorCache: xsync.NewMap[string, serviceFactorEntry](),
+		missingTTL:         missingTTL,
+		now:                time.Now,
 	}
+}
+
+// missingEntry builds a negative entry that stands until missingTTL elapses.
+func (c *ServiceFactorClient) missingEntry() serviceFactorEntry {
+	return serviceFactorEntry{missingUntil: c.now().Add(c.missingTTL)}
 }
 
 // Start begins the service factor client, subscribing to invalidation events.
@@ -137,45 +188,71 @@ func (c *ServiceFactorClient) handleInvalidation(_ context.Context, rawPayload s
 // GetServiceFactor returns the service factor for a given service ID.
 // It checks L1 cache first, then falls back to L2 (Redis).
 // Returns (factor, true) if found, (0, false) if not configured.
+//
+// A per-service entry recording ABSENCE means "this service has no override",
+// so it skips the per-service GET and still resolves the default. Only a
+// negative default entry ends the lookup.
 func (c *ServiceFactorClient) GetServiceFactor(ctx context.Context, serviceID string) (float64, bool) {
 	// Check L1 cache for per-service override
-	if data, ok := c.serviceFactorCache.Load(serviceID); ok {
-		return data.Factor, true
+	knownMissing := false
+	if entry, ok := c.serviceFactorCache.Load(serviceID); ok {
+		if entry.data != nil {
+			return entry.data.Factor, true
+		}
+		knownMissing = c.now().Before(entry.missingUntil)
 	}
 
-	// Try to fetch from Redis (L2)
-	key := c.serviceFactorServiceKey(serviceID)
-	data, err := c.redisClient.Get(ctx, key).Bytes()
-	if err == nil {
-		var factorData ServiceFactorData
-		if json.Unmarshal(data, &factorData) == nil {
-			// Store in L1 cache
-			c.serviceFactorCache.Store(serviceID, &factorData)
-			return factorData.Factor, true
+	if !knownMissing {
+		// Try to fetch from Redis (L2)
+		key := c.serviceFactorServiceKey(serviceID)
+		data, err := c.redisClient.Get(ctx, key).Bytes()
+		switch {
+		case err == nil:
+			var factorData ServiceFactorData
+			if json.Unmarshal(data, &factorData) == nil {
+				// Store in L1 cache
+				c.serviceFactorCache.Store(serviceID, serviceFactorEntry{data: &factorData})
+				return factorData.Factor, true
+			}
+			// A value that does not parse is a defect in the producer, not an
+			// absence: it is left uncached so it keeps reaching Redis and
+			// resolves the moment the miner rewrites the key.
+		case errors.Is(err, redis.Nil):
+			c.serviceFactorCache.Store(serviceID, c.missingEntry())
+		default:
+			// A timeout or a lost connection is not an absence. Remembering it
+			// would price every relay of this service off one blink of Redis.
+			c.logger.Debug().
+				Err(err).
+				Str("service_id", serviceID).
+				Msg("failed to get service factor from Redis")
 		}
-	} else if !errors.Is(err, redis.Nil) {
-		c.logger.Debug().
-			Err(err).
-			Str("service_id", serviceID).
-			Msg("failed to get service factor from Redis")
 	}
 
 	// Check L1 cache for default
-	if d, ok := c.defaultFactorCache.Load("default"); ok {
-		return d.Factor, true
+	if entry, ok := c.defaultFactorCache.Load("default"); ok {
+		if entry.data != nil {
+			return entry.data.Factor, true
+		}
+		if c.now().Before(entry.missingUntil) {
+			return 0, false
+		}
 	}
 
 	// Try to fetch default from Redis (L2)
-	key = c.serviceFactorDefaultKey()
+	key := c.serviceFactorDefaultKey()
 	data2, err := c.redisClient.Get(ctx, key).Bytes()
-	if err == nil {
+	switch {
+	case err == nil:
 		var factorData ServiceFactorData
 		if json.Unmarshal(data2, &factorData) == nil {
 			// Store in L1 cache
-			c.defaultFactorCache.Store("default", &factorData)
+			c.defaultFactorCache.Store("default", serviceFactorEntry{data: &factorData})
 			return factorData.Factor, true
 		}
-	} else if !errors.Is(err, redis.Nil) {
+	case errors.Is(err, redis.Nil):
+		c.defaultFactorCache.Store("default", c.missingEntry())
+	default:
 		c.logger.Debug().
 			Err(err).
 			Msg("failed to get default service factor from Redis")
@@ -215,7 +292,7 @@ func (c *ServiceFactorClient) refreshAll(ctx context.Context) {
 	if err == nil {
 		var factorData ServiceFactorData
 		if json.Unmarshal(data, &factorData) == nil {
-			c.defaultFactorCache.Store("default", &factorData)
+			c.defaultFactorCache.Store("default", serviceFactorEntry{data: &factorData})
 			c.logger.Debug().
 				Float64("factor", factorData.Factor).
 				Msg("loaded default service factor from Redis")
