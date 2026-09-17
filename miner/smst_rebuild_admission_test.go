@@ -22,13 +22,16 @@ import (
 )
 
 // heapModel is the process memory an admission reads in a test: objects moves
-// with every load and drop, live only when gc runs.
+// with every load and drop, live only when gc runs. Its clock moves by step on
+// every read, an hour unless set, so forced GCs are not throttled.
 type heapModel struct {
 	mu      sync.Mutex
 	objects uint64
 	live    uint64
 	garbage uint64
 	gcs     int
+	clock   time.Time
+	step    time.Duration
 }
 
 func (h *heapModel) readObjects() uint64 { h.mu.Lock(); defer h.mu.Unlock(); return h.objects }
@@ -49,13 +52,35 @@ func (h *heapModel) drop(n uint64) { h.mu.Lock(); defer h.mu.Unlock(); h.garbage
 
 func (h *heapModel) gcCount() int { h.mu.Lock(); defer h.mu.Unlock(); return h.gcs }
 
+func (h *heapModel) cycles() uint64 { h.mu.Lock(); defer h.mu.Unlock(); return uint64(h.gcs) }
+
+func (h *heapModel) now() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.step == 0 {
+		h.step = time.Hour
+	}
+	h.clock = h.clock.Add(h.step)
+	return h.clock
+}
+
+func (h *heapModel) memory(limit uint64) processMemory {
+	return processMemory{
+		objects: h.readObjects,
+		live:    h.readLive,
+		limit:   func() uint64 { return limit },
+		cycles:  h.cycles,
+		gc:      h.gc,
+		now:     h.now,
+	}
+}
+
 func (h *heapModel) admission(limit uint64) *RebuildAdmission {
-	return newRebuildAdmission(zerolog.Nop(), h.readObjects, h.readLive, func() uint64 { return limit }, h.gc)
+	return newRebuildAdmission(zerolog.Nop(), h.memory(limit))
 }
 
 func noRoom() *RebuildAdmission {
-	zero := func() uint64 { return 0 }
-	return newRebuildAdmission(zerolog.Nop(), zero, zero, zero, func() {})
+	return (&heapModel{}).admission(0)
 }
 
 func waitingCount(a *RebuildAdmission) int {
@@ -171,6 +196,96 @@ func TestRebuildAdmission_GarbageAloneDoesNotKeepATreeWaiting(t *testing.T) {
 		t.Fatal("LINK gc-retry: a tree that fits once the garbage is collected must not wait")
 	}
 	require.Equal(t, 1, heap.gcCount(), "the objects said no, one GC said yes")
+}
+
+func TestRebuildAdmission_AForcedGCDoesNotHoldTheAdmissionLocked(t *testing.T) {
+	const tree = 100 << 20
+	heap := &heapModel{objects: 1 << 30, live: 1 << 30}
+	memory := heap.memory(rebuildHeadroomBytes + 1<<30 + tree/2)
+	inGC, finishGC := make(chan struct{}), make(chan struct{})
+	var finish sync.Once
+	memory.gc = func() {
+		close(inGC)
+		<-finishGC
+		heap.gc()
+	}
+	admission := newRebuildAdmission(zerolog.Nop(), memory)
+
+	loaded, release, err := admission.acquire(context.Background(), rebuildKindProof, tree, 2)
+	require.NoError(t, err)
+	loaded()
+	// Cleanups run last first: the GC ends before the tree is released, so a
+	// failure does not leave release waiting on a GC that never ends.
+	t.Cleanup(release)
+	t.Cleanup(func() { finish.Do(func() { close(finishGC) }) })
+	waiter := acquireAsync(admission, context.Background(), tree, 1)
+	<-inGC
+
+	answered := make(chan struct{})
+	go func() {
+		admission.IngestionPause("pokt1any").Paused()
+		admission.oldestProofWait()
+		close(answered)
+	}()
+	select {
+	case <-answered:
+	case <-time.After(30 * time.Second):
+		t.Fatal("LINK gc-unlocked: the pause and the oldest wait gauge must answer while a forced GC runs")
+	}
+	finish.Do(func() { close(finishGC) })
+	deadline := time.After(30 * time.Second)
+	for collecting := true; collecting; {
+		admission.mu.Lock()
+		collecting = admission.collecting
+		admission.mu.Unlock()
+		select {
+		case <-deadline:
+			t.Fatal("the admission never saw its GC end")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	requireNotAdmitted(t, admission, waiter, 1, "the tree still does not fit after the GC")
+	require.Equal(t, 1, heap.gcCount())
+}
+
+func TestRebuildAdmission_ForcedGCsAreAtMostOnePerIntervalAndSkippedAfterARecentOne(t *testing.T) {
+	heap := &heapModel{step: time.Millisecond}
+	admission := heap.admission(1 << 40)
+	before := testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonRebuildAdmission))
+
+	admission.collect(gcReasonRebuildAdmission)
+	require.Equal(t, 1, heap.gcCount(), "the first collection forces a GC")
+	admission.collect(gcReasonRebuildAdmission)
+	require.Equal(t, 1, heap.gcCount(), "LINK gc-interval: a second GC within the interval is not forced")
+
+	heap.mu.Lock()
+	heap.clock = heap.clock.Add(forcedGCInterval)
+	heap.mu.Unlock()
+	admission.collect(gcReasonRebuildAdmission)
+	require.Equal(t, 2, heap.gcCount(), "past the interval a GC is forced again")
+
+	heap.mu.Lock()
+	heap.clock = heap.clock.Add(forcedGCInterval)
+	heap.gcs++ // the runtime completed a GC on its own, some time since the last look
+	heap.mu.Unlock()
+	admission.collect(gcReasonRebuildAdmission)
+	require.Equal(t, 4, heap.gcCount(), "a GC the runtime ran an interval or more after the last look may be old: one is forced")
+
+	advance := func(d time.Duration) {
+		heap.mu.Lock()
+		heap.clock = heap.clock.Add(d)
+		heap.mu.Unlock()
+	}
+	advance(forcedGCInterval * 6 / 10)
+	admission.collect(gcReasonRebuildAdmission) // throttled, but it looks
+	require.Equal(t, 4, heap.gcCount())
+	advance(forcedGCInterval * 6 / 10)
+	heap.mu.Lock()
+	heap.gcs++ // the runtime completes one within an interval of that look
+	heap.mu.Unlock()
+	admission.collect(gcReasonRebuildAdmission)
+	require.Equal(t, 5, heap.gcCount(), "LINK gc-recent: a GC the runtime completed within an interval of the last look stands in for a forced one")
+	require.Equal(t, before+3, testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonRebuildAdmission)), "forced GCs are counted, the runtime's are not")
 }
 
 func TestRebuildAdmission_TheNextTreeIsNotAskedWhileOneIsLoading(t *testing.T) {

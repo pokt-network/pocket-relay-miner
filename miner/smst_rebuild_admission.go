@@ -11,9 +11,11 @@ package miner
 // question is asked: does this tree's estimate fit between the heap and
 // GOMEMLIMIT, less rebuildHeadroomBytes? The first answer reads the heap's
 // objects, which every allocation updates and which include garbage: a yes
-// never misses the tree loaded last. On a no, a GC runs and the question is
-// asked again of the live heap that GC just measured, so garbage alone does
-// not keep a tree waiting. If it still does not fit, the tree waits for a
+// never misses the tree loaded last. On a no, the question is asked again of
+// the live heap, measured by a GC that ran in the last second or by one forced
+// now, so garbage alone does not keep a tree waiting. The forced GC runs with
+// the admission unlocked: a collection of gigabytes takes seconds, and the
+// consumers and the metrics read the admission meanwhile. If it still does not fit, the tree waits for a
 // rebuild in flight to end. With nothing in flight it is admitted whatever it
 // weighs, so no proof is ever given up for memory.
 //
@@ -43,6 +45,10 @@ import (
 const (
 	// rebuildHeadroomBytes is what admission leaves free under GOMEMLIMIT.
 	rebuildHeadroomBytes = 512 << 20
+
+	// forcedGCInterval is the least time between two forced GCs, and how old a
+	// GC the runtime ran on its own may be for its live heap to stand in for one.
+	forcedGCInterval = time.Second
 
 	// rebuildLeafOverheadBytes is the heap a rebuilt leaf holds besides its
 	// value's two copies: its inner nodes, map entries and slice headers.
@@ -80,12 +86,7 @@ var _ = observability.MinerFactory.NewGaugeFunc(
 // nil *RebuildAdmission admits everything at once.
 type RebuildAdmission struct {
 	logger logging.Logger
-	// objects reads the heap's objects, live and dead; live the heap the last
-	// GC marked; limit GOMEMLIMIT; gc runs a collection.
-	objects func() uint64
-	live    func() uint64
-	limit   func() uint64
-	gc      func()
+	processMemory
 	// admitted, when set, runs on the admitted caller's goroutine before
 	// acquire returns. Tests only.
 	admitted func(kind string, value uint64)
@@ -93,15 +94,36 @@ type RebuildAdmission struct {
 	mu       sync.Mutex
 	loading  bool
 	inFlight int
-	// collected is set once a GC ran for a tree that did not fit, and cleared
-	// when a tree loads or a rebuild ends: until then another GC finds
+	// generation moves when a tree loads or a rebuild ends. collectedAt is the
+	// generation a GC for a tree that did not fit started in, and collecting
+	// is set while that GC runs: until the generation moves another GC finds
 	// nothing new to free.
-	collected bool
-	waiting   []*rebuildWaiter
-	seq       uint64
-	proofs    int
-	flushes   map[string]int
-	changed   chan struct{}
+	generation  uint64
+	collectedAt uint64
+	collecting  bool
+	waiting     []*rebuildWaiter
+	seq         uint64
+	proofs      int
+	flushes     map[string]int
+	changed     chan struct{}
+
+	// gcMu serializes forced GCs and guards the fields after it.
+	gcMu     sync.Mutex
+	gcForced time.Time
+	gcSeen   time.Time
+	gcCycles uint64
+}
+
+// processMemory reads the process's memory. objects reads the heap's objects,
+// live and dead; live the heap the last GC marked; limit GOMEMLIMIT; cycles
+// the GCs completed; gc runs a collection.
+type processMemory struct {
+	objects func() uint64
+	live    func() uint64
+	limit   func() uint64
+	cycles  func() uint64
+	gc      func()
+	now     func() time.Time
 }
 
 type rebuildWaiter struct {
@@ -118,7 +140,14 @@ type rebuildWaiter struct {
 // becomes the one the process's metrics report. Without GOMEMLIMIT every tree
 // fits, and trees still load one at a time.
 func NewRebuildAdmission(logger logging.Logger) *RebuildAdmission {
-	a := newRebuildAdmission(logger, runtimeHeapObjects, runtimeHeapLive, runtimeMemoryLimit, runtime.GC)
+	a := newRebuildAdmission(logger, processMemory{
+		objects: runtimeHeapObjects,
+		live:    runtimeHeapLive,
+		limit:   runtimeMemoryLimit,
+		cycles:  runtimeGCCycles,
+		gc:      runtime.GC,
+		now:     time.Now,
+	})
 	if runtimeMemoryLimit() == math.MaxInt64 {
 		a.logger.Warn().Msg("GOMEMLIMIT is not set: rebuilds of compacted SMSTs are not bounded by memory")
 	}
@@ -126,21 +155,21 @@ func NewRebuildAdmission(logger logging.Logger) *RebuildAdmission {
 	return a
 }
 
-func newRebuildAdmission(logger logging.Logger, objects, live, limit func() uint64, gc func()) *RebuildAdmission {
+func newRebuildAdmission(logger logging.Logger, memory processMemory) *RebuildAdmission {
 	return &RebuildAdmission{
-		logger:  logging.ForComponent(logger, "smst_rebuild_admission"),
-		objects: objects,
-		live:    live,
-		limit:   limit,
-		gc:      gc,
-		flushes: make(map[string]int),
-		changed: make(chan struct{}),
+		logger:        logging.ForComponent(logger, "smst_rebuild_admission"),
+		processMemory: memory,
+		generation:    1,
+		flushes:       make(map[string]int),
+		changed:       make(chan struct{}),
 	}
 }
 
 func runtimeHeapObjects() uint64 { return readRuntimeBytes("/memory/classes/heap/objects:bytes") }
 
 func runtimeHeapLive() uint64 { return readRuntimeBytes("/gc/heap/live:bytes") }
+
+func runtimeGCCycles() uint64 { return readRuntimeBytes("/gc/cycles/total:gc-cycles") }
 
 func readRuntimeBytes(name string) uint64 {
 	sample := []metrics.Sample{{Name: name}}
@@ -171,8 +200,7 @@ func (a *RebuildAdmission) acquire(ctx context.Context, kind string, estimate, v
 	a.seq++
 	w.seq = a.seq
 	a.enqueue(w)
-	a.dispatch()
-	a.mu.Unlock()
+	a.unlockAndDispatch()
 
 	select {
 	case <-w.ready:
@@ -181,9 +209,10 @@ func (a *RebuildAdmission) acquire(ctx context.Context, kind string, estimate, v
 		granted := w.granted
 		if !granted {
 			a.remove(w)
-			a.dispatch()
+			a.unlockAndDispatch()
+		} else {
+			a.mu.Unlock()
 		}
-		a.mu.Unlock()
 		if granted {
 			_, release := a.slot()
 			release()
@@ -212,9 +241,8 @@ func (a *RebuildAdmission) slot() (loaded, release func()) {
 		isLoaded = true
 		a.mu.Lock()
 		a.loading = false
-		a.collected = false
-		a.dispatch()
-		a.mu.Unlock()
+		a.generation++
+		a.unlockAndDispatch()
 	}
 	release = func() {
 		mu.Lock()
@@ -228,9 +256,8 @@ func (a *RebuildAdmission) slot() (loaded, release func()) {
 			a.loading = false
 		}
 		a.inFlight--
-		a.collected = false
-		a.dispatch()
-		a.mu.Unlock()
+		a.generation++
+		a.unlockAndDispatch()
 	}
 	return loaded, release
 }
@@ -277,22 +304,40 @@ func (a *RebuildAdmission) remove(w *rebuildWaiter) {
 	observability.SMSTRebuildWaiting.WithLabelValues(w.kind).Dec()
 }
 
+// unlockAndDispatch dispatches, releases a.mu, and runs the GC dispatch asks
+// for with a.mu released, dispatching again after it. a.mu must be held.
+func (a *RebuildAdmission) unlockAndDispatch() {
+	for {
+		collect, started := a.dispatch(), a.generation
+		a.mu.Unlock()
+		if !collect {
+			return
+		}
+
+		a.collect(gcReasonRebuildAdmission)
+
+		a.mu.Lock()
+		a.collecting = false
+		a.collectedAt = started
+	}
+}
+
 // dispatch admits the head of the queue when no tree is loading and it fits,
 // or when nothing is in flight. The head blocks the rest: a smaller tree
-// behind it does not jump ahead.
-func (a *RebuildAdmission) dispatch() {
-	if a.loading || len(a.waiting) == 0 {
-		return
+// behind it does not jump ahead. It reports whether the head needs a GC to be
+// asked again; the caller runs it without a.mu.
+func (a *RebuildAdmission) dispatch() (collect bool) {
+	if a.loading || a.collecting || len(a.waiting) == 0 {
+		return false
 	}
 	w := a.waiting[0]
 	if a.inFlight > 0 && !a.fits(w.estimate, a.objects) {
-		if a.collected {
-			return
+		if a.collectedAt != a.generation {
+			a.collecting = true
+			return true
 		}
-		a.gc()
-		a.collected = true
 		if !a.fits(w.estimate, a.live) {
-			return
+			return false
 		}
 	}
 	a.remove(w)
@@ -300,6 +345,23 @@ func (a *RebuildAdmission) dispatch() {
 	a.inFlight++
 	w.granted = true
 	close(w.ready)
+	return false
+}
+
+// collect makes the live heap recent: it forces a GC unless the runtime
+// completed one within forcedGCInterval, or one was forced within it.
+func (a *RebuildAdmission) collect(reason string) {
+	a.gcMu.Lock()
+	defer a.gcMu.Unlock()
+	now, cycles := a.now(), a.cycles()
+	recent := !a.gcSeen.IsZero() && cycles != a.gcCycles && now.Sub(a.gcSeen) <= forcedGCInterval
+	a.gcSeen, a.gcCycles = now, cycles
+	if recent || !a.gcForced.IsZero() && now.Sub(a.gcForced) < forcedGCInterval {
+		return
+	}
+	a.gc()
+	a.gcForced, a.gcSeen, a.gcCycles = a.now(), a.now(), a.cycles()
+	forcedGCs.WithLabelValues(reason).Inc()
 }
 
 func (a *RebuildAdmission) fits(estimate uint64, heap func() uint64) bool {

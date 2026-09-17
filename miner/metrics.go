@@ -17,7 +17,22 @@ const (
 	metricsSubsystem = "miner"
 )
 
+// Reasons a GC is forced, used as a metric label.
+const gcReasonRebuildAdmission = "rebuild_admission"
+
 var (
+	// forcedGCs counts the GCs the miner forces to read a recent live heap,
+	// by reason.
+	forcedGCs = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "forced_gc_total",
+			Help:      "GCs the miner forced to read a recent live heap, by reason",
+		},
+		[]string{"reason"},
+	)
+
 	// trackingWritesSkipped counts submission tracking records not written because
 	// Redis could not take writes, by kind (claim, proof, claim_outcome,
 	// proof_outcome).
