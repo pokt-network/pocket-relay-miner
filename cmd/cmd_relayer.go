@@ -23,6 +23,7 @@ import (
 	// Aliased because runHARelayer binds a local variable named `config` to
 	// the relayer configuration, which would shadow the package name.
 	sharedconfig "github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/observability"
@@ -425,6 +426,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
+	memlimit.Apply(logger)
 
 	// Keys the file carries that this binary does not understand.
 	//

@@ -8,9 +8,9 @@ package miner
 //
 // RebuildAdmission loads one tree at a time. The next is asked only once the
 // previous one is loaded, so its memory is already in the process when the
-// question is asked: does this tree's estimate fit between the heap and
-// GOMEMLIMIT, less rebuildHeadroomBytes? The first answer reads the heap's
-// objects, which every allocation updates and which include garbage: a yes
+// question is asked: does this tree's estimate fit between the heap and the
+// process's memory limit, less rebuildHeadroomBytes? The first answer reads the
+// heap's objects, which every allocation updates and which include garbage: a yes
 // never misses the tree loaded last. On a no, the question is asked again of
 // the live heap, measured by a GC that ran in the last second or by one forced
 // now, so garbage alone does not keep a tree waiting. The forced GC runs with
@@ -27,7 +27,6 @@ package miner
 
 import (
 	"context"
-	"math"
 	"runtime"
 	"runtime/debug"
 	"runtime/metrics"
@@ -43,7 +42,7 @@ import (
 )
 
 const (
-	// rebuildHeadroomBytes is what admission leaves free under GOMEMLIMIT.
+	// rebuildHeadroomBytes is what admission leaves free under the memory limit.
 	rebuildHeadroomBytes = 512 << 20
 
 	// forcedGCInterval is the least time between two forced GCs, and how old a
@@ -115,8 +114,8 @@ type RebuildAdmission struct {
 }
 
 // processMemory reads the process's memory. objects reads the heap's objects,
-// live and dead; live the heap the last GC marked; limit GOMEMLIMIT; cycles
-// the GCs completed; gc runs a collection.
+// live and dead; live the heap the last GC marked; limit the runtime's memory
+// limit; cycles the GCs completed; gc runs a collection.
 type processMemory struct {
 	objects func() uint64
 	live    func() uint64
@@ -136,9 +135,10 @@ type rebuildWaiter struct {
 	granted  bool
 }
 
-// NewRebuildAdmission reads the runtime's live heap and memory limit, and
-// becomes the one the process's metrics report. Without GOMEMLIMIT every tree
-// fits, and trees still load one at a time.
+// NewRebuildAdmission reads the runtime's heap and memory limit, and becomes
+// the one the process's metrics report. The limit is the one the process set
+// when it started; without one every tree fits, and trees still load one at a
+// time.
 func NewRebuildAdmission(logger logging.Logger) *RebuildAdmission {
 	a := newRebuildAdmission(logger, processMemory{
 		objects: runtimeHeapObjects,
@@ -148,9 +148,6 @@ func NewRebuildAdmission(logger logging.Logger) *RebuildAdmission {
 		gc:      runtime.GC,
 		now:     time.Now,
 	})
-	if runtimeMemoryLimit() == math.MaxInt64 {
-		a.logger.Warn().Msg("GOMEMLIMIT is not set: rebuilds of compacted SMSTs are not bounded by memory")
-	}
 	processRebuildAdmission.Store(a)
 	return a
 }
@@ -366,9 +363,6 @@ func (a *RebuildAdmission) collect(reason string) {
 
 func (a *RebuildAdmission) fits(estimate uint64, heap func() uint64) bool {
 	limit := a.limit()
-	if limit == math.MaxInt64 {
-		return true
-	}
 	if limit <= rebuildHeadroomBytes {
 		return false
 	}

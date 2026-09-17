@@ -12,6 +12,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -161,6 +162,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
+	memlimit.Apply(logger)
 
 	// Keys the file carries that this binary does not understand.
 	//
