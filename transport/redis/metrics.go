@@ -15,6 +15,22 @@ const (
 )
 
 var (
+	// dispatchRoundDuration is how long a round of the batch dispatcher took, from
+	// its start until the slowest EXEC in it came back, by result (ok, error,
+	// oom). While a round is in flight admission measures the dispatcher's age
+	// from its start, so a round longer than the heartbeat limit keeps admission
+	// closed for what it lasts past that limit.
+	dispatchRoundDuration = observability.SharedFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "dispatch_round_duration_seconds",
+			Help:      "Duration of a batch dispatcher round, from its start until its slowest EXEC came back, by result",
+			Buckets:   []float64{0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 7, 10, 20, 30},
+		},
+		[]string{"result"},
+	)
+
 	// storeOperable is 1 while StoreHealth admits work for the component and 0
 	// while it does not.
 	storeOperable = observability.SharedFactory.NewGaugeVec(

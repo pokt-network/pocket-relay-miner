@@ -430,8 +430,15 @@ var errDispatchWorkerStopped = errors.New("dispatch worker stopped before report
 // each outcome on its job. A job starts out as unwritten, so one whose worker
 // panics goes back to the queue instead of being taken as written.
 func (p *BatchingPublisher) writeRound(ctx context.Context, round []*dispatchJob, ledger *ChargeLedger) {
-	p.inFlightSince.Store(p.now().UnixNano())
-	defer p.inFlightSince.Store(0)
+	start := p.now()
+	p.inFlightSince.Store(start.UnixNano())
+	// The round is what LastSuccess measures from while it is in flight, so its
+	// duration, until the slowest EXEC comes back, is what admission's heartbeat
+	// is compared with.
+	defer func() {
+		dispatchRoundDuration.WithLabelValues(roundResult(round)).Observe(p.now().Sub(start).Seconds())
+		p.inFlightSince.Store(0)
+	}()
 	if len(round) == 1 {
 		job := round[0]
 		job.retry, job.discard, job.err = p.writeChunk(ctx, job.chunk, job.charges, ledger)
@@ -469,6 +476,21 @@ func (p *BatchingPublisher) writeRound(ctx context.Context, round []*dispatchJob
 			}
 		}
 	}
+}
+
+// roundResult labels a finished round: oom if Redis refused a chunk for memory,
+// error if any other chunk failed, ok otherwise.
+func roundResult(round []*dispatchJob) string {
+	result := "ok"
+	for _, job := range round {
+		switch {
+		case errors.Is(job.err, errStoreOutOfMemory):
+			return "oom"
+		case job.err != nil:
+			result = "error"
+		}
+	}
+	return result
 }
 
 // chargesBySupplier keeps charges grouped by the supplier whose stream they
