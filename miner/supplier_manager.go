@@ -578,6 +578,10 @@ func (m *SupplierManager) Start(ctx context.Context) error {
 	m.ctx, m.cancelFn = context.WithCancel(ctx)
 	m.mu.Unlock()
 
+	if m.rebuildAdmission != nil {
+		go logging.RecoverGoRoutine(m.logger, "ingestion_memory_brake", m.rebuildAdmission.RunMemoryBrake)(m.ctx)
+	}
+
 	// Register for key changes
 	m.keyManager.OnKeyChange(m.onKeyChange)
 

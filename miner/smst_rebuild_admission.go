@@ -24,6 +24,7 @@ package miner
 // consumers stop reading, so ingestion does not grow the heap the proof is
 // waiting for -- except a supplier's whose claim is waiting to drain its
 // stream, since that claim seals at its height cap with or without the relays.
+// The ingestion memory brake holds the consumers through the same pause.
 
 import (
 	"context"
@@ -105,6 +106,9 @@ type RebuildAdmission struct {
 	proofs      int
 	flushes     map[string]int
 	changed     chan struct{}
+	// brakeClosed is the ingestion memory brake, closed since brakeClosedAt.
+	brakeClosed   bool
+	brakeClosedAt time.Time
 
 	// gcMu serializes forced GCs and guards the fields after it.
 	gcMu     sync.Mutex
@@ -423,7 +427,8 @@ func (a *RebuildAdmission) IngestionPause(supplier string) IngestionPauseView {
 }
 
 // IngestionPauseView holds one supplier's stream consumer while a proof waits
-// for memory, unless that supplier's claim is waiting for its stream.
+// for memory or the ingestion memory brake is closed, unless that supplier's
+// claim is waiting for its stream.
 type IngestionPauseView struct {
 	a        *RebuildAdmission
 	supplier string
@@ -436,7 +441,7 @@ func (v IngestionPauseView) Paused() bool {
 	}
 	v.a.mu.Lock()
 	defer v.a.mu.Unlock()
-	return v.a.proofs > 0 && v.a.flushes[v.supplier] == 0
+	return (v.a.proofs > 0 || v.a.brakeClosed) && v.a.flushes[v.supplier] == 0
 }
 
 // PauseChanged returns a channel closed the next time Paused may have changed.

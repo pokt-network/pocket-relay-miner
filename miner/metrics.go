@@ -18,7 +18,16 @@ const (
 )
 
 // Reasons a GC is forced, used as a metric label.
-const gcReasonRebuildAdmission = "rebuild_admission"
+const (
+	gcReasonRebuildAdmission = "rebuild_admission"
+	gcReasonMemoryBrake      = "memory_brake"
+)
+
+// Ingestion memory brake states, used as a metric label.
+const (
+	memoryBrakeClosed = "closed"
+	memoryBrakeOpen   = "open"
+)
 
 var (
 	// forcedGCs counts the GCs the miner forces to read a recent live heap,
@@ -31,6 +40,28 @@ var (
 			Help:      "GCs the miner forced to read a recent live heap, by reason",
 		},
 		[]string{"reason"},
+	)
+
+	// ingestionMemoryBrakeClosed is 1 while the heap near the memory limit
+	// holds the stream consumers.
+	ingestionMemoryBrakeClosed = observability.MinerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "ingestion_memory_brake_closed",
+			Help:      "1 while the live heap near the process memory limit holds the stream consumers",
+		},
+	)
+
+	// ingestionMemoryBrakeTransitions counts the brake closing and reopening.
+	ingestionMemoryBrakeTransitions = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "ingestion_memory_brake_transitions_total",
+			Help:      "Times the ingestion memory brake closed or reopened, by the state it entered",
+		},
+		[]string{"state"},
 	)
 
 	// trackingWritesSkipped counts submission tracking records not written because

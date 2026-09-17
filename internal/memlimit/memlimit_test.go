@@ -154,3 +154,13 @@ func TestMargin(t *testing.T) {
 	require.Equal(t, uint64(256<<20), Margin(2*gib))
 	require.Zero(t, Margin(0))
 }
+
+func TestBrakeThresholds(t *testing.T) {
+	closeAbove, reopenBelow := BrakeThresholds(7 * gib)
+	require.Equal(t, uint64(7*gib-896<<20), closeAbove, "a margin under the limit")
+	require.Equal(t, uint64(7*gib-896<<20-448<<20), reopenBelow, "LINK brake-hysteresis: a margin and a half under the limit")
+
+	closeAbove, reopenBelow = BrakeThresholds(0)
+	require.Zero(t, closeAbove)
+	require.Zero(t, reopenBelow)
+}

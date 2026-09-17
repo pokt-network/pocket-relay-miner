@@ -53,6 +53,14 @@ func Margin(limit uint64) uint64 {
 	return min(maxMargin, limit/8)
 }
 
+// BrakeThresholds are the heap sizes a limit of limit bytes closes a brake
+// above and reopens it below: a margin under the limit, and a margin and a
+// half.
+func BrakeThresholds(limit uint64) (closeAbove, reopenBelow uint64) {
+	margin := Margin(limit)
+	return limit - margin, limit - margin - margin/2
+}
+
 // Sources are what Resolve reads.
 type Sources struct {
 	// Limit is the runtime's current limit, math.MaxInt64 when GOMEMLIMIT is
