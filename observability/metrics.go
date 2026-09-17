@@ -176,4 +176,30 @@ var (
 		},
 		[]string{"supplier", "operation"},
 	)
+
+	// SMSTRebuildWaiting is how many rebuilds of compacted trees wait for
+	// memory, by kind (proof, compaction). While kind="proof" is above zero the
+	// stream consumers do not read.
+	SMSTRebuildWaiting = MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "rebuild_waiting",
+			Help:      "Rebuilds of compacted SMSTs waiting for memory, by kind",
+		},
+		[]string{"kind"},
+	)
+
+	// SMSTRebuildWaitSeconds is how long a rebuild waited for memory before it
+	// was admitted, by kind.
+	SMSTRebuildWaitSeconds = MinerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "rebuild_wait_seconds",
+			Help:      "Time a rebuild of a compacted SMST waited for memory, by kind",
+			Buckets:   FineGrainedLatencyBuckets,
+		},
+		[]string{"kind"},
+	)
 )

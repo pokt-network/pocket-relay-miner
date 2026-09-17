@@ -129,11 +129,13 @@ type RedisSMSTManagerConfig struct {
 	// active session.
 	LiveRootCheckpointInterval int
 
-	// ColdCompactionPool runs compactions, and ColdRebuildPool the rebuilds a
-	// proof of a compacted tree needs. Shared by every supplier's manager so
-	// the bound is per process. Nil runs the work on the caller's goroutine.
+	// ColdCompactionPool runs compactions. Shared by every supplier's manager
+	// so the bound is per process. Nil runs them on the caller's goroutine.
 	ColdCompactionPool pond.Pool
-	ColdRebuildPool    pond.Pool
+
+	// RebuildAdmission bounds, by memory, the trees of compacted sessions
+	// loaded at once across the process. Nil admits every load at once.
+	RebuildAdmission *RebuildAdmission
 }
 
 // liveRootInterval went with the per-update live_root checkpoint, disabled in

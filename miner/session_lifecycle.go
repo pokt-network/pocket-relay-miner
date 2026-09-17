@@ -184,6 +184,13 @@ type SessionLifecycleManager struct {
 	lastGeneratedMsgIDLookup        func(ctx context.Context) (streamMsgID, bool, error)
 	flushDelay                      FlushDelayConfig
 
+	// claimFlushWaiting, when set, is called as the flush delay starts waiting
+	// for the stream, and the function it returns when the wait ends. It lets
+	// this supplier's consumer read while ingestion is held for proofs:
+	// otherwise the claim seals at its cap without the relays still in the
+	// stream.
+	claimFlushWaiting func() (done func())
+
 	// Active sessions being monitored (lock-free concurrent map)
 	activeSessions *xsync.Map[string, *SessionSnapshot]
 
@@ -261,6 +268,12 @@ type FlushDelayConfig struct {
 // deliveries. This should be called before Start().
 func (m *SessionLifecycleManager) SetMaxNonReclaimHandledMsgIDLookup(fn func() (streamMsgID, bool)) {
 	m.maxNonReclaimHandledMsgIDLookup = fn
+}
+
+// SetClaimFlushWaiting sets what the flush-delay wait calls while it waits for
+// the stream to drain. This should be called before Start().
+func (m *SessionLifecycleManager) SetClaimFlushWaiting(fn func() (done func())) {
+	m.claimFlushWaiting = fn
 }
 
 // SetLastGeneratedMsgIDLookup sets what the flush-delay wait calls, once,
@@ -1096,6 +1109,9 @@ func (m *SessionLifecycleManager) awaitFlushWatermark(ctx context.Context, sessi
 	}
 
 	// Rule 3.
+	if m.claimFlushWaiting != nil {
+		defer m.claimFlushWaiting()()
+	}
 	for {
 		select {
 		case <-ctx.Done():

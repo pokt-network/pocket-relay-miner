@@ -442,11 +442,14 @@ type SupplierManager struct {
 	// Pond subpool for bounded supplier queries (prevents unbounded goroutine spawning)
 	querySubpool pond.Pool
 
-	// Subpools shared by every supplier's SMST manager for cold tree
-	// compaction and for the rebuilds proving a compacted tree needs. Nil only
-	// without a WorkerPool (tests), where the manager runs that work inline.
+	// Subpool shared by every supplier's SMST manager for cold tree
+	// compaction. Nil only without a WorkerPool (tests), where the manager
+	// runs it inline.
 	coldCompactionPool pond.Pool
-	coldRebuildPool    pond.Pool
+
+	// rebuildAdmission bounds the trees proofs and compactions load, and
+	// holds every supplier's stream consumer while a proof waits for it.
+	rebuildAdmission *RebuildAdmission
 
 	// Distributed claiming (optional)
 	claimer *SupplierClaimer
@@ -528,7 +531,7 @@ func NewSupplierManager(
 	// runs.
 	if config.WorkerPool != nil {
 		mgr.coldCompactionPool = CreateBoundedSubpool(componentLogger, config.WorkerPool, coldCompactionWorkers, "smst_cold_compaction")
-		mgr.coldRebuildPool = CreateBoundedSubpool(componentLogger, config.WorkerPool, coldRebuildWorkers, "smst_cold_rebuild")
+		mgr.rebuildAdmission = NewRebuildAdmission(componentLogger)
 	}
 
 	// Construct a shared deduplicator if we have a Redis client. Falls back to
@@ -1601,7 +1604,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			CacheTTL:                   m.config.CacheTTL,
 			LiveRootCheckpointInterval: m.config.SMSTLiveRootCheckpointInterval,
 			ColdCompactionPool:         m.coldCompactionPool,
-			ColdRebuildPool:            m.coldRebuildPool,
+			RebuildAdmission:           m.rebuildAdmission,
 		},
 	)
 
@@ -1758,6 +1761,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		cancelFn:           cancelFn,
 	}
 	state.StoreStatus(SupplierStatusActive)
+	m.wireRebuildAdmission(operatorAddr, consumer, lifecycleManager)
 
 	if lifecycleManager != nil {
 		// Conditional flush delay -- wired BEFORE Start(), not alongside
@@ -1859,6 +1863,20 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		Msg("supplier added and consuming")
 
 	return nil
+}
+
+// wireRebuildAdmission holds the supplier's consumer while a proof waits for
+// memory, and lets its claim's flush delay release that hold. Called before
+// the consumer and the lifecycle manager start.
+func (m *SupplierManager) wireRebuildAdmission(operatorAddr string, consumer *redistransport.StreamsConsumer, lifecycleManager *SessionLifecycleManager) {
+	if m.rebuildAdmission == nil {
+		return
+	}
+	admission := m.rebuildAdmission
+	consumer.SetIngestionPause(admission.IngestionPause(operatorAddr))
+	if lifecycleManager != nil {
+		lifecycleManager.SetClaimFlushWaiting(func() func() { return admission.claimFlushWaiting(operatorAddr) })
+	}
 }
 
 // supplierDataSource describes how we obtained (or failed to obtain)
@@ -2930,9 +2948,6 @@ func (m *SupplierManager) Close() error {
 	// its closed flag instead of starting.
 	if m.coldCompactionPool != nil {
 		m.coldCompactionPool.StopAndWait()
-	}
-	if m.coldRebuildPool != nil {
-		m.coldRebuildPool.StopAndWait()
 	}
 
 	m.logger.Info().Msg("supplier manager closed")

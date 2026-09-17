@@ -15,7 +15,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alitto/pond/v2"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	"github.com/pokt-network/smt"
 	"github.com/prometheus/client_golang/prometheus/testutil"
@@ -142,10 +141,8 @@ func TestColdCompaction_AFailoverMinerProvesACompactedTreeAgainstTheClaimedRoot(
 	}
 
 	// A miner that never held the tree: the failover path, loadTreeFromRedis.
-	pool := pond.NewPool(2)
-	t.Cleanup(pool.StopAndWait)
 	failover := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
-		SupplierAddress: supplier, CacheTTL: time.Hour, ColdRebuildPool: pool,
+		SupplierAddress: supplier, CacheTTL: time.Hour, RebuildAdmission: NewRebuildAdmission(zerolog.Nop()),
 	})
 	for i, path := range paths {
 		proofBz, err := failover.ProveClosest(ctx, sessionID, path)
@@ -231,10 +228,8 @@ func TestColdCompaction_ConcurrentProofsOfACompactedTreeAllVerify(t *testing.T) 
 	require.NoError(t, err)
 	require.Equal(t, coldCompacted, result)
 
-	pool := pond.NewPool(2)
-	t.Cleanup(pool.StopAndWait)
 	failover := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
-		SupplierAddress: supplier, CacheTTL: time.Hour, ColdRebuildPool: pool,
+		SupplierAddress: supplier, CacheTTL: time.Hour, RebuildAdmission: NewRebuildAdmission(zerolog.Nop()),
 	})
 	paths := coldPaths(3, 16)
 	proofs := make([][]byte, len(paths))

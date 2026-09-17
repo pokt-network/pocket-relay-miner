@@ -77,10 +77,9 @@ const (
 	coldCompactionAttempts   = 10
 	coldCompactionRetryDelay = 30 * time.Second
 
-	// coldCompactionWorkers and coldRebuildWorkers size the process-wide
-	// subpools (see NewSupplierManager). Not measured under load.
+	// coldCompactionWorkers sizes the process-wide compaction subpool (see
+	// NewSupplierManager). Not measured under load.
 	coldCompactionWorkers = 2
-	coldRebuildWorkers    = 4
 )
 
 // coldCompactionResult is the label value of SMSTColdCompactions.
@@ -342,6 +341,15 @@ func (m *RedisSMSTManager) CompactColdTree(ctx context.Context, sessionID string
 		return coldNoTree, nil
 	}
 
+	// A compaction starts only when no proof waits for memory, and holds its
+	// turn until the blob is verified, before it takes the tree's lock.
+	leafCount, _ := smt.MerkleSumRoot(claimedRoot).Count() //nolint:errcheck // validated above
+	_, release, err := m.config.RebuildAdmission.acquire(ctx, rebuildKindCompaction, leafCount*compactionLeafEstimateBytes, 0)
+	if err != nil {
+		return coldReadFailed, fmt.Errorf("wait for memory to compact: %w", err)
+	}
+	defer release()
+
 	leaves, hashBytes, err := m.readColdLeaves(ctx, nodesKey)
 	if err != nil {
 		return coldReadFailed, fmt.Errorf("read leaves: %w", err)
@@ -372,6 +380,7 @@ func (m *RedisSMSTManager) CompactColdTree(ctx context.Context, sessionID string
 			Msg("leaves of the claimed SMST do not rebuild its claimed root; keeping the nodes hash")
 		return coldMismatch, verifyErr
 	}
+	release()
 
 	// The resident tree, if any, is held while the hash goes, so a proof that
 	// holds it runs entirely before or entirely after; and it is dropped, so
@@ -480,8 +489,8 @@ func (m *RedisSMSTManager) coldTreeCompacted(ctx context.Context, sessionID stri
 
 // proveClosestFromLeaves rebuilds the claimed tree from its leaves blob in
 // memory, checks the rebuilt root against claimedRoot, and proves on it. The
-// rebuild runs on ColdRebuildPool when set, which bounds how many trees are in
-// memory at once when a whole cohort of sessions reaches its proof window.
+// load waits on RebuildAdmission, which bounds how many trees are in memory at
+// once when a whole cohort of sessions reaches its proof window.
 func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID string, claimedRoot, path []byte) ([]byte, error) {
 	supplier := m.config.SupplierAddress
 	start := time.Now()
@@ -492,6 +501,8 @@ func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID
 	}()
 
 	var proofBz []byte
+	// loaded tells the admission this tree is in memory; set once admitted.
+	loaded := func() {}
 	rebuildAndProve := func() error {
 		blob, err := m.redisClient.Get(ctx, m.redisClient.KB().SMSTLeavesKey(supplier, sessionID)).Bytes()
 		if errors.Is(err, redis.Nil) {
@@ -506,6 +517,7 @@ func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID
 			return fmt.Errorf("decode leaves blob: %w", err)
 		}
 		store, rebuilt, err := m.rebuildColdTree(sessionID, leaves)
+		loaded()
 		if err != nil {
 			return fmt.Errorf("rebuild from leaves: %w", err)
 		}
@@ -535,13 +547,22 @@ func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID
 		return nil
 	}
 
-	var err error
-	if m.config.ColdRebuildPool != nil {
-		err = m.config.ColdRebuildPool.SubmitErr(rebuildAndProve).Wait()
-	} else {
-		err = rebuildAndProve()
-	}
+	// Admitted before the blob is read, so a tree waiting for memory does not
+	// hold it, and the queue orders every waiter by value. The next tree is
+	// asked once this one is loaded.
+	estimate, err := m.coldRebuildEstimate(ctx, sessionID)
 	if err != nil {
+		return nil, err
+	}
+	value, _ := smt.MerkleSumRoot(claimedRoot).Sum() //nolint:errcheck // claimedRoot validated at load
+	var release func()
+	loaded, release, err = m.config.RebuildAdmission.acquire(ctx, rebuildKindProof, estimate, value)
+	if err != nil {
+		return nil, fmt.Errorf("wait for memory to rebuild session %s: %w", sessionID, err)
+	}
+	defer release()
+
+	if err := rebuildAndProve(); err != nil {
 		return nil, err
 	}
 	m.logger.Info().
@@ -551,6 +572,30 @@ func (m *RedisSMSTManager) proveClosestFromLeaves(ctx context.Context, sessionID
 		Int("proof_len", len(proofBz)).
 		Msg("generated proof from SMST rebuilt from its leaves blob")
 	return proofBz, nil
+}
+
+// coldRebuildEstimate is the heap a rebuild of the session's blob holds, read
+// from the blob's header without fetching the blob: every leaf value twice plus
+// rebuildLeafOverheadBytes per leaf. The frame's content size is what the
+// values decode to; the encoder writes it for any frame of 256 B or more, and a
+// smaller frame is too small to matter. A missing blob estimates zero, and the
+// rebuild reports it.
+func (m *RedisSMSTManager) coldRebuildEstimate(ctx context.Context, sessionID string) (uint64, error) {
+	head, err := m.redisClient.GetRange(ctx, m.redisClient.KB().SMSTLeavesKey(m.config.SupplierAddress, sessionID),
+		0, coldLeavesHeaderLen+zstd.HeaderMaxSize-1).Bytes()
+	if err != nil {
+		return 0, fmt.Errorf("read leaves blob header: %w", err)
+	}
+	if len(head) < coldLeavesHeaderLen {
+		return 0, nil
+	}
+	count := binary.BigEndian.Uint64(head[2:10])
+	var frame zstd.Header
+	var decoded uint64
+	if frame.Decode(head[coldLeavesHeaderLen:]) == nil && frame.HasFCS {
+		decoded = frame.FrameContentSize
+	}
+	return 2*decoded + count*rebuildLeafOverheadBytes, nil
 }
 
 // marshalClosestProof compacts and marshals a closest proof the way the chain
