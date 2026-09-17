@@ -20,7 +20,7 @@ require (
 	github.com/pokt-network/poktroll v0.1.35
 	github.com/pokt-network/ring-go v0.2.0
 	github.com/pokt-network/shannon-sdk v0.0.0-20260812141256-a508808fbbe0
-	github.com/pokt-network/smt v0.14.2-0.20260915183850-4e1952b30796
+	github.com/pokt-network/smt v0.14.2-0.20260916232209-b01fe326d026
 	github.com/prometheus/client_golang v1.23.2
 	github.com/prometheus/client_model v0.6.2
 	github.com/puzpuzpuz/xsync/v4 v4.2.0
