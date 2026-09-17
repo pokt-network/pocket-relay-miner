@@ -85,6 +85,10 @@ type StreamsConsumer struct {
 	// writes: entries stay in the stream and in the PEL, unacked and undeleted.
 	health *StoreHealth
 
+	// pause, when set, holds reading and reclaiming while it is Paused, for a
+	// condition of the process rather than of Redis.
+	pause IngestionPause
+
 	// Lifecycle management
 	mu       sync.RWMutex
 	closed   bool
@@ -233,18 +237,42 @@ func (c *StreamsConsumer) SetStoreHealth(health *StoreHealth) {
 	c.health = health
 }
 
-// waitOperable returns once Redis can take writes, or with ctx's error. Reading
-// is not refused under maxmemory, but what the miner does with a read relay is a
-// write, so reading while full only moves relays from the stream into a PEL they
-// cannot leave.
+// IngestionPause holds a consumer's reads while Paused. PauseChanged returns a
+// channel closed the next time Paused may have changed.
+type IngestionPause interface {
+	Paused() bool
+	PauseChanged() <-chan struct{}
+}
+
+// SetIngestionPause holds this consumer's reads and reclaims while pause is
+// Paused. Call it before Consume.
+func (c *StreamsConsumer) SetIngestionPause(pause IngestionPause) {
+	c.pause = pause
+}
+
+// operable reports whether the consumer may read: Redis can take writes and
+// nothing holds ingestion.
+func (c *StreamsConsumer) operable() bool {
+	return c.health.Operable() && (c.pause == nil || !c.pause.Paused())
+}
+
+// waitOperable returns once Redis can take writes and nothing holds ingestion,
+// or with ctx's error. Reading is not refused under maxmemory, but what the
+// miner does with a read relay is a write, so reading while full only moves
+// relays from the stream into a PEL they cannot leave.
 func (c *StreamsConsumer) waitOperable(ctx context.Context) error {
 	for {
 		changed := c.health.Changed()
-		if c.health.Operable() {
+		var pauseChanged <-chan struct{}
+		if c.pause != nil {
+			pauseChanged = c.pause.PauseChanged()
+		}
+		if c.operable() {
 			return nil
 		}
 		select {
 		case <-changed:
+		case <-pauseChanged:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
@@ -261,7 +289,7 @@ func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
 	if err := c.ensureConsumerGroup(ctx); err != nil && ctx.Err() == nil {
 		c.logger.Debug().Err(err).Msg("failed to ensure consumer group before the first reclaim sweep")
 	}
-	if c.health.Operable() {
+	if c.operable() {
 		c.claimPendingMessages(ctx)
 	}
 
@@ -274,7 +302,7 @@ func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-sweep.C:
-			if c.health.Operable() {
+			if c.operable() {
 				c.claimPendingMessages(ctx)
 			}
 		case <-reap.C:
