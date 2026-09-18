@@ -398,27 +398,7 @@ gate_pkg_target() {
 #
 # Keep this list in one place: it used to live inline in the Makefile's `test`
 # and `test_miner` targets with different values in each.
-# GATE_PARALLELISM overrides everything below, and it exists for a hazard the
-# reasoning above does not cover: SERVER-WIDE Redis state. A test that lowers
-# `maxmemory` changes it for the whole server, so the per-client, per-prefix
-# isolation `internal/testredis` provides does NOT contain it -- while that test
-# holds it low, a test in ANOTHER package gets
-# `OOM command not allowed when used memory > 'maxmemory'` and fails.
-#
-# Measured 2026-09-18: TestClaimPendingMessages_DrainsWholePEL failed with
-# exactly that error under `-p 4`, taking the whole gate down, while
-# miner/submission_tracker_brake_test.go held maxmemory low. It is INTERMITTENT
-# -- two other runs the same day passed on timing luck -- which is worse than a
-# hard failure, because it makes a green gate mean less.
-#
-# Setting GATE_PARALLELISM='-p 1 -parallel 1' makes a run deterministic while the
-# real fix (a dedicated Redis for the maxmemory tests, so the hazard cannot exist
-# rather than being scheduled around) is decided. The default is unchanged.
 gate_parallelism() {
-    if [ -n "${GATE_PARALLELISM:-}" ]; then
-        printf -- '%s' "$GATE_PARALLELISM"
-        return
-    fi
     case "$(gate_pkg_normalized)" in
     cache | miner | relayer) printf -- '-p 1 -parallel 1' ;;
     *) printf -- '-p 4 -parallel 4' ;;
