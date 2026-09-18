@@ -32,11 +32,12 @@ func TestNewTxClient_ValidConfig(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
-		UseTLS:       false,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
+		UseTLS:            false,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -63,10 +64,11 @@ func TestNewTxClient_WithSharedConnection(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	config := TxClientConfig{
-		GRPCConn: conn,
-		ChainID:  "test-chain",
-		GasLimit: 100000,
-		GasPrice: parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCConn:          conn,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -84,9 +86,10 @@ func TestNewTxClient_InvalidEndpoint(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: "invalid-endpoint-format",
-		ChainID:      "test-chain",
-		GasLimit:     10000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      "invalid-endpoint-format",
+		ChainID:           "test-chain",
+		GasLimit:          10000,
 	}
 
 	// Should create client successfully (gRPC doesn't validate endpoint format upfront)
@@ -115,7 +118,8 @@ func TestNewTxClient_MissingEndpointAndConn(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		ChainID: "test-chain",
+		BlockTimeProvider: testBlockTime(),
+		ChainID:           "test-chain",
 		// No GRPCEndpoint or GRPCConn
 	}
 
@@ -134,7 +138,8 @@ func TestNewTxClient_MissingChainID(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
 		// ChainID is empty, should use default
 	}
 
@@ -156,7 +161,8 @@ func TestNewTxClient_Defaults(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
 		// Leave all other fields at zero/empty
 	}
 
@@ -181,9 +187,10 @@ func TestTxClient_Close_Success(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -203,9 +210,10 @@ func TestTxClient_Close_AlreadyClosed(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -234,9 +242,10 @@ func TestTxClient_Close_SharedConnection(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	config := TxClientConfig{
-		GRPCConn: conn,
-		ChainID:  "test-chain",
-		GasLimit: 100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCConn:          conn,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -259,9 +268,10 @@ func TestTxClient_OperationsAfterClose(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -305,9 +315,10 @@ func TestGetAccount_Success(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -332,9 +343,10 @@ func TestGetAccount_NotFound(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -360,8 +372,9 @@ func TestGetAccount_Cached(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -398,9 +411,10 @@ func TestGetAccount_CacheInvalidation(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -439,8 +453,9 @@ func TestIncrementSequence(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -474,10 +489,11 @@ func TestCreateClaims_Success(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -511,9 +527,10 @@ func TestCreateClaims_EmptyList(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -540,10 +557,11 @@ func TestSubmitProofs_Success(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -575,9 +593,10 @@ func TestSubmitProofs_EmptyList(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -607,10 +626,11 @@ func TestSignAndBroadcast_GasEstimation(t *testing.T) {
 	gasPrice := parseGasPrice(t, "0.000025upokt")
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     gasLimit,
-		GasPrice:     gasPrice,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          gasLimit,
+		GasPrice:          gasPrice,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -653,9 +673,10 @@ func TestSubmitTx_NetworkTimeout(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -687,9 +708,10 @@ func TestSubmitTx_InvalidSequence(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -721,9 +743,10 @@ func TestSubmitTx_InsufficientGas(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -752,9 +775,10 @@ func TestSubmitTx_AccountNotFound(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -784,9 +808,10 @@ func TestSubmitTx_KeyNotFound(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -818,9 +843,10 @@ func TestSubmitTx_BroadcastError(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -853,9 +879,10 @@ func TestConcurrentSubmissions_SameSupplier(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -922,9 +949,10 @@ func TestConcurrentSubmissions_DifferentSuppliers(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     10000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          10000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -984,9 +1012,10 @@ func TestConcurrentAccountQueries(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1045,9 +1074,10 @@ func TestHASupplierClient_CreateClaims(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1079,9 +1109,10 @@ func TestHASupplierClient_SubmitProofs(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1112,9 +1143,10 @@ func TestHASupplierClient_OperatorAddress(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     10000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          10000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1140,10 +1172,11 @@ func TestCalculateFee_RoundingUp(t *testing.T) {
 
 	// Use values that will result in fractional fee
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     123456,
-		GasPrice:     parseGasPrice(t, "0.000007upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          123456,
+		GasPrice:          parseGasPrice(t, "0.000007upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1161,10 +1194,11 @@ func TestCalculateFee_ExactValue(t *testing.T) {
 
 	// Use values that result in exact fee
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1188,9 +1222,10 @@ func TestCreateClaims_ContextCanceled(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -1221,9 +1256,10 @@ func TestCreateClaims_ContextTimeout(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
 	}
 
 	tc, err := NewTxClient(logger, km, config)

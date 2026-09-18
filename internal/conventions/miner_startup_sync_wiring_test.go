@@ -36,13 +36,15 @@ func minerStartupSyncViolations(f *ast.File) []string {
 		managerStart   = token.NoPos
 	)
 	// The body block is visited before anything inside it, so the height
-	// variable is known before any SeedHeight call is looked at.
+	// variable is known before any seeding call is looked at.
 	ast.Inspect(start.Body, func(n ast.Node) bool {
 		switch n := n.(type) {
 		case *ast.BlockStmt:
 			for i, stmt := range n.List {
 				assign, ok := stmt.(*ast.AssignStmt)
-				if !ok || len(assign.Lhs) != 3 || len(assign.Rhs) != 1 {
+				// params, height, block time, error: the block time joined them
+				// when the anchor of every transaction started being read here.
+				if !ok || len(assign.Lhs) != 4 || len(assign.Rhs) != 1 {
 					continue
 				}
 				call, ok := assign.Rhs[0].(*ast.CallExpr)
@@ -52,7 +54,7 @@ func minerStartupSyncViolations(f *ast.File) []string {
 				if id, ok := assign.Lhs[1].(*ast.Ident); ok {
 					heightVar = id.Name
 				}
-				if id, ok := assign.Lhs[2].(*ast.Ident); ok && i+1 < len(n.List) {
+				if id, ok := assign.Lhs[3].(*ast.Ident); ok && i+1 < len(n.List) {
 					returnsOnError = ifErrorReturns(n.List[i+1], id.Name)
 				}
 			}
@@ -65,8 +67,8 @@ func minerStartupSyncViolations(f *ast.File) []string {
 				return true
 			}
 			switch {
-			case sel.Sel.Name == "SeedHeight" && selectsField(sel.X, "redisBlockClientAdapter") &&
-				len(n.Args) == 1 && heightVar != "" && isIdentNamed(n.Args[0], heightVar):
+			case sel.Sel.Name == "seedChainState" && len(n.Args) == 2 &&
+				heightVar != "" && isIdentNamed(n.Args[0], heightVar):
 				seed = n.Pos()
 			case sel.Sel.Name == "Start" && selectsField(sel.X, "supplierManager"):
 				managerStart = n.Pos()
@@ -87,7 +89,7 @@ func minerStartupSyncViolations(f *ast.File) []string {
 		out = append(out, "Start must return right after readStartupChainState fails")
 	}
 	if seed == token.NoPos || seed < read.Pos() {
-		out = append(out, "the block adapter must be seeded with the height readStartupChainState returned, after reading it")
+		out = append(out, "the chain state read at startup must be seeded (seedChainState) with the height readStartupChainState returned, after reading it and before consuming")
 	}
 	if managerStart == token.NoPos || managerStart < seed {
 		out = append(out, "the supplier manager, which starts consuming, must start after the block adapter is seeded")
@@ -130,7 +132,7 @@ func TestTheMinerDoesNotConsumeBeforeItHasReadTheChain(t *testing.T) {
 // return, the chain ID, the seeded height and the order, not merely the names.
 func TestMinerStartupSyncViolationsReadsTheShape(t *testing.T) {
 	const read = `
-	sharedParams, startHeight, err := readStartupChainState(w.ctx, w.config.ChainID, readers)
+	sharedParams, startHeight, startBlockTime, err := readStartupChainState(w.ctx, w.config.ChainID, readers)
 	if err != nil {
 		w.cleanup()
 		return err
@@ -141,28 +143,28 @@ func TestMinerStartupSyncViolationsReadsTheShape(t *testing.T) {
 		want int
 	}{
 		{"wired", read + `
-	w.redisBlockClientAdapter.SeedHeight(startHeight)
+	w.seedChainState(startHeight, startBlockTime)
 	w.supplierManager.Start(ctx)`, 0},
 		{"error only logged", `
-	sharedParams, startHeight, err := readStartupChainState(w.ctx, w.config.ChainID, readers)
+	sharedParams, startHeight, startBlockTime, err := readStartupChainState(w.ctx, w.config.ChainID, readers)
 	if err != nil {
 		w.logger.Warn().Err(err).Msg("chain unreadable")
 	}
-	w.redisBlockClientAdapter.SeedHeight(startHeight)
+	w.seedChainState(startHeight, startBlockTime)
 	w.supplierManager.Start(ctx)`, 1},
 		{"not given the configured chain id", `
-	sharedParams, startHeight, err := readStartupChainState(w.ctx, "pocket", readers)
+	sharedParams, startHeight, startBlockTime, err := readStartupChainState(w.ctx, "pocket", readers)
 	if err != nil {
 		return err
 	}
-	w.redisBlockClientAdapter.SeedHeight(startHeight)
+	w.seedChainState(startHeight, startBlockTime)
 	w.supplierManager.Start(ctx)`, 1},
 		{"seeded with another height", read + `
-	w.redisBlockClientAdapter.SeedHeight(0)
+	w.seedChainState(0, startBlockTime)
 	w.supplierManager.Start(ctx)`, 1},
 		{"consumes before seeding", read + `
 	w.supplierManager.Start(ctx)
-	w.redisBlockClientAdapter.SeedHeight(startHeight)`, 1},
+	w.seedChainState(startHeight, startBlockTime)`, 1},
 		{"never read", `
 	w.supplierManager.Start(ctx)`, 1},
 	}

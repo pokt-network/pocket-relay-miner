@@ -23,7 +23,8 @@ func TestSimulationPathIsExercisedWhenGasIsUnset(t *testing.T) {
 	srv := setupMockGRPCServer(t)
 	t.Cleanup(srv.cleanup)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{}) // GasLimit unset => 0 => simulate
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()}) // GasLimit unset => 0 => simulate
 
 	before := srv.txServer.SimulateCalls()
 	require.NoError(t, claim(tc, context.Background(), t))
@@ -45,7 +46,8 @@ func TestSimulationFailureCarriesTheWholeWrappingChain(t *testing.T) {
 	t.Cleanup(srv.cleanup)
 	srv.txServer.FailSimulation("proof not required", 0, true)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 
 	err := claim(tc, context.Background(), t)
 	require.Error(t, err)
@@ -71,7 +73,8 @@ func TestAnteHandlerFailureCarriesNoMessageIndex(t *testing.T) {
 	t.Cleanup(srv.cleanup)
 	srv.txServer.FailSimulation("insufficient fees", 0, false)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 
 	err := claim(tc, context.Background(), t)
 	require.Error(t, err)

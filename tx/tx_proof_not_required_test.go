@@ -38,7 +38,8 @@ func TestProofNotRequiredIsReportedAsAFactAndCarriesTheDatum(t *testing.T) {
 	t.Cleanup(srv.cleanup)
 	armNotRequired(srv)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 	hash, err := submitOneProof(t, tc)
 
 	require.Empty(t, hash)
@@ -65,7 +66,8 @@ func TestTheNeedleIsTheRegisteredDescription(t *testing.T) {
 	// malformed address and two fee-deduction failures.
 	srv.txServer.FailSimulation("not enough funds to submit proof", 0, true)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 	_, err := submitOneProof(t, tc)
 	require.Error(t, err)
 	require.NotErrorIs(t, err, ErrTxProofNotRequired,
@@ -81,7 +83,8 @@ func TestTheDivergenceIsCounted(t *testing.T) {
 	armNotRequired(srv)
 
 	before := testutil.ToFloat64(txProofNotRequired.WithLabelValues(budgetTestSupplier))
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 	_, err := submitOneProof(t, tc)
 	require.ErrorIs(t, err, ErrTxProofNotRequired)
 
@@ -97,7 +100,8 @@ func TestTheEmptyBatchIsUntouched(t *testing.T) {
 	armNotRequired(srv)
 
 	before := testutil.ToFloat64(txProofNotRequired.WithLabelValues(budgetTestSupplier))
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 
 	hash, _, err := tc.SubmitProofs(context.Background(), budgetTestSupplier, 1000, nil)
 	require.NoError(t, err, "an empty batch is not a refusal")
@@ -120,7 +124,8 @@ func TestTheRefusalEscapesAndLeavesTheClientUntouched(t *testing.T) {
 	t.Cleanup(srv.cleanup)
 	armNotRequired(srv)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 	client := NewHASupplierClient(tc, budgetTestSupplier, logging.NewLoggerFromConfig(logging.DefaultConfig()))
 
 	// State a real submission would have left behind.
@@ -154,7 +159,8 @@ func TestTheRefusalIsNotRetried(t *testing.T) {
 	t.Cleanup(srv.cleanup)
 	armNotRequired(srv)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 	_, err := submitOneProof(t, tc)
 	require.ErrorIs(t, err, ErrTxProofNotRequired)
 	require.Equal(t, 1, srv.txServer.SimulateCalls())

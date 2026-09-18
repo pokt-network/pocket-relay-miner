@@ -27,6 +27,7 @@ func newPermitClient(t *testing.T, srv *testGRPCServer, n int) *TxClient {
 	t.Cleanup(func() { _ = km.Close() })
 
 	tc, err := NewTxClient(logging.NewLoggerFromConfig(logging.DefaultConfig()), km, TxClientConfig{
+		BlockTimeProvider: testBlockTime(),
 		GRPCEndpoint:      srv.address,
 		ChainID:           "test-chain",
 		GasLimit:          100000,

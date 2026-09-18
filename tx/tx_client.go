@@ -182,14 +182,12 @@ type TxClientConfig struct {
 	// Default: false (insecure connection)
 	UseTLS bool
 
-	// BlockTimeProvider, when non-nil, supplies the chain's latest
-	// observed block time. signAndBroadcast uses it as the anchor for
-	// timeoutTimestamp (so the 10-minute cosmos-sdk unordered-tx TTL is
-	// measured against the same clock the validator uses). When nil, or
-	// when LatestBlockTime returns the zero time.Time, signAndBroadcast
-	// falls back to time.Now() — this preserves the pre-fix behaviour
-	// for existing tests and the brief startup window before the first
-	// block event lands.
+	// BlockTimeProvider supplies the chain's latest observed block time, the
+	// anchor of every timeoutTimestamp this client builds, so the 10-minute
+	// cosmos-sdk unordered-tx TTL is measured against the clock the validator
+	// uses. It is REQUIRED: a transaction anchored on anything else is refused
+	// by the chain whenever its blocks lag wall clock, which is exactly what a
+	// restarted miner does first (238 proofs, measured 2026-09-17).
 	BlockTimeProvider BlockTimeProvider
 }
 
@@ -252,6 +250,9 @@ func NewTxClient(
 	// Validate: either GRPCConn or GRPCEndpoint must be provided
 	if config.GRPCConn == nil && config.GRPCEndpoint == "" {
 		return nil, fmt.Errorf("either GRPCConn or GRPCEndpoint is required")
+	}
+	if config.BlockTimeProvider == nil {
+		return nil, fmt.Errorf("BlockTimeProvider is required: %w", ErrNoBlockTimeAnchor)
 	}
 	if config.ChainID == "" {
 		config.ChainID = DefaultChainID
@@ -791,7 +792,6 @@ type signedTx struct {
 	timeoutTimestamp time.Time
 	timeoutDuration  time.Duration
 	timeoutSource    string
-	anchorSource     string
 }
 
 // signAndEncode builds, signs and encodes the transaction without sending it.
@@ -844,18 +844,15 @@ func (tc *TxClient) signAndEncode(
 	// wall-clock anchoring pushes us silently over the ceiling and
 	// CheckTx drops the claim — permanent economic loss.
 	//
-	// Fallback to time.Now() when the provider is nil (legacy wiring,
-	// tests) or returns the zero time.Time (startup race before the
-	// first block event). The fallback preserves the previous
-	// behaviour so nothing breaks; the new default behaviour kicks in
-	// automatically once the miner wires a provider.
-	anchor := time.Now()
-	anchorSource := "wall_clock"
-	if tc.config.BlockTimeProvider != nil {
-		if bt := tc.config.BlockTimeProvider.LatestBlockTime(); !bt.IsZero() {
-			anchor = bt
-			anchorSource = "block_time"
-		}
+	// There is no wall-clock fallback. It anchored the first transactions of a
+	// restarted process on a clock the chain does not use, and the chain refused
+	// them: measured 2026-09-17, 238 proofs of a restarted miner rejected with
+	// `unordered tx ttl exceeds 10m0s`. The block time is read at startup and
+	// seeded before anything is signed (readStartupChainState, SeedBlockTime),
+	// so the zero here is a wiring defect, not a race to paper over.
+	anchor := tc.config.BlockTimeProvider.LatestBlockTime()
+	if anchor.IsZero() {
+		return signedTx{}, fmt.Errorf("%w: refusing to anchor a transaction on wall-clock time", ErrNoBlockTimeAnchor)
 	}
 	// The offset is what keeps the unordered nonce unique. Without it every
 	// transaction this process builds for one supplier and one window against
@@ -950,7 +947,6 @@ func (tc *TxClient) signAndEncode(
 		timeoutTimestamp: timeoutTimestamp,
 		timeoutDuration:  timeoutDuration,
 		timeoutSource:    timeoutSource,
-		anchorSource:     anchorSource,
 	}, nil
 }
 
@@ -1081,7 +1077,6 @@ func (tc *TxClient) broadcastRaw(
 		Str("tx_type", txType).
 		Str("tx_hash", txHash).
 		Str("timeout_source", st.timeoutSource).
-		Str("anchor_source", st.anchorSource).
 		Time("anchor", st.anchor).
 		Dur("timeout_duration", st.timeoutDuration).
 		Time("timeout_timestamp", st.timeoutTimestamp).
@@ -1361,6 +1356,12 @@ func isInsufficientBalanceError(errorMsg string) bool {
 // errors.As, instead of matching substrings on a message that grows a wrapper at
 // every frame. The two are different questions: "was it this condition" and
 // "which message of the batch, and what did the server actually say".
+// ErrNoBlockTimeAnchor is returned when a transaction would have to be anchored
+// on something other than the chain's own block time. The miner reads that time
+// at startup and refuses to start without it, so reaching this means the anchor
+// never got to the transaction client.
+var ErrNoBlockTimeAnchor = errors.New("no chain block time to anchor the transaction on")
+
 var ErrTxProofNotRequired = errors.New("chain reports no proof was required")
 
 // ErrTxWindowExpired reports that the CHAIN refused the transaction because its

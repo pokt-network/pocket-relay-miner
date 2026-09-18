@@ -4,7 +4,6 @@ package tx
 
 import (
 	"context"
-	"sync"
 	"testing"
 	"time"
 
@@ -14,20 +13,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 )
-
-// stubBlockTimeProvider is a test double for BlockTimeProvider. The
-// stored time is returned by every LatestBlockTime call; set it to the
-// zero time.Time to simulate "no block event yet".
-type stubBlockTimeProvider struct {
-	mu sync.RWMutex
-	t  time.Time
-}
-
-func (s *stubBlockTimeProvider) LatestBlockTime() time.Time {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.t
-}
 
 // decodeBroadcastTxTimeoutTimestamp decodes the most recently
 // broadcast TX bytes and returns the TimeoutTimestamp the client set
@@ -56,6 +41,7 @@ func decodeBroadcastTxTimeoutTimestamp(t *testing.T, txBytes []byte) time.Time {
 // where a new block commits between our read of latest_block_time
 // and the validator processing the tx. 10s covers that comfortably
 // without wasting session-window budget.
+
 func TestDefaultTxTimeout_Max_BelowCosmosHardLimit(t *testing.T) {
 	require.Less(t, DefaultTxTimeoutMax, 10*time.Minute,
 		"DefaultTxTimeoutMax must stay strictly below 10m — the cosmos-sdk "+
@@ -143,93 +129,48 @@ func TestSignAndBroadcast_AnchorsOnBlockTime_NotWallClock(t *testing.T) {
 			"stop bounding anything if the spread ever grew past it")
 }
 
-// TestSignAndBroadcast_FallsBackToWallClockWhenProviderNil pins the
-// backward-compat guarantee: existing wiring that doesn't supply a
-// BlockTimeProvider (tests, the brief window before the miner's block
-// subscriber receives its first event) keeps the pre-fix behaviour of
-// anchoring on time.Now().
-func TestSignAndBroadcast_FallsBackToWallClockWhenProviderNil(t *testing.T) {
+// A transaction anchored on anything but the chain's own block time is refused
+// whenever the chain lags wall clock, which is what a restarted miner does
+// first: measured 2026-09-17, 238 proofs rejected with `unordered tx ttl exceeds
+// 10m0s`. Two tests used to live here pinning that fallback as correct. The
+// anchor is read at startup and seeded before anything is signed, so no anchor
+// is a wiring defect, and these two say so.
+func TestNewTxClient_RefusesWithoutABlockTimeProvider(t *testing.T) {
 	testServer := setupMockGRPCServer(t)
 	defer testServer.cleanup()
-
-	supplierAddr := "pokt1supplier456"
-	testServer.addAccount(supplierAddr, 1, 0)
-
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
-	km := setupTestKeyManager(t, supplierAddr)
+	km := setupTestKeyManager(t, "pokt1supplier456")
 	defer func() { _ = km.Close() }()
 
-	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.000001upokt"),
-		// BlockTimeProvider intentionally nil.
-	}
-
-	tc, err := NewTxClient(logger, km, config)
-	require.NoError(t, err)
-	defer func() { _ = tc.Close() }()
-
-	before := time.Now()
-	_, _, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
-		[]*prooftypes.MsgCreateClaim{generateTestClaim(t, supplierAddr, "session-nil")})
-	require.NoError(t, err)
-	after := time.Now()
-
-	ts := decodeBroadcastTxTimeoutTimestamp(t, testServer.getLastTxBytes())
-
-	// With nil provider, anchor should be wall clock at broadcast
-	// time (sampled between `before` and `after`), plus the default
-	// timeout duration.
-	require.GreaterOrEqual(t, ts, before.Add(DefaultTxTimeoutMax).Add(-2*time.Second))
-	require.LessOrEqual(t, ts, after.Add(DefaultTxTimeoutMax).Add(2*time.Second))
+	_, err := NewTxClient(logger, km, TxClientConfig{
+		GRPCEndpoint: testServer.address, ChainID: "test-chain",
+		GasLimit: 100000, GasPrice: parseGasPrice(t, "0.000001upokt"),
+	})
+	require.ErrorIs(t, err, ErrNoBlockTimeAnchor,
+		"LINK provider-required: a client with no block time to anchor on is not built")
 }
 
-// TestSignAndBroadcast_FallsBackToWallClockWhenProviderReturnsZero
-// covers the startup race: the provider is wired but hasn't received
-// any block events yet, so LatestBlockTime returns the zero
-// time.Time. signAndBroadcast must treat zero as "no data" and fall
-// back to time.Now() rather than anchoring on year-0001.
-func TestSignAndBroadcast_FallsBackToWallClockWhenProviderReturnsZero(t *testing.T) {
+func TestSignAndBroadcast_RefusesToSignWithoutABlockTime(t *testing.T) {
 	testServer := setupMockGRPCServer(t)
 	defer testServer.cleanup()
 
-	supplierAddr := "pokt1supplier789"
+	const supplierAddr = "pokt1supplier789"
 	testServer.addAccount(supplierAddr, 1, 0)
-
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	km := setupTestKeyManager(t, supplierAddr)
 	defer func() { _ = km.Close() }()
 
-	// Provider returns zero time — startup race.
-	provider := &stubBlockTimeProvider{t: time.Time{}}
-
-	config := TxClientConfig{
-		GRPCEndpoint:      testServer.address,
-		ChainID:           "test-chain",
-		GasLimit:          100000,
-		GasPrice:          parseGasPrice(t, "0.000001upokt"),
-		BlockTimeProvider: provider,
-	}
-
-	tc, err := NewTxClient(logger, km, config)
+	// A provider that has seen nothing: the state the startup seeding closes.
+	tc, err := NewTxClient(logger, km, TxClientConfig{
+		GRPCEndpoint: testServer.address, ChainID: "test-chain",
+		GasLimit: 100000, GasPrice: parseGasPrice(t, "0.000001upokt"),
+		BlockTimeProvider: &stubBlockTimeProvider{},
+	})
 	require.NoError(t, err)
 	defer func() { _ = tc.Close() }()
 
-	before := time.Now()
 	_, _, err = tc.CreateClaims(context.Background(), supplierAddr, 1000,
-		[]*prooftypes.MsgCreateClaim{generateTestClaim(t, supplierAddr, "session-zero")})
-	require.NoError(t, err)
-	after := time.Now()
-
-	ts := decodeBroadcastTxTimeoutTimestamp(t, testServer.getLastTxBytes())
-
-	// Zero block time must NOT be used as the anchor. Had it been,
-	// ts would land sometime in year 1, billions of seconds away
-	// from `before`. Assert we're within a sensible window around
-	// wall clock instead.
-	require.GreaterOrEqual(t, ts, before.Add(DefaultTxTimeoutMax).Add(-2*time.Second),
-		"zero block time must trigger wall-clock fallback, not anchor on year-0001")
-	require.LessOrEqual(t, ts, after.Add(DefaultTxTimeoutMax).Add(2*time.Second))
+		[]*prooftypes.MsgCreateClaim{generateTestClaim(t, supplierAddr, "session-no-anchor")})
+	require.ErrorIs(t, err, ErrNoBlockTimeAnchor,
+		"LINK no-wall-clock-anchor: with no block time the transaction is refused, not anchored on wall clock")
 }

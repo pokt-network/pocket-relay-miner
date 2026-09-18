@@ -29,8 +29,9 @@ func newInclusionClient(t *testing.T) (*TxClient, *testGRPCServer) {
 	t.Cleanup(server.cleanup)
 
 	tc, err := NewTxClient(logging.NewLoggerFromConfig(logging.DefaultConfig()), nil, TxClientConfig{
-		GRPCEndpoint: server.address,
-		ChainID:      "test",
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      server.address,
+		ChainID:           "test",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tc.Close() })

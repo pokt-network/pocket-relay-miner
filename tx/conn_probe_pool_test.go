@@ -20,8 +20,9 @@ func newPoolClientAgainst(t *testing.T, address string) *TxClient {
 	t.Helper()
 
 	tc, err := NewTxClient(logging.Logger{}, nil, TxClientConfig{
-		GRPCEndpoint: address,
-		ChainID:      "test",
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      address,
+		ChainID:           "test",
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tc.Close() })

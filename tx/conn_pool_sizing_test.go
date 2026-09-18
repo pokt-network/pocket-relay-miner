@@ -18,9 +18,10 @@ func newPoolSizingClient(t *testing.T, maxConcurrent int) *TxClient {
 	t.Helper()
 
 	tc, err := NewTxClient(logging.Logger{}, nil, TxClientConfig{
-		GRPCEndpoint:  "127.0.0.1:59999",
-		ChainID:       "test",
-		MaxConcurrent: maxConcurrent,
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      "127.0.0.1:59999",
+		ChainID:           "test",
+		MaxConcurrent:     maxConcurrent,
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tc.Close() })

@@ -35,6 +35,7 @@ func newProbeClient(t *testing.T, endpoint string, interval time.Duration) *TxCl
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		setupTestKeyManager(t),
 		TxClientConfig{
+			BlockTimeProvider: testBlockTime(),
 			GRPCEndpoint:      endpoint,
 			ChainID:           "test-chain",
 			ConnProbeInterval: interval,
@@ -249,6 +250,7 @@ func TestCloseWaitsForAnInFlightBroadcast(t *testing.T) {
 	t.Cleanup(func() { _ = km.Close() })
 
 	tc, err := NewTxClient(logging.NewLoggerFromConfig(logging.DefaultConfig()), km, TxClientConfig{
+		BlockTimeProvider: testBlockTime(),
 		GRPCEndpoint:      srv.address,
 		ChainID:           "test-chain",
 		GasLimit:          100000,

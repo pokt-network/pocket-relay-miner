@@ -7,6 +7,7 @@ import (
 	"errors"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/stretchr/testify/require"
@@ -21,12 +22,15 @@ type countingReaders struct {
 func (c *countingReaders) readers(
 	network string, networkErr error,
 	params *sharedtypes.Params, paramsErr error,
-	height int64, heightErr error,
+	height int64, blockTime time.Time, heightErr error,
 ) startupChainReaders {
 	return startupChainReaders{
 		network: func(context.Context) (string, error) { c.network.Add(1); return network, networkErr },
 		params:  func(context.Context) (*sharedtypes.Params, error) { c.params.Add(1); return params, paramsErr },
-		height:  func(context.Context) (int64, error) { c.height.Add(1); return height, heightErr },
+		height: func(context.Context) (int64, time.Time, error) {
+			c.height.Add(1)
+			return height, blockTime, heightErr
+		},
 	}
 }
 
@@ -34,6 +38,7 @@ func (c *countingReaders) readers(
 // chain, the shared params and a committed height, and says which one failed.
 func TestReadStartupChainState(t *testing.T) {
 	const chainID = "pocket"
+	blockTime := time.Date(2026, 9, 17, 22, 5, 17, 0, time.UTC)
 	params := &sharedtypes.Params{NumBlocksPerSession: 10, ClaimWindowOpenOffsetBlocks: 1}
 	errNetwork := errors.New("injected: node info unreadable")
 	errParams := errors.New("injected: params unreadable")
@@ -47,7 +52,8 @@ func TestReadStartupChainState(t *testing.T) {
 		height     int64
 		heightErr  error
 
-		wantErr error
+		blockTime time.Time
+		wantErr   error
 		// A node of another chain answers with that chain's params and height,
 		// so they must not even be read.
 		wantParamsReads, wantHeightReads int32
@@ -66,7 +72,9 @@ func TestReadStartupChainState(t *testing.T) {
 			wantErr: errNoChainHeight, wantParamsReads: 1, wantHeightReads: 1},
 		{name: "negative height", network: chainID, height: -3,
 			wantErr: errNoChainHeight, wantParamsReads: 1, wantHeightReads: 1},
-		{name: "same chain, both read", network: chainID, height: 4242,
+		{name: "a block with no time anchors nothing", network: chainID, height: 4242, blockTime: time.Time{},
+			wantErr: errNoChainBlockTime, wantParamsReads: 1, wantHeightReads: 1},
+		{name: "same chain, all read", network: chainID, height: 4242, blockTime: blockTime,
 			wantParamsReads: 1, wantHeightReads: 1},
 	}
 	for _, tt := range tests {
@@ -76,21 +84,24 @@ func TestReadStartupChainState(t *testing.T) {
 			if tt.paramsErr == nil {
 				gotParamsIn = params
 			}
-			gotParams, gotHeight, err := readStartupChainState(context.Background(), chainID,
-				c.readers(tt.network, tt.networkErr, gotParamsIn, tt.paramsErr, tt.height, tt.heightErr))
+			gotParams, gotHeight, gotBlockTime, err := readStartupChainState(context.Background(), chainID,
+				c.readers(tt.network, tt.networkErr, gotParamsIn, tt.paramsErr, tt.height, tt.blockTime, tt.heightErr))
 
 			require.Equal(t, int32(1), c.network.Load(), "the network is always read, and read first")
 			require.Equal(t, tt.wantParamsReads, c.params.Load(), "params reads")
 			require.Equal(t, tt.wantHeightReads, c.height.Load(), "height reads")
 			if tt.wantErr != nil {
-				require.ErrorIs(t, err, tt.wantErr)
+				require.ErrorIs(t, err, tt.wantErr,
+					"LINK startup-reads-block-time: the miner does not start without the chain's block time, and says which read failed")
 				require.Nil(t, gotParams)
 				require.Zero(t, gotHeight)
+				require.Zero(t, gotBlockTime)
 				return
 			}
 			require.NoError(t, err)
 			require.Same(t, params, gotParams)
 			require.Equal(t, tt.height, gotHeight)
+			require.Equal(t, tt.blockTime, gotBlockTime, "LINK startup-reads-block-time: the time of that block comes back with it")
 		})
 	}
 }
@@ -99,7 +110,7 @@ func TestReadStartupChainState(t *testing.T) {
 // unreachable node fails the start instead of hanging it.
 func TestReadStartupChainState_BoundsEachRead(t *testing.T) {
 	var networkDeadline, paramsDeadline, heightDeadline bool
-	_, _, err := readStartupChainState(context.Background(), "pocket", startupChainReaders{
+	_, _, _, err := readStartupChainState(context.Background(), "pocket", startupChainReaders{
 		network: func(ctx context.Context) (string, error) {
 			_, networkDeadline = ctx.Deadline()
 			return "pocket", nil
@@ -108,9 +119,9 @@ func TestReadStartupChainState_BoundsEachRead(t *testing.T) {
 			_, paramsDeadline = ctx.Deadline()
 			return &sharedtypes.Params{}, nil
 		},
-		height: func(ctx context.Context) (int64, error) {
+		height: func(ctx context.Context) (int64, time.Time, error) {
 			_, heightDeadline = ctx.Deadline()
-			return 1, nil
+			return 1, time.Now(), nil
 		},
 	})
 	require.NoError(t, err)

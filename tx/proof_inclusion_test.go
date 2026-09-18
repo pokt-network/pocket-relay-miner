@@ -37,10 +37,11 @@ func TestSubmitProofs_SyncAcceptIsSuccess_NoInclusionCheck(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -86,10 +87,11 @@ func TestSubmitProofs_OnlyCheckTxErrorsAreSurfaced(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)

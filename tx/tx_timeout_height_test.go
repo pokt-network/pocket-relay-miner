@@ -51,10 +51,11 @@ func newTimeoutHeightTestClient(t *testing.T, supplierAddr string) (*testGRPCSer
 	t.Cleanup(func() { _ = km.Close() })
 
 	tc, err := NewTxClient(logger, km, TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.000001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.000001upokt"),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tc.Close() })
@@ -92,11 +93,12 @@ func TestSignAndBroadcast_TimeoutHeightIsNotInTheSimulatedTx(t *testing.T) {
 	t.Cleanup(func() { _ = km.Close() })
 
 	tc, err := NewTxClient(logger, km, TxClientConfig{
-		GRPCEndpoint:  testServer.address,
-		ChainID:       "test-chain",
-		GasLimit:      0, // simulate, as production does
-		GasAdjustment: DefaultGasAdjustment,
-		GasPrice:      parseGasPrice(t, "0.000001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          0, // simulate, as production does
+		GasAdjustment:     DefaultGasAdjustment,
+		GasPrice:          parseGasPrice(t, "0.000001upokt"),
 	})
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = tc.Close() })

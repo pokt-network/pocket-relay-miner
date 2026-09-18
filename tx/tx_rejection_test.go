@@ -282,7 +282,8 @@ func TestRealPathKeepsTodaysMessageAndCarriesTheRejection(t *testing.T) {
 			t.Cleanup(srv.cleanup)
 			tt.arm(srv)
 
-			tc := newBudgetClient(t, srv, TxClientConfig{})
+			tc := newBudgetClient(t, srv, TxClientConfig{
+				BlockTimeProvider: testBlockTime()})
 			err := claim(tc, context.Background(), t)
 			require.Error(t, err)
 
@@ -307,7 +308,8 @@ func TestTheRejectionSurvivesTheProofWrapperToo(t *testing.T) {
 	t.Cleanup(srv.cleanup)
 	srv.setBroadcastFailure(11, "out of gas")
 
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 	_, _, err := tc.SubmitProofs(context.Background(), budgetTestSupplier, 1000,
 		[]*prooftypes.MsgSubmitProof{generateTestProof(t, budgetTestSupplier, "session-1")})
 	require.Error(t, err)
@@ -328,7 +330,8 @@ func TestHashByStageOverTheWire(t *testing.T) {
 		t.Cleanup(srv.cleanup)
 		srv.txServer.FailSimulation("proof not required", 0, true)
 
-		tc := newBudgetClient(t, srv, TxClientConfig{})
+		tc := newBudgetClient(t, srv, TxClientConfig{
+			BlockTimeProvider: testBlockTime()})
 		var rej *TxRejection
 		require.True(t, errors.As(claim(tc, context.Background(), t), &rej))
 		require.Empty(t, rej.TxHash, "the simulated bytes are not the transaction: the tx is re-signed after simulating")
@@ -339,7 +342,8 @@ func TestHashByStageOverTheWire(t *testing.T) {
 		t.Cleanup(srv.cleanup)
 		srv.setBroadcastFailure(11, "out of gas")
 
-		tc := newBudgetClient(t, srv, TxClientConfig{})
+		tc := newBudgetClient(t, srv, TxClientConfig{
+			BlockTimeProvider: testBlockTime()})
 		var rej *TxRejection
 		require.True(t, errors.As(claim(tc, context.Background(), t), &rej))
 		require.Equal(t, "test-hash-1", rej.TxHash)
@@ -350,7 +354,8 @@ func TestHashByStageOverTheWire(t *testing.T) {
 		t.Cleanup(srv.cleanup)
 		srv.setBroadcastError(status.Error(codes.Unavailable, "node down"))
 
-		tc := newBudgetClient(t, srv, TxClientConfig{})
+		tc := newBudgetClient(t, srv, TxClientConfig{
+			BlockTimeProvider: testBlockTime()})
 		var rej *TxRejection
 		require.True(t, errors.As(claim(tc, context.Background(), t), &rej))
 

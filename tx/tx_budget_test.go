@@ -61,7 +61,8 @@ func TestDeadlineCoversTheFirstNetworkCall(t *testing.T) {
 	release := srv.authServer.BlockAccount()
 	defer close(release)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{TxRPCTimeout: 300 * time.Millisecond})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime(), TxRPCTimeout: 300 * time.Millisecond})
 
 	// Off to the side so a MISSING deadline fails by naming the defect instead
 	// of hanging the package for ten minutes with nothing in the output.
@@ -94,7 +95,8 @@ func TestRetriesShareTheWindowBudget(t *testing.T) {
 	seen := srv.authServer.NotifyAccount(8)
 
 	tc := newBudgetClient(t, srv, TxClientConfig{
-		TxRPCTimeout: time.Hour, // the window has to be the binding cap
+		BlockTimeProvider: testBlockTime(),
+		TxRPCTimeout:      time.Hour, // the window has to be the binding cap
 	})
 
 	// One context, reused -- exactly what the lifecycle does across retries.

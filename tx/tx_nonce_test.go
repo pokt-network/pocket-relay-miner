@@ -138,10 +138,11 @@ func TestNonceOffsetAppliesUnderWallClockAnchoring(t *testing.T) {
 
 	// No BlockTimeProvider: signAndBroadcast falls back to wall clock.
 	tc, err := NewTxClient(logging.NewLoggerFromConfig(logging.DefaultConfig()), km, TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	})
 	require.NoError(t, err)
 	defer func() { _ = tc.Close() }()

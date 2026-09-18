@@ -26,7 +26,8 @@ func TestBatchReachesTheWireInTheOrderItWasGiven(t *testing.T) {
 	srv := setupMockGRPCServer(t)
 	t.Cleanup(srv.cleanup)
 
-	tc := newBudgetClient(t, srv, TxClientConfig{})
+	tc := newBudgetClient(t, srv, TxClientConfig{
+		BlockTimeProvider: testBlockTime()})
 	client := NewHASupplierClient(tc, budgetTestSupplier, logging.NewLoggerFromConfig(logging.DefaultConfig()))
 
 	want := []string{"session-a", "session-b", "session-c", "session-d"}
