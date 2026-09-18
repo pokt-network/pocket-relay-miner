@@ -5,7 +5,6 @@ package redis
 import (
 	"context"
 	"errors"
-	"os"
 	"strconv"
 	"sync/atomic"
 	"testing"
@@ -129,14 +128,10 @@ func TestBatchingPublisher_HoldsTheQueueWhileTheStoreIsNotOperable(t *testing.T)
 }
 
 // TestBatchingPublisher_RealMaxmemory drives a REAL Redis to maxmemory. It changes
-// maxmemory, so it only runs against a disposable server:
-// PRM_REAL_OOM=1 REDIS_TEST_URL=redis://127.0.0.1:<port>.
+// maxmemory, so it runs against a Redis of its own.
 func TestBatchingPublisher_RealMaxmemory(t *testing.T) {
-	if os.Getenv("PRM_REAL_OOM") != "1" {
-		t.Skip("set PRM_REAL_OOM=1 and REDIS_TEST_URL to a disposable server: this changes maxmemory")
-	}
 	ctx := context.Background()
-	client := testredis.Client(t)
+	client := testredis.Exclusive(t)
 	prefix := testredis.Prefix(t)
 	health := NewStoreHealth(zerolog.Nop(), client, "test_real_oom", StoreGateAdmission)
 	client.AddHook(health.Hook())
@@ -167,10 +162,14 @@ func TestBatchingPublisher_RealMaxmemory(t *testing.T) {
 	require.Equal(t, []int{0, 0, 0, 0, 0}, queuedAttempts(p), "no entry spent an attempt")
 	require.Equal(t, published, testutil.ToFloat64(publishedTotal.WithLabelValues(supplier, "svc")))
 
-	require.NoError(t, client.ConfigSet(ctx, "maxmemory", "0").Err())
+	// Back to the limit the server started with, NOT to 0: a store reporting
+	// maxmemory 0 is misconfigured, and the gate closes on that permanently
+	// instead of reopening. This test asserted the opposite and never ran to
+	// find out -- it sat behind an env guard nothing set.
+	require.NoError(t, client.ConfigSet(ctx, "maxmemory", strconv.Itoa(testredis.ExclusiveMaxmemoryBytes)).Err())
 	require.Equal(t, int64(0), client.XLen(ctx, stream).Val(), "the refused MULTI wrote nothing (EXECABORT)")
 	health.poll(ctx)
-	require.True(t, health.Operable(), "without the limit a sample reopens the store")
+	require.True(t, health.Operable(), "room again, and a sample reopens the store")
 	p.dispatchAll(ctx)
 	require.Equal(t, int64(5), client.XLen(ctx, stream).Val(), "every relay reaches the stream once")
 	require.Equal(t, "11", client.Get(ctx, prefix+":consumed").Val(), "and the charge is written once")

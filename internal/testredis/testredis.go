@@ -10,11 +10,18 @@
 // blocked. A test asserting on those semantics against miniredis is not
 // evidence.
 //
-// The server is supplied by the environment, not started per test:
+// The SHARED server is supplied by the environment, not started per test:
 // scripts/gates/redis.sh brings ONE container up for the whole run and exports
 // REDIS_TEST_URL. Starting a container per package instead is what the first
-// attempt did, and `go test ./...` runs package binaries in parallel, so the
-// container-plus-reaper storm timed the gate out.
+// attempt did, and `go test ./...` runs package binaries in parallel, so that
+// storm timed the gate out -- it was 24 CONTAINERS, not 24 reapers:
+// testcontainers starts a single Ryuk per run, grouping by a hash of the
+// parent PID, measured live on 2026-09-18.
+//
+// The exception is the handful of tests that change SERVER-wide configuration
+// (maxmemory, maxmemory-policy), which prefix isolation cannot contain: each
+// asks for its own with Exclusive / ExclusiveURL -- one container per TEST, on
+// an ephemeral port. See exclusive.go.
 //
 // It is deliberately not the localnet's Redis either: locally that is the
 // running Tilt fleet holding live relay traffic, and a test writing there

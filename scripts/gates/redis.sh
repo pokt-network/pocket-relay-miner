@@ -12,9 +12,16 @@
 # meant to measure, on a port a stray FLUSHALL could ruin. This starts its own
 # container on its own port instead.
 #
-# One container for the WHOLE run, not one per package: `go test ./...` runs
-# package binaries in parallel, and a container plus a reaper per binary is how
-# the first attempt at this timed out.
+# One SHARED container for the whole run, not one per package: `go test ./...` runs
+# package binaries in parallel, and a container per binary is how the first attempt
+# at this timed out -- that was 24 CONTAINERS, not 24 reapers: testcontainers starts
+# a single Ryuk per run (it groups by a hash of the parent PID), measured live on
+# 2026-09-18.
+#
+# The exception is the handful of tests that change SERVER-wide config (`maxmemory`,
+# `maxmemory-policy`), which prefix isolation cannot contain: each asks for its own
+# with `testredis.Exclusive(t)` -- one container per TEST on an ephemeral port. See
+# `internal/testredis/exclusive.go`.
 #
 #   eval "$(scripts/gates/redis.sh up)"   # exports REDIS_TEST_URL
 #   scripts/gates/redis.sh down

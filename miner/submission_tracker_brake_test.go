@@ -77,7 +77,7 @@ func closeStoreByReserve(t *testing.T, client *redistransport.Client, prefix str
 // closed by the memory reserve, each of the four record kinds is still written.
 func TestSubmissionTracker_WritesEveryKindWhileTheStoreIsClosed(t *testing.T) {
 	ctx := context.Background()
-	client, prefix := newTestRedis(t)
+	client, prefix := newExclusiveTestRedis(t)
 	closeStoreByReserve(t, client, prefix)
 
 	tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
@@ -118,7 +118,7 @@ func TestSubmissionTracker_WritesEveryKindWhileTheStoreIsClosed(t *testing.T) {
 // any other failure.
 func TestSubmissionTracker_AWriteRefusedByRedisReachesTheCallerAndIsCounted(t *testing.T) {
 	ctx := context.Background()
-	client, _ := newTestRedis(t)
+	client, _ := newExclusiveTestRedis(t)
 	tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
 	const supplier = "pokt1refused"
 

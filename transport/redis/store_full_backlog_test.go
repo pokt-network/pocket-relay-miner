@@ -4,7 +4,6 @@ package redis
 
 import (
 	"context"
-	"os"
 	"strconv"
 	"testing"
 
@@ -22,13 +21,10 @@ import (
 // is what a proof does. So a full store made of backlog reopens only when a
 // proof frees enough tree memory, however far that proof is.
 //
-// It changes maxmemory: PRM_REAL_OOM=1 REDIS_TEST_URL=<disposable server>.
+// It changes maxmemory, so it runs against a Redis of its own.
 func TestStoreHealth_RealMaxmemoryWhatFreesAFullStore(t *testing.T) {
-	if os.Getenv("PRM_REAL_OOM") != "1" {
-		t.Skip("set PRM_REAL_OOM=1 and REDIS_TEST_URL to a disposable server: this changes maxmemory")
-	}
 	ctx := context.Background()
-	client := testredis.Client(t)
+	client := testredis.Exclusive(t)
 	prefix := testredis.Prefix(t)
 	require.NoError(t, client.ConfigSet(ctx, "maxmemory-policy", "noeviction").Err())
 	t.Cleanup(func() { _ = client.ConfigSet(context.Background(), "maxmemory", "0").Err() })

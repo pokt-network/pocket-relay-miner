@@ -78,11 +78,8 @@ func TestColdCompaction_MeasureSizesAndTimes(t *testing.T) {
 // just above what the server holds once the tree is stored, so the blob's SET
 // is refused by Redis itself; then lifts it and compacts.
 func TestColdCompaction_RealMaxmemoryRefusesTheBlobAndKeepsTheHash(t *testing.T) {
-	if os.Getenv("PRM_COLD_REAL_MAXMEMORY") != "1" {
-		t.Skip("set PRM_COLD_REAL_MAXMEMORY=1 and REDIS_TEST_URL to a disposable server: this changes maxmemory")
-	}
 	ctx := context.Background()
-	client, _ := newTestRedis(t)
+	client, _ := newExclusiveTestRedis(t)
 	kb := client.KB()
 	const supplier, sessionID = "pokt1cold_maxmemory", "sess-cold-maxmemory"
 	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{SupplierAddress: supplier, CacheTTL: time.Hour})
