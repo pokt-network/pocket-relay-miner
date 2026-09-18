@@ -31,9 +31,28 @@ CONF=${TRIAGE_CONF:-$SCRIPTS/localonly/observability/triage.conf}
 PROM_URL=${PROM_URL:-http://localhost:9091}
 CHAIN_URL=${CHAIN_URL:-http://localhost:26657}
 END=${1:-$(date -u +%FT%TZ)}
-MINUTES=${2:-75}
+
+# The window is the SECOND POSITIONAL argument, or TRIAGE_MINUTES. A caller who sets
+# W= gets told, not ignored: W is what this script calls the window internally, so
+# passing it that way is the natural mistake, and it used to fall through to the
+# 75-minute default IN SILENCE. Measured 2026-09-18: a 122-minute run was read with the
+# 75-minute default, which cut the run in half and made the claims identity report
+# GAP 804 != 1054; with the real window it closes at 1054. A window that is silently
+# wrong turns every identity below into decoration.
+W_INHERITED=${W:-}
+MINUTES=${2:-${TRIAGE_MINUTES:-75}}
+if [ -n "$W_INHERITED" ] && [ -z "${2:-}" ] && [ -z "${TRIAGE_MINUTES:-}" ]; then
+  echo "ABORT: W=$W_INHERITED is not how the window is passed, and the default would" >&2
+  echo "       have been used instead -- silently, which is the bug this guard exists" >&2
+  echo "       for. Use:  triage.sh <END-ISO8601> <MINUTES>   or  TRIAGE_MINUTES=<n>" >&2
+  exit 2
+fi
+case $MINUTES in ''|*[!0-9]*) echo "ABORT: MINUTES must be a whole number, got '$MINUTES'" >&2; exit 2;; esac
 T=$(date -u -d "$END" +%s) || { echo "invalid timestamp: $END" >&2; exit 2; }
 W="${MINUTES}m"
+# The window's START, printed with the header: "window 122m" alone does not say whether
+# it covers the run, and that is exactly what the reader has to check.
+START_ISO=$(date -u -d "@$((T - MINUTES * 60))" +%FT%TZ)
 
 failures=0
 
@@ -136,7 +155,9 @@ note() {
   else printf '  %-52s ok    %s\n' "$label" "$val"; fi
 }
 
-echo "== run triage: end $END, window $W, prometheus $PROM_URL"
+echo "== run triage: window $START_ISO -> $END ($W), prometheus $PROM_URL"
+echo "   Check that START is at or after the run's own start: a window that reaches into"
+echo "   the previous run adds its numbers, and one that starts late cuts this one in half."
 
 # A window that reaches into a PREVIOUS run adds its numbers silently, and the only
 # way to see it from here is that more than one process reported. The miner and the
