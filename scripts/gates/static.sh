@@ -150,6 +150,31 @@ fi
 # ---------------------------------------------------------------------------
 # .gitignore cannot enforce anything on a path git already tracks, which is
 # exactly how .planning/ and .idea/ ended up in the repository. Guarded by
+# Go files left under scripts/localonly/ compile as part of the module, and they
+# are almost always EVIDENCE copies from a delivery -- a test pulled out of a
+# worktree to show a red. They reference identifiers that do not exist at the
+# repository root, so vet and the linter fail with "undefined: SessionLifecycleManager"
+# and nothing points at the real cause. Measured 2026-09-17: six such files from
+# three earlier deliveries failed this gate, and the message named none of them.
+#
+# The trap only bites the MAIN tree: a fresh worktree does not carry gitignored
+# files, so a delivery's own gate passes green and the failure surfaces at
+# integration. Go ignores any directory or file whose name starts with "_" or
+# ".", so the fix is to move the file under a "_rescued/" directory.
+gate_step "stray Go files under scripts/localonly"
+if [ -d scripts/localonly ]; then
+    stray="$(find scripts/localonly -name '*.go' -not -path '*/[._]*' 2>/dev/null | sort)"
+    if [ -z "$stray" ]; then
+        gate_pass "no Go files under scripts/localonly that the module would compile"
+    else
+        gate_fail "Go files under scripts/localonly are compiled with the module:"
+        gate_detail "$stray"
+        gate_detail "move each one under a directory starting with _ (e.g. _rescued/)"
+    fi
+else
+    gate_skip "scripts/localonly not present"
+fi
+
 # existence so this gate still runs on branches predating the script.
 gate_step "tracked files"
 if [ -x ./scripts/check-tracked-files.sh ]; then

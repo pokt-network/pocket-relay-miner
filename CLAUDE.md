@@ -59,6 +59,14 @@ provider is configured, run the local council (`claude-council:local-council-exe
 and say in the report that its members share a model, so their agreement is a
 common prior to stress-test, not corroboration.
 
+**A red on a fix is not an exemption either.** When a test or a live run goes red
+on a fix, the next step is a council on the WHOLE design with every red so far,
+not a patch for the last red — and whoever supervises cannot waive the council for
+the one writing. Measured 2026-09-17 (item 321): "the test found the defect and
+the fix follows the existing pattern" waived it twice in a row, and the result was
+patch on patch — live-heap brake, overage, hysteresis, unload with TryLock,
+deadlock, in-place re-import — each chosen against the last red only.
+
 Measured 2026-08-30, and it is why this paragraph moved here: the council rule
 lived only in `.claude/skills/item/SKILL.md`, and `CLAUDE.md` did not mention the
 council at all. That session invoked karpathy -- because THIS file demands it
