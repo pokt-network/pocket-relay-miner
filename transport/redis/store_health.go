@@ -18,6 +18,7 @@ package redis
 
 import (
 	"context"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -68,6 +69,9 @@ const (
 	StoreReasonMemoryReserve = "memory_reserve"
 	StoreReasonOOMReply      = "oom_reply"
 	StoreReasonSampleStale   = "sample_stale"
+	// StoreReasonMisconfigured is a store that answered with a configuration
+	// this miner cannot run on: no memory limit, or a policy that evicts.
+	StoreReasonMisconfigured = "misconfigured"
 )
 
 // storeCloseBelow is the free memory below which every gate closes:
@@ -109,7 +113,6 @@ type StoreHealth struct {
 	gates      map[StoreGate]*storeGateState
 	lastSample time.Time
 	started    bool
-	noMaxWarn  bool
 	lastUsed   uint64
 	lastMax    uint64
 }
@@ -188,16 +191,24 @@ func (h *StoreHealth) view() StoreGateView {
 }
 
 // Start samples INFO memory every storeHealthPollInterval until ctx ends. The
-// first sample is taken before it returns.
-func (h *StoreHealth) Start(ctx context.Context) {
+// first sample is taken before it returns, and it decides whether this process
+// runs at all: a store that ANSWERED with a configuration this miner cannot run
+// on (see storeConfigRefusal) returns an error, and the caller stops.
+//
+// A store that did not answer is not an error. Its gates are closed by the
+// sample's own age, and a Redis that is slow to accept connections is a state
+// that passes; refusing to start on it would turn a delay into an outage.
+func (h *StoreHealth) Start(ctx context.Context) error {
 	if h == nil {
-		return
+		return nil
 	}
 	h.mu.Lock()
 	h.started = true
 	h.lastSample = h.now()
 	h.mu.Unlock()
-	h.poll(ctx)
+	if err := h.preflight(ctx); err != nil {
+		return err
+	}
 	go logging.RecoverGoRoutine(h.logger, "store_health_poll", func(c context.Context) {
 		ticker := time.NewTicker(storeHealthPollInterval)
 		defer ticker.Stop()
@@ -210,6 +221,38 @@ func (h *StoreHealth) Start(ctx context.Context) {
 			}
 		}
 	})(ctx)
+	return nil
+}
+
+// preflight takes the first sample and refuses a store whose configuration this
+// process cannot run on. The sample is applied either way, so a store that is
+// merely full, or one that has not answered yet, starts with its gates closed
+// rather than not at all.
+//
+// A store that has not answered ONCE is closed here and not left to age out:
+// until a sample arrives there is nothing to say Redis can take a write, and
+// this process refuses what it cannot record.
+func (h *StoreHealth) preflight(ctx context.Context) error {
+	sampleCtx, cancel := context.WithTimeout(ctx, storeHealthSampleMaxAge)
+	defer cancel()
+	info, err := h.client.Info(sampleCtx, "memory").Result()
+	if err != nil {
+		h.closeAll(StoreReasonSampleStale)
+		h.logger.Error().Err(err).Str("process", h.component).
+			Msg("redis did not answer INFO memory at startup: the store stays closed until it does")
+		return nil
+	}
+	used, maxmemory, policy, ok := parseStoreMemory(info)
+	if !ok {
+		h.closeAll(StoreReasonSampleStale)
+		h.logger.Error().Str("process", h.component).
+			Msg("redis INFO memory has no used_memory, maxmemory or maxmemory_policy: the store stays closed")
+		return nil
+	}
+	// Applied before the refusal is returned, so what the metrics show is the
+	// sample the process refused to run on.
+	h.observe(used, maxmemory, policy)
+	return storeConfigRefusal(maxmemory, policy)
 }
 
 // poll takes one sample and applies it.
@@ -221,12 +264,12 @@ func (h *StoreHealth) poll(ctx context.Context) {
 		h.observeFailure()
 		return
 	}
-	used, maxmemory, ok := parseStoreMemory(info)
+	used, maxmemory, policy, ok := parseStoreMemory(info)
 	if !ok {
 		h.observeFailure()
 		return
 	}
-	h.observe(used, maxmemory)
+	h.observe(used, maxmemory, policy)
 }
 
 // observeFailure closes every gate when the last good sample is too old.
@@ -239,42 +282,54 @@ func (h *StoreHealth) observeFailure() {
 	}
 }
 
-// observe applies a sample of used_memory and maxmemory to every gate.
-func (h *StoreHealth) observe(used, maxmemory uint64) {
+// storeEvictionPolicy is the only maxmemory-policy this miner runs on. Every
+// other one evicts, and what Redis holds here -- the SMST nodes a claim is
+// proved from, the relays not yet in a tree -- is not a cache: a key it drops
+// is a proof this supplier can no longer produce.
+const storeEvictionPolicy = "noeviction"
+
+// storeConfigRefusal reports why a store's memory configuration cannot be run
+// on, or nil when it can. It names the value read, so the operator does not
+// have to find it.
+func storeConfigRefusal(maxmemory uint64, policy string) error {
+	switch {
+	case maxmemory == 0:
+		return fmt.Errorf("redis maxmemory is 0 (no memory limit): set it below the memory its container has, so Redis refuses writes instead of being killed")
+	case policy != storeEvictionPolicy:
+		return fmt.Errorf("redis maxmemory-policy is %q: set it to %s, or Redis silently drops the nodes a claim is proved from", policy, storeEvictionPolicy)
+	}
+	return nil
+}
+
+// observe applies a sample of used_memory, maxmemory and maxmemory-policy to
+// every gate.
+//
+// A store with no memory limit, or one that evicts, is closed and stays closed:
+// without a limit Redis never refuses a write, it is killed instead, and the
+// relays written since its last save go with it; with an evicting policy it
+// drops SMST nodes, which is a claim this miner can no longer prove. Neither is
+// a condition that passes: only a sample with a usable configuration reopens.
+func (h *StoreHealth) observe(used, maxmemory uint64, policy string) {
 	h.mu.Lock()
 	h.lastSample = h.now()
 	h.lastUsed, h.lastMax = used, maxmemory
-	warnNoMax := maxmemory == 0 && !h.noMaxWarn
-	if warnNoMax {
-		h.noMaxWarn = true
-	}
 	h.mu.Unlock()
 
-	if warnNoMax {
-		h.logger.Warn().
-			Str("process", h.component).
-			Msg("Redis has no maxmemory: the store is only closed by refused writes or a lost sample, never before Redis runs out")
+	if err := storeConfigRefusal(maxmemory, policy); err != nil {
+		storeFreeBytes.WithLabelValues(h.component).Set(-1)
+		h.closeAll(StoreReasonMisconfigured)
+		return
 	}
 	free := uint64(0)
 	if used < maxmemory {
 		free = maxmemory - used
 	}
-	if maxmemory == 0 {
-		storeFreeBytes.WithLabelValues(h.component).Set(-1)
-	} else {
-		storeFreeBytes.WithLabelValues(h.component).Set(float64(free))
-	}
+	storeFreeBytes.WithLabelValues(h.component).Set(float64(free))
 	for gate, st := range h.gates {
 		operable := st.operable.Load()
 		h.mu.Lock()
 		reason := st.reason
 		h.mu.Unlock()
-		if maxmemory == 0 {
-			if !operable {
-				h.transition(gate, true, reason)
-			}
-			continue
-		}
 		closeBelow := storeCloseBelow(maxmemory)
 		switch {
 		case operable && free < closeBelow:
@@ -361,9 +416,11 @@ func (h *StoreHealth) transition(gate StoreGate, operable bool, reason string) {
 	}
 }
 
-// parseStoreMemory reads used_memory and maxmemory from an INFO memory reply.
-func parseStoreMemory(info string) (used, maxmemory uint64, ok bool) {
-	var haveUsed, haveMax bool
+// parseStoreMemory reads used_memory, maxmemory and maxmemory_policy from an
+// INFO memory reply. A reply without all three is not a sample: the caller
+// treats it as a store that did not answer.
+func parseStoreMemory(info string) (used, maxmemory uint64, policy string, ok bool) {
+	var haveUsed, haveMax, havePolicy bool
 	for _, line := range strings.Split(info, "\n") {
 		key, value, found := strings.Cut(strings.TrimSpace(line), ":")
 		if !found {
@@ -376,9 +433,13 @@ func parseStoreMemory(info string) (used, maxmemory uint64, ok bool) {
 		case "maxmemory":
 			n, err := strconv.ParseUint(value, 10, 64)
 			maxmemory, haveMax = n, err == nil
+		case "maxmemory_policy":
+			// INFO writes it with an underscore; CONFIG GET spells the same
+			// setting with a hyphen, and CONFIG is refused by managed Redis.
+			policy, havePolicy = value, true
 		}
 	}
-	return used, maxmemory, haveUsed && haveMax
+	return used, maxmemory, policy, haveUsed && haveMax && havePolicy
 }
 
 // Hook returns a go-redis hook that reports every OOM reply to h. Add it to every

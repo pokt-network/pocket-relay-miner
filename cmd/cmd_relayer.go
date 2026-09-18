@@ -533,7 +533,11 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// admission path reads it.
 	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer", redistransport.StoreGateAdmission)
 	redisClient.AddHook(storeHealth.Hook())
-	storeHealth.Start(ctx)
+	// A Redis with no memory limit, or one that evicts, is refused here: the
+	// relayer would serve relays whose record the store drops or loses.
+	if err := storeHealth.Start(ctx); err != nil {
+		return fmt.Errorf("redis is not configured for this relayer: %w", err)
+	}
 
 	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
 	// files and the redis CLI build clients, and a repeated MustRegister panics.

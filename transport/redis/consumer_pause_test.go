@@ -86,7 +86,7 @@ func TestStreamsConsumer_ReadsNothingWhileTheStoreIsClosedAndResumesWhenItReopen
 	// wait below is the transition, not a duration.
 	changed := health.Changed()
 	const maxmemory = 1024 * mib
-	health.observe(maxmemory-512*mib, maxmemory)
+	health.observe(maxmemory-512*mib, maxmemory, storeEvictionPolicy)
 	<-changed
 
 	select {

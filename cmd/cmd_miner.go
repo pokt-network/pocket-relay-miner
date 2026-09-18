@@ -271,7 +271,11 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	// component the relayer uses.
 	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "miner", redistransport.StoreGateIngestion)
 	redisClient.AddHook(storeHealth.Hook())
-	storeHealth.Start(ctx)
+	// A Redis with no memory limit, or one that evicts, is refused here: the
+	// miner would serve relays it cannot claim, and find out at the settlement.
+	if err := storeHealth.Start(ctx); err != nil {
+		return fmt.Errorf("redis is not configured for this miner: %w", err)
+	}
 	miner.RecordStoreMemoryOnClose(ctx, logger, redisClient, storeHealth)
 
 	redisPools := redistransport.NewPoolCollector("miner")

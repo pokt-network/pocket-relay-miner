@@ -47,7 +47,7 @@ func heldConsumer(t *testing.T) (*StreamsConsumer, *StoreHealth, *heldIngestion,
 	t.Helper()
 	c, health, counter, _, _ := pausedConsumer(t)
 	const maxmemory = 1024 * mib
-	health.observe(maxmemory-512*mib, maxmemory)
+	health.observe(maxmemory-512*mib, maxmemory, storeEvictionPolicy)
 	require.True(t, health.Operable(), "control: the store is open")
 	pause := newHeldIngestion()
 	c.SetIngestionPause(pause)

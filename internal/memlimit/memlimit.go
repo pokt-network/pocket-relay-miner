@@ -17,6 +17,7 @@ import (
 	"os"
 	"path"
 	"runtime/debug"
+	"runtime/metrics"
 	"strconv"
 	"strings"
 
@@ -59,6 +60,18 @@ func Margin(limit uint64) uint64 {
 func BrakeThresholds(limit uint64) (closeAbove, reopenBelow uint64) {
 	margin := Margin(limit)
 	return limit - margin, limit - margin - margin/2
+}
+
+// Mapped reads the memory the runtime's limit bounds: all the runtime has
+// mapped, less the heap pages it returned to the system.
+func Mapped() uint64 {
+	samples := []metrics.Sample{
+		{Name: "/memory/classes/total:bytes"},
+		{Name: "/memory/classes/heap/released:bytes"},
+	}
+	metrics.Read(samples)
+	total, released := samples[0].Value.Uint64(), samples[1].Value.Uint64()
+	return total - min(total, released)
 }
 
 // Sources are what Resolve reads.

@@ -121,7 +121,7 @@ data:
     latency-monitor-threshold 10
 """.format(
         maxmemory=redis_config.get("maxmemory", "1887436800"),
-        maxmemory_policy=redis_config.get("maxmemory_policy", "allkeys-lru"),
+        maxmemory_policy=redis_config.get("maxmemory_policy", "noeviction"),
         slowlog_us=redis_config.get("slowlog_log_slower_than_us", "-1"),
     )
 
@@ -217,7 +217,9 @@ data:
     rdbchecksum no
     # === MEMORY MANAGEMENT ===
     maxmemory 471859200
-    maxmemory-policy allkeys-lru
+    # noeviction and NOT allkeys-lru: the SMST nodes are the proof preimage, so
+    # evicting them looks like lost claims instead of "Redis is full".
+    maxmemory-policy noeviction
     # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
     # Counts the main thread: 4 = main + 3 I/O threads. io-threads-do-reads
     # is deprecated and ignored since 8.x, so it is not set.

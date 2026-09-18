@@ -123,7 +123,7 @@ func TestBatchingPublisher_HoldsTheQueueWhileTheStoreIsNotOperable(t *testing.T)
 	require.Equal(t, []int{0}, queuedAttempts(p), "and the entry keeps its place and its attempts")
 
 	const maxmemory = 1024 * mib
-	health.observe(maxmemory-512*mib, maxmemory)
+	health.observe(maxmemory-512*mib, maxmemory, storeEvictionPolicy)
 	p.dispatchAll(ctx)
 	require.Equal(t, int64(1), client.XLen(ctx, stream).Val(), "reopened, the entry is written")
 }
