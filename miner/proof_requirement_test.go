@@ -102,11 +102,19 @@ func TestResolveClaimedRoot_ReturnsSentinelWhenSMSTEmpty(t *testing.T) {
 	assert.True(t, errors.Is(err, ErrClaimedRootUnavailable))
 }
 
-// TestResolveClaimedRoot_PropagatesProviderError asserts that a transient
-// Redis/SMST failure surfaces as ErrClaimedRootUnavailable wrapping the
-// provider error, not as a caller-visible root of unknown provenance.
-func TestResolveClaimedRoot_PropagatesProviderError(t *testing.T) {
-	providerErr := errors.New("redis: connection refused")
+// TestResolveClaimedRoot_OpaqueProviderErrorStaysTerminal asserts that a
+// provider error the classifier cannot recognise stays TERMINAL. A bare
+// errors.New carries nothing IsRetryableError or IsShutdownCancelError can
+// read — no net.Error, no redis sentinel, no context error — so it is
+// treated as an answer ("the root is not available") rather than as silence.
+//
+// The wording matters: this test used to call that string "transient" and
+// assert the same outcome, which read as proof that transient failures were
+// covered. They were not; nothing here reaches the deferral path. What
+// exercises it is a REAL Redis that stopped answering — see
+// proof_deferral_test.go.
+func TestResolveClaimedRoot_OpaqueProviderErrorStaysTerminal(t *testing.T) {
+	providerErr := errors.New("smst: root payload malformed")
 	provider := &stubRootProvider{err: providerErr}
 	checker := &ProofRequirementChecker{
 		logger:       logging.NewLoggerFromConfig(logging.DefaultConfig()),
@@ -118,7 +126,11 @@ func TestResolveClaimedRoot_PropagatesProviderError(t *testing.T) {
 	assert.Nil(t, got)
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, ErrClaimedRootUnavailable),
-		"provider errors must be wrapped with ErrClaimedRootUnavailable for caller classification")
+		"an unclassifiable provider error must stay terminal")
+	assert.False(t, errors.Is(err, ErrClaimedRootUnreadable),
+		"it must NOT be deferred: nothing says the root would be readable next block")
+	assert.ErrorIs(t, err, providerErr,
+		"the provider error must stay in the chain so operators see the cause")
 }
 
 // TestClaimFromSnapshot_UsesExplicitRoot asserts the new two-argument

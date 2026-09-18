@@ -2080,6 +2080,24 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			if lc.proofChecker != nil {
 				required, checkErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofRequirementSeedBlock.Hash())
 				if checkErr != nil {
+					// ErrClaimedRootUnreadable means we could not READ the
+					// root this block, not that it is gone: the tree is
+					// still in Redis and the proof is buildable next block.
+					// Defer instead of marking terminal — the claim is
+					// already on chain, so a proof that never arrives costs
+					// the whole claim plus a flat slash, while another block
+					// of waiting costs nothing. The session leaves this
+					// batch exactly as it does today, so the healthy
+					// sessions in the group are not delayed by it.
+					if errors.Is(checkErr, ErrClaimedRootUnreadable) {
+						RecordProofSkipped(snapshot.SupplierOperatorAddress, snapshot.ServiceID, ProofSkippedReasonClaimedRootUnreadable)
+						logger.Warn().
+							Err(checkErr).
+							Str(logging.FieldSessionID, snapshot.SessionID).
+							Msg("cannot read claimed root this block; deferring proof to a later block inside the window")
+						lc.deferProof(ctx, snapshot)
+						continue
+					}
 					// ErrClaimedRootUnavailable means the session has no
 					// authoritative root to anchor a proof on — falling
 					// open to submission would produce an on-chain invalid
@@ -2087,6 +2105,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					// failure) so the pipeline doesn't spend gas on a
 					// guaranteed reject.
 					if errors.Is(checkErr, ErrClaimedRootUnavailable) {
+						RecordProofSkipped(snapshot.SupplierOperatorAddress, snapshot.ServiceID, ProofSkippedReasonClaimedRootUnavailable)
 						logger.Error().
 							Err(checkErr).
 							Str(logging.FieldSessionID, snapshot.SessionID).
@@ -2209,10 +2228,22 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			for _, snapshot := range sessionsNeedingProof {
 				required, recheckErr := lc.proofChecker.IsProofRequired(ctx, snapshot, proofRequirementSeedBlock.Hash())
 				if recheckErr != nil {
+					// Same split as the initial check: unreadable is deferred,
+					// unavailable is terminal.
+					if errors.Is(recheckErr, ErrClaimedRootUnreadable) {
+						RecordProofSkipped(snapshot.SupplierOperatorAddress, snapshot.ServiceID, ProofSkippedReasonClaimedRootUnreadable)
+						logger.Warn().
+							Err(recheckErr).
+							Str(logging.FieldSessionID, snapshot.SessionID).
+							Msg("cannot read claimed root on re-check; deferring proof to a later block inside the window")
+						lc.deferProof(ctx, snapshot)
+						continue
+					}
 					// Same guard as the initial check — a missing claimed
 					// root means we'd submit a fabricated proof. Surface
 					// as proof_tx_error instead of falling open.
 					if errors.Is(recheckErr, ErrClaimedRootUnavailable) {
+						RecordProofSkipped(snapshot.SupplierOperatorAddress, snapshot.ServiceID, ProofSkippedReasonClaimedRootUnavailable)
 						logger.Error().
 							Err(recheckErr).
 							Str(logging.FieldSessionID, snapshot.SessionID).
@@ -2913,6 +2944,37 @@ func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, 
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
 	)
+}
+
+// deferProof returns a session to claimed after a proof attempt was
+// abandoned for a reason that will not still hold next block, so the
+// per-block transition engine tries it again until the proof window closes.
+//
+// Both halves are needed and the order matters. Redis is what a failover
+// leader reads, and the in-memory snapshot is what checkSessionTransition
+// reads on the next block: a session left at proving in memory can only
+// leave through proof_window_closed, which is the same money lost. The
+// snapshot pointer is the one activeSessions holds (session_lifecycle.go
+// hands it to the callback and mutates it the same way right after this
+// call returns), and this runs on that same goroutine.
+//
+// If the Redis write fails the snapshot is left alone on purpose: the
+// session then ages out through proof_window_closed, which at least counts
+// the loss. Same rule as resumeUnsentSubmission -- when the write does not
+// land, the session stays as it was.
+func (lc *LifecycleCallback) deferProof(ctx context.Context, snapshot *SessionSnapshot) {
+	if lc.sessionCoordinator == nil {
+		return
+	}
+	if err := lc.sessionCoordinator.OnProofDeferred(ctx, snapshot.SessionID); err != nil {
+		lc.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, snapshot.SessionID).
+			Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+			Msg("failed to return session to claimed after deferring the proof; it will age out at proof window close")
+		return
+	}
+	snapshot.State = SessionStateClaimed
 }
 
 // markAndCountProofWindowClosed is markAndCountClaimWindowClosed one window later.

@@ -413,7 +413,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "sessions_failed_total",
-			Help:      "Failed session attempts by reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, proof_window_closed, proof_tx_error, panic_recovered on relays only); claim_tx_error and proof_tx_error are retried by the inclusion reconciler, so they are not losses on their own -- what settles it is claim_inclusion_outcome_total / proof_inclusion_outcome_total with outcome=on_chain_found",
+			Help:      "Failed session attempts by reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, proof_window_closed, proof_tx_error, panic_recovered on relays only); claim_tx_error and proof_tx_error are retried by the inclusion reconciler ONLY when a transaction was actually broadcast, since the reconciler walks rebroadcast entries -- a session marked proof_tx_error before any proof was built has none, and nothing retries it. What settles the broadcast case is claim_inclusion_outcome_total / proof_inclusion_outcome_total with outcome=on_chain_found",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -2013,6 +2013,25 @@ const (
 	// fan-out. The rest of the batch continues so one bad session does
 	// not poison the submission.
 	ProofSkippedReasonBuildFailed = "build_failed"
+
+	// ProofSkippedReasonClaimedRootUnavailable — the session has no
+	// authoritative root to anchor a proof on and never will: no provider
+	// is wired, or the SMST answered that it holds no root. Terminal; the
+	// session goes to SessionStateProofTxError.
+	ProofSkippedReasonClaimedRootUnavailable = "claimed_root_unavailable"
+
+	// ProofSkippedReasonClaimedRootUnreadable — the root could not be read
+	// this block (Redis unreachable, pool timeout, shutdown). NOT terminal:
+	// the session is written back to claimed and the per-block engine tries
+	// again until the proof window closes. This counter rising while
+	// sessions_failed_total{reason="proof_window_closed"} stays flat is the
+	// signal the deferral is working.
+	//
+	// It counts ATTEMPTS, not sessions, and it is NOT a denominator: one
+	// session deferred for four blocks increments it four times. The count
+	// of sessions that actually lost their proof is
+	// sessions_failed_total{reason="proof_window_closed"}.
+	ProofSkippedReasonClaimedRootUnreadable = "claimed_root_unreadable"
 )
 
 // RecordProofSkipped increments the proof-skipped counter with the given

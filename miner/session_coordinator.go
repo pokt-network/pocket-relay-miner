@@ -745,6 +745,59 @@ func (c *SessionCoordinator) OnProofTxError(ctx context.Context, sessionID strin
 	return nil
 }
 
+// OnProofDeferred returns a session to SessionStateClaimed after a proof
+// attempt was abandoned for a reason that will not still be true next block
+// — Redis unreachable while reading the claimed root, or a shutdown cancel.
+//
+// It is OnProofTxError minus the terminal callback, and that omission is the
+// whole point. onSessionTerminal is wired to RemoveSession
+// (supplier_manager.go), so marking a session terminal drops it from
+// activeSessions and nothing looks at it again; its claim is already on
+// chain, and a required proof that never arrives costs the entire claim plus
+// a flat slash.
+//
+// Writing claimed rather than leaving the session in proving is also
+// deliberate: a session in proving can only leave through
+// proof_window_closed (session_lifecycle.go), which is the same money lost,
+// just more quietly. From claimed, checkSessionTransition returns Proving
+// again on every block while currentHeight is inside the proof window, and
+// stops on its own at proofWindowClose. No new loop, no new state.
+func (c *SessionCoordinator) OnProofDeferred(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	// Same guard as OnProofTxError: another miner may already have proved
+	// this session, and rewinding it to claimed would make this miner
+	// submit a duplicate proof.
+	current, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to read session state before deferring proof")
+	} else if current != nil && (current.State == SessionStateProved || current.State == SessionStateProbabilisticProved || current.ProofTxHash != "") {
+		c.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Str("current_state", string(current.State)).
+			Str("proof_tx_hash", current.ProofTxHash).
+			Msg("NOT deferring proof: session already proved by another miner")
+		return nil
+	}
+
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimed); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to return session to claimed after deferring proof")
+		return err
+	}
+
+	c.logger.Info().
+		Str(logging.FieldSessionID, sessionID).
+		Msg("proof deferred: session returned to claimed, will retry next block inside the proof window")
+	return nil
+}
+
 // OnProbabilisticProved marks session as probabilistically proved (no proof required).
 // Updates state immediately in Redis for HA compatibility.
 func (c *SessionCoordinator) OnProbabilisticProved(ctx context.Context, sessionID string) error {

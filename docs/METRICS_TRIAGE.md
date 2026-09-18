@@ -88,7 +88,17 @@ curl -s "localhost:26657/block_results?height=$H" | jq '
   fire on a run that lost nothing. They also fire on a run that lost everything,
   with the same reason — **they cannot tell the two apart.** Read
   `*_inclusion_outcome` instead, and read `proof_rebroadcasts_total` for what the
-  retries cost.
+  retries cost. That resubmission only exists when a transaction was actually
+  broadcast: the reconciler walks rebroadcast entries, so a session marked
+  `proof_tx_error` before any proof was built has none, and nothing retries it.
+- **`proof_skipped_total{reason="claimed_root_unreadable"}`** is the opposite
+  signal, and it is not a decoy: the miner could not read a session's claimed root
+  this block and returned the session to `claimed` to try again while the proof
+  window is open. It rising while
+  `sessions_failed_total{reason="proof_window_closed"}` stays flat means the
+  deferral is doing its job. Both rising together means the window ran out.
+  It counts **attempts, not sessions** — one session deferred for four blocks
+  increments it four times — so it is not a denominator for anything.
 - **`sessions_failed_total{reason="proof_window_closed"}`**: includes sessions
   whose proof was already on chain before the process restarted.
 - **`proofs_submitted_total`** does not count a proof that landed on a rebroadcast,

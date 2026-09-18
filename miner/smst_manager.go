@@ -1631,8 +1631,20 @@ func (m *RedisSMSTManager) loadTreeFromRedis(ctx context.Context, sessionID stri
 	// Keyed by (supplier, session) so each supplier's tree is isolated.
 	rootKey := m.redisClient.KB().SMSTRootKey(m.config.SupplierAddress, sessionID)
 	rootBytes, err := m.redisClient.Get(ctx, rootKey).Bytes()
-	if err != nil || len(rootBytes) == 0 {
-		return nil, fmt.Errorf("claimed root not found in Redis: %w", err)
+	if err != nil {
+		// "Redis did not answer" and "the key is not there" are different
+		// facts, and the proof path acts on them differently: a root it
+		// could not READ is still in Redis a block later, so the session is
+		// deferred; a root that is ABSENT makes the session unprovable.
+		// Collapsing both under one message also printed "%!w(<nil>)"
+		// whenever the key was merely empty, because err was nil there.
+		if errors.Is(err, redis.Nil) {
+			return nil, fmt.Errorf("claimed root not found in Redis for session %s: %w", sessionID, err)
+		}
+		return nil, fmt.Errorf("failed to read claimed root from Redis for session %s: %w", sessionID, err)
+	}
+	if len(rootBytes) == 0 {
+		return nil, fmt.Errorf("claimed root is empty in Redis for session %s", sessionID)
 	}
 	if !isValidSMSTRoot(rootBytes) {
 		// Corrupt root would panic inside the smt library on import. Delete it
