@@ -305,6 +305,29 @@ func signedTimeoutNanos(p tx.SignedTxPayload) int64 {
 // that no claim exists for this (supplier, session).
 //
 // The decision this feeds is terminal and costs money — see the pre-proof guard in
+// OnClaimedSessionsResumed queues again the cold compaction of the sessions the
+// lifecycle loaded with their claim already sent (see resumeColdCompactions).
+//
+// It does not help a Redis that is already full: the leaves blob is written
+// before the nodes hash is deleted, on purpose, so with maxmemory reached every
+// attempt is refused and the retries run out. This keeps the next restart from
+// leaving those trees behind; it does not recover the one that already did.
+func (lc *LifecycleCallback) OnClaimedSessionsResumed(ctx context.Context, sessions []*SessionSnapshot) {
+	compactor, ok := lc.smstManager.(interface {
+		ScheduleColdCompaction(ctx context.Context, sessionID string)
+	})
+	if !ok {
+		return
+	}
+	for _, snapshot := range sessions {
+		compactor.ScheduleColdCompaction(ctx, snapshot.SessionID)
+	}
+	lc.logger.Info().
+		Str(logging.FieldSupplier, lc.config.SupplierAddress).
+		Int("sessions", len(sessions)).
+		Msg("queued again the cold compaction of the sessions claimed before this miner started")
+}
+
 // OnSessionsNeedProof — so it follows query.IsEntityNotFound's policy: an explicit
 // gRPC NotFound and nothing else. Any other error means we failed to get an answer,
 // and the caller must fail OPEN rather than skip a proof we cannot prove is
@@ -555,9 +578,13 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 	// an operator who disabled the reconciler already knows no retry is coming,
 	// and stamping every ejection would drown the case that is a surprise.
 	if recoverable || lc.rebroadcastStore == nil {
+		// `recoverable` is exactly "an entry landed, so the reconciler will
+		// answer for this session". With no store at all nothing will answer,
+		// and the money is counted forgone rather than left waiting forever.
 		RecordClaimTxError(
 			snapshot.SupplierOperatorAddress,
 			snapshot.ServiceID,
+			recoverable,
 			snapshot.RelayCount,
 			int64(snapshot.TotalComputeUnits),
 		)
@@ -666,7 +693,12 @@ func (lc *LifecycleCallback) settleNotRequiredBatch(
 			continue
 		}
 
-		RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+		// NOT resolvable, and the comment above this function says why: this path
+		// deliberately persists no rebroadcast entry, because the chain just
+		// refused these proofs and resending the same bytes is doomed. With
+		// nothing that will ever answer, the money is lost now rather than
+		// waiting in `unresolved` for a resolver that does not exist.
+		RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, false, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 		if lc.sessionCoordinator != nil {
 			if err := lc.sessionCoordinator.OnProofTxError(ctx, snapshot.SessionID); err != nil {
 				logger.Warn().Err(err).Str(logging.FieldSessionID, snapshot.SessionID).
@@ -1759,9 +1791,18 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		}
 
 		if lastErr != nil && !windowClosed {
+			// A store means the self-heal persist further down will hand these
+			// sessions to the inclusion reconciler, which is what makes the
+			// failure an ATTEMPT rather than a verdict. Read from the store
+			// being wired and not from the persist's result on purpose: an
+			// individual persist that fails is logged there and degrades that
+			// one session to fire-once, which is the pre-reconciler behaviour
+			// and is already the accepted degradation.
+			resolvable := lc.rebroadcastStore != nil
+
 			// Mark all sessions as failed due to claim TX error (after exhausting retries)
 			for _, snapshot := range groupSnapshots {
-				RecordClaimTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+				RecordClaimTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				if lc.sessionCoordinator != nil {
@@ -1982,7 +2023,16 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// Filter sessions based on proof requirement (probabilistic proof selection)
 		var sessionsNeedingProof []*SessionSnapshot
 		for _, snapshot := range groupSnapshots {
-			// CRITICAL: Deduplication check - never submit the same proof twice
+			// CRITICAL: Deduplication check - never submit the same proof twice.
+			//
+			// The hash is stored when the mempool accepts the transaction
+			// (session_coordinator.go:487), so it says the proof was SENT, not
+			// that it was included: a transaction accepted and never included
+			// leaves this session skipped for good. Inclusion is readable only
+			// from the claim -- the proof is deleted in the same EndBlocker that
+			// judges it (poktroll v0.1.35 x/proof/module/abci.go:14-24), which
+			// writes Claim.ProofValidationStatus (keeper/validate_proofs.go:197).
+			// Checking it here is 323b.
 			if snapshot.ProofTxHash != "" {
 				logger.Warn().
 					Str(logging.FieldSessionID, snapshot.SessionID).
@@ -2632,10 +2682,16 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		}
 
 		if lastErr != nil && !windowClosed && !notRequired {
+			// Same reading as the claim side: a store means the self-heal
+			// persist below hands these to the reconciler, so the money waits in
+			// `unresolved` instead of being declared lost by a submission that
+			// may yet land.
+			resolvable := lc.rebroadcastStore != nil
+
 			// Mark sessions that entered the tx as failed (the ones that did
 			// not build are already counted as build_failed via RecordProofSkipped).
 			for _, snapshot := range validProofSnapshots {
-				RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
+				RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				if lc.sessionCoordinator != nil {
@@ -2853,6 +2909,7 @@ func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, 
 	RecordClaimWindowClosed(
 		snapshot.SupplierOperatorAddress,
 		snapshot.ServiceID,
+		snapshot.ClaimTxHash,
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
 	)
@@ -2874,6 +2931,7 @@ func (lc *LifecycleCallback) markAndCountProofWindowClosed(ctx context.Context, 
 	RecordProofWindowClosed(
 		snapshot.SupplierOperatorAddress,
 		snapshot.ServiceID,
+		snapshot.ProofTxHash,
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
 	)
@@ -2900,9 +2958,15 @@ func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *
 	// tracking altogether; and determineTransition has no case for a session
 	// already in claim_window_closed, so it would produce no transition even
 	// if it were still tracked.
+	//
+	// The sweep persists the terminal state BEFORE calling this, and that order
+	// is the other half of "exactly once": a session counted here whose state
+	// did not reach Redis is re-loaded as non-terminal by whoever takes the
+	// supplier over, swept again, and counted again. See executeTransition.
 	RecordClaimWindowClosed(
 		snapshot.SupplierOperatorAddress,
 		snapshot.ServiceID,
+		snapshot.ClaimTxHash,
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
 	)
@@ -2931,10 +2995,12 @@ func (lc *LifecycleCallback) OnProofWindowClosed(ctx context.Context, snapshot *
 	}
 
 	// Same gap as OnClaimWindowClosed above, one window later: the sweep is the
-	// only route here and it recorded nothing.
+	// only route here and it recorded nothing. The same ordering applies -- the
+	// state is persisted before this runs, so a handover cannot count it twice.
 	RecordProofWindowClosed(
 		snapshot.SupplierOperatorAddress,
 		snapshot.ServiceID,
+		snapshot.ProofTxHash,
 		snapshot.RelayCount,
 		int64(snapshot.TotalComputeUnits),
 	)

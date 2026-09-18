@@ -164,7 +164,12 @@ func TestMarkAndCountClaimWindowClosed_DoesNotRecordWhenTheMarkFails(t *testing.
 		TotalComputeUnits:       5_000_000,
 	}
 
-	before := testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
+	// The snapshot carries no claim tx hash, so its money is FORGONE and not
+	// lost: nothing ever reached the chain, so it never entered the claim book.
+	// This probe has to watch the series the verdict actually writes, or it
+	// asserts that an untouched series stayed untouched.
+	before := testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
+	sessionsBefore := testutil.ToFloat64(sessionsFailedTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
 
 	// Break every Redis command so UpdateState fails inside the coordinator.
 	f.failRedis.Fail("LOADING Redis is loading the dataset in memory")
@@ -172,8 +177,11 @@ func TestMarkAndCountClaimWindowClosed_DoesNotRecordWhenTheMarkFails(t *testing.
 	f.failRedis.Clear()
 
 	require.Equal(t, before,
-		testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
+		testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
 		"the mark failed, so the sweep will record this session later; recording here too double counts")
+	require.Equal(t, sessionsBefore,
+		testutil.ToFloat64(sessionsFailedTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
+		"the session counter must not move either: the verdict has not been reached yet")
 }
 
 func TestMarkAndCountClaimWindowClosed_RecordsWhenTheMarkTakes(t *testing.T) {
@@ -196,16 +204,25 @@ func TestMarkAndCountClaimWindowClosed_RecordsWhenTheMarkTakes(t *testing.T) {
 		TotalComputeUnits:       5_000_000,
 	}
 
-	before := testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
+	before := testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
+	lostBefore := testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
 	lc.markAndCountClaimWindowClosed(f.ctx, snapshot)
 	require.Equal(t, before+5,
+		testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
+		"the mark took, so this is the only place the verdict is recorded")
+	require.Equal(t, lostBefore,
 		testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
-		"the mark took, so this is the only place the loss is recorded")
+		"no claim reached the chain, so this work never entered the book: it is forgone, not lost, "+
+			"and putting it in lost is what stops claimed-proved-lost-unresolved from closing")
 }
 
 // The sweep in SessionLifecycleManager decides a window timeout on height alone
 // and records nothing; OnClaimWindowClosed is the only place both it and the
-// cleanup pass through, so the loss is recorded there.
+// cleanup pass through, so the verdict is recorded there.
+//
+// With no claim tx hash on the snapshot the verdict is FORGONE: no claim ever
+// reached the chain, so this work was never in upokt_claimed_total and counting
+// it lost would break the ledger identity by exactly its weight.
 func TestOnClaimWindowClosed_RecordsTheLoss(t *testing.T) {
 	const supplier = "pokt1window_metric_claim"
 	f := newHandlerTestFixture(t, supplier)
@@ -223,7 +240,8 @@ func TestOnClaimWindowClosed_RecordsTheLoss(t *testing.T) {
 	}
 
 	sessionsBefore := testutil.ToFloat64(sessionsFailedTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
-	relaysBefore := testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
+	relaysBefore := testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
+	lostBefore := testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
 
 	require.NoError(t, lc.OnClaimWindowClosed(context.Background(), snapshot))
 
@@ -231,8 +249,11 @@ func TestOnClaimWindowClosed_RecordsTheLoss(t *testing.T) {
 		testutil.ToFloat64(sessionsFailedTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
 		"a session lost to a closed claim window must be counted")
 	require.Equal(t, relaysBefore+4,
-		testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
+		testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
 		"the relays it carried must be counted, not just the session")
+	require.Equal(t, lostBefore,
+		testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
+		"no claim reached the chain, so these relays never entered the book")
 }
 
 func TestOnProofWindowClosed_RecordsTheLoss(t *testing.T) {

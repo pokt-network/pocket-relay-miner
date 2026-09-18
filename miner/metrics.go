@@ -23,6 +23,12 @@ const (
 	gcReasonMemoryBrake      = "memory_brake"
 )
 
+// Why the ingestion memory brake closed, logged.
+const (
+	memoryBrakeReasonOverage = "overage"
+	memoryBrakeReasonLive    = "live"
+)
+
 // Ingestion memory brake states, used as a metric label.
 const (
 	memoryBrakeClosed = "closed"
@@ -40,6 +46,18 @@ var (
 			Help:      "GCs the miner forced to read a recent live heap, by reason",
 		},
 		[]string{"reason"},
+	)
+
+	// smstTreesUnloaded counts the trees of ended sessions dropped from memory
+	// and kept in Redis, by supplier.
+	smstTreesUnloaded = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "smst_trees_unloaded_total",
+			Help:      "Trees of sessions past their grace period dropped from memory and kept in Redis",
+		},
+		[]string{"supplier"},
 	)
 
 	// ingestionMemoryBrakeClosed is 1 while the heap near the memory limit
@@ -64,15 +82,36 @@ var (
 		[]string{"state"},
 	)
 
-	// trackingWritesSkipped counts submission tracking records not written because
-	// Redis could not take writes, by kind (claim, proof, claim_outcome,
-	// proof_outcome).
-	trackingWritesSkipped = observability.MinerFactory.NewCounterVec(
+	// trackingWritesFailed counts submission tracking records Redis REFUSED,
+	// by kind (claim, proof, claim_outcome, proof_outcome) and by reason: oom
+	// when Redis answered that it is out of memory, other for anything else.
+	//
+	// It replaces tracking_writes_skipped_total, which counted records this
+	// miner chose not to write while its own store gate was closed. That choice
+	// is gone: these records are facts about claims and proofs already sent, and
+	// the memory reserve exists so their writes fit. What is worth counting is a
+	// write the store turned down, which is also the signal the brake trusts
+	// most -- an OOM reply closes every gate on its own.
+	trackingWritesFailed = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "tracking_writes_skipped_total",
-			Help:      "Submission tracking records not written because Redis could not take writes",
+			Name:      "tracking_writes_failed_total",
+			Help:      "Submission tracking records Redis refused, by kind and reason (oom, other)",
+		},
+		[]string{"kind", "reason"},
+	)
+
+	// trackingOutcomesWithoutRecord counts on-chain outcomes the reconciler
+	// resolved and could not write down, because the submission record they
+	// annotate was not there. The reconciler polls a tx until it resolves and
+	// then stops, so that outcome is gone for good: nothing will ask again.
+	trackingOutcomesWithoutRecord = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "tracking_outcomes_without_record_total",
+			Help:      "On-chain outcomes that found no submission record to annotate, by kind",
 		},
 		[]string{"kind"},
 	)
@@ -374,7 +413,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "sessions_failed_total",
-			Help:      "Total sessions failed by specific reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, proof_window_closed, proof_tx_error)",
+			Help:      "Failed session attempts by reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, proof_window_closed, proof_tx_error, panic_recovered on relays only); claim_tx_error and proof_tx_error are retried by the inclusion reconciler, so they are not losses on their own -- what settles it is claim_inclusion_outcome_total / proof_inclusion_outcome_total with outcome=on_chain_found",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -409,7 +448,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "compute_units_lost_total",
-			Help:      "Total compute units lost due to claim/proof failures",
+			Help:      "Compute units that entered the claim book and will not be paid, by reason (see sessions_failed_total for the session-level reasons). A RETRIED claim_tx_error or proof_tx_error no longer reaches this series: the loss is counted once, either when the window closes with nothing submitted, or when the inclusion reconciler gets the chain's answer -- which arrives here as on_chain_missing or on_chain_rejected. Work whose claim never reached the chain is in compute_units_forgone_total instead, so this series is subtractable from compute_units_claimed_total",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -440,7 +479,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "upokt_lost_total",
-			Help:      "Total uPOKT lost due to claim/proof failures (compute units = uPOKT, 1:1)",
+			Help:      "uPOKT that entered the claim book and will not be paid, compute units 1:1, by reason (see sessions_failed_total for the session-level reasons). A RETRIED claim_tx_error or proof_tx_error no longer reaches this series: the loss is counted once, either when the window closes with nothing submitted, or when the inclusion reconciler gets the chain's answer -- which arrives here as on_chain_missing or on_chain_rejected. Work whose claim never reached the chain is in upokt_forgone_total instead, so upokt_claimed_total = upokt_proved_total + this + (upokt_unresolved_opened_total - upokt_unresolved_resolved_total)",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -471,7 +510,137 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_lost_total",
-			Help:      "Total relays lost due to claim/proof failures",
+			Help:      "Relays that entered the claim book and will not be paid, by reason (see sessions_failed_total for the session-level reasons, plus panic_recovered for a relay dropped by a recovered panic -- which never reached a tree, so it is the one reason here whose work was never in the book). A RETRIED claim_tx_error or proof_tx_error no longer reaches this series: the loss is counted once, either when the window closes with nothing submitted, or when the inclusion reconciler gets the chain's answer -- which arrives here as on_chain_missing or on_chain_rejected. Work whose claim never reached the chain is in relays_forgone_total instead",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
+	// ====== THE THIRD DOOR: UNRESOLVED ======
+	//
+	// Money that entered the book leaves it through exactly one door, so the
+	// doors must sum:
+	//
+	//     claimed = proved + lost + (unresolved_opened - unresolved_resolved)
+	//
+	// `unresolved` is a session whose submission was never confirmed and whose
+	// fate the chain has not yet told us. It is a SERIES and not an absence on
+	// purpose: if nothing ever resolves it, it stays up and is visible, which is
+	// the honest failure mode. A signal whose job is to reveal a gap cannot have
+	// a gap of its own.
+	//
+	// A COUNTER PAIR AND NOT A GAUGE, AND THE REASON IS THE RESTART. A gauge
+	// lives in one process. A session this replica leaves unresolved and a
+	// DIFFERENT replica resolves would leave a stale 1 on the first series and a
+	// 0 on the second, and no query over the fleet recovers the truth -- it
+	// reads 1 forever, or 0 once the dead series ages out, and both are wrong.
+	// Two counters survive it: this replica reports the open, that one reports
+	// the close, and the fleet-wide difference is right. Failover is the normal
+	// case here, so this is the case that decides the shape.
+	//
+	// `phase` is a CLOSED set of two, and only "proof" is reachable today.
+	// Opening one requires the money to already be in the book, and the claim
+	// side only enters the book when the chain accepts the claim -- at which
+	// point there is nothing left to be unresolved ABOUT the claim. The label
+	// stays because the claim side entering the book earlier (the success-side
+	// rework) would make "claim" reachable without a schema change.
+	upoktUnresolvedOpenedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_unresolved_opened_total",
+			Help:      "uPOKT that left through a retryable submission failure and is awaiting the chain's answer (opened). Subtract upokt_unresolved_resolved_total for the pending balance.",
+		},
+		[]string{"supplier", "service_id", "phase"},
+	)
+
+	upoktUnresolvedResolvedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_unresolved_resolved_total",
+			Help:      "uPOKT previously counted unresolved that the inclusion reconciler has since settled into proved or lost.",
+		},
+		[]string{"supplier", "service_id", "phase"},
+	)
+
+	computeUnitsUnresolvedOpenedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "compute_units_unresolved_opened_total",
+			Help:      "Compute units awaiting the chain's answer after a retryable submission failure (opened).",
+		},
+		[]string{"supplier", "service_id", "phase"},
+	)
+
+	computeUnitsUnresolvedResolvedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "compute_units_unresolved_resolved_total",
+			Help:      "Compute units previously counted unresolved that have since been settled into proved or lost.",
+		},
+		[]string{"supplier", "service_id", "phase"},
+	)
+
+	relaysUnresolvedOpenedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_unresolved_opened_total",
+			Help:      "Relays awaiting the chain's answer after a retryable submission failure (opened).",
+		},
+		[]string{"supplier", "service_id", "phase"},
+	)
+
+	relaysUnresolvedResolvedTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_unresolved_resolved_total",
+			Help:      "Relays previously counted unresolved that have since been settled into proved or lost.",
+		},
+		[]string{"supplier", "service_id", "phase"},
+	)
+
+	// ====== FORGONE: WORK THAT NEVER ENTERED THE BOOK ======
+	//
+	// Relays served whose claim never reached the chain. It is revenue the
+	// operator did not earn, and it is deliberately OUTSIDE the identity above.
+	//
+	// The book measures what entered the book, and `claimed` rises in exactly
+	// one place: after a claim transaction the chain accepted. A session that
+	// ran out of claim window, or whose claim was ejected with no way back, was
+	// never in `claimed` -- so adding it to `lost` would make the ledger fail to
+	// close by exactly this amount, which is the defect this whole family exists
+	// to remove. It is counted apart so that it cannot disappear either: work
+	// served and never claimed is the operator's most expensive number.
+	upoktForgoneTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "upokt_forgone_total",
+			Help:      "uPOKT for work that never entered the claim book (no claim ever reached the chain), by reason (claim_window_closed, claim_tx_error, claim_ejected_unrecoverable, on_chain_missing, on_chain_rejected). OUTSIDE the claimed/proved/lost/unresolved identity by construction: claimed only rises on a claim the chain accepted, so this can never be subtracted from it.",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
+	computeUnitsForgoneTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "compute_units_forgone_total",
+			Help:      "Compute units for work that never entered the claim book, by reason (see upokt_forgone_total). OUTSIDE the ledger identity by construction.",
+		},
+		[]string{"supplier", "service_id", "reason"},
+	)
+
+	relaysForgoneTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relays_forgone_total",
+			Help:      "Relays served whose work never entered the claim book, by reason (see upokt_forgone_total). OUTSIDE the ledger identity by construction.",
 		},
 		[]string{"supplier", "service_id", "reason"},
 	)
@@ -1018,6 +1187,16 @@ var (
 		[]string{"supplier"},
 	)
 
+	sessionSnapshotsResumedAtStartup = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "session_snapshots_resumed_at_startup_total",
+			Help:      "Session snapshots loaded in claiming or proving with no transaction sent, moved back so it is sent, by the state they were loaded in",
+		},
+		[]string{"supplier", "from_state"},
+	)
+
 	sessionSnapshotsSkippedAtStartup = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -1546,56 +1725,185 @@ func RecordSessionProbabilisticProved(supplier, serviceID string) {
 	sessionsProbabilisticProvedTotal.WithLabelValues(supplier, serviceID).Inc()
 }
 
-// recordSessionFailure is the internal function that records all failure metrics.
-// This tracks sessions, relays, compute units, and uPOKT lost due to claim/proof failures.
-func recordSessionFailure(supplier, serviceID, reason string, relays, computeUnits int64) {
-	cu := float64(computeUnits)
-	relayCount := float64(relays)
+// THE FOUR VERDICTS.
+//
+// Every session that fails increments sessions_failed_total exactly once, with
+// its reason -- that series is the operator's unchanged view and it counts
+// SESSIONS, never money. What differs between the four is where the MONEY goes,
+// and there are only three destinations plus "nowhere":
+//
+//	attempt    -> nowhere. The outcome is genuinely unknown and something exists
+//	              that will answer it. Putting uPOKT on an attempt is what made
+//	              upokt_lost_total read 45% of revenue on a run that lost nothing.
+//	lost       -> the money WAS in the book (the chain accepted its claim) and
+//	              will not be paid.
+//	unresolved -> the money is in the book and the chain has not answered yet.
+//	forgone    -> the money was never in the book, because no claim ever reached
+//	              the chain. Outside the ledger identity by construction.
+//
+// Choosing between them needs one fact -- did this session's claim reach the
+// chain -- and that fact is not inferred anywhere: it is read off the snapshot's
+// tx hash, or off the caller's own knowledge of whether a resolver exists.
 
-	// Session failure count
+// recordSessionAttemptFailure counts a failed ATTEMPT: the session, its reason,
+// and no money at all.
+func recordSessionAttemptFailure(supplier, serviceID, reason string) {
 	sessionsFailedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
+}
 
-	// Relays lost
-	relaysLostTotal.WithLabelValues(supplier, serviceID, reason).Add(relayCount)
+// RecordRevenueLost counts MONEY ONLY: relays, compute units and uPOKT that
+// entered the book and will not be paid.
+//
+// It is split from the session counter because the two have different
+// arithmetic. A session fails ONCE and is counted once in sessions_failed_total,
+// under the reason that ended it. Its money can be named twice -- held in
+// `unresolved` when the submission failed, then settled into `lost` when the
+// chain finally answers -- and the second of those must not claim a second
+// failed session.
+func RecordRevenueLost(supplier, serviceID, reason string, relays, computeUnits int64) {
+	cu := float64(computeUnits)
 
-	// Compute units lost (in pPOKT from service config)
+	relaysLostTotal.WithLabelValues(supplier, serviceID, reason).Add(float64(relays))
 	computeUnitsLostTotal.WithLabelValues(supplier, serviceID, reason).Add(cu)
-
 	// uPOKT lost (convert pPOKT to uPOKT by dividing by 1e6)
 	upoktLostTotal.WithLabelValues(supplier, serviceID, reason).Add(cu / 1e6)
 }
 
-// RecordClaimWindowClosed records a claim window timeout failure.
-func RecordClaimWindowClosed(supplier, serviceID string, relays, computeUnits int64) {
-	recordSessionFailure(supplier, serviceID, "claim_window_closed", relays, computeUnits)
+// RecordRevenueForgone counts MONEY ONLY for work that never entered the book.
+// Split from the session counter for the same reason as RecordRevenueLost.
+func RecordRevenueForgone(supplier, serviceID, reason string, relays, computeUnits int64) {
+	cu := float64(computeUnits)
+
+	relaysForgoneTotal.WithLabelValues(supplier, serviceID, reason).Add(float64(relays))
+	computeUnitsForgoneTotal.WithLabelValues(supplier, serviceID, reason).Add(cu)
+	upoktForgoneTotal.WithLabelValues(supplier, serviceID, reason).Add(cu / 1e6)
+}
+
+// recordSessionLoss is the session-ending verdict: one failed session plus its
+// money in `lost`.
+func recordSessionLoss(supplier, serviceID, reason string, relays, computeUnits int64) {
+	recordSessionAttemptFailure(supplier, serviceID, reason)
+	RecordRevenueLost(supplier, serviceID, reason, relays, computeUnits)
+}
+
+// recordSessionForgone is the session-ending verdict for work that never
+// entered the book: one failed session plus its money in `forgone`.
+func recordSessionForgone(supplier, serviceID, reason string, relays, computeUnits int64) {
+	recordSessionAttemptFailure(supplier, serviceID, reason)
+	RecordRevenueForgone(supplier, serviceID, reason, relays, computeUnits)
+}
+
+// RecordSessionUnresolvedOpened counts money that left through a retryable
+// submission failure and is waiting for the chain's answer. The session counter
+// carries the caller's reason; the money carries the PHASE, because that is
+// what the resolving side knows about it.
+func RecordSessionUnresolvedOpened(supplier, serviceID, reason, phase string, relays, computeUnits int64) {
+	cu := float64(computeUnits)
+
+	sessionsFailedTotal.WithLabelValues(supplier, serviceID, reason).Inc()
+	relaysUnresolvedOpenedTotal.WithLabelValues(supplier, serviceID, phase).Add(float64(relays))
+	computeUnitsUnresolvedOpenedTotal.WithLabelValues(supplier, serviceID, phase).Add(cu)
+	upoktUnresolvedOpenedTotal.WithLabelValues(supplier, serviceID, phase).Add(cu / 1e6)
+}
+
+// RecordSessionUnresolvedResolved closes an unresolved balance. It does NOT say
+// which way it went: the caller records the destination (proved or lost) on top,
+// because only the caller knows what the chain said.
+//
+// It touches no session counter. sessions_failed_total already counted this
+// session when it was opened, and a session does not fail twice.
+func RecordSessionUnresolvedResolved(supplier, serviceID, phase string, relays, computeUnits int64) {
+	cu := float64(computeUnits)
+
+	relaysUnresolvedResolvedTotal.WithLabelValues(supplier, serviceID, phase).Add(float64(relays))
+	computeUnitsUnresolvedResolvedTotal.WithLabelValues(supplier, serviceID, phase).Add(cu)
+	upoktUnresolvedResolvedTotal.WithLabelValues(supplier, serviceID, phase).Add(cu / 1e6)
+}
+
+// RecordClaimWindowClosed records a claim window that closed on a session.
+//
+// claimTxHash is the discriminator and it is a FACT on the snapshot, not a
+// guess. Empty means no claim transaction ever went out, so this session was
+// never in `claimed` and its money is forgone, not lost -- counting it lost is
+// what makes the ledger fail to close. Non-empty means the claim was accepted
+// and the money IS in the book, and a window closing on it now means it will
+// never be proved.
+func RecordClaimWindowClosed(supplier, serviceID, claimTxHash string, relays, computeUnits int64) {
+	if claimTxHash == "" {
+		recordSessionForgone(supplier, serviceID, "claim_window_closed", relays, computeUnits)
+		return
+	}
+	recordSessionLoss(supplier, serviceID, "claim_window_closed", relays, computeUnits)
 }
 
 // RecordClaimEjectedUnrecoverable records a claim the chain named inside a batch
 // whose rebroadcast entry did NOT land, so nothing will ever re-send it.
 //
 // It is deliberately a separate reason from claim_tx_error rather than a second
-// counter. Both are the same event to the revenue totals -- the relays and
-// compute units are lost either way -- but claim_tx_error carries an implicit
-// promise that the reconciler will retry, and here that promise is false. An
-// operator reading sessions_failed_total has to be able to tell a loss that is
-// still pending from one that is already final.
+// counter. Both end the session, but claim_tx_error carries an implicit promise
+// that the reconciler will retry, and here that promise is false. An operator
+// reading sessions_failed_total has to be able to tell a loss that is still
+// pending from one that is already final.
+//
+// The money is FORGONE and not lost: this claim message never travelled, so the
+// session was never in `claimed`.
 func RecordClaimEjectedUnrecoverable(supplier, serviceID string, relays, computeUnits int64) {
-	recordSessionFailure(supplier, serviceID, "claim_ejected_unrecoverable", relays, computeUnits)
+	recordSessionForgone(supplier, serviceID, "claim_ejected_unrecoverable", relays, computeUnits)
 }
 
-// RecordClaimTxError records a claim transaction error failure.
-func RecordClaimTxError(supplier, serviceID string, relays, computeUnits int64) {
-	recordSessionFailure(supplier, serviceID, "claim_tx_error", relays, computeUnits)
+// RecordClaimTxError records a claim whose transaction did not go out.
+//
+// resolvable says whether a rebroadcast entry was persisted for this session, so
+// that the inclusion reconciler will eventually answer for it. It is the
+// caller's own fact -- it knows whether it has a store -- and never an inference.
+//
+// Resolvable: this is an ATTEMPT and takes no money. The claim is not in the
+// book (nothing reached the chain), and the reconciler will either put it there
+// on on_chain_found or count it forgone on on_chain_missing. Giving it money
+// here is what let one session be counted lost and proved at the same time.
+//
+// Not resolvable: nothing will ever answer, so the work is forgone now rather
+// than silently.
+func RecordClaimTxError(supplier, serviceID string, resolvable bool, relays, computeUnits int64) {
+	if resolvable {
+		recordSessionAttemptFailure(supplier, serviceID, "claim_tx_error")
+		return
+	}
+	recordSessionForgone(supplier, serviceID, "claim_tx_error", relays, computeUnits)
 }
 
-// RecordProofWindowClosed records a proof window timeout failure.
-func RecordProofWindowClosed(supplier, serviceID string, relays, computeUnits int64) {
-	recordSessionFailure(supplier, serviceID, "proof_window_closed", relays, computeUnits)
+// RecordProofWindowClosed records a proof window that closed on a session.
+//
+// proofTxHash is the discriminator, read off the snapshot. Empty means no proof
+// transaction ever went out: the session IS in the book (its claim was accepted)
+// and will never be paid, which is a real loss. Non-empty means the proof was
+// submitted, and a submitted proof was ALREADY counted into upokt_proved_total
+// at submission -- so counting anything here would be the session leaving the
+// book through a second door. Whether that proof actually landed is a question
+// about the SUCCESS side, and proof_inclusion_outcome_total is the series that
+// answers it.
+func RecordProofWindowClosed(supplier, serviceID, proofTxHash string, relays, computeUnits int64) {
+	if proofTxHash == "" {
+		recordSessionLoss(supplier, serviceID, "proof_window_closed", relays, computeUnits)
+		return
+	}
+	recordSessionAttemptFailure(supplier, serviceID, "proof_window_closed")
 }
 
-// RecordProofTxError records a proof transaction error failure.
-func RecordProofTxError(supplier, serviceID string, relays, computeUnits int64) {
-	recordSessionFailure(supplier, serviceID, "proof_tx_error", relays, computeUnits)
+// RecordProofTxError records a proof whose transaction did not go out.
+//
+// The session IS in the book here -- a proof is only attempted for a claim the
+// chain accepted -- so unlike the claim side this money has to leave through a
+// named door. Resolvable means the reconciler holds an entry and will answer:
+// the money waits in `unresolved` until it does. Not resolvable means nothing
+// will ever answer, and it is lost now.
+func RecordProofTxError(supplier, serviceID string, resolvable bool, relays, computeUnits int64) {
+	if resolvable {
+		RecordSessionUnresolvedOpened(
+			supplier, serviceID, "proof_tx_error", string(RebroadcastPhaseProof), relays, computeUnits)
+		return
+	}
+	recordSessionLoss(supplier, serviceID, "proof_tx_error", relays, computeUnits)
 }
 
 // recordRevenueClaimed is the internal function that records all claim success metrics.
@@ -1866,6 +2174,14 @@ func StartWorkerPoolMetricsTicker(
 // This exists because the panic path counted NOTHING. logging.PanicRecoveriesTotal
 // says a panic happened; nothing said a relay had already been served to the
 // client, at the supplier's expense, and then dropped.
+//
+// It stays on relays_lost_total rather than moving to relays_forgone_total, and
+// that is a deliberate INCONSISTENCY with the rest of this family: a panicked
+// relay never reached a tree, so strictly it never entered the claim book. What
+// keeps it here is that relays_lost_total is not a term in the money identity --
+// only the uPOKT series are -- so the reason costs nothing there, while moving it
+// would rewrite a Help that says where panic_recovered lives and is not this
+// change's to rewrite. Worth revisiting with the relays view as a whole.
 func RecordRelayLostToPanic(supplier, serviceID string) {
 	relaysLostTotal.WithLabelValues(supplier, serviceID, "panic_recovered").Add(1)
 }

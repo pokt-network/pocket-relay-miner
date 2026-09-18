@@ -392,8 +392,28 @@ func (m *RedisSMSTManager) CompactColdTree(ctx context.Context, sessionID string
 		tree.mu.Lock()
 		defer tree.mu.Unlock()
 	}
-	if err := m.redisClient.Unlink(ctx, nodesKey).Err(); err != nil {
+	// The hash goes only if the blob Redis holds is still the one verified
+	// above, so a compaction of the same session in another process -- one that
+	// read the hash while this one was deleting it, and stored a blob of
+	// partial leaves -- cannot leave the session with neither.
+	//
+	// The two writes are not one transaction on purpose: the blob is verified
+	// from what Redis stored, which cannot be read inside a MULTI. What that
+	// costs is a crash between them, which leaves the blob written and the hash
+	// whole -- the safe way round, and the next attempt starts over. Under
+	// maxmemory nothing is half done either: measured 2026-09-17 against Redis
+	// 8 with maxmemory reached, a SET inside MULTI is refused when it is queued
+	// ("OOM command not allowed"), EXEC answers EXECABORT, and the hash is
+	// untouched.
+	deleted, err := unlinkNodesIfBlobScript.Run(ctx, m.redisClient, []string{nodesKey, leavesKey}, stored).Int64()
+	if err != nil {
 		return coldDeleteFailed, fmt.Errorf("unlink nodes hash: %w", err)
+	}
+	if deleted == 0 {
+		m.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Msg("the leaves blob changed while the claimed SMST was being compacted; keeping the nodes hash")
+		return coldMismatch, fmt.Errorf("session %s: the leaves blob changed while compacting", sessionID)
 	}
 	if tree != nil {
 		m.treesMu.Lock()
@@ -473,6 +493,20 @@ func (m *RedisSMSTManager) submitColdCompaction(ctx context.Context, sessionID s
 	}
 	m.config.ColdCompactionPool.Submit(task)
 }
+
+// unlinkNodesIfBlobScript deletes a claimed tree's nodes hash only while the
+// leaves blob is the one the caller verified, so two compactions of the same
+// session cannot leave it with neither.
+//
+// KEYS[1] = nodes hash, KEYS[2] = leaves blob
+// ARGV[1] = the blob as read back and verified
+var unlinkNodesIfBlobScript = redis.NewScript(`
+if redis.call('GET', KEYS[2]) ~= ARGV[1] then
+	return 0
+end
+redis.call('UNLINK', KEYS[1])
+return 1
+`)
 
 // coldTreeCompacted reports whether the session's tree is stored as a leaves
 // blob only: the blob present and the nodes hash absent.

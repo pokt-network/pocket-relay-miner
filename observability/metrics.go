@@ -190,6 +190,21 @@ var (
 		[]string{"kind"},
 	)
 
+	// SMSTRebuildHeapGrowthOverEstimate is how much the heap's objects grew
+	// from a rebuild's admission until its tree loaded, over the estimate it
+	// was admitted with, by kind. It counts what other goroutines allocated
+	// meanwhile, and a GC during the load lowers it.
+	SMSTRebuildHeapGrowthOverEstimate = MinerFactory.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "rebuild_heap_growth_over_estimate",
+			Help:      "Growth of the heap's objects while a compacted SMST loaded, over its admission estimate, by kind",
+			Buckets:   []float64{0.25, 0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 5, 6, 8, 10, 15, 20},
+		},
+		[]string{"kind"},
+	)
+
 	// SMSTRebuildWaitSeconds is how long a rebuild waited for memory before it
 	// was admitted, by kind.
 	SMSTRebuildWaitSeconds = MinerFactory.NewHistogramVec(

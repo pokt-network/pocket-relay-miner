@@ -239,8 +239,10 @@ func (m *RedisSMSTManager) evictCorruptSessionLocked(ctx context.Context, sessio
 		WithLabelValues(m.config.SupplierAddress, reason).Inc()
 
 	// Track consecutive evictions; UpdateTree resets this to 0 on success.
+	m.evictionMu.Lock()
 	m.evictionCounts[sessionID]++
 	consecutive := m.evictionCounts[sessionID]
+	m.evictionMu.Unlock()
 
 	// Below the threshold: preserve Redis so a transient in-memory failure
 	// can recover from the backing store on the next UpdateTree.
@@ -288,7 +290,9 @@ func (m *RedisSMSTManager) evictCorruptSessionLocked(ctx context.Context, sessio
 
 	// Reset the counter: future evictions on this session start from 0
 	// since the backing state is now clean.
+	m.evictionMu.Lock()
 	delete(m.evictionCounts, sessionID)
+	m.evictionMu.Unlock()
 }
 
 // evictCorruptSession is the exported variant that handles its own lock.
@@ -304,8 +308,8 @@ func (m *RedisSMSTManager) evictCorruptSession(ctx context.Context, sessionID, r
 // corruption gets the full persistentCorruptionThreshold budget before
 // escalating to a Redis purge.
 func (m *RedisSMSTManager) resetEvictionCount(sessionID string) {
-	m.treesMu.Lock()
-	defer m.treesMu.Unlock()
+	m.evictionMu.Lock()
+	defer m.evictionMu.Unlock()
 	delete(m.evictionCounts, sessionID)
 }
 
@@ -370,6 +374,11 @@ type redisSMST struct {
 	// drop the tree, and the next one asks again. Only that answer sets it.
 	sessionConfirmed atomic.Bool
 
+	// unloaded is set when the trie is imported again from its written root
+	// (importLazyLocked), and cleared by the next relay, so an ended session is
+	// not checkpointed and imported again at every flush tick. Protected by mu.
+	unloaded bool
+
 	// gen is this tree's generation (see addTreeLocked). Set once, before the
 	// tree is published in the manager's map, and never written again, so it
 	// is read without tree.mu.
@@ -406,8 +415,10 @@ type RedisSMSTManager struct {
 
 	// Consecutive corruption-eviction counter per session. Incremented
 	// by evictCorruptSessionLocked, reset to 0 on every successful
-	// UpdateTree. Protected by treesMu.
+	// UpdateTree. Protected by evictionMu, not treesMu: commitLocked resets
+	// it while holding a tree's mu, and a tree's mu is taken before treesMu.
 	evictionCounts map[string]int
+	evictionMu     sync.Mutex
 
 	// deleted holds the sessions whose tree DeleteTree removed, with when. The
 	// lifecycle calls DeleteTree when a session reaches a terminal state, and a
@@ -695,6 +706,7 @@ func (m *RedisSMSTManager) updateTree(
 	if tree.claimedRoot != nil {
 		return ErrSessionClaimed
 	}
+	tree.unloaded = false
 
 	// trie.Update traverses the tree via store.Get; a missing inner
 	// node or a malformed payload returns an error from our MapStore
@@ -979,9 +991,14 @@ func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID str
 
 	tree.mu.Lock()
 	defer tree.mu.Unlock()
+	return true, tree.gen, m.checkpointLocked(ctx, sessionID, tree)
+}
 
+// checkpointLocked commits the tree's nodes and stores the live_root that
+// references them. The caller holds tree.mu.
+func (m *RedisSMSTManager) checkpointLocked(ctx context.Context, sessionID string, tree *redisSMST) error {
 	if err := m.commitLocked(sessionID, tree); err != nil {
-		return true, tree.gen, err
+		return err
 	}
 
 	var rootBytes []byte
@@ -989,12 +1006,13 @@ func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID str
 		rootBytes = []byte(tree.trie.Root())
 		return nil
 	}); err != nil {
-		return true, tree.gen, err
+		return err
 	}
 	if !isValidSMSTRoot(rootBytes) {
-		return true, tree.gen, fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(rootBytes), SMSTRootLen)
+		return fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(rootBytes), SMSTRootLen)
 	}
 
+	var err error
 	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
 	if redisStore, ok := tree.store.(*RedisMapStore); ok {
 		err = redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes, m.config.CacheTTL)
@@ -1004,7 +1022,79 @@ func (m *RedisSMSTManager) CheckpointLiveRoot(ctx context.Context, sessionID str
 	if err == nil {
 		tree.liveRoot = rootBytes
 	}
-	return true, tree.gen, err
+	return err
+}
+
+// UnloadTree drops a session's tree nodes from memory, keeping them in Redis. A
+// tree holds every node of its session in the heap, and a session past its
+// grace period no longer grows: until its claim and its compaction it would
+// only occupy memory the sessions still being served need. Its nodes and
+// live_root are written first, and the trie is then imported again from that
+// root, so it holds every relay it held and reads a node from Redis only when
+// a claim, a proof or a late relay walks to it.
+//
+// The tree stays in the manager's map and keeps its generation: a caller that
+// took it before the unload and waits on its lock finds the imported trie, not
+// a tree nobody writes anymore.
+//
+// root is the root the trie was imported from, nil when nothing was unloaded:
+// no tree was resident, it was already unloaded and no relay has entered it
+// since, FlushTree is sealing it, or writing it failed.
+func (m *RedisSMSTManager) UnloadTree(ctx context.Context, sessionID string) (root []byte, err error) {
+	defer func() {
+		if isSMSTCorruption(err) {
+			m.evictCorruptSession(ctx, sessionID, "unload_corruption")
+		}
+	}()
+
+	m.treesMu.RLock()
+	tree, exists := m.trees[sessionID]
+	m.treesMu.RUnlock()
+	if !exists {
+		return nil, nil
+	}
+
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+	// While FlushTree seals the tree it releases the lock to let the root
+	// settle, and reads the trie again after it: the trie is left to it.
+	if tree.unloaded || (tree.sealing && tree.claimedRoot == nil) {
+		return nil, nil
+	}
+	if tree.claimedRoot == nil {
+		if err := m.checkpointLocked(ctx, sessionID, tree); err != nil {
+			return nil, err
+		}
+	} else if err := m.commitLocked(sessionID, tree); err != nil {
+		return nil, err
+	}
+	root, err = m.importLazyLocked(sessionID, tree)
+	if err != nil {
+		return nil, err
+	}
+	smstTreesUnloaded.WithLabelValues(m.config.SupplierAddress).Inc()
+	return root, nil
+}
+
+// importLazyLocked replaces the tree's trie with one imported from its root, so
+// its nodes stay in Redis until something walks to them. The nodes under the
+// root must already be written. The caller holds tree.mu.
+func (m *RedisSMSTManager) importLazyLocked(sessionID string, tree *redisSMST) ([]byte, error) {
+	var root []byte
+	var trie smt.SparseMerkleSumTrie
+	if err := m.runSMSTSafely(sessionID, "import_unload", func() error {
+		root = []byte(tree.trie.Root())
+		if !isValidSMSTRoot(root) {
+			return fmt.Errorf("session %s: root has invalid length %d, expected %d", sessionID, len(root), SMSTRootLen)
+		}
+		trie = smt.ImportSparseMerkleSumTrie(tree.store, protocol.NewTrieHasher(), root, protocol.SMTValueHasher())
+		return nil
+	}); err != nil {
+		return nil, err
+	}
+	tree.trie = trie
+	tree.unloaded = true
+	return root, nil
 }
 
 // CheckpointLiveRootOnExit is the checkpoint a supplier's exit writes before it
@@ -1347,6 +1437,16 @@ func (m *RedisSMSTManager) FlushTree(ctx context.Context, sessionID string) (roo
 			Str(logging.FieldSessionID, sessionID).
 			Msg("failed to store claimed root in Redis (non-fatal)")
 		// Continue anyway - root is in memory
+	}
+	// The sealed tree takes no more relays, and its nodes are written: it is
+	// left lazy, whether or not the unload after its grace period reached it.
+	if nodesErr == nil && !tree.unloaded {
+		if _, err := m.importLazyLocked(sessionID, tree); err != nil {
+			m.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to unload the sealed SMST from memory: it stays resident (non-fatal)")
+		}
 	}
 
 	// Store count and sum in Redis for HA warmup, with the same sliding TTL
@@ -1697,7 +1797,9 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	// Drop any accumulated corruption-eviction counter for this session
 	// so the per-session map does not leak entries across the full
 	// session lifecycle for sessions that had any eviction history.
+	m.evictionMu.Lock()
 	delete(m.evictionCounts, sessionID)
+	m.evictionMu.Unlock()
 
 	// Remove nodes hash, root, stats, live_root and leaves blob from Redis. Keys are
 	// scoped by (supplier, sessionID), so this delete only affects THIS

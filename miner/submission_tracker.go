@@ -30,14 +30,29 @@ type SubmissionTrackingRecord struct {
 	SessionEnd   int64  `json:"session_end"`
 
 	// Claim tracking
-	ClaimHash            string `json:"claim_hash"`
-	ClaimTxHash          string `json:"claim_tx_hash"`
-	ClaimSuccess         bool   `json:"claim_success"` // BROADCAST acceptance only — not on-chain
-	ClaimErrorReason     string `json:"claim_error_reason,omitempty"`
-	ClaimSubmitHeight    int64  `json:"claim_submit_height"`
-	ClaimSubmitTimestamp int64  `json:"claim_submit_timestamp"` // Unix timestamp
-	ClaimSubmitTimeUTC   string `json:"claim_submit_time_utc"`  // RFC3339 UTC time
-	ClaimCurrentHeight   int64  `json:"claim_current_height"`   // Current block at submission
+	ClaimHash   string `json:"claim_hash"`
+	ClaimTxHash string `json:"claim_tx_hash"`
+	// ClaimSuccess is a MIRROR IN RETREAT of ClaimBroadcastOutcome, kept only so
+	// that a binary from before that field can still read this record: it cannot
+	// express "not known yet", and a zero bool reported 250 claims that had been
+	// broadcast and paid as failed. Written whenever the outcome is known; delete
+	// it once the fleet has rotated (queued in the deep-cleanup list).
+	ClaimSuccess bool `json:"claim_success"` // BROADCAST acceptance only — not on-chain
+	// ClaimBroadcastOutcome is what this miner was told about the claim
+	// broadcast: ClaimBroadcastAccepted, ClaimBroadcastRejected, or empty when
+	// nobody has said -- the record was created by the proof path, which knows
+	// nothing about the claim. Same shape as ClaimOnChainOutcome below, for the
+	// same reason: the absence of an answer is not an answer.
+	//
+	// MIXED FLEET: an older binary that re-marshals this record drops the field
+	// its struct cannot see, and falls back to reading ClaimSuccess, which the
+	// new binary writes alongside it whenever the outcome is known.
+	ClaimBroadcastOutcome string `json:"claim_broadcast_outcome,omitempty"`
+	ClaimErrorReason      string `json:"claim_error_reason,omitempty"`
+	ClaimSubmitHeight     int64  `json:"claim_submit_height"`
+	ClaimSubmitTimestamp  int64  `json:"claim_submit_timestamp"` // Unix timestamp
+	ClaimSubmitTimeUTC    string `json:"claim_submit_time_utc"`  // RFC3339 UTC time
+	ClaimCurrentHeight    int64  `json:"claim_current_height"`   // Current block at submission
 
 	// Claim on-chain outcome (populated by the inclusion reconciler after polling
 	// GetClaim). One of: "", "on_chain_found", "on_chain_missing",
@@ -87,28 +102,42 @@ type SubmissionTrackingRecord struct {
 	ProofRequirementSeed string `json:"proof_requirement_seed,omitempty"` // Hex-encoded seed block hash
 }
 
+// What this miner was told about a claim or proof broadcast. Empty means
+// nobody has said yet, which is why these are strings and not a bool.
+const (
+	ClaimBroadcastAccepted = "accepted"
+	ClaimBroadcastRejected = "rejected"
+)
+
+// claimBroadcastOutcome renders a known broadcast result.
+func claimBroadcastOutcome(success bool) string {
+	if success {
+		return ClaimBroadcastAccepted
+	}
+	return ClaimBroadcastRejected
+}
+
 // SubmissionTracker tracks claim/proof submissions to Redis for debugging.
 type SubmissionTracker struct {
 	logger      logging.Logger
 	redisClient *redistransport.Client
 	ttl         time.Duration
-	// health, when set, stops every write while Redis cannot take them: these
-	// records are debugging data and the first thing not to spend its room on.
-	health *redistransport.StoreHealth
 }
 
-// SetStoreHealth stops the tracker's writes while health says Redis is full.
-func (t *SubmissionTracker) SetStoreHealth(health *redistransport.StoreHealth) {
-	t.health = health
-}
-
-// skipWrite reports, and counts, a write not made because Redis cannot take it.
-func (t *SubmissionTracker) skipWrite(kind string) bool {
-	if t.health.Operable() {
-		return false
+// countWriteFailure counts a tracking write Redis refused, telling an
+// out-of-memory refusal from anything else.
+//
+// The tracker does not ask the store gate whether to write. Every record here
+// describes a claim or a proof already broadcast, so skipping it does not save
+// the work it describes -- it only loses the evidence of it -- and the memory
+// reserve that closes the gate exists so these writes still fit. What the store
+// itself refuses is counted here and returned to the caller, which logs it.
+func countWriteFailure(kind string, err error) {
+	reason := "other"
+	if redistransport.IsOOMError(err) {
+		reason = "oom"
 	}
-	trackingWritesSkipped.WithLabelValues(kind).Inc()
-	return true
+	trackingWritesFailed.WithLabelValues(kind, reason).Inc()
 }
 
 // NewSubmissionTracker creates a new submission tracker.
@@ -144,31 +173,29 @@ func (t *SubmissionTracker) TrackClaimSubmission(
 	proofRequired bool,
 	proofRequirementSeed string,
 ) error {
-	if t.skipWrite("claim") {
-		return nil
-	}
 	key := t.makeKey(supplier, sessionEnd, sessionID)
 
 	now := time.Now()
 	record := SubmissionTrackingRecord{
-		Supplier:             supplier,
-		Service:              service,
-		Application:          application,
-		SessionID:            sessionID,
-		SessionStart:         sessionStart,
-		SessionEnd:           sessionEnd,
-		ClaimHash:            claimHash,
-		ClaimTxHash:          claimTxHash,
-		ClaimSuccess:         success,
-		ClaimErrorReason:     errorReason,
-		ClaimSubmitHeight:    submitHeight,
-		ClaimSubmitTimestamp: now.Unix(),
-		ClaimSubmitTimeUTC:   now.UTC().Format(time.RFC3339),
-		ClaimCurrentHeight:   currentHeight,
-		NumRelays:            numRelays,
-		ComputeUnits:         computeUnits,
-		ProofRequired:        proofRequired,
-		ProofRequirementSeed: proofRequirementSeed,
+		Supplier:              supplier,
+		Service:               service,
+		Application:           application,
+		SessionID:             sessionID,
+		SessionStart:          sessionStart,
+		SessionEnd:            sessionEnd,
+		ClaimHash:             claimHash,
+		ClaimTxHash:           claimTxHash,
+		ClaimSuccess:          success,
+		ClaimBroadcastOutcome: claimBroadcastOutcome(success),
+		ClaimErrorReason:      errorReason,
+		ClaimSubmitHeight:     submitHeight,
+		ClaimSubmitTimestamp:  now.Unix(),
+		ClaimSubmitTimeUTC:    now.UTC().Format(time.RFC3339),
+		ClaimCurrentHeight:    currentHeight,
+		NumRelays:             numRelays,
+		ComputeUnits:          computeUnits,
+		ProofRequired:         proofRequired,
+		ProofRequirementSeed:  proofRequirementSeed,
 	}
 
 	data, err := json.Marshal(record)
@@ -177,6 +204,7 @@ func (t *SubmissionTracker) TrackClaimSubmission(
 	}
 
 	if err := t.redisClient.Set(ctx, key, data, t.ttl).Err(); err != nil {
+		countWriteFailure("claim", err)
 		return fmt.Errorf("failed to store tracking record: %w", err)
 	}
 
@@ -204,9 +232,6 @@ func (t *SubmissionTracker) TrackProofSubmission(
 	proofRequired bool,
 	proofRequirementSeed string,
 ) error {
-	if t.skipWrite("proof") {
-		return nil
-	}
 	key := t.makeKey(supplier, sessionEnd, sessionID)
 
 	// Get existing record
@@ -239,6 +264,7 @@ func (t *SubmissionTracker) TrackProofSubmission(
 		}
 
 		if setErr := t.redisClient.Set(ctx, key, newData, t.ttl).Err(); setErr != nil {
+			countWriteFailure("proof", setErr)
 			return fmt.Errorf("failed to store new tracking record: %w", setErr)
 		}
 
@@ -364,9 +390,6 @@ type ClaimOnChainUpdate struct {
 // single miner's in-flight-session set is bounded and the update runs on
 // a background worker pool, so the O(N) cost is acceptable.
 func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u ClaimOnChainUpdate) error {
-	if t.skipWrite("claim_outcome") {
-		return nil
-	}
 	if u.TxHash == "" {
 		return nil
 	}
@@ -394,11 +417,27 @@ func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u Cla
 			continue
 		}
 		if setErr := t.redisClient.Set(ctx, key, data, t.ttl).Err(); setErr != nil {
+			countWriteFailure("claim_outcome", setErr)
 			t.logger.Warn().Err(setErr).Str("session_id", record.SessionID).
 				Msg("failed to persist updated claim on-chain outcome record")
 			continue
 		}
 		updated++
+	}
+
+	if updated == 0 {
+		// The reconciler polls a tx until it resolves and then stops, so an
+		// outcome with no record to annotate is lost for good. Warn, not Debug:
+		// this is once per session, not per relay, and after the tracker stopped
+		// skipping writes it should not happen at all -- when it does, the
+		// record it wanted is missing and only these two fields say which.
+		trackingOutcomesWithoutRecord.WithLabelValues("claim").Inc()
+		t.logger.Warn().
+			Str("supplier", u.Supplier).
+			Str("tx_hash", u.TxHash).
+			Str("outcome", u.Outcome).
+			Msg("claim on-chain outcome found no submission record to annotate; the outcome is lost")
+		return nil
 	}
 
 	t.logger.Debug().
@@ -435,9 +474,6 @@ type ProofOnChainUpdate struct {
 // analogue of UpdateClaimOnChainOutcome. The TTL is preserved at t.ttl. A
 // missing record is a no-op (the proof was never tracked).
 func (t *SubmissionTracker) UpdateProofOnChainOutcome(ctx context.Context, u ProofOnChainUpdate) error {
-	if t.skipWrite("proof_outcome") {
-		return nil
-	}
 	record, err := t.GetRecord(ctx, u.Supplier, u.SessionEnd, u.SessionID)
 	if err != nil {
 		// The previous version returned nil on ANY error here, under "no record

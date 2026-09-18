@@ -252,9 +252,9 @@ func (s *RedisSMSTTestSuite) TestEscalation_FailedUpdateDoesNotResetCounter() {
 			[]byte(fmt.Sprintf("probe_v%04d", i)),
 			uint64(10))
 
-		mgr.treesMu.RLock()
+		mgr.evictionMu.Lock()
 		c := mgr.evictionCounts[sessionID]
-		mgr.treesMu.RUnlock()
+		mgr.evictionMu.Unlock()
 		if c > maxObservedCount {
 			maxObservedCount = c
 		}
@@ -294,9 +294,9 @@ func (s *RedisSMSTTestSuite) TestEscalation_DeleteTree_ClearsEvictionCount() {
 	// Accumulate one eviction (below threshold, so the entry stays
 	// in the evictionCounts map).
 	mgr.evictCorruptSession(s.ctx, sessionID, "update_tree_corruption")
-	mgr.treesMu.RLock()
+	mgr.evictionMu.Lock()
 	_, present := mgr.evictionCounts[sessionID]
-	mgr.treesMu.RUnlock()
+	mgr.evictionMu.Unlock()
 	s.Require().Truef(present,
 		"eviction below threshold must leave an entry in evictionCounts for subsequent accumulation")
 

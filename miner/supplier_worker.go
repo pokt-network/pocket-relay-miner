@@ -9,6 +9,7 @@ import (
 	stdhttp "net/http"
 	"runtime"
 	"sync"
+	"time"
 
 	"github.com/alitto/pond/v2"
 	"github.com/cometbft/cometbft/rpc/client/http"
@@ -113,6 +114,26 @@ func (w *SupplierWorker) recordDiscovered(ctx context.Context, appAddr, serviceI
 	}
 }
 
+// blockTimeProvider is the object the transaction client anchors on, and the
+// one the startup seed must reach. It is named once so the two cannot drift:
+// the adapter keeps its own last block, and nothing reads the anchor from it.
+func (w *SupplierWorker) blockTimeProvider() *cache.RedisBlockSubscriber {
+	return w.redisBlockSubscriber
+}
+
+// seedChainState tells the process where the chain is before the first block
+// event reaches it. In the process that wins the election the leader that
+// publishes those events only starts after this returns, so without the seed
+// the height is zero for as long as a block lasts -- and so is the time every
+// unordered transaction is anchored on, which the chain then refuses.
+//
+// The height and the time go to different objects on purpose: the height to the
+// block adapter, and the time to the provider the transaction client reads.
+func (w *SupplierWorker) seedChainState(startHeight int64, startBlockTime time.Time) {
+	w.redisBlockClientAdapter.SeedHeight(startHeight)
+	w.blockTimeProvider().SeedBlockTime(startBlockTime)
+}
+
 // Start initializes and starts the supplier worker.
 func (w *SupplierWorker) Start(ctx context.Context) error {
 	w.mu.Lock()
@@ -183,7 +204,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// starts, so the first relays are not judged against height 0 while the
 	// first block event is still on its way. cache_ttl validation and the
 	// shared-params advisory read this same result.
-	sharedParams, startHeight, err := readStartupChainState(w.ctx, w.config.ChainID, startupChainReaders{
+	sharedParams, startHeight, startBlockTime, err := readStartupChainState(w.ctx, w.config.ChainID, startupChainReaders{
 		network: nodeNetworkReader(w.queryClients.GRPCConnection()),
 		params:  w.queryClients.Shared().GetParams,
 		height:  committedHeightReader(w.queryClients.GRPCConnection()),
@@ -257,7 +278,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 	// consumed. Not by waiting for a block event: in the process that wins the
 	// election, the leader that publishes them only starts after this Start
 	// returns.
-	w.redisBlockClientAdapter.SeedHeight(startHeight)
+	w.seedChainState(startHeight, startBlockTime)
 
 	// NOTE: The worker does NOT build its own shared/session/proof param caches.
 	// The economic paths read the raw query clients (GetParamsAtHeight for
@@ -361,7 +382,7 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 			// TTLs. Prevents `unordered tx ttl exceeds 10m0s` rejections
 			// when the chain's block time lags wall clock. See
 			// BlockTimeProvider in tx/tx_client.go for the full rationale.
-			BlockTimeProvider: w.redisBlockSubscriber,
+			BlockTimeProvider: w.blockTimeProvider(),
 		},
 	)
 	if err != nil {

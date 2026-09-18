@@ -312,6 +312,8 @@ func (m *SessionLifecycleManager) Start(ctx context.Context) error {
 		m.logger.Warn().Err(err).Msg("failed to load existing sessions, starting fresh")
 	}
 
+	m.resumeColdCompactions(ctx)
+
 	// LATE SESSION PRIORITIZATION: Check for sessions needing immediate attention
 	// If we have loaded sessions and any are past their claim window, process them now
 	// instead of waiting for the next block event (could be 10+ seconds)
@@ -338,6 +340,78 @@ func (m *SessionLifecycleManager) Start(ctx context.Context) error {
 	return nil
 }
 
+// resumeUnsentSubmission moves a session loaded in claiming or proving whose
+// transaction was never sent back to the state before it. Either state is
+// persisted before the claim or proof is built and sent, and only its window
+// closing moves a session out of it: a process that stopped in between -- a
+// crash, or an instance that let the supplier go -- left a claim or proof that
+// nothing would send. Back in active or claimed, the next transition check
+// sends it. A session whose transaction hash was stored stays as it is.
+func (m *SessionLifecycleManager) resumeUnsentSubmission(ctx context.Context, session *SessionSnapshot) {
+	var resumeTo SessionState
+	switch {
+	case session.State == SessionStateProving && session.ProofTxHash == "":
+		resumeTo = SessionStateClaimed
+	case session.State == SessionStateClaiming && session.ClaimTxHash == "":
+		resumeTo = SessionStateActive
+	default:
+		return
+	}
+	from := session.State
+	if err := m.sessionStore.UpdateState(ctx, session.SessionID, resumeTo); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, session.SessionID).
+			Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+			Str("state", string(from)).
+			Msg("failed to resume a session whose transaction was never sent: it stays as loaded")
+		sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state").Inc()
+		return
+	}
+	session.State = resumeTo
+	sessionSnapshotsResumedAtStartup.WithLabelValues(m.config.SupplierAddress, string(from)).Inc()
+	m.logger.Info().
+		Str(logging.FieldSessionID, session.SessionID).
+		Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+		Str(logging.FieldServiceID, session.ServiceID).
+		Str("from_state", string(from)).
+		Str("to_state", string(resumeTo)).
+		Int64("session_end", session.SessionEndHeight).
+		Msg("resuming a session whose transaction was never sent")
+}
+
+// resumeColdCompactions hands the callback the sessions loaded with their claim
+// already sent, so their trees are stored as their leaves again. The claim path
+// is the only place that queues that compaction and the queue is this process's,
+// so a miner that stopped between a claim and its compaction -- a crash, an
+// OOM, or an instance that let the supplier go -- left those trees whole in
+// Redis until their proof deletes them.
+//
+// It selects by session STATE, never by which keys are in Redis: claimed_root is
+// written before the claim is sent, so a session still in claiming looks the
+// same there and is the one that must still send its claim. A session being
+// proved is included: its proof reads the leaves blob when the nodes hash is
+// gone, and the admission serves proofs before compactions.
+func (m *SessionLifecycleManager) resumeColdCompactions(ctx context.Context) {
+	resumer, ok := m.callback.(interface {
+		OnClaimedSessionsResumed(ctx context.Context, sessions []*SessionSnapshot)
+	})
+	if !ok {
+		return
+	}
+	var claimed []*SessionSnapshot
+	m.activeSessions.Range(func(_ string, session *SessionSnapshot) bool {
+		if session.State == SessionStateClaimed || session.State == SessionStateProving {
+			claimed = append(claimed, session)
+		}
+		return true
+	})
+	if len(claimed) == 0 {
+		return
+	}
+	resumer.OnClaimedSessionsResumed(ctx, claimed)
+}
+
 // loadExistingSessions loads sessions from the store on startup.
 func (m *SessionLifecycleManager) loadExistingSessions(ctx context.Context) error {
 	sessions, err := m.sessionStore.GetBySupplier(ctx)
@@ -348,6 +422,7 @@ func (m *SessionLifecycleManager) loadExistingSessions(ctx context.Context) erro
 	for _, session := range sessions {
 		// Only track sessions that aren't in terminal state
 		if !session.State.IsTerminal() {
+			m.resumeUnsentSubmission(ctx, session)
 			m.activeSessions.Store(session.SessionID, session)
 			sessionSnapshotsLoaded.WithLabelValues(m.config.SupplierAddress).Inc()
 		} else {
@@ -1433,7 +1508,30 @@ func (m *SessionLifecycleManager) executeTransition(
 		Str(logging.FieldAction, action).
 		Msg("executing session transition")
 
-	var err error
+	// THE STATE IS PERSISTED BEFORE THE CALLBACKS, AND THE ORDER IS THE POINT.
+	//
+	// The terminal callbacks are where a session's money is counted. Counting
+	// first and persisting after is how the same session is counted twice, and
+	// the path is not hypothetical: on a persist failure this function used to
+	// return below WITHOUT removing the session from activeSessions, leaving
+	// Redis still saying `claiming`. A replica that takes this supplier over
+	// reads that state, loadExistingSessions accepts it because it is not
+	// terminal, its sweep reaches the same window verdict, and the same relays
+	// and uPOKT are counted a second time by a different process.
+	//
+	// With the write first, a failure means nothing was counted and nothing was
+	// cleaned up: the session stays tracked and in `claiming`, and whoever owns
+	// it next -- this replica on a later pass, or a new one after failover --
+	// settles it exactly once. Under-counting until the write succeeds is the
+	// direction this codebase already chose everywhere else in this ledger.
+	//
+	// session.State is still assigned after the callbacks, so they see the same
+	// snapshot they have always seen.
+	if err := m.sessionStore.UpdateState(ctx, session.SessionID, newState); err != nil {
+		sessionLogger.Error().Err(err).Msg("failed to persist state change")
+		sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state").Inc()
+		return
+	}
 
 	// Execute terminal state callbacks
 	switch newState {
@@ -1471,14 +1569,6 @@ func (m *SessionLifecycleManager) executeTransition(
 	// Update session state (pointer update, safe without mutex)
 	session.State = newState
 	session.LastUpdatedAt = time.Now()
-
-	// Persist the state change
-	err = m.sessionStore.UpdateState(ctx, session.SessionID, newState)
-	if err != nil {
-		sessionLogger.Error().Err(err).Msg("failed to persist state change")
-		sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state").Inc()
-		return
-	}
 
 	// Record the transition
 	sessionStateTransitions.WithLabelValues(

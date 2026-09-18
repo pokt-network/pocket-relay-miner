@@ -33,24 +33,53 @@ func requireClosed(t *testing.T, ch <-chan struct{}, msg string) {
 	}
 }
 
-func TestIngestionMemoryBrake_ClosesAboveAMarginAndReopensOnlyBelowAMarginAndAHalf(t *testing.T) {
-	heap := &heapModel{objects: 6000 * mib, live: 6000 * mib}
+func TestIngestionMemoryBrake_ClosesWhenTheRuntimeIsOverItsLimitAndReopensOnceItIsBackWithin(t *testing.T) {
+	heap := &heapModel{objects: 1500 * mib, live: 1500 * mib, mapped: brakeLimit + mib}
+	admission := heap.admission(brakeLimit)
+	held := admission.IngestionPause("pokt1held")
+	forcedBefore := testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonMemoryBrake))
+
+	changed := held.PauseChanged()
+	admission.evaluateMemoryBrake()
+	require.False(t, held.Paused(), "LINK brake-overage-one-tick: one evaluation over the limit is the runtime's overshoot, not a close")
+	admission.evaluateMemoryBrake()
+	require.True(t, held.Paused(), "LINK brake-overage: the runtime over its limit closes the brake, whatever the live heap")
+	requireClosed(t, changed, "LINK brake-signal: closing the brake wakes the consumers waiting on the pause")
+	require.Zero(t, heap.gcCount(), "LINK brake-overage-no-gc: closing on the runtime's memory forces no GC")
+
+	admission.evaluateMemoryBrake()
+	require.True(t, held.Paused(), "LINK brake-reopen-mapped: a low live heap does not reopen while the runtime is over its limit")
+
+	// The scavenger returns nothing while the runtime is within its limit, so
+	// the memory the limit bounds may stay just under it.
+	heap.setMapped(brakeLimit * 97 / 100)
+	changed = held.PauseChanged()
+	admission.evaluateMemoryBrake()
+	require.True(t, held.Paused(), "LINK brake-reopen-sustained: the brake does not reopen the moment the runtime is back within its limit")
+	heap.advance(brakeReopenAfter)
+	admission.evaluateMemoryBrake()
+	require.False(t, held.Paused(), "LINK brake-reopen-within: back within its limit with a low live heap, the brake reopens")
+	requireClosed(t, changed, "LINK brake-signal: reopening the brake wakes the consumers waiting on the pause")
+	require.Equal(t, forcedBefore, testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonMemoryBrake)))
+}
+
+func TestIngestionMemoryBrake_ClosesOnTheLiveHeapTheRuntimeMeasuredAndReopensOnlyBelowAMarginAndAHalf(t *testing.T) {
+	// A clock of milliseconds: every GC here is the runtime's, and recent.
+	heap := &heapModel{objects: 6000 * mib, live: 6000 * mib, mapped: 6900 * mib, step: time.Millisecond}
 	admission := heap.admission(brakeLimit)
 	held := admission.IngestionPause("pokt1held")
 	closedBefore := testutil.ToFloat64(ingestionMemoryBrakeTransitions.WithLabelValues(memoryBrakeClosed))
 	openBefore := testutil.ToFloat64(ingestionMemoryBrakeTransitions.WithLabelValues(memoryBrakeOpen))
-	forcedBefore := testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonMemoryBrake))
 
+	heap.load(1000 * mib)
 	admission.evaluateMemoryBrake()
-	require.False(t, held.Paused(), "under the brake the consumers read")
-	require.Zero(t, heap.gcCount(), "objects under the brake settle it without a GC")
+	require.False(t, held.Paused(), "objects over the threshold do not close the brake: they include garbage")
+	require.Zero(t, heap.gcCount(), "LINK brake-open-no-gc: an open brake forces no GC, it reads the live heap the runtime measured")
 
-	changed := held.PauseChanged()
-	heap.load(400 * mib)
+	heap.drop(600 * mib)
+	heap.gc() // the runtime collects: live 6400
 	admission.evaluateMemoryBrake()
 	require.True(t, held.Paused(), "LINK brake-close: a live heap above the limit less a margin holds the consumers")
-	requireClosed(t, changed, "LINK brake-signal: closing the brake wakes the consumers waiting on the pause")
-	require.Equal(t, 1, heap.gcCount(), "objects above the brake are asked again of the live heap")
 	require.Equal(t, float64(1), testutil.ToFloat64(ingestionMemoryBrakeClosed))
 	require.Equal(t, closedBefore+1, testutil.ToFloat64(ingestionMemoryBrakeTransitions.WithLabelValues(memoryBrakeClosed)))
 
@@ -62,44 +91,83 @@ func TestIngestionMemoryBrake_ClosesAboveAMarginAndReopensOnlyBelowAMarginAndAHa
 	require.True(t, admission.IngestionPause("pokt1flush").Paused(), "and the hold returns when its claim stops waiting")
 
 	heap.drop(400 * mib)
+	heap.gc() // live 6000
 	admission.evaluateMemoryBrake()
-	require.Equal(t, uint64(6000*mib), heap.readLive(), "premise: the live heap is between the two thresholds")
 	require.True(t, held.Paused(), "LINK brake-hysteresis: the brake does not reopen above the limit less a margin and a half")
 
-	changed = held.PauseChanged()
 	heap.drop(300 * mib)
+	heap.gc() // live 5700
+	changed := held.PauseChanged()
+	admission.evaluateMemoryBrake()
+	heap.advance(brakeReopenAfter)
 	admission.evaluateMemoryBrake()
 	require.False(t, held.Paused(), "LINK brake-reopen: a live heap below the limit less a margin and a half reopens the brake")
 	requireClosed(t, changed, "LINK brake-signal: reopening the brake wakes the consumers waiting on the pause")
 	require.Zero(t, testutil.ToFloat64(ingestionMemoryBrakeClosed))
 	require.Equal(t, openBefore+1, testutil.ToFloat64(ingestionMemoryBrakeTransitions.WithLabelValues(memoryBrakeOpen)))
-
-	heap.load(1000 * mib)
-	heap.drop(1000 * mib)
-	admission.evaluateMemoryBrake()
-	require.False(t, held.Paused(), "LINK brake-live: garbage alone does not close the brake")
-	require.Equal(t, 4, heap.gcCount())
-	require.Equal(t, forcedBefore+4, testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonMemoryBrake)))
-
-	heap.load(1000 * mib)
-	admission.evaluateMemoryBrake()
-	require.True(t, held.Paused(), "premise: closed again")
-	heap.drop(2000 * mib)
-	heap.gc() // the runtime collects on its own
-	admission.evaluateMemoryBrake()
-	require.False(t, held.Paused(), "objects under the reopen threshold reopen the brake without forcing a GC")
-	require.Equal(t, 6, heap.gcCount(), "one GC to close, and the runtime's")
+	require.Equal(t, 3, heap.gcCount(), "every GC was the runtime's")
 }
 
-func TestIngestionMemoryBrake_ItsGCRunsAtMostOncePerIntervalWithTheAdmission(t *testing.T) {
-	heap := &heapModel{objects: 6400 * mib, live: 6400 * mib, step: time.Millisecond}
+func TestIngestionMemoryBrake_ClosedItForcesAGCOnlyAfterAMinuteWithoutOne(t *testing.T) {
+	heap := &heapModel{objects: 6400 * mib, live: 6400 * mib, mapped: 6900 * mib, step: time.Millisecond}
+	heap.gc() // the runtime's last GC measured 6400
 	admission := heap.admission(brakeLimit)
+	held := admission.IngestionPause("pokt1held")
+	forcedBefore := testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonMemoryBrake))
 
-	admission.collect(gcReasonRebuildAdmission)
-	require.Equal(t, 1, heap.gcCount(), "premise: the admission forced a GC")
 	admission.evaluateMemoryBrake()
-	require.Equal(t, 1, heap.gcCount(), "LINK brake-gc-shared: the brake does not force another GC within the interval")
-	require.True(t, admission.IngestionPause("pokt1held").Paused(), "the live heap that GC measured decides")
+	require.True(t, held.Paused(), "premise: closed on the live heap")
+
+	heap.drop(1000 * mib) // a claim lets its trees go; nothing sees it until a GC
+	for range 59 {
+		heap.advance(time.Second)
+		admission.evaluateMemoryBrake()
+	}
+	require.Equal(t, 1, heap.gcCount(), "LINK brake-collect-after: within a minute of the last GC the closed brake forces none")
+	require.True(t, held.Paused(), "and the live heap it reads has not fallen")
+
+	heap.advance(time.Second)
+	admission.evaluateMemoryBrake()
+	require.Equal(t, 2, heap.gcCount(), "LINK brake-collect: a minute without a GC, the closed brake forces one")
+	heap.advance(brakeReopenAfter)
+	admission.evaluateMemoryBrake()
+	require.False(t, held.Paused(), "and the live heap that GC measured reopens it, once it has held")
+	require.Equal(t, forcedBefore+1, testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonMemoryBrake)))
+}
+
+// Measured under load, in a proof window: the runtime crossed its limit and came
+// back on the next evaluation, again and again, with the live heap far below the
+// thresholds. Closing on each crossing closed the brake nine times in 25 s.
+func TestIngestionMemoryBrake_DoesNotFlapOnTheRuntimeOvershootingItsLimitOneEvaluationAtATime(t *testing.T) {
+	heap := &heapModel{objects: 4000 * mib, live: 4000 * mib, step: time.Second}
+	admission := heap.admission(brakeLimit)
+	held := admission.IngestionPause("pokt1held")
+	closedBefore := testutil.ToFloat64(ingestionMemoryBrakeTransitions.WithLabelValues(memoryBrakeClosed))
+
+	for tick := range 25 {
+		if tick%2 == 0 {
+			heap.setMapped(brakeLimit + 200*mib)
+		} else {
+			heap.setMapped(brakeLimit - 10*mib)
+		}
+		admission.evaluateMemoryBrake()
+		require.False(t, held.Paused(), "LINK brake-no-flap: tick %d", tick)
+	}
+	require.Equal(t, closedBefore, testutil.ToFloat64(ingestionMemoryBrakeTransitions.WithLabelValues(memoryBrakeClosed)))
+
+	heap.setMapped(brakeLimit + 200*mib)
+	admission.evaluateMemoryBrake()
+	admission.evaluateMemoryBrake()
+	require.True(t, held.Paused(), "a runtime that stays over its limit closes the brake")
+	for tick := range 20 {
+		if tick%2 == 0 {
+			heap.setMapped(brakeLimit - 10*mib)
+		} else {
+			heap.setMapped(brakeLimit + 200*mib)
+		}
+		admission.evaluateMemoryBrake()
+		require.True(t, held.Paused(), "LINK brake-reopen-sustained: tick %d, the process has not held within its limit", tick)
+	}
 }
 
 // armedPause records when a consumer found its pause held after taking the
@@ -180,6 +248,7 @@ func TestIngestionMemoryBrake_TheStreamConsumerSleepsUnderTheBrakeAndReadsOnceIt
 
 	heap.drop(1000 * mib)
 	admission.evaluateMemoryBrake()
+	admission.evaluateMemoryBrake() // the clock moves an hour: the reopen has held
 	for read.Load() == nil {
 		select {
 		case <-ctx.Done():

@@ -13,23 +13,30 @@ import (
 	"github.com/alitto/pond/v2"
 	"github.com/pokt-network/smt"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // heapModel is the process memory an admission reads in a test: objects moves
-// with every load and drop, live only when gc runs. Its clock moves by step on
-// every read, an hour unless set, so forced GCs are not throttled.
+// with every load and drop, live only when gc runs, and mapped only when the
+// test sets it. Its clock starts at a real date and moves by step on every
+// read, an hour unless set, so no GC is recent enough to skip a forced one.
+// Before any GC its last one reads as the Unix epoch, as debug.ReadGCStats
+// reports it.
 type heapModel struct {
 	mu      sync.Mutex
 	objects uint64
 	live    uint64
 	garbage uint64
+	mapped  uint64
 	gcs     int
+	lastGC  time.Time
 	clock   time.Time
 	step    time.Duration
 }
@@ -44,6 +51,15 @@ func (h *heapModel) gc() {
 	h.garbage = 0
 	h.live = h.objects
 	h.gcs++
+	h.startClock()
+	h.lastGC = h.clock
+}
+
+// startClock sets the clock to a real date the first time. h.mu must be held.
+func (h *heapModel) startClock() {
+	if h.clock.IsZero() {
+		h.clock = time.Date(2026, 9, 17, 0, 0, 0, 0, time.UTC)
+	}
 }
 
 func (h *heapModel) load(n uint64) { h.mu.Lock(); defer h.mu.Unlock(); h.objects += n }
@@ -52,7 +68,25 @@ func (h *heapModel) drop(n uint64) { h.mu.Lock(); defer h.mu.Unlock(); h.garbage
 
 func (h *heapModel) gcCount() int { h.mu.Lock(); defer h.mu.Unlock(); return h.gcs }
 
-func (h *heapModel) cycles() uint64 { h.mu.Lock(); defer h.mu.Unlock(); return uint64(h.gcs) }
+func (h *heapModel) readMapped() uint64 { h.mu.Lock(); defer h.mu.Unlock(); return h.mapped }
+
+func (h *heapModel) readLastGC() time.Time {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.lastGC.IsZero() {
+		return time.Unix(0, 0)
+	}
+	return h.lastGC
+}
+
+func (h *heapModel) setMapped(n uint64) { h.mu.Lock(); defer h.mu.Unlock(); h.mapped = n }
+
+func (h *heapModel) advance(d time.Duration) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.startClock()
+	h.clock = h.clock.Add(d)
+}
 
 func (h *heapModel) now() time.Time {
 	h.mu.Lock()
@@ -60,6 +94,7 @@ func (h *heapModel) now() time.Time {
 	if h.step == 0 {
 		h.step = time.Hour
 	}
+	h.startClock()
 	h.clock = h.clock.Add(h.step)
 	return h.clock
 }
@@ -68,8 +103,9 @@ func (h *heapModel) memory(limit uint64) processMemory {
 	return processMemory{
 		objects: h.readObjects,
 		live:    h.readLive,
+		mapped:  h.readMapped,
 		limit:   func() uint64 { return limit },
-		cycles:  h.cycles,
+		lastGC:  h.readLastGC,
 		gc:      h.gc,
 		now:     h.now,
 	}
@@ -135,8 +171,8 @@ func requireNotAdmitted(t *testing.T, a *RebuildAdmission, got <-chan admittedTr
 func TestRebuildAdmission_ALoadedTreeTheLastGCDidNotSeeKeepsTheNextWaitingUntilItIsDone(t *testing.T) {
 	const tree = 100 << 20
 	heap := &heapModel{objects: 1 << 30, live: 1 << 30}
-	// Room for one tree and a half above what the process holds.
-	admission := heap.admission(rebuildHeadroomBytes + 1<<30 + tree + tree/2)
+	// Room above what the process holds for one tree's load and half a tree kept.
+	admission := heap.admission(rebuildHeadroomBytes + 1<<30 + 4*tree)
 
 	aLoaded, aRelease, err := admission.acquire(context.Background(), rebuildKindProof, tree, 3)
 	require.NoError(t, err)
@@ -177,7 +213,7 @@ func TestRebuildAdmission_ALoadedTreeTheLastGCDidNotSeeKeepsTheNextWaitingUntilI
 func TestRebuildAdmission_GarbageAloneDoesNotKeepATreeWaiting(t *testing.T) {
 	const tree = 100 << 20
 	heap := &heapModel{objects: 1 << 30, live: 1 << 30}
-	admission := heap.admission(rebuildHeadroomBytes + 1<<30 + tree + tree/2)
+	admission := heap.admission(rebuildHeadroomBytes + 1<<30 + 3*tree)
 
 	aLoaded, aRelease, err := admission.acquire(context.Background(), rebuildKindProof, tree, 2)
 	require.NoError(t, err)
@@ -196,6 +232,102 @@ func TestRebuildAdmission_GarbageAloneDoesNotKeepATreeWaiting(t *testing.T) {
 		t.Fatal("LINK gc-retry: a tree that fits once the garbage is collected must not wait")
 	}
 	require.Equal(t, 1, heap.gcCount(), "the objects said no, one GC said yes")
+}
+
+func TestRebuildAdmission_ATreeIsBudgetedForWhatItsLoadAllocatesNotWhatItKeeps(t *testing.T) {
+	const tree = 100 << 20
+	heap := &heapModel{objects: 1 << 30, live: 1 << 30}
+	// Room for two trees kept, not for the three and a half a load allocates.
+	admission := heap.admission(rebuildHeadroomBytes + 1<<30 + 2*tree)
+
+	loaded, release, err := admission.acquire(context.Background(), rebuildKindProof, 1, 2)
+	require.NoError(t, err)
+	loaded()
+	t.Cleanup(release)
+
+	b := acquireAsync(admission, context.Background(), tree, 1)
+	requireNotAdmitted(t, admission, b, 1,
+		"LINK admission-transient: a tree whose kept size fits but whose load does not waits for the rebuild in flight")
+}
+
+func TestRebuildAdmission_WithTheRuntimeOverItsLimitATreeWaitsForTheOneInFlight(t *testing.T) {
+	const limit = 8 << 30
+	heap := &heapModel{objects: 1 << 30, live: 1 << 30, mapped: limit + 1}
+	admission := heap.admission(limit)
+
+	loaded, release, err := admission.acquire(context.Background(), rebuildKindProof, 1, 2)
+	require.NoError(t, err, "with nothing in flight a tree loads over the limit too: no proof is given up for memory")
+	loaded()
+
+	b := acquireAsync(admission, context.Background(), 1, 1)
+	requireNotAdmitted(t, admission, b, 1, "LINK admission-overage: with the runtime over its limit a tree waits for the one in flight")
+	require.Zero(t, heap.gcCount(), "no GC is forced: collecting does not bring the runtime under its limit")
+
+	heap.setMapped(limit / 2)
+	release()
+	got := <-b
+	require.NoError(t, got.err, "the rebuild in flight ends and the tree loads")
+	got.release()
+}
+
+func TestRebuildAdmission_WithTheRuntimeOverItsLimitACompactionWaitsEvenWithNothingInFlight(t *testing.T) {
+	const limit = 8 << 30
+	heap := &heapModel{objects: 1 << 30, live: 1 << 30, mapped: limit + 1}
+	admission := heap.admission(limit)
+
+	compaction := make(chan error, 1)
+	go func() {
+		_, release, err := admission.acquire(context.Background(), rebuildKindCompaction, 1, 0)
+		if err == nil {
+			release()
+		}
+		compaction <- err
+	}()
+	waitQueuedOr(t, admission, 1, "LINK admission-overage-compaction: a compaction does not load with the runtime over its limit, even with nothing in flight")
+	select {
+	case <-compaction:
+		t.Fatal("LINK admission-overage-compaction: a compaction does not load with the runtime over its limit, even with nothing in flight")
+	default:
+	}
+
+	_, release, err := admission.acquire(context.Background(), rebuildKindProof, 1, 1)
+	require.NoError(t, err, "a proof with nothing in flight loads over the limit: no proof is given up for memory")
+	release()
+	waitQueuedOr(t, admission, 1, "the compaction still waits once the proof is done")
+
+	heap.setMapped(limit / 2)
+	admission.evaluateMemoryBrake()
+	select {
+	case err := <-compaction:
+		require.NoError(t, err)
+	case <-time.After(30 * time.Second):
+		t.Fatal("LINK admission-overage-wake: back within its limit, the brake's evaluation admits the waiting compaction")
+	}
+}
+
+func TestRebuildAdmission_ObservesTheHeapALoadGrewOverItsEstimate(t *testing.T) {
+	heap := &heapModel{objects: 1 << 30, live: 1 << 30}
+	admission := heap.admission(1 << 40)
+	count, sum := heapGrowthOverEstimate(t, rebuildKindCompaction)
+
+	loaded, release, err := admission.acquire(context.Background(), rebuildKindCompaction, 100<<20, 0)
+	require.NoError(t, err)
+	heap.load(350 << 20)
+	loaded()
+	loaded()
+	release()
+
+	gotCount, gotSum := heapGrowthOverEstimate(t, rebuildKindCompaction)
+	require.Equal(t, count+1, gotCount, "LINK admission-growth: a load is observed once")
+	require.InDelta(t, 3.5, gotSum-sum, 1e-9, "LINK admission-growth: as the heap's growth over its estimate")
+}
+
+// heapGrowthOverEstimate reads the count and sum of the heap growth histogram for kind.
+func heapGrowthOverEstimate(t *testing.T, kind string) (uint64, float64) {
+	t.Helper()
+	var m dto.Metric
+	require.NoError(t, observability.SMSTRebuildHeapGrowthOverEstimate.WithLabelValues(kind).(interface{ Write(*dto.Metric) error }).Write(&m))
+	return m.GetHistogram().GetSampleCount(), m.GetHistogram().GetSampleSum()
 }
 
 func TestRebuildAdmission_AForcedGCDoesNotHoldTheAdmissionLocked(t *testing.T) {
@@ -248,44 +380,26 @@ func TestRebuildAdmission_AForcedGCDoesNotHoldTheAdmissionLocked(t *testing.T) {
 	require.Equal(t, 1, heap.gcCount())
 }
 
-func TestRebuildAdmission_ForcedGCsAreAtMostOnePerIntervalAndSkippedAfterARecentOne(t *testing.T) {
+func TestRebuildAdmission_AGCIsForcedOnlyWhenNoneEndedWithinTheWindow(t *testing.T) {
 	heap := &heapModel{step: time.Millisecond}
 	admission := heap.admission(1 << 40)
 	before := testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonRebuildAdmission))
 
 	admission.collect(gcReasonRebuildAdmission)
-	require.Equal(t, 1, heap.gcCount(), "the first collection forces a GC")
+	require.Equal(t, 1, heap.gcCount(), "with no GC yet one is forced")
 	admission.collect(gcReasonRebuildAdmission)
-	require.Equal(t, 1, heap.gcCount(), "LINK gc-interval: a second GC within the interval is not forced")
+	require.Equal(t, 1, heap.gcCount(), "LINK gc-recent: the GC just forced stands in for another")
 
-	heap.mu.Lock()
-	heap.clock = heap.clock.Add(forcedGCInterval)
-	heap.mu.Unlock()
+	heap.advance(recentGCWindow)
 	admission.collect(gcReasonRebuildAdmission)
-	require.Equal(t, 2, heap.gcCount(), "past the interval a GC is forced again")
+	require.Equal(t, 2, heap.gcCount(), "LINK gc-window: past the window a GC is forced again")
 
-	heap.mu.Lock()
-	heap.clock = heap.clock.Add(forcedGCInterval)
-	heap.gcs++ // the runtime completed a GC on its own, some time since the last look
-	heap.mu.Unlock()
+	heap.advance(recentGCWindow)
+	heap.gc() // the runtime collects on its own
+	heap.advance(recentGCWindow - time.Second)
 	admission.collect(gcReasonRebuildAdmission)
-	require.Equal(t, 4, heap.gcCount(), "a GC the runtime ran an interval or more after the last look may be old: one is forced")
-
-	advance := func(d time.Duration) {
-		heap.mu.Lock()
-		heap.clock = heap.clock.Add(d)
-		heap.mu.Unlock()
-	}
-	advance(forcedGCInterval * 6 / 10)
-	admission.collect(gcReasonRebuildAdmission) // throttled, but it looks
-	require.Equal(t, 4, heap.gcCount())
-	advance(forcedGCInterval * 6 / 10)
-	heap.mu.Lock()
-	heap.gcs++ // the runtime completes one within an interval of that look
-	heap.mu.Unlock()
-	admission.collect(gcReasonRebuildAdmission)
-	require.Equal(t, 5, heap.gcCount(), "LINK gc-recent: a GC the runtime completed within an interval of the last look stands in for a forced one")
-	require.Equal(t, before+3, testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonRebuildAdmission)), "forced GCs are counted, the runtime's are not")
+	require.Equal(t, 3, heap.gcCount(), "LINK gc-recent: a GC the runtime ended within the window stands in for a forced one")
+	require.Equal(t, before+2, testutil.ToFloat64(forcedGCs.WithLabelValues(gcReasonRebuildAdmission)), "forced GCs are counted, the runtime's are not")
 }
 
 func TestRebuildAdmission_TheNextTreeIsNotAskedWhileOneIsLoading(t *testing.T) {

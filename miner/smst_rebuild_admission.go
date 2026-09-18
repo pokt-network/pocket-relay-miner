@@ -8,14 +8,16 @@ package miner
 //
 // RebuildAdmission loads one tree at a time. The next is asked only once the
 // previous one is loaded, so its memory is already in the process when the
-// question is asked: does this tree's estimate fit between the heap and the
+// question is asked: does what this tree's load allocates, its estimate times
+// rebuildAllocatedHalvesPerRetained halves, fit between the heap and the
 // process's memory limit, less rebuildHeadroomBytes? The first answer reads the
 // heap's objects, which every allocation updates and which include garbage: a yes
 // never misses the tree loaded last. On a no, the question is asked again of
-// the live heap, measured by a GC that ran in the last second or by one forced
-// now, so garbage alone does not keep a tree waiting. The forced GC runs with
-// the admission unlocked: a collection of gigabytes takes seconds, and the
-// consumers and the metrics read the admission meanwhile. If it still does not fit, the tree waits for a
+// the live heap, measured by a GC that ended within recentGCWindow or by one
+// forced now, so garbage alone does not keep a tree waiting. The forced GC runs
+// with the admission unlocked: a collection of gigabytes takes seconds, and
+// the consumers and the metrics read the admission meanwhile. If it still does
+// not fit, or if the runtime is already over its limit, the tree waits for a
 // rebuild in flight to end. With nothing in flight it is admitted whatever it
 // weighs, so no proof is ever given up for memory.
 //
@@ -38,6 +40,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/observability"
 )
@@ -46,15 +49,22 @@ const (
 	// rebuildHeadroomBytes is what admission leaves free under the memory limit.
 	rebuildHeadroomBytes = 512 << 20
 
-	// forcedGCInterval is the least time between two forced GCs, and how old a
-	// GC the runtime ran on its own may be for its live heap to stand in for one.
-	forcedGCInterval = time.Second
+	// recentGCWindow is how old a GC may be for the live heap it measured to
+	// stand in for a forced one.
+	recentGCWindow = 5 * time.Second
 
 	// rebuildLeafOverheadBytes is the heap a rebuilt leaf holds besides its
 	// value's two copies: its inner nodes, map entries and slice headers.
 	// Derived from a synthetic measurement (~2.1 KB per leaf with 700 B
 	// values, 1k-100k leaves) less those copies; rounded up.
 	rebuildLeafOverheadBytes = 1 << 10
+
+	// rebuildAllocatedHalvesPerRetained is, in halves, how many bytes a load
+	// allocates per byte its tree keeps: 3.5, from a synthetic probe that
+	// decoded and rebuilt trees of 1k-100k leaves and measured allocated over
+	// live retained. It is not a measured peak; the heap growth each load
+	// observes, ha_smst_rebuild_heap_growth_over_estimate, is what replaces it.
+	rebuildAllocatedHalvesPerRetained = 7
 
 	// compactionLeafEstimateBytes is what a compaction holds per leaf before
 	// its size is known: the leaves read from the hash, the encoded frame, and
@@ -109,22 +119,27 @@ type RebuildAdmission struct {
 	// brakeClosed is the ingestion memory brake, closed since brakeClosedAt.
 	brakeClosed   bool
 	brakeClosedAt time.Time
+	// brakeOverages counts the evaluations in a row that found the runtime over
+	// its limit; brakeWithinSince is when a closed brake last started finding
+	// the process within its reopen thresholds. Only the brake's goroutine
+	// reads and writes them.
+	brakeOverages    int
+	brakeWithinSince time.Time
 
-	// gcMu serializes forced GCs and guards the fields after it.
-	gcMu     sync.Mutex
-	gcForced time.Time
-	gcSeen   time.Time
-	gcCycles uint64
+	// gcMu serializes forced GCs.
+	gcMu sync.Mutex
 }
 
 // processMemory reads the process's memory. objects reads the heap's objects,
-// live and dead; live the heap the last GC marked; limit the runtime's memory
-// limit; cycles the GCs completed; gc runs a collection.
+// live and dead; live the heap the last GC marked; mapped the memory the
+// runtime's limit bounds; limit the runtime's memory limit; lastGC when the
+// last GC ended; gc runs a collection.
 type processMemory struct {
 	objects func() uint64
+	mapped  func() uint64
 	live    func() uint64
 	limit   func() uint64
-	cycles  func() uint64
+	lastGC  func() time.Time
 	gc      func()
 	now     func() time.Time
 }
@@ -147,8 +162,9 @@ func NewRebuildAdmission(logger logging.Logger) *RebuildAdmission {
 	a := newRebuildAdmission(logger, processMemory{
 		objects: runtimeHeapObjects,
 		live:    runtimeHeapLive,
+		mapped:  memlimit.Mapped,
 		limit:   runtimeMemoryLimit,
-		cycles:  runtimeGCCycles,
+		lastGC:  runtimeLastGC,
 		gc:      runtime.GC,
 		now:     time.Now,
 	})
@@ -170,7 +186,11 @@ func runtimeHeapObjects() uint64 { return readRuntimeBytes("/memory/classes/heap
 
 func runtimeHeapLive() uint64 { return readRuntimeBytes("/gc/heap/live:bytes") }
 
-func runtimeGCCycles() uint64 { return readRuntimeBytes("/gc/cycles/total:gc-cycles") }
+func runtimeLastGC() time.Time {
+	var stats debug.GCStats
+	debug.ReadGCStats(&stats)
+	return stats.LastGC
+}
 
 func readRuntimeBytes(name string) uint64 {
 	sample := []metrics.Sample{{Name: name}}
@@ -215,7 +235,7 @@ func (a *RebuildAdmission) acquire(ctx context.Context, kind string, estimate, v
 			a.mu.Unlock()
 		}
 		if granted {
-			_, release := a.slot()
+			_, release := a.slot(nil)
 			release()
 		}
 		return nil, nil, ctx.Err()
@@ -225,12 +245,19 @@ func (a *RebuildAdmission) acquire(ctx context.Context, kind string, estimate, v
 	if a.admitted != nil {
 		a.admitted(kind, value)
 	}
-	loaded, release = a.slot()
+	before := a.objects()
+	loaded, release = a.slot(func() {
+		after := a.objects()
+		observability.SMSTRebuildHeapGrowthOverEstimate.WithLabelValues(kind).
+			Observe(float64(after-min(after, before)) / float64(max(estimate, 1)))
+	})
 	return loaded, release, nil
 }
 
 // slot returns the loaded and release functions of one admitted tree.
-func (a *RebuildAdmission) slot() (loaded, release func()) {
+//
+// onLoaded, when set, runs once the tree is loaded.
+func (a *RebuildAdmission) slot(onLoaded func()) (loaded, release func()) {
 	var mu sync.Mutex
 	isLoaded, isReleased := false, false
 	loaded = func() {
@@ -240,6 +267,10 @@ func (a *RebuildAdmission) slot() (loaded, release func()) {
 			return
 		}
 		isLoaded = true
+		// Read before the next tree is asked, which may force a GC.
+		if onLoaded != nil {
+			onLoaded()
+		}
 		a.mu.Lock()
 		a.loading = false
 		a.generation++
@@ -332,6 +363,14 @@ func (a *RebuildAdmission) dispatch() (collect bool) {
 		return false
 	}
 	w := a.waiting[0]
+	// The runtime over its limit is collecting all it can: no GC makes room,
+	// so the tree waits for a rebuild in flight to end. A compaction waits even
+	// with nothing in flight -- only a proof is admitted whatever it weighs --
+	// and the memory brake's evaluation asks again once the runtime is back
+	// within its limit.
+	if a.mapped() > a.limit() && (a.inFlight > 0 || w.kind == rebuildKindCompaction) {
+		return false
+	}
 	if a.inFlight > 0 && !a.fits(w.estimate, a.objects) {
 		if a.collectedAt != a.generation {
 			a.collecting = true
@@ -349,19 +388,15 @@ func (a *RebuildAdmission) dispatch() (collect bool) {
 	return false
 }
 
-// collect makes the live heap recent: it forces a GC unless the runtime
-// completed one within forcedGCInterval, or one was forced within it.
+// collect makes the live heap recent: it forces a GC unless one ended within
+// recentGCWindow, which a forced one also does.
 func (a *RebuildAdmission) collect(reason string) {
 	a.gcMu.Lock()
 	defer a.gcMu.Unlock()
-	now, cycles := a.now(), a.cycles()
-	recent := !a.gcSeen.IsZero() && cycles != a.gcCycles && now.Sub(a.gcSeen) <= forcedGCInterval
-	a.gcSeen, a.gcCycles = now, cycles
-	if recent || !a.gcForced.IsZero() && now.Sub(a.gcForced) < forcedGCInterval {
+	if a.now().Sub(a.lastGC()) <= recentGCWindow {
 		return
 	}
 	a.gc()
-	a.gcForced, a.gcSeen, a.gcCycles = a.now(), a.now(), a.cycles()
 	forcedGCs.WithLabelValues(reason).Inc()
 }
 
@@ -370,7 +405,7 @@ func (a *RebuildAdmission) fits(estimate uint64, heap func() uint64) bool {
 	if limit <= rebuildHeadroomBytes {
 		return false
 	}
-	return heap()+estimate <= limit-rebuildHeadroomBytes
+	return heap()+estimate*rebuildAllocatedHalvesPerRetained/2 <= limit-rebuildHeadroomBytes
 }
 
 // signal wakes whoever waits on the pause changing.

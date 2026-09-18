@@ -80,23 +80,9 @@ func TestExecuteBatchedProofTransition_AProvedWriteThatFailsStillFreesTheTree(t 
 	require.False(t, stillActive)
 }
 
-func TestSubmissionTracker_WritesNothingWhileTheStoreIsClosed(t *testing.T) {
-	client, _ := newTestRedis(t)
-	tr := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
-	health := redistransport.NewStoreHealth(zerolog.Nop(), client.UniversalClient, "test_tracker", redistransport.StoreGateIngestion)
-	tr.SetStoreHealth(health)
-	health.ReportOOM()
-	skipped := testutil.ToFloat64(trackingWritesSkipped.WithLabelValues("claim"))
-
-	seedClaim(t, tr, "pokt1track", "sess-closed", "0xtx")
-	require.False(t, keyExists(t, client, client.KB().TxTrackKey("pokt1track", 110, "sess-closed")),
-		"LINK tracker-skip: no tracking record is written while Redis is full")
-	require.Equal(t, skipped+1, testutil.ToFloat64(trackingWritesSkipped.WithLabelValues("claim")))
-
-	control := NewSubmissionTracker(zerolog.Nop(), client, time.Hour)
-	seedClaim(t, control, "pokt1track", "sess-open", "0xtx")
-	require.True(t, keyExists(t, client, client.KB().TxTrackKey("pokt1track", 110, "sess-open")), "control: an open store writes")
-}
+// The tracker's writes are covered by submission_tracker_brake_test.go: what
+// used to be asserted here -- that a closed store writes no record -- is the
+// defect that lost 250 claim records, so the assertion is inverted there.
 
 // TestStoreMemory_TellsStreamsFromTrees is the measurement behind "a store full of
 // stream backlog stays full while the miner is paused": what it attributes to

@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"hash/fnv"
 	"runtime/debug"
 	"strconv"
 	"strings"
@@ -28,6 +29,7 @@ import (
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
+	"github.com/pokt-network/smt"
 )
 
 // SupplierQueryClient queries supplier information from the blockchain.
@@ -422,6 +424,10 @@ type SupplierManager struct {
 	// relayBatch.flushSession recover what they call. The restart and the
 	// panic budget are a defence against a defect that is not there yet.
 	consumeLoopFlushHook func()
+
+	// firstFlushTimer, when set, stands in for the timer of a consume loop's
+	// first flush. For tests only: nil in production.
+	firstFlushTimer func(d time.Duration) (fire <-chan time.Time, stop func() bool)
 
 	// afterReleaseAfterPanicHook, when set, runs once in consumeForSupplier
 	// right after releaseBatchAfterPanic returns and strictly before
@@ -1364,8 +1370,10 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 		terminalCount := 0
 		missingSmstCount := 0
 		for _, session := range sessions {
-			// Sessions that have already been claimed/proved don't need SMST anymore.
-			// The SMST was deleted after the root hash was computed and submitted.
+			// A session whose claim is sent or being sent takes no more relays, so
+			// a missing SMST is not a defect here. It is not gone either: its
+			// proof is built from it, and it is deleted only when the session
+			// reaches a terminal state (DeleteTree, from the lifecycle callback).
 			if session.State.IsTerminal() || session.State == SessionStateClaimed || session.State == SessionStateClaiming {
 				terminalCount++
 				continue
@@ -2090,6 +2098,110 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 	}
 }
 
+// unloadEndedSessionTrees drops from memory the trees of this supplier's
+// sessions past their grace period and before their claim window, keeping them
+// in Redis. At a claim height
+// under load, the relays those sessions held put their trees at about half the
+// live heap (estimated from relays consumed, not profiled per session), twelve
+// blocks after their last relay. It runs right after the flush, on the consume loop's
+// goroutine, so the relays of those sessions are checkpointed and acknowledged
+// by then.
+//
+// From the claim window on it leaves them: the claim leaves its tree unloaded
+// (FlushTree), and a proof may hold a tree's lock while it waits for memory,
+// which would hold this loop, and the supplier's relays, behind it.
+func (m *SupplierManager) unloadEndedSessionTrees(ctx context.Context, state *SupplierState) {
+	if state.LifecycleManager == nil || state.SMSTManager == nil || m.config.BlockClient == nil || m.config.SharedClient == nil {
+		return
+	}
+	block := m.config.BlockClient.LastBlock(ctx)
+	if block == nil {
+		return
+	}
+	height := block.Height()
+	type unloadedAtEnd struct {
+		graceEnd, claimOpen         int64
+		trees, leaves, computeUnits uint64
+	}
+	var unloaded map[int64]*unloadedAtEnd
+	state.LifecycleManager.activeSessions.Range(func(sessionID string, session *SessionSnapshot) bool {
+		if session.SessionEndHeight <= 0 || session.SessionEndHeight >= height {
+			return true
+		}
+		params, err := m.config.SharedClient.GetParamsAtHeight(ctx, session.SessionEndHeight)
+		if err != nil || params == nil {
+			return true
+		}
+		graceEnd := sharedtypes.GetSessionGracePeriodEndHeight(params, session.SessionEndHeight)
+		claimOpen := sharedtypes.GetClaimWindowOpenHeight(params, session.SessionEndHeight)
+		if height <= graceEnd || height >= claimOpen {
+			return true
+		}
+		root, err := state.SMSTManager.UnloadTree(ctx, sessionID)
+		if err != nil {
+			m.logger.Debug().Err(err).
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to unload an ended session's tree: it stays in memory")
+			return true
+		}
+		if root == nil {
+			return true
+		}
+		// The count and the sum are in the root's bytes: nothing is read.
+		leaves, _ := smt.MerkleSumRoot(root).Count()
+		computeUnits, _ := smt.MerkleSumRoot(root).Sum()
+		m.logger.Debug().
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Str(logging.FieldSessionID, sessionID).
+			Int64("height", height).
+			Int64("session_end_height", session.SessionEndHeight).
+			Uint64("leaves", leaves).
+			Uint64("compute_units", computeUnits).
+			Msg("unloaded an ended session's tree from memory")
+		if unloaded == nil {
+			unloaded = make(map[int64]*unloadedAtEnd)
+		}
+		at := unloaded[session.SessionEndHeight]
+		if at == nil {
+			at = &unloadedAtEnd{graceEnd: graceEnd, claimOpen: claimOpen}
+			unloaded[session.SessionEndHeight] = at
+		}
+		at.trees++
+		at.leaves += leaves
+		at.computeUnits += computeUnits
+		return true
+	})
+	for sessionEnd, at := range unloaded {
+		m.logger.Info().
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Int64("height", height).
+			Int64("session_end_height", sessionEnd).
+			Int64("grace_period_end_height", at.graceEnd).
+			Int64("claim_window_open_height", at.claimOpen).
+			Uint64("trees", at.trees).
+			Uint64("leaves", at.leaves).
+			Uint64("compute_units", at.computeUnits).
+			Msg("unloaded ended sessions' trees from memory")
+	}
+}
+
+// flushPhase is how long a supplier's first flush waits: its address hashed
+// into [0, interval), so suppliers started together flush apart.
+func flushPhase(supplier string, interval time.Duration) time.Duration {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(supplier))
+	return time.Duration(h.Sum64() % uint64(interval))
+}
+
+func (m *SupplierManager) newFirstFlushTimer(d time.Duration) (<-chan time.Time, func() bool) {
+	if m.firstFlushTimer != nil {
+		return m.firstFlushTimer(d)
+	}
+	timer := time.NewTimer(d)
+	return timer.C, timer.Stop
+}
+
 // runConsumeLoop consumes until the delivery channel closes or ctx ends, and
 // reports whether it stopped on a recovered panic instead.
 func (m *SupplierManager) runConsumeLoop(
@@ -2112,11 +2224,24 @@ func (m *SupplierManager) runConsumeLoop(
 	// The flush tick runs on this goroutine, between deliveries, so a flush
 	// never races the relays being added: the lifecycle's claim transition is
 	// the only other caller, and the batch serialises it.
+	//
+	// Every supplier's loop starts at once, and a flush commits every node the
+	// relays since the last one dirtied: with the tickers in phase, all the
+	// suppliers' commits allocated together, hundreds of MiB within a second.
+	// The first flush waits a phase of the interval taken from the supplier's
+	// address, and the ticker starts from there.
 	var flushTick <-chan time.Time
-	if state.relayBatch != nil && m.config.RelayBatchFlushInterval > 0 {
-		ticker := time.NewTicker(m.config.RelayBatchFlushInterval)
-		defer ticker.Stop()
-		flushTick = ticker.C
+	var flushTicker *time.Ticker
+	interval := m.config.RelayBatchFlushInterval
+	if state.relayBatch != nil && interval > 0 {
+		fire, stop := m.newFirstFlushTimer(flushPhase(state.OperatorAddr, interval))
+		defer stop()
+		flushTick = fire
+		defer func() {
+			if flushTicker != nil {
+				flushTicker.Stop()
+			}
+		}()
 	}
 
 	for {
@@ -2130,10 +2255,15 @@ func (m *SupplierManager) runConsumeLoop(
 			m.handleStreamMessage(ctx, state, msg)
 
 		case <-flushTick:
+			if flushTicker == nil {
+				flushTicker = time.NewTicker(interval)
+				flushTick = flushTicker.C
+			}
 			if m.consumeLoopFlushHook != nil {
 				m.consumeLoopFlushHook()
 			}
 			state.relayBatch.FlushAll(ctx)
+			m.unloadEndedSessionTrees(ctx, state)
 
 		case <-ctx.Done():
 			// The batch goes back first, while the exit budget is whole.
@@ -3098,7 +3228,6 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 func (m *SupplierManager) ensureSharedTrackers() {
 	m.sharedTrackersOnce.Do(func() {
 		m.sharedSubmissionTracker = NewSubmissionTracker(m.logger, m.config.RedisClient, m.config.SubmissionTrackingTTL)
-		m.sharedSubmissionTracker.SetStoreHealth(m.config.StoreHealth)
 
 		// Only build the rebroadcast store + reconciler when we can actually run
 		// it. Leaving m.rebroadcastStore nil means the lifecycle callback skips
@@ -3138,6 +3267,11 @@ func (m *SupplierManager) ensureSharedTrackers() {
 				}
 			}
 			claimInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
+			// After the counter and after reactivation, for the same reason
+			// reactivation runs first: a failure above keeps the entry and the
+			// observation is re-delivered next block, and the ledger must not be
+			// moved once per retry.
+			m.settleLedgerOutcome(ctx, RebroadcastPhaseClaim, e, supplier, sessionID, outcome)
 			if outcome == inclusionMissing {
 				m.recordMissingCause(ctx, RebroadcastPhaseClaim, e, supplier, sessionID)
 			}
@@ -3184,6 +3318,12 @@ func (m *SupplierManager) ensureSharedTrackers() {
 		}
 		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error {
 			proofInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
+			// Closes the `unresolved` balance this session's submission failure
+			// opened, and names where the money went. on_chain_rejected settles
+			// it as lost like on_chain_missing does: the chain executed the proof
+			// and refused it, so nothing further will answer, and without this
+			// branch a rejected proof's balance would never come down.
+			m.settleLedgerOutcome(ctx, RebroadcastPhaseProof, e, supplier, sessionID, outcome)
 			if outcome == inclusionMissing {
 				m.recordMissingCause(ctx, RebroadcastPhaseProof, e, supplier, sessionID)
 			}
@@ -3441,6 +3581,96 @@ func (m *SupplierManager) startReconcilerBlockLoop() {
 			m.logger.Debug().Msg("inclusion reconciler block loop stopped")
 		}
 	}()
+}
+
+// settleLedgerOutcome moves a session's money to its final door once the chain
+// has answered for it. It is the only place the ledger CLOSES a balance, and the
+// counterpart to the places that open one.
+//
+// THE DISCRIMINATOR IS e.OrigTxHash, AND IT IS A FACT THE ENTRY ALREADY CARRIES.
+// persistRebroadcastEntry is its only writer and it is never rewritten, so it is
+// the original submission's tx hash for as long as the entry lives. EMPTY means
+// the submission was never confirmed -- the self-heal persists on the failure
+// paths pass "" precisely to mark that -- which is exactly the case where
+// RecordRevenueClaimed / RecordRevenueProved did NOT run at submission time.
+// NON-EMPTY means the transaction was accepted and the revenue was already
+// counted, so there is nothing to add here and adding it would count the session
+// twice. Without this test, crediting every on_chain_found would double every
+// normal claim and proof, because the success paths persist an entry too.
+//
+// OWNERSHIP IS NOT RE-DECIDED HERE. The weight comes from the session store on
+// the SupplierState this replica holds, which is the same m.suppliers.Load that
+// the reconciler's own ownership filter reads. Two predicates answering the same
+// question is how they drift apart, and only the replica that owns a supplier
+// may report its accounting -- otherwise two replicas report the same money.
+//
+// KNOWN GAP, deliberately not closed here: a CONFIRMED proof the chain turns out
+// not to hold was already counted into upokt_proved_total at submission. This
+// function cannot subtract it -- a counter does not go down -- so `proved`
+// overstates by that amount and proof_inclusion_outcome_total is what reveals
+// it. That is the success side of the ledger and it is a separate change.
+func (m *SupplierManager) settleLedgerOutcome(
+	ctx context.Context,
+	phase RebroadcastPhase,
+	e rebroadcastEntry,
+	supplier, sessionID, outcome string,
+) {
+	// poll_error is not an answer: the entry is kept and asked again next block.
+	if outcome == inclusionPollErr {
+		return
+	}
+	if e.OrigTxHash != "" {
+		return
+	}
+
+	st, owned := m.suppliers.Load(supplier)
+	if !owned || st.SessionStore == nil {
+		return
+	}
+	snapshot, err := st.SessionStore.Get(ctx, sessionID)
+	if err != nil || snapshot == nil {
+		// No snapshot, no weight, and inventing one would be worse than the
+		// absence. The session's own failure is already in sessions_failed_total;
+		// what is missing is the money, and an unresolved balance that never
+		// closes is exactly the visible signal this family exists to give.
+		m.logger.Debug().Err(err).
+			Str("supplier", supplier).
+			Str(logging.FieldSessionID, sessionID).
+			Str("phase", string(phase)).
+			Str("outcome", outcome).
+			Msg("inclusion outcome not settled into the ledger: no session snapshot to weigh it with")
+		return
+	}
+
+	relays := snapshot.RelayCount
+	computeUnits := int64(snapshot.TotalComputeUnits)
+
+	switch phase {
+	case RebroadcastPhaseClaim:
+		// Nothing was opened as unresolved on the claim side: this money was
+		// never in the book, so there was no balance to hold. The chain's answer
+		// decides whether it enters the book or is written off.
+		if outcome == inclusionFound {
+			// The chain HOLDS this claim, so "uPOKT claimed" is literally true.
+			// This is the write the recovery path was missing: the submission
+			// never confirmed, so nothing counted it, and the session goes on to
+			// be proved -- crediting `proved` revenue that `claimed` never had.
+			RecordRevenueClaimed(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays)
+			return
+		}
+		RecordRevenueForgone(supplier, snapshot.ServiceID, outcome, relays, computeUnits)
+
+	case RebroadcastPhaseProof:
+		// This money IS in the book and is waiting in `unresolved`, opened by the
+		// same failure path that wrote this entry. Close that balance first, then
+		// name where it went.
+		RecordSessionUnresolvedResolved(supplier, snapshot.ServiceID, string(phase), relays, computeUnits)
+		if outcome == inclusionFound {
+			RecordRevenueProved(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays)
+			return
+		}
+		RecordRevenueLost(supplier, snapshot.ServiceID, outcome, relays, computeUnits)
+	}
 }
 
 // recordMissingCause splits an on_chain_missing verdict by what the chain says

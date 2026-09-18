@@ -168,15 +168,8 @@ func listSubmissions(ctx context.Context, client *DebugRedisClient, supplier, se
 		if app != "" && record.Application != app {
 			continue
 		}
-		if failedOnly {
-			if record.ClaimSuccess && record.ProofSuccess {
-				continue // Skip successful
-			}
-		}
-		if successOnly {
-			if !record.ClaimSuccess || !record.ProofSuccess {
-				continue // Skip failed
-			}
+		if !matchesOutcomeFilters(record, failedOnly, successOnly) {
+			continue
 		}
 
 		records = append(records, record)
@@ -214,6 +207,39 @@ func listSubmissions(ctx context.Context, client *DebugRedisClient, supplier, se
 	return nil
 }
 
+// matchesOutcomeFilters applies --failed-only and --success-only.
+//
+// A claim nobody reported on is neither failed nor successful: it is unknown.
+// Counting unknown as failed is how 250 claims that had been broadcast and paid
+// showed up as failures in the command an operator runs during an incident.
+func matchesOutcomeFilters(r submissionRecord, failedOnly, successOnly bool) bool {
+	outcome := claimOutcome(r)
+	if failedOnly && outcome != miner.ClaimBroadcastRejected && r.ProofSuccess {
+		return false
+	}
+	if successOnly && (outcome != miner.ClaimBroadcastAccepted || !r.ProofSuccess) {
+		return false
+	}
+	return true
+}
+
+// claimOutcome reads what this miner was told about the claim broadcast,
+// falling back to the older boolean for records written by a binary that did
+// not have the field yet. A record with neither says nothing, and is rendered
+// and filtered as unknown.
+func claimOutcome(r submissionRecord) string {
+	if r.ClaimBroadcastOutcome != "" {
+		return r.ClaimBroadcastOutcome
+	}
+	if r.ClaimSuccess {
+		return miner.ClaimBroadcastAccepted
+	}
+	if r.ClaimTxHash != "" || r.ClaimErrorReason != "" {
+		return miner.ClaimBroadcastRejected
+	}
+	return ""
+}
+
 func printSubmissionsTable(records []submissionRecord) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer func() { _ = w.Flush() }()
@@ -222,9 +248,14 @@ func printSubmissionsTable(records []submissionRecord) {
 	_, _ = fmt.Fprintf(w, "-----------\t-------\t------------\t------------\t------\t--\t----------\n")
 
 	for _, r := range records {
-		claimStatus := "✗ FAILED"
-		if r.ClaimSuccess {
+		// Same three-way shape the proof side below already uses: "-" is "no
+		// answer yet", which is not the same as a failure.
+		claimStatus := "-"
+		switch claimOutcome(r) {
+		case miner.ClaimBroadcastAccepted:
 			claimStatus = "✓ SUCCESS"
+		case miner.ClaimBroadcastRejected:
+			claimStatus = "✗ FAILED"
 		}
 
 		proofStatus := "-"
