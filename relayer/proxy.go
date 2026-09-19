@@ -1206,7 +1206,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 
 		eagerStart := time.Now()
-		if validationErr := p.validateRelayRequest(r.Context(), r, body, arrivalBlockHeight); validationErr != nil {
+		if validationErr := p.validateRelayRequest(r.Context(), body, arrivalBlockHeight); validationErr != nil {
 			p.sendError(w, http.StatusForbidden, validationErr.Error())
 			reason := rejectReasonValidationFailed
 			if errors.Is(validationErr, ErrSessionExpired) {
@@ -1462,20 +1462,31 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	// For optimistic validation, validate after serving (in background using pond subpool)
 	if validationMode == ValidationModeOptimistic {
-		// Capture variables for closure (avoid race conditions)
+		// Captured for the closure.
+		//
+		// The *http.Request is deliberately NOT among them. It used to be, and
+		// it was retention nobody could account for: a Request is a graph --
+		// headers, context, body reader, TLS state -- so no honest number can be
+		// put on what it holds, and the two functions it was handed to never
+		// read it.
+		//
+		// The bodies are no longer copied either. Both are already private
+		// allocations -- the request body comes from io.ReadAll and the response
+		// from BufferPool.ReadWithBuffer, which returns "an independent copy
+		// safe for use after the function returns". The eager path has passed
+		// these same slices straight through for as long as it has existed; the
+		// copies here bought a second allocation and a memcpy per optimistic
+		// relay and protected nothing.
 		capturedRequest := relayRequest
-		capturedHTTPReq := r
-		capturedReqBody := make([]byte, len(body))
-		copy(capturedReqBody, body)
-		capturedRespBody := make([]byte, len(respBody))
-		copy(capturedRespBody, respBody)
+		capturedReqBody := body
+		capturedRespBody := respBody
 		capturedBlockHeight := arrivalBlockHeight
 		capturedServiceID := serviceID
 		capturedRPCType := rpcType
 		capturedSessionCtx := sessionCtx
 
 		// Submit to validation subpool (non-blocking; admission bounds it by bytes).
-		retainedBytes := int64(len(capturedReqBody) + len(capturedRespBody))
+		retainedBytes := optimisticRetainedBytes(capturedReqBody, capturedRespBody, capturedRequest)
 		validationQueueBytes.Set(float64(p.validationQueuedBytes.Add(retainedBytes)))
 		p.validationSubpool.Submit(func() {
 			defer func() {
@@ -1496,7 +1507,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 			// ONLY measure validation time, NOT meter or miner submit
 			optimisticStart := time.Now()
-			if err := p.validateRelayRequest(context.Background(), capturedHTTPReq, capturedReqBody, capturedBlockHeight); err != nil {
+			if err := p.validateRelayRequest(context.Background(), capturedReqBody, capturedBlockHeight); err != nil {
 				// An expired session is not a signature failure, and calling it
 				// one is what kept the grace period invisible here: the eager
 				// path has told them apart since rejectReasonSessionExpired
@@ -1583,12 +1594,12 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			// Submit publish task to worker pool (after successful validation AND metering)
 			// Only publish relays that are within stake limits
 			// Note: relaysServed already incremented when we sent response
-			p.submitPublishTask(capturedRequest, capturedHTTPReq, capturedReqBody, capturedRespBody, capturedBlockHeight, capturedServiceID, capturedRPCType)
+			p.submitPublishTask(capturedRequest, capturedReqBody, capturedRespBody, capturedBlockHeight, capturedServiceID, capturedRPCType)
 		})
 	} else {
 		// For eager validation, submit publish task to worker pool
 		// If we reached here, the relay was allowed by the meter (stake not exhausted)
-		p.submitPublishTask(relayRequest, r, body, respBody, arrivalBlockHeight, serviceID, rpcType)
+		p.submitPublishTask(relayRequest, body, respBody, arrivalBlockHeight, serviceID, rpcType)
 	}
 }
 
@@ -1596,7 +1607,6 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 // This is non-blocking and uses the server context, not the request context.
 func (p *ProxyServer) submitPublishTask(
 	relayRequest *servicetypes.RelayRequest,
-	r *http.Request,
 	reqBody, respBody []byte,
 	arrivalBlockHeight int64,
 	serviceID string,
@@ -2444,9 +2454,32 @@ const rejectReasonPricingUnavailable = "pricing_unavailable"
 // served and not yet validated hold maxValidationQueuedBytes.
 const rejectReasonValidationQueueFull = "validation_queue_full"
 
+// optimisticRetainedBytes is what one queued validation actually holds alive.
+//
+// The two bodies are the obvious part. The parsed RelayRequest is the part the
+// counter used to miss, and it is not a rounding error: gogoproto's generated
+// Unmarshal COPIES bytes fields rather than aliasing the buffer it decodes --
+// `m.Payload = append(m.Payload[:0], dAtA[iNdEx:postIndex]...)` in poktroll's
+// relay.pb.go -- so the request carries its own second copy of the payload.
+// Counting only the bodies bounded the queue by roughly two thirds of what it
+// was holding, and that number is what an operator sizes memory against.
+//
+// What is left out is bounded and small by construction: the session header's
+// strings and the struct headers themselves. An `*http.Request` is left out
+// too, and that one is deliberate in the other direction -- it is no longer
+// retained at all, because there is no honest way to price a graph of headers,
+// context and TLS state, and nothing read it.
+func optimisticRetainedBytes(reqBody, respBody []byte, req *servicetypes.RelayRequest) int64 {
+	retained := int64(len(reqBody)) + int64(len(respBody))
+	if req == nil {
+		return retained
+	}
+	return retained + int64(len(req.Payload)) + int64(len(req.Meta.Signature))
+}
+
 // maxValidationQueuedBytes bounds the request and response bytes optimistic
-// relays hold between serving and validation. Every task copies both bodies,
-// so a count of tasks says nothing about memory. Not measured under load.
+// relays hold between serving and validation. A count of tasks says nothing
+// about memory: what a task holds is its payload. Not measured under load.
 const maxValidationQueuedBytes = 256 << 20
 
 // validationQueueFull reports that optimistic relays waiting for validation hold
@@ -2729,7 +2762,6 @@ func (p *ProxyServer) InitGRPCHandler() error {
 // If no validator is configured, validation is skipped (but body must still be valid RelayRequest).
 func (p *ProxyServer) validateRelayRequest(
 	ctx context.Context,
-	r *http.Request,
 	body []byte,
 	arrivalBlockHeight int64,
 ) error {
