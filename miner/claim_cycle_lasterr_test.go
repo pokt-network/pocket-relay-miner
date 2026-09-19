@@ -5,31 +5,55 @@ package miner
 import (
 	"context"
 	"errors"
+	"fmt"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 )
+
+// fakeTxSeq numbers every transaction a fake supplier "signs", so no two
+// submissions in a test binary return the same hash or payload. A double that
+// answered every call with one constant could never show a submission walking
+// off with another one's transaction.
+var fakeTxSeq atomic.Int64
+
+// fakeSigned is what a fake supplier returns for an accepted submission: a
+// distinct, non-empty hash and payload. Empty ones would make the success path
+// skip its rebroadcast persist (it is guarded on a non-empty hash), and a test
+// on that path would then pass without checking anything.
+func fakeSigned(kind string) (string, tx.SignedTxPayload) {
+	hash := fmt.Sprintf("fake-%s-tx-%d", kind, fakeTxSeq.Add(1))
+	return hash, tx.SignedTxPayload{Bytes: []byte(hash), Hash: hash}
+}
 
 // flakySupplier fails the first N submissions and accepts every one after that.
 // It is the shape the defect needs: a batch that FAILS and then SUCCEEDS, which
 // no existing test exercised -- the estate had "always accepts" and "always
 // fails", and the bug lives exactly between them.
 type flakySupplier struct {
-	pocktclient.SupplierClient
 	failures int
 	calls    int
 }
 
-func (f *flakySupplier) CreateClaims(_ context.Context, _ int64, _ ...pocktclient.MsgCreateClaim) error {
+// A refused connection fails before anything is signed, so a failure returns
+// no payload.
+func (f *flakySupplier) CreateClaimsReturningHash(_ context.Context, _ int64, _ ...pocktclient.MsgCreateClaim) (string, tx.SignedTxPayload, error) {
 	f.calls++
 	if f.calls <= f.failures {
-		return errors.New("connection refused by the full node")
+		return "", tx.SignedTxPayload{}, errors.New("connection refused by the full node")
 	}
-	return nil
+	hash, signed := fakeSigned("claim")
+	return hash, signed, nil
 }
+
+// GetEstimatedFeeUpokt answers zero, which leaves the economic viability floor
+// off: these tests are about the submit loop, not about which sessions pay.
+func (*flakySupplier) GetEstimatedFeeUpokt(context.Context) uint64 { return 0 }
 
 // TestOnSessionsNeedClaim_SuccessfulRetryIsNotCountedAsLoss pins that a batch
 // which failed once and then succeeded reaches the SUCCESS verdict only.

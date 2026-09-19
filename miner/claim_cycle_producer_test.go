@@ -13,6 +13,7 @@ import (
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 )
 
 // smstStub flushes a well-formed root for every session: 32 bytes of digest,
@@ -28,16 +29,20 @@ func (smstStub) FlushTree(_ context.Context, _ string) ([]byte, error) {
 	return root, nil
 }
 
-// acceptingSupplier accepts every claim batch. It is deliberately NOT a
-// *tx.HASupplierClient: the two type-asserts in the claim path then take their
-// else branch, leaving the fee estimate at zero (which makes every claim look
-// profitable, so nothing is skipped for economics) and the tx hash empty (used
-// only by a nil-safe coordinator call and a log). Verified before writing this.
-type acceptingSupplier struct{ pocktclient.SupplierClient }
+// acceptingSupplier accepts every claim batch. Its fee estimate is zero, which
+// keeps the economic viability floor off, so nothing is skipped for economics.
+type acceptingSupplier struct{}
 
-func (acceptingSupplier) CreateClaims(_ context.Context, _ int64, _ ...pocktclient.MsgCreateClaim) error {
-	return nil
+func (acceptingSupplier) CreateClaimsReturningHash(_ context.Context, _ int64, _ ...pocktclient.MsgCreateClaim) (string, tx.SignedTxPayload, error) {
+	hash, signed := fakeSigned("claim")
+	return hash, signed, nil
 }
+
+func (acceptingSupplier) SubmitProofsReturningHash(context.Context, int64, ...pocktclient.MsgSubmitProof) (string, tx.SignedTxPayload, error) {
+	panic("acceptingSupplier is a claim double; the proof path must not reach it")
+}
+
+func (acceptingSupplier) GetEstimatedFeeUpokt(context.Context) uint64 { return 0 }
 
 // erroringService makes the CUPR guard fail open, which is its documented
 // behaviour when the session-start service cannot be queried.

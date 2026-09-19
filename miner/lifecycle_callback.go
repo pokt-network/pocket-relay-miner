@@ -139,7 +139,7 @@ type SessionQueryClient interface {
 type LifecycleCallback struct {
 	logger             logging.Logger
 	config             LifecycleCallbackConfig
-	supplierClient     pocktclient.SupplierClient
+	supplierClient     LifecycleTxClient
 	sharedClient       pocktclient.SharedQueryClient
 	blockClient        pocktclient.BlockClient
 	sessionClient      SessionQueryClient
@@ -188,7 +188,7 @@ type LifecycleCallback struct {
 // The proofChecker parameter is optional - if nil, proofs are always submitted (legacy behavior).
 func NewLifecycleCallback(
 	logger logging.Logger,
-	supplierClient pocktclient.SupplierClient,
+	supplierClient LifecycleTxClient,
 	sharedClient pocktclient.SharedQueryClient,
 	blockClient pocktclient.BlockClient,
 	sessionClient SessionQueryClient,
@@ -272,22 +272,24 @@ func (lc *LifecycleCallback) SetRebroadcastStore(store RebroadcastStorage) {
 	lc.rebroadcastStore = store
 }
 
-// lastClaimSignedOf / lastProofSignedOf read the payload of the last submission
-// from the concrete client, answering with an empty one when the client is not
-// the HA type. The assertion is the same one the hash readers already use.
-func lastClaimSignedOf(c pocktclient.SupplierClient) tx.SignedTxPayload {
-	if ha, ok := c.(*tx.HASupplierClient); ok {
-		return ha.GetLastClaimSignedTx()
-	}
-	return tx.SignedTxPayload{}
+// LifecycleTxClient is what the claim and proof cycles call on the chain.
+//
+// Every submission returns its OWN hash and signed payload. The client is
+// shared with the inclusion reconciler, which submits through it from another
+// goroutine woken by the same block event, so "the last submission" is not a
+// question this client can answer for a caller: a value read back from the
+// client after the call may belong to a submission of another session.
+//
+// The fee estimate is here rather than behind a type assertion so that a client
+// without it cannot compile, instead of silently disabling the economic
+// viability floor.
+type LifecycleTxClient interface {
+	CreateClaimsReturningHash(ctx context.Context, timeoutHeight int64, claimMsgs ...pocktclient.MsgCreateClaim) (string, tx.SignedTxPayload, error)
+	SubmitProofsReturningHash(ctx context.Context, timeoutHeight int64, proofMsgs ...pocktclient.MsgSubmitProof) (string, tx.SignedTxPayload, error)
+	GetEstimatedFeeUpokt(ctx context.Context) uint64
 }
 
-func lastProofSignedOf(c pocktclient.SupplierClient) tx.SignedTxPayload {
-	if ha, ok := c.(*tx.HASupplierClient); ok {
-		return ha.GetLastProofSignedTx()
-	}
-	return tx.SignedTxPayload{}
-}
+var _ LifecycleTxClient = (*tx.HASupplierClient)(nil)
 
 // signedTimeoutNanos converts the sealed deadline for storage, keeping ZERO as
 // "not known" rather than as the Unix epoch: an entry with no cached
@@ -1171,10 +1173,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		numTasks := len(candidateSnapshots)
 
 		// Resolve fee cost once for the entire batch (shared across all sessions)
-		var claimAndProofCostUpokt uint64
-		if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-			claimAndProofCostUpokt = haClient.GetEstimatedFeeUpokt(ctx)
-		}
+		claimAndProofCostUpokt := lc.supplierClient.GetEstimatedFeeUpokt(ctx)
 
 		for i, snapshot := range candidateSnapshots {
 			index := i
@@ -1546,17 +1545,24 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// for one session -- and overwrites the accurate window-closed state in
 		// Redis with the vaguer tx_error one.
 		windowClosed := false
+		// claimTxHash and claimSigned are what the LAST attempt returned. They
+		// come from that call's return values and from nowhere else: the client
+		// is shared with the reconciler, and anything read back from it after
+		// the call may be another session's transaction.
+		//
+		// On the failure path claimSigned is what gets persisted for
+		// re-injection. The last attempt is always one made with the current
+		// batch -- the loop only exhausts on a send, never on an ejection -- so
+		// its bytes are the only ones that match the messages stored beside them.
 		var claimTxHash string
-		// claimSigned is the transaction the batch actually went out in, read
-		// from the client under the same lock as the hash above so the two
-		// cannot describe different transactions.
 		var claimSigned tx.SignedTxPayload
 		// The increment lives in the BODY because an ejection is not a retry: the
 		// batch changed, so the next send asks a different question. What bounds
 		// the ejections instead is that each one strictly shrinks `remaining`,
 		// and the loop refuses to go below one message.
 		for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; {
-			submitErr := lc.supplierClient.CreateClaims(claimCtx, claimWindowClose, interfaceClaimMsgs...)
+			txHash, signed, submitErr := lc.supplierClient.CreateClaimsReturningHash(claimCtx, claimWindowClose, interfaceClaimMsgs...)
+			claimSigned = signed
 			if submitErr != nil {
 				lastErr = submitErr
 
@@ -1596,11 +1602,11 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// rest; tying the fate of healthy claims to one bad message
 				// costs them their window for no reason.
 				//
-				// `len(remaining) > 1` is not defensive. CreateClaims returns
-				// SUCCESS for an empty batch (tx_client.go:438-440) and the tx
-				// hash is read from a field shared across groups, so ejecting the
-				// last message would report "submitted successfully" carrying the
-				// PREVIOUS group's hash, for a claim that never travelled.
+				// `len(remaining) > 1` is not defensive. The tx client returns
+				// SUCCESS with no hash and no bytes for an empty batch, so
+				// ejecting the last message would report "submitted
+				// successfully" for a claim that never travelled -- and with no
+				// hash, the success path would store nothing for the reconciler.
 				if named, ok := namedMessageIndex(submitErr, len(remaining)); ok && len(remaining) > 1 {
 					ejected := remaining[named]
 					remaining = append(remaining[:named:named], remaining[named+1:]...)
@@ -1672,19 +1678,14 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// is wrong.
 				lastErr = nil
 
-				// SUCCESS: Claim TX broadcast accepted to mempool
-				// Retrieve TX hash from HA client (stored immediately after broadcast)
-				if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-					claimTxHash = haClient.GetLastClaimTxHash()
-					// Cache what was signed, keyed by the hash just read: the
-					// two come from one critical section, so they describe one
-					// transaction. This is the ORIGINAL submission, which is
-					// where re-injection has to begin -- the failure it exists
-					// for is the send whose answer never arrived, and a resend
-					// that had to sign again would be a second live transaction
-					// for one claim.
-					claimSigned = haClient.GetLastClaimSignedTx()
-				}
+				// SUCCESS: Claim TX broadcast accepted to mempool. The hash and
+				// the signed bytes are the ones this call returned, so they
+				// describe one transaction. This is the ORIGINAL submission,
+				// which is where re-injection has to begin -- the failure it
+				// exists for is the send whose answer never arrived, and a
+				// resend that had to sign again would be a second live
+				// transaction for one claim.
+				claimTxHash = txHash
 
 				currentBlock := lc.blockClient.LastBlock(ctx)
 				blocksAfterWindowOpen := float64(currentBlock.Height() - claimWindowOpenHeight)
@@ -1862,7 +1863,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					// for -- nobody knows whether it arrived, so re-injecting
 					// the same bytes is the only reply that cannot duplicate it.
 					ctx, RebroadcastPhaseClaim, validSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
-					lastClaimSignedOf(lc.supplierClient),
+					claimSigned,
 					func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
 				)
 			}
@@ -2529,10 +2530,14 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		// settled itself per session inside the loop, so the block after it must
 		// not settle them a second time with a vaguer verdict.
 		notRequired := false
+		// proofTxHash and proofSigned are what the LAST attempt returned, for
+		// the reason the claim cycle states: the client is shared with the
+		// reconciler, so nothing may be read back from it after the call.
 		var proofTxHash string
 		var proofSigned tx.SignedTxPayload
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
-			submitErr := lc.supplierClient.SubmitProofs(proofCtx, proofWindowClose, interfaceProofMsgs...)
+			txHash, signed, submitErr := lc.supplierClient.SubmitProofsReturningHash(proofCtx, proofWindowClose, interfaceProofMsgs...)
+			proofSigned = signed
 			if submitErr != nil {
 				lastErr = submitErr
 
@@ -2607,12 +2612,9 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				// two contradictory verdicts for one session in one cycle.
 				lastErr = nil
 
-				// SUCCESS: Proof TX broadcast accepted to mempool
-				// Retrieve TX hash from HA client (stored immediately after broadcast)
-				if haClient, ok := lc.supplierClient.(*tx.HASupplierClient); ok {
-					proofTxHash = haClient.GetLastProofTxHash()
-					proofSigned = haClient.GetLastProofSignedTx()
-				}
+				// SUCCESS: Proof TX broadcast accepted to mempool. The hash and
+				// the signed bytes are the ones this call returned.
+				proofTxHash = txHash
 
 				currentBlock := lc.blockClient.LastBlock(ctx)
 				blocksAfterWindowOpen := float64(currentBlock.Height() - proofWindowOpenHeight)
@@ -2776,7 +2778,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			if lc.rebroadcastStore != nil {
 				lc.persistRebroadcastEntries(
 					ctx, RebroadcastPhaseProof, validProofSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
-					lastProofSignedOf(lc.supplierClient),
+					proofSigned,
 					func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
 				)
 			}

@@ -45,13 +45,6 @@ type TestConfig struct {
 
 	// ForceProofTxError forces proof transaction submission to fail (for testing proof error path)
 	ForceProofTxError bool
-
-	// FailOriginalProofSubmit fails ONLY the lifecycle's original proof submit
-	// (the SubmitProofs wrapper), letting the inclusion reconciler's resend (which
-	// calls SubmitProofsReturningHash directly) succeed. Used to validate the
-	// never-broadcast self-heal end-to-end: original fails → entry persisted with
-	// OrigTxHash="" → reconciler resends → proof lands → claim VALIDATED.
-	FailOriginalProofSubmit bool
 }
 
 var (
@@ -64,7 +57,6 @@ func getTestConfig() TestConfig {
 	testConfigOnce.Do(func() {
 		testConfig.ForceClaimTxError = os.Getenv("TEST_FORCE_CLAIM_TX_ERROR") == "true"
 		testConfig.ForceProofTxError = os.Getenv("TEST_FORCE_PROOF_TX_ERROR") == "true"
-		testConfig.FailOriginalProofSubmit = os.Getenv("TEST_FAIL_ORIGINAL_PROOF_SUBMIT") == "true"
 	})
 	return testConfig
 }
@@ -809,7 +801,6 @@ func (tc *TxClient) signAndEncode(
 	timeoutSource string,
 	msgs ...cosmostypes.Msg,
 ) (signedTx, error) {
-
 	// Get signing key
 	privKey, err := tc.keyManager.GetSigner(signerAddr)
 	if err != nil {
@@ -1611,27 +1602,17 @@ func (tc *TxClient) Close() error {
 // SupplierClient wrapper for compatibility with pkg/client interfaces
 // =============================================================================
 
-// HASupplierClient wraps TxClient to implement the client.SupplierClient interface.
+// HASupplierClient binds a TxClient to one supplier operator.
+//
+// ONE instance is shared by that supplier's lifecycle and by the inclusion
+// reconciler, which submit from different goroutines. So it keeps no record of
+// "the last submission": every submission hands its hash and signed payload
+// back to its own caller, and a value read back from a shared field after the
+// call could belong to another session's transaction.
 type HASupplierClient struct {
 	txClient     *TxClient
 	operatorAddr string
 	logger       logging.Logger
-
-	// lastClaimTxHash stores the TX hash of the last claim submission (for deduplication)
-	lastClaimTxHash string
-	// lastClaimSigned stores the payload that produced that hash, stashed in
-	// the SAME critical section so the two can never describe different
-	// transactions. The original submission is where re-injection has to start:
-	// the failure it exists for is the send whose answer never arrived, and by
-	// then there is nothing left to sign from.
-	lastClaimSigned SignedTxPayload
-	lastClaimTxMu   sync.RWMutex
-
-	// lastProofTxHash stores the TX hash of the last proof submission (for deduplication)
-	lastProofTxHash string
-	// lastProofSigned is the claim field's twin, and stashed the same way.
-	lastProofSigned SignedTxPayload
-	lastProofTxMu   sync.RWMutex
 
 	// feeCacheUpokt is the cached sum of the most recently observed claim
 	// tx fee + proof tx fee on chain. It is populated lazily by querying the
@@ -1750,26 +1731,14 @@ func (c *HASupplierClient) GetEstimatedFeeUpokt(ctx context.Context) uint64 {
 	return total
 }
 
-// CreateClaims implements client.SupplierClient.
-// CreateClaims implements client.SupplierClient. The resulting tx hash is
-// stashed for retrieval via GetLastClaimTxHash. Callers that need the hash
-// atomically (e.g. concurrent in-window rebroadcasts sharing one client) should
-// use CreateClaimsReturningHash, which avoids the CreateClaims()+GetLastClaimTxHash()
-// cross-attribution race.
-func (c *HASupplierClient) CreateClaims(
-	ctx context.Context,
-	timeoutHeight int64,
-	claimMsgs ...pocktclient.MsgCreateClaim,
-) error {
-	_, _, err := c.CreateClaimsReturningHash(ctx, timeoutHeight, claimMsgs...)
-	return err
-}
-
 // CreateClaimsReturningHash submits claims and returns the resulting tx hash
-// directly, alongside still stashing it for GetLastClaimTxHash. Returning the
-// hash inline lets concurrent rebroadcasts of different sessions through the
-// same shared client each record their own tx hash, instead of racing on the
-// shared lastClaimTxHash field.
+// and the signed payload to THIS caller. Nothing about the submission is kept
+// on the client: the lifecycle and the reconciler share one instance, so a
+// value stored here for a later read could be taken by the other one.
+//
+// On error the hash is empty and the payload is whatever was signed: empty when
+// the failure came before signing, the bytes when the send got no answer --
+// which are exactly the bytes a resend must re-inject.
 func (c *HASupplierClient) CreateClaimsReturningHash(
 	ctx context.Context,
 	timeoutHeight int64,
@@ -1792,26 +1761,10 @@ func (c *HASupplierClient) CreateClaimsReturningHash(
 		claims[i] = claim
 	}
 
-	// Call TxClient and capture TX hash for deduplication
 	txHash, signed, err := c.txClient.CreateClaims(ctx, c.operatorAddr, timeoutHeight, claims)
 	if err != nil {
-		// Stash the PAYLOAD but not a hash. A send that got no answer is
-		// precisely the one whose bytes a resend must re-inject, and this is
-		// the only place they still exist -- while the hash stays empty because
-		// nothing confirmed it. The empty hash does not change WHEN the
-		// reconciler resends: every stored entry goes from the block after its
-		// submit (canRebroadcast).
-		c.lastClaimTxMu.Lock()
-		c.lastClaimSigned = signed
-		c.lastClaimTxMu.Unlock()
 		return "", signed, err
 	}
-
-	// Store TX hash for retrieval by caller (1 line after broadcast)
-	c.lastClaimTxMu.Lock()
-	c.lastClaimTxHash = txHash
-	c.lastClaimSigned = signed
-	c.lastClaimTxMu.Unlock()
 
 	// The fee we just paid is now the freshest observation available.
 	// Drop any cached chain-observed estimate so the next economic-viability
@@ -1822,32 +1775,8 @@ func (c *HASupplierClient) CreateClaimsReturningHash(
 	return txHash, signed, nil
 }
 
-// SubmitProofs implements client.SupplierClient. The resulting tx hash is
-// stashed for retrieval via GetLastProofTxHash. Callers that need the hash
-// atomically (e.g. concurrent in-window rebroadcasts sharing one client) should
-// use SubmitProofsReturningHash instead, which avoids the
-// SubmitProofs()+GetLastProofTxHash() cross-attribution race.
-func (c *HASupplierClient) SubmitProofs(
-	ctx context.Context,
-	timeoutHeight int64,
-	proofMsgs ...pocktclient.MsgSubmitProof,
-) error {
-	// TEST: fail ONLY the lifecycle's original submit (this wrapper), so the
-	// inclusion reconciler's self-heal resend (SubmitProofsReturningHash, called
-	// directly) can still land. Validates the never-broadcast self-heal path.
-	if getTestConfig().FailOriginalProofSubmit {
-		c.logger.Warn().Msg("TEST MODE: TEST_FAIL_ORIGINAL_PROOF_SUBMIT - failing original proof submit (reconciler resend will recover)")
-		return fmt.Errorf("TEST MODE: simulated original proof submit error")
-	}
-	_, _, err := c.SubmitProofsReturningHash(ctx, timeoutHeight, proofMsgs...)
-	return err
-}
-
-// SubmitProofsReturningHash submits proofs and returns the resulting tx hash
-// directly, alongside still stashing it for GetLastProofTxHash. Returning the
-// hash inline lets concurrent rebroadcasts of different sessions through the
-// same shared client each record their own tx hash, instead of racing on the
-// shared lastProofTxHash field.
+// SubmitProofsReturningHash is the proof twin of CreateClaimsReturningHash,
+// with the same contract: hash and payload go to the caller, none is kept.
 func (c *HASupplierClient) SubmitProofsReturningHash(
 	ctx context.Context,
 	timeoutHeight int64,
@@ -1870,23 +1799,12 @@ func (c *HASupplierClient) SubmitProofsReturningHash(
 		proofs[i] = proof
 	}
 
-	// Call TxClient and capture TX hash for deduplication
 	txHash, signed, err := c.txClient.SubmitProofs(ctx, c.operatorAddr, timeoutHeight, proofs)
 	if err != nil {
-		// Same as the claim path: keep the bytes, leave the hash empty.
-		c.lastProofTxMu.Lock()
-		c.lastProofSigned = signed
-		c.lastProofTxMu.Unlock()
 		return "", signed, err
 	}
 
-	// Store TX hash for retrieval by caller (1 line after broadcast)
-	c.lastProofTxMu.Lock()
-	c.lastProofTxHash = txHash
-	c.lastProofSigned = signed
-	c.lastProofTxMu.Unlock()
-
-	// Same rationale as CreateClaims — refresh the cached estimate from the
+	// Same rationale as the claim path -- refresh the cached estimate from the
 	// most recent successful submission.
 	c.InvalidateFeeCache()
 
@@ -1896,36 +1814,6 @@ func (c *HASupplierClient) SubmitProofsReturningHash(
 // OperatorAddress implements client.SupplierClient.
 func (c *HASupplierClient) OperatorAddress() string {
 	return c.operatorAddr
-}
-
-// GetLastClaimTxHash returns the TX hash of the last claim submission.
-// This is used for deduplication tracking in Redis.
-func (c *HASupplierClient) GetLastClaimTxHash() string {
-	c.lastClaimTxMu.RLock()
-	defer c.lastClaimTxMu.RUnlock()
-	return c.lastClaimTxHash
-}
-
-// GetLastClaimSignedTx returns the payload of the last claim submission,
-// alongside GetLastClaimTxHash and read under the same lock, so a caller that
-// takes both gets one transaction rather than two halves of different ones.
-func (c *HASupplierClient) GetLastClaimSignedTx() SignedTxPayload {
-	if c == nil {
-		return SignedTxPayload{}
-	}
-	c.lastClaimTxMu.RLock()
-	defer c.lastClaimTxMu.RUnlock()
-	return c.lastClaimSigned
-}
-
-// GetLastProofSignedTx is the proof twin of GetLastClaimSignedTx.
-func (c *HASupplierClient) GetLastProofSignedTx() SignedTxPayload {
-	if c == nil {
-		return SignedTxPayload{}
-	}
-	c.lastProofTxMu.RLock()
-	defer c.lastProofTxMu.RUnlock()
-	return c.lastProofSigned
 }
 
 // LatestBlockTime exposes the chain clock this client anchors its deadlines to.
@@ -1950,12 +1838,4 @@ func (c *HASupplierClient) BroadcastRawReturningHash(ctx context.Context, txType
 		return "", fmt.Errorf("no tx client")
 	}
 	return c.txClient.BroadcastRawReturningHash(ctx, c.operatorAddr, txType, p)
-}
-
-// GetLastProofTxHash returns the TX hash of the last proof submission.
-// This is used for deduplication tracking in Redis.
-func (c *HASupplierClient) GetLastProofTxHash() string {
-	c.lastProofTxMu.RLock()
-	defer c.lastProofTxMu.RUnlock()
-	return c.lastProofTxHash
 }

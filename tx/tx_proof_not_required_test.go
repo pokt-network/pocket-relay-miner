@@ -115,10 +115,11 @@ func TestTheEmptyBatchIsUntouched(t *testing.T) {
 // back onto today's behaviour and this test pinned that it did; here the
 // scaffolding is gone and the same two effects must NOT happen.
 //
-// Both were side effects of reporting a refusal as a success. The stashed hash
-// overwrote whatever a concurrent submission had recorded, with an empty string.
-// The fee-cache refresh took its estimate "from the most recent successful
-// submission" -- one that never occurred.
+// It was a side effect of reporting a refusal as a success: the fee-cache
+// refresh took its estimate "from the most recent successful submission" -- one
+// that never occurred. (The other side effect, overwriting a shared "last tx
+// hash" with an empty string, has no subject any more: the client keeps no
+// record of a submission, and the hash goes to the caller.)
 func TestTheRefusalEscapesAndLeavesTheClientUntouched(t *testing.T) {
 	srv := setupMockGRPCServer(t)
 	t.Cleanup(srv.cleanup)
@@ -129,9 +130,6 @@ func TestTheRefusalEscapesAndLeavesTheClientUntouched(t *testing.T) {
 	client := NewHASupplierClient(tc, budgetTestSupplier, logging.NewLoggerFromConfig(logging.DefaultConfig()))
 
 	// State a real submission would have left behind.
-	client.lastProofTxMu.Lock()
-	client.lastProofTxHash = "PRIOR-HASH"
-	client.lastProofTxMu.Unlock()
 	client.feeCacheMu.Lock()
 	client.feeCacheUpokt = 9999
 	client.feeCacheTime = time.Now()
@@ -142,9 +140,6 @@ func TestTheRefusalEscapesAndLeavesTheClientUntouched(t *testing.T) {
 
 	require.Empty(t, hash)
 	require.ErrorIs(t, err, ErrTxProofNotRequired, "the refusal must reach the caller that can decide per session")
-
-	require.Equal(t, "PRIOR-HASH", client.GetLastProofTxHash(),
-		"a refusal overwrote another submission's hash with an empty string")
 
 	client.feeCacheMu.RLock()
 	defer client.feeCacheMu.RUnlock()

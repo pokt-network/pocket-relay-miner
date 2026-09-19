@@ -11,16 +11,19 @@ import (
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 )
 
-// SubmitProofs mirrors flakySupplier.CreateClaims: fail the first N, then
-// accept. It shares the call counter on purpose -- each test uses one phase.
-func (f *flakySupplier) SubmitProofs(_ context.Context, _ int64, _ ...pocktclient.MsgSubmitProof) error {
+// SubmitProofsReturningHash mirrors flakySupplier.CreateClaimsReturningHash:
+// fail the first N, then accept. It shares the call counter on purpose -- each
+// test uses one phase.
+func (f *flakySupplier) SubmitProofsReturningHash(_ context.Context, _ int64, _ ...pocktclient.MsgSubmitProof) (string, tx.SignedTxPayload, error) {
 	f.calls++
 	if f.calls <= f.failures {
-		return errors.New("connection refused by the full node")
+		return "", tx.SignedTxPayload{}, errors.New("connection refused by the full node")
 	}
-	return nil
+	hash, signed := fakeSigned("proof")
+	return hash, signed, nil
 }
 
 // provingSMST is smstStub plus the one method the proof path needs. Kept

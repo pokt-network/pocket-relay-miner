@@ -36,7 +36,8 @@ func TestBatchReachesTheWireInTheOrderItWasGiven(t *testing.T) {
 		msgs[i] = generateTestProof(t, budgetTestSupplier, id)
 	}
 
-	require.NoError(t, client.SubmitProofs(context.Background(), 1000, msgs...))
+	_, _, err := client.SubmitProofsReturningHash(context.Background(), 1000, msgs...)
+	require.NoError(t, err)
 
 	require.Equal(t, want, broadcastProofSessionIDs(t, srv.getLastTxBytes()),
 		"the batch was reordered somewhere between the caller and the wire")

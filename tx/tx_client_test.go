@@ -1090,7 +1090,7 @@ func TestHASupplierClient_CreateClaims(t *testing.T) {
 	ctx := context.Background()
 	claim := generateTestClaim(t, supplierAddr, "session-1")
 
-	err = sc.CreateClaims(ctx, 100, claim)
+	_, _, err = sc.CreateClaimsReturningHash(ctx, 100, claim)
 	require.NoError(t, err)
 
 	// Verify broadcast occurred
@@ -1125,7 +1125,7 @@ func TestHASupplierClient_SubmitProofs(t *testing.T) {
 	ctx := context.Background()
 	proof := generateTestProof(t, supplierAddr, "session-1")
 
-	err = sc.SubmitProofs(ctx, 100, proof)
+	_, _, err = sc.SubmitProofsReturningHash(ctx, 100, proof)
 	require.NoError(t, err)
 
 	// Verify broadcast occurred

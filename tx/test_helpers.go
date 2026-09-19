@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"cosmossdk.io/math"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -712,4 +713,59 @@ func calculateExpectedFee(gasLimit uint64, gasPrice cosmostypes.DecCoin) cosmost
 	}
 
 	return cosmostypes.NewCoins(cosmostypes.NewCoin(gasPrice.Denom, feeInt))
+}
+
+// TestSupplierNode is the PRODUCTION HASupplierClient over this package's mock
+// gRPC node, exported (behind the test build tag) so another package can drive
+// the real client instead of a hand-written double. A double that merely
+// satisfies an interface cannot reproduce a defect that lives in how the real
+// client's calls interleave, which is exactly what the miner's submission tests
+// need to observe.
+type TestSupplierNode struct {
+	Client *HASupplierClient
+	srv    *testGRPCServer
+}
+
+// fixedBlockTime anchors every transaction the node signs at one chain time.
+type fixedBlockTime struct{ t time.Time }
+
+func (f fixedBlockTime) LatestBlockTime() time.Time { return f.t }
+
+// NewTestSupplierNode starts a mock node, funds operatorAddr on it and returns
+// a real HASupplierClient signing as that address. The gas limit is fixed so
+// no simulation runs: every failure the caller arms happens at BROADCAST, after
+// the transaction was signed, which is the stage that hands its bytes back.
+func NewTestSupplierNode(t *testing.T, operatorAddr string) *TestSupplierNode {
+	t.Helper()
+
+	srv := setupMockGRPCServer(t)
+	t.Cleanup(srv.cleanup)
+	srv.addAccount(operatorAddr, 1, 0)
+
+	km := setupTestKeyManager(t, operatorAddr)
+	t.Cleanup(func() { _ = km.Close() })
+
+	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
+	tc, err := NewTxClient(logger, km, TxClientConfig{
+		BlockTimeProvider: fixedBlockTime{t: time.Date(2026, 9, 17, 22, 5, 17, 0, time.UTC)},
+		GRPCEndpoint:      srv.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		ConnProbeInterval: time.Hour,
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tc.Close() })
+
+	return &TestSupplierNode{
+		Client: NewHASupplierClient(tc, operatorAddr, logger),
+		srv:    srv,
+	}
+}
+
+// FailBroadcasts makes every later BroadcastTx fail with err, so each send is
+// signed and then gets no answer.
+func (n *TestSupplierNode) FailBroadcasts(err error) {
+	n.srv.txServer.rwMu.Lock()
+	defer n.srv.txServer.rwMu.Unlock()
+	n.srv.txServer.broadcastError = err
 }

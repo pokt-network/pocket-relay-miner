@@ -27,7 +27,6 @@ import (
 // ejection is exactly that: four parallel views of one batch, of which only
 // interfaceClaimMsgs is transmitted.
 type batchSpy struct {
-	pocktclient.SupplierClient
 	errs  []error // errs[i] is returned on call i; nil (or past the end) accepts
 	calls [][]string
 	// onCall runs after recording call i (0-based). It exists so a test can move
@@ -36,7 +35,7 @@ type batchSpy struct {
 	onCall func(i int)
 }
 
-func (b *batchSpy) CreateClaims(_ context.Context, _ int64, msgs ...pocktclient.MsgCreateClaim) error {
+func (b *batchSpy) CreateClaimsReturningHash(_ context.Context, _ int64, msgs ...pocktclient.MsgCreateClaim) (string, tx.SignedTxPayload, error) {
 	sent := make([]string, 0, len(msgs))
 	for _, m := range msgs {
 		sent = append(sent, m.(*prooftypes.MsgCreateClaim).SessionHeader.GetSessionId())
@@ -46,11 +45,22 @@ func (b *batchSpy) CreateClaims(_ context.Context, _ int64, msgs ...pocktclient.
 		b.onCall(len(b.calls) - 1)
 	}
 
-	if len(b.calls) <= len(b.errs) {
-		return b.errs[len(b.calls)-1]
+	// A named rejection comes from simulation, before signing, so a refused
+	// call carries no payload.
+	if len(b.calls) <= len(b.errs) && b.errs[len(b.calls)-1] != nil {
+		return "", tx.SignedTxPayload{}, b.errs[len(b.calls)-1]
 	}
-	return nil
+	hash, signed := fakeSigned("claim")
+	return hash, signed, nil
 }
+
+func (*batchSpy) SubmitProofsReturningHash(context.Context, int64, ...pocktclient.MsgSubmitProof) (string, tx.SignedTxPayload, error) {
+	panic("batchSpy is a claim double; the proof path must not reach it")
+}
+
+// GetEstimatedFeeUpokt answers zero, which leaves the economic viability floor
+// off: the batch under test must reach the submit loop whole.
+func (*batchSpy) GetEstimatedFeeUpokt(context.Context) uint64 { return 0 }
 
 func namedRejection(index int) error {
 	return &tx.TxRejection{
