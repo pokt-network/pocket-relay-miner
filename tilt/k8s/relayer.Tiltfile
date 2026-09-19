@@ -199,13 +199,18 @@ spec:
         # miner uses (miner.Tiltfile), which is why the miner survived the load
         # of 2026-09-16 while Redis did not.
         #
-        # NOTE, measured 2026-09-16: this is a SOFT limit and the relayer's live
-        # memory is its unbounded validation queue (proxy.go:1433 "non-blocking,
-        # unbounded queue"). At 3.700 rps that queue reached 580.469 tasks and
-        # 4,4 GB of heap. GOMEMLIMIT makes the GC work harder; it does NOT stop
-        # the queue from growing. The real brake is rejecting when the validation
-        # queue passes a cap -- today only the PUBLISH queue has one
-        # (queueFull(), proxy.go:2390, measured in bytes).
+        # NOTE: this is a SOFT limit -- GOMEMLIMIT makes the GC work harder, it
+        # does not refuse work. What refuses work is a cap, and BOTH queues have
+        # one now, each in BYTES because a count of tasks says nothing about
+        # memory: the publish queue at redis.batch_max_queued_mib (default
+        # 512 MiB, queueFull(), proxy.go:2390) and the validation queue at
+        # maxValidationQueuedBytes = 256 MiB (proxy.go:2427), which answers 429
+        # with Retry-After and counts rejectReasonValidationQueueFull.
+        #
+        # The worst case is both caps held at once, ~768 MiB of payload, and the
+        # working set runs about twice the live heap -- so this container's limit
+        # is sized against that sum, not against what a quiet relayer uses.
+        # Neither cap has been measured at its own ceiling under load.
         - name: GOMEMLIMIT
           value: "7GiB"
         - name: POD_NAME
