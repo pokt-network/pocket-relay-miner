@@ -289,8 +289,18 @@ echo
 echo "4. Did relays reach the tree?"
 srv=$(v ha_relayer_relays_served_total); pub=$(v ha_relayer_relays_published_total)
 skp=$(v ha_relayer_relays_skipped_difficulty_total)
+# DROPPED is the third destination of a served relay, and leaving it out made this
+# identity accuse a healthy system. Measured 2026-09-19: an optimistic service served
+# 1,069,276 and published 704,141 because 365,135 were dropped with
+# reason="stake_exhausted" -- served, answered, and then found to have no budget to
+# charge against. Without this term the run reported GAP 365,135 and TRIAGE=REVIEW;
+# with it, all six services close at exactly zero. A dropped relay is NOT loss of our
+# making, but it IS work given away, so it is printed on its own line below rather
+# than folded silently into the sum.
+drp=$(v ha_relayer_relays_dropped_total)
 con=$(v ha_miner_relays_consumed_from_stream_total); add=$(v ha_miner_relays_added_to_smst_total)
-identity "served == published + skipped by difficulty" "$srv" "$((pub+skp))" 1000
+identity "served == published + skipped + dropped" "$srv" "$((pub+skp+drp))" 1000
+note "relays SERVED and never charged (dropped)" "$drp" 0
 identity "consumed from stream == added to the tree"   "$con" "$add"
 
 echo
