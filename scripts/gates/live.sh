@@ -671,6 +671,18 @@ for pair in $MATRIX; do
             # run is already failing.
             gate_fail "${mode}: only ${succeeded} of ${expected} relays were served (${unserved} never made it) -- the loss is upstream of the claim path this gate measures"
             gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | tail -15)"
+            # THE REASON LIVES IN THE METRIC, NOT THE LOG, and this branch needs it
+            # MORE than the failure branch below: here the CLI exited clean, so its
+            # output says nothing about why the relayer turned relays away. Measured
+            # 2026-09-19: 22 of 60 lost on develop-http-eager, and the cause
+            # (`meter_error`) only surfaced by querying Prometheus by hand -- which is
+            # exactly what the sibling branch had already been fixed to avoid.
+            SHORTFALL_REJECTS="$(rejections_for_service "$service")"
+            if [ -n "$SHORTFALL_REJECTS" ]; then
+                gate_detail "relayer rejections for ${service}: ${SHORTFALL_REJECTS}"
+            else
+                gate_detail "relayer rejections for ${service}: none recorded -- so the relays were lost BEFORE admission (client, network, or a path that counts nowhere)"
+            fi
         fi
         if [ "${succeeded:-0}" -gt 0 ]; then
             gate_pass "${mode}: ${succeeded} relay(s)/batch(es) verified end to end"
