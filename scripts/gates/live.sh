@@ -672,7 +672,19 @@ for pair in $MATRIX; do
         fi
     else
         gate_fail "${mode}: the load run failed:"
-        gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | tail -15)"
+        # WHY THIS IS NOT A PLAIN `tail`: the relay CLI does not set SilenceUsage, so
+        # any RUNTIME failure prints `Error: <cause>` and then its whole flag list --
+        # and a tail of that keeps the last twenty flags and throws away the only line
+        # that says what happened. Measured 2026-09-19: a red on develop-stream
+        # reported nothing but `--ws-handshake string  websocket mode: ...`.
+        # So: if the output carries a usage block, show what came BEFORE it; otherwise
+        # the tail is still the right end to read.
+        if printf '%s\n' "$TRANSPORT_OUT" | grep -q '^Usage:'; then
+            gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | sed -n '1,/^Usage:/p' | head -15)"
+            gate_detail "(the CLI's flag list was cut: it prints usage on runtime errors too)"
+        else
+            gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | tail -15)"
+        fi
     fi
 done
 
