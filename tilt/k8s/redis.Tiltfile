@@ -39,8 +39,19 @@ def install_redis_operator():
     # v0.23.0 (Jan 2025) - supports Redis >=6 (including Redis 8.x)
     # See: https://github.com/OT-CONTAINER-KIT/redis-operator/releases
     # NOTE: GenerateConfigInInitContainer is needed to load additionalRedisConfig.
-    # Issue #1542 affects maxMemoryPercentOfLimit + additionalRedisConfig combo,
-    # but we only use additionalRedisConfig, so it should work.
+    #
+    # The line that used to sit here said issue #1542 (maxMemoryPercentOfLimit +
+    # additionalRedisConfig) did not affect us "because we only use
+    # additionalRedisConfig". That is FALSE, measured on the live pod 2026-09-18:
+    # the ConfigMap carries maxmemory 9663676416 (9 GiB), the pod DOES read it at
+    # /etc/redis/external.conf.d/redis-additional.conf:17, and the server runs
+    # with 8589934592 -- exactly 80% of the 10Gi container limit, which is the
+    # operator applying its own percentage on top. So the 1 GiB-per-step ladder
+    # in tilt_config.yaml collapses: the ingestion brake closes at 8 GiB and
+    # Redis refuses writes at 8 GiB, the same point, with no margin between them.
+    # Queue item 363 carries the evidence and the options; do not "fix" it here
+    # without reading it, because raising memory_limit and pinning the percentage
+    # move the same number in opposite directions.
     helm_resource(
         "redis-operator",
         "ot-helm/redis-operator",
