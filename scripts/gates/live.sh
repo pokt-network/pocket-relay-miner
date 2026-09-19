@@ -550,6 +550,19 @@ skipped_difficulty_now() {
         jq -r '.data.result[]? | "\(.metric.service_id)\t\(.value[1])"' 2>/dev/null || true
 }
 
+# WHY THE REJECTION REASON IS READ FROM THE METRIC AND NOT FROM THE LOG: a relay
+# rejection is a per-request condition, so the logging policy puts it at Debug and
+# the alertable signal is the metric with its bounded `reason` label. A relayer
+# running at Info therefore fails a load with NOTHING in the log to say why.
+# Measured 2026-09-19: develop-cometbft went red on one rejection, the log had no
+# line for it, and the reason (`meter_error`) only surfaced by querying Prometheus
+# by hand afterwards. Whatever a red asserts, the gate must carry its own evidence.
+rejections_for_service() {
+    curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" \
+        --data-urlencode "query=sum by (reason) (ha_relayer_relays_rejected_total{service_id=\"$1\"})" 2>/dev/null |
+        jq -r '.data.result[]? | "\(.metric.reason)=\(.value[1])"' 2>/dev/null | paste -sd' ' - || true
+}
+
 # UNORDERED-NONCE COLLISIONS. A cosmos-sdk unordered tx is keyed by
 # (timeout.UnixNano, sender); the anchor is the chain's latest_block_time and
 # does not move inside a block, so several txs for one supplier in one block
@@ -677,13 +690,37 @@ for pair in $MATRIX; do
         # and a tail of that keeps the last twenty flags and throws away the only line
         # that says what happened. Measured 2026-09-19: a red on develop-stream
         # reported nothing but `--ws-handshake string  websocket mode: ...`.
-        # So: if the output carries a usage block, show what came BEFORE it; otherwise
-        # the tail is still the right end to read.
+        # So: if the output carries a usage block, show what came BEFORE it -- and read
+        # that text from its END, because cobra prints `Error: <cause>` IMMEDIATELY
+        # before the usage block, so the cause is its LAST line, never its first.
+        # Measured 2026-09-19 by this guard's own first version: it took the HEAD of the
+        # pre-usage text, the CLI's diagnostic banner is exactly 15 lines long, and the
+        # Error line sat on line 16 -- the same failure as the plain tail, mirrored.
         if printf '%s\n' "$TRANSPORT_OUT" | grep -q '^Usage:'; then
-            gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | sed -n '1,/^Usage:/p' | head -15)"
+            PRE_USAGE="$(printf '%s\n' "$TRANSPORT_OUT" | sed -n '1,/^Usage:/p' | sed '$d')"
+            # ANCHOR ON CONTENT, NEVER ON A LINE COUNT. A fixed head/tail has now eaten
+            # the wrong thing three times: a `tail` ate the NAME of the failing check
+            # (it sat in the middle), then a `head -15` ate the cause (cobra prints
+            # `Error:` last, pressed against Usage, and the CLI banner is exactly 15
+            # lines). The count is never the fix for the count -- the error line is
+            # found by what it SAYS, and the surrounding lines are context, not source.
+            ERR_LINE="$(printf '%s\n' "$PRE_USAGE" | grep -m1 '^Error:' || true)"
+            if [ -n "$ERR_LINE" ]; then
+                gate_detail "$ERR_LINE"
+                gate_detail "$(printf '%s\n' "$PRE_USAGE" | grep -v '^Error:' | tail -12)"
+            else
+                gate_detail "$(printf '%s\n' "$PRE_USAGE" | tail -15)"
+                gate_detail "(no 'Error:' line before the usage block -- showed its tail instead)"
+            fi
             gate_detail "(the CLI's flag list was cut: it prints usage on runtime errors too)"
         else
             gate_detail "$(printf '%s\n' "$TRANSPORT_OUT" | tail -15)"
+        fi
+        TRANSPORT_REJECTS="$(rejections_for_service "$service")"
+        if [ -n "$TRANSPORT_REJECTS" ]; then
+            gate_detail "relayer rejections for ${service}: ${TRANSPORT_REJECTS}"
+        else
+            gate_detail "relayer rejections for ${service}: none recorded -- so the failure is NOT an admission rejection (it says nothing about which of the other paths it is)"
         fi
     fi
 done
