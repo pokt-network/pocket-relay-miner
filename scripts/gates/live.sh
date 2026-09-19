@@ -201,9 +201,60 @@ fi
 # ---------------------------------------------------------------------------
 gate_step "preflight: binary"
 
-BIN_DIR="$(mktemp -d)"
-trap 'rm -rf "$BIN_DIR"' EXIT
-BIN="${BIN_DIR}/pocket-relay-miner"
+# The gate's working directory, and it is KEPT. Everything this run can be audited
+# from lives in it: the binary under test, the counter snapshots taken BEFORE the load
+# (announced drops, difficulty failures, relays skipped by difficulty), the load
+# matrix, the miner's session states, and settlement_events.jsonl -- which is where
+# every uPOKT figure this gate asserts comes from.
+#
+# It used to be an unconditional `mktemp -d` plus `trap rm -rf`, so the instant the
+# gate finished, the evidence for every assertion it had just made was gone. That is
+# worst on a gate that FAILS: the one run somebody needs to diagnose destroyed its own
+# inputs, and the only way to look was to re-run and hope it broke the same way.
+#
+# The BINARY is deliberately NOT kept: it is 185 MB (measured 2026-09-19) and it is
+# reproducible with `go build` at the recorded commit, while the TSVs and the JSONL
+# are not reproducible at all. Keeping ten runs of evidence costs a few hundred KB;
+# keeping ten binaries would cost 1.85 GB, so the binary goes to its own temporary
+# directory and is deleted on exit.
+#
+# GATE_EVIDENCE_DIR moves the location; GATE_EVIDENCE_KEEP (default 10) is how many
+# past runs survive, so this grows bounded instead of forever.
+#
+# The directory and the timestamp format are the ones gate_keep_evidence already uses
+# (lib.sh), on purpose: that helper keeps a FAILING gate's raw log beside these, under
+# the same path, and its date is LOCAL. Two date conventions in one directory make a
+# listing sort wrongly, and the pruning below sorts by name -- so this follows the
+# neighbour rather than introducing UTC next to it.
+#
+# The prefix is `live-run-`, not `live-`, and the pruning matches DIRECTORIES only.
+# gate_keep_evidence names its files "<gate>-<date>.log" in this same directory, so the
+# day this gate calls it with the name "live" there would be a live-<date>.log sitting
+# next to these -- and a `live-*` glob would delete the raw log of a RED run, which is
+# the exact thing this change exists to stop.
+LIVE_EVIDENCE_ROOT=${GATE_EVIDENCE_DIR:-scripts/localonly/_state/gate-evidence}
+BIN_DIR="${LIVE_EVIDENCE_ROOT}/live-run-$(date +%Y%m%d-%H%M%S)"
+if mkdir -p "$BIN_DIR" 2>/dev/null; then
+    LIVE_BIN_TMP="$(mktemp -d)"
+    trap 'rm -rf "$LIVE_BIN_TMP"; printf "\n[evidence] %s\n" "$BIN_DIR"' EXIT
+    # Prune oldest first, keeping the most recent N. A non-numeric KEEP falls back to
+    # the default rather than deleting everything.
+    keep=${GATE_EVIDENCE_KEEP:-10}
+    case $keep in ''|*[!0-9]*) keep=10;; esac
+    [ "$keep" -lt 1 ] && keep=1
+    find "$LIVE_EVIDENCE_ROOT" -maxdepth 1 -type d -name 'live-run-*' 2>/dev/null |
+        sort | head -n "-${keep}" |
+        while IFS= read -r old; do [ -n "$old" ] && rm -rf -- "$old"; done
+else
+    # A checkout without scripts/localonly (CI, a bare clone) still has to run the
+    # gate, so fall back to a temporary directory -- and SAY that the evidence is
+    # about to be deleted, instead of silently losing it the way this used to.
+    BIN_DIR="$(mktemp -d)"
+    LIVE_BIN_TMP="$BIN_DIR"
+    trap 'rm -rf "$BIN_DIR"' EXIT
+    gate_detail "no evidence directory (${LIVE_EVIDENCE_ROOT} not writable) -- using a temporary one, evidence WILL be deleted on exit"
+fi
+BIN="${LIVE_BIN_TMP}/pocket-relay-miner"
 if build_out="$(go build -o "$BIN" . 2>&1)"; then
     gate_pass "built the CLI under test"
 else
