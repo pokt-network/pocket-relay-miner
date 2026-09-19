@@ -92,7 +92,7 @@ func newUnstartedOwnerBridge(t *testing.T, signer *ResponseSigner, pipeline *Rel
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	backendURL, _, _ := countingWSBackend(t)
 	bridge, err := NewWebSocketBridge(
-		testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
 		nil, pipeline, 5*time.Second, false, nil, "", nil,
 	)

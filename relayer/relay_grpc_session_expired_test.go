@@ -23,11 +23,9 @@ import (
 // ValidateRelayRequest:149).
 type sessionExpiredValidator struct{}
 
-func (sessionExpiredValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest) error {
+func (sessionExpiredValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest, int64) error {
 	return fmt.Errorf("session timing validation failed: %w", ErrSessionExpired)
 }
-func (sessionExpiredValidator) GetCurrentBlockHeight() int64 { return 100 }
-func (sessionExpiredValidator) SetCurrentBlockHeight(int64)  {}
 
 // newSessionExpiredGRPCFixture wires a RelayGRPCService whose pipeline ALWAYS
 // rejects at ValidateRelay with ErrSessionExpired. No meter, no processor, no

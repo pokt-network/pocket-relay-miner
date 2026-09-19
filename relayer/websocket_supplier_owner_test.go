@@ -27,12 +27,9 @@ import (
 // validator would need a chain-backed session cache to say yes at all.
 type acceptAnyValidator struct{}
 
-func (acceptAnyValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest) error {
+func (acceptAnyValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest, int64) error {
 	return nil
 }
-
-func (acceptAnyValidator) GetCurrentBlockHeight() int64 { return 100 }
-func (acceptAnyValidator) SetCurrentBlockHeight(int64)  {}
 
 const ownerTestAppAddr = "pokt1app"
 
@@ -108,7 +105,7 @@ func newPublishingSageBridge(
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService,
 		"", // sage sends no Pocket-Supplier-Address
-		100,
+		atHeight(100),
 		&recordingProcessor{}, publisher, signer, http.Header{},
 		nil, pipeline, 2*time.Second, false, nil, "", nil,
 	)

@@ -76,7 +76,11 @@ func relayWithSession(sessionStart, sessionEnd int64) *servicetypes.RelayRequest
 
 // newEpochValidator builds a validator over an epoch-aware params cache.
 // grace offsets: oldGrace applies to sessions at/below boundary, newGrace above.
-func newEpochValidator(oldGrace, newGrace uint64, boundary int64) (*relayValidator, *epochSharedParamCache) {
+// liveHeight is what the process sees on chain, and it is a DIFFERENT quantity
+// from the height a relay arrived at: the first bounds the plausibility band,
+// the second decides the grace branch. They used to share one field, which is
+// what let one relay be judged at another relay's height.
+func newEpochValidator(oldGrace, newGrace uint64, boundary int64, liveHeight int64) (*relayValidator, *epochSharedParamCache) {
 	// NumBlocksPerSession must be non-zero: IsGracePeriodElapsed resolves the session
 	// grid through GetSessionStartHeight, which divides by it. Only the grace offset
 	// differs between the two epochs, so it is the sole variable under test.
@@ -98,6 +102,7 @@ func newEpochValidator(oldGrace, newGrace uint64, boundary int64) (*relayValidat
 		nil, // ringClient: unused by the paths under test
 		nil, // sessionCache: unused by the paths under test
 		paramCache,
+		func() int64 { return liveHeight },
 	).(*relayValidator)
 
 	return v, paramCache
@@ -117,10 +122,11 @@ func TestGetTargetSessionBlockHeight_GracePathUsesParamsAtSessionEnd(t *testing.
 		currentH     = int64(105) // inside old grace, outside new grace
 	)
 
-	v, paramCache := newEpochValidator(oldGrace, newGrace, sessionEnd)
-	v.SetCurrentBlockHeight(currentH)
+	// liveHeight 0: the plausibility band is a different bound and is not under
+	// test here. currentH is what THIS relay arrived at, and it is an argument.
+	v, paramCache := newEpochValidator(oldGrace, newGrace, sessionEnd, 0)
 
-	height, err := v.getTargetSessionBlockHeight(context.Background(), relayWithSession(sessionStart, sessionEnd))
+	height, err := v.getTargetSessionBlockHeight(context.Background(), relayWithSession(sessionStart, sessionEnd), currentH)
 	require.NoError(t, err, "a session still inside its OWN grace window must resolve, not expire")
 	require.Equal(t, sessionEnd, height, "grace-period lookups use the session end height")
 
@@ -140,10 +146,10 @@ func TestGetTargetSessionBlockHeight_ActiveSessionSkipsParams(t *testing.T) {
 		sessionEnd   = int64(100)
 	)
 
-	v, paramCache := newEpochValidator(10, 2, sessionEnd)
-	v.SetCurrentBlockHeight(95) // still inside the session
+	v, paramCache := newEpochValidator(10, 2, sessionEnd, 0)
 
-	height, err := v.getTargetSessionBlockHeight(context.Background(), relayWithSession(sessionStart, sessionEnd))
+	// 95: this relay arrived while its session was still open.
+	height, err := v.getTargetSessionBlockHeight(context.Background(), relayWithSession(sessionStart, sessionEnd), 95)
 	require.NoError(t, err)
 	require.Equal(t, sessionStart, height,
 		"active sessions resolve at their start height so the session cache key is stable for the whole session")
@@ -161,10 +167,10 @@ func TestGetTargetSessionBlockHeight_ExpiredSessionErrors(t *testing.T) {
 		grace        = uint64(2) // grace elapses after height 102
 	)
 
-	v, _ := newEpochValidator(grace, grace, sessionEnd)
-	v.SetCurrentBlockHeight(150)
+	v, _ := newEpochValidator(grace, grace, sessionEnd, 0)
 
-	_, err := v.getTargetSessionBlockHeight(context.Background(), relayWithSession(sessionStart, sessionEnd))
+	// 150: this relay arrived long after its session's grace window closed.
+	_, err := v.getTargetSessionBlockHeight(context.Background(), relayWithSession(sessionStart, sessionEnd), 150)
 	require.Error(t, err)
 	require.ErrorIs(t, err, ErrSessionExpired)
 }

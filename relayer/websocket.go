@@ -264,8 +264,22 @@ type WebSocketBridge struct {
 	latestMu       sync.RWMutex
 
 	// Service info
-	serviceID     string
-	arrivalHeight int64
+	serviceID string
+
+	// heightNow reports the chain height right now, and it is a function rather
+	// than the height captured at the handshake.
+	//
+	// A connection is not a relay: each backend push on a subscription is a
+	// relay that gets metered and mined (see handleBackendMessage, which keeps
+	// latestRequest precisely so eth_subscribe can bill every update). The
+	// arrival height of a relay is the height when THAT relay arrived, so a
+	// field pinned once at connection setup answers for the first message and
+	// lies for every one after it -- and a session lasts ~20 blocks, so any
+	// subscription outliving its session was judged against a height inside it.
+	//
+	// HTTP (proxy.go handleRelay) and gRPC (relay_grpc_service.go) already read
+	// the height per request. This makes WebSocket obey the same rule.
+	heightNow func() int64
 
 	// owner is the supplier operator address this bridge belongs to, and it is
 	// the ONLY supplier this connection may ever mine, meter or sign for.
@@ -347,7 +361,7 @@ func NewWebSocketBridge(
 	backendURL string,
 	serviceID string,
 	supplierAddress string,
-	arrivalHeight int64,
+	heightNow func() int64,
 	relayProcessor RelayProcessor,
 	publisher transport.MinedRelayPublisher,
 	responseSigner *ResponseSigner,
@@ -389,7 +403,7 @@ func NewWebSocketBridge(
 		relayPipeline:    relayPipeline,
 		msgChan:          make(chan wsMessage, 100),
 		serviceID:        serviceID,
-		arrivalHeight:    arrivalHeight,
+		heightNow:        heightNow,
 		simulated:        simulated,
 		simVerifier:      simVerifier,
 		simKeyID:         simKeyID,
@@ -993,11 +1007,15 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		// Validate and meter the relay if pipeline is available
 		// Build relay context for validation/metering
 		relayCtx := &RelayContext{
-			Request:            relayReq,
-			ServiceID:          b.serviceID,
-			SupplierAddress:    b.ownerAddress(),
-			SessionID:          relayReq.Meta.SessionHeader.SessionId,
-			ArrivalBlockHeight: b.arrivalHeight,
+			Request:         relayReq,
+			ServiceID:       b.serviceID,
+			SupplierAddress: b.ownerAddress(),
+			SessionID:       relayReq.Meta.SessionHeader.SessionId,
+			// This message's own arrival height, read now. Pinning the
+			// handshake height here is what kept a long-lived subscription
+			// being validated against a height inside its original session,
+			// so its grace window never closed.
+			ArrivalBlockHeight: b.heightNow(),
 		}
 
 		// Validate relay request (ring signature + session)
@@ -1405,7 +1423,11 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 		respPayload,
 		supplierAddr,
 		b.serviceID,
-		b.arrivalHeight,
+		// Read now, like the validation path above: a relay is mined at the
+		// height it arrived at, and on a subscription that is this push, not
+		// the handshake. Mining at a height the relay was not validated at
+		// would make the two disagree about which session it belongs to.
+		b.heightNow(),
 	)
 	if procErr != nil {
 		relaysDropped.WithLabelValues(b.serviceID, BackendTypeWebSocket, dropReasonProcessFailed).Inc()
@@ -1867,8 +1889,6 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		headers.Set(HeaderPocketService, serviceID)
 		// Note: Application address is not known until first relay request arrives on the WebSocket
 
-		arrivalHeight := p.currentBlockHeight.Load()
-
 		// Get dial timeout from service's timeout profile
 		dialTimeout := getWSDialTimeout(p.config.GetServiceTimeoutProfile(serviceID))
 
@@ -1895,7 +1915,10 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			backendURL,
 			serviceID,
 			supplierAddress,
-			arrivalHeight,
+			// The SOURCE of the height, not a reading of it. A connection is
+			// not a relay: the bridge reads this per message, because that is
+			// when each relay actually arrives.
+			p.CurrentBlockHeight,
 			p.relayProcessor,
 			bridgePublisher,
 			p.responseSigner,

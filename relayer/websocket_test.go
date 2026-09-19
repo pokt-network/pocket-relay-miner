@@ -150,7 +150,7 @@ func TestNewWebSocketBridge_RequiresRelayProcessor(t *testing.T) {
 		"ws://backend:8545",
 		"svc-test",
 		"pokt1supplier",
-		0,
+		atHeight(0),
 		nil, // relayProcessor - intentionally nil
 		&noopPublisher{},
 		nil,

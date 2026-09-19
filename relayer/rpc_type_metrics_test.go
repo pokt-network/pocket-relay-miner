@@ -50,7 +50,7 @@ func TestRelaysDropped_APublishFailureCountsUnderItsTransport(t *testing.T) {
 		relayerConn, _ := newGatewaySideHarness(t)
 
 		bridge, err := NewWebSocketBridge(
-			testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+			testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 			&recordingProcessor{}, countPublished(failingPublisher{}), signer, http.Header{},
 			nil, pipeline, 5*time.Second, false, nil, "", nil,
 		)
@@ -171,9 +171,13 @@ func (failingSendStream) SendMsg(interface{}) error {
 	return errors.New("injected: the stream broke on write")
 }
 
-type rejectAllValidator struct{ acceptAnyValidator }
+// rejectAllValidator refuses every request. It stands on its own rather than
+// embedding acceptAnyValidator: RelayValidator is a one-method interface now
+// that the block-height setter and getter are gone, and this type overrides that
+// one method, so the embed contributed nothing but a name.
+type rejectAllValidator struct{}
 
-func (rejectAllValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest) error {
+func (rejectAllValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest, int64) error {
 	return errors.New("injected: invalid ring signature")
 }
 

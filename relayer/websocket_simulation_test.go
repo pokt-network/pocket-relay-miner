@@ -43,13 +43,10 @@ type neverCallValidator struct {
 	calls atomic.Int32
 }
 
-func (v *neverCallValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest) error {
+func (v *neverCallValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest, int64) error {
 	v.calls.Add(1)
 	return errors.New("ValidateRelay must never be called for a simulated websocket relay")
 }
-
-func (v *neverCallValidator) GetCurrentBlockHeight() int64 { return 0 }
-func (v *neverCallValidator) SetCurrentBlockHeight(int64)  {}
 
 // newSimWSBackendServer starts a fake WebSocket backend: every message it
 // receives increments hits and gets a canned JSON-RPC-shaped reply, echoed
@@ -192,7 +189,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 		backendURL,
 		simWSTestService,
 		supplierAddr,
-		1, // arrivalHeight
+		atHeight(1), // the height this connection opened at
 		proc,
 		pub, // NOT nil -- proves the "never publish" guard doesn't depend on nil propagation
 		signer,

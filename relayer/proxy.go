@@ -114,11 +114,22 @@ const (
 
 	// Drop reasons (for relaysDropped metric)
 	dropReasonValidationFailed = "validation_failed"
-	dropReasonStakeExhausted   = "stake_exhausted"
-	dropReasonNoSupplier       = "no_supplier"
-	dropReasonMarshalFailed    = "marshal_failed"
-	dropReasonProcessFailed    = "process_failed"
-	dropReasonPublishFailed    = "publish_failed"
+
+	// dropReasonSessionExpired is the optimistic twin of
+	// rejectReasonSessionExpired: a relay already SERVED whose session had
+	// outlived its grace window.
+	//
+	// Without it the optimistic path books an expired session as a signature
+	// failure, which is not a coarser label but a misleading one -- and it makes
+	// the grace period unobservable exactly where it matters. WebSocket already
+	// tells them apart (websocket.go, errors.Is on ErrSessionExpired); the eager
+	// HTTP path does too. This is the last one that did not.
+	dropReasonSessionExpired = "session_expired"
+	dropReasonStakeExhausted = "stake_exhausted"
+	dropReasonNoSupplier     = "no_supplier"
+	dropReasonMarshalFailed  = "marshal_failed"
+	dropReasonProcessFailed  = "process_failed"
+	dropReasonPublishFailed  = "publish_failed"
 	// dropReasonNoPublisher: mined, but this relayer has no publisher to hand
 	// it to the store.
 	dropReasonNoPublisher = "no_publisher"
@@ -1486,8 +1497,20 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			// ONLY measure validation time, NOT meter or miner submit
 			optimisticStart := time.Now()
 			if err := p.validateRelayRequest(context.Background(), capturedHTTPReq, capturedReqBody, capturedBlockHeight); err != nil {
-				validationFailures.WithLabelValues(capturedServiceID, "signature").Inc()
-				relaysDropped.WithLabelValues(capturedServiceID, capturedRPCType, dropReasonValidationFailed).Inc()
+				// An expired session is not a signature failure, and calling it
+				// one is what kept the grace period invisible here: the eager
+				// path has told them apart since rejectReasonSessionExpired
+				// existed, this one folded both into validation_failed and
+				// counted every one as a signature error. An operator reading
+				// that sees broken crypto where the truth is a relay served
+				// after its session closed.
+				reason := dropReasonValidationFailed
+				if errors.Is(err, ErrSessionExpired) {
+					reason = dropReasonSessionExpired
+				} else {
+					validationFailures.WithLabelValues(capturedServiceID, "signature").Inc()
+				}
+				relaysDropped.WithLabelValues(capturedServiceID, capturedRPCType, reason).Inc()
 				logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 					Err(err).
 					Str("validation_mode", "optimistic").
@@ -2725,11 +2748,14 @@ func (p *ProxyServer) validateRelayRequest(
 		return nil
 	}
 
-	// Set the block height for the validator
-	p.validator.SetCurrentBlockHeight(arrivalBlockHeight)
-
-	// Validate the relay request
-	if err := p.validator.ValidateRelayRequest(ctx, relayRequest); err != nil {
+	// Validate the relay request at the height THIS relay arrived at.
+	//
+	// An argument rather than state set on the validator a line earlier: the
+	// validator is shared by every worker, so "set then validate" was two
+	// operations with a gap, and one worker's height could decide another
+	// worker's grace branch. A mutex made each half safe and the pair was still
+	// wrong, which is why -race never reported it.
+	if err := p.validator.ValidateRelayRequest(ctx, relayRequest, arrivalBlockHeight); err != nil {
 		return fmt.Errorf("relay validation failed: %w", err)
 	}
 
@@ -2843,6 +2869,18 @@ func (p *ProxyServer) sendError(w http.ResponseWriter, status int, message strin
 func (p *ProxyServer) SetBlockHeight(height int64) {
 	p.currentBlockHeight.Store(height)
 	currentBlockHeight.Set(float64(height))
+}
+
+// CurrentBlockHeight is the chain height this process last saw, for collaborators
+// that need the LIVE height rather than a relay's arrival height.
+//
+// The block subscriber is its only writer (SetBlockHeight, driven by one
+// goroutine), so this is a single-writer value and reading it costs an atomic
+// load. It is exported because the validator takes it as a function at
+// construction: handing it the value once would freeze it, and handing it a
+// setter is what let per-relay heights be written onto shared state.
+func (p *ProxyServer) CurrentBlockHeight() int64 {
+	return p.currentBlockHeight.Load()
 }
 
 // Close drains the proxy and shuts it down, bounded by ctx.

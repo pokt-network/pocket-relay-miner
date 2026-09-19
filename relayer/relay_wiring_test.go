@@ -141,7 +141,7 @@ func TestWebSocketClosesAFrameWithoutAPipeline(t *testing.T) {
 
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	bridge, err := NewWebSocketBridge(
-		testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, pub, signer, http.Header{},
 		nil, nil, 2*time.Second, false, nil, "", nil,
 	)

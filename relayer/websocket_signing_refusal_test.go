@@ -52,7 +52,7 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 	pipeline, redisClient, _, charges := newOwnerTestPipelineWithCharges(t)
 
 	bridge, err := NewWebSocketBridge(
-		logger, relayerConn, backendURL, simWSTestService, supplierAddr, 1,
+		logger, relayerConn, backendURL, simWSTestService, supplierAddr, atHeight(1),
 		proc, pub, signer, http.Header{}, nil, pipeline,
 		2*time.Second, false, nil, "", nil,
 	)

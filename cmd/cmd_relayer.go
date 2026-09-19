@@ -1106,6 +1106,11 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		ringClient,
 		sessionCache,
 		sharedParamCache,
+		// The LIVE chain height, read at each call. The block subscriber above
+		// is its only writer, so the validator now follows the same source of
+		// truth as the rest of the proxy instead of a field that every relay
+		// overwrote with its own arrival height.
+		proxy.CurrentBlockHeight,
 	)
 	proxy.SetValidator(fullValidator)
 	logger.Info().

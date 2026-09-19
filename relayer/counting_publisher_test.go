@@ -72,7 +72,7 @@ func TestRelaysPublished_AWebSocketRelayCountsOnce(t *testing.T) {
 	relayerConn, _ := newGatewaySideHarness(t)
 
 	bridge, err := NewWebSocketBridge(
-		testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, countPublished(&ctxWatchingPublisher{}), signer, http.Header{},
 		nil, pipeline, 5*time.Second, false, nil, "", nil,
 	)

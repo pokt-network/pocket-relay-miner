@@ -80,8 +80,19 @@ func (p *RelayPipeline) ValidateRelay(
 		Str("supplier", relayCtx.SupplierAddress).
 		Msg("validating relay request")
 
-	// Validate relay request (ring signature + session)
-	if err := p.validator.ValidateRelayRequest(ctx, relayCtx.Request); err != nil {
+	// Validate relay request (ring signature + session) at the height THIS relay
+	// arrived at.
+	//
+	// This handover is the whole of the defect it replaced: the arrival height
+	// was already in RelayContext and was never passed on, so the two transports
+	// that reach the validator ONLY through here -- WebSocket (websocket.go) and
+	// gRPC (relay_grpc_service.go) -- had it judge every relay against whatever
+	// the last HTTP relay left in a shared field, or against 0, which
+	// getTargetSessionBlockHeight reads as "session active". The grace period was
+	// therefore never evaluated on either transport: relays long past their grace
+	// window validated as live, were served, and were mined into claims the chain
+	// does not pay.
+	if err := p.validator.ValidateRelayRequest(ctx, relayCtx.Request, relayCtx.ArrivalBlockHeight); err != nil {
 		p.logger.Debug().
 			Err(err).
 			Str("service_id", relayCtx.ServiceID).

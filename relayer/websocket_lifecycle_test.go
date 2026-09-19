@@ -111,7 +111,7 @@ func newLifecycleBridge(t *testing.T, backendURL string) (*WebSocketBridge, *web
 
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	bridge, err := NewWebSocketBridge(
-		testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
 		nil, pipeline, 5*time.Second, false, nil, "", rec.record,
 	)
@@ -320,12 +320,9 @@ func TestBridgeClosesABackendDialThatLandsAfterTheBridgeClosed(t *testing.T) {
 // used to take the bridge down. It stands in for the CLASS.
 type panickingValidator struct{}
 
-func (panickingValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest) error {
+func (panickingValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest, int64) error {
 	panic("induced panic on the gateway message path")
 }
-
-func (panickingValidator) GetCurrentBlockHeight() int64 { return 100 }
-func (panickingValidator) SetCurrentBlockHeight(int64)  {}
 
 // TestBridgeTearsDownWhenTheGatewayPathPanics pins the teardown net/http will
 // not do for us.
@@ -348,7 +345,7 @@ func TestBridgeTearsDownWhenTheGatewayPathPanics(t *testing.T) {
 
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	bridge, err := NewWebSocketBridge(
-		testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
 		nil, pipeline, 2*time.Second, false, nil, "", nil,
 	)
@@ -447,7 +444,7 @@ func TestBridgeBillsEverySubscriptionPush(t *testing.T) {
 
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	bridge, err := NewWebSocketBridge(
-		testLogger(), relayerConn, pushingWSBackend(t, pushes), simWSTestService, "", 100,
+		testLogger(), relayerConn, pushingWSBackend(t, pushes), simWSTestService, "", atHeight(100),
 		proc, pub, signer, http.Header{},
 		nil, pipeline, 5*time.Second, false, nil, "", nil,
 	)
@@ -522,7 +519,7 @@ func TestBridgePublishesARelayItAlreadyServedAfterTheBridgeWasCancelled(t *testi
 
 	pub := &ctxWatchingPublisher{}
 	bridge, err := NewWebSocketBridge(
-		testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, pub, signer, http.Header{},
 		nil, pipeline, 5*time.Second, false, nil, "", nil,
 	)

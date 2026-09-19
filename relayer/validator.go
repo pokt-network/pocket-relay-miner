@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
@@ -27,14 +26,18 @@ var ErrSessionExpired = errors.New("session expired")
 type RelayValidator interface {
 	// ValidateRelayRequest validates a relay request.
 	// Returns nil if the request is valid, or an error describing the validation failure.
-	ValidateRelayRequest(ctx context.Context, relayRequest *servicetypes.RelayRequest) error
-
-	// GetCurrentBlockHeight returns the current block height used for validation.
-	GetCurrentBlockHeight() int64
-
-	// SetCurrentBlockHeight updates the current block height.
-	// This should be called when a new block is received.
-	SetCurrentBlockHeight(height int64)
+	//
+	// arrivalHeight is the chain height at which THIS relay arrived, and every
+	// transport must supply its own: it decides whether the relay's session is
+	// still live or past its grace window, which is a question about this relay
+	// and no other.
+	//
+	// There is deliberately no setter to park it in. It used to be one, written
+	// per relay onto a validator shared by every validation worker, which let one
+	// worker's height decide another worker's grace branch -- and left WebSocket
+	// and gRPC, which never wrote it at all, judging every relay against 0 (read
+	// as "session active", so the grace period was never evaluated there).
+	ValidateRelayRequest(ctx context.Context, relayRequest *servicetypes.RelayRequest, arrivalHeight int64) error
 }
 
 // ValidatorConfig contains configuration for the relay validator.
@@ -68,9 +71,19 @@ type relayValidator struct {
 	// sharedParamCache is used for shared parameter lookups.
 	sharedParamCache cache.SharedParamCache
 
-	// currentBlockHeight is the latest known block height.
-	currentBlockHeight int64
-	blockHeightMu      sync.RWMutex
+	// heightNow reports the chain height this process last saw. It is the
+	// PROCESS's height -- shared and monotonic -- and it is deliberately NOT the
+	// height of any particular relay.
+	//
+	// The two are different quantities, and storing them in one field is what
+	// produced the defect this replaced: a per-relay height parked in a field
+	// shared by every validation worker, so worker A's relay was judged against
+	// worker B's height. A mutex made each access safe and left the pair
+	// non-atomic, which is why the race detector never saw it.
+	//
+	// There is no setter any more, so there is nowhere to park a per-relay
+	// height. A nil func means "unknown" -- see liveHeight.
+	heightNow func() int64
 
 	// ownsSupplierKey is the live check for "is this relayer authorized to
 	// serve this supplier". See ValidatorConfig.OwnsSupplierKey.
@@ -84,6 +97,7 @@ func NewRelayValidator(
 	ringClient crypto.RingClient,
 	sessionCache cache.SessionCache,
 	sharedParamCache cache.SharedParamCache,
+	heightNow func() int64,
 ) RelayValidator {
 	return &relayValidator{
 		logger:           logging.ForComponent(logger, logging.ComponentRelayValidator),
@@ -91,14 +105,30 @@ func NewRelayValidator(
 		ringClient:       ringClient,
 		sessionCache:     sessionCache,
 		sharedParamCache: sharedParamCache,
+		heightNow:        heightNow,
 		ownsSupplierKey:  config.OwnsSupplierKey,
 	}
+}
+
+// liveHeight is the chain height this process last saw, or 0 when nothing
+// reports it.
+//
+// 0 is not a neutral value here: getTargetSessionBlockHeight reads it as
+// "session active", so a validator with no height source accepts every session
+// as live. That is only safe because the grace decision no longer reads this --
+// it takes the relay's own arrival height as an argument.
+func (rv *relayValidator) liveHeight() int64 {
+	if rv.heightNow == nil {
+		return 0
+	}
+	return rv.heightNow()
 }
 
 // ValidateRelayRequest validates a relay request.
 func (rv *relayValidator) ValidateRelayRequest(
 	ctx context.Context,
 	relayRequest *servicetypes.RelayRequest,
+	arrivalHeight int64,
 ) error {
 	// Basic validation
 	step1 := time.Now()
@@ -127,27 +157,31 @@ func (rv *relayValidator) ValidateRelayRequest(
 	// (websocket.go) only pass through here — so the bound belongs here too, or
 	// those two transports keep the pre-signature amplification surface.
 	//
-	// rv.GetCurrentBlockHeight() rather than a caller-supplied arrival height: the
-	// WebSocket bridge pins its arrival height at connection setup and never
-	// refreshes it, so a long-lived connection would drift out of the band.
+	// The LIVE height, not this relay's arrival height, and the two are not
+	// interchangeable here: this bound asks "could a session with these heights
+	// plausibly exist right now?", which is a question about the chain, while the
+	// grace decision below asks "was this relay's session still live when it
+	// arrived?", which is a question about the relay. They used to read one
+	// field, which is why one of them was always wrong.
 	if sessionHeader != nil {
+		liveHeight := rv.liveHeight()
 		if !sessionHeightsPlausible(
 			sessionHeader.GetSessionStartBlockHeight(),
 			sessionHeader.GetSessionEndBlockHeight(),
-			rv.GetCurrentBlockHeight(),
+			liveHeight,
 		) {
 			return fmt.Errorf(
 				"implausible session heights: start %d, end %d (current height %d)",
 				sessionHeader.GetSessionStartBlockHeight(),
 				sessionHeader.GetSessionEndBlockHeight(),
-				rv.GetCurrentBlockHeight(),
+				liveHeight,
 			)
 		}
 	}
 
 	// Get target session block height
 	step2 := time.Now()
-	sessionBlockHeight, err := rv.getTargetSessionBlockHeight(ctx, relayRequest)
+	sessionBlockHeight, err := rv.getTargetSessionBlockHeight(ctx, relayRequest, arrivalHeight)
 	if err != nil {
 		return fmt.Errorf("session timing validation failed: %w", err)
 	}
@@ -201,7 +235,9 @@ func (rv *relayValidator) ValidateRelayRequest(
 
 	// Verify supplier is in session
 	supplierFound := false
-	currentHeight := rv.GetCurrentBlockHeight()
+	// Log field only: it reports what the process sees, not what this relay was
+	// judged against. The decision above used arrivalHeight.
+	currentHeight := rv.liveHeight()
 
 	for _, supplier := range session.Suppliers {
 		if supplier.OperatorAddress == supplierAddr {
@@ -290,29 +326,20 @@ func compareSessionHeaders(onchainSessionHeader, requestSessionHeader *sessionty
 	return nil
 }
 
-// GetCurrentBlockHeight returns the current block height.
-func (rv *relayValidator) GetCurrentBlockHeight() int64 {
-	rv.blockHeightMu.RLock()
-	defer rv.blockHeightMu.RUnlock()
-	return rv.currentBlockHeight
-}
-
-// SetCurrentBlockHeight updates the current block height.
-func (rv *relayValidator) SetCurrentBlockHeight(height int64) {
-	rv.blockHeightMu.Lock()
-	defer rv.blockHeightMu.Unlock()
-	rv.currentBlockHeight = height
-}
-
 // getTargetSessionBlockHeight determines the block height to use for session lookup.
 // It handles grace period logic.
+//
+// arrivalHeight is the height at which THIS relay arrived, and it is a parameter
+// rather than shared state because the answer is about this relay and no other.
+// It travels with the relay from the transport that received it.
 func (rv *relayValidator) getTargetSessionBlockHeight(
 	ctx context.Context,
 	relayRequest *servicetypes.RelayRequest,
+	arrivalHeight int64,
 ) (int64, error) {
 	sessionStartHeight := relayRequest.Meta.SessionHeader.GetSessionStartBlockHeight()
 	sessionEndHeight := relayRequest.Meta.SessionHeader.GetSessionEndBlockHeight()
-	currentHeight := rv.GetCurrentBlockHeight()
+	currentHeight := arrivalHeight
 
 	// CRITICAL: For active sessions, use sessionStartHeight for cache consistency!
 	// Session start height is constant for the session duration (~10 blocks),

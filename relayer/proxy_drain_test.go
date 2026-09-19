@@ -167,7 +167,7 @@ func newGatedLifecycleBridge(t *testing.T, backendURL string) (*WebSocketBridge,
 	pipeline, _, _ := newOwnerTestPipeline(t)
 	_, signer := newSupplier(t)
 	bridge, err := NewWebSocketBridge(
-		testLogger(), relayerConn, backendURL, simWSTestService, "", 100,
+		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
 		nil, pipeline, 5*time.Second, false, nil, "", func(int, error) {},
 	)
