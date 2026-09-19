@@ -354,6 +354,10 @@ func (lc *LifecycleCallback) persistRebroadcastEntries(
 	// entry so a resend re-injects it rather than signing a new one; empty means
 	// the resend signs, which is what it did before this existed.
 	signed tx.SignedTxPayload,
+	// attemptErr is how the send that produced `signed` ended, and nil means it
+	// was accepted. See persistRebroadcastEntry: it decides whether those bytes
+	// are worth re-injecting at all.
+	attemptErr error,
 	marshalAt func(i int) ([]byte, error),
 ) {
 	for i, snapshot := range snapshots {
@@ -365,7 +369,7 @@ func (lc *LifecycleCallback) persistRebroadcastEntries(
 				Msg("failed to marshal message for rebroadcast persistence")
 			continue
 		}
-		if pErr := lc.persistRebroadcastEntry(ctx, phase, snapshot, submitHeight, txHash, signed, msgBytes); pErr != nil {
+		if pErr := lc.persistRebroadcastEntry(ctx, phase, snapshot, submitHeight, txHash, signed, attemptErr, msgBytes); pErr != nil {
 			lc.logger.Warn().Err(pErr).
 				Str(logging.FieldSessionID, snapshot.SessionID).
 				Str("phase", string(phase)).
@@ -388,8 +392,29 @@ func (lc *LifecycleCallback) persistRebroadcastEntry(
 	submitHeight int64,
 	txHash string,
 	signed tx.SignedTxPayload,
+	attemptErr error,
 	msgBytes []byte,
 ) error {
+	// STORE THE BYTES ONLY IF THE CHAIN HAS NOT ALREADY JUDGED THEM.
+	//
+	// A failed send hands its payload back whatever went wrong, so "bytes
+	// present" does NOT mean "nobody answered": a CheckTx refusal returns them
+	// too. Re-injecting bytes the chain refused asks the same question again
+	// and gets the same answer, which costs blocks of a window that is about
+	// ten long -- and if the node keeps invalid transactions in its cache, the
+	// resend is answered "I already hold this", which spends no attempt and
+	// stalls the entry until the stall bound.
+	//
+	// Dropping them costs one signature: the entry keeps its MsgBytes, so the
+	// reconciler signs a fresh transaction, which is a question the node has
+	// not answered yet. RejectionPreservesBytes is the same predicate the
+	// reconciler applies to its own resend, one block later; asking it here
+	// only means asking it as soon as the answer is known. A nil error is an
+	// accepted send, and the predicate answers true for it, so the success path
+	// is unchanged by construction rather than by care.
+	if !tx.RejectionPreservesBytes(attemptErr) {
+		signed = tx.SignedTxPayload{}
+	}
 	entryBytes, eErr := marshalRebroadcastEntry(rebroadcastEntry{
 		MsgBytes:            msgBytes,
 		SubmitHeight:        submitHeight,
@@ -562,7 +587,7 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 			// never broadcast, so there is nothing to re-inject and the resend
 			// will sign. That is the same state as an entry written before this
 			// field existed.
-			ctx, RebroadcastPhaseClaim, snapshot, currentHeight, "", tx.SignedTxPayload{}, msgBytes,
+			ctx, RebroadcastPhaseClaim, snapshot, currentHeight, "", tx.SignedTxPayload{}, nil, msgBytes,
 		); pErr != nil {
 			logger.Error().Err(pErr).
 				Str(logging.FieldSessionID, snapshot.SessionID).
@@ -1776,7 +1801,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// ordered set). Survives leader failover (state lives in Redis).
 				if lc.rebroadcastStore != nil && claimTxHash != "" {
 					lc.persistRebroadcastEntries(
-						ctx, RebroadcastPhaseClaim, validSnapshots, currentBlock.Height(), claimTxHash, claimSigned,
+						ctx, RebroadcastPhaseClaim, validSnapshots, currentBlock.Height(), claimTxHash, claimSigned, nil,
 						func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
 					)
 				}
@@ -1857,13 +1882,16 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			// stored entry goes from the block after its submit (canRebroadcast).
 			if lc.rebroadcastStore != nil {
 				lc.persistRebroadcastEntries(
-					// Hash empty, BYTES PRESENT: the transaction was built and
-					// signed, the send just never answered. That pair is not a
-					// contradiction, it is the case this whole mechanism exists
-					// for -- nobody knows whether it arrived, so re-injecting
-					// the same bytes is the only reply that cannot duplicate it.
+					// Hash empty and bytes PRESENT is the case this mechanism
+					// exists for: the transaction was signed and the send never
+					// answered, so nobody knows whether it arrived and
+					// re-injecting the same bytes is the only reply that cannot
+					// duplicate it. But the pair does NOT prove that case -- a
+					// send the chain REFUSED hands its payload back too -- so
+					// lastErr travels with the bytes and persistRebroadcastEntry
+					// drops them when the chain already judged them.
 					ctx, RebroadcastPhaseClaim, validSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
-					claimSigned,
+					claimSigned, lastErr,
 					func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
 				)
 			}
@@ -2683,7 +2711,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				// ordered set). Survives leader failover (state lives in Redis).
 				if lc.rebroadcastStore != nil && proofTxHash != "" {
 					lc.persistRebroadcastEntries(
-						ctx, RebroadcastPhaseProof, validProofSnapshots, currentBlock.Height(), proofTxHash, proofSigned,
+						ctx, RebroadcastPhaseProof, validProofSnapshots, currentBlock.Height(), proofTxHash, proofSigned, nil,
 						func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
 					)
 				}
@@ -2777,8 +2805,10 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			// the block after its submit (canRebroadcast).
 			if lc.rebroadcastStore != nil {
 				lc.persistRebroadcastEntries(
+					// lastErr travels with the bytes for the reason the claim
+					// twin states: a refusal also hands its payload back.
 					ctx, RebroadcastPhaseProof, validProofSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
-					proofSigned,
+					proofSigned, lastErr,
 					func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
 				)
 			}

@@ -769,3 +769,14 @@ func (n *TestSupplierNode) FailBroadcasts(err error) {
 	defer n.srv.txServer.rwMu.Unlock()
 	n.srv.txServer.broadcastError = err
 }
+
+// RefuseInCheckTx makes the node ANSWER every later broadcast with a refusal:
+// the transaction was delivered and judged, which is a different outcome from
+// FailBroadcasts (delivered or not, nobody said).
+func (n *TestSupplierNode) RefuseInCheckTx(codespace string, code uint32, rawLog string) {
+	n.srv.txServer.rwMu.Lock()
+	defer n.srv.txServer.rwMu.Unlock()
+	n.srv.txServer.broadcastCodespace = codespace
+	n.srv.txServer.broadcastCode = code
+	n.srv.txServer.broadcastRawLog = rawLog
+}
