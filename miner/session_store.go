@@ -61,7 +61,12 @@ const (
 	// SessionStateProbabilisticProved means proof was not required and the claim will be settled by protocol.
 	SessionStateProbabilisticProved SessionState = "probabilistic_proved"
 
-	// SessionStateProofWindowClosed means the proof window closed before the proof was submitted.
+	// SessionStateProofWindowClosed means the proof window closed with no proof
+	// transaction ever submitted for this session -- ProofTxHash is empty. A
+	// session whose proof WAS submitted ends in `proved`, even when the callback
+	// that normally writes it never ran. This comment used to say "before the
+	// proof was submitted" while nothing checked that, and sessions whose proof
+	// was already on chain landed here.
 	SessionStateProofWindowClosed SessionState = "proof_window_closed"
 
 	// SessionStateProofTxError means the proof transaction failed (RPC error, gas, etc).
@@ -203,7 +208,6 @@ type SessionStore interface {
 
 // SessionStoreConfig contains configuration for the session store.
 type SessionStoreConfig struct {
-
 	// SupplierAddress is the supplier this store is for.
 	SupplierAddress string
 

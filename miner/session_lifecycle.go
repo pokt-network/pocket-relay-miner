@@ -1103,6 +1103,23 @@ func (m *SessionLifecycleManager) determineTransition(
 		// ❌ OLD BUG: returned SessionStateSettled on timeout (wrong - proof was required but not submitted!)
 		// ✅ FIX: Proof window closed = failure (fallback if callback didn't run)
 		if currentHeight >= proofWindowClose {
+			// A hash means the mempool accepted a proof transaction for this
+			// session, which is exactly what `proved` records -- "the proof
+			// transaction was successfully submitted", not that it was
+			// included. A session sitting in `proving` WITH a hash at the close
+			// is that same case with the callback dead: the process was killed
+			// between the broadcast and the transition that writes `proved`.
+			// Measured 2026-09-18: five sessions ended here after a kill -9,
+			// all five on chain, all five paid, and all five booked as a
+			// timeout.
+			//
+			// Whether the transaction actually landed is a different fact with
+			// its own series, written only after asking the chain
+			// (proof_inclusion_outcome_total). This function does not guess it:
+			// it reports what the snapshot knows.
+			if session.ProofTxHash != "" {
+				return SessionStateProved, "proof_submitted_before_close"
+			}
 			return SessionStateProofWindowClosed, "proof_timeout"
 		}
 	}
