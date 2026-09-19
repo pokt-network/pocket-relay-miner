@@ -200,17 +200,29 @@ spec:
         # of 2026-09-16 while Redis did not.
         #
         # NOTE: this is a SOFT limit -- GOMEMLIMIT makes the GC work harder, it
-        # does not refuse work. What refuses work is a cap, and BOTH queues have
-        # one now, each in BYTES because a count of tasks says nothing about
-        # memory: the publish queue at redis.batch_max_queued_mib (default
-        # 512 MiB, queueFull(), proxy.go:2390) and the validation queue at
-        # maxValidationQueuedBytes = 256 MiB (proxy.go:2427), which answers 429
-        # with Retry-After and counts rejectReasonValidationQueueFull.
+        # does not refuse work. What refuses work is a cap, and there are two:
+        # the validation queue at maxValidationQueuedBytes = 256 MiB
+        # (proxy.go:2427), which answers 429 with Retry-After and counts
+        # rejectReasonValidationQueueFull; and an admission gate on the publish
+        # side at redis.batch_max_queued_mib (default 512 MiB, queueFull(),
+        # proxy.go:1097).
         #
-        # The worst case is both caps held at once, ~768 MiB of payload, and the
-        # working set runs about twice the live heap -- so this container's limit
-        # is sized against that sum, not against what a quiet relayer uses.
-        # Neither cap has been measured at its own ceiling under load.
+        # MEASURED 2026-09-19 (run l3p, two miners), and it is why this limit is
+        # 8Gi rather than the sum of those caps: only the VALIDATION cap held.
+        # The relayer peaked at 6.793 GiB, 83% of this container, with the
+        # validation queue pinned at exactly 256,03 MiB and 1.965.145 relays
+        # refused -- that cap is what kept the pod alive. The publish gate never
+        # fired once (zero series for reason="publish_queue_full", against
+        # 1.965.145 for the validation one, so the query looked), because it
+        # reads batcher.QueuedBytes() -- the stage AFTER the publish worker pool
+        # -- while the backlog piles up BEFORE it: 2.214.146 tasks waiting in the
+        # publish subpool holding 1.324 MiB of bodies, which is 2,6x the gate's
+        # own threshold in a place the gate cannot see. Queue item 368.
+        #
+        # So do not size this container from "both caps held at once". The
+        # accounted payload at the peak was ~1,58 GiB and the working set was
+        # 6,79 GiB -- 4,3x, not the 2x rule of thumb, because a queued task costs
+        # far more than the body it is accounted for.
         - name: GOMEMLIMIT
           value: "7GiB"
         - name: POD_NAME
