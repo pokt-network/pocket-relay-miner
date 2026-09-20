@@ -50,9 +50,27 @@ func (r *execRecorder) ProcessPipelineHook(next goredis.ProcessPipelineHook) gor
 				s.expireKeys = append(s.expireKeys, fmt.Sprint(c.Args()[1]))
 			}
 		}
-		r.mu.Lock()
-		r.execs = append(r.execs, s)
-		r.mu.Unlock()
+		// Only the dispatcher's own writes are shapes. go-redis initialises every
+		// NEW connection with a pipeline of its own -- SELECT, CLIENT SETNAME,
+		// CLIENT TRACKING (redis.go:839 of v9.22.0, and the comment at :725-730
+		// calls it "this internal conn's init pipeline") -- and it runs through
+		// the client's hooks like any other, so it reaches this recorder as an
+		// EXEC with none of the commands measured here.
+		//
+		// Measured 2026-09-20: once the dispatcher started beating as it starts
+		// (item 388), that PING opens a connection while the fixture is already
+		// recording, and the extra empty shape made the chunk-border test fail
+		// about one run in five.
+		//
+		// What this costs: an EXEC of the dispatcher's that carried none of these
+		// three commands would go unrecorded. writeChunk never sends one -- a
+		// chunk always carries an XADD or a charge's INCRBY -- so the exclusion
+		// is on a shape the dispatcher does not produce.
+		if s.xadds+s.incrs+s.expires > 0 {
+			r.mu.Lock()
+			r.execs = append(r.execs, s)
+			r.mu.Unlock()
+		}
 		return next(ctx, cmds)
 	}
 }
@@ -255,22 +273,27 @@ func TestTheHeartbeatMarksOnlyWhatRedisAnswered(t *testing.T) {
 	require.NoError(t, p.Close())
 	ctx := context.Background()
 
-	t1 := time.Unix(1_700_000_000, 0)
+	alive, err := p.DispatcherHealthy()
+	require.False(t, alive, "a publisher that has not reached Redis yet must refuse admission")
+	require.ErrorIs(t, err, errDispatcherNeverReachedRedis,
+		"construction must not hand admission a mark nobody earned")
+
+	t1 := time.Now()
 	p.now = func() time.Time { return t1 }
 	p.heartbeat(ctx)
-	require.True(t, p.LastSuccess().Equal(t1), "an answered PING marks")
+	require.True(t, lastMark(p).Equal(t1), "an answered PING marks")
 
 	client.AddHook(failingPing{})
 	p.now = func() time.Time { return t1.Add(10 * time.Second) }
 	p.heartbeat(ctx)
-	require.True(t, p.LastSuccess().Equal(t1), "a refused PING does not mark")
+	require.True(t, lastMark(p).Equal(t1), "a refused PING does not mark")
 
 	t3 := t1.Add(20 * time.Second)
 	p.now = func() time.Time { return t3 }
 	ledger := NewChargeLedger()
-	_, _, err := p.writeChunk(ctx, nil, []Charge{{Key: prefix + ":consumed:beat", Supplier: "pokt1beat", Amount: 1, TTL: time.Hour}}, ledger)
+	_, _, err = p.writeChunk(ctx, nil, []Charge{{Key: prefix + ":consumed:beat", Supplier: "pokt1beat", Amount: 1, TTL: time.Hour}}, ledger)
 	require.NoError(t, err)
-	require.True(t, p.LastSuccess().Equal(t3), "an answered EXEC marks")
+	require.True(t, lastMark(p).Equal(t3), "an answered EXEC marks")
 }
 
 // pingsAnswered signals every PING Redis answered.
@@ -299,7 +322,7 @@ func TestTheHeartbeatRunsOnItsOwnTickerWhateverTheBatchInterval(t *testing.T) {
 	client.AddHook(hook)
 	p := NewBatchingPublisher(zerolog.Nop(), client, testredis.Prefix(t), time.Hour)
 	t.Cleanup(func() { _ = p.Close() })
-	built := p.LastSuccess()
+	built := lastMark(p)
 
 	// The SECOND answered PING: the dispatcher runs one heartbeat at a time, so by
 	// then the first one has stored its mark.
@@ -310,5 +333,5 @@ func TestTheHeartbeatRunsOnItsOwnTickerWhateverTheBatchInterval(t *testing.T) {
 			t.Fatalf("PING %d did not come within five heartbeat intervals: the heartbeat is not on its own ticker", i+1)
 		}
 	}
-	require.True(t, p.LastSuccess().After(built), "an answered heartbeat moves the mark admission reads")
+	require.True(t, lastMark(p).After(built), "an answered heartbeat moves the mark admission reads")
 }

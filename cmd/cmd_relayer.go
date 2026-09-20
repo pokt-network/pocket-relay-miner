@@ -1208,7 +1208,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// that dispatcher stops reaching Redis. Both come from the concrete batcher,
 	// and until they are wired the meter refuses every relay.
 	batcher.SetChargeLedger(relayMeter.ChargeLedger())
-	relayMeter.SetDispatcherHeartbeat(batcher.LastSuccess)
+	relayMeter.SetDispatcherHealth(batcher.DispatcherHealthy)
 	logger.Info().
 		Msg("relay meter initialized and wired")
 

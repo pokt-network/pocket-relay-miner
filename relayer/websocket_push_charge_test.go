@@ -4,6 +4,7 @@ package relayer
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -283,7 +284,9 @@ func TestAStaleDispatcherClosesAnOpenWebSocketOnItsNextBackendMessage(t *testing
 
 	bridge, gwClient := newUnstartedOwnerBridge(t, signer, pipeline, supplier)
 	admitFrame(t, pipeline, bridge, ownerTestRelay(sessionID, supplier))
-	pipeline.relayMeter.SetDispatcherHeartbeat(func() time.Time { return time.Time{} })
+	pipeline.relayMeter.SetDispatcherHealth(func() (bool, error) {
+		return false, errors.New("dispatcher stopped reaching redis")
+	})
 
 	bridge.handleBackendMessage(backendMessage(`{"push":1}`))
 

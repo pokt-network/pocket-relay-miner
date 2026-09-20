@@ -84,7 +84,7 @@ func TestAWarmedPairIsAdmittedWithoutTouchingRedis(t *testing.T) {
 
 	readerRedis := newTestRedisOnPrefix(t, prefix)
 	reader := newChargeMeterOn(t, readerRedis, false)
-	reader.SetDispatcherHeartbeat(time.Now)
+	reader.SetDispatcherHealth(dispatcherReachingRedis)
 
 	warmed, err := reader.WarmFromRedis(ctx, signsOnly(chargeTestSupplier))
 	require.NoError(t, err)
@@ -103,7 +103,7 @@ func TestAWarmedPairIsAdmittedWithoutTouchingRedis(t *testing.T) {
 	require.Zero(t, counter.commands.Load(), "a warmed pair must be admitted without a Redis round trip")
 
 	cold := newChargeMeterOn(t, readerRedis, false)
-	cold.SetDispatcherHeartbeat(time.Now)
+	cold.SetDispatcherHealth(dispatcherReachingRedis)
 	_, allowed, err := cold.Admit(ctx, sessions[0], chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
 	require.NoError(t, err)
 	require.True(t, allowed)
@@ -148,7 +148,7 @@ func TestWarmupDoesNotOverwriteAPairAlreadyInTheView(t *testing.T) {
 	meterLivePairs(t, writer, charges, chargeTestSupplier, []string{sessionID})
 
 	reader := newChargeMeterOn(t, newTestRedisOnPrefix(t, prefix), false)
-	reader.SetDispatcherHeartbeat(time.Now)
+	reader.SetDispatcherHealth(dispatcherReachingRedis)
 	reservation, allowed, err := reader.Admit(ctx, sessionID, chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
 	require.NoError(t, err)
 	require.True(t, allowed, "premise: the pair is in the view")

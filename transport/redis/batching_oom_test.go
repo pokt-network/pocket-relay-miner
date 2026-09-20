@@ -68,6 +68,15 @@ func TestBatchingPublisher_AChunkRefusedForMemoryIsNotSuccessAndSpendsNoAttempt(
 	prefix := testredis.Prefix(t)
 	refuse := &redisRefusesForMemory{}
 	client.AddHook(refuse)
+	// The heartbeat is silenced for the whole test: what is measured here is
+	// whether a REFUSED CHUNK marks success, and a PING answered beside it marks
+	// for a reason this test is not about. The dispatcher beats once as it starts
+	// and once a second after that, so without this the mark below is a race.
+	//
+	// Not because Redis refuses PINGs under maxmemory -- measured 2026-09-20, it
+	// answers PONG while every write gets OOM, and that gap is a hole of its own
+	// that item 388 records and does not close.
+	client.AddHook(failingPing{})
 	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour)
 	t.Cleanup(func() { _ = p.Close() })
 	ledger := NewChargeLedger()
@@ -78,7 +87,8 @@ func TestBatchingPublisher_AChunkRefusedForMemoryIsNotSuccessAndSpendsNoAttempt(
 		require.NoError(t, p.Publish(ctx, mined(supplier, "s1", i)))
 	}
 	ledger.Add(prefix+":consumed", supplier, 7, time.Minute)
-	p.lastSuccess.Store(1)
+	marked := time.Now()
+	p.lastSuccess.Store(&marked)
 	published := testutil.ToFloat64(publishedTotal.WithLabelValues(supplier, "svc"))
 	exhausted := testutil.ToFloat64(chargeWriteFailures.WithLabelValues("attempts_exhausted"))
 
@@ -89,7 +99,7 @@ func TestBatchingPublisher_AChunkRefusedForMemoryIsNotSuccessAndSpendsNoAttempt(
 	require.Positive(t, refuse.fired.Load(), "control: the refusal reached a real dispatch")
 	require.Equal(t, []int{0, 0, 0}, queuedAttempts(p),
 		"LINK oom-attempts: a chunk refused for memory spends no entry's attempt")
-	require.Equal(t, int64(1), p.lastSuccess.Load(), "LINK oom-success: a refusal is not Redis answering the dispatcher")
+	require.True(t, lastMark(p).Equal(marked), "LINK oom-success: a refusal is not Redis answering the dispatcher")
 	require.Equal(t, published, testutil.ToFloat64(publishedTotal.WithLabelValues(supplier, "svc")),
 		"nothing refused counts as published")
 	require.Equal(t, exhausted, testutil.ToFloat64(chargeWriteFailures.WithLabelValues("attempts_exhausted")),

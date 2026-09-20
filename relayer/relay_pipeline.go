@@ -216,7 +216,8 @@ func (p *RelayPipeline) ChargeServedRelay(
 	return p.relayMeter.ChargeServed(ctx, sessionID, serviceID, supplierAddress, sessionStartHeight)
 }
 
-// DispatcherAlive reports whether a relay served now would be charged.
-func (p *RelayPipeline) DispatcherAlive() bool {
-	return p.relayMeter.DispatcherAlive()
+// DispatcherHealthy reports whether a relay served now would be charged, and
+// why not when it would not.
+func (p *RelayPipeline) DispatcherHealthy() (bool, error) {
+	return p.relayMeter.DispatcherHealthy()
 }

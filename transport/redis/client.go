@@ -222,7 +222,14 @@ func NewClient(ctx context.Context, cfg ClientConfig) (*Client, error) {
 // rather than publish a zero: a zero pool timeout reads as "no limit", which is
 // the opposite of the truth.
 func (c *Client) EffectivePoolOptions() (EffectivePool, bool) {
-	switch cl := c.UniversalClient.(type) {
+	return EffectivePoolOf(c.UniversalClient)
+}
+
+// EffectivePoolOf asks the same of a bare client. The batching publisher holds a
+// redis.UniversalClient and not a *Client, and one type switch serving both is
+// one that cannot drift from a second copy.
+func EffectivePoolOf(client redis.UniversalClient) (EffectivePool, bool) {
+	switch cl := client.(type) {
 	case *redis.Client:
 		o := cl.Options()
 		return EffectivePool{PoolSize: o.PoolSize, MinIdleConns: o.MinIdleConns, PoolTimeout: o.PoolTimeout}, true

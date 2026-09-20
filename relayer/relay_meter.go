@@ -173,14 +173,17 @@ type RelayMeter struct {
 	// Admission view, per consumed counter. seen is the counter's value as this
 	// replica last read or wrote it, inFlight is what admitted relays hold until
 	// they are served or released, and the ledger holds what was served and not
-	// written yet. accMu guards seen, inFlight and heartbeat, and it is taken
-	// BEFORE the ledger's lock, never while holding it.
-	ledger    *redisutil.ChargeLedger
-	accMu     sync.Mutex
-	seen      map[string]int64
-	inFlight  map[string]int64
-	heartbeat func() time.Time
-	now       func() time.Time
+	// written yet. accMu guards seen, inFlight and dispatcherHealth, and it is
+	// taken BEFORE the ledger's lock, never while holding it.
+	ledger   *redisutil.ChargeLedger
+	accMu    sync.Mutex
+	seen     map[string]int64
+	inFlight map[string]int64
+	// dispatcherHealth asks the batch dispatcher whether what is served now can
+	// still be charged. It answers yes/no with the reason; the meter does no
+	// arithmetic on instants of its own, which is what kept a wall-clock jump
+	// from closing admission.
+	dispatcherHealth func() (bool, error)
 
 	// Lifecycle
 	ctx      context.Context
@@ -222,16 +225,14 @@ func NewRelayMeter(
 		ledger:                redisutil.NewChargeLedger(),
 		seen:                  make(map[string]int64),
 		inFlight:              make(map[string]int64),
-		now:                   time.Now,
 	}
 	m.ledger.OnWritten(m.chargeWritten)
 	return m
 }
 
-// dispatcherHeartbeatMaxAge is how long admission stays open without the batch
-// dispatcher reaching Redis. That dispatcher is what writes served charges, so
-// past this age a relay admitted now may never be charged.
-const dispatcherHeartbeatMaxAge = 3 * time.Second
+// errDispatcherNotWired is the refusal before SetDispatcherHealth ran: with no
+// dispatcher there is nothing to write what a served relay owes.
+var errDispatcherNotWired = errors.New("batch dispatcher is not wired")
 
 // meterOperationDispatcherHeartbeat is the relay_meter_errors_total operation of
 // a relay refused because the batch dispatcher stopped reaching Redis, on every
@@ -244,12 +245,13 @@ func (m *RelayMeter) ChargeLedger() *redisutil.ChargeLedger {
 	return m.ledger
 }
 
-// SetDispatcherHeartbeat wires the time the batch dispatcher last reached Redis.
-// Until it is set admission refuses, because nothing would write what is served.
-func (m *RelayMeter) SetDispatcherHeartbeat(lastSuccess func() time.Time) {
+// SetDispatcherHealth wires the batch dispatcher's own answer to "can a relay
+// served now still be charged?". Until it is set admission refuses, because
+// nothing would write what is served.
+func (m *RelayMeter) SetDispatcherHealth(healthy func() (bool, error)) {
 	m.accMu.Lock()
 	defer m.accMu.Unlock()
-	m.heartbeat = lastSuccess
+	m.dispatcherHealth = healthy
 }
 
 // SetServiceComputeUnitsProvider wires the session-start CUPR provider so the
@@ -387,9 +389,9 @@ func (m *RelayMeter) admit(
 	}
 	m.mu.RUnlock()
 
-	if !m.dispatcherAlive() {
+	if alive, err := m.dispatcherHealthy(); !alive {
 		allowed, meterErr := m.handleMeterError(meterOperationDispatcherHeartbeat,
-			fmt.Errorf("%w: batch dispatcher has not reached redis within %s", ErrMeterStoreUnavailable, dispatcherHeartbeatMaxAge))
+			fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err))
 		return Reservation{}, allowed, meterErr
 	}
 
@@ -549,22 +551,23 @@ func (m *RelayMeter) ChargeServed(
 	return total >= meta.MaxStakeUpokt, nil
 }
 
-// DispatcherAlive reports whether a relay served now would be charged: the
-// batch dispatcher that writes charges has reached Redis recently.
-func (m *RelayMeter) DispatcherAlive() bool {
-	return m.dispatcherAlive()
+// DispatcherHealthy reports whether a relay served now would be charged: the
+// batch dispatcher that writes charges is still reaching Redis. The error says
+// why not, for the caller that logs its own refusal.
+func (m *RelayMeter) DispatcherHealthy() (bool, error) {
+	return m.dispatcherHealthy()
 }
 
-// dispatcherAlive reports whether the batch dispatcher reached Redis recently
-// enough for a relay admitted now to be charged.
-func (m *RelayMeter) dispatcherAlive() bool {
+// dispatcherHealthy asks the dispatcher. It does NOT compare instants: the
+// dispatcher owns them, decides against its own budget, and answers.
+func (m *RelayMeter) dispatcherHealthy() (bool, error) {
 	m.accMu.Lock()
-	lastSuccess := m.heartbeat
+	healthy := m.dispatcherHealth
 	m.accMu.Unlock()
-	if lastSuccess == nil {
-		return false
+	if healthy == nil {
+		return false, errDispatcherNotWired
 	}
-	return m.now().Sub(lastSuccess()) <= dispatcherHeartbeatMaxAge
+	return healthy()
 }
 
 // loadSeen reads the pair's consumed counter the first time this replica sees

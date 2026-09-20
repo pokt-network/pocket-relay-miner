@@ -37,7 +37,7 @@ func TestDispatchRoundDurationIsTheSlowestWriteOfTheRound(t *testing.T) {
 		proceed: make(chan struct{}),
 	}
 	client.AddHook(hook)
-	t0 := time.Unix(1_700_000_000, 0)
+	t0 := time.Now()
 	clock := newFakeClock(t0)
 	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour, WithDispatchWorkers(2), withClock(clock.now))
 	t.Cleanup(func() { _ = p.Close() })
@@ -63,7 +63,7 @@ func TestDispatchRoundDurationIsTheSlowestWriteOfTheRound(t *testing.T) {
 	fastAt := t0.Add(100 * time.Millisecond)
 	clock.set(fastAt)
 	proceed()
-	require.Eventually(t, func() bool { return p.lastSuccess.Load() == fastAt.UnixNano() },
+	require.Eventually(t, func() bool { return lastMark(p).Equal(fastAt) },
 		10*time.Second, time.Millisecond, "premise: the fast write was answered first")
 	count, _ := roundDurations(t, "ok")
 	require.Equal(t, okCount, count, "LINK round-once: nothing is observed while the round's slowest write is in flight")

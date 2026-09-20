@@ -36,7 +36,14 @@ func newChargeWriter(t *testing.T, meter *RelayMeter, client *redisutil.Client) 
 func (w *chargeWriter) wire() {
 	w.batcher = redisutil.NewBatchingPublisher(testLogger(), w.client.UniversalClient, w.client.KB().StreamPrefix(), time.Hour)
 	w.batcher.SetChargeLedger(w.meter.ChargeLedger())
-	w.meter.SetDispatcherHeartbeat(w.batcher.LastSuccess)
+	w.meter.SetDispatcherHealth(w.batcher.DispatcherHealthy)
+	// The publisher marks nothing until Redis answers it, so admission is closed
+	// until the dispatcher's first beat lands. Waiting for the fact and not for a
+	// duration: a sleep here would be the flake this repo forbids.
+	require.Eventually(w.t, func() bool {
+		alive, _ := w.batcher.DispatcherHealthy()
+		return alive
+	}, 10*time.Second, time.Millisecond, "premise: the dispatcher reached Redis before the first relay")
 }
 
 // flush writes every charge settled so far.

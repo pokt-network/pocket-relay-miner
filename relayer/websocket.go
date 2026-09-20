@@ -1172,12 +1172,14 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	// reaching Redis the charge may never be written, so the connection closes
 	// instead, the answer a client frame gets at admission. A subscription whose
 	// backend sends nothing more stays open, and serves nothing meanwhile.
-	if !b.simulated && !b.relayPipeline.DispatcherAlive() {
-		relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonMeterError).Inc()
-		relayMeterErrors.WithLabelValues(meterOperationDispatcherHeartbeat).Inc()
-		b.logger.Debug().Msg("backend message not served - relay charges are not being written, closing connection")
-		_ = b.closeWithReason(CloseTryAgainLater, "unable to process relay request", wsCloseInitiatorRelayer)
-		return
+	if !b.simulated {
+		if alive, chargeErr := b.relayPipeline.DispatcherHealthy(); !alive {
+			relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonMeterError).Inc()
+			relayMeterErrors.WithLabelValues(meterOperationDispatcherHeartbeat).Inc()
+			b.logger.Debug().Err(chargeErr).Msg("backend message not served - relay charges are not being written, closing connection")
+			_ = b.closeWithReason(CloseTryAgainLater, "unable to process relay request", wsCloseInitiatorRelayer)
+			return
+		}
 	}
 
 	b.logger.Debug().Msg("latestRequest found - building signed response")

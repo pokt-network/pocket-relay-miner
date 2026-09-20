@@ -83,14 +83,24 @@ type BatchingPublisher struct {
 	// ledger holds the served cost written with the XADDs; nil writes none.
 	ledger *ChargeLedger
 
-	// lastSuccess is the UnixNano of the last round trip Redis answered: a PING
-	// on the heartbeat tick or an EXEC. Admission reads it to stop when the
-	// dispatcher can no longer write.
-	lastSuccess atomic.Int64
-	// inFlightSince is the UnixNano at which the round of writes now in flight
-	// started, and 0 while none is. Every chunk of a round starts together, so it
-	// is also when the oldest write in flight started.
-	inFlightSince atomic.Int64
+	// lastSuccess is the last round trip Redis answered: a PING on the heartbeat
+	// tick or an EXEC. It is nil until the first one is answered, so a dispatcher
+	// that has never reached Redis refuses instead of coasting.
+	//
+	// It holds the instant itself and not its UnixNano on purpose. An instant
+	// stored as an integer loses its monotonic reading, so comparing it against a
+	// later time.Now() measures the WALL clock, and a clock jump alone closes
+	// admission with Redis healthy and the dispatcher writing. Measured
+	// 2026-09-20 on a cold start: a +3.34s jump refused 1203 relays.
+	lastSuccess atomic.Pointer[time.Time]
+	// inFlightSince is when the round of writes now in flight started, and nil
+	// while none is. Every chunk of a round starts together, so it is also when
+	// the oldest write in flight started.
+	inFlightSince atomic.Pointer[time.Time]
+	// silenceBudget is how long the dispatcher may go without reaching Redis
+	// before admission closes; dispatcherSilenceBudget derives it at construction
+	// from the client that actually runs.
+	silenceBudget time.Duration
 	now           func() time.Time
 
 	// health, when set, pauses dispatch while Redis cannot take writes.
@@ -156,7 +166,10 @@ func NewBatchingPublisher(
 		opt(p)
 	}
 	p.pool = pond.NewPool(p.workers)
-	p.markSuccess()
+	p.silenceBudget = dispatcherSilenceBudget(p.logger, client)
+	// Nothing is marked here. Marking success at construction handed admission a
+	// mark nobody earned: with Redis unreachable from the start the relayer
+	// admitted for the whole budget on a round trip that never happened.
 	go logging.RecoverGoRoutine(p.logger, "batching_publisher_dispatch", func(c context.Context) {
 		defer close(p.done)
 		p.run(c)
@@ -227,6 +240,58 @@ const queuedEntryOverheadBytes = 730
 // blind for 30 s.
 const heartbeatInterval = time.Second
 
+// minDispatcherSilence is the floor of how long the dispatcher may go without
+// reaching Redis before admission closes. Operator decision (Jorge, 2026-09-20:
+// "10s MINIMO"): under load, ordinary scheduling contention keeps a healthy
+// dispatcher from marking for longer than a small budget tolerates, and every
+// relay refused there was one a healthy fleet would have served and charged.
+const minDispatcherSilence = 10 * time.Second
+
+// healthyRoundBudget is how long a HEALTHY dispatch round may keep the shared
+// goroutine before the heartbeat gets its turn. Both tickers select on the same
+// goroutine on purpose (see DispatcherHealthy), so a round in progress delays
+// the next beat by its own duration.
+//
+// It is a declared allowance and NOT a measurement: a healthy round is one
+// TxPipelined round trip of at most maxChunkCommands, milliseconds in practice.
+// The number never decides the budget on its own -- with go-redis's 6s pool
+// timeout the sum stays under the floor for any value up to 3s. What it does is
+// keep the budget growing with an operator who raises the pool timeout.
+const healthyRoundBudget = time.Second
+
+// dispatcherSilenceBudget derives the budget from the client that actually runs
+// rather than from config: a pool timeout left unset reaches the client as
+// go-redis's own default, and config would have published the zero.
+//
+// The batch interval is deliberately NOT a term: the heartbeat has its own
+// ticker, and what bounds the budget is how long a dispatch keeps the goroutine,
+// not how often one starts.
+//
+// ok=false means this client type cannot be asked, and then the floor is the
+// whole budget. It says so once, at startup: without the line the max() returns
+// the right number for the wrong reason and nobody learns the term was missing.
+func dispatcherSilenceBudget(logger logging.Logger, client redis.UniversalClient) time.Duration {
+	pool, ok := EffectivePoolOf(client)
+	if !ok {
+		logger.Warn().Msg("redis client cannot report its pool timeout; the dispatcher silence budget falls back to its floor")
+		return minDispatcherSilence
+	}
+	// One heartbeat interval and not two: a time.Ticker buffers one tick, so a
+	// beat delayed by a round is not lost, it fires late.
+	budget := healthyRoundBudget + pool.PoolTimeout + heartbeatInterval
+	if budget < minDispatcherSilence {
+		return minDispatcherSilence
+	}
+	return budget
+}
+
+// errDispatcherNeverReachedRedis refuses before the first answered round trip:
+// nothing served could be charged yet.
+var errDispatcherNeverReachedRedis = errors.New("batch dispatcher has not reached redis since startup")
+
+// errDispatcherSilent refuses once the dispatcher stops reaching Redis.
+var errDispatcherSilent = errors.New("batch dispatcher stopped reaching redis")
+
 // SetChargeLedger makes every dispatch write the ledger's charges alongside the
 // XADDs.
 func (p *BatchingPublisher) SetChargeLedger(ledger *ChargeLedger) {
@@ -235,25 +300,40 @@ func (p *BatchingPublisher) SetChargeLedger(ledger *ChargeLedger) {
 	p.ledger = ledger
 }
 
-// LastSuccess is the time admission measures the dispatcher's progress from:
-// when Redis last answered it, or, while writes are in flight, when the oldest of
-// them started if that is earlier.
+// DispatcherHealthy answers the one question admission asks before serving a
+// relay: can what is served now still be charged? Yes while the dispatcher keeps
+// reaching Redis, and no with the reason once it stops.
 //
-// An answer alone is not progress with several workers: one worker can hang on
-// its EXEC while another is answered, and the charges riding in the hung write
-// stay unwritten, invisible to every other replica. So a write in flight for
-// longer than admission tolerates closes admission even if Redis answers the
-// rest.
-func (p *BatchingPublisher) LastSuccess() time.Time {
+// The decision is made HERE, next to the instants, instead of handing an instant
+// out. An instant that crosses this boundary has to be carried as something, and
+// carrying it as an integer of UnixNano is what let a wall-clock jump close
+// admission while Redis was answering.
+//
+// Progress is measured from when Redis last answered, or, while writes are in
+// flight, from when the oldest of them started if that is earlier. An answer
+// alone is not progress with several workers: one worker can hang on its EXEC
+// while another is answered, and the charges riding in the hung write stay
+// unwritten, invisible to every other replica. So a write in flight for longer
+// than the budget closes admission even if Redis answers the rest.
+func (p *BatchingPublisher) DispatcherHealthy() (bool, error) {
 	last := p.lastSuccess.Load()
-	if since := p.inFlightSince.Load(); since != 0 && since < last {
-		last = since
+	if last == nil {
+		return false, errDispatcherNeverReachedRedis
 	}
-	return time.Unix(0, last)
+	measuredFrom := *last
+	if since := p.inFlightSince.Load(); since != nil && since.Before(measuredFrom) {
+		measuredFrom = *since
+	}
+	if age := p.now().Sub(measuredFrom); age > p.silenceBudget {
+		return false, fmt.Errorf("%w: last answer %s ago, budget %s",
+			errDispatcherSilent, age.Round(time.Millisecond), p.silenceBudget)
+	}
+	return true, nil
 }
 
 func (p *BatchingPublisher) markSuccess() {
-	p.lastSuccess.Store(p.now().UnixNano())
+	at := p.now()
+	p.lastSuccess.Store(&at)
 }
 
 // heartbeat marks success when Redis answers a PING. It runs on the dispatcher's
@@ -263,7 +343,7 @@ func (p *BatchingPublisher) markSuccess() {
 // whether the dispatcher progresses, and a PING answered next to a hung write
 // would only prove that Redis answers.
 func (p *BatchingPublisher) heartbeat(ctx context.Context) {
-	if p.inFlightSince.Load() != 0 {
+	if p.inFlightSince.Load() != nil {
 		return
 	}
 	if err := p.client.Ping(ctx).Err(); err == nil {
@@ -277,6 +357,12 @@ func (p *BatchingPublisher) run(ctx context.Context) {
 	defer ticker.Stop()
 	beat := time.NewTicker(heartbeatInterval)
 	defer beat.Stop()
+
+	// The first beat is taken now rather than a tick from now. Construction
+	// marks nothing, so until Redis answers once, admission is closed: waiting
+	// out a full interval to ask would keep it closed for that interval with
+	// Redis healthy.
+	p.heartbeat(ctx)
 
 	for {
 		select {
@@ -431,13 +517,13 @@ var errDispatchWorkerStopped = errors.New("dispatch worker stopped before report
 // panics goes back to the queue instead of being taken as written.
 func (p *BatchingPublisher) writeRound(ctx context.Context, round []*dispatchJob, ledger *ChargeLedger) {
 	start := p.now()
-	p.inFlightSince.Store(start.UnixNano())
-	// The round is what LastSuccess measures from while it is in flight, so its
-	// duration, until the slowest EXEC comes back, is what admission's heartbeat
+	p.inFlightSince.Store(&start)
+	// The round is what DispatcherHealthy measures from while it is in flight, so
+	// its duration, until the slowest EXEC comes back, is what the silence budget
 	// is compared with.
 	defer func() {
 		dispatchRoundDuration.WithLabelValues(roundResult(round)).Observe(p.now().Sub(start).Seconds())
-		p.inFlightSince.Store(0)
+		p.inFlightSince.Store(nil)
 	}()
 	if len(round) == 1 {
 		job := round[0]

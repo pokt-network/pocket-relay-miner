@@ -20,7 +20,15 @@ import (
 )
 
 // fakeClock is a clock the test moves by hand, safe to read from the workers.
-type fakeClock struct{ nanos atomic.Int64 }
+//
+// It stores the instant and not its UnixNano, for the same reason the publisher
+// does: an instant that crosses an int64 comes back without its monotonic
+// reading, and then every Sub over it measures the wall clock. Measured
+// 2026-09-20 while writing item 388's positive control -- with the old
+// atomic.Int64 here, a round's own mark carried no reading even after the test's
+// base was moved from a literal to time.Now, so the test could not tell a
+// monotonic implementation from the broken one.
+type fakeClock struct{ at atomic.Pointer[time.Time] }
 
 func newFakeClock(t time.Time) *fakeClock {
 	c := &fakeClock{}
@@ -28,8 +36,8 @@ func newFakeClock(t time.Time) *fakeClock {
 	return c
 }
 
-func (c *fakeClock) set(t time.Time) { c.nanos.Store(t.UnixNano()) }
-func (c *fakeClock) now() time.Time  { return time.Unix(0, c.nanos.Load()) }
+func (c *fakeClock) set(t time.Time) { c.at.Store(&t) }
+func (c *fakeClock) now() time.Time  { return *c.at.Load() }
 func withClock(now func() time.Time) BatchingPublisherOption {
 	return func(p *BatchingPublisher) { p.now = now }
 }
@@ -104,7 +112,10 @@ func TestAStuckWriteClosesAdmissionEvenIfAnotherWorkerAnswers(t *testing.T) {
 		proceed: make(chan struct{}),
 	}
 	client.AddHook(hook)
-	t0 := time.Unix(1_700_000_000, 0)
+	// time.Now and not a wall-clock literal: a literal carries no monotonic
+	// reading, so Sub over it falls back to the wall clock and an implementation
+	// that lost the monotonic reading would pass this test too.
+	t0 := time.Now()
 	clock := newFakeClock(t0)
 	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour, WithDispatchWorkers(2), withClock(clock.now))
 	t.Cleanup(func() { _ = p.Close() })
@@ -129,24 +140,43 @@ func TestAStuckWriteClosesAdmissionEvenIfAnotherWorkerAnswers(t *testing.T) {
 	waitFor(t, hook.entered, "the first write of the round")
 	waitFor(t, hook.entered, "the second write of the round")
 
+	// The round stamped its own mark through writeRound, not a test store: if
+	// that stamp ever loses its monotonic reading, the pinch below measures the
+	// wall clock again. See TestTheMarksAdmissionMeasuresFromKeepTheirMonotonicReading.
+	require.True(t, hasMonotonic(*p.inFlightSince.Load()),
+		"the mark a real dispatch round stamps must carry a monotonic reading")
+
 	answeredAt := t0.Add(2500 * time.Millisecond)
 	clock.set(answeredAt)
 	proceed()
-	require.Eventually(t, func() bool { return p.lastSuccess.Load() == answeredAt.UnixNano() },
+	require.Eventually(t, func() bool { return lastMark(p).Equal(answeredAt) },
 		10*time.Second, time.Millisecond, "premise: the other worker's EXEC was answered and marked")
 
 	clock.set(t0.Add(time.Hour))
-	require.True(t, p.LastSuccess().Equal(t0),
+	alive, err := p.DispatcherHealthy()
+	require.False(t, alive,
 		"a worker was answered at %s, but the oldest write in flight started at %s: admission must measure "+
-			"from the hung write, not from any answer (got %s)", answeredAt, t0, p.LastSuccess())
+			"from the hung write, not from any answer", answeredAt, t0)
+	require.ErrorIs(t, err, errDispatcherSilent)
 
 	recovered := t0.Add(2 * time.Hour)
 	clock.set(recovered)
 	release()
 	waitFor(t, done, "the round to end once the hung write is answered")
-	require.True(t, p.LastSuccess().Equal(recovered),
-		"once no write is in flight, admission measures from the last answer again (got %s)", p.LastSuccess())
+	alive, err = p.DispatcherHealthy()
+	require.True(t, alive,
+		"once no write is in flight, admission measures from the last answer again (%v)", err)
 	require.Equal(t, int64(200), client.XLen(context.Background(), stuck).Val())
+}
+
+// lastMark is the instant the publisher last marked, or the zero time while it
+// has marked nothing. Tests read it through here because the field holds a
+// pointer: nil is "never reached Redis", which is what a fresh publisher is.
+func lastMark(p *BatchingPublisher) time.Time {
+	if at := p.lastSuccess.Load(); at != nil {
+		return *at
+	}
+	return time.Time{}
 }
 
 // pingCounter counts the PINGs sent through the client.
@@ -203,10 +233,10 @@ func TestTheHeartbeatPingsOnlyWhileNoWriteIsInFlight(t *testing.T) {
 	waitFor(t, hook.entered, "the write to be in flight")
 
 	before := counter.pings.Load()
-	markBefore := p.lastSuccess.Load()
+	markBefore := lastMark(p)
 	p.heartbeat(ctx)
 	require.Equal(t, before, counter.pings.Load(), "the heartbeat sent a PING while a write was in flight")
-	require.Equal(t, markBefore, p.lastSuccess.Load())
+	require.True(t, lastMark(p).Equal(markBefore))
 
 	release()
 	waitFor(t, done, "the write to end")

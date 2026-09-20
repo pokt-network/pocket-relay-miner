@@ -284,6 +284,10 @@ func TestTheFirstAdmissionOfAPairRespectsWhatRedisHolds(t *testing.T) {
 	require.Equal(t, chargeTestCap-2, consumedIn(t, rc, key), "admission reads the counter and never rewrites it")
 }
 
+// dispatcherReachingRedis is the answer of a dispatcher that still reaches
+// Redis: what is served now will be charged.
+func dispatcherReachingRedis() (bool, error) { return true, nil }
+
 // TestAdmissionClosesWhenTheDispatcherStopsReachingRedis: the dispatcher writes
 // what is served, so admission follows its heartbeat, not the relay traffic.
 func TestAdmissionClosesWhenTheDispatcherStopsReachingRedis(t *testing.T) {
@@ -296,27 +300,28 @@ func TestAdmissionClosesWhenTheDispatcherStopsReachingRedis(t *testing.T) {
 	require.ErrorIs(t, err, ErrMeterStoreUnavailable, "with no dispatcher wired nothing would write the charge")
 	require.False(t, allowed)
 
-	t0 := time.Unix(1_700_000_000, 0)
-	now, lastSuccess := t0, t0
-	meter.now = func() time.Time { return now }
-	meter.SetDispatcherHeartbeat(func() time.Time { return lastSuccess })
+	// The meter compares no instants of its own: it asks the dispatcher and
+	// obeys. How long a silence is tolerated is the dispatcher's budget, pinned
+	// in transport/redis where the instants live.
+	healthy, reason := true, error(nil)
+	meter.SetDispatcherHealth(func() (bool, error) { return healthy, reason })
 
-	now = t0.Add(dispatcherHeartbeatMaxAge)
 	reservation, allowed, err := meter.Admit(ctx, sessionID, chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
 	require.NoError(t, err)
-	require.True(t, allowed, "exactly at the limit the dispatcher still counts as alive")
+	require.True(t, allowed, "a dispatcher still reaching Redis keeps admission open")
 	meter.Release(reservation)
 
-	now = t0.Add(dispatcherHeartbeatMaxAge + time.Millisecond)
+	healthy, reason = false, errors.New("last answer 12s ago, budget 10s")
 	_, allowed, err = meter.Admit(ctx, sessionID, chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
-	require.ErrorIs(t, err, ErrMeterStoreUnavailable, "past the limit a relay admitted now may never be charged")
+	require.ErrorIs(t, err, ErrMeterStoreUnavailable, "with the dispatcher silent a relay admitted now may never be charged")
+	require.NotContains(t, err.Error(), "last answer 12s ago",
+		"the dispatcher's reason stays in the Debug log and the metric: what crosses this boundary reaches a "+
+			"client's 503 body, and our budget and store are not a client's business")
 	require.False(t, allowed)
 	require.Zero(t, inFlightOf(meter, key), "a refused relay reserves nothing")
 
-	// Redis healthy and no relay traffic for five seconds: the heartbeat kept
-	// reaching Redis, so admission is still open.
-	now = t0.Add(5 * time.Second)
-	lastSuccess = now.Add(-time.Second)
+	// The dispatcher reaches Redis again: nothing in the meter has to age out.
+	healthy, reason = true, nil
 	_, allowed, err = meter.Admit(ctx, sessionID, chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
 	require.NoError(t, err)
 	require.True(t, allowed)
@@ -455,7 +460,7 @@ func (c *commandCounter) ProcessPipelineHook(next goredis.ProcessPipelineHook) g
 // view lowered to the older reply would admit what Redis already counts.
 func TestAnOlderWriteReplyDoesNotLowerTheView(t *testing.T) {
 	meter, _ := newChargeTestMeter(t, false)
-	meter.SetDispatcherHeartbeat(time.Now)
+	meter.SetDispatcherHealth(dispatcherReachingRedis)
 	const sessionID = "sess-replies"
 	reservation, allowed, err := meter.Admit(context.Background(), sessionID, chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
 	require.NoError(t, err)
@@ -478,7 +483,7 @@ func TestAnOlderWriteReplyDoesNotLowerTheView(t *testing.T) {
 func TestAViewedPairIsAdmittedAndChargedWithoutTouchingRedis(t *testing.T) {
 	meter, rc := newChargeTestMeter(t, false)
 	// No dispatcher here, so the count below is the meter's alone.
-	meter.SetDispatcherHeartbeat(time.Now)
+	meter.SetDispatcherHealth(dispatcherReachingRedis)
 	const sessionID = "sess-hot"
 	ctx := context.Background()
 

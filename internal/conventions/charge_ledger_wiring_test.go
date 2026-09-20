@@ -12,9 +12,9 @@ import (
 //
 // What goes red: either call missing, repeated or under a condition (the meter
 // would refuse every relay, or serve with nothing writing its charges); a
-// heartbeat taken from anything but the concrete batcher's LastSuccess, such as a
-// type assertion on the publisher interface; and wiring placed after the relay
-// pipeline is initialized.
+// health signal taken from anything but the concrete batcher's DispatcherHealthy,
+// such as a type assertion on the publisher interface; and wiring placed after
+// the relay pipeline is initialized.
 
 // chargeWiringViolations reports what is wrong with the ledger and heartbeat
 // wiring in f. The concrete batcher is the variable assigned from
@@ -42,7 +42,7 @@ func chargeWiringViolations(f *ast.File, fset *token.FileSet) []string {
 	}
 
 	calls := map[string]*ast.CallExpr{}
-	for _, wanted := range []string{"SetChargeLedger", "SetDispatcherHeartbeat"} {
+	for _, wanted := range []string{"SetChargeLedger", "SetDispatcherHealth"} {
 		unconditional, conditional := callsOf(f, wanted)
 		for _, pos := range conditional {
 			out = append(out, wanted+" is called under a condition at "+fset.Position(pos).String())
@@ -65,21 +65,21 @@ func chargeWiringViolations(f *ast.File, fset *token.FileSet) []string {
 			out = append(out, "SetChargeLedger is not called on the concrete batcher "+batcher)
 		}
 	}
-	if call := calls["SetDispatcherHeartbeat"]; call != nil {
+	if call := calls["SetDispatcherHealth"]; call != nil {
 		ok := false
 		if len(call.Args) == 1 {
-			if sel, isSel := call.Args[0].(*ast.SelectorExpr); isSel && sel.Sel.Name == "LastSuccess" {
+			if sel, isSel := call.Args[0].(*ast.SelectorExpr); isSel && sel.Sel.Name == "DispatcherHealthy" {
 				id, isIdent := sel.X.(*ast.Ident)
 				ok = isIdent && id.Name == batcher
 			}
 		}
 		if !ok {
-			out = append(out, "SetDispatcherHeartbeat must be given "+batcher+".LastSuccess, from the concrete batcher")
+			out = append(out, "SetDispatcherHealth must be given "+batcher+".DispatcherHealthy, from the concrete batcher")
 		}
 	}
 
 	pipelineInit, _ := callsOf(f, "InitializeRelayPipeline")
-	for _, name := range []string{"SetChargeLedger", "SetDispatcherHeartbeat"} {
+	for _, name := range []string{"SetChargeLedger", "SetDispatcherHealth"} {
 		call := calls[name]
 		if call == nil {
 			continue
@@ -117,25 +117,25 @@ func TestChargeWiringViolationsReadsTheShape(t *testing.T) {
 		{"wired", `
 	batcher := x.NewBatchingPublisher()
 	batcher.SetChargeLedger(meter.ChargeLedger())
-	meter.SetDispatcherHeartbeat(batcher.LastSuccess)
+	meter.SetDispatcherHealth(batcher.DispatcherHealthy)
 	proxy.InitializeRelayPipeline()`, 0},
 		{"heartbeat through a type assertion", `
 	batcher := x.NewBatchingPublisher()
 	var publisher transport.MinedRelayPublisher = batcher
 	batcher.SetChargeLedger(meter.ChargeLedger())
-	meter.SetDispatcherHeartbeat(publisher.(*x.BatchingPublisher).LastSuccess)
+	meter.SetDispatcherHealth(publisher.(*x.BatchingPublisher).DispatcherHealthy)
 	proxy.InitializeRelayPipeline()`, 1},
 		{"ledger on another receiver", `
 	batcher := x.NewBatchingPublisher()
 	other.SetChargeLedger(meter.ChargeLedger())
-	meter.SetDispatcherHeartbeat(batcher.LastSuccess)
+	meter.SetDispatcherHealth(batcher.DispatcherHealthy)
 	proxy.InitializeRelayPipeline()`, 1},
 		{"guarded ledger", `
 	batcher := x.NewBatchingPublisher()
 	if on {
 		batcher.SetChargeLedger(meter.ChargeLedger())
 	}
-	meter.SetDispatcherHeartbeat(batcher.LastSuccess)
+	meter.SetDispatcherHealth(batcher.DispatcherHealthy)
 	proxy.InitializeRelayPipeline()`, 2},
 		{"heartbeat missing", `
 	batcher := x.NewBatchingPublisher()
@@ -145,7 +145,7 @@ func TestChargeWiringViolationsReadsTheShape(t *testing.T) {
 	batcher := x.NewBatchingPublisher()
 	proxy.InitializeRelayPipeline()
 	batcher.SetChargeLedger(meter.ChargeLedger())
-	meter.SetDispatcherHeartbeat(batcher.LastSuccess)`, 2},
+	meter.SetDispatcherHealth(batcher.DispatcherHealthy)`, 2},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
