@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/url"
+	"os"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -204,7 +205,9 @@ func RelayCmd() *cobra.Command {
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayLoadTest, "load-test", false, "Enable load test mode with concurrency")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayConcurrency, "concurrency", 10, "Number of concurrent workers (load test mode)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayRPS, "rps", 0, "Target requests per second (0 = unlimited, only for load test mode)")
-	relayCmd.PersistentFlags().StringVar(&relay.RelayPayloadJSON, "payload", "", "Custom JSON-RPC payload (default: eth_blockNumber)")
+	relayCmd.PersistentFlags().StringVar(&relay.RelayPayloadJSON, "payload", "",
+		"Custom JSON-RPC payload, or @FILE to read it from a file (default: eth_blockNumber). "+
+			"A body over ~128 KiB can ONLY be passed as @FILE: the kernel caps one argument at that size")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayOutputJSON, "output-json", false, "Output results as JSON (stream mode only; ignored by other modes)")
 	relayCmd.PersistentFlags().IntVar(&relay.RelayTimeout, "timeout", 120, "Request timeout in seconds (also the max time a stream is read before giving up)")
 	relayCmd.PersistentFlags().BoolVar(&relay.RelayVerbose, "verbose", false, "Verbose logging")
@@ -220,9 +223,85 @@ func RelayCmd() *cobra.Command {
 	return relayCmd
 }
 
+// payloadFileMarker is the prefix that makes --payload name a FILE instead of
+// carrying the body itself.
+//
+// It exists because an argument cannot carry a big body: the kernel caps a
+// single argv entry at MAX_ARG_STRLEN (128 KiB), and a --payload past that dies
+// as "Argument list too long" from the shell, AFTER the caller has printed how
+// many bytes it meant to send. Measured 2026-09-20 with 8 MiB. So the sizes
+// that matter for filling a validation queue -- megabytes, up to the service's
+// max_body_size_bytes -- can only arrive through a file.
+const payloadFileMarker = "@"
+
+// payloadSizeWarnBytes is where this command warns that the body may be refused
+// before it proves anything.
+//
+// It is the STOCK default of the relayer's default_max_body_size_bytes (10 MiB)
+// and not a limit this command enforces: the real bound belongs to the service
+// being relayed to, and this process does not read the relayer's config. A body
+// over it is still sent, because refusing here would be this tool inventing a
+// rule the relayer might not have. What must not happen is the silent version:
+// the relay refused for SIZE while the operator believes they measured a queue.
+const payloadSizeWarnBytes = 10 * 1024 * 1024
+
+// resolvePayloadFile replaces a --payload of the form @path with the file's
+// contents.
+//
+// A missing or unreadable file is a FAILURE naming the path, never a fallback
+// to the built-in payload: a body that was not sent and a run that "did not
+// saturate" read identically afterwards, and that is the failure mode this
+// whole change exists to remove.
+func resolvePayloadFile() error {
+	if !strings.HasPrefix(relay.RelayPayloadJSON, payloadFileMarker) {
+		return nil
+	}
+
+	path := strings.TrimPrefix(relay.RelayPayloadJSON, payloadFileMarker)
+	if path == "" {
+		return fmt.Errorf("--payload=%s needs a file path after the %s",
+			payloadFileMarker, payloadFileMarker)
+	}
+
+	body, err := os.ReadFile(path) //nolint:gosec // the operator names the file; this is a testing CLI
+	if err != nil {
+		return fmt.Errorf("--payload=%s%s: %w", payloadFileMarker, path, err)
+	}
+	if len(body) == 0 {
+		return fmt.Errorf("--payload=%s%s: the file is empty, so the relay would carry no body",
+			payloadFileMarker, path)
+	}
+
+	if int64(len(body)) > payloadSizeWarnBytes {
+		fmt.Fprintf(os.Stderr,
+			"WARNING: payload is %d bytes, over the stock default_max_body_size_bytes (%d). "+
+				"If this service does not raise max_body_size_bytes, the relayer refuses the relay for SIZE "+
+				"-- which is not the limit you are trying to measure.\n",
+			len(body), payloadSizeWarnBytes)
+	}
+
+	relay.RelayPayloadJSON = string(body)
+	return nil
+}
+
 // runRelayCommand executes the relay command based on the selected mode.
 func runRelayCommand(cmd *cobra.Command, args []string) error {
 	mode := args[0]
+
+	// A payload given as @path is read from the FILE, and it is resolved HERE,
+	// before anything else runs.
+	//
+	// WHY IN THIS ONE PLACE: the value has seven readers (cmd/relay/http.go,
+	// websocket.go, cometbft.go, stream.go, grpc.go, websocket_cases.go, and the
+	// gRPC flag check further down), and every mode arrives through this
+	// function -- `relay` takes the mode as an ARGUMENT, not as a cobra
+	// subcommand, so there is exactly one entry point. Resolving it per reader
+	// would be seven edits, and the one that got forgotten would send the
+	// literal "@/tmp/payload.json" as the body: the backend then answers a JSON
+	// error, which names the payload and not the resolution that never happened.
+	if err := resolvePayloadFile(); err != nil {
+		return err
+	}
 
 	// Initialize Cosmos SDK config with the "pokt" Bech32 prefix, same as
 	// runHARelayer. Without this, cosmostypes.AccAddress(...).String() (used
