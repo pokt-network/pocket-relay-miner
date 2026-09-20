@@ -267,13 +267,29 @@ var (
 	// holding. Task COUNT is not a proxy for it: a hundred tasks carrying 100 KB
 	// each are 10 MB of retained heap and a hundred carrying ten bytes are
 	// nothing, and it is the bytes that end a process, not the count.
-	validationQueueBytes = observability.RelayerFactory.NewGauge(
+	// Per SERVICE, because the bound is per service: with a global bound the
+	// service that PAID the rejection and the one that was OCCUPYING could be
+	// different, which is the defect this replaced. The max below is its twin:
+	// a depth is only readable against the ceiling it is approaching, the same
+	// pairing as http_pool_in_flight with http_pool_max_conns.
+	validationQueueBytes = observability.RelayerFactory.NewGaugeVec(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "validation_queue_bytes",
-			Help:      "Request and response bodies held by optimistic relays served and not yet validated",
+			Help:      "Request and response bodies held by this service's optimistic relays, served and not yet validated",
 		},
+		[]string{"service_id"},
+	)
+
+	validationQueueMaxBytes = observability.RelayerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "validation_queue_max_bytes",
+			Help:      "Most this service's optimistic relays may hold before it is refused (effective bound, floor applied)",
+		},
+		[]string{"service_id"},
 	)
 
 	publishQueueBytes = observability.RelayerFactory.NewGauge(

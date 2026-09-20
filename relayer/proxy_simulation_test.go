@@ -63,7 +63,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 			MaxRPS:            50,
 			AppPubKeyHex:      hex.EncodeToString(appPriv.PubKey().Bytes()),
 			GatewayPubKeysHex: []string{hex.EncodeToString(gwPriv.PubKey().Bytes())},
-			AllowedServices:   []string{simTestService},
+			AllowedServices:   []string{simTestService, simTestService2},
 		}},
 	}
 
@@ -81,13 +81,28 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 			"fast":      {Name: "fast", RequestTimeoutSeconds: 30, ResponseHeaderTimeoutSeconds: 30, DialTimeoutSeconds: 5, TLSHandshakeTimeoutSeconds: 10},
 			"streaming": {Name: "streaming", RequestTimeoutSeconds: 600, DialTimeoutSeconds: 10, TLSHandshakeTimeoutSeconds: 15},
 		},
+		DefaultValidationQueueMaxMiB: DefaultValidationQueueMaxMiB,
 		Services: map[string]ServiceConfig{
+			// The first service takes the DEFAULT bound; the second overrides
+			// it. Two services with different bounds is what the per-service
+			// cap has to be tested with: with one service, "the default
+			// applies" and "the override is respected" are the same assertion,
+			// and "one service is refused while another is served" cannot be
+			// written at all.
 			simTestService: {
 				TimeoutProfile: "fast",
 				PoolProfile:    "high",
 				DefaultBackend: "jsonrpc",
 				ValidationMode: validationMode,
 				Backends:       map[string]BackendConfig{"jsonrpc": {URL: backendURL}},
+			},
+			simTestService2: {
+				TimeoutProfile:        "fast",
+				PoolProfile:           "high",
+				DefaultBackend:        "jsonrpc",
+				ValidationMode:        validationMode,
+				ValidationQueueMaxMiB: simTestService2QueueMiB,
+				Backends:              map[string]BackendConfig{"jsonrpc": {URL: backendURL}},
 			},
 		},
 		Simulation: simCfg,
@@ -104,7 +119,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 	rc, _ := newTestRedis(t)
 
 	simVerifier, err := NewSimulationVerifier(logger, &simCfg, rc, signer,
-		map[string]struct{}{simTestService: {}}, clock)
+		map[string]struct{}{simTestService: {}, simTestService2: {}}, clock)
 	require.NoError(t, err)
 
 	pub := &recordingPublisher{}
@@ -114,6 +129,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 	p := &ProxyServer{
 		logger:             logger,
 		config:             c,
+		validationQueues:   newValidationQueues(c),
 		clientPool:         clients,
 		clientPoolFallback: fallback,
 		responseSigner:     signer,

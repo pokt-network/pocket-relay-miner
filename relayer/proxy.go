@@ -195,10 +195,20 @@ type ProxyServer struct {
 	// nil admits everything.
 	storeOperable func() bool
 
-	// validationQueuedBytes is the request and response bytes held by optimistic
-	// relays served and not yet validated. Admission of optimistic relays stops at
-	// maxValidationQueuedBytes.
-	validationQueuedBytes atomic.Int64
+	// validationQueues holds ONE entry per service whose optimistic relays can
+	// reach the validation queue, each with its own bytes and its own bound.
+	//
+	// LIFETIME: built in NewProxyServer and never written again -- so it is read
+	// without a lock, the way the hot path already reads config.Services. It
+	// cannot grow at runtime because a service that is not in the config is
+	// refused with 404 before admission, which is also why it cannot leak: it
+	// is born with the process and dies with it.
+	//
+	// PER SERVICE and not global: under one global bound the relay that ARRIVES
+	// pays for the bytes another service is HOLDING. Here a service is refused
+	// because IT is over ITS own quota, so the rejection is attributable by
+	// construction rather than by instrumentation.
+	validationQueues map[string]*serviceValidationQueue
 
 	// warnedUndeclaredTransport dedups the "served a transport the supplier did
 	// not declare on-chain" warning to once per (supplier, service, transport).
@@ -346,6 +356,8 @@ func NewProxyServer(
 		Int64("max_body_size_mb", maxBodySize/(1024*1024)).
 		Msg("initialized buffer pool for backend response reading")
 
+	validationQueues := newValidationQueues(config)
+
 	proxy := &ProxyServer{
 		logger:             logging.ForComponent(logger, logging.ComponentProxyServer),
 		config:             config,
@@ -358,6 +370,7 @@ func NewProxyServer(
 		publishSubpool:     publishSubpool,
 		metricsSubpool:     metricsSubpool,
 		metricRecorder:     metricRecorder,
+		validationQueues:   validationQueues,
 
 		warnedUndeclaredTransport: xsync.NewMap[string, struct{}](),
 		bridges:                   xsync.NewMap[*WebSocketBridge, struct{}](),
@@ -1117,7 +1130,17 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// queue, so they are not refused by it.
 	// 429 with Retry-After, like storage_saturated: the relayer is not failing,
 	// it is refusing work until it has room.
-	if validationMode == ValidationModeOptimistic && p.validationQueueFull() {
+	//
+	// THE MODE IS NOT ASKED AGAIN HERE, AND RE-ADDING IT WOULD BE A REGRESSION.
+	// Having a queue IS being optimistic: serviceQueuesForValidation decides it
+	// once, at construction, and a service that cannot queue has no queue to be
+	// full. Asking a second oracle for the same fact is what made this gate
+	// capable of disagreeing with the builder -- and a disagreement here fails
+	// OPEN, because full() on a nil queue is false, so an optimistic service
+	// that somehow lost its queue would be admitted without any bound at all,
+	// in silence. One fact, one place.
+	svcQueue := p.validationQueueFor(serviceID)
+	if svcQueue.full() {
 		w.Header().Set("Retry-After", "1")
 		p.sendError(w, http.StatusTooManyRequests, "relayer is not admitting relays right now")
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonValidationQueueFull).Inc()
@@ -1486,11 +1509,31 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		capturedSessionCtx := sessionCtx
 
 		// Submit to validation subpool (non-blocking; admission bounds it by bytes).
+		// The gauge is moved with Add/Sub and not with Set(counter.Add(...)):
+		// the request goroutine adds and the validation worker subtracts, so
+		// publishing a value READ between the two can leave the series holding
+		// a number that was never the total. publishQueueBytes already does it
+		// this way.
 		retainedBytes := optimisticRetainedBytes(capturedReqBody, capturedRespBody, capturedRequest)
-		validationQueueBytes.Set(float64(p.validationQueuedBytes.Add(retainedBytes)))
+		capturedQueue := svcQueue
+		if capturedQueue == nil {
+			// A service that reaches this accounting has a queue by
+			// construction: only a relay the gate above admitted gets here, and
+			// serviceQueuesForValidation gave a queue to every service whose
+			// relays can enter it. So this is unreachable rather than defensive
+			// -- but reaching it would be a nil dereference on the serving path,
+			// and the honest degradation is to account nothing rather than to
+			// crash the relayer.
+			p.logger.Warn().Str(logging.FieldServiceID, capturedServiceID).
+				Msg("optimistic relay with no validation queue: not accounted")
+			return
+		}
+		capturedQueue.queued.Add(retainedBytes)
+		capturedQueue.bytesGauge.Add(float64(retainedBytes))
 		p.validationSubpool.Submit(func() {
 			defer func() {
-				validationQueueBytes.Set(float64(p.validationQueuedBytes.Add(-retainedBytes)))
+				capturedQueue.queued.Add(-retainedBytes)
+				capturedQueue.bytesGauge.Sub(float64(retainedBytes))
 			}()
 			logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 				Str("validation_mode", "optimistic").
@@ -2477,15 +2520,73 @@ func optimisticRetainedBytes(reqBody, respBody []byte, req *servicetypes.RelayRe
 	return retained + int64(len(req.Payload)) + int64(len(req.Meta.Signature))
 }
 
-// maxValidationQueuedBytes bounds the request and response bytes optimistic
-// relays hold between serving and validation. A count of tasks says nothing
-// about memory: what a task holds is its payload. Not measured under load.
-const maxValidationQueuedBytes = 256 << 20
+// serviceValidationQueue is one service's share of the bound: what its
+// optimistic relays are holding between being served and being validated, and
+// the most it may hold.
+//
+// The bound is resolved ONCE, at construction, by the same config function
+// `relayer validate` calls, so the number enforced here and the number the
+// startup warning printed cannot drift apart. There is no hot reload of this
+// config, so there is nothing to recompute per relay.
+type serviceValidationQueue struct {
+	// queued is the bytes currently held. It is the gate's number, so it stays
+	// an atomic the gate can compare exactly.
+	queued atomic.Int64
+	// maxBytes is the effective bound for this service: its configured value or
+	// the default, raised to the floor of one relay of its largest size.
+	maxBytes int64
+	// bytesGauge is this service's child of the occupancy gauge, resolved at
+	// construction so the hot path never looks a label up.
+	bytesGauge prometheus.Gauge
+}
 
-// validationQueueFull reports that optimistic relays waiting for validation hold
-// maxValidationQueuedBytes.
-func (p *ProxyServer) validationQueueFull() bool {
-	return p.validationQueuedBytes.Load() >= maxValidationQueuedBytes
+// newValidationQueues builds one queue per service whose relays can enter it.
+//
+// WHO GETS A QUEUE IS NOT DECIDED HERE: it is serviceQueuesForValidation, the
+// same predicate BuildValidationQueueReport uses to decide who is counted in
+// the memory the operator provisions. Asking it rather than restating it is
+// what keeps the set of queues, the set of published ceiling series and the
+// startup warning's total from being three different answers.
+//
+// IT IS A FUNCTION AND NOT INLINE IN THE CONSTRUCTOR, and that is the point:
+// the tests assemble a ProxyServer as a struct literal, so any wiring that
+// lives only in NewProxyServer is silently absent there. A test proxy with no
+// queues admits every relay and passes -- not because the bound works, but
+// because the fixture turned it off. Whoever adds a field to ProxyServer that
+// the serving path depends on has to add it here, or to the fixture, and this
+// function is what keeps those two from drifting apart.
+//
+// Both series of every service are created here so they exist at zero from the
+// first scrape. A gauge that is absent and a gauge at zero read the same on a
+// dashboard and mean opposite things.
+func newValidationQueues(config *Config) map[string]*serviceValidationQueue {
+	queues := make(map[string]*serviceValidationQueue, len(config.Services))
+	for serviceID := range config.Services {
+		if !serviceQueuesForValidation(config, serviceID) {
+			continue
+		}
+		maxBytes := config.ValidationQueueMaxBytes(serviceID)
+		queues[serviceID] = &serviceValidationQueue{
+			maxBytes:   maxBytes,
+			bytesGauge: validationQueueBytes.WithLabelValues(serviceID),
+		}
+		validationQueueMaxBytes.WithLabelValues(serviceID).Set(float64(maxBytes))
+	}
+	return queues
+}
+
+// validationQueueFor returns the queue of a service, or nil when that service
+// cannot queue -- it is eager, or it is served by a transport that never enters
+// this queue.
+func (p *ProxyServer) validationQueueFor(serviceID string) *serviceValidationQueue {
+	return p.validationQueues[serviceID]
+}
+
+// validationQueueFull reports that THIS service's optimistic relays already
+// hold its whole bound. A service with no queue is never full: it does not
+// queue at all.
+func (q *serviceValidationQueue) full() bool {
+	return q != nil && q.queued.Load() >= q.maxBytes
 }
 
 // rejectReasonStorageSaturated refuses a relay while Redis cannot take writes.

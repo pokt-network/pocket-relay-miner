@@ -268,6 +268,21 @@ type Config struct {
 	// DefaultMaxBodySizeBytes is the default max body size for requests/responses.
 	DefaultMaxBodySizeBytes int64 `yaml:"default_max_body_size_bytes"`
 
+	// DefaultValidationQueueMaxMiB bounds, PER SERVICE, the request and response
+	// bodies that service's optimistic relays hold between being served and
+	// being validated. It applies to every service that does not override it.
+	//
+	// The bound is per service and not global on purpose: with one global bound
+	// the relay that ARRIVES pays for the bytes another service is HOLDING, so
+	// a single heavy service refuses everyone. Per service, a service is
+	// refused because IT is over ITS own quota, which also makes the rejection
+	// attributable by construction.
+	//
+	// 0 means the default (DefaultValidationQueueMaxMiB), NEVER unlimited --
+	// the same convention as redis.batch_max_queued_mib. Read it through
+	// ValidationQueueMaxBytes, which also applies the per-service floor.
+	DefaultValidationQueueMaxMiB int `yaml:"default_validation_queue_max_mib,omitempty"`
+
 	// Metrics configuration
 	Metrics MetricsConfig `yaml:"metrics"`
 
@@ -476,6 +491,10 @@ type ServiceConfig struct {
 
 	// MaxBodySizeBytes overrides the default max body size for this service.
 	MaxBodySizeBytes int64 `yaml:"max_body_size_bytes,omitempty"`
+
+	// ValidationQueueMaxMiB overrides default_validation_queue_max_mib for this
+	// service. 0 means "use the default", never unlimited.
+	ValidationQueueMaxMiB int `yaml:"validation_queue_max_mib,omitempty"`
 
 	// DefaultBackend specifies which backend to use when no Rpc-Type header is provided.
 	// Must match one of the keys in the Backends map.
@@ -695,6 +714,7 @@ func DefaultConfig() Config {
 		DefaultValidationMode:        ValidationModeOptimistic,
 		DefaultRequestTimeoutSeconds: 30,
 		DefaultMaxBodySizeBytes:      10 * 1024 * 1024, // 10MB
+		DefaultValidationQueueMaxMiB: DefaultValidationQueueMaxMiB,
 		Metrics: MetricsConfig{
 			Enabled: true,
 			Addr:    "0.0.0.0:9090",
@@ -877,6 +897,28 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("invalid default_validation_mode: %s", c.DefaultValidationMode)
 	}
 
+	// The validation-queue bounds, global and per service. Out of range is an
+	// error and not a silent clamp: a number the operator wrote and the relayer
+	// ignored is how a bound ends up meaning something other than it says.
+	if c.DefaultValidationQueueMaxMiB != 0 &&
+		(c.DefaultValidationQueueMaxMiB < MinValidationQueueMaxMiB ||
+			c.DefaultValidationQueueMaxMiB > MaxValidationQueueMaxMiB) {
+		return fmt.Errorf(
+			"default_validation_queue_max_mib must be 0 (the default, %d) or between %d and %d, got %d",
+			DefaultValidationQueueMaxMiB, MinValidationQueueMaxMiB, MaxValidationQueueMaxMiB,
+			c.DefaultValidationQueueMaxMiB)
+	}
+	for id, svc := range c.Services {
+		if svc.ValidationQueueMaxMiB != 0 &&
+			(svc.ValidationQueueMaxMiB < MinValidationQueueMaxMiB ||
+				svc.ValidationQueueMaxMiB > MaxValidationQueueMaxMiB) {
+			return fmt.Errorf(
+				"services.%s.validation_queue_max_mib must be 0 (the default, %d) or between %d and %d, got %d",
+				id, DefaultValidationQueueMaxMiB, MinValidationQueueMaxMiB, MaxValidationQueueMaxMiB,
+				svc.ValidationQueueMaxMiB)
+		}
+	}
+
 	// Validate and auto-populate timeout profiles
 	if err := c.ValidateTimeoutProfiles(); err != nil {
 		return err
@@ -1022,6 +1064,71 @@ func (c *Config) GetServiceTimeoutProfile(serviceID string) *TimeoutProfile {
 		return &profile
 	}
 	return nil
+}
+
+// DefaultValidationQueueMaxMiB is the per-service validation-queue bound used
+// when the config leaves default_validation_queue_max_mib at 0 or omits it, and
+// when a service does not override it.
+const DefaultValidationQueueMaxMiB = 128
+
+// MinValidationQueueMaxMiB and MaxValidationQueueMaxMiB bound what an operator
+// may configure, like the publish queue's 64..8192. The floor below is derived
+// per service on top of this one and can raise it further.
+const (
+	MinValidationQueueMaxMiB = 64
+	MaxValidationQueueMaxMiB = 8192
+)
+
+// maxBodySizeAcrossServices is the largest max body size any service allows.
+//
+// It is the RESPONSE bound for EVERY service, not just for that one: the proxy
+// builds a single buffer pool sized to this maximum and every service reads its
+// responses through it. A per-service floor computed from the service's own
+// value alone would therefore be short for every service but the largest.
+func (c *Config) maxBodySizeAcrossServices() int64 {
+	max := c.DefaultMaxBodySizeBytes
+	for _, svc := range c.Services {
+		if svc.MaxBodySizeBytes > max {
+			max = svc.MaxBodySizeBytes
+		}
+	}
+	return max
+}
+
+// ValidationQueueFloorBytes is the smallest bound that still lets a service
+// serve ONE relay of its largest allowed size.
+//
+// A single queued relay retains the request body TWICE -- once as the body and
+// once as the RelayRequest's Payload, which the unmarshal COPIES rather than
+// aliases (poktroll x/service/types/relay.pb.go, `m.Payload = append(...)`) --
+// plus one response, which is bounded fleet-wide (see maxBodySizeAcrossServices).
+// Below this, the service refuses relays it was configured to accept: its own
+// traffic, rejected by its own bound.
+func (c *Config) ValidationQueueFloorBytes(serviceID string) int64 {
+	return 2*c.GetServiceMaxBodySize(serviceID) + c.maxBodySizeAcrossServices()
+}
+
+// ValidationQueueMaxBytes is the EFFECTIVE bound for one service: its override
+// if it has one, otherwise the default, raised to the floor when it sits below
+// it.
+//
+// Raised, not refused. A bound under the floor makes that service reject 100%
+// of its relays forever, and refusing to start would turn one dead service into
+// a dead relayer. The caller that wants to TELL the operator uses
+// ValidationQueueReport, which reports the same computation.
+func (c *Config) ValidationQueueMaxBytes(serviceID string) int64 {
+	mib := c.DefaultValidationQueueMaxMiB
+	if svc, ok := c.Services[serviceID]; ok && svc.ValidationQueueMaxMiB > 0 {
+		mib = svc.ValidationQueueMaxMiB
+	}
+	if mib <= 0 {
+		mib = DefaultValidationQueueMaxMiB
+	}
+	configured := int64(mib) << 20
+	if floor := c.ValidationQueueFloorBytes(serviceID); configured < floor {
+		return floor
+	}
+	return configured
 }
 
 // GetServiceMaxBodySize returns the max body size for a service.

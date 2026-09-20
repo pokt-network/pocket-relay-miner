@@ -426,7 +426,14 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
-	memlimit.Apply(logger)
+	memLimit := memlimit.Apply(logger)
+
+	// Capacity planning, not a guard: it says what the validation queues may
+	// hold and starts anyway. This is NOT routed through config.Warnings()
+	// on purpose -- that list is fatal under --strict-config and always fatal
+	// in `relayer validate`, so putting it there would turn "warn and start"
+	// into "refuse to start".
+	logValidationQueueCapacity(logger, config, memLimit)
 
 	// Keys the file carries that this binary does not understand.
 	//
@@ -1422,4 +1429,66 @@ func verifyGRPCConnectivity(ctx context.Context, logger logging.Logger, grpcURL 
 		Msg("gRPC endpoint responded successfully to GetParams query")
 
 	return nil
+}
+
+// logValidationQueueCapacity reports what the per-service validation queues may
+// hold against the memory this process is allowed to use, and never stops the
+// boot.
+//
+// It compares against Base -- what the limit was DERIVED from, the cgroup's
+// memory.max or the host's RAM -- and not against the applied limit, because
+// the applied one already has a margin subtracted from it that is the same size
+// as the threshold below; comparing against it would make the warning fire on a
+// healthy default.
+func logValidationQueueCapacity(logger logging.Logger, config *relayer.Config, limit memlimit.Limit) {
+	base := int64(limit.Base)
+	if base < 0 {
+		base = 0
+	}
+	report := relayer.BuildValidationQueueReport(config, base, limit.Source)
+
+	// A bound the operator wrote that is not the bound in force is the first
+	// thing they need to know, whatever the totals say.
+	for _, svc := range report.RaisedToFloor() {
+		logger.Warn().
+			Str("service_id", svc.ServiceID).
+			Int("configured_mib", svc.ConfiguredMiB).
+			Int64("floor_mib", svc.FloorBytes>>20).
+			Int64("effective_mib", svc.EffectiveBytes>>20).
+			Msg("validation_queue_max_mib is below this service's floor and was RAISED to it: " +
+				"the configured value would have refused every relay of this service")
+	}
+
+	switch {
+	case report.MemoryLimitBytes <= 0:
+		logger.Warn().
+			Int64("validation_queue_total_mib", report.TotalBytes>>20).
+			Int("services", len(report.Services)).
+			Str("memory_source", report.MemorySource).
+			Msg("could not compare the validation queues against a memory limit: capacity NOT checked")
+	case !report.Fits():
+		logger.Warn().
+			Int64("validation_queue_total_mib", report.TotalBytes>>20).
+			Int64("memory_limit_mib", report.MemoryLimitBytes>>20).
+			Int64("margin_mib", report.MarginBytes()>>20).
+			Str("memory_source", report.MemorySource).
+			Int("services", len(report.Services)).
+			Msg(report.String())
+	case report.MarginIsThin():
+		logger.Warn().
+			Int64("validation_queue_total_mib", report.TotalBytes>>20).
+			Int64("memory_limit_mib", report.MemoryLimitBytes>>20).
+			Int64("margin_mib", report.MarginBytes()>>20).
+			Str("memory_source", report.MemorySource).
+			Int("services", len(report.Services)).
+			Msg(report.String())
+	default:
+		logger.Info().
+			Int64("validation_queue_total_mib", report.TotalBytes>>20).
+			Int64("memory_limit_mib", report.MemoryLimitBytes>>20).
+			Int64("margin_mib", report.MarginBytes()>>20).
+			Str("memory_source", report.MemorySource).
+			Int("services", len(report.Services)).
+			Msg("validation queue capacity")
+	}
 }
