@@ -186,6 +186,7 @@ type mockTxServiceServer struct {
 	t               *testing.T
 	rwMu            sync.RWMutex // protects mutable fields below
 	broadcastError  error
+	firstTxBytes    []byte
 	broadcastCode   uint32
 	broadcastRawLog string
 	// broadcastCodespace overrides the codespace of a synthetic CheckTx
@@ -334,6 +335,9 @@ func (m *mockTxServiceServer) BroadcastTx(
 	// Copy so later test assertions don't race with in-flight reuse of
 	// the request buffer by the grpc server.
 	m.lastTxBytes = append([]byte(nil), req.TxBytes...)
+	if m.firstTxBytes == nil {
+		m.firstTxBytes = append([]byte(nil), req.TxBytes...)
+	}
 	block, seen := m.broadcastBlockCh, m.broadcastSeen
 	m.rwMu.Unlock()
 
@@ -768,6 +772,31 @@ func (n *TestSupplierNode) FailBroadcasts(err error) {
 	n.srv.txServer.rwMu.Lock()
 	defer n.srv.txServer.rwMu.Unlock()
 	n.srv.txServer.broadcastError = err
+}
+
+// Broadcasts is how many transactions reached the node, and LastTxBytes the
+// bytes of the last one. Together they answer the question a retry loop has to
+// be judged by: not "how many sends were there", but "was the second send the
+// SAME transaction".
+func (n *TestSupplierNode) Broadcasts() int {
+	n.srv.txServer.rwMu.RLock()
+	defer n.srv.txServer.rwMu.RUnlock()
+	return n.srv.txServer.broadcastCounter
+}
+
+// FirstTxBytes is what the FIRST send put on the wire, kept because the node
+// otherwise remembers only the last and a retry would overwrite the very thing
+// the caller wants to compare against.
+func (n *TestSupplierNode) FirstTxBytes() []byte {
+	n.srv.txServer.rwMu.RLock()
+	defer n.srv.txServer.rwMu.RUnlock()
+	return append([]byte(nil), n.srv.txServer.firstTxBytes...)
+}
+
+func (n *TestSupplierNode) LastTxBytes() []byte {
+	n.srv.txServer.rwMu.RLock()
+	defer n.srv.txServer.rwMu.RUnlock()
+	return append([]byte(nil), n.srv.txServer.lastTxBytes...)
 }
 
 // RefuseInCheckTx makes the node ANSWER every later broadcast with a refusal:

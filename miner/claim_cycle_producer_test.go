@@ -8,6 +8,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -43,6 +44,16 @@ func (acceptingSupplier) SubmitProofsReturningHash(context.Context, int64, ...po
 }
 
 func (acceptingSupplier) GetEstimatedFeeUpokt(context.Context) uint64 { return 0 }
+
+// BroadcastRawReturningHash and LatestBlockTime make this double satisfy the
+// client interface. The zero clock makes reusable() answer NO, so a retry
+// through this double signs again -- which is what these tests were written
+// against, and keeps them measuring what they were measuring.
+func (acceptingSupplier) BroadcastRawReturningHash(context.Context, string, tx.SignedTxPayload) (string, error) {
+	return "", errors.New("acceptingSupplier does not re-inject")
+}
+
+func (acceptingSupplier) LatestBlockTime() time.Time { return time.Time{} }
 
 // erroringService makes the CUPR guard fail open, which is its documented
 // behaviour when the session-start service cannot be queried.

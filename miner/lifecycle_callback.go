@@ -287,9 +287,74 @@ type LifecycleTxClient interface {
 	CreateClaimsReturningHash(ctx context.Context, timeoutHeight int64, claimMsgs ...pocktclient.MsgCreateClaim) (string, tx.SignedTxPayload, error)
 	SubmitProofsReturningHash(ctx context.Context, timeoutHeight int64, proofMsgs ...pocktclient.MsgSubmitProof) (string, tx.SignedTxPayload, error)
 	GetEstimatedFeeUpokt(ctx context.Context) uint64
+	// BroadcastRawReturningHash and LatestBlockTime are what a RETRY needs to
+	// re-inject the bytes it already has instead of signing a second live
+	// transaction. They are on the interface rather than behind a type
+	// assertion so a client that cannot re-inject cannot compile.
+	BroadcastRawReturningHash(ctx context.Context, txType string, p tx.SignedTxPayload) (string, error)
+	LatestBlockTime() time.Time
 }
 
 var _ LifecycleTxClient = (*tx.HASupplierClient)(nil)
+
+// resendOrSignClaims sends one claim batch: re-injecting the bytes of the
+// previous attempt when they are still worth sending, and signing a new
+// transaction otherwise.
+//
+// `previous` is empty on the first attempt and after an ejection, so both sign
+// by construction. `previousErr` is how the attempt that produced those bytes
+// ended: bytes the chain JUDGED are not worth re-injecting, which is the same
+// rule the reconciler applies to its own resends and the one persistence
+// applies to what it stores.
+func (lc *LifecycleCallback) resendOrSignClaims(
+	ctx context.Context,
+	timeoutHeight int64,
+	previous tx.SignedTxPayload,
+	previousErr error,
+	msgs []pocktclient.MsgCreateClaim,
+) (string, tx.SignedTxPayload, error) {
+	if lc.canReinject(previous, previousErr) {
+		hash, err := lc.supplierClient.BroadcastRawReturningHash(ctx, string(RebroadcastPhaseClaim), previous)
+		// The payload goes back unchanged: nothing was signed, so the caller
+		// keeps exactly the bytes it already had.
+		return hash, previous, err
+	}
+	return lc.supplierClient.CreateClaimsReturningHash(ctx, timeoutHeight, msgs...)
+}
+
+// resendOrSignProofs is the proof twin of resendOrSignClaims.
+func (lc *LifecycleCallback) resendOrSignProofs(
+	ctx context.Context,
+	timeoutHeight int64,
+	previous tx.SignedTxPayload,
+	previousErr error,
+	msgs []pocktclient.MsgSubmitProof,
+) (string, tx.SignedTxPayload, error) {
+	if lc.canReinject(previous, previousErr) {
+		hash, err := lc.supplierClient.BroadcastRawReturningHash(ctx, string(RebroadcastPhaseProof), previous)
+		return hash, previous, err
+	}
+	return lc.supplierClient.SubmitProofsReturningHash(ctx, timeoutHeight, msgs...)
+}
+
+// canReinject answers whether the bytes of the previous attempt may be sent
+// again as they are.
+//
+// Three conditions, and each rules out a different way of being wrong: there
+// have to BE bytes (the first attempt has none); the chain must not have judged
+// them (a refusal re-injected asks the same question and gets the same answer);
+// and they must still be valid against the CHAIN's clock, which is what
+// reusable() reads -- an unknown clock answers no, because re-injecting on a
+// guess spends the attempt on bytes the ante handler may already refuse.
+func (lc *LifecycleCallback) canReinject(previous tx.SignedTxPayload, previousErr error) bool {
+	if len(previous.Bytes) == 0 || previousErr == nil {
+		return false
+	}
+	if !tx.RejectionPreservesBytes(previousErr) {
+		return false
+	}
+	return reusable(previous, lc.supplierClient.LatestBlockTime())
+}
 
 // signedTimeoutNanos converts the sealed deadline for storage, keeping ZERO as
 // "not known" rather than as the Unix epoch: an entry with no cached
@@ -1586,7 +1651,25 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 		// the ejections instead is that each one strictly shrinks `remaining`,
 		// and the loop refuses to go below one message.
 		for attempt := 1; attempt <= lc.config.ClaimRetryAttempts; {
-			txHash, signed, submitErr := lc.supplierClient.CreateClaimsReturningHash(claimCtx, claimWindowClose, interfaceClaimMsgs...)
+			// A RETRY RE-INJECTS THE SAME BYTES WHEN THEY ARE STILL WORTH
+			// SENDING, INSTEAD OF SIGNING AGAIN.
+			//
+			// Signing again makes a transaction with a NEW unordered nonce, so
+			// the node cannot recognise it as the one it may already hold: the
+			// duplicate protection ("I already have this") is designed out
+			// between siblings of one retry loop, and a send that got no answer
+			// becomes two live transactions rather than one asked twice.
+			//
+			// The decision is not invented here. The inclusion reconciler
+			// already makes it for its own resends -- reusable() says whether
+			// the bytes are still valid against the CHAIN's clock, and
+			// RejectionPreservesBytes says whether the chain judged them -- and
+			// this is the other caller finally asking the same question.
+			// When either says no, the send below signs, which is what this
+			// loop did before: the worst case of this branch is the previous
+			// behaviour.
+			txHash, signed, submitErr := lc.resendOrSignClaims(
+				claimCtx, claimWindowClose, claimSigned, lastErr, interfaceClaimMsgs)
 			claimSigned = signed
 			if submitErr != nil {
 				lastErr = submitErr
@@ -1636,6 +1719,12 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					ejected := remaining[named]
 					remaining = append(remaining[:named:named], remaining[named+1:]...)
 					claimMsgs, groupRootHashes, validSnapshots, interfaceClaimMsgs = alignClaimBatch(remaining)
+					// THE BATCH CHANGED, SO ITS BYTES ARE NO LONGER ITS BYTES.
+					// Re-injecting them would send the chain exactly the message
+					// it just named. Dropping them makes the next attempt sign,
+					// which is the only correct answer for a batch that is not
+					// the one that was signed.
+					claimSigned = tx.SignedTxPayload{}
 					groupSnapshots = withoutSession(groupSnapshots, ejected.snapshot.SessionID)
 
 					lc.settleEjectedClaim(ctx, logger, ejected, submitErr, earliestClaimHeight)
@@ -1826,8 +1915,40 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			// and is already the accepted degradation.
 			resolvable := lc.rebroadcastStore != nil
 
+			// THE NODE ANSWERING "I ALREADY HAVE THIS" IS NOT A LOST CLAIM.
+			//
+			// A re-injection that ARRIVES is refused with code 19, so the very
+			// outcome this loop now aims for reads as an error here. Counting
+			// it would report the session's relays and compute units as lost
+			// and write a TERMINAL claim_tx_error, for a transaction the node
+			// is holding and will most likely include -- turning the retry that
+			// worked into the one that killed the session.
+			//
+			// The policy is nothingWasSpent, the SAME function the inclusion
+			// reconciler decides with, which is why that one does not charge
+			// the attempt either. Asking it rather than restating the sentinels
+			// is deliberate: two copies of this rule would agree today and
+			// drift later, and the claim/proof twins in this file have already
+			// proven they drift.
+			//
+			// What is NOT done here is settling the session as a success. The
+			// sentinel's guarantee is weaker than that: "already queued" means
+			// this node holds it NOW, not that the chain will include it. So
+			// the session stays unsettled and the persist below hands the bytes
+			// to the reconciler, which is what verifies inclusion.
+			nodeHoldsTheBatch := nothingWasSpent(lastErr)
+			if nodeHoldsTheBatch {
+				logger.Info().
+					Err(lastErr).
+					Int("batch_size", len(claimMsgs)).
+					Msg("claim not counted as lost: the node reports it already holds the transaction")
+			}
+
 			// Mark all sessions as failed due to claim TX error (after exhausting retries)
 			for _, snapshot := range groupSnapshots {
+				if nodeHoldsTheBatch {
+					break
+				}
 				RecordClaimTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
@@ -2564,7 +2685,14 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 		var proofTxHash string
 		var proofSigned tx.SignedTxPayload
 		for attempt := 1; attempt <= lc.config.ProofRetryAttempts; attempt++ {
-			txHash, signed, submitErr := lc.supplierClient.SubmitProofsReturningHash(proofCtx, proofWindowClose, interfaceProofMsgs...)
+			// Re-inject instead of re-signing, for the reason the claim twin
+			// states in full. THE PROOF LOOP HAS NO EJECTION -- the chain never
+			// names one proof of a batch -- so there is no batch change that
+			// could invalidate the bytes here. That asymmetry is written down
+			// rather than left to be noticed: a fix applied to one of these two
+			// loops and not the other is this file's recurring defect.
+			txHash, signed, submitErr := lc.resendOrSignProofs(
+				proofCtx, proofWindowClose, proofSigned, lastErr, interfaceProofMsgs)
 			proofSigned = signed
 			if submitErr != nil {
 				lastErr = submitErr
@@ -2749,9 +2877,24 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			// may yet land.
 			resolvable := lc.rebroadcastStore != nil
 
+			// Same reading as the claim side, and deliberately the same
+			// function: a node answering that it already holds this proof has
+			// not lost it, so it is not counted as lost and the session is not
+			// settled as failed. See the longer note on the claim twin.
+			nodeHoldsTheBatch := nothingWasSpent(lastErr)
+			if nodeHoldsTheBatch {
+				logger.Info().
+					Err(lastErr).
+					Int("batch_size", len(proofMsgs)).
+					Msg("proof not counted as lost: the node reports it already holds the transaction")
+			}
+
 			// Mark sessions that entered the tx as failed (the ones that did
 			// not build are already counted as build_failed via RecordProofSkipped).
 			for _, snapshot := range validProofSnapshots {
+				if nodeHoldsTheBatch {
+					break
+				}
 				RecordProofTxError(snapshot.SupplierOperatorAddress, snapshot.ServiceID, resolvable, snapshot.RelayCount, int64(snapshot.TotalComputeUnits))
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility

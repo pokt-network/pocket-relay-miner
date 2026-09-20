@@ -708,15 +708,34 @@ func (tc *TxClient) signEncodeAndBroadcast(
 //
 // It never signs, so the unordered nonce is the ORIGINAL one and the network
 // recognises the duplicate on its own -- which is the whole reason to keep the
-// bytes. The caller owns the budget: the deadline check lives here only as the
-// guard inside broadcastRaw, while deciding whether these bytes are still
-// VALID (their own timeout has not passed) belongs to whoever stored them,
-// because only that side knows the chain's clock.
+// bytes. Deciding whether these bytes are still VALID (their own timeout has
+// not passed) belongs to whoever stored them, because only that side knows the
+// chain's clock.
+//
+// THE DEADLINE IS INSTALLED HERE, and that corrects the previous contract
+// rather than bending it. The caller declares the WINDOW, as a value, with
+// WithTxWindowTimeout; turning that value into a deadline is this package's
+// job, and it was already being done for the path that signs
+// (signAndBroadcastReturningSigned). Leaving the second entry point out made
+// "the caller owns the budget" a rule expressible only in prose -- and the
+// first caller written against it, the lifecycle's retry loop, got it wrong:
+// every one of its re-injections died in broadcastRaw's guard without ever
+// reaching the network. Both entry points now derive with the SAME two caps.
+//
+// A caller that already holds a deadline keeps it: context.WithDeadline never
+// extends past the parent, so the inclusion reconciler's per-group budget still
+// wins by being the earliest.
 func (tc *TxClient) BroadcastRawReturningHash(
 	ctx context.Context,
 	signerAddr, txType string,
 	p SignedTxPayload,
 ) (string, error) {
+	// The regime is discarded rather than recorded: nothing is signed here, so
+	// it would describe a derivation this attempt is only replaying.
+	timeoutDuration, _, window := tc.effectiveTxTimeout(ctx)
+	ctx, cancelDeadline := tc.withBroadcastDeadline(ctx, timeoutDuration, window)
+	defer cancelDeadline()
+
 	return tc.broadcastRaw(ctx, signerAddr, txType, signedTx{
 		bytes:         p.Bytes,
 		hash:          p.Hash,
@@ -952,15 +971,21 @@ func (tc *TxClient) broadcastRaw(
 	signerAddr, txType string,
 	st signedTx,
 ) (string, error) {
-	// The broadcast budget is the CALLER's, and this refuses to run without one.
+	// A broadcast without a deadline waits instead of failing fast, which is
+	// precisely what the budget exists to prevent -- and it fails by being LATE
+	// rather than by erroring, so nothing downstream would call it a failure.
 	//
-	// Every path here is meant to arrive with a deadline already on the context:
-	// the original submission derives it from the window, and a re-injection
-	// inherits the reconciler's per-group budget. Saying so in a comment is what
-	// the previous version did, and a contract in prose is one a caller can
-	// forget silently -- a resend with no deadline waits instead of failing
-	// fast, which is precisely what the budget exists to prevent, and it fails
-	// by being LATE rather than by erroring. So the machine checks.
+	// THIS IS NOW AN ASSERTION, NOT THE CONTRACT. Both entry points of this
+	// package install the deadline themselves —
+	// signAndBroadcastReturningSigned for the path that signs and
+	// BroadcastRawReturningHash for the one that re-injects — so no caller can
+	// arrive here without one by forgetting something. What remains is a third
+	// internal path added later that reaches broadcastRaw directly and skips
+	// that derivation.
+	//
+	// It stays because it earned its keep: this is the line that caught the
+	// lifecycle's retry loop the first time it re-injected, back when the
+	// deadline was the caller's job and a rule in prose was all that said so.
 	if _, ok := ctx.Deadline(); !ok {
 		return "", fmt.Errorf("broadcast attempted with no deadline on the context: "+
 			"the caller owns the budget (supplier %s, tx_type %s)", signerAddr, txType)

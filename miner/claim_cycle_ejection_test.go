@@ -4,6 +4,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -61,6 +62,16 @@ func (*batchSpy) SubmitProofsReturningHash(context.Context, int64, ...pocktclien
 // GetEstimatedFeeUpokt answers zero, which leaves the economic viability floor
 // off: the batch under test must reach the submit loop whole.
 func (*batchSpy) GetEstimatedFeeUpokt(context.Context) uint64 { return 0 }
+
+// BroadcastRawReturningHash and LatestBlockTime make this double satisfy the
+// client interface. The zero clock makes reusable() answer NO, so a retry
+// through this double signs again -- which is what these tests were written
+// against, and keeps them measuring what they were measuring.
+func (*batchSpy) BroadcastRawReturningHash(context.Context, string, tx.SignedTxPayload) (string, error) {
+	return "", errors.New("batchSpy does not re-inject")
+}
+
+func (*batchSpy) LatestBlockTime() time.Time { return time.Time{} }
 
 func namedRejection(index int) error {
 	return &tx.TxRejection{

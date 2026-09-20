@@ -55,6 +55,16 @@ func (f *flakySupplier) CreateClaimsReturningHash(_ context.Context, _ int64, _ 
 // off: these tests are about the submit loop, not about which sessions pay.
 func (*flakySupplier) GetEstimatedFeeUpokt(context.Context) uint64 { return 0 }
 
+// BroadcastRawReturningHash and LatestBlockTime make this double satisfy the
+// client interface. The zero clock makes reusable() answer NO, so a retry
+// through this double signs again -- which is what these tests were written
+// against, and keeps them measuring what they were measuring.
+func (*flakySupplier) BroadcastRawReturningHash(context.Context, string, tx.SignedTxPayload) (string, error) {
+	return "", errors.New("flakySupplier does not re-inject")
+}
+
+func (*flakySupplier) LatestBlockTime() time.Time { return time.Time{} }
+
 // TestOnSessionsNeedClaim_SuccessfulRetryIsNotCountedAsLoss pins that a batch
 // which failed once and then succeeded reaches the SUCCESS verdict only.
 //
