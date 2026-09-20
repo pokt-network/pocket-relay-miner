@@ -211,13 +211,34 @@ newest by date.
    - Use `xsync.Map` (puzpuzpuz/xsync/v4) for lock-free concurrent maps —
      never `sync.Map` (enforced by `internal/conventions`)
    - Protect shared state with `sync.RWMutex` when necessary
-   - **A package var a test overrides must be read on the CALLER's goroutine**,
-     not inside one the code spawns. Measured 2026-09-03: `wsMaxMessageBytes` is
-     read in the constructor and never raced; `wsFirstFrameWait` was read inside
-     the deadline goroutine and gave `DATA RACE` under `-race`, because one
-     test's bridge was still winding down while the next test wrote the var.
-     Capture it into a struct field at construction — the constructor runs on
-     the caller's goroutine, so the test's write is ordered with the read.
+   - **A package var a test overrides needs a happens-before edge between the
+     test's write and every read of it — and "read it on the caller's goroutine"
+     is NOT that edge.** This rule used to say "capture it into a struct field at
+     construction, because the constructor runs on the caller's goroutine". That
+     fix was applied (`websocket.go:241-244` states it, `:399` does it) and the
+     race SURVIVED it: measured 2026-09-20, `-race -count=5 ./relayer/` went red
+     in 9 of 10 invocations. The reason is precise and it is the whole lesson:
+     **the rule assumed the constructor's caller is the test.** Here the caller
+     was an `httptest.Server` handler belonging to ANOTHER test, and the trace
+     showed that goroutine as `(finished)` — so the two never even ran at the
+     same time. Nothing was racing in parallel; there was simply no edge, because
+     `httptest` calls `wg.Done()` at `StateHijacked` (the instant of the upgrade)
+     and `srv.Close()` therefore returns without waiting for the handler body.
+     **What fixed it: the test WAITS for its own handler to return** (a
+     `WaitGroup` the handler marks on exit, with a bounded wait that `t.Error`s
+     by name rather than hanging the package). That does not prevent anything —
+     it creates the edge. Two corollaries paid for the same day: `wsMaxMessageBytes`
+     is NOT the safe contrast this rule used to cite — it has a second read in
+     `ensureBackend` (`websocket.go:464`) reached from `Run`'s goroutine, so
+     construction-capture cannot order it even in principle; and a comment
+     asserting safety because "no test calls `t.Parallel()`, so tests never
+     overlap" is true in its premise and false in its conclusion — what outlives
+     a test is a goroutine of its server, not an overlapping test. Such a comment
+     is worse than none: it actively discourages looking. The class is enforced,
+     not remembered: `internal/conventions` fails on a test assigning a package
+     var declared outside tests, with the 43 pre-existing ones frozen (AST, and
+     it counts `.Store()` too, or making the var atomic would satisfy the guard
+     without fixing anything).
    - Use `context.Context` for cancellation and timeouts
    - ALWAYS defer `Close()` or cleanup functions
    - **Worker Pool Pattern**:
@@ -407,7 +428,16 @@ happened in one day, all silent:
   cap, not a count — the real number was 294. **A total equal to a well-known
   default is a claim about tooling.** And the fix is not "widen the filter":
   widening turned counting imports into counting mentions, which is a different
-  question. Ask what your filter counts.
+  question. Ask what your filter counts. Same shape, 2026-09-20, and worth naming
+  because the filter looked like the obvious one: `grep -v '^#'` over
+  `scripts/gates/deadcode-allowlist.txt` to "get the real entries" dropped the
+  paragraph that answered the question — in that file most reasons sit at the end
+  of their line, but the load-bearing one sits ABOVE its entry. The conclusion
+  drawn from the filtered view ("this line is obsolete, delete it") was the exact
+  inverse of what the comment said, and acting on it would have armed a future
+  gate failure. **An allowlist keeps its data in the lines and its reasons in the
+  comments, so stripping the comments is a partial read dressed as an inventory.**
+  Before proposing that a line be deleted from one, read that line's comment.
 - **A file with NUL bytes: `grep` prints NOTHING, not even the `0` of no matches.**
   A retention file had 1448 contiguous NULs from an interrupted write, and every
   search in it came back silent. `file` said `data`, not text. This one is worse
@@ -421,6 +451,22 @@ the new member is the one still saying the old number**. When corrected on one
 number, verify the others — the second time, that is how the wrapped-grep trap
 above surfaced.
 
+**AN INSTRUMENT BUILT FROM THE DEFECT'S OWN MATERIAL CANNOT DETECT IT, AND IT FAILS
+GREEN.** Measured 2026-09-20, closing item 388 — a wall-clock instant crossed as an
+`int64`, which loses the monotonic reading `Sub` needs. A council had already caught
+that the liveness test's fake clock started from `time.Unix(1_700_000_000, 0)`, a
+`Time` with no monotonic reading, so a correct implementation and a broken one passed
+it identically; the fix was to start from `time.Now()`. That fix was applied, and it
+was **not enough**: one level below, the test's `fakeClock` stored its instant in an
+`atomic.Int64` via `UnixNano()` and rebuilt it with `time.Unix(0, …)` — **the exact
+round trip the item is about**. The instrument destroyed the property the test existed
+to assert, so the test still could not discriminate, and the written criterion claimed
+it now did. What found it was the new positive control going red against a mark stamped
+by a REAL dispatch round, not by a test's `Store`. So: when the defect is a PATTERN
+(a lost property, a dropped field, a truncated value), grep the test harness for that
+same pattern before trusting any green it produces — the harness is code, written by
+the same hands, and a partial fix one layer up reads exactly like a complete one.
+
 **A GATE WRITES TO A FILE, AND THE FILE CARRIES ITS OWN `EXIT=$?`.** Never a
 `tail` with a fixed count: one ate the NAME of the failing check, which sat in
 the MIDDLE of the output, not at the end. And the harness's own completion notice
@@ -428,6 +474,39 @@ reports the exit code of the LAST command in the pipeline, not the gate's — a
 gate that exited 2 was announced as `exit code 0`. Writing `EXIT=$?` inside the
 log makes the artefact self-sufficient instead of depending on the reader
 remembering to distrust the notice.
+
+**A GATE MEASURES THE TREE THAT EXISTED WHEN IT STARTED, NOT THE ONE THAT EXISTS
+WHEN YOU READ ITS LOG. WHILE IT RUNS, THE TREE IS FROZEN.** `go test` compiles at
+the start of every invocation, so editing between invocations of a repeat loop
+silently splits it: measured 2026-09-20, a 5x`-count=5` run was aborted because a
+dead field was deleted after invocation 2 — runs 1-2 and 3-5 would have measured
+different binaries and been reported as one figure. Reviewing the diff while a
+gate runs is fine; touching it is not. When a repeat loop is the evidence, record
+the `sha256` of the files under test alongside its log, so a later reader can
+confirm every invocation saw the same tree. And an aborted run's partial logs get
+DELETED, not kept: a log nobody labelled as void is a log someone will quote.
+
+**WHEN YOU REMOVE A DEFAULT FROM A CONSTRUCTOR, ENUMERATE ITS CALLERS.** Not "does
+the startup path still work" — that is a narrower question than the change.
+Measured the same day: dropping a `markSuccess()` that marked a publisher healthy
+before asking Redis anything was verified against the production startup, where
+hundreds of lines of wiring hide the sub-second window before the first
+heartbeat, and it was correct. The test bench has no wiring and relays in
+milliseconds, so the same change produced **33 failures and a 10-minute
+timeout**. The question that was missing is mechanical, not intuitive: `grep -rn
+"NewBatchingPublisher"` returns three sites, and the one that broke is the second
+line of the test helper. This is the same move the repo already demands when you
+change how a datum is PRODUCED — enumerate the consumers and walk each one —
+applied to construction. A verification can be correct and incomplete, and the
+tell is that it answered about one caller. **The same holds for a change that only
+moves WHEN something happens.** Measured the same day: making the publisher's first
+heartbeat fire immediately instead of one tick later added no new behaviour, and broke
+two tests by two unrelated paths — it raced a test that injects its own mark, and it
+opened a connection while a fixture was recording, so go-redis's per-connection init
+pipeline (`redis.go:839`, which goes through the client's hooks) arrived as an extra
+empty EXEC. Neither is visible in the diff, because the test harness observes TRAFFIC,
+not design. After a timing change, run the packages whose tests watch traffic or
+counters, with `-count=5`.
 
 **TILT IS THE WATCHER AND THE PROXY, SO IT IS A TURN TO SHARE, NOT A NUISANCE.**
 With Tilt up the live gate can reach the relayer and nobody may edit `.go`
