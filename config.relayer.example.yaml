@@ -245,6 +245,21 @@ default_request_timeout_seconds: 30
 # Default max body size in bytes (used when not specified per-service)
 default_max_body_size_bytes: 10485760  # 10MB
 
+# How many MiB of request and response bodies EACH service's optimistic relays
+# may hold between being served and being validated. Applies to every service
+# that does not set its own validation_queue_max_mib.
+#
+# 0 MEANS THE DEFAULT (128), NOT UNLIMITED. There is no way to switch this off:
+# an unbounded validation queue is what this bound exists to prevent.
+#
+# It is raised automatically when it is below what ONE relay of that service can
+# retain, and the relayer says so at startup instead of refusing to boot.
+#
+# The relayer also prints, at startup, the SUM of these bounds against the
+# memory it is allowed to use: with no global bound above them, that sum is the
+# ceiling the validation queues can reach together.
+# default_validation_queue_max_mib: 128
+
 # Metrics server (Prometheus)
 metrics:
   enabled: true
