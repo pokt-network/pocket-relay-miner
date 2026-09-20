@@ -146,8 +146,7 @@ func TestWebSocketClosesAFrameWithoutAPipeline(t *testing.T) {
 		nil, nil, 2*time.Second, false, nil, "", nil,
 	)
 	require.NoError(t, err)
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	rejected := relaysRejected.WithLabelValues(simWSTestService, BackendTypeWebSocket, rejectReasonMeteringNotConfigured)
 	before := testutil.ToFloat64(rejected)

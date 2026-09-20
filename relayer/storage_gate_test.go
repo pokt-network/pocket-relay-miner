@@ -151,8 +151,7 @@ func TestWebSocketStorageSaturatedRefusesTheUpgradeWith429(t *testing.T) {
 	proxy.SetPublishQueueFull(func() bool { queueAsked.Add(1); return true })
 	proxy.storeOperable = func() bool { return false }
 
-	srv := httptest.NewServer(proxy.WebSocketHandler())
-	t.Cleanup(srv.Close)
+	srv := wsTestServer(t, proxy.WebSocketHandler())
 	before := storageRejections(metricLabelUnknown, BackendTypeWebSocket)
 
 	headers := http.Header{}

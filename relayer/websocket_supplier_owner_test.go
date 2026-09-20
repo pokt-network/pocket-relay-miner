@@ -110,8 +110,7 @@ func newPublishingSageBridge(
 		nil, pipeline, 2*time.Second, false, nil, "", nil,
 	)
 	require.NoError(t, err)
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 	return gwClient
 }
 

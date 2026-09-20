@@ -204,8 +204,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 	)
 	require.NoError(t, err)
 
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	return &simWSFixture{
 		gwClient:     gwClient,

@@ -128,8 +128,7 @@ func TestWebSocketWithoutAPriceRefusesTheUpgrade(t *testing.T) {
 		relayMeter:     unpricedMeter(),
 	}
 
-	srv := httptest.NewServer(proxy.WebSocketHandler())
-	t.Cleanup(srv.Close)
+	srv := wsTestServer(t, proxy.WebSocketHandler())
 	before := pricingRejections("develop-websocket", BackendTypeWebSocket)
 
 	headers := http.Header{}

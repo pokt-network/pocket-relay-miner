@@ -4,7 +4,6 @@ package relayer
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -64,8 +63,7 @@ func TestWebSocketHandlerClosesAnUpgradedConnectionItDoesNotHandOff(t *testing.T
 		publisher:      &noopPublisher{},
 	}
 
-	srv := httptest.NewServer(proxy.WebSocketHandler())
-	t.Cleanup(srv.Close)
+	srv := wsTestServer(t, proxy.WebSocketHandler())
 
 	headers := http.Header{}
 	headers.Set("Target-Service-Id", "develop-websocket")
@@ -127,8 +125,7 @@ func TestWebSocketHandlerClosesAConnectionItRefusesWhileDraining(t *testing.T) {
 	// them decide this branch -- p.closed alone does.
 	proxy.closed = true
 
-	srv := httptest.NewServer(proxy.WebSocketHandler())
-	t.Cleanup(srv.Close)
+	srv := wsTestServer(t, proxy.WebSocketHandler())
 
 	headers := http.Header{}
 	headers.Set("Target-Service-Id", "develop-websocket")

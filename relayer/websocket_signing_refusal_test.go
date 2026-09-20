@@ -57,8 +57,7 @@ func TestWebSocketRefusesToServeOrBillAnUnsignableResponse(t *testing.T) {
 		2*time.Second, false, nil, "", nil,
 	)
 	require.NoError(t, err)
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	before := testutil.ToFloat64(relaysRejected.WithLabelValues(
 		simWSTestService, "websocket", rejectReasonSigningError))

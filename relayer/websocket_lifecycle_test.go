@@ -136,11 +136,10 @@ func TestBridgeDoesNotDialTheBackendUntilAFrameEarnsIt(t *testing.T) {
 	backendURL, dials, _ := countingWSBackend(t)
 	bridge, gwClient, rec, supplier := newLifecycleBridge(t, backendURL)
 
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	// NOT asserted here: "dials == 0 before the frame". There is no
-	// synchronisation point between `go bridge.Run()` and the first frame, so
+	// synchronisation point between runBridge starting Run and the first frame, so
 	// that assertion races the goroutine and passes on timing rather than on
 	// behaviour -- measured: it stayed green with the prologue removed and the
 	// dial put back at the top of Run. TestBridgeRefusesARawFrameBeforeAnyRelay
@@ -164,8 +163,7 @@ func TestBridgeRefusesARawFrameBeforeAnyRelay(t *testing.T) {
 	backendURL, dials, _ := countingWSBackend(t)
 	bridge, gwClient, _, _ := newLifecycleBridge(t, backendURL)
 
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	require.NoError(t, gwClient.WriteMessage(websocket.BinaryMessage, []byte{0xFF, 0xFF, 0xFF}))
 	require.NoError(t, gwClient.SetReadDeadline(time.Now().Add(10*time.Second)))
@@ -198,8 +196,7 @@ func TestBridgeClosesAConnectionThatNeverSendsAFrame(t *testing.T) {
 		return gwClient.WriteControl(websocket.PongMessage, []byte(appData), time.Now().Add(time.Second))
 	})
 
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	require.NoError(t, gwClient.SetReadDeadline(time.Now().Add(10*time.Second)))
 	_, _, err := gwClient.ReadMessage()
@@ -224,8 +221,7 @@ func TestBridgeDoesNotCloseAConnectionThatDidSendAFrame(t *testing.T) {
 	backendURL, dials, _ := countingWSBackend(t)
 	bridge, gwClient, _, supplier := newLifecycleBridge(t, backendURL)
 
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	sendRelay(t, gwClient, ownerTestRelay("stays-open", supplier))
 	readServedResponse(t, gwClient)
@@ -449,8 +445,7 @@ func TestBridgeBillsEverySubscriptionPush(t *testing.T) {
 		nil, pipeline, 5*time.Second, false, nil, "", nil,
 	)
 	require.NoError(t, err)
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	// ONE relay request, the subscribe.
 	sendRelay(t, gwClient, ownerTestRelay("subscription", supplier))

@@ -167,8 +167,7 @@ func TestWebSocketQueueFullRefusesTheUpgrade(t *testing.T) {
 	}
 	proxy.SetPublishQueueFull(func() bool { return true })
 
-	srv := httptest.NewServer(proxy.WebSocketHandler())
-	t.Cleanup(srv.Close)
+	srv := wsTestServer(t, proxy.WebSocketHandler())
 	before := queueFullRejections("develop-websocket", BackendTypeWebSocket)
 
 	headers := http.Header{}
