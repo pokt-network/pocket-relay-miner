@@ -235,6 +235,12 @@ type ProxyServer struct {
 	// Reuses buffers across requests to minimize GC pressure
 	bufferPool *BufferPool
 
+	// maxRequestBodySizeAcrossServices bounds the first read of an HTTP relay
+	// body, before the service is known. Resolved once: the relayer has no hot
+	// config reload, and walking the services map per relay is work on the
+	// hottest path there is.
+	maxRequestBodySizeAcrossServices int64
+
 	// HTTP server
 	server *http.Server
 
@@ -290,6 +296,65 @@ type ProxyServer struct {
 	bridgeWG sync.WaitGroup
 }
 
+// maxRequestBodySize is the bound on the FIRST read of an HTTP relay body,
+// before the service is known.
+//
+// It reads the field the constructor resolved, and falls back to computing it
+// when that field is zero. The fallback is a guard, not a convenience: thirty
+// test fixtures build ProxyServer as a struct literal rather than through
+// NewProxyServer, so a value wired only in the constructor is zero on every one
+// of them -- and a zero bound does not fail loudly, it truncates every body to
+// nothing and answers 413 to relays that are fine. The same shape already cost
+// this package once, which is why newValidationQueues was extracted.
+//
+// In production the field is always set, so the fallback never runs.
+func (p *ProxyServer) maxRequestBodySize() int64 {
+	if p.maxRequestBodySizeAcrossServices > 0 {
+		return p.maxRequestBodySizeAcrossServices
+	}
+	return p.config.MaxRequestBodySizeAcrossServices()
+}
+
+// logBodySizeLimits states, at startup, which body bounds ended up in force and
+// which key each one came from.
+//
+// It exists because a config key that is read but never confirmed is
+// indistinguishable from one that was ignored: max_request_body_size_bytes falls
+// back through two older keys, and an operator who writes it has no other way to
+// find out whether theirs is the one that applied.
+//
+// One line per service would be one line per service on a fleet of fifty, so it
+// names the defaults once and then only the services that DEPART from them --
+// which is exactly the set the operator wrote by hand and wants confirmed.
+func logBodySizeLimits(logger zerolog.Logger, config *Config) {
+	defaultRequest, defaultRequestSource := config.ResolveMaxRequestBodySize("")
+	defaultResponse, defaultResponseSource := config.ResolveMaxResponseBodySize("")
+
+	logger.Info().
+		Int64("default_max_request_body_size_bytes", defaultRequest).
+		Str("default_max_request_body_size_source", string(defaultRequestSource)).
+		Int64("default_max_response_body_size_bytes", defaultResponse).
+		Str("default_max_response_body_size_source", string(defaultResponseSource)).
+		Int64("max_request_body_size_across_services_bytes", config.MaxRequestBodySizeAcrossServices()).
+		Msg("body size limits in force")
+
+	for serviceID := range config.Services {
+		request, requestSource := config.ResolveMaxRequestBodySize(serviceID)
+		response, responseSource := config.ResolveMaxResponseBodySize(serviceID)
+		if request == defaultRequest && requestSource == defaultRequestSource &&
+			response == defaultResponse && responseSource == defaultResponseSource {
+			continue
+		}
+		logger.Info().
+			Str(logging.FieldServiceID, serviceID).
+			Int64("max_request_body_size_bytes", request).
+			Str("max_request_body_size_source", string(requestSource)).
+			Int64("max_response_body_size_bytes", response).
+			Str("max_response_body_size_source", string(responseSource)).
+			Msg("service overrides a body size limit")
+	}
+}
+
 // NewProxyServer creates a new HTTP proxy server.
 func NewProxyServer(
 	logger logging.Logger,
@@ -338,23 +403,23 @@ func NewProxyServer(
 	metricRecorder := NewMetricRecorder(logger, metricsSubpool)
 	metricRecorder.Start()
 
-	// Initialize buffer pool for reading backend responses
-	// Find the maximum body size across all services to ensure we can handle any response
-	maxBodySize := config.DefaultMaxBodySizeBytes
-	for _, svc := range config.Services {
-		if svc.MaxBodySizeBytes > maxBodySize {
-			maxBodySize = svc.MaxBodySizeBytes
-		}
+	// Initialize buffer pool for reading backend responses. The pool is shared by
+	// every service on both transports because it recycles BUFFERS; the bound it
+	// is built with is only the fallback for a read that names no service. Each
+	// read passes its own service's limit. The computation lives in config so
+	// this and ValidationQueueFloorBytes cannot drift apart -- they did, as two
+	// copies of the same loop.
+	maxResponseBodySize := config.MaxResponseBodySizeAcrossServices()
+	if maxResponseBodySize <= 0 {
+		maxResponseBodySize = DefaultMaxResponseSize // Fallback to 200MB if not configured
 	}
-	if maxBodySize <= 0 {
-		maxBodySize = DefaultMaxResponseSize // Fallback to 200MB if not configured
-	}
-	bufferPool := NewBufferPool(maxBodySize)
+	bufferPool := NewBufferPool(maxResponseBodySize)
 
 	logger.Info().
-		Int64("max_body_size_bytes", maxBodySize).
-		Int64("max_body_size_mb", maxBodySize/(1024*1024)).
+		Int64("max_response_body_size_across_services_bytes", maxResponseBodySize).
 		Msg("initialized buffer pool for backend response reading")
+
+	logBodySizeLimits(logger, config)
 
 	validationQueues := newValidationQueues(config)
 
@@ -365,12 +430,14 @@ func NewProxyServer(
 		clientPool:         clientPool,
 		clientPoolFallback: clientPoolFallback,
 		bufferPool:         bufferPool,
-		workerPool:         workerPool,
-		validationSubpool:  validationSubpool,
-		publishSubpool:     publishSubpool,
-		metricsSubpool:     metricsSubpool,
-		metricRecorder:     metricRecorder,
-		validationQueues:   validationQueues,
+
+		maxRequestBodySizeAcrossServices: config.MaxRequestBodySizeAcrossServices(),
+		workerPool:                       workerPool,
+		validationSubpool:                validationSubpool,
+		publishSubpool:                   publishSubpool,
+		metricsSubpool:                   metricsSubpool,
+		metricRecorder:                   metricRecorder,
+		validationQueues:                 validationQueues,
 
 		warnedUndeclaredTransport: xsync.NewMap[string, struct{}](),
 		bridges:                   xsync.NewMap[*WebSocketBridge, struct{}](),
@@ -885,8 +952,13 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read request body first (we need it to extract service ID from relay request)
-	maxBodySize := p.config.DefaultMaxBodySizeBytes
+	// Read request body first (we need it to extract service ID from relay
+	// request). The bound is the LARGEST any service allows, not the default: the
+	// service is unknown until this body is parsed, so a default-sized first
+	// stage rejects -- as unknown/unknown, before the service ID exists -- every
+	// relay of a service configured to allow more. The service's own, smaller
+	// bound is applied below, once it is known.
+	maxBodySize := p.maxRequestBodySize()
 
 	// Read request body
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize+1))
@@ -1056,7 +1128,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// rejection reason could not be emitted. Its own NOTE said as much.
 
 	// Check service-specific body size limit
-	serviceMaxBodySize := p.config.GetServiceMaxBodySize(serviceID)
+	serviceMaxBodySize := p.config.GetServiceMaxRequestBodySize(serviceID)
 	if int64(len(body)) > serviceMaxBodySize {
 		p.sendError(w, http.StatusRequestEntityTooLarge, "request body too large for service")
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonBodyTooLarge).Inc()
@@ -1495,7 +1567,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		//
 		// The bodies are no longer copied either. Both are already private
 		// allocations -- the request body comes from io.ReadAll and the response
-		// from BufferPool.ReadWithBuffer, which returns "an independent copy
+		// from BufferPool.ReadWithBufferLimit, which returns "an independent copy
 		// safe for use after the function returns". The eager path has passed
 		// these same slices straight through for as long as it has existed; the
 		// copies here bought a second allocation and a memcpy per optimistic
@@ -2075,7 +2147,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 
 	// Read response body using buffer pool to avoid RAM exhaustion
 	// Handles responses from 10KB to 200MB+ without allocating unbounded memory
-	respBody, err := p.bufferPool.ReadWithBuffer(resp.Body)
+	respBody, err := p.bufferPool.ReadWithBufferLimit(resp.Body, p.config.GetServiceMaxResponseBodySize(serviceID))
 	if err != nil {
 		return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -2824,22 +2896,24 @@ func (p *ProxyServer) InitGRPCHandler() error {
 	p.grpcRelayService = NewRelayGRPCService(
 		p.logger,
 		RelayGRPCServiceConfig{
-			ServiceConfigs:     p.config.Services,
-			ResponseSigner:     p.responseSigner,
-			Publisher:          p.publisher,
-			RelayProcessor:     p.relayProcessor,
-			RelayPipeline:      p.relayPipeline, // Unified relay processing pipeline
-			SimVerifier:        p.simVerifier,
-			PublishQueueFull:   p.queueFull,
-			StoreSaturated:     p.storeSaturated,
-			RelayMeter:         p.relayMeter,
-			CurrentBlockHeight: &p.currentBlockHeight,
-			MaxBodySize:        p.config.DefaultMaxBodySizeBytes,
-			BufferPool:         p.bufferPool, // Share buffer pool for efficient memory usage
-			GetHTTPClient:      p.getClientForService,
-			GetServiceTimeout:  p.config.GetServiceTimeout, // Timeout from profile
-			GetPool:            p.config.GetPool,
-			GetBackendConfig:   p.config.GetBackendConfig,
+			ServiceConfigs:                   p.config.Services,
+			ResponseSigner:                   p.responseSigner,
+			Publisher:                        p.publisher,
+			RelayProcessor:                   p.relayProcessor,
+			RelayPipeline:                    p.relayPipeline, // Unified relay processing pipeline
+			SimVerifier:                      p.simVerifier,
+			PublishQueueFull:                 p.queueFull,
+			StoreSaturated:                   p.storeSaturated,
+			RelayMeter:                       p.relayMeter,
+			CurrentBlockHeight:               &p.currentBlockHeight,
+			MaxRequestBodySizeAcrossServices: p.config.MaxRequestBodySizeAcrossServices(),
+			GetServiceMaxRequestBodySize:     p.config.GetServiceMaxRequestBodySize,
+			GetServiceMaxResponseBodySize:    p.config.GetServiceMaxResponseBodySize,
+			BufferPool:                       p.bufferPool, // Share buffer pool for efficient memory usage
+			GetHTTPClient:                    p.getClientForService,
+			GetServiceTimeout:                p.config.GetServiceTimeout, // Timeout from profile
+			GetPool:                          p.config.GetPool,
+			GetBackendConfig:                 p.config.GetBackendConfig,
 		},
 	)
 

@@ -93,7 +93,13 @@ type RelayGRPCService struct {
 	currentBlockHeight *atomic.Int64
 
 	// Max response body size
-	maxBodySize int64
+	// maxRequestBodySizeAcrossServices bounds what the transport will accept at
+	// all, before the service is known -- the gRPC counterpart of the HTTP
+	// pre-parse read. Per-service bounds are applied once the RelayRequest has
+	// been received, through the two resolvers below.
+	maxRequestBodySizeAcrossServices int64
+	getServiceMaxRequestBodySize     func(serviceID string) int64
+	getServiceMaxResponseBodySize    func(serviceID string) int64
 
 	// Buffer pool for reading backend responses efficiently
 	bufferPool *BufferPool
@@ -108,12 +114,14 @@ type RelayGRPCServiceConfig struct {
 	RelayPipeline  *RelayPipeline // Unified relay processing pipeline
 	SimVerifier    *SimulationVerifier
 	// PublishQueueFull is the batch queue admission gate (ProxyServer.queueFull).
-	PublishQueueFull   func() bool
-	StoreSaturated     func() bool // the storage gate (ProxyServer.storeSaturated)
-	RelayMeter         *RelayMeter
-	CurrentBlockHeight *atomic.Int64
-	MaxBodySize        int64
-	BufferPool         *BufferPool
+	PublishQueueFull                 func() bool
+	StoreSaturated                   func() bool // the storage gate (ProxyServer.storeSaturated)
+	RelayMeter                       *RelayMeter
+	CurrentBlockHeight               *atomic.Int64
+	MaxRequestBodySizeAcrossServices int64
+	GetServiceMaxRequestBodySize     func(serviceID string) int64
+	GetServiceMaxResponseBodySize    func(serviceID string) int64
+	BufferPool                       *BufferPool
 	// GetHTTPClient returns the HTTP client for a service (supports per-service timeout profiles)
 	GetHTTPClient func(serviceID string) *http.Client
 	// GetServiceTimeout returns the request timeout for a service (from timeout profile)
@@ -153,9 +161,17 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 		}
 	}
 
-	maxBodySize := config.MaxBodySize
+	maxBodySize := config.MaxRequestBodySizeAcrossServices
 	if maxBodySize == 0 {
 		maxBodySize = 10 * 1024 * 1024 // 10MB default
+	}
+	getServiceMaxRequestBodySize := config.GetServiceMaxRequestBodySize
+	if getServiceMaxRequestBodySize == nil {
+		getServiceMaxRequestBodySize = func(string) int64 { return maxBodySize }
+	}
+	getServiceMaxResponseBodySize := config.GetServiceMaxResponseBodySize
+	if getServiceMaxResponseBodySize == nil {
+		getServiceMaxResponseBodySize = func(string) int64 { return maxBodySize }
 	}
 
 	bufferPool := config.BufferPool
@@ -187,24 +203,26 @@ func NewRelayGRPCService(logger logging.Logger, config RelayGRPCServiceConfig) *
 	}
 
 	return &RelayGRPCService{
-		logger:             logger.With().Str(logging.FieldComponent, "grpc_relay_service").Logger(),
-		serviceConfigs:     config.ServiceConfigs,
-		responseSigner:     config.ResponseSigner,
-		publisher:          countPublished(config.Publisher),
-		relayProcessor:     config.RelayProcessor,
-		relayPipeline:      config.RelayPipeline,
-		simVerifier:        config.SimVerifier,
-		publishQueueFull:   config.PublishQueueFull,
-		storeSaturated:     config.StoreSaturated,
-		relayMeter:         config.RelayMeter,
-		currentBlockHeight: config.CurrentBlockHeight,
-		maxBodySize:        maxBodySize,
-		bufferPool:         bufferPool,
-		getHTTPClient:      getHTTPClient,
-		grpcHTTPClient:     grpcHTTPClient,
-		getServiceTimeout:  getServiceTimeout,
-		getPool:            config.GetPool,
-		getBackendConfig:   config.GetBackendConfig,
+		logger:                           logger.With().Str(logging.FieldComponent, "grpc_relay_service").Logger(),
+		serviceConfigs:                   config.ServiceConfigs,
+		responseSigner:                   config.ResponseSigner,
+		publisher:                        countPublished(config.Publisher),
+		relayProcessor:                   config.RelayProcessor,
+		relayPipeline:                    config.RelayPipeline,
+		simVerifier:                      config.SimVerifier,
+		publishQueueFull:                 config.PublishQueueFull,
+		storeSaturated:                   config.StoreSaturated,
+		relayMeter:                       config.RelayMeter,
+		currentBlockHeight:               config.CurrentBlockHeight,
+		maxRequestBodySizeAcrossServices: maxBodySize,
+		getServiceMaxRequestBodySize:     getServiceMaxRequestBodySize,
+		getServiceMaxResponseBodySize:    getServiceMaxResponseBodySize,
+		bufferPool:                       bufferPool,
+		getHTTPClient:                    getHTTPClient,
+		grpcHTTPClient:                   grpcHTTPClient,
+		getServiceTimeout:                getServiceTimeout,
+		getPool:                          config.GetPool,
+		getBackendConfig:                 config.GetBackendConfig,
 	}
 }
 
@@ -326,6 +344,15 @@ func (s *RelayGRPCService) serveSendRelay(stream grpc.ServerStream, ctx context.
 	if !ok {
 		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonUnknownService).Inc()
 		return status.Errorf(codes.NotFound, "unknown service: %s", serviceID)
+	}
+
+	// The service's own request bound, the counterpart of the HTTP check. The
+	// transport-level bound above is the widest any service allows, so without
+	// this a service's configured limit would not apply on gRPC at all.
+	if maxRequest := s.getServiceMaxRequestBodySize(serviceID); int64(len(relayRequest.Payload)) > maxRequest {
+		relaysRejected.WithLabelValues(serviceID, BackendTypeGRPC, rejectReasonBodyTooLarge).Inc()
+		return status.Errorf(codes.ResourceExhausted,
+			"request body too large for service: %d > %d", len(relayRequest.Payload), maxRequest)
 	}
 
 	// Apply service timeout to context (from timeout profile)
@@ -903,7 +930,7 @@ func (s *RelayGRPCService) forwardToBackend(
 
 	// Read response body using buffer pool to avoid RAM exhaustion
 	// The buffer pool enforces the size limit and reuses buffers
-	respBody, err := s.bufferPool.ReadWithBuffer(resp.Body)
+	respBody, err := s.bufferPool.ReadWithBufferLimit(resp.Body, s.getServiceMaxResponseBodySize(serviceID))
 	if err != nil {
 		return nil, nil, 0, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -1005,7 +1032,15 @@ func (s *RelayGRPCService) getCircuitBreakerThreshold(serviceID, rpcType string)
 // It uses the standard proto codec and handles typed RelayRequest/RelayResponse messages.
 // Includes panic recovery interceptors for both unary and stream RPCs.
 func NewGRPCServerForRelayService(service *RelayGRPCService) *grpc.Server {
+	// Without MaxRecvMsgSize gRPC keeps grpc-go's 4 MiB default, so a service
+	// configured for more was cut off at 4 MiB on this transport and served in
+	// full over HTTP -- the same config, two answers. Worse, that rejection
+	// happens inside grpc-go before any of our code runs, so it increments no
+	// counter of ours and leaves no reason: from the miner's side the relay
+	// simply never existed. The bound here is the widest any service allows;
+	// each service's own, narrower bound is applied in the handler.
 	server := grpc.NewServer(
+		grpc.MaxRecvMsgSize(int(service.maxRequestBodySizeAcrossServices)),
 		grpc.UnknownServiceHandler(service.HandleUnknownService),
 		grpc.UnaryInterceptor(UnaryPanicRecoveryInterceptor(service.logger)),
 		grpc.StreamInterceptor(StreamPanicRecoveryInterceptor(service.logger)),

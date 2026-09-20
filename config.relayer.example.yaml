@@ -244,6 +244,51 @@ default_request_timeout_seconds: 30
 
 # Default max body size in bytes (used when not specified per-service)
 default_max_body_size_bytes: 10485760  # 10MB
+#
+# The two directions can be set apart. Either key unset inherits
+# default_max_body_size_bytes above, so an existing config keeps its behaviour.
+#
+# They are not alike. A REQUEST body is held for the whole validation queue and
+# then again inside the SMST leaf until the claim -- roughly forty blocks -- so
+# it is what Redis is sized against. A RESPONSE is read, signed and dropped.
+#
+# default_max_request_body_size_bytes: 10485760
+# default_max_response_body_size_bytes: 10485760
+#
+# Both accept a per-service override -- services.<id>.max_request_body_size_bytes
+# and services.<id>.max_response_body_size_bytes -- and both fall back to that
+# service's max_body_size_bytes before reaching the defaults above.
+#
+# One value per key, the same for every rpc_type: a service allows what it
+# allows whether the relay arrives over JSON-RPC, REST, gRPC or a stream. gRPC
+# used to be the exception -- it kept grpc-go's 4 MiB default and refused larger
+# relays inside the library, before any counter of ours could record it.
+#
+# The relayer logs both effective values and the key each came from at startup
+# ("body size limits in force"). If the key you wrote is not the one named
+# there, a more specific one is winning.
+#
+# HOW TO SIZE REDIS AGAINST THE REQUEST BOUND. Measured 2026-09-20 on a
+# single-node run: a relay costs roughly 450 bytes of Redis that never change
+# (the trie's interior nodes, the field name -- a digest in hex, so 96 bytes
+# that cannot shrink -- and Redis's own per-entry overhead) PLUS the request
+# payload. Only the payload grows. Over the ~40 blocks a tree stays alive, a
+# 12.8 GiB Redis therefore sustains roughly:
+#
+#   request payload    sustained rps
+#   1 KB                     ~3,900
+#   120 KB                      ~47
+#   1 MB                         ~5.5
+#   4 MB                         ~1.4
+#
+# Read those as orders of magnitude, not precise figures: the constant was
+# derived from one run, and a second operator on different hardware measured
+# ~1.5x more (more suppliers means more trees and more interior nodes).
+#
+# The rule: size Redis against (peak rps x average REQUEST size x 40 blocks).
+# Raising the request bound does not only admit bigger requests -- it lowers
+# the rps the same Redis can sustain, proportionally. Raising the RESPONSE
+# bound costs bandwidth and relayer memory, and no Redis at all.
 
 # How many MiB of request and response bodies EACH service's optimistic relays
 # may hold between being served and being validated. Applies to every service

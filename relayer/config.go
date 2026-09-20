@@ -266,7 +266,23 @@ type Config struct {
 	DefaultRequestTimeoutSeconds int64 `yaml:"default_request_timeout_seconds"`
 
 	// DefaultMaxBodySizeBytes is the default max body size for requests/responses.
+	//
+	// It is the ORIGINAL single knob and it still works: it is the fallback both
+	// directions resolve through, so a config that names only this key keeps the
+	// behaviour it had. The two keys below split it, because the directions are
+	// not alike -- a request body is retained for the whole validation queue and
+	// then again in the SMST leaf until the claim, while a response is read,
+	// signed and dropped.
 	DefaultMaxBodySizeBytes int64 `yaml:"default_max_body_size_bytes"`
+
+	// DefaultMaxRequestBodySizeBytes is the default bound on a RELAY REQUEST
+	// body. Unset (0) inherits DefaultMaxBodySizeBytes.
+	DefaultMaxRequestBodySizeBytes int64 `yaml:"default_max_request_body_size_bytes"`
+
+	// DefaultMaxResponseBodySizeBytes bounds a BACKEND RESPONSE body for every
+	// service that does not override it. Unset (0) inherits
+	// DefaultMaxBodySizeBytes.
+	DefaultMaxResponseBodySizeBytes int64 `yaml:"default_max_response_body_size_bytes"`
 
 	// DefaultValidationQueueMaxMiB bounds, PER SERVICE, the request and response
 	// bodies that service's optimistic relays hold between being served and
@@ -490,7 +506,16 @@ type ServiceConfig struct {
 	PoolProfile string `yaml:"pool_profile,omitempty"`
 
 	// MaxBodySizeBytes overrides the default max body size for this service.
+	// It is the fallback MaxRequestBodySizeBytes resolves through.
 	MaxBodySizeBytes int64 `yaml:"max_body_size_bytes,omitempty"`
+
+	// MaxRequestBodySizeBytes overrides the request bound for this service.
+	// 0 means "fall back", never unlimited.
+	MaxRequestBodySizeBytes int64 `yaml:"max_request_body_size_bytes,omitempty"`
+
+	// MaxResponseBodySizeBytes overrides the response bound for this service.
+	// 0 means "fall back", never unlimited.
+	MaxResponseBodySizeBytes int64 `yaml:"max_response_body_size_bytes,omitempty"`
 
 	// ValidationQueueMaxMiB overrides default_validation_queue_max_mib for this
 	// service. 0 means "use the default", never unlimited.
@@ -1079,33 +1104,18 @@ const (
 	MaxValidationQueueMaxMiB = 8192
 )
 
-// maxBodySizeAcrossServices is the largest max body size any service allows.
-//
-// It is the RESPONSE bound for EVERY service, not just for that one: the proxy
-// builds a single buffer pool sized to this maximum and every service reads its
-// responses through it. A per-service floor computed from the service's own
-// value alone would therefore be short for every service but the largest.
-func (c *Config) maxBodySizeAcrossServices() int64 {
-	max := c.DefaultMaxBodySizeBytes
-	for _, svc := range c.Services {
-		if svc.MaxBodySizeBytes > max {
-			max = svc.MaxBodySizeBytes
-		}
-	}
-	return max
-}
-
 // ValidationQueueFloorBytes is the smallest bound that still lets a service
 // serve ONE relay of its largest allowed size.
 //
 // A single queued relay retains the request body TWICE -- once as the body and
 // once as the RelayRequest's Payload, which the unmarshal COPIES rather than
 // aliases (poktroll x/service/types/relay.pb.go, `m.Payload = append(...)`) --
-// plus one response, which is bounded fleet-wide (see maxBodySizeAcrossServices).
+// plus one response, bounded by that same service (the pool is shared, the
+// limit is not).
 // Below this, the service refuses relays it was configured to accept: its own
 // traffic, rejected by its own bound.
 func (c *Config) ValidationQueueFloorBytes(serviceID string) int64 {
-	return 2*c.GetServiceMaxBodySize(serviceID) + c.maxBodySizeAcrossServices()
+	return 2*c.GetServiceMaxRequestBodySize(serviceID) + c.GetServiceMaxResponseBodySize(serviceID)
 }
 
 // ValidationQueueMaxBytes is the EFFECTIVE bound for one service: its override
@@ -1131,12 +1141,117 @@ func (c *Config) ValidationQueueMaxBytes(serviceID string) int64 {
 	return configured
 }
 
-// GetServiceMaxBodySize returns the max body size for a service.
+// GetServiceMaxBodySize returns the max body size for a service under the
+// original single knob. Both directions resolve through it, so it is the reason
+// a config written before the split keeps the behaviour it had.
 func (c *Config) GetServiceMaxBodySize(serviceID string) int64 {
 	if svc, ok := c.Services[serviceID]; ok && svc.MaxBodySizeBytes > 0 {
 		return svc.MaxBodySizeBytes
 	}
 	return c.DefaultMaxBodySizeBytes
+}
+
+// BodySizeSource names where an effective bound came from. It exists so the
+// startup log can answer the only question an operator has about a new key:
+// whether the one they wrote is the one that applied.
+type BodySizeSource string
+
+const (
+	// BodySizeFromServiceRequestOverride: services.<id>.max_request_body_size_bytes.
+	BodySizeFromServiceRequestOverride BodySizeSource = "service.max_request_body_size_bytes"
+	// BodySizeFromServiceResponseOverride: services.<id>.max_response_body_size_bytes.
+	BodySizeFromServiceResponseOverride BodySizeSource = "service.max_response_body_size_bytes"
+	// BodySizeFromServiceLegacy: services.<id>.max_body_size_bytes, the pre-split key.
+	BodySizeFromServiceLegacy BodySizeSource = "service.max_body_size_bytes"
+	// BodySizeFromDefaultRequest: default_max_request_body_size_bytes.
+	BodySizeFromDefaultRequest BodySizeSource = "default_max_request_body_size_bytes"
+	// BodySizeFromDefaultResponse: default_max_response_body_size_bytes.
+	BodySizeFromDefaultResponse BodySizeSource = "default_max_response_body_size_bytes"
+	// BodySizeFromLegacyDefault: default_max_body_size_bytes, the pre-split key.
+	BodySizeFromLegacyDefault BodySizeSource = "default_max_body_size_bytes"
+)
+
+// ResolveMaxRequestBodySize returns the request bound for one service and the
+// key it came from, most specific first.
+func (c *Config) ResolveMaxRequestBodySize(serviceID string) (int64, BodySizeSource) {
+	if svc, ok := c.Services[serviceID]; ok {
+		if svc.MaxRequestBodySizeBytes > 0 {
+			return svc.MaxRequestBodySizeBytes, BodySizeFromServiceRequestOverride
+		}
+		if svc.MaxBodySizeBytes > 0 {
+			return svc.MaxBodySizeBytes, BodySizeFromServiceLegacy
+		}
+	}
+	if c.DefaultMaxRequestBodySizeBytes > 0 {
+		return c.DefaultMaxRequestBodySizeBytes, BodySizeFromDefaultRequest
+	}
+	return c.DefaultMaxBodySizeBytes, BodySizeFromLegacyDefault
+}
+
+// GetServiceMaxRequestBodySize is ResolveMaxRequestBodySize without the source,
+// for the hot path that only needs the number.
+func (c *Config) GetServiceMaxRequestBodySize(serviceID string) int64 {
+	size, _ := c.ResolveMaxRequestBodySize(serviceID)
+	return size
+}
+
+// ResolveMaxResponseBodySize returns the response bound for one service and the
+// key it came from, most specific first -- the mirror of the request side.
+//
+// The shared BufferPool is not an obstacle to this being per-service: the pool
+// recycles buffers, and the bound is a limit passed per read
+// (BufferPool.ReadWithBufferLimit). Only the pool's own fallback bound is
+// fleet-wide, and that is MaxResponseBodySizeAcrossServices.
+func (c *Config) ResolveMaxResponseBodySize(serviceID string) (int64, BodySizeSource) {
+	if svc, ok := c.Services[serviceID]; ok {
+		if svc.MaxResponseBodySizeBytes > 0 {
+			return svc.MaxResponseBodySizeBytes, BodySizeFromServiceResponseOverride
+		}
+		if svc.MaxBodySizeBytes > 0 {
+			return svc.MaxBodySizeBytes, BodySizeFromServiceLegacy
+		}
+	}
+	if c.DefaultMaxResponseBodySizeBytes > 0 {
+		return c.DefaultMaxResponseBodySizeBytes, BodySizeFromDefaultResponse
+	}
+	return c.DefaultMaxBodySizeBytes, BodySizeFromLegacyDefault
+}
+
+// GetServiceMaxResponseBodySize is ResolveMaxResponseBodySize without the source.
+func (c *Config) GetServiceMaxResponseBodySize(serviceID string) int64 {
+	size, _ := c.ResolveMaxResponseBodySize(serviceID)
+	return size
+}
+
+// MaxResponseBodySizeAcrossServices is the largest response bound any service
+// allows. It is the buffer pool's own fallback bound, for a read that names no
+// service.
+func (c *Config) MaxResponseBodySizeAcrossServices() int64 {
+	max, _ := c.ResolveMaxResponseBodySize("")
+	for serviceID := range c.Services {
+		if size := c.GetServiceMaxResponseBodySize(serviceID); size > max {
+			max = size
+		}
+	}
+	return max
+}
+
+// MaxRequestBodySizeAcrossServices is the largest request bound any service
+// allows.
+//
+// It is the bound the FIRST read of an HTTP relay body uses, and it has to be
+// the maximum rather than the default: the service is not known until the body
+// has been read and parsed, so a first stage bounded by the default rejects --
+// as unknown/unknown, before the service ID exists -- every relay of a service
+// that legitimately allows more.
+func (c *Config) MaxRequestBodySizeAcrossServices() int64 {
+	max, _ := c.ResolveMaxRequestBodySize("")
+	for serviceID := range c.Services {
+		if size := c.GetServiceMaxRequestBodySize(serviceID); size > max {
+			max = size
+		}
+	}
+	return max
 }
 
 // getMaxServiceTimeout returns the maximum timeout across all services.
