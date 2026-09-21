@@ -251,13 +251,23 @@ func TestColdCompaction_ConcurrentProofsOfACompactedTreeAllVerify(t *testing.T) 
 }
 
 // findLeafField returns the hash field and bytes of one leaf node of a stored tree.
+// findLeafField returns one leaf of the hash, DECOMPRESSED.
+//
+// It reads the stored bytes directly, so it is one of the readers that knows
+// how a node is stored -- and it has to decompress like the store does, or it
+// matches nothing: a leaf is stored as a zstd frame whose first byte is 0x28,
+// never 0x00 (item 398, smst_node_codec.go). This is the test scaffolding
+// reading the format without declaring it, which is why the assertion above it
+// went red the moment production started compressing.
 func findLeafField(t *testing.T, client *redisutil.Client, hashKey string) (string, []byte) {
 	t.Helper()
 	all, err := client.HGetAll(context.Background(), hashKey).Result()
 	require.NoError(t, err)
-	for field, node := range all {
+	for field, stored := range all {
+		node, decErr := decompressNode([]byte(stored))
+		require.NoError(t, decErr, "field %s of %s", field, hashKey)
 		if len(node) > 1+coldLeafPathLen+coldLeafMetaLen && node[0] == 0 {
-			return field, []byte(node)
+			return field, node
 		}
 	}
 	t.Fatalf("no leaf node in %s", hashKey)
@@ -274,7 +284,9 @@ func TestColdCompaction_LeavesThatDoNotRebuildTheClaimedRootKeepTheNodesHash(t *
 			tamper: func(t *testing.T, client *redisutil.Client, hashKey string) {
 				field, node := findLeafField(t, client, hashKey)
 				node[1+coldLeafPathLen+3] ^= 0xff
-				require.NoError(t, client.HSet(context.Background(), hashKey, field, node).Err())
+				// Written the way production writes it, so the tampering is a
+				// changed LEAF and not a changed encoding.
+				require.NoError(t, client.HSet(context.Background(), hashKey, field, compressNode(node)).Err())
 			},
 		},
 		{

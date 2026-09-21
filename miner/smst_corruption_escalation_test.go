@@ -218,7 +218,13 @@ func (s *RedisSMSTTestSuite) TestEscalation_FailedUpdateDoesNotResetCounter() {
 	fields, err := s.redisClient.HGetAll(s.ctx, nodesKey).Result()
 	s.Require().NoError(err)
 	victims := make([]string, 0, len(fields))
-	for field, val := range fields {
+	for field, stored := range fields {
+		// The kind prefix is a read of the stored format: since item 398 a
+		// value may be one zstd frame, whose first byte is 0x28. Inner nodes
+		// are hashes and do not compress today, so this would keep working by
+		// luck — decode it so it keeps working by construction.
+		val, decErr := decompressNode([]byte(stored))
+		s.Require().NoError(decErr)
 		if len(val) > 0 && val[0] == smstInnerNodePrefix {
 			victims = append(victims, field)
 		}

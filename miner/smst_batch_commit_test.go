@@ -3,7 +3,6 @@
 package miner
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"fmt"
@@ -154,6 +153,24 @@ func TestHandleRelay_ARelayOutsideTheBatchIsStoredBeforeItIsAcknowledged(t *test
 	require.True(t, stored, "the acknowledged relay's leaf must already be in Redis")
 }
 
+// nodeSizedValue is a value the size of a node and, like a node, incompressible:
+// almost all of what a node carries is hash bytes.
+//
+// bytes.Repeat is NOT a node for this purpose. The nodes write counts the bytes
+// that TRAVEL, and since item 398 those are the compressed ones, so a repeated
+// filler of 1 KiB reaches Redis as a few dozen bytes -- both chunking controls
+// below then pass with ONE HSET while asserting nothing about chunking. Chained
+// SHA-256 keeps it deterministic and keeps zstd from finding anything.
+func nodeSizedValue(n int) []byte {
+	out := make([]byte, 0, n+sha256.Size)
+	sum := sha256.Sum256([]byte("node filler"))
+	for len(out) < n {
+		out = append(out, sum[:]...)
+		sum = sha256.Sum256(sum[:])
+	}
+	return out[:n]
+}
+
 func TestRedisMapStore_ALargeNodesWriteIsSplitAndFullyWritten(t *testing.T) {
 	ctx := context.Background()
 	client, _ := newTestRedis(t)
@@ -164,7 +181,7 @@ func TestRedisMapStore_ALargeNodesWriteIsSplitAndFullyWritten(t *testing.T) {
 
 	// About 600 KiB of values: more than two nodesWriteChunkBytes.
 	const nodes = 600
-	value := bytes.Repeat([]byte("v"), 1024)
+	value := nodeSizedValue(1024)
 	store.BeginPipeline()
 	for i := 0; i < nodes; i++ {
 		require.NoError(t, store.Set([]byte(fmt.Sprintf("node-%d", i)), value))
@@ -250,7 +267,7 @@ func TestRedisMapStore_AFullRelayBatchOfNodesGoesInPiecesOfAtMost32KiB(t *testin
 
 	// relayBatchCap leaves of about 1 KiB each.
 	const leaves = relayBatchCap
-	value := bytes.Repeat([]byte("v"), 1024)
+	value := nodeSizedValue(1024)
 	store.BeginPipeline()
 	for i := 0; i < leaves; i++ {
 		require.NoError(t, store.Set([]byte(fmt.Sprintf("node-%04d", i)), value))

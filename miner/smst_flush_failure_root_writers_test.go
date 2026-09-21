@@ -108,9 +108,15 @@ func TestRedisMapStore_FailedFlushKeepsBufferedNodesForTheNextFlush(t *testing.T
 	require.NoError(t, store.FlushPipeline())
 
 	for field, want := range map[string]string{"node-a": "value-a", "node-b": "value-b"} {
-		got, err := client.HGet(ctx, hashKey, hex.EncodeToString([]byte(field))).Result()
+		stored, err := client.HGet(ctx, hashKey, hex.EncodeToString([]byte(field))).Bytes()
 		require.NoError(t, err, "%s must be in Redis after the next successful flush", field)
-		require.Equal(t, want, got)
+		// Read the way the store reads: a node is stored as itself or as one
+		// zstd frame of it (item 398). Comparing the stored bytes directly
+		// passes here only because these values are too small to compress —
+		// a property of the fixture, not of the store.
+		got, decErr := decompressNode(stored)
+		require.NoError(t, decErr)
+		require.Equal(t, want, string(got))
 	}
 }
 

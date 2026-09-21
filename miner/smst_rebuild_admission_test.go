@@ -168,6 +168,43 @@ func requireNotAdmitted(t *testing.T, a *RebuildAdmission, got <-chan admittedTr
 	}
 }
 
+// requireGCCount waits, bounded, for the model to have run exactly n
+// collections, and fails by name if it does not.
+//
+// Being in the queue does NOT mean the GC has already run. unlockAndDispatch
+// enqueues under a.mu, RELEASES it, and only then calls collect
+// (smst_rebuild_admission.go:341-350, and its own comment says so), while
+// waitQueuedOr returns the moment the waiter is visible in the queue. Reading
+// gcCount() on the next line therefore asserts an order the production code
+// never promised.
+//
+// Measured 2026-09-20: one invocation in five of `-race -count=5 ./miner/`
+// failed at that read with 0, while 20 isolated runs and 50 more at
+// GOMAXPROCS=1 stayed green -- what opens the window is the contention of the
+// whole package, not the interleaving of these goroutines alone. Rule #1 puts
+// the bar at one failure in a thousand runs, so this is two hundred times over
+// it, and "pre-existing" is not an exemption.
+//
+// The fix waits for the FACT, never for a duration: a Sleep here is what the
+// same rule forbids one line above.
+func requireGCCount(t *testing.T, h *heapModel, n int, msg string) {
+	t.Helper()
+	deadline := time.After(30 * time.Second)
+	for {
+		switch got := h.gcCount(); {
+		case got == n:
+			return
+		case got > n:
+			t.Fatalf("%s: %d collections, expected %d", msg, got, n)
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("%s: %d collections after 30s, expected %d", msg, h.gcCount(), n)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
 func TestRebuildAdmission_ALoadedTreeTheLastGCDidNotSeeKeepsTheNextWaitingUntilItIsDone(t *testing.T) {
 	const tree = 100 << 20
 	heap := &heapModel{objects: 1 << 30, live: 1 << 30}
@@ -183,10 +220,22 @@ func TestRebuildAdmission_ALoadedTreeTheLastGCDidNotSeeKeepsTheNextWaitingUntilI
 	b := acquireAsync(admission, context.Background(), tree, 2)
 	requireNotAdmitted(t, admission, b, 1,
 		"LINK seq-objects: B was admitted while A is loaded and only fits by the live heap no GC updated")
-	require.Equal(t, 1, heap.gcCount(), "a no is asked again after one GC")
+	requireGCCount(t, heap, 1, "a no is asked again after one GC")
 
 	c := acquireAsync(admission, context.Background(), tree, 1)
 	requireNotAdmitted(t, admission, c, 2, "C was admitted ahead of B")
+	// KNOWN WEAK, and left as it is on purpose (2026-09-20, item 398). This has
+	// the same window as the read above, in the opposite direction: the queue
+	// becomes visible before collect runs, so a second GC arriving late would be
+	// read here as "still 1" and this line would PASS. It is therefore not a
+	// flake -- it is an assertion that cannot fail, which is worse, because it
+	// reads as coverage and never says so.
+	//
+	// It has no fix by waiting: one cannot wait for something not to happen.
+	// Closing it needs a design (an event the admission publishes, or a barrier
+	// the test can hold), which is more than a line and is not this item's
+	// scope. Written here rather than in a queue because this is where whoever
+	// touches the assertion will be looking.
 	require.Equal(t, 1, heap.gcCount(), "no second GC before anything changes")
 
 	heap.drop(tree)

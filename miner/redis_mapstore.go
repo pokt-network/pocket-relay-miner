@@ -91,6 +91,55 @@ func NewRedisMapStore(
 	}
 }
 
+// newRedisMapStoreForHash is NewRedisMapStore for a caller that already holds
+// the hash key rather than the (supplier, session) pair that names it. It
+// exists so the cold path reads nodes through this store -- the one place that
+// knows how a node is stored -- instead of talking to Redis itself.
+func newRedisMapStoreForHash(ctx context.Context, redisClient *redisutil.Client, hashKey string) *RedisMapStore {
+	return &RedisMapStore{
+		redisClient:    redisClient,
+		hashKey:        hashKey,
+		ctx:            ctx,
+		pipelineBuffer: make(map[string][]byte),
+		orphanBuffer:   make(map[string]struct{}),
+	}
+}
+
+// RangeNodes calls fn for every field of the nodes hash, with the node already
+// decompressed and with the number of bytes it occupies in Redis.
+//
+// Both are given because they answer different questions and only one of them
+// is the node: storedBytes is what the hash COSTS -- the figure the cold
+// compaction reports as what it frees -- while node is what the tree holds. A
+// caller handed only the decompressed node would report the uncompressed size
+// as the hash's, and would be wrong by exactly what this change saves.
+//
+// HSCAN may return a field twice; this passes both through, because what a
+// repeat means belongs to the caller.
+func (s *RedisMapStore) RangeNodes(ctx context.Context, fn func(field string, node []byte, storedBytes int) error) error {
+	var cursor uint64
+	for {
+		kvs, next, err := s.redisClient.HScan(ctx, s.hashKey, cursor, "", coldLeavesScanCount).Result()
+		if err != nil {
+			return err
+		}
+		for i := 0; i+1 < len(kvs); i += 2 {
+			field, stored := kvs[i], kvs[i+1]
+			node, decErr := decompressNode([]byte(stored))
+			if decErr != nil {
+				return fmt.Errorf("field=%s hash=%s: %w", field, s.hashKey, decErr)
+			}
+			if fnErr := fn(field, node, len(stored)); fnErr != nil {
+				return fnErr
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
+}
+
 // Get retrieves a value from the Redis hash.
 //
 // The key is hex-encoded before being used as a Redis hash field name,
@@ -118,7 +167,7 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	// Convert key to hex string for Redis field name
 	field := hex.EncodeToString(key)
 
-	val, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
+	stored, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
 	if err == redis.Nil {
 		observability.SMSTStoreOperations.WithLabelValues("get", "not_found").Inc()
 		return nil, fmt.Errorf("%w: field=%s hash=%s", ErrSMSTNodeMissing, field, s.hashKey)
@@ -127,6 +176,15 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 		observability.SMSTStoreOperations.WithLabelValues("get", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("get", "store_error").Inc()
 		return nil, err
+	}
+	// The value may be one zstd frame; see smst_node_codec.go for why the
+	// first byte says which. Decompressing HERE and not in each caller is what
+	// keeps the format private to this store.
+	val, err := decompressNode(stored)
+	if err != nil {
+		observability.SMSTStoreOperations.WithLabelValues("get", "error").Inc()
+		observability.SMSTStoreErrors.WithLabelValues("get", "store_error").Inc()
+		return nil, fmt.Errorf("field=%s hash=%s: %w", field, s.hashKey, err)
 	}
 	// Defense-in-depth: a zero-length payload would also panic the smt
 	// library (data[:1] in isLeafNode). Reject explicitly so we never
@@ -183,7 +241,7 @@ func (s *RedisMapStore) Set(key, value []byte) error {
 		observability.SMSTStoreOperationDuration.WithLabelValues("set").Observe(time.Since(start).Seconds())
 	}()
 
-	err := s.redisClient.HSet(s.ctx, s.hashKey, field, value).Err()
+	err := s.redisClient.HSet(s.ctx, s.hashKey, field, compressNode(value)).Err()
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("set", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("set", "store_error").Inc()
@@ -378,13 +436,16 @@ func (s *RedisMapStore) writePendingNodesLocked() error {
 	args := make([]interface{}, 0, len(s.pipelineBuffer)*2)
 	chunkBytes := 0
 	for field, value := range s.pipelineBuffer {
-		if len(args) > 0 && chunkBytes+len(field)+len(value) > nodesWriteChunkBytes {
+		// Compressed on the way out, so the buffer keeps raw nodes and the
+		// chunking counts the bytes that actually travel.
+		stored := compressNode(value)
+		if len(args) > 0 && chunkBytes+len(field)+len(stored) > nodesWriteChunkBytes {
 			chunks = append(chunks, args)
 			args = make([]interface{}, 0, len(s.pipelineBuffer)*2-len(args))
 			chunkBytes = 0
 		}
-		args = append(args, field, value)
-		chunkBytes += len(field) + len(value)
+		args = append(args, field, stored)
+		chunkBytes += len(field) + len(stored)
 	}
 	chunks = append(chunks, args)
 

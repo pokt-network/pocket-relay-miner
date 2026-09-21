@@ -261,44 +261,46 @@ func (m *RedisSMSTManager) rebuildColdTree(sessionID string, leaves []coldLeaf) 
 	return store, root, err
 }
 
-// readColdLeaves reads every leaf node of a nodes hash by HSCAN. A field HSCAN
-// returns twice is counted once. hashBytes is the field and value bytes read.
+// readColdLeaves reads every leaf node of a nodes hash through the store, which
+// is what knows whether a stored value is a node or one zstd frame of it. A
+// field HSCAN returns twice is counted once. hashBytes is the field and STORED
+// value bytes -- what the hash costs in Redis, which is what compacting frees.
+//
+// The offsets below parse a node and nothing else: the store hands one over
+// already decompressed, so this reads the same bytes it always read. Before the
+// compression landed this function ran its own HSCAN, and a frame would have
+// made `node[0] != 0` skip every leaf IN SILENCE -- no crash, no log, an empty
+// rebuild and a root mismatch that is not retriable (item 398).
 func (m *RedisSMSTManager) readColdLeaves(ctx context.Context, hashKey string) (leaves []coldLeaf, hashBytes int, err error) {
 	seen := make(map[string]struct{})
-	var cursor uint64
-	for {
-		kvs, next, scanErr := m.redisClient.HScan(ctx, hashKey, cursor, "", coldLeavesScanCount).Result()
-		if scanErr != nil {
-			return nil, 0, scanErr
+	store := newRedisMapStoreForHash(ctx, m.redisClient, hashKey)
+	rangeErr := store.RangeNodes(ctx, func(field string, node []byte, storedBytes int) error {
+		if _, dup := seen[field]; dup {
+			return nil
 		}
-		for i := 0; i+1 < len(kvs); i += 2 {
-			field, node := kvs[i], kvs[i+1]
-			if _, dup := seen[field]; dup {
-				continue
-			}
-			seen[field] = struct{}{}
-			hashBytes += len(field) + len(node)
-			if len(node) == 0 || node[0] != 0 {
-				continue // inner (0x01) or extension (0x02) node
-			}
-			if len(node) < 1+coldLeafPathLen+coldLeafMetaLen {
-				return nil, 0, fmt.Errorf("leaf node %s has %d bytes", field, len(node))
-			}
-			if leafCount := binary.BigEndian.Uint64([]byte(node[len(node)-8:])); leafCount != 1 {
-				return nil, 0, fmt.Errorf("leaf node %s has count %d", field, leafCount)
-			}
-			valueEnd := len(node) - coldLeafMetaLen
-			leaves = append(leaves, coldLeaf{
-				path:   []byte(node[1 : 1+coldLeafPathLen]),
-				value:  []byte(node[1+coldLeafPathLen : valueEnd]),
-				weight: binary.BigEndian.Uint64([]byte(node[valueEnd : valueEnd+8])),
-			})
+		seen[field] = struct{}{}
+		hashBytes += len(field) + storedBytes
+		if len(node) == 0 || node[0] != 0 {
+			return nil // inner (0x01) or extension (0x02) node
 		}
-		cursor = next
-		if cursor == 0 {
-			return leaves, hashBytes, nil
+		if len(node) < 1+coldLeafPathLen+coldLeafMetaLen {
+			return fmt.Errorf("leaf node %s has %d bytes", field, len(node))
 		}
+		if leafCount := binary.BigEndian.Uint64(node[len(node)-8:]); leafCount != 1 {
+			return fmt.Errorf("leaf node %s has count %d", field, leafCount)
+		}
+		valueEnd := len(node) - coldLeafMetaLen
+		leaves = append(leaves, coldLeaf{
+			path:   node[1 : 1+coldLeafPathLen],
+			value:  node[1+coldLeafPathLen : valueEnd],
+			weight: binary.BigEndian.Uint64(node[valueEnd : valueEnd+8]),
+		})
+		return nil
+	})
+	if rangeErr != nil {
+		return nil, 0, rangeErr
 	}
+	return leaves, hashBytes, nil
 }
 
 // CompactColdTree stores a claimed session's tree as its leaves blob and deletes
