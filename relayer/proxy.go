@@ -971,8 +971,18 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	if int64(len(body)) > maxBodySize {
 		p.sendError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		relaysReceived.WithLabelValues(metricLabelUnknown, metricLabelUnknown).Inc()
-		relaysRejected.WithLabelValues(metricLabelUnknown, metricLabelUnknown, rejectReasonBodyTooLarge).Inc()
+		// The body is cut at the limit, but its metadata is at the front: attribute the refusal to
+		// its service so an operator can tell which one needs a larger limit. Only a CONFIGURED
+		// service is used as a label -- the value comes from the client, and an arbitrary one
+		// would give the metric unbounded cardinality.
+		serviceLabel := metricLabelUnknown
+		if id := serviceIDFromRelayRequestPrefix(body); id != "" {
+			if _, configured := p.config.Services[id]; configured {
+				serviceLabel = id
+			}
+		}
+		relaysReceived.WithLabelValues(serviceLabel, metricLabelUnknown).Inc()
+		relaysRejected.WithLabelValues(serviceLabel, metricLabelUnknown, rejectReasonBodyTooLarge).Inc()
 		return
 	}
 
