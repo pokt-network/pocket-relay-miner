@@ -59,6 +59,15 @@ provider is configured, run the local council (`claude-council:local-council-exe
 and say in the report that its members share a model, so their agreement is a
 common prior to stress-test, not corroboration.
 
+**And the council's own output goes to a FILE under `scripts/localonly/<item>/`, not
+only into the conversation.** Measured 2026-09-20: a three-lens council on SMST
+compression ran as subagents, its findings were distilled into the queue item, and the
+transcript carrying its reasoning and its rejected alternatives was gone after the next
+compact -- so the session that came to implement it had to ask where the council was, and
+the honest answer was "it ran, and only its conclusions survive". A distilled conclusion
+cannot be re-examined; the argument behind it can. Write the synthesis down when it comes
+back, with the tensions and what each lens rejected.
+
 **A red on a fix is not an exemption either.** When a test or a live run goes red
 on a fix, the next step is a council on the WHOLE design with every red so far,
 not a patch for the last red — and whoever supervises cannot waive the council for
@@ -466,6 +475,14 @@ by a REAL dispatch round, not by a test's `Store`. So: when the defect is a PATT
 (a lost property, a dropped field, a truncated value), grep the test harness for that
 same pattern before trusting any green it produces — the harness is code, written by
 the same hands, and a partial fix one layer up reads exactly like a complete one.
+**The same trap wears a second costume: synthetic test DATA that does not behave like
+the real thing.** Measured the same day, adding node compression: two controls that
+assert a large write is split into chunks built their nodes with
+`bytes.Repeat([]byte("v"), 1024)`. Real nodes are mostly hashes and do not compress;
+that filler compresses to tens of bytes, so 600 nodes started fitting in ONE `HSET`
+and both controls went green while controlling nothing. They only went red because
+they assert the split itself. Filler is a stand-in for the real value's SHAPE, not just
+its size — here, chained SHA-256.
 
 **A GATE WRITES TO A FILE, AND THE FILE CARRIES ITS OWN `EXIT=$?`.** Never a
 `tail` with a fixed count: one ate the NAME of the failing check, which sat in
