@@ -9,7 +9,7 @@
 # disk). So this script never guesses by mtime. It reads the declaration out of
 # the queue and REFUSES to answer when there is none.
 #
-# The contract, one line in scripts/localonly/QUEUE-deep-cleanup.md:
+# The contract, one line in scripts/localonly/QUEUE.md:
 #
 #     **Handoff CANÓNICO: `HANDOFF-2026-08-26-r1.md`**
 #
@@ -26,7 +26,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 LOCAL_DIR="${HANDOFF_DIR:-scripts/localonly}"
-QUEUE="${HANDOFF_QUEUE:-$LOCAL_DIR/QUEUE-deep-cleanup.md}"
+QUEUE="${HANDOFF_QUEUE:-$LOCAL_DIR/QUEUE.md}"
 
 red() { printf '\033[31m%s\033[0m\n' "$*"; }
 yellow() { printf '\033[33m%s\033[0m\n' "$*"; }

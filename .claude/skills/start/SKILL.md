@@ -93,7 +93,7 @@ than being obvious.
 ## Step 1 — read, in this order
 
 1. The canonical hand-over that Step 0b named.
-2. `scripts/localonly/QUEUE-deep-cleanup.md` — the index of everything pending.
+2. `scripts/localonly/QUEUE.md` — the items the maintainer approved; nothing else is pending work.
 
 ## Step 2 — recite the gates, at the START
 

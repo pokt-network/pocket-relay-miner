@@ -106,8 +106,10 @@ failure mode the previous one had just fixed).
 ## Closing a Session
 
 **Use the `close-session` skill.** The work does not end at the hand-over -- it
-ends at asking for push and PR. Every finding reaches
-`scripts/localonly/QUEUE-deep-cleanup.md` or it is not recorded, and the
+ends at asking for push and PR. `scripts/localonly/QUEUE.md` holds ONLY the items the
+maintainer approved. EVERY finding is put to the maintainer with two questions -- add it
+to the queue or not, open an issue or not -- and waits in the hand-over's "Proposed
+findings" section until answered. Nothing is queued or filed on your own, and the
 canonical hand-over is whatever `scripts/handoff-index.sh` says it is, never the
 newest by date.
 

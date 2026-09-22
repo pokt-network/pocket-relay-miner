@@ -28,8 +28,10 @@ each step DOES differs where the products differ.
    que sigo teniendo que recordarlo"*. It had already been the finding of
    2026-08-25. A rule that fires only when someone remembers it is not a rule,
    which is why it is step one here and not advice.
-2. **A finding is not recorded until it is in `scripts/localonly/QUEUE-deep-cleanup.md`.**
-   A hand-over, a digest and a task list feel like three records and are none.
+2. **A finding is not recorded until it is proposed to the maintainer** (the
+   hand-over's "Proposed findings" section) with two questions: add it to
+   `scripts/localonly/QUEUE.md` or not, open an issue or not. Nothing is queued or
+   filed without his answer.
 3. **The work ends at asking for push and PR**, not at the hand-over. See
    `close-session`.
 

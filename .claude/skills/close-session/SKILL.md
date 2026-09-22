@@ -64,10 +64,13 @@ touched the path that broke.
 
 ## 2. Enumerate what the session opened, and prove each item landed
 
-Not "I noted the findings". List them, then for each one show the line in
-`scripts/localonly/QUEUE-deep-cleanup.md` that holds it.
+Not "I noted the findings". List them, then for each one show where it landed: the
+line in `scripts/localonly/QUEUE.md` or the issue, if the maintainer approved it, or
+the hand-over's "Proposed findings" section plus the question put to the maintainer.
+EVERY finding gets two questions -- add to the queue or not, open an issue or not.
+Never queue it or file it on your own.
 
-**A finding is not recorded until it is in the queue.** Writing it in a
+**A finding is not recorded until it is in the queue or proposed to the maintainer.** Writing it in a
 hand-over, a digest and a session task list feels like three records and is none
 — only the queue is read to decide what to do next. Issue #25 has an
 evidence file and hand-over paragraphs since 2026-08-19 and is still uncommented

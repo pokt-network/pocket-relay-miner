@@ -13,7 +13,7 @@
 # It reports; it never edits. Exit 1 when something needs a human decision.
 set -u
 
-QUEUE="${QUEUE:-scripts/localonly/QUEUE-deep-cleanup.md}"
+QUEUE="${QUEUE:-scripts/localonly/QUEUE.md}"
 RED=$'\033[31m'; YEL=$'\033[33m'; GRN=$'\033[32m'; BOLD=$'\033[1m'; OFF=$'\033[0m'
 
 [ -f "$QUEUE" ] || { printf 'queue not found: %s\n' "$QUEUE" >&2; exit 2; }
