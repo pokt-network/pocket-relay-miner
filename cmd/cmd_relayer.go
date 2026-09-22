@@ -896,7 +896,11 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// The gate reads the CONCRETE batcher, never the publisher the proxy wraps in
 	// countPublished: one path, independent of decorator order.
 	maxQueuedBytes := config.Redis.BatchMaxQueuedBytes()
-	proxy.SetPublishQueueFull(func() bool { return batcher.QueuedBytes() >= maxQueuedBytes })
+	proxy.SetPublishQueueFull(func() bool {
+		n := batcher.QueuedBytes()
+		relayer.BatchQueueBytes.Set(float64(n))
+		return n >= maxQueuedBytes
+	})
 	// Redis being able to take writes is the first gate of every transport.
 	proxy.SetStoreHealth(storeHealth)
 

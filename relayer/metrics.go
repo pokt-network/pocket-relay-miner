@@ -301,6 +301,21 @@ var (
 		},
 	)
 
+	// BatchQueueBytes is the batcher's own retained-bytes count -- the exact
+	// number the admission gate compares against redis.batch_max_queued_mib
+	// (cmd/cmd_relayer.go). It stayed unexported until 2026-09-22: a pulse test
+	// found a 1 GiB relayer RSS spike with zero publish_queue_full rejections,
+	// and there was no metric to say whether the gate saw it or not -- the
+	// number that decides admission was invisible to Prometheus.
+	BatchQueueBytes = observability.RelayerFactory.NewGauge(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "batch_queue_bytes",
+			Help:      "Bytes the batching publisher retains right now -- the exact value the admission gate compares against redis.batch_max_queued_mib",
+		},
+	)
+
 	// signingKeysLoaded is how many supplier signing keys this relayer holds
 	// right now. It moves on every hot reload.
 	//
