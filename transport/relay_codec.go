@@ -10,11 +10,11 @@ import (
 // RelayCompressionThreshold is the RelayBytes size below which a relay travels
 // as it is: it is neither compressed nor probed.
 //
-// NOT settled: the maintainer proposed 64 KiB and 16 KiB was recommended against
-// the S2 cost curve. The curve measures relayer CPU, while the point of
-// compressing is the memory the WAL holds in the relayer's queue, in Redis and in
-// the miner's delivery channel.
-const RelayCompressionThreshold = 64 << 10
+// 16 KiB is the maintainer's decision (2026-09-23), over the 64 KiB first
+// proposed. What the S2 cost curve measured that day: structured JSON paid for
+// its compression in relayer time from about 4 KiB, and bodies under about 8 KiB
+// did not compress at all, the request's signed header dominating them.
+const RelayCompressionThreshold = 16 << 10
 
 // MaxCompressedRelayBytes is the largest relay the relayer compresses, and the
 // largest DecodedLen the miner accepts. It is a contract between the two, not a
