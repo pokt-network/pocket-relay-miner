@@ -462,6 +462,23 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 	if ledger != nil {
 		d.charges.add(ledger.takeAll())
 	}
+	// ctx decides only whether the NEXT write starts. The writes themselves do
+	// not inherit its cancellation: Close cancels it, and go-redis then refuses a
+	// write before sending anything (waitTurn checks the context first), which
+	// writeChunk cannot tell from a reply that never came back -- so the charges
+	// of a write that never left would be forgotten, never billed.
+	//
+	// They DO keep its deadline. WithoutCancel drops both, and the final flush's
+	// deadline is what bounds a shutdown: without it a write already started
+	// there would be bounded only by the client's read timeout, which an operator
+	// may raise. The dispatch loop's context has no deadline, so a write it
+	// started when Close came lasts at most that read timeout.
+	writeCtx := context.WithoutCancel(ctx)
+	if deadline, ok := ctx.Deadline(); ok {
+		var cancelWrites context.CancelFunc
+		writeCtx, cancelWrites = context.WithDeadline(writeCtx, deadline)
+		defer cancelWrites()
+	}
 	// Charges taken and never sent go back when the tick stops early.
 	defer func() {
 		for _, c := range append(d.leftover.rest(), d.charges.rest()...) {
@@ -478,14 +495,14 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 	for taken := 0; ; {
 		// Once a write has failed nothing more is taken: what failed goes back to
 		// the head only after every write in flight has reported, see below.
-		for len(failed) == 0 && len(free) > 0 {
+		for len(failed) == 0 && len(free) > 0 && ctx.Err() == nil {
 			job := p.nextJob(&d, ledger)
 			if job == nil {
 				break
 			}
 			job.slot, job.order = free[len(free)-1], taken
 			free = free[:len(free)-1]
-			p.startWrite(ctx, job, results, ledger)
+			p.startWrite(writeCtx, job, results, ledger)
 			taken++
 		}
 		if len(free) == p.workers {
@@ -529,13 +546,18 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 		return
 	}
 
+	// Cancelled: the charges go back to the ledger (the defer above), and the
+	// final flush writes them with the relays still queued.
+	if ctx.Err() != nil {
+		return
+	}
 	d.charges.add(d.leftover.rest())
 	for {
 		part := d.charges.take(maxChunkCommands / 2)
 		if len(part) == 0 {
 			return
 		}
-		if _, _, err := p.writeChunk(ctx, nil, part, ledger); err != nil {
+		if _, _, err := p.writeChunk(writeCtx, nil, part, ledger); err != nil {
 			p.logger.Warn().Err(err).Int("charges", len(part)).
 				Msg("charge dispatch failed; the charges not sent stay pending")
 			return

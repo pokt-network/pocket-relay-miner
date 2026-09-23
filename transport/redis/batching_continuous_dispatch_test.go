@@ -554,3 +554,133 @@ func TestChargesThatDidNotRideAreWrittenOnceWhenTheLedgerIsTakenAgain(t *testing
 		require.Zero(t, ledger.Pending(key), key)
 	}
 }
+
+// TestCancellingTheDispatchLetsWritesInFlightLandAndCharged: the dispatch's
+// context is cancelled -- Close does this -- while two writes are in flight. Both
+// still land with their charges, and nothing more is taken. A write that
+// inherits the cancellation is refused by go-redis before anything is sent, and
+// its charges are forgotten as if the EXEC might have run: served, never billed.
+func TestCancellingTheDispatchLetsWritesInFlightLandAndCharged(t *testing.T) {
+	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
+	s1 := transport.SupplierStreamName(prefix, "pokt1cancelA")
+	s2 := transport.SupplierStreamName(prefix, "pokt1cancelB")
+	s3 := transport.SupplierStreamName(prefix, "pokt1cancelC")
+	hook := &holdStreams{
+		hold:    map[string]chan struct{}{s1: make(chan struct{}), s2: make(chan struct{})},
+		entered: make(chan string, 8),
+		proceed: make(chan struct{}),
+	}
+	client.AddHook(hook)
+	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour, WithDispatchWorkers(2))
+	t.Cleanup(func() { _ = p.Close() })
+	ledger := NewChargeLedger()
+	p.SetChargeLedger(ledger)
+
+	keys := map[string]string{}
+	for _, s := range []string{"pokt1cancelA", "pokt1cancelB", "pokt1cancelC"} {
+		publishMined(t, p, s, 200, func(int) string { return "s1" })
+		keys[s] = prefix + ":consumed:" + s
+		ledger.Add(keys[s], s, 9, time.Hour)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.dispatchAll(ctx)
+	}()
+	proceed := onceCloser(hook.proceed)
+	release1, release2 := onceCloser(hook.hold[s1]), onceCloser(hook.hold[s2])
+	t.Cleanup(func() {
+		proceed()
+		release1()
+		release2()
+		<-done
+	})
+	waitFor(t, hook.entered, "the first write")
+	waitFor(t, hook.entered, "the second write")
+
+	cancel()
+	release1()
+	release2()
+	proceed()
+	waitFor(t, done, "the dispatch to return once cancelled")
+
+	bg := context.Background()
+	for _, s := range []string{"pokt1cancelA", "pokt1cancelB"} {
+		require.Equal(t, int64(200), client.XLen(bg, transport.SupplierStreamName(prefix, s)).Val(),
+			"%s: a write in flight when the dispatch was cancelled must still land", s)
+		got, err := client.Get(bg, keys[s]).Int64()
+		require.NoError(t, err, "%s: its charge must be written, not forgotten", s)
+		require.Equal(t, int64(9), got, s)
+		require.Zero(t, ledger.Pending(keys[s]), s)
+	}
+	require.Zero(t, client.XLen(bg, s3).Val(), "nothing is taken once the dispatch is cancelled")
+	require.Positive(t, p.QueuedBytes(), "the untaken relays stay queued for the final flush")
+	require.Equal(t, int64(9), ledger.Pending(keys["pokt1cancelC"]),
+		"a charge that never rode stays pending for the final flush")
+}
+
+// hangsUntilContextEnds blocks every dispatch pipeline until the context it was
+// handed ends -- a Redis that never answers, bounded only by the caller's
+// context -- or until released, after which pipelines go through.
+type hangsUntilContextEnds struct {
+	entered  chan struct{}
+	released chan struct{}
+}
+
+func (h *hangsUntilContextEnds) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+func (h *hangsUntilContextEnds) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return next
+}
+
+func (h *hangsUntilContextEnds) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error {
+		if firstXAddStream(cmds) == "" {
+			return next(ctx, cmds)
+		}
+		select {
+		case h.entered <- struct{}{}:
+		default:
+		}
+		select {
+		case <-h.released:
+			return next(ctx, cmds)
+		case <-ctx.Done():
+		}
+		for _, cmd := range cmds {
+			cmd.SetErr(ctx.Err())
+		}
+		return ctx.Err()
+	}
+}
+
+// TestADeadlineOnTheDispatchBoundsTheWritesAlreadyStarted: the final flush runs
+// on a context with a deadline, and a write it started against a Redis that
+// never answers must end at that deadline. Detaching the writes from
+// cancellation must not detach them from the deadline too, or the flush -- and
+// the shutdown -- lasts as long as the hung write.
+func TestADeadlineOnTheDispatchBoundsTheWritesAlreadyStarted(t *testing.T) {
+	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
+	hook := &hangsUntilContextEnds{entered: make(chan struct{}, 1), released: make(chan struct{})}
+	client.AddHook(hook)
+	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour, WithDispatchWorkers(2))
+	publishMined(t, p, "pokt1deadline", 10, func(int) string { return "s1" })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		p.dispatchAll(ctx)
+	}()
+	waitFor(t, hook.entered, "the write to be in flight")
+	waitFor(t, done, "the dispatch to end at its deadline, with its write hung")
+
+	require.Positive(t, p.QueuedBytes(), "the write that ran out of time goes back to the queue")
+	close(hook.released)
+	require.NoError(t, p.Close(), "once Redis answers, the final flush writes what went back")
+	require.Equal(t, int64(10), client.XLen(context.Background(), transport.SupplierStreamName(prefix, "pokt1deadline")).Val())
+}
