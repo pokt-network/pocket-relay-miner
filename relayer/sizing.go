@@ -92,21 +92,19 @@ func SizingFromMaster(master int) WorkerSizing {
 	return s
 }
 
-// BatchDispatchWorkers is how many workers write the mined-relay batches to Redis
-// at once, derived from the schedulable processors and bounded on both sides.
-// At least two, so one slow write does not stall the whole dispatch. At most
-// eight, because every batch is a MULTI that runs on Redis' single thread: more
-// batches in flight lengthen every other command the relayer and the miner send
-// to the same Redis.
-func BatchDispatchWorkers(procs int) int {
-	return min(max(procs/4, 2), 8)
-}
-
-// BatchDispatchWorkersForProcess is BatchDispatchWorkers for THIS process, read
-// from GOMAXPROCS for the same reason ComputeWorkerSizingForProcess is.
-func BatchDispatchWorkersForProcess() int {
-	return BatchDispatchWorkers(runtime.GOMAXPROCS(0))
-}
+// BatchDispatchWorkers is how many writes of mined-relay batches the relayer
+// keeps in flight to Redis at once. It is a constant and not derived from the
+// processors: the writes wait on Redis, which executes every MULTI on one
+// thread, so the cost of one more writer lands on every other client of that
+// Redis -- the miner first -- whatever the relayer's own CPU.
+//
+// Four is where the measured curve bends. Draining a saturated queue into a real
+// Redis 8 (loopback, 3 runs per cell), four writers carried 1.3 GB/s of 64 KiB
+// relays and 510-550k relays/s of 1 KiB, the most of any count, and 1450-1530/s
+// of 1 MiB relays. Eight added at most 15% on 1 MiB and nothing on the others,
+// while the p99 of a concurrent GET went from 1.5-3.4 ms to 1.9-9.3 ms. Two, the
+// old minimum, left 8-15% of the median throughput behind.
+const BatchDispatchWorkers = 4
 
 // RedisPoolSize is how many Redis connections the relayer's BOUNDED users can
 // need at once.

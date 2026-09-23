@@ -36,7 +36,7 @@ func TestTheSilenceBudgetComesFromTheRunningClientAndNeverGoesUnderItsFloor(t *t
 	// connection its own configuration allows it to wait for.
 	patient := goredis.NewClient(&goredis.Options{PoolTimeout: 30 * time.Second})
 	t.Cleanup(func() { _ = patient.Close() })
-	require.Equal(t, healthyRoundBudget+30*time.Second+heartbeatInterval,
+	require.Equal(t, healthyWriteBudget+30*time.Second+heartbeatInterval,
 		dispatcherSilenceBudget(zerolog.Nop(), patient))
 
 	// A client type that cannot report its pool falls back to the floor rather

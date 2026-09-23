@@ -38,8 +38,9 @@ func hasMonotonic(t time.Time) bool { return t != t.Round(0) }
 // clock step moved the answer with Redis healthy.
 //
 // So this pins the property the fix rests on, at BOTH doors: the pinch in
-// DispatcherHealthy compares lastSuccess against inFlightSince and then against
-// now, and one mark losing the reading brings the defect back on its own.
+// DispatcherHealthy compares lastSuccess against the oldest write in flight and
+// then against now, and one mark losing the reading brings the defect back on
+// its own.
 func TestTheMarksAdmissionMeasuresFromKeepTheirMonotonicReading(t *testing.T) {
 	// Control positive for the instrument: without it, "carries a reading" and
 	// "the check cannot tell" print the same answer. These two lines are also
@@ -68,9 +69,8 @@ func TestTheMarksAdmissionMeasuresFromKeepTheirMonotonicReading(t *testing.T) {
 			"the WALL clock, so a clock step alone closes admission with Redis answering (item 388)")
 
 	at := p.now()
-	p.inFlightSince.Store(&at)
-	inFlight := p.inFlightSince.Load()
-	require.True(t, hasMonotonic(*inFlight),
+	p.inFlight[0].Store(&at)
+	require.True(t, hasMonotonic(p.oldestInFlight()),
 		"the in-flight mark lost its monotonic reading: the pinch compares it against lastSuccess and then "+
 			"against now, so this door alone brings the defect back")
 }

@@ -21,9 +21,8 @@ import (
 func TestAFailedRoundGoesBackInArrivalOrder(t *testing.T) {
 	client := testredis.Client(t)
 	client.AddHook(&alwaysFails{err: errors.New("connection reset by peer")})
-	p := NewBatchingPublisher(zerolog.Nop(), client, testredis.Prefix(t), time.Hour)
+	p := NewBatchingPublisher(zerolog.Nop(), client, testredis.Prefix(t), time.Hour, WithDispatchWorkers(2))
 	t.Cleanup(func() { _ = p.Close() })
-	p.workers = 2
 
 	fillOneStream(t, p, 2*maxChunkCommands)
 	before := p.QueuedBytes()

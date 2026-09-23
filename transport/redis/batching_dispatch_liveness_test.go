@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alitto/pond/v2"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
@@ -140,11 +141,11 @@ func TestAStuckWriteClosesAdmissionEvenIfAnotherWorkerAnswers(t *testing.T) {
 	waitFor(t, hook.entered, "the first write of the round")
 	waitFor(t, hook.entered, "the second write of the round")
 
-	// The round stamped its own mark through writeRound, not a test store: if
+	// The writes stamped their own marks through startWrite, not a test store: if
 	// that stamp ever loses its monotonic reading, the pinch below measures the
 	// wall clock again. See TestTheMarksAdmissionMeasuresFromKeepTheirMonotonicReading.
-	require.True(t, hasMonotonic(*p.inFlightSince.Load()),
-		"the mark a real dispatch round stamps must carry a monotonic reading")
+	require.True(t, hasMonotonic(p.oldestInFlight()),
+		"the mark a real dispatch write stamps must carry a monotonic reading")
 
 	answeredAt := t0.Add(2500 * time.Millisecond)
 	clock.set(answeredAt)
@@ -216,14 +217,19 @@ func TestTheHeartbeatPingsOnlyWhileNoWriteIsInFlight(t *testing.T) {
 	chunk := p.takeChunk()
 	require.Len(t, chunk, 3)
 	// Closed first, with an empty queue: its own heartbeat ticker stops, so every
-	// PING counted below is one this test asked for.
+	// PING counted below is one this test asked for. Close also stopped its pool,
+	// so the write below runs on one of the test's.
 	require.NoError(t, p.Close())
+	p.pool = pond.NewPool(1)
+	t.Cleanup(p.pool.StopAndWait)
 	ctx := context.Background()
 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		p.writeRound(ctx, []*dispatchJob{{chunk: chunk}}, nil)
+		results := make(chan *dispatchJob, 1)
+		p.startWrite(ctx, &dispatchJob{chunk: chunk}, results, nil)
+		p.finishWrite(ctx, <-results, nil)
 	}()
 	release := onceCloser(hook.release)
 	t.Cleanup(func() {

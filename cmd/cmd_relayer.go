@@ -811,7 +811,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// meter cannot hold the dispatch back on a shared pool: one connection per
 	// dispatch worker, plus one for the heartbeat PING sent while the queue is
 	// empty.
-	batchWorkers := relayer.BatchDispatchWorkersForProcess()
+	batchWorkers := relayer.BatchDispatchWorkers
 	batchRedisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
 		URL:                    redisURL,
 		PoolSize:               batchWorkers + 1,

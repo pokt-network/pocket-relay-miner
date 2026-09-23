@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -50,6 +51,10 @@ type queued struct {
 	// this waiting" for a discard nobody classified, and it is the only way to
 	// tell a queue that is slow from one that is stuck.
 	enqueuedAt time.Time
+	// seq is the order Publish accepted this relay in, counted from 1. A drain
+	// sends a chunk short of the limits only for entries queued before it began
+	// (see takeChunkBefore).
+	seq uint64
 }
 
 // BatchingPublisher writes mined relays in batches instead of one round trip
@@ -76,7 +81,9 @@ type BatchingPublisher struct {
 	head   int
 	bytes  int
 	closed bool
-	// workers is how many chunks one round of a dispatch writes at once, and pool
+	// enqueued is how many relays Publish has accepted; the last one's seq.
+	enqueued uint64
+	// workers is how many chunks a dispatch keeps in flight at once, and pool
 	// runs them.
 	workers int
 	pool    pond.Pool
@@ -93,10 +100,12 @@ type BatchingPublisher struct {
 	// admission with Redis healthy and the dispatcher writing. Measured
 	// 2026-09-20 on a cold start: a +3.34s jump refused 1203 relays.
 	lastSuccess atomic.Pointer[time.Time]
-	// inFlightSince is when the round of writes now in flight started, and nil
-	// while none is. Every chunk of a round starts together, so it is also when
-	// the oldest write in flight started.
-	inFlightSince atomic.Pointer[time.Time]
+	// inFlight holds, per write slot, when the write now in it started, and nil
+	// while the slot is free. Writes start and end independently, so the oldest
+	// write in flight is the minimum over the slots: no single mark can stand for
+	// it, since a newer start would overwrite an older one still hung and a newer
+	// end would clear it.
+	inFlight []atomic.Pointer[time.Time]
 	// silenceBudget is how long the dispatcher may go without reaching Redis
 	// before admission closes; dispatcherSilenceBudget derives it at construction
 	// from the client that actually runs.
@@ -123,7 +132,7 @@ func WithStoreHealth(health *StoreHealth) BatchingPublisherOption {
 	}
 }
 
-// WithDispatchWorkers sets how many chunks one dispatch round writes at once.
+// WithDispatchWorkers sets how many chunks a dispatch keeps in flight at once.
 // Values below two keep a single writer.
 func WithDispatchWorkers(n int) BatchingPublisherOption {
 	return func(p *BatchingPublisher) {
@@ -166,6 +175,7 @@ func NewBatchingPublisher(
 		opt(p)
 	}
 	p.pool = pond.NewPool(p.workers)
+	p.inFlight = make([]atomic.Pointer[time.Time], p.workers)
 	p.silenceBudget = dispatcherSilenceBudget(p.logger, client)
 	// Nothing is marked here. Marking success at construction handed admission a
 	// mark nobody earned: with Redis unreachable from the start the relayer
@@ -196,6 +206,7 @@ func (p *BatchingPublisher) Publish(_ context.Context, msg *transport.MinedRelay
 		return fmt.Errorf("publisher is closed")
 	}
 	n := approxBytes(args)
+	p.enqueued++
 	p.queue = append(p.queue, queued{
 		stream:     stream,
 		args:       args,
@@ -203,6 +214,7 @@ func (p *BatchingPublisher) Publish(_ context.Context, msg *transport.MinedRelay
 		service:    msg.ServiceId,
 		bytes:      n,
 		enqueuedAt: time.Now(),
+		seq:        p.enqueued,
 	})
 	p.bytes += n
 	return nil
@@ -247,17 +259,16 @@ const heartbeatInterval = time.Second
 // relay refused there was one a healthy fleet would have served and charged.
 const minDispatcherSilence = 10 * time.Second
 
-// healthyRoundBudget is how long a HEALTHY dispatch round may keep the shared
-// goroutine before the heartbeat gets its turn. Both tickers select on the same
-// goroutine on purpose (see DispatcherHealthy), so a round in progress delays
-// the next beat by its own duration.
+// healthyWriteBudget is how long a HEALTHY write may stay in flight. While one
+// is, admission measures from its start, so its duration is what the silence
+// budget has to cover on top of the pool timeout.
 //
-// It is a declared allowance and NOT a measurement: a healthy round is one
+// It is a declared allowance and NOT a measurement: a healthy write is one
 // TxPipelined round trip of at most maxChunkCommands, milliseconds in practice.
 // The number never decides the budget on its own -- with go-redis's 6s pool
 // timeout the sum stays under the floor for any value up to 3s. What it does is
 // keep the budget growing with an operator who raises the pool timeout.
-const healthyRoundBudget = time.Second
+const healthyWriteBudget = time.Second
 
 // dispatcherSilenceBudget derives the budget from the client that actually runs
 // rather than from config: a pool timeout left unset reaches the client as
@@ -278,7 +289,7 @@ func dispatcherSilenceBudget(logger logging.Logger, client redis.UniversalClient
 	}
 	// One heartbeat interval and not two: a time.Ticker buffers one tick, so a
 	// beat delayed by a round is not lost, it fires late.
-	budget := healthyRoundBudget + pool.PoolTimeout + heartbeatInterval
+	budget := healthyWriteBudget + pool.PoolTimeout + heartbeatInterval
 	if budget < minDispatcherSilence {
 		return minDispatcherSilence
 	}
@@ -321,8 +332,8 @@ func (p *BatchingPublisher) DispatcherHealthy() (bool, error) {
 		return false, errDispatcherNeverReachedRedis
 	}
 	measuredFrom := *last
-	if since := p.inFlightSince.Load(); since != nil && since.Before(measuredFrom) {
-		measuredFrom = *since
+	if since := p.oldestInFlight(); !since.IsZero() && since.Before(measuredFrom) {
+		measuredFrom = since
 	}
 	if age := p.now().Sub(measuredFrom); age > p.silenceBudget {
 		return false, fmt.Errorf("%w: last answer %s ago, budget %s",
@@ -336,6 +347,29 @@ func (p *BatchingPublisher) markSuccess() {
 	p.lastSuccess.Store(&at)
 }
 
+// oldestInFlight is when the oldest write now in flight started, and the zero
+// time while none is.
+func (p *BatchingPublisher) oldestInFlight() time.Time {
+	var oldest time.Time
+	for i := range p.inFlight {
+		if at := p.inFlight[i].Load(); at != nil && (oldest.IsZero() || at.Before(oldest)) {
+			oldest = *at
+		}
+	}
+	return oldest
+}
+
+// writesInFlight is how many write slots are taken right now.
+func (p *BatchingPublisher) writesInFlight() int {
+	n := 0
+	for i := range p.inFlight {
+		if p.inFlight[i].Load() != nil {
+			n++
+		}
+	}
+	return n
+}
+
 // heartbeat marks success when Redis answers a PING. It runs on the dispatcher's
 // goroutine, so a dispatch stuck on a slow Redis also stops the marks.
 //
@@ -343,7 +377,7 @@ func (p *BatchingPublisher) markSuccess() {
 // whether the dispatcher progresses, and a PING answered next to a hung write
 // would only prove that Redis answers.
 func (p *BatchingPublisher) heartbeat(ctx context.Context) {
-	if p.inFlightSince.Load() != nil {
+	if p.writesInFlight() > 0 {
 		return
 	}
 	if err := p.client.Ping(ctx).Err(); err == nil {
@@ -397,12 +431,21 @@ func (p *BatchingPublisher) finalFlush() {
 const finalFlushTimeout = 30 * time.Second
 
 // dispatchAll writes every queued relay and every pending charge, one chunk per
-// round trip.
+// round trip, keeping up to p.workers writes in flight.
+//
+// It is ONE dispatcher, this goroutine, and N write slots. Taking chunks,
+// attaching charges, deciding what goes back and recording what is discarded all
+// stay here, so no two writes can carry the same charge and the queue is only
+// ever touched from one place. The slots only write: each write is a task on
+// p.pool and reports back on a channel, and as soon as one reports, its slot
+// takes the next chunk. No write waits for another to finish, which is what a
+// round did: with 1 MiB relays every chunk carries one relay, and a round of N
+// such writes was as slow as its slowest EXEC.
 //
 // A charge rides in the first chunk that carries XADDs of its supplier and has
-// room for its two commands; what does not fit, or whose supplier mined nothing
-// this tick, goes in chunks of charges alone at the end. A charge's INCRBY and
-// EXPIRE NX are never split across two EXECs.
+// room for its two commands; what does not fit, or whose supplier mined nothing,
+// goes in chunks of charges alone once the queue is drained. A charge's INCRBY
+// and EXPIRE NX are never split across two EXECs.
 func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 	// A write Redis refuses for memory is refused for every entry, and each
 	// refusal would spend one of an entry's attempts: the queue waits instead.
@@ -411,79 +454,83 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 	}
 	p.mu.Lock()
 	ledger := p.ledger
+	// What was queued up to here may leave in a chunk short of the limits; what
+	// arrives later waits for a full chunk or for the next tick.
+	cutoff := p.enqueued
 	p.mu.Unlock()
-	var charges chargesBySupplier
+	d := drain{cutoff: cutoff, charges: groupCharges(nil)}
 	if ledger != nil {
-		charges = groupCharges(ledger.takeAll())
+		d.charges.add(ledger.takeAll())
 	}
 	// Charges taken and never sent go back when the tick stops early.
 	defer func() {
-		for _, c := range charges.rest() {
+		for _, c := range d.charges.rest() {
 			ledger.untake(c)
 		}
 	}()
 
-	for {
-		// A round is at most one chunk per worker, each with the charges of its
-		// suppliers attached. Taking chunks and attaching charges stay on this
-		// goroutine, so no two writes can carry the same charge.
-		round := make([]*dispatchJob, 0, p.workers)
-		for len(round) < p.workers {
-			chunk := p.takeChunk()
-			if len(chunk) == 0 {
+	results := make(chan *dispatchJob, p.workers)
+	free := make([]int, 0, p.workers)
+	for slot := p.workers - 1; slot >= 0; slot-- {
+		free = append(free, slot)
+	}
+	var failed []*dispatchJob
+	for taken := 0; ; {
+		// Once a write has failed nothing more is taken: what failed goes back to
+		// the head only after every write in flight has reported, see below.
+		for len(failed) == 0 && len(free) > 0 {
+			job := p.nextJob(&d)
+			if job == nil {
 				break
 			}
-			round = append(round, &dispatchJob{
-				chunk:   chunk,
-				charges: charges.attach(chunk, maxChunkCommands-len(chunk)),
-			})
+			job.slot, job.order = free[len(free)-1], taken
+			free = free[:len(free)-1]
+			p.startWrite(ctx, job, results, ledger)
+			taken++
 		}
-		if len(round) == 0 {
+		if len(free) == p.workers {
 			break
 		}
-		p.writeRound(ctx, round, ledger)
-
-		failed := false
-		// Back to front: requeueFront puts what it gets at the head, so the last
-		// job goes back first and the queue keeps its arrival order.
-		for i := len(round) - 1; i >= 0; i-- {
-			job := round[i]
-			chunk, retry, discard, err := job.chunk, job.retry, job.discard, job.err
-			for _, q := range discard {
-				p.recordDiscard(ctx, q, err)
-			}
-			if err == nil {
-				continue
-			}
-			failed = true
-			// Only what did NOT reach the stream goes back, at the front, to be
-			// retried next tick. It is not dropped and it is not counted as
-			// published: every relay in it was served, signed and answered to a
-			// client, and the write simply did not happen.
-			//
-			// Requeueing the WHOLE chunk is what this used to do, and it was
-			// wrong whenever the EXEC succeeded with one XADD failing inside it
-			// (see writeChunk): the relays that had already landed were written
-			// a second time and counted a second time, so published climbed
-			// above served. The comment that stood here asserted "it is not
-			// counted as published", which was false in exactly that case.
-			if len(retry) > 0 {
-				p.requeueFront(retry)
-			}
-			p.logger.Warn().
-				Err(err).
-				Int("relays", len(chunk)).
-				Int("requeued", len(retry)).
-				Int("discarded", len(discard)).
-				Msg("batch dispatch failed; the unwritten relays stay queued and will be retried")
-		}
-		if failed {
-			return
+		job := <-results
+		p.finishWrite(ctx, job, ledger)
+		free = append(free, job.slot)
+		if job.err != nil {
+			failed = append(failed, job)
 		}
 	}
 
+	if len(failed) > 0 {
+		// Only what did NOT reach the stream goes back, at the front, to be
+		// retried next tick. It is not dropped and it is not counted as
+		// published: every relay in it was served, signed and answered to a
+		// client, and the write simply did not happen.
+		//
+		// Requeueing the WHOLE chunk is what this used to do, and it was wrong
+		// whenever the EXEC succeeded with one XADD failing inside it (see
+		// writeChunk): the relays that had already landed were written a second
+		// time and counted a second time, so published climbed above served.
+		//
+		// Back to front in the order the chunks were TAKEN, not the order their
+		// writes failed: requeueFront puts what it gets at the head, so the chunk
+		// taken last goes back first and the queue keeps its arrival order. The
+		// writes fail in whatever order Redis answers them.
+		slices.SortFunc(failed, func(a, b *dispatchJob) int { return b.order - a.order })
+		for _, job := range failed {
+			if len(job.retry) > 0 {
+				p.requeueFront(job.retry)
+			}
+			p.logger.Warn().
+				Err(job.err).
+				Int("relays", len(job.chunk)).
+				Int("requeued", len(job.retry)).
+				Int("discarded", len(job.discard)).
+				Msg("batch dispatch failed; the unwritten relays stay queued and will be retried")
+		}
+		return
+	}
+
 	for {
-		part := charges.take(maxChunkCommands / 2)
+		part := d.charges.take(maxChunkCommands / 2)
 		if len(part) == 0 {
 			return
 		}
@@ -495,7 +542,27 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 	}
 }
 
-// dispatchJob is one chunk of a round, the charges that ride in its EXEC, and
+// drain is what one dispatchAll carries from one job to the next.
+type drain struct {
+	// cutoff is the last relay queued when the drain began: see takeChunkBefore.
+	cutoff uint64
+	// charges were taken from the ledger when the drain began. Each rides in a
+	// chunk that carries XADDs of its supplier and has room for it; what does
+	// not goes in chunks of charges alone once the queue is drained.
+	charges chargesBySupplier
+}
+
+// nextJob is the next write of a drain, or nil when there is none to start now:
+// the next chunk with the charges that ride in it.
+func (p *BatchingPublisher) nextJob(d *drain) *dispatchJob {
+	chunk := p.takeChunkBefore(d.cutoff)
+	if len(chunk) == 0 {
+		return nil
+	}
+	return &dispatchJob{chunk: chunk, charges: d.charges.attach(chunk, maxChunkCommands-len(chunk))}
+}
+
+// dispatchJob is one chunk in flight, the charges that ride in its EXEC, and
 // what writing it left to retry or to discard.
 type dispatchJob struct {
 	chunk   []queued
@@ -506,49 +573,52 @@ type dispatchJob struct {
 	// started is set by the worker before it writes, so a job the pool never ran
 	// can be told from one whose worker panicked.
 	started bool
+	// slot is the write slot the job holds, and startedAt when it took it.
+	slot      int
+	startedAt time.Time
+	// order is when the job was taken within its dispatch, counted from 0.
+	order int
 }
 
 // errDispatchWorkerStopped is the outcome of a job whose worker stopped before
 // reporting its write.
 var errDispatchWorkerStopped = errors.New("dispatch worker stopped before reporting the write")
 
-// writeRound writes the jobs of a round at once, one worker each, and records
-// each outcome on its job. A job starts out as unwritten, so one whose worker
-// panics goes back to the queue instead of being taken as written.
-func (p *BatchingPublisher) writeRound(ctx context.Context, round []*dispatchJob, ledger *ChargeLedger) {
-	start := p.now()
-	p.inFlightSince.Store(&start)
-	// The round is what DispatcherHealthy measures from while it is in flight, so
-	// its duration, until the slowest EXEC comes back, is what the silence budget
-	// is compared with.
-	defer func() {
-		dispatchRoundDuration.WithLabelValues(roundResult(round)).Observe(p.now().Sub(start).Seconds())
-		p.inFlightSince.Store(nil)
-	}()
-	if len(round) == 1 {
-		job := round[0]
+// startWrite marks the job's slot as in flight and hands the write to the pool.
+// The job reports on results exactly once, whatever happens to its worker.
+func (p *BatchingPublisher) startWrite(ctx context.Context, job *dispatchJob, results chan<- *dispatchJob, ledger *ChargeLedger) {
+	at := p.now()
+	job.startedAt = at
+	p.inFlight[job.slot].Store(&at)
+	// A job starts out as unwritten, so one whose worker panics, or that the pool
+	// never ran, goes back to the queue instead of being taken as written.
+	job.retry, job.err = job.chunk, errDispatchWorkerStopped
+	err := p.pool.Go(func() {
+		defer func() {
+			if r := recover(); r != nil {
+				p.logger.Error().Interface("panic", r).Msg("a batch dispatch worker stopped before reporting its write")
+			}
+			results <- job
+		}()
+		job.started = true
 		job.retry, job.discard, job.err = p.writeChunk(ctx, job.chunk, job.charges, ledger)
-		return
+	})
+	if err != nil {
+		// The pool is stopped, so nothing ran: the job reports its unwritten
+		// outcome from here. results has room for one job per slot.
+		results <- job
 	}
-	group := p.pool.NewGroup()
-	for _, job := range round {
-		job.retry, job.err = job.chunk, errDispatchWorkerStopped
-		group.Submit(func() {
-			job.started = true
-			job.retry, job.discard, job.err = p.writeChunk(ctx, job.chunk, job.charges, ledger)
-		})
+}
+
+// finishWrite records the outcome of a job that reported, on the dispatcher's
+// goroutine. Its slot is cleared LAST: until then admission still measures from
+// this write, which errs on the side of closing.
+func (p *BatchingPublisher) finishWrite(ctx context.Context, job *dispatchJob, ledger *ChargeLedger) {
+	dispatchWriteDuration.WithLabelValues(writeResult(job.err)).Observe(p.now().Sub(job.startedAt).Seconds())
+	for _, q := range job.discard {
+		p.recordDiscard(ctx, q, job.err)
 	}
-	// The tasks return nothing; Wait reports a panic in one of them, and that
-	// job keeps the unwritten outcome it started with. Wait also waits for every
-	// task still running, so the jobs are read below only once no worker writes
-	// them.
-	if err := group.Wait(); err != nil {
-		p.logger.Error().Err(err).Msg("a batch dispatch worker stopped before reporting its write")
-	}
-	for _, job := range round {
-		if !errors.Is(job.err, errDispatchWorkerStopped) {
-			continue
-		}
+	if errors.Is(job.err, errDispatchWorkerStopped) {
 		// Nothing reported the charges of this job either way. A job that never
 		// started sent nothing, so its charges go back. One whose worker panicked
 		// may have sent its EXEC, so, like an EXEC whose reply never came back,
@@ -562,21 +632,19 @@ func (p *BatchingPublisher) writeRound(ctx context.Context, round []*dispatchJob
 			}
 		}
 	}
+	p.inFlight[job.slot].Store(nil)
 }
 
-// roundResult labels a finished round: oom if Redis refused a chunk for memory,
-// error if any other chunk failed, ok otherwise.
-func roundResult(round []*dispatchJob) string {
-	result := "ok"
-	for _, job := range round {
-		switch {
-		case errors.Is(job.err, errStoreOutOfMemory):
-			return "oom"
-		case job.err != nil:
-			result = "error"
-		}
+// writeResult labels a finished write: oom if Redis refused it for memory,
+// error if it failed otherwise, ok if it did not.
+func writeResult(err error) string {
+	switch {
+	case errors.Is(err, errStoreOutOfMemory):
+		return "oom"
+	case err != nil:
+		return "error"
 	}
-	return result
+	return "ok"
 }
 
 // chargesBySupplier keeps charges grouped by the supplier whose stream they
@@ -588,12 +656,7 @@ type chargesBySupplier struct {
 
 func groupCharges(all []Charge) chargesBySupplier {
 	g := chargesBySupplier{by: make(map[string][]Charge)}
-	for _, c := range all {
-		if _, seen := g.by[c.Supplier]; !seen {
-			g.order = append(g.order, c.Supplier)
-		}
-		g.by[c.Supplier] = append(g.by[c.Supplier], c)
-	}
+	g.add(all)
 	return g
 }
 
@@ -626,6 +689,16 @@ func (g *chargesBySupplier) take(n int) []Charge {
 	return out
 }
 
+// add appends charges, keeping suppliers in the order first seen.
+func (g *chargesBySupplier) add(more []Charge) {
+	for _, c := range more {
+		if _, seen := g.by[c.Supplier]; !seen {
+			g.order = append(g.order, c.Supplier)
+		}
+		g.by[c.Supplier] = append(g.by[c.Supplier], c)
+	}
+}
+
 func (g *chargesBySupplier) rest() []Charge {
 	return g.take(int(^uint(0) >> 1))
 }
@@ -641,15 +714,23 @@ func transportFailure(err error) bool {
 	return !errors.As(err, &redisErr)
 }
 
-// takeChunk removes the next chunk from the queue, WITHOUT splitting a stream
-// across chunks.
+// takeChunkBefore removes the next chunk from the queue, WITHOUT splitting a
+// stream across chunks.
 //
 // Keeping a stream whole is the point of batching: the miner's reader for that
 // supplier wakes once per EXEC that touches its stream, so a stream split over
 // two chunks wakes it twice and gives back what the batch bought. A single
 // stream larger than the limits on its own is split anyway -- the cap on how
 // long one EXEC blocks Redis wins over the wake-up count.
-func (p *BatchingPublisher) takeChunk() []queued {
+//
+// A chunk short of the limits is taken only when its first entry was queued at
+// or before cutoff; otherwise it returns nothing and the entries wait. A write
+// slot frees every few milliseconds, and taking whatever has arrived by then
+// would send chunks of two or three relays: more EXECs on Redis' one thread and
+// more wake-ups of the miner for the same relays. So a drain empties what was
+// queued when it began, and after that only a FULL chunk leaves before the next
+// tick. Under saturation every chunk is full and nothing waits.
+func (p *BatchingPublisher) takeChunkBefore(cutoff uint64) []queued {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	live := p.queue[p.head:]
@@ -658,9 +739,11 @@ func (p *BatchingPublisher) takeChunk() []queued {
 	}
 
 	cut := len(live)
+	full := false
 	cmds, bytes := 0, 0
 	for i, q := range live {
 		if (cmds+1 > maxChunkCommands || bytes+q.bytes > maxChunkBytes) && cmds > 0 {
+			full = true
 			// Cut back to where the trailing stream begins, so no stream is
 			// split. If that would empty the chunk, this one stream is larger
 			// than a chunk on its own and has to be split: the cap on how long a
@@ -673,6 +756,12 @@ func (p *BatchingPublisher) takeChunk() []queued {
 		}
 		cmds++
 		bytes += q.bytes
+	}
+	// A chunk that reached a limit exactly is full too, and so is one relay
+	// larger than a chunk on its own: that is every chunk of 1 MiB relays.
+	full = full || cmds >= maxChunkCommands || bytes >= maxChunkBytes
+	if !full && live[0].seq > cutoff {
+		return nil
 	}
 
 	// The chunk is COPIED out: requeueFront writes a failed chunk back into the
