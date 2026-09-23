@@ -4,9 +4,14 @@ package miner
 
 import (
 	"crypto/sha256"
+	"encoding/binary"
 	"fmt"
+	"runtime"
 	"testing"
 
+	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
+	"github.com/pokt-network/smt"
+	"github.com/pokt-network/smt/kvstore/simplemap"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/require"
 
@@ -136,4 +141,87 @@ func TestHandleRelay_UnrestorableRelayIsDroppedNotRetried(t *testing.T) {
 			}
 		})
 	}
+}
+
+// allocatedBy reports the bytes the heap allocated while fn ran.
+func allocatedBy(fn func()) uint64 {
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	fn()
+	runtime.ReadMemStats(&after)
+	return after.TotalAlloc - before.TotalAlloc
+}
+
+// TestSMSTUpdateAppendsTheLeafSuffixInPlace freezes the smt behaviour the miner's
+// memory rests on, with the trie built exactly as production builds it: given a
+// value with smstLeafSuffixBytes of spare capacity, Update writes the weight and
+// the count INTO that buffer and allocates nothing the size of the relay. The
+// second half is the control that makes the first mean something: the same
+// relay with no spare capacity makes Update copy it whole.
+//
+// If an smt upgrade changes the suffix or stops appending in place, this goes red
+// instead of the miner silently holding each relay twice.
+func TestSMSTUpdateAppendsTheLeafSuffixInPlace(t *testing.T) {
+	const n = 1 << 20
+	const weight = uint64(7)
+	trie := smt.NewSparseMerkleSumTrie(simplemap.NewSimpleMap(), protocol.NewTrieHasher(), protocol.SMTValueHasher())
+
+	value := make([]byte, n, n+smstLeafSuffixBytes)
+	copy(value, transport.ChainedHashBytes("leaf", n))
+	key := sha256.Sum256(value)
+	inPlace := allocatedBy(func() { require.NoError(t, trie.Update(key[:], value, weight)) })
+
+	require.Less(t, inPlace, uint64(n/4), "with room for the suffix, Update must not copy the relay")
+	suffix := value[n : n+smstLeafSuffixBytes]
+	require.Equal(t, weight, binary.BigEndian.Uint64(suffix[:8]), "the weight is written in place, right after the relay")
+	require.Equal(t, uint64(1), binary.BigEndian.Uint64(suffix[8:]), "and the count after it")
+
+	tight := transport.ChainedHashBytes("tight-leaf", n)
+	tight = tight[:n:n]
+	tightKey := sha256.Sum256(tight)
+	copied := allocatedBy(func() { require.NoError(t, trie.Update(tightKey[:], tight, weight)) })
+	require.GreaterOrEqual(t, copied, uint64(n), "control: with no room, Update copies the whole relay")
+}
+
+// TestHandleRelay_CompressedRelayIsNotCopiedByTheTree is the wiring half of the
+// above: the worker must hand the tree relay bytes with the leaf's spare, or the
+// tree keeps a copy a quarter larger than the relay.
+//
+// It reads what the tree RETAINS rather than what the heap allocated: one
+// handleRelay of a 1 MiB relay allocates 7 or 25 MB depending on whether it
+// reaches a commit, and that noise hides a 1.3 MB copy (measured 2026-09-23). The
+// leaf keeps its value as a slice, and smt's Get returns that same slice cut
+// before the suffix, capacity intact: written in place it is n+suffix, copied by
+// the append it is about 1.25n. The premise checks the leaf was not compacted,
+// because a compacted leaf is re-read into a fresh buffer and would pass for the
+// wrong reason -- which is why this runs through the supplier's batch: without
+// one, each relay commits and compacts on its own.
+func TestHandleRelay_CompressedRelayIsNotCopiedByTheTree(t *testing.T) {
+	client, _ := newTestRedis(t)
+	w := newBatchWorker(t, client, "pokt1leafretained", "c1")
+	const n = 1 << 20
+	const sessionID = "sess-leaf-retained"
+	text := transport.SyntheticRelayBytes(transport.RelayShapeText, n)
+	compressed, outcome := transport.CompressRelayBytes(text)
+	require.Equal(t, transport.CompressionOutcomeCompressed, outcome, "premise")
+	hash := sha256.Sum256(text)
+
+	// Through the supplier's batch, as in production: the relay's tree commits
+	// with its batch, so the leaf is still resident and uncompacted afterwards.
+	msg := newStreamMessage(w.supplier, sessionID, "", 1)
+	msg.Message.RelayHash, msg.Message.RelayBytes, msg.Message.RelayBytesS2 = hash[:], nil, compressed
+	require.ErrorIs(t, w.worker.handleRelay(w.ctx, w.supplier, msg), ErrRelayBatched)
+
+	w.smst.treesMu.RLock()
+	tree := w.smst.trees[sessionID]
+	w.smst.treesMu.RUnlock()
+	require.NotNil(t, tree, "premise: the session's tree is resident")
+	tree.mu.Lock()
+	defer tree.mu.Unlock()
+	require.Equal(t, int64(n), tree.pendingLeafBytes.Load(), "premise: the leaf is not compacted yet")
+	retained, _, err := tree.trie.Get(hash[:])
+	require.NoError(t, err)
+	require.Equal(t, text, retained, "the leaf holds the original relay")
+	require.Less(t, cap(retained), n+n/8,
+		"the leaf keeps the decompressed buffer itself (cap %d), not a copy grown by a quarter", cap(retained))
 }

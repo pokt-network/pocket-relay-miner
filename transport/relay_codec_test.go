@@ -41,7 +41,7 @@ func TestCompressRelayBytesDecidesPerRelay(t *testing.T) {
 			require.LessOrEqual(t, len(compressed), n-n/10, "%s/%d: compressed only when it saves at least 10%%", shape, n)
 
 			msg := &MinedRelayMessage{RelayBytesS2: compressed}
-			restored, err := msg.OriginalRelayBytes()
+			restored, err := msg.OriginalRelayBytes(0)
 			require.NoError(t, err, "%s/%d", shape, n)
 			require.Equal(t, original, restored, "%s/%d: the restored bytes are the original bytes", shape, n)
 		}
@@ -99,7 +99,7 @@ func TestOriginalRelayBytesRefusesWhatCannotBeTheRelay(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := tc.msg.OriginalRelayBytes()
+			got, err := tc.msg.OriginalRelayBytes(0)
 			require.ErrorIs(t, err, ErrRelayBytesCorrupt)
 			require.Nil(t, got)
 		})
@@ -111,7 +111,7 @@ func TestOriginalRelayBytesRefusesWhatCannotBeTheRelay(t *testing.T) {
 // nothing new.
 func TestOriginalRelayBytesReturnsRawBytesAsTheyAre(t *testing.T) {
 	raw := []byte("relay")
-	got, err := (&MinedRelayMessage{RelayBytes: raw}).OriginalRelayBytes()
+	got, err := (&MinedRelayMessage{RelayBytes: raw}).OriginalRelayBytes(0)
 	require.NoError(t, err)
 	require.Equal(t, raw, got)
 	require.Same(t, &raw[0], &got[0])
@@ -127,7 +127,7 @@ func TestOriginalRelayBytesCorruptPrefixAllocatesNothing(t *testing.T) {
 	var before, after runtime.MemStats
 	runtime.ReadMemStats(&before)
 
-	_, err := msg.OriginalRelayBytes()
+	_, err := msg.OriginalRelayBytes(0)
 
 	runtime.ReadMemStats(&after)
 	require.ErrorIs(t, err, ErrRelayBytesCorrupt)
@@ -144,4 +144,42 @@ func TestReleasedMessageForgetsItsCompressedBytes(t *testing.T) {
 	ReleaseMinedRelayMessage(m)
 
 	require.Empty(t, m.RelayBytesS2)
+}
+
+// TestOriginalRelayBytesLeavesTheSpareTheLeafNeeds pins the contract the miner's
+// memory depends on: whatever branch the bytes come from, the slice returned has
+// at least spare bytes of capacity past its length, so the SMST appends the
+// leaf's weight and count in place instead of copying the relay. A decode buffer
+// sized exactly -- s2.Decode(nil, ...) -- is what took the miner's heap from
+// 872 MiB to 2.3 GiB on 2026-09-23.
+func TestOriginalRelayBytesLeavesTheSpareTheLeafNeeds(t *testing.T) {
+	const spare = 16
+	for _, shape := range []string{RelayShapeEVMJSON, RelayShapeCosmosJSON, RelayShapeText} {
+		raw := SyntheticRelayBytes(shape, 1<<20)
+		compressed, outcome := CompressRelayBytes(raw)
+		require.Equal(t, CompressionOutcomeCompressed, outcome, "premise: %s compresses", shape)
+
+		got, err := (&MinedRelayMessage{RelayBytesS2: compressed}).OriginalRelayBytes(spare)
+
+		require.NoError(t, err)
+		require.Equal(t, raw, got, shape)
+		require.GreaterOrEqual(t, cap(got)-len(got), spare, "%s: decompressed with room for the leaf suffix", shape)
+	}
+
+	// Raw with room already, as Unmarshal leaves it almost always: returned as
+	// it is, no copy.
+	roomy := append([]byte(nil), ChainedHashBytes("roomy", 1<<20+1)...)
+	require.GreaterOrEqual(t, cap(roomy)-len(roomy), spare, "premise: a page-rounded capacity leaves room")
+	got, err := (&MinedRelayMessage{RelayBytes: roomy}).OriginalRelayBytes(spare)
+	require.NoError(t, err)
+	require.Same(t, &roomy[0], &got[0], "a raw relay with room is not copied")
+
+	// Raw without room: a length that is an exact multiple of the 8 KiB page
+	// leaves Unmarshal's append with no spare capacity at all.
+	tight := append([]byte(nil), ChainedHashBytes("tight", 1<<20)...)
+	require.Less(t, cap(tight)-len(tight), spare, "premise: a page-multiple length leaves no room")
+	got, err = (&MinedRelayMessage{RelayBytes: tight}).OriginalRelayBytes(spare)
+	require.NoError(t, err)
+	require.Equal(t, tight, got)
+	require.GreaterOrEqual(t, cap(got)-len(got), spare, "copied once, with the room the leaf needs")
 }

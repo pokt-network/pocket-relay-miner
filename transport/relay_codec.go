@@ -81,12 +81,30 @@ func CompressRelayBytes(raw []byte) ([]byte, string) {
 // so a relay that arrived compressed can never reach the hash or the SMST leaf in
 // its compressed form, and one that arrived with no bytes fails here instead of
 // becoming an empty leaf.
-func (m *MinedRelayMessage) OriginalRelayBytes() ([]byte, error) {
+//
+// The slice returned has at least spare bytes of capacity past its length. The
+// miner needs that: the SMST appends the leaf's weight and count to the value it
+// is given, in place when the capacity allows and otherwise by copying the whole
+// relay into a slice grown by a quarter -- measured live on 2026-09-23 as a
+// decode buffer with no spare capacity (s2.Decode sizes it exactly) that took the
+// miner's heap from 872 MiB to 2.3 GiB. RelayBytes as Unmarshal leaves it has
+// the spare almost always (its capacity is rounded up to a page) and is returned
+// as it is; in the rare case it does not, it is copied once here, at the size
+// the append needs, instead of by the append at a quarter more.
+//
+// The spare is private to the caller: the SMST leaf keeps this buffer and writes
+// into it, so it must never come from, or go back to, a pool.
+func (m *MinedRelayMessage) OriginalRelayBytes(spare int) ([]byte, error) {
 	switch {
 	case len(m.RelayBytes) > 0 && len(m.RelayBytesS2) > 0:
 		return nil, fmt.Errorf("%w: both relay_bytes and relay_bytes_s2 are set", ErrRelayBytesCorrupt)
 	case len(m.RelayBytes) > 0:
-		return m.RelayBytes, nil
+		if cap(m.RelayBytes)-len(m.RelayBytes) >= spare {
+			return m.RelayBytes, nil
+		}
+		raw := make([]byte, len(m.RelayBytes), len(m.RelayBytes)+spare)
+		copy(raw, m.RelayBytes)
+		return raw, nil
 	case len(m.RelayBytesS2) == 0:
 		return nil, fmt.Errorf("%w: neither relay_bytes nor relay_bytes_s2 is set", ErrRelayBytesCorrupt)
 	}
@@ -97,7 +115,9 @@ func (m *MinedRelayMessage) OriginalRelayBytes() ([]byte, error) {
 	if n > MaxCompressedRelayBytes {
 		return nil, fmt.Errorf("%w: decoded length %d exceeds %d", ErrRelayBytesCorrupt, n, MaxCompressedRelayBytes)
 	}
-	raw, err := s2.Decode(nil, m.RelayBytesS2)
+	// s2.Decode writes into dst when its capacity holds the decoded length, and
+	// returns dst[:n] with dst's capacity: the spare survives.
+	raw, err := s2.Decode(make([]byte, 0, n+spare), m.RelayBytesS2)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrRelayBytesCorrupt, err)
 	}

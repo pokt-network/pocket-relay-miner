@@ -2073,6 +2073,15 @@ func (m *RedisSMSTManager) Close() error {
 	return nil
 }
 
+// smstLeafSuffixBytes is what the SMST appends to a leaf's value: its weight and
+// its count, 8 bytes each (smt v0.15.0 SMST.Update). With the protocol's nil
+// value hasher the value IS the relay, and the append writes in place only when
+// the relay's buffer has this much capacity past its length; otherwise it copies
+// the whole relay into a slice grown by a quarter. The relay bytes handed to the
+// tree are sized for it (transport.MinedRelayMessage.OriginalRelayBytes), and
+// TestSMSTUpdateAppendsTheLeafSuffixInPlace goes red if smt stops doing this.
+const smstLeafSuffixBytes = 16
+
 // Ensure RedisSMSTManager implements SMSTManager
 var _ SMSTManager = (*RedisSMSTManager)(nil)
 

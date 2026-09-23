@@ -647,7 +647,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// Every use of the relay's bytes from here on reads relayBytes, never the
 	// message fields: a compressed relay must not reach the hash or the SMST leaf
 	// in its compressed form.
-	relayBytes, err := msg.Message.OriginalRelayBytes()
+	relayBytes, err := msg.Message.OriginalRelayBytes(smstLeafSuffixBytes)
 	if err != nil {
 		// A defect in the producer, not a per-request condition: it stays visible
 		// without debug logging, and no retry can repair it.
@@ -800,9 +800,11 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	relayHash := msg.Message.RelayHash
 	computeUnits := msg.Message.ComputeUnitsPerRelay
 
-	// MEMORY OPTIMIZATION: Clear RelayBytes and RelayHash after SMST update
-	// The SMST has copied the data to Redis - these fields are no longer needed.
-	// This allows GC to reclaim the memory early instead of holding until message is ACK'd.
+	// Drop the message's references to the relay after the SMST update. The leaf
+	// now holds the relay bytes itself -- in memory, until its tree's next leaf
+	// compaction, not in Redis: the commit is per batch, not per relay -- so the
+	// message's copies are no longer needed and the compressed form can be freed
+	// before the ack.
 	msg.Message.RelayBytes = nil
 	msg.Message.RelayBytesS2 = nil
 	msg.Message.RelayHash = nil

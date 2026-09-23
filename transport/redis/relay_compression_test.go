@@ -53,7 +53,7 @@ func TestCompressedRelayRoundTripsThroughRedis(t *testing.T) {
 		var got transport.MinedRelayMessage
 		require.NoError(t, got.Unmarshal([]byte(data)))
 
-		restored, err := got.OriginalRelayBytes()
+		restored, err := got.OriginalRelayBytes(0)
 		require.NoError(t, err, "entry %d", i)
 		require.Equal(t, sent[i], restored, "entry %d: the bytes out of Redis are the bytes that went in", i)
 

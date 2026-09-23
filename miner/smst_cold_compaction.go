@@ -57,7 +57,7 @@ const (
 	// 0x00 | path(32) | value | weight(8) | count(8), value being the raw relay
 	// bytes because the miner's value hasher is nil.
 	coldLeafPathLen = 32
-	coldLeafMetaLen = 16
+	coldLeafMetaLen = smstLeafSuffixBytes
 
 	// coldLeavesScanCount is the HSCAN batch. A nodes hash of 100k leaves is
 	// ~120 MB; one HGETALL would build that reply on Redis's only thread.
