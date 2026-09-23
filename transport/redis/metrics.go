@@ -185,6 +185,50 @@ var (
 		[]string{"supplier_addr"},
 	)
 
+	// The four below say what the consumer asks Redis for and what it holds, in
+	// BYTES as well as entries: a count bound admits a GiB per read once relays
+	// are a MiB each, and the miner's heap under that load was 75% relays read
+	// and not yet processed, with no series saying where they sat.
+	consumerReadRequestedCount = observability.SharedFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "consumer_read_requested_count",
+			Help:      "COUNT the last XREADGROUP of this supplier's stream asked for",
+		},
+		[]string{"supplier_addr"},
+	)
+
+	consumerReadReplyBytes = observability.SharedFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "consumer_read_reply_bytes",
+			Help:      "Payload bytes of the XREADGROUP reply being parsed now; 0 once the reply is handed over",
+		},
+		[]string{"supplier_addr"},
+	)
+
+	consumerReadBytesTotal = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "consumer_read_bytes_total",
+			Help:      "Payload bytes read from this supplier's stream, reclaims included",
+		},
+		[]string{"supplier_addr"},
+	)
+
+	consumerChannelBytes = observability.SharedFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "consumer_channel_bytes",
+			Help:      "Relay bytes parsed and waiting in the consumer's delivery channel for the miner to take",
+		},
+		[]string{"supplier_addr"},
+	)
+
 	// End-to-end latency from publish to consume
 	endToEndLatency = observability.SharedFactory.NewHistogramVec(
 		prometheus.HistogramOpts{

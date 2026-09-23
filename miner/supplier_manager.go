@@ -2252,6 +2252,7 @@ func (m *SupplierManager) runConsumeLoop(
 				m.releaseRelayBatchOnExit(ctx, state)
 				return false
 			}
+			redistransport.MarkDelivered(msg)
 			m.handleStreamMessage(ctx, state, msg)
 
 		case <-flushTick:
@@ -2640,6 +2641,7 @@ func (m *SupplierManager) drainDeliveryBuffer(
 				m.reportDrain(state, drained, abandoned)
 				return
 			}
+			redistransport.MarkDelivered(msg)
 			select {
 			case <-drainCtx.Done():
 				// Out of time. Release the pooled message so the slot returns,

@@ -372,6 +372,7 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 		// Kubernetes runs out of grace and SIGKILLs the pod.
 		//
 		// Each blocked call holds one connection from the pool.
+		consumerReadRequestedCount.WithLabelValues(c.config.SupplierOperatorAddress).Set(float64(c.config.BatchSize))
 		streams, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    c.config.ConsumerGroup,
 			Consumer: c.config.ConsumerName,
@@ -421,6 +422,8 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			continue
 		}
 
+		replyBytes := consumerReadReplyBytes.WithLabelValues(c.config.SupplierOperatorAddress)
+		replyBytes.Set(float64(payloadBytes(streams[0].Messages)))
 		for _, message := range streams[0].Messages {
 			msg, parseErr := c.parseMessage(message, c.streamName)
 			if parseErr != nil {
@@ -463,14 +466,18 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			).Inc()
 
 			// Send to channel (blocks if channel is full)
+			trackChannelSend(msg)
 			select {
 			case c.msgCh <- msg:
 			case <-ctx.Done():
 				// Parsed from the pool and never handed over.
+				MarkDelivered(msg)
 				transport.ReleaseMinedRelayMessage(msg.Message)
+				replyBytes.Set(0)
 				return ctx.Err()
 			}
 		}
+		replyBytes.Set(0)
 	}
 }
 
@@ -730,10 +737,12 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 			}
 			msg.IsReclaim = true
 
+			trackChannelSend(msg)
 			select {
 			case c.msgCh <- msg:
 			case <-ctx.Done():
 				// Parsed from the pool and never handed over.
+				MarkDelivered(msg)
 				transport.ReleaseMinedRelayMessage(msg.Message)
 				return
 			}
@@ -781,10 +790,12 @@ func (c *StreamsConsumer) deliverOwnPending(ctx context.Context) error {
 		return err
 	}
 	after, err := c.eachOwnPending(ctx, c.ownPendingAfter, func(msg transport.StreamMessage) error {
+		trackChannelSend(msg)
 		select {
 		case c.msgCh <- msg:
 			return nil
 		case <-ctx.Done():
+			MarkDelivered(msg)
 			transport.ReleaseMinedRelayMessage(msg.Message)
 			return ctx.Err()
 		}
@@ -889,6 +900,7 @@ func (c *StreamsConsumer) parseMessage(message redis.XMessage, streamName string
 	if !ok {
 		return transport.StreamMessage{}, fmt.Errorf("message 'data' field is not a string")
 	}
+	consumerReadBytesTotal.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(dataStr)))
 
 	// Deserialize from protobuf binary format into a pooled MinedRelayMessage
 	// so we recycle the struct across relays instead of burning GC cycles on
@@ -1137,4 +1149,41 @@ func (c *StreamsConsumer) Close() error {
 
 	c.logger.Info().Msg("Redis Streams consumer closed")
 	return nil
+}
+
+// payloadBytes is the size of the `data` fields of a read reply, the bytes the
+// reply holds on the heap until it has been parsed.
+func payloadBytes(msgs []redis.XMessage) int {
+	n := 0
+	for _, m := range msgs {
+		if d, ok := m.Values["data"].(string); ok {
+			n += len(d)
+		}
+	}
+	return n
+}
+
+// channelBytesOf is what one delivered relay adds to consumer_channel_bytes.
+// trackChannelSend adds it and MarkDelivered subtracts it, so both must read
+// the same size: RelayBytes, before the miner clears it after the SMST update.
+func channelBytesOf(msg transport.StreamMessage) (string, float64) {
+	if msg.Message == nil {
+		return "", 0
+	}
+	return msg.Message.SupplierOperatorAddress, float64(len(msg.Message.RelayBytes))
+}
+
+// trackChannelSend counts a relay as waiting in the delivery channel. It runs
+// BEFORE the send: counting after it would let the receiver's MarkDelivered
+// land first and take the gauge below zero.
+func trackChannelSend(msg transport.StreamMessage) {
+	supplier, n := channelBytesOf(msg)
+	consumerChannelBytes.WithLabelValues(supplier).Add(n)
+}
+
+// MarkDelivered is called by whoever takes a message from the channel Consume
+// returns, as soon as it takes it, so consumer_channel_bytes stops counting it.
+func MarkDelivered(msg transport.StreamMessage) {
+	supplier, n := channelBytesOf(msg)
+	consumerChannelBytes.WithLabelValues(supplier).Sub(n)
 }

@@ -120,6 +120,20 @@ var (
 		[]string{"supplier"},
 	)
 
+	// SMSTPendingLeafBytes is the relay bytes held by SMST leaves that were
+	// updated and whose in-memory value has not been dropped yet: with a nil value
+	// hasher a leaf keeps the raw relay until the commit compacts it, so this is
+	// the tree's share of the relays the miner holds between read and commit.
+	SMSTPendingLeafBytes = MinerFactory.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Namespace: metricsNamespace,
+			Subsystem: "smst",
+			Name:      "pending_leaf_bytes",
+			Help:      "Relay bytes held in memory by SMST leaves updated since their tree's last successful leaf compaction",
+		},
+		[]string{"supplier"},
+	)
+
 	// SMSTColdCompactions counts attempts to replace a claimed tree's nodes
 	// hash with its leaves blob, by result: compacted, already_compacted,
 	// no_tree, not_ready, read_failed, set_failed, delete_failed, mismatch.

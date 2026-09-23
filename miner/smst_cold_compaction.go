@@ -420,6 +420,7 @@ func (m *RedisSMSTManager) CompactColdTree(ctx context.Context, sessionID string
 	if tree != nil {
 		m.treesMu.Lock()
 		if m.trees[sessionID] == tree {
+			m.releasePendingLeafBytes(tree)
 			delete(m.trees, sessionID)
 		}
 		m.treesMu.Unlock()

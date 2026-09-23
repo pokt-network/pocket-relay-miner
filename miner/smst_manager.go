@@ -233,6 +233,7 @@ func (m *RedisSMSTManager) runSMSTSafely(sessionID, op string, fn func() error) 
 //
 // Caller must hold m.treesMu.
 func (m *RedisSMSTManager) evictCorruptSessionLocked(ctx context.Context, sessionID, reason string) {
+	m.releasePendingLeafBytes(m.trees[sessionID])
 	delete(m.trees, sessionID)
 
 	observability.SMSTCorruptionEvictions.
@@ -339,6 +340,11 @@ type redisSMST struct {
 	claimedSum     uint64 // Cached sum after flush (for HA warmup)
 	proofPath      []byte
 	compactProofBz []byte
+
+	// pendingLeafBytes is the relay bytes its leaves hold since the last leaf
+	// compaction; atomic because removing a tree from the map reads it without
+	// the tree's lock.
+	pendingLeafBytes atomic.Int64
 
 	// compactorMissingLogged guards the once-per-tree Error log fired when
 	// trie does not satisfy leafCompactor (a wrapper that hides it; the smt
@@ -651,6 +657,7 @@ func (m *RedisSMSTManager) resumeTreeFromRedisLocked(ctx context.Context, sessio
 // longer has. Every tree enters m.trees through here. The caller holds
 // m.treesMu.
 func (m *RedisSMSTManager) addTreeLocked(sessionID string, tree *redisSMST) {
+	m.releasePendingLeafBytes(m.trees[sessionID])
 	tree.gen = m.treeGen.Add(1)
 	m.trees[sessionID] = tree
 }
@@ -722,6 +729,8 @@ func (m *RedisSMSTManager) updateTree(
 		// isSMSTCorruption (in the defer above) depends on that.
 		return fmt.Errorf("%w: %w", ErrSMSTUpdateFailed, err)
 	}
+	tree.pendingLeafBytes.Add(int64(len(value)))
+	observability.SMSTPendingLeafBytes.WithLabelValues(m.config.SupplierAddress).Add(float64(len(value)))
 
 	// CRITICAL: Log successful SMST update for debugging
 	m.logger.Debug().
@@ -929,6 +938,7 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 				tree.compactionDisabled = true
 			} else {
 				observability.SMSTLeavesCompacted.WithLabelValues(m.config.SupplierAddress).Add(float64(compactedLeaves))
+				m.releasePendingLeafBytes(tree)
 				m.logger.Debug().
 					Str(logging.FieldSessionID, sessionID).
 					Int("compacted_leaves", compactedLeaves).
@@ -1080,6 +1090,8 @@ func (m *RedisSMSTManager) UnloadTree(ctx context.Context, sessionID string) (ro
 // its nodes stay in Redis until something walks to them. The nodes under the
 // root must already be written. The caller holds tree.mu.
 func (m *RedisSMSTManager) importLazyLocked(sessionID string, tree *redisSMST) ([]byte, error) {
+	// The trie is replaced below, and with it every leaf value it held.
+	m.releasePendingLeafBytes(tree)
 	var root []byte
 	var trie smt.SparseMerkleSumTrie
 	if err := m.runSMSTSafely(sessionID, "import_unload", func() error {
@@ -1804,6 +1816,7 @@ func (m *RedisSMSTManager) DeleteTree(ctx context.Context, sessionID string) err
 	defer m.treesMu.Unlock()
 
 	// Remove from memory
+	m.releasePendingLeafBytes(m.trees[sessionID])
 	delete(m.trees, sessionID)
 	m.markDeletedLocked(sessionID)
 	// Drop any accumulated corruption-eviction counter for this session
@@ -2041,6 +2054,9 @@ func (m *RedisSMSTManager) Close() error {
 	m.treesMu.Lock()
 	defer m.treesMu.Unlock()
 
+	for _, tree := range m.trees {
+		m.releasePendingLeafBytes(tree)
+	}
 	m.trees = make(map[string]*redisSMST)
 	m.closed.Store(true)
 
@@ -2050,3 +2066,14 @@ func (m *RedisSMSTManager) Close() error {
 
 // Ensure RedisSMSTManager implements SMSTManager
 var _ SMSTManager = (*RedisSMSTManager)(nil)
+
+// releasePendingLeafBytes stops counting tree's pending leaf bytes, when its
+// leaves were compacted or the tree left memory. A nil tree releases nothing.
+func (m *RedisSMSTManager) releasePendingLeafBytes(tree *redisSMST) {
+	if tree == nil {
+		return
+	}
+	if n := tree.pendingLeafBytes.Swap(0); n != 0 {
+		observability.SMSTPendingLeafBytes.WithLabelValues(m.config.SupplierAddress).Sub(float64(n))
+	}
+}
