@@ -201,6 +201,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 		simVerifier,
 		simTestKeyID,
 		nil, // onBackendDial
+		nil, // queueFull
 	)
 	require.NoError(t, err)
 

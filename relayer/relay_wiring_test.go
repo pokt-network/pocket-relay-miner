@@ -143,7 +143,7 @@ func TestWebSocketClosesAFrameWithoutAPipeline(t *testing.T) {
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, pub, signer, http.Header{},
-		nil, nil, 2*time.Second, false, nil, "", nil,
+		nil, nil, 2*time.Second, false, nil, "", nil, nil,
 	)
 	require.NoError(t, err)
 	runBridge(t, bridge)

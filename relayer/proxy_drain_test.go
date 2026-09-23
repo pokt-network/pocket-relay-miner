@@ -169,7 +169,7 @@ func newGatedLifecycleBridge(t *testing.T, backendURL string) (*WebSocketBridge,
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
-		nil, pipeline, 5*time.Second, false, nil, "", func(int, error) {},
+		nil, pipeline, 5*time.Second, false, nil, "", func(int, error) {}, nil,
 	)
 	require.NoError(t, err)
 	return bridge, gate

@@ -107,7 +107,7 @@ func newPublishingSageBridge(
 		"", // sage sends no Pocket-Supplier-Address
 		atHeight(100),
 		&recordingProcessor{}, publisher, signer, http.Header{},
-		nil, pipeline, 2*time.Second, false, nil, "", nil,
+		nil, pipeline, 2*time.Second, false, nil, "", nil, nil,
 	)
 	require.NoError(t, err)
 	runBridge(t, bridge)

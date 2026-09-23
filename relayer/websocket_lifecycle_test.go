@@ -113,7 +113,7 @@ func newLifecycleBridge(t *testing.T, backendURL string) (*WebSocketBridge, *web
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
-		nil, pipeline, 5*time.Second, false, nil, "", rec.record,
+		nil, pipeline, 5*time.Second, false, nil, "", rec.record, nil,
 	)
 	require.NoError(t, err)
 	return bridge, gwClient, rec, supplier
@@ -343,7 +343,7 @@ func TestBridgeTearsDownWhenTheGatewayPathPanics(t *testing.T) {
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, &recordingPublisher{}, signer, http.Header{},
-		nil, pipeline, 2*time.Second, false, nil, "", nil,
+		nil, pipeline, 2*time.Second, false, nil, "", nil, nil,
 	)
 	require.NoError(t, err)
 
@@ -442,7 +442,7 @@ func TestBridgeBillsEverySubscriptionPush(t *testing.T) {
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, pushingWSBackend(t, pushes), simWSTestService, "", atHeight(100),
 		proc, pub, signer, http.Header{},
-		nil, pipeline, 5*time.Second, false, nil, "", nil,
+		nil, pipeline, 5*time.Second, false, nil, "", nil, nil,
 	)
 	require.NoError(t, err)
 	runBridge(t, bridge)
@@ -516,7 +516,7 @@ func TestBridgePublishesARelayItAlreadyServedAfterTheBridgeWasCancelled(t *testi
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, pub, signer, http.Header{},
-		nil, pipeline, 5*time.Second, false, nil, "", nil,
+		nil, pipeline, 5*time.Second, false, nil, "", nil, nil,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bridge.Close() })

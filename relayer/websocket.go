@@ -238,6 +238,13 @@ type WebSocketBridge struct {
 	// while the constructor dialled. Optional: nil means nobody is watching.
 	onBackendDial func(statusCode int, err error)
 
+	// queueFull is the admission gate on the batch queue, the same one HTTP,
+	// gRPC and the handshake ask. The bridge asks it for every client frame and
+	// every backend message, because a connection admitted while the queue had
+	// room otherwise keeps publishing once it has none. nil admits: tests and
+	// simulated connections, which publish nothing.
+	queueFull func() bool
+
 	// firstFrameWait is captured from wsFirstFrameWait at construction rather
 	// than read later: the constructor runs on the caller's goroutine, so a test
 	// that shortens the package var is ordered with this read.
@@ -373,6 +380,7 @@ func NewWebSocketBridge(
 	simVerifier *SimulationVerifier,
 	simKeyID string,
 	onBackendDial func(statusCode int, err error),
+	queueFull func() bool,
 ) (*WebSocketBridge, error) {
 	// A nil relayProcessor used to drop us into a "fallback" emit path that
 	// published MinedRelayMessage{RelayHash: nil, CU: 1}, which silently
@@ -409,6 +417,7 @@ func NewWebSocketBridge(
 		simKeyID:         simKeyID,
 		sessionMonitor:   sessionMonitor,
 		onBackendDial:    onBackendDial,
+		queueFull:        queueFull,
 		sessionEndHeight: 0, // Will be set from first relay request
 		ctx:              ctx,
 		cancelFn:         cancelFn,
@@ -1004,6 +1013,11 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 			return
 		}
 	} else if b.relayPipeline != nil {
+		// Before validation, so a full queue costs neither a signature check nor
+		// the backend: the frame would become a relay the queue cannot take.
+		if b.refuseOnFullQueue() {
+			return
+		}
 		// Validate and meter the relay if pipeline is available
 		// Build relay context for validation/metering
 		relayCtx := &RelayContext{
@@ -1137,6 +1151,30 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 }
 
 // handleBackendMessage handles messages from the backend.
+// wsCloseTextPublishQueueFull is the close text of a connection refused for a
+// full batch queue. Its own text, and not the "unable to process relay request"
+// the meter and dispatcher refusals share, so an operator and a client can tell
+// this reason from those; the code is the same 1013, try again later.
+const wsCloseTextPublishQueueFull = "relayer publish queue is full"
+
+// refuseOnFullQueue closes the connection with 1013 when the batch queue is
+// over its bound, and reports whether it did.
+//
+// The connection closes rather than the message being refused, for the reason
+// every other refusal on this bridge closes: a refusal inside the stream arrives
+// as a payload the client reads as backend traffic, and a subscription push has
+// no request to answer. A close code says one thing, and PATH hands it to the
+// client as it is.
+func (b *WebSocketBridge) refuseOnFullQueue() bool {
+	if b.simulated || b.queueFull == nil || !b.queueFull() {
+		return false
+	}
+	relaysRejected.WithLabelValues(b.serviceID, BackendTypeWebSocket, rejectReasonPublishQueueFull).Inc()
+	b.logger.Debug().Msg("relay refused - publish queue full, closing connection")
+	_ = b.closeWithReason(CloseTryAgainLater, wsCloseTextPublishQueueFull, wsCloseInitiatorRelayer)
+	return true
+}
+
 // Each backend message is billed as part of a relay.
 func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	// A message still queued when the bridge closed is neither written nor
@@ -1180,6 +1218,13 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 			_ = b.closeWithReason(CloseTryAgainLater, "unable to process relay request", wsCloseInitiatorRelayer)
 			return
 		}
+	}
+
+	// Before signing, and therefore before serving and charging: the charge is
+	// taken before the relay is published, so a gate any later would leave a
+	// relay served and charged that the queue never took.
+	if b.refuseOnFullQueue() {
+		return
 	}
 
 	b.logger.Debug().Msg("latestRequest found - building signed response")
@@ -1812,8 +1857,9 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		p.validateAndLogWebSocketHandshake(r, serviceID)
 
 		// Stop admitting new connections while the batch queue is full: an HTTP 503
-		// before the upgrade, like the other refusals above. A connection already open
-		// keeps admitting frames; this gate does not reach them.
+		// before the upgrade, like the other refusals above. A connection already
+		// open asks the same gate for every frame and backend message, and closes
+		// with 1013 (refuseOnFullQueue).
 		if p.queueFull() {
 			relaysRejected.WithLabelValues(serviceID, BackendTypeWebSocket, rejectReasonPublishQueueFull).Inc()
 			p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
@@ -1943,6 +1989,9 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 					logCircuitBreakerTransition(p.logger, transition, serviceID, "websocket", threshold)
 				}
 			},
+			// The gate the handshake asked, asked again by the connection for
+			// every frame and every backend message.
+			p.queueFull,
 		)
 		if err != nil {
 			// Construction no longer dials, so a failure here is a wiring fault

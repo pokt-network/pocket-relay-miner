@@ -74,7 +74,7 @@ func TestRelaysPublished_AWebSocketRelayCountsOnce(t *testing.T) {
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService, "", atHeight(100),
 		&recordingProcessor{}, countPublished(&ctxWatchingPublisher{}), signer, http.Header{},
-		nil, pipeline, 5*time.Second, false, nil, "", nil,
+		nil, pipeline, 5*time.Second, false, nil, "", nil, nil,
 	)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = bridge.Close() })
