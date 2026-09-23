@@ -445,6 +445,14 @@ type RedisSMSTManager struct {
 	// goroutine before anything reads them.
 	coldAfterFunc  func(time.Duration, func())
 	coldRetryDelay time.Duration
+
+	// leafBytesSinceFlush is the relay bytes put in this supplier's leaves since
+	// the relay batch last TRIED to flush, whatever that flush's outcome. The
+	// byte trigger reads this and not the pending level: a tree whose leaves
+	// cannot be compacted (a failed pipeline, a panicked compaction) keeps its
+	// level up for good, and a trigger on the level would then flush on every
+	// relay.
+	leafBytesSinceFlush atomic.Int64
 }
 
 // NewRedisSMSTManager creates a new Redis-backed SMST manager.
@@ -730,6 +738,7 @@ func (m *RedisSMSTManager) updateTree(
 		return fmt.Errorf("%w: %w", ErrSMSTUpdateFailed, err)
 	}
 	tree.pendingLeafBytes.Add(int64(len(value)))
+	m.leafBytesSinceFlush.Add(int64(len(value)))
 	observability.SMSTPendingLeafBytes.WithLabelValues(m.config.SupplierAddress).Add(float64(len(value)))
 
 	// CRITICAL: Log successful SMST update for debugging
@@ -2066,6 +2075,19 @@ func (m *RedisSMSTManager) Close() error {
 
 // Ensure RedisSMSTManager implements SMSTManager
 var _ SMSTManager = (*RedisSMSTManager)(nil)
+
+// LeafBytesSinceFlush is the relay bytes put in leaves since the last
+// ResetLeafBytesSinceFlush.
+func (m *RedisSMSTManager) LeafBytesSinceFlush() int64 {
+	return m.leafBytesSinceFlush.Load()
+}
+
+// ResetLeafBytesSinceFlush starts the count again; the relay batch calls it on
+// every flush of all its sessions, before the flush, so bytes added while it
+// runs are not lost.
+func (m *RedisSMSTManager) ResetLeafBytesSinceFlush() {
+	m.leafBytesSinceFlush.Store(0)
+}
 
 // releasePendingLeafBytes stops counting tree's pending leaf bytes, when its
 // leaves were compacted or the tree left memory. A nil tree releases nothing.

@@ -659,6 +659,20 @@ var (
 		[]string{"supplier"},
 	)
 
+	// relayBatchFlushesTotal counts relay batch flushes by what set them off:
+	// time (the interval ticked), count (a session reached relayBatchCap) or
+	// bytes (relayBatchFlushBytes went into the supplier's leaves). With small
+	// relays bytes stays at zero; with big ones it is what bounds the leaves.
+	relayBatchFlushesTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_batch_flushes_total",
+			Help:      "Relay batch flushes by trigger (time, count, bytes)",
+		},
+		[]string{"supplier", "trigger"},
+	)
+
 	// relayBatchReleasedTotal counts relays a batch handed back unacknowledged
 	// at a flush instead of settling them, by why: they stay pending for a
 	// redelivery that puts them in the session's current tree.
@@ -2211,6 +2225,11 @@ func RecordRelayBatchReleased(supplier, reason string, n int) {
 		return
 	}
 	relayBatchReleasedTotal.WithLabelValues(supplier, reason).Add(float64(n))
+}
+
+// RecordRelayBatchFlush counts one relay batch flush by its trigger.
+func RecordRelayBatchFlush(supplier, trigger string) {
+	relayBatchFlushesTotal.WithLabelValues(supplier, trigger).Inc()
 }
 
 // RecordRelayBatchPanic counts one relay batch whose flush panicked.

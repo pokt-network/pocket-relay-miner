@@ -2252,8 +2252,17 @@ func (m *SupplierManager) runConsumeLoop(
 				m.releaseRelayBatchOnExit(ctx, state)
 				return false
 			}
-			redistransport.MarkDelivered(msg)
+			state.Consumer.MarkDelivered(msg)
 			m.handleStreamMessage(ctx, state, msg)
+			// The byte trigger: a supplier of big relays flushes when its
+			// leaves took relayBatchFlushBytes, instead of holding a whole
+			// interval of them. Only the flush -- ending sessions are left to
+			// the tick, which asks the chain about each one.
+			if state.relayBatch != nil && state.SMSTManager != nil &&
+				state.SMSTManager.LeafBytesSinceFlush() >= relayBatchFlushBytes {
+				RecordRelayBatchFlush(state.OperatorAddr, relayBatchFlushBytesTrigger)
+				state.relayBatch.FlushAll(ctx)
+			}
 
 		case <-flushTick:
 			if flushTicker == nil {
@@ -2263,6 +2272,7 @@ func (m *SupplierManager) runConsumeLoop(
 			if m.consumeLoopFlushHook != nil {
 				m.consumeLoopFlushHook()
 			}
+			RecordRelayBatchFlush(state.OperatorAddr, relayBatchFlushTime)
 			state.relayBatch.FlushAll(ctx)
 			m.unloadEndedSessionTrees(ctx, state)
 
@@ -2641,7 +2651,7 @@ func (m *SupplierManager) drainDeliveryBuffer(
 				m.reportDrain(state, drained, abandoned)
 				return
 			}
-			redistransport.MarkDelivered(msg)
+			state.Consumer.MarkDelivered(msg)
 			select {
 			case <-drainCtx.Done():
 				// Out of time. Release the pooled message so the slot returns,

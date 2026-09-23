@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -77,6 +78,15 @@ type StreamsConsumer struct {
 	// deliverOwnPending). Only the read loop's goroutine touches them.
 	ownPendingAfter string
 	ownPendingDone  bool
+
+	// largestEntry is the biggest `data` field the read loop has seen lately,
+	// decaying slowly (see noteLargestEntry); zero until the first read. Only
+	// the read loop's goroutine touches it.
+	largestEntry int64
+
+	// channelBytes is the relay bytes parsed and waiting in msgCh, the value
+	// consumer_channel_bytes shows, kept here so the read can size itself.
+	channelBytes atomic.Int64
 
 	// Message channel
 	msgCh chan transport.StreamMessage
@@ -372,12 +382,13 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 		// Kubernetes runs out of grace and SIGKILLs the pod.
 		//
 		// Each blocked call holds one connection from the pool.
-		consumerReadRequestedCount.WithLabelValues(c.config.SupplierOperatorAddress).Set(float64(c.config.BatchSize))
+		count := c.readCount()
+		consumerReadRequestedCount.WithLabelValues(c.config.SupplierOperatorAddress).Set(float64(count))
 		streams, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    c.config.ConsumerGroup,
 			Consumer: c.config.ConsumerName,
 			Streams:  []string{c.streamName, ">"},
-			Count:    c.config.BatchSize,
+			Count:    count,
 			Block:    blockInterval,
 		}).Result()
 		if err != nil {
@@ -423,7 +434,9 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 		}
 
 		replyBytes := consumerReadReplyBytes.WithLabelValues(c.config.SupplierOperatorAddress)
-		replyBytes.Set(float64(payloadBytes(streams[0].Messages)))
+		total, largest := payloadStats(streams[0].Messages)
+		replyBytes.Set(float64(total))
+		c.noteLargestEntry(largest)
 		for _, message := range streams[0].Messages {
 			msg, parseErr := c.parseMessage(message, c.streamName)
 			if parseErr != nil {
@@ -466,12 +479,12 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			).Inc()
 
 			// Send to channel (blocks if channel is full)
-			trackChannelSend(msg)
+			c.trackChannelSend(msg)
 			select {
 			case c.msgCh <- msg:
 			case <-ctx.Done():
 				// Parsed from the pool and never handed over.
-				MarkDelivered(msg)
+				c.MarkDelivered(msg)
 				transport.ReleaseMinedRelayMessage(msg.Message)
 				replyBytes.Set(0)
 				return ctx.Err()
@@ -737,12 +750,12 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 			}
 			msg.IsReclaim = true
 
-			trackChannelSend(msg)
+			c.trackChannelSend(msg)
 			select {
 			case c.msgCh <- msg:
 			case <-ctx.Done():
 				// Parsed from the pool and never handed over.
-				MarkDelivered(msg)
+				c.MarkDelivered(msg)
 				transport.ReleaseMinedRelayMessage(msg.Message)
 				return
 			}
@@ -790,12 +803,12 @@ func (c *StreamsConsumer) deliverOwnPending(ctx context.Context) error {
 		return err
 	}
 	after, err := c.eachOwnPending(ctx, c.ownPendingAfter, func(msg transport.StreamMessage) error {
-		trackChannelSend(msg)
+		c.trackChannelSend(msg)
 		select {
 		case c.msgCh <- msg:
 			return nil
 		case <-ctx.Done():
-			MarkDelivered(msg)
+			c.MarkDelivered(msg)
 			transport.ReleaseMinedRelayMessage(msg.Message)
 			return ctx.Err()
 		}
@@ -1151,16 +1164,48 @@ func (c *StreamsConsumer) Close() error {
 	return nil
 }
 
-// payloadBytes is the size of the `data` fields of a read reply, the bytes the
-// reply holds on the heap until it has been parsed.
-func payloadBytes(msgs []redis.XMessage) int {
-	n := 0
+// readBudgetBytes is how many relay bytes one supplier's read may bring in,
+// counting what already waits in the delivery channel. XREADGROUP bounds a
+// read in entries only, so the COUNT is derived from it (readCount): with
+// relays of a MiB a fixed COUNT of 1000 read a GiB at once.
+const readBudgetBytes = 64 << 20
+
+// readCount is the COUNT of the next read: what fits in readBudgetBytes, minus
+// the channel's bytes, at the largest entry seen lately, between 1 and
+// BatchSize. The first read asks for one entry, whatever its size; relays of a
+// few KiB get BatchSize from the second read on. It never returns 0: the read
+// is sized, not paused.
+func (c *StreamsConsumer) readCount() int64 {
+	if c.largestEntry <= 0 {
+		return 1
+	}
+	n := (readBudgetBytes - c.channelBytes.Load()) / c.largestEntry
+	return min(max(n, 1), c.config.BatchSize)
+}
+
+// noteLargestEntry folds the largest entry of the last read into largestEntry:
+// a bigger one takes over at once, a smaller one lets it fall by a sixteenth
+// per read, so one big relay does not size a supplier's reads forever. An
+// empty read changes nothing.
+func (c *StreamsConsumer) noteLargestEntry(largest int64) {
+	if largest <= 0 {
+		return
+	}
+	c.largestEntry = max(largest, c.largestEntry-c.largestEntry/16)
+}
+
+// payloadStats is the total and the largest size of the `data` fields of a
+// read reply: the total is what the reply holds on the heap until it has been
+// parsed, the largest sizes the next read.
+func payloadStats(msgs []redis.XMessage) (total, largest int64) {
 	for _, m := range msgs {
 		if d, ok := m.Values["data"].(string); ok {
-			n += len(d)
+			n := int64(len(d))
+			total += n
+			largest = max(largest, n)
 		}
 	}
-	return n
+	return total, largest
 }
 
 // channelBytesOf is what one delivered relay adds to consumer_channel_bytes.
@@ -1175,15 +1220,21 @@ func channelBytesOf(msg transport.StreamMessage) (string, float64) {
 
 // trackChannelSend counts a relay as waiting in the delivery channel. It runs
 // BEFORE the send: counting after it would let the receiver's MarkDelivered
-// land first and take the gauge below zero.
-func trackChannelSend(msg transport.StreamMessage) {
+// land first and take the count below zero.
+func (c *StreamsConsumer) trackChannelSend(msg transport.StreamMessage) {
 	supplier, n := channelBytesOf(msg)
+	c.channelBytes.Add(int64(n))
 	consumerChannelBytes.WithLabelValues(supplier).Add(n)
 }
 
 // MarkDelivered is called by whoever takes a message from the channel Consume
-// returns, as soon as it takes it, so consumer_channel_bytes stops counting it.
-func MarkDelivered(msg transport.StreamMessage) {
+// returns, as soon as it takes it, so the channel's byte count stops counting
+// it. A nil consumer does nothing.
+func (c *StreamsConsumer) MarkDelivered(msg transport.StreamMessage) {
+	if c == nil {
+		return
+	}
 	supplier, n := channelBytesOf(msg)
+	c.channelBytes.Add(-int64(n))
 	consumerChannelBytes.WithLabelValues(supplier).Sub(n)
 }

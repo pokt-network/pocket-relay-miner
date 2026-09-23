@@ -29,6 +29,21 @@ var ErrRelayBatched = errors.New("relay handed to the batch: acknowledged when t
 // relay the batch cannot take is finished on its own.
 const relayBatchCap = 1000
 
+// relayBatchFlushBytes is how many relay bytes one supplier puts in its leaves
+// before the consume loop flushes its batch without waiting for the tick. A leaf
+// holds its relay until the commit a flush runs compacts it, so between two
+// ticks a supplier of big relays held the whole interval's bytes: 1 MiB relays
+// at ~450/s kept 3.0-3.6 GiB in leaves. Relays of a few KiB never reach it
+// before the tick. Per supplier, so N busy suppliers hold about N times this.
+const relayBatchFlushBytes = 16 << 20
+
+// Why a batch flushed; the trigger label of relay_batch_flushes_total.
+const (
+	relayBatchFlushTime         = "time"  // the flush interval ticked
+	relayBatchFlushCount        = "count" // a session reached relayBatchCap
+	relayBatchFlushBytesTrigger = "bytes" // relayBatchFlushBytes were put in leaves
+)
+
 // relaySession is what every relay of one session shares. It is kept once per
 // session, not per relay, and only for the per-relay fallback, which calls the
 // session coordinator with it.
@@ -212,6 +227,7 @@ func (b *relayBatch) Add(ctx context.Context, s relaySession, r batchedRelay) bo
 
 	sb := b.sessions[s.sessionID]
 	if sb != nil && len(sb.relays) >= relayBatchCap {
+		RecordRelayBatchFlush(b.supplierAddr, relayBatchFlushCount)
 		if b.flushLocked(ctx, sb) {
 			return false
 		}
@@ -263,6 +279,9 @@ func (b *relayBatch) flushAcksLocked(ctx context.Context) (retained bool) {
 func (b *relayBatch) FlushAll(ctx context.Context) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if b.smst != nil {
+		b.smst.ResetLeafBytesSinceFlush()
+	}
 	for _, sb := range b.sessions {
 		b.flushLocked(ctx, sb)
 	}
