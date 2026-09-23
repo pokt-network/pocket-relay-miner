@@ -1201,6 +1201,19 @@ var (
 		[]string{"supplier"},
 	)
 
+	// sessionTransitionsUndispatched MUST stay at zero: a lifecycle verdict the
+	// transition dispatcher has no batch for, so the session never moves. It is
+	// how 58 proved sessions stayed in proving on 2026-09-22 with nothing to say so.
+	sessionTransitionsUndispatched = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "session_transitions_undispatched_total",
+			Help:      "Session transitions the lifecycle decided but had no dispatcher for, so the session stayed in its state. Any non-zero value is a bug",
+		},
+		[]string{"supplier", "target_state"},
+	)
+
 	sessionSnapshotsResumedAtStartup = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

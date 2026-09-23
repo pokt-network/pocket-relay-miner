@@ -870,19 +870,31 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			Int64("session_end", session.SessionEndHeight).
 			Msg("session transition determined")
 
-		// Group by transition type for batching
-		switch newState {
-		case SessionStateClaiming:
+		// Group by transition type for batching. The terminal group is every
+		// state IsTerminal names, not a list kept here by hand: that list
+		// omitted SessionStateProved, so a proving session with its proof sent
+		// was judged proved at its window's close and the verdict was dropped
+		// on every block -- measured 2026-09-22, 58 sessions left in proving
+		// with their proofs on chain. A target that is neither is a verdict
+		// this dispatcher cannot carry out, and it says so instead of dropping
+		// it in silence.
+		switch {
+		case newState == SessionStateClaiming:
 			claimingSessions = append(claimingSessions, session)
-		case SessionStateProving:
+		case newState == SessionStateProving:
 			provingSessions = append(provingSessions, session)
-		case SessionStateProbabilisticProved,
-			SessionStateClaimWindowClosed,
-			SessionStateClaimTxError,
-			SessionStateProofWindowClosed,
-			SessionStateProofTxError:
+		case newState.IsTerminal():
 			// Terminal states: store (state, session) pairs
 			terminalSessions = append(terminalSessions, newState, session)
+		default:
+			m.logger.Error().
+				Str(logging.FieldSessionID, session.SessionID).
+				Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+				Str("current_state", string(session.State)).
+				Str("target_state", string(newState)).
+				Str("reason", reason).
+				Msg("session transition has no dispatcher: the session stays where it is")
+			sessionTransitionsUndispatched.WithLabelValues(m.config.SupplierAddress, string(newState)).Inc()
 		}
 	}
 

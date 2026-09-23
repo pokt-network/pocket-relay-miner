@@ -30,6 +30,7 @@ type resumeCallback struct {
 	mu     sync.Mutex
 	claims []string
 	proofs []string
+	proved []string
 	called chan struct{}
 }
 
@@ -55,6 +56,21 @@ func (c *resumeCallback) OnSessionsNeedProof(_ context.Context, sessions []*Sess
 	c.mu.Unlock()
 	c.called <- struct{}{}
 	return ProofCycleResult{}, nil
+}
+
+// OnSessionProved records a session the lifecycle booked as proved. Without it
+// the embedded nil interface panics the moment a proved verdict is carried out.
+func (c *resumeCallback) OnSessionProved(_ context.Context, snapshot *SessionSnapshot) error {
+	c.mu.Lock()
+	c.proved = append(c.proved, snapshot.SessionID)
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *resumeCallback) provedSessions() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.proved...)
 }
 
 func (c *resumeCallback) sent() (claims, proofs []string) {
