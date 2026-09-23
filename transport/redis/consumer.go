@@ -79,14 +79,24 @@ type StreamsConsumer struct {
 	ownPendingAfter string
 	ownPendingDone  bool
 
-	// largestEntry is the biggest `data` field the read loop has seen lately,
-	// decaying slowly (see noteLargestEntry); zero until the first read. Only
-	// the read loop's goroutine touches it.
-	largestEntry int64
+	// largestEntry is the biggest `data` field read lately, decaying slowly
+	// (see noteLargestEntry); zero until the first read. Atomic because the
+	// reclaim sizes its pages from it on another goroutine.
+	largestEntry atomic.Int64
 
 	// channelBytes is the relay bytes parsed and waiting in msgCh, the value
-	// consumer_channel_bytes shows, kept here so the read can size itself.
+	// consumer_channel_bytes shows, kept here so the read can size itself and
+	// a producer can wait while it is at readBudgetBytes (send).
 	channelBytes atomic.Int64
+
+	// sendWaitHook is nil in production; a test sets it before Consume to
+	// learn that a producer is waiting in send.
+	sendWaitHook func()
+
+	// space is signalled, without blocking, each time a relay leaves msgCh
+	// (MarkDelivered), to wake a producer waiting in send. One slot: a signal
+	// sent while nobody waits is kept for the next waiter, so none is lost.
+	space chan struct{}
 
 	// Message channel
 	msgCh chan transport.StreamMessage
@@ -154,6 +164,7 @@ func NewStreamsConsumer(
 		config:     config,
 		streamName: streamName,
 		msgCh:      make(chan transport.StreamMessage, channelBufferSize),
+		space:      make(chan struct{}, 1),
 	}, nil
 }
 
@@ -478,16 +489,9 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 				msg.Message.ServiceId,
 			).Inc()
 
-			// Send to channel (blocks if channel is full)
-			c.trackChannelSend(msg)
-			select {
-			case c.msgCh <- msg:
-			case <-ctx.Done():
-				// Parsed from the pool and never handed over.
-				c.MarkDelivered(msg)
-				transport.ReleaseMinedRelayMessage(msg.Message)
+			if err := c.send(ctx, msg); err != nil {
 				replyBytes.Set(0)
-				return ctx.Err()
+				return err
 			}
 		}
 		replyBytes.Set(0)
@@ -527,13 +531,16 @@ func (c *StreamsConsumer) claimIdleFromOtherConsumers(
 	// so a young entry filtered out here is simply not examined this pass --
 	// and it was not claimable anyway. claimPendingMessages restarts every
 	// drain from "0-0", so nothing is permanently skipped.
+	// The page size and the last-page test below must agree, so both read
+	// this one value.
+	pageSize := c.pageSize()
 	pending, err := c.client.XPendingExt(ctx, &redis.XPendingExtArgs{
 		Stream: c.streamName,
 		Group:  c.config.ConsumerGroup,
 		Idle:   minIdle,
 		Start:  start,
 		End:    "+",
-		Count:  pendingPageSize,
+		Count:  pageSize,
 	}).Result()
 	if err != nil {
 		if !isStreamNotFoundError(err) {
@@ -559,7 +566,7 @@ func (c *StreamsConsumer) claimIdleFromOtherConsumers(
 	// "<ms>-<seq>" is "<ms>-<seq+1>"; computing it avoids the exclusive-range
 	// syntax "(", which not every Redis implementation accepts.
 	next = nextStreamID(pending[len(pending)-1].ID)
-	if len(pending) < pendingPageSize {
+	if int64(len(pending)) < pageSize {
 		next = "0-0" // last page
 	}
 
@@ -750,13 +757,7 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 			}
 			msg.IsReclaim = true
 
-			c.trackChannelSend(msg)
-			select {
-			case c.msgCh <- msg:
-			case <-ctx.Done():
-				// Parsed from the pool and never handed over.
-				c.MarkDelivered(msg)
-				transport.ReleaseMinedRelayMessage(msg.Message)
+			if c.send(ctx, msg) != nil {
 				return
 			}
 		}
@@ -803,15 +804,7 @@ func (c *StreamsConsumer) deliverOwnPending(ctx context.Context) error {
 		return err
 	}
 	after, err := c.eachOwnPending(ctx, c.ownPendingAfter, func(msg transport.StreamMessage) error {
-		c.trackChannelSend(msg)
-		select {
-		case c.msgCh <- msg:
-			return nil
-		case <-ctx.Done():
-			c.MarkDelivered(msg)
-			transport.ReleaseMinedRelayMessage(msg.Message)
-			return ctx.Err()
-		}
+		return c.send(ctx, msg)
 	})
 	c.ownPendingAfter = after
 	if err != nil {
@@ -854,7 +847,7 @@ func (c *StreamsConsumer) eachOwnPending(
 			Group:    c.config.ConsumerGroup,
 			Consumer: c.config.ConsumerName,
 			Streams:  []string{c.streamName, after},
-			Count:    pendingPageSize,
+			Count:    c.pageSize(),
 			Block:    -1,
 		}).Result()
 		if err == redis.Nil {
@@ -1168,7 +1161,7 @@ func (c *StreamsConsumer) Close() error {
 // counting what already waits in the delivery channel. XREADGROUP bounds a
 // read in entries only, so the COUNT is derived from it (readCount): with
 // relays of a MiB a fixed COUNT of 1000 read a GiB at once.
-const readBudgetBytes = 64 << 20
+const readBudgetBytes = 32 << 20
 
 // readCount is the COUNT of the next read: what fits in readBudgetBytes, minus
 // the channel's bytes, at the largest entry seen lately, between 1 and
@@ -1176,11 +1169,24 @@ const readBudgetBytes = 64 << 20
 // few KiB get BatchSize from the second read on. It never returns 0: the read
 // is sized, not paused.
 func (c *StreamsConsumer) readCount() int64 {
-	if c.largestEntry <= 0 {
+	largest := c.largestEntry.Load()
+	if largest <= 0 {
 		return 1
 	}
-	n := (readBudgetBytes - c.channelBytes.Load()) / c.largestEntry
+	n := (readBudgetBytes - c.channelBytes.Load()) / largest
 	return min(max(n, 1), c.config.BatchSize)
+}
+
+// pageSize is the COUNT of one reclaim or own-pending page: pendingPageSize
+// entries, or fewer when entries are big -- the same budget as readCount, so a
+// page of 1 MiB relays does not bring in 50 MiB outside the channel's count.
+// Before any read it is pendingPageSize.
+func (c *StreamsConsumer) pageSize() int64 {
+	largest := c.largestEntry.Load()
+	if largest <= 0 {
+		return pendingPageSize
+	}
+	return min(max(readBudgetBytes/largest, 1), pendingPageSize)
 }
 
 // noteLargestEntry folds the largest entry of the last read into largestEntry:
@@ -1191,7 +1197,8 @@ func (c *StreamsConsumer) noteLargestEntry(largest int64) {
 	if largest <= 0 {
 		return
 	}
-	c.largestEntry = max(largest, c.largestEntry-c.largestEntry/16)
+	prev := c.largestEntry.Load()
+	c.largestEntry.Store(max(largest, prev-prev/16))
 }
 
 // payloadStats is the total and the largest size of the `data` fields of a
@@ -1220,6 +1227,39 @@ func channelBytesOf(msg transport.StreamMessage) (string, float64) {
 	return msg.Message.SupplierOperatorAddress, float64(len(msg.Message.RelayBytes) + len(msg.Message.RelayBytesS2))
 }
 
+// send hands a parsed relay to the delivery channel, waiting while the channel
+// already holds readBudgetBytes -- "X bytes or N relays": the channel's
+// capacity bounds entries and this bounds bytes. The wait is soft: a relay is
+// let in as soon as the channel drops below the budget, whatever its own size,
+// and always when the channel is empty, so a relay bigger than the budget
+// passes and a drifted count can never wedge a producer. Up to the three
+// producers can pass the check together, so the channel can exceed the budget
+// by at most three relays. On ctx's end the relay is not handed over: it is
+// released to its pool and ctx's error returned.
+func (c *StreamsConsumer) send(ctx context.Context, msg transport.StreamMessage) error {
+	for c.channelBytes.Load() >= readBudgetBytes && len(c.msgCh) > 0 {
+		if c.sendWaitHook != nil {
+			c.sendWaitHook()
+		}
+		select {
+		case <-c.space:
+		case <-ctx.Done():
+			transport.ReleaseMinedRelayMessage(msg.Message)
+			return ctx.Err()
+		}
+	}
+	c.trackChannelSend(msg)
+	select {
+	case c.msgCh <- msg:
+		return nil
+	case <-ctx.Done():
+		// Parsed from the pool and never handed over.
+		c.MarkDelivered(msg)
+		transport.ReleaseMinedRelayMessage(msg.Message)
+		return ctx.Err()
+	}
+}
+
 // trackChannelSend counts a relay as waiting in the delivery channel. It runs
 // BEFORE the send: counting after it would let the receiver's MarkDelivered
 // land first and take the count below zero.
@@ -1239,4 +1279,8 @@ func (c *StreamsConsumer) MarkDelivered(msg transport.StreamMessage) {
 	supplier, n := channelBytesOf(msg)
 	c.channelBytes.Add(-int64(n))
 	consumerChannelBytes.WithLabelValues(supplier).Sub(n)
+	select {
+	case c.space <- struct{}{}:
+	default:
+	}
 }

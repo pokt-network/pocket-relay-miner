@@ -50,18 +50,18 @@ func TestReadCount_OneBigEntryFadesAway(t *testing.T) {
 	c := &StreamsConsumer{config: transport.ConsumerConfig{BatchSize: 1000}}
 	c.noteLargestEntry(1 << 20)
 	c.noteLargestEntry(0) // an empty read changes nothing
-	require.Equal(t, int64(1<<20), c.largestEntry)
+	require.Equal(t, int64(1<<20), c.largestEntry.Load())
 
 	c.noteLargestEntry(1200)
-	require.Equal(t, int64(1<<20-(1<<20)/16), c.largestEntry, "a smaller read lets it fall by a sixteenth")
+	require.Equal(t, int64(1<<20-(1<<20)/16), c.largestEntry.Load(), "a smaller read lets it fall by a sixteenth")
 	for i := 0; i < 200; i++ {
 		c.noteLargestEntry(1200)
 	}
-	require.Equal(t, int64(1200), c.largestEntry, "it settles on the entries actually read")
+	require.Equal(t, int64(1200), c.largestEntry.Load(), "it settles on the entries actually read")
 	require.Equal(t, int64(1000), c.readCount())
 
 	c.noteLargestEntry(2 << 20)
-	require.Equal(t, int64(2<<20), c.largestEntry, "a bigger entry takes over at once")
+	require.Equal(t, int64(2<<20), c.largestEntry.Load(), "a bigger entry takes over at once")
 }
 
 // readCounts records the COUNT of every XREADGROUP for new entries (">").
