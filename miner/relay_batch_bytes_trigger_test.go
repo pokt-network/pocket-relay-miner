@@ -20,15 +20,32 @@ func batchFlushes(supplier, trigger string) float64 {
 
 // newBytesTriggerFixture runs the supplier's real consume loop with a flush
 // interval no test waits for, so a flush can only come from the byte trigger.
-func newBytesTriggerFixture(t *testing.T, supplier string) *panicLoopFixture {
+func newBytesTriggerFixture(t *testing.T, supplier string) (*panicLoopFixture, <-chan struct{}) {
 	t.Helper()
 	f := newPanicLoopFixture(t, supplier, func(int32) {})
 	f.w.mgr.config.RelayBatchFlushInterval = time.Hour
-	return f
+	flushed := make(chan struct{}, 8)
+	f.w.mgr.consumeLoopByteFlushedHook = func() { flushed <- struct{}{} }
+	return f, flushed
 }
 
-// waitProcessed waits for n relays to go through the handler.
-func (f *panicLoopFixture) waitProcessed(t *testing.T, n int) {
+// newBytesTriggerFixture's byteFlushed receives once per byte-triggered flush,
+// after the flush returned; waitByteFlush waits for one.
+func waitByteFlush(t *testing.T, flushed <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-flushed:
+	case <-time.After(20 * time.Second):
+		t.Fatal("no byte-triggered flush finished")
+	}
+}
+
+// processAndStop waits for n relays to go through the handler, then stops the
+// loop and waits for it to return: the byte trigger is checked in the same
+// iteration, after the handler signals, so once the loop returns it has run.
+// Only for a case with no flush to cut short -- the stop cancels the context a
+// flush would use.
+func (f *panicLoopFixture) processAndStop(t *testing.T, n int) {
 	t.Helper()
 	for i := 0; i < n; i++ {
 		select {
@@ -37,6 +54,8 @@ func (f *panicLoopFixture) waitProcessed(t *testing.T, n int) {
 			t.Fatalf("only %d of %d relays were processed", i, n)
 		}
 	}
+	f.w.state.cancelFn()
+	f.waitLoopDone(t, "the consume loop never returned after cancel")
 }
 
 // TestRelayBatch_BigRelaysFlushOnBytesWithoutTheTick: a leaf keeps its relay
@@ -47,19 +66,19 @@ func (f *panicLoopFixture) waitProcessed(t *testing.T, n int) {
 // tick an hour away.
 func TestRelayBatch_BigRelaysFlushOnBytesWithoutTheTick(t *testing.T) {
 	const supplier, sessionID = "pokt1bytes_trigger_big", "sess-bytes-trigger-big"
-	f := newBytesTriggerFixture(t, supplier)
+	f, flushed := newBytesTriggerFixture(t, supplier)
 	half := relayBatchFlushBytes/2 + 1
 	f.addRelay(t, sessionID, "a"+strings.Repeat("x", half))
 	f.addRelay(t, sessionID, "b"+strings.Repeat("x", half))
 	before := batchFlushes(supplier, relayBatchFlushBytesTrigger)
 
 	f.start(t)
-	f.waitProcessed(t, 2)
+	waitByteFlush(t, flushed)
 
 	require.Equal(t, before+1, batchFlushes(supplier, relayBatchFlushBytesTrigger),
 		"the second relay took the supplier past relayBatchFlushBytes: exactly one byte flush")
-	require.Zero(t, f.w.held(sessionID), "the byte flush finished both relays, it did not wait for the tick")
 	require.Zero(t, f.w.smst.LeafBytesSinceFlush(), "the flush started the count again")
+	require.Zero(t, f.w.held(sessionID), "the byte flush finished both relays, it did not wait for the tick")
 	require.Zero(t, f.w.pending(), "both relays acknowledged by the flush")
 	require.Equal(t, int64(2), f.w.snapshot(sessionID).RelayCount, "both relays counted once")
 }
@@ -68,33 +87,33 @@ func TestRelayBatch_BigRelaysFlushOnBytesWithoutTheTick(t *testing.T) {
 // than relayBatchFlushBytes is enough on its own.
 func TestRelayBatch_ARelayBiggerThanTheThresholdFlushesAlone(t *testing.T) {
 	const supplier, sessionID = "pokt1bytes_trigger_alone", "sess-bytes-trigger-alone"
-	f := newBytesTriggerFixture(t, supplier)
+	f, flushed := newBytesTriggerFixture(t, supplier)
 	f.addRelay(t, sessionID, strings.Repeat("y", relayBatchFlushBytes+1))
 	before := batchFlushes(supplier, relayBatchFlushBytesTrigger)
 
 	f.start(t)
-	f.waitProcessed(t, 1)
+	waitByteFlush(t, flushed)
 
 	require.Equal(t, before+1, batchFlushes(supplier, relayBatchFlushBytesTrigger))
 	require.Zero(t, f.w.held(sessionID))
-	require.Zero(t, f.w.pending())
+	require.Zero(t, f.w.pending(), "acknowledged by the byte flush")
 }
 
 // TestRelayBatch_SmallRelaysNeverFlushOnBytes is the control: relays of the
 // size of an eth_blockNumber stay in the batch for the tick, as before.
 func TestRelayBatch_SmallRelaysNeverFlushOnBytes(t *testing.T) {
 	const supplier, sessionID = "pokt1bytes_trigger_small", "sess-bytes-trigger-small"
-	f := newBytesTriggerFixture(t, supplier)
+	f, _ := newBytesTriggerFixture(t, supplier)
 	for i := 0; i < 5; i++ {
 		f.addRelay(t, sessionID, `{"jsonrpc":"2.0","id":1,"method":"eth_blockNumber","params":[]}`+string(rune('a'+i)))
 	}
 	before := batchFlushes(supplier, relayBatchFlushBytesTrigger)
 
 	f.start(t)
-	f.waitProcessed(t, 5)
+	f.processAndStop(t, 5)
 
 	require.Equal(t, before, batchFlushes(supplier, relayBatchFlushBytesTrigger), "small relays never reach the byte trigger")
-	require.Equal(t, 5, f.w.held(sessionID), "they wait in the batch for the tick")
+	require.Equal(t, int64(5), f.w.pending(), "none was flushed: all five handed back unacknowledged on exit")
 	require.Positive(t, f.w.smst.LeafBytesSinceFlush(), "premise: their bytes were counted")
 }
 

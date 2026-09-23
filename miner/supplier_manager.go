@@ -425,6 +425,11 @@ type SupplierManager struct {
 	// panic budget are a defence against a defect that is not there yet.
 	consumeLoopFlushHook func()
 
+	// consumeLoopByteFlushedHook, when set, runs right after the consume loop's
+	// byte-triggered flush returns, on the loop's goroutine. Nil in production;
+	// a test sets it before the loop starts, to learn that the flush is over.
+	consumeLoopByteFlushedHook func()
+
 	// firstFlushTimer, when set, stands in for the timer of a consume loop's
 	// first flush. For tests only: nil in production.
 	firstFlushTimer func(d time.Duration) (fire <-chan time.Time, stop func() bool)
@@ -2262,6 +2267,9 @@ func (m *SupplierManager) runConsumeLoop(
 				state.SMSTManager.LeafBytesSinceFlush() >= relayBatchFlushBytes {
 				RecordRelayBatchFlush(state.OperatorAddr, relayBatchFlushBytesTrigger)
 				state.relayBatch.FlushAll(ctx)
+				if m.consumeLoopByteFlushedHook != nil {
+					m.consumeLoopByteFlushedHook()
+				}
 			}
 
 		case <-flushTick:
