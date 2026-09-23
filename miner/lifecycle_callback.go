@@ -1822,6 +1822,24 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					validSnapshots[i].ClaimedRootHash = groupRootHashes[i]
 				}
 
+				// Persist each built claim message so the InclusionReconciler can
+				// verify on-chain inclusion per block and re-broadcast a
+				// still-missing claim while the claim window is open. The index
+				// into claimMsgs matches validSnapshots (both the built-only
+				// ordered set). Survives leader failover (state lives in Redis).
+				//
+				// It is written RIGHT AFTER the claimed state, before anything
+				// else: those two writes together are what make a sent claim
+				// resendable, and a process killed between them left a claimed
+				// session no reconciler could see -- its claim lost if the mempool
+				// dropped it.
+				if lc.rebroadcastStore != nil && claimTxHash != "" {
+					lc.persistRebroadcastEntries(
+						ctx, RebroadcastPhaseClaim, validSnapshots, currentBlock.Height(), claimTxHash, claimSigned, nil,
+						func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
+					)
+				}
+
 				// NOTE: Proof requirement check moved to OnSessionsNeedProof.
 				// Previously we blocked here waiting for the proof requirement seed block
 				// (proofWindowOpen - 1), which is ~19 blocks in the future after claim submission.
@@ -1881,18 +1899,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 								Msg("failed to track claim submission")
 						}
 					}
-				}
-
-				// Persist each built claim message so the InclusionReconciler can
-				// verify on-chain inclusion per block and re-broadcast a
-				// still-missing claim while the claim window is open. The index
-				// into claimMsgs matches validSnapshots (both the built-only
-				// ordered set). Survives leader failover (state lives in Redis).
-				if lc.rebroadcastStore != nil && claimTxHash != "" {
-					lc.persistRebroadcastEntries(
-						ctx, RebroadcastPhaseClaim, validSnapshots, currentBlock.Height(), claimTxHash, claimSigned, nil,
-						func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
-					)
 				}
 
 				logger.Info().
@@ -3100,7 +3106,58 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 // record the very same snapshots again as a tx error. The windowClosed flag at
 // the two call sites is what stops it; without it this function's careful
 // ordering was undone one frame up the stack.
+// ObserveClaimOnChain asks the chain whether this session already has a claim,
+// and if it does, books the session claimed with the claim's root -- the edge
+// the inclusion reconciler uses, OnClaimObservedOnChain -- and reports true.
+//
+// It exists for a session that reached claiming and is about to be booked
+// claim_window_closed: a process killed after broadcasting a claim and before
+// storing its hash leaves such a session with no hash and no rebroadcast entry,
+// so nothing local knows the claim is on chain. Booking it failed would delete
+// its tree while the chain waits for its proof. The chain says which one is
+// true, keyed by (supplier, session), which is all a claim is keyed by.
+//
+// NotFound is an answer (false, nil). Any other error is NOT: the caller must
+// leave the session as it is and ask again, never make it terminal on a
+// question the chain did not answer.
+func (lc *LifecycleCallback) ObserveClaimOnChain(ctx context.Context, snapshot *SessionSnapshot) (bool, error) {
+	if lc.proofQueryClient == nil || lc.sessionCoordinator == nil {
+		return false, nil
+	}
+	claim, err := lc.proofQueryClient.GetClaim(ctx, snapshot.SupplierOperatorAddress, snapshot.SessionID)
+	if err != nil {
+		if isClaimNotFoundError(err) {
+			return false, nil
+		}
+		return false, fmt.Errorf("querying the claim of session %s: %w", snapshot.SessionID, err)
+	}
+	if err := lc.sessionCoordinator.OnClaimObservedOnChain(ctx, snapshot.SessionID, claim.GetRootHash(), snapshot.ClaimTxHash); err != nil {
+		return false, fmt.Errorf("booking the claim of session %s observed on chain: %w", snapshot.SessionID, err)
+	}
+	lc.logger.Info().
+		Str(logging.FieldSessionID, snapshot.SessionID).
+		Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+		Str(logging.FieldServiceID, snapshot.ServiceID).
+		Msg("claim window closing on a session whose claim is already on chain: booked claimed instead of failed")
+	return true, nil
+}
+
 func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) {
+	// A session that reached claiming may have its claim on chain already (see
+	// ObserveClaimOnChain). If the chain cannot say, the session is left as it
+	// is: the lifecycle's next pass asks again.
+	observed, err := lc.ObserveClaimOnChain(ctx, snapshot)
+	if err != nil {
+		lc.logger.Warn().
+			Err(err).
+			Str(logging.FieldSessionID, snapshot.SessionID).
+			Str(logging.FieldSupplier, snapshot.SupplierOperatorAddress).
+			Msg("could not ask the chain for the session's claim: not booked claim_window_closed, asking again next pass")
+		return
+	}
+	if observed {
+		return
+	}
 	if lc.sessionCoordinator != nil {
 		if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
 			lc.logger.Warn().

@@ -31,6 +31,13 @@ type resumeCallback struct {
 	claims []string
 	proofs []string
 	proved []string
+	// observed names the sessions the lifecycle asked about on chain, and
+	// observeClaim answers for the chain (nil: no claim).
+	observed     []string
+	observeClaim func(ctx context.Context, snapshot *SessionSnapshot) (bool, error)
+	// store is the session store the manager under test uses, set before Start
+	// so an observer can book what it finds as the production one does.
+	store  *RedisSessionStore
 	called chan struct{}
 }
 
@@ -58,6 +65,21 @@ func (c *resumeCallback) OnSessionsNeedProof(_ context.Context, sessions []*Sess
 	return ProofCycleResult{}, nil
 }
 
+// ObserveClaimOnChain answers what the chain would, through observeClaim; with
+// none set, the claim is not on chain, which is what every other test here
+// assumes. It makes resumeCallback a claimOnChainObserver like the production
+// callback, so the lifecycle's question is actually asked.
+func (c *resumeCallback) ObserveClaimOnChain(ctx context.Context, snapshot *SessionSnapshot) (bool, error) {
+	c.mu.Lock()
+	c.observed = append(c.observed, snapshot.SessionID)
+	observe := c.observeClaim
+	c.mu.Unlock()
+	if observe == nil {
+		return false, nil
+	}
+	return observe(ctx, snapshot)
+}
+
 // OnSessionProved records a session the lifecycle booked as proved. Without it
 // the embedded nil interface panics the moment a proved verdict is carried out.
 func (c *resumeCallback) OnSessionProved(_ context.Context, snapshot *SessionSnapshot) error {
@@ -71,6 +93,12 @@ func (c *resumeCallback) provedSessions() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return append([]string(nil), c.proved...)
+}
+
+func (c *resumeCallback) observedSessions() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]string(nil), c.observed...)
 }
 
 func (c *resumeCallback) sent() (claims, proofs []string) {
@@ -88,14 +116,21 @@ const (
 // starts a new lifecycle manager on the same Redis at height.
 func startAfterRestart(t *testing.T, snapshot *SessionSnapshot, height int64, more ...*SessionSnapshot) (*SessionLifecycleManager, *RedisSessionStore, *resumeCallback) {
 	t.Helper()
+	return startAfterRestartWith(t, newResumeCallback(), snapshot, height, more...)
+}
+
+// startAfterRestartWith is startAfterRestart with the callback prepared by the
+// caller, for what has to be in place before Start runs its first pass.
+func startAfterRestartWith(t *testing.T, cb *resumeCallback, snapshot *SessionSnapshot, height int64, more ...*SessionSnapshot) (*SessionLifecycleManager, *RedisSessionStore, *resumeCallback) {
+	t.Helper()
 	client, _ := newTestRedis(t)
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	store := NewRedisSessionStore(logger, client, SessionStoreConfig{SupplierAddress: resumeSupplier})
 	for _, s := range append([]*SessionSnapshot{snapshot}, more...) {
 		require.NoError(t, store.Save(context.Background(), s))
 	}
+	cb.store = store
 
-	cb := newResumeCallback()
 	pool := pond.NewPool(4)
 	t.Cleanup(pool.StopAndWait)
 	m := NewSessionLifecycleManager(logger, store, &mockSharedQueryClient{}, &mockBlockClient{currentHeight: height}, cb,

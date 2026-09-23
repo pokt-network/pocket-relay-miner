@@ -194,6 +194,12 @@ type SessionLifecycleManager struct {
 	// Active sessions being monitored (lock-free concurrent map)
 	activeSessions *xsync.Map[string, *SessionSnapshot]
 
+	// resumedUnsentClaims names the sessions loaded in claiming with no claim
+	// hash and moved back to active: a previous process may have broadcast
+	// their claim before it died. When their claim window closes they are asked
+	// about on chain before being booked failed (see claimOnChainObserver).
+	resumedUnsentClaims *xsync.Map[string, struct{}]
+
 	// Pond subpool for controlled concurrency during transitions
 	transitionSubpool pond.Pool
 
@@ -231,14 +237,15 @@ func NewSessionLifecycleManager(
 		Msg("created transition subpool from master pool")
 
 	return &SessionLifecycleManager{
-		logger:            componentLogger,
-		config:            config,
-		sessionStore:      sessionStore,
-		sharedClient:      sharedClient,
-		blockClient:       blockClient,
-		callback:          callback,
-		activeSessions:    xsync.NewMap[string, *SessionSnapshot](),
-		transitionSubpool: transitionSubpool,
+		logger:              componentLogger,
+		config:              config,
+		sessionStore:        sessionStore,
+		sharedClient:        sharedClient,
+		blockClient:         blockClient,
+		callback:            callback,
+		activeSessions:      xsync.NewMap[string, *SessionSnapshot](),
+		resumedUnsentClaims: xsync.NewMap[string, struct{}](),
+		transitionSubpool:   transitionSubpool,
 	}
 }
 
@@ -340,6 +347,25 @@ func (m *SessionLifecycleManager) Start(ctx context.Context) error {
 	return nil
 }
 
+// claimOnChainObserver is what the lifecycle asks before booking a session that
+// reached claiming as claim_window_closed. The production callback implements
+// it (LifecycleCallback.ObserveClaimOnChain); a callback that does not keeps
+// today's behaviour.
+type claimOnChainObserver interface {
+	ObserveClaimOnChain(ctx context.Context, snapshot *SessionSnapshot) (bool, error)
+}
+
+// mayHaveClaimOnChain reports whether a session may have a claim on chain that
+// no local record shows: it is in claiming, or it was loaded in claiming with no
+// hash and resumed to active.
+func (m *SessionLifecycleManager) mayHaveClaimOnChain(session *SessionSnapshot) bool {
+	if session.State == SessionStateClaiming && session.ClaimTxHash == "" {
+		return true
+	}
+	_, resumed := m.resumedUnsentClaims.Load(session.SessionID)
+	return resumed
+}
+
 // resumeUnsentSubmission moves a session loaded in claiming or proving whose
 // transaction was never sent back to the state before it. Either state is
 // persisted before the claim or proof is built and sent, and only its window
@@ -369,6 +395,9 @@ func (m *SessionLifecycleManager) resumeUnsentSubmission(ctx context.Context, se
 		return
 	}
 	session.State = resumeTo
+	if from == SessionStateClaiming {
+		m.resumedUnsentClaims.Store(session.SessionID, struct{}{})
+	}
 	sessionSnapshotsResumedAtStartup.WithLabelValues(m.config.SupplierAddress, string(from)).Inc()
 	m.logger.Info().
 		Str(logging.FieldSessionID, session.SessionID).
@@ -869,6 +898,35 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			Int64("current_height", currentHeight).
 			Int64("session_end", session.SessionEndHeight).
 			Msg("session transition determined")
+
+		// A session that reached claiming with no hash stored may have its claim
+		// on chain: a process can die after the broadcast and before the hash
+		// is written. Before it is booked claim_window_closed -- terminal, its
+		// tree deleted -- the chain is asked. Found, it is booked claimed and
+		// goes on to its proof; unanswered, it stays as it is and is asked
+		// again next pass. Only sessions that reached claiming are asked, so an
+		// outage does not turn every expired active session into a query.
+		if newState == SessionStateClaimWindowClosed && m.mayHaveClaimOnChain(session) {
+			if observer, ok := m.callback.(claimOnChainObserver); ok {
+				observed, err := observer.ObserveClaimOnChain(ctx, session)
+				if err != nil {
+					m.logger.Warn().
+						Err(err).
+						Str(logging.FieldSessionID, session.SessionID).
+						Str(logging.FieldSupplier, session.SupplierOperatorAddress).
+						Msg("could not ask the chain for the session's claim: not booked claim_window_closed, asking again next pass")
+					continue
+				}
+				if observed {
+					m.resumedUnsentClaims.Delete(session.SessionID)
+					if fresh, getErr := m.sessionStore.Get(ctx, session.SessionID); getErr == nil && fresh != nil {
+						m.activeSessions.Store(session.SessionID, fresh)
+					}
+					continue
+				}
+			}
+			m.resumedUnsentClaims.Delete(session.SessionID)
+		}
 
 		// Group by transition type for batching. The terminal group is every
 		// state IsTerminal names, not a list kept here by hand: that list
