@@ -897,10 +897,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// countPublished: one path, independent of decorator order.
 	maxQueuedBytes := config.Redis.BatchMaxQueuedBytes()
 	proxy.SetPublishQueueFull(func() bool {
-		n := batcher.QueuedBytes()
-		relayer.BatchQueueBytes.Set(float64(n))
-		return n >= maxQueuedBytes
+		return batcher.QueuedBytes() >= maxQueuedBytes
 	})
+	// batch_queue_bytes reads the same batcher at every scrape. It used to be
+	// written by the gate above, and the queue drains while no admission asks,
+	// so it kept the last size the gate saw -- 3.1 MB hours after a load ended.
+	relayer.SetBatchQueueBytesSource(batcher.QueuedBytes)
 	// Redis being able to take writes is the first gate of every transport.
 	proxy.SetStoreHealth(storeHealth)
 

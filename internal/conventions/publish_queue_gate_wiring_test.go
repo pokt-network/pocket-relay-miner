@@ -77,6 +77,75 @@ func TestTheRelayerWiresThePublishQueueGate(t *testing.T) {
 	for _, p := range queueGateViolations(f, fset) {
 		t.Errorf("%s: %s", path, p)
 	}
+	for _, p := range queueBytesSourceViolations(f, fset) {
+		t.Errorf("%s: %s", path, p)
+	}
+}
+
+// queueBytesSourceViolations reports what is wrong with the wiring of the
+// batch_queue_bytes gauge in f. The gauge reads its source at scrape time, so a
+// relayer that never sets it reports 0 forever -- a queue at its bound would
+// look empty.
+func queueBytesSourceViolations(f *ast.File, fset *token.FileSet) []string {
+	var problems []string
+	unconditional, conditional := callsOf(f, "SetBatchQueueBytesSource")
+	for _, pos := range conditional {
+		problems = append(problems, "SetBatchQueueBytesSource is called under a condition at "+fset.Position(pos).String())
+	}
+	if len(unconditional) != 1 {
+		problems = append(problems, "SetBatchQueueBytesSource must be called unconditionally exactly once")
+	}
+	readsBatcher := false
+	ast.Inspect(f, func(n ast.Node) bool {
+		call, ok := n.(*ast.CallExpr)
+		if !ok || !callsName(call, "SetBatchQueueBytesSource") || len(call.Args) != 1 {
+			return true
+		}
+		if sel, ok := call.Args[0].(*ast.SelectorExpr); ok && sel.Sel.Name == "QueuedBytes" {
+			readsBatcher = true
+		}
+		return true
+	})
+	if len(unconditional) == 1 && !readsBatcher {
+		problems = append(problems, "SetBatchQueueBytesSource must be given the batcher's QueuedBytes")
+	}
+	return problems
+}
+
+// TestQueueBytesSourceViolationsReadsTheWiring proves the rule reads the call,
+// its guard and what it is given, and not merely the name.
+func TestQueueBytesSourceViolationsReadsTheWiring(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{"wired", `package x
+func a() {
+	relayer.SetBatchQueueBytesSource(batcher.QueuedBytes)
+}`, 0},
+		{"missing", `package x
+func a() {}`, 1},
+		{"guarded", `package x
+func a() {
+	if on {
+		relayer.SetBatchQueueBytesSource(batcher.QueuedBytes)
+	}
+}`, 2},
+		{"reads something else", `package x
+func a() {
+	relayer.SetBatchQueueBytesSource(func() int { return 0 })
+}`, 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f, fset := parseSource(t, tc.src)
+			got := queueBytesSourceViolations(f, fset)
+			if len(got) != tc.want {
+				t.Fatalf("want %d violations, got %d: %v", tc.want, len(got), got)
+			}
+		})
+	}
 }
 
 // TestQueueGateViolationsReadsTheWiring proves the rule reads the call, its guard,

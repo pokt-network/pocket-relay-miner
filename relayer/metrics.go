@@ -3,6 +3,7 @@ package relayer
 import (
 	"errors"
 	"fmt"
+	"sync/atomic"
 
 	"github.com/alitto/pond/v2"
 	"github.com/prometheus/client_golang/prometheus"
@@ -301,18 +302,28 @@ var (
 		},
 	)
 
-	// BatchQueueBytes is the batcher's own retained-bytes count -- the exact
+	// batch_queue_bytes is the batcher's own retained-bytes count -- the exact
 	// number the admission gate compares against redis.batch_max_queued_mib
 	// (cmd/cmd_relayer.go). It stayed unexported until 2026-09-22: a pulse test
 	// found a 1 GiB relayer RSS spike with zero publish_queue_full rejections,
 	// and there was no metric to say whether the gate saw it or not -- the
 	// number that decides admission was invisible to Prometheus.
-	BatchQueueBytes = observability.RelayerFactory.NewGauge(
+	//
+	// Read at scrape time and not written by the admission check: the queue
+	// drains while NO admission asks, and a gauge written only on admission kept
+	// the last size it saw -- measured, 3.1 MB three hours after a load ended.
+	_ = observability.RelayerFactory.NewGaugeFunc(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "batch_queue_bytes",
 			Help:      "Bytes the batching publisher retains right now -- the exact value the admission gate compares against redis.batch_max_queued_mib",
+		},
+		func() float64 {
+			if read := batchQueueBytesSource.Load(); read != nil {
+				return float64((*read)())
+			}
+			return 0
 		},
 	)
 
@@ -776,4 +787,15 @@ func registerWorkerQueueDepth(subpools map[string]pond.Pool) error {
 // only place that learns of a reload.
 func SetSigningKeysLoaded(n int) {
 	signingKeysLoaded.Set(float64(n))
+}
+
+// batchQueueBytesSource is what batch_queue_bytes reads at every scrape; nil
+// until the relayer wires its batcher.
+var batchQueueBytesSource atomic.Pointer[func() int]
+
+// SetBatchQueueBytesSource makes batch_queue_bytes read the batcher's queue.
+//
+// Exported because the batcher is wired in package cmd.
+func SetBatchQueueBytesSource(read func() int) {
+	batchQueueBytesSource.Store(&read)
 }
