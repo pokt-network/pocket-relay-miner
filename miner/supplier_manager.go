@@ -3830,7 +3830,8 @@ func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	//
 	// A missing budget means an entry written before the field existed, or one
 	// an older binary rewrote and stripped. The ceiling is used, with the regime
-	// saying so out loud.
+	// saying so out loud -- counted by tx where a transaction is SIGNED, so a
+	// re-injection, which replays a derivation already counted, counts nothing.
 	//
 	// THAT FALLBACK IS ONLY SAFE BECAUSE THE TRANSACTION CARRIES A
 	// timeout_height. A timestamp longer than the window is inert once the chain
@@ -3844,7 +3845,6 @@ func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase Rebroadcast
 	if resendTimeout <= 0 {
 		resendTimeout, resendRegime = tx.WindowTimeout(0, 0)
 	}
-	RecordTxTimeoutRegime("resend", resendRegime)
 	ctx = tx.WithTxWindowTimeout(ctx, resendTimeout, resendRegime)
 
 	// A resend must not queue for a broadcast permit. Its budget is the

@@ -252,14 +252,16 @@ served **by design** — that gap is `relays_skipped_difficulty`, not loss.
 | Question | Series |
 |---|---|
 | Rejections the chain returned on broadcast | `ha_tx_broadcast_rejections_total{tx_type,codespace,code}` |
-| Which rule set the broadcast deadline | `ha_miner_tx_timeout_regime_total{phase,regime}` |
+| Which rule set the deadline of each signed transaction | `ha_tx_timeout_regime_total{phase,regime}` |
 | Are we saturating the broadcast permits | `ha_tx_permit_saturated_total`, `ha_tx_permit_wait_seconds` |
 
 ### Decoy in this section
 
-- **`ha_miner_tx_timeout_regime_total{phase="resend"}`** is always `unknown`: the
-  fields that would carry the inherited budget are not written by production code,
-  only by tests. It says nothing about the process's age or state.
+- **`ha_tx_timeout_regime_total` is not the number of broadcasts.** It counts
+  transactions SIGNED; `ha_tx_broadcasts_total` counts sends the node accepted,
+  fresh or re-injected. A resend that re-injects bytes already signed counts no
+  regime, and a signed transaction the node refuses counts no broadcast, so the
+  two differ on a healthy run.
 
 ---
 

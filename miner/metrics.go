@@ -1039,38 +1039,6 @@ var (
 	// proofRebroadcastsTotal counts in-window proof re-submissions triggered
 	// by the inclusion reconciler when a proof was CheckTx-accepted but not
 	// yet on-chain and the proof window was still open.
-	// txTimeoutRegimeTotal reports WHICH RULE decided a transaction's broadcast
-	// deadline. It exists because the four operator knobs that used to decide it
-	// were retired: the deadline is derived now, and a derived value with no
-	// escape hatch is only acceptable while it stays visible.
-	//
-	// What it is for, concretely. "window" and "ceiling" are both healthy, and
-	// which one appears says something an operator cannot otherwise see -- their
-	// network's window measured against the chain's ceiling, with mainnet
-	// sitting on the ceiling because 10 blocks x 60 s exceeds it.
-	//
-	// "unknown" means the window could not be measured, or a resend found no
-	// inherited budget. It is the interesting one, and reading it needs one
-	// caveat or it produces false alarms: it should be flat at zero IN STEADY
-	// STATE, but a bounded spike during a ROLLOUT is expected and healthy. A
-	// resend entry rewritten by an older binary loses the fields that binary's
-	// struct cannot see, so the next resend legitimately reports "unknown" until
-	// the fleet finishes converging. Sustained above zero on a settled fleet is
-	// the defect; a burst that decays as a deploy completes is the deploy.
-	//
-	// Both labels are closed sets -- three phases, three regimes, nine series at
-	// most -- and both are stamped by code in this repository rather than
-	// derived from anything a peer sends.
-	txTimeoutRegimeTotal = observability.MinerFactory.NewCounterVec(
-		prometheus.CounterOpts{
-			Namespace: metricsNamespace,
-			Subsystem: metricsSubsystem,
-			Name:      "tx_timeout_regime_total",
-			Help:      "Broadcast deadlines by the rule that decided them (labeled by phase, regime)",
-		},
-		[]string{"phase", "regime"},
-	)
-
 	proofRebroadcastsTotal = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
@@ -1611,14 +1579,6 @@ var (
 // =============================================
 // METRICS HELPER FUNCTIONS FOR OPERATORS
 // =============================================
-
-// RecordTxTimeoutRegime records which rule decided a broadcast deadline.
-// phase is "claim", "proof" or "resend"; regime comes from tx.WindowTimeout and
-// is one of its three exported constants. Both sets are closed -- see
-// txTimeoutRegimeTotal for why that matters here.
-func RecordTxTimeoutRegime(phase, regime string) {
-	txTimeoutRegimeTotal.WithLabelValues(phase, regime).Inc()
-}
 
 // RecordRelayConsumedFromStream records a relay consumed from Redis Stream.
 func RecordRelayConsumedFromStream(supplier, serviceID string) {

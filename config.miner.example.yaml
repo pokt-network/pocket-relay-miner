@@ -135,7 +135,7 @@ pocket_node:
   # tx_timeout_clock_skew_buffer_seconds. Leaving any of them in a config file
   # now STOPS STARTUP with an explanation — they are not ignored.
   #
-  # What to watch instead: ha_miner_tx_timeout_regime_total. "window" and
+  # What to watch instead: ha_tx_timeout_regime_total. "window" and
   # "ceiling" are both healthy and say which of the two bounds is binding on
   # your network; "unknown" means a deadline could not be derived, and should be
   # flat at zero once a deploy has settled.

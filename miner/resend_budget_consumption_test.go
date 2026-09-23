@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -76,33 +75,17 @@ func managerWithProbe(t *testing.T, supplier string) (*SupplierManager, *budgetP
 	return m, probe, cached
 }
 
-func regimeCount(phase, regime string) float64 {
-	return testutil.ToFloat64(txTimeoutRegimeTotal.WithLabelValues(phase, regime))
-}
-
-// 1 + 3: an ABSENT budget falls to the ceiling under the `unknown` regime, it is
-// COUNTED as such, and -- the half a metric cannot show -- that timeout actually
-// reaches the client on the context.
-//
-// Asserting only the counter would certify that the branch DECIDED correctly and
-// say nothing about whether the decision was USED: breaking the line that puts
-// the budget on the context, while leaving the line that records the regime,
-// keeps a counter-only test green with the defect alive.
+// 1 + 3: an ABSENT budget falls to the ceiling under the `unknown` regime, and
+// that timeout actually reaches the client on the context. The regime is counted
+// by tx where a transaction is signed (tx/tx_timeout_regime_test.go); this
+// resend re-injects cached bytes, so what it must get right is the context.
 func TestResubmit_AnAbsentBudgetFallsToTheCeilingAndTravels(t *testing.T) {
 	m, probe, cached := managerWithProbe(t, "pokt1absent")
-
-	beforeUnknown := regimeCount("resend", tx.TimeoutRegimeUnknown)
-	beforeCeiling := regimeCount("resend", tx.TimeoutRegimeCeiling)
 
 	hash, _, err := m.ResubmitMessage(context.Background(), RebroadcastPhaseClaim,
 		"pokt1absent", nil, cached, 500, 0, "")
 	require.NoError(t, err)
 	require.Equal(t, "hash-resent", hash)
-
-	require.Equal(t, beforeUnknown+1, regimeCount("resend", tx.TimeoutRegimeUnknown),
-		"an absent budget must be counted as `unknown`, so the counter shows a defect instead of a plausible number")
-	require.Equal(t, beforeCeiling, regimeCount("resend", tx.TimeoutRegimeCeiling),
-		"the ceiling VALUE is used, but the regime that names it is `unknown`; counting it as `ceiling` would hide the defect")
 
 	ceiling, _ := tx.WindowTimeout(0, 0)
 	gotTimeout, gotRegime := probe.window(t)
@@ -116,16 +99,9 @@ func TestResubmit_AnAbsentBudgetFallsToTheCeilingAndTravels(t *testing.T) {
 func TestResubmit_AnInheritedBudgetIsUsedAsGiven(t *testing.T) {
 	m, probe, cached := managerWithProbe(t, "pokt1inherited")
 
-	beforeWindow := regimeCount("resend", tx.TimeoutRegimeWindow)
-	beforeUnknown := regimeCount("resend", tx.TimeoutRegimeUnknown)
-
 	_, _, err := m.ResubmitMessage(context.Background(), RebroadcastPhaseClaim,
 		"pokt1inherited", nil, cached, 500, 100*time.Second, tx.TimeoutRegimeWindow)
 	require.NoError(t, err)
-
-	require.Equal(t, beforeWindow+1, regimeCount("resend", tx.TimeoutRegimeWindow))
-	require.Equal(t, beforeUnknown, regimeCount("resend", tx.TimeoutRegimeUnknown),
-		"the budget was inherited, so nothing was unknown; degrading anyway loses the window property the whole design rests on")
 
 	gotTimeout, gotRegime := probe.window(t)
 	require.Equal(t, 100*time.Second, gotTimeout, "the resend must spend the budget it inherited, not a fresh one")

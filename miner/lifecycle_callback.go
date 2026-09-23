@@ -423,6 +423,11 @@ func (lc *LifecycleCallback) persistRebroadcastEntries(
 	// was accepted. See persistRebroadcastEntry: it decides whether those bytes
 	// are worth re-injecting at all.
 	attemptErr error,
+	// budget and regime are the broadcast budget the submission was born with
+	// (tx.WindowTimeout). A resend that signs a new transaction spends them
+	// rather than a budget of its own.
+	budget time.Duration,
+	regime string,
 	marshalAt func(i int) ([]byte, error),
 ) {
 	for i, snapshot := range snapshots {
@@ -434,7 +439,7 @@ func (lc *LifecycleCallback) persistRebroadcastEntries(
 				Msg("failed to marshal message for rebroadcast persistence")
 			continue
 		}
-		if pErr := lc.persistRebroadcastEntry(ctx, phase, snapshot, submitHeight, txHash, signed, attemptErr, msgBytes); pErr != nil {
+		if pErr := lc.persistRebroadcastEntry(ctx, phase, snapshot, submitHeight, txHash, signed, attemptErr, budget, regime, msgBytes); pErr != nil {
 			lc.logger.Warn().Err(pErr).
 				Str(logging.FieldSessionID, snapshot.SessionID).
 				Str("phase", string(phase)).
@@ -458,6 +463,8 @@ func (lc *LifecycleCallback) persistRebroadcastEntry(
 	txHash string,
 	signed tx.SignedTxPayload,
 	attemptErr error,
+	budget time.Duration,
+	regime string,
 	msgBytes []byte,
 ) error {
 	// STORE THE BYTES ONLY IF THE CHAIN HAS NOT ALREADY JUDGED THEM.
@@ -489,6 +496,8 @@ func (lc *LifecycleCallback) persistRebroadcastEntry(
 		SignedBytes:         signed.Bytes,
 		SignedTimeoutAt:     signedTimeoutNanos(signed),
 		SignedTimeoutHeight: signed.TimeoutHeight,
+		TimeoutSeconds:      int64(budget / time.Second),
+		TimeoutRegime:       regime,
 	})
 	if eErr != nil {
 		return fmt.Errorf("encoding rebroadcast entry: %w", eErr)
@@ -615,6 +624,8 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 	ejected claimBuildResult,
 	submitErr error,
 	earliestClaimHeight int64,
+	budget time.Duration,
+	regime string,
 ) {
 	snapshot := ejected.snapshot
 	currentHeight := lc.blockClient.LastBlock(ctx).Height()
@@ -652,7 +663,7 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 			// never broadcast, so there is nothing to re-inject and the resend
 			// will sign. That is the same state as an entry written before this
 			// field existed.
-			ctx, RebroadcastPhaseClaim, snapshot, currentHeight, "", tx.SignedTxPayload{}, nil, msgBytes,
+			ctx, RebroadcastPhaseClaim, snapshot, currentHeight, "", tx.SignedTxPayload{}, nil, budget, regime, msgBytes,
 		); pErr != nil {
 			logger.Error().Err(pErr).
 				Str(logging.FieldSessionID, snapshot.SessionID).
@@ -1608,7 +1619,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			claimWindowClose-claimWindowOpen,
 			lc.config.BlockTimeSeconds,
 		)
-		RecordTxTimeoutRegime("claim", claimTimeoutRegime)
 		claimCtx := tx.WithTxWindowTimeout(ctx, claimTimeout, claimTimeoutRegime)
 
 		logger.Info().
@@ -1727,7 +1737,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					claimSigned = tx.SignedTxPayload{}
 					groupSnapshots = withoutSession(groupSnapshots, ejected.snapshot.SessionID)
 
-					lc.settleEjectedClaim(ctx, logger, ejected, submitErr, earliestClaimHeight)
+					lc.settleEjectedClaim(ctx, logger, ejected, submitErr, earliestClaimHeight, claimTimeout, claimTimeoutRegime)
 
 					logger.Warn().
 						Err(submitErr).
@@ -1836,6 +1846,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				if lc.rebroadcastStore != nil && claimTxHash != "" {
 					lc.persistRebroadcastEntries(
 						ctx, RebroadcastPhaseClaim, validSnapshots, currentBlock.Height(), claimTxHash, claimSigned, nil,
+						claimTimeout, claimTimeoutRegime,
 						func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
 					)
 				}
@@ -2018,7 +2029,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					// lastErr travels with the bytes and persistRebroadcastEntry
 					// drops them when the chain already judged them.
 					ctx, RebroadcastPhaseClaim, validSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
-					claimSigned, lastErr,
+					claimSigned, lastErr, claimTimeout, claimTimeoutRegime,
 					func(i int) ([]byte, error) { return claimMsgs[i].Marshal() },
 				)
 			}
@@ -2655,7 +2666,6 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			proofWindowClose-proofWindowOpen,
 			lc.config.BlockTimeSeconds,
 		)
-		RecordTxTimeoutRegime("proof", proofTimeoutRegime)
 		proofCtx := tx.WithTxWindowTimeout(ctx, proofTimeout, proofTimeoutRegime)
 
 		logger.Info().
@@ -2843,6 +2853,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				if lc.rebroadcastStore != nil && proofTxHash != "" {
 					lc.persistRebroadcastEntries(
 						ctx, RebroadcastPhaseProof, validProofSnapshots, currentBlock.Height(), proofTxHash, proofSigned, nil,
+						proofTimeout, proofTimeoutRegime,
 						func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
 					)
 				}
@@ -2951,7 +2962,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 					// lastErr travels with the bytes for the reason the claim
 					// twin states: a refusal also hands its payload back.
 					ctx, RebroadcastPhaseProof, validProofSnapshots, lc.blockClient.LastBlock(ctx).Height(), "",
-					proofSigned, lastErr,
+					proofSigned, lastErr, proofTimeout, proofTimeoutRegime,
 					func(i int) ([]byte, error) { return proofMsgs[i].Marshal() },
 				)
 			}

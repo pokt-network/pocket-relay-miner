@@ -700,6 +700,7 @@ func (tc *TxClient) signEncodeAndBroadcast(
 	if err != nil {
 		return "", SignedTxPayload{}, err
 	}
+	txTimeoutRegimeTotal.WithLabelValues(txType, timeoutSource).Inc()
 	hash, bErr := tc.broadcastRaw(ctx, signerAddr, txType, st)
 	return hash, st.payload(), bErr
 }

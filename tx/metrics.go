@@ -23,6 +23,31 @@ var (
 		[]string{"supplier"},
 	)
 
+	// txTimeoutRegimeTotal reports WHICH RULE decided a transaction's deadline,
+	// once per transaction SIGNED -- signing is where the deadline is sealed into
+	// the bytes, so a re-injection of bytes signed earlier counts nothing. The
+	// deadline is derived, not configured, and a derived value with no escape
+	// hatch is only acceptable while it stays visible.
+	//
+	// "window" and "ceiling" are both healthy; which one appears is the network's
+	// window measured against the chain's ceiling (mainnet sits on the ceiling:
+	// 10 blocks x 60 s exceeds it). "unknown" means a transaction was signed with
+	// no budget declared by its caller, or a resend found no inherited budget. It
+	// should be flat at zero in steady state; a bounded burst during a rollout is
+	// a resend entry rewritten by an older binary that did not carry the budget.
+	//
+	// Both labels are closed sets: phase is the tx type ("claim", "proof"),
+	// regime one of the three TimeoutRegime constants.
+	txTimeoutRegimeTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "timeout_regime_total",
+			Help:      "Signed transactions by the rule that decided their deadline (labeled by phase, regime)",
+		},
+		[]string{"phase", "regime"},
+	)
+
 	// txPermitWait is how long a broadcast waited for a concurrency permit.
 	//
 	// This -- not broadcast latency -- is the metric that would justify moving

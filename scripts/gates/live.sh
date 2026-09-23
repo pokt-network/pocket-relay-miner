@@ -1137,27 +1137,29 @@ prom_scalar() {
 # GetClaimWindowOpenHeight/GetClaimWindowCloseHeight and their proof-window
 # counterparts in poktroll's x/shared/types (exact offsets and the module
 # version this was checked against are in the commit, not repeated here where
-# they would rot the moment either side moves). A resend inherits the
-# ORIGINAL broadcast's regime -- supplier_manager.go's fallback path only
-# fires when that inherited timeout is non-positive, and it degrades through
-# tx.WindowTimeout(0, 0) -- so a resend may legitimately carry either the
-# claim or the proof phase's regime; this gate cannot tell which broadcasts
-# were resends of which phase, so it accepts either one.
+# they would rot the moment either side moves).
+#
+# The regime is counted where a transaction is SIGNED (tx), labeled by its type,
+# so a resend that signs is checked under its own phase -- it inherits the
+# original's budget from the rebroadcast entry -- and a re-injection of bytes
+# already signed counts nothing. There is no equality with broadcasts: those
+# count accepted sends, fresh or re-injected, and a signed transaction may be
+# refused, so the two differ legitimately (measured 2026-09-23: 1384 regimes,
+# 1304 broadcasts, the gap being 80 re-injections answered "already in the
+# mempool"). A path that signs without deriving a deadline is what this gate
+# exists to catch, and it shows as regime=unknown.
 assert_timeout_regime_per_phase() {
     local regime_total="$1" broadcasts_total="$2" regime_unknown="$3"
     local claim_ceiling="$4" claim_window="$5" proof_ceiling="$6" proof_window="$7"
-    local resend_ceiling="$8" resend_window="$9"
-    local claim_window_blocks="${10}" proof_window_blocks="${11}" block_time_seconds="${12}"
-    local window_source_desc="${13}"
+    local claim_window_blocks="$8" proof_window_blocks="$9" block_time_seconds="${10}"
+    local window_source_desc="${11}"
 
     if [ "$regime_total" = "UNREADABLE" ] || [ "$broadcasts_total" = "UNREADABLE" ]; then
         gate_nothing_measured "Prometheus did not answer for the timeout-regime or broadcast families -- the deadline rule cannot be read, so this run proves nothing about it"
     elif [ "$regime_total" = "ABSENT" ] || [ "$broadcasts_total" = "ABSENT" ]; then
-        gate_nothing_measured "no ha_miner_tx_timeout_regime_total / ha_tx_broadcasts_total series exist after a run that settled claims -- either nothing was broadcast or the counter is not wired; NOT evidence that the deadline rule ran"
+        gate_nothing_measured "no ha_tx_timeout_regime_total / ha_tx_broadcasts_total series exist after a run that settled claims -- either nothing was broadcast or the counter is not wired; NOT evidence that the deadline rule ran"
     elif [ -z "$claim_window_blocks" ] || [ -z "$proof_window_blocks" ] || [ -z "$block_time_seconds" ]; then
         gate_nothing_measured "could not read the claim/proof window width from ${window_source_desc} or block_time_seconds from configmap miner-config -- the expected timeout regime cannot be derived, so this run's regime counts prove nothing about the deadline rule"
-    elif [ "${regime_total%%.*}" -ne "${broadcasts_total%%.*}" ] 2>/dev/null; then
-        gate_fail "${broadcasts_total} transaction(s) broadcast but ${regime_total} got a timeout regime -- every transaction must pass the deadline derivation exactly once, so a mismatch means one path skips it"
     elif [ "$regime_unknown" != "ABSENT" ] && [ "${regime_unknown%%.*}" -gt 0 ] 2>/dev/null; then
         gate_fail "${regime_unknown} transaction(s) fell to regime=unknown -- the window could not be derived, so the deadline came from the SDK ceiling instead of the claim/proof window"
     else
@@ -1186,19 +1188,11 @@ assert_timeout_regime_per_phase() {
         if [ "$expected_proof" = "ceiling" ] && [ "$proof_window" != "ABSENT" ] && [ "${proof_window%%.*}" -gt 0 ] 2>/dev/null; then
             bad="${bad}proof/window=${proof_window} (expected ceiling, ${proof_window_blocks} blocks x ${block_time_seconds}s); "
         fi
-        if [ "$expected_claim" != "ceiling" ] && [ "$expected_proof" != "ceiling" ] &&
-            [ "$resend_ceiling" != "ABSENT" ] && [ "${resend_ceiling%%.*}" -gt 0 ] 2>/dev/null; then
-            bad="${bad}resend/ceiling=${resend_ceiling} (neither phase expects ceiling); "
-        fi
-        if [ "$expected_claim" != "window" ] && [ "$expected_proof" != "window" ] &&
-            [ "$resend_window" != "ABSENT" ] && [ "${resend_window%%.*}" -gt 0 ] 2>/dev/null; then
-            bad="${bad}resend/window=${resend_window} (neither phase expects window); "
-        fi
 
         if [ -n "$bad" ]; then
             gate_fail "regime mismatch by phase: ${bad}-- unknown=0 held, but a phase's broadcasts did not follow its own derived regime"
         else
-            gate_pass "all ${regime_total} transaction(s) took their deadline from the expected regime per phase (unknown=0, claim ${claim_window_blocks}x${block_time_seconds}s->${expected_claim}, proof ${proof_window_blocks}x${block_time_seconds}s->${expected_proof})"
+            gate_pass "all ${regime_total} signed transaction(s) took their deadline from the expected regime per phase (unknown=0, claim ${claim_window_blocks}x${block_time_seconds}s->${expected_claim}, proof ${proof_window_blocks}x${block_time_seconds}s->${expected_proof})"
             gate_exercised coverage timeout_regime "${regime_total%%.*}"
         fi
     fi
@@ -1206,15 +1200,13 @@ assert_timeout_regime_per_phase() {
 
 gate_step "assert: every transaction got a deadline, and the window rule set it, per phase"
 
-regime_total="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total)')"
+regime_total="$(prom_scalar 'sum(ha_tx_timeout_regime_total)')"
 broadcasts_total="$(prom_scalar 'sum(ha_tx_broadcasts_total)')"
-regime_unknown="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{regime="unknown"})')"
-claim_ceiling="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="claim",regime="ceiling"})')"
-claim_window="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="claim",regime="window"})')"
-proof_ceiling="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="proof",regime="ceiling"})')"
-proof_window="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="proof",regime="window"})')"
-resend_ceiling="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="resend",regime="ceiling"})')"
-resend_window="$(prom_scalar 'sum(ha_miner_tx_timeout_regime_total{phase="resend",regime="window"})')"
+regime_unknown="$(prom_scalar 'sum(ha_tx_timeout_regime_total{regime="unknown"})')"
+claim_ceiling="$(prom_scalar 'sum(ha_tx_timeout_regime_total{phase="claim",regime="ceiling"})')"
+claim_window="$(prom_scalar 'sum(ha_tx_timeout_regime_total{phase="claim",regime="window"})')"
+proof_ceiling="$(prom_scalar 'sum(ha_tx_timeout_regime_total{phase="proof",regime="ceiling"})')"
+proof_window="$(prom_scalar 'sum(ha_tx_timeout_regime_total{phase="proof",regime="window"})')"
 
 # The regime a broadcast falls into is NOT fixed to "ceiling must be 0": it is
 # window_blocks x block_time_seconds against the SDK's unordered-tx ceiling
@@ -1244,12 +1236,8 @@ block_time_seconds="$(kubectl get configmap miner-config -o jsonpath='{.data.con
 # reaching an arithmetic bash cannot do.
 case "$block_time_seconds" in '' | *[!0-9]* | 0) block_time_seconds="" ;; esac
 
-# Measured on a healthy localnet 2026-09-09: 109 broadcasts, 109 regimes
-# (claim=15, proof=94), unknown=0, ceiling=0 (30s clock -- both phases expect
-# "window").
 assert_timeout_regime_per_phase "$regime_total" "$broadcasts_total" "$regime_unknown" \
     "$claim_ceiling" "$claim_window" "$proof_ceiling" "$proof_window" \
-    "$resend_ceiling" "$resend_window" \
     "$claim_window_blocks" "$proof_window_blocks" "$block_time_seconds" "$window_source_desc"
 
 gate_step "assert: nobody missed their window (sdk/code=30)"
