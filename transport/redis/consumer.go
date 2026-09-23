@@ -1160,8 +1160,10 @@ func (c *StreamsConsumer) Close() error {
 // readBudgetBytes is how many relay bytes one supplier's read may bring in,
 // counting what already waits in the delivery channel. XREADGROUP bounds a
 // read in entries only, so the COUNT is derived from it (readCount): with
-// relays of a MiB a fixed COUNT of 1000 read a GiB at once.
-const readBudgetBytes = 32 << 20
+// relays of a MiB a fixed COUNT of 1000 read a GiB at once. It is per
+// supplier, so a miner holds up to this times its suppliers: a supplier only
+// needs what it consumes in one read round trip, a few MiB at the most.
+const readBudgetBytes = 8 << 20
 
 // readCount is the COUNT of the next read: what fits in readBudgetBytes, minus
 // the channel's bytes, at the largest entry seen lately, between 1 and
