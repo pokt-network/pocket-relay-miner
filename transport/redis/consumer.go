@@ -1210,12 +1210,14 @@ func payloadStats(msgs []redis.XMessage) (total, largest int64) {
 
 // channelBytesOf is what one delivered relay adds to consumer_channel_bytes.
 // trackChannelSend adds it and MarkDelivered subtracts it, so both must read
-// the same size: RelayBytes, before the miner clears it after the SMST update.
+// the same size: the relay bytes the message carries, before the miner clears
+// them after the SMST update. Both fields, because a relay the relayer
+// compressed waits in the channel as RelayBytesS2 with RelayBytes empty.
 func channelBytesOf(msg transport.StreamMessage) (string, float64) {
 	if msg.Message == nil {
 		return "", 0
 	}
-	return msg.Message.SupplierOperatorAddress, float64(len(msg.Message.RelayBytes))
+	return msg.Message.SupplierOperatorAddress, float64(len(msg.Message.RelayBytes) + len(msg.Message.RelayBytesS2))
 }
 
 // trackChannelSend counts a relay as waiting in the delivery channel. It runs

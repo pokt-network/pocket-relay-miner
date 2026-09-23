@@ -115,3 +115,24 @@ func TestQueuedBytesCountsTheCompressedEntry(t *testing.T) {
 
 	require.Less(t, p.QueuedBytes(), 1<<19, "a 1 MiB text relay compresses to about a third")
 }
+
+// TestChannelBytesCountsACompressedRelay: a compressed relay waits in the
+// delivery channel as RelayBytesS2, with RelayBytes empty. The channel gauge
+// must count what it holds, and give it all back when the miner takes it.
+func TestChannelBytesCountsACompressedRelay(t *testing.T) {
+	const supplier = "pokt1channelbytes"
+	gauge := consumerChannelBytes.WithLabelValues(supplier)
+	before := testutil.ToFloat64(gauge)
+	raw := transport.SyntheticRelayBytes(transport.RelayShapeText, 1<<20)
+	compressed, outcome := transport.CompressRelayBytes(raw)
+	require.Equal(t, transport.CompressionOutcomeCompressed, outcome, "premise")
+	msg := transport.StreamMessage{Message: &transport.MinedRelayMessage{
+		SupplierOperatorAddress: supplier, RelayBytesS2: compressed}}
+
+	trackChannelSend(msg)
+	require.Equal(t, before+float64(len(compressed)), testutil.ToFloat64(gauge),
+		"a compressed relay in the channel holds its compressed bytes")
+
+	MarkDelivered(msg)
+	require.Equal(t, before, testutil.ToFloat64(gauge), "taken from the channel, it holds nothing")
+}
