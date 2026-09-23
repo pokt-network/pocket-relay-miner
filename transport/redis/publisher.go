@@ -55,7 +55,23 @@ func prepareXAdd(streamPrefix string, msg *transport.MinedRelayMessage) (string,
 	// Protobuf binary format is 3-5× smaller than JSON and eliminates JSON decoder
 	// memory overhead (literalStore accumulation with 1000 suppliers).
 	// Performance: protobuf Marshal is ~2× faster than json.Marshal
-	data, err := msg.Marshal()
+	// The relay bytes are compressed HERE, on the one path every publisher shares,
+	// and on a COPY of the message: the caller's RelayBytes stay the original, and
+	// the entry the queue counts and Redis stores carries the compressed form.
+	wire := msg
+	if len(msg.RelayBytesS2) == 0 {
+		compressed, outcome := transport.CompressRelayBytes(msg.RelayBytes)
+		relayCompressionTotal.WithLabelValues(msg.ServiceId, outcome).Inc()
+		if compressed != nil {
+			relayCompressionBytes.WithLabelValues(msg.ServiceId, "in").Add(float64(len(msg.RelayBytes)))
+			relayCompressionBytes.WithLabelValues(msg.ServiceId, "out").Add(float64(len(compressed)))
+			c := *msg
+			c.RelayBytes = nil
+			c.RelayBytesS2 = compressed
+			wire = &c
+		}
+	}
+	data, err := wire.Marshal()
 	if err != nil {
 		return "", nil, "serialize_failed", fmt.Errorf("failed to serialize message: %w", err)
 	}

@@ -216,6 +216,7 @@ when section 1 shows a gap, or when it never reopens.
 | Did trees leave memory when sessions ended | `ha_miner_smst_trees_unloaded_total` |
 | Is a proof waiting for memory | `ha_smst_rebuild_waiting`, `ha_smst_rebuild_oldest_proof_wait_seconds`, `ha_smst_rebuild_wait_seconds` |
 | Was the rebuild estimate wrong | `ha_smst_rebuild_heap_growth_over_estimate` |
+| How much the relayer's compression shrinks the WAL | `ha_transport_relay_compression_bytes_total{stage="out"}` over `{stage="in"}` is the ratio of the relays it compressed; `ha_transport_relay_compression_total` by `outcome` says how many relays that was (`compressed`) and why the rest travelled raw (`below_threshold`, `probe_incompressible`, `not_smaller`, `over_max`) |
 
 Working set is roughly **2× the live heap** under `GOGC=100` (measured: 1276 MiB
 live against 2532 MiB working set). A threshold written against the live heap does
@@ -235,6 +236,11 @@ stream; leaves are what the tree holds; `num_relays` on chain is what we signed.
 | Nothing is dropped between stream and tree | `ha_miner_relays_consumed_from_stream_total` == `ha_miner_relays_added_to_smst_total` |
 | What the claim actually carried | `ha_miner_claim_num_leaves`, `ha_miner_relays_claimed_total` |
 | What the chain credited | `num_relays` in the settlement event, against the leaves |
+
+A relay the miner cannot restore to its original bytes (a compressed field that
+does not decode, or a message carrying neither form) is acknowledged and counted in
+`ha_miner_relays_rejected_total{reason="relay_bytes_corrupt"}`: it is a defect in
+the producer, never a retry.
 
 After the first settlement the difficulty rises, so published drops well below
 served **by design** — that gap is `relays_skipped_difficulty`, not loss.

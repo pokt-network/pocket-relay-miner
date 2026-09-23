@@ -54,4 +54,9 @@ message MinedRelayMessage {
   // session_start_height is the block height at which the session started.
   // Used for session lifecycle management and SessionHeader construction.
   int64 session_start_height = 11;
+  // relay_bytes_s2 is relay_bytes compressed with S2 (klauspost/compress/s2, block format).
+  // Exactly one of relay_bytes and relay_bytes_s2 is set. The relayer compresses a large relay
+  // that shrinks; the miner restores the original bytes right before it uses them, so the hash,
+  // the SMST leaf and the proof are computed over the same bytes as an uncompressed relay.
+  bytes relay_bytes_s2 = 12;
 }

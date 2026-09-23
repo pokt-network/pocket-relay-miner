@@ -25,7 +25,9 @@ func TestApproxBytesTracksTheRetainedHeap(t *testing.T) {
 		for i := range msgs {
 			msgs[i] = &transport.MinedRelayMessage{SessionId: "session-0123456789abcdef", SessionEndHeight: 10,
 				SupplierOperatorAddress: "pokt1supplieroperatoraddress0000000000000", ServiceId: "develop-http",
-				RelayBytes: make([]byte, size)}
+				// Incompressible, so each size is what the queue holds: from 64 KiB up
+				// a compressible filler would be queued compressed.
+				RelayBytes: transport.ChainedHashBytes("measure", size)}
 		}
 		var before, after runtime.MemStats
 		runtime.GC()

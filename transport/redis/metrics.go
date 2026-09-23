@@ -302,6 +302,33 @@ var (
 		[]string{"supplier_addr"},
 	)
 
+	// relayCompressionTotal counts, per service, what the relayer decided for each
+	// mined relay's bytes before writing it to the WAL: compressed, or why not
+	// (below_threshold, over_max, probe_incompressible, not_smaller).
+	relayCompressionTotal = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_compression_total",
+			Help:      "Mined relays by what the relayer decided about compressing their bytes before the WAL write, by service and outcome",
+		},
+		[]string{"service_id", "outcome"},
+	)
+
+	// relayCompressionBytes counts the relay bytes the relayer COMPRESSED, before
+	// (stage=in) and after (stage=out). A relay that stayed raw counts in neither:
+	// in/out is the ratio of what compression was applied to, and
+	// relay_compression_total says how many relays that was.
+	relayCompressionBytes = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "relay_compression_bytes_total",
+			Help:      "Bytes of the relays the relayer compressed before the WAL write, before (stage=in) and after (stage=out), by service",
+		},
+		[]string{"service_id", "stage"},
+	)
+
 	// Note: Stream discovery metrics removed with single-stream-per-supplier architecture.
 	// Discovery is no longer needed - we consume from a single known stream per supplier.
 )

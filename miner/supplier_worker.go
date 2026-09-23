@@ -640,13 +640,34 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		return w.ackWithBatch(ctx, state, msg)
 	}
 
+	// The relay's original bytes, restored here from the compressed field when
+	// the relayer compressed them: after the drops that need no bytes, so a relay
+	// dropped above never costs a decompression and waits compressed in the
+	// delivery channel, and BEFORE the recompute below, which hashes these bytes.
+	// Every use of the relay's bytes from here on reads relayBytes, never the
+	// message fields: a compressed relay must not reach the hash or the SMST leaf
+	// in its compressed form.
+	relayBytes, err := msg.Message.OriginalRelayBytes()
+	if err != nil {
+		// A defect in the producer, not a per-request condition: it stays visible
+		// without debug logging, and no retry can repair it.
+		w.logger.Warn().
+			Err(err).
+			Str("session_id", msg.Message.SessionId).
+			Str("supplier", supplierAddr).
+			Str("service_id", msg.Message.ServiceId).
+			Msg("dropping relay - its bytes cannot be restored")
+		RecordRelayRejected(supplierAddr, dropReason("relay_bytes_corrupt", msg.IsReclaim), msg.Message.ServiceId)
+		return w.ackWithBatch(ctx, state, msg)
+	}
+
 	// Defensive recompute: if the publisher somehow shipped a MinedRelayMessage
 	// with an empty RelayHash (e.g. a bug on any new transport path), recompute
-	// it locally from RelayBytes before inserting into the SMST. An empty key
+	// it locally from the relay bytes before inserting into the SMST. An empty key
 	// would otherwise collide with every other empty-keyed leaf and collapse
 	// legitimate events into a single SMST entry, silently losing claims.
-	if len(msg.Message.RelayHash) == 0 && len(msg.Message.RelayBytes) > 0 {
-		recomputed := protocol.GetRelayHashFromBytes(msg.Message.RelayBytes)
+	if len(msg.Message.RelayHash) == 0 {
+		recomputed := protocol.GetRelayHashFromBytes(relayBytes)
 		msg.Message.RelayHash = recomputed[:]
 		w.logger.Warn().
 			Str("session_id", msg.Message.SessionId).
@@ -722,7 +743,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		ctx,
 		msg.Message.SessionId,
 		msg.Message.RelayHash,
-		msg.Message.RelayBytes,
+		relayBytes,
 		msg.Message.ComputeUnitsPerRelay,
 	)
 	if err != nil {
@@ -783,6 +804,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	// The SMST has copied the data to Redis - these fields are no longer needed.
 	// This allows GC to reclaim the memory early instead of holding until message is ACK'd.
 	msg.Message.RelayBytes = nil
+	msg.Message.RelayBytesS2 = nil
 	msg.Message.RelayHash = nil
 
 	// The relay is in the tree. What is left -- dedup mark, counters, stream

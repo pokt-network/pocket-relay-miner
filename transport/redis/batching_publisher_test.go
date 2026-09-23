@@ -128,7 +128,9 @@ func TestBatchingPublisherQueuedBytesCountsPayloadNotEntries(t *testing.T) {
 
 	for i := 0; i < 3; i++ {
 		msg := mined("pokt1big", "s1", i)
-		msg.RelayBytes = make([]byte, 1<<20)
+		// Incompressible on purpose: zeros would be compressed to a few bytes and
+		// the queue would count what it really holds, not three MiB.
+		msg.RelayBytes = transport.ChainedHashBytes(fmt.Sprint("big", i), 1<<20)
 		require.NoError(t, p.Publish(ctx, msg))
 	}
 	require.GreaterOrEqual(t, p.QueuedBytes(), 3<<20, "three 1 MiB relays must count as at least 3 MiB")
