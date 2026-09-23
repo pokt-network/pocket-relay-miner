@@ -273,6 +273,113 @@ func TestFailedWritesHandledOneAtATimeGoBackInArrivalOrder(t *testing.T) {
 	}
 }
 
+// refillingCharger keeps the queue full while a drain runs: every dispatch
+// pipeline, up to refills of them, publishes another full chunk before it is
+// sent, and moves the clock one step. At pipeline number chargeAt it adds a
+// charge to the ledger, which is therefore NEW to the drain already running,
+// and it records the first pipeline that carried that charge's INCRBY.
+type refillingCharger struct {
+	p        *BatchingPublisher
+	ledger   *ChargeLedger
+	clock    *fakeClock
+	step     time.Duration
+	supplier string
+	key      string
+	chargeAt int64
+	refills  int64
+
+	n          atomic.Int64
+	firstWrite atomic.Int64
+	mu         sync.Mutex
+	errs       []error
+}
+
+func (h *refillingCharger) DialHook(next goredis.DialHook) goredis.DialHook          { return next }
+func (h *refillingCharger) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook { return next }
+func (h *refillingCharger) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error {
+		if firstXAddStream(cmds) == "" && !hasIncr(cmds, h.key) {
+			return next(ctx, cmds)
+		}
+		n := h.n.Add(1)
+		h.clock.set(h.clock.now().Add(h.step))
+		if hasIncr(cmds, h.key) {
+			h.firstWrite.CompareAndSwap(0, n)
+		}
+		if n == h.chargeAt {
+			h.ledger.Add(h.key, h.supplier, 7, time.Hour)
+		}
+		if n <= h.refills {
+			for i := 0; i < maxChunkCommands; i++ {
+				msg := mined(h.supplier, "s1", i)
+				msg.RelayBytes = []byte(fmt.Sprintf("refill-%d-%d", n, i))
+				if err := h.p.Publish(ctx, msg); err != nil {
+					h.mu.Lock()
+					h.errs = append(h.errs, err)
+					h.mu.Unlock()
+				}
+			}
+		}
+		return next(ctx, cmds)
+	}
+}
+
+func hasIncr(cmds []goredis.Cmder, key string) bool {
+	for _, c := range cmds {
+		if strings.EqualFold(c.Name(), "incrby") && fmt.Sprint(c.Args()[1]) == key {
+			return true
+		}
+	}
+	return false
+}
+
+// TestAChargeServedWhileTheQueueStaysFullIsWrittenDuringTheDrain: while relays
+// keep arriving faster than they drain, one dispatch never finds the queue empty.
+// A charge added to the ledger after that dispatch started must still be written
+// while it runs, once intervals pass, and exactly once. Every chunk here is full
+// at maxChunkCommands, so the charge cannot ride with its supplier's relays: it
+// is written as a leftover, in a chunk of charges alone.
+func TestAChargeServedWhileTheQueueStaysFullIsWrittenDuringTheDrain(t *testing.T) {
+	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
+	rec := &execRecorder{}
+	client.AddHook(rec)
+	clock := newFakeClock(time.Now())
+	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour, WithDispatchWorkers(2), withClock(clock.now))
+	t.Cleanup(func() { _ = p.Close() })
+	ledger := NewChargeLedger()
+	p.SetChargeLedger(ledger)
+	const supplier = "pokt1full"
+	hook := &refillingCharger{
+		p: p, ledger: ledger, clock: clock, step: time.Hour, supplier: supplier,
+		key:      prefix + ":consumed:late",
+		chargeAt: 2,
+		refills:  20,
+	}
+	client.AddHook(hook)
+	ctx := context.Background()
+
+	publishMined(t, p, supplier, maxChunkCommands, func(int) string { return "s1" })
+	p.dispatchAll(ctx)
+
+	hook.mu.Lock()
+	require.Empty(t, hook.errs)
+	hook.mu.Unlock()
+	require.Greater(t, hook.n.Load(), hook.refills,
+		"premise: one dispatch kept draining through every refill, so the queue never emptied under it")
+	first := hook.firstWrite.Load()
+	require.NotZero(t, first, "the charge added during the drain was not written by it at all")
+	require.LessOrEqual(t, first, hook.refills,
+		"the charge was written at pipeline %d, only once the queue had emptied: it waited out the whole saturation", first)
+	requireChargesNeverSplit(t, rec.shapes())
+	got, err := client.Get(ctx, hook.key).Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(7), got, "the charge is written exactly once")
+	require.Zero(t, ledger.Pending(hook.key))
+	require.Equal(t, (hook.refills+1)*maxChunkCommands,
+		client.XLen(ctx, transport.SupplierStreamName(prefix, supplier)).Val())
+}
+
 // publishesOneBigRelayOnce publishes one relay larger than a chunk from inside
 // the first dispatch pipeline, so it is queued AFTER the drain began.
 type publishesOneBigRelayOnce struct {
@@ -379,4 +486,71 @@ func TestAChunkShortOfTheLimitsQueuedDuringTheDrainWaitsForTheNextTick(t *testin
 	p.dispatchAll(ctx)
 	require.Equal(t, int64(13), client.XLen(ctx, stream).Val(), "the next tick writes them")
 	require.Zero(t, p.QueuedBytes())
+}
+
+// advancesClockOnce moves the clock by step the first time a dispatch pipeline
+// passes, so every chunk taken after that one sees an interval gone by.
+type advancesClockOnce struct {
+	clock *fakeClock
+	step  time.Duration
+	once  sync.Once
+}
+
+func (h *advancesClockOnce) DialHook(next goredis.DialHook) goredis.DialHook          { return next }
+func (h *advancesClockOnce) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook { return next }
+func (h *advancesClockOnce) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return func(ctx context.Context, cmds []goredis.Cmder) error {
+		if firstXAddStream(cmds) != "" {
+			h.once.Do(func() { h.clock.set(h.clock.now().Add(h.step)) })
+		}
+		return next(ctx, cmds)
+	}
+}
+
+// TestChargesThatDidNotRideAreWrittenOnceWhenTheLedgerIsTakenAgain: 40 charges
+// of one supplier, whose one chunk has room for 28 of them. An interval passes,
+// and the next chunk (another supplier's) takes the ledger again: the 12 that
+// did not ride leave as leftovers. Each of the 40 is written exactly once, in
+// one EXEC, never split from its EXPIRE NX.
+func TestChargesThatDidNotRideAreWrittenOnceWhenTheLedgerIsTakenAgain(t *testing.T) {
+	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
+	rec := &execRecorder{}
+	client.AddHook(rec)
+	clock := newFakeClock(time.Now())
+	client.AddHook(&advancesClockOnce{clock: clock, step: 2 * time.Hour})
+	// One worker, so the second chunk is taken after the first pipeline passed.
+	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour, withClock(clock.now))
+	t.Cleanup(func() { _ = p.Close() })
+	ledger := NewChargeLedger()
+	p.SetChargeLedger(ledger)
+	ctx := context.Background()
+
+	publishMined(t, p, "pokt1ride", 200, func(int) string { return "s1" })
+	publishMined(t, p, "pokt1other", 200, func(int) string { return "s1" })
+	amounts := map[string]int64{}
+	for j := 0; j < 40; j++ {
+		key := fmt.Sprintf("%s:consumed:ride:%d", prefix, j)
+		amounts[key] = int64(j + 1)
+		ledger.Add(key, "pokt1ride", amounts[key], time.Hour)
+	}
+
+	p.dispatchAll(ctx)
+
+	shapes := rec.shapes()
+	requireChargesNeverSplit(t, shapes)
+	require.Equal(t, 28, shapes[0].incrs, "premise: 28 charges rode with their supplier's 200 relays")
+	execsOf := map[string]int{}
+	for _, s := range shapes {
+		for _, k := range s.incrKeys {
+			execsOf[k]++
+		}
+	}
+	for key, amount := range amounts {
+		require.Equal(t, 1, execsOf[key], "%s must be charged in exactly one EXEC", key)
+		got, err := client.Get(ctx, key).Int64()
+		require.NoError(t, err, key)
+		require.Equal(t, amount, got, "%s: written exactly once", key)
+		require.Zero(t, ledger.Pending(key), key)
+	}
 }

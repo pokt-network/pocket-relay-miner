@@ -458,13 +458,13 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 	// arrives later waits for a full chunk or for the next tick.
 	cutoff := p.enqueued
 	p.mu.Unlock()
-	d := drain{cutoff: cutoff, charges: groupCharges(nil)}
+	d := drain{cutoff: cutoff, tookAt: p.now(), charges: groupCharges(nil), leftover: groupCharges(nil)}
 	if ledger != nil {
 		d.charges.add(ledger.takeAll())
 	}
 	// Charges taken and never sent go back when the tick stops early.
 	defer func() {
-		for _, c := range d.charges.rest() {
+		for _, c := range append(d.leftover.rest(), d.charges.rest()...) {
 			ledger.untake(c)
 		}
 	}()
@@ -479,7 +479,7 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 		// Once a write has failed nothing more is taken: what failed goes back to
 		// the head only after every write in flight has reported, see below.
 		for len(failed) == 0 && len(free) > 0 {
-			job := p.nextJob(&d)
+			job := p.nextJob(&d, ledger)
 			if job == nil {
 				break
 			}
@@ -529,6 +529,7 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 		return
 	}
 
+	d.charges.add(d.leftover.rest())
 	for {
 		part := d.charges.take(maxChunkCommands / 2)
 		if len(part) == 0 {
@@ -546,18 +547,37 @@ func (p *BatchingPublisher) dispatchAll(ctx context.Context) {
 type drain struct {
 	// cutoff is the last relay queued when the drain began: see takeChunkBefore.
 	cutoff uint64
-	// charges were taken from the ledger when the drain began. Each rides in a
-	// chunk that carries XADDs of its supplier and has room for it; what does
-	// not goes in chunks of charges alone once the queue is drained.
-	charges chargesBySupplier
+	// charges were taken from the ledger at tookAt. Each rides in a chunk that
+	// carries XADDs of its supplier and has room for it. Once an interval has
+	// passed since tookAt, what did not ride becomes leftover, written in chunks
+	// of charges alone, and the ledger is taken again: a charge waits at most
+	// about two intervals.
+	//
+	// Taken again inside the drain because under saturation the queue never
+	// empties, so a drain never ends, and a charge served after it began would
+	// otherwise wait out the whole saturation unwritten. By TIME and not per
+	// chunk or per pass over the queue: a chunk of small relays is full at
+	// maxChunkCommands, so a charge seldom rides, and anything faster than the
+	// interval turns into a chunk of charges alone every few chunks -- the
+	// EXECs the ride exists to save.
+	tookAt            time.Time
+	charges, leftover chargesBySupplier
 }
 
 // nextJob is the next write of a drain, or nil when there is none to start now:
-// the next chunk with the charges that ride in it.
-func (p *BatchingPublisher) nextJob(d *drain) *dispatchJob {
+// leftover charges first, then the next chunk with the charges that ride in it.
+func (p *BatchingPublisher) nextJob(d *drain, ledger *ChargeLedger) *dispatchJob {
+	if part := d.leftover.take(maxChunkCommands / 2); len(part) > 0 {
+		return &dispatchJob{charges: part}
+	}
 	chunk := p.takeChunkBefore(d.cutoff)
 	if len(chunk) == 0 {
 		return nil
+	}
+	if now := p.now(); ledger != nil && now.Sub(d.tookAt) >= p.interval {
+		d.leftover.add(d.charges.rest())
+		d.charges.add(ledger.takeAll())
+		d.tookAt = now
 	}
 	return &dispatchJob{chunk: chunk, charges: d.charges.attach(chunk, maxChunkCommands-len(chunk))}
 }
