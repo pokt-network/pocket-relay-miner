@@ -2810,15 +2810,12 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				if lc.submissionTracker != nil {
 					proofRequirementSeed := hex.EncodeToString(proofRequirementSeedBlock.Hash())
 					for i, snapshot := range validProofSnapshots {
-						// Get proof hash from proof message
-						proofHash := hex.EncodeToString(proofMsgs[i].Proof)
-
 						if trackErr := lc.submissionTracker.TrackProofSubmission(
 							ctx,
 							snapshot.SupplierOperatorAddress,
 							snapshot.SessionEndHeight,
 							snapshot.SessionID,
-							proofHash,
+							proofMsgs[i].Proof,
 							proofTxHash,
 							true, // success
 							"",   // no error
@@ -2919,15 +2916,12 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			if lc.submissionTracker != nil {
 				proofRequirementSeed := hex.EncodeToString(proofRequirementSeedBlock.Hash())
 				for i, snapshot := range validProofSnapshots {
-					// Get proof hash from proof message (proof was built, but submission failed)
-					proofHash := hex.EncodeToString(proofMsgs[i].Proof)
-
 					if trackErr := lc.submissionTracker.TrackProofSubmission(
 						ctx,
 						snapshot.SupplierOperatorAddress,
 						snapshot.SessionEndHeight,
 						snapshot.SessionID,
-						proofHash,
+						proofMsgs[i].Proof,
 						"",    // no TX hash on failure
 						false, // failed
 						lastErr.Error(),

@@ -94,7 +94,7 @@ func TestSubmissionTracker_WritesEveryKindWhileTheStoreIsClosed(t *testing.T) {
 	require.Equal(t, txHash, record.ClaimTxHash, "and it holds the claim it was asked to record")
 
 	require.NoError(t, tr.TrackProofSubmission(ctx, supplier, 110, sessionID,
-		"0xproof", "0xprooftx", true, "", 105, 110, true, ""))
+		[]byte("proof"), "0xprooftx", true, "", 105, 110, true, ""))
 	require.NoError(t, tr.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
 		Supplier: supplier, TxHash: txHash, Outcome: "on_chain_found", InclusionHeight: 111,
 	}))
@@ -152,7 +152,7 @@ func TestSubmissionTracker_AProofWithNoClaimSaysItDoesNotKnow(t *testing.T) {
 	const supplier = "pokt1unknown"
 
 	require.NoError(t, tr.TrackProofSubmission(ctx, supplier, 110, "sess-proof-first",
-		"0xproof", "0xprooftx", true, "", 105, 110, true, ""))
+		[]byte("proof"), "0xprooftx", true, "", 105, 110, true, ""))
 
 	record, err := tr.GetRecord(ctx, supplier, 110, "sess-proof-first")
 	require.NoError(t, err)

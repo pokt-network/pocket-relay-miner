@@ -329,6 +329,9 @@ func printSubmissionDetail(r *submissionRecord) {
 		if r.ProofHash != "" {
 			fmt.Printf("Proof Hash:        %s\n", r.ProofHash)
 		}
+		if r.ProofSizeBytes > 0 {
+			fmt.Printf("Proof Size:        %d bytes\n", r.ProofSizeBytes)
+		}
 		if r.ProofTxHash != "" {
 			fmt.Printf("Proof TX Hash:     %s\n", r.ProofTxHash)
 			fmt.Printf("Proof Success:     %v\n", r.ProofSuccess)

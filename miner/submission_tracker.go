@@ -2,6 +2,8 @@ package miner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,7 +75,13 @@ type SubmissionTrackingRecord struct {
 	ClaimRebroadcasts int `json:"claim_rebroadcasts,omitempty"`
 
 	// Proof tracking
+	// ProofHash is the hex SHA-256 of the proof bytes sent, and ProofSizeBytes
+	// their length. It used to hold the proof itself in hex: 4.2 MB per record
+	// with 1 MiB relays, since a closest proof carries the relay. The hash is
+	// reproducible from the proof transaction, and it tells which proof is which
+	// inside a transaction that carries several.
 	ProofHash            string `json:"proof_hash,omitempty"`
+	ProofSizeBytes       int64  `json:"proof_size_bytes,omitempty"`
 	ProofTxHash          string `json:"proof_tx_hash,omitempty"`
 	ProofSuccess         bool   `json:"proof_success"` // BROADCAST acceptance only — not on-chain
 	ProofErrorReason     string `json:"proof_error_reason,omitempty"`
@@ -223,7 +231,7 @@ func (t *SubmissionTracker) TrackProofSubmission(
 	supplier string,
 	sessionEnd int64,
 	sessionID string,
-	proofHash string,
+	proof []byte,
 	proofTxHash string,
 	success bool,
 	errorReason string,
@@ -233,6 +241,9 @@ func (t *SubmissionTracker) TrackProofSubmission(
 	proofRequirementSeed string,
 ) error {
 	key := t.makeKey(supplier, sessionEnd, sessionID)
+	proofDigest := sha256.Sum256(proof)
+	proofHash := hex.EncodeToString(proofDigest[:])
+	proofSize := int64(len(proof))
 
 	// Get existing record
 	data, err := t.redisClient.Get(ctx, key).Bytes()
@@ -249,6 +260,7 @@ func (t *SubmissionTracker) TrackProofSubmission(
 			SessionID:            sessionID,
 			SessionEnd:           sessionEnd,
 			ProofHash:            proofHash,
+			ProofSizeBytes:       proofSize,
 			ProofTxHash:          proofTxHash,
 			ProofSuccess:         success,
 			ProofErrorReason:     errorReason,
@@ -279,6 +291,7 @@ func (t *SubmissionTracker) TrackProofSubmission(
 
 	now := time.Now()
 	record.ProofHash = proofHash
+	record.ProofSizeBytes = proofSize
 	record.ProofTxHash = proofTxHash
 	record.ProofSuccess = success
 	record.ProofErrorReason = errorReason
