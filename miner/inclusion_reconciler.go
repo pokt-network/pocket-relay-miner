@@ -990,6 +990,18 @@ func (r *InclusionReconciler) rebroadcast(ctx context.Context, rp reconcilePhase
 		return
 	}
 
+	// The chain already validated or rejected this proof, read uncached just
+	// before a new transaction would be signed (ErrProofAlreadyJudged). Same
+	// shape as not-required: nothing left to verify, so the entry is dropped;
+	// the session is settled by the lifecycle at the proof window's close.
+	if errors.Is(err, ErrProofAlreadyJudged) {
+		clearCtx, cancelClear := context.WithTimeout(context.WithoutCancel(ctx), rebroadcastPersistTimeout)
+		r.clear(clearCtx, rp.phase, g, sessionID, entry)
+		cancelClear()
+		rp.recordRebroadcast(g.Supplier, entry.ServiceID, "already_judged")
+		return
+	}
+
 	// Count this attempt and persist it, so MaxRebroadcasts bounds the total
 	// number of resend tries. Without counting failures, a persistently failing
 	// resend (e.g. a CUPR-doomed claim whose gas simulation always fails) would

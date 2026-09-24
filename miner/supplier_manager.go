@@ -3881,11 +3881,42 @@ func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase Rebroadcast
 		if err := msg.Unmarshal(msgBytes); err != nil {
 			return "", tx.SignedTxPayload{}, fmt.Errorf("unmarshal MsgSubmitProof: %w", err)
 		}
+		if m.proofAlreadyJudged(ctx, supplier, msg.GetSessionHeader().GetSessionId()) {
+			return "", tx.SignedTxPayload{}, ErrProofAlreadyJudged
+		}
 		hash, signed, err := state.SupplierClient.SubmitProofsReturningHash(ctx, timeoutHeight, &msg)
 		return hash, signed, err
 	default:
 		return "", tx.SignedTxPayload{}, fmt.Errorf("unknown rebroadcast phase %q", phase)
 	}
+}
+
+// ErrProofAlreadyJudged is a resend that would sign a NEW proof transaction for
+// a claim whose proof the chain already validated or rejected. poktroll deletes
+// a proof once its EndBlocker judges it and SubmitProof does not read the
+// claim's verdict, so a second proof is accepted and charged again: the fee is
+// the whole cost and nothing is gained.
+var ErrProofAlreadyJudged = errors.New("the chain already judged this claim's proof")
+
+// proofAlreadyJudged asks the chain, uncached, whether the claim's proof was
+// already validated or rejected. It is asked only where a resend would SIGN a
+// new transaction -- a re-injection carries the original nonce and cannot be
+// charged twice. An unanswered question is not a verdict: the proof is sent,
+// because a missed proof costs the claim and a duplicate costs one fee.
+// GetClaim is not used here: it is cached for liveEntityCacheTTL, long enough
+// to still answer "pending" for a proof validated since.
+func (m *SupplierManager) proofAlreadyJudged(ctx context.Context, supplier, sessionID string) bool {
+	if m.config.ProofQueryClient == nil || sessionID == "" {
+		return false
+	}
+	states, err := m.config.ProofQueryClient.GetSupplierSessionStates(ctx, supplier)
+	if err != nil {
+		m.logger.Debug().Err(err).Str("session_id", sessionID).
+			Msg("resend: could not read the proof's verdict before signing; sending it")
+		return false
+	}
+	claim, ok := states[sessionID]
+	return ok && (claim.ProofState == query.SessionProofValidated || claim.ProofState == query.SessionProofRejected)
 }
 
 // reusable answers whether the transaction an entry already carries is still
