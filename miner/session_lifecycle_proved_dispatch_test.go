@@ -42,6 +42,9 @@ func TestProvingWithProofSentIsBookedProvedAfterRestart(t *testing.T) {
 
 	requireStateEventually(t, store, "sess-resume", SessionStateProved,
 		"a proof the mempool accepted is proved at the window's close, restart or not")
+	// The state is persisted BEFORE the callbacks run (executeTransition), so
+	// seeing proved in Redis does not mean the callback has run yet.
+	require.Eventually(t, func() bool { return len(cb.provedSessions()) > 0 }, 10*time.Second, 5*time.Millisecond, "the proved callback runs")
 	require.Equal(t, []string{"sess-resume"}, cb.provedSessions(), "and the proved callback runs, once")
 	_, proofs := cb.sent()
 	require.Empty(t, proofs, "the proof already sent is not sent again")
@@ -62,6 +65,9 @@ func TestProvingWithProofSentIsBookedProvedWithoutRestart(t *testing.T) {
 	m.checkSessionTransitions(context.Background(), proofClose)
 
 	requireStateEventually(t, store, "sess-resume", SessionStateProved, "at the close it is booked proved")
+	// The state is persisted BEFORE the callbacks run (executeTransition), so
+	// seeing proved in Redis does not mean the callback has run yet.
+	require.Eventually(t, func() bool { return len(cb.provedSessions()) > 0 }, 10*time.Second, 5*time.Millisecond, "the proved callback runs")
 	require.Equal(t, []string{"sess-resume"}, cb.provedSessions())
 }
 
