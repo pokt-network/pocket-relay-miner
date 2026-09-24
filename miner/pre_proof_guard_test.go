@@ -17,6 +17,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	pocktclient "github.com/pokt-network/poktroll/pkg/client"
+	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 )
 
 // -----------------------------------------------------------------------------
@@ -331,4 +332,54 @@ func TestPreProofGuard_NilClient_NoCall(t *testing.T) {
 	}
 
 	require.False(t, runGuard(context.Background(), lc, snapshot))
+}
+
+// judgedProofCycle runs the REAL OnSessionsNeedProof for one session whose
+// claim the chain reports with the given proof status, and returns how many
+// proofs were signed and the cycle's result.
+func judgedProofCycle(t *testing.T, st prooftypes.ClaimProofStatus) (int, ProofCycleResult) {
+	t.Helper()
+	blocks := &heightedBlocks{}
+	blocks.currentHeight = 108
+	supplier := &flakySupplier{}
+	lc := &LifecycleCallback{
+		logger:         logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sharedClient:   &defaultParamsShared{},
+		blockClient:    blocks,
+		smstManager:    provingSMST{},
+		supplierClient: supplier,
+		serviceClient:  erroringService{},
+		proofQueryClient: &stubProofQueryClient{getClaimFn: func(context.Context, string, string) (pocktclient.Claim, error) {
+			return &prooftypes.Claim{ProofValidationStatus: st}, nil
+		}},
+		config: LifecycleCallbackConfig{ProofRetryAttempts: 1, ProofRetryDelay: time.Millisecond},
+	}
+	result, err := lc.OnSessionsNeedProof(context.Background(), []*SessionSnapshot{{
+		SessionID: "session-judged", SessionEndHeight: 100, SessionStartHeight: 81,
+		SupplierOperatorAddress: "pokt1judgedcycle", ServiceID: "svc", RelayCount: 10, TotalComputeUnits: 100,
+		State: SessionStateProving, ClaimedRootHash: make([]byte, SMSTRootLen),
+	}})
+	require.NoError(t, err)
+	return supplier.calls, result
+}
+
+// A session back in claimed after a kill between its proof's broadcast and the
+// write of its hash must not send the proof again once the chain validated it:
+// poktroll deletes the judged proof and would accept and charge a second one.
+func TestPreProofGuard_AValidatedProofIsNotSentAgain(t *testing.T) {
+	signed, result := judgedProofCycle(t, prooftypes.ClaimProofStatus_VALIDATED)
+	require.Zero(t, signed, "the chain already validated this proof: no second one is charged")
+	require.True(t, result.IsSettled("session-judged"), "and the session is settled, since its proof is on chain")
+}
+
+func TestPreProofGuard_AnInvalidProofIsNotSentAgain(t *testing.T) {
+	signed, result := judgedProofCycle(t, prooftypes.ClaimProofStatus_INVALID)
+	require.Zero(t, signed, "the same proof would be judged the same way")
+	require.False(t, result.IsSettled("session-judged"), "and a rejected proof is not a settlement")
+}
+
+func TestPreProofGuard_APendingClaimGetsItsProof(t *testing.T) {
+	signed, result := judgedProofCycle(t, prooftypes.ClaimProofStatus_PENDING_VALIDATION)
+	require.Equal(t, 1, signed, "control: a claim waiting for its proof gets it")
+	require.True(t, result.IsSettled("session-judged"))
 }

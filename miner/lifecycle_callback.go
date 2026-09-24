@@ -2206,7 +2206,27 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 			// from this batch and mark it terminal. Fail-open on other RPC errors so a
 			// flapping chain node does not lose valid proofs.
 			if !lc.config.DisablePreProofClaimVerification && lc.proofQueryClient != nil {
-				_, claimErr := lc.proofQueryClient.GetClaim(ctx, snapshot.SupplierOperatorAddress, snapshot.SessionID)
+				claim, claimErr := lc.proofQueryClient.GetClaim(ctx, snapshot.SupplierOperatorAddress, snapshot.SessionID)
+				// A claim whose proof the chain already judged must not get a
+				// second one: poktroll deletes a judged proof and SubmitProof
+				// does not read the verdict, so a new proof is charged again.
+				// This is the restart after a kill between the proof's broadcast
+				// and the write of its hash: the session came back to claimed
+				// and would send it again. Validated means the proof is on
+				// chain, so the session is settled; invalid is left to its
+				// window, since the same proof would be judged the same way.
+				if claimErr == nil {
+					if status, known := claimProofStatus(claim); known && status != prooftypes.ClaimProofStatus_PENDING_VALIDATION {
+						logger.Debug().
+							Str(logging.FieldSessionID, snapshot.SessionID).
+							Str("proof_status", status.String()).
+							Msg("pre-proof guard: the chain already judged this claim's proof -- not sending another")
+						if status == prooftypes.ClaimProofStatus_VALIDATED {
+							result.Settled[snapshot.SessionID] = struct{}{}
+						}
+						continue
+					}
+				}
 				if claimErr != nil && isClaimNotFoundError(claimErr) {
 					logger.Warn().
 						Str(logging.FieldSessionID, snapshot.SessionID).
@@ -3076,6 +3096,19 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 	// Remove session lock
 
 	return nil
+}
+
+// claimProofStatus reads the proof verdict a claim carries. The client.Claim
+// interface does not expose it, the chain's type does; a claim of another type
+// answers unknown and is treated as not judged.
+func claimProofStatus(c pocktclient.Claim) (prooftypes.ClaimProofStatus, bool) {
+	withStatus, ok := c.(interface {
+		GetProofValidationStatus() prooftypes.ClaimProofStatus
+	})
+	if !ok {
+		return prooftypes.ClaimProofStatus_PENDING_VALIDATION, false
+	}
+	return withStatus.GetProofValidationStatus(), true
 }
 
 // markAndCountClaimWindowClosed marks a session claim_window_closed and records
