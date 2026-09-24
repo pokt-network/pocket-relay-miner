@@ -457,6 +457,22 @@ func TestBatchingPublisherWritesTheGoodHalfOnceAndDiscardsThePoison(t *testing.T
 		return client.XLen(ctx, goodStream).Val() == int64(n)
 	}, 5*time.Second, 10*time.Millisecond, "the dispatcher must still be writing after the discard")
 
+	// The sentinel is visible in the stream before its write returns and counts
+	// it, so the counters are read only after Close: its final flush waits for
+	// every write in flight, and nothing is written after it. Bounded, so a
+	// dispatcher that never stops fails here by name instead of hanging.
+	closed := make(chan error, 1)
+	go func() { closed <- p.Close() }()
+	select {
+	case err := <-closed:
+		require.NoError(t, err, "nothing may be left on the queue: the poisoned relay was discarded, not requeued")
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return: the dispatcher never stopped")
+	}
+
+	require.Equal(t, float64(1), testutil.ToFloat64(
+		publishDiscardedTotal.WithLabelValues(poisoned, "svc", discardReasonWrongType))-discardedBefore,
+		"the poisoned relay is discarded once")
 	require.Equal(t, int64(n), client.XLen(ctx, goodStream).Val(),
 		"the relays that already reached the stream must not be written again: a second copy "+
 			"is a relay the miner counts twice and a leaf that does not exist")
