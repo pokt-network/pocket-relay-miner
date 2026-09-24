@@ -147,6 +147,16 @@ func TestHandleRelay_KnownButStillOpenSessionPastClaimWindow_IsDropped(t *testin
 // failure, before the callback that removes the session from the sweep's
 // tracking, so the sweep would transition it later and record the SAME relays a
 // second time.
+// finalClaimClose and finalReadBlocks put these cases past close+1, where a
+// "no claim" read is final and the mark is attempted at all.
+const finalClaimClose = 110
+
+func finalReadBlocks() *heightedBlocks {
+	b := &heightedBlocks{}
+	b.currentHeight = finalClaimClose + 1
+	return b
+}
+
 func TestMarkAndCountClaimWindowClosed_DoesNotRecordWhenTheMarkFails(t *testing.T) {
 	const supplier = "pokt1mark_fails"
 	f := newHandlerTestFixture(t, supplier)
@@ -155,6 +165,7 @@ func TestMarkAndCountClaimWindowClosed_DoesNotRecordWhenTheMarkFails(t *testing.
 		logger:             logging.ForComponent(zerolog.Nop(), "lifecycle_callback_test"),
 		smstManager:        f.smstMgr,
 		sessionCoordinator: f.coordinator,
+		blockClient:        finalReadBlocks(),
 	}
 	snapshot := &SessionSnapshot{
 		SessionID:               "sess-mark-fails",
@@ -173,7 +184,7 @@ func TestMarkAndCountClaimWindowClosed_DoesNotRecordWhenTheMarkFails(t *testing.
 
 	// Break every Redis command so UpdateState fails inside the coordinator.
 	f.failRedis.Fail("LOADING Redis is loading the dataset in memory")
-	lc.markAndCountClaimWindowClosed(f.ctx, snapshot)
+	lc.markAndCountClaimWindowClosed(f.ctx, snapshot, finalClaimClose)
 	f.failRedis.Clear()
 
 	require.Equal(t, before,
@@ -192,6 +203,7 @@ func TestMarkAndCountClaimWindowClosed_RecordsWhenTheMarkTakes(t *testing.T) {
 		logger:             logging.ForComponent(zerolog.Nop(), "lifecycle_callback_test"),
 		smstManager:        f.smstMgr,
 		sessionCoordinator: f.coordinator,
+		blockClient:        finalReadBlocks(),
 	}
 	require.NoError(t, f.coordinator.OnSessionCreated(
 		f.ctx, "sess-mark-takes", supplier, "svc-1", "pokt1app", 1, 10))
@@ -206,7 +218,7 @@ func TestMarkAndCountClaimWindowClosed_RecordsWhenTheMarkTakes(t *testing.T) {
 
 	before := testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
 	lostBefore := testutil.ToFloat64(relaysLostTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed"))
-	lc.markAndCountClaimWindowClosed(f.ctx, snapshot)
+	lc.markAndCountClaimWindowClosed(f.ctx, snapshot, finalClaimClose)
 	require.Equal(t, before+5,
 		testutil.ToFloat64(relaysForgoneTotal.WithLabelValues(supplier, "svc-1", "claim_window_closed")),
 		"the mark took, so this is the only place the verdict is recorded")

@@ -23,6 +23,10 @@ import (
 // is booked claim_window_closed -- terminal, its tree deleted, while the chain
 // waits for its proof -- and that an unanswered question never makes it terminal.
 
+// observeClaimClose is the claim window close these cases pretend: only a read
+// after it is final.
+const observeClaimClose = 110
+
 func claimOnChainRoot() []byte {
 	root := make([]byte, SMSTRootLen)
 	root[0] = 0x2a
@@ -30,7 +34,8 @@ func claimOnChainRoot() []byte {
 }
 
 // TestResumedUnsentClaimFoundOnChainIsBookedClaimed: loaded in claiming with no
-// hash, resumed to active, and restarted at its claim window's close. Before this
+// hash, resumed to active, and restarted just past its claim window's close
+// (from close+1 a "no claim" read is final, see claimReadIsFinal). Before this
 // change the lifecycle booked it claim_window_closed without asking. Now the chain
 // is asked, and a claim found there books the session claimed with that root.
 func TestResumedUnsentClaimFoundOnChainIsBookedClaimed(t *testing.T) {
@@ -41,7 +46,7 @@ func TestResumedUnsentClaimFoundOnChainIsBookedClaimed(t *testing.T) {
 		return cb.store.ReactivateClaimed(ctx, s.SessionID, claimOnChainRoot(), s.ClaimTxHash)
 	}
 	snapshot := resumeSnapshot(SessionStateClaiming)
-	m, store, _ := startAfterRestartWith(t, cb, snapshot, claimClose)
+	m, store, _ := startAfterRestartWith(t, cb, snapshot, claimClose+1)
 	t.Cleanup(func() { _ = m.Close() })
 
 	requireStateEventually(t, store, snapshot.SessionID, SessionStateClaimed,
@@ -58,7 +63,7 @@ func TestResumedUnsentClaimNotOnChainIsBookedClosed(t *testing.T) {
 	claimClose := sharedtypes.GetClaimWindowCloseHeight(resumeParams(t), resumeSessionEnd)
 	cb := newResumeCallback()
 	snapshot := resumeSnapshot(SessionStateClaiming)
-	m, store, _ := startAfterRestartWith(t, cb, snapshot, claimClose)
+	m, store, _ := startAfterRestartWith(t, cb, snapshot, claimClose+1)
 	t.Cleanup(func() { _ = m.Close() })
 
 	requireStateEventually(t, store, snapshot.SessionID, SessionStateClaimWindowClosed, "no claim on chain: closed, as before")
@@ -74,10 +79,10 @@ func TestResumedUnsentClaimUnansweredStaysUnbooked(t *testing.T) {
 		return false, errors.New("node unreachable")
 	}
 	snapshot := resumeSnapshot(SessionStateClaiming)
-	m, store, _ := startAfterRestartWith(t, cb, snapshot, claimClose)
+	m, store, _ := startAfterRestartWith(t, cb, snapshot, claimClose+1)
 	t.Cleanup(func() { _ = m.Close() })
 
-	m.checkSessionTransitions(context.Background(), claimClose+1)
+	m.checkSessionTransitions(context.Background(), claimClose+2)
 	got, err := store.Get(context.Background(), snapshot.SessionID)
 	require.NoError(t, err)
 	require.Equal(t, SessionStateActive, got.State, "an unanswered question never makes the session terminal")
@@ -115,9 +120,12 @@ func TestObserveClaimOnChain(t *testing.T) {
 				SessionStartHeight: 91, SessionEndHeight: 100, State: SessionStateActive,
 			}
 			require.NoError(t, store.Save(ctx, snapshot))
+			blocks := &heightedBlocks{}
+			blocks.currentHeight = observeClaimClose + 1
 			lc := &LifecycleCallback{
 				logger:             logging.NewLoggerFromConfig(logging.DefaultConfig()),
 				config:             DefaultLifecycleCallbackConfig(),
+				blockClient:        blocks,
 				sessionCoordinator: coord,
 				proofQueryClient: &stubProofQueryClient{getClaimFn: func(context.Context, string, string) (pocktclient.Claim, error) {
 					return tc.getClaim()
@@ -135,7 +143,16 @@ func TestObserveClaimOnChain(t *testing.T) {
 				require.Equal(t, claimOnChainRoot(), got.ClaimedRootHash)
 			}
 
-			lc.markAndCountClaimWindowClosed(ctx, snapshot)
+			// At close the read is not final (a claim can land IN block close):
+			// nothing is booked whatever the chain said.
+			blocks.currentHeight = observeClaimClose
+			lc.markAndCountClaimWindowClosed(ctx, snapshot, observeClaimClose)
+			got, getErr = store.Get(ctx, snapshot.SessionID)
+			require.NoError(t, getErr)
+			require.NotEqual(t, SessionStateClaimWindowClosed, got.State, "a read at close is not final: not booked closed")
+
+			blocks.currentHeight = observeClaimClose + 1
+			lc.markAndCountClaimWindowClosed(ctx, snapshot, observeClaimClose)
 			got, getErr = store.Get(ctx, snapshot.SessionID)
 			require.NoError(t, getErr)
 			if tc.wantFound || tc.wantErr {

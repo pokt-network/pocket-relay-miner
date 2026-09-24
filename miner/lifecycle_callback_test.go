@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"sync"
 	"testing"
 
 	"github.com/pokt-network/smt"
@@ -72,10 +71,9 @@ func (m *mockSMSTManager) DeleteTree(_ context.Context, sessionID string) error 
 func createTestLifecycleCallback(smstManager SMSTManager) *LifecycleCallback {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	return &LifecycleCallback{
-		logger:       logger,
-		config:       DefaultLifecycleCallbackConfig(),
-		smstManager:  smstManager,
-		sessionLocks: make(map[string]*sync.Mutex),
+		logger:      logger,
+		config:      DefaultLifecycleCallbackConfig(),
+		smstManager: smstManager,
 	}
 }
 

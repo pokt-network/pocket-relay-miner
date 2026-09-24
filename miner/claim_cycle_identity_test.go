@@ -81,11 +81,12 @@ func TestExecuteBatchedClaimTransition_SkippedSessionIsNotResurrected(t *testing
 	store := &identitySpyStore{}
 	cb := &middleSkippedCallback{claimed: []string{"first", "third"}}
 	m := &SessionLifecycleManager{
-		logger:         logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		sessionStore:   store,
-		callback:       cb,
-		config:         SessionLifecycleConfig{SupplierAddress: "pokt1identity"},
-		activeSessions: xsync.NewMap[string, *SessionSnapshot](),
+		logger:              logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sessionStore:        store,
+		callback:            cb,
+		config:              SessionLifecycleConfig{SupplierAddress: "pokt1identity"},
+		activeSessions:      xsync.NewMap[string, *SessionSnapshot](),
+		resumedUnsentClaims: xsync.NewMap[string, struct{}](),
 	}
 
 	sessions := []*SessionSnapshot{

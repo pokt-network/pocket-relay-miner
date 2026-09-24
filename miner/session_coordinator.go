@@ -548,6 +548,11 @@ func (c *SessionCoordinator) OnClaimWindowClosed(ctx context.Context, sessionID 
 	c.mu.Unlock()
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimWindowClosed); err != nil {
+		if errors.Is(err, ErrClaimAlreadyOnChain) {
+			c.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
+				Msg("not marking claim_window_closed: the session holds its claim")
+			return err
+		}
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_window_closed")
 		return err
@@ -600,6 +605,11 @@ func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID strin
 	}
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimTxError); err != nil {
+		if errors.Is(err, ErrClaimAlreadyOnChain) {
+			c.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
+				Msg("not marking claim_tx_error: the session holds its claim")
+			return err
+		}
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_tx_error")
 		return err

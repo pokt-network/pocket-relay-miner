@@ -391,11 +391,12 @@ func TestExecuteTransition_HandoverCountsTheMoneyExactlyOnce(t *testing.T) {
 
 	newManager := func() *SessionLifecycleManager {
 		return &SessionLifecycleManager{
-			logger:         logging.ForComponent(zerolog.Nop(), "lifecycle_manager_test"),
-			config:         SessionLifecycleConfig{SupplierAddress: supplier},
-			sessionStore:   f.sessionStore,
-			callback:       lc,
-			activeSessions: xsync.NewMap[string, *SessionSnapshot](),
+			logger:              logging.ForComponent(zerolog.Nop(), "lifecycle_manager_test"),
+			config:              SessionLifecycleConfig{SupplierAddress: supplier},
+			sessionStore:        f.sessionStore,
+			callback:            lc,
+			activeSessions:      xsync.NewMap[string, *SessionSnapshot](),
+			resumedUnsentClaims: xsync.NewMap[string, struct{}](),
 		}
 	}
 
@@ -451,11 +452,12 @@ func TestExecuteTransition_CountsOnceWhenTheWriteTakes(t *testing.T) {
 		smstManager: f.smstMgr,
 	}
 	mgr := &SessionLifecycleManager{
-		logger:         logging.ForComponent(zerolog.Nop(), "lifecycle_manager_test"),
-		config:         SessionLifecycleConfig{SupplierAddress: supplier},
-		sessionStore:   f.sessionStore,
-		callback:       lc,
-		activeSessions: xsync.NewMap[string, *SessionSnapshot](),
+		logger:              logging.ForComponent(zerolog.Nop(), "lifecycle_manager_test"),
+		config:              SessionLifecycleConfig{SupplierAddress: supplier},
+		sessionStore:        f.sessionStore,
+		callback:            lc,
+		activeSessions:      xsync.NewMap[string, *SessionSnapshot](),
+		resumedUnsentClaims: xsync.NewMap[string, struct{}](),
 	}
 
 	snapshot := &SessionSnapshot{

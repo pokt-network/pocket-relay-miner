@@ -2,6 +2,7 @@ package miner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -198,6 +199,7 @@ type SessionLifecycleManager struct {
 	// hash and moved back to active: a previous process may have broadcast
 	// their claim before it died. When their claim window closes they are asked
 	// about on chain before being booked failed (see claimOnChainObserver).
+	// An entry leaves with its session, wherever activeSessions drops it.
 	resumedUnsentClaims *xsync.Map[string, struct{}]
 
 	// Pond subpool for controlled concurrency during transitions
@@ -364,6 +366,14 @@ func (m *SessionLifecycleManager) mayHaveClaimOnChain(session *SessionSnapshot) 
 	}
 	_, resumed := m.resumedUnsentClaims.Load(session.SessionID)
 	return resumed
+}
+
+// claimReadIsFinal reports whether a "no claim" answer read at height is the
+// last word for a claim window closing at claimClose. poktroll accepts a claim
+// in block claimClose itself, so only a read taken after that block exists --
+// height claimClose+1 or later -- cannot be overtaken by it.
+func claimReadIsFinal(height, claimClose int64) bool {
+	return height > claimClose
 }
 
 // resumeUnsentSubmission moves a session loaded in claiming or proving whose
@@ -853,6 +863,7 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 			// Session expired from Redis (TTL) or was deleted - remove from in-memory tracking
 			// This is expected behavior: sessions complete and expire, this prevents endless reload attempts
 			m.activeSessions.Delete(sessionID)
+			m.resumedUnsentClaims.Delete(sessionID)
 			redisExpired++
 			m.logger.Debug().
 				Err(err).
@@ -869,6 +880,7 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		// represent final outcomes and must not be overwritten by window timeout logic
 		if session.State.IsTerminal() {
 			m.activeSessions.Delete(session.SessionID)
+			m.resumedUnsentClaims.Delete(session.SessionID)
 			terminalCleaned++
 
 			m.logger.Debug().
@@ -907,6 +919,14 @@ func (m *SessionLifecycleManager) checkSessionTransitions(ctx context.Context, c
 		// again next pass. Only sessions that reached claiming are asked, so an
 		// outage does not turn every expired active session into a query.
 		if newState == SessionStateClaimWindowClosed && m.mayHaveClaimOnChain(session) {
+			// The chain still accepts a claim IN block close, so a "no claim"
+			// read at close can be overtaken by that block. The verdict waits
+			// until close has been built on: from close+1 a negative is final.
+			claimClose := sharedtypes.GetClaimWindowCloseHeight(resolveParams(session.SessionEndHeight), session.SessionEndHeight)
+			if !claimReadIsFinal(currentHeight, claimClose) {
+				noTransition++
+				continue
+			}
 			if observer, ok := m.callback.(claimOnChainObserver); ok {
 				observed, err := observer.ObserveClaimOnChain(ctx, session)
 				if err != nil {
@@ -1567,6 +1587,7 @@ func (m *SessionLifecycleManager) executeBatchedProofTransition(ctx context.Cont
 
 		// Remove from active tracking (lock-free delete)
 		m.activeSessions.Delete(session.SessionID)
+		m.resumedUnsentClaims.Delete(session.SessionID)
 
 		m.logger.Info().
 			Str(logging.FieldSessionID, session.SessionID).
@@ -1615,6 +1636,13 @@ func (m *SessionLifecycleManager) executeTransition(
 	// session.State is still assigned after the callbacks, so they see the same
 	// snapshot they have always seen.
 	if err := m.sessionStore.UpdateState(ctx, session.SessionID, newState); err != nil {
+		if errors.Is(err, ErrClaimAlreadyOnChain) {
+			// The inclusion reconciler booked this session claimed between the
+			// verdict and this write. Nothing was written, so nothing is counted
+			// and the tree stays: the claim is the truth.
+			sessionLogger.Debug().Err(err).Msg("claim-phase failure refused: the session holds its claim")
+			return
+		}
 		sessionLogger.Error().Err(err).Msg("failed to persist state change")
 		sessionStoreErrors.WithLabelValues(m.config.SupplierAddress, "update_state").Inc()
 		return
@@ -1668,6 +1696,7 @@ func (m *SessionLifecycleManager) executeTransition(
 	// Remove terminal sessions from active tracking (lock-free delete)
 	if newState.IsTerminal() {
 		m.activeSessions.Delete(session.SessionID)
+		m.resumedUnsentClaims.Delete(session.SessionID)
 
 		sessionLogger.Info().
 			Str(logging.FieldNewState, string(newState)).

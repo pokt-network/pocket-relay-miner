@@ -175,10 +175,6 @@ type LifecycleCallback struct {
 	// fire-once-at-window-open behavior (silent CLAIM_MISSING/PROOF_MISSING).
 	rebroadcastStore RebroadcastStorage
 
-	// Per-session locks to prevent concurrent claim/proof operations
-	sessionLocks   map[string]*sync.Mutex
-	sessionLocksMu sync.Mutex
-
 	// buildPool is used for bounded parallel claim/proof building.
 	// If nil, falls back to unbounded goroutines (legacy behavior).
 	buildPool pond.Pool
@@ -220,7 +216,6 @@ func NewLifecycleCallback(
 		smstManager:        smstManager,
 		sessionCoordinator: sessionCoordinator,
 		proofChecker:       proofChecker,
-		sessionLocks:       make(map[string]*sync.Mutex),
 	}
 }
 
@@ -512,13 +507,6 @@ func (lc *LifecycleCallback) persistRebroadcastEntry(
 	return nil
 }
 
-// removeSessionLock removes a per-session lock.
-func (lc *LifecycleCallback) removeSessionLock(sessionID string) {
-	lc.sessionLocksMu.Lock()
-	defer lc.sessionLocksMu.Unlock()
-	delete(lc.sessionLocks, sessionID)
-}
-
 // getClaimReward calculates the expected reward for a claim using the canonical
 // poktroll formula (prooftypes.Claim.GetClaimeduPOKT). This uses the SMST root
 // hash as the source of truth — not snapshot counters.
@@ -701,7 +689,7 @@ func (lc *LifecycleCallback) settleEjectedClaim(
 	}
 
 	if lc.sessionCoordinator != nil {
-		if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil {
+		if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil && !errors.Is(err, ErrClaimAlreadyOnChain) {
 			logger.Warn().Err(err).
 				Str(logging.FieldSessionID, snapshot.SessionID).
 				Msg("failed to mark ejected session as claim_tx_error in Redis")
@@ -1211,7 +1199,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 			// Mark all sessions in this group as failed (metrics + Redis state for HA)
 			for _, snapshot := range groupSnapshots {
-				lc.markAndCountClaimWindowClosed(ctx, snapshot)
+				lc.markAndCountClaimWindowClosed(ctx, snapshot, claimWindowClose)
 			}
 
 			groupErrs = append(groupErrs,
@@ -1597,7 +1585,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 			// Mark all sessions in this batch as failed (metrics + Redis state for HA)
 			for _, snapshot := range groupSnapshots {
-				lc.markAndCountClaimWindowClosed(ctx, snapshot)
+				lc.markAndCountClaimWindowClosed(ctx, snapshot, claimWindowClose)
 			}
 
 			groupErrs = append(groupErrs,
@@ -1708,7 +1696,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 					// Mark all sessions in this batch as failed (metrics + Redis state for HA)
 					for _, snapshot := range groupSnapshots {
-						lc.markAndCountClaimWindowClosed(ctx, snapshot)
+						lc.markAndCountClaimWindowClosed(ctx, snapshot, claimWindowClose)
 					}
 
 					windowClosed = true
@@ -1750,7 +1738,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 					// that closed while we were splitting it.
 					if lc.blockClient.LastBlock(ctx).Height() >= claimWindowClose {
 						for _, snapshot := range groupSnapshots {
-							lc.markAndCountClaimWindowClosed(ctx, snapshot)
+							lc.markAndCountClaimWindowClosed(ctx, snapshot, claimWindowClose)
 						}
 						windowClosed = true
 						break
@@ -1970,7 +1958,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 
 				// CRITICAL: Update session state in Redis immediately for HA compatibility
 				if lc.sessionCoordinator != nil {
-					if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil {
+					if err := lc.sessionCoordinator.OnClaimTxError(ctx, snapshot.SessionID); err != nil && !errors.Is(err, ErrClaimAlreadyOnChain) {
 						logger.Warn().
 							Err(err).
 							Str(logging.FieldSessionID, snapshot.SessionID).
@@ -3012,7 +3000,6 @@ func (lc *LifecycleCallback) OnSessionProved(ctx context.Context, snapshot *Sess
 	}
 
 	// Remove session lock
-	lc.removeSessionLock(snapshot.SessionID)
 
 	return nil
 }
@@ -3047,7 +3034,6 @@ func (lc *LifecycleCallback) OnClaimSkipped(ctx context.Context, snapshot *Sessi
 		}
 	}
 
-	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
@@ -3088,7 +3074,6 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 	}
 
 	// Remove session lock
-	lc.removeSessionLock(snapshot.SessionID)
 
 	return nil
 }
@@ -3147,7 +3132,7 @@ func (lc *LifecycleCallback) ObserveClaimOnChain(ctx context.Context, snapshot *
 	return true, nil
 }
 
-func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot) {
+func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, snapshot *SessionSnapshot, claimWindowClose int64) {
 	// A session that reached claiming may have its claim on chain already (see
 	// ObserveClaimOnChain). If the chain cannot say, the session is left as it
 	// is: the lifecycle's next pass asks again.
@@ -3163,8 +3148,18 @@ func (lc *LifecycleCallback) markAndCountClaimWindowClosed(ctx context.Context, 
 	if observed {
 		return
 	}
+	// A "no claim" read before close+1 can still be overtaken by a claim in
+	// block close (claimReadIsFinal). The session stays as it is and the
+	// lifecycle's sweep books it once the read is final.
+	if !claimReadIsFinal(lc.blockClient.LastBlock(ctx).Height(), claimWindowClose) {
+		return
+	}
 	if lc.sessionCoordinator != nil {
 		if err := lc.sessionCoordinator.OnClaimWindowClosed(ctx, snapshot.SessionID); err != nil {
+			if errors.Is(err, ErrClaimAlreadyOnChain) {
+				// Booked claimed by the reconciler in between: not a failure.
+				return
+			}
 			lc.logger.Warn().
 				Err(err).
 				Str(logging.FieldSessionID, snapshot.SessionID).
@@ -3270,7 +3265,6 @@ func (lc *LifecycleCallback) OnClaimWindowClosed(ctx context.Context, snapshot *
 		int64(snapshot.TotalComputeUnits),
 	)
 
-	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
@@ -3282,7 +3276,6 @@ func (lc *LifecycleCallback) OnClaimTxError(ctx context.Context, snapshot *Sessi
 	}
 
 	// Metrics already recorded at failure point, just cleanup
-	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
@@ -3304,7 +3297,6 @@ func (lc *LifecycleCallback) OnProofWindowClosed(ctx context.Context, snapshot *
 		int64(snapshot.TotalComputeUnits),
 	)
 
-	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 
@@ -3316,7 +3308,6 @@ func (lc *LifecycleCallback) OnProofTxError(ctx context.Context, snapshot *Sessi
 	}
 
 	// Metrics already recorded at failure point, just cleanup
-	lc.removeSessionLock(snapshot.SessionID)
 	return nil
 }
 

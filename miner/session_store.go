@@ -90,6 +90,31 @@ func (s SessionState) IsTerminal() bool {
 	}
 }
 
+// HoldsClaimOnChain reports whether the session is at or past `claimed`: its
+// claim was accepted, whatever happened to the proof after it. A claim-phase
+// failure (claim_window_closed, claim_tx_error) must never be written over such
+// a state -- see ErrClaimAlreadyOnChain. luaHoldsClaimOnChain is its Lua twin.
+func (s SessionState) HoldsClaimOnChain() bool {
+	switch s {
+	case SessionStateClaimed,
+		SessionStateProving,
+		SessionStateProved,
+		SessionStateProbabilisticProved,
+		SessionStateProofWindowClosed,
+		SessionStateProofTxError:
+		return true
+	default:
+		return false
+	}
+}
+
+// ErrClaimAlreadyOnChain is UpdateState refusing a claim-phase failure over a
+// session that already holds its claim. The lifecycle can book a session
+// claim_window_closed on a negative chain read while the inclusion reconciler
+// books the same session claimed on a positive one; whichever lands second must
+// not undo the claim, because the failure deletes the session's tree.
+var ErrClaimAlreadyOnChain = errors.New("session already holds its claim on chain")
+
 // IsSuccess returns true if the state represents a successful terminal outcome.
 func (s SessionState) IsSuccess() bool {
 	switch s {
@@ -767,6 +792,9 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		if strings.Contains(errMsg, "session not found") {
 			return fmt.Errorf("session not found: %s", sessionID)
 		}
+		if strings.Contains(errMsg, "claim already on chain") {
+			return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
+		}
 		if strings.Contains(errMsg, "legacy key") {
 			// Legacy JSON string key — fall back to Get→Save migration path
 			snapshot, getErr := s.Get(ctx, sessionID)
@@ -775,6 +803,9 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 			}
 			if snapshot == nil {
 				return fmt.Errorf("session not found: %s", sessionID)
+			}
+			if (newState == SessionStateClaimWindowClosed || newState == SessionStateClaimTxError) && snapshot.State.HoldsClaimOnChain() {
+				return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
 			}
 			snapshot.State = newState
 			return s.Save(ctx, snapshot)
@@ -877,8 +908,10 @@ func (s *RedisSessionStore) ReactivateClaimed(
 // ARGV[2] = RFC3339Nano timestamp for last_updated_at
 // ARGV[3] = TTL seconds
 //
-// Returns: old state string, or error "session not found" / "legacy key"
-var updateStateScript = redis.NewScript(`
+// Returns: old state string, or error "session not found" / "legacy key" /
+// "claim already on chain" (a claim-phase failure over a session that holds its
+// claim: nothing is written, see ErrClaimAlreadyOnChain).
+var updateStateScript = redis.NewScript(luaHoldsClaimOnChain + `
 if redis.call('EXISTS', KEYS[1]) == 0 then
 	return redis.error_reply('session not found')
 end
@@ -887,6 +920,9 @@ if ktype ~= 'hash' then
 	return redis.error_reply('legacy key')
 end
 local old_state = redis.call('HGET', KEYS[1], 'state')
+if (ARGV[1] == 'claim_window_closed' or ARGV[1] == 'claim_tx_error') and holds_claim_on_chain(old_state) then
+	return redis.error_reply('claim already on chain')
+end
 redis.call('HSET', KEYS[1], 'state', ARGV[1], 'last_updated_at', ARGV[2])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 return old_state
@@ -938,6 +974,17 @@ end
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
 return old_state
 `)
+
+// luaHoldsClaimOnChain defines holds_claim_on_chain(state), the Lua twin of
+// SessionState.HoldsClaimOnChain(); TestLuaHoldsClaimOnChainMatchesGo fails if
+// the two diverge.
+const luaHoldsClaimOnChain = `
+local function holds_claim_on_chain(state)
+	return state == 'claimed' or state == 'proving' or state == 'proved'
+		or state == 'probabilistic_proved'
+		or state == 'proof_window_closed' or state == 'proof_tx_error'
+end
+`
 
 // luaIsTerminal defines is_terminal(state), the Lua twin of
 // SessionState.IsTerminal(), for every script that must refuse a terminal

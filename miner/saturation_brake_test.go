@@ -63,11 +63,12 @@ func TestExecuteBatchedProofTransition_AProvedWriteThatFailsStillFreesTheTree(t 
 	store := &failingStateStore{errs: map[string]error{"a": errors.New(redisOOMReplyText)}}
 	cb := &partialProofCallback{settle: []string{"a"}}
 	m := &SessionLifecycleManager{
-		logger:         logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		sessionStore:   store,
-		callback:       cb,
-		config:         SessionLifecycleConfig{SupplierAddress: "pokt1proved"},
-		activeSessions: xsync.NewMap[string, *SessionSnapshot](),
+		logger:              logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sessionStore:        store,
+		callback:            cb,
+		config:              SessionLifecycleConfig{SupplierAddress: "pokt1proved"},
+		activeSessions:      xsync.NewMap[string, *SessionSnapshot](),
+		resumedUnsentClaims: xsync.NewMap[string, struct{}](),
 	}
 	session := &SessionSnapshot{SessionID: "a", State: SessionStateProving}
 	m.activeSessions.Store("a", session)

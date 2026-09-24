@@ -74,11 +74,12 @@ func TestExecuteBatchedProofTransition_OnlySettledSessionsAreProved(t *testing.T
 		err:    errors.New("group for b failed"),
 	}
 	m := &SessionLifecycleManager{
-		logger:         logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		sessionStore:   store,
-		callback:       cb,
-		config:         SessionLifecycleConfig{SupplierAddress: "pokt1test"},
-		activeSessions: xsync.NewMap[string, *SessionSnapshot](),
+		logger:              logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sessionStore:        store,
+		callback:            cb,
+		config:              SessionLifecycleConfig{SupplierAddress: "pokt1test"},
+		activeSessions:      xsync.NewMap[string, *SessionSnapshot](),
+		resumedUnsentClaims: xsync.NewMap[string, struct{}](),
 	}
 
 	m.executeBatchedProofTransition(context.Background(), []*SessionSnapshot{

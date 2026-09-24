@@ -869,11 +869,12 @@ func TestClaimTransition_FlushesTheBatchBeforeReadingTheCounters(t *testing.T) {
 
 	cb := &countSeenCallback{seen: map[string]int64{}}
 	m := &SessionLifecycleManager{
-		logger:         zerolog.Nop(),
-		sessionStore:   w.store,
-		callback:       cb,
-		config:         SessionLifecycleConfig{SupplierAddress: supplier},
-		activeSessions: xsync.NewMap[string, *SessionSnapshot](),
+		logger:              zerolog.Nop(),
+		sessionStore:        w.store,
+		callback:            cb,
+		config:              SessionLifecycleConfig{SupplierAddress: supplier},
+		activeSessions:      xsync.NewMap[string, *SessionSnapshot](),
+		resumedUnsentClaims: xsync.NewMap[string, struct{}](),
 	}
 	m.SetPendingRelayFlusher(w.batch.FlushSessions)
 
