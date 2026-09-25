@@ -97,18 +97,25 @@ func TestCommit_CompactsBigLeavesBeforeTheFlushAndLosesNothingWhenItFails(t *tes
 
 	compacted := observability.SMSTLeavesCompacted.WithLabelValues(h.supplier)
 	before := testutil.ToFloat64(compacted)
+	pending := observability.SMSTPendingLeafBytes.WithLabelValues(h.supplier)
+	pendingBefore := testutil.ToFloat64(pending)
+	require.Greater(t, pendingBefore, float64(1<<20), "premise: the uncommitted leaves are counted as pending")
 	h.fail.Fail("injected: flush pipeline failed")
 	_, err := h.mgr.CommitTree(h.ctx, h.sessionID)
 	h.fail.Clear()
 	require.ErrorIs(t, err, ErrSMSTCommitFailed, "premise: the flush failed")
 	require.GreaterOrEqual(t, testutil.ToFloat64(compacted)-before, float64(len(relays)),
 		"every new leaf is compacted before the flush, so even a failed flush leaves no relay held twice")
+	require.Equal(t, pendingBefore, testutil.ToFloat64(pending),
+		"a failed flush leaves the compacted leaves' bytes in the store's buffer, so they stay counted as pending")
 	for _, r := range relays {
 		require.False(t, h.inRedis(r), "premise: the failed flush wrote nothing")
 		require.True(t, h.inMemory(r), "a compacted leaf whose flush failed is still reachable, from the buffer")
 	}
 
 	h.commit()
+	require.LessOrEqual(t, testutil.ToFloat64(pending), pendingBefore-float64(1<<20),
+		"once the flush wrote them, the bytes are released, the 1 MiB leaf's included")
 	root, err := h.mgr.FlushTree(h.ctx, h.sessionID)
 	require.NoError(t, err)
 	for _, r := range relays {
@@ -132,4 +139,28 @@ func TestCommit_CompactsBigLeavesBeforeTheFlushAndLosesNothingWhenItFails(t *tes
 	}
 	require.GreaterOrEqual(t, checked, len(relays), "CONTROL: every new leaf is among the nodes checked")
 	require.Greater(t, biggest, 1<<20, "CONTROL: the 1 MiB leaf's node is among the stored nodes checked")
+}
+
+// FlushTree does not fail on a failed node write: the claim goes out with the
+// root the tree holds, and the proof is built later from leaves already
+// compacted. Until a flush succeeds, those nodes exist only in the store's
+// buffer, and the proof has to be served from there.
+func TestProveClosest_ServesACompactedLeafFromTheBufferAfterAFailedFlush(t *testing.T) {
+	h := newFlushFailureHarness(t, true)
+	h.seed(4)
+	key := sha256.Sum256([]byte("proof-from-buffer"))
+	big := flushFailureRelay{key: key[:], value: transport.ChainedHashBytes("proof-from-buffer", 1<<20), weight: 9}
+	require.NoError(t, big.update(h.ctx, h.mgr, h.sessionID))
+
+	h.fail.Fail("injected: redis unreachable for the seal")
+	root, err := h.mgr.FlushTree(h.ctx, h.sessionID)
+	require.NoError(t, err, "premise: a failed node write does not fail the seal")
+	require.NotEmpty(t, root)
+
+	// Redis answers again, but nothing has retried the flush: the leaf's node is
+	// still only in the buffer when the proof is built.
+	h.fail.Clear()
+	require.False(t, h.inRedis(big), "premise: the leaf's node never reached Redis")
+	require.NoError(t, h.proveAndVerify(big, root),
+		"the 1 MiB relay's proof must be built from the buffered node and verify against the sealed root")
 }

@@ -57,9 +57,13 @@ type RedisMapStore struct {
 	//   at a checkpoint boundary, so live_root always references nodes that
 	//   are still present in the hash.
 	pipelineMu      sync.Mutex
-	pipelineEnabled bool                // true when buffering Set()/Delete() calls
-	pipelineBuffer  map[string][]byte   // field -> value (new-node writes)
-	orphanBuffer    map[string]struct{} // field set (orphan deletes pending checkpoint)
+	pipelineEnabled bool // true when buffering Set()/Delete() calls
+	// pipelineBuffer holds field -> value for new-node writes until a flush
+	// writes them. A node leaves it only through a successful flush or an
+	// orphan Delete: commitLocked compacts a leaf before the flush, so a
+	// buffered node can be the only copy of a leaf, and Get serves it from here.
+	pipelineBuffer map[string][]byte
+	orphanBuffer   map[string]struct{} // field set (orphan deletes pending checkpoint)
 }
 
 // NewRedisMapStore creates a new Redis-backed MapStore for a (supplier, session) pair.
@@ -347,6 +351,12 @@ func (s *RedisMapStore) ClearAll() error {
 	defer func() {
 		observability.SMSTStoreOperationDuration.WithLabelValues("clear_all").Observe(time.Since(start).Seconds())
 	}()
+
+	// Nodes still buffered belong to the hash being deleted: kept, Get would
+	// keep serving them after the clear.
+	s.pipelineMu.Lock()
+	s.pipelineBuffer = make(map[string][]byte)
+	s.pipelineMu.Unlock()
 
 	err := s.redisClient.Del(s.ctx, s.hashKey).Err()
 	if err != nil {

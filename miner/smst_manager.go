@@ -151,8 +151,9 @@ type RedisSMSTManagerConfig struct {
 // 	return DefaultLiveRootCheckpointInterval
 // }
 
-// leafCompactor is the smt capability commitLocked calls after every successful
-// flush to drop the in-memory value of persisted leaves.
+// leafCompactor is the smt capability commitLocked calls after every Commit,
+// before the flush, to drop the in-memory value of the leaves Commit handed to
+// the store.
 type leafCompactor interface {
 	CompactPersistedLeaves() int
 }
@@ -930,6 +931,7 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 	// SMSTPanicsRecovered{supplier,"compact"}, and the tree stops being
 	// compacted (see compactionDisabled), which costs that session its memory
 	// saving, not its relays.
+	compacted := false
 	if compactor, ok := tree.trie.(leafCompactor); ok {
 		if !tree.compactionDisabled {
 			var compactedLeaves int
@@ -940,7 +942,7 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 				tree.compactionDisabled = true
 			} else {
 				observability.SMSTLeavesCompacted.WithLabelValues(m.config.SupplierAddress).Add(float64(compactedLeaves))
-				m.releasePendingLeafBytes(tree)
+				compacted = true
 				m.logger.Debug().
 					Str(logging.FieldSessionID, sessionID).
 					Int("compacted_leaves", compactedLeaves).
@@ -963,6 +965,12 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 			// net.Error / Redis error through the sentinel wrapper.
 			return fmt.Errorf("%w: flush pipeline: %w", ErrSMSTCommitFailed, err)
 		}
+	}
+	// Released only once the flush wrote them: until then the compacted leaves'
+	// bytes still sit in the store's buffer, and the gauge must keep counting
+	// what a failing Redis leaves in memory.
+	if compacted {
+		m.releasePendingLeafBytes(tree)
 	}
 
 	// Full write path (Update + Commit + FlushPipeline) succeeded end-to-

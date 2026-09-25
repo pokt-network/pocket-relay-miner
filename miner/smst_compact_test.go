@@ -127,8 +127,9 @@ func TestCommitTreeCountsEveryCompactedLeaf(t *testing.T) {
 
 // TestARelayIsNotLostWhenCompactionFails: a compaction that panics must not
 // fail the commit, must not evict the tree, and must not be tried again on it.
-// The relays it ran after are already durable in the trie and in Redis. An
-// error would hand them back as if the write had failed; an eviction would
+// The relays it ran after are already handed to the store, which keeps them
+// until a flush writes them. An error would hand them back as if the write had
+// failed; an eviction would
 // resume the tree from Redis and panic again, and after
 // persistentCorruptionThreshold evictions purge the session's Redis state with
 // its relays. So the tree keeps serving, uncompacted.
