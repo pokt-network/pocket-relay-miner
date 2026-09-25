@@ -35,7 +35,7 @@ func (f failingCompactor) CompactPersistedLeaves() int {
 }
 
 // TestSMSTCompactsPersistedLeavesWithoutChangingTheRoot: after N relays, the
-// compactor (wired in commitLocked right after FlushPipeline) must
+// compactor (wired in commitLocked right after Commit, before FlushPipeline) must
 // have compacted every persisted leaf, and the sealed root the miner signs
 // must be identical to a twin tree that never compacts anything.
 func TestSMSTCompactsPersistedLeavesWithoutChangingTheRoot(t *testing.T) {

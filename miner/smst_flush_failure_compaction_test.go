@@ -23,11 +23,10 @@ import (
 //
 // Commit marks a node persisted once the store's Set returns without error, and
 // in pipeline mode Set only buffers the write; FlushPipeline is what sends it.
-// When that flush fails, the commit returns early -- before compaction -- and
-// the leaf stays in the resident trie marked persisted while its bytes are not
-// in Redis yet. The store must therefore keep those nodes buffered for the next
-// write: dropped, the next successful commit's compaction pass would trust the
-// flag and release a leaf value that exists nowhere else.
+// The leaf is compacted right after Commit, before the flush, so when that
+// flush fails the buffered node is the only copy of the leaf's bytes. The store
+// must therefore keep those nodes buffered for the next write and serve them
+// from the buffer until then: dropped, the leaf would exist nowhere.
 //
 // An update writes nothing: the tree is committed once per relay batch, before
 // a root is stored or a relay acknowledged. The scenarios commit where the
@@ -155,11 +154,11 @@ func (h *flushFailureHarness) inRedis(r flushFailureRelay) bool {
 	return ok
 }
 
-// inMemory reports whether the relay's value is resident in the trie. Get is
-// run with every Redis command failing: a resident value is returned without
-// touching the store, while a compacted leaf has to resolve its value from the
-// store and fails. Redis is never reachable during the probe, so the probe
-// cannot hydrate the leaf it is looking at.
+// inMemory reports whether the relay's value is reachable without Redis: a
+// resident leaf, or a compacted one whose node the store still holds buffered
+// after a failed flush. Get is run with every Redis command failing, so a
+// compacted leaf whose node was written resolves from the store and fails, and
+// the probe cannot hydrate the leaf it is looking at.
 func (h *flushFailureHarness) inMemory(r flushFailureRelay) bool {
 	h.t.Helper()
 	h.fail.Fail("probe: redis unreachable")
@@ -284,7 +283,7 @@ func TestFlushFailure_RedeliveredImmediately(t *testing.T) {
 			t.Logf("LINK 1: inRedis(A)=%v inMemory(A)=%v", h.inRedis(a), h.inMemory(a))
 			require.False(t, h.inRedis(a), "LINK 1: A's leaf must not have reached Redis")
 			require.True(t, h.inMemory(a),
-				"LINK 1: A's value must still be resident -- the commit returns before compaction on a failed flush")
+				"LINK 1: A's value must still be reachable without Redis -- its node stays buffered after the failed flush")
 
 			// LINK 2
 			require.NoError(t, a.update(h.ctx, h.mgr, h.sessionID), "LINK 2: the redelivered A must be accepted")
@@ -329,7 +328,7 @@ func TestFlushFailure_OtherRelaysLandFirstAndRedeliveryMissesTheSeal(t *testing.
 			// LINK 1
 			h.failFlush(a)
 			require.False(t, h.inRedis(a), "LINK 1: A's leaf must not have reached Redis")
-			require.True(t, h.inMemory(a), "LINK 1: A's value must still be resident")
+			require.True(t, h.inMemory(a), "LINK 1: A's value must still be reachable without Redis")
 
 			// Other relays land. Their Commit leaves A's leaf alone (it is
 			// marked persisted) and their compaction pass runs.

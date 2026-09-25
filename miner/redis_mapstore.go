@@ -167,6 +167,22 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	// Convert key to hex string for Redis field name
 	field := hex.EncodeToString(key)
 
+	// A node Set buffered and no FlushPipeline has written yet is read from
+	// the buffer: a leaf is compacted as soon as Commit hands its node over,
+	// before the HSET, so until the flush succeeds -- or after it failed, since
+	// the buffer is kept for the next one -- the buffer is the only place that
+	// node exists. Returned as a copy because the buffer owns its slice and
+	// smt appends to a leaf value in place when it has room.
+	s.pipelineMu.Lock()
+	if pending, ok := s.pipelineBuffer[field]; ok {
+		val := make([]byte, len(pending))
+		copy(val, pending)
+		s.pipelineMu.Unlock()
+		observability.SMSTStoreOperations.WithLabelValues("get", "success").Inc()
+		return val, nil
+	}
+	s.pipelineMu.Unlock()
+
 	stored, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
 	if err == redis.Nil {
 		observability.SMSTStoreOperations.WithLabelValues("get", "not_found").Inc()
@@ -211,11 +227,13 @@ func (s *RedisMapStore) Set(key, value []byte) error {
 	// Check if we're in pipeline mode
 	s.pipelineMu.Lock()
 	if s.pipelineEnabled {
-		// Buffer the operation instead of executing immediately.
-		// Make a copy of value to avoid memory aliasing issues.
-		valueCopy := make([]byte, len(value))
-		copy(valueCopy, value)
-		s.pipelineBuffer[field] = valueCopy
+		// Buffer the operation instead of executing immediately. The store
+		// takes ownership of value, uncopied: the smt library is the only
+		// caller, it encodes every node into a fresh slice and never touches
+		// it after Set. A copy here doubled every big relay (a 1 MiB leaf
+		// encodes to a 1 MiB node) for as long as the batch waited for its
+		// HSET.
+		s.pipelineBuffer[field] = value
 		// If the field was previously marked for deletion (unlikely — SMT
 		// node digests are content-addressed — but possible on hash reuse),
 		// un-orphan it so the pending HDEL doesn't wipe the value we just

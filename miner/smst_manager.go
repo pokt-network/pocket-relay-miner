@@ -875,9 +875,10 @@ func (m *RedisSMSTManager) CommitTree(ctx context.Context, sessionID string) (re
 	return true, m.commitLocked(sessionID, tree)
 }
 
-// commitLocked writes the tree's dirty nodes to Redis, then drops the in-memory
-// value of every leaf that write persisted. With nothing changed since the last
-// commit it sends nothing. The caller holds tree.mu.
+// commitLocked hands the tree's dirty nodes to the store, drops the in-memory
+// value of every leaf it handed over, and then writes the nodes to Redis. With
+// nothing changed since the last commit it sends nothing. The caller holds
+// tree.mu.
 //
 // Commit always runs inside BeginPipeline: it deletes orphaned nodes once it has
 // written the new ones, and outside a pipeline RedisMapStore.Delete would HDEL
@@ -898,21 +899,13 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 		return fmt.Errorf("%w: %w", ErrSMSTCommitFailed, err)
 	}
 
-	// Flush buffered operations to Redis
-	// NOTE: FlushPipeline errors are Redis errors and should be retryable.
-	// We wrap with ErrSMSTCommitFailed so it's classified as permanent if not a Redis error.
-	if redisStore, ok := tree.store.(*RedisMapStore); ok {
-		if err := redisStore.FlushPipeline(); err != nil {
-			// Double %w so IsRetryableError can reach the underlying
-			// net.Error / Redis error through the sentinel wrapper.
-			return fmt.Errorf("%w: flush pipeline: %w", ErrSMSTCommitFailed, err)
-		}
-	}
-
-	// Drop the in-memory value of every leaf FlushPipeline just persisted:
-	// with a nil value hasher a leaf holds the raw relay bytes, and Commit
-	// already wrote those same bytes to the node store keyed by the leaf's
-	// digest, so keeping them resident too is a redundant copy. The
+	// Drop the in-memory value of every leaf Commit just handed to the store,
+	// BEFORE the flush: with a nil value hasher a leaf holds the raw relay
+	// bytes, and the node Commit encoded for it already carries those same
+	// bytes, so keeping both resident until the HSET returned held every big
+	// relay twice through the write. From here the buffered node is the only
+	// copy, and RedisMapStore.Get reads it from the buffer until a flush
+	// writes it -- including after a failed flush, whose buffer is kept. The
 	// compactor lives only on the concrete *smt.SMST (embedded via *SMT),
 	// not on the smt.SparseMerkleSumTrie interface, so this is a type
 	// assertion against the concrete capability rather than an interface
@@ -929,14 +922,14 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 	// disappear without touching the smt library; its negative branch is loud.
 	//
 	// A panicking compaction is deliberately NOT propagated as an error here:
-	// by this point the relay is already durable in both the trie and Redis
-	// (Update + Commit + FlushPipeline all succeeded above), so returning an
-	// error would report an already-successful write as failed, and the caller
-	// would retry or drop a relay that was never at risk. CompactPersistedLeaves
-	// returns no error, so a recovered panic is its only failure: runSMSTSafely
-	// logs it once and counts it in SMSTPanicsRecovered{supplier,"compact"},
-	// and the tree stops being compacted (see compactionDisabled), which costs
-	// that session its memory saving, not its relays.
+	// by this point Commit has handed every node to the store, which keeps it
+	// until a flush writes it, so returning an error would report a write that
+	// is not at risk as failed, and the caller would retry or drop the relay.
+	// CompactPersistedLeaves returns no error, so a recovered panic is its only
+	// failure: runSMSTSafely logs it once and counts it in
+	// SMSTPanicsRecovered{supplier,"compact"}, and the tree stops being
+	// compacted (see compactionDisabled), which costs that session its memory
+	// saving, not its relays.
 	if compactor, ok := tree.trie.(leafCompactor); ok {
 		if !tree.compactionDisabled {
 			var compactedLeaves int
@@ -959,6 +952,17 @@ func (m *RedisSMSTManager) commitLocked(sessionID string, tree *redisSMST) error
 		m.logger.Error().
 			Str(logging.FieldSessionID, sessionID).
 			Msg("SMST tree does not satisfy leafCompactor -- something wraps the trie and hides CompactPersistedLeaves; leaves will never be compacted for this session")
+	}
+
+	// Flush buffered operations to Redis
+	// NOTE: FlushPipeline errors are Redis errors and should be retryable.
+	// We wrap with ErrSMSTCommitFailed so it's classified as permanent if not a Redis error.
+	if redisStore, ok := tree.store.(*RedisMapStore); ok {
+		if err := redisStore.FlushPipeline(); err != nil {
+			// Double %w so IsRetryableError can reach the underlying
+			// net.Error / Redis error through the sentinel wrapper.
+			return fmt.Errorf("%w: flush pipeline: %w", ErrSMSTCommitFailed, err)
+		}
 	}
 
 	// Full write path (Update + Commit + FlushPipeline) succeeded end-to-
