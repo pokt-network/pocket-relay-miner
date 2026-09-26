@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -340,4 +341,136 @@ func TestStoreHealth_BothGatesCloseTogetherAndTheMinerReopensFirst(t *testing.T)
 	require.Equal(t, uint64(2<<30), storeReopenAt(StoreGateAdmission, maxmemory))
 	require.Equal(t, uint64(1536*mib), storeReopenAt(StoreGateIngestion, maxmemory))
 	require.Equal(t, 128*mib+64*mib, storeReopenAt(StoreGateIngestion, 1024*mib), "a small maxmemory keeps the proportions")
+}
+
+func TestStoreVersionRefusal_Table(t *testing.T) {
+	cases := []struct {
+		version string
+		fork    string
+		accept  bool
+		// quote must appear in the refusal: the operator is told what was read.
+		quote string
+	}{
+		{version: "8.10.0", accept: true},
+		{version: "8.10.1", accept: true},
+		{version: "8.10", accept: true},
+		{version: "8.11.2", accept: true},
+		{version: "9.0.0", accept: true},
+		{version: "9.0", accept: true},
+		{version: "10.1.0", accept: true},
+		// "8.9.9" > "8.10.0" as strings: the row a string comparison gets wrong.
+		{version: "8.9.9", quote: "8.9.9"},
+		{version: "8.9", quote: "8.9"},
+		{version: "8.2.1", quote: "8.2.1"},
+		{version: "7.2.4", quote: "7.2.4"},
+		{version: "7.9.227", quote: "7.9.227"},
+		{version: "6.2.14", quote: "6.2.14"},
+		{version: "8.10.0-rc1", quote: "8.10.0-rc1"},
+		{version: "", quote: `""`},
+		{version: "abc", quote: "abc"},
+		{version: "v8.10", quote: "v8.10"},
+		{version: "7.2.4", fork: "valkey_version 8.1.0", quote: "valkey_version 8.1.0"},
+	}
+	// One subtest per row, so every row runs and a wrong comparison reports
+	// each row it gets wrong, not only the first.
+	for _, tc := range cases {
+		t.Run(tc.version+"|"+tc.fork, func(t *testing.T) {
+			err := storeVersionRefusal(tc.version, tc.fork)
+			if tc.accept {
+				require.NoError(t, err, "LINK version-gate: redis_version %q is supported", tc.version)
+				return
+			}
+			require.Error(t, err, "LINK version-gate: redis_version %q (fork %q) must be refused", tc.version, tc.fork)
+			require.ErrorContains(t, err, tc.quote, "the refusal quotes what it read")
+			require.ErrorContains(t, err, "8.10", "the refusal says which version to run")
+		})
+	}
+}
+
+// A real INFO reply carries both sections, and lines such as redis_build_id or
+// executable that hold colons of their own.
+func TestStoreHealth_ParsesInfoServerAndMemory(t *testing.T) {
+	const reply = "# Server\r\nredis_version:8.10.1\r\nredis_git_sha1:00000000\r\nredis_build_id:9a1b2c3d4e5f\r\n" +
+		"redis_mode:standalone\r\nexecutable:/usr/local/bin/redis-server\r\ngcc_version:14.2.0\r\n\r\n" +
+		"# Memory\r\nused_memory:1234\r\nmaxmemory:9663676416\r\nmaxmemory_policy:noeviction\r\n"
+	s, ok := parseStoreInfo(reply)
+	require.True(t, ok)
+	require.Equal(t, storeSample{used: 1234, maxmemory: 9663676416, policy: "noeviction", version: "8.10.1"}, s)
+
+	s, ok = parseStoreInfo("# Server\r\nredis_version:7.2.4\r\nvalkey_version:8.1.0\r\n# Memory\r\nused_memory:1\r\nmaxmemory:2\r\nmaxmemory_policy:noeviction\r\n")
+	require.True(t, ok)
+	require.Equal(t, "7.2.4", s.version)
+	require.Equal(t, "valkey_version 8.1.0", s.fork, "a fork is named, so the refusal does not tell a Valkey operator to upgrade Redis 7.2.4")
+
+	s, ok = parseStoreInfo("# Memory\r\nused_memory:1\r\nmaxmemory:2\r\nmaxmemory_policy:noeviction\r\n")
+	require.True(t, ok, "a reply without redis_version is still a sample: the server answered")
+	require.Empty(t, s.version, "and apply refuses it, because the version is empty")
+}
+
+// A sample from an unsupported server closes the store as misconfigured even
+// after startup -- a Redis that was not answering when the process started, or
+// one replaced behind the same address -- and only a supported one reopens it.
+func TestStoreHealth_AnOldServerClosesTheStoreAfterStartup(t *testing.T) {
+	const component, maxmemory = "test_old_version", 4096 * mib
+	h := NewStoreHealth(zerolog.Nop(), nil, component, StoreGateAdmission)
+	good := storeSample{used: 512 * mib, maxmemory: maxmemory, policy: storeEvictionPolicy, version: "8.10.1"}
+	require.NoError(t, h.apply(good))
+	require.True(t, h.Operable(), "premise: a supported server with room is open")
+
+	old := good
+	old.version = "7.2.4"
+	before := transitions(component, "closed", StoreReasonMisconfigured)
+	require.ErrorContains(t, h.apply(old), "7.2.4")
+	require.False(t, h.Operable(), "LINK version-gate-observe: an old server closes the store")
+	require.Equal(t, before+1, transitions(component, "closed", StoreReasonMisconfigured),
+		"LINK version-gate-observe: closed as misconfigured, not as full")
+	require.Equal(t, -1.0, testutil.ToFloat64(storeFreeBytes.WithLabelValues(component)))
+
+	require.NoError(t, h.apply(good))
+	require.True(t, h.Operable(), "a supported server with room reopens it")
+}
+
+// infoVersionRewriter rewrites redis_version in every INFO reply, and nothing
+// else, so the real server can play an old one.
+type infoVersionRewriter struct {
+	to        string
+	rewritten atomic.Int64
+}
+
+var redisVersionLine = regexp.MustCompile(`redis_version:[^\r\n]*`)
+
+func (f *infoVersionRewriter) DialHook(next goredis.DialHook) goredis.DialHook { return next }
+
+func (f *infoVersionRewriter) ProcessHook(next goredis.ProcessHook) goredis.ProcessHook {
+	return func(ctx context.Context, cmd goredis.Cmder) error {
+		err := next(ctx, cmd)
+		if sc, ok := cmd.(*goredis.StringCmd); ok && cmd.Name() == "info" && err == nil {
+			sc.SetVal(redisVersionLine.ReplaceAllString(sc.Val(), "redis_version:"+f.to))
+			f.rewritten.Add(1)
+		}
+		return err
+	}
+}
+
+func (f *infoVersionRewriter) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis.ProcessPipelineHook {
+	return next
+}
+
+// The real path: Start reads the version from a real INFO reply and refuses an
+// old server BEFORE its memory configuration. The shared test server has no
+// maxmemory, so with the version check gone this test reads "maxmemory is 0".
+func TestStoreHealth_StartRefusesAnOldServer(t *testing.T) {
+	const component = "test_start_old"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	client := testredis.Client(t)
+	rw := &infoVersionRewriter{to: "7.2.4"}
+	client.AddHook(rw)
+	h := NewStoreHealth(zerolog.Nop(), client, component, StoreGateAdmission)
+
+	err := h.Start(ctx)
+	require.Positive(t, rw.rewritten.Load(), "premise: Start's INFO went through the rewriter")
+	require.ErrorContains(t, err, "redis_version is 7.2.4",
+		"LINK version-gate-start: an old server stops the process, and the refusal names the version")
+	require.NotContains(t, err.Error(), "maxmemory", "the version is the root cause and is reported first")
 }

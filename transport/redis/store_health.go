@@ -8,7 +8,7 @@ package redis
 // refused with "OOM command not allowed" closes the store at once, whatever the
 // last sample said. PING is not a write and is not refused under maxmemory
 // (measured, Redis 8.10.1), which is why a heartbeat cannot stand in for it. The
-// other signal is INFO memory, sampled every second, which closes the store BEFORE
+// other signal is INFO, sampled every second, which closes the store BEFORE
 // Redis starts refusing, while there is still room for the writes that must not
 // stop (claims, proofs, deletes), and which is the only thing that reopens it.
 //
@@ -25,13 +25,14 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/hashicorp/go-version"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
 const (
-	// storeHealthPollInterval is how often INFO memory is sampled.
+	// storeHealthPollInterval is how often INFO is sampled.
 	storeHealthPollInterval = time.Second
 	// storeHealthSampleMaxAge is how old the last successful sample may be before
 	// the store is treated as not operable.
@@ -190,10 +191,11 @@ func (h *StoreHealth) view() StoreGateView {
 	return h.Gate(h.defaultGate)
 }
 
-// Start samples INFO memory every storeHealthPollInterval until ctx ends. The
+// Start samples INFO every storeHealthPollInterval until ctx ends. The
 // first sample is taken before it returns, and it decides whether this process
 // runs at all: a store that ANSWERED with a configuration this miner cannot run
-// on (see storeConfigRefusal) returns an error, and the caller stops.
+// on (see storeVersionRefusal and storeConfigRefusal) returns an error, and the
+// caller stops.
 //
 // A store that did not answer is not an error. Its gates are closed by the
 // sample's own age, and a Redis that is slow to accept connections is a state
@@ -235,41 +237,79 @@ func (h *StoreHealth) Start(ctx context.Context) error {
 func (h *StoreHealth) preflight(ctx context.Context) error {
 	sampleCtx, cancel := context.WithTimeout(ctx, storeHealthSampleMaxAge)
 	defer cancel()
-	info, err := h.client.Info(sampleCtx, "memory").Result()
+	info, err := h.sample(sampleCtx)
 	if err != nil {
 		h.closeAll(StoreReasonSampleStale)
 		h.logger.Error().Err(err).Str("process", h.component).
-			Msg("redis did not answer INFO memory at startup: the store stays closed until it does")
+			Msg("redis did not answer INFO at startup: the store stays closed until it does")
 		return nil
 	}
-	used, maxmemory, policy, ok := parseStoreMemory(info)
+	s, ok := parseStoreInfo(info)
 	if !ok {
 		h.closeAll(StoreReasonSampleStale)
 		h.logger.Error().Str("process", h.component).
-			Msg("redis INFO memory has no used_memory, maxmemory or maxmemory_policy: the store stays closed")
+			Msg("redis INFO has no used_memory, maxmemory or maxmemory_policy: the store stays closed")
 		return nil
 	}
 	// Applied before the refusal is returned, so what the metrics show is the
 	// sample the process refused to run on.
-	h.observe(used, maxmemory, policy)
-	return storeConfigRefusal(maxmemory, policy)
+	return h.apply(s)
+}
+
+// sample reads INFO with no section argument. The default reply carries both
+// the Server and the Memory sections on every Redis version, while INFO with
+// several sections is a newer syntax: an old server would answer it with an
+// error, which preflight reads as "did not answer" -- and the process would
+// start without ever learning the version it has to refuse.
+//
+// With a cluster client INFO answers from one node; the supported topology is
+// one Redis.
+func (h *StoreHealth) sample(ctx context.Context) (string, error) {
+	info, err := h.client.Info(ctx).Result()
+	if err != nil {
+		return "", fmt.Errorf("redis INFO: %w", err)
+	}
+	return info, nil
+}
+
+// apply checks the server's version, then applies the memory sample. A version
+// this release does not run on closes every gate as misconfigured, the same way
+// a store without a memory limit does, and stays closed until a sample from a
+// supported server arrives. It returns why the store cannot be run on, or nil.
+//
+// The version is checked on every sample, not only at startup: a Redis that
+// had not answered when the process started, or one replaced by an older
+// server behind the same address, would otherwise never be looked at again.
+func (h *StoreHealth) apply(s storeSample) error {
+	if err := storeVersionRefusal(s.version, s.fork); err != nil {
+		h.mu.Lock()
+		h.lastSample = h.now()
+		h.lastUsed, h.lastMax = s.used, s.maxmemory
+		h.mu.Unlock()
+		storeFreeBytes.WithLabelValues(h.component).Set(-1)
+		h.closeAll(StoreReasonMisconfigured)
+		return err
+	}
+	h.observe(s.used, s.maxmemory, s.policy)
+	return storeConfigRefusal(s.maxmemory, s.policy)
 }
 
 // poll takes one sample and applies it.
 func (h *StoreHealth) poll(ctx context.Context) {
 	sampleCtx, cancel := context.WithTimeout(ctx, storeHealthSampleMaxAge)
 	defer cancel()
-	info, err := h.client.Info(sampleCtx, "memory").Result()
+	info, err := h.sample(sampleCtx)
 	if err != nil {
 		h.observeFailure()
 		return
 	}
-	used, maxmemory, policy, ok := parseStoreMemory(info)
+	s, ok := parseStoreInfo(info)
 	if !ok {
 		h.observeFailure()
 		return
 	}
-	h.observe(used, maxmemory, policy)
+	// The refusal is already carried by the closed gates and their reason.
+	_ = h.apply(s)
 }
 
 // observeFailure closes every gate when the last good sample is too old.
@@ -287,6 +327,39 @@ func (h *StoreHealth) observeFailure() {
 // proved from, the relays not yet in a tree -- is not a cache: a key it drops
 // is a proof this supplier can no longer produce.
 const storeEvictionPolicy = "noeviction"
+
+// storeMinRedisVersion is the oldest Redis this release runs on. 8.10 is the
+// version it was built, tested and measured on (8.10.1); the stream consumer
+// releases what it cannot process with XNACK, which Redis before 8.8 does not have.
+var storeMinRedisVersion = version.Must(version.NewVersion("8.10.0"))
+
+// storeForkVersionKeys are INFO fields that name a Redis-compatible server which
+// is not Redis. Such a server reports a compatibility redis_version of its own
+// choosing, so naming the fork is the only message that leads the operator
+// somewhere. Valkey's field is valkey_version; others are not listed because
+// their field names were not verified against a live server.
+var storeForkVersionKeys = []string{"valkey_version"}
+
+// storeVersionRefusal reports why a server's version cannot be run on, or nil
+// when it can. Anything that does not read as a plain dotted version -- empty,
+// absent, "v8.10", a pre-release -- is refused: this process does not start on
+// a server it cannot identify.
+func storeVersionRefusal(redisVersion, fork string) error {
+	if fork != "" {
+		return fmt.Errorf("redis INFO reports %s (redis_version %q): this server is not Redis; run Redis %s or newer", fork, redisVersion, storeMinRedisVersion.Original())
+	}
+	if redisVersion == "" || redisVersion[0] < '0' || redisVersion[0] > '9' {
+		return fmt.Errorf("redis INFO reports redis_version %q, which is not a version this release can check: run Redis %s or newer", redisVersion, storeMinRedisVersion.Original())
+	}
+	v, err := version.NewVersion(redisVersion)
+	if err != nil {
+		return fmt.Errorf("redis INFO reports redis_version %q, which is not a version this release can check (%w): run Redis %s or newer", redisVersion, err, storeMinRedisVersion.Original())
+	}
+	if v.LessThan(storeMinRedisVersion) {
+		return fmt.Errorf("redis_version is %s: this release runs on Redis %s or newer; upgrade Redis", redisVersion, storeMinRedisVersion.Original())
+	}
+	return nil
+}
 
 // storeConfigRefusal reports why a store's memory configuration cannot be run
 // on, or nil when it can. It names the value read, so the operator does not
@@ -416,9 +489,49 @@ func (h *StoreHealth) transition(gate StoreGate, operable bool, reason string) {
 	}
 }
 
+// storeSample is one INFO reply, as StoreHealth reads it.
+type storeSample struct {
+	used, maxmemory uint64
+	policy          string
+	// version is redis_version, "" when the reply has none.
+	version string
+	// fork is "<field> <value>" for the first storeForkVersionKeys field the
+	// reply carries, "" when it carries none.
+	fork string
+}
+
+// parseStoreInfo reads a sample from an INFO reply. A reply without
+// used_memory, maxmemory and maxmemory_policy is not a sample: the caller
+// treats it as a store that did not answer. A missing redis_version is not a
+// missing sample: the server answered, and apply refuses what it cannot name.
+func parseStoreInfo(info string) (storeSample, bool) {
+	var s storeSample
+	used, maxmemory, policy, ok := parseStoreMemory(info)
+	if !ok {
+		return s, false
+	}
+	s.used, s.maxmemory, s.policy = used, maxmemory, policy
+	for _, line := range strings.Split(info, "\n") {
+		key, value, found := strings.Cut(strings.TrimSpace(line), ":")
+		if !found {
+			continue
+		}
+		if key == "redis_version" {
+			s.version = value
+			continue
+		}
+		for _, fk := range storeForkVersionKeys {
+			if key == fk && s.fork == "" {
+				s.fork = fk + " " + value
+			}
+		}
+	}
+	return s, true
+}
+
 // parseStoreMemory reads used_memory, maxmemory and maxmemory_policy from an
-// INFO memory reply. A reply without all three is not a sample: the caller
-// treats it as a store that did not answer.
+// INFO reply. A reply without all three is not a sample: the caller treats it
+// as a store that did not answer.
 func parseStoreMemory(info string) (used, maxmemory uint64, policy string, ok bool) {
 	var haveUsed, haveMax, havePolicy bool
 	for _, line := range strings.Split(info, "\n") {

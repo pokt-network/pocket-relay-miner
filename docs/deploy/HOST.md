@@ -74,10 +74,11 @@ sudo install -d -m 0750 -o root -g pocket-relay-miner /etc/pocket-relay-miner
 
 ## Step 2: Redis 8.10
 
-8.10 is the supported Redis version. Redis must load
+Redis 8.10 or newer is required. Redis must load
 [config.redis.example.conf](../../config.redis.example.conf): both binaries
-refuse to start when `maxmemory` is 0 or `maxmemory-policy` is anything other
-than `noeviction`. The version itself is not checked at startup.
+refuse to start when `redis_version` is below 8.10, when `maxmemory` is 0, or
+when `maxmemory-policy` is anything other than `noeviction`. `validate` does not
+connect to Redis; these are checked when the process starts.
 
 Distribution packages may ship an older Redis; check before installing. Either
 use the Redis project's packages for 8.10, or run the official image on the

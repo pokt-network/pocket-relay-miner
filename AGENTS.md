@@ -34,10 +34,11 @@ are not checked, and breaking them is unsupported.
 2. **Same version for relayer and miner**: image
    `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0` for both, or the binary of
    the same tag. Mixed versions are not supported. Never use a moving tag.
-3. **Redis with `maxmemory` set and `maxmemory-policy noeviction`.** Both
-   binaries refuse to start when `maxmemory` is 0 or the policy is anything
-   other than `noeviction`. 8.10 is the supported version; the version itself
-   is not checked at startup. Use
+3. **Redis 8.10 or newer, with `maxmemory` set and `maxmemory-policy
+   noeviction`.** Both binaries refuse to start when `redis_version` is below
+   8.10, when `maxmemory` is 0, or when the policy is anything other than
+   `noeviction`. `validate` does not connect to Redis: these are checked when
+   the process starts. Use
    [config.redis.example.conf](config.redis.example.conf).
 4. **Memory and CPU limits**: set `GOMEMLIMIT` and `GOMAXPROCS`, or give each
    process a container (or systemd) memory and CPU limit. Without either, each

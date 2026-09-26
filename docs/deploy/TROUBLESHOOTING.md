@@ -90,10 +90,16 @@ Expect `noeviction` and a number above 0. In compose, run them as
 `redis.conf`: the file must be passed to `redis-server` as its first argument,
 as the compose example does.
 
-**Redis version**: 8.10 is the supported version; v0.1.0 was built, tested and
-measured on 8.10.1. The binaries do not check the version at startup: what stops
-them is `maxmemory` 0 or a policy other than `noeviction`.
-Check with `redis-cli INFO server | grep redis_version`.
+**Redis version**: both binaries refuse to start on Redis older than 8.10;
+v0.1.0 was built, tested and measured on 8.10.1. The refusal quotes what Redis
+reported, for example `redis_version is 7.2.4: this release runs on Redis 8.10.0
+or newer; upgrade Redis`. A Redis-compatible server that is not Redis (Valkey)
+is refused by name, and so is a version string that cannot be read. Managed
+offerings still on 7.x are out. Check with
+`redis-cli INFO server | grep redis_version`. The check runs on every sample,
+not only at startup: if Redis is replaced by an older server while the process
+runs, admission closes with reason `misconfigured` until a supported one
+answers. `validate` does not connect to Redis and does not check any of this.
 
 ## Miner does not start
 
