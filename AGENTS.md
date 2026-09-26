@@ -21,8 +21,10 @@ the claim and the proof from the served relays and submits them to the chain.
 | troubleshoot a deployment | [docs/deploy/TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md) |
 | develop this repository | [CONTRIBUTING.md](CONTRIBUTING.md), then [CLAUDE.md](CLAUDE.md) |
 
-Kubernetes is not supported in v0.1.0. The Tilt setup in `tilt/` is the
-developers' local environment, a reference only, not a deployment path.
+v0.1.0 ships no Kubernetes example or runbook. The Tilt setup in `tilt/` runs
+the relayer, the miner and Redis on a local kind cluster for development: it is
+a starting point for your own manifests, not a production config. The
+invariants below hold on any platform.
 
 ## Invariants
 

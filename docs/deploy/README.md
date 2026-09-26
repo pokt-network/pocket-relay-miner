@@ -8,10 +8,12 @@ Start here, pick 1 path, and follow its runbook from the first step.
 |---|---|---|---|
 | Docker Compose | you want the fastest start, or a full local chain to try it on | [DOCKER_COMPOSE.md](DOCKER_COMPOSE.md) | end to end on a local chain: relay served, claim and proof on chain, reward settled |
 | Host (binary + systemd) | you run services on VMs or bare metal without containers | [HOST.md](HOST.md) | configs and units checked; not verified end to end under systemd |
-| Kubernetes | | not supported in v0.1.0 | |
+| Kubernetes | you already run Kubernetes | no example in v0.1.0 | not verified |
 
-The Tilt setup in `tilt/` is the developers' local environment. It is a
-reference for how the pieces fit, not a supported deployment.
+v0.1.0 ships no Kubernetes example or runbook. The Tilt setup in `tilt/` runs
+the relayer, the miner and Redis on a local kind cluster for development: it is
+a starting point for your own manifests, not a production config. The
+[invariants](../../AGENTS.md#invariants) hold on any platform.
 
 ## How the pieces fit
 

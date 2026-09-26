@@ -1,23 +1,15 @@
 # CLAUDE.md
 
-This file tells Claude Code (and any human reading along) how to work in this
-repository. It has two audiences; read the section that is yours.
+@AGENTS.md
 
-## If you are here to deploy or operate
+AGENTS.md, imported above, is the entry point every coding agent reads:
+Claude Code through this import, the tools that read AGENTS.md on their own
+directly. It routes a deployer or an operator to the deploy guides and lists
+the invariants. The rest of this file is for Claude Code working on the code.
 
-You do not need the rest of this file. Start here:
-
-- [AGENTS.md](AGENTS.md) -- the entry point for an agent deploying or operating
-  the relayer and the miner.
-- [docs/deploy/README.md](docs/deploy/README.md) -- the deployment guide.
-- [examples/docker-compose](examples/docker-compose) -- a runnable example.
-
-The minimum you must know:
-
-- **Kubernetes is not a supported deployment target in v0.1.0.**
 - **Tilt (`Tiltfile`, `tilt/`) is the DEVELOPMENT environment**, a local kind
-  cluster that rebuilds on every file change. It is not a deployment path and
-  its configs are not production configs.
+  cluster that rebuilds on every file change. It is a starting point for anyone
+  writing their own Kubernetes manifests, not a production config.
 
 ## If you develop this repository
 

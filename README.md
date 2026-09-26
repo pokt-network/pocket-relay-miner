@@ -47,7 +47,7 @@ and the miner on the same version.
 |---|---|
 | Docker Compose | [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md): a full local chain first, then your own node |
 | Host (binary + systemd) | [docs/deploy/HOST.md](docs/deploy/HOST.md) |
-| Kubernetes | not supported in v0.1.0 |
+| Kubernetes | no example in v0.1.0; `tilt/` runs the stack on a local kind cluster and is a starting point for your own manifests |
 
 The image is `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0`. What a deployment
 must hold (Redis 8.10 with `maxmemory` and `noeviction`, memory and CPU limits,
