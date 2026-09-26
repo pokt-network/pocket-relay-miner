@@ -17,15 +17,14 @@ func main() {
 	rootCmd := &cobra.Command{
 		Use:   "pocket-relay-miner",
 		Short: "Pocket Network High-Availability RelayMiner",
-		Long: `High-Availability (HA) RelayMiner for Pocket Network Shannon.
+		Long: `Relay miner for Pocket Network Shannon.
 
-The HA RelayMiner enables running multiple RelayMiner instances behind a load balancer
-with shared state via Redis. This provides:
+A deployment is one relayer, one miner and one Redis. The relayer validates,
+charges and serves relays and publishes them to Redis Streams; the miner builds
+the claim trees from those streams and submits claims and proofs. All session
+state lives in Redis.
 
-- Horizontal scaling for high throughput
-- Automatic failover for high availability
-- Shared session state across instances
-- Redis Streams for relay message coordination`,
+Start with AGENTS.md or docs/deploy/README.md in the repository.`,
 	}
 
 	// Add relayer and miner subcommands directly under root
