@@ -30,9 +30,9 @@ type Config struct {
 	// Default: true
 	Async bool `yaml:"async"`
 
-	// AsyncBufferSize is the size of the async ring buffer (in bytes).
-	// Larger buffer = more buffering capacity but more memory usage.
-	// Default: 100000 (100KB)
+	// AsyncBufferSize is the number of log messages the async ring buffer holds.
+	// A larger buffer drops fewer messages under a burst and uses more memory.
+	// Default: 100000 messages
 	AsyncBufferSize int `yaml:"async_buffer_size"`
 
 	// AsyncPollInterval is how often the async writer polls for messages (in milliseconds).

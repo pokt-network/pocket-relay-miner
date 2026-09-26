@@ -162,8 +162,8 @@ func TestRelaysServed_NoParallelPerTransportCounter(t *testing.T) {
 // TestRelaysServed_SimulatedWebSocketRelayDoesNotCount holds the isolation
 // contract on the transport that gets it by PLACEMENT rather than by structure.
 //
-// docs/SIMULATED_RELAYS.md is explicit that a simulated relay "never touches the
-// counters that measure real traffic". HTTP satisfies that structurally --
+// docs/SIMULATED_RELAYS.md is explicit that a relay, once recognised as
+// simulated, increments only the simulated-relay counters. HTTP satisfies that structurally --
 // proxy.go:903 diverts to serveSimulatedHTTP, a different function, so the real
 // counter is unreachable -- and gRPC satisfies it because its increment sits in
 // handleSendRelay and not in serveSimulatedGRPC. WebSocket has neither defence:

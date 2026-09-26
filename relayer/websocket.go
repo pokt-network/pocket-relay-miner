@@ -1390,7 +1390,8 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	//
 	// AFTER the simulated guard above and BEFORE everything below it. Both
 	// halves are load-bearing: docs/SIMULATED_RELAYS.md is explicit that a
-	// simulated relay "never touches the counters that measure real traffic",
+	// relay, once recognised as simulated, increments only the simulated-relay
+	// counters,
 	// which HTTP gets structurally (proxy.go:903 diverts to another function)
 	// and gRPC gets by placement -- so WebSocket has to get it here. And it
 	// stays ahead of the difficulty filter and of the nil-publisher return,

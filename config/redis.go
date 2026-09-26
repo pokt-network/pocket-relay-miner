@@ -25,8 +25,8 @@ type RedisConfig struct {
 	URL string `yaml:"url"`
 
 	// PoolSize is the maximum number of socket connections.
-	// Default: 20 × runtime.GOMAXPROCS (2x go-redis default for production)
-	// Set to 0 to use go-redis default (10 × GOMAXPROCS)
+	// Default (0): 50 in the miner (transport/redis.NewClient); the relayer
+	// sizes its own from its workers (WorkerSizing.RedisPoolSize).
 	PoolSize int `yaml:"pool_size,omitempty"`
 
 	// MinIdleConns is the minimum number of idle connections to maintain.
@@ -52,8 +52,7 @@ type RedisConfig struct {
 
 	// ConnMaxIdleTime is the maximum amount of time a connection can be idle.
 	// Idle connections older than this are closed.
-	// Default: 5 minutes
-	// Set to 0 to disable (connections never closed due to idle time)
+	// Default (0): the go-redis default, 30 minutes.
 	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
 
 	// Namespace configures Redis key prefixes for all data types.

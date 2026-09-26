@@ -1047,9 +1047,7 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 	//     ClaimWindowCloseOffsetBlocks +
 	//     ProofWindowOpenOffsetBlocks +
 	//     ProofWindowCloseOffsetBlocks
-	//
-	// See scripts/localonly/SERVICE-FACTOR-FORMULA.md for a worked example with
-	// current mainnet params and the reference tuning table.
+
 	numSuppliers := int64(sessionParams.NumSuppliersPerSession)
 	if numSuppliers == 0 {
 		numSuppliers = 1

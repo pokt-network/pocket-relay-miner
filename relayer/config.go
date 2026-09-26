@@ -421,8 +421,8 @@ type RedisConfig struct {
 	URL string `yaml:"url"`
 
 	// PoolSize is the maximum number of socket connections.
-	// Default: 20 × runtime.GOMAXPROCS (2x go-redis default for production)
-	// Set to 0 to use go-redis default (10 × GOMAXPROCS)
+	// Default (0): sized from the relayer's validation and publish workers,
+	// which follow GOMAXPROCS (WorkerSizing.RedisPoolSize).
 	PoolSize int `yaml:"pool_size,omitempty"`
 
 	// MinIdleConns is the minimum number of idle connections to maintain.
@@ -432,14 +432,12 @@ type RedisConfig struct {
 	MinIdleConns int `yaml:"min_idle_conns,omitempty"`
 
 	// PoolTimeout is the amount of time to wait for a connection from the pool.
-	// Default: 4 seconds
-	// Set to 0 to wait indefinitely
+	// Default (0): config.DefaultPoolTimeoutSeconds (6 seconds).
 	PoolTimeoutSeconds int `yaml:"pool_timeout_seconds,omitempty"`
 
 	// ConnMaxIdleTime is the maximum amount of time a connection can be idle.
 	// Idle connections older than this are closed.
-	// Default: 5 minutes
-	// Set to 0 to disable (connections never closed due to idle time)
+	// Default (0): the go-redis default, 30 minutes.
 	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
 
 	// BatchPublishIntervalMs sets how often the relayer writes its batch of mined
