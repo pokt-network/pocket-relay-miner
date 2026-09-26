@@ -81,7 +81,7 @@ a week later.
 Declare which hand-over governs, in the queue's header:
 
 ```
-**Handoff CANÓNICO: `HANDOFF-<date>-<r>.md`**
+**Handoff CANONICAL: `HANDOFF-<date>-<r>.md`**
 ```
 
 Then run it:
@@ -99,20 +99,20 @@ Measured 2026-08-26: 25 hand-overs had accumulated and none was ever
 overwritten, which is right. The
 cost is the inverse: which one governs used to live in a sentence a human had to
 keep rewriting. Measured on 2026-08-19, authority was SPLIT across two files —
-`HANDOFF-2026-08-19-r3.md` opens with *"Sucede a `HANDOFF-2026-08-19-r1.md`. Ese
-archivo sigue siendo válido para lo que **no** se tocó"*, so the newer one
+`HANDOFF-2026-08-19-r3.md` opens with *"Succeeds `HANDOFF-2026-08-19-r1.md`. That
+file is still valid for what was **not** touched"*, so the newer one
 governed its own changes while the pending-work list stayed in the older one.
 Nothing on disk said that; a sentence in a memory file did. One pointer, one
 file: if part of an older hand-over still governs, move that part.
 
 ## 4. Say what you did not finish, in those words
 
-Write the heading "QUÉ NO TERMINÉ" and fill it. Then, for each item, **separate
+Write the heading "NOT ACHIEVED" and fill it. Then, for each item, **separate
 the blocker from the pretext** — an environment blocker and a decision not to do
 it are different, and the reader has to be able to tell.
 
-The model, from 2026-08-26: *"No corrí L3 sobre `5ed2650`, y es la mitad de la
-vara. Bloqueante de entorno, no de código: Tilt no está corriendo."* That names
+The model, from 2026-08-26: *"I did not run L3 on `5ed2650`, and that is half
+the bar. An environment blocker, not a code one: Tilt is not running."* That names
 the gap, its size, and why — and it does not dress a choice as an obstacle.
 
 ## 5. A green gate belongs to a COMMIT, not to a branch

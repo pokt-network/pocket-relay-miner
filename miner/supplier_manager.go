@@ -2552,9 +2552,10 @@ func (m *SupplierManager) handleStreamMessage(
 		// rescue it afterwards.
 		//
 		// Losing that relay rather than risking a loop is an owner decision, not
-		// a property of the code (Jorge, 2026-09-02: "el panic debe perderse
-		// lamentablemente... o quedara vivo sin cobrar"). It is written here so
-		// it is not re-litigated and not read as something that was measured.
+		// a property of the code (Jorge, 2026-09-02: "the panic must
+		// unfortunately be lost... or it will stay alive without billing"). It
+		// is written here so it is not re-litigated and not read as something
+		// that was measured.
 		if errors.Is(processErr, ErrRelayPanicRecovered) {
 			RecordRelayLostToPanic(state.OperatorAddr, serviceID)
 			if ackErr := state.Consumer.AckMessage(ctx, msg); ackErr != nil {

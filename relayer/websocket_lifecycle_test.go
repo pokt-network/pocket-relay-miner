@@ -128,9 +128,10 @@ func newLifecycleBridge(t *testing.T, backendURL string) (*WebSocketBridge, *web
 // log, so anyone who could complete an upgrade opened a socket against the
 // operator's backend without ever sending a relay.
 //
-// Owner decision 2026-09-03: "en son de proteger el recurso valioso (backend,
-// blockchain) no hacemos el handshake al backend hasta no tener validacion del
-// supplier address, evitamos un ddos a sus backends sin relays."
+// Owner decision 2026-09-03: "in order to protect the valuable resource
+// (backend, blockchain) we don't do the handshake to the backend until we have
+// validated the supplier address, we avoid a ddos on their backends without
+// relays."
 func TestBridgeDoesNotDialTheBackendUntilAFrameEarnsIt(t *testing.T) {
 	verifyNoBridgeGoroutines(t)
 	backendURL, dials, _ := countingWSBackend(t)

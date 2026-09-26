@@ -100,10 +100,10 @@ data:
     rdbcompression yes
     rdbchecksum no
     # === MEMORY MANAGEMENT ===
-    # Sale del config (gitignored) porque un tope fijo con allkeys-lru DESALOJA
-    # en silencio: todo el estado vive aca (nodos SMST, meter, tracking), asi que
-    # un desalojo se ve como claims perdidos, no como "Redis lleno". Poner 0 para
-    # medir cuanta memoria PIDE Redis en vez de cuanta le dejamos.
+    # Comes from the config (gitignored) because a fixed cap with allkeys-lru
+    # SILENTLY EVICTS: all state lives here (SMST nodes, meter, tracking), so
+    # an eviction looks like lost claims, not like "Redis is full". Set 0 to
+    # measure how much memory Redis ASKS FOR instead of how much we grant it.
     maxmemory {maxmemory}
     maxmemory-policy {maxmemory_policy}
     # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
@@ -120,9 +120,10 @@ data:
     timeout 0
     tcp-keepalive 300
     activerehashing yes
-    # -1 apaga el slowlog: `SLOWLOG GET` devuelve vacio y se lee como "no hubo
-    # comandos lentos" sin haber mirado. Configurable para poder nombrar a Redis
-    # como cuello en vez de inferirlo del timeout del que lo llama.
+    # -1 turns off the slowlog: `SLOWLOG GET` returns empty and reads as "no
+    # slow commands happened" without ever having looked. Configurable so
+    # Redis can be named as the bottleneck instead of inferred from its
+    # caller's timeout.
     slowlog-log-slower-than {slowlog_us}
     # 128 entries were overwritten within seconds under load, which lost the
     # slow commands of the window being measured.

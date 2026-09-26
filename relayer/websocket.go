@@ -69,9 +69,9 @@ var wsMaxMessageBytes int64 = 15 * 1024 * 1024
 // wsFirstFrameWait bounds how long a connection may stay open without having
 // sent a frame that passes admission.
 //
-// TWO MINUTES, set by the owner (Jorge, 2026-09-03): "2m hardcode, no veo que ni
-// 1m sea necesario, so 2m es mas que de sobra". Hardcoded on purpose, no config
-// knob.
+// TWO MINUTES, set by the owner (Jorge, 2026-09-03): "2m hardcoded, I don't see
+// that even 1m is necessary, so 2m is more than enough". Hardcoded on purpose,
+// no config knob.
 //
 // The measurement it was decided against: PATH upgrades its CLIENT and then
 // dials the relayminer immediately (path/websockets/bridge.go:97-105), and the
@@ -1108,10 +1108,10 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	// false (see ServiceFactorClient.manifest).
 
 	// PAST THIS LINE THE FRAME HAS PASSED ADMISSION, and only now does the
-	// operator's backend get dialled. Jorge, 2026-09-03: "en son de proteger el
-	// recurso valioso (backend, blockchain) no hacemos el handshake al backend
-	// hasta no tener validacion del supplier address, evitamos un ddos a sus
-	// backends sin relays."
+	// operator's backend get dialled. Jorge, 2026-09-03: "in order to protect
+	// the valuable resource (backend, blockchain) we don't do the handshake to
+	// the backend until we have validated the supplier address, we avoid a ddos
+	// on their backends without relays."
 	//
 	// Reachable with backendConn nil only from awaitFirstFrame, on the Run
 	// goroutine, before any loop exists -- see ensureBackend.
@@ -1826,8 +1826,9 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 
 		// The v2 half of the owner rule: a handshake that NAMES a supplier is
 		// checked against the live key set before anything is upgraded or
-		// dialled. Jorge, 2026-09-03: "la primera vez lo miras y ves que lo
-		// tengas etc, si pasa ... se crea el handshake (v2)".
+		// dialled. Jorge, 2026-09-03: "the first time you look at it and see
+		// that you have it etc, if it passes ... the handshake is created
+		// (v2)".
 		//
 		// An HTTP status and not a 4xxx close code, and the difference is
 		// deliberate: this is a verdict about the ENDPOINT -- this relayer does

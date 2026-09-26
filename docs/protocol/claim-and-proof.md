@@ -1,24 +1,24 @@
-## Claim y Proof — las reglas del protocolo, y por dónde se mueve la plata
+## Claim and Proof — the protocol rules, and where the money moves
 
-Verificado contra **poktroll v0.1.35** (`go.mod:19`). Cada regla cita su fuente.
-**Sin cita, no es una regla.**
+Verified against **poktroll v0.1.35** (`go.mod:19`). Every rule cites its source.
+**Without a citation, it is not a rule.**
 
-### Regla 1 — el Claim tiene CUATRO campos, y la cantidad NO es uno de ellos
+### Rule 1 — the Claim has FOUR fields, and the amount is NOT one of them
 
 `poktroll/x/proof/types/types.pb.go`, `type Claim struct`:
 
-| campo | |
+| field | |
 |---|---|
-| `supplier_operator_address` | quién reclama |
-| `session_header` | qué sesión |
-| `root_hash` | **el root del árbol que construimos y firmamos NOSOTROS** |
-| `proof_validation_status` | ver regla 4 |
+| `supplier_operator_address` | who claims |
+| `session_header` | which session |
+| `root_hash` | **the root of the tree that WE built and signed** |
+| `proof_validation_status` | see rule 4 |
 
-No hay `num_relays`. No hay `num_compute_units`. **No hay cantidad guardada.**
+There is no `num_relays`. There is no `num_compute_units`. **No amount is stored.**
 
-### Regla 2 — la cantidad se DERIVA de nuestro root, así que la cadena no es oráculo
+### Rule 2 — the amount is DERIVED from our root, so the chain is not an oracle
 
-`poktroll/x/proof/types/claim.go:20-22` y `:32-34`:
+`poktroll/x/proof/types/claim.go:20-22` and `:32-34`:
 
 ```go
 func (claim *Claim) GetNumClaimedComputeUnits() (uint64, error) {
@@ -29,95 +29,96 @@ func (claim *Claim) GetNumRelays() (uint64, error) {
 }
 ```
 
-`num_relays` es el **Count** y las unidades reclamadas son el **Sum** del mismo
-root que enviamos. La cadena **lee lo que le dimos**; no cuenta relays por su
-cuenta.
+`num_relays` is the **Count** and the claimed units are the **Sum** of the same root
+we send. The chain **reads what we gave it**; it does not count relays on its own.
 
-**Consecuencias, y son las que más se confunden:**
+**Consequences, and they are the ones most often confused:**
 
-- **Comparar "relays servidos" contra `num_relays` de la cadena NO valida a la
-  cadena: valida a nuestro árbol contra sí mismo.** Si el árbol pierde una hoja,
-  la cadena reporta el número perdido sin notar nada.
-- **El subreclamo es invisible por diseño.** Reclamar de menos produce un claim
-  perfectamente válido.
-- La comparación honesta contra la cadena es **hojas del SMST vs `num_relays`**.
+- **Comparing "relays served" against the chain's `num_relays` does NOT validate the
+  chain: it validates our tree against itself.** If the tree loses a leaf, the chain
+  reports the lost number without noticing anything.
+- **Underclaiming is invisible by design.** Claiming too little produces a perfectly
+  valid claim.
+- The honest comparison against the chain is **SMST leaves vs `num_relays`**.
 
-### Regla 3 — no todo relay entra al árbol, y eso NO es pérdida
+### Rule 3 — not every relay enters the tree, and that is NOT a loss
 
-Comentario textual en `claim.go:24-31`: *"not every Relay (Request, Response) pair
+Verbatim comment in `claim.go:24-31`: *"not every Relay (Request, Response) pair
 in the session is inserted into the tree. The relay hash has to have matched the
-difficulty for that service"*, y explica el porqué: *"controlled by the Relay
+difficulty for that service"*, and it explains why: *"controlled by the Relay
 Mining difficulty to reduce co-processor hardware requirements and enable scaling
 to tens of billions of relays"*.
 
-**Consecuencia**: servidos > hojas es lo NORMAL cuando la dificultad no es la
-base. Son **tres conteos distintos** —servidos, hojas del árbol, `num_relays`— y
-sólo los dos últimos deben coincidir.
+**Consequence**: served > leaves is NORMAL when the difficulty is not the base one.
+There are **three different counts** —served, tree leaves, `num_relays`— and only
+the last two must match.
 
-Por eso el evento trae `num_relays` **y** `num_estimated_relays`, y
-`num_claimed_compute_units` **y** `num_estimated_compute_units`
-(`event.pb.go`, `EventClaimUpdated`): lo reclamado es lo que entró al árbol; lo
-estimado es lo que ese árbol representa dada la dificultad.
+That is why the event carries `num_relays` **and** `num_estimated_relays`, and
+`num_claimed_compute_units` **and** `num_estimated_compute_units`
+(`event.pb.go`, `EventClaimUpdated`): what is claimed is what entered the tree; what
+is estimated is what that tree represents given the difficulty.
 
-### Regla 4 — dos enumerados distintos, y se confunden
+### Rule 4 — two different enums, and they get confused
 
 `poktroll/x/proof/types/types.pb.go`:
 
-- **`ClaimProofStage`**: `CLAIMED`, `PROVEN`, `SETTLED`, `EXPIRED` — dónde está el
-  claim en su ciclo.
-- **`ClaimProofStatus`**: `PENDING_VALIDATION`, `VALIDATED`, `INVALID` — qué se
-  concluyó sobre su proof.
+- **`ClaimProofStage`**: `CLAIMED`, `PROVEN`, `SETTLED`, `EXPIRED` — where the claim
+  is in its lifecycle.
+- **`ClaimProofStatus`**: `PENDING_VALIDATION`, `VALIDATED`, `INVALID` — what was
+  concluded about its proof.
 
-El campo que vive EN el claim es `proof_validation_status` (el segundo).
+The field that lives IN the claim is `proof_validation_status` (the second one).
 
-### Regla 5 — los CINCO eventos del módulo proof
+### Rule 5 — the FIVE events of the proof module
 
 `poktroll/x/proof/types/event.pb.go`: `EventClaimCreated`, `EventClaimUpdated`,
 `EventProofSubmitted`, `EventProofUpdated`, `EventProofValidityChecked`.
 
-`EventClaimUpdated` lleva: `num_relays`, `num_claimed_compute_units`,
+`EventClaimUpdated` carries: `num_relays`, `num_claimed_compute_units`,
 `num_estimated_compute_units`, `num_estimated_relays`, `claimed_upokt`,
 `service_id`, `application_address`, `session_end_block_height`,
 `supplier_operator_address`, `claim_proof_status_int`.
 
-**`claimed_upokt` está en el evento**: la plata reclamada se puede leer del evento
-sin recalcularla.
+**`claimed_upokt` is in the event**: the claimed money can be read from the event
+without recomputing it.
 
-### Regla 6 — el proof no siempre se exige, y hay TRES parámetros que lo deciden
+### Rule 6 — the proof is not always required, and THREE parameters decide it
 
 `poktroll/x/proof/types/params.pb.go`: `ProofRequestProbability`,
 `ProofRequirementThreshold`, `ProofMissingPenalty`.
 
-O sea: por encima de un umbral el proof se exige siempre; por debajo se sortea con
-una probabilidad. **Que un claim no tenga proof no implica que esté mal.**
+That is: above a threshold the proof is always required; below it, it is required
+with a given probability. **A claim without a proof is not necessarily wrong.**
 
-### Regla 7 — el que liquida es el módulo tokenomics, y ahí está el slashing
+### Rule 7 — the settler is the tokenomics module, and that is where slashing is
 
-`poktroll/x/tokenomics/keeper/settle_pending_claims.go:296` llama
-`slashSupplierStake` para el resultado EXPIRADO, y `:720-728` es la función.
+`poktroll/x/tokenomics/keeper/settle_pending_claims.go:296` calls
+`slashSupplierStake` for the EXPIRED outcome, and `:720-728` is the function.
 
-**Consecuencia**: el castigo por un proof faltante o inválido **no** sale del
-módulo proof: sale de la liquidación. Un claim expirado es el que cuesta stake.
+**Consequence**: the penalty for a missing or invalid proof does **not** come from
+the proof module: it comes from settlement. An expired claim is the one that costs
+stake.
 
-### Lo que no se puede leer del código
+### What cannot be read from the code
 
-Los valores de mainnet de `ProofRequestProbability`, `ProofRequirementThreshold`
-y `ProofMissingPenalty`. Son estado de la cadena.
+The mainnet values of `ProofRequestProbability`, `ProofRequirementThreshold`
+and `ProofMissingPenalty`. They are chain state.
 
-### Regla 8 — el Proof es EFÍMERO: se valida y se borra en el mismo EndBlocker
+### Rule 8 — the Proof is EPHEMERAL: it is validated and deleted in the same EndBlocker
 
-`poktroll/x/proof/keeper/validate_proofs.go:46` es `ValidateSubmittedProofs`, que
-corre en contexto de EndBlocker (lo dice su propio comentario sobre el gas meter,
-`:85-93`). Valida cada proof en una goroutine, espera a todas, cierra el iterador
-y entonces:
+`poktroll/x/proof/keeper/validate_proofs.go:46` is `ValidateSubmittedProofs`, which
+runs in EndBlocker context (its own comment about the gas meter says so,
+`:85-93`). It validates each proof in a goroutine, waits for all of them, closes the
+iterator and then:
 
 > *"Delete all the processed proofs from the store since they are no longer
-> needed."* (`:104-110`, con `k.RemoveProof(ctx, sessionId, supplierOperatorAddr)`)
+> needed."* (`:104-110`, with `k.RemoveProof(ctx, sessionId, supplierOperatorAddr)`)
 
-**Consecuencia, y es una trampa cara**: consultar el proof para saber si se
-incluyó **no funciona** — para cuando se pregunta, ya no existe. La inclusión se
-verifica por **`Claim.ProofValidationStatus`**, que sí persiste en el claim.
+**Consequence, and it is an expensive trap**: querying the proof to find out whether
+it was included **does not work** — by the time you ask, it no longer exists.
+Inclusion is verified via **`Claim.ProofValidationStatus`**, which does persist in
+the claim.
 
-Un `AllProofs` o un `GetProof` que devuelve vacío significa *"ya se procesó"*, no
-*"nunca llegó"*. Los dos casos dan el mismo resultado y **no se pueden distinguir
-por ahí**.
+An `AllProofs` or a `GetProof` that returns empty means *"already processed"*, not
+*"never arrived"*. Both cases give the same result and **cannot be told apart that
+way**.

@@ -1,123 +1,123 @@
-## Supplier — las reglas del protocolo
+## Supplier — the protocol rules
 
-Verificado contra **poktroll v0.1.35** (la versión que `go.mod:19` fija). Cada
-regla cita el archivo del que sale. **Sin cita, no es una regla**: es una
-suposición, y este documento existe porque las suposiciones sobre el protocolo
-nos costaron un fin de semana persiguiendo relays que no faltaban.
+Verified against **poktroll v0.1.35** (the version `go.mod:19` pins). Each
+rule cites the file it comes from. **Without a citation, it is not a rule**: it is an
+assumption, and this document exists because assumptions about the protocol
+cost us a weekend chasing relays that were not missing.
 
-Las rutas `poktroll/...` son relativas a la raíz del módulo en el module cache.
+The `poktroll/...` paths are relative to the module root in the module cache.
 
-### Qué es un supplier, y qué campos lo definen
+### What a supplier is, and which fields define it
 
 `poktroll/x/shared/types/supplier.pb.go`:
 
-| campo | qué es |
+| field | what it is |
 |---|---|
-| `operator_address` | quién opera. Es la identidad que firma relays |
-| `owner_address` | quién puso la plata y a quién vuelve |
-| `stake` | el stake |
-| `services` | los servicios declarados |
-| `service_config_history` | el historial, con `activation_height` y `deactivation_height` por entrada |
-| `unstake_session_end_height` | la sesión en que termina de desmontar |
+| `operator_address` | who operates. It is the identity that signs relays |
+| `owner_address` | who put up the money and whom it returns to |
+| `stake` | the stake |
+| `services` | the declared services |
+| `service_config_history` | the history, with `activation_height` and `deactivation_height` per entry |
+| `unstake_session_end_height` | the session in which it finishes unbonding |
 
-**El historial no es decoración: es lo que decide si el supplier está activo.**
+**The history is not decoration: it is what decides whether the supplier is active.**
 
-### Regla 1 — "activo" es POR SERVICIO y POR ALTURA, y NO mira el unbonding
+### Rule 1 — "active" is PER SERVICE and PER HEIGHT, and does NOT look at unbonding
 
 `poktroll/x/shared/types/supplier.go:23-38` — `Supplier.IsActive(queryHeight, serviceId)`
-recorre `ServiceConfigHistory` y responde verdadero si hay una entrada para ESE
-servicio cuya ventana contiene ESA altura (`activation <= h < deactivation`).
+walks `ServiceConfigHistory` and returns true if there is an entry for THAT
+service whose window contains THAT height (`activation <= h < deactivation`).
 
-**No consulta `unstake_session_end_height`.** Estar desmontando y estar activo
-para un servicio son **ortogonales** en el protocolo.
+**It does not consult `unstake_session_end_height`.** Unbonding and being active
+for a service are **orthogonal** in the protocol.
 
-`IsUnbonding()` es una pregunta distinta y más pobre
-(`poktroll/x/shared/types/supplier.go:10-12`): sólo dice si
+`IsUnbonding()` is a different and poorer question
+(`poktroll/x/shared/types/supplier.go:10-12`): it only says whether
 `unstake_session_end_height != SupplierNotUnstaking`.
 
-**Consecuencia para este repo**: nuestro `cache.SupplierState.IsActive()` es
-`Staked && Status != NotStaked` (`cache/supplier_cache.go`), que es MÁS GRUESO que
-el del protocolo — no es por servicio ni por altura. Los dos nombres coinciden y
-las dos preguntas no. Al afirmar algo sobre "activo", decir cuál de los dos.
+**Consequence for this repo**: our `cache.SupplierState.IsActive()` is
+`Staked && Status != NotStaked` (`cache/supplier_cache.go`), which is COARSER than
+the protocol's — it is neither per service nor per height. The two names match and
+the two questions do not. When stating something about "active", say which of the two.
 
-### Regla 2 — un supplier que desmonta SIGUE SIRVIENDO
+### Rule 2 — a supplier that is unbonding KEEPS SERVING
 
-Se deduce de la regla 1: si su configuración de servicio sigue activa a esa
-altura, sirve, aunque `IsUnbonding()` sea verdadero.
+It follows from rule 1: if its service configuration is still active at that
+height, it serves, even if `IsUnbonding()` is true.
 
-**Esto ya nos costó un defecto**: el write de drenaje reconstruía un estado
-parcial y borraba la vista de transportes de un supplier que seguía sirviendo
-(arreglado en `b67b811`).
+**This already cost us a defect**: the drain write rebuilt a partial state
+and erased the transports view of a supplier that was still serving
+(fixed in `b67b811`).
 
-### Regla 3 — hay CUATRO razones de unbonding, no una
+### Rule 3 — there are FOUR unbonding reasons, not one
 
 `poktroll/x/supplier/types/event.pb.go`:
 
-- `SUPPLIER_UNBONDING_REASON_VOLUNTARY` — el operador lo pidió
-- `SUPPLIER_UNBONDING_REASON_BELOW_MIN_STAKE` — **la cadena lo bajó sola**
+- `SUPPLIER_UNBONDING_REASON_VOLUNTARY` — the operator requested it
+- `SUPPLIER_UNBONDING_REASON_BELOW_MIN_STAKE` — **the chain unstaked it on its own**
 - `SUPPLIER_UNBONDING_REASON_MIGRATION`
 - `SUPPLIER_UNBONDING_REASON_UNSPECIFIED`
 
-**La segunda es la que se olvida**: un supplier puede entrar en unbonding **sin
-que nadie del lado del operador haga nada**, por caer bajo el stake mínimo (por
-ejemplo tras un slash). Cualquier razonamiento que asuma "desmontar = alguien
-pidió unstake" está incompleto.
+**The second is the one that gets forgotten**: a supplier can enter unbonding **without
+anyone on the operator side doing anything**, by falling below the minimum stake (for
+example after a slash). Any reasoning that assumes "unbonding = someone
+requested unstake" is incomplete.
 
-### Regla 4 — los SEIS eventos, que es lo que se puede observar
+### Rule 4 — the SIX events, which is what can be observed
 
 `poktroll/x/supplier/types/event.pb.go`:
 
-| evento | cuándo |
+| event | when |
 |---|---|
-| `EventSupplierStaked` | se stakeó |
-| `EventSupplierUnbondingBegin` | empezó a desmontar |
-| `EventSupplierUnbondingEnd` | terminó |
-| `EventSupplierUnbondingCanceled` | **se canceló** — el unbonding es reversible |
-| `EventSupplierServiceConfigActivated` | se activó una config de servicio |
-| `EventSupplierStakeStuckInModulePool` | ver regla 5 |
+| `EventSupplierStaked` | it was staked |
+| `EventSupplierUnbondingBegin` | it started unbonding |
+| `EventSupplierUnbondingEnd` | it finished |
+| `EventSupplierUnbondingCanceled` | **it was canceled** — unbonding is reversible |
+| `EventSupplierServiceConfigActivated` | a service config was activated |
+| `EventSupplierStakeStuckInModulePool` | see rule 5 |
 
-`UnbondingBegin` y `UnbondingEnd` llevan los mismos cuatro campos: `supplier`,
+`UnbondingBegin` and `UnbondingEnd` carry the same four fields: `supplier`,
 `reason`, `session_end_height`, `unbonding_end_height`.
 
-**`EventSupplierUnbondingCanceled` existe**, así que un unbonding observado NO es
-un estado terminal y no se puede tratar como tal.
+**`EventSupplierUnbondingCanceled` exists**, so an observed unbonding is NOT
+a terminal state and cannot be treated as one.
 
-### Regla 5 — la devolución del stake PUEDE FALLAR, y la plata queda atrapada
+### Rule 5 — returning the stake CAN FAIL, and the money gets stuck
 
-`poktroll/x/supplier/keeper/unbond_suppliers.go:88-106`. Si el envío de las
-monedas desde el module pool a la cuenta del owner falla, **el supplier se
-elimina igual y las monedas se quedan en el module pool**, y se emite
-`EventSupplierStakeStuckInModulePool` "for indexer/governance".
+`poktroll/x/supplier/keeper/unbond_suppliers.go:88-106`. If sending the
+coins from the module pool to the owner's account fails, **the supplier is
+removed anyway and the coins stay in the module pool**, and
+`EventSupplierStakeStuckInModulePool` is emitted "for indexer/governance".
 
-Textual del código: *"supplier will be removed and coins will remain in module
+Verbatim from the code: *"supplier will be removed and coins will remain in module
 pool"*.
 
-**Consecuencia**: "el supplier terminó de desmontar" **no** implica "el owner
-cobró". Son dos hechos distintos y hay un evento dedicado justo para el caso en
-que divergen.
+**Consequence**: "the supplier finished unbonding" does **not** imply "the owner
+got paid". They are two distinct facts and there is an event dedicated exactly to the case
+where they diverge.
 
-### Regla 6 — un supplier que DESMONTA SIGUE SIENDO ELEGIDO para sesiones nuevas
+### Rule 6 — a supplier that is UNBONDING IS STILL SELECTED for new sessions
 
 `poktroll/x/session/keeper/session_hydrator.go:187-226` — `hydrateSessionSuppliers`
-arma los candidatos **sólo** desde el iterador de configuraciones de servicio
-(`GetServiceConfigUpdatesIterator(serviceId, blockHeight)`) y se queda con las que
-cumplen `IsActive(blockHeight)`.
+builds the candidates **only** from the service configuration iterator
+(`GetServiceConfigUpdatesIterator(serviceId, blockHeight)`) and keeps those that
+satisfy `IsActive(blockHeight)`.
 
-**No consulta `IsUnbonding()` ni `unstake_session_end_height` en ningún punto.**
+**It does not consult `IsUnbonding()` or `unstake_session_end_height` at any point.**
 
-Consecuencias, y son de plata:
+Consequences, and they are about money:
 
-- A un supplier que está desmontando **se le siguen asignando relays**. Servirlos
-  y reclamarlos es correcto; dejar de mantener bien su estado local no lo es.
-- Lo que finalmente lo saca de las sesiones **no es el unbonding**: es que al
-  terminar se lo ELIMINA del estado (`unbond_suppliers.go`), lo que se lleva sus
-  configuraciones de servicio y por lo tanto lo saca del iterador.
-- `NumSuppliersPerSession` se lee con `GetParamsAtHeight(ctx, blockHeight)`, o sea
-  **parámetros históricos**, para que hidratar una sesión pasada sea determinista.
-- Si no hay ni un candidato, la hidratación **falla** con
-  `ErrSessionSuppliersNotFound`; no devuelve una sesión vacía.
+- A supplier that is unbonding **keeps being assigned relays**. Serving them
+  and claiming them is correct; failing to keep its local state right is not.
+- What finally takes it out of sessions **is not the unbonding**: it is that on
+  finishing it is REMOVED from state (`unbond_suppliers.go`), which takes its
+  service configurations with it and therefore removes it from the iterator.
+- `NumSuppliersPerSession` is read with `GetParamsAtHeight(ctx, blockHeight)`, that is,
+  **historical parameters**, so that hydrating a past session is deterministic.
+- If there is not a single candidate, hydration **fails** with
+  `ErrSessionSuppliersNotFound`; it does not return an empty session.
 
-### Regla 7 — cuándo termina el unbonding, con la fórmula
+### Rule 7 — when unbonding ends, with the formula
 
 `poktroll/x/shared/types/supplier.go:75-84`:
 
@@ -126,41 +126,41 @@ unbondingEndHeight = unstake_session_end_height
                    + SupplierUnbondingPeriodSessions * NumBlocksPerSession
 ```
 
-Default de `SupplierUnbondingPeriodSessions`: **1 sesión**
-(`poktroll/x/shared/types/params.go:20`). **Es el default del código, NO el valor
-de mainnet** — ese hay que consultarlo a la cadena.
+Default of `SupplierUnbondingPeriodSessions`: **1 session**
+(`poktroll/x/shared/types/params.go:20`). **It is the code's default, NOT the mainnet
+value** — that one must be queried from the chain.
 
-La cola de unbonding salta a los que no están desmontando (`unbond_suppliers.go:43`)
-y a los que todavía no llegaron a su altura (`:62`).
+The unbonding queue skips those that are not unbonding (`unbond_suppliers.go:43`)
+and those that have not reached their height yet (`:62`).
 
-### Regla 8 — al terminar, la plata puede NO moverse por dos razones distintas
+### Rule 8 — on finishing, the money may NOT move, for two distinct reasons
 
 `poktroll/x/supplier/keeper/unbond_suppliers.go:80-106`:
 
-1. **Stake en 0 por slashing** → *no se mueve nada*, y es deliberado: el código
-   comprueba `supplier.Stake.IsPositive()` justo para no transferir 0 monedas.
-2. **La transferencia falla** (owner que es una module account, estado legacy
-   anterior a v0.1.34) → se loguea, se emite `EventSupplierStakeStuckInModulePool`
-   y **se continúa a propósito**. Textual: *"Why not halt the chain: pre-existing
-   legacy state must not be allowed to brick the EndBlocker"*. El supplier se
-   elimina igual y las monedas quedan en el module pool.
+1. **Stake at 0 due to slashing** → *nothing moves*, and it is deliberate: the code
+   checks `supplier.Stake.IsPositive()` precisely to avoid transferring 0 coins.
+2. **The transfer fails** (owner that is a module account, legacy state
+   predating v0.1.34) → it is logged, `EventSupplierStakeStuckInModulePool` is emitted
+   and **it continues on purpose**. Verbatim: *"Why not halt the chain: pre-existing
+   legacy state must not be allowed to brick the EndBlocker"*. The supplier is
+   removed anyway and the coins stay in the module pool.
 
-O sea: **"terminó de desmontar" no implica "el owner cobró"**, y hay DOS caminos
-distintos por los que no cobra.
+That is: **"finished unbonding" does not imply "the owner got paid"**, and there are TWO
+distinct paths by which they do not get paid.
 
-### Regla 9 — las configuraciones de servicio se activan al ARRANCAR una sesión
+### Rule 9 — service configurations are activated when a session STARTS
 
-`poktroll/x/supplier/keeper/activate_services.go:30-60`. Al empezar una sesión se
-recorre `GetActivatedServiceConfigUpdatesIterator(currentHeight)` y se emite un
-`EventSupplierServiceConfigActivated` **por cada configuración activada**, con
+`poktroll/x/supplier/keeper/activate_services.go:30-60`. When a session starts,
+`GetActivatedServiceConfigUpdatesIterator(currentHeight)` is walked and an
+`EventSupplierServiceConfigActivated` is emitted **for each activated configuration**, with
 `ActivationHeight: currentHeight`.
 
-Las entradas de índice huérfanas se **saltean con un log de debug**, no fallan
+Orphaned index entries are **skipped with a debug log**, they do not fail
 (`:48-52`).
 
-### Lo único que NO se puede leer del código
+### The only thing that CANNOT be read from the code
 
-El **valor de mainnet** de `supplier_unbonding_period_sessions` y de
-`num_blocks_per_session`: son estado de la cadena, no fuente. Se consultan a un
-nodo. El default del código (1 sesión) **no** es evidencia de lo que corre en
+The **mainnet value** of `supplier_unbonding_period_sessions` and of
+`num_blocks_per_session`: they are chain state, not source. They are queried from a
+node. The code's default (1 session) is **not** evidence of what runs on
 mainnet.

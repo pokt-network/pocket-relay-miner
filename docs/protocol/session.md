@@ -1,13 +1,13 @@
-## Session — las reglas del protocolo
+## Session — the protocol rules
 
-Verificado contra **poktroll v0.1.35** (`go.mod:19`). Cada regla cita su fuente.
-**Sin cita, no es una regla.**
+Verified against **poktroll v0.1.35** (`go.mod:19`). Each rule cites its source.
+**Without a citation, it is not a rule.**
 
-Una sesión es la unidad de contabilidad: los relays se agrupan por sesión, se
-reclaman por sesión y se liquidan por sesión. Todas las alturas de abajo salen de
+A session is the accounting unit: relays are grouped by session, claimed by
+session and settled by session. All the heights below come from
 `poktroll/x/shared/types/session.go`.
 
-### La línea de tiempo, con las fórmulas exactas
+### The timeline, with the exact formulas
 
 ```
 sessionEnd
@@ -19,69 +19,69 @@ sessionEnd
 
 `session.go:99-104`, `:109-112`, `:117-119`, `:124-126`.
 
-**El `+ 1` de `claimWindowOpen` es parte de la fórmula**, no un redondeo: la
-ventana abre en el bloque SIGUIENTE al offset. Un cálculo que lo omita queda un
-bloque adelantado.
+**The `+ 1` in `claimWindowOpen` is part of the formula**, not a rounding: the
+window opens at the block AFTER the offset. A calculation that omits it ends up one
+block early.
 
-Aparte, y son otra cosa:
+Separately, and these are something else:
 
 - `GetSessionGracePeriodEndHeight = sessionEnd + GracePeriodEndOffsetBlocks`
   (`session.go:86-88`).
-- `GetSettlementSessionEndHeight` (`session.go:210`) se apoya en
+- `GetSettlementSessionEndHeight` (`session.go:210`) relies on
   `GetSessionEndToProofWindowCloseBlocks`.
 
-### Regla 1 — NO hay reparto de claims entre suppliers. Está comentado.
+### Rule 1 — there is NO spreading of claims across suppliers. It is commented out.
 
-`session.go`, `GetEarliestSupplierClaimCommitHeight`: la función recibe el hash
-del bloque de apertura y la dirección del supplier **para sortear un offset
-determinista**, y **todo ese cuerpo está comentado**. Devuelve
-`claimWindowOpenHeight` pelado.
+`session.go`, `GetEarliestSupplierClaimCommitHeight`: the function receives the hash
+of the opening block and the supplier's address **to draw a deterministic
+offset**, and **that whole body is commented out**. It returns bare
+`claimWindowOpenHeight`.
 
-Lo mismo en `GetEarliestSupplierProofCommitHeight`: devuelve
-`proofWindowOpenHeight` pelado.
+The same in `GetEarliestSupplierProofCommitHeight`: it returns bare
+`proofWindowOpenHeight`.
 
-El propio código lo explica: *"Having proof distribution windows was a
+The code itself explains it: *"Having proof distribution windows was a
 requirement that was never determined to be necessary, but implemented regardless.
 We are keeping around the functions but TBD whether it is deemed necessary."*
 
-**Consecuencias, y son operativas:**
+**Consequences, and they are operational:**
 
-- **Todos los suppliers pueden presentar en la MISMA altura.** No hay spread que
-  lo evite. Cualquier suposición de "la cadena reparte la carga de submissions"
-  es falsa hoy.
-- El nombre de la función (`EarliestSupplier...`) **sugiere** un reparto por
-  supplier que no ocurre. Leer el nombre y no el cuerpo lleva a la conclusión
-  contraria.
-- Si este repo espacia sus envíos, **el espaciado es nuestro**, no del protocolo,
-  y no hay que atribuírselo a la cadena.
+- **All suppliers can submit at the SAME height.** There is no spread to
+  prevent it. Any assumption that "the chain spreads the submission load"
+  is false today.
+- The function's name (`EarliestSupplier...`) **suggests** a per-supplier spread
+  that does not happen. Reading the name and not the body leads to the opposite
+  conclusion.
+- If this repo spaces out its submissions, **the spacing is ours**, not the protocol's,
+  and must not be attributed to the chain.
 
-### Regla 2 — las ventanas se calculan desde `queryHeight`, no desde "ahora"
+### Rule 2 — the windows are computed from `queryHeight`, not from "now"
 
-Todas las funciones toman `queryHeight` y derivan el fin de sesión con
-`GetSessionEndHeight(sharedParams, queryHeight)`. Junto con la Regla 3, esto es lo
-que hace que una sesión pasada se pueda recalcular exactamente.
+Every function takes `queryHeight` and derives the session end with
+`GetSessionEndHeight(sharedParams, queryHeight)`. Together with Rule 3, this is
+what makes a past session exactly recomputable.
 
-### Regla 3 — los parámetros son HISTÓRICOS
+### Rule 3 — the parameters are HISTORICAL
 
-`poktroll/x/session/keeper/session_hydrator.go:190` lee
-`k.GetParamsAtHeight(ctx, sh.blockHeight)`, con el comentario *"Use historical
+`poktroll/x/session/keeper/session_hydrator.go:190` reads
+`k.GetParamsAtHeight(ctx, sh.blockHeight)`, with the comment *"Use historical
 params to ensure deterministic session hydration for historical heights"*.
 
-**Consecuencia**: usar los parámetros de HOY para razonar sobre una sesión vieja
-da un resultado equivocado si algún parámetro cambió. Los offsets de arriba se
-evalúan con los parámetros de la altura de esa sesión.
+**Consequence**: using TODAY's parameters to reason about an old session
+gives a wrong result if any parameter changed. The offsets above are
+evaluated with the parameters at that session's height.
 
-### Regla 4 — quién entra en la sesión
+### Rule 4 — who enters the session
 
-Ver `docs/protocol/supplier.md`, regla 6: los candidatos salen **sólo** de las
-configuraciones de servicio activas a esa altura; el unbonding no se consulta. Si
-no hay candidatos, la hidratación **falla** con `ErrSessionSuppliersNotFound` — no
-devuelve una sesión vacía.
+See `docs/protocol/supplier.md`, rule 6: candidates come **only** from the
+service configurations active at that height; unbonding is not consulted. If
+there are no candidates, hydration **fails** with `ErrSessionSuppliersNotFound` — it
+does not return an empty session.
 
-### Lo que no se puede leer del código
+### What cannot be read from the code
 
-Los VALORES de mainnet de `ClaimWindowOpenOffsetBlocks`,
+The mainnet VALUES of `ClaimWindowOpenOffsetBlocks`,
 `ClaimWindowCloseOffsetBlocks`, `ProofWindowOpenOffsetBlocks`,
 `ProofWindowCloseOffsetBlocks`, `GracePeriodEndOffsetBlocks`,
-`NumBlocksPerSession` y `NumSuppliersPerSession`. Son estado de la cadena. Los
-defaults del código no son evidencia de lo que corre en mainnet.
+`NumBlocksPerSession` and `NumSuppliersPerSession`. They are chain state. The
+code's defaults are not evidence of what runs on mainnet.

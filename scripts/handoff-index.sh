@@ -11,7 +11,7 @@
 #
 # The contract, one line in scripts/localonly/QUEUE.md:
 #
-#     **Handoff CANÓNICO: `HANDOFF-2026-08-26-r1.md`**
+#     **Handoff CANONICAL: `HANDOFF-2026-08-26-r1.md`**
 #
 # Why a script and not a convention: 24 hand-overs accumulated, and which one
 # governed lived in a sentence a human had to keep rewriting. It stopped being
@@ -55,9 +55,9 @@ if [ ! -f "$QUEUE" ]; then
     exit 1
 fi
 
-# Only the declaration counts. Accents and case vary between sessions, so match
-# loosely on the label and strictly on the backticked filename.
-canonical="$(grep -oiE 'handoff[[:space:]]+CAN[OÓ]NICO:[[:space:]]*`[^`]+`' "$QUEUE" \
+# Only the declaration counts. Case varies between sessions, so match loosely
+# on the label and strictly on the backticked filename.
+canonical="$(grep -oiE 'handoff[[:space:]]+CANONICAL:[[:space:]]*`[^`]+`' "$QUEUE" \
     | tail -1 | grep -oE '`[^`]+`' | tr -d '`' || true)"
 
 if [ -z "$canonical" ]; then
@@ -66,7 +66,7 @@ if [ -z "$canonical" ]; then
     echo "This is NOT the same as 'the newest one wins'. Add the line, in the"
     echo "queue's header, naming the hand-over that governs:"
     echo
-    echo '    **Handoff CANÓNICO: `HANDOFF-<date>-<r>.md`**'
+    echo '    **Handoff CANONICAL: `HANDOFF-<date>-<r>.md`**'
     echo
     echo "Hand-overs present, oldest first (NOT a ranking):"
     printf '  %s\n' "${handoffs[@]#"$LOCAL_DIR"/}"

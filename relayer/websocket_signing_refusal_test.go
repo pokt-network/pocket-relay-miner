@@ -23,8 +23,8 @@ import (
 // nicety -- emitRelay mines the RelayHash over {Req, Res}, so the SMST leaf was
 // committed to a response nobody signed.
 //
-// Owner decision 2026-09-03: "respuesta sin firma no existe, siempre con firma,
-// si no se puede firmar, se tumba el ws."
+// Owner decision 2026-09-03: "a response without a signature does not exist,
+// always with a signature; if it can't be signed, the ws goes down."
 //
 // Closing is also the only answer that ENDS the failure. Admission already
 // refuses a request whose supplier this relayer holds no key for

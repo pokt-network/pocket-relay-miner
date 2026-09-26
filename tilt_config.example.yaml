@@ -1,18 +1,17 @@
-# tilt_config.example.yaml — la referencia TRACKEADA del config de Tilt.
+# tilt_config.example.yaml — the TRACKED reference for the Tilt config.
 #
-# `tilt_config.yaml` es gitignored (.gitignore:8), asi que los valores que se
-# ajustan en la maquina se pierden en un clon. Este archivo es la copia que SI
-# viaja con el repo: copiar a `tilt_config.yaml` y ajustar lo que sea propio.
+# `tilt_config.yaml` is gitignored (.gitignore:8), so values tuned on the
+# machine are lost on a clone. This file is the copy that DOES travel with
+# the repo: copy it to `tilt_config.yaml` and adjust what is yours.
 #
 #     cp tilt_config.example.yaml tilt_config.yaml
 #
-# Todo lo que hay aca es LOCALNET (direcciones del genesis local, pubkeys de
-# simulacion, URLs internas del cluster). No va ningun dato de operador:
-# hostnames reales, IPs publicas o alias de ssh quedan fuera, en el archivo
-# gitignored.
+# Everything here is LOCALNET (local genesis addresses, simulation pubkeys,
+# internal cluster URLs). No operator data goes in: real hostnames, public
+# IPs or ssh aliases stay out, in the gitignored file.
 #
-# Los valores de memoria de Redis (seccion `redis:`) NO son arbitrarios: salen
-# de una medicion del 2026-09-16 y su justificacion esta al lado de cada uno.
+# The Redis memory values (`redis:` section) are NOT arbitrary: they come
+# from a measurement on 2026-09-16, and its rationale sits next to each one.
 
 # Tilt Development Configuration for Pocket RelayMiner
 # Edit this file to customize your local development environment.
@@ -83,14 +82,15 @@ miner:
     redis:
       claim_idle_timeout_ms: 60000
       consumer_name: ""
-      # N suppliers = N lecturas bloqueadas, y cada una ocupa una conexion (consumer.go:309).
-      # Sin esto el pool usa el default del repo, 50 (transport/redis/client.go:119-122; NO
-      # 40: eso fue un calculo mio de 10 x GOMAXPROCS que nunca verifique), y queda agotado:
-      # medido 2026-09-11 con 1 miner, 50 goroutines esperando conexion y el WAL drenando a
-      # 7 relays/s en reposo. Formula de config.miner.example.yaml:45 (numSuppliers + 20).
-      # 100 y no 72 porque el perfil scale ya paso de 50 a 52 suppliers y el aviso del miner
-      # salio rojo en la corrida de hoy (min_required=72): el margen evita perseguir el
-      # numero cada vez que cambia el perfil.
+      # N suppliers = N blocked reads, and each one occupies a connection (consumer.go:309).
+      # Without this the pool uses the repo default, 50 (transport/redis/client.go:119-122;
+      # NOT 40: that was a 10 x GOMAXPROCS calculation of mine that was never verified), and
+      # it runs out: measured 2026-09-11 with 1 miner, 50 goroutines waiting for a connection
+      # and the WAL draining at 7 relays/s at rest. Formula from
+      # config.miner.example.yaml:45 (numSuppliers + 20).
+      # 100 and not 72 because the scale profile already moved from 50 to 52 suppliers and
+      # the miner's warning came back red in today's run (min_required=72): the margin
+      # avoids chasing the number every time the profile changes.
       pool_size: 100
       url: redis://redis-standalone:6379
     session_lifecycle:
@@ -125,36 +125,38 @@ redis:
   enabled: true
   max_memory: 512Mi
   mode: standalone
-  # 2026-09-10 (r1): se puso SIN TOPE a proposito para MEDIR cuanta memoria pide
-  # Redis a 50 suppliers, en vez de medir el tope. **Esa medicion ya se hizo.**
+  # 2026-09-10 (r1): set with NO CAP on purpose, to MEASURE how much memory
+  # Redis asks for at 50 suppliers, instead of measuring the cap. **That
+  # measurement is already done.**
   #
-  # 2026-09-16 (r1, con Jorge): a ~3.700 rps pide MAS de 12 GiB y el 2026-09-16
-  # 04:33:07Z fue OOMKilled (exit=137) con el working set del cgroup en 12.161 MiB.
-  # Medido: 602 B por nodo SMST, 16.218.683 nodos vivos en el pico (dos cohortes:
-  # la sesion que sirve mas la que espera proof, que vive ~30 min mas) = 9,0 GB de
-  # datos + ~8% de allocator = 9,7 GiB de used_memory.
+  # 2026-09-16 (r1, with Jorge): at ~3,700 rps it asks for MORE than 12 GiB and
+  # on 2026-09-16 04:33:07Z it was OOMKilled (exit=137) with the cgroup's working
+  # set at 12,161 MiB. Measured: 602 B per SMST node, 16,218,683 live nodes at
+  # the peak (two sessions: the one that is serving plus the one waiting on a
+  # proof, which lives ~30 min longer) = 9.0 GB of data + ~8% allocator overhead
+  # = 9.7 GiB of used_memory.
   #
-  # Se pone tope para que Redis RECHACE escrituras en vez de morir:
-  #   - ESCALERA de 1 GiB por escalon (Jorge, 2026-09-16):
-  #       10 GiB contenedor (kernel: OOMKill, nunca debe pasar)
-  #        9 GiB maxmemory + noeviction (Redis rechaza escrituras, no desaloja)
-  #        8 GiB = maxmemory - 1 GiB: el FRENO cierra ("estamos full, volve mas tarde")
-  #     Miner y relayer: contenedor 8 GiB, GOMEMLIMIT 7 GiB.
-  #     Dato medido: el dia que Redis murio el fork del bgsave sumo ~2 GiB sobre
-  #     used_memory; con esta escalera eso solo muerde si used llega a 9 GiB DURANTE un
-  #     bgsave, y el freno existe para que no llegue.
-  #   - noeviction y NO allkeys-lru: `miner/smst_manager.go:32-34` lo EXIGE --
+  # A cap is set so Redis REJECTS writes instead of dying:
+  #   - 1 GiB-per-step LADDER (Jorge, 2026-09-16):
+  #       10 GiB container (kernel: OOMKill, must never happen)
+  #        9 GiB maxmemory + noeviction (Redis rejects writes, does not evict)
+  #        8 GiB = maxmemory - 1 GiB: the BRAKE closes ("we're full, come back later")
+  #     Miner and relayer: 8 GiB container, GOMEMLIMIT 7 GiB.
+  #     Measured fact: the day Redis died, the bgsave fork added ~2 GiB on top of
+  #     used_memory; with this ladder that only bites if used reaches 9 GiB DURING
+  #     a bgsave, and the brake exists so it never gets there.
+  #   - noeviction and NOT allkeys-lru: `miner/smst_manager.go:32-34` REQUIRES it --
   #     "must be noeviction. Any *-lru, *-lfu, or *-random policy will silently
   #     evict SMST data under memory pressure and cause this exact failure mode".
-  #     Los nodos SMST son el preimage del proof: desalojarlos se ve como claims
-  #     perdidos, no como "Redis lleno".
-  #   - Es seguro porque el rechazo se REINTENTA: `IsOOMError` esta dentro de
-  #     `IsRetryableError` (`miner/errors.go:104`), asi que el relay no se pierde.
+  #     The SMST nodes are the proof's preimage: evicting them looks like lost
+  #     claims, not like "Redis is full".
+  #   - It is safe because the rejection is RETRIED: `IsOOMError` is inside
+  #     `IsRetryableError` (`miner/errors.go:104`), so the relay is not lost.
   maxmemory: "9663676416"
   maxmemory_policy: "noeviction"
   memory_limit: 10Gi
-  # -1 (el default) apaga el slowlog y `SLOWLOG GET` sale vacio: no se puede
-  # distinguir "no hubo comandos lentos" de "no miramos".
+  # -1 (the default) turns off the slowlog and `SLOWLOG GET` comes back empty:
+  # there is no way to tell "no slow commands happened" from "we never looked".
   slowlog_log_slower_than_us: 10000
 relayer:
   base_port: 8180
@@ -388,12 +390,12 @@ validator:
     rpc: 26657
   tag: 0.1.35
 
-# Perfil de escala (2026-09-10, r1): 5 apps/servicio, 50 suppliers. Volver a default al terminar.
+# Scale profile (2026-09-10, r1): 5 apps/service, 50 suppliers. Revert to default when done.
 localnet:
   profile: scale
-  # Reloj de MAINNET para las corridas de carga del paquete 186. El default trackeado
-  # es 30 (beta); esto lo pisa desde un archivo gitignored, que es el punto del knob:
-  # el arbol queda limpio y run-base111.sh:12 no aborta, asi que la corrida es
-  # atribuible. Medido 2026-09-12 con 30: bloques de 29,05 s (timeout_commit 29 s),
-  # o sea que el consenso agrega 0,05 s EN REPOSO.
+  # MAINNET clock for package 186's load runs. The tracked default is 30
+  # (beta); this overrides it from a gitignored file, which is the whole point
+  # of the knob: the tree stays clean and run-base111.sh:12 does not abort, so
+  # the run is attributable. Measured 2026-09-12 with 30: 29.05 s blocks
+  # (timeout_commit 29 s), i.e. consensus adds 0.05 s AT REST.
   block_time_seconds: 60

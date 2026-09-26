@@ -123,13 +123,13 @@ data:
         static_configs:
           - targets: ['backend:9095']
 
-      # cAdvisor: CPU y memoria POR POD (container_cpu_usage_seconds_total,
+      # cAdvisor: CPU and memory PER POD (container_cpu_usage_seconds_total,
       # container_memory_working_set_bytes, container_cpu_cfs_throttled_periods_total).
-      # Sin esto no hay historia por pod: las apps Go exponen su propio
-      # process_resident_memory_bytes, pero Redis, el validator y cualquier pod
-      # generador de carga no, y el throttling de cgroup no lo expone nadie mas.
-      # Se scrapea via el proxy del apiserver porque el ClusterRole ya tiene
-      # nodes/proxy; asi no hace falta abrir el puerto del kubelet.
+      # Without this there is no per-pod history: Go apps expose their own
+      # process_resident_memory_bytes, but Redis, the validator and any
+      # load-generating pod do not, and nobody else exposes cgroup throttling.
+      # Scraped via the apiserver proxy because the ClusterRole already has
+      # nodes/proxy, so there is no need to open the kubelet's port.
       - job_name: 'cadvisor'
         scheme: https
         tls_config:

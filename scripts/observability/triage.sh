@@ -170,11 +170,11 @@ inst=$(curl -s -G "$PROM_URL/api/v1/query" \
         --data-urlencode "time=$T" 2>/dev/null | jq -r '.data.result[]?.metric.exported_instance' | sort)
 ni=$(grep -c . <<<"$inst")
 if [ "${ni:-0}" -gt 1 ]; then
-  echo "   AVISO: $ni procesos del miner reportaron en esta ventana:"
+  echo "   WARNING: $ni miner processes reported in this window:"
   sed 's/^/     /' <<<"$inst"
-  echo "   Si son de corridas DISTINTAS, cada total de abajo suma las dos. Una sola"
-  echo "   corrida con un reinicio tambien da 2, y ahi si hay que sumarlas: la"
-  echo "   diferencia la dice el nombre del pod, no este script."
+  echo "   If these are from DIFFERENT runs, every total below sums both. A single"
+  echo "   run with one restart also gives 2, and there they SHOULD be summed: the"
+  echo "   pod name tells the difference, not this script."
 fi
 echo
 echo "1. Did we lose claims or proofs? (the only section that answers that)"

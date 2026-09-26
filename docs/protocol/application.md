@@ -1,86 +1,86 @@
-## Application — las reglas del protocolo, y el presupuesto que recorta el pago
+## Application — the protocol rules, and the budget that cuts the payment
 
-Verificado contra **poktroll v0.1.35** (`go.mod:19`). **Sin cita, no es una regla.**
+Verified against **poktroll v0.1.35** (`go.mod:19`). **Without a citation, it is not a rule.**
 
-La application es **quien paga**. Su stake es el presupuesto del que sale lo que
-cobra un supplier, y por eso la mayoría de las reglas de "por qué cobré menos de
-lo que reclamé" viven acá y no en el claim.
+The application is **the one that pays**. Its stake is the budget that pays what a
+supplier collects, and that is why most of the rules on "why was I paid
+less than I claimed" live here and not in the claim.
 
-### Los campos
+### The fields
 
 `poktroll/x/application/types`:
 
-| campo | por qué importa |
+| field | why it matters |
 |---|---|
 | `address` | |
-| `stake` | el presupuesto |
-| `service_configs` y `service_config_history` | igual que en supplier: ventanas por altura |
-| `delegatee_gateway_addresses` | los gateways delegados (el anillo de firma) |
-| `pending_undelegations` | delegaciones que se están deshaciendo |
-| `per_session_spend_limit` | **límite de gasto por sesión** |
-| `pending_transfer` | ver regla 3 |
-| `unstake_session_end_height` | igual que en supplier |
+| `stake` | the budget |
+| `service_configs` and `service_config_history` | same as in supplier: windows per height |
+| `delegatee_gateway_addresses` | the delegated gateways (the signing ring) |
+| `pending_undelegations` | delegations being undone |
+| `per_session_spend_limit` | **per-session spend limit** |
+| `pending_transfer` | see rule 3 |
+| `unstake_session_end_height` | same as in supplier |
 
-### Regla 1 — el piso por supplier es B/N, y es un PISO, no un techo
+### Rule 1 — the per-supplier floor is B/N, and it is a FLOOR, not a ceiling
 
-`poktroll/x/tokenomics/keeper/token_logic_modules.go:316-330`, sobre
-`ensureClaimAmountLimits`. Textual:
+`poktroll/x/tokenomics/keeper/token_logic_modules.go:316-330`, on
+`ensureClaimAmountLimits`. Verbatim:
 
 > *"The per-supplier head-split B/N (where B is the application's per-session
 > budget and N the actual number of claiming suppliers) is a GUARANTEED FLOOR,
 > not a hard ceiling"*
 
-- Servir **en o por debajo** del piso se paga **siempre completo**.
-- Servir **por encima** puede cobrarse además del presupuesto que dejaron sin usar
-  los suppliers ociosos o livianos, **en proporción al exceso propio**.
+- Serving **at or below** the floor is **always paid in full**.
+- Serving **above** it can additionally be paid from the budget left unused by
+  idle or light suppliers, **in proportion to one's own excess**.
 
-**`N` es la cantidad REAL de suppliers que reclamaron**, no la cantidad de
-suppliers de la sesión. Un supplier que no reclama agranda el piso de los demás.
+**`N` is the REAL number of suppliers that claimed**, not the number of suppliers in
+the session. A supplier that does not claim enlarges the floor of the others.
 
-### Regla 2 — el bonus por sobreservicio, y el cero que NO significa infinito
+### Rule 2 — the overservicing bonus, and the zero that does NOT mean infinite
 
 `token_logic_modules.go:360-375`:
 
 ```
-bonus_i = unused * excess_i / totalExcess      (división entera ⇒ Σ bonus ≤ unused)
+bonus_i = unused * excess_i / totalExcess      (integer division ⇒ Σ bonus ≤ unused)
 ```
 
-Acotado por `overservicing_bonus_multiplier` (`m`):
+Bounded by `overservicing_bonus_multiplier` (`m`):
 
-- `m == 0` o `m == 1` → tope exactamente en el piso (comportamiento legacy, sin
-  redistribución).
-- `m > 1` → permite hasta `m * piso` desde el presupuesto no usado.
+- `m == 0` or `m == 1` → capped exactly at the floor (legacy behavior, no
+  redistribution).
+- `m > 1` → allows up to `m * floor` from the unused budget.
 
-**El cero se trata deliberadamente como 1, NO como "ilimitado"**, y el código dice
-por qué: el valor cero del parámetro —venga de un decode proto3 fresco, de un
-handler de upgrade que no corrió, o de una escritura pisada— **debe ser benigno y
-nunca habilitar la redistribución en silencio**.
+**Zero is deliberately treated as 1, NOT as "unlimited"**, and the code says why:
+the zero value of the parameter —whether from a fresh proto3 decode, from an upgrade
+handler that did not run, or from a write that overwrote it— **must be benign and never
+silently enable redistribution**.
 
-Y la invariante que cierra: `Σ piso + Σ bonus ≤ N*piso = B`, así que **lo
-liquidado del grupo nunca supera el presupuesto comprometido y el stake de la
-application no puede quedar negativo**.
+And the closing invariant: `Σ floor + Σ bonus ≤ N*floor = B`, so **what the group
+settles never exceeds the committed budget and the application's stake cannot go
+negative**.
 
-**Consecuencia para cualquier afirmación de pérdida**: cobrar menos que lo
-reclamado **no es un defecto nuestro por defecto**. Puede ser el piso funcionando.
-Antes de llamarlo pérdida hay que saber B, N y `m`.
+**Consequence for any claim of loss**: being paid less than claimed **is not our
+defect by default**. It may be the floor working. Before calling it a loss you need
+to know B, N and `m`.
 
-### Regla 3 — una application se puede TRANSFERIR, y falla en tres pasos
+### Rule 3 — an application can be TRANSFERRED, and it fails in three steps
 
-`poktroll/x/application/types/event.pb.go` — nueve eventos:
+`poktroll/x/application/types/event.pb.go` — nine events:
 `EventApplicationStaked`, `EventRedelegation`, `EventTransferBegin`,
 `EventTransferEnd`, `EventTransferError`, `EventApplicationUnbondingBegin`,
 `EventApplicationUnbondingEnd`, `EventApplicationUnbondingCanceled`,
 `EventApplicationStakeStuckInModulePool`.
 
-- La transferencia tiene **begin / end / error** y un campo `pending_transfer`:
-  no es atómica y **puede fallar**.
-- `EventApplicationUnbondingCanceled` existe: igual que en supplier, **el
-  unbonding es reversible** y no es terminal.
-- `EventApplicationStakeStuckInModulePool` existe: **la misma trampa que en
-  supplier** — el stake puede quedar atrapado en el module pool.
+- The transfer has **begin / end / error** and a `pending_transfer` field: it is
+  not atomic and **can fail**.
+- `EventApplicationUnbondingCanceled` exists: same as in supplier, **unbonding is
+  reversible** and not terminal.
+- `EventApplicationStakeStuckInModulePool` exists: **the same trap as in
+  supplier** — the stake can get stuck in the module pool.
 
-### Lo que no se puede leer del código
+### What cannot be read from the code
 
-Los valores de mainnet de `overservicing_bonus_multiplier`, del stake mínimo de
-application y del `per_session_spend_limit` de una application concreta. Son
-estado de la cadena.
+The mainnet values of `overservicing_bonus_multiplier`, of the minimum application
+stake, and of the `per_session_spend_limit` of a specific application. They are
+chain state.

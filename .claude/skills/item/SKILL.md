@@ -24,8 +24,8 @@ each step DOES differs where the products differ.
    a restore. Automation does not make a missing criterion cheaper; it repeats
    the mistake once per item.
 
-   Jorge, same day, on being asked what he had to repeat: *"solo lo de karpathy,
-   que sigo teniendo que recordarlo"*. It had already been the finding of
+   Jorge, same day, on being asked what he had to repeat: *"just the karpathy
+   thing, which I keep having to remind you of"*. It had already been the finding of
    2026-08-25. A rule that fires only when someone remembers it is not a rule,
    which is why it is step one here and not advice.
 2. **A finding is not recorded until it is proposed to the maintainer** (the
@@ -53,9 +53,9 @@ Somebody else's finding is a claim until you reproduce it.
 
 ### WALK ONE CONCRETE CASE, AND REPRODUCE IT, BEFORE SIZING OR CHOOSING
 
-Jorge, 2026-09-03: *"siempre debemos caminar el ejemplo, para entender que y donde
-esta pasando, reproducirlo, eso nos da entendimiento y perspectiva - solo asi vemos
-lo que se intenta y buscamos la mejor solucion."*
+Jorge, 2026-09-03: *"we should always walk the example, to understand what and where
+it is happening, reproduce it — that gives us understanding and perspective; only
+that way do we see what is being attempted and look for the best solution."*
 
 Not "read the code": take ONE operator, ONE file, ONE request, and follow it hop by
 hop to the consequence — then RUN it. A probe, a failing test, a bare container. The
@@ -106,12 +106,12 @@ not add a bare `go` statement, do not reach for `sync.Map`.
 
 **Invoke the council before the first edit of ANY issue or feature.** Not when the
 space looks wide, not when the fix looks hard, not only for product code — every
-item. Jorge, 2026-08-29, after a session skipped it: *"claramente te instrui que
-para cualquier fix usaras el council, porque? simple, para que la solucion sea la
-mejor, no la primera que se te ocurrio, para que te hagan dudar, re-pensar el
-caso."* And the reasoning behind it, his words: *"2 piensan mejor que 1 y 3 mejor
-que 2; aveces es ruido, pero del ruido filtrado, salen otros puntos importantes
-que ayudan a considerar la mejor solucion."*
+item. Jorge, 2026-08-29, after a session skipped it: *"I clearly instructed you to
+use the council for any fix — why? Simple: so the solution is the best one, not
+the first one that occurred to you, so they make you doubt, rethink the
+case."* And the reasoning behind it, his words: *"2 think better than 1, and 3
+better than 2; sometimes it's noise, but from the filtered noise come other
+important points that help arrive at the best solution."*
 
 **The council is not the review.** A review reads code you already wrote; the
 council reads the SPACE OF APPROACHES before you pick one. They do not substitute
@@ -171,8 +171,9 @@ than had been measured:
 - a clamp comment reasoning only about removals, when an addition in the same
   window produces the same reading.
 
-Jorge, that day: *"eso te pasa por no revisarte lo que vas a ir a escribir, te vas
-a escribir o hacer fix sin consultar alguien que te evalúe a vos."* The council
+Jorge, that day: *"that happens to you because you don't review what you're about
+to write; you go write it or make the fix without consulting someone who
+evaluates YOU."* The council
 evaluates the PLAN. Nothing was evaluating the author.
 
 So, before `git commit`, and on the diff you are about to commit:
@@ -342,9 +343,9 @@ N rather than one that the two rounds above cost.
 
 **A finding that re-enters a DECIDED topic is not a finding — it is the decision
 being re-litigated, and it is branch 3.** Jorge, 2026-08-31, after three rounds
-each opened with a HIGH about the same tension: *"así dejamos de tener ya estas
-preguntaderas de HIGH, por el mismo topic. En realidad no son findings, es dar
-vuelta sobre lo mismo."*
+each opened with a HIGH about the same tension: *"that way we stop having these
+HIGH interrogations over and over, on the same topic. They're not really
+findings, it's just going in circles on the same thing."*
 
 The three rounds that day reported, as three separate HIGHs, three doorways into
 one room: a key source that reports a failure makes the manager hold its previous
@@ -367,9 +368,9 @@ So, when a round raises something whose ROOT is already decided:
   proof of it.
 
 **And the sharper half, which is what actually ended it** (Jorge, 2026-08-31,
-answering what he had to repeat): *"justamente el tema este de seguir trayendo
-items como HIGH que eran preguntas, se solucionaron presentando un caso y
-pidiendo claridad/opinion a mi."*
+answering what he had to repeat): *"exactly this thing of continuing to bring
+items as HIGH that were actually questions — those got solved by presenting a
+case and asking me for clarity/an opinion."*
 
 The three HIGHs of that day were not re-litigations of a DECIDED topic — nothing
 had been decided. They were **questions with no owner**, reported as defects

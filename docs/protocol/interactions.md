@@ -1,99 +1,99 @@
-## Cómo interactúa todo — la vida de un relay, y dónde muerde cada parámetro
+## How it all interacts — the life of a relay, and where each parameter bites
 
-Verificado contra **poktroll v0.1.35**. Las fichas por entidad están al lado; esto
-es lo que **ninguna de ellas puede mostrar sola**: el orden, y qué depende de qué.
+Verified against **poktroll v0.1.35**. The per-entity sheets sit next to this one;
+this is what **none of them can show on its own**: the order, and what depends on what.
 
-### La cadena del dinero, de punta a punta
+### The money chain, end to end
 
 ```
-relay servido
-  └─ ¿su hash cumple target_hash?            ← service, dificultad
-       no → NO entra al árbol (y NO es pérdida)
-       sí → hoja del SMST
-              └─ root firmado por NOSOTROS
+relay served
+  └─ does its hash meet target_hash?         ← service, difficulty
+       no → does NOT enter the tree (and is NOT a loss)
+       yes → SMST leaf
+              └─ root signed by US
                    ├─ Count() = num_relays
                    └─ Sum()   = num_claimed_compute_units
-                        └─ × multiplicador(target_hash)     ← service
+                        └─ × multiplier(target_hash)        ← service
                              = num_estimated_compute_units
-                                  └─ × CUTTM / granularidad ← shared
+                                  └─ × CUTTM / granularity  ← shared
                                        = claimed_upokt
-                                            └─ acotado por piso B/N   ← application
-                                                 └─ × reparto 0.7      ← tokenomics
-                                                      = lo que cobra el supplier
+                                            └─ bounded by the B/N floor ← application
+                                                 └─ × 0.7 split         ← tokenomics
+                                                      = what the supplier collects
 ```
 
-**Cada flecha es un lugar donde el número baja legítimamente.** Antes de llamar
-"pérdida" a una diferencia hay que saber en cuál de las seis se produjo.
+**Each arrow is a place where the number legitimately goes down.** Before calling
+a difference a "loss", you have to know in which of the six it happened.
 
-### Los cinco recortes legítimos, en orden
+### The five legitimate cuts, in order
 
-1. **La dificultad** decide qué relay entra al árbol (`service.md`, regla 2). Con
-   dificultad base entra todo y el multiplicador es 1.
-2. **El multiplicador** vuelve a subir el número para estimar lo real
-   (`service.md`, regla 3). Es lo inverso del anterior, no un recorte.
-3. **CUTTM / granularidad** convierte unidades de cómputo en uPOKT
-   (`claim.go:GetClaimeduPOKT`). Es el precio, y es **global de la red**.
-4. **El piso `B/N`** de la application acota lo que se puede cobrar de su
-   presupuesto (`application.md`, regla 1). Servir de más se puede pagar del
-   sobrante, acotado por `overservicing_bonus_multiplier`.
-5. **El reparto de emisión** deja al supplier el **0.7** (`params.md`,
-   tokenomics). El 0.3 restante va a DAO, proposer y source owner **por diseño**.
+1. **The difficulty** decides which relay enters the tree (`service.md`, rule 2). At
+   base difficulty everything enters and the multiplier is 1.
+2. **The multiplier** raises the number again to estimate the real one
+   (`service.md`, rule 3). It is the inverse of the previous one, not a cut.
+3. **CUTTM / granularity** converts compute units into uPOKT
+   (`claim.go:GetClaimeduPOKT`). It is the price, and it is **network-wide**.
+4. **The `B/N` floor** of the application bounds what can be charged to its
+   budget (`application.md`, rule 1). Overservicing can be paid from the
+   surplus, bounded by `overservicing_bonus_multiplier`.
+5. **The emission split** leaves the supplier **0.7** (`params.md`,
+   tokenomics). The remaining 0.3 goes to the DAO, proposer and source owner **by design**.
 
-### La agenda, y de qué parámetro depende cada paso
+### The schedule, and which parameter each step depends on
 
 ```
-sesión ─── sessionEnd
-             +ClaimWindowOpenOffset +1  → se puede RECLAMAR
-             +ClaimWindowCloseOffset    → se cierra
-             +ProofWindowOpenOffset     → se puede PROBAR
-             +ProofWindowCloseOffset    → se cierra; después el claim EXPIRA
-                                          y expirar CUESTA STAKE
+session ─── sessionEnd
+             +ClaimWindowOpenOffset +1  → CLAIMING is allowed
+             +ClaimWindowCloseOffset    → it closes
+             +ProofWindowOpenOffset     → PROVING is allowed
+             +ProofWindowCloseOffset    → it closes; after that the claim EXPIRES
+                                          and expiring COSTS STAKE
 ```
 
-Los cuatro offsets son de `x/shared` y **son de governance**: la agenda del miner
-no es nuestra, la fija la cadena y puede cambiar sin que toquemos código.
+The four offsets belong to `x/shared` and **are governance parameters**: the miner's
+schedule is not ours, the chain sets it and it can change without us touching code.
 
-**Y no hay reparto entre suppliers**: la función que lo hacía está comentada
-(`session.md`, regla 1), así que todos podemos presentar en la misma altura.
+**And there is no spreading across suppliers**: the function that did it is commented
+out (`session.md`, rule 1), so we can all submit at the same height.
 
-### Quién decide qué, y es donde más se confunde
+### Who decides what, which is where the most confusion happens
 
-| la pregunta | la entidad que la responde | la que NO |
+| the question | the entity that answers it | the one that does NOT |
 |---|---|---|
-| ¿este supplier sirve este servicio ahora? | **supplier**, por `ServiceConfigHistory` y altura | no el unbonding |
-| ¿entra en la sesión? | **la ventana de config de servicio** | no el unbonding (`supplier.md`, regla 6) |
-| ¿cuánto vale un relay? | **service** (CUPR) + `shared` (CUTTM) | no el supplier |
-| ¿cuántos relays valen? | **el root que firmamos nosotros** | no la cadena (`claim-and-proof.md`, regla 2) |
-| ¿qué gateways puede usar una app? | **la application** (`delegatee_gateway_addresses`) | no el gateway (`gateway.md`) |
-| ¿cuánto se puede cobrar? | **la application** (presupuesto y piso) | no el claim |
-| ¿cuánto llega al supplier? | **tokenomics** (reparto 0.7) | no el claim |
+| does this supplier serve this service now? | **supplier**, via `ServiceConfigHistory` and height | not the unbonding |
+| does it enter the session? | **the service config window** | not the unbonding (`supplier.md`, rule 6) |
+| how much is a relay worth? | **service** (CUPR) + `shared` (CUTTM) | not the supplier |
+| how many relays count? | **the root we sign** | not the chain (`claim-and-proof.md`, rule 2) |
+| which gateways can an app use? | **the application** (`delegatee_gateway_addresses`) | not the gateway (`gateway.md`) |
+| how much can be charged? | **the application** (budget and floor) | not the claim |
+| how much reaches the supplier? | **tokenomics** (0.7 split) | not the claim |
 
-### Las tres formas que se repiten en las tres entidades stakeables
+### The three shapes repeated across the three stakeable entities
 
-`supplier`, `application` y `gateway` comparten estructura, y aprenderla una vez
-sirve para las tres:
+`supplier`, `application` and `gateway` share structure, and learning it once
+serves for all three:
 
-1. Las tres tienen `stake` y `unstake_session_end_height`.
-2. Las tres tienen **`UnbondingCanceled`**: el unbonding **es reversible** y nunca
-   es un estado terminal.
-3. `supplier` y `application` tienen **`StakeStuckInModulePool`**: terminar de
-   desmontar **no implica que el owner haya cobrado**.
+1. All three have `stake` and `unstake_session_end_height`.
+2. All three have **`UnbondingCanceled`**: unbonding **is reversible** and is never
+   a terminal state.
+3. `supplier` and `application` have **`StakeStuckInModulePool`**: finishing
+   unbonding **does not imply the owner got paid**.
 
-### Lo que un cambio de governance nos puede hacer sin avisar
+### What a governance change can do to us without warning
 
-- **Mover los cuatro offsets** → cambia cuándo hay que reclamar y probar.
-- **Mover `target_num_relays`** → mueve la dificultad → cambia cuántos relays
-  entran al árbol, con el mismo tráfico.
-- **Mover CUTTM o la granularidad** → cambia el precio de todo lo no liquidado.
-- **Mover `mint_allocation_percentages`** → cambia nuestro 0.7.
-- **Mover `min_stake` de supplier** → nos puede poner en unbonding **solos**.
-- **Mover `num_suppliers_per_session`** → cambia `N`, y `N` es el divisor del piso
-  `B/N`: **más suppliers por sesión, piso más chico para cada uno.**
+- **Moving the four offsets** → changes when we must claim and prove.
+- **Moving `target_num_relays`** → moves the difficulty → changes how many relays
+  enter the tree, with the same traffic.
+- **Moving CUTTM or the granularity** → changes the price of everything not yet settled.
+- **Moving `mint_allocation_percentages`** → changes our 0.7.
+- **Moving the supplier `min_stake`** → can put us into unbonding **on its own**.
+- **Moving `num_suppliers_per_session`** → changes `N`, and `N` is the divisor of the
+  `B/N` floor: **more suppliers per session, a smaller floor for each.**
 
-Ninguno de esos requiere que cambiemos código, y todos cambian la plata.
+None of those requires us to change code, and all of them change the money.
 
-### Lo que NO está leído todavía
+### What is NOT read yet
 
-Las reglas de una **delegación que cambia a mitad de sesión** y el armado del
-anillo de firma (ver `gateway.md`). Es la única pieza de esta serie que sigue sin
-citar, y está declarada como tal en vez de completada de memoria.
+The rules for a **delegation that changes mid-session** and how the signing ring
+is assembled (see `gateway.md`). It is the only piece of this series still without
+citations, and it is declared as such instead of completed from memory.

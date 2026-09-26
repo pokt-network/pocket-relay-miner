@@ -1,47 +1,47 @@
-## Service — cuánto vale un relay, y cuáles entran al árbol
+## Service — how much a relay is worth, and which ones enter the tree
 
-Verificado contra **poktroll v0.1.35** (`go.mod:19`). **Sin cita, no es una regla.**
+Verified against **poktroll v0.1.35** (`go.mod:19`). **Without a citation, it is not a rule.**
 
-El service es la entidad que decide **el precio de un relay** y **qué fracción de
-los relays servidos llega a ser reclamable**. Es donde vive el multiplicador que
-convierte hojas del árbol en plata, así que casi toda afirmación de la forma
-"cobramos menos de lo que servimos" se resuelve acá.
+The service is the entity that decides **the price of a relay** and **what fraction of
+the relays served becomes claimable**. It is where the multiplier that turns tree
+leaves into money lives, so almost any claim of the form "we collect less than we
+served" is resolved here.
 
-### Los campos
+### The fields
 
 `poktroll/x/shared/types/service.pb.go`, `type Service struct`:
 
-| campo | |
+| field | |
 |---|---|
 | `id` | |
 | `name` | |
-| `compute_units_per_relay` | **CUPR**: cuántas unidades de cómputo vale UN relay de este servicio |
+| `compute_units_per_relay` | **CUPR**: how many compute units ONE relay of this service is worth |
 | `owner_address` | |
 | `metadata` | |
 
-### Regla 1 — el CUPR es del SERVICIO, no del relay ni del supplier
+### Rule 1 — the CUPR belongs to the SERVICE, not to the relay or the supplier
 
-Un relay no lleva su precio: lo hereda del service. **Cambiar el CUPR cambia el
-valor de todos los relays de ese servicio**, y lo hace para cualquier sesión que
-se liquide después del cambio.
+A relay does not carry its price: it inherits it from the service. **Changing the CUPR
+changes the value of every relay of that service**, and it does so for any session
+settled after the change.
 
-### Regla 2 — la dificultad decide qué relay ENTRA al árbol
+### Rule 2 — the difficulty decides which relay ENTERS the tree
 
 `poktroll/x/service/types/relay_mining_difficulty.pb.go`, `type
 RelayMiningDifficulty struct`:
 
-| campo | |
+| field | |
 |---|---|
 | `service_id` | |
 | `block_height` | |
-| `num_relays_ema` | la media móvil exponencial de relays del servicio |
-| `target_hash` | **el umbral**: sólo entran al árbol los relays cuyo hash lo cumple |
+| `num_relays_ema` | the exponential moving average of the service's relays |
+| `target_hash` | **the threshold**: only relays whose hash meets it enter the tree |
 
-Ver `docs/protocol/claim-and-proof.md`, regla 3: *"not every Relay (Request,
+See `docs/protocol/claim-and-proof.md`, rule 3: *"not every Relay (Request,
 Response) pair in the session is inserted into the tree. The relay hash has to
 have matched the difficulty for that service."*
 
-### Regla 3 — la fórmula del multiplicador, exacta
+### Rule 3 — the multiplier formula, exact
 
 `poktroll/pkg/crypto/protocol/relay_difficulty.go:85-96`:
 
@@ -50,23 +50,23 @@ probability = target_hash / BaseRelayDifficultyHash      (GetRelayDifficultyProb
 multiplier  = 1 / probability                            (GetRelayDifficultyMultiplier)
 ```
 
-Textual del código: el multiplicador *"scales FROM 'onchain_volume_applicable_relays'
+Verbatim from the code: the multiplier *"scales FROM 'onchain_volume_applicable_relays'
 TO 'offchain_estimate_actual_relays'"*.
 
-**Consecuencias:**
+**Consequences:**
 
-- Cuando `target_hash == BaseRelayDifficultyHash`, la probabilidad es 1 y el
-  multiplicador es 1: **entra todo, y estimado == reclamado**. Ése es el caso de
-  los gates locales, y por eso ahí `servido == facturado` exacto es la aserción
-  correcta.
-- Con dificultad mayor que la base, **estimado > reclamado por diseño**, y la
-  diferencia **no es pérdida**.
-- `GetRelayDifficultyMultiplierToFloat32` existe pero el código dice, en
-  mayúsculas, *"THIS IS TO BE USED FOR TELEMETRY PURPOSES ONLY"*: la conversión a
-  float32 pierde precisión y **no debe usarse para plata**. Lo que se usa es
+- When `target_hash == BaseRelayDifficultyHash`, the probability is 1 and the
+  multiplier is 1: **everything enters, and estimated == claimed**. That is the case
+  of the local gates, and that is why there `served == billed` exactly is the correct
+  assertion.
+- With a difficulty above the base, **estimated > claimed by design**, and the
+  difference **is not a loss**.
+- `GetRelayDifficultyMultiplierToFloat32` exists but the code says, in
+  capitals, *"THIS IS TO BE USED FOR TELEMETRY PURPOSES ONLY"*: the conversion to
+  float32 loses precision and **must not be used for money**. What is used is
   `*big.Rat`.
 
-### Regla 4 — estimado = multiplicador × reclamado, y el service ID debe coincidir
+### Rule 4 — estimated = multiplier × claimed, and the service ID must match
 
 `poktroll/x/proof/types/claim.go`, `getNumEstimatedComputeUnitsRat`:
 
@@ -75,23 +75,23 @@ numEstimatedComputeUnits = GetRelayDifficultyMultiplier(difficulty.target_hash)
                          × claim.GetNumClaimedComputeUnits()
 ```
 
-Y antes de multiplicar valida que **el service ID del claim coincida con el de la
-dificultad**, o falla con `ErrProofInvalidRelayDifficulty`.
+And before multiplying it validates that **the claim's service ID matches the
+difficulty's**, or it fails with `ErrProofInvalidRelayDifficulty`.
 
-**Consecuencia**: la dificultad usada es la **del servicio del claim**. Aplicar la
-dificultad de otro servicio no da un número malo: da un error.
+**Consequence**: the difficulty used is **that of the claim's service**. Applying
+another service's difficulty does not give a wrong number: it gives an error.
 
-### Regla 5 — la dificultad CAMBIA, y hay un evento que lo dice con ambos valores
+### Rule 5 — the difficulty CHANGES, and an event reports it with both values
 
-`poktroll/x/service/types/event.pb.go`: `EventRelayMiningDifficultyUpdated`, con
+`poktroll/x/service/types/event.pb.go`: `EventRelayMiningDifficultyUpdated`, with
 `service_id`, `prev_target_hash_hex_encoded`, `new_target_hash_hex_encoded`,
-`prev_num_relays_ema` y `new_num_relays_ema`.
+`prev_num_relays_ema` and `new_num_relays_ema`.
 
-**Es el único evento del módulo service.** Lleva el valor anterior y el nuevo, así
-que un cambio de dificultad **se puede fechar y cuantificar desde la cadena** en
-vez de inferirse.
+**It is the only event of the service module.** It carries the previous and the new
+value, so a difficulty change **can be dated and quantified from the chain** instead
+of being inferred.
 
-### Lo que no se puede leer del código
+### What cannot be read from the code
 
-El CUPR de un servicio concreto y el `target_hash` vigente: son estado de la
-cadena. `BaseRelayDifficultyHashBz` sí es una constante del protocolo.
+The CUPR of a specific service and the current `target_hash`: they are chain
+state. `BaseRelayDifficultyHashBz` is a protocol constant.

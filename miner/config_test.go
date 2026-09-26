@@ -503,7 +503,7 @@ func TestConfig_Validate_RejectsBadLoggingLevel(t *testing.T) {
 // produced a number; now an absent block time means WindowTimeout is called with
 // zero, falls to the chain ceiling under the "unknown" regime, and every claim
 // and proof carries a deadline nobody chose. Jorge's decision was explicit --
-// "nada de move to defaults, no arranca, para que lo arreglen" -- and without a
+// "no moving to defaults, it doesn't start, so they fix it" -- and without a
 // test a later refactor can delete the guard with nothing turning red.
 //
 // The fixtures are valid in EVERY other respect on purpose. The guard sits at

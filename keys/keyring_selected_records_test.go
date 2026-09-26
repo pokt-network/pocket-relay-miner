@@ -17,9 +17,10 @@ import (
 // branch had already been through that and calls it a bug in its own comments --
 // one damaged record blocking the withdrawal of all the others.
 //
-// Owner decision, textual: "si nos piden por nombre y no funcionan, se ignoran y
-// se cargan las que si, ruidoso y seguimos. Como cuando listamos". The noise is
-// for the operator to find their own problem; nothing of ours breaks over it.
+// Owner decision, textual: "if they're requested by name and they don't work,
+// they're ignored and the ones that do get loaded, noisily, and we go on. Like
+// when we list". The noise is for the operator to find their own problem;
+// nothing of ours breaks over it.
 
 // TestASelectedCorruptRecordIsIgnoredAndTheRestAreLoaded is the policy itself.
 func TestASelectedCorruptRecordIsIgnoredAndTheRestAreLoaded(t *testing.T) {

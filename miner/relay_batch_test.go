@@ -886,7 +886,7 @@ func TestClaimTransition_FlushesTheBatchBeforeReadingTheCounters(t *testing.T) {
 }
 
 // TestValidateRelayBatchFlushInterval pins the ceiling at exactly a quarter of
-// the reclaim's idle timeout (Jorge, 2026-09-10: 15 s, "vamos al tope").
+// the reclaim's idle timeout (Jorge, 2026-09-10: 15 s, "go to the ceiling").
 func TestValidateRelayBatchFlushInterval(t *testing.T) {
 	require.NoError(t, validateRelayBatchFlushInterval(15*time.Second, 60*time.Second), "15 s with 60 s is the ceiling and passes")
 	require.Error(t, validateRelayBatchFlushInterval(15*time.Second+time.Nanosecond, 60*time.Second), "one nanosecond over fails")
