@@ -1,56 +1,94 @@
 # Pocket RelayMiner
 
-Serves relays for Pocket Network suppliers and gets them paid on chain.
+**Every relay you serve, paid on chain.**
 
-## What it is
+Pocket RelayMiner is the supplier side of Pocket Network: it serves relays from
+gateways to your backends on every transport, charges each one against the
+application's stake before serving it, and turns what it served into claims and
+proofs that settle on chain -- through crashes, restarts, Redis outages and
+partial rejections.
 
-1 binary, 2 processes, 1 Redis:
+> **Measured for v0.1.0** on 1 relayer, 1 miner and 1 Redis: **10.7 M relays
+> served at ~2,300 relays/s**, through 4 session windows with 6 sessions of 50
+> suppliers each, and **1,501 of 1,501 claims settled**, with the miner killed
+> twice on purpose along the way. The numbers are in the
+> [capacity report](https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.0/Relay-Miner-Capacity.pdf).
 
-- **Relayer**: verifies each relay (ring signature, session, the application's
-  remaining stake), forwards it to your backend, signs the response with the
-  supplier's key and queues the relay in Redis.
-- **Miner**: builds the claim tree of each session from the queued relays and
-  submits the claim and the proof to the chain.
-- **Redis**: all shared state: relays, claim trees, the stake meter.
+## Why operators run it
+
+**It gets every relay paid**
+- Claims and proofs are submitted automatically for every session, and watched
+  until the chain includes them; what did not land is resubmitted while its
+  window is still open.
+- A claim or a proof is never lost to a crash, a rollout or a batch the chain
+  partly refuses: the message the chain names leaves the batch, the rest goes
+  through.
+- Every relay is charged against the application's stake before it is served,
+  so the relayer does not serve work the session can no longer pay for. If Redis
+  cannot confirm the budget, the relay is refused rather than served for free.
+
+**It serves every transport**
+- JSON-RPC over HTTP, WebSocket, gRPC, REST and streaming (SSE), and CometBFT,
+  routed to your backends per service.
+- Ring signatures and sessions are verified on every relay, and every response
+  is signed with the supplier's key.
+
+**It scales and survives failure**
+- Relayers keep no state of their own: all of it lives in one Redis, which
+  every relayer and miner of a deployment shares.
+- Miners elect a leader through Redis; a standby takes over when it stops.
+- Memory and Redis are bounded at every stage: under pressure it refuses new
+  work cleanly instead of running out of memory.
+
+**It refuses to run unsafe**
+- `validate` checks a config offline and lists every problem in one pass;
+  `--check-stake` finds staked services with no backend.
+- Both processes refuse to start on a Redis that could lose data (no
+  `maxmemory`, an evicting policy, a version older than 8.10).
+
+**It shows you what it is doing**
+- Prometheus metrics with a triage order for incidents
+  ([docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md)).
+- `pocket-relay-miner redis` decodes sessions, streams, claim trees, meters and
+  every claim and proof submission straight from Redis.
+
+**It is built to build on**
+- `pocket-relay-miner relay` sends single relays and load tests on every
+  transport, and **simulated relays** exercise a live relayer end to end without
+  staking or billing anything ([docs/SIMULATED_RELAYS.md](docs/SIMULATED_RELAYS.md)).
+- The bLSAG ring signature a relay carries is documented byte for byte, with
+  working signers in Node.js, Python and Rust and a Go oracle to check yours
+  ([examples/relay-signing/](examples/relay-signing/README.md)).
+- Supplier keys come from a keys file or a keyring and reload without a restart
+  ([docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md)).
+
+## How it fits
 
 ```
-  gateways ──> relayer ──> your backends
-                  │
-                  ▼
-                Redis
-                  ▲
-                  │
-                miner ──> Pocket chain (claims, proofs)
+                 gateways
+                    │
+        ┌───────────┼───────────┐
+        ▼           ▼           ▼
+   ┌─────────┐ ┌─────────┐ ┌─────────┐
+   │ relayer │ │ relayer │ │ relayer │ ──> your backends
+   └────┬────┘ └────┬────┘ └────┬────┘     (stateless: validate, charge, serve, sign)
+        └───────────┼───────────┘
+                    ▼
+               ┌─────────┐
+               │  Redis  │  relays, claim trees, the stake meter
+               └────┬────┘
+            ┌───────┴───────┐
+            ▼               ▼
+      ┌──────────┐    ┌──────────┐
+      │  miner   │    │  miner   │ ──> Pocket chain (claims, proofs)
+      │ (leader) │    │(standby) │
+      └──────────┘    └──────────┘
 ```
 
-A deployment is **1 Redis shared by the relayers and miners**, all on the same
+1 binary, 2 processes, 1 Redis shared by all of them, every process on the same
 version. v0.1.0 was tested on 1 relayer + 1 miner and on 2 relayers + 2 miners
-(the latter at lower load); the load tests are from 1 relayer + 1 miner.
-
-## What it does
-
-1. **Serves relays over every transport**: JSON-RPC over HTTP, WebSocket, gRPC,
-   REST and streaming (SSE), CometBFT, routed to your backends per service.
-2. **Charges each relay against the application's stake** and refuses what the
-   session can no longer pay for. If Redis cannot confirm the budget, the relay
-   is refused rather than served for free.
-3. **Claims and proves every session automatically**, and keeps watching until
-   each claim and proof is included on chain; what did not land is resubmitted
-   while its window is open. See [docs/CLAIM_PROOF_LIFECYCLE.md](docs/CLAIM_PROOF_LIFECYCLE.md).
-4. **Runs many suppliers in one process**, with keys from a keys file or a
-   keyring, reloaded without a restart. See [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md).
-5. **Fails over between miners**: one leader at a time, elected through Redis.
-6. **Refuses an unsafe setup before serving**: `validate` checks a config
-   offline, `--check-stake` checks every staked service has a backend, and both
-   processes refuse to start on a Redis that could lose data.
-7. **Sends test and load relays** on every transport, including **simulated
-   relays** that exercise a live relayer without staking or billing anything.
-   See [docs/SIMULATED_RELAYS.md](docs/SIMULATED_RELAYS.md).
-8. **Shows its state**: `pocket-relay-miner redis` decodes sessions, streams,
-   claim trees, meters and submissions, and the metrics have a triage order
-   ([docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md)).
-9. **Documents relay signing byte for byte**, with working signers in Node.js,
-   Python and Rust: [examples/relay-signing/](examples/relay-signing/README.md).
+(the latter at lower load); the load tests and the capacity figures are from
+1 relayer + 1 miner.
 
 ## Where to start
 
@@ -60,7 +98,7 @@ invariants that stop a deployment.
 | I want to... | Read |
 |---|---|
 | choose a path, check prerequisites and ports | [docs/deploy/README.md](docs/deploy/README.md) |
-| run it with Docker Compose, a whole local chain first | [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) |
+| run it with Docker Compose, on beta first | [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) |
 | run it on a host, binary and systemd | [docs/deploy/HOST.md](docs/deploy/HOST.md) |
 | use Kubernetes | no example in v0.1.0; `tilt/` runs the stack on a local kind cluster and is a starting point for your own manifests |
 
