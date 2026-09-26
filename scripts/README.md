@@ -51,5 +51,17 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 
 - `loadtest/` — backend RPS-ceiling measurement and per-service pool tuning (`backends.sh`). See [`loadtest/README.md`](loadtest/README.md).
 - `ws-test/` — manual WebSocket tester through the gateway, reconnecting on session rollover (the CLI's `relay websocket --load-test` redials on its own).
-- `lib/` — shared bash helpers (`common.sh`).
+- `lib/` — shared bash helpers (`cli-build.sh`: builds the relay CLI once for the scripts that drive the relayer at `:8180`).
+- `observability/` — `triage.sh` evaluates the metric identities of [`../docs/METRICS_TRIAGE.md`](../docs/METRICS_TRIAGE.md) against Prometheus; `triage.conf.example` shows its settings.
+- `localnet/` — localnet tooling: `gen-genesis.go` (a genesis sized for load), `check-account-init.sh` (the accounts derived from the genesis), `check-cpu-limits.sh` (GOMAXPROCS equals each container's CPU limit).
+- `hooks/` — the `pre-commit` and `pre-push` git hooks; install with `make install-hooks`.
 - `localonly/` — gitignored; operator-specific config (see the operator-data rule in [`../CONTRIBUTING.md`](../CONTRIBUTING.md)).
+
+## Repository and session tooling
+
+| Script | What it does |
+|---|---|
+| `check-tracked-files.sh` | Fails when a file that must stay local (a working document, an ignored path) is tracked; `make check-tracked-files` and CI run it. |
+| `handoff-index.sh` | Indexes the session hand-overs in `localonly/` and says which one is canonical. |
+| `queue-audit.sh` | Audits the local work queue against the tree. |
+| `session-start-check.sh` | Reports the machine's state at the start of a session. |

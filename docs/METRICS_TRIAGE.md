@@ -37,8 +37,8 @@ This is the money question, and only one pair of series answers it.
 
 `*_inclusion_outcome` is the only one written **after asking the chain** (the
 inclusion reconciler polls `GetClaim`), which is why it is the one that
-discriminates. Its other outcomes (`on_chain_missing`, `poll_error`) are the real
-alarm.
+discriminates. Its other outcomes (`on_chain_missing`, `on_chain_rejected`,
+`poll_error`) are the real alarm.
 
 **Two different resend paths, and they are easy to confuse — this table confused
 them, twice, on 2026-09-18.** The FIRST is the restart resubmission: a miner that
@@ -66,7 +66,9 @@ falls through to the default. `success` and `already_queued` are both good outco
 `window_closed` is not this defect but it IS work lost, so read it separately.
 `triage.sh` prints `NO-DENOM` rather than `ok 0` when no resend was attempted.
 
-The chain's own answer, for a settlement at height H:
+The chain's own answer, for a settlement at height H (`localhost:26657` is the
+Tilt chain; on beta or mainnet use your node's CometBFT RPC, or the public
+Sauron RPC, as `triage.sh` does with `CHAIN_URL`):
 
 ```
 curl -s "localhost:26657/block_results?height=$H" | jq '
@@ -82,11 +84,13 @@ curl -s "localhost:26657/block_results?height=$H" | jq '
 
 ### Decoys in this section
 
-- **`relays_lost_total`, `compute_units_lost_total`, `upokt_lost_total`,
-  `sessions_failed_total`** with `reason="proof_tx_error"`: these count a failed
-  submission *attempt*. A restarted miner resubmits, and the retry lands, so these
-  fire on a run that lost nothing. They also fire on a run that lost everything,
-  with the same reason — **they cannot tell the two apart.** Read
+- **`sessions_failed_total{reason="proof_tx_error"}`**: this counts a failed
+  submission *attempt*. A restarted miner resubmits, and the retry lands, so it
+  fires on a run that lost nothing. It also fires on a run that lost everything,
+  with the same reason — **it cannot tell the two apart.** The `*_lost_total`
+  counters (`relays_`, `compute_units_`, `upokt_`) do not move on a retryable
+  proof error: that money waits in the `unresolved` balance until the chain
+  answers, and is counted lost only when nothing will retry it. Read
   `*_inclusion_outcome` instead, and read `proof_rebroadcasts_total` for what the
   retries cost. That resubmission only exists when a transaction was actually
   broadcast: the reconciler walks rebroadcast entries, so a session marked
@@ -184,7 +188,9 @@ anything: there is no subtraction that yields what was earned.
 | Writes Redis actually refused | `ha_smst_store_errors_total`, and the `denyoom` classification |
 
 **The gate closing is not an incident by itself** — it is the designed response,
-and ingestion reopens at +512 MiB, admission at +1 GiB. It becomes an incident
+and ingestion reopens 512 MiB above the close line, admission 1 GiB above it (at
+a `maxmemory` of 8 GiB or more: close below 1 GiB free, reopen at 1.5 GiB and
+2 GiB). It becomes an incident
 when section 1 shows a gap, or when it never reopens.
 
 ### Audit trail
@@ -194,8 +200,10 @@ when section 1 shows a gap, or when it never reopens.
   another reason. The record for that claim or proof is missing — not wrong,
   missing. Any figure taken from `ha:tx:track:*` for that window is incomplete.
 - **`ha_miner_tracking_outcomes_without_record_total{kind}`**: the inclusion
-  reconciler had an on-chain outcome to annotate and found no record to put it on.
-  **That outcome is lost for good**, even if storage recovers a minute later.
+  reconciler had a CLAIM's on-chain outcome to annotate and found no record to
+  put it on. **That outcome is lost for good**, even if storage recovers a minute
+  later. Only `kind="claim"` is ever counted; the proof side has no series (see
+  "What has NO series at all").
 - Historical note: until 2026-09-17 the tracker skipped these writes entirely
   while the storage gates were closed, and a later phase then created a minimal
   record reporting `claim_success: false` for claims that had settled. Measured on
@@ -232,18 +240,21 @@ stream; leaves are what the tree holds; `num_relays` on chain is what we signed.
 
 | Identity | Series |
 |---|---|
-| Served splits into published plus skipped | `ha_relayer_relays_served_total` == `ha_relayer_relays_published_total` + `ha_relayer_relays_skipped_difficulty_total` |
+| Served splits into published, skipped and dropped | `ha_relayer_relays_served_total` == `ha_relayer_relays_published_total` + `ha_relayer_relays_skipped_difficulty_total` + `ha_relayer_relays_dropped_total` |
 | Nothing is dropped between stream and tree | `ha_miner_relays_consumed_from_stream_total` == `ha_miner_relays_added_to_smst_total` |
 | What the claim actually carried | `ha_miner_claim_num_leaves`, `ha_miner_relays_claimed_total` |
 | What the chain credited | `num_relays` in the settlement event, against the leaves |
 
 A relay the miner cannot restore to its original bytes (a compressed field that
 does not decode, or a message carrying neither form) is acknowledged and counted in
-`ha_miner_relays_rejected_total{reason="relay_bytes_corrupt"}`: it is a defect in
-the producer, never a retry.
+`ha_miner_relays_rejected_total{reason="relay_bytes_corrupt"}` (or
+`reason="relay_bytes_corrupt_redelivered"` when the message was a redelivery, so
+match both): it is a defect in the producer, never a retry.
 
 After the first settlement the difficulty rises, so published drops well below
-served **by design** — that gap is `relays_skipped_difficulty`, not loss.
+served **by design** — that gap is `relays_skipped_difficulty`, not loss. The
+third term, `relays_dropped`, is relays served and never published: read it by
+`reason` (`stake_exhausted` is work given away; `publish_failed` is loss).
 
 ---
 
@@ -277,9 +288,10 @@ right question:
   found by reading 500 Redis records by hand.
 - **Which clock anchored a transaction's timeout.** The code computes the anchor
   source and only logs it.
-- **A reconciler that found no record to annotate.** It reports
-  `records_updated: 0` in a `Debug` log with no counter, so an on-chain outcome
-  lost this way is silent.
+- **A proof outcome that found no record to annotate.** The claim side is
+  counted (`ha_miner_tracking_outcomes_without_record_total{kind="claim"}`, with a
+  `Warn`), but a proof's on-chain outcome with no record is a silent no-op: no
+  counter and no log, so a proof outcome lost this way is invisible.
 - **Time from process start to the first observed block.** Nothing measures it,
   so nobody knows how long a restarted process runs without a chain clock.
 

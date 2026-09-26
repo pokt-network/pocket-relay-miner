@@ -4,7 +4,7 @@ What poktroll does, per entity, and where the money moves. It exists because
 reasoning about the protocol from memory missed half the cases and invented
 situations that cannot happen.
 
-**Verified against poktroll v0.1.35** — the version pinned by `go.mod:19`.
+**Verified against poktroll v0.1.35** — the version pinned by `go.mod:20`.
 
 ### The rule of this directory
 
@@ -30,7 +30,7 @@ read from the source.
 
 | document | what for |
 |---|---|
-| [params](PARAMS.md) | **the full governance inventory**: 30 parameters in 8 modules, and what each one does to us. They change without us touching code, and several change how much we get paid |
+| [params](PARAMS.md) | **the full governance inventory**: 31 parameters in 8 modules, and what each one does to us. They change without us touching code, and several change how much we get paid |
 | [interactions](INTERACTIONS.md) | **how everything chains together**: the life of a relay from arrival to the uPOKT the supplier collects, the five legitimate cuts, and which entity answers each question |
 
 ### How it is updated

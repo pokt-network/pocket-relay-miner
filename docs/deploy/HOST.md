@@ -1,7 +1,7 @@
 # Deploy on a host (binary + systemd)
 
 This runbook installs the relayer and the miner as 2 systemd services on 1
-Linux host (or VM), next to Redis 8.10. Example files are in
+Linux host (or VM), next to Redis 8.10 or newer. Example files are in
 [examples/host/](../../examples/host/).
 
 **Verification status.** The configs in `examples/host/` pass `validate`, and
@@ -142,13 +142,18 @@ Then edit every line marked `CHANGE`:
   `pocket_node.query_node_rpc_url`, `pocket_node.query_node_grpc_url`,
   `pocket_node.grpc_insecure`.
 - `miner.yaml`: `pocket_node.chain_id` (`pocket` for mainnet, `pocket-lego-testnet`
-  for the beta testnet) and `block_time_seconds` (measured; mainnet is roughly 60).
+  for the beta testnet) and `block_time_seconds` (measured; beta is roughly 30,
+  mainnet roughly 60).
 - `relayer.yaml`: `services.<service_id>` with `backends.<transport>.url`, 1
   entry per service your suppliers are staked for.
 - `supplier-keys.yaml`: your suppliers' private keys, 1 per line under `keys:`.
   For a keyring instead, see [docs/SUPPLIER_KEYS.md](../SUPPLIER_KEYS.md) and
   set `KEYRING_PASSPHRASE` in both `.env` files.
 - `miner.env`: `GOMEMLIMIT=7200MiB` (the miner unit has `MemoryMax=8G`).
+- pprof: the relayer example serves it on `127.0.0.1:6060`; the miner example
+  leaves it off. Both binaries default to `127.0.0.1:6060`, so if you enable
+  it in `miner.yaml`, give it another `pprof.addr` (for example
+  `127.0.0.1:6065`) or the 2 processes on this host collide.
 
 [config.relayer.example.yaml](../../config.relayer.example.yaml) and
 [config.miner.example.yaml](../../config.miner.example.yaml) document every
@@ -279,10 +284,11 @@ simulation settings only at startup, so after editing
 `/etc/pocket-relay-miner/relayer.yaml` run step 4's relayer `validate` again
 (`EXIT=0`), then `sudo systemctl restart pocket-relay-miner-relayer` and wait
 for `/ready` as in step 7. Then, with `<sim-keys-file>` the absolute path of
-the simulation keys file you created (a placeholder, like every `<...>` here):
+the simulation keys file you created and `<chain-id>` the miner's
+`pocket_node.chain_id` (placeholders, like every `<...>` here):
 
 ```bash
-pocket-relay-miner relay jsonrpc --relayer-url http://127.0.0.1:8080 --node <node-grpc-host:port> --grpc-tls --keys-file <sim-keys-file> --service <service-id> --supplier <supplier-address> --simulate --sim-key-id <identity>; echo "EXIT=$?"
+pocket-relay-miner relay jsonrpc --relayer-url http://127.0.0.1:8080 --node <node-grpc-host:port> --grpc-tls --chain-id <chain-id> --keys-file <sim-keys-file> --service <service-id> --supplier <supplier-address> --simulate --sim-key-id <identity>; echo "EXIT=$?"
 ```
 
 **Expect**: `Status: ✅ SUCCESS`, `Signature: ✅ VALID`, `EXIT=0`.

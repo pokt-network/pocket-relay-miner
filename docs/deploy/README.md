@@ -62,11 +62,12 @@ produces, where there is one.
 | A Pocket full node: CometBFT RPC and gRPC | both processes; the miner submits transactions through it | yours, or a provider's. The compose example uses the public Sauron endpoints |
 | At least 1 staked supplier and its private key (64 hex characters) | signing responses, claims and proofs | your staking process. **A human provides it; an agent never generates or moves funds** |
 | A backend node for every service your suppliers are staked for | answering relays | yours |
-| Redis 8.10 | shared state | [config.redis.example.conf](../../config.redis.example.conf) |
+| Redis 8.10 or newer (both processes refuse an older one at startup), `maxmemory` set, `noeviction` | shared state | [config.redis.example.conf](../../config.redis.example.conf) |
 | The supplier's account funded for transaction fees | claims and proofs cost fees | your wallet |
 
-The miner's `block_time_seconds` must match the network: mainnet is roughly
-60 seconds; measure yours.
+The miner's `block_time_seconds` must match the network: beta
+(`pocket-lego-testnet`) is roughly 30 seconds, mainnet (`pocket`) roughly 60
+seconds; measure yours.
 
 ## Ports
 
@@ -77,11 +78,14 @@ The miner's `block_time_seconds` must match the network: mainnet is roughly
 | relayer | 9090 | Prometheus metrics (`metrics.addr`) |
 | relayer | 6060 | pprof profiling (`pprof.addr`). The default is `127.0.0.1:6060`, loopback only; in a container that means `docker exec` or an explicit `pprof.addr: "0.0.0.0:6060"` to reach it. Never expose it publicly |
 | miner | 9092 | Prometheus metrics and `GET /health` (`metrics.addr`) |
+| miner | 6060 | pprof profiling (`pprof.addr`), off by default. When enabled with no `addr` it also listens on `127.0.0.1:6060`, the relayer's default: on 1 host, give one of them another port |
 | Redis | 6379 | never expose it outside the host or the compose network |
 
 Relayer metrics on 9090 and a node's gRPC on 9090 collide when both run on the
 same host network. The host runbook binds metrics and pprof to `127.0.0.1`; move one of
-them if your node is on the same host.
+them if your node is on the same host. Both binaries default pprof to
+`127.0.0.1:6060`, so a relayer and a miner with pprof enabled on 1 host collide:
+the second one logs `pprof server failed` and keeps running without pprof.
 
 ## Startup order
 

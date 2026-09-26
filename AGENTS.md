@@ -60,14 +60,19 @@ are not checked, and breaking them is unsupported.
 ## Rules for an agent running a deployment
 
 - **Size the limits for the load; the examples do not.** The limits in
-  `examples/` (Redis and miner 4 GiB, relayer 2 GiB, 2 CPUs each) fit a few
-  suppliers with ordinary traffic; they do not absorb a burst of large relays
-  or dozens of suppliers. Before real traffic, scale them from: the comments
-  above each limit in
+  `examples/docker-compose/` (Redis and miner 4 GiB, relayer 2 GiB, 2 CPUs
+  each) fit a few suppliers with ordinary traffic; they do not absorb a burst
+  of large relays or dozens of suppliers. The `examples/host/` units have their
+  own (miner `MemoryMax=8G`, relayer `MemoryMax=4G`, `CPUQuota=400%` each;
+  Redis `maxmemory` is yours to set,
+  [HOST.md, step 2](docs/deploy/HOST.md#step-2-redis-810)); neither set is
+  the one the load run used. Before real traffic, scale them from: the
+  comments above each limit in
   [examples/docker-compose/docker-compose.yaml](examples/docker-compose/docker-compose.yaml)
   (what the v0.1.0 load run used), the
-  [capacity report](https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.0/Relay-Miner-Capacity.pdf)
-  (memory, CPU and Redis per component under load),
+  [capacity report](docs/benchmarks/v0.1.0/Relay-Miner-Capacity.pdf)
+  (memory, CPU and Redis per component under load; how to read it against your
+  load is in [docs/benchmarks/README.md](docs/benchmarks/README.md)),
   [config.redis.example.conf](config.redis.example.conf) (Redis settings of
   that run), and [TROUBLESHOOTING.md, Memory and CPU](docs/deploy/TROUBLESHOOTING.md#memory-and-cpu).
 - Pick 1 runbook, [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md)

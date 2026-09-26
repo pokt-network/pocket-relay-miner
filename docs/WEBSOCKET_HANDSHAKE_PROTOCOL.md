@@ -24,8 +24,8 @@ The gateway must send the following headers during WebSocket upgrade handshake, 
 | `Pocket-Session-Id` | Session identifier | `abc123...` |
 | `Pocket-Session-Start-Height` | Session start block height | `1000` |
 | `Pocket-Session-End-Height` | Session end block height | `1010` |
-| `Pocket-App-Address` | Application address | `pokt1abc...` |
-| `Pocket-Service-Id` | Service identifier | `develop-websocket` |
+| `App-Address` | Application address | `pokt1abc...` |
+| `Target-Service-Id` | Service identifier (`Pocket-Service-Id` is read as a legacy fallback) | `develop-websocket` |
 | `Pocket-Supplier-Address` | Target supplier operator address | `pokt1xyz...` |
 | `Pocket-Signature` | Ring signature (base64 encoded) | `base64...` |
 
@@ -47,8 +47,8 @@ signature = ring.Sign(signableBytes, gatewayOrAppPrivateKey)
 │  Headers:                                                        │
 │    Pocket-Session-Id: abc123                                    │
 │    Pocket-Session-End-Height: 1010                              │
-│    Pocket-App-Address: pokt1app...                              │
-│    Pocket-Service-Id: develop-websocket                         │
+│    App-Address: pokt1app...                                     │
+│    Target-Service-Id: develop-websocket                         │
 │    Pocket-Supplier-Address: pokt1supplier...                    │
 │    Pocket-Signature: <ring-signature>                           │
 └─────────────────────────────────────────────────────────────────┘
@@ -62,7 +62,7 @@ signature = ring.Sign(signableBytes, gatewayOrAppPrivateKey)
 │     - Reject if mismatch (wrong supplier)                        │
 │                                                                  │
 │  2. Validate Service                                             │
-│     - Pocket-Service-Id is configured in relayer                │
+│     - Target-Service-Id is configured in relayer                │
 │     - Reject if service not supported                            │
 │                                                                  │
 │  3. Validate Session                                             │

@@ -23,7 +23,7 @@ relay served
 ```
 
 **Each arrow is a place where the number legitimately goes down.** Before calling
-a difference a "loss", you have to know in which of the six it happened.
+a difference a "loss", you have to know in which of the five it happened.
 
 ### The five legitimate cuts, in order
 
@@ -87,8 +87,13 @@ serves for all three:
 - **Moving CUTTM or the granularity** → changes the price of everything not yet settled.
 - **Moving `mint_allocation_percentages`** → changes our 0.7.
 - **Moving the supplier `min_stake`** → can put us into unbonding **on its own**.
-- **Moving `num_suppliers_per_session`** → changes `N`, and `N` is the divisor of the
-  `B/N` floor: **more suppliers per session, a smaller floor for each.**
+- **Moving `num_suppliers_per_session`** → bounds `N`. On chain, `N` in the `B/N`
+  floor is the number of suppliers that actually claimed (`APPLICATION.md`,
+  rule 1), at most `num_suppliers_per_session`: **more suppliers claiming, a
+  smaller floor for each.** Our relay meter is stricter: its guaranteed share
+  (`baseLimit`, `config.miner.example.yaml`) divides by
+  `num_suppliers_per_session` itself, because it cannot know in advance who will
+  claim.
 
 None of those requires us to change code, and all of them change the money.
 

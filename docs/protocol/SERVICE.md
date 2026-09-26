@@ -1,6 +1,6 @@
 ## Service — how much a relay is worth, and which ones enter the tree
 
-Verified against **poktroll v0.1.35** (`go.mod:19`). **Without a citation, it is not a rule.**
+Verified against **poktroll v0.1.35** (`go.mod:20`). **Without a citation, it is not a rule.**
 
 The service is the entity that decides **the price of a relay** and **what fraction of
 the relays served becomes claimable**. It is where the multiplier that turns tree

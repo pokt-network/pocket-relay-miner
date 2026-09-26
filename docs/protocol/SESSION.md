@@ -1,6 +1,6 @@
 ## Session — the protocol rules
 
-Verified against **poktroll v0.1.35** (`go.mod:19`). Each rule cites its source.
+Verified against **poktroll v0.1.35** (`go.mod:20`). Each rule cites its source.
 **Without a citation, it is not a rule.**
 
 A session is the accounting unit: relays are grouped by session, claimed by

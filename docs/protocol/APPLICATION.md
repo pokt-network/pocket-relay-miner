@@ -1,6 +1,6 @@
 ## Application — the protocol rules, and the budget that cuts the payment
 
-Verified against **poktroll v0.1.35** (`go.mod:19`). **Without a citation, it is not a rule.**
+Verified against **poktroll v0.1.35** (`go.mod:20`). **Without a citation, it is not a rule.**
 
 The application is **the one that pays**. Its stake is the budget that pays what a
 supplier collects, and that is why most of the rules on "why was I paid

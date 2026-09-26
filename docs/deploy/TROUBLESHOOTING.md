@@ -138,7 +138,7 @@ EXIT=1
 ```
 
 **Action**: set `block_time_seconds` to the network's measured block time
-(mainnet is roughly 60).
+(beta, `pocket-lego-testnet`, is roughly 30; mainnet, `pocket`, roughly 60).
 
 `miner validate` checks neither the chain nor Redis: a config that validates
 can still fail here.

@@ -2,6 +2,17 @@
 
 Redis is the central state store for distributed coordination. **It's NOT just a cache** - it stores critical revenue-generating data.
 
+**Topology**: 1 Redis shared by the relayers and miners of a deployment. v0.1.0
+was tested on 1 relayer + 1 miner and on 2 relayers + 2 miners (the latter at
+lower load), always against a standalone Redis; the load tests and the capacity
+figures are from 1 relayer + 1 miner ([docs/benchmarks/](benchmarks/README.md)).
+
+**Version and memory**: Redis 8.10 or newer, with `maxmemory` set and
+`maxmemory-policy noeviction`. Both binaries refuse to start against an older
+Redis, a `maxmemory` of 0 or an evicting policy. The server settings the
+release was measured with are
+[config.redis.example.conf](../config.redis.example.conf); start from it.
+
 ## Configuration
 
 ### Connection Settings
@@ -9,17 +20,24 @@ Redis is the central state store for distributed coordination. **It's NOT just a
 ```yaml
 redis:
   url: "redis://localhost:6379"
-  pool_size: 50                      # Formula: numSuppliers + 20 (see below)
-  min_idle_conns: 10                 # Warm connections
-  pool_timeout_seconds: 4            # Wait time for connection from pool
-  conn_max_idle_time_seconds: 300    # Close idle connections after 5 minutes
+  # pool_size: miner default 50; the relayer sizes its own from its worker pools
+  # min_idle_conns: default pool_size / 4
+  # pool_timeout_seconds: default 6
+  # conn_max_idle_time_seconds: default 30 minutes
 ```
 
-### Pool Size Formula
+[config.relayer.example.yaml](../config.relayer.example.yaml) and
+[config.miner.example.yaml](../config.miner.example.yaml) document each key and
+its default.
 
-**CRITICAL**: Stream consumption uses `BLOCK 0` (TRUE PUSH) which holds 1 connection per supplier indefinitely.
+### Pool Size (miner)
 
-**Note**: Suppliers are auto-discovered from keyring keys. The number of suppliers equals the number of keys configured in the keyring.
+Each supplier's stream consumer holds 1 pooled connection while its read
+blocks. A read blocks for at most one block interval, then returns and is
+issued again, so the connection is held almost continuously.
+
+Suppliers come from the keys the miner loads: a keys file or a keyring
+([SUPPLIER_KEYS.md](SUPPLIER_KEYS.md)).
 
 ```
 pool_size = numSuppliers + 20 overhead
@@ -29,7 +47,7 @@ pool_size = numSuppliers + 20 overhead
 
 | Type | Connections | Duration |
 |------|-------------|----------|
-| Stream consumer (per supplier) | 1 × numSuppliers | Held indefinitely (BLOCK 0) |
+| Stream consumer (per supplier) | 1 × numSuppliers | Held while the read blocks (one block interval per read) |
 | Block event pub/sub | 1 | Held indefinitely |
 | Cache invalidation pub/sub | 2-3 | Held indefinitely |
 | Supplier registry pub/sub | 1 | Held indefinitely |
@@ -70,14 +88,15 @@ string, and `cache_prefix: "supplier"` made the supplier SCAN pattern
 supplier --invalidate`, which deletes what it scans. With the layout constant,
 each pattern provably matches only its own family, and a test pins it.
 
-The base prefix stays configurable, and it must match `^[a-zA-Z0-9_-]+$` — ONE
-flat segment, enforced at startup. That rule is what makes two base prefixes two
-disjoint keyspaces, so one Redis can host several fleets. Position alone does not
-give you that: a colon-nested base would not be disjoint at all, because a fleet
-based at `ha` scans `ha:*`, which matches every key of a fleet based at
-`ha:prod`, and that pattern is what `redis flush --all` deletes. A glob character
-is rejected for the same family of reason — it would end up inside every SCAN
-pattern the key builder produces.
+The base prefix stays configurable, and it must be ONE flat segment, enforced
+at startup: it must not contain `:`, whitespace, or the glob characters
+`* ? [ ]`. That rule is what makes two base prefixes two disjoint keyspaces, so
+one Redis can host several fleets. Position alone does not give you that: a
+colon-nested base would not be disjoint at all, because a fleet based at `ha`
+scans `ha:*`, which matches every key of a fleet based at `ha:prod`, and that
+pattern is what `redis flush --all` deletes. A glob character is rejected for
+the same family of reason — it would end up inside every SCAN pattern the key
+builder produces.
 
 If you want stronger isolation than a shared keyspace with distinct prefixes,
 use a different Redis database or a different server. That isolates; a prefix
@@ -101,7 +120,7 @@ kb := redisClient.KB()
 
 // Examples
 kb.MinerSessionKey(supplier, sessionID)   // ha:miner:sessions:{supplier}:{sessionID}
-kb.MinerSMSTNodesKey(sessionID)           // ha:smst:{sessionID}:nodes
+kb.SMSTNodesKey(supplier, sessionID)      // ha:smst:{supplier}:{sessionID}:nodes
 kb.StreamKey(supplier)                     // ha:relays:{supplier}
 kb.CacheKey("application", address)       // ha:cache:application:{address}
 kb.MeterMetaKey(sessionID, supplier)      // ha:meter:{sessionID}:{supplier}:meta
@@ -120,7 +139,7 @@ Reference: `transport/redis/namespace.go`
 
 | Pattern                                      | Type   | Purpose                              |
 |----------------------------------------------|--------|--------------------------------------|
-| `ha:smst:{sessionID}:nodes`                  | Hash   | SMST tree nodes for proof generation |
+| `ha:smst:{supplier}:{sessionID}:nodes`       | Hash   | SMST tree nodes for proof generation |
 | `ha:relays:{supplierAddress}`                | Stream | WAL for mined relays                 |
 | `ha:miner:sessions:{supplier}:{sessionID}`   | String | Session metadata                     |
 | `ha:miner:sessions:{supplier}:state:{state}` | Set    | Session state indexes                |
@@ -167,7 +186,7 @@ the fleet index along with the orphans — and the balance monitor and
 orphan-stream detection then see no suppliers at all until a miner restarts and
 repopulates it. Every address begins with `pokt1`; the index does not.
 
-Note that `redis cache cleanup-all` never touches `ha:suppliers:*` by design
+Note that `redis cache --type all --invalidate --all` never touches `ha:suppliers:*` by design
 (`cmd/redis/cache_all.go`), so it will not clear these for you.
 
 
@@ -188,80 +207,43 @@ Note that `redis cache cleanup-all` never touches `ha:suppliers:*` by design
 
 ## Persistence Configuration
 
-```yaml
-# AOF with 1-second sync (100x faster than fsync always)
-appendonly: "yes"
-appendfsync: "everysec"
-no-appendfsync-on-rewrite: "yes"
-auto-aof-rewrite-percentage: "100"
-auto-aof-rewrite-min-size: "512mb"
-aof-use-rdb-preamble: "yes"
+[config.redis.example.conf](../config.redis.example.conf) uses RDB snapshots and
+no AOF, which is what the v0.1.0 capacity report measured:
 
-# Disable RDB (redundant with AOF)
-save: ""
-
-# Memory policy
-maxmemory-policy: "noeviction"
+```
+save ""
+save 900 1 300 10
+appendonly no
+maxmemory-policy noeviction
 ```
 
-**Trade-off**: Max 1-second data loss on crash (<0.01% of 4-hour session)
+With RDB only, a Redis crash loses what was written since the last snapshot.
+AOF (`appendonly yes`, `appendfsync everysec`) narrows that to about 1 second
+at the cost of extra writes; it was not measured for this release.
+
+Keep `maxmemory` below the memory Redis may use, with headroom for the snapshot
+fork and the allocator: the report ran `maxmemory` 12.8 GiB in a 16 GiB
+container.
 
 ---
 
 ## Performance Tuning
 
-### Server Config (Redis 8.2+)
-
-```yaml
-# Multi-threading (+50-72% throughput)
-io-threads: 3
-
-# Lazy freeing (non-blocking deletes)
-lazyfree-lazy-eviction: "yes"
-lazyfree-lazy-expire: "yes"
-lazyfree-lazy-server-del: "yes"
-
-# Active defragmentation
-activedefrag: "yes"
-active-defrag-threshold-lower: 10
-active-defrag-threshold-upper: 25
-
-# Event loop frequency
-hz: 100
-```
-
-### Go-Redis Client
-
-```go
-// Formula: numSuppliers + 20 overhead
-// Default handles up to 30 suppliers (auto-discovered from keyring)
-redisOpts.PoolSize = 50                         // numSuppliers + 20
-redisOpts.MinIdleConns = 10                     // Keep connections warm
-redisOpts.PoolTimeout = 4 * time.Second         // pool_timeout_seconds
-redisOpts.ConnMaxIdleTime = 5 * time.Minute     // conn_max_idle_time_seconds
-```
+The server settings (I/O threads, lazy freeing and the rest) are in
+[config.redis.example.conf](../config.redis.example.conf), each with its reason;
+it is the configuration the release was measured with. Settings it does not
+carry, such as active defragmentation or a different `hz`, were not measured.
 
 ---
 
-## Standalone vs Cluster
+## Standalone, Sentinel and Cluster
 
-| Aspect     | Standalone                 | Cluster (3+3)   |
-|------------|----------------------------|-----------------|
-| Throughput | 1000+ RPS                  | 3000+ RPS       |
-| Failover   | Manual                     | Automatic (<5s) |
-| Latency    | 1-2ms p95                  | 1-2ms p95       |
-| Use Case   | Dev/test/Production(risky) | Production      |
-
-### Cluster Connection
-
-```go
-redis.NewClusterClient(&redis.ClusterOptions{
-    Addrs: []string{"leader-0:6379", "leader-1:6379", "leader-2:6379"},
-    RouteByLatency: true,
-})
-```
-
-**Note**: Use hash tags `{supplier}` to colocate related keys on same slot.
+The URL scheme selects the client: `redis://` or `rediss://` for a single
+Redis, `redis-sentinel://` for Sentinel, `redis-cluster://` for Cluster (see the
+`redis.url` comment in the example configs). v0.1.0 was tested and measured
+only against a standalone Redis; Sentinel and Cluster are accepted by the
+client but not verified. The keys carry no `{...}` hash tags except the
+miner's rebroadcast keys (`ha:miner:rebroadcast:{claim}:...`).
 
 ---
 
@@ -269,21 +251,22 @@ redis.NewClusterClient(&redis.ClusterOptions{
 
 ### Key Metrics
 
+The miner samples Redis and publishes, among others:
+
 ```promql
-# Throughput
-rate(redis_commands_processed_total[5m])
-
-# Memory
-redis_memory_used_bytes / redis_memory_max_bytes
-
-# Replication lag (cluster)
-redis_master_repl_offset
+ha_miner_redis_used_memory_bytes
+ha_miner_redis_max_memory_bytes
+ha_miner_redis_memory_usage_ratio
 ```
+
+[METRICS_TRIAGE.md](METRICS_TRIAGE.md) says which to read, in order. Series
+such as `redis_memory_used_bytes` or `redis_commands_processed_total` come from
+a separate redis_exporter, not from this repository.
 
 ### Health Check
 
 ```bash
-redis-cli INFO persistence | grep aof_last_write_status
+redis-cli INFO persistence | grep rdb_last_bgsave_status
 # Expected: ok
 ```
 

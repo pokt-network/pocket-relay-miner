@@ -9,10 +9,10 @@ proofs that settle on chain -- through crashes, restarts, Redis outages and
 partial rejections.
 
 > **Measured for v0.1.0** on 1 relayer, 1 miner and 1 Redis: **10.7 M relays
-> served at ~2,300 relays/s**, through 4 session windows with 6 sessions of 50
+> served at ~2,400 relays/s**, through 4 session windows with 6 sessions of 50
 > suppliers each, and **1,501 of 1,501 claims settled**, with the miner killed
 > twice on purpose along the way. The numbers are in the
-> [capacity report](https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.0/Relay-Miner-Capacity.pdf).
+> [capacity report](docs/benchmarks/v0.1.0/Relay-Miner-Capacity.pdf).
 
 ## Why operators run it
 
@@ -120,6 +120,7 @@ every change.
 | fix a deployment that does not start or does not serve | [docs/deploy/TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md) |
 | know which metrics to read, in order | [docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md), and [scripts/observability/triage.sh](scripts/observability/triage.sh) to check them against Prometheus |
 | inspect what is in Redis | `pocket-relay-miner redis --help`; what each key holds: [docs/REDIS.md](docs/REDIS.md) |
+| size memory, CPU and Redis for your load | [docs/benchmarks/](docs/benchmarks/README.md): the v0.1.0 capacity report and how to read it |
 
 **Test and measure.**
 

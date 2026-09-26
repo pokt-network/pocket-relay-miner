@@ -1,6 +1,6 @@
 ## Governance parameters — the complete inventory, and what each one does to us
 
-Verified against **poktroll v0.1.35** (`go.mod:19`), enumerating each module's
+Verified against **poktroll v0.1.35** (`go.mod:20`), enumerating each module's
 `Params` from the source. **Without a citation, it is not a rule.**
 
 **All of them are governance parameters**: they change by proposal, without us

@@ -30,8 +30,9 @@ services:
   #
   # Sizing: these limits fit a deployment with a few suppliers and ordinary
   # traffic, not a burst of large relays. The v0.1.0 load run (50 suppliers,
-  # ~2,300 relays/s) used Redis with a 16 GiB limit and 5 CPUs; it peaked at
-  # 4.4 GiB used and 0.3 cores. At that scale drop the two
+  # ~2,400 relays/s; docs/benchmarks/v0.1.0/Relay-Miner-Capacity.pdf) used Redis
+  # with a 16 GiB limit and 5 CPUs; it peaked at 4.9 GiB used and at most
+  # 0.7 cores. At that scale drop the two
   # overrides below so the config file's maxmemory (12.8 GiB) and io-threads (4)
   # apply, and give it 16g and 5 CPUs. maxmemory stays below mem_limit to leave
   # room for the snapshot fork.
@@ -61,7 +62,7 @@ services:
       # for your own keys: mode 0600, owned by uid 1000 (the image's uid).
       - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
     # Sizing: fits a few suppliers, not a burst of large relays. In the v0.1.0
-    # load run (8 GiB limit) the miner peaked at 2.8 GiB, 6.9 GiB during a burst
+    # load run (8 GiB limit) the miner peaked at 2.9 GiB, 6.8 GiB during a burst
     # of 1 MiB relays, and used 0.5 cores; give it 8g (GOMEMLIMIT 7200MiB) at
     # that scale.
     mem_limit: 4g
@@ -95,7 +96,7 @@ services:
       # it by accident. For gateways, bind the address they reach, for example
       # "0.0.0.0:8180:8080" or "<public-ip>:8180:8080", behind your TLS proxy.
       - "127.0.0.1:${RELAYER_PORT:-8180}:8080"
-    # Sizing: in the v0.1.0 load run (~2,300 relays/s) the relayer peaked at
+    # Sizing: in the v0.1.0 load run (~2,400 relays/s) the relayer peaked at
     # 118 MiB, 1.1 GiB during a burst of 1 MiB relays, and used 3.6 cores. Its
     # CPU scales with relays/s: give it 4 CPUs (and GOMAXPROCS 4) at that rate.
     mem_limit: 2g

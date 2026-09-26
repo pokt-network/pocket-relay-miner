@@ -22,9 +22,10 @@
 # its worker pools, its Redis connection pool and its validation-queue memory
 # against the WHOLE HOST, not against what it is allowed to use.
 #
-# Redis: run Redis 8.10, with maxmemory set and maxmemory-policy noeviction.
-# The relayer refuses to start against a Redis with no memory limit or with an
-# evicting policy. config.redis.example.conf is a starting point.
+# Redis: run Redis 8.10 or newer, with maxmemory set and maxmemory-policy
+# noeviction. The relayer refuses to start against a Redis older than 8.10, with
+# no memory limit or with an evicting policy. config.redis.example.conf is a
+# starting point.
 
 # ==============================================================================
 # HTTP Server

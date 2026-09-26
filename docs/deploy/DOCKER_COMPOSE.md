@@ -1,7 +1,7 @@
 # Deploy with Docker Compose
 
 This runbook starts the compose example in
-[examples/docker-compose/](../../examples/docker-compose/): Redis 8.10,
+[examples/docker-compose/](../../examples/docker-compose/): Redis 8.10.1,
 1 relayer and 1 miner, pointed at the **beta testnet** (chain id
 `pocket-lego-testnet`) through the public Sauron endpoints. No chain runs
 locally; for a local chain to develop on, use Tilt
@@ -51,7 +51,8 @@ missing → install Docker Engine with the compose plugin.
 
 **Stop if**: you cannot install Docker on this machine.
 
-Also needed: about 6 GB of free RAM (3 containers limited to 2 GB each), the
+Also needed: about 10 GiB of free RAM (Redis and the miner are limited to
+4 GiB each, the relayer to 2 GiB), the
 local port 8180 free (or export `RELAYER_PORT` before step 4), and outbound
 HTTPS to `sauron-rpc.beta.infra.pocket.network` and
 `sauron-grpc.beta.infra.pocket.network:443`.
@@ -455,6 +456,9 @@ and snapshots and other public endpoints in
 The limits in `docker-compose.yaml` (Redis 4 GiB with a 3 GiB `maxmemory`,
 miner 4 GiB, relayer 2 GiB, 2 CPUs each) fit a deployment with a few
 suppliers. Above each one, a comment gives what the v0.1.0 load run
-(50 suppliers, ~2,300 relays/s) used and what to set at that scale. When you
+(50 suppliers, ~2,400 relays/s;
+[capacity report](../benchmarks/v0.1.0/Relay-Miner-Capacity.pdf), read with
+[docs/benchmarks/README.md](../benchmarks/README.md)) used and what to set at
+that scale. When you
 change them, keep `mem_limit` of Redis at least 1.25x its `maxmemory`, and
 `GOMEMLIMIT` about 10% below each process's `mem_limit`.

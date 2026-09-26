@@ -1,6 +1,6 @@
 ## Claim and Proof — the protocol rules, and where the money moves
 
-Verified against **poktroll v0.1.35** (`go.mod:19`). Every rule cites its source.
+Verified against **poktroll v0.1.35** (`go.mod:20`). Every rule cites its source.
 **Without a citation, it is not a rule.**
 
 ### Rule 1 — the Claim has FOUR fields, and the amount is NOT one of them

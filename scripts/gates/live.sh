@@ -891,8 +891,8 @@ gate_step "settle: waiting for FINAL on-chain outcomes per service (up to ${SETT
 # inclusion of the claim: a claim can land on-chain and still expire without
 # its proof, be discarded, or get its supplier slashed. This reads the terminal
 # events the chain emits in its EndBlocker via block_results, and it does so
-# directly against the validator -- the miner's settlement monitor is disabled
-# by default, so its metrics are empty on a stock localnet.
+# directly against the validator -- the miner exports no series for a claim's
+# settlement (expiry, slashing, discard), only for its inclusion.
 scan_settlement_events() {
     local from="$1" to="$2"
     local h

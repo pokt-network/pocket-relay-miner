@@ -1,6 +1,6 @@
 ## Gateway — delegation and the signing ring
 
-Verified against **poktroll v0.1.35** (`go.mod:19`). **Without a citation, it is not a rule.**
+Verified against **poktroll v0.1.35** (`go.mod:20`). **Without a citation, it is not a rule.**
 
 ### The fields, and there are few
 

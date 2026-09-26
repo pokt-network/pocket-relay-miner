@@ -23,9 +23,11 @@ its mainnet value in a comment right above it, marked `Mainnet:`.
 - `config/supplier-keys.local.yaml`: where YOUR keys go. It is gitignored
   (`.gitignore` here); point the 2 keys mounts in `docker-compose.yaml` at it.
 - Redis uses `config.redis.example.conf` from the repository root, with
-  `maxmemory` lowered to 3 GB for a 4 GB container. Its port is never published.
-- The limits (Redis and miner 4 GB, relayer 2 GB, 2 CPUs each) fit a few
-  suppliers; the comments above each one give what the v0.1.0 load run used.
+  `maxmemory` lowered to 3 GiB for a 4 GiB container. Its port is never published.
+- The limits (Redis and miner 4 GiB, relayer 2 GiB, 2 CPUs each, about 10 GiB in
+  total) fit a few suppliers; the comments above each one give what the v0.1.0
+  load run used ([capacity report](../../docs/benchmarks/v0.1.0/Relay-Miner-Capacity.pdf),
+  [how to read it](../../docs/benchmarks/README.md)).
 
 ### Run it
 

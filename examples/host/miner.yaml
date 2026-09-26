@@ -24,7 +24,7 @@ keys:
   keys_file: "/etc/pocket-relay-miner/supplier-keys.yaml"
 
 # CHANGE: the measured block time of your network, in seconds. Mainnet is
-# roughly 60. Required: the miner refuses to start without it.
+# roughly 60, beta roughly 30. Required: the miner refuses to start without it.
 block_time_seconds: 60
 
 # Prometheus metrics, and GET /health.

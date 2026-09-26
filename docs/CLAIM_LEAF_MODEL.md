@@ -57,7 +57,7 @@ Two shapes, both protocol-correct:
 
 ## How to observe it
 
-Three metrics in `miner/metrics.go` partition the question:
+Four metrics in `miner/metrics.go` partition the question:
 
 | Metric                                | Meaning                                                                 |
 |---------------------------------------|-------------------------------------------------------------------------|

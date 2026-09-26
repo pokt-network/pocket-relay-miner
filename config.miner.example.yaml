@@ -22,9 +22,10 @@
 # worker pools and its memory bounds against the WHOLE HOST, not against what
 # it is allowed to use.
 #
-# Redis: run Redis 8.10, with maxmemory set and maxmemory-policy noeviction.
-# The miner refuses to start against a Redis with no memory limit or with an
-# evicting policy. config.redis.example.conf is a starting point.
+# Redis: run Redis 8.10 or newer, with maxmemory set and maxmemory-policy
+# noeviction. The miner refuses to start against a Redis older than 8.10, with
+# no memory limit or with an evicting policy. config.redis.example.conf is a
+# starting point.
 
 # ==============================================================================
 # Redis Configuration (REQUIRED)
@@ -270,7 +271,8 @@ keys:
 #
 # It is a per-deployment value, not a constant: mainnet, testnet and localnet
 # run different block times, and mainnet's drifts with network conditions.
-# Measure the block time of your target network; mainnet is roughly 60s.
+# Measure the block time of your target network; beta (pocket-lego-testnet)
+# is roughly 30s, mainnet (pocket) roughly 60s.
 # Localnet runs faster blocks.
 block_time_seconds: 10
 
@@ -530,11 +532,13 @@ metrics:
   addr: ":9092"
 
 # pprof profiling server. Default: disabled (127.0.0.1:6060, loopback only,
-# when enabled with no addr). To reach it from outside the host or container,
-# set addr explicitly, e.g. "0.0.0.0:6060", and firewall the port.
+# when enabled with no addr). 6060 is also the relayer's default, so a miner
+# and a relayer on 1 host need different ports: this example uses 6065. To
+# reach it from outside the host or container, set addr explicitly, e.g.
+# "0.0.0.0:6065", and firewall the port.
 pprof:
   enabled: true
-  addr: "127.0.0.1:6060"
+  addr: "127.0.0.1:6065"
 
 logging:
   # debug, info, warn or error; any other value fails config load.

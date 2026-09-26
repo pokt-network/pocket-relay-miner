@@ -1,6 +1,6 @@
 ## Supplier — the protocol rules
 
-Verified against **poktroll v0.1.35** (the version `go.mod:19` pins). Each
+Verified against **poktroll v0.1.35** (the version `go.mod:20` pins). Each
 rule cites the file it comes from. **Without a citation, it is not a rule**: it is an
 assumption, and this document exists because assumptions about the protocol
 cost us a weekend chasing relays that were not missing.

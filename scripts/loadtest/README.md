@@ -218,11 +218,14 @@ fits your topology.
   the relayer; this script measures what one client (= one relayer
   replica) can extract from the backend. That's the right answer for
   per-replica pool sizing — see the section above.
-- **Why not test through the relayer?** The relayer expects a fully
-  signed `RelayRequest` proto with a ring signature from an
-  application with an active session. You can't send "raw" relays
-  from outside. Testing the full path (client → gateway → relayer →
-  backend) needs a gateway with a real app stake. That's a
-  separate project. In the meantime, the gap between the numbers
-  here and the throughput visible in `ha_relayer_*` metrics tells
-  you what the relayer is costing.
+- **Why not test through the relayer?** This script isolates the
+  backend: it measures what the backend sustains with no relayer in
+  front of it. The relayer expects a ring-signed `RelayRequest` from
+  an application with an active session, so a raw request cannot
+  reach it. To load the full path (client → relayer → backend) use
+  the repository's own client, `pocket-relay-miner relay <mode>
+  --load-test`, which signs every request
+  ([docs/testing/DIRECT_CLI.md](../../docs/testing/DIRECT_CLI.md)),
+  or `--simulate` to do it without staking
+  ([docs/SIMULATED_RELAYS.md](../../docs/SIMULATED_RELAYS.md)). The
+  gap between the two measurements is what the relayer costs.

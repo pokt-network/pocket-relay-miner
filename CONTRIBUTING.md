@@ -205,7 +205,7 @@ pocket-relay-miner redis keys --pattern "ha:*" --stats
 pocket-relay-miner redis pubsub --channel "ha:events:cache:application:invalidate"
 pocket-relay-miner redis dedup --session <id>
 pocket-relay-miner redis supplier --list
-pocket-relay-miner redis meter --session <id>      # or --all
+pocket-relay-miner redis meter --session <id>      # without --session: every meter
 pocket-relay-miner redis submissions --supplier pokt1abc... [--failed-only]
 pocket-relay-miner redis flush --pattern "ha:test:*"   # destructive, asks first
 ```
