@@ -52,9 +52,11 @@ missing → install Docker Engine with the compose plugin.
 **Stop if**: you cannot install Docker on this machine.
 
 Also needed: about 10 GiB of free RAM (Redis and the miner are limited to
-4 GiB each, the relayer to 2 GiB), the
-local port 8180 free (or export `RELAYER_PORT` before step 4), and outbound
-HTTPS to `sauron-rpc.beta.infra.pocket.network` and
+4 GiB each, the relayer to 2 GiB; `free -g` shows it in the `available`
+column), the local port 8180 free (if it is taken, run
+`export RELAYER_PORT=18180` in this shell before step 4 and use that port
+wherever this runbook says 8180), and outbound HTTPS to
+`sauron-rpc.beta.infra.pocket.network` and
 `sauron-grpc.beta.infra.pocket.network:443`.
 
 ## Step 1: get the image
@@ -260,7 +262,9 @@ READY HTTP=200
 ha_relayer_current_block_height 680249
 ```
 
-Run the last command again a minute later: the height grows. The relayer gets
+Run the last command again a minute later: the height grows (beta makes a
+block about every 30 seconds; if it has not moved in 5 minutes, go back to
+step 7). The relayer gets
 its blocks from the miner through Redis, so a growing height proves the whole
 chain → miner → Redis → relayer path. `READY` means the relayer can serve; it
 does not mean any supplier is staked: with the public key it serves nothing.
