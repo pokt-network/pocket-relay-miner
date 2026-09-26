@@ -94,7 +94,7 @@ func TestAWarmedPairIsAdmittedWithoutTouchingRedis(t *testing.T) {
 	require.Equal(t, int64(1), consumed, "with the counter Redis holds")
 
 	counter := &commandCounter{}
-	readerRedis.AddHook(counter)
+	readerRedis.AddHook(testredis.ProductCommands(counter))
 	for _, sessionID := range sessions {
 		_, allowed, err := reader.Admit(ctx, sessionID, chargeTestApp, chargeTestService, chargeTestSupplier, 91, 100, 0)
 		require.NoError(t, err)

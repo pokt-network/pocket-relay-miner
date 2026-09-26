@@ -19,6 +19,8 @@ import (
 	"github.com/stretchr/testify/require"
 
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
+
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 )
 
 // Admission and charging, end to end: a relay reserves its cost when admitted,
@@ -492,7 +494,7 @@ func TestAViewedPairIsAdmittedAndChargedWithoutTouchingRedis(t *testing.T) {
 	require.True(t, allowed, "premise: the first relay reads the pair from Redis")
 
 	counter := &commandCounter{}
-	rc.AddHook(counter)
+	rc.AddHook(testredis.ProductCommands(counter))
 
 	const relays = 50
 	for i := 0; i < relays; i++ {

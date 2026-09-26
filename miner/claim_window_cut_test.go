@@ -15,6 +15,8 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
+
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 )
 
 // A real session end on the 4-block grid of mockSharedQueryClient's params, so
@@ -122,7 +124,7 @@ func TestHandleRelay_PastTheFlushCapIsDroppedBeforeTouchingRedis(t *testing.T) {
 	f.worker.discovered = xsync.NewMap[string, struct{}]()
 
 	counter := &redisCommandCounter{}
-	f.redisClient.AddHook(counter)
+	f.redisClient.AddHook(testredis.ProductCommands(counter))
 	openBefore, addedBefore := f.rejected(claimWindowReasonOpen), f.added()
 
 	require.NoError(t, f.worker.handleRelay(f.ctx, supplier, f.message("sess-cut-past-cap")),

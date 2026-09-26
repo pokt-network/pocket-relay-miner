@@ -12,6 +12,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 )
 
 // cmdCounter counts, by command name, every Redis command a client ATTEMPTS.
@@ -89,7 +91,7 @@ func TestGet_HashReadCostsOneCommand(t *testing.T) {
 	saveTestSession(t, store, "sess-hash", SessionStateActive, 0, 0)
 
 	counter := newCmdCounter()
-	client.AddHook(counter)
+	client.AddHook(testredis.ProductCommands(counter))
 
 	snapshot, err := store.Get(ctx, "sess-hash")
 	require.NoError(t, err)
@@ -110,7 +112,7 @@ func TestGet_MissingKeyCostsOneCommandAndReturnsNil(t *testing.T) {
 	ctx := context.Background()
 
 	counter := newCmdCounter()
-	client.AddHook(counter)
+	client.AddHook(testredis.ProductCommands(counter))
 
 	snapshot, err := store.Get(ctx, "sess-does-not-exist")
 	require.NoError(t, err, "a missing session is not an error")
@@ -141,7 +143,7 @@ func TestGet_LegacyJSONStringCostsTwoCommands(t *testing.T) {
 	require.NoError(t, client.Set(ctx, store.sessionKey("sess-legacy"), blob, 0).Err())
 
 	counter := newCmdCounter()
-	client.AddHook(counter)
+	client.AddHook(testredis.ProductCommands(counter))
 
 	snapshot, err := store.Get(ctx, "sess-legacy")
 	require.NoError(t, err)
@@ -165,7 +167,7 @@ func TestGet_NonWrongTypeErrorDoesNotFallBackToLegacy(t *testing.T) {
 	saveTestSession(t, store, "sess-broken", SessionStateActive, 0, 0)
 
 	counter := newCmdCounter()
-	client.AddHook(counter) // outermost: counts attempts, including failed ones
+	client.AddHook(testredis.ProductCommands(counter)) // outermost: counts attempts, including failed ones
 
 	boom := errors.New("connection reset by peer")
 	client.AddHook(failNamedCmd{name: "hgetall", err: boom})
