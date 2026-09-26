@@ -153,8 +153,8 @@ func assignSuppliersToPool(suppliers []string, concurrency int) []string {
 // Uses a connection pool to avoid overhead of creating new connections for each request.
 //
 // Each worker calls BuildRelayRequest itself so the ring signature is generated
-// fresh per relay (ring sigs are randomized). This matches PATH's production
-// behavior (one sign per incoming request) and guarantees distinct relay bytes
+// fresh per relay (ring sigs are randomized). This matches what a gateway does
+// in production (one sign per incoming request) and guarantees distinct relay bytes
 // per call, so the SMST stores one leaf per request instead of collapsing.
 func runWebSocketLoadTest(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
 	// Supplier targeting: fixed (--supplier / localnet default) or, with
@@ -195,7 +195,7 @@ type wsLoadDeps struct {
 
 // wsSlot is one pooled connection and the supplier it was handshaked against.
 // WebSocket pins the supplier at connection time via the Pocket-Supplier-Address
-// header (PATH v2 protocol; the relayer reads it in websocket.go
+// header (the v2 handshake; the relayer reads it in websocket.go
 // handleWebSocket), so a connection can only serve relays for that one supplier
 // and the pairing travels with it: workers sign and verify against the right key.
 // conn is nil when the connection is dead: whoever takes the slot next dials it
@@ -338,7 +338,7 @@ func runWebSocketLoad(ctx context.Context, logger logging.Logger, deps wsLoadDep
 
 			// Build a FRESH relay request for this worker. Ring signatures use
 			// randomness, so each call yields distinct bytes even for an
-			// identical payload — matches PATH's per-request sign behaviour.
+			// identical payload — as a gateway signs once per request.
 			relayRequestBz, err := deps.build(requestCtx, slot.supplier)
 			if err != nil {
 				metrics.RecordError(fmt.Errorf("build relay request: %w", err))
@@ -454,10 +454,10 @@ func connectWebSocket(relayerURL, serviceID, supplierAddr string) (*websocket.Co
 	headers.Set("Pocket-Service-Id", serviceID)
 
 	// Pocket-Supplier-Address: names the supplier in the handshake. That is
-	// PATH's shape, and it is what the relayer's 403 gate checks against its
+	// the v2 shape, and it is what the relayer's 403 gate checks against its
 	// live key set.
 	//
-	// --ws-handshake=v1 omits it, which is sage's shape: the supplier then
+	// --ws-handshake=v1 omits it, which is the v1 shape: the supplier then
 	// arrives inside the first RelayRequest and the bridge adopts it as its
 	// owner. Those are two different code paths in the relayer, and before this
 	// flag the CLI could only ever produce the first one -- so the metering

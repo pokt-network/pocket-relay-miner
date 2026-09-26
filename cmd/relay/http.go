@@ -19,7 +19,7 @@ import (
 
 // Shared HTTP client with connection pooling for load tests.
 // Reuses connections to avoid TCP handshake overhead.
-// IMPORTANT: DisableCompression is false (Go default) to mimic PATH's behavior.
+// IMPORTANT: DisableCompression is false (Go default) to mimic a gateway's behavior.
 // This makes Go automatically add "Accept-Encoding: gzip" and decompress responses.
 var sharedHTTPClient = &http.Client{
 	Timeout: 30 * time.Second, // Default timeout, overridden per-request if needed
@@ -33,7 +33,7 @@ var sharedHTTPClient = &http.Client{
 		}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		DisableCompression:    false, // Mimic PATH: auto-add Accept-Encoding, auto-decompress
+		DisableCompression:    false, // Mimic a gateway: auto-add Accept-Encoding, auto-decompress
 	},
 }
 
@@ -91,7 +91,7 @@ func runHTTPDiagnostic(ctx context.Context, logger logging.Logger, client *relay
 //
 // Each worker calls BuildRelayRequest itself so the ring signature is generated
 // fresh per relay (ring sigs are randomized — NewRandomScalar). This matches
-// PATH's production behavior (one sign per incoming request) and guarantees
+// what a gateway does in production (one sign per incoming request) and guarantees
 // distinct relay bytes even when the payload is identical, so the SMST stores
 // N unique leaves for N concurrent requests instead of collapsing to one.
 // BuildRelayRequest reads the session at the chain's current height, so a run
@@ -133,7 +133,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 
 			// Build a FRESH relay request for this worker. Ring signatures use
 			// randomness, so each call produces different bytes even for an
-			// identical payload, matching PATH's per-request sign behaviour.
+			// identical payload, as a gateway signs once per request.
 			supplier := supplierAddrs[supplierIdx.Add(1)%uint64(len(supplierAddrs))]
 			_, relayRequestBz, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
 			if err != nil {

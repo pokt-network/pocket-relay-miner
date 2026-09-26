@@ -24,9 +24,9 @@ of times and inflate claims.
 1. **Per-request ring signature** — `ring-go` calls
    `curve.NewRandomScalar()` twice per sign, so any caller that signs the
    request **per inbound message** gets distinct bytes, distinct hashes,
-   distinct leaves. This is what PATH does for JSON-RPC: every HTTP POST
-   goes through `buildAndSignRelayRequest`. Empirically: 10 byte-identical
-   `eth_blockNumber` POSTs through PATH yield 10 unique dedup entries and
+   distinct leaves. This is what a gateway does for JSON-RPC: it signs every
+   HTTP POST it receives. Empirically: 10 byte-identical
+   `eth_blockNumber` POSTs through a gateway yield 10 unique dedup entries and
    10 leaves in the claim.
 
 2. **Per-event response payload (`PayloadHash`)** — for WebSocket

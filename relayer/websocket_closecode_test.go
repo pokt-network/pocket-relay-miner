@@ -68,8 +68,8 @@ func readCloseCodeFromRealPeer(t *testing.T, code int, text string) error {
 // TCP with no close frame (conn.go, errUnexpectedEOF) -- an ordinary
 // disconnect. That code used to reach both write points unchanged, and 1006 is
 // reserved and must not be sent: a receiving gorilla answers a protocol error.
-// So a backend that dies made PATH see a protocol violation by the RELAYER, and
-// PATH charges that to our endpoint's reputation.
+// So a backend that dies made the gateway see a protocol violation by the
+// RELAYER, and the gateway charges that to our endpoint's reputation.
 func TestEveryCloseCodeTheBridgeCanPickIsAcceptedByARealPeer(t *testing.T) {
 	// Every code the bridge can hand to release(), including the ones gorilla
 	// fabricates locally and the ones RFC 6455 marks reserved.

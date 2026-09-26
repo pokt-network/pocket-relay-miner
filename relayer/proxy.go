@@ -789,8 +789,8 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 	// The dumb check, first and unconditional: do we hold this supplier's
 	// signing key? Without it nothing else matters — we cannot sign the relay
 	// response, so serving means paying for a backend call and failing anyway,
-	// and the client gets a signing error instead of a clean 503, which PATH
-	// penalises.
+	// and the client gets a signing error instead of a clean 503, which the
+	// gateway penalises.
 	//
 	// It has to be FIRST rather than another case further down, because the
 	// miner's teardown writes {unstaking, staked: true, services: [...]} when an
@@ -854,7 +854,7 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 // (service, transport) the supplier did NOT declare on-chain. The relay is still
 // served and remains claimable — the chain keys claims by (supplier, session)
 // and never sees the transport — so this is deliberately a WARN, never a reject:
-// the operator should declare the endpoint on-chain so PATH routes it on purpose
+// the operator should declare the endpoint on-chain so a gateway routes it on purpose
 // and the network has an accurate view of what each supplier serves.
 //
 // Skipped only when state is nil (boot/optimistic). An empty per-transport view
@@ -879,7 +879,7 @@ func (p *ProxyServer) warnUndeclaredTransport(state *cache.SupplierState, suppli
 		Str("transport", backendType).
 		Msg("serving a relay for a (service, transport) this supplier's cached stake does not declare; " +
 			"still served and claimable. Either the endpoint is genuinely undeclared on-chain -- declare it " +
-			"so PATH routes it deliberately -- or the miner writing this supplier's state is too old to " +
+			"so a gateway routes it deliberately -- or the miner writing this supplier's state is too old to " +
 			"publish the per-transport view, in which case upgrade it rather than restaking")
 }
 
@@ -905,7 +905,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	defer activeConnections.Dec()
 
 	// Record the inbound protocol so we can detect any migration to h2c.
-	// r.TLS is always nil on this deployment (PATH hits us over plain HTTP),
+	// r.TLS is always nil on this deployment (the gateway hits us over plain HTTP),
 	// so the proto label collapses to "http1" or "h2c" based on ProtoMajor.
 	proto := "http1"
 	if r.ProtoMajor == 2 {
@@ -1862,7 +1862,7 @@ func (p *ProxyServer) parseRelayRequest(body []byte) (*servicetypes.RelayRequest
 // extractServiceID extracts the service ID from request headers or path.
 // This is a fallback method for non-relay traffic or when the body cannot be parsed.
 func (p *ProxyServer) extractServiceID(r *http.Request) string {
-	// Try Target-Service-Id header (PATH gateway uses this)
+	// Try Target-Service-Id header (the gateway sends this)
 	if serviceID := r.Header.Get("Target-Service-Id"); serviceID != "" {
 		return serviceID
 	}
@@ -2331,8 +2331,8 @@ func gaugeValue(g prometheus.Gauge) float64 {
 //  3. backend_network_error — any other transport error
 //
 // When err is nil, the HTTP status class decides: 5xx -> backend_5xx,
-// anything else -> success (2xx/3xx/4xx are valid relays that PATH gets
-// paid for).
+// anything else -> success (2xx/3xx/4xx are valid relays that the gateway
+// gets paid for).
 func classifyBackendOutcome(err error, respStatus int) string {
 	if err != nil {
 		errMsg := err.Error()

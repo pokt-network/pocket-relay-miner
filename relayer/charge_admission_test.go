@@ -384,7 +384,7 @@ func TestAWebSocketChargesEachBackendMessageAndNotTheFrame(t *testing.T) {
 	supplier, signer := newSupplier(t)
 
 	answered := newPublishSignal()
-	conn := newPublishingSageBridge(t, pushingWSBackend(t, pushes), signer, pipeline, answered)
+	conn := newPublishingV1Bridge(t, pushingWSBackend(t, pushes), signer, pipeline, answered)
 	sendRelay(t, conn, ownerTestRelay("ws-answered", supplier))
 	for i := 0; i < pushes; i++ {
 		readServedResponse(t, conn)
@@ -394,7 +394,7 @@ func TestAWebSocketChargesEachBackendMessageAndNotTheFrame(t *testing.T) {
 	checked := relayMeterConsumptions.WithLabelValues(simWSTestService, "within_limit")
 	checksBefore := testutil.ToFloat64(checked)
 	silentURL, received := silentWSBackend(t)
-	silent := newSageShapedBridge(t, silentURL, signer, pipeline)
+	silent := newV1ShapedBridge(t, silentURL, signer, pipeline)
 	sendRelay(t, silent, ownerTestRelay("ws-unanswered", supplier))
 	awaitSignal(t, received, "the unanswered frame reaching the backend")
 	charges.flush()

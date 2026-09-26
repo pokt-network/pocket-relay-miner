@@ -20,7 +20,7 @@
 #
 # Three things that will otherwise waste an afternoon, all learned the hard way:
 #
-#   * Load goes through the relay CLI at :8180, NEVER the PATH gateway. PATH
+#   * Load goes through the relay CLI at :8180, NEVER the gateway. The gateway
 #     answers a relayer 503 with 200 and an empty body, so a gateway-side run
 #     reports 20000/20000 OK with an empty WAL.
 #   * There is an economic cap of roughly 115-130 mined relays per supplier per
@@ -744,7 +744,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # Multi-backend distribution (absorbed from the retired test-round-robin.sh,
-# which measured this through PATH and could not tell a relayer 503 from a
+# which measured this through the gateway and could not tell a relayer 503 from a
 # served relay). The demo backend stamps backend_id into eth_blockNumber
 # responses; when the rendered config gives develop-http more than one
 # jsonrpc backend, a handful of signed single relays must land on more than

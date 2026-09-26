@@ -27,7 +27,7 @@ func TestWebSocketSessionExpiredDispatchesReason(t *testing.T) {
 	backendURL, _, _ := newSimWSBackendServer(t)
 	supplier, signer := newSupplier(t)
 
-	conn := newSageShapedBridge(t, backendURL, signer, pipeline)
+	conn := newV1ShapedBridge(t, backendURL, signer, pipeline)
 
 	expired := relaysRejected.WithLabelValues(simWSTestService, "websocket", rejectReasonSessionExpired)
 	genericBefore := testutil.ToFloat64(relaysRejected.WithLabelValues(simWSTestService, "websocket", rejectReasonValidationFailed))

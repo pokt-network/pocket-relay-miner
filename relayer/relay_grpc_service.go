@@ -29,7 +29,7 @@ import (
 )
 
 // RelayServiceMethodPath is the gRPC method path for the relay service.
-// Clients (e.g., PATH gateway) call this method with a RelayRequest message.
+// Clients (e.g., a gateway) call this method with a RelayRequest message.
 const RelayServiceMethodPath = "/pocket.service.RelayService/SendRelay"
 
 // grpcPublishTimeout bounds the detached mining/WAL-publish work for a gRPC relay.

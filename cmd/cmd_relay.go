@@ -70,7 +70,7 @@ const (
 
 	// Gateway private key (all apps delegate to this gateway)
 	// When --gateway-priv-key is provided, relays are signed with this key on behalf of the app
-	// This matches PATH's approach for gateway signing
+	// This is how a gateway signs
 	localnetGateway1PrivKey = "cf09805c952fa999e9a63a9f434147b0a5abfd10f268879694c6b5a70e1ae177"
 
 	// First supplier address (for relay routing)
@@ -347,7 +347,7 @@ func runRelayCommand(cmd *cobra.Command, args []string) error {
 			relay.RelayAppPrivKey = localnetApp1PrivKey
 		}
 
-		// Set gateway key for gateway mode (matches PATH's approach)
+		// Set gateway key for gateway mode (signs as a gateway does)
 		// All apps delegate to gateway1, so we can sign relays on their behalf
 		if relay.RelayGatewayPrivKey == "" {
 			relay.RelayGatewayPrivKey = localnetGateway1PrivKey

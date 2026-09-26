@@ -114,7 +114,7 @@ var (
 	// rpc_type endpoint). The relay is still served and is claimable — the chain
 	// keys claims by (supplier, session) and never sees the transport — so this
 	// is a visibility signal, not a rejection: declare the endpoint on-chain so
-	// PATH routes it deliberately. It also fires for every relay of a supplier
+	// a gateway routes it deliberately. It also fires for every relay of a supplier
 	// whose miner is too old to publish the per-transport stake view, because an
 	// empty view now declares nothing; the deduped warn names which of the two
 	// cases it is.
@@ -220,7 +220,7 @@ var (
 	//   - success             : 2xx/3xx/4xx response received and read
 	//   - backend_5xx         : 5xx response (not mined)
 	//   - backend_timeout     : our internal context deadline fired
-	//   - client_disconnected : PATH cancelled the request mid-flight
+	//   - client_disconnected : the gateway cancelled the request mid-flight
 	//   - backend_network_error: dial/read/reset/other transport error
 	backendLatency = observability.RelayerFactory.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -585,7 +585,7 @@ var (
 	)
 
 	// inboundRequestsByProto tracks the wire protocol every inbound request
-	// arrives on. Today PATH ships over HTTP/1.1 exclusively, so http1 will
+	// arrives on. Today the gateway ships over HTTP/1.1 exclusively, so http1 will
 	// be ~100% and h2c will be 0. The metric is here to surface any shift
 	// early — if h2c starts ticking, we know the MaxConcurrentStreams=250
 	// ceiling per-conn becomes relevant and inflight analysis has to

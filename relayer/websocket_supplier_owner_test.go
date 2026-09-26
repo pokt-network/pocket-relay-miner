@@ -78,22 +78,22 @@ func newSupplier(t *testing.T) (string, *ResponseSigner) {
 	return addr, signer
 }
 
-// newSageShapedBridge builds a bridge the way SAGE's handshake leaves it: with
-// NO supplier address, because sage sends only Target-Service-Id, App-Address
-// and Rpc-Type (measured 2026-09-03 in ~/development/sage, ws_relayer.go).
-func newSageShapedBridge(
+// newV1ShapedBridge builds a bridge the way a v1 handshake leaves it: with
+// NO supplier address, because that gateway sends only Target-Service-Id,
+// App-Address and Rpc-Type (measured 2026-09-03).
+func newV1ShapedBridge(
 	t *testing.T,
 	backendURL string,
 	signer *ResponseSigner,
 	pipeline *RelayPipeline,
 ) *websocket.Conn {
 	t.Helper()
-	return newPublishingSageBridge(t, backendURL, signer, pipeline, &recordingPublisher{})
+	return newPublishingV1Bridge(t, backendURL, signer, pipeline, &recordingPublisher{})
 }
 
-// newPublishingSageBridge is newSageShapedBridge with the publisher the test
+// newPublishingV1Bridge is newV1ShapedBridge with the publisher the test
 // observes.
-func newPublishingSageBridge(
+func newPublishingV1Bridge(
 	t *testing.T,
 	backendURL string,
 	signer *ResponseSigner,
@@ -104,7 +104,7 @@ func newPublishingSageBridge(
 	relayerConn, gwClient := newGatewaySideHarness(t)
 	bridge, err := NewWebSocketBridge(
 		testLogger(), relayerConn, backendURL, simWSTestService,
-		"", // sage sends no Pocket-Supplier-Address
+		"", // a v1 handshake sends no Pocket-Supplier-Address
 		atHeight(100),
 		&recordingProcessor{}, publisher, signer, http.Header{},
 		nil, pipeline, 2*time.Second, false, nil, "", nil, nil,
@@ -153,10 +153,10 @@ func readServedResponse(t *testing.T, conn *websocket.Conn) {
 // TestWebSocketMetersAgainstTheSupplierThatOwnsTheConnection is the regression
 // test for a shared budget, not for a mis-labelled key.
 //
-// The bridge used to meter with the supplier from its HANDSHAKE, and sage sends
-// none, so relayCtx.SupplierAddress was "". RelayMeter addresses its counter as
-// {session}:{supplier}:consumed, so every sage connection on one session wrote
-// to the SAME "{session}::consumed" key. Measured before the fix, two suppliers
+// The bridge used to meter with the supplier from its HANDSHAKE, and a v1
+// handshake sends none, so relayCtx.SupplierAddress was "". RelayMeter
+// addresses its counter as {session}:{supplier}:consumed, so every v1
+// connection on one session wrote to the SAME "{session}::consumed" key. Measured before the fix, two suppliers
 // on one session: one key reading 2. The per-supplier limit is derived by
 // dividing the application stake by the session's supplier count, so sharing
 // one counter throttles the session to roughly 1/N of what it is owed.
@@ -175,13 +175,13 @@ func TestWebSocketMetersAgainstTheSupplierThatOwnsTheConnection(t *testing.T) {
 	// The response is charged after it is written, so the charge is waited for on
 	// the publish that follows it, not on the read.
 	publishedA := newPublishSignal()
-	connA := newPublishingSageBridge(t, backendURL, signerA, pipeline, publishedA)
+	connA := newPublishingV1Bridge(t, backendURL, signerA, pipeline, publishedA)
 	sendRelay(t, connA, ownerTestRelay(sessionID, supplierA))
 	readServedResponse(t, connA)
 	publishedA.await(t, 1)
 
 	publishedB := newPublishSignal()
-	connB := newPublishingSageBridge(t, backendURL, signerB, pipeline, publishedB)
+	connB := newPublishingV1Bridge(t, backendURL, signerB, pipeline, publishedB)
 	sendRelay(t, connB, ownerTestRelay(sessionID, supplierB))
 	readServedResponse(t, connB)
 	publishedB.await(t, 1)
@@ -223,7 +223,7 @@ func TestWebSocketClosesWhenAFrameNamesADifferentSupplier(t *testing.T) {
 	otherPriv := secp256k1.GenPrivKey()
 	supplierB := cosmostypes.AccAddress(otherPriv.PubKey().Address()).String()
 
-	conn := newSageShapedBridge(t, backendURL, signerA, pipeline)
+	conn := newV1ShapedBridge(t, backendURL, signerA, pipeline)
 
 	before := testutil.ToFloat64(relaysRejected.WithLabelValues(
 		simWSTestService, "websocket", rejectReasonSupplierChanged))
@@ -256,7 +256,7 @@ func TestWebSocketClosesWhenAFrameNamesNoSupplier(t *testing.T) {
 	backendURL, _, _ := newSimWSBackendServer(t)
 	_, signer := newSupplier(t)
 
-	conn := newSageShapedBridge(t, backendURL, signer, pipeline)
+	conn := newV1ShapedBridge(t, backendURL, signer, pipeline)
 
 	before := testutil.ToFloat64(relaysRejected.WithLabelValues(
 		simWSTestService, "websocket", rejectReasonMissingSupplierAddress))
@@ -289,7 +289,7 @@ func TestWebSocketClosesWhenAFrameCarriesNoSessionHeader(t *testing.T) {
 	backendURL, _, _ := newSimWSBackendServer(t)
 	supplier, signer := newSupplier(t)
 
-	conn := newSageShapedBridge(t, backendURL, signer, pipeline)
+	conn := newV1ShapedBridge(t, backendURL, signer, pipeline)
 
 	before := testutil.ToFloat64(relaysRejected.WithLabelValues(
 		simWSTestService, "websocket", rejectReasonInvalidRelayRequest))

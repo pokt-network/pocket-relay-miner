@@ -2,11 +2,11 @@
 
 ## Overview
 
-This document specifies the WebSocket handshake validation protocol between PATH (gateway) and RelayMiner (supplier). The handshake carries the same validation information as `RelayRequest.Meta`, enabling the relayer to validate the connection upfront (eager validation), after which subsequent WebSocket messages can be validated either eagerly or optimistically based on relayer configuration.
+This document specifies the WebSocket handshake validation protocol between the gateway (the client that sends relays) and RelayMiner (supplier). The handshake carries the same validation information as `RelayRequest.Meta`, enabling the relayer to validate the connection upfront (eager validation), after which subsequent WebSocket messages can be validated either eagerly or optimistically based on relayer configuration.
 
 ## Current State (v1.0)
 
-Currently, PATH sends minimal headers during WebSocket handshake:
+In the v1 handshake, the gateway sends minimal headers during the WebSocket handshake:
 - `Target-Service-Id`: Service identifier
 - `App-Address`: Application address
 - `Rpc-Type`: RPC type (2 = WebSocket)
@@ -15,9 +15,9 @@ This is insufficient for the relayer to validate the connection properly.
 
 ## Proposed Protocol (v2.0)
 
-### Headers Required from PATH
+### Headers Required from the Gateway
 
-PATH must send the following headers during WebSocket upgrade handshake, mirroring `RelayRequestMetadata` and `SessionHeader`:
+The gateway must send the following headers during WebSocket upgrade handshake, mirroring `RelayRequestMetadata` and `SessionHeader`:
 
 | Header | Description | Example |
 |--------|-------------|---------|
@@ -110,10 +110,10 @@ The validation mode is configured per-service in the relayer config.
 
 ## Implementation Tasks
 
-### PATH Changes
-1. Update `getRelayMinerConnectionHeaders()` to include all required headers
-2. Generate ring signature for handshake parameters
-3. Include session context in headers
+### Gateway Side
+1. Send every header listed in "Headers Required from the Gateway" on the upgrade request
+2. Generate the ring signature over the handshake parameters
+3. Carry the session context (id, start and end height) in those headers
 
 ### RelayMiner Changes
 1. Update `WebSocketHandler()` to extract and validate all headers
@@ -131,7 +131,7 @@ The validation mode is configured per-service in the relayer config.
 
 ## Backwards Compatibility
 
-During transition:
-- RelayMiner should accept connections with old headers (warn in logs)
-- New validation is opt-in via config flag
-- Once PATH is updated, enforce new validation
+Today the relayer accepts every handshake. A v1 handshake (no validation
+headers) and a v2 handshake are both logged; the v2 headers are read, but their
+signature is not verified yet, and no config setting changes that. Enforcing
+the v2 validation is future work, for once gateways send the v2 headers.

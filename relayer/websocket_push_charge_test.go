@@ -156,7 +156,7 @@ func TestABackendMessageThatReachesTheBudgetIsServedChargedAndCloses(t *testing.
 	overBudget := relaysServedOverBudget.WithLabelValues(simWSTestService, BackendTypeWebSocket, overBudgetReasonPushAtBudget)
 	before := testutil.ToFloat64(overBudget)
 
-	conn := newSageShapedBridge(t, pushingWSBackend(t, 3), signer, pipeline)
+	conn := newV1ShapedBridge(t, pushingWSBackend(t, 3), signer, pipeline)
 	sendRelay(t, conn, ownerTestRelay(sessionID, supplier))
 
 	require.Contains(t, readServedPayload(t, conn), `"sequence":1`,
@@ -217,7 +217,7 @@ func TestAFrameRefusedAtTheBudgetIsNotCountedAsServedOverIt(t *testing.T) {
 	rejected := relaysRejected.WithLabelValues(simWSTestService, "websocket", rejectReasonStakeExhausted)
 	rejectedBefore := testutil.ToFloat64(rejected)
 
-	conn := newSageShapedBridge(t, pushingWSBackend(t, 1), signer, pipeline)
+	conn := newV1ShapedBridge(t, pushingWSBackend(t, 1), signer, pipeline)
 	sendRelay(t, conn, ownerTestRelay(sessionID, supplier))
 
 	require.NoError(t, conn.SetReadDeadline(time.Now().Add(10*time.Second)))

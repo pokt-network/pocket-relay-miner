@@ -84,7 +84,7 @@ func newSimWSBackendServer(t *testing.T) (wsURL string, hits *atomic.Int32, gotT
 	return "ws" + strings.TrimPrefix(srv.URL, "http"), hits, gotTypes
 }
 
-// newGatewaySideHarness stands in for the PATH gateway's side of the
+// newGatewaySideHarness stands in for the gateway's side of the
 // WebSocket handshake. It returns the relayer-side *websocket.Conn (the value
 // WebSocketHandler would normally get from Upgrade(), passed as gatewayConn
 // into NewWebSocketBridge) and a client-side *websocket.Conn the test uses to

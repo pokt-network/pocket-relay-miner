@@ -49,10 +49,10 @@ const (
 // The backend side is bounded too, since a compromised or hostile backend can
 // send an abusive frame just as easily.
 //
-// 15MB matches PATH's maxMessageBytes and go-ethereum's wsMessageSizeLimit,
+// 15MB matches the gateway's own message cap and go-ethereum's wsMessageSizeLimit,
 // which is what the EVM backends behind this relayer enforce on their own
 // output. Matching the rest of the stack is deliberate: a tighter cap here
-// would reject frames PATH already accepted and forwarded, reintroducing the
+// would reject frames the gateway already accepted and forwarded, reintroducing the
 // class of cross-component divergence this bridge exists to avoid.
 //
 // When exceeded, ReadMessage returns websocket.ErrReadLimit and readLoop tears
@@ -73,11 +73,10 @@ var wsMaxMessageBytes int64 = 15 * 1024 * 1024
 // that even 1m is necessary, so 2m is more than enough". Hardcoded on purpose,
 // no config knob.
 //
-// The measurement it was decided against: PATH upgrades its CLIENT and then
-// dials the relayminer immediately (path/websockets/bridge.go:97-105), and the
-// handshake RelayRequest it builds (protocol/shannon/websocket_context.go:493)
-// exists only to produce the Pocket-Signature header -- it is never written to
-// the socket. So the first frame arrives when the client speaks, not when the
+// The measurement it was decided against: a gateway upgrades its CLIENT and
+// then dials the relayminer immediately, and the handshake RelayRequest it
+// builds exists only to produce the Pocket-Signature header -- it is never
+// written to the socket. So the first frame arrives when the client speaks, not when the
 // gateway connects, and the residual is real and accepted: a client that holds a
 // socket open for more than two minutes before its first subscribe is closed
 // with 1013 and reconnects.
@@ -180,7 +179,7 @@ func closeInitiatorForSource(source wsMessageSource) wsCloseInitiator {
 type wsCloseInitiator string
 
 const (
-	wsCloseInitiatorClient  wsCloseInitiator = "client"  // PATH gateway (upstream)
+	wsCloseInitiatorClient  wsCloseInitiator = "client"  // The gateway (upstream)
 	wsCloseInitiatorBackend wsCloseInitiator = "backend" // Backend service (downstream)
 	wsCloseInitiatorRelayer wsCloseInitiator = "relayer" // This relayer (bridge)
 )
@@ -292,15 +291,15 @@ type WebSocketBridge struct {
 	// the ONLY supplier this connection may ever mine, meter or sign for.
 	//
 	// It has two sources and one moment of decision. A v2 handshake carries
-	// Pocket-Supplier-Address, so the owner exists before the first frame; v1
-	// and sage carry nothing, so it is adopted from the first RelayRequest.
+	// Pocket-Supplier-Address, so the owner exists before the first frame; a v1
+	// handshake carries nothing, so it is adopted from the first RelayRequest.
 	// From that moment on the bridge HAS an owner: adoptOrVerifyOwner requires
 	// every subsequent frame to name the same one, and closes the connection
 	// otherwise.
 	//
 	// It replaced a plain string that was written once at construction and
 	// never again, while a comment promised the bridge would "extract from
-	// first RelayRequest". It did not: a sage connection metered against an
+	// first RelayRequest". It did not: a v1 connection metered against an
 	// EMPTY supplier segment, which is not a mis-labelled key but a SHARED
 	// budget -- measured 2026-09-03, two suppliers on one session produced a
 	// single "<session>::consumed" counter reading 2. The per-supplier limit is
@@ -424,7 +423,7 @@ func NewWebSocketBridge(
 	}
 
 	// A v2 handshake names the supplier, so the bridge has an owner before the
-	// first frame; v1 and sage do not, and the owner is adopted from the first
+	// first frame; v1 does not, and the owner is adopted from the first
 	// RelayRequest instead. Either way every later frame must name the same one.
 	if supplierAddress != "" {
 		bridge.owner.Store(&supplierAddress)
@@ -449,7 +448,7 @@ func (b *WebSocketBridge) ensureBackend() error {
 
 	// The backend's Pocket-Supplier header is set HERE and not at the handshake,
 	// which is the second thing deferring the dial buys: at handshake time the
-	// owner is unknown for v1 and sage, so the header the backend saw was empty.
+	// owner is unknown for v1, so the header the backend saw was empty.
 	if owner := b.ownerAddress(); owner != "" {
 		b.backendHeaders.Set(HeaderPocketSupplier, owner)
 	}
@@ -647,17 +646,17 @@ func (b *WebSocketBridge) release() {
 
 	deadline := time.Now().Add(wsWriteWait)
 
-	// The gateway keeps the Pocket code -- PATH understands those, and the
+	// The gateway keeps the Pocket code -- the gateway understands those, and the
 	// private band passes whole -- but it is still sanitized: a 1006 that
 	// gorilla fabricated locally for a dead backend must not go out as a
-	// reserved code, which PATH would read as a protocol violation by us.
+	// reserved code, which the gateway would read as a protocol violation by us.
 	gatewayCode, gatewayText := sanitizeCloseCode(reason.code, reason.text)
 	gatewayCloseMsg := websocket.FormatCloseMessage(gatewayCode, gatewayText)
 	b.gatewayWriteMu.Lock()
 	gwErr := b.gatewayConn.WriteControl(websocket.CloseMessage, gatewayCloseMsg, deadline)
 	b.gatewayWriteMu.Unlock()
 	if gwErr != nil {
-		b.logger.Debug().Err(gwErr).Msg("failed to send close to client (PATH)")
+		b.logger.Debug().Err(gwErr).Msg("failed to send close to client (gateway)")
 	}
 
 	// The backend gets an RFC-compliant code, and may not exist at all: a
@@ -856,7 +855,7 @@ func writeDataFrame(conn *websocket.Conn, writeMu *sync.Mutex, messageType int, 
 	return conn.WriteMessage(messageType, data)
 }
 
-// writeToGateway writes a data frame to the gateway (PATH) connection.
+// writeToGateway writes a data frame to the gateway connection.
 func (b *WebSocketBridge) writeToGateway(messageType int, data []byte) error {
 	return writeDataFrame(b.gatewayConn, &b.gatewayWriteMu, messageType, data, wsWriteWait)
 }
@@ -875,7 +874,7 @@ func (b *WebSocketBridge) writeToBackend(messageType int, data []byte) error {
 }
 
 // ownerAddress returns the supplier this bridge belongs to, or "" while no
-// frame has established one yet (v1/sage before the first RelayRequest).
+// frame has established one yet (v1 before the first RelayRequest).
 //
 // Every accounting and signing site reads THIS and not the address inside the
 // frame it is handling. Preferring the frame's is exploitable: the backend
@@ -923,7 +922,7 @@ func (b *WebSocketBridge) adoptOrVerifyOwner(relayReq *servicetypes.RelayRequest
 
 	owner := b.owner.Load()
 	if owner == nil {
-		// v1/sage: the handshake carried no supplier, so this frame establishes
+		// v1: the handshake carried no supplier, so this frame establishes
 		// the owner. Admission still runs below and closes the connection if it
 		// fails, so an owner adopted here never outlives a rejected frame.
 		b.owner.Store(&reqSupplier)
@@ -1070,7 +1069,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 			// payload on a stream the client is reading as backend traffic, and
 			// nothing in the shape of a WebSocket message lets the client tell
 			// "the relayminer refused this" from "the backend said this". A
-			// close code says exactly one thing, and PATH and SAGE both already
+			// close code says exactly one thing, and both gateways already
 			// handle it, which is why every other refusal on this path closes
 			// too.
 			//
@@ -1137,7 +1136,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	// No relay protobuf carries a frame type, so the WebSocket envelope is the
 	// only channel for it: hardcoding a type here destroys information nothing
 	// downstream can reconstruct. Text-only JSON-RPC backends reject binary
-	// frames. Matches poktroll, PATH, and the raw forwarding paths below.
+	// frames. Matches poktroll, the gateway, and the raw forwarding paths below.
 	err := b.writeToBackend(msg.messageType, relayReq.Payload)
 	if err != nil {
 		b.logger.Debug().Err(err).Msg("failed to forward to backend")
@@ -1163,8 +1162,8 @@ const wsCloseTextPublishQueueFull = "relayer publish queue is full"
 // The connection closes rather than the message being refused, for the reason
 // every other refusal on this bridge closes: a refusal inside the stream arrives
 // as a payload the client reads as backend traffic, and a subscription push has
-// no request to answer. A close code says one thing, and PATH hands it to the
-// client as it is.
+// no request to answer. A close code says one thing, and the gateway hands it to
+// the client as it is.
 func (b *WebSocketBridge) refuseOnFullQueue() bool {
 	if b.simulated || b.queueFull == nil || !b.queueFull() {
 		return false
@@ -1199,7 +1198,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 		// No request yet - just forward raw data
 		err := b.writeToGateway(msg.messageType, msg.data)
 		if err != nil {
-			b.logger.Debug().Err(err).Msg("failed to forward to client (PATH)")
+			b.logger.Debug().Err(err).Msg("failed to forward to client (gateway)")
 			_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		}
 		return
@@ -1276,7 +1275,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	// doing JSON.parse(e.data) needs text to survive the round trip.
 	writeErr := b.writeToGateway(msg.messageType, respBytes)
 	if writeErr != nil {
-		b.logger.Debug().Err(writeErr).Msg("failed to forward signed response to client (PATH)")
+		b.logger.Debug().Err(writeErr).Msg("failed to forward signed response to client (gateway)")
 		_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		return
 	}
@@ -1616,7 +1615,7 @@ func (b *WebSocketBridge) logCloseError(err error, source wsMessageSource) {
 // a readLoop read fails.
 //
 // A peer-sent close frame wins: propagating its code is what carries session
-// rollover signalling (e.g. 4000 SessionExpired from PATH) through to the backend.
+// rollover signalling (e.g. 4000 SessionExpired from the gateway) through to the backend.
 //
 // websocket.ErrReadLimit is called out explicitly because it is NOT a close frame,
 // so it would otherwise fall through to the generic "peer disconnected" default and
@@ -1654,8 +1653,8 @@ func extractCloseInfo(err error) (int, string) {
 // closeInfoForReadError propagates whatever it finds, and release() used to put
 // that straight on the wire in both directions. 1006 is reserved and must not
 // be sent, so the receiving gorilla answers a protocol error: a backend that
-// dies made PATH see a protocol violation by the RELAYER, which PATH charges to
-// this endpoint's reputation.
+// dies made the gateway see a protocol violation by the RELAYER, which the
+// gateway charges to this endpoint's reputation.
 //
 // The accepted set is gorilla's own validReceivedCloseCodes, enumerated here
 // because it is unexported. It is enumerated and NOT written as a range: the
@@ -1837,7 +1836,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		// a frame that contradicts an established owner is a verdict about the
 		// CLIENT and closes with CloseValidationFailed instead.
 		//
-		// v1 and sage name no supplier here; their gate is adoptOrVerifyOwner on
+		// v1 names no supplier here; their gate is adoptOrVerifyOwner on
 		// the first frame, whose ring signature and ownsSupplierKey check are
 		// the real authority for both protocols.
 		if handshakeSupplier := r.Header.Get(HeaderPocketSupplierAddress); handshakeSupplier != "" {
@@ -1854,8 +1853,8 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		}
 
 		// Validate and log WebSocket handshake (permissive - never rejects)
-		// - PATH v2: Attempts signature verification, logs WARN if fails
-		// - PATH v1: Logs INFO about legacy handshake
+		// - v2 handshake: Attempts signature verification, logs WARN if fails
+		// - v1 handshake: Logs INFO about legacy handshake
 		p.validateAndLogWebSocketHandshake(r, serviceID)
 
 		// Stop admitting new connections while the batch queue is full: an HTTP 503
@@ -1929,8 +1928,8 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			headers.Set(k, v)
 		}
 
-		// Extract supplier address from handshake header (sent by PATH v2 protocol).
-		// Empty for PATH v1 and for sage, which send no supplier header; the
+		// Extract supplier address from handshake header (sent by the v2 handshake).
+		// Empty for the v1 handshake, which sends no supplier header; the
 		// bridge adopts the owner from the first RelayRequest in that case.
 		supplierAddress := r.Header.Get(HeaderPocketSupplierAddress)
 
@@ -1957,7 +1956,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 
 		// Create and run bridge
 		// Session end height will be set when the first relay request arrives.
-		// supplierAddress is empty for PATH v1 and sage; the bridge adopts its
+		// supplierAddress is empty for the v1 handshake; the bridge adopts its
 		// owner from the first RelayRequest (see WebSocketBridge.owner).
 		bridge, err := NewWebSocketBridge(
 			p.logger,
@@ -2044,9 +2043,9 @@ func IsWebSocketUpgrade(r *http.Request) bool {
 	return websocket.IsWebSocketUpgrade(r)
 }
 
-// WebSocket handshake header constants (matching PATH's request/parser.go)
+// WebSocket handshake header constants (the names the gateway sends)
 const (
-	// Headers sent by PATH during WebSocket handshake for validation
+	// Headers sent by the gateway during WebSocket handshake for validation
 	HeaderPocketSessionID          = "Pocket-Session-Id"
 	HeaderPocketSessionStartHeight = "Pocket-Session-Start-Height"
 	HeaderPocketSessionEndHeight   = "Pocket-Session-End-Height"
@@ -2059,8 +2058,8 @@ const (
 
 // validateAndLogWebSocketHandshake validates and logs WebSocket handshake.
 // This function is permissive - it never rejects connections, only logs validation results.
-// - PATH v2: Attempts signature verification, logs WARN if fails (but continues)
-// - PATH v1: Logs INFO about legacy handshake (no validation headers)
+// - v2 handshake: Attempts signature verification, logs WARN if fails (but continues)
+// - v1 handshake: Logs INFO about legacy handshake (no validation headers)
 func (p *ProxyServer) validateAndLogWebSocketHandshake(r *http.Request, serviceID string) {
 	// Extract handshake headers
 	sessionID := r.Header.Get(HeaderPocketSessionID)
@@ -2071,21 +2070,21 @@ func (p *ProxyServer) validateAndLogWebSocketHandshake(r *http.Request, serviceI
 	signature := r.Header.Get(HeaderPocketSignature)
 	rpcType := r.Header.Get(HeaderRpcType)
 
-	// Check if we have PATH v2 validation headers
+	// Check if we have v2 handshake validation headers
 	hasV2Headers := sessionID != "" && supplierAddress != "" && signature != ""
 
 	if !hasV2Headers {
-		// PATH v1 - no validation headers present
+		// v1 handshake - no validation headers present
 		p.logger.Debug().
 			Str(logging.FieldServiceID, serviceID).
 			Str("remote_addr", r.RemoteAddr).
 			Str("app_address", appAddress).
 			Str("rpc_type", rpcType).
-			Msg("websocket handshake from PATH v1 (no validation headers)")
+			Msg("websocket handshake v1 (no validation headers)")
 		return
 	}
 
-	// PATH v2 - validation headers present, attempt verification
+	// v2 handshake - validation headers present, attempt verification
 	p.logger.Debug().
 		Str(logging.FieldServiceID, serviceID).
 		Str("remote_addr", r.RemoteAddr).
@@ -2097,23 +2096,23 @@ func (p *ProxyServer) validateAndLogWebSocketHandshake(r *http.Request, serviceI
 		Str("rpc_type", rpcType).
 		Bool("has_signature", true).
 		Int("signature_length", len(signature)).
-		Msg("websocket handshake from PATH v2 (with validation headers)")
+		Msg("websocket handshake v2 (with validation headers)")
 
-	// TODO(PATH-v2): Implement full handshake signature verification
+	// TODO(ws-handshake-v2): Implement full handshake signature verification
 	// The signature should be verified against a reconstructed message containing:
 	// - Session ID, session start/end heights
 	// - Supplier address, application address
 	// - Service ID, RPC type
 	//
-	// For now, we accept all handshakes permissively until PATH v2 protocol is finalized.
+	// For now, we accept all handshakes permissively until the v2 handshake protocol is finalized.
 	// When ready, we should:
-	// 1. Reconstruct the signed message structure (matching PATH's signing logic)
+	// 1. Reconstruct the signed message structure (matching the gateway's signing logic)
 	// 2. Verify signature using application's public key (from session or blockchain)
 	// 3. Log WARN if verification fails (but still allow connection for backward compatibility)
 
 	if p.validator != nil {
 		// Placeholder for future signature verification
-		// When PATH v2 is stable, uncomment and implement:
+		// When the v2 handshake is stable, uncomment and implement:
 		/*
 			verifyErr := p.verifyWebSocketHandshakeSignature(sessionID, sessionStartHeight, sessionEndHeight,
 				supplierAddress, appAddress, serviceID, rpcType, signature)

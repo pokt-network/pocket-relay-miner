@@ -100,7 +100,7 @@ func (d *dialRecorder) record(statusCode int, _ error) {
 	d.lastArg.Store(int32(statusCode))
 }
 
-// newLifecycleBridge builds a sage-shaped bridge (no supplier header) against
+// newLifecycleBridge builds a v1-shaped bridge (no supplier header) against
 // the given backend, with a recorder in the circuit breaker's seat. It does NOT
 // call Run: each test drives the lifecycle itself, which is the point.
 func newLifecycleBridge(t *testing.T, backendURL string) (*WebSocketBridge, *websocket.Conn, *dialRecorder, string) {
@@ -182,8 +182,9 @@ func TestBridgeRefusesARawFrameBeforeAnyRelay(t *testing.T) {
 // A read deadline works here only because pingLoop has not started: gorilla's
 // default ping handler answers a ping without touching the read deadline, while
 // the SetPongHandler pingLoop installs REFRESHES it. So the client below keeps
-// answering pings — PATH pings every 27s, sage every 20s — and still hits the
-// deadline, which under the old shape needed a fifth goroutine and a flag.
+// answering pings — one gateway pings every 27s, the other every 20s — and
+// still hits the deadline, which under the old shape needed a fifth goroutine
+// and a flag.
 func TestBridgeClosesAConnectionThatNeverSendsAFrame(t *testing.T) {
 	verifyNoBridgeGoroutines(t)
 	prev := wsFirstFrameWait

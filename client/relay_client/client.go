@@ -25,7 +25,7 @@ import (
 )
 
 // ringCacheKey identifies a cached ring by app address and session end height.
-// This matches PATH's caching approach where rings are valid for an entire session.
+// A gateway caches rings the same way: a ring is valid for an entire session.
 type ringCacheKey struct {
 	appAddress       string
 	sessionEndHeight int64
@@ -49,7 +49,7 @@ type RelayClient struct {
 	appAddress   string
 
 	// gatewayMode indicates whether we're signing with a gateway key on behalf of the app.
-	// This matches PATH's approach where gateway signs relays for delegated apps.
+	// This is how a gateway signs: it signs relays for the apps that delegate to it.
 	gatewayMode bool
 
 	// sessions answers which session the app is in at a height. It is always
@@ -63,7 +63,7 @@ type RelayClient struct {
 	height *latestHeight
 
 	// ringCache stores rings keyed by (appAddress, sessionEndHeight).
-	// This matches PATH's caching approach where rings are built once per session
+	// As a gateway does, rings are built once per session
 	// and reused for all requests within that session.
 	// Thread-safe via sync.Map for concurrent load testing.
 	ringCache *xsync.Map[ringCacheKey, *ring.Ring]
@@ -89,12 +89,12 @@ type Config struct {
 	AppPrivateKeyHex string
 
 	// GatewayPrivateKeyHex is the gateway's private key in hex format (optional).
-	// When provided, enables "gateway mode" matching PATH's approach:
+	// When provided, enables "gateway mode", signing the way a gateway does:
 	//   - The gateway signs relay requests on behalf of the application
 	//   - The ring is still constructed from app + delegated gateways
 	//   - The gateway must be in app.DelegateeGatewayAddresses to be valid
 	//
-	// This allows testing the full PATH-compatible signing flow where gateways
+	// This allows testing the full gateway signing flow where gateways
 	// sign relays for their delegated applications.
 	GatewayPrivateKeyHex string
 
@@ -114,7 +114,7 @@ type Config struct {
 // Gateway Mode (when GatewayPrivateKeyHex is provided):
 //   - The gateway's private key is used for signing
 //   - The app's address is still used for session/ring construction
-//   - This matches PATH's approach where gateways sign for delegated apps
+//   - This is how a gateway signs for the apps that delegate to it
 //
 // Parameters:
 //   - config: Configuration with private key and query clients (both required)
@@ -131,7 +131,7 @@ type Config struct {
 //	    QueryClients:     queryClients,
 //	}, logger)
 //
-// Example (gateway mode - matches PATH):
+// Example (gateway mode - signs as a gateway does):
 //
 //	relayClient, err := NewRelayClient(relay_client.Config{
 //	    AppPrivateKeyHex:     "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a",
@@ -160,7 +160,7 @@ func NewRelayClient(config Config, logger logging.Logger) (*RelayClient, error) 
 	gatewayMode := false
 
 	if config.GatewayPrivateKeyHex != "" {
-		// Gateway mode: sign with gateway key on behalf of app (matches PATH)
+		// Gateway mode: sign with gateway key on behalf of app, as a gateway does
 		gatewaySigner, err := NewSignerFromHex(config.GatewayPrivateKeyHex)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gateway signer: %w", err)
@@ -341,7 +341,7 @@ func (c *RelayClient) BuildRelayRequest(
 }
 
 // getOrCreateRing returns a cached ring or creates a new one for the given app and session.
-// This matches PATH's caching approach where rings are built once per session and reused.
+// As a gateway does, rings are built once per session and reused.
 // Thread-safe via sync.Map for concurrent load testing.
 func (c *RelayClient) getOrCreateRing(
 	ctx context.Context,
@@ -400,7 +400,7 @@ func (c *RelayClient) GetAppAddress() string {
 }
 
 // IsGatewayMode returns true if the client is configured to sign with a gateway key.
-// This matches PATH's approach where gateways sign relays on behalf of delegated apps.
+// This is how a gateway signs relays on behalf of the apps that delegate to it.
 func (c *RelayClient) IsGatewayMode() bool {
 	return c.gatewayMode
 }

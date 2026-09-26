@@ -391,7 +391,7 @@ type HTTPTransportConfig struct {
 }
 
 // ResponseCompressionConfig controls gzip compression of signed relay responses
-// returned from the relayer to the gateway (PATH).
+// returned from the relayer to the gateway.
 //
 // Historical context: gzip was enabled unconditionally and consumed ~9% of
 // relayer CPU at 200 RPS per the Apr 14 2026 pprof profile (60-67% CPU is

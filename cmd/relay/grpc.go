@@ -212,8 +212,8 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 // runGRPCLoadTest sends concurrent gRPC relay requests with performance metrics.
 //
 // Each worker calls BuildRelayRequest itself so the ring signature is generated
-// fresh per relay (ring sigs are randomized). This matches PATH's production
-// behavior (one sign per incoming request) and guarantees distinct relay bytes
+// fresh per relay (ring sigs are randomized). This matches what a gateway does
+// in production (one sign per incoming request) and guarantees distinct relay bytes
 // per call, so the SMST stores one leaf per request instead of collapsing.
 func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte, requireNonEmpty bool) error {
 	// Create gRPC connection (reuse across workers)
@@ -267,7 +267,7 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 
 			// Build a FRESH relay request for this worker. Ring signatures use
 			// randomness, so each call yields distinct bytes even for an
-			// identical payload — matches PATH's per-request sign behaviour.
+			// identical payload — as a gateway signs once per request.
 			supplier := supplierAddrs[supplierIdx.Add(1)%uint64(len(supplierAddrs))]
 			relayRequest, _, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
 			if err != nil {

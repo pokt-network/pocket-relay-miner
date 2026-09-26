@@ -221,8 +221,8 @@ fits your topology.
 - **Why not test through the relayer?** The relayer expects a fully
   signed `RelayRequest` proto with a ring signature from an
   application with an active session. You can't send "raw" relays
-  from outside. Testing the full path (client → PATH → relayer →
-  backend) needs a PATH gateway with a real app stake. That's a
+  from outside. Testing the full path (client → gateway → relayer →
+  backend) needs a gateway with a real app stake. That's a
   separate project. In the meantime, the gap between the numbers
   here and the throughput visible in `ha_relayer_*` metrics tells
   you what the relayer is costing.

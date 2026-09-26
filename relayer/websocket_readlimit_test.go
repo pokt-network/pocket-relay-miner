@@ -142,7 +142,7 @@ func TestCloseInfoForReadError(t *testing.T) {
 	}{
 		{
 			// A peer close frame must win: this is what carries session rollover
-			// (4000 SessionExpired from PATH) through to the backend.
+			// (4000 SessionExpired from the gateway) through to the backend.
 			name:     "peer close frame propagates its own code",
 			err:      &websocket.CloseError{Code: CloseSessionExpired, Text: "session ended"},
 			wantCode: CloseSessionExpired,

@@ -158,7 +158,7 @@ func TestMergeBackendPath(t *testing.T) {
 	}
 }
 
-// TestNormalizeBackendPath covers issue #8: PATH-style clients may forward
+// TestNormalizeBackendPath covers issue #8: gateway-style clients may forward
 // `//` (double-slash) as the request path, and raw backends without a
 // normalizing reverse proxy return 404 for `POST //`. The normalize step
 // applied at the dispatch site collapses these artifacts.

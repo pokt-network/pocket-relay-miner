@@ -303,7 +303,7 @@ func (rs *ResponseSigner) BuildAndSignWebSocketRelayResponse(
 // and raw response body (for HTTP/gRPC/streaming responses where we've already read the body).
 // This wraps the response in POKTHTTPResponse format.
 // NOTE: If the response is gzip-compressed, it will be decompressed before signing.
-// This ensures PATH receives uncompressed JSON-RPC payloads it can parse.
+// This ensures the gateway receives uncompressed JSON-RPC payloads it can parse.
 func (rs *ResponseSigner) BuildAndSignRelayResponseFromBody(
 	relayRequest *servicetypes.RelayRequest,
 	respBody []byte,
@@ -324,7 +324,7 @@ func (rs *ResponseSigner) BuildAndSignRelayResponseFromBody(
 	}
 
 	// Decompress gzipped response body if needed
-	// This ensures the RelayResponse payload contains uncompressed JSON-RPC that PATH can parse
+	// This ensures the RelayResponse payload contains uncompressed JSON-RPC that the gateway can parse
 	bodyToSign := respBody
 	contentEncoding := ""
 	if respHeaders != nil {

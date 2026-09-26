@@ -1,4 +1,4 @@
-// Test WebSocket relay through PATH gateway with session rollover handling
+// Test WebSocket relay through the gateway with session rollover handling
 // Usage: go run scripts/ws-test/main.go [service-id] [message-count]
 //
 // Examples:

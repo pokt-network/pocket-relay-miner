@@ -88,8 +88,8 @@ func (s *Signer) GetAddress() string {
 
 // SignRelayRequestWithRing signs a relay request using a pre-built ring.
 //
-// The ring is fetched and cached by the caller (once per session, matching
-// PATH's caching approach) rather than per request.
+// The ring is fetched and cached by the caller (once per session, as a
+// gateway caches it) rather than per request.
 //
 // The ring should be built from the app's address + delegated gateways using
 // RingClient.GetRingForAddressAtHeight(). The signer's private key is used for signing,

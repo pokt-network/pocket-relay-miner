@@ -17,7 +17,7 @@ package rings
 // by a verifier running the other.
 //
 // That makes the tag a silent consensus fork. A binary built with it would
-// mine relays that the chain, PATH, and every other relayer reject at a rate
+// mine relays that the chain, the gateways, and every other relayer reject at a rate
 // low enough to be mistaken for a flaky network. It was originally tried as a
 // way to buy speed and did not deliver any — only latency and problems — so
 // nothing is being given up by refusing it.

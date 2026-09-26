@@ -434,10 +434,10 @@ func wsCaseAbruptDisconnect(ctx context.Context, logger logging.Logger, client *
 // the CLIENT dies, writeToGateway fails before the relay is emitted and nothing
 // asymmetric happens. When the BACKEND dies with no close frame, the relayer's
 // gorilla reader manufactures CloseError{1006} locally -- 1006 is reserved and
-// must never be sent -- and release() then writes a close to PATH, which is
-// alive and reading. Before sanitizeCloseCode that 1006 went out raw, and a
+// must never be sent -- and release() then writes a close to the gateway, which
+// is alive and reading. Before sanitizeCloseCode that 1006 went out raw, and a
 // gorilla peer answers a raw 1006 with a protocol error: a backend that dies
-// made PATH see a protocol violation by the RELAYER, charged to this endpoint.
+// made the gateway see a protocol violation by the RELAYER, charged to this endpoint.
 //
 // The discriminant is the TYPE of the error the client gets, not a metric.
 // ha_relayer_websocket_closes_total records the code BEFORE sanitising, so it
@@ -510,7 +510,7 @@ func wsCaseBackendAbruptClose(ctx context.Context, logger logging.Logger, client
 		// code and raises a plain protocol error instead of a CloseError.
 		return fmt.Errorf(
 			"backend-abrupt-close: the relayer sent a close code this peer refuses "+
-				"(a gorilla peer answers that with a protocol error, and PATH charges it "+
+				"(a gorilla peer answers that with a protocol error, and the gateway charges it "+
 				"to this endpoint): %w", readErr)
 	}
 	if closeErr.Code != relayer.CloseGoingAway {
