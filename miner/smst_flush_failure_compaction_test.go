@@ -119,10 +119,6 @@ func newFlushFailureHarness(t *testing.T, compact bool) *flushFailureHarness {
 	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
 		SupplierAddress: supplier,
 		CacheTTL:        0,
-		// No update checkpoints on its own; every checkpoint is driven
-		// explicitly, so the state between "the flush wrote X" and "the
-		// orphan HDEL ran" can be observed.
-		LiveRootCheckpointInterval: 1_000_000,
 	})
 
 	sessionID := fmt.Sprintf("sess-flush-failure-compact-%v", compact)

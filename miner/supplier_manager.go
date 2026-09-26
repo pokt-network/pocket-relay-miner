@@ -262,12 +262,6 @@ type SupplierManagerConfig struct {
 	// CacheTTL is the TTL for cached data (SMST trees, params, etc.)
 	CacheTTL time.Duration
 
-	// SMSTLiveRootCheckpointInterval bounds the relay loss window on
-	// mid-session leader kills. Zero means use the SMST manager default
-	// (DefaultLiveRootCheckpointInterval). See config.Config docs for
-	// the operator-facing trade-off.
-	SMSTLiveRootCheckpointInterval int
-
 	// Batch configuration
 	BatchSize int64 // Number of messages to fetch per XREADGROUP
 
@@ -1617,11 +1611,10 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		m.logger,
 		m.config.RedisClient,
 		RedisSMSTManagerConfig{
-			SupplierAddress:            operatorAddr,
-			CacheTTL:                   m.config.CacheTTL,
-			LiveRootCheckpointInterval: m.config.SMSTLiveRootCheckpointInterval,
-			ColdCompactionPool:         m.coldCompactionPool,
-			RebuildAdmission:           m.rebuildAdmission,
+			SupplierAddress:    operatorAddr,
+			CacheTTL:           m.config.CacheTTL,
+			ColdCompactionPool: m.coldCompactionPool,
+			RebuildAdmission:   m.rebuildAdmission,
 		},
 	)
 

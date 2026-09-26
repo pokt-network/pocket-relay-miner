@@ -49,10 +49,6 @@ type Config struct {
 	// Logging configuration.
 	Logging logging.Config `yaml:"logging"`
 
-	// DeduplicationTTLBlocks is how many blocks to keep relay hashes for deduplication.
-	// Default: 10 (session length + grace period + buffer)
-	DeduplicationTTLBlocks int64 `yaml:"deduplication_ttl_blocks"`
-
 	// BatchSize is the number of relays to process in a single batch.
 	// Default: 100
 	BatchSize int64 `yaml:"batch_size"`
@@ -66,17 +62,6 @@ type Config struct {
 	// This is a backup safety net - manual cleanup is primary, TTL prevents leaks if cleanup fails.
 	// Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
-
-	// SMSTLiveRootCheckpointInterval is how often (in UpdateTree calls) the
-	// intermediate SMST root is written to Redis so a follower promoted
-	// mid-session can resume the tree. Lower = safer (up to interval-1
-	// relays can be lost on a leader kill between checkpoints) but more
-	// Redis writes. Default: 10 (a 10x reduction in Redis SET load versus
-	// checkpointing every relay, with at most 9 relays lost per kill).
-	// Set to 1 for zero-loss mode. Do not set to 0 in production - 0 means
-	// "use default" and is only honored for config upgrades from older
-	// versions.
-	SMSTLiveRootCheckpointInterval int `yaml:"smst_live_root_checkpoint_interval,omitempty"`
 
 	// SubmissionTrackingTTL is the TTL for claim/proof submission tracking records.
 	// These records are used for debugging failed submissions and auditing.
@@ -647,14 +632,6 @@ func (c *Config) GetTxConnProbeInterval() time.Duration {
 	return 0
 }
 
-// GetDeduplicationTTL returns the deduplication TTL in blocks.
-func (c *Config) GetDeduplicationTTL() int64 {
-	if c.DeduplicationTTLBlocks > 0 {
-		return c.DeduplicationTTLBlocks
-	}
-	return 10 // Default (session length + grace + buffer)
-}
-
 // GetLeaderTTL returns the leader TTL as a duration.
 func (c *Config) GetLeaderTTL() time.Duration {
 	if c.LeaderElection.LeaderTTLSeconds > 0 {
@@ -966,8 +943,7 @@ func DefaultConfig() *Config {
 			GasPrice:      "0.000001upokt", // Default gas price
 			GasAdjustment: 1.7,             // Default 70% safety margin
 		},
-		DeduplicationTTLBlocks: 10,
-		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
+		BatchSize: 1000, // Increased from 100 for better throughput (10x more efficient)
 		// Hot reload on by default, in BOTH binaries: an operator who never
 		// thinks about it gets a fleet that picks up a key change on its own,
 		// and one who turns it off is told so at startup by the key manager's

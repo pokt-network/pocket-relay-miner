@@ -142,6 +142,17 @@ var retiredKeys = map[string]string{
 		"off, max_rebroadcasts: 0 is the surviving knob -- observe-only, it verifies and records the outcome " +
 		"but never re-sends. If this said \"false\" (the default), nothing changes: that is now the only " +
 		"behaviour",
+
+	"smst_live_root_checkpoint_interval": "the SMST root is no longer checkpointed every N relays, so there " +
+		"is no interval left to tune. The miner writes it once per relay batch, before it acknowledges any " +
+		"relay in that batch, so a relay a resumed tree lacks is one still pending in the stream, and it is " +
+		"redelivered to the next owner. Where this bounded the relays a miner restart could lose per session " +
+		"to the interval minus one, expect those relays to come back through redelivery instead, whatever " +
+		"it said, including \"1\" -- provided the redelivery lands before the session is sealed",
+
+	"deduplication_ttl_blocks": "the miner never read it: it builds its relay deduplicator without " +
+		"it, so the window was a fixed 10 blocks whatever this said, and it still is -- converted to time " +
+		"with block_time_seconds. Expect no change in behaviour",
 }
 
 // UnknownKeys reports every key in data that probe's type does not declare.

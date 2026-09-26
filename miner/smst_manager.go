@@ -43,9 +43,6 @@
 //     With sliding-TTL refresh (FlushOrphansWithLiveRoot), this
 //     auto-extends while relays keep coming in, but a session
 //     that idles past cache_ttl will still expire — keep ≥ 2h.
-//     - smst_live_root_checkpoint_interval: no longer read by the
-//     relay path. live_root is written by the relay batch before it
-//     acknowledges, once per flush, instead of every N updates.
 package miner
 
 import (
@@ -78,29 +75,6 @@ const (
 	// RedisScanBatchSize is the number of keys to scan per Redis SCAN iteration
 	// when warming up SMST trees from Redis.
 	RedisScanBatchSize = 100
-
-	// DefaultLiveRootCheckpointInterval is the number of UpdateTree
-	// calls between writes of the intermediate root to Redis. This is
-	// the bound on relay loss if the miner dies between checkpoints:
-	// up to (interval - 1) relays that were committed to the nodes
-	// hash but not yet represented in a stored live_root get dropped
-	// on resume.
-	//
-	// Default 10. Rationale: protocol relay-mining difficulty scales
-	// with aggregate network RPS, so the count of relays that actually
-	// meet difficulty and reach UpdateTree stays bounded regardless of
-	// how much raw traffic the relayer signs. Trees tend toward similar
-	// sizes across load levels, which makes a worst-case 9-relay loss
-	// per session per process restart proportionally small — while the
-	// 10× reduction in TxPipeline round-trips (HDEL orphans + SET
-	// live_root + EXPIRE × 2) meaningfully cuts Redis load, which
-	// matters given the larger Redis footprint in recent releases
-	// (HINCRBY session counters, dedup sets, stream backlogs, etc.).
-	//
-	// Operators who value zero-loss-per-restart over Redis throughput
-	// can set smst_live_root_checkpoint_interval: 1 in
-	// config.miner.yaml.
-	DefaultLiveRootCheckpointInterval = 10
 )
 
 // flushTreeSealWaitHook is a test-only hook that fires during FlushTree's
@@ -120,15 +94,6 @@ type RedisSMSTManagerConfig struct {
 	// CacheTTL is how long to keep SMST data in Redis (backup if manual cleanup fails).
 	CacheTTL time.Duration
 
-	// LiveRootCheckpointInterval is the number of UpdateTree calls
-	// between writes of the intermediate root to Redis. See
-	// DefaultLiveRootCheckpointInterval for the trade-off and the
-	// current default value. Zero falls back to the default. Raise
-	// this only if Redis write throughput is the bottleneck — the
-	// loss bound per process restart is (interval - 1) relays per
-	// active session.
-	LiveRootCheckpointInterval int
-
 	// ColdCompactionPool runs compactions. Shared by every supplier's manager
 	// so the bound is per process. Nil runs them on the caller's goroutine.
 	ColdCompactionPool pond.Pool
@@ -137,19 +102,6 @@ type RedisSMSTManagerConfig struct {
 	// loaded at once across the process. Nil admits every load at once.
 	RebuildAdmission *RebuildAdmission
 }
-
-// liveRootInterval went with the per-update live_root checkpoint, disabled in
-// updateTree: live_root is now written by the relay batch before it
-// acknowledges, so nothing reads the configured interval any more.
-//
-// // liveRootInterval returns the configured checkpoint interval or the
-// // default if unset. Always >= 1.
-// func (m *RedisSMSTManager) liveRootInterval() int {
-// 	if m.config.LiveRootCheckpointInterval > 0 {
-// 		return m.config.LiveRootCheckpointInterval
-// 	}
-// 	return DefaultLiveRootCheckpointInterval
-// }
 
 // leafCompactor is the smt capability commitLocked calls after every Commit,
 // before the flush, to drop the in-memory value of the leaves Commit handed to
@@ -360,13 +312,6 @@ type redisSMST struct {
 	// Redis, panic again, and after persistentCorruptionThreshold evictions
 	// purge the session's Redis state with its relays.
 	compactionDisabled bool
-
-	// updateCount was the running tally of UpdateTree calls against this
-	// tree instance, which drove the live_root checkpoint at the first update
-	// and every LiveRootCheckpointInterval updates. That checkpoint is disabled
-	// (see updateTree), and nothing else read it.
-	//
-	// updateCount uint64
 
 	// liveRoot is the live_root this manager last wrote for the tree, or the
 	// one it resumed the tree from; nil when there is neither. The exit
@@ -758,94 +703,12 @@ func (m *RedisSMSTManager) updateTree(
 	// FlushPipeline, leaf compaction and the eviction-counter reset -- is
 	// commitLocked now.
 	//
-	// The live_root checkpoint below, at the first update and every
-	// LiveRootCheckpointInterval updates, is disabled, and with it
-	// smst_live_root_checkpoint_interval no longer changes anything. Run
-	// without a commit it would store a root over nodes Redis does not have
-	// yet, and a miner resuming from it would walk into missing digests; run
-	// with one, it would put back a per-relay write the batch exists to remove.
-	// The relay batch checkpoints live_root before it acknowledges, so a relay
-	// a resumed tree lacks is one whose entry is still pending.
-	//
-	// // Checkpoint the current intermediate root to Redis so a follower
-	// // promoted mid-session can resume the tree at this point via
-	// // ImportSparseMerkleSumTrie. Without this checkpoint, the new leader's
-	// // GetOrCreateTree would start from an empty root while the dead
-	// // leader's relay nodes remain orphaned in the shared nodes hash,
-	// // producing claims that undercount by up to ~50% depending on kill
-	// // timing (see scripts/test-quantitative-failover.sh).
-	// //
-	// // Default interval is 10 — checkpointing every 10 updates instead
-	// // of every update keeps Redis write amplification low. The worst
-	// // case relay loss on a mid-session process death is (interval - 1)
-	// // relays, which is proportionally small given that protocol
-	// // difficulty bounds how many relays reach the tree in the first
-	// // place. Operators who need exact claim fidelity can lower it via
-	// // smst_live_root_checkpoint_interval.
-	// //
-	// // A failure is non-fatal: the relay is already in the nodes hash, we
-	// // just degrade HA recovery for the current checkpoint window.
-	// tree.updateCount++
-	// interval := uint64(m.liveRootInterval())
-	// if tree.updateCount == 1 || tree.updateCount%interval == 0 {
-	// 	liveRootKey := m.redisClient.KB().SMSTLiveRootKey(m.config.SupplierAddress, sessionID)
-	// 	// Explicit []byte conversion: trie.Root() returns smt.MerkleSumRoot
-	// 	// which go-redis does not know how to marshal directly. Guarded
-	// 	// with runSMSTSafely because Root() hashes the (possibly
-	// 	// corrupted) dirty-child subtree and can panic on a malformed
-	// 	// encoding just like Update/Commit.
-	// 	var rootBytes []byte
-	// 	if err := m.runSMSTSafely(sessionID, "root", func() error {
-	// 		rootBytes = []byte(tree.trie.Root())
-	// 		return nil
-	// 	}); err != nil {
-	// 		// Corruption at Root() means we cannot safely persist a
-	// 		// live_root. Skip the checkpoint and let the outer deferred
-	// 		// eviction drop the session on return.
-	// 		return err
-	// 	}
-	// 	if !isValidSMSTRoot(rootBytes) {
-	// 		// Defensive: never persist a root we wouldn't be willing to read back.
-	// 		// Keeps the Redis invariant "live_root is always SMSTRootLen or absent".
-	// 		m.logger.Warn().
-	// 			Str(logging.FieldSessionID, sessionID).
-	// 			Int("got_len", len(rootBytes)).
-	// 			Int("want_len", SMSTRootLen).
-	// 			Uint64("update_count", tree.updateCount).
-	// 			Msg("trie.Root() returned unexpected length - skipping live_root checkpoint")
-	// 	} else if redisStore, ok := tree.store.(*RedisMapStore); ok {
-	// 		// Atomic: HDEL accumulated orphans + SET live_root + EXPIRE
-	// 		// on both keys, in one MULTI/EXEC. Before this: live_root
-	// 		// points to the previous checkpoint whose nodes are still
-	// 		// in the hash (orphans deferred). After: live_root points
-	// 		// to the new checkpoint whose nodes were written by the
-	// 		// FlushPipeline calls above, orphans are gone, and the
-	// 		// sliding TTL keeps both keys alive as long as the session
-	// 		// keeps receiving relays — preventing the "nodes hash
-	// 		// expires while live_root and in-memory tree still think
-	// 		// it's valid" corruption shape on long-lived sessions.
-	// 		if err := redisStore.FlushOrphansWithLiveRoot(ctx, liveRootKey, rootBytes, m.config.CacheTTL); err != nil {
-	// 			m.logger.Warn().
-	// 				Err(err).
-	// 				Str(logging.FieldSessionID, sessionID).
-	// 				Uint64("update_count", tree.updateCount).
-	// 				Msg("failed to atomically flush orphans + live_root (HA resume degraded, orphans retained for next checkpoint)")
-	// 		} else {
-	// 			tree.liveRoot = rootBytes
-	// 		}
-	// 	} else {
-	// 		// Non-Redis store path (test doubles etc.) — preserve old behaviour.
-	// 		if err := m.redisClient.Set(ctx, liveRootKey, rootBytes, 0).Err(); err != nil {
-	// 			m.logger.Warn().
-	// 				Err(err).
-	// 				Str(logging.FieldSessionID, sessionID).
-	// 				Uint64("update_count", tree.updateCount).
-	// 				Msg("failed to checkpoint live root (HA resume degraded)")
-	// 		} else {
-	// 			tree.liveRoot = rootBytes
-	// 		}
-	// 	}
-	// }
+	// Nor is live_root checkpointed here. Run without a commit it would store
+	// a root over nodes Redis does not have yet, and a miner resuming from it
+	// would walk into missing digests; run with one, it would put back a
+	// per-relay write the batch exists to remove. The relay batch checkpoints
+	// live_root before it acknowledges, so a relay a resumed tree lacks is one
+	// whose entry is still pending.
 
 	// TTL is set once at tree creation in GetOrCreateTree (not per-relay).
 
@@ -1166,12 +1029,11 @@ func (m *RedisSMSTManager) CheckpointLiveRootOnExit(ctx context.Context, session
 }
 
 // CheckpointAllOnExit is CheckpointLiveRootOnExit for every tree this manager
-// still holds, run as a supplier is torn down. Relays finished one at a time
-// are acknowledged as they arrive, while live_root is written only at a tree's
-// first update and every LiveRootCheckpointInterval after; torn down without
-// this, the trees went with up to interval-1 of those relays uncovered, and the
-// next owner resumed without them. A tree that is sealing or claimed, or unchanged since its
-// live_root, is left alone.
+// still holds, run as a supplier is torn down. A relay inserted into a tree
+// after its last live_root is in the tree but not in that root; torn down
+// without this, the next owner resumes without it and gets it back only if its
+// entry is redelivered before the session is sealed. A tree that is sealing or
+// claimed, or unchanged since its live_root, is left alone.
 //
 // written counts the live_roots set and failed the trees that returned an
 // error. Every tree is tried; the errors are joined.

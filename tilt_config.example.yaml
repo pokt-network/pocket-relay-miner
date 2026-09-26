@@ -44,7 +44,6 @@ miner:
       slowness_threshold: 1.5
     block_time_seconds: 10
     cache_ttl: 2h
-    deduplication_ttl_blocks: 10
     default_service_factor: 0.01
     keys:
       # Lives under keys: in BOTH binaries. At the top level it is a startup
@@ -95,7 +94,6 @@ miner:
       url: redis://redis-standalone:6379
     session_lifecycle:
       max_concurrent_transitions: 10
-    smst_live_root_checkpoint_interval: 10
     submission_tracking_ttl: 24h
     supplier_claiming:
       claim_ttl_seconds: 30

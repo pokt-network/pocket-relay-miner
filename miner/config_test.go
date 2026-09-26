@@ -25,7 +25,6 @@ func TestDefaultConfig(t *testing.T) {
 	// block sets no read deadline, so a cancelled context cannot end the read
 	// and Close() hangs.
 	require.Equal(t, int64(60000), cfg.Redis.ClaimIdleTimeoutMs)
-	require.Equal(t, int64(10), cfg.DeduplicationTTLBlocks)
 	require.Equal(t, int64(1000), cfg.BatchSize) // Increased from 100 for better throughput
 }
 
@@ -335,15 +334,6 @@ func TestConfig_GetBatchSize(t *testing.T) {
 	require.Equal(t, int64(1000), cfg.GetBatchSize()) // Default increased from 100
 }
 
-func TestConfig_GetDeduplicationTTL(t *testing.T) {
-	cfg := &Config{DeduplicationTTLBlocks: 20}
-	require.Equal(t, int64(20), cfg.GetDeduplicationTTL())
-
-	// Test default
-	cfg.DeduplicationTTLBlocks = 0
-	require.Equal(t, int64(10), cfg.GetDeduplicationTTL())
-}
-
 // Note: TestSupplierConfig_WithServices and TestConfig_Validate_MultipleSuppliers removed
 // Suppliers are now auto-discovered from keys configuration - no explicit supplier config needed
 
@@ -395,63 +385,6 @@ func TestGetMasterPoolSize(t *testing.T) {
 	require.Equal(t, 500, cfg.GetMasterPoolSize(78))
 	require.Equal(t, 500, cfg.GetMasterPoolSize(5)) // override ignores supplier count
 }
-
-// TestSMSTLiveRootCheckpointIntervalYAMLParsing verifies the full wire
-// from config.miner.yaml (smst_live_root_checkpoint_interval key) down
-// to the SMST manager's internal checkpoint cadence. A regression here
-// would leave operators unable to tune the relay-loss-on-failover
-// trade-off in production even though the knob exists.
-func TestSMSTLiveRootCheckpointIntervalYAMLParsing(t *testing.T) {
-	t.Run("parses configured value", func(t *testing.T) {
-		yamlData := `smst_live_root_checkpoint_interval: 25`
-		var cfg Config
-		err := yaml.Unmarshal([]byte(yamlData), &cfg)
-		require.NoError(t, err)
-		require.Equal(t, 25, cfg.SMSTLiveRootCheckpointInterval)
-	})
-
-	t.Run("absent yields zero (manager falls back to default)", func(t *testing.T) {
-		var cfg Config
-		err := yaml.Unmarshal([]byte(""), &cfg)
-		require.NoError(t, err)
-		require.Equal(t, 0, cfg.SMSTLiveRootCheckpointInterval,
-			"absent key must yield zero so the manager picks DefaultLiveRootCheckpointInterval")
-	})
-}
-
-// This test pinned liveRootInterval, which went with the per-update live_root
-// checkpoint: live_root is now written by the relay batch before it
-// acknowledges, and the configured interval is no longer read.
-//
-// // TestSMSTLiveRootCheckpointInterval_PropagatesToManager is the integration
-// // side of the wiring check: build a RedisSMSTManagerConfig from a specific
-// // operator-provided interval and verify the manager actually applies it
-// // (as opposed to always using the default). This would have caught the
-// // gap where the YAML key existed but nothing downstream read it.
-// func TestSMSTLiveRootCheckpointInterval_PropagatesToManager(t *testing.T) {
-// 	// Without a miniredis harness here we exercise only the config helper,
-// 	// which is the single source of truth the manager consults. The
-// 	// end-to-end test in smst_live_root_test.go's TestLiveRoot_CustomIntervalRespected
-// 	// covers the behavioural side (writes respect the interval).
-// 	cases := []struct {
-// 		name     string
-// 		input    int
-// 		expected int
-// 	}{
-// 		{"explicit 1 = zero-loss mode", 1, 1},
-// 		{"explicit 50", 50, 50},
-// 		{"zero falls back to default", 0, DefaultLiveRootCheckpointInterval},
-// 		{"negative falls back to default (defensive)", -5, DefaultLiveRootCheckpointInterval},
-// 	}
-// 	for _, tc := range cases {
-// 		t.Run(tc.name, func(t *testing.T) {
-// 			m := &RedisSMSTManager{
-// 				config: RedisSMSTManagerConfig{LiveRootCheckpointInterval: tc.input},
-// 			}
-// 			require.Equal(t, tc.expected, m.liveRootInterval())
-// 		})
-// 	}
-// }
 
 func TestWorkerPoolConfigYAMLParsing(t *testing.T) {
 	yamlData := `

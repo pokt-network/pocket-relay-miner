@@ -37,9 +37,8 @@ func (s *RedisSMSTTestSuite) TestFlushOrphansWithLiveRoot_RefreshesTTL() {
 	const cacheTTL = 30 * time.Second
 
 	config := RedisSMSTManagerConfig{
-		SupplierAddress:            supplier,
-		CacheTTL:                   cacheTTL,
-		LiveRootCheckpointInterval: 1, // checkpoint every update
+		SupplierAddress: supplier,
+		CacheTTL:        cacheTTL,
 	}
 	mgr := NewRedisSMSTManager(zerolog.Nop(), s.redisClient, config)
 
@@ -124,14 +123,13 @@ func (s *RedisSMSTTestSuite) TestEvictCorruptSession_PreservesRedisState() {
 // TestEvictCorruptSession_ResumePathRecoversIntactState closes the loop:
 // after a memory-only eviction on a non-corrupt Redis state, the next
 // UpdateTree must resume the tree via resumeTreeFromRedisLocked and
-// preserve the pre-eviction relay count, modulo the expected
-// interval-1 checkpoint-window loss. Interval=1 isolates the eviction
-// behavior from the checkpoint behavior so the count is exact.
+// preserve the pre-eviction relay count. The seed is checkpointed before
+// the eviction, so the count is exact.
 func (s *RedisSMSTTestSuite) TestEvictCorruptSession_ResumePathRecoversIntactState() {
 	supplier := "pokt1evict_resume"
 	sessionID := "session_evict_resume"
 
-	mgr := s.createTestRedisSMSTManagerWithInterval(supplier, 1)
+	mgr := s.createTestRedisSMSTManager(supplier)
 	const preEvictionUpdates = 5
 	for i := 0; i < preEvictionUpdates; i++ {
 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,

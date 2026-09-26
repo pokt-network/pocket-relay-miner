@@ -271,8 +271,8 @@ func indexOf(ids []string, id string) int {
 // acknowledged entry is never delivered again -- so the tree must already be
 // reachable from a stored root holding those relays.
 //
-// Seven relays, fewer than the per-relay checkpoint interval of 10, so before
-// the flush the stored live_root holds only the first. The flush is cut between
+// Seven relays, and an update writes no live_root on its own, so before the
+// flush no stored live_root holds any of them. The flush is cut between
 // its two steps, the miner "dies", and a new one takes the pending entries.
 // If the steps ran in the other order the cut would land after the
 // acknowledgement: nothing left to redeliver, and a restart resumes one leaf.

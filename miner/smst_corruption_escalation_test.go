@@ -119,7 +119,7 @@ func (s *RedisSMSTTestSuite) TestEscalation_PostPurge_NextUpdateStartsFresh() {
 	supplier := "pokt1escalation_fresh"
 	sessionID := "session_escalation_fresh"
 
-	mgr := s.createTestRedisSMSTManagerWithInterval(supplier, 1)
+	mgr := s.createTestRedisSMSTManager(supplier)
 	for i := 0; i < 5; i++ {
 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 			[]byte{byte(i)}, []byte{byte(i + 100)}, 10))
