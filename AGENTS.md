@@ -86,6 +86,11 @@ are not checked, and breaking them is unsupported.
   or [docs/deploy/HOST.md](docs/deploy/HOST.md), and run its steps in order
   from Step 0. A step gives **Run** and **Expect**, and **If not** and
   **Stop if** where they apply. Compare the output with **Expect** before going on.
+- **Give every HTTP backend an active health check, and check that each
+  backend answers before starting**: `validate` never contacts a backend.
+  Without a health check the relayer finds a dead backend only by failing the
+  relays it forwards; see
+  [docs/deploy/README.md, "Backend health checks"](docs/deploy/README.md#backend-health-checks-turn-them-on).
 - **Stop and ask a human** before using real supplier keys, spending funds,
   staking, or pointing anything at mainnet. The key in
   `examples/docker-compose/config/supplier-keys.yaml` is public and unstaked,

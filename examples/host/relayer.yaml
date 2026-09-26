@@ -37,6 +37,21 @@ services:
       jsonrpc:
         # CHANGE: the backend node that answers this service.
         url: "http://127.0.0.1:8545"
+        # Active health check: strongly recommended on every HTTP backend
+        # (jsonrpc, rest, cometbft); not on websocket. Without it a dead
+        # backend is found only by failing real relays. CHANGE the probe to
+        # one your node answers: this one is for an EVM JSON-RPC node.
+        # docs/deploy/README.md, "Backend health checks".
+        health_check:
+          enabled: true
+          endpoint: "/"
+          method: "POST"
+          request_body: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+          expected_body: '"result"'
+          interval_seconds: 10
+          timeout_seconds: 5
+          unhealthy_threshold: 3
+          healthy_threshold: 2
 
 # GET /ready answers 200 once the relayer can serve relays.
 health_check:

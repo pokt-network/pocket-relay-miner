@@ -142,7 +142,11 @@ every network value has its mainnet value in a comment marked `Mainnet:`
 `CHANGE`:
 
 - `relayer.yaml`: `services.<service_id>` with `backends.<transport>.url`, 1
-  entry per service your suppliers are staked for.
+  entry per service your suppliers are staked for. Keep an active
+  `health_check` on every HTTP backend and change its probe to one your node
+  answers: without it a dead backend is found only by failing real relays
+  ([why](README.md#backend-health-checks-turn-them-on)). Check each backend
+  answers from this host before starting (`curl` the same probe).
 - `supplier-keys.yaml`: your suppliers' private keys, 1 per line under `keys:`.
   The human who owns the supplier creates and stakes it with `pocketd`:
   [docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](../SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).

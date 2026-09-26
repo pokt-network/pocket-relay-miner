@@ -101,7 +101,7 @@ produces, where there is one.
 |---|---|---|
 | A Pocket full node: CometBFT RPC and gRPC | both processes; the miner submits transactions through it | yours, or a provider's. The compose example uses the public Sauron endpoints |
 | At least 1 staked supplier and its private key (64 hex characters) | signing responses, claims and proofs | your staking process ([how, with `pocketd`](../SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it)). **A human provides it; an agent never generates or moves funds** |
-| A backend node for every service your suppliers are staked for | answering relays | yours |
+| A backend node for every service your suppliers are staked for, **with an active health check** ([why](#backend-health-checks-turn-them-on)) | answering relays | yours |
 | Redis 8.10 or newer (both processes refuse an older one at startup), `maxmemory` set, `noeviction` | shared state | [config.redis.example.conf](../../config.redis.example.conf) |
 | The supplier's account funded for transaction fees | claims and proofs cost fees | your wallet |
 
@@ -111,6 +111,52 @@ What a relay pays, and every step between a served relay and the reward:
 The miner's `block_time_seconds` must match the network: beta
 (`pocket-lego-testnet`) is roughly 30 seconds, mainnet (`pocket`) roughly 60
 seconds; measure yours.
+
+## Backend health checks: turn them on
+
+**Give every HTTP backend (`jsonrpc`, `rest`, `cometbft`) an active health
+check.** Without one, the relayer learns that a backend is down only from the
+relays it forwards: it marks the backend unhealthy after 5 consecutive failed
+relays, and every 30 seconds it sends real relays to it again to see whether it
+came back. Each of those failures is a relay a gateway sent you that got an
+error instead of an answer.
+
+With an active health check, the relayer probes the backend on its own, every
+`interval_seconds`: after `unhealthy_threshold` failed probes it stops sending
+relays there, and after `healthy_threshold` good ones it sends them again. With
+2 or more `urls` in a backend, relays go to the healthy ones. Probe something
+that proves the node can answer, not only that its port is open: for an EVM
+node, a JSON-RPC `eth_blockNumber` with `expected_body: '"result"'`.
+
+```yaml
+services:
+  eth:
+    backends:
+      jsonrpc:
+        url: "http://10.0.0.5:8545"
+        health_check:
+          enabled: true
+          endpoint: "/"
+          method: "POST"
+          request_body: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+          expected_body: '"result"'
+          interval_seconds: 10
+          timeout_seconds: 5
+          unhealthy_threshold: 3
+          healthy_threshold: 2
+```
+
+Every key, with its default: [config.relayer.example.yaml](../../config.relayer.example.yaml)
+(the `health_check` block under a backend). `/ready/<service-id>` on the
+relayer's health address lists each backend's state and answers 503 when none
+is healthy: `$C exec relayer curl -s http://localhost:8081/ready/<service-id>`
+in the compose example, `curl -s http://127.0.0.1:8081/ready/<service-id>` on a
+host.
+
+**Not for WebSocket backends in v0.1.0**: the probe is an HTTP request, and a
+`ws://` or `wss://` URL fails every probe, which marks a working backend
+unhealthy. Leave `health_check` off on `websocket` backends. On `grpc` backends
+it is not verified.
 
 ## Ports
 

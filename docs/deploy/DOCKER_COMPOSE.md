@@ -238,8 +238,7 @@ pokt108cdyngrx0x8sh8pgagwk6d574hly9j5764pyp  not_staked  ✗ no    -         202
 
 With the shipped key the address is `pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa`.
 `staked_suppliers:0` and `not_staked` are expected here: an unstaked key is
-not an error, and neither process logged a warning or an error in the recorded
-run.
+not an error, and the miner logged no warning or error in the recorded run.
 
 **If not**: no `fetched initial block` line → the miner cannot reach the RPC
 URL → check `pocket_node.query_node_rpc_url` and step 2.
@@ -261,6 +260,11 @@ OK HTTP=200
 READY HTTP=200
 ha_relayer_current_block_height 680249
 ```
+
+The relayer logs 1 warning, `backend became unhealthy (active health check)`,
+for the example's placeholder backend `my-backend.example.com`, and
+`/ready/my-service` answers 503: expected until step 10 sets your backend.
+`/ready` stays 200 (measured 2026-09-26).
 
 Run the last command again a minute later: the height grows (beta makes a
 block about every 30 seconds; if it has not moved in 5 minutes, go back to
@@ -330,6 +334,25 @@ your supplier is staked for, and its `backends.jsonrpc.url` with your
 backend's URL, reachable from inside the relayer container. Add 1 entry under
 `services:` per staked service; [config.relayer.example.yaml](../../config.relayer.example.yaml)
 documents every option, including the other transports.
+
+**Give every HTTP backend an active health check**: without one, the relayer
+finds a dead backend only by failing the relays it forwards to it.
+[What to set, and why](README.md#backend-health-checks-turn-them-on).
+
+**Run**, for each backend URL (this probe is for a JSON-RPC node; use your
+backend's own health request otherwise):
+
+```bash
+$C exec relayer curl -s -m 5 -X POST -H 'Content-Type: application/json' \
+  -d '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}' <backend-url>; echo " EXIT=$?"
+```
+
+**Expect**: a JSON body with `"result"` and `EXIT=0`. A config that passes
+`validate` says nothing about whether the backend answers: this does.
+
+**If not**: `EXIT=28` (timeout) or `EXIT=7` (refused) → the relayer container
+cannot reach the backend: check that the node listens on an address the
+container can route to, and the host firewall.
 
 ## Step 11: validate, and check the stake against your backends
 

@@ -83,6 +83,12 @@ CLI, does. Run these on a machine you trust, and never paste a private key, a
 mnemonic or a passphrase into a chat or an AI agent. Flags below are from
 `pocketd` 0.1.35.
 
+**0. Install `pocketd`.** Download the archive for your platform
+(`pocket_linux_amd64.tar.gz`, `pocket_linux_arm64.tar.gz`, or the `darwin`
+ones) from the [poktroll v0.1.35 release](https://github.com/pokt-network/poktroll/releases/tag/v0.1.35),
+check it against `release_checksum` from the same page, extract it and put
+`pocketd` on your `PATH`.
+
 **1. Create the key in a passphrase-protected keyring.**
 
 ```bash
@@ -109,9 +115,12 @@ mnemonic. Write the mnemonic down offline: it is the only way to recover the key
   The supplier address is derived from the key: nothing else to write down.
 
 **3. Fund and stake the supplier.** The account needs POKT for the stake and for
-the fee of every claim and proof. Staking is a chain transaction; its config file
+the fee of every claim and proof. On beta, request test POKT for the address
+from the faucet, <https://faucet.beta.pocket.network>. On mainnet there is no
+faucet: POKT is bought, and sent to the address from an account you control. Staking is a chain transaction; its config file
 (owner and operator addresses, stake amount, and each service with the public URL
-gateways reach your relayer at) and the minimum stake are defined by the network:
+gateways reach your relayer at: your relayer's address, never your backend
+node's) and the minimum stake are defined by the network:
 see the [supplier staking config](https://dev.poktroll.com/operate/configs/supplier_staking_config).
 
 ```bash
