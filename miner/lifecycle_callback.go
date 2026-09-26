@@ -1551,7 +1551,6 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 			SetClaimScheduledHeight(
 				r.snapshot.SupplierOperatorAddress,
 				r.snapshot.ServiceID,
-				r.snapshot.SessionID,
 				float64(earliestClaimHeight),
 			)
 		}
@@ -2538,7 +2537,7 @@ func (lc *LifecycleCallback) OnSessionsNeedProof(ctx context.Context, snapshots 
 				}()
 
 				// Record the scheduled proof height for operators
-				SetProofScheduledHeight(snap.SupplierOperatorAddress, snap.ServiceID, snap.SessionID, float64(earliestProofHeight))
+				SetProofScheduledHeight(snap.SupplierOperatorAddress, snap.ServiceID, float64(earliestProofHeight))
 
 				// Generate the proof path from the seed block hash
 				path := protocol.GetPathForProof(proofPathSeedBlock.Hash(), snap.SessionID)
@@ -2986,9 +2985,6 @@ func (lc *LifecycleCallback) OnSessionProved(ctx context.Context, snapshot *Sess
 	// Record session proved metrics
 	RecordSessionProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
 
-	// Clean up session-specific metrics (gauges with session_id label)
-	ClearSessionMetrics(snapshot.SupplierOperatorAddress, snapshot.SessionID, snapshot.ServiceID)
-
 	// Clean up SMST
 	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
 		logger.Warn().Err(err).Msg("failed to delete SMST tree")
@@ -3025,8 +3021,6 @@ func (lc *LifecycleCallback) OnClaimSkipped(ctx context.Context, snapshot *Sessi
 		Int64(logging.FieldCount, snapshot.RelayCount).
 		Msg("claim skipped for economic reasons - cleaning up")
 
-	ClearSessionMetrics(snapshot.SupplierOperatorAddress, snapshot.SessionID, snapshot.ServiceID)
-
 	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {
 		logger.Warn().Err(err).Msg("failed to delete SMST tree on claim_skipped")
 	}
@@ -3058,9 +3052,6 @@ func (lc *LifecycleCallback) OnProbabilisticProved(ctx context.Context, snapshot
 
 	// Record session outcome
 	RecordSessionProbabilisticProved(snapshot.SupplierOperatorAddress, snapshot.ServiceID)
-
-	// Clean up session-specific metrics (gauges with session_id label)
-	ClearSessionMetrics(snapshot.SupplierOperatorAddress, snapshot.SessionID, snapshot.ServiceID)
 
 	// Clean up SMST tree
 	if err := lc.smstManager.DeleteTree(ctx, snapshot.SessionID); err != nil {

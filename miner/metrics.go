@@ -341,9 +341,9 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "claim_scheduled_height",
-			Help:      "Block height when claim is scheduled to be submitted",
+			Help:      "Block height the latest claim batch of this supplier and service is scheduled to be submitted at (one height per batch of sessions ending at the same block)",
 		},
-		[]string{"supplier", "service_id", "session_id"},
+		[]string{"supplier", "service_id"},
 	)
 
 	claimSubmissionLatencyBlocks = observability.MinerFactory.NewHistogramVec(
@@ -363,9 +363,9 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "proof_scheduled_height",
-			Help:      "Block height when proof is scheduled to be submitted",
+			Help:      "Block height the latest proof batch of this supplier and service is scheduled to be submitted at (one height per batch of sessions ending at the same block)",
 		},
-		[]string{"supplier", "service_id", "session_id"},
+		[]string{"supplier", "service_id"},
 	)
 
 	proofSubmissionLatencyBlocks = observability.MinerFactory.NewHistogramVec(
@@ -1670,15 +1670,9 @@ func RecordSessionCreated(supplier, serviceID string) {
 	sessionsCreatedTotal.WithLabelValues(supplier, serviceID).Inc()
 }
 
-// ClearSessionMetrics removes session-specific metrics when session completes.
-func ClearSessionMetrics(supplier, sessionID, serviceID string) {
-	claimScheduledHeight.DeleteLabelValues(supplier, serviceID, sessionID)
-	proofScheduledHeight.DeleteLabelValues(supplier, serviceID, sessionID)
-}
-
 // SetClaimScheduledHeight sets when a claim is scheduled to be submitted.
-func SetClaimScheduledHeight(supplier, serviceID, sessionID string, height float64) {
-	claimScheduledHeight.WithLabelValues(supplier, serviceID, sessionID).Set(height)
+func SetClaimScheduledHeight(supplier, serviceID string, height float64) {
+	claimScheduledHeight.WithLabelValues(supplier, serviceID).Set(height)
 }
 
 // RecordClaimSubmissionLatency records how many blocks after window opened the claim was submitted.
@@ -1687,8 +1681,8 @@ func RecordClaimSubmissionLatency(supplier string, blocksAfterWindowOpened float
 }
 
 // SetProofScheduledHeight sets when a proof is scheduled to be submitted.
-func SetProofScheduledHeight(supplier, serviceID, sessionID string, height float64) {
-	proofScheduledHeight.WithLabelValues(supplier, serviceID, sessionID).Set(height)
+func SetProofScheduledHeight(supplier, serviceID string, height float64) {
+	proofScheduledHeight.WithLabelValues(supplier, serviceID).Set(height)
 }
 
 // RecordProofSubmissionLatency records how many blocks after window opened the proof was submitted.
