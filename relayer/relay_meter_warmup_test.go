@@ -221,7 +221,7 @@ func TestWarmupThatLosesTheStoreWhileReadingThePairsReportsIt(t *testing.T) {
 
 	readerRedis := newTestRedisOnPrefix(t, prefix)
 	reader := newChargeMeterOn(t, readerRedis, false)
-	readerRedis.AddHook(failPipelines{})
+	readerRedis.AddHook(testredis.ProductCommands(failPipelines{}))
 	warmed, err := reader.WarmFromRedis(ctx, signsOnly(chargeTestSupplier))
 
 	require.ErrorIs(t, err, ErrMeterStoreUnavailable)

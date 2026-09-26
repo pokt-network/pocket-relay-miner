@@ -14,14 +14,17 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // execStall holds every MULTI/EXEC of the client it is installed on until
-// release is closed, and reports the first one on entered. PINGs pass: a stalled
-// EXEC is a Redis that answers some commands and not the write, which is what the
-// dispatcher's in-flight round saw on 2026-09-23 at 03:08:20-24.
+// release is closed, and reports the first one on entered. It is registered
+// through testredis.ProductCommands, so a new connection's handshake is not
+// held and PINGs pass even on a fresh connection: a stalled EXEC is a Redis
+// that answers some commands and not the write, which is what the dispatcher's
+// in-flight round saw on 2026-09-23 at 03:08:20-24.
 type execStall struct {
 	entered chan struct{}
 	release chan struct{}
@@ -31,7 +34,7 @@ type execStall struct {
 func newExecStall(client redis.UniversalClient) *execStall {
 	s := &execStall{entered: make(chan struct{}), release: make(chan struct{}), first: make(chan struct{}, 1)}
 	s.first <- struct{}{}
-	client.AddHook(s)
+	client.AddHook(testredis.ProductCommands(s))
 	return s
 }
 
