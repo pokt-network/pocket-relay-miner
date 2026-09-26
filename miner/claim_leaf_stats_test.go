@@ -61,23 +61,22 @@ func TestRecordClaimLeafStats_CountsOnlyTheShortfall(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			session := "session-" + tc.name
-			before := testutil.ToFloat64(claimLeafCollapseTotal.WithLabelValues(supplier, service))
+			collapseBefore := testutil.ToFloat64(claimLeafCollapseTotal.WithLabelValues(supplier, service))
+			leavesBefore := testutil.ToFloat64(claimLeavesTotal.WithLabelValues(supplier, service))
+			attemptsBefore := testutil.ToFloat64(claimRelayAttemptsTotal.WithLabelValues(supplier, service))
 
-			RecordClaimLeafStats(supplier, service, session, tc.leaves, tc.attempts)
-			t.Cleanup(func() { ClearClaimLeafStats(supplier, service, session) })
+			RecordClaimLeafStats(supplier, service, tc.leaves, tc.attempts)
 
-			after := testutil.ToFloat64(claimLeafCollapseTotal.WithLabelValues(supplier, service))
-			require.Equal(t, tc.wantCollapse, after-before,
+			require.Equal(t, tc.wantCollapse,
+				testutil.ToFloat64(claimLeafCollapseTotal.WithLabelValues(supplier, service))-collapseBefore,
 				"collapse counter moved by the wrong amount for leaves=%d attempts=%d",
 				tc.leaves, tc.attempts)
-
 			require.Equal(t, float64(tc.leaves),
-				testutil.ToFloat64(claimNumLeaves.WithLabelValues(supplier, service, session)),
-				"claim_num_leaves must hold what the chain will bill")
+				testutil.ToFloat64(claimLeavesTotal.WithLabelValues(supplier, service))-leavesBefore,
+				"claim_leaves_total must add what the chain will bill")
 			require.Equal(t, float64(tc.attempts),
-				testutil.ToFloat64(claimRelayAttempts.WithLabelValues(supplier, service, session)),
-				"claim_relay_attempts must hold what the coordinator counted")
+				testutil.ToFloat64(claimRelayAttemptsTotal.WithLabelValues(supplier, service))-attemptsBefore,
+				"claim_relay_attempts_total must add what the coordinator counted")
 		})
 	}
 }

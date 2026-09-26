@@ -62,8 +62,8 @@ Four metrics in `miner/metrics.go` partition the question:
 | Metric                                | Meaning                                                                 |
 |---------------------------------------|-------------------------------------------------------------------------|
 | `ha_miner_relays_added_to_smst_total` | `UpdateTree` CALLS that succeeded — counts attempts, not unique leaves. |
-| `ha_miner_claim_num_leaves`           | Distinct leaves in the claim (matches on-chain `num_relays`).           |
-| `ha_miner_claim_relay_attempts`       | Session coordinator `RelayCount` at claim time.                         |
+| `ha_miner_claim_leaves_total`         | Distinct leaves in the claims built (each matches its on-chain `num_relays`). |
+| `ha_miner_claim_relay_attempts_total` | Session coordinator `RelayCount` of the claims built.                   |
 | `ha_miner_claim_leaf_collapse_total`  | Claims where leaves < attempts (dedup collapse fired).                  |
 
 A healthy service has `claim_leaf_collapse_total == 0`. When it ticks up,

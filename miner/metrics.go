@@ -145,17 +145,17 @@ var (
 	// NOT count unique SMST leaves: when two relays share the same
 	// RelayHash (dedup by protocol-key), UpdateTree succeeds for both but
 	// only one leaf survives in the claimed root. For the number of
-	// billable leaves at claim time, see ha_miner_claim_num_leaves.
+	// billable leaves at claim time, see ha_miner_claim_leaves_total.
 	relaysAddedToSMST = observability.MinerFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "relays_added_to_smst_total",
-			Help:      "SMST UpdateTree successes (NOT unique leaves — see claim_num_leaves for billable count)",
+			Help:      "SMST UpdateTree successes (NOT unique leaves — see claim_leaves_total for billable count)",
 		},
 		// session_id deliberately excluded: it is an unbounded value on a
 		// Counter (never DeleteLabelValues'd) → TSDB OOM. Per-session detail
-		// lives in logs and the claim_num_leaves gauges (which DO clean up).
+		// lives in logs.
 		[]string{"supplier", "service_id"},
 	)
 
@@ -217,33 +217,35 @@ var (
 		[]string{"supplier"},
 	)
 
-	// claimNumLeaves is the number of distinct SMST leaves in the claim
-	// being submitted (equals EventClaimCreated.num_relays on-chain).
-	// Paired with claimRelayAttempts below, the delta exposes collapses
-	// caused by identical-bytes relays sharing a key (e.g. a subscription
-	// fan-out where every event body is byte-identical).
-	claimNumLeaves = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
+	// claimLeavesTotal adds up the distinct SMST leaves of every claim built
+	// (each equals EventClaimCreated.num_relays on-chain). Paired with
+	// claimRelayAttemptsTotal below, the difference in their rates exposes
+	// collapses caused by identical-bytes relays sharing a key (e.g. a
+	// subscription fan-out where every event body is byte-identical). Counters
+	// rather than per-session gauges: sessions of one supplier and service
+	// are built concurrently, and a session_id label is unbounded.
+	claimLeavesTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "claim_num_leaves",
-			Help:      "Distinct SMST leaves in the claim being submitted (matches on-chain num_relays)",
+			Name:      "claim_leaves_total",
+			Help:      "Distinct SMST leaves in the claims built (each claim's matches its on-chain num_relays)",
 		},
-		[]string{"supplier", "service_id", "session_id"},
+		[]string{"supplier", "service_id"},
 	)
 
-	// claimRelayAttempts is the session coordinator's RelayCount at claim
-	// time — how many relays the relayer successfully mined into the
-	// session before sealing. Compare against claim_num_leaves to detect
+	// claimRelayAttemptsTotal adds up the session coordinator's RelayCount of
+	// every claim built -- how many relays the relayer mined into each session
+	// before sealing. Compare its rate with claim_leaves_total to detect
 	// dedup-by-key collapses without tailing logs.
-	claimRelayAttempts = observability.MinerFactory.NewGaugeVec(
-		prometheus.GaugeOpts{
+	claimRelayAttemptsTotal = observability.MinerFactory.NewCounterVec(
+		prometheus.CounterOpts{
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
-			Name:      "claim_relay_attempts",
-			Help:      "Session coordinator RelayCount at claim time (compare with claim_num_leaves to detect collapse)",
+			Name:      "claim_relay_attempts_total",
+			Help:      "Session coordinator RelayCount of the claims built (compare with claim_leaves_total to detect collapse)",
 		},
-		[]string{"supplier", "service_id", "session_id"},
+		[]string{"supplier", "service_id"},
 	)
 
 	// claimLeafCollapseTotal fires once per claim whose SMST leaf count
@@ -1623,24 +1625,17 @@ func RecordRelayAddedToSMST(supplier, serviceID string) {
 	relaysAddedToSMST.WithLabelValues(supplier, serviceID).Inc()
 }
 
-// RecordClaimLeafStats pins the two gauges that let operators compare the
-// number of distinct SMST leaves sealed into a claim against the number of
-// relays the session coordinator counted. When leaves < attempts, some
-// relays shared a RelayHash and were deduped at the SMST-key level — log +
-// collapse counter bumped so it surfaces in dashboards.
-func RecordClaimLeafStats(supplier, serviceID, sessionID string, leaves, attempts int64) {
-	claimNumLeaves.WithLabelValues(supplier, serviceID, sessionID).Set(float64(leaves))
-	claimRelayAttempts.WithLabelValues(supplier, serviceID, sessionID).Set(float64(attempts))
+// RecordClaimLeafStats adds a claim's distinct SMST leaves and the relays the
+// session coordinator counted to the two counters that let operators compare
+// them. When leaves < attempts, some relays shared a RelayHash and were deduped
+// at the SMST-key level — log + collapse counter bumped so it surfaces in
+// dashboards.
+func RecordClaimLeafStats(supplier, serviceID string, leaves, attempts int64) {
+	claimLeavesTotal.WithLabelValues(supplier, serviceID).Add(float64(leaves))
+	claimRelayAttemptsTotal.WithLabelValues(supplier, serviceID).Add(float64(attempts))
 	if leaves < attempts {
 		claimLeafCollapseTotal.WithLabelValues(supplier, serviceID).Inc()
 	}
-}
-
-// ClearClaimLeafStats removes the per-session claim leaf gauges (called on
-// terminal transitions to keep cardinality bounded).
-func ClearClaimLeafStats(supplier, serviceID, sessionID string) {
-	claimNumLeaves.DeleteLabelValues(supplier, serviceID, sessionID)
-	claimRelayAttempts.DeleteLabelValues(supplier, serviceID, sessionID)
 }
 
 // RecordRelayFailedSMST records a relay that failed to add to SMST tree.
@@ -1679,7 +1674,6 @@ func RecordSessionCreated(supplier, serviceID string) {
 func ClearSessionMetrics(supplier, sessionID, serviceID string) {
 	claimScheduledHeight.DeleteLabelValues(supplier, serviceID, sessionID)
 	proofScheduledHeight.DeleteLabelValues(supplier, serviceID, sessionID)
-	ClearClaimLeafStats(supplier, serviceID, sessionID)
 }
 
 // SetClaimScheduledHeight sets when a claim is scheduled to be submitted.

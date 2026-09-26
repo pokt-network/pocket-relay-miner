@@ -242,7 +242,7 @@ stream; leaves are what the tree holds; `num_relays` on chain is what we signed.
 |---|---|
 | Served splits into published, skipped and dropped | `ha_relayer_relays_served_total` == `ha_relayer_relays_published_total` + `ha_relayer_relays_skipped_difficulty_total` + `ha_relayer_relays_dropped_total` |
 | Nothing is dropped between stream and tree | `ha_miner_relays_consumed_from_stream_total` == `ha_miner_relays_added_to_smst_total` |
-| What the claim actually carried | `ha_miner_claim_num_leaves`, `ha_miner_relays_claimed_total` |
+| What the claim actually carried | `ha_miner_claim_leaves_total`, `ha_miner_relays_claimed_total` |
 | What the chain credited | `num_relays` in the settlement event, against the leaves |
 
 A relay the miner cannot restore to its original bytes (a compressed field that

@@ -15,14 +15,12 @@ import (
 // panel that is always empty — a lie with a name).
 
 // sessionIDLabelAllowlist freezes the metric variables allowed to carry a
-// session_id label, keyed "file: varName". The four existing ones are Gauges
+// session_id label, keyed "file: varName". The two existing ones are Gauges
 // whose series are deleted at session end (DeleteLabelValues — bounded by
 // ACTIVE sessions, documented in miner/metrics.go). A session_id label on a
 // Counter is forbidden with no exemption: Counter series are never deleted,
 // so they grow one per session forever until the TSDB OOMs.
 var sessionIDLabelAllowlist = map[string]bool{
-	"miner/metrics.go: claimNumLeaves":       true,
-	"miner/metrics.go: claimRelayAttempts":   true,
 	"miner/metrics.go: claimScheduledHeight": true,
 	"miner/metrics.go: proofScheduledHeight": true,
 }
