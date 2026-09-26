@@ -267,16 +267,24 @@ func (failingPing) ProcessPipelineHook(next goredis.ProcessPipelineHook) goredis
 func TestTheHeartbeatMarksOnlyWhatRedisAnswered(t *testing.T) {
 	client := testredis.Client(t)
 	prefix := testredis.Prefix(t)
+	ctx := context.Background()
+
+	// The dispatcher beats as soon as it starts, so a publisher on a Redis that
+	// answers may be marked before any check here runs. On a Redis that refuses
+	// PING that first beat earns nothing, and what is left is construction.
+	refusing := testredis.Client(t)
+	refusing.AddHook(failingPing{})
+	unreached := NewBatchingPublisher(zerolog.Nop(), refusing, prefix, time.Hour)
+	require.NoError(t, unreached.Close())
+	alive, err := unreached.DispatcherHealthy()
+	require.False(t, alive, "a publisher that has not reached Redis yet must refuse admission")
+	require.ErrorIs(t, err, errDispatcherNeverReachedRedis,
+		"construction must not hand admission a mark nobody earned")
+
 	p := NewBatchingPublisher(zerolog.Nop(), client, prefix, time.Hour)
 	// Stopped first: the checks below drive the heartbeat by hand, and the
 	// dispatcher's own ticker must not race the injected clock.
 	require.NoError(t, p.Close())
-	ctx := context.Background()
-
-	alive, err := p.DispatcherHealthy()
-	require.False(t, alive, "a publisher that has not reached Redis yet must refuse admission")
-	require.ErrorIs(t, err, errDispatcherNeverReachedRedis,
-		"construction must not hand admission a mark nobody earned")
 
 	t1 := time.Now()
 	p.now = func() time.Time { return t1 }
