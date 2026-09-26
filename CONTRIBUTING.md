@@ -4,6 +4,7 @@ Thank you for your interest in contributing to Pocket RelayMiner! This document 
 
 ## Table of Contents
 
+- [Local Development Environment](#local-development-environment)
 - [Development Workflow](#development-workflow)
 - [Commit Message Format](#commit-message-format)
 - [Code Standards](#code-standards)
@@ -11,6 +12,41 @@ Thank you for your interest in contributing to Pocket RelayMiner! This document 
 - [Testing Requirements](#testing-requirements)
 - [Pull Request Process](#pull-request-process)
 - [Getting Help](#getting-help)
+
+## Local Development Environment
+
+This section is for changing the code. To deploy the relay miner, see
+[docs/deploy/](docs/deploy/README.md).
+
+Development runs on [Tilt](https://tilt.dev/) over a local kind cluster: a
+localnet chain, Redis, the relayer and the miner, test backends, Prometheus and
+Grafana. Tilt watches the tree and rebuilds and restarts pods on every change,
+so there is no manual build, pod deletion or port-forward.
+
+```bash
+make tilt-up-k8s     # start (requires a kind cluster)
+make tilt-down-k8s   # stop
+```
+
+With Tilt up:
+
+- Relayer: `localhost:8180` (the target of every direct CLI test)
+- Prometheus: `localhost:9091`
+- Grafana: `localhost:3000`
+
+Setup and details: [tilt/README.md](tilt/README.md) and
+[docs/testing/TILT.md](docs/testing/TILT.md). Direct CLI tests of every
+transport: [docs/testing/DIRECT_CLI.md](docs/testing/DIRECT_CLI.md).
+
+The Tilt environment is a development tool and a reference for how the pieces
+fit. It is not a supported deployment path.
+
+To build without Tilt:
+
+```bash
+make build          # development build: ./bin/pocket-relay-miner
+make build-release  # optimized, statically linked
+```
 
 ## Development Workflow
 
@@ -37,7 +73,7 @@ dev (development) → main (release candidate) → vX.Y.Z (production)
 **Release Tags (`v1.0.0`):**
 - Production releases
 - Created from `main` branch
-- Docker image tags: `1.0.0`, `latest`
+- Docker image tags: `v1.0.0`, `latest` (the tag as pushed, v included); the GitHub release is created as a draft
 - Use for: Production deployments
 
 ### Making Changes
@@ -326,9 +362,19 @@ Unit tests do not prove a relay was mined and paid.
 
 ### Writing Tests
 
+Rule 1, which cannot be broken:
+
+- Every test passes with `-race`, with no race warnings.
+- Every test is deterministic: no `time.Sleep()` for synchronization, no
+  dependency on ordering that is not guaranteed.
+- A test that fails once in 1000 runs is fixed or deleted.
+
+
 - Unit tests for all business logic
 - Benchmarks for critical paths (SMST ops, validation, signing)
-- Integration tests with miniredis for Redis operations
+- Integration tests against a real Redis (`internal/testredis`, Redis 8 on
+  127.0.0.1:6399, started by `scripts/gates/redis.sh up`); never miniredis or
+  mocks: `internal/conventions` fails on a new file that uses the fake
 - Use `-tags test` build constraint for test-only code
 
 ### Performance Benchmarks
@@ -414,8 +460,10 @@ Closes #123
 ### Documentation
 
 - **README.md**: Project overview and quick start
+- **AGENTS.md**: Entry point for AI agents: where to go, and what stops a deployment
 - **CLAUDE.md**: Development guidelines (if using Claude Code)
-- **Architecture docs**: See `docs/` directory (if available)
+- **Deployment**: `docs/deploy/`
+- **Architecture docs**: `docs/`
 
 ### Communication
 
@@ -442,20 +490,20 @@ Closes #123
 
 ### Debugging
 
-Use the built-in redis-debug tool:
+Use the built-in `redis` command (Redis is reachable locally through Tilt):
 
 ```bash
 # Check leader election
-./bin/pocket-relay-miner redis-debug leader
+./bin/pocket-relay-miner redis leader
 
 # Inspect sessions
-./bin/pocket-relay-miner redis-debug sessions --supplier <address>
+./bin/pocket-relay-miner redis sessions --supplier <address>
 
 # View SMST tree
-./bin/pocket-relay-miner redis-debug smst --session <session_id>
+./bin/pocket-relay-miner redis smst --session <session_id>
 
 # Monitor Redis Streams
-./bin/pocket-relay-miner redis-debug streams --supplier <address>
+./bin/pocket-relay-miner redis streams --supplier <address>
 ```
 
 ## Code of Conduct

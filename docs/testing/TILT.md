@@ -37,8 +37,10 @@ Tilt owns all of that. Open the Tilt UI at <http://localhost:10350> to watch
 resources come up.
 
 There is no Docker-Compose dev variant: the K8s environment above is the
-production-like one and the target for the HA/chaos scripts. A minimal
-compose file for documentation purposes lives in `examples/docker-compose/`.
+production-like one and the target for the HA/chaos scripts. The compose file
+in `examples/docker-compose/` is the operators' deployment example (a full
+local chain, verified from genesis to a settled claim); its runbook is
+[`docs/deploy/DOCKER_COMPOSE.md`](../deploy/DOCKER_COMPOSE.md).
 
 ## 2. What you get (pods & replicas)
 

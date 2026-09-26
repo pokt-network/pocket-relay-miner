@@ -1,0 +1,49 @@
+# Relayer config for a host deployment (systemd). Minimal on purpose: every key
+# not set here takes its default; config.relayer.example.yaml at the repository
+# root lists all of them. Replace every value marked CHANGE before starting.
+# Check it with:
+#   pocket-relay-miner relayer validate --config /etc/pocket-relay-miner/relayer.yaml
+
+# Address the relay server listens on (relay traffic from gateways).
+listen_addr: "0.0.0.0:8080"
+
+# The same Redis as the miner's.
+redis:
+  url: "redis://127.0.0.1:6379"
+
+# The chain node the relayer reads applications, sessions and params from.
+pocket_node:
+  # CHANGE: your node's CometBFT RPC.
+  query_node_rpc_url: "https://rpc.node.example.com"
+  # CHANGE: your node's gRPC, host:port.
+  query_node_grpc_url: "grpc.node.example.com:443"
+  # TLS gRPC. Set true only for a plain-text node.
+  grpc_insecure: false
+
+# The suppliers this relayer signs responses for. Same keys as the miner's.
+keys:
+  keys_file: "/etc/pocket-relay-miner/supplier-keys.yaml"
+
+# CHANGE: one entry per service your suppliers are staked for, keyed by
+# on-chain service id.
+services:
+  my-service:
+    validation_mode: eager
+    default_backend: jsonrpc
+    backends:
+      jsonrpc:
+        # CHANGE: the backend node that answers this service.
+        url: "http://127.0.0.1:8545"
+
+# GET /ready answers 200 once the relayer can serve relays.
+health_check:
+  enabled: true
+  addr: "127.0.0.1:8081"
+
+metrics:
+  enabled: true
+  addr: "127.0.0.1:9090"
+
+logging:
+  level: "info"
+  format: "json"

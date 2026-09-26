@@ -1,0 +1,36 @@
+# systemd unit for the miner. Install:
+#   sudo cp pocket-relay-miner-miner.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pocket-relay-miner-miner
+# The miner exits if it cannot read the chain at startup; Restart=on-failure
+# retries it.
+
+[Unit]
+Description=Pocket RelayMiner miner
+After=network-online.target redis-server.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pocket-relay-miner
+Group=pocket-relay-miner
+# Secrets and Go runtime settings (GOMEMLIMIT, GOMAXPROCS). Mode 0600.
+EnvironmentFile=/etc/pocket-relay-miner/miner.env
+ExecStartPre=/usr/local/bin/pocket-relay-miner miner validate --config /etc/pocket-relay-miner/miner.yaml
+ExecStart=/usr/local/bin/pocket-relay-miner miner --config /etc/pocket-relay-miner/miner.yaml
+Restart=on-failure
+RestartSec=10
+# Give the miner time to drain delivered relays and checkpoint its trees.
+TimeoutStopSec=120
+# Hard limits. Keep GOMEMLIMIT in miner.env about 10% below MemoryMax, and
+# GOMAXPROCS equal to CPUQuota / 100%.
+MemoryMax=8G
+CPUQuota=400%
+LimitNOFILE=1048576
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

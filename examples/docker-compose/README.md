@@ -4,6 +4,9 @@ A complete Pocket RelayMiner deployment on a local chain: one validator,
 Redis, a test backend, one relayer and one miner. It serves real relays and
 submits real claims and proofs, with nothing to install but Docker.
 
+The step-by-step runbook, with the expected output of every step and what to
+change for a real network, is [docs/deploy/DOCKER_COMPOSE.md](../../docs/deploy/DOCKER_COMPOSE.md).
+
 Every key in `localnet/` and `config/supplier-keys.yaml` is a public localnet
 key. Never use one on a real network.
 

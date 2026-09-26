@@ -1,0 +1,34 @@
+# systemd unit for the relayer. Install:
+#   sudo cp pocket-relay-miner-relayer.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now pocket-relay-miner-relayer
+# Start the miner first: the relayer refuses relays until the miner has
+# published its service factor manifest.
+
+[Unit]
+Description=Pocket RelayMiner relayer
+After=network-online.target redis-server.service pocket-relay-miner-miner.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pocket-relay-miner
+Group=pocket-relay-miner
+# Secrets and Go runtime settings (GOMEMLIMIT, GOMAXPROCS). Mode 0600.
+EnvironmentFile=/etc/pocket-relay-miner/relayer.env
+ExecStartPre=/usr/local/bin/pocket-relay-miner relayer validate --config /etc/pocket-relay-miner/relayer.yaml
+ExecStart=/usr/local/bin/pocket-relay-miner relayer --config /etc/pocket-relay-miner/relayer.yaml
+Restart=on-failure
+RestartSec=5
+# Hard limits. Keep GOMEMLIMIT in relayer.env about 10% below MemoryMax, and
+# GOMAXPROCS equal to CPUQuota / 100%.
+MemoryMax=4G
+CPUQuota=400%
+LimitNOFILE=1048576
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
