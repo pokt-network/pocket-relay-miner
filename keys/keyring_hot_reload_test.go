@@ -27,7 +27,7 @@ import (
 // operator addresses are derived from the material, so importing one into a
 // keyring and writing the other into a keys file gives two distinct suppliers.
 const (
-	hotReloadHexA = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
+	hotReloadHexA = "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda"
 	hotReloadHexB = "fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210"
 )
 

@@ -59,7 +59,7 @@ spec:
         - |
           set -e
           VALIDATOR_RPC="http://validator:26657"
-          PNF_ADDRESS="pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw"
+          PNF_ADDRESS="pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g"
 
           # Create necessary directories
           mkdir -p /tmp/pocket/data

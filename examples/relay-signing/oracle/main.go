@@ -36,7 +36,7 @@ import (
 // Fixed keys so vectors are reproducible across runs and machines. These are
 // throwaway test keys and are not used to hold anything.
 const (
-	appPrivHex = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
+	appPrivHex = "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda"
 	gwPrivHex  = "1a11ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ab11"
 )
 

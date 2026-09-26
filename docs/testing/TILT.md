@@ -249,7 +249,7 @@ use the built-in `redis` subcommand — full reference in
 ```bash
 pocket-relay-miner redis leader
 pocket-relay-miner redis keys --pattern "ha:*" --stats
-pocket-relay-miner redis submissions --supplier pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj
+pocket-relay-miner redis submissions --supplier pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj
 ```
 
 ## 7. Sending relays

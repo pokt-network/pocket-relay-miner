@@ -127,14 +127,14 @@ type Config struct {
 // Example (app mode):
 //
 //	relayClient, err := NewRelayClient(relay_client.Config{
-//	    AppPrivateKeyHex: "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a",
+//	    AppPrivateKeyHex: "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda",
 //	    QueryClients:     queryClients,
 //	}, logger)
 //
 // Example (gateway mode - signs as a gateway does):
 //
 //	relayClient, err := NewRelayClient(relay_client.Config{
-//	    AppPrivateKeyHex:     "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a",
+//	    AppPrivateKeyHex:     "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda",
 //	    GatewayPrivateKeyHex: "cf09805c952fa999e9a63a9f434147b0a5abfd10f268879694c6b5a70e1ae177",
 //	    QueryClients:         queryClients,
 //	}, logger)
@@ -394,7 +394,7 @@ func (c *RelayClient) currentSession(ctx context.Context, serviceID string) (*se
 // In gateway mode, this is still the app's address (not the gateway's).
 //
 // Returns:
-//   - string: Application address (e.g., "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4")
+//   - string: Application address (e.g., "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z")
 func (c *RelayClient) GetAppAddress() string {
 	return c.appAddress
 }

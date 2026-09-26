@@ -40,7 +40,7 @@ func testLogger() logging.Logger {
 // validAppHex and validGatewayHex are real secp256k1 private keys (localnet
 // app1/gateway1), used here only as well-formed 64-char hex inputs.
 const (
-	validAppHex     = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
+	validAppHex     = "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda"
 	validGatewayHex = "cf09805c952fa999e9a63a9f434147b0a5abfd10f268879694c6b5a70e1ae177"
 )
 

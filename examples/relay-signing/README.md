@@ -48,7 +48,7 @@ Nothing about them is Pocket-specific. A private key here is a **raw secp256k1
 scalar: 32 bytes, hex-encoded — 64 hex characters**. That is the whole input.
 
 ```
-2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a
+c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda
 ```
 
 No keyring, no armor, no mnemonic, no derivation path, no bech32, no
@@ -65,9 +65,9 @@ Everything else is derived from that scalar with standard operations:
 Worked end to end, so you can check your own code against it:
 
 ```
-private key  2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a
-public key   0397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc5
-address      pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
+private key  c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda
+public key   02f8a265f0e802f1cd6ca87c4c90614178d2f426b2d2417cfe172d120a480335bb
+address      pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z
 ```
 
 Two traps, both real:

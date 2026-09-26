@@ -24,7 +24,7 @@ import (
 // Unused test constants - may be used for future integration tests
 // const (
 // 	testServiceID    = "develop"
-// 	testSupplierAddr = "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj"
+// 	testSupplierAddr = "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj"
 // 	testPayload      = `{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}`
 // )
 

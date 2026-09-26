@@ -527,7 +527,7 @@ cache_warmup:
   # Application addresses to preload, if you know them. This one is a localnet
   # genesis application.
   # known_applications:
-  #   - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
+  #   - "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z"
 
   # Parallel warmup operations (higher = faster, more load). Default: 10.
   warmup_concurrency: 10

@@ -429,7 +429,7 @@ supplier_reconcile_interval_seconds: 60
 # Applications to discover at startup (optional; speeds up startup). These are
 # the localnet genesis applications.
 known_applications:
-  - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
+  - "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z"
   - "pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm"
   - "pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex"
   - "pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst"

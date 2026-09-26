@@ -52,7 +52,7 @@ miner:
       hot_reload_enabled: true
       keys_file: /keys/supplier-keys.yaml
     known_applications:
-    - pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
+    - pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z
     - pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm
     - pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex
     - pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst
@@ -324,7 +324,7 @@ relayer:
       identities:
       - allowed_services:
         - develop-http
-        app_pubkey_hex: 0397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc5
+        app_pubkey_hex: 02f8a265f0e802f1cd6ca87c4c90614178d2f426b2d2417cfe172d120a480335bb
         enabled: true
         gateway_pubkeys_hex:
         - 025821a2ac597a034250ac14b772efccf9297aa7c4bea5444564059a7cfb152063

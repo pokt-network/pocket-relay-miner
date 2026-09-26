@@ -19,7 +19,7 @@ import (
 
 // testAppHex is a real secp256k1 private key (localnet app1), used only as a
 // well-formed hex input to import into a transient keyring.
-const testAppHex = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
+const testAppHex = "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda"
 
 // newInMemoryKeyring returns a transient keyring for tests.
 func newInMemoryKeyring(t *testing.T) keyring.Keyring {

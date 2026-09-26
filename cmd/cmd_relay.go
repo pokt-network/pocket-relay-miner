@@ -48,7 +48,7 @@ Examples:
 // Localnet defaults, compiled in. They mirror tilt/config/all-keys.yaml but
 // are not read from it at runtime.
 // Genesis has 5 services with corresponding apps:
-//   - develop-http      -> app1 (pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4)
+//   - develop-http      -> app1 (pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z)
 //   - develop-websocket -> app2 (pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm)
 //   - develop-stream    -> app3 (pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex)
 //   - develop-grpc      -> app4 (pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst)
@@ -57,7 +57,7 @@ Examples:
 // All apps delegate to gateway1 (pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4)
 const (
 	// App private keys (each app is staked for one service)
-	localnetApp1PrivKey                = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a" // develop-http
+	localnetApp1PrivKey                = "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda" // develop-http
 	localnetApp2PrivKey                = "7e7571a8c61b0887ff8a9017bb4ad83c016b193234f9dc8b6a8ce10c7c483600" // develop-websocket
 	localnetApp3PrivKey                = "7cbbaa043b9b63baa7d6bb087483b0a6a9f82596c19dce4c5028eb43e5b63674" // develop-stream
 	localnetApp4PrivKey                = "84e4f2257f24d9e1517d414b834bbbfa317e0d53fef21c1528a07a5fa8c70d57" // develop-grpc
@@ -74,7 +74,7 @@ const (
 	localnetGateway1PrivKey = "cf09805c952fa999e9a63a9f434147b0a5abfd10f268879694c6b5a70e1ae177"
 
 	// First supplier address (for relay routing)
-	localnetSupplier1Addr = "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj"
+	localnetSupplier1Addr = "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj"
 
 	// Network endpoints
 	localnetGRPCEndpoint = "localhost:9090"

@@ -319,7 +319,7 @@ def apply_k8s_overrides_relayer(config, redis_host):
         "freshness_window_seconds": 60,
         "identities": [
             {"key_id": "sim-http", "enabled": True, "max_rps": 100,
-             "app_pubkey_hex": "0397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc5",
+             "app_pubkey_hex": "02f8a265f0e802f1cd6ca87c4c90614178d2f426b2d2417cfe172d120a480335bb",
              "gateway_pubkeys_hex": [_gw1], "allowed_services": ["develop-http"]},
             {"key_id": "sim-ws", "enabled": True, "max_rps": 100,
              "app_pubkey_hex": "02ff92de294bea65988bf929d7c159be03f69c4d74dc75682c78751102febf2d8e",

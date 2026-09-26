@@ -9,7 +9,7 @@
     "application": {
       "applicationList": [
         {
-          "address": "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4",
+          "address": "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z",
           "delegatee_gateway_addresses": [
             "pokt15vzxjqklzjtlz7lahe8z2dfe9nm5vxwwmscne4"
           ],
@@ -178,14 +178,14 @@
       "accounts": [
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt1awtlw5sjmw2f5lgj8ekdkaqezphgz88rdk93sk",
+          "address": "pokt1n49vq2cjtn49epxvq9mkrm9vhhr3ca8nen6cf4",
           "pub_key": null,
           "account_number": "0",
           "sequence": "0"
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "address": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "pub_key": null,
           "account_number": "1",
           "sequence": "0"
@@ -199,7 +199,7 @@
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4",
+          "address": "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z",
           "pub_key": null,
           "account_number": "3",
           "sequence": "0"
@@ -227,7 +227,7 @@
         },
         {
           "@type": "/cosmos.auth.v1beta1.BaseAccount",
-          "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+          "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
           "pub_key": null,
           "account_number": "7",
           "sequence": "0"
@@ -387,7 +387,7 @@
       "authorization": [
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.service.MsgUpdateParams"
@@ -396,7 +396,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.session.MsgUpdateParams"
@@ -405,7 +405,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.gateway.MsgUpdateParams"
@@ -414,7 +414,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.application.MsgUpdateParams"
@@ -423,7 +423,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.supplier.MsgUpdateParams"
@@ -432,7 +432,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.proof.MsgUpdateParams"
@@ -441,7 +441,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.tokenomics.MsgUpdateParams"
@@ -450,7 +450,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.shared.MsgUpdateParams"
@@ -459,7 +459,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.service.MsgUpdateParam"
@@ -468,7 +468,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.session.MsgUpdateParam"
@@ -477,7 +477,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.gateway.MsgUpdateParam"
@@ -486,7 +486,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.application.MsgUpdateParam"
@@ -495,7 +495,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.supplier.MsgUpdateParam"
@@ -504,7 +504,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.proof.MsgUpdateParam"
@@ -513,7 +513,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.tokenomics.MsgUpdateParam"
@@ -522,7 +522,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.shared.MsgUpdateParam"
@@ -531,7 +531,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.gateway.MsgUpdateParam"
@@ -540,7 +540,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.application.MsgUpdateParam"
@@ -549,7 +549,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.supplier.MsgUpdateParam"
@@ -558,7 +558,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.session.MsgUpdateParam"
@@ -567,7 +567,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.migration.MsgImportMorseClaimableAccounts"
@@ -576,7 +576,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.migration.MsgUpdateParams"
@@ -585,7 +585,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.upgrade.v1beta1.MsgSoftwareUpgrade"
@@ -594,7 +594,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.upgrade.v1beta1.MsgCancelUpgrade"
@@ -603,7 +603,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.auth.v1beta1.MsgUpdateParams"
@@ -612,7 +612,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.bank.v1beta1.MsgUpdateParams"
@@ -621,7 +621,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.distribution.v1beta1.MsgUpdateParams"
@@ -630,7 +630,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.mint.v1beta1.MsgUpdateParams"
@@ -639,7 +639,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.staking.v1beta1.MsgUpdateParams"
@@ -648,7 +648,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.slashing.v1beta1.MsgUpdateParams"
@@ -657,7 +657,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.gov.v1.MsgUpdateParams"
@@ -666,7 +666,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.gov.v1.MsgCancelProposal"
@@ -675,7 +675,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.consensus.v1.MsgUpdateParams"
@@ -684,7 +684,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.authz.v1beta1.MsgGrant"
@@ -693,7 +693,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.authz.v1beta1.MsgRevoke"
@@ -702,7 +702,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.migration.MsgUpdateParams"
@@ -711,7 +711,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.authz.v1beta1.MsgExec"
@@ -720,7 +720,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.authz.v1beta1.MsgRevokeAll"
@@ -729,7 +729,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/cosmos.authz.v1beta1.MsgPruneExpiredGrants"
@@ -738,7 +738,7 @@
         },
         {
           "granter": "pokt10d07y265gmmuvt4z0w9aw880jnsr700j8yv32t",
-          "grantee": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "grantee": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "authorization": {
             "@type": "/cosmos.authz.v1beta1.GenericAuthorization",
             "msg": "/pocket.migration.MsgRecoverMorseAccount"
@@ -826,7 +826,7 @@
           ]
         },
         {
-          "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+          "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
           "coins": [
             {
               "denom": "upokt",
@@ -943,7 +943,7 @@
           ]
         },
         {
-          "address": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+          "address": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
           "coins": [
             {
               "denom": "mact",
@@ -956,7 +956,7 @@
           ]
         },
         {
-          "address": "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4",
+          "address": "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z",
           "coins": [
             {
               "denom": "upokt",
@@ -992,7 +992,7 @@
           ]
         },
         {
-          "address": "pokt1awtlw5sjmw2f5lgj8ekdkaqezphgz88rdk93sk",
+          "address": "pokt1n49vq2cjtn49epxvq9mkrm9vhhr3ca8nen6cf4",
           "coins": [
             {
               "denom": "upokt",
@@ -1465,8 +1465,8 @@
       },
       "supplierList": [
         {
-          "operator_address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
-          "owner_address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+          "operator_address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
+          "owner_address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
           "services": [
             {
               "endpoints": [
@@ -1478,7 +1478,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1494,7 +1494,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1510,7 +1510,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1526,7 +1526,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1542,7 +1542,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1558,7 +1558,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1574,7 +1574,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1590,7 +1590,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1606,7 +1606,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -1622,7 +1622,7 @@
               ],
               "rev_share": [
                 {
-                  "address": "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+                  "address": "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
                   "rev_share_percentage": 100
                 }
               ],
@@ -4018,7 +4018,7 @@
     },
     "tokenomics": {
       "params": {
-        "dao_reward_address": "pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw",
+        "dao_reward_address": "pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g",
         "global_inflation_per_claim": 0,
         "mint_ratio": 1,
         "mint_allocation_percentages": {
