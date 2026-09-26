@@ -186,7 +186,21 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Skip if the release already exists
+        id: existing
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # A release created by hand, or a re-run of this job, keeps its notes:
+          # the action below would replace the body with the image stub.
+          if gh release view "${GITHUB_REF#refs/tags/}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Write the draft release body
+        if: steps.existing.outputs.exists == 'false'
         run: |
           # The release is created as a DRAFT with only the image references.
           # Its notes are written by hand and published with the release's
@@ -205,6 +219,7 @@ jobs:
           EOF
 
       - name: Create GitHub Release
+        if: steps.existing.outputs.exists == 'false'
         uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md

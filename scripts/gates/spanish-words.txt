@@ -18,7 +18,7 @@
 #
 # HOW TO CHANGE IT. A word here must have ZERO hits in the tracked tree. If one
 # ever collides with legitimate English or code, remove THE WORD, never exempt
-# the file. Measured on 2026-09-26: this list has 0 hits at HEAD (0ca3ed4) and,
+# the file. Measured on 2026-09-26: this list has 0 hits at HEAD (3c7510a) and,
 # together with the accent level, flags 25 of 25 files c1cc164 translated and no
 # file it did not touch.
 #
@@ -39,7 +39,6 @@ hasta
 desde
 para
 por
-sin
 sobre
 
 # Articles, contractions and demonstratives.

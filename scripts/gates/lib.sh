@@ -583,8 +583,9 @@ gate_spanish_hits() {
     local exclude=':(exclude)scripts/gates/spanish-words.txt'
     [ "$mode" = --cached ] && src=(--cached)
 
-    # a e i o u acute, n tilde, upper then lower case, then inverted ? and !.
-    accents="$(printf '\303\201|\303\211|\303\215|\303\223|\303\232|\303\221|\303\241|\303\251|\303\255|\303\263|\303\272|\303\261|\302\277|\302\241')"
+    # a e i o u acute, n tilde, upper then lower case, u and U diaeresis, then
+    # inverted ? and !.
+    accents="$(printf '\303\201|\303\211|\303\215|\303\223|\303\232|\303\221|\303\241|\303\251|\303\255|\303\263|\303\272|\303\261|\303\274|\303\234|\302\277|\302\241')"
 
     words="$(grep -v '^[[:space:]]*#' "$words_file" 2>/dev/null | tr -d '[:blank:]' |
         grep -v '^$' | paste -sd'|' -)"
