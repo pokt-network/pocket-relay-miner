@@ -59,7 +59,7 @@ Features:
 - Prometheus metrics at /metrics
 
 Example:
-  pocketd relayminer ha miner --config /path/to/miner-config.yaml
+  pocket-relay-miner miner --config /path/to/miner.yaml
 
 `,
 		RunE: runHAMiner,

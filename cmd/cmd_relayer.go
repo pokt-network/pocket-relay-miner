@@ -90,7 +90,7 @@ Features:
 - Prometheus metrics at /metrics
 
 Example:
-  pocketd relayminer ha relayer --config /path/to/ha-relayer.yaml --redis-url redis://localhost:6379
+  pocket-relay-miner relayer --config /path/to/relayer.yaml --redis-url redis://localhost:6379
 `,
 		RunE: runHARelayer,
 	}
