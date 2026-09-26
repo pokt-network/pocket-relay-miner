@@ -117,7 +117,7 @@ properties:
         default: pocket
         examples:
           - pocket
-          - pocket-beta
+          - pocket-lego-testnet
       grpc_insecure:
         type: boolean
         description: Disable TLS for gRPC connections (use for local development only)

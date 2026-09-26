@@ -38,8 +38,8 @@ resources come up.
 
 There is no Docker-Compose dev variant: the K8s environment above is the
 production-like one and the target for the HA/chaos scripts. The compose file
-in `examples/docker-compose/` is the operators' deployment example (a full
-local chain, verified from genesis to a settled claim); its runbook is
+in `examples/docker-compose/` is the operators' deployment example (Redis,
+relayer and miner pointed at the beta testnet; no local chain); its runbook is
 [`docs/deploy/DOCKER_COMPOSE.md`](../deploy/DOCKER_COMPOSE.md).
 
 ## 2. What you get (pods & replicas)

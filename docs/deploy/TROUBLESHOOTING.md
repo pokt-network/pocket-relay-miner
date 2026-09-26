@@ -123,7 +123,7 @@ Wrong network. From the source (`miner/startup_chain_state.go`):
 `cannot start: the node is on another chain: the node reports network "<network>" and this miner is configured for chain "<chain_id>"`.
 
 **Action**: set `pocket_node.chain_id` to what the node reports (`pocket` is
-mainnet, `pocket-beta` the testnet), or point at the right node.
+mainnet, `pocket-lego-testnet` the beta testnet), or point at the right node.
 **Stop if** you are not sure which network the supplier is staked on.
 
 Other chain reads, from the source: `cannot start without the chain's shared params`,

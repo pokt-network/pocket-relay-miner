@@ -1,0 +1,3 @@
+# The operator's real supplier keys. The tracked config/supplier-keys.yaml
+# holds only a public, unstaked key.
+config/supplier-keys.local.yaml

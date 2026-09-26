@@ -1,22 +1,14 @@
 ## Docker Compose example
 
-A complete Pocket RelayMiner deployment on a local chain: one validator,
-Redis, a test backend, one relayer and one miner. It serves real relays and
-submits real claims and proofs, with nothing to install but Docker.
+Redis, 1 relayer and 1 miner, pointed at the beta testnet
+(`pocket-lego-testnet`) through the public Sauron endpoints. No chain runs
+here: the node is remote. For a local chain to develop on, use Tilt
+([docs/testing/TILT.md](../../docs/testing/TILT.md)).
 
-The step-by-step runbook, with the expected output of every step and what to
-change for a real network, is [docs/deploy/DOCKER_COMPOSE.md](../../docs/deploy/DOCKER_COMPOSE.md).
-
-Every key in `localnet/` and `config/supplier-keys.yaml` is a public localnet
-key. Never use one on a real network.
-
-The local chain is for trying it out. To run on mainnet or the beta testnet,
-replace `localnet/` with a full node of that network, as
-[Pointing it at your own node](../../docs/deploy/DOCKER_COMPOSE.md#pointing-it-at-your-own-node)
-describes: node configs and genesis per network are in
-[pocket-network-genesis/shannon](https://github.com/pokt-network/pocket-network-genesis/tree/master/shannon),
-snapshots and public endpoints in
-[pocket-network-resources](https://github.com/pokt-network/pocket-network-resources).
+The step-by-step runbook, with the expected output of every step, is
+[docs/deploy/DOCKER_COMPOSE.md](../../docs/deploy/DOCKER_COMPOSE.md). It also
+says what to switch for mainnet: every network-specific value in `config/` has
+its mainnet value in a comment right above it, marked `Mainnet:`.
 
 ### Files
 
@@ -24,11 +16,14 @@ snapshots and public endpoints in
 - `config/relayer.yaml`, `config/miner.yaml`: minimal configs; every key not
   set takes its default (see `config.relayer.example.yaml` and
   `config.miner.example.yaml` at the repository root for all of them).
-- `config/supplier-keys.yaml`: the signing keys of the 15 localnet suppliers.
-- `localnet/`: the validator's genesis and node files, and `account-init.sh`,
-  which puts the public key of every staked account on chain.
+  `config/relayer.yaml` declares 1 placeholder service, `my-service`, with a
+  placeholder backend URL: replace both with yours.
+- `config/supplier-keys.yaml`: 1 PUBLIC key that is not staked, so the stack
+  starts as cloned and serves nothing. Never fund or stake it.
+- `config/supplier-keys.local.yaml`: where YOUR keys go. It is gitignored
+  (`.gitignore` here); point the 2 keys mounts in `docker-compose.yaml` at it.
 - Redis uses `config.redis.example.conf` from the repository root, with
-  `maxmemory` lowered to 1 GB.
+  `maxmemory` lowered to 1 GB. Its port is never published.
 
 ### Run it
 
@@ -46,19 +41,9 @@ docker compose -p prm-example up -d
 docker compose -p prm-example ps -a
 ```
 
-Expected: `validator`, `redis`, `backend`, `miner` and `relayer` are
-`healthy`, and `account-init` is `Exited (0)`. The first run builds the test
-backend image, which takes a few minutes.
-
-Send a relay (from the repository root, after `make build`):
-
-```bash
-./bin/pocket-relay-miner relay jsonrpc --localnet --service develop-http
-```
-
-Expected: `Status: ✅ SUCCESS` and `Signature: ✅ VALID`. `--localnet` uses the
-relayer on `localhost:8180` and the validator gRPC on `localhost:9090`, which
-is where this compose file publishes them.
+Expected: `redis`, `miner` and `relayer` are `healthy`. With the public key the
+miner reports the supplier as not staked, and nothing is served until you put
+your own keys and services in place (runbook steps 9 to 12).
 
 ### Reset
 
@@ -66,5 +51,5 @@ is where this compose file publishes them.
 docker compose -p prm-example down -v
 ```
 
-`-v` deletes the chain and Redis together. Keep them together: a Redis that
-holds sessions of a previous chain does not match a new one.
+`-v` deletes the Redis data, including relays not yet claimed and claim trees
+not yet proved.

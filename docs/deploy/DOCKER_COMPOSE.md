@@ -1,15 +1,29 @@
 # Deploy with Docker Compose
 
 This runbook starts the compose example in
-[examples/docker-compose/](../../examples/docker-compose/): a local 1-validator
-chain, Redis 8.10, a test backend, 1 relayer and 1 miner. It ends with a relay
-served, its claim and proof on chain, and the supplier's reward settled. Then
-[Pointing it at your own node](#pointing-it-at-your-own-node) says what to
-change for a real network.
+[examples/docker-compose/](../../examples/docker-compose/): Redis 8.10,
+1 relayer and 1 miner, pointed at the **beta testnet** (chain id
+`pocket-lego-testnet`) through the public Sauron endpoints. No chain runs
+locally; for a local chain to develop on, use Tilt
+([docs/testing/TILT.md](../testing/TILT.md)).
 
-Every **Expect** below comes from a real run of this runbook on 2026-09-26
-(image built from commit `334a4c4`). Ids, timestamps and durations differ on
-every run, and `...` marks lines left out.
+The runbook goes in two halves:
+
+1. **Steps 0 to 8**: first start, with the PUBLIC, unstaked key that ships in
+   `config/supplier-keys.yaml`. Nothing is at stake. It proves Redis, the node
+   connection and both processes.
+2. **Steps 9 to 14**: your own keys, your services and backends, then real
+   relays and their claims and proofs. **Stop and ask a human** before step 9.
+
+Mainnet is the same runbook with the values in
+[Switching to mainnet](#switching-to-mainnet).
+
+Every **Expect** below comes from a real run against beta on 2026-09-26, unless
+it says **not verified**. That run used an image built locally from commit
+`daaf6e2`, because `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0` was not
+published yet, and a random key that is not staked anywhere, so its supplier
+address differs from the one the shipped key gives. Ids, timestamps, heights
+and durations differ on every run, and `...` marks lines left out.
 
 How to read a step: **Run** the command, compare with **Expect**, use
 **If not** when it differs, and **Stop if** says when to ask a human instead of
@@ -37,11 +51,10 @@ missing → install Docker Engine with the compose plugin.
 
 **Stop if**: you cannot install Docker on this machine.
 
-Also needed: about 6 GB of free RAM (3 containers are limited to 2 GB each,
-plus the validator and the backend) and free local ports 8180 and 9090. To use
-other ports, export `RELAYER_PORT` and `VALIDATOR_GRPC_PORT` before step 3, and
-then pass the same ports to the relay client in steps 10 and 11 (see step 10):
-its `--localnet` defaults are fixed to `localhost:8180` and `localhost:9090`.
+Also needed: about 6 GB of free RAM (3 containers limited to 2 GB each), the
+local port 8180 free (or export `RELAYER_PORT` before step 4), and outbound
+HTTPS to `sauron-rpc.beta.infra.pocket.network` and
+`sauron-grpc.beta.infra.pocket.network:443`.
 
 ## Step 1: get the image
 
@@ -52,7 +65,8 @@ docker pull ghcr.io/pokt-network/pocket-relay-miner:v0.1.0
 ```
 
 **Expect**: exit 0 and `Status: Downloaded newer image` or
-`Status: Image is up to date`.
+`Status: Image is up to date`. **Not verified**: the tag was not published
+when this runbook was checked.
 
 **If not**: `manifest unknown` → the tag is not published yet → build it
 locally with the same name (takes a few minutes), because the compose file
@@ -64,13 +78,34 @@ docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.0 .
 ```
 
 If the tag is not in the repository either, the release is not out: the image
-is then whatever commit you have checked out, under the v0.1.0 name. That is
-enough for this local runbook, since relayer and miner run the same image.
+is then whatever commit you have checked out, under the v0.1.0 name.
 
 **Stop if**: someone asks you to use another tag. Relayer and miner must run
-the same version, and v0.1.0 is what this runbook was verified with.
+the same version.
 
-## Step 2: validate both configs
+## Step 2: the node answers, on the network you expect
+
+**Run**
+
+```bash
+curl -s https://sauron-rpc.beta.infra.pocket.network/status | grep -oE '"network":"[^"]*"|"latest_block_height":"[0-9]*"'
+```
+
+**Expect**
+
+```
+"network":"pocket-lego-testnet"
+"latest_block_height":"680249"
+```
+
+Run it again about 30 seconds later: the height grows by about 1 (beta makes a
+block about every 30 seconds).
+
+**If not**: no output → the node is unreachable from this machine → check
+outbound HTTPS. Another `network` → it is not the node you meant; the miner
+refuses to start on a chain id that differs from `pocket_node.chain_id`.
+
+## Step 3: validate both configs
 
 **Run**
 
@@ -79,30 +114,35 @@ $C run --rm --no-deps miner miner validate --config /config/miner.yaml; echo "EX
 $C run --rm --no-deps relayer relayer validate --config /config/relayer.yaml; echo "EXIT=$?"
 ```
 
-**Expect** (the recorded run; the container ids and timestamps differ)
+**Expect** (container ids and timestamps differ)
 
 ```
- Container prm-example-miner-run-679306ae8c54 Creating
- Container prm-example-miner-run-679306ae8c54 Created
-2026/09/26 04:45:14 maxprocs: Honoring GOMAXPROCS="2" as set in environment
+ Container prm-example-miner-run-... Created
+2026/09/26 07:46:06 maxprocs: Honoring GOMAXPROCS="2" as set in environment
 config OK: /config/miner.yaml would start
 EXIT=0
- Container prm-example-relayer-run-ac1c9dd1fdc8 Creating
- Container prm-example-relayer-run-ac1c9dd1fdc8 Created
-2026/09/26 04:45:15 maxprocs: Honoring GOMAXPROCS="2" as set in environment
+ Container prm-example-relayer-run-... Created
+2026/09/26 07:46:07 maxprocs: Honoring GOMAXPROCS="2" as set in environment
 config OK: /config/relayer.yaml would start
 EXIT=0
 ```
 
 The lines that matter are `config OK: ... would start` and `EXIT=0`.
 
-**If not**: `Error: config is INVALID: ...` → the message names the key
-(and the line, for an unknown or retired key) → fix that key in `examples/docker-compose/config/`. See
+**If not**: `Error: config is INVALID: ...` → the message names the key (and
+the line, for an unknown or retired key) → fix that key in
+`examples/docker-compose/config/`. See
 [Config rejected](TROUBLESHOOTING.md#config-rejected).
 
 **Stop if**: the fix would mean removing a key you do not understand.
 
-## Step 3: start everything
+## Step 4: first start, with the public unstaked key
+
+`config/supplier-keys.yaml` ships 1 PUBLIC key, supplier 2 of the Tilt
+localnet (`pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa`). It was not staked on
+beta or mainnet and held no funds when checked on 2026-09-26. The stack starts
+with it and serves nothing, which is the point: every part except the stake
+is exercised. Never fund or stake that key.
 
 **Run**
 
@@ -119,22 +159,16 @@ $C up -d; echo "EXIT=$?"
 EXIT=0
 ```
 
-The first run builds the test backend image, which takes a few minutes.
-
 **If not**:
-- `account-init` exited 1 → the chain did not register the account keys
-  → `$C logs account-init | tail -5` (the last line names the accounts
-  without a public key), then [reset](#reset) and retry once.
-- `container prm-example-miner-1 is unhealthy` → `$C logs miner | grep '"level":"error"\|Error:'`
-  and look the message up in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#miner-does-not-start).
-- `bind: address already in use` → port 8180 or 9090 is taken → export
-  `RELAYER_PORT=18180` or `VALIDATOR_GRPC_PORT=19090`, run `$C down -v`, retry.
-  From then on, pass `--relayer-url http://localhost:18180` and/or
-  `--node localhost:19090` to every relay command in steps 10 and 11.
+- `container prm-example-miner-1 is unhealthy` →
+  `$C logs miner | grep '"level":"error"\|Error:'` and look the message up in
+  [Miner does not start](TROUBLESHOOTING.md#miner-does-not-start).
+- `bind: address already in use` → port 8180 is taken → export
+  `RELAYER_PORT=18180`, run `$C down -v`, retry.
 
-**Stop if**: the same step fails twice after a reset.
+**Stop if**: the same step fails twice after a [reset](#reset).
 
-## Step 4: every service is healthy
+## Step 5: every service is healthy
 
 **Run**
 
@@ -142,39 +176,17 @@ The first run builds the test backend image, which takes a few minutes.
 $C ps -a --format '{{.Service}}\t{{.Status}}'
 ```
 
-**Expect** (the recorded run, taken right after step 3; seconds vary):
+**Expect** (about a minute after step 4)
 
 ```
-account-init	Exited (0) 7 seconds ago
-backend	Up 51 seconds (healthy)
-miner	Up 6 seconds (healthy)
-redis	Up 52 seconds (healthy)
-relayer	Up Less than a second (health: starting)
-validator	Up 51 seconds (healthy)
+miner	Up About a minute (healthy)
+redis	Up About a minute (healthy)
+relayer	Up About a minute (healthy)
 ```
 
-The relayer's `(health: starting)` turns `(healthy)` within about 30 seconds;
-run the command again until it does.
-
-**If not**: `relayer ... (unhealthy)` → its `/ready` stays 503 → step 7.
-`miner ... Restarting` → the miner cannot read the chain →
+**If not**: `miner ... Restarting` → the miner cannot read the chain →
 [Miner does not start](TROUBLESHOOTING.md#miner-does-not-start).
-
-## Step 5: the chain produces blocks
-
-**Run** (twice, about 30 seconds apart)
-
-```bash
-$C exec validator pocketd status --node tcp://localhost:26657 | grep -o '"latest_block_height":"[0-9]*"'
-```
-
-**Expect**: the height grows by about 3 every 30 seconds (the local chain
-makes a block every ~11 seconds), for example `"latest_block_height":"5"` then
-`"latest_block_height":"8"`.
-
-**If not**: the height does not move → `$C logs validator | tail -20`.
-
-**Stop if**: the validator logs a genesis or consensus error.
+`relayer ... (unhealthy)` → its `/ready` stays 503 → step 8.
 
 ## Step 6: Redis runs with the required memory settings
 
@@ -197,135 +209,197 @@ maxmemory
 **If not**: any other policy, or `0` → the Redis config was not loaded → both
 binaries refuse to start; see [Redis](TROUBLESHOOTING.md#redis).
 
-## Step 7: the relayer is ready
+## Step 7: the miner reads the chain and sees the supplier as unstaked
 
 **Run**
 
 ```bash
-$C exec relayer curl -s -w ' HTTP=%{http_code}\n' http://localhost:8081/ready
+$C logs --no-log-prefix miner | grep -E 'using chain ID|fetched initial block|WebSocket subscription established|supplier manager started'
+$C exec miner pocket-relay-miner redis --config /config/miner.yaml supplier --list | grep -v INF
 ```
 
-**Expect**: `READY HTTP=200`
+**Expect** (log lines shortened)
+
+```
+{"level":"info",...,"chain_id":"pocket-lego-testnet",...,"message":"using chain ID for transaction signing"}
+{"level":"info",...,"claimed":0,"staked_suppliers":0,"total_keys":1,...,"message":"supplier manager started with distributed claiming"}
+{"level":"info",...,"height":680246,"block_time":"2026-09-26T07:45:53Z",...,"message":"fetched initial block via RPC"}
+{"level":"info",...,"message":"WebSocket subscription established"}
+...
+Supplier Cache (1 total: 0 staked, 1 not staked):
+
+ADDRESS                                      STATUS      STAKED  SERVICES  LAST UPDATED
+───────                                      ──────      ──────  ────────  ────────────
+pokt108cdyngrx0x8sh8pgagwk6d574hly9j5764pyp  not_staked  ✗ no    -         2026-09-26 07:47:31
+```
+
+With the shipped key the address is `pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa`.
+`staked_suppliers:0` and `not_staked` are expected here: an unstaked key is
+not an error, and neither process logged a warning or an error in the recorded
+run.
+
+**If not**: no `fetched initial block` line → the miner cannot reach the RPC
+URL → check `pocket_node.query_node_rpc_url` and step 2.
+
+## Step 8: the relayer is up and receives blocks
+
+**Run**
+
+```bash
+$C exec relayer curl -s -w ' HTTP=%{http_code}\n' http://localhost:8081/health
+$C exec relayer curl -s -w ' HTTP=%{http_code}\n' http://localhost:8081/ready
+$C exec relayer curl -s http://localhost:9090/metrics | grep -E '^ha_relayer_current_block_height'
+```
+
+**Expect**
+
+```
+OK HTTP=200
+READY HTTP=200
+ha_relayer_current_block_height 680249
+```
+
+Run the last command again a minute later: the height grows. The relayer gets
+its blocks from the miner through Redis, so a growing height proves the whole
+chain → miner → Redis → relayer path. `READY` means the relayer can serve; it
+does not mean any supplier is staked: with the public key it serves nothing.
 
 **If not**: `no service factor manifest: the miner has not published one yet HTTP=503`
-→ the miner is not running or has not published yet → check step 4 for the
-miner; see [Relayer up but not ready](TROUBLESHOOTING.md#relayer-up-but-not-ready).
+→ the miner is not running or has not published yet → step 5; see
+[Relayer up but not ready](TROUBLESHOOTING.md#relayer-up-but-not-ready).
 
-## Step 8: build the relay test client
+This is the end of the first half. Relays served, claims and proofs need
+your own staked supplier.
 
-The relay client is the same binary, run on the host. `--localnet` uses the
-local chain's test application and gateway keys, the relayer at
-`http://localhost:8180` and the node's gRPC at `localhost:9090`. All of them are
-compiled into the binary; nothing is read from the repository at run time.
+## Step 9: switch to your own keys
 
-**Run** (needs Go 1.26.5 and make)
+**Stop if**: you do not have a staked supplier's private key from a human.
+An agent never generates, funds or stakes a key, and never pastes a key into a
+tracked file.
 
-```bash
-make build
-```
+`config/supplier-keys.yaml` is tracked and holds only the public key. Your keys
+go in `config/supplier-keys.local.yaml`, which the example's `.gitignore`
+excludes.
 
-**Expect**
-
-```
-Building pocket-relay-miner...
-Build complete: ./bin/pocket-relay-miner
-```
-
-**If not**: no Go toolchain → copy the binary out of the image instead (it is
-statically linked):
+**Run** (from `examples/docker-compose/`)
 
 ```bash
-mkdir -p bin && id=$(docker create ghcr.io/pokt-network/pocket-relay-miner:v0.1.0) && docker cp "$id:/usr/local/bin/pocket-relay-miner" bin/pocket-relay-miner && docker rm "$id"
+cp config/supplier-keys.yaml config/supplier-keys.local.yaml
+$EDITOR config/supplier-keys.local.yaml     # replace the key under keys: with yours, 1 per supplier
+chmod 0600 config/supplier-keys.local.yaml
+sudo chown 1000:1000 config/supplier-keys.local.yaml
+git check-ignore config/supplier-keys.local.yaml
 ```
 
-## Step 9: record the supplier's balance
+The image runs as uid 1000, so a 0600 file owned by any other uid cannot be
+read. Then, in `docker-compose.yaml`, change both keys mounts (under `miner`
+and under `relayer`) from `./config/supplier-keys.yaml` to
+`./config/supplier-keys.local.yaml`. For a keyring instead of a keys file, see
+[docs/SUPPLIER_KEYS.md](../SUPPLIER_KEYS.md).
 
-A balance only means something against a baseline, so take it before the relay.
-`pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj` is localnet supplier 1.
+**Expect**: `git check-ignore` prints `config/supplier-keys.local.yaml`: git
+will not track it. **Not verified** with a real key; the ignore rule itself
+was checked.
+
+**If not**: `git check-ignore` prints nothing → the file would be committable
+→ do not continue until it is ignored.
+
+## Step 10: your services and backends
+
+In `config/relayer.yaml`, replace `my-service` with the on-chain service id
+your supplier is staked for, and its `backends.jsonrpc.url` with your
+backend's URL, reachable from inside the relayer container. Add 1 entry under
+`services:` per staked service; [config.relayer.example.yaml](../../config.relayer.example.yaml)
+documents every option, including the other transports.
+
+## Step 11: validate, and check the stake against your backends
 
 **Run**
 
 ```bash
-$C exec validator pocketd q bank balances pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj --node tcp://localhost:26657 -o json | grep -o '"amount":"[0-9]*"'
+$C run --rm --no-deps relayer relayer validate --config /config/relayer.yaml --check-stake; echo "EXIT=$?"
+$C run --rm --no-deps miner miner validate --config /config/miner.yaml; echo "EXIT=$?"
 ```
 
-**Expect**: `"amount":"999999999998"`. Write the number down.
-
-## Step 10: send relays
-
-**Run**
-
-```bash
-./bin/pocket-relay-miner relay jsonrpc --localnet --service develop-http; echo "EXIT=$?"
-```
-
-If you exported `RELAYER_PORT` or `VALIDATOR_GRPC_PORT`, add
-`--relayer-url http://localhost:$RELAYER_PORT` and
-`--node localhost:$VALIDATOR_GRPC_PORT` here and in every relay command below.
-Without them the client still targets 8180 and 9090, and if another relayer
-answers there this step passes against the wrong one.
-
-**Expect**
+**Expect** with your staked keys: `config OK`, then
+`stake check OK: every staked (service, transport) pair has a backend` and
+`EXIT=0`. **Not verified** with a staked key. The recorded run, with the
+unstaked key, printed:
 
 ```
-Supplier: pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj
+config OK: /config/relayer.yaml would start
 ...
-Status: ✅ SUCCESS
-Signature: ✅ VALID
-Error Check: ✅ NO ERRORS
+checking on-chain stake for 1 supplier(s) via sauron-grpc.beta.infra.pocket.network:443 (tls=true)
+  info   supplier not staked on-chain (nothing to serve): supplier=pokt108cdyngrx0x8sh8pgagwk6d574hly9j5764pyp
+  info   backend configured, not staked (surplus): service=my-service transport=jsonrpc
+stake check OK: every staked (service, transport) pair has a backend
 ...
 EXIT=0
 ```
 
-The `Supplier:` line names the supplier that served it; use that address in
-steps 11 and 12 if it is not supplier 1. Then send a few hundred more so the
-claim is not trivial:
-
-```bash
-./bin/pocket-relay-miner relay jsonrpc --localnet --service develop-http --load-test --count 300 --concurrency 10; echo "EXIT=$?"
-```
-
-**Expect**: `Successful: 300`, `Errors: 0`, `Success Rate: 100.00%`, `EXIT=0`.
-
 **If not**:
-- `connection refused` on `localhost:8180` → the relayer is not published →
-  step 4.
-- HTTP 503 → the relayer is not ready → step 7.
-- `Signature: ❌` → relayer and client disagree on keys → check that
-  `examples/docker-compose/config/supplier-keys.yaml` is unmodified.
+- `ERROR  staked but no backend: supplier=... service=... transport=...` →
+  a pair you are staked for and do not serve, which earns nothing → add it in
+  step 10, or stop and ask.
+- `info   supplier not staked on-chain` for YOUR key → the key is not the
+  staked one, or it is staked on the other network.
 
-## Step 11: the claim and the proof land on chain
+**Stop if**: you are not sure which network the supplier is staked on.
 
-A session on this chain is 20 blocks. A relay sent at height H belongs to the
-session that ends at the next multiple of 20. Its claim lands about 11 to 21
-blocks after that end, and the proof about 11 blocks later. At ~11 seconds per
-block, expect the claim 4 to 6 minutes after step 10 and settlement about
-4 minutes after that.
-
-**Run** (repeat every minute until it shows a claim)
-
-```bash
-$C exec validator pocketd q proof list-claims --node tcp://localhost:26657 -o json
-```
-
-**Expect**: a claim for your supplier and `develop-http`, first
-`PENDING_VALIDATION`, then `VALIDATED` once the proof is in. From the real run
-(relays at height 10, claim seen at height 33, validated at height 44):
-
-```
-{"claims":[{"supplier_operator_address":"pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj","session_header":{"application_address":"pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4","service_id":"develop-http", ... "session_end_block_height":"20"}, ... "proof_validation_status":"VALIDATED"}], ...}
-```
-
-The claim disappears from this list once it settles, so `"claims":[]` after
-the window closes does not mean it never landed: check the miner's record.
+## Step 12: restart with your keys and services
 
 **Run**
 
 ```bash
-$C exec miner pocket-relay-miner redis --config /config/miner.yaml submissions --supplier pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj
+$C up -d --force-recreate miner relayer; echo "EXIT=$?"
 ```
 
-**Expect**
+Then repeat steps 5, 7 and 8.
+
+**Expect** (the command itself, from the recorded run)
+
+```
+ Container prm-example-miner-1 Recreated
+ Container prm-example-relayer-1 Recreated
+...
+ Container prm-example-miner-1 Healthy
+ Container prm-example-relayer-1 Started
+EXIT=0
+```
+
+Then steps 5 and 8 as before, and in step 7 `"staked_suppliers":1` (or your
+count) and the supplier list showing your addresses as `staked`. **Not
+verified** with a staked key.
+
+## Step 13: send relays
+
+Either:
+- a **simulated relay** from your own tooling: real signature, real backend
+  round-trip, never metered or claimed. It needs a simulation identity in
+  `config/relayer.yaml`; see [docs/SIMULATED_RELAYS.md](../SIMULATED_RELAYS.md).
+- a **real gateway** sending relays to the relayer, once your supplier's staked
+  endpoint URL points at it. Publish the relay port first: the `relayer`
+  service binds `127.0.0.1` only; bind the address your gateways reach, behind
+  your TLS proxy. Never publish Redis.
+
+**Not verified** on beta: the recorded run had no staked supplier and no real
+backend. What a successful relay looks like from the command-line client is in
+[docs/testing/DIRECT_CLI.md](../testing/DIRECT_CLI.md).
+
+## Step 14: watch claims and proofs
+
+A claim is submitted after the session of the relays ends, and the proof after
+the claim, each in its on-chain window.
+
+**Run** (every few minutes)
+
+```bash
+$C exec miner pocket-relay-miner redis --config /config/miner.yaml submissions --supplier <your-supplier-address> | grep -v INF
+```
+
+**Expect**: before any claim, `No submission tracking records found` (the
+recorded run). Once your relays are claimed, 1 row per session with
+`CLAIM_STATUS` and then `PROOF_STATUS` at `✓ SUCCESS`, as in:
 
 ```
 SESSION_END  SERVICE       CLAIM_STATUS  PROOF_STATUS  RELAYS  CU      SESSION_ID
@@ -333,27 +407,11 @@ SESSION_END  SERVICE       CLAIM_STATUS  PROOF_STATUS  RELAYS  CU      SESSION_I
 20           develop-http  ✓ SUCCESS     ✓ SUCCESS     301     301000  fce30d03f194...
 ```
 
-**If not**: no row after 30 blocks past the session end → the miner did not
-submit → `$C logs miner | grep '"level":"error"'`.
+That row is from a local chain, not from beta. **Not verified** on beta:
+claims, proofs and their transaction broadcast through Sauron.
 
-**Stop if**: a claim or proof shows `FAILED`; report the row and the miner's
-error lines.
-
-## Step 12: the reward is settled
-
-**Run** (after the claim reached `VALIDATED` and a few more blocks passed)
-
-```bash
-$C exec validator pocketd q bank balances pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj --node tcp://localhost:26657 -o json | grep -o '"amount":"[0-9]*"'
-```
-
-**Expect**: above the step 9 baseline. The real run went from `999999999998`
-to `999999999997` (claim fee), `999998999996` (proof fee, 1 POKT) and then
-`1000020069996` at settlement: +20069998 upokt net of fees against the
-baseline, and +21070000 upokt gross against the balance after the proof fee.
-
-This is the end of the local deployment: relays served, claimed, proved and
-paid.
+**Stop if**: a claim or proof shows `FAILED`; report the row and
+`$C logs miner | grep '"level":"error"'`.
 
 ## Reset
 
@@ -363,73 +421,39 @@ paid.
 $C down -v; echo "EXIT=$?"
 ```
 
-**Expect**: `Volume prm-example_validator-data Removed`,
-`Volume prm-example_redis-data Removed`, `EXIT=0`.
+**Expect**: `Volume prm-example_redis-data Removed` and `EXIT=0`.
 
-`-v` deletes the chain and Redis together. Keep them together: a Redis holding
-sessions of a previous chain does not match a new one.
+`-v` deletes the Redis data: the relays not yet claimed and the claim trees of
+sessions not yet proved. Do not reset while a claimed session awaits its proof.
 
-## Pointing it at your own node
+## Switching to mainnet
 
-The local chain is for trying the relay miner out. For a real network, keep the
-relayer, miner and Redis services and replace the local chain with a full node
-of that network. Do each change, then run step 2 (validate) again.
+**Stop if**: you have not been told by a human to run on mainnet.
 
-**Your node**: run a full node of the network, or use a public endpoint.
+Every network-specific value has its mainnet value in a comment right above
+it, marked `Mainnet:`:
 
-- Genesis, `config.toml`, `app.toml` and seeds per network (`mainnet`,
-  `testnet-beta`):
-  [pocket-network-genesis/shannon](https://github.com/pokt-network/pocket-network-genesis/tree/master/shannon).
-- Snapshots to sync a node faster, and public RPC and gRPC endpoints:
-  [pocket-network-resources](https://github.com/pokt-network/pocket-network-resources).
+- `config/relayer.yaml` and `config/miner.yaml`:
+  `pocket_node.query_node_rpc_url` (`https://sauron-rpc.infra.pocket.network`)
+  and `pocket_node.query_node_grpc_url` (`sauron-grpc.infra.pocket.network:443`).
+- `config/miner.yaml`: `pocket_node.chain_id` (`pocket`) and
+  `block_time_seconds` (`60`; mainnet makes a block about every 61 seconds).
 
-**Stop if**: you do not have a staked supplier key and a funded account from a
-human. Never use the keys in `examples/docker-compose/` on a real network: they
-are public.
+Then run the whole runbook again from step 2, with
+`https://sauron-rpc.infra.pocket.network/status` in step 2 (**Expect**
+`"network":"pocket"`, measured on 2026-09-26). A read-only
+`--check-stake` against the mainnet gRPC with an unstaked key printed the same
+lines as in step 11; starting the stack on mainnet was **not verified**.
 
-1. **Remove the local chain**: delete the `validator` and `account-init`
-   services, and the `validator` and `account-init` entries under
-   `depends_on:` of `miner`. Delete the `validator-data` volume and the
-   `localnet/` mount. Keep `backend` only if you want the test backend; if you
-   delete it, also delete the `backend` entry under `depends_on:` of `relayer`,
-   or compose refuses to start with an undefined service.
-2. **Point both configs at your node**, in `config/relayer.yaml` and
-   `config/miner.yaml`:
-   - `pocket_node.query_node_rpc_url`: your node's CometBFT RPC URL.
-   - `pocket_node.query_node_grpc_url`: your node's gRPC, as `host:port`.
-   - `pocket_node.grpc_insecure`: `false` for a TLS endpoint (`:443`).
-3. **Set the network in the miner config**:
-   - `pocket_node.chain_id`: `pocket` for mainnet, `pocket-beta` for the testnet.
-   - `block_time_seconds`: the measured block time of that network (mainnet is
-     roughly 60).
-4. **Use your keys**: replace `config/supplier-keys.yaml` with a file that
-   holds only your suppliers' keys (same `keys:` format), outside version
-   control, mode 0600 and owned by uid 1000: the image runs as uid 1000
-   (`pocket`), so a 0600 file owned by any other uid cannot be read
-   (`sudo chown 1000:1000 <file>`). For a keyring instead, see
-   [docs/SUPPLIER_KEYS.md](../SUPPLIER_KEYS.md).
-5. **Declare your services** in `config/relayer.yaml` under `services.<service_id>`,
-   1 entry per service your suppliers are staked for, each with its
-   `backends.<transport>.url`. [config.relayer.example.yaml](../../config.relayer.example.yaml)
-   documents every option.
-6. **Size Redis and the containers**: raise `--maxmemory` in the `redis`
-   service and every `mem_limit`, keeping `mem_limit` of Redis at least 1.25x
-   its `maxmemory`, and `GOMEMLIMIT` about 10% below each process's
-   `mem_limit`. [config.redis.example.conf](../../config.redis.example.conf)
-   has the values v0.1.0 was measured with.
-7. **Publish the relay port** for your gateways: the `relayer` service's
-   `ports:` binds `127.0.0.1` only; bind the address your gateways reach.
-   Never publish Redis.
-8. **Check the stake against your backends**, once the node is reachable:
+The public Sauron endpoints are enough to start. For claims and proofs you are
+paid for, your own full node is the better choice: node configs and genesis
+per network (`mainnet`, and `testnet-lego` for beta) are in
+[pocket-network-genesis/shannon](https://github.com/pokt-network/pocket-network-genesis/tree/master/shannon),
+and snapshots and other public endpoints in
+[pocket-network-resources](https://github.com/pokt-network/pocket-network-resources).
 
-   ```bash
-   $C run --rm --no-deps relayer relayer validate --config /config/relayer.yaml --check-stake; echo "EXIT=$?"
-   ```
-
-   **Expect**: `EXIT=0`. A line `staked but no backend: supplier=... service=... transport=...`
-   is a staked service you do not serve: add it, or stop and ask.
-
-Then start with step 3 and check steps 4, 6 and 7. To test the relayer without
-a staked application, use a simulated relay:
-[docs/SIMULATED_RELAYS.md](../SIMULATED_RELAYS.md). Pointing at a real network
-is not verified end to end by this runbook.
+Before real traffic, size Redis and the containers: raise `--maxmemory` in the
+`redis` service and every `mem_limit`, keeping `mem_limit` of Redis at least
+1.25x its `maxmemory`, and `GOMEMLIMIT` about 10% below each process's
+`mem_limit`. [config.redis.example.conf](../../config.redis.example.conf) has
+the values v0.1.0 was measured with.

@@ -1,9 +1,13 @@
-# Relayer config for the docker compose localnet example.
+# Relayer config for the docker compose example, pointed at the beta testnet.
 #
 # Minimal on purpose: every key not set here takes its default. The full list
 # of keys, with their defaults, is in config.relayer.example.yaml at the
 # repository root. Check a config before starting it with:
 #   pocket-relay-miner relayer validate --config <file>
+# and, once your keys are in place, what you are staked for but do not serve:
+#   pocket-relay-miner relayer validate --config <file> --check-stake
+#
+# Mainnet: switch every value marked "Mainnet:" below.
 
 # Address the relay server listens on (relay traffic from gateways).
 listen_addr: "0.0.0.0:8080"
@@ -15,13 +19,16 @@ redis:
   url: "redis://redis:6379"
 
 # The chain node the relayer reads applications, sessions and params from.
+# These are the public Sauron endpoints.
 pocket_node:
   # CometBFT RPC.
-  query_node_rpc_url: "http://validator:26657"
-  # gRPC: chain queries.
-  query_node_grpc_url: "validator:9090"
-  # Plain-text gRPC; the localnet validator does not serve TLS.
-  grpc_insecure: true
+  # Mainnet: "https://sauron-rpc.infra.pocket.network"
+  query_node_rpc_url: "https://sauron-rpc.beta.infra.pocket.network"
+  # gRPC: chain queries, as host:port.
+  # Mainnet: "sauron-grpc.infra.pocket.network:443"
+  query_node_grpc_url: "sauron-grpc.beta.infra.pocket.network:443"
+  # TLS gRPC (port 443). true only for a plain-text node.
+  grpc_insecure: false
 
 # The suppliers this relayer signs responses for.
 keys:
@@ -29,9 +36,11 @@ keys:
   keys_file: "/keys/supplier-keys.yaml"
 
 # Services this relayer serves, keyed by on-chain service id. A relay for a
-# service that is not listed here is rejected.
+# service that is not listed here is rejected. Add one entry per service your
+# suppliers are staked for; `validate --check-stake` lists any you miss.
 services:
-  develop-http:
+  # CHANGE: the on-chain service id your supplier is staked for.
+  my-service:
     # eager: validate the relay (signature, session) before forwarding it.
     validation_mode: eager
     # Backend used when the relay does not name a transport.
@@ -39,8 +48,9 @@ services:
     # Backends keyed by transport: jsonrpc | rest | websocket | grpc | cometbft.
     backends:
       jsonrpc:
-        # "backend" is the compose service name of the test backend.
-        url: "http://backend:8545"
+        # CHANGE: the URL of the backend node that answers this service,
+        # reachable from inside the relayer container.
+        url: "http://my-backend.example.com:8545"
 
 # Health server: GET /ready answers 200 once the relayer can serve relays.
 health_check:

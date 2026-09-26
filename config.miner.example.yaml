@@ -114,7 +114,7 @@ pocket_node:
 
   # Chain ID used to sign transactions. It MUST match the chain you connect
   # to, or every transaction signature fails. "pocket" is mainnet (and the
-  # localnet), "pocket-beta" is the testnet. Default: "pocket".
+  # localnet), "pocket-lego-testnet" is the beta testnet. Default: "pocket".
   chain_id: "pocket"
 
   # Disable TLS for gRPC. Localnet: true. Production: false.

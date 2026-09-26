@@ -14,8 +14,8 @@ pocket_node:
   query_node_rpc_url: "https://rpc.node.example.com"
   # CHANGE: your node's gRPC, host:port.
   query_node_grpc_url: "grpc.node.example.com:443"
-  # "pocket" is mainnet, "pocket-beta" the testnet. The miner refuses to
-  # start if the node reports another network.
+  # "pocket" is mainnet, "pocket-lego-testnet" the beta testnet. The miner
+  # refuses to start if the node reports another network.
   chain_id: "pocket"
   grpc_insecure: false
 

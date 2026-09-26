@@ -6,7 +6,7 @@ Start here, pick 1 path, and follow its runbook from the first step.
 
 | Path | Use it when | Runbook | Verified |
 |---|---|---|---|
-| Docker Compose | you want the fastest start, or a full local chain to try it on | [DOCKER_COMPOSE.md](DOCKER_COMPOSE.md) | end to end on a local chain: relay served, claim and proof on chain, reward settled |
+| Docker Compose | you want the fastest start, on beta through public endpoints | [DOCKER_COMPOSE.md](DOCKER_COMPOSE.md) | on beta with an unstaked key: configs validated, Redis, node connection, blocks reaching both processes, relayer ready. Not verified: relays, claims and proofs on beta or mainnet |
 | Host (binary + systemd) | you run services on VMs or bare metal without containers | [HOST.md](HOST.md) | configs and units checked; not verified end to end under systemd |
 | Kubernetes | you already run Kubernetes | no example in v0.1.0 | not verified |
 
@@ -59,7 +59,7 @@ produces, where there is one.
 
 | You need | For | Where it comes from |
 |---|---|---|
-| A Pocket full node: CometBFT RPC and gRPC | both processes; the miner submits transactions through it | yours, or a provider's. The compose runbook runs a local one for you |
+| A Pocket full node: CometBFT RPC and gRPC | both processes; the miner submits transactions through it | yours, or a provider's. The compose example uses the public Sauron endpoints |
 | At least 1 staked supplier and its private key (64 hex characters) | signing responses, claims and proofs | your staking process. **A human provides it; an agent never generates or moves funds** |
 | A backend node for every service your suppliers are staked for | answering relays | yours |
 | Redis 8.10 | shared state | [config.redis.example.conf](../../config.redis.example.conf) |

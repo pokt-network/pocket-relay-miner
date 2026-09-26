@@ -64,6 +64,6 @@ are not checked, and breaking them is unsupported.
   from Step 0. A step gives **Run** and **Expect**, and **If not** and
   **Stop if** where they apply. Compare the output with **Expect** before going on.
 - **Stop and ask a human** before using real supplier keys, spending funds,
-  staking, or pointing anything at mainnet. The keys in
-  `examples/docker-compose/` are public localnet keys: never use them on a real
-  network.
+  staking, or pointing anything at mainnet. The key in
+  `examples/docker-compose/config/supplier-keys.yaml` is public and unstaked,
+  there only to start the stack: never fund or stake it.

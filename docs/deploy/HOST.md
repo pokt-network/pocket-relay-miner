@@ -141,8 +141,8 @@ Then edit every line marked `CHANGE`:
 - `/etc/pocket-relay-miner/relayer.yaml` and `miner.yaml`:
   `pocket_node.query_node_rpc_url`, `pocket_node.query_node_grpc_url`,
   `pocket_node.grpc_insecure`.
-- `miner.yaml`: `pocket_node.chain_id` (`pocket` for mainnet, `pocket-beta`
-  for the testnet) and `block_time_seconds` (measured; mainnet is roughly 60).
+- `miner.yaml`: `pocket_node.chain_id` (`pocket` for mainnet, `pocket-lego-testnet`
+  for the beta testnet) and `block_time_seconds` (measured; mainnet is roughly 60).
 - `relayer.yaml`: `services.<service_id>` with `backends.<transport>.url`, 1
   entry per service your suppliers are staked for.
 - `supplier-keys.yaml`: your suppliers' private keys, 1 per line under `keys:`.
