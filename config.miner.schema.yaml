@@ -370,7 +370,7 @@ properties:
       enabled:
         type: boolean
         description: Enable block health monitoring
-        default: false
+        default: true
       slowness_threshold:
         type: number
         description: Alert when blocks arrive slower than threshold × configured time

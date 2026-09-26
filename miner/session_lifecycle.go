@@ -595,7 +595,6 @@ func (m *SessionLifecycleManager) lifecycleCheckerEventDriven(ctx context.Contex
 			sessionBlockProcessingLag.WithLabelValues(m.config.SupplierAddress).Set(float64(height - lastHeight))
 		}
 		lastHeight = height
-		currentBlockHeight.Set(float64(height))
 		// Sample the transition subpool's queue depth once per pass. Cheap atomic
 		// read (no goroutine); surfaces backpressure before it becomes RAM pressure
 		// or a missed window.
@@ -720,7 +719,6 @@ func (m *SessionLifecycleManager) lifecycleCheckerPolling(ctx context.Context) {
 				continue
 			}
 			lastHeight = currentHeight
-			currentBlockHeight.Set(float64(currentHeight))
 
 			// Check all sessions for transitions
 			m.checkSessionTransitions(ctx, currentHeight)

@@ -130,6 +130,7 @@ func (w *SupplierWorker) blockTimeProvider() *cache.RedisBlockSubscriber {
 // The height and the time go to different objects on purpose: the height to the
 // block adapter, and the time to the provider the transaction client reads.
 func (w *SupplierWorker) seedChainState(startHeight int64, startBlockTime time.Time) {
+	currentBlockHeight.Set(float64(startHeight))
 	w.redisBlockClientAdapter.SeedHeight(startHeight)
 	w.blockTimeProvider().SeedBlockTime(startBlockTime)
 }
@@ -260,6 +261,10 @@ func (w *SupplierWorker) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to start redis block subscriber: %w", err)
 	}
 	w.logger.Info().Msg("redis block subscriber started (receiving events from leader)")
+	heightEvents := w.redisBlockSubscriber.Subscribe(w.ctx)
+	go logging.RecoverGoRoutine(w.logger, "block_height_gauge", func(c context.Context) {
+		trackBlockHeight(c, heightEvents)
+	})(w.ctx)
 
 	// Create Redis block client adapter to implement client.BlockClient interface
 	// Pass the RPC client so it can query specific block heights for proof generation
@@ -1062,4 +1067,25 @@ func (w *SupplierWorker) GetSupplierCache() *cache.SupplierCache {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.supplierCache
+}
+
+// trackBlockHeight keeps currentBlockHeight at the highest block this replica
+// has received. It runs in every miner process, standby included and with no
+// supplier configured, so the gauge does not depend on a session lifecycle.
+func trackBlockHeight(ctx context.Context, events <-chan cache.BlockEvent) {
+	var highest int64
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case event, ok := <-events:
+			if !ok {
+				return
+			}
+			if event.Height > highest {
+				highest = event.Height
+				currentBlockHeight.Set(float64(highest))
+			}
+		}
+	}
 }

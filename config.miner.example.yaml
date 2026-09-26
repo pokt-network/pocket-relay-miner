@@ -277,7 +277,7 @@ block_time_seconds: 10
 # Block health monitoring: warns when blocks arrive slower than expected (a
 # lagging full node or a network problem).
 block_health_monitor:
-  # Default: false.
+  # Default: true.
   enabled: true
   # Warn when a block takes longer than this multiple of block_time_seconds
   # (1.5 with 10s blocks: slower than 15s). Default: 1.5.

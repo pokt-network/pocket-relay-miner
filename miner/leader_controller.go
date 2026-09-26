@@ -363,7 +363,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	// it to SupplierManager; LeaderController has no consumer for it.
 
 	// Start block health monitor if enabled
-	if c.config.Config.BlockHealthMonitor.Enabled {
+	if c.config.Config.BlockHealthMonitorEnabled() {
 		c.blockHealthMonitor = NewBlockHealthMonitor(
 			c.logger,
 			c.blockSubscriber,

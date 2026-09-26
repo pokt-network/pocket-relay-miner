@@ -1070,7 +1070,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "current_block_height",
-			Help:      "Current block height as seen by the miner",
+			Help:      "Height of the last block this miner process received, leader or standby",
 		},
 	)
 
@@ -1126,7 +1126,7 @@ var (
 			Namespace: metricsNamespace,
 			Subsystem: metricsSubsystem,
 			Name:      "current_block_interval_seconds",
-			Help:      "Actual time between the last two blocks in seconds",
+			Help:      "Actual time between the last two blocks in seconds, measured by the leader; a standby keeps the last value it measured as leader, or 0",
 		},
 	)
 

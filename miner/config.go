@@ -213,9 +213,9 @@ type BalanceMonitorConfigYAML struct {
 
 // BlockHealthConfig contains configuration for block time health monitoring.
 type BlockHealthConfig struct {
-	// Enabled enables block time health monitoring.
-	// Default: false
-	Enabled bool `yaml:"enabled,omitempty"`
+	// Enabled enables block time health monitoring on the leader, which also
+	// feeds the current_block_interval_seconds gauge. Unset means true.
+	Enabled *bool `yaml:"enabled,omitempty"`
 
 	// SlownessThreshold is the multiplier for determining slow blocks.
 	// If actualTime > configuredTime × threshold, a warning is logged.
@@ -697,6 +697,12 @@ func (c *Config) GetBlockTimeSeconds() int64 {
 		return c.BlockTimeSeconds
 	}
 	return cache.DefaultBlockTimeSeconds
+}
+
+// BlockHealthMonitorEnabled reports whether the leader runs the block health
+// monitor: true unless the config sets block_health_monitor.enabled to false.
+func (c *Config) BlockHealthMonitorEnabled() bool {
+	return c.BlockHealthMonitor.Enabled == nil || *c.BlockHealthMonitor.Enabled
 }
 
 // GetBlockHealthSlownessThreshold returns the slowness threshold for block health monitoring.
