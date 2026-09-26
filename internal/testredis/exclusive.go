@@ -128,7 +128,7 @@ func Exclusive(t testing.TB) *redis.Client {
 func requireDocker(t testing.TB) {
 	t.Helper()
 
-	if os.Getenv("TESTCONTAINERS_RYUK_DISABLED") == "true" {
+	if ryukDisabledOffCI(os.Getenv) {
 		t.Fatal("TESTCONTAINERS_RYUK_DISABLED is set: the reaper is what removes these containers " +
 			"when a test binary is killed, and a killed binary never runs its cleanup")
 	}
@@ -146,4 +146,12 @@ func requireDocker(t testing.TB) {
 		}
 		t.Skipf("docker is installed but not usable -- daemon stopped, or this user is not in the docker group: %s", out)
 	}
+}
+
+// ryukDisabledOffCI reports a disabled reaper where the reaper matters. On
+// GitHub Actions the runner is discarded after the job, and every container
+// with it, so there the reaper protects nothing and CI turns it off: waiting
+// for it to report ready failed a CI run on its own.
+func ryukDisabledOffCI(getenv func(string) string) bool {
+	return getenv("TESTCONTAINERS_RYUK_DISABLED") == "true" && getenv("GITHUB_ACTIONS") != "true"
 }

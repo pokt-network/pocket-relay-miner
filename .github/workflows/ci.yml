@@ -93,6 +93,12 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      # The runner is discarded after the job, and every container with it, so
+      # the testcontainers reaper protects nothing here; waiting for it to
+      # report ready failed a run on its own. Off CI it stays required
+      # (internal/testredis/exclusive.go).
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     services:
       # Real Redis, because miniredis is not Redis where it matters. The
       # XREADGROUP BLOCK semantics that hung shutdown behave differently in the
@@ -150,6 +156,12 @@ jobs:
   race:
     name: Race Detector
     runs-on: ubuntu-latest
+    env:
+      # The runner is discarded after the job, and every container with it, so
+      # the testcontainers reaper protects nothing here; waiting for it to
+      # report ready failed a run on its own. Off CI it stays required
+      # (internal/testredis/exclusive.go).
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     services:
       # Real Redis, because miniredis is not Redis where it matters. The
       # XREADGROUP BLOCK semantics that hung shutdown behave differently in the
