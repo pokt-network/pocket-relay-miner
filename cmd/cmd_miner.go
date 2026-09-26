@@ -42,7 +42,7 @@ func MinerCmd() *cobra.Command {
 		Short: "Start the Miner (SMST builder and claim/proof submitter)",
 		Long: `Start the Miner component.
 
-A deployment runs one miner next to one relayer and one Redis. The Miner consumes mined relays from Redis Streams and builds SMST trees.
+The relayers and miners of a deployment share one Redis. The Miner consumes mined relays from Redis Streams and builds SMST trees.
 It supports multiple suppliers and dynamically adds/removes them based on key changes.
 
 Configuration:

@@ -36,8 +36,9 @@ a starting point for your own manifests, not a production config. The
 - **Redis**: holds all shared state. It is not a cache: a lost key is a claim
   that cannot be proved.
 
-**Topology: 1 relayer, 1 miner, 1 Redis.** v0.1.0 was tested and measured on
-this topology only.
+**Topology: 1 Redis shared by the relayers and miners.** v0.1.0 was tested on
+1 relayer + 1 miner and on 2 relayers + 2 miners, the latter at lower load. The
+load tests and every capacity figure are from 1 relayer + 1 miner.
 
 ## Invariants
 

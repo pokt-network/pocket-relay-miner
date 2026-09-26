@@ -81,7 +81,7 @@ func RelayerCmd() *cobra.Command {
 		Long: `Start the Relayer component.
 
 The Relayer handles incoming relay requests and forwards them to backend services.
-A deployment runs one relayer, one miner and one Redis; the relayer keeps no
+The relayers and miners of a deployment share one Redis; the relayer keeps no
 session state of its own, all of it lives in Redis.
 
 Features:

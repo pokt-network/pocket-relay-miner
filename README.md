@@ -38,8 +38,9 @@ Serves relays for Pocket Network suppliers and gets them paid on chain.
                 miner ──> Pocket chain (claims, proofs)
 ```
 
-The supported topology is **1 relayer, 1 miner, 1 Redis**, with the relayer
-and the miner on the same version.
+A deployment is **1 Redis shared by the relayers and miners**, all on the same
+version. v0.1.0 was tested on 1 relayer + 1 miner and on 2 relayers + 2 miners
+(the latter at lower load); the load tests are from 1 relayer + 1 miner.
 
 ## Deploy
 

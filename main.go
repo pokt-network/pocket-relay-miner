@@ -19,7 +19,7 @@ func main() {
 		Short: "Pocket Network RelayMiner",
 		Long: `Relay miner for Pocket Network Shannon.
 
-A deployment is one relayer, one miner and one Redis. The relayer validates,
+The relayers and miners of a deployment share one Redis. The relayer validates,
 charges and serves relays and publishes them to Redis Streams; the miner builds
 the claim trees from those streams and submits claims and proofs. All session
 state lives in Redis.

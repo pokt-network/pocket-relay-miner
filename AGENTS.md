@@ -31,8 +31,9 @@ invariants below hold on any platform.
 Some of these are checked at startup and stop a binary when broken; the rest
 are not checked, and breaking them is unsupported.
 
-1. **Topology: 1 relayer, 1 miner, 1 Redis.** This is the topology v0.1.0 was
-   tested and measured on.
+1. **Topology: 1 Redis shared by the relayers and miners.** v0.1.0 was tested
+   on 1 relayer + 1 miner and on 2 relayers + 2 miners, the latter at lower
+   load; the load tests and every capacity figure are from 1 relayer + 1 miner.
 2. **Same version for relayer and miner**: image
    `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0` for both, or the binary of
    the same tag. Mixed versions are not supported. Never use a moving tag.
