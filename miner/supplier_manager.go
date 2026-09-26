@@ -2576,8 +2576,8 @@ func (m *SupplierManager) handleStreamMessage(
 		// Not simply "leave it pending": measured 2026-09-02, the reclaim skips
 		// any entry still owned by this consumer, so on a single-miner fleet a
 		// pending entry is stranded until the process restarts and its name
-		// changes. Releasing parks it under a sentinel owner (8.4.6) or unowned
-		// (XNACK, 8.8+), which is what makes it visible again.
+		// changes. Releasing leaves it unowned (XNACK), which is what makes it
+		// visible again.
 		if relErr := state.Consumer.ReleaseMessage(ctx, msg); relErr != nil {
 			m.logger.Warn().
 				Err(relErr).

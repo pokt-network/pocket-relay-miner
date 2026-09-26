@@ -101,8 +101,7 @@ func TestClose_HandsBackWhatIsLeftUnderTheConsumersName(t *testing.T) {
 }
 
 // refuseReleaseOf fails the XNACK of the given entries, so ReleaseMessage fails
-// for them: this server has the command and the error is not "unknown command",
-// so there is no fallback.
+// for them.
 type refuseReleaseOf map[string]bool
 
 func (refuseReleaseOf) DialHook(next redis.DialHook) redis.DialHook { return next }

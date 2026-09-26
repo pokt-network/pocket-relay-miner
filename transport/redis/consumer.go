@@ -247,11 +247,11 @@ func (c *StreamsConsumer) ensureConsumerGroup(ctx context.Context) error {
 // It sweeps as soon as it starts and then every quarter of the idle timeout.
 // The first sweep used to come one full idle timeout after start, so a consumer
 // that lived less than that -- a supplier claimed and released every ~32 s, as
-// the L3 of df5441c saw on 2026-09-11 -- never swept at all, and entries released
-// to it (parked idle under the "released" sentinel, or unowned) waited for
-// whoever outlived the timeout. Sweeping more often takes nothing younger: the
-// sweep itself only claims entries idle past ClaimIdleTimeout. Reaping dead
-// consumers stays on the full timeout.
+// the L3 of df5441c saw on 2026-09-11 -- never swept at all, and entries it
+// released (unowned, by XNACK) waited for whoever outlived the timeout.
+// Sweeping more often takes nothing younger: the sweep itself only claims
+// entries idle past ClaimIdleTimeout. Reaping dead consumers stays on the full
+// timeout.
 // SetStoreHealth pauses this consumer while health says Redis cannot take writes.
 // Call it before Consume.
 func (c *StreamsConsumer) SetStoreHealth(health *StoreHealth) {
@@ -636,26 +636,6 @@ func (c *StreamsConsumer) reapDeadConsumers(ctx context.Context) {
 		if consumer.Name == c.config.ConsumerName {
 			continue
 		}
-		// The sentinel is the one candidate the three conditions below cannot
-		// make safe. They were written for the record of a DEAD POD: the name
-		// embeds hostname and pid, so such a record is inert -- once it reads
-		// Pending == 0 it can never gain another entry, and the window between
-		// reading that and deleting is unreachable in practice.
-		//
-		// releasedConsumerName breaks that premise, because ReleaseMessage's
-		// pre-8.8 fallback parks entries under it on every transient processing
-		// failure and every shutdown drain. It reaches Pending == 0 whenever the
-		// reclaim drains it and its idle then grows like any other record, so it
-		// DOES become a candidate -- and a release landing between XINFO
-		// CONSUMERS and XGROUP DELCONSUMER would be destroyed, which for a relay
-		// already served means it is never billed.
-		//
-		// The cost of skipping it is one permanent consumer record per group,
-		// which is what the sentinel is: it names handed-back work, and an
-		// operator reading XINFO CONSUMERS wants to see it.
-		if consumer.Name == releasedConsumerName {
-			continue
-		}
 		if consumer.Pending != 0 {
 			continue
 		}
@@ -940,42 +920,15 @@ func (c *StreamsConsumer) parseMessage(message redis.XMessage, streamName string
 // doing so removes the entry from the pending list the reclaim reads, so nothing
 // can rescue it.
 //
-// Two paths, both MEASURED against real servers on 2026-09-01:
+// It is XNACK SILENT (Redis 8.8.0 and newer; this release refuses to start on
+// anything older than 8.10). It marks the entry unowned and sets its delivery
+// time to 0, so it is claimable immediately regardless of any min-idle -- by
+// every consumer, including the one that let go, whose reclaim skips only the
+// entries it still owns. SILENT is the mode Redis documents for a consumer that
+// is shutting down: the delivery "did not count".
 //
-//   - XNACK SILENT, from Redis 8.8.0. Marks the entry unowned and sets its
-//     delivery time to 0, so it is claimable immediately regardless of any
-//     min-idle. SILENT is the mode Redis documents for a consumer that is
-//     shutting down: the delivery "did not count".
-//
-//   - Older servers (the deployed cluster is 8.4.6) have no XNACK, so the entry
-//     is claimed to a SENTINEL consumer with a high IDLE: idle enough for the
-//     next reclaim to take it, and owned by nobody real so the reclaim's
-//     skip-my-own-deliveries filter does not swallow it. This goes through a raw
-//     Do because XClaimArgs does not expose IDLE in any go-redis version.
-//
-//     It used to claim the entry back to ITSELF, which measured as a no-op:
-//     the owner never changed, the reclaim skipped it as its own in-flight
-//     delivery, and on a single-miner fleet nothing else existed to rescue it.
-//
-// A NOPERM is NOT treated as "unsupported": an ACL that forbids XNACK is a
-// deliberate operator decision, and degrading past it silently would hide it.
-// releaseIdleMillis is what the pre-8.8 fallback writes as the entry's idle
-// time: large enough that any reclaim's min-idle is already satisfied.
-const releaseIdleMillis = 24 * 60 * 60 * 1000
-
-// releasedConsumerName is the sentinel owner the pre-8.8 fallback parks a
-// released entry under.
-//
-// It is not a real consumer and never reads: it exists so the entry has an owner
-// that is nobody, which is the closest a server without XNACK can get to
-// "unowned". The reclaim only skips entries owned by ITSELF, so parking them
-// here makes them visible to every consumer including the one that let go.
-//
-// It shows up in XINFO CONSUMERS, deliberately: an operator counting pending
-// entries per consumer can see how much work is in flight versus how much was
-// handed back, and the name says which is which.
-const releasedConsumerName = "released"
-
+// A NOPERM is reported as such: an ACL that forbids XNACK is a deliberate
+// operator decision, not a server that lacks the command.
 func (c *StreamsConsumer) ReleaseMessage(ctx context.Context, msg transport.StreamMessage) error {
 	// Same guard AckMessage keeps: a closed consumer must not claim to have
 	// handed anything over. The caller counts a failure here as abandoned, which
@@ -1001,37 +954,10 @@ func (c *StreamsConsumer) ReleaseMessage(ctx context.Context, msg transport.Stre
 		return nil
 	}
 
-	errText := err.Error()
-	if strings.Contains(errText, "NOPERM") {
+	if strings.Contains(err.Error(), "NOPERM") {
 		return fmt.Errorf("XNACK is forbidden by ACL for this user, which is configuration rather than server version: %w", err)
 	}
-	if !strings.Contains(errText, "unknown command") {
-		return fmt.Errorf("failed to release message %s: %w", msg.ID, err)
-	}
-
-	// Pre-8.8 fallback. Two things make it work, and the second is not obvious --
-	// it was measured against a bare redis:8.4.6 on 2026-09-02, with
-	// scripts/localonly/redisprobe/release-owner.sh:
-	//
-	//   - The IDLE: without it the entry stays young and a reclaim with a
-	//     positive min-idle skips it.
-	//   - The TARGET consumer. Claiming it back to c.config.ConsumerName leaves
-	//     the entry owned by this very consumer, and the reclaim skips any entry
-	//     whose owner is itself ("our own in-flight delivery, not a stranded
-	//     one"). Measured: the owner stayed `consumer-A` and its own reclaim
-	//     returned nothing, so "release" released it to nobody -- and on a
-	//     single-miner fleet there is no other consumer to rescue it. Claiming to
-	//     a sentinel makes the entry foreign to every real consumer, including
-	//     this one, which is exactly what XNACK achieves on 8.8+ by leaving it
-	//     unowned.
-	claim := []any{
-		"XCLAIM", msg.StreamName, c.config.ConsumerGroup, releasedConsumerName, 0,
-		msg.ID, "IDLE", releaseIdleMillis, "JUSTID",
-	}
-	if claimErr := c.client.Do(ctx, claim...).Err(); claimErr != nil {
-		return fmt.Errorf("failed to release message %s via XCLAIM fallback: %w", msg.ID, claimErr)
-	}
-	return nil
+	return fmt.Errorf("failed to release message %s: %w", msg.ID, err)
 }
 
 // AckMessage acknowledges a StreamMessage using its embedded stream name.

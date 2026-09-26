@@ -93,25 +93,18 @@ func startSweeper(t *testing.T, client redis.UniversalClient, stream, group, nam
 // (2026-09-11) the supplier was re-taken every ~32 s against a 60 s timeout, so
 // the first sweep never came and the released relays waited for another miner.
 func TestReclaimLoopSweepsAsSoonAsItStarts(t *testing.T) {
-	for _, tc := range []struct {
-		name    string
-		killXNA bool
-	}{{"xnack", false}, {"sentinel_pre_8_8", true}} {
-		t.Run(tc.name, func(t *testing.T) {
-			f := newReleaseFixture(t, tc.killXNA)
-			released := f.deliverRelay(t)
-			require.NoError(t, f.consumer.ReleaseMessage(context.Background(), released))
+	f := newReleaseFixture(t, nil)
+	released := f.deliverRelay(t)
+	require.NoError(t, f.consumer.ReleaseMessage(context.Background(), released))
 
-			b := startSweeper(t, f.client, f.stream, f.group, "b")
+	b := startSweeper(t, f.client, f.stream, f.group, "b")
 
-			select {
-			case got := <-b.msgCh:
-				require.Equal(t, released.ID, got.ID)
-				require.True(t, got.IsReclaim, "it arrives as a reclaim, so the worker runs its duplicate check")
-			case <-time.After(10 * time.Second):
-				t.Fatal("the released entry did not reach the new consumer's reclaim: its first sweep waits for the idle timeout")
-			}
-		})
+	select {
+	case got := <-b.msgCh:
+		require.Equal(t, released.ID, got.ID)
+		require.True(t, got.IsReclaim, "it arrives as a reclaim, so the worker runs its duplicate check")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the released entry did not reach the new consumer's reclaim: its first sweep waits for the idle timeout")
 	}
 }
 
@@ -120,7 +113,7 @@ func TestReclaimLoopSweepsAsSoonAsItStarts(t *testing.T) {
 // group fails as NOGROUP, which the sweep skips in silence -- the immediate
 // sweep would then do nothing at all.
 func TestReclaimLoopCreatesTheGroupBeforeItsFirstSweep(t *testing.T) {
-	f := newReleaseFixture(t, false)
+	f := newReleaseFixture(t, nil)
 	const group = "group-not-created-yet"
 	seen := &sweepSeen{key: f.stream, ch: make(chan error, 4)}
 	f.client.AddHook(seen)
@@ -140,7 +133,7 @@ func TestReclaimLoopCreatesTheGroupBeforeItsFirstSweep(t *testing.T) {
 // merely busy. Only entries idle past ClaimIdleTimeout are claimed. The sweep is
 // run to completion on this goroutine, so nothing cancels it half-way.
 func TestReclaimSweepDoesNotTakeAnEntryALiveConsumerIsProcessing(t *testing.T) {
-	f := newReleaseFixture(t, false)
+	f := newReleaseFixture(t, nil)
 	inflight := f.deliverRelay(t) // delivered to "me", not released: in flight
 
 	b := &StreamsConsumer{
