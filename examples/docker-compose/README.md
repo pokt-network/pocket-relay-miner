@@ -1,47 +1,59 @@
-## Docker Compose HA reference
+## Docker Compose example
 
-The smallest deployment that is still the HA architecture: one stateless
-relayer, one miner and the shared Redis that holds every piece of session
-state. It exists as **documentation** — the supported development environment
-is the Tilt/Kubernetes localnet (`tilt/README.md`), which brings a chain,
-backends and observability with it. This compose file brings none of that:
-you point it at your own Pocket full node and your own service backends.
+A complete Pocket RelayMiner deployment on a local chain: one validator,
+Redis, a test backend, one relayer and one miner. It serves real relays and
+submits real claims and proofs, with nothing to install but Docker.
+
+Every key in `localnet/` and `config/supplier-keys.yaml` is a public localnet
+key. Never use one on a real network.
+
+### Files
+
+- `docker-compose.yaml`: the services, their limits and their startup order.
+- `config/relayer.yaml`, `config/miner.yaml`: minimal configs; every key not
+  set takes its default (see `config.relayer.example.yaml` and
+  `config.miner.example.yaml` at the repository root for all of them).
+- `config/supplier-keys.yaml`: the signing keys of the 15 localnet suppliers.
+- `localnet/`: the validator's genesis and node files, and `account-init.sh`,
+  which puts the public key of every staked account on chain.
+- Redis uses `config.redis.example.conf` from the repository root, with
+  `maxmemory` lowered to 1 GB.
 
 ### Run it
 
-```bash
-cp ../../config.relayer.example.yaml config/relayer.yaml
-cp ../../config.miner.example.yaml config/miner.yaml
-cp config/supplier-keys.yaml.example config/supplier-keys.yaml
-```
-
-Then edit the copies — every step is required:
-
-1. **Set `redis.url: redis://redis:6379` in BOTH `config/relayer.yaml` and
-   `config/miner.yaml`.** The example configs dial `redis://localhost:6379`,
-   which inside a container is the container itself — both services
-   crash-loop until this points at the compose service name.
-2. Set `keys.keys_file: /keys/supplier-keys.yaml` in both configs (the path
-   the compose file mounts the keys at).
-3. In `config/relayer.yaml`: point `pocket_node` at your full node and
-   configure your services/backends.
-4. In `config/miner.yaml`: point `pocket_node` at your full node and set the
-   chain id.
-5. In `config/supplier-keys.yaml`: replace the placeholder with your real
-   hex-encoded supplier private keys — **never commit this file**.
+The relayer and miner run `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0`.
+If that tag is not published yet, build it from the repository root first:
 
 ```bash
-docker compose up -d
-docker compose logs -f relayer miner
+docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.0 .
 ```
 
-### Scaling is the whole point
+Then, from this directory:
 
 ```bash
-docker compose up -d --scale relayer=3 --scale miner=2
+docker compose -p prm-example up -d
+docker compose -p prm-example ps -a
 ```
 
-Nothing else changes: relayers are stateless, miners elect a leader through
-Redis, and any replica can pick up another's in-flight work. When scaling
-relayers, remove the fixed `ports:` mapping and front them with your own
-load balancer.
+Expected: `validator`, `redis`, `backend`, `miner` and `relayer` are
+`healthy`, and `account-init` is `Exited (0)`. The first run builds the test
+backend image, which takes a few minutes.
+
+Send a relay (from the repository root, after `make build`):
+
+```bash
+./bin/pocket-relay-miner relay jsonrpc --localnet --service develop-http
+```
+
+Expected: `Status: ✅ SUCCESS` and `Signature: ✅ VALID`. `--localnet` uses the
+relayer on `localhost:8180` and the validator gRPC on `localhost:9090`, which
+is where this compose file publishes them.
+
+### Reset
+
+```bash
+docker compose -p prm-example down -v
+```
+
+`-v` deletes the chain and Redis together. Keep them together: a Redis that
+holds sessions of a previous chain does not match a new one.

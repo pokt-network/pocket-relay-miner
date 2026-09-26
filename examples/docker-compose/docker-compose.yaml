@@ -1,58 +1,143 @@
-# Minimal HA reference deployment: shared Redis, one relayer, one miner.
+# Pocket RelayMiner on a self-contained localnet: one validator, Redis, a test
+# backend, one relayer and one miner. Everything a relay needs, from the chain
+# to the claim, runs here; nothing on the host is required except Docker.
 #
-# This is DOCUMENTATION, not a dev environment — local development uses the
-# Tilt/Kubernetes localnet (see tilt/README.md), which brings its own chain,
-# backends and observability. This file shows the smallest wiring that is
-# still the HA architecture: every piece of session state lives in Redis, so
-# adding replicas is just scaling the stateless services against the same
-# Redis and the same chain endpoints:
+#   docker compose -p prm-example up -d        # start (first build of the backend takes a few minutes)
+#   docker compose -p prm-example ps           # every service healthy, account-init exited 0
+#   docker compose -p prm-example down -v      # stop and reset chain AND Redis
 #
-#   docker compose up -d --scale relayer=2 --scale miner=2
+# The chain and Redis are reset together (down -v): a Redis holding sessions
+# of a previous chain confuses the miner on a fresh one.
 #
-# Before starting:
-#   1. Edit config/relayer.yaml and config/miner.yaml: point pocket_node at
-#      your full node and configure your services/backends.
-#   2. Put your supplier signing keys in config/supplier-keys.yaml
-#      (hex-encoded private keys; see config.relayer.example.yaml for the
-#      schema). NEVER commit that file.
+# Every key in localnet/ and config/supplier-keys.yaml is a PUBLIC localnet
+# key. Never use one on a real network.
 
 services:
-  redis:
-    image: redis:8.2-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+  # Single-validator Pocket chain. The genesis already stakes 10 applications,
+  # 15 suppliers and 1 gateway on 10 test services.
+  validator:
+    image: ghcr.io/pokt-network/pocketd:0.1.35
+    # The image runs as a non-root user; the fresh data volume is root-owned.
+    user: "0:0"
+    entrypoint: ["/bin/bash", "/seed/validator-entrypoint.sh"]
     volumes:
+      - ./localnet:/seed:ro
+      - validator-data:/home/pocket/.pocket
+    ports:
+      # gRPC, published so the relay test client on the host can read sessions.
+      - "127.0.0.1:${VALIDATOR_GRPC_PORT:-9090}:9090"
+    healthcheck:
+      # Healthy once a block has been committed (the image has no curl).
+      test: ["CMD-SHELL", "pocketd status --node tcp://localhost:26657 2>/dev/null | grep -Eq '\"latest_block_height\":\"[1-9]'"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 20s
+    restart: unless-stopped
+
+  # One-shot: registers the public key of every staked account on chain
+  # (see localnet/account-init.sh). Exits 0 only if all of them have one.
+  account-init:
+    image: ghcr.io/pokt-network/pocketd:0.1.35
+    entrypoint: ["/bin/bash", "/localnet/account-init.sh"]
+    volumes:
+      - ./localnet:/localnet:ro
+    depends_on:
+      validator:
+        condition: service_healthy
+    restart: "no"
+
+  # Shared state for relayer and miner. The server config is the repository's
+  # config.redis.example.conf (maxmemory-policy noeviction: Redis must refuse
+  # writes rather than drop relay data); only maxmemory is lowered here to fit
+  # a laptop. The container limit is twice maxmemory.
+  redis:
+    image: redis:8.10.1-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--maxmemory", "1gb"]
+    volumes:
+      - ../../config.redis.example.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-data:/data
+    mem_limit: 2g
+    cpus: 2
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
 
+  # Test backend the relayer forwards relays to (JSON-RPC on 8545).
+  backend:
+    build: ../../tilt/backend-server
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:8545/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Builds the claim and proof for every served relay and submits them.
+  # Exits if it cannot read the chain at startup, hence restart: on-failure.
+  miner:
+    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.0
+    command: ["miner", "--config", "/config/miner.yaml"]
+    volumes:
+      - ./config/miner.yaml:/config/miner.yaml:ro
+      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
+    mem_limit: 2g
+    cpus: 2
+    environment:
+      # Go runtime soft limit below mem_limit, so GC tightens before an OOM kill.
+      GOMEMLIMIT: 1800MiB
+      # Equal to cpus.
+      GOMAXPROCS: "2"
+    depends_on:
+      redis:
+        condition: service_healthy
+      validator:
+        condition: service_healthy
+      account-init:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9092/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: on-failure
+
+  # Serves relays: verifies each request, forwards it to the backend, signs
+  # the response and hands the relay to the miner through Redis.
   relayer:
-    # config/relayer.yaml must set redis.url: redis://redis:6379 — the
-    # example config's localhost:6379 is THIS container inside compose.
-    image: ghcr.io/pokt-network/pocket-relay-miner:latest
+    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.0
     command: ["relayer", "--config", "/config/relayer.yaml"]
     volumes:
       - ./config/relayer.yaml:/config/relayer.yaml:ro
       - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
     ports:
-      - "8080:8080" # relay traffic; front with your own LB when scaling
+      # Relay traffic.
+      - "127.0.0.1:${RELAYER_PORT:-8180}:8080"
+    mem_limit: 2g
+    cpus: 2
+    environment:
+      # Go runtime soft limit below mem_limit, so GC tightens before an OOM kill.
+      GOMEMLIMIT: 1800MiB
+      # Equal to cpus.
+      GOMAXPROCS: "2"
     depends_on:
       redis:
         condition: service_healthy
-
-  miner:
-    # config/miner.yaml must set redis.url: redis://redis:6379 — the
-    # example config's localhost:6379 is THIS container inside compose.
-    image: ghcr.io/pokt-network/pocket-relay-miner:latest
-    command: ["miner", "--config", "/config/miner.yaml"]
-    volumes:
-      - ./config/miner.yaml:/config/miner.yaml:ro
-      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
-    depends_on:
-      redis:
+      miner:
         condition: service_healthy
+      backend:
+        condition: service_healthy
+    healthcheck:
+      # /ready on the health port answers 200 only once the relayer can serve.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
 
 volumes:
+  validator-data:
   redis-data:

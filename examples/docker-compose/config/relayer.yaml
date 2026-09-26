@@ -1,0 +1,58 @@
+# Relayer config for the docker compose localnet example.
+#
+# Minimal on purpose: every key not set here takes its default. The full list
+# of keys, with their defaults, is in config.relayer.example.yaml at the
+# repository root. Check a config before starting it with:
+#   pocket-relay-miner relayer validate --config <file>
+
+# Address the relay server listens on (relay traffic from gateways).
+listen_addr: "0.0.0.0:8080"
+
+# Redis that holds all shared state. Relayer and miner must point at the same
+# Redis: the relayer publishes every served relay there for the miner.
+redis:
+  # "redis" is the compose service name.
+  url: "redis://redis:6379"
+
+# The chain node the relayer reads applications, sessions and params from.
+pocket_node:
+  # CometBFT RPC.
+  query_node_rpc_url: "http://validator:26657"
+  # gRPC: chain queries.
+  query_node_grpc_url: "validator:9090"
+  # Plain-text gRPC; the localnet validator does not serve TLS.
+  grpc_insecure: true
+
+# The suppliers this relayer signs responses for.
+keys:
+  # Mounted by the compose file; same file as the miner's.
+  keys_file: "/keys/supplier-keys.yaml"
+
+# Services this relayer serves, keyed by on-chain service id. A relay for a
+# service that is not listed here is rejected.
+services:
+  develop-http:
+    # eager: validate the relay (signature, session) before forwarding it.
+    validation_mode: eager
+    # Backend used when the relay does not name a transport.
+    default_backend: jsonrpc
+    # Backends keyed by transport: jsonrpc | rest | websocket | grpc | cometbft.
+    backends:
+      jsonrpc:
+        # "backend" is the compose service name of the test backend.
+        url: "http://backend:8545"
+
+# Health server: GET /ready answers 200 once the relayer can serve relays.
+health_check:
+  enabled: true
+  addr: "0.0.0.0:8081"
+
+# Prometheus metrics.
+metrics:
+  enabled: true
+  addr: "0.0.0.0:9090"
+
+# Log level and format; logs go to stderr.
+logging:
+  level: "info"
+  format: "json"

@@ -1,0 +1,43 @@
+# Miner config for the docker compose localnet example.
+#
+# Minimal on purpose: every key not set here takes its default. The full list
+# of keys, with their defaults, is in config.miner.example.yaml at the
+# repository root. Check a config before starting it with:
+#   pocket-relay-miner miner validate --config <file>
+
+# Redis that holds all shared state (relay streams, SMST trees, sessions).
+# Relayer and miner must point at the same Redis.
+redis:
+  # "redis" is the compose service name.
+  url: "redis://redis:6379"
+
+# The chain node the miner reads from and submits claims and proofs to.
+pocket_node:
+  # CometBFT RPC: blocks, and transaction submission.
+  query_node_rpc_url: "http://validator:26657"
+  # gRPC: chain queries (params, sessions, suppliers).
+  query_node_grpc_url: "validator:9090"
+  # The miner refuses to start if the node reports a different chain id.
+  chain_id: "pocket"
+  # Plain-text gRPC; the localnet validator does not serve TLS.
+  grpc_insecure: true
+
+# The suppliers this miner claims and proves for.
+keys:
+  # Mounted by the compose file; same file as the relayer's.
+  keys_file: "/keys/supplier-keys.yaml"
+
+# Expected seconds per block. Must match the chain: the localnet validator
+# commits a block every ~11s (timeout_commit = "10s" in localnet/config.toml,
+# plus the time to build the block).
+block_time_seconds: 11
+
+# Prometheus metrics, and GET /health for the container healthcheck.
+metrics:
+  enabled: true
+  addr: "0.0.0.0:9092"
+
+# Log level and format; logs go to stderr.
+logging:
+  level: "info"
+  format: "json"
