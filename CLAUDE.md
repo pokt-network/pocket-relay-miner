@@ -56,9 +56,12 @@ tested code is mandatory, and every millisecond on the hot path counts.
 - **When you don't know, SAY SO.** Do not guess. Search the code, read the tests,
   check imports, ask. Then answer with the location, e.g. "invalidation is
   triggered via Redis pub/sub, see `cache/<file>.go:<lines>`".
-- **Clients are out of scope.** This repository documents and tests only its own
-  behaviour. When a rule needs the other side, say "the gateway/client that sends
-  relays", never another product by name.
+- **Design with the gateways that send relays in mind.** Their behaviour
+  constrains ours: how they pick suppliers, retry, hold WebSocket sessions and
+  read our errors decides what a change to the relayer means for the traffic it
+  serves. Check a change against that client side before calling it done. The
+  public docs name no other product, so a rule here says "the gateway/client
+  that sends relays".
 
 ### Before the first edit -- THE COUNCIL, then the success criterion
 
@@ -196,8 +199,9 @@ clients, crypto), go-redis v9 (state, streams, pub/sub, locks), Cosmos SDK
    NEVER run tests without `make` unless debugging one package.
 4. **Code quality**: `make fmt`, `make lint`, `make tidy`.
 5. **Benchmarks**: `go test -bench=. -benchmem ./miner/` (SMST), `./cache/`.
-6. **Redis**: `redis-cli` works locally (Tilt proxies Redis). For decoded views
-   use the `pocket-relay-miner redis ...` subcommands (see "Debugging Redis").
+6. **Redis**: inspect it with this product's own `pocket-relay-miner redis ...`
+   subcommands first (see "Debugging Redis"); `redis-cli` (proxied by Tilt) is the
+   fallback for what they do not show.
 
 Working order for a change: read the code first (grep, don't assume), check
 what imports the package you touch (`go list -f '{{.ImportPath}}' -deps ./... |
@@ -622,10 +626,11 @@ before quoting a figure.
 
 #### Debugging Redis
 
-`redis-cli` is proxied by Tilt and is the tool for raw inspection
-(`redis-cli INFO memory`, `redis-cli MONITOR` -- very verbose,
-`redis-cli HGETALL <key>`). The `pocket-relay-miner redis` subcommands
-(`cmd/redis/`) decode what raw Redis cannot:
+Use this product's own `pocket-relay-miner redis` subcommands (`cmd/redis/`)
+first: they build every key through the KeyBuilder and decode what raw Redis
+cannot. `redis-cli` (proxied by Tilt) is the fallback for what they do not
+cover (`redis-cli INFO memory`, `redis-cli MONITOR` -- very verbose,
+`redis-cli HGETALL <key>`):
 
 ```bash
 pocket-relay-miner redis leader                                  # leader status and TTL
