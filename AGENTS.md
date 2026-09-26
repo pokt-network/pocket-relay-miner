@@ -59,6 +59,17 @@ are not checked, and breaking them is unsupported.
 
 ## Rules for an agent running a deployment
 
+- **Size the limits for the load; the examples do not.** The limits in
+  `examples/` (Redis and miner 4 GiB, relayer 2 GiB, 2 CPUs each) fit a few
+  suppliers with ordinary traffic; they do not absorb a burst of large relays
+  or dozens of suppliers. Before real traffic, scale them from: the comments
+  above each limit in
+  [examples/docker-compose/docker-compose.yaml](examples/docker-compose/docker-compose.yaml)
+  (what the v0.1.0 load run used), the
+  [capacity report](https://github.com/pokt-network/pocket-relay-miner/releases/download/v0.1.0/Relay-Miner-Capacity.pdf)
+  (memory, CPU and Redis per component under load),
+  [config.redis.example.conf](config.redis.example.conf) (Redis settings of
+  that run), and [TROUBLESHOOTING.md, Memory and CPU](docs/deploy/TROUBLESHOOTING.md#memory-and-cpu).
 - Pick 1 runbook, [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md)
   or [docs/deploy/HOST.md](docs/deploy/HOST.md), and run its steps in order
   from Step 0. A step gives **Run** and **Expect**, and **If not** and

@@ -199,7 +199,7 @@ the unit's `MemoryMax`) and `GOMAXPROCS` equal to its CPU limit.
 | 503 `relayer is not admitting relays right now` | `pricing_unavailable` | no service factor manifest yet | [Relayer up but not ready](#relayer-up-but-not-ready) |
 | 503 `relayer is not admitting relays right now` | `publish_queue_full` | the queue of relays waiting to be written to Redis is full | check Redis latency and health; the queue drains by itself |
 | 429 `relayer is not admitting relays right now` | `validation_queue_full` | an optimistic service's validation queue is full | wait for `Retry-After`; if persistent, raise the service's capacity |
-| 429 `relayer is not admitting relays: storage saturated` | `storage_saturated` | Redis has less than 1 GiB free, or 1/8 of `maxmemory` when that is smaller | raise `maxmemory`, or let the miner drain; admission reopens at twice that line (2 GiB free with a `maxmemory` of 8 GiB or more; 256 MiB free with the compose example's `1gb`) |
+| 429 `relayer is not admitting relays: storage saturated` | `storage_saturated` | Redis has less than 1 GiB free, or 1/8 of `maxmemory` when that is smaller | raise `maxmemory`, or let the miner drain; admission reopens at twice that line (2 GiB free with a `maxmemory` of 8 GiB or more; 768 MiB free with the compose example's `3gb`) |
 | relay refused before any backend call | `no_local_signer` | the relay names a supplier whose key this relayer does not hold | add the key to `keys.keys_file`, or check the gateway targets the right supplier |
 
 Per-relay rejections log at debug level only; count them with the metric,

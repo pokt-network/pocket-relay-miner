@@ -203,7 +203,7 @@ $C exec redis redis-cli --raw CONFIG GET maxmemory
 maxmemory-policy
 noeviction
 maxmemory
-1073741824
+3221225472
 ```
 
 **If not**: any other policy, or `0` → the Redis config was not loaded → both
@@ -452,8 +452,9 @@ per network (`mainnet`, and `testnet-lego` for beta) are in
 and snapshots and other public endpoints in
 [pocket-network-resources](https://github.com/pokt-network/pocket-network-resources).
 
-Before real traffic, size Redis and the containers: raise `--maxmemory` in the
-`redis` service and every `mem_limit`, keeping `mem_limit` of Redis at least
-1.25x its `maxmemory`, and `GOMEMLIMIT` about 10% below each process's
-`mem_limit`. [config.redis.example.conf](../../config.redis.example.conf) has
-the values v0.1.0 was measured with.
+The limits in `docker-compose.yaml` (Redis 4 GiB with a 3 GiB `maxmemory`,
+miner 4 GiB, relayer 2 GiB, 2 CPUs each) fit a deployment with a few
+suppliers. Above each one, a comment gives what the v0.1.0 load run
+(50 suppliers, ~2,300 relays/s) used and what to set at that scale. When you
+change them, keep `mem_limit` of Redis at least 1.25x its `maxmemory`, and
+`GOMEMLIMIT` about 10% below each process's `mem_limit`.
