@@ -24,6 +24,18 @@ What it measured:
 - **A comparison** with the build that preceded the release, run on the same
   machine and load.
 
+## The figures, in text
+
+From the report's "Sizing this release" section (highest reading outside the
+1 MiB burst unless stated):
+
+| Component | Sustained | What it cost |
+|---|---|---|
+| relayer | ~2,400 relays/s (the test load, not a ceiling) | at most 3.9 cores, at most 128 MiB |
+| miner | 300 to 600 live claim trees | 0.5 cores steady, 1.9 while ~300 claims are built; at most 2.9 GiB |
+| miner, 1 MiB burst | 128 concurrent 1 MiB requests for 15 s | 6.8 GiB of its 8 GiB limit |
+| Redis | 4.9 GiB peak | at most 0.7 cores; 38 % of the 12.8 GiB `maxmemory` |
+
 ## How to read it against your load
 
 - The figures come from 1 topology on 1 machine. Supplier count, services,

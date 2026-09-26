@@ -15,7 +15,12 @@ the claim and the proof from the served relays and submits them to the chain.
 - **Deploying**: [docs/deploy/README.md](docs/deploy/README.md) to choose a path,
   then its runbook: [DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) or
   [HOST.md](docs/deploy/HOST.md). When it does not start or does not serve:
-  [TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md).
+  [TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md). Words such as
+  supplier, stake, session or backend are explained at the top of
+  [docs/deploy/README.md](docs/deploy/README.md#words-you-will-meet).
+- **Dashboards** (optional): Prometheus and Grafana with 7 dashboards, started
+  with the compose example's `observability` profile:
+  [examples/observability/](examples/observability/README.md).
 - **Anything else** -- configuring, operating, testing, understanding the
   protocol, changing the code: the index in
   [README.md, "Where to start"](README.md#where-to-start) says, for what you
@@ -40,8 +45,9 @@ are not checked, and breaking them is unsupported.
 3. **Redis 8.10 or newer, with `maxmemory` set and `maxmemory-policy
    noeviction`.** Both binaries refuse to start when `redis_version` is below
    8.10, when `maxmemory` is 0, or when the policy is anything other than
-   `noeviction`. `validate` does not connect to Redis: these are checked when
-   the process starts. Use
+   `noeviction`: Redis holds every relay until it is claimed and proved, and an
+   evicted key is a claim that cannot be proved. `validate` does not connect
+   to Redis: these are checked when the process starts. Use
    [config.redis.example.conf](config.redis.example.conf).
 4. **Memory and CPU limits**: set `GOMEMLIMIT` and `GOMAXPROCS`, or give each
    process a container (or systemd) memory and CPU limit. Without either, each
@@ -66,7 +72,8 @@ are not checked, and breaking them is unsupported.
   own (miner `MemoryMax=8G`, relayer `MemoryMax=4G`, `CPUQuota=400%` each;
   Redis `maxmemory` is yours to set,
   [HOST.md, step 2](docs/deploy/HOST.md#step-2-redis-810)); neither set is
-  the one the load run used. Before real traffic, scale them from: the
+  the one the load run used, which gave the relayer 8 GiB, the miner 8 GiB and
+  Redis 16 GiB with `maxmemory` 12.8 GiB. Before real traffic, scale them from: the
   comments above each limit in
   [examples/docker-compose/docker-compose.yaml](examples/docker-compose/docker-compose.yaml)
   (what the v0.1.0 load run used), the

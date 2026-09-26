@@ -76,6 +76,54 @@ looks like this mistake.
 If you want a passphrase-protected keyring on a bare VM, say `file`. You get the
 behaviour you asked for on every host.
 
+## Creating a supplier key, and staking it
+
+The relay miner does not create keys or stake: `pocketd`, the Pocket Network
+CLI, does. Run these on a machine you trust, and never paste a private key, a
+mnemonic or a passphrase into a chat or an AI agent. Flags below are from
+`pocketd` 0.1.35.
+
+**1. Create the key in a passphrase-protected keyring.**
+
+```bash
+pocketd keys add supplier1 --keyring-backend file --keyring-dir ~/.pocket
+```
+
+It asks for a passphrase twice, then prints the address (`pokt1...`) and a
+mnemonic. Write the mnemonic down offline: it is the only way to recover the key.
+
+**2. Give the key to the relay miner, one of two ways.**
+
+- **The keyring itself.** Copy `~/.pocket/keyring-file/` to the server and point
+  `keys.keyring.dir` at its PARENT, with `backend: file` and the passphrase in a
+  file ([the `keyring` source](#keyring--a-cosmos-sdk-keyring),
+  [the passphrase](#the-passphrase-for-backend-file)).
+- **A hex key in the keys file.** Export the private key and put its 64 hex
+  characters under `keys:` in `supplier-keys.yaml` (mode 0600;
+  [the `keys_file` source](#keys_file--a-yaml-file-of-hex-private-keys)):
+
+  ```bash
+  pocketd keys export supplier1 --unarmored-hex --unsafe --keyring-backend file --keyring-dir ~/.pocket
+  ```
+
+  The supplier address is derived from the key: nothing else to write down.
+
+**3. Fund and stake the supplier.** The account needs POKT for the stake and for
+the fee of every claim and proof. Staking is a chain transaction; its config file
+(owner and operator addresses, stake amount, and each service with the public URL
+gateways reach your relayer at) and the minimum stake are defined by the network:
+see the [supplier staking config](https://dev.poktroll.com/operate/configs/supplier_staking_config).
+
+```bash
+pocketd tx supplier stake-supplier --config stake_config.yaml --from supplier1 \
+  --keyring-backend file --keyring-dir ~/.pocket --network beta
+pocketd query supplier show-supplier <pokt1-address> --network beta
+```
+
+Use `--network main` for mainnet. Once staked,
+`pocket-relay-miner relayer validate --config <file> --check-stake` confirms every
+staked service has a backend in your relayer config.
+
 ## The passphrase, for `backend: file`
 
 The passphrase never goes in the config. The config carries a **reference** to

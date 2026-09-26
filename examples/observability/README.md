@@ -20,14 +20,14 @@ incident is in [docs/METRICS_TRIAGE.md](../../docs/METRICS_TRIAGE.md).
 
 ## With the compose example
 
-Start the compose example first
-([docs/deploy/DOCKER_COMPOSE.md](../../docs/deploy/DOCKER_COMPOSE.md)), then,
-from the repository root, add this file to the same project:
+The compose example carries Prometheus, Grafana and a Redis exporter in its
+`observability` profile, which a plain `up` does not start. Start the example
+first ([docs/deploy/DOCKER_COMPOSE.md](../../docs/deploy/DOCKER_COMPOSE.md)),
+then, from the repository root:
 
 ```bash
-docker compose -p prm-example -f examples/docker-compose/docker-compose.yaml \
-  -f examples/observability/docker-compose.observability.yaml up -d
-curl -s http://127.0.0.1:9091/api/v1/targets | grep -o '"health":"[a-z]*"' | sort | uniq -c
+docker compose -p prm-example -f examples/docker-compose/docker-compose.yaml --profile observability up -d
+curl -s "http://127.0.0.1:${PROMETHEUS_PORT:-9091}/api/v1/targets" | grep -o '"health":"[a-z]*"' | sort | uniq -c
 ```
 
 **Expect**: `3 "health":"up"` (relayer, miner, Redis exporter). Then open
@@ -36,6 +36,16 @@ login): the Money dashboard is the home page, the others are in the
 "Pocket RelayMiner" folder. Both ports are bound to loopback; from another
 machine use an SSH tunnel (`ssh -L 3000:127.0.0.1:3000 <host>`). If 9091 or
 3000 is taken, export `PROMETHEUS_PORT` or `GRAFANA_PORT` before `up`.
+
+Without a browser, list the dashboards through Grafana's HTTP API:
+
+```bash
+curl -s -u admin:admin "http://127.0.0.1:${GRAFANA_PORT:-3000}/api/search?type=dash-db" | grep -o '"title":"[^"]*"'
+```
+
+**Expect**: 7 titles, `Relay Miner / 1 Money` to `Relay Miner / 7 Process internals`.
+If it prints nothing, Grafana is still starting after `up`: retry after a few
+seconds.
 
 With the public, unstaked key the money panels stay at 0: nothing is served.
 The chain panels (dashboard 6) and the process panels (dashboard 7) fill in at

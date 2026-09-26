@@ -2,6 +2,46 @@
 
 Start here, pick 1 path, and follow its runbook from the first step.
 
+## Words you will meet
+
+- **POKT**: Pocket Network's token. Stakes, fees and rewards are paid in it;
+  amounts on chain are in uPOKT (1 POKT = 1,000,000 uPOKT).
+- **Beta and mainnet**: beta (chain id `pocket-lego-testnet`) is the test
+  network, mainnet (`pocket`) the real one. Start on beta.
+- **Supplier**: your account on Pocket Network. It is staked for one or more
+  services, it is paid for the relays it serves, and its private key signs every
+  response, claim and proof ([more](../protocol/SUPPLIER.md)).
+- **Stake**: POKT locked on chain. A supplier must be staked for a service to be
+  sent relays for it; the minimum is set by the network. You stake with
+  `pocketd`, the Pocket Network CLI, not with this repository
+  ([how](../SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it)).
+- **Application**: the on-chain account that pays for relays; its stake is the
+  budget each relay is charged against ([more](../protocol/APPLICATION.md)).
+- **Gateway**: the client that sends relays to your relayer on behalf of
+  applications ([more](../protocol/GATEWAY.md)).
+- **Relay**: 1 request from a gateway and the signed response to it.
+- **Service**: an on-chain service id, such as one blockchain's RPC, that a
+  supplier is staked for ([more](../protocol/SERVICE.md)). A compose file also
+  calls each container a service; where the two could be confused, the
+  runbooks say "on-chain service id".
+- **Backend**: the node that answers a relay for a service, such as your own RPC
+  node for that blockchain. The relayer forwards each relay to it.
+- **Session**: a fixed number of blocks in which a set of suppliers serves 1
+  application on 1 service. Work is claimed and paid per session
+  ([more](../protocol/SESSION.md)).
+- **Claim and proof**: the 2 transactions the miner submits after each session.
+  The claim states the work, the proof backs it when the chain asks for one; a
+  claim whose required proof misses its window is not paid. Each costs a fee,
+  paid from the supplier's account ([more](../CLAIM_PROOF_LIFECYCLE.md)).
+- **Full node**: a server that follows the Pocket chain and answers queries
+  (CometBFT RPC and gRPC). The compose example uses the public
+  `sauron-*.infra.pocket.network` endpoints; in production use your own or a
+  provider's.
+- **Redis**: the database the relayer and the miner share. It holds every relay
+  until it is claimed and proved, which is why it must never evict a key.
+- **Keyring**: an encrypted store of keys created by `pocketd`; one of the 2 ways
+  to give the relay miner its keys ([more](../SUPPLIER_KEYS.md)).
+
 ## Choose a path
 
 | Path | Use it when | Runbook | Verified |
@@ -60,10 +100,13 @@ produces, where there is one.
 | You need | For | Where it comes from |
 |---|---|---|
 | A Pocket full node: CometBFT RPC and gRPC | both processes; the miner submits transactions through it | yours, or a provider's. The compose example uses the public Sauron endpoints |
-| At least 1 staked supplier and its private key (64 hex characters) | signing responses, claims and proofs | your staking process. **A human provides it; an agent never generates or moves funds** |
+| At least 1 staked supplier and its private key (64 hex characters) | signing responses, claims and proofs | your staking process ([how, with `pocketd`](../SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it)). **A human provides it; an agent never generates or moves funds** |
 | A backend node for every service your suppliers are staked for | answering relays | yours |
 | Redis 8.10 or newer (both processes refuse an older one at startup), `maxmemory` set, `noeviction` | shared state | [config.redis.example.conf](../../config.redis.example.conf) |
 | The supplier's account funded for transaction fees | claims and proofs cost fees | your wallet |
+
+What a relay pays, and every step between a served relay and the reward:
+[docs/protocol/INTERACTIONS.md, "The money chain"](../protocol/INTERACTIONS.md#the-money-chain-end-to-end).
 
 The miner's `block_time_seconds` must match the network: beta
 (`pocket-lego-testnet`) is roughly 30 seconds, mainnet (`pocket`) roughly 60
@@ -97,6 +140,10 @@ the second one logs `pprof server failed` and keeps running without pprof.
 
 ## Upgrading and rolling back
 
+- Read the release notes of the version you are moving to first: what changed,
+  what it breaks (config keys, metrics, dashboards) and what to do before
+  upgrading. They are on each release, at
+  <https://github.com/pokt-network/pocket-relay-miner/releases>.
 - Upgrade the relayer and the miner together.
 - Validate the new configs with the new binary before switching: retired keys
   fail `validate`.

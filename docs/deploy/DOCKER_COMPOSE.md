@@ -279,15 +279,22 @@ your own staked supplier.
 ## Dashboards (optional, any time from here)
 
 Prometheus and Grafana with dashboards for money, claims and proofs, relay
-flow, the relayer, storage and memory, suppliers and the chain: run
-[examples/observability/](../../examples/observability/README.md) in the same
-compose project.
+flow, the relayer, storage and memory, suppliers and the chain are in the
+example's `observability` profile:
+
+```bash
+$C --profile observability up -d
+```
+
+Then follow [examples/observability/README.md](../../examples/observability/README.md)
+from its first **Expect**. To stop everything, `$C --profile observability down -v`.
 
 ## Step 9: switch to your own keys
 
 **Stop if**: you do not have a staked supplier's private key from a human.
 An agent never generates, funds or stakes a key, and never pastes a key into a
-tracked file.
+tracked file. The human creates and stakes it with `pocketd`, in a few steps:
+[docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](../SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
 
 `config/supplier-keys.yaml` is tracked and holds only the public key. Your keys
 go in `config/supplier-keys.local.yaml`, which the example's `.gitignore`
