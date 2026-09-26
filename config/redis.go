@@ -99,11 +99,11 @@ func DefaultRedisNamespaceConfig() RedisNamespaceConfig {
 	return RedisNamespaceConfig{BasePrefix: "ha"}
 }
 
-// basePrefixAccepted is what a base prefix may contain: ONE flat segment of
-// letters, digits, underscore and dash. It is the rule docs/REDIS.md and both
-// config schemas have always stated.
+// basePrefixRejected is what a base prefix must not contain: a colon,
+// whitespace or a glob metacharacter (* ? [ ]), so the prefix is ONE flat
+// segment. Anything else is accepted.
 //
-// Why not just ban globs and allow the rest. A glob is the loud hazard -- it
+// Why the colon too, and not just the globs. A glob is the loud hazard -- it
 // reaches every SCAN pattern the KeyBuilder builds, and one of those feeds a
 // delete -- but ':' is the quiet one. The base prefix is a NAMESPACE, one
 // segment, and a colon turns it into a hierarchy the key layout does not model:

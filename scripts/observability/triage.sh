@@ -226,8 +226,9 @@ echo "   sessions_failed=$(v ha_miner_sessions_failed_total) upokt_lost_uPOKT=$(
 # doors must sum. Measured 2026-09-17 BEFORE this was enforced: claimed 6742.81,
 # proved 4277.10, lost 3034.77 -> residual -569.06, i.e. 108.4%. A session whose
 # first submission failed was counted lost at the error and proved again when the
-# retry landed. Until that is fixed this line is expected to show a gap; once it
-# is, a non-zero residual means a session vanished or was double counted.
+# retry landed. A retried failure is no longer counted lost: it waits in the
+# unresolved pair read below until the chain answers. So at run end a non-zero
+# residual means a session vanished or was double counted.
 echo
 # The identity balances only once every session has left the book through a door,
 # so it is a run-END reading. Mid-run it shows claimed > the sum of the doors for a
