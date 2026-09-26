@@ -29,9 +29,9 @@ services:
   # writes rather than drop relay data). Never publish its port.
   #
   # Sizing: these limits fit a deployment with a few suppliers and ordinary
-  # traffic, not a burst of large relays. The v0.1.0 load
-  # run (50 suppliers, ~2,300 relays/s) used Redis with a 16 GiB limit and 5
-  # CPUs; it peaked at 4.4 GiB used and 0.3 cores. At that scale drop the two
+  # traffic, not a burst of large relays. The v0.1.0 load run (50 suppliers,
+  # ~2,300 relays/s) used Redis with a 16 GiB limit and 5 CPUs; it peaked at
+  # 4.4 GiB used and 0.3 cores. At that scale drop the two
   # overrides below so the config file's maxmemory (12.8 GiB) and io-threads (4)
   # apply, and give it 16g and 5 CPUs. maxmemory stays below mem_limit to leave
   # room for the snapshot fork.
