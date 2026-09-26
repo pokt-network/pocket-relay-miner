@@ -28,8 +28,6 @@ tilt/
 │   ├── *.toml              # Validator configs
 │   └── *.json              # Validator keys
 ├── backend-server/         # Demo backend server
-├── grafana/
-│   └── dashboards/         # unified-overview.json
 ├── local-registry.sh       # Local image registry for kind
 └── README.md               # This file
 ```
@@ -70,10 +68,12 @@ Configuration files for the K8s environment:
 | `config.toml` | Validator CometBFT config |
 | `app.toml` | Validator app config |
 
-### Grafana Dashboard (`grafana/`)
+### Grafana dashboards
 
-One dashboard, `dashboards/unified-overview.json`: service and protocol
-performance, claims, proofs, settlement, failed submissions and the cache.
+Tilt provisions the 7 dashboards of
+[examples/observability/](../examples/observability/README.md), the same files
+the compose example runs; they are generated from the metrics the code defines
+by `scripts/dashboards/generate.py`.
 
 ## Services
 
