@@ -35,14 +35,14 @@ const (
 	flagSessionTTL   = "session-ttl"
 )
 
-// MinerCmd returns the command for starting the HA Miner component.
+// MinerCmd returns the command for starting the Miner component.
 func MinerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "miner",
-		Short: "Start the HA Miner (SMST builder and claim/proof submitter)",
-		Long: `Start the High-Availability Miner component.
+		Short: "Start the Miner (SMST builder and claim/proof submitter)",
+		Long: `Start the Miner component.
 
-The HA Miner consumes mined relays from Redis Streams and builds SMST trees.
+A deployment runs one miner next to one relayer and one Redis. The Miner consumes mined relays from Redis Streams and builds SMST trees.
 It supports multiple suppliers and dynamically adds/removes them based on key changes.
 
 Configuration:

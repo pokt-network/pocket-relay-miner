@@ -45,7 +45,8 @@ Examples:
 
 // Relay command flags are now in the relay package (relay.relay.RelayAppPrivKey, etc.)
 
-// Localnet defaults (from tilt/config/all-keys.yaml)
+// Localnet defaults, compiled in. They mirror tilt/config/all-keys.yaml but
+// are not read from it at runtime.
 // Genesis has 5 services with corresponding apps:
 //   - develop-http      -> app1 (pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4)
 //   - develop-websocket -> app2 (pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm)
@@ -169,7 +170,7 @@ func validateServiceID(serviceID string) error {
 // RelayCmd returns the relay command for testing relay requests.
 func RelayCmd() *cobra.Command {
 	// Localnet mode
-	relayCmd.PersistentFlags().BoolVar(&relay.RelayLocalnet, "localnet", false, "Use localnet defaults from tilt/config (auto-selects app for service)")
+	relayCmd.PersistentFlags().BoolVar(&relay.RelayLocalnet, "localnet", false, "Use the compiled-in localnet defaults: relayer http://localhost:8180, node localhost:9090, the Tilt localnet keys (auto-selects app for service); --relayer-url and --node override them")
 
 	// Connection flags
 	relayCmd.PersistentFlags().StringVar(&relay.RelayAppPrivKey, "app-priv-key", "", "Application private key (hex) — testing/localnet only; prefer --app-key or --keys-file to keep hex off the command line")

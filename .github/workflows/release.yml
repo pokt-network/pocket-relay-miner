@@ -193,10 +193,16 @@ jobs:
         run: |
           # A release created by hand, or a re-run of this job, keeps its notes:
           # the action below would replace the body with the image stub.
-          if gh release view "${GITHUB_REF#refs/tags/}" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+          # Only "release not found" means there is no release. Any other
+          # failure (auth, network, rate limit, 5xx) stops the job: treating it
+          # as "absent" would create a draft and overwrite hand-written notes.
+          if err=$(gh release view "${GITHUB_REF#refs/tags/}" --repo "${{ github.repository }}" 2>&1 >/dev/null); then
             echo "exists=true" >> "$GITHUB_OUTPUT"
-          else
+          elif printf '%s' "$err" | grep -q 'release not found'; then
             echo "exists=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "gh release view failed: $err" >&2
+            exit 1
           fi
 
       - name: Write the draft release body

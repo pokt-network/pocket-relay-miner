@@ -73,15 +73,16 @@ func initSDKConfig() {
 	config.Seal()
 }
 
-// startRelayerCmd returns the command for starting the HA Relayer component.
+// RelayerCmd returns the command for starting the Relayer component.
 func RelayerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "relayer",
-		Short: "Start the HA Relayer (HTTP/WebSocket proxy)",
-		Long: `Start the High-Availability Relayer component.
+		Short: "Start the Relayer (HTTP/WebSocket proxy)",
+		Long: `Start the Relayer component.
 
-The HA Relayer handles incoming relay requests and forwards them to backend services.
-It is stateless and can be scaled horizontally behind a load balancer.
+The Relayer handles incoming relay requests and forwards them to backend services.
+A deployment runs one relayer, one miner and one Redis; the relayer keeps no
+session state of its own, all of it lives in Redis.
 
 Features:
 - HTTP and WebSocket relay proxying
@@ -95,7 +96,7 @@ Example:
 		RunE: runHARelayer,
 	}
 
-	cmd.Flags().String(flagRelayerConfig, "", "Path to HA relayer config file (required)")
+	cmd.Flags().String(flagRelayerConfig, "", "Path to relayer config file (required)")
 	cmd.Flags().String(flagRedisURL, "redis://localhost:6379", "Redis connection URL")
 	cmd.Flags().Bool(flagStrictConfig, false, "Refuse to start when the config carries keys this binary does not understand (default: warn and start)")
 
@@ -201,7 +202,7 @@ Examples:
 			return runCheckStake(cmd.Context(), config, nodeOverride)
 		},
 	}
-	cmd.Flags().String(flagRelayerConfig, "", "Path to HA relayer config file (required)")
+	cmd.Flags().String(flagRelayerConfig, "", "Path to relayer config file (required)")
 	cmd.Flags().Bool(flagCheckStake, false, "Cross-check on-chain stake against configured backends (queries the chain)")
 	cmd.Flags().String(flagNode, "", "Override the gRPC query node URL (default: pocket_node.query_node_grpc_url from config)")
 	_ = cmd.MarkFlagRequired(flagRelayerConfig)

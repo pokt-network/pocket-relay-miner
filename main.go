@@ -16,7 +16,7 @@ func main() {
 	cmd.SetVersionInfo(Version, Commit, BuildDate)
 	rootCmd := &cobra.Command{
 		Use:   "pocket-relay-miner",
-		Short: "Pocket Network High-Availability RelayMiner",
+		Short: "Pocket Network RelayMiner",
 		Long: `Relay miner for Pocket Network Shannon.
 
 A deployment is one relayer, one miner and one Redis. The relayer validates,
