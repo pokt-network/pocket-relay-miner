@@ -655,7 +655,7 @@ func TestExampleConfig_SimulationBlockStartsCleanly(t *testing.T) {
 	require.False(t, v.Enabled())
 }
 
-// uncommentSimTemplate performs, mechanically, the edit docs/simulated-relays.md
+// uncommentSimTemplate performs, mechanically, the edit docs/SIMULATED_RELAYS.md
 // tells an operator to perform on the example config: find the commented
 // simulated-relay identity template and strip the leading "# " from every one
 // of its lines. It returns the rewritten document.

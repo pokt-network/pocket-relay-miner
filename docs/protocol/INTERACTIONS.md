@@ -27,16 +27,16 @@ a difference a "loss", you have to know in which of the six it happened.
 
 ### The five legitimate cuts, in order
 
-1. **The difficulty** decides which relay enters the tree (`service.md`, rule 2). At
+1. **The difficulty** decides which relay enters the tree (`SERVICE.md`, rule 2). At
    base difficulty everything enters and the multiplier is 1.
 2. **The multiplier** raises the number again to estimate the real one
-   (`service.md`, rule 3). It is the inverse of the previous one, not a cut.
+   (`SERVICE.md`, rule 3). It is the inverse of the previous one, not a cut.
 3. **CUTTM / granularity** converts compute units into uPOKT
    (`claim.go:GetClaimeduPOKT`). It is the price, and it is **network-wide**.
 4. **The `B/N` floor** of the application bounds what can be charged to its
-   budget (`application.md`, rule 1). Overservicing can be paid from the
+   budget (`APPLICATION.md`, rule 1). Overservicing can be paid from the
    surplus, bounded by `overservicing_bonus_multiplier`.
-5. **The emission split** leaves the supplier **0.7** (`params.md`,
+5. **The emission split** leaves the supplier **0.7** (`PARAMS.md`,
    tokenomics). The remaining 0.3 goes to the DAO, proposer and source owner **by design**.
 
 ### The schedule, and which parameter each step depends on
@@ -54,17 +54,17 @@ The four offsets belong to `x/shared` and **are governance parameters**: the min
 schedule is not ours, the chain sets it and it can change without us touching code.
 
 **And there is no spreading across suppliers**: the function that did it is commented
-out (`session.md`, rule 1), so we can all submit at the same height.
+out (`SESSION.md`, rule 1), so we can all submit at the same height.
 
 ### Who decides what, which is where the most confusion happens
 
 | the question | the entity that answers it | the one that does NOT |
 |---|---|---|
 | does this supplier serve this service now? | **supplier**, via `ServiceConfigHistory` and height | not the unbonding |
-| does it enter the session? | **the service config window** | not the unbonding (`supplier.md`, rule 6) |
+| does it enter the session? | **the service config window** | not the unbonding (`SUPPLIER.md`, rule 6) |
 | how much is a relay worth? | **service** (CUPR) + `shared` (CUTTM) | not the supplier |
-| how many relays count? | **the root we sign** | not the chain (`claim-and-proof.md`, rule 2) |
-| which gateways can an app use? | **the application** (`delegatee_gateway_addresses`) | not the gateway (`gateway.md`) |
+| how many relays count? | **the root we sign** | not the chain (`CLAIM_AND_PROOF.md`, rule 2) |
+| which gateways can an app use? | **the application** (`delegatee_gateway_addresses`) | not the gateway (`GATEWAY.md`) |
 | how much can be charged? | **the application** (budget and floor) | not the claim |
 | how much reaches the supplier? | **tokenomics** (0.7 split) | not the claim |
 
@@ -95,5 +95,5 @@ None of those requires us to change code, and all of them change the money.
 ### What is NOT read yet
 
 The rules for a **delegation that changes mid-session** and how the signing ring
-is assembled (see `gateway.md`). It is the only piece of this series still without
+is assembled (see `GATEWAY.md`). It is the only piece of this series still without
 citations, and it is declared as such instead of completed from memory.

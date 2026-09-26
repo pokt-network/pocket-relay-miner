@@ -9,7 +9,7 @@ Production-grade, horizontally scalable relay mining service for Pocket Network.
 - **High Availability**: Redis-backed shared state with automatic leader election
 - **Relay Validation**: Ring signature verification, session validation, supplier signing
 - **Relay Metering**: Rate limiting based on application stake
-- **Simulated Relays**: Exercise a live relayer end-to-end — real signature, real backend — without minting a claimable relay ([guide](docs/simulated-relays.md))
+- **Simulated Relays**: Exercise a live relayer end-to-end — real signature, real backend — without minting a claimable relay ([guide](docs/SIMULATED_RELAYS.md))
 - **Observability**: Prometheus metrics, pprof profiling, structured logging
 
 ## Architecture
@@ -160,7 +160,7 @@ pocket-relay-miner relay jsonrpc --localnet --service develop-http \
   --supplier <addr> --simulate --sim-key-id sim-http
 ```
 
-See [`docs/simulated-relays.md`](docs/simulated-relays.md) for configuration, the
+See [`docs/SIMULATED_RELAYS.md`](docs/SIMULATED_RELAYS.md) for configuration, the
 per-transport key IDs, and how to verify that nothing was charged.
 
 ### Debugging Redis State
@@ -225,7 +225,7 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development workflow and guidelines
 ## Documentation
 
 - [`docs/testing/`](docs/testing/README.md) - Testing guides (Tilt bring-up, PATH+hey load, direct-CLI per-protocol)
-- [`docs/simulated-relays.md`](docs/simulated-relays.md) - Simulated relays: what they are, how to enable and fire them, and how to verify nothing was charged
+- [`docs/SIMULATED_RELAYS.md`](docs/SIMULATED_RELAYS.md) - Simulated relays: what they are, how to enable and fire them, and how to verify nothing was charged
 - [`examples/relay-signing/`](examples/relay-signing/README.md) - Signing a relay in Node.js, Python or Rust: the ring-signature scheme byte-for-byte, working signers, and an oracle to verify your own
 - [`docs/SUPPLIER_KEYS.md`](docs/SUPPLIER_KEYS.md) - Supplier signing keys: the two sources, the keyring
   backends and why only two are supported, where the passphrase comes from, and how hot reload behaves

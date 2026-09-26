@@ -9,7 +9,7 @@ Verified against **poktroll v0.1.35** (`go.mod:19`). **Without a citation, it is
 
 **There is no list of applications.** The relationship is stored by the APPLICATION,
 not the gateway: `delegatee_gateway_addresses` and `pending_undelegations` live in
-`poktroll/x/application/types` (see `docs/protocol/application.md`).
+`poktroll/x/application/types` (see `docs/protocol/APPLICATION.md`).
 
 **Consequence**: to know which applications a gateway can serve, **you do not query
 the gateway**. You query the applications.
@@ -25,7 +25,7 @@ application, **unbonding is reversible and not terminal**. The three entities
 share that shape.
 
 **There is no delegation event here.** Delegation is observed from the application
-side: `EventRedelegation` (see `application.md`, rule 3).
+side: `EventRedelegation` (see `APPLICATION.md`, rule 3).
 
 ### Rule 2 — the gateway is staked too, and can unstake too
 

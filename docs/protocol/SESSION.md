@@ -73,7 +73,7 @@ evaluated with the parameters at that session's height.
 
 ### Rule 4 — who enters the session
 
-See `docs/protocol/supplier.md`, rule 6: candidates come **only** from the
+See `docs/protocol/SUPPLIER.md`, rule 6: candidates come **only** from the
 service configurations active at that height; unbonding is not consulted. If
 there are no candidates, hydration **fails** with `ErrSessionSuppliersNotFound` — it
 does not return an empty session.

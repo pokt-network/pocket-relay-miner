@@ -481,7 +481,7 @@ simulation:
   # the template are illustrative and are NOT valid secp256k1 public keys -
   # a config carrying them is rejected at startup once `simulation.enabled`
   # is true. Generate your own dedicated simulation app and gateway key
-  # pairs and pin their public halves here; see docs/simulated-relays.md
+  # pairs and pin their public halves here; see docs/SIMULATED_RELAYS.md
   # for the provisioning steps.
   #
   # TO PIN AN IDENTITY: delete the leading "# " (hash and one space) from

@@ -123,7 +123,7 @@ func TestRelaysServed_NoParallelPerTransportCounter(t *testing.T) {
 		"relays_served_optimistically_total": "a SUBSET of served (owned supplier not yet in the registry), not a second total",
 		"relays_served_over_budget_total":    "a SUBSET of served (a WebSocket backend message that left its session at or over the budget, at most one per connection), not a second total",
 		"relays_published_total":             "mined relays ACCEPTED by the publisher, every transport, rpc_type as a label: a later hop",
-		"simulated_relays_total":             "simulated traffic, isolated from every real counter by contract (docs/simulated-relays.md)",
+		"simulated_relays_total":             "simulated traffic, isolated from every real counter by contract (docs/SIMULATED_RELAYS.md)",
 		"relays_received_total":              "inbound, a different event from served",
 		"relays_rejected_total":              "refused BEFORE serving",
 		"relays_dropped_total":               "served but not mined",
@@ -162,7 +162,7 @@ func TestRelaysServed_NoParallelPerTransportCounter(t *testing.T) {
 // TestRelaysServed_SimulatedWebSocketRelayDoesNotCount holds the isolation
 // contract on the transport that gets it by PLACEMENT rather than by structure.
 //
-// docs/simulated-relays.md is explicit that a simulated relay "never touches the
+// docs/SIMULATED_RELAYS.md is explicit that a simulated relay "never touches the
 // counters that measure real traffic". HTTP satisfies that structurally --
 // proxy.go:903 diverts to serveSimulatedHTTP, a different function, so the real
 // counter is unreachable -- and gRPC satisfies it because its increment sits in
@@ -197,5 +197,5 @@ func TestRelaysServed_SimulatedWebSocketRelayDoesNotCount(t *testing.T) {
 	after := servedCount(t, simWSTestService, BackendTypeWebSocket, statusCodeNoHTTP)
 	require.Equal(t, before, after,
 		"a SIMULATED WebSocket relay must leave relays_served_total flat; "+
-			"docs/simulated-relays.md makes that a contract, not a preference")
+			"docs/SIMULATED_RELAYS.md makes that a contract, not a preference")
 }

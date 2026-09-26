@@ -37,7 +37,7 @@ RelayMiningDifficulty struct`:
 | `num_relays_ema` | the exponential moving average of the service's relays |
 | `target_hash` | **the threshold**: only relays whose hash meets it enter the tree |
 
-See `docs/protocol/claim-and-proof.md`, rule 3: *"not every Relay (Request,
+See `docs/protocol/CLAIM_AND_PROOF.md`, rule 3: *"not every Relay (Request,
 Response) pair in the session is inserted into the tree. The relay hash has to
 have matched the difficulty for that service."*
 

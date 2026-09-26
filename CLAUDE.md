@@ -1045,7 +1045,7 @@ reader who was not in the session that produced it.
   ignored directory. They stay on disk; they just never reach a commit.
 - ✅ The committed deliverable for a feature is its **usage doc**: what
   it does and how to run it, in `docs/`, written for an operator who
-  has never read your plan. `docs/simulated-relays.md` is the model.
+  has never read your plan. `docs/SIMULATED_RELAYS.md` is the model.
 - ✅ Code comments state constraints the code cannot show. A comment must
   never point at a design doc — the doc will move or die, and the reader
   needs the invariant, not its provenance.

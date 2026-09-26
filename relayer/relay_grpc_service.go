@@ -614,7 +614,7 @@ func (s *RelayGRPCService) serveSendRelay(stream grpc.ServerStream, ctx context.
 	// the one on the forward-error branch is the REJECTED path (HTTP does the
 	// same, relaysRejected + return before its own relaysServed at
 	// proxy.go:1302), and the one in serveSimulatedGRPC must leave this counter
-	// flat -- docs/simulated-relays.md states that as the isolation contract.
+	// flat -- docs/SIMULATED_RELAYS.md states that as the isolation contract.
 	relaysServed.WithLabelValues(serviceID, BackendTypeGRPC, statusCodeNoHTTP).Inc()
 
 	// Latency ends HERE, where the client has the response and before the

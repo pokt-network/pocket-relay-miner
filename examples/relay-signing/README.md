@@ -103,7 +103,7 @@ backend, without staking anything or talking to a chain. Get a simulated relay
 accepted and you have a working relay signer — point it at a staked app and
 gateway and it signs real ones.
 
-See [`docs/simulated-relays.md`](../../docs/simulated-relays.md) for the
+See [`docs/SIMULATED_RELAYS.md`](../../docs/SIMULATED_RELAYS.md) for the
 simulated path itself.
 
 ### A relay is not signed with a plain secp256k1 signature
@@ -431,6 +431,6 @@ separately by the relayer, so any protobuf library will do.
 
 ### Reference
 
-- [`docs/simulated-relays.md`](../../docs/simulated-relays.md) — the simulated relay path, config, and CLI
+- [`docs/SIMULATED_RELAYS.md`](../../docs/SIMULATED_RELAYS.md) — the simulated relay path, config, and CLI
 - [`client/relay_client/simulated.go`](../../client/relay_client/simulated.go) — the Go implementation these examples mirror
 - [`rings/pinned.go`](../../rings/pinned.go) — how the relayer verifies against a pinned ring

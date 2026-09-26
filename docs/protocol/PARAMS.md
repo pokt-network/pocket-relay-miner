@@ -26,7 +26,7 @@ touching code, and several change **how much we collect**. The defaults below ar
 | `session_number_at_anchor` | same |
 
 **The four window offsets are the miner's entire schedule.** A governance change
-there moves when we must claim and prove; see `session.md`.
+there moves when we must claim and prove; see `SESSION.md`.
 
 ### `x/session` — 1
 
@@ -45,7 +45,7 @@ there moves when we must claim and prove; see `session.md`.
 
 | parameter | what it does to us |
 |---|---|
-| `min_stake` | below it, the chain **unstakes us on its own**: `SUPPLIER_UNBONDING_REASON_BELOW_MIN_STAKE` (see `supplier.md`) |
+| `min_stake` | below it, the chain **unstakes us on its own**: `SUPPLIER_UNBONDING_REASON_BELOW_MIN_STAKE` (see `SUPPLIER.md`) |
 | `staking_fee` | paid when staking |
 
 ### `x/application` — 2
@@ -78,7 +78,7 @@ there moves when we must claim and prove; see `session.md`.
 | `mint_equals_burn_claim_distribution` | the same split for the mint==burn regime. Same defaults |
 | `global_inflation_per_claim` | default `0.1` |
 | `mint_ratio` | default `1.0` — *"no deflation (mint equals burn)"* |
-| `overservicing_bonus_multiplier` | default `1`. **Zero is treated as 1, never as unlimited** (see `application.md`) |
+| `overservicing_bonus_multiplier` | default `1`. **Zero is treated as 1, never as unlimited** (see `APPLICATION.md`) |
 | `dao_reward_address` | where the DAO's share goes |
 
 **The rule most often forgotten, and it lives here**: of what is distributed, **the

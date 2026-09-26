@@ -246,7 +246,7 @@ would not benefit from a file, it does not belong in a commit.
 **Tracked:**
 
 - `docs/` — protocol references, Redis architecture, testing guides, and a
-  usage guide per feature (see `docs/simulated-relays.md` for the shape:
+  usage guide per feature (see `docs/SIMULATED_RELAYS.md` for the shape:
   what it does, how to run it, written for an operator).
 - `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, and the `scripts/` READMEs.
 - Code, tests, configs, and example configs with placeholder values.
