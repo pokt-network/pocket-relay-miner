@@ -200,7 +200,8 @@ type LeaderElectionConfig struct {
 
 // BalanceMonitorConfigYAML contains configuration for balance/stake monitoring.
 type BalanceMonitorConfigYAML struct {
-	// Enabled enables balance/stake monitoring.
+	// Enabled runs the balance and stake monitor; false turns it off entirely,
+	// both the balance warnings and the stake alerts.
 	// Default: true
 	Enabled bool `yaml:"enabled,omitempty"`
 
@@ -210,7 +211,7 @@ type BalanceMonitorConfigYAML struct {
 
 	// BalanceThresholdUpokt is the minimum balance in uPOKT before triggering warnings.
 	// Operators should set this based on their operational needs.
-	// Example: 1000 (1000 uPOKT)
+	// Default: 1000000 (1 POKT)
 	BalanceThresholdUpokt int64 `yaml:"balance_threshold_upokt,omitempty"`
 
 	// StakeWarningProofThreshold is the number of missed proofs remaining before triggering a warning.
@@ -680,7 +681,7 @@ func (c *Config) GetSessionLifecycleMaxConcurrentTransitions() int {
 
 // GetBalanceMonitorEnabled returns whether balance monitoring is enabled.
 func (c *Config) GetBalanceMonitorEnabled() bool {
-	// Default to true if not explicitly set
+	// DefaultConfig sets it true; a config loaded without the key keeps that.
 	return c.BalanceMonitor.Enabled
 }
 

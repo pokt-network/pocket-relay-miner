@@ -380,8 +380,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger.Info().Msg("block health monitor started (leader-only)")
 	}
 
-	// Start balance monitor if enabled
-	if c.config.Config.GetBalanceMonitorEnabled() || c.config.Config.GetBalanceMonitorThreshold() > 0 {
+	if balanceMonitorWanted(c.config.Config) {
 		c.balanceMonitor = NewBalanceMonitor(
 			c.logger,
 			BalanceMonitorConfig{
@@ -424,6 +423,14 @@ func (c *LeaderController) Start(ctx context.Context) error {
 
 // Close shuts down all leader-only resources.
 // This is called when the instance loses leadership.
+// balanceMonitorWanted is the one decision to run the balance monitor:
+// balance_monitor.enabled alone. It used to also start whenever the balance
+// threshold was above 0, and the default threshold is 1 POKT, so enabled: false
+// never turned it off.
+func balanceMonitorWanted(cfg *Config) bool {
+	return cfg.GetBalanceMonitorEnabled()
+}
+
 func (c *LeaderController) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
