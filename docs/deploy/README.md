@@ -153,10 +153,11 @@ is healthy: `$C exec relayer curl -s http://localhost:8081/ready/<service-id>`
 in the compose example, `curl -s http://127.0.0.1:8081/ready/<service-id>` on a
 host.
 
-**Not for WebSocket backends in v0.1.0**: the probe is an HTTP request, and a
-`ws://` or `wss://` URL fails every probe, which marks a working backend
-unhealthy. Leave `health_check` off on `websocket` backends. On `grpc` backends
-it is not verified.
+**HTTP backends only in v0.1.0**: the probe is a plain HTTP/1.1 request. On a
+`websocket` backend (`ws://`, `wss://`) or a `grpc` backend it fails every
+probe and marks a working backend unhealthy (measured 2026-09-26 against a
+WebSocket server and a gRPC server with the standard health service). Leave
+`health_check` off on `websocket` and `grpc` backends.
 
 ## Ports
 

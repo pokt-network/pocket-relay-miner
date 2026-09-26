@@ -52,7 +52,8 @@ services:
         # reachable from inside the relayer container.
         url: "http://my-backend.example.com:8545"
         # Active health check: strongly recommended on every HTTP backend
-        # (jsonrpc, rest, cometbft); not on websocket. Without it a dead
+        # (jsonrpc, rest, cometbft); never on websocket or grpc, where the HTTP
+        # probe always fails. Without it a dead
         # backend is found only by failing real relays. CHANGE the probe to
         # one your node answers: this one is for an EVM JSON-RPC node.
         # docs/deploy/README.md, "Backend health checks".
