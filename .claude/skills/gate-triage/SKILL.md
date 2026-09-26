@@ -41,7 +41,7 @@ race is gone. Fix it. Re-running until green is how a race reaches production.
 
 **3. Is it "pre-existing"?**
 
-In this repository that is not an excuse — CLAUDE.md says so explicitly. If it
+In this repository that is not an excuse — CONTRIBUTING.md says so explicitly. If it
 fails now, either your change broke it or it was already broken; either way it
 gets diagnosed. What changes is the *handling*, not whether you look:
 

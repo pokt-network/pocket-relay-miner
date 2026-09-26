@@ -139,7 +139,7 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  # CLAUDE.md calls the race detector Rule #1 and says it cannot be broken.
+  # CONTRIBUTING.md calls the race detector Rule #1 and says it cannot be broken.
   # Until this job existed the rule was declared but never executed here: `make
   # test` and `make test-coverage` do not pass -race, and the only target that
   # did (`test_miner`) covered ./miner/... alone and was never invoked by CI.

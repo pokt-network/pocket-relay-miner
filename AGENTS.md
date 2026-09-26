@@ -10,16 +10,56 @@ It is 2 processes from 1 binary, sharing 1 Redis: the **relayer** verifies each
 relay, forwards it to your backend and signs the response; the **miner** builds
 the claim and the proof from the served relays and submits them to the chain.
 
-## Where to go
+## Index
 
-| I want to... | Read |
+**Deploy**
+
+| Document | What it is for |
 |---|---|
-| deploy with docker compose | [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) |
-| deploy on a host (binary + systemd) | [docs/deploy/HOST.md](docs/deploy/HOST.md) |
-| choose a path, or check the prerequisites | [docs/deploy/README.md](docs/deploy/README.md) |
-| configure the relayer or the miner | [config.relayer.example.yaml](config.relayer.example.yaml), [config.miner.example.yaml](config.miner.example.yaml), [config.redis.example.conf](config.redis.example.conf) |
-| troubleshoot a deployment | [docs/deploy/TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md) |
-| develop this repository | [CONTRIBUTING.md](CONTRIBUTING.md), then [CLAUDE.md](CLAUDE.md) |
+| [docs/deploy/README.md](docs/deploy/README.md) | choose a path; prerequisites, ports and how the pieces fit |
+| [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) | runbook: a whole local chain first, then your own node |
+| [docs/deploy/HOST.md](docs/deploy/HOST.md) | runbook: binary and systemd on a host |
+| [examples/docker-compose/](examples/docker-compose/README.md), [examples/host/](examples/host) | the files those runbooks use |
+
+**Configure**
+
+| Document | What it is for |
+|---|---|
+| [config.relayer.example.yaml](config.relayer.example.yaml), [config.miner.example.yaml](config.miner.example.yaml) | every key, with its default and why you would change it |
+| [config.relayer.schema.yaml](config.relayer.schema.yaml), [config.miner.schema.yaml](config.miner.schema.yaml) | the schemas `validate` checks against |
+| [config.redis.example.conf](config.redis.example.conf) | the Redis settings the release was measured with |
+| [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md) | supplier keys: keys file, keyring, hot reload |
+
+**Operate and diagnose**
+
+| Document | What it is for |
+|---|---|
+| [docs/deploy/TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md) | a symptom, its cause and the fix |
+| [docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md) | which metrics to read after a run or during an incident, in order |
+| [docs/REDIS.md](docs/REDIS.md) | what lives in Redis and why losing it costs money |
+| `pocket-relay-miner redis --help` | inspect sessions, streams, caches, meters and submissions in Redis |
+| [scripts/observability/triage.sh](scripts/observability/triage.sh) | checks the identities in METRICS_TRIAGE.md against Prometheus and prints OK or GAP per line (copy `triage.conf.example` first) |
+
+**Understand what it does**
+
+| Document | What it is for |
+|---|---|
+| [docs/CLAIM_PROOF_LIFECYCLE.md](docs/CLAIM_PROOF_LIFECYCLE.md) | how served relays become claims, proofs and rewards |
+| [docs/CLAIM_LEAF_MODEL.md](docs/CLAIM_LEAF_MODEL.md) | when two relays collapse into one tree leaf |
+| [docs/protocol/](docs/protocol/README.md) | the protocol per entity (application, gateway, supplier, session, service, params) and where the money moves |
+| [docs/PROTOCOL_SPEC.md](docs/PROTOCOL_SPEC.md), [docs/WEBSOCKET_HANDSHAKE_PROTOCOL.md](docs/WEBSOCKET_HANDSHAKE_PROTOCOL.md) | what a gateway/client, the relayer and a backend expect from each other |
+| [examples/relay-signing/](examples/relay-signing/README.md) | how to sign and send a relay from other languages |
+
+**Test and measure**
+
+| Document | What it is for |
+|---|---|
+| [docs/SIMULATED_RELAYS.md](docs/SIMULATED_RELAYS.md) | exercise a running relayer end to end with the `relay` command |
+| [scripts/loadtest/README.md](scripts/loadtest/README.md) | measure each backend's RPS ceiling and size its connection pool |
+| [docs/testing/](docs/testing/README.md), [scripts/README.md](scripts/README.md) | the development environment and its test scripts |
+
+**Develop**: [CONTRIBUTING.md](CONTRIBUTING.md) holds every rule for changing
+the code.
 
 v0.1.0 ships no Kubernetes example or runbook. The Tilt setup in `tilt/` runs
 the relayer, the miner and Redis on a local kind cluster for development: it is

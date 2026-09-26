@@ -10,7 +10,7 @@ import (
 	"testing"
 )
 
-// CLAUDE.md metrics rules: no high-cardinality labels (session IDs are
+// CONTRIBUTING.md metrics rules: no high-cardinality labels (session IDs are
 // unbounded), and no dead declarations (a metric nobody writes is a dashboard
 // panel that is always empty — a lie with a name).
 

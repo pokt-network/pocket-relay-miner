@@ -157,9 +157,8 @@ type SupplierClaimer struct {
 	// renewal loop DOES read it from the goroutine Start spawns. What makes
 	// that safe is that nothing writes it after construction except a test,
 	// and a test may only write it with the loop STOPPED. Mutating it while
-	// the loop runs is a data race. (CLAUDE.md, wsFirstFrameWait: the field
-	// capture is what removes the race a package var had; it does not make
-	// later writes safe.)
+	// the loop runs is a data race: capturing a value into a field removes the
+	// race a package var had, and it does not make later writes safe.
 	nowFn func() time.Time
 
 	// Callbacks

@@ -52,4 +52,4 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 - `loadtest/` — backend RPS-ceiling measurement and per-service pool tuning (`backends.sh`). See [`loadtest/README.md`](loadtest/README.md).
 - `ws-test/` — manual WebSocket tester through PATH, reconnecting on session rollover (the CLI's `relay websocket --load-test` redials on its own).
 - `lib/` — shared bash helpers (`common.sh`).
-- `localonly/` — gitignored; operator-specific config (see the operator-data rule in [`../CLAUDE.md`](../CLAUDE.md)).
+- `localonly/` — gitignored; operator-specific config (see the operator-data rule in [`../CONTRIBUTING.md`](../CONTRIBUTING.md)).

@@ -1520,7 +1520,7 @@ func (lc *LifecycleCallback) OnSessionsNeedClaim(ctx context.Context, snapshots 
 				// Phase 3 decided the tree was empty, and this arm is the only
 				// one that reaches no OnClaimSkipped / OnSessionProved, so
 				// nothing else would ever delete them. Both carry session_id as
-				// a label, which CLAUDE.md forbids leaving unbounded.
+				// a label, which CONTRIBUTING.md forbids leaving unbounded.
 				//
 				// The recording itself stays where it is on purpose: an empty
 				// tree with RelayCount > 0 is the EXTREME shortfall, and

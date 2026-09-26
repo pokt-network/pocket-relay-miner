@@ -263,7 +263,7 @@ func TestCanonicalHashToScalarIsRejected(t *testing.T) {
 	}
 
 	// Expected ~31 of 4000. Bound loosely: this is a probabilistic assertion and
-	// must not flake (see CLAUDE.md rule #1). The point is that the rate is
+	// must not flake (see CONTRIBUTING.md rule #1). The point is that the rate is
 	// small-but-real, not its exact value.
 	rate := float64(rejected) / trials
 	if rate > 0.05 {

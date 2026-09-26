@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// CLAUDE.md concurrency rule: no unbounded bare goroutines. The accepted
+// CONTRIBUTING.md concurrency rule: no unbounded bare goroutines. The accepted
 // shapes are a worker pool submission (pond's pool.Go — a method call, not a
 // go statement) and `go logging.RecoverGoRoutine(...)(ctx)`, which caps
 // nothing but at least converts a panic into a counted, logged recovery.

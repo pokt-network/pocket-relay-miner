@@ -8,7 +8,7 @@
 #   scripts/gates/race.sh             # whole tree
 #   PKG=miner scripts/gates/race.sh   # one package
 #
-# CLAUDE.md calls this Rule #1 and says it cannot be broken. Until this gate
+# CONTRIBUTING.md calls this Rule #1 and says it cannot be broken. Until this gate
 # existed the only target that passed -race was `test_miner`, covering
 # ./miner/... alone, and CI invoked neither -- the rule was declared and never
 # executed.
