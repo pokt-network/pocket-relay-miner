@@ -22,6 +22,9 @@ Restart=on-failure
 RestartSec=10
 # Give the miner time to drain delivered relays and checkpoint its trees.
 TimeoutStopSec=120
+# Sizing: in the v0.1.0 load run (50 suppliers, ~2,400 relays/s, 8 GiB limit)
+# the miner peaked at 2.9 GiB, 6.8 GiB during a burst of 1 MiB relays, and used
+# 0.5 cores steady, 1.9 while a generation of claims is built.
 # Hard limits. Keep GOMEMLIMIT in miner.env about 10% below MemoryMax, and
 # GOMAXPROCS equal to CPUQuota / 100%.
 MemoryMax=8G

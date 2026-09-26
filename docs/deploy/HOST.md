@@ -136,17 +136,16 @@ sudo install -m 0600 -o pocket-relay-miner examples/host/pocket-relay-miner.env.
 sudo install -m 0600 -o pocket-relay-miner examples/host/pocket-relay-miner.env.example /etc/pocket-relay-miner/miner.env
 ```
 
-Then edit every line marked `CHANGE`:
+The configs point at the beta testnet through the public Sauron endpoints;
+every network value has its mainnet value in a comment marked `Mainnet:`
+([Switching to mainnet](#switching-to-mainnet)). Then edit every line marked
+`CHANGE`:
 
-- `/etc/pocket-relay-miner/relayer.yaml` and `miner.yaml`:
-  `pocket_node.query_node_rpc_url`, `pocket_node.query_node_grpc_url`,
-  `pocket_node.grpc_insecure`.
-- `miner.yaml`: `pocket_node.chain_id` (`pocket` for mainnet, `pocket-lego-testnet`
-  for the beta testnet) and `block_time_seconds` (measured; beta is roughly 30,
-  mainnet roughly 60).
 - `relayer.yaml`: `services.<service_id>` with `backends.<transport>.url`, 1
   entry per service your suppliers are staked for.
 - `supplier-keys.yaml`: your suppliers' private keys, 1 per line under `keys:`.
+  The human who owns the supplier creates and stakes it with `pocketd`:
+  [docs/SUPPLIER_KEYS.md, "Creating a supplier key, and staking it"](../SUPPLIER_KEYS.md#creating-a-supplier-key-and-staking-it).
   For a keyring instead, see [docs/SUPPLIER_KEYS.md](../SUPPLIER_KEYS.md) and
   set `KEYRING_PASSPHRASE` in both `.env` files.
 - `miner.env`: `GOMEMLIMIT=7200MiB` (the miner unit has `MemoryMax=8G`).
@@ -160,7 +159,8 @@ Then edit every line marked `CHANGE`:
 other key.
 
 **Stop if**: you are about to paste a private key into a file that is under
-version control or readable by other users.
+version control or readable by other users, or you do not have a staked
+supplier's key from a human. An agent never generates, funds or stakes a key.
 
 ## Step 4: validate both configs
 
@@ -310,6 +310,29 @@ sudo -u pocket-relay-miner /usr/local/bin/pocket-relay-miner redis --config /etc
 at `✓ SUCCESS` once the proof window has passed.
 
 **Stop if**: any row shows a failure; report it with the miner's error lines.
+
+## Dashboards (optional)
+
+Prometheus and Grafana with the 7 dashboards of the compose example work on a
+host too: scrape `127.0.0.1:9090` (relayer) and `127.0.0.1:9092` (miner) and
+provision the dashboard files, as
+[examples/observability/README.md, "With a host deployment"](../../examples/observability/README.md#with-a-host-deployment)
+describes.
+
+## Switching to mainnet
+
+**Stop if**: you have not been told by a human to run on mainnet.
+
+In `/etc/pocket-relay-miner/relayer.yaml` and `miner.yaml`, switch every value
+marked `Mainnet:`: `pocket_node.query_node_rpc_url`
+(`https://sauron-rpc.infra.pocket.network`) and
+`pocket_node.query_node_grpc_url` (`sauron-grpc.infra.pocket.network:443`);
+in `miner.yaml` also `pocket_node.chain_id` (`pocket`) and
+`block_time_seconds` (`60`). Then validate both configs again (step 4) and
+restart the miner, then the relayer. Your own full node is the better choice
+for claims and proofs you are paid for:
+[DOCKER_COMPOSE.md, "Switching to mainnet"](DOCKER_COMPOSE.md#switching-to-mainnet)
+lists where node configs and snapshots are published.
 
 ## Operating
 

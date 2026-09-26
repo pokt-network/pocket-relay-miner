@@ -1,6 +1,7 @@
 # Miner config for a host deployment (systemd). Minimal on purpose: every key
 # not set here takes its default; config.miner.example.yaml at the repository
-# root lists all of them. Replace every value marked CHANGE before starting.
+# root lists all of them. Pointed at the beta testnet: for mainnet, switch every
+# value marked "Mainnet:". Replace every value marked CHANGE before starting.
 # Check it with:
 #   pocket-relay-miner miner validate --config /etc/pocket-relay-miner/miner.yaml
 
@@ -10,22 +11,24 @@ redis:
 
 # The chain node the miner reads from and submits claims and proofs to.
 pocket_node:
-  # CHANGE: your node's CometBFT RPC.
-  query_node_rpc_url: "https://rpc.node.example.com"
-  # CHANGE: your node's gRPC, host:port.
-  query_node_grpc_url: "grpc.node.example.com:443"
-  # "pocket" is mainnet, "pocket-lego-testnet" the beta testnet. The miner
-  # refuses to start if the node reports another network.
-  chain_id: "pocket"
+  # The public Sauron endpoints of beta; your own full node is the better
+  # choice for claims and proofs you are paid for.
+  # CometBFT RPC. Mainnet: "https://sauron-rpc.infra.pocket.network"
+  query_node_rpc_url: "https://sauron-rpc.beta.infra.pocket.network"
+  # gRPC, host:port. Mainnet: "sauron-grpc.infra.pocket.network:443"
+  query_node_grpc_url: "sauron-grpc.beta.infra.pocket.network:443"
+  # The miner refuses to start if the node reports another network.
+  # Mainnet: "pocket"
+  chain_id: "pocket-lego-testnet"
   grpc_insecure: false
 
 # Same keys as the relayer's.
 keys:
   keys_file: "/etc/pocket-relay-miner/supplier-keys.yaml"
 
-# CHANGE: the measured block time of your network, in seconds. Mainnet is
-# roughly 60, beta roughly 30. Required: the miner refuses to start without it.
-block_time_seconds: 60
+# The measured block time of the network, in seconds; beta is roughly 30.
+# Required: the miner refuses to start without it. Mainnet: 60
+block_time_seconds: 30
 
 # Prometheus metrics, and GET /health.
 metrics:

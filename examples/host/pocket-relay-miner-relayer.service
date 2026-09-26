@@ -20,6 +20,9 @@ ExecStartPre=/usr/local/bin/pocket-relay-miner relayer validate --config /etc/po
 ExecStart=/usr/local/bin/pocket-relay-miner relayer --config /etc/pocket-relay-miner/relayer.yaml
 Restart=on-failure
 RestartSec=5
+# Sizing: in the v0.1.0 load run (~2,400 relays/s, 8 GiB limit) the relayer
+# used at most 128 MiB, 1.1 GiB during a burst of 1 MiB relays, and at most 3.9
+# cores. Its CPU scales with relays/s.
 # Hard limits. Keep GOMEMLIMIT in relayer.env about 10% below MemoryMax, and
 # GOMAXPROCS equal to CPUQuota / 100%.
 MemoryMax=4G

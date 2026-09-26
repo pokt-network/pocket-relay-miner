@@ -1,6 +1,7 @@
 # Relayer config for a host deployment (systemd). Minimal on purpose: every key
 # not set here takes its default; config.relayer.example.yaml at the repository
-# root lists all of them. Replace every value marked CHANGE before starting.
+# root lists all of them. Pointed at the beta testnet: for mainnet, switch every
+# value marked "Mainnet:". Replace every value marked CHANGE before starting.
 # Check it with:
 #   pocket-relay-miner relayer validate --config /etc/pocket-relay-miner/relayer.yaml
 
@@ -13,10 +14,12 @@ redis:
 
 # The chain node the relayer reads applications, sessions and params from.
 pocket_node:
-  # CHANGE: your node's CometBFT RPC.
-  query_node_rpc_url: "https://rpc.node.example.com"
-  # CHANGE: your node's gRPC, host:port.
-  query_node_grpc_url: "grpc.node.example.com:443"
+  # The public Sauron endpoints of beta; your own full node is the better
+  # choice for claims and proofs you are paid for.
+  # CometBFT RPC. Mainnet: "https://sauron-rpc.infra.pocket.network"
+  query_node_rpc_url: "https://sauron-rpc.beta.infra.pocket.network"
+  # gRPC, host:port. Mainnet: "sauron-grpc.infra.pocket.network:443"
+  query_node_grpc_url: "sauron-grpc.beta.infra.pocket.network:443"
   # TLS gRPC. Set true only for a plain-text node.
   grpc_insecure: false
 
