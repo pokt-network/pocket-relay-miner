@@ -6,6 +6,7 @@ required:
   - redis
   - pocket_node
   - keys
+  - block_time_seconds
 
 properties:
   redis:
@@ -16,11 +17,18 @@ properties:
     properties:
       url:
         type: string
-        description: Redis connection URL
-        pattern: ^redis(s)?://
+        description: >-
+          Redis connection URL. The scheme selects the client: redis:// or
+          rediss:// (TLS) for a single Redis, redis-sentinel:// for Sentinel
+          (sentinel addresses, then the master name as the path), and
+          redis-cluster:// for a Cluster. A comma-separated host list under
+          redis:// is not a cluster. Redis must run with maxmemory set and
+          maxmemory-policy noeviction, or the miner refuses to start.
+        pattern: ^(redis|rediss|redis-sentinel|redis-cluster)://
         examples:
           - redis://localhost:6379
-          - redis://redis-node1:6379,redis-node2:6379
+          - redis-sentinel://sentinel1:26379,sentinel2:26379/mymaster?db=0
+          - redis-cluster://node1:6379,node2:6379,node3:6379
       consumer_name:
         type: string
         description: >-
@@ -31,7 +39,7 @@ properties:
           stranded deliveries. Defaults to "miner".
       claim_idle_timeout_ms:
         type: integer
-        description: Timeout for reclaiming idle messages from crashed consumers
+        description: Milliseconds after which a delivered, unacknowledged relay is reclaimed (recovery from a crashed consumer)
         default: 60000
         minimum: 1000
       relay_batch_flush_interval_ms:
@@ -45,7 +53,10 @@ properties:
         minimum: 0
       pool_size:
         type: integer
-        description: Maximum number of socket connections (0 = use default 20 × GOMAXPROCS)
+        description: >-
+          Maximum number of connections (0 = default, 50). Size it as the
+          number of suppliers + 20: each supplier holds one blocking stream
+          read.
         default: 0
         minimum: 0
       min_idle_conns:
@@ -55,12 +66,14 @@ properties:
         minimum: 0
       pool_timeout_seconds:
         type: integer
-        description: Wait time for connection from pool in seconds (0 = use default 4s)
+        description: Seconds a caller waits for a pooled connection (0 = default, 6)
         default: 0
         minimum: 0
       conn_max_idle_time_seconds:
         type: integer
-        description: Close idle connections after this many seconds (0 = use default 300s)
+        description: >-
+          Close a connection idle for this many seconds (0 = the Redis client
+          library's default, 30 minutes)
         default: 0
         minimum: 0
       namespace:
@@ -72,8 +85,11 @@ properties:
         properties:
           base_prefix:
             type: string
-            description: Root prefix for all Redis keys. Two base prefixes are two disjoint keyspaces.
-            pattern: "^[a-zA-Z0-9_-]+$"
+            description: >-
+              Root prefix for all Redis keys. Two base prefixes are two disjoint
+              keyspaces. Must not contain ':', whitespace, or * ? [ ]. Must be
+              the same in the miner and every relayer of one fleet.
+            pattern: "^[^:*?\\[\\]\\s]+$"
             default: ha
 
   pocket_node:
@@ -85,15 +101,15 @@ properties:
     properties:
       query_node_rpc_url:
         type: string
-        description: RPC endpoint for queries and block subscription
+        description: CometBFT RPC endpoint for queries, block subscription and transaction submission
         examples:
-          - https://rpc.testnet.pokt.network
+          - https://your-full-node:26657
           - http://localhost:26657
       query_node_grpc_url:
         type: string
         description: gRPC endpoint for queries
         examples:
-          - grpc.testnet.pokt.network:443
+          - your-full-node:9090
           - localhost:9090
       chain_id:
         type: string
@@ -106,6 +122,11 @@ properties:
         type: boolean
         description: Disable TLS for gRPC connections (use for local development only)
         default: false
+      query_timeout_seconds:
+        type: integer
+        description: Seconds allowed for one chain query
+        default: 5
+        minimum: 0
 
   transaction:
     type: object
@@ -118,8 +139,8 @@ properties:
         minimum: 0
       gas_price:
         type: string
-        description: Gas price in upokt (e.g., "0.00001upokt")
-        default: "0.00001upokt"
+        description: Gas price in upokt (1 POKT = 1,000,000 upokt)
+        default: "0.000001upokt"
         pattern: ^[0-9]+(\\.[0-9]+)?upokt$
       gas_adjustment:
         type: number
@@ -129,38 +150,56 @@ properties:
       disable_pre_proof_claim_verification:
         type: boolean
         description: |
-          Disable the pre-proof GetClaim guard that verifies each session's
-          claim is on-chain before proof submission. Default: false (guard
-          enabled — recommended). Enabling this reproduces pre-WS-A behavior
-          where proof submission attempts run even when the claim never
-          landed on-chain, producing FailedPrecondition retry storms.
+          Diagnostic only. Disables the check that each session's claim is on
+          chain before its proof is submitted. With it disabled, proofs are
+          submitted for claims that never landed, and each fails and is
+          retried. Default: false (check enabled, recommended).
         default: false
+      tx_max_concurrent:
+        type: integer
+        description: >-
+          How many claim/proof broadcasts may be in flight at once. It bounds
+          the load on the full node (with gas estimation on, each transaction
+          costs a simulation plus a broadcast). Raise it only when
+          ha_tx_permit_wait_seconds shows broadcasts waiting. 0 = default.
+        default: 32
+        minimum: 0
+      tx_rpc_timeout_seconds:
+        type: integer
+        description: >-
+          Seconds allowed for ONE broadcast attempt; not the transaction's
+          on-chain deadline. Tune it from the p99 of
+          ha_tx_broadcast_latency_seconds. 0 = default.
+        default: 30
+        minimum: 0
+      tx_conn_probe_interval_seconds:
+        type: integer
+        description: >-
+          Seconds between probes of the dedicated transaction connection while
+          it is idle, so a connection dropped between windows is reported
+          before the next window instead of costing a claim. 0 = default.
+        default: 60
+        minimum: 0
       inclusion_reconciler_max_concurrent:
         type: integer
-        description: Worker pool size for per-block group reconciliation (one task per owned supplier per block).
+        description: Worker pool size for per-block group reconciliation (one task per owned supplier per block). Capped at tx_max_concurrent.
         default: 64
         minimum: 1
       max_rebroadcasts:
         type: integer
-        description: |
-          Max in-window re-submissions of a still-missing claim/proof. Default 2,
-          spaced 2 blocks apart (one block for a resend to be included, one for
-          the inclusion read to observe it). The first is due at the window
-          midpoint for an accepted-but-evicted tx, or promptly for a build-OK-
-          but-submit-failed tx that was never broadcast. A window too short to
-          hold the spacing simply yields fewer resends -- watch
-          ha_miner_inclusion_resend_cap_unused_total to tell that apart from a
-          cap that was never needed. Set to 0 for observe-only (verify + record
-          outcomes but never resend). Omit to use the default.
-        default: 2
+        description: >-
+          Cap on in-window re-sends of a still-missing claim/proof. Unset: no
+          cap -- a still-missing claim or proof is re-sent on every block its
+          window allows, each re-send costing one transaction fee. 0:
+          observe-only (verify and record outcomes, never re-send).
         minimum: 0
       rebroadcast_safety_blocks:
         type: integer
-        description: |
-          Stop rebroadcasting once the chain is within this many blocks of
-          window-close (claim or proof), so a re-submit cannot land after the
-          window.
-        default: 1
+        description: >-
+          Stop re-sending once the chain is within this many blocks of the
+          window close (claim or proof). 0: the block before the close is the
+          last re-send, the last one that can still be included.
+        default: 0
         minimum: 0
       inclusion_reconciler_per_group_timeout_ms:
         type: integer
@@ -251,12 +290,12 @@ properties:
 
   pprof:
     type: object
-    description: Prometheus metrics server configuration
+    description: Pprof profiling server configuration (for debugging)
     properties:
       enabled:
         type: boolean
         description: Enable pprof profiling server (for debugging, disable in production)
-        default: true
+        default: false
       addr:
         type: string
         description: Pprof HTTP server address (use localhost for security)
@@ -287,7 +326,7 @@ properties:
         default: true
       async_buffer_size:
         type: integer
-        description: Async log buffer size
+        description: Async ring buffer size, in log messages (not bytes)
         default: 100000
         minimum: 1000
       async_poll_interval:
@@ -317,19 +356,16 @@ properties:
   block_time_seconds:
     type: integer
     description: >-
-      Expected block time in seconds. Set this explicitly per deployment --
-      mainnet, beta/testnet, and localnet run different real block times, and
-      mainnet's own drifts with network conditions rather than holding still.
-      Do not trust a single number here without measuring your target network.
-      The default below (cache.DefaultBlockTimeSeconds in Go, the ONLY place
-      this fallback is allowed to be a literal) is a last-resort value for an
-      unconfigured deployment, not production guidance.
-    default: 30
+      REQUIRED, with no default: the miner does not start without it. Expected
+      block time in seconds; every claim and proof transaction deadline is
+      computed from it. Mainnet, testnet and localnet run different block
+      times, and mainnet's drifts with network conditions, so measure your
+      target network (mainnet is roughly 60).
     minimum: 1
 
   block_health_monitor:
     type: object
-    description: Block health monitoring configuration (Feature 1)
+    description: Block health monitoring (warns when blocks arrive slower than expected)
     properties:
       enabled:
         type: boolean
@@ -343,7 +379,11 @@ properties:
 
   default_service_factor:
     type: number
-    description: Global serviceFactor applied to all services. If set, effectiveLimit = appStake × serviceFactor. If 0 or unset, use baseLimit formula.
+    description: >-
+      Global service factor for every service without an override. If set,
+      effectiveLimit = appStake x factor. If 0 or unset, the baseLimit formula
+      applies: (appStake / num_suppliers_per_session) / pendingSessions, which
+      follows the chain's parameters.
     default: 0
     minimum: 0
 
@@ -356,11 +396,11 @@ properties:
 
   balance_monitor:
     type: object
-    description: Balance and stake monitoring configuration (Feature 4)
+    description: Balance and stake monitoring
     properties:
       enabled:
         type: boolean
-        description: Enable balance/stake monitoring
+        description: Runs the balance and stake monitor. false turns it off entirely -- no balance warnings and no stake alerts.
         default: true
       check_interval_seconds:
         type: integer
@@ -410,7 +450,7 @@ properties:
       workers_per_supplier:
         type: integer
         description: Workers allocated per supplier for claim/proof building
-        default: 2
+        default: 6
         minimum: 1
       query_workers:
         type: integer
@@ -453,26 +493,21 @@ properties:
         default: 30
         minimum: 5
 
-  deduplication_ttl_blocks:
-    type: integer
-    description: How many blocks to keep relay hashes for deduplication
-    default: 10
-    minimum: 1
-
   batch_size:
     type: integer
-    description: Number of messages to fetch per XREADGROUP operation
+    description: Number of relays read per stream read
     default: 1000
     minimum: 1
 
-
   # hot_reload_enabled is NOT a top-level setting: it lives under keys, in both
-  # binaries. A top-level value is rejected at startup with a migration message.
+  # binaries. A top-level value is reported at startup, and fails
+  # "miner validate" and --strict-config.
 
   session_ttl:
     type: string
-    description: TTL for session data (duration string, e.g., "24h")
-    default: 24h
+    description: >-
+      TTL of session state in Redis (duration string, e.g. "2h"). Unset: equal
+      to cache_ttl, so sessions and their trees expire together.
     pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
   cache_ttl:
@@ -486,17 +521,6 @@ properties:
     description: How often the leader rewrites the service factor manifest. The manifest has no TTL, so this is what bounds how long a miner that lost leadership can leave its own config standing.
     default: 5m
     pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
-
-  smst_live_root_checkpoint_interval:
-    type: integer
-    description: |
-      How often (in UpdateTree calls) the intermediate SMST root is written to
-      Redis so a follower promoted mid-session can resume the tree. Bounds the
-      relay loss window on a leader kill to (interval - 1) relays. Lower = safer,
-      more Redis writes. Default 10 balances durability vs write amplification.
-      Set to 1 for zero-loss mode. 0 is treated as "use default".
-    default: 10
-    minimum: 0
 
   submission_tracking_ttl:
     type: string

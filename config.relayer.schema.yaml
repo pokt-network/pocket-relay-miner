@@ -24,14 +24,23 @@ properties:
     properties:
       url:
         type: string
-        description: Redis connection URL (supports single, sentinel, cluster)
-        pattern: ^redis(s)?://
+        description: >-
+          Redis connection URL. The scheme selects the client: redis:// or
+          rediss:// (TLS) for a single Redis, redis-sentinel:// for Sentinel
+          (sentinel addresses, then the master name as the path), and
+          redis-cluster:// for a Cluster. A comma-separated host list under
+          redis:// is not a cluster. Redis must run with maxmemory set and
+          maxmemory-policy noeviction, or the relayer refuses to start.
+        pattern: ^(redis|rediss|redis-sentinel|redis-cluster)://
         examples:
           - redis://localhost:6379
-          - redis://node1:6379,node2:6379,node3:6379
+          - redis-sentinel://sentinel1:26379,sentinel2:26379/mymaster
+          - redis-cluster://node1:6379,node2:6379,node3:6379
       pool_size:
         type: integer
-        description: Maximum number of socket connections (0 = use default 20 × GOMAXPROCS)
+        description: >-
+          Maximum number of connections. 0 = sized from the relayer's worker
+          pools, about 7.2 x GOMAXPROCS + 20.
         default: 0
         minimum: 0
       min_idle_conns:
@@ -41,12 +50,14 @@ properties:
         minimum: 0
       pool_timeout_seconds:
         type: integer
-        description: Wait time for connection from pool in seconds (0 = use default 4s)
+        description: Seconds a caller waits for a pooled connection (0 = default, 6)
         default: 0
         minimum: 0
       conn_max_idle_time_seconds:
         type: integer
-        description: Close idle connections after this many seconds (0 = use default 300s)
+        description: >-
+          Close a connection idle for this many seconds (0 = the Redis client
+          library's default, 30 minutes)
         default: 0
         minimum: 0
       batch_publish_interval_ms:
@@ -82,8 +93,11 @@ properties:
         properties:
           base_prefix:
             type: string
-            description: Root prefix for all Redis keys. Two base prefixes are two disjoint keyspaces.
-            pattern: "^[a-zA-Z0-9_-]+$"
+            description: >-
+              Root prefix for all Redis keys. Two base prefixes are two disjoint
+              keyspaces. Must not contain ':', whitespace, or * ? [ ]. Must be
+              the same in the miner and every relayer of one fleet.
+            pattern: "^[^:*?\\[\\]\\s]+$"
             default: ha
 
   pocket_node:
@@ -224,8 +238,12 @@ properties:
           type: integer
           description: >-
             Overrides default_validation_queue_max_mib for this service.
-            0 means "use the default", never unlimited.
-          minimum: 0
+            0 means "use the default", never unlimited. Any other value must be
+            between 64 and 8192.
+          oneOf:
+            - const: 0
+            - minimum: 64
+              maximum: 8192
         default_backend:
           type: string
           enum:
@@ -279,7 +297,7 @@ properties:
                           description: Backend endpoint URL
               base_path:
                 type: string
-                description: "Optional path prefix the backend expects on every request (e.g. /ext/bc/C/rpc for AvalancheGo). The proxy prepends it to client requests that do not already start with it, avoiding duplication when PATH sends either / or the full prefix. Takes precedence over any path component in url/urls."
+                description: "Optional path prefix the backend expects on every request (e.g. /ext/bc/C/rpc). The relayer prepends it to a request path that does not already start with it, so a caller sending either / or the full prefix reaches the same path. Takes precedence over any path component in url/urls. A health check with no endpoint probes this path."
                 pattern: ^/
               load_balancing:
                 type: string
@@ -288,10 +306,25 @@ properties:
                   - round_robin
                 description: >-
                   Load balancing strategy for this backend pool. "first_healthy"
-                  (the default) always routes to the first healthy endpoint;
-                  "round_robin" distributes across healthy endpoints. These are
-                  the only values the relayer accepts.
-                default: first_healthy
+                  always routes to the first healthy endpoint; "round_robin"
+                  distributes across healthy endpoints. These are the only
+                  values the relayer accepts. Unset: round_robin when the pool
+                  has two or more endpoints, first_healthy when it has one.
+              max_retries:
+                type: integer
+                description: Retries of a failed backend request. Explicit 0 disables retries.
+                default: 1
+                minimum: 0
+                maximum: 3
+              recovery_timeout_seconds:
+                type: integer
+                description: >-
+                  Seconds after which an endpoint tripped by the circuit breaker
+                  is tried again, so a pool with no active health checks cannot
+                  stay down forever. 0 disables it: only an active health check
+                  can then bring an endpoint back.
+                default: 30
+                minimum: 0
               headers:
                 type: object
                 description: Additional headers for backend requests
@@ -323,7 +356,7 @@ properties:
                     default: false
                   endpoint:
                     type: string
-                    description: Health check endpoint path (e.g., /health)
+                    description: Health check endpoint path (e.g., /health). Required when enabled, unless base_path is set (the probe then uses base_path).
                   interval_seconds:
                     type: integer
                     description: How often to check health (seconds)
@@ -340,6 +373,24 @@ properties:
                     type: integer
                     description: Successes before marking healthy
                     minimum: 1
+                  method:
+                    type: string
+                    description: HTTP method of the probe. Use POST for a JSON-RPC probe.
+                    default: GET
+                  request_body:
+                    type: string
+                    description: Body sent with the probe (e.g. a JSON-RPC request). Unset sends no body.
+                  content_type:
+                    type: string
+                    description: Content-Type of the probe. Unset defaults to application/json when request_body starts with { or [.
+                  expected_body:
+                    type: string
+                    description: Substring the probe's response body must contain. Unset checks the status code only.
+                  expected_status:
+                    type: array
+                    description: Status codes accepted as healthy. Unset accepts any 2xx.
+                    items:
+                      type: integer
                   headers:
                     type: object
                     description: >-
@@ -361,7 +412,11 @@ properties:
 
   default_request_timeout_seconds:
     type: integer
-    description: Default backend request timeout (seconds)
+    description: >-
+      Fallback request timeout (seconds) for a service whose timeout profile
+      sets request_timeout_seconds to 0. Also takes part in sizing the relayer's
+      HTTP server read timeout (the largest timeout of any service). A service
+      normally takes its timeout from its timeout profile.
     default: 30
     minimum: 1
 
@@ -400,6 +455,10 @@ properties:
       between 64 and 8192, and is raised automatically when it falls below
       what one relay of that service can retain.
     default: 128
+    oneOf:
+      - const: 0
+      - minimum: 64
+        maximum: 8192
 
   metrics:
     type: object
@@ -483,11 +542,14 @@ properties:
         default: json
       async:
         type: boolean
-        description: Enable async logging for better performance
-        default: true
+        description: >-
+          Non-blocking logging through a ring buffer (recommended). The relayer
+          applies no logging defaults to fields left out of the logging block,
+          so without async: true it logs synchronously.
+        default: false
       async_buffer_size:
         type: integer
-        description: Async log buffer size
+        description: Async ring buffer size, in log messages (not bytes)
         default: 100000
         minimum: 1000
       async_poll_interval:
@@ -520,7 +582,10 @@ properties:
     properties:
       cache_ttl:
         type: string
-        description: TTL for all cached Redis data (streams, params, app stakes, meters). Redis TTL handles automatic expiration.
+        description: >-
+          TTL of the relay meter's per-session keys in Redis (metering metadata,
+          consumed-stake counters, active-session markers). Redis expiry cleans
+          them up.
         default: 2h
         pattern: ^[0-9]+(ns|us|µs|ms|s|m|h)$
 
@@ -578,9 +643,31 @@ properties:
         description: Don't modify content encoding (required for relay protocol)
         default: true
 
+  response_compression:
+    type: object
+    description: >-
+      gzip of the signed relay responses the relayer returns. Off by default,
+      because gzip costs a measurable share of relayer CPU. When enabled it runs
+      only when the client sent Accept-Encoding gzip and the response is at
+      least min_size_bytes long.
+    properties:
+      enabled:
+        type: boolean
+        default: false
+      min_size_bytes:
+        type: integer
+        description: Smallest response worth compressing; below it gzip makes the output larger.
+        default: 1024
+        minimum: 0
+
   timeout_profiles:
     type: object
-    description: Timeout profiles for different service types. Each profile defines request timeout and HTTP client timeouts. Services select a profile via timeout_profile field. Auto-populated with "fast" and "streaming" defaults if not specified.
+    description: >-
+      Timeout profiles. Each defines a request timeout and HTTP client timeouts;
+      services select one via timeout_profile. "fast" and "streaming" are built
+      in; a profile defined here is added to them, and redefining a built-in
+      name replaces it. Unset dial and TLS timeouts fall back to
+      http_transport.
     additionalProperties:
       type: object
       description: A timeout profile defining all timeout settings for a service
@@ -608,7 +695,13 @@ properties:
 
   pool_profiles:
     type: object
-    description: Per-service HTTP connection pool profiles. Each profile overrides a subset of http_transport pool knobs. Services reference them via pool_profile. Auto-populated with "low" / "medium" / "high" defaults if not specified. Tier values come from sweep-optimal loadtest; re-run on your own infra to retune.
+    description: >-
+      Per-service HTTP connection pool profiles. Each profile overrides a subset
+      of the http_transport pool settings; services reference them via
+      pool_profile. "low", "medium" and "high" are built in; a profile defined
+      here is added to them, and redefining a built-in name replaces it. The
+      built-in tiers were sized for a p99 of 100 ms or less; measure your own
+      backends to retune them.
     additionalProperties:
       type: object
       description: A pool profile defining per-service HTTP connection pool sizing
