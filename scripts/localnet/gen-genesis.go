@@ -1,10 +1,11 @@
 //go:build ignore
 
-// gen-genesis writes a localnet genesis sized for load: a number of
-// applications per service and a number of suppliers, grown from the default
-// localnet genesis as a template. Everything it does not add it copies.
+// gen-genesis writes the localnet genesis Tilt runs, sized for load: a number
+// of applications per service and a number of suppliers, grown from the genesis
+// it reads. Everything it does not add it copies, so a run on its own output
+// changes nothing.
 //
-//	go run scripts/localnet/gen-genesis.go                  # tilt/config -> tilt/config/scale
+//	go run scripts/localnet/gen-genesis.go                  # regenerates tilt/config in place
 //	go run scripts/localnet/gen-genesis.go -check <genesis> # invariants only, on any genesis
 //
 // Every existing account, application and supplier is kept as it is, so the
@@ -52,7 +53,7 @@ type obj = map[string]any
 
 func main() {
 	in := flag.String("in", "tilt/config", "directory holding the template genesis.json and all-keys.yaml")
-	out := flag.String("out", "tilt/config/scale", "directory to write genesis.json and all-keys.yaml to")
+	out := flag.String("out", "tilt/config", "directory to write genesis.json and all-keys.yaml to (the input directory by default: a run on its own output changes nothing)")
 	appsPerService := flag.Int("apps-per-service", 5, "applications staked for each service")
 	suppliers := flag.Int("suppliers", 50, "suppliers, which is also num_suppliers_per_session")
 	appStake := flag.String("app-stake", "", "stake of EVERY application in upokt, template ones included (default: each keeps its template's)")

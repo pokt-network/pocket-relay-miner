@@ -504,8 +504,9 @@ known_applications:
 
 # Global service factor, for every service without an override below.
 # Default: unset (baseLimit). 0.01 is a localnet value: the localnet genesis
-# has 15 suppliers per session and 20-block sessions, so its baseLimit factor
-# is 1 / 15 / 3 = 0.022. On mainnet (worked example above) 0.01 is above
+# has 50 suppliers per session and 20-block sessions, so its baseLimit factor
+# is 1 / 50 / 3 = 0.0067 and 0.01 lets each supplier serve more of the
+# application's stake. On mainnet (worked example above) 0.01 is also above
 # baseLimit.
 default_service_factor: 0.01
 

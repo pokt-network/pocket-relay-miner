@@ -2,8 +2,6 @@
 #
 # Derived from the genesis instead of listed by hand, so a generated localnet
 # (scripts/localnet/gen-genesis.go) brings its own accounts with it.
-# scripts/localnet/check-account-init.sh holds this to the list that was
-# written by hand for the default localnet, order included.
 
 def staked_account_names(all_keys, genesis):
     """Names of the all-keys.yaml accounts that are staked actors in genesis.

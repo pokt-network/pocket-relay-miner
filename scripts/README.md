@@ -53,7 +53,7 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 - `ws-test/` — manual WebSocket tester through the gateway, reconnecting on session rollover (the CLI's `relay websocket --load-test` redials on its own).
 - `lib/` — shared bash helpers (`cli-build.sh`: builds the relay CLI once for the scripts that drive the relayer at `:8180`).
 - `observability/` — `triage.sh` evaluates the metric identities of [`../docs/METRICS_TRIAGE.md`](../docs/METRICS_TRIAGE.md) against Prometheus; `triage.conf.example` shows its settings.
-- `localnet/` — localnet tooling: `gen-genesis.go` (a genesis sized for load), `check-account-init.sh` (the accounts derived from the genesis), `check-cpu-limits.sh` (GOMAXPROCS equals each container's CPU limit).
+- `localnet/` — localnet tooling: `gen-genesis.go` (regenerates the Tilt genesis and keys, sized for load), `check-cpu-limits.sh` (GOMAXPROCS equals each container's CPU limit).
 - `hooks/` — the `pre-commit` and `pre-push` git hooks; install with `make install-hooks`.
 - `localonly/` — gitignored; operator-specific config (see the operator-data rule in [`../CONTRIBUTING.md`](../CONTRIBUTING.md)).
 

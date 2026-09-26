@@ -388,9 +388,7 @@ validator:
     rpc: 26657
   tag: 0.1.35
 
-# Scale profile (2026-09-10, r1): 5 apps/service, 50 suppliers. Revert to default when done.
 localnet:
-  profile: scale
   # MAINNET clock for package 186's load runs. The tracked default is 30
   # (beta); this overrides it from a gitignored file, which is the whole point
   # of the knob: the tree stays clean and run-base111.sh:12 does not abort, so

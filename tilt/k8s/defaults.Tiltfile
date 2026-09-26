@@ -10,12 +10,6 @@ def get_defaults():
             "debug": True,
         },
         "localnet": {
-            # Which genesis and keys the stack starts from: "default" is
-            # tilt/config, "scale" is what scripts/localnet/gen-genesis.go writes
-            # to tilt/config/scale. Switching it on a running chain needs a
-            # fresh validator.
-            "profile": "default",
-
             # THE localnet clock. One number feeds both the validator's
             # timeout_commit and the miner's block_time_seconds, so they cannot
             # drift apart -- and the miner derives its claim and proof deadlines

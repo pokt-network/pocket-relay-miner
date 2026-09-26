@@ -23,11 +23,10 @@ tilt/
 │   ├── account-init.Tiltfile   # Account initialization
 │   └── accounts.star       # Accounts account-init initializes, derived from the genesis
 ├── config/                 # Shared configuration files
-│   ├── genesis.json        # Pocket Network genesis
+│   ├── genesis.json        # Localnet genesis: 50 suppliers, 5 applications per service
 │   ├── all-keys.yaml       # All account keys
 │   ├── *.toml              # Validator configs
-│   ├── *.json              # Validator keys
-│   └── scale/              # Genesis and keys sized for load (scripts/localnet/gen-genesis.go)
+│   └── *.json              # Validator keys
 ├── backend-server/         # Demo backend server
 ├── grafana/
 │   └── dashboards/         # unified-overview.json

@@ -79,14 +79,9 @@ docker_build(
     ],
 )
 
-# localnet.profile picks the genesis and keys everything below starts from.
-localnet_config_dirs = {"default": "tilt/config", "scale": "tilt/config/scale"}
-localnet_profile = config["localnet"]["profile"]
-if localnet_profile not in localnet_config_dirs:
-    fail("localnet.profile must be one of {}, got {}".format(sorted(localnet_config_dirs.keys()), localnet_profile))
-localnet_config_dir = localnet_config_dirs[localnet_profile]
-if localnet_profile != "default" and not os.path.exists(localnet_config_dir + "/genesis.json"):
-    fail("localnet.profile={} but {}/genesis.json does not exist -- generate it with: go run scripts/localnet/gen-genesis.go".format(localnet_profile, localnet_config_dir))
+# The genesis and keys everything below starts from (scripts/localnet/gen-genesis.go
+# regenerates them in place).
+localnet_config_dir = "tilt/config"
 
 # Load all-keys.yaml to extract supplier keys and application addresses
 all_keys_path = localnet_config_dir + "/all-keys.yaml"

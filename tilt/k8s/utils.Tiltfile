@@ -70,6 +70,10 @@ def apply_k8s_overrides_miner(config, redis_host):
     if "redis" not in config:
         config["redis"] = {}
     config["redis"]["url"] = "redis://{}:6379".format(redis_host)
+    # The localnet genesis stakes 50 suppliers, and each one's stream read holds a
+    # pooled connection while it blocks: the default pool of 50 is too small.
+    if "pool_size" not in config["redis"]:
+        config["redis"]["pool_size"] = 100
 
     # Override pocket_node with k8s service names
     if "pocket_node" not in config:
