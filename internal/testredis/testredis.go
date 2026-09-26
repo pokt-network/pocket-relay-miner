@@ -73,6 +73,12 @@ func Client(t testing.TB) *redis.Client {
 	if err != nil {
 		t.Fatalf("REDIS_TEST_URL %q is not a valid Redis URL: %v", URL(), err)
 	}
+	// No CLIENT SETINFO on connect. go-redis sends it as a pipeline through the
+	// client's own hooks every time it dials, so a test hook that counts or holds
+	// pipelines sees a write nobody made whenever the pool opens a connection
+	// mid-test -- and whether it does depends on load. Production sends it; it
+	// only names the library, so leaving it out changes no behaviour under test.
+	opt.DisableIdentity = true
 	client := redis.NewClient(opt)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
