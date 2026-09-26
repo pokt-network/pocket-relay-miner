@@ -24,15 +24,20 @@ the claim and the proof from the served relays and submits them to the chain.
 Kubernetes is not supported in v0.1.0. The Tilt setup in `tilt/` is the
 developers' local environment, a reference only, not a deployment path.
 
-## Invariants: a deployment that breaks one does not start
+## Invariants
+
+Some of these are checked at startup and stop a binary when broken; the rest
+are not checked, and breaking them is unsupported.
 
 1. **Topology: 1 relayer, 1 miner, 1 Redis.** This is the topology v0.1.0 was
    tested and measured on.
 2. **Same version for relayer and miner**: image
    `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0` for both, or the binary of
    the same tag. Mixed versions are not supported. Never use a moving tag.
-3. **Redis 8.10 with `maxmemory` set and `maxmemory-policy noeviction`.** Both
-   binaries refuse to start otherwise. Use
+3. **Redis with `maxmemory` set and `maxmemory-policy noeviction`.** Both
+   binaries refuse to start when `maxmemory` is 0 or the policy is anything
+   other than `noeviction`. 8.10 is the supported version; the version itself
+   is not checked at startup. Use
    [config.redis.example.conf](config.redis.example.conf).
 4. **Memory and CPU limits**: set `GOMEMLIMIT` and `GOMAXPROCS`, or give each
    process a container (or systemd) memory and CPU limit. Without either, each

@@ -7,8 +7,9 @@ served, its claim and proof on chain, and the supplier's reward settled. Then
 [Pointing it at your own node](#pointing-it-at-your-own-node) says what to
 change for a real network.
 
-Every **Expect** below is copied from a real run of this runbook on
-2026-09-26 (image built from commit `334a4c4`).
+Every **Expect** below comes from a real run of this runbook on 2026-09-26
+(image built from commit `334a4c4`). Ids, timestamps and durations differ on
+every run, and `...` marks lines left out.
 
 How to read a step: **Run** the command, compare with **Expect**, use
 **If not** when it differs, and **Stop if** says when to ask a human instead of
@@ -38,7 +39,9 @@ missing → install Docker Engine with the compose plugin.
 
 Also needed: about 6 GB of free RAM (3 containers are limited to 2 GB each,
 plus the validator and the backend) and free local ports 8180 and 9090. To use
-other ports, export `RELAYER_PORT` and `VALIDATOR_GRPC_PORT` before step 3.
+other ports, export `RELAYER_PORT` and `VALIDATOR_GRPC_PORT` before step 3, and
+then pass the same ports to the relay client in steps 10 and 11 (see step 10):
+its `--localnet` defaults are fixed to `localhost:8180` and `localhost:9090`.
 
 ## Step 1: get the image
 
@@ -52,11 +55,17 @@ docker pull ghcr.io/pokt-network/pocket-relay-miner:v0.1.0
 `Status: Image is up to date`.
 
 **If not**: `manifest unknown` → the tag is not published yet → build it
-locally with the same name (takes a few minutes):
+locally with the same name (takes a few minutes), because the compose file
+names that image:
 
 ```bash
+git checkout v0.1.0 2>/dev/null || echo "tag v0.1.0 not found: building the current checkout"
 docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.0 .
 ```
+
+If the tag is not in the repository either, the release is not out: the image
+is then whatever commit you have checked out, under the v0.1.0 name. That is
+enough for this local runbook, since relayer and miner run the same image.
 
 **Stop if**: someone asks you to use another tag. Relayer and miner must run
 the same version, and v0.1.0 is what this runbook was verified with.
@@ -70,17 +79,25 @@ $C run --rm --no-deps miner miner validate --config /config/miner.yaml; echo "EX
 $C run --rm --no-deps relayer relayer validate --config /config/relayer.yaml; echo "EXIT=$?"
 ```
 
-**Expect**
+**Expect** (the recorded run; the container ids and timestamps differ)
 
 ```
+ Container prm-example-miner-run-679306ae8c54 Creating
+ Container prm-example-miner-run-679306ae8c54 Created
+2026/09/26 04:45:14 maxprocs: Honoring GOMAXPROCS="2" as set in environment
 config OK: /config/miner.yaml would start
 EXIT=0
+ Container prm-example-relayer-run-ac1c9dd1fdc8 Creating
+ Container prm-example-relayer-run-ac1c9dd1fdc8 Created
+2026/09/26 04:45:15 maxprocs: Honoring GOMAXPROCS="2" as set in environment
 config OK: /config/relayer.yaml would start
 EXIT=0
 ```
 
-**If not**: `Error: config is INVALID: ...` → the message names the key and
-the line → fix that key in `examples/docker-compose/config/`. See
+The lines that matter are `config OK: ... would start` and `EXIT=0`.
+
+**If not**: `Error: config is INVALID: ...` → the message names the key
+(and the line, for an unknown or retired key) → fix that key in `examples/docker-compose/config/`. See
 [Config rejected](TROUBLESHOOTING.md#config-rejected).
 
 **Stop if**: the fix would mean removing a key you do not understand.
@@ -112,6 +129,8 @@ The first run builds the test backend image, which takes a few minutes.
   and look the message up in [TROUBLESHOOTING.md](TROUBLESHOOTING.md#miner-does-not-start).
 - `bind: address already in use` → port 8180 or 9090 is taken → export
   `RELAYER_PORT=18180` or `VALIDATOR_GRPC_PORT=19090`, run `$C down -v`, retry.
+  From then on, pass `--relayer-url http://localhost:18180` and/or
+  `--node localhost:19090` to every relay command in steps 10 and 11.
 
 **Stop if**: the same step fails twice after a reset.
 
@@ -123,17 +142,19 @@ The first run builds the test backend image, which takes a few minutes.
 $C ps -a --format '{{.Service}}\t{{.Status}}'
 ```
 
-**Expect** (seconds vary; right after step 3 the relayer shows
-`(health: starting)` and turns `(healthy)` within about 30 seconds):
+**Expect** (the recorded run, taken right after step 3; seconds vary):
 
 ```
 account-init	Exited (0) 7 seconds ago
 backend	Up 51 seconds (healthy)
 miner	Up 6 seconds (healthy)
 redis	Up 52 seconds (healthy)
-relayer	Up 30 seconds (healthy)
+relayer	Up Less than a second (health: starting)
 validator	Up 51 seconds (healthy)
 ```
+
+The relayer's `(health: starting)` turns `(healthy)` within about 30 seconds;
+run the command again until it does.
 
 **If not**: `relayer ... (unhealthy)` → its `/ready` stays 503 → step 7.
 `miner ... Restarting` → the miner cannot read the chain →
@@ -160,8 +181,8 @@ makes a block every ~11 seconds), for example `"latest_block_height":"5"` then
 **Run**
 
 ```bash
-$C exec redis redis-cli CONFIG GET maxmemory-policy
-$C exec redis redis-cli CONFIG GET maxmemory
+$C exec redis redis-cli --raw CONFIG GET maxmemory-policy
+$C exec redis redis-cli --raw CONFIG GET maxmemory
 ```
 
 **Expect**
@@ -192,9 +213,10 @@ miner; see [Relayer up but not ready](TROUBLESHOOTING.md#relayer-up-but-not-read
 
 ## Step 8: build the relay test client
 
-The relay client is the same binary, run on the host. `--localnet` reads the
-local chain's test application and gateway keys from `tilt/config/`, so run it
-from the repository root.
+The relay client is the same binary, run on the host. `--localnet` uses the
+local chain's test application and gateway keys, the relayer at
+`http://localhost:8180` and the node's gRPC at `localhost:9090`. All of them are
+compiled into the binary; nothing is read from the repository at run time.
 
 **Run** (needs Go 1.26.5 and make)
 
@@ -236,6 +258,12 @@ $C exec validator pocketd q bank balances pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2g
 ```bash
 ./bin/pocket-relay-miner relay jsonrpc --localnet --service develop-http; echo "EXIT=$?"
 ```
+
+If you exported `RELAYER_PORT` or `VALIDATOR_GRPC_PORT`, add
+`--relayer-url http://localhost:$RELAYER_PORT` and
+`--node localhost:$VALIDATOR_GRPC_PORT` here and in every relay command below.
+Without them the client still targets 8180 and 9090, and if another relayer
+answers there this step passes against the wrong one.
 
 **Expect**
 
@@ -321,7 +349,8 @@ $C exec validator pocketd q bank balances pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2g
 
 **Expect**: above the step 9 baseline. The real run went from `999999999998`
 to `999999999997` (claim fee), `999998999996` (proof fee, 1 POKT) and then
-`1000020069996` at settlement: +21070000 upokt net of fees.
+`1000020069996` at settlement: +20069998 upokt net of fees against the
+baseline, and +21070000 upokt gross against the balance after the proof fee.
 
 This is the end of the local deployment: relays served, claimed, proved and
 paid.
@@ -352,7 +381,9 @@ are public.
 1. **Remove the local chain**: delete the `validator` and `account-init`
    services, and the `validator` and `account-init` entries under
    `depends_on:` of `miner`. Delete the `validator-data` volume and the
-   `localnet/` mount. Keep `backend` only if you want the test backend.
+   `localnet/` mount. Keep `backend` only if you want the test backend; if you
+   delete it, also delete the `backend` entry under `depends_on:` of `relayer`,
+   or compose refuses to start with an undefined service.
 2. **Point both configs at your node**, in `config/relayer.yaml` and
    `config/miner.yaml`:
    - `pocket_node.query_node_rpc_url`: your node's CometBFT RPC URL.
@@ -364,7 +395,9 @@ are public.
      roughly 60).
 4. **Use your keys**: replace `config/supplier-keys.yaml` with a file that
    holds only your suppliers' keys (same `keys:` format), outside version
-   control, mode 0600. For a keyring instead, see
+   control, mode 0600 and owned by uid 1000: the image runs as uid 1000
+   (`pocket`), so a 0600 file owned by any other uid cannot be read
+   (`sudo chown 1000:1000 <file>`). For a keyring instead, see
    [docs/SUPPLIER_KEYS.md](../SUPPLIER_KEYS.md).
 5. **Declare your services** in `config/relayer.yaml` under `services.<service_id>`,
    1 entry per service your suppliers are staked for, each with its

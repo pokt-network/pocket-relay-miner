@@ -49,10 +49,10 @@ and the miner on the same version.
 | Host (binary + systemd) | [docs/deploy/HOST.md](docs/deploy/HOST.md) |
 | Kubernetes | not supported in v0.1.0 |
 
-The image is `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0`. What stops a
-deployment from starting (Redis 8.10 with `maxmemory` and `noeviction`, memory
-and CPU limits, the miner needing the chain, the relayer waiting for the
-miner) is listed in [AGENTS.md](AGENTS.md#invariants-a-deployment-that-breaks-one-does-not-start).
+The image is `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0`. What a deployment
+must hold (Redis 8.10 with `maxmemory` and `noeviction`, memory and CPU limits,
+the miner needing the chain, the relayer waiting for the miner), and which of
+those stop a binary at startup, is listed in [AGENTS.md](AGENTS.md#invariants).
 
 ## Configuration
 

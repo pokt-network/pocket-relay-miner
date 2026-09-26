@@ -26,7 +26,10 @@ Logs are JSON by default; search for `"level":"error"`, `"level":"warn"` and `Er
 
 ## Config rejected
 
-`validate` and startup report every bad key in 1 pass, with its line number.
+`validate` reports every unknown or retired key in 1 pass, each with its line
+number. A key it knows but whose value it rejects is reported alone, the first
+one found, without a line number: fix it and run `validate` again until it
+exits 0.
 
 A retired key names what replaced it. Real output (a relayer config still
 carrying `relay_meter.fail_behavior`):
@@ -87,7 +90,9 @@ Expect `noeviction` and a number above 0. In compose, run them as
 `redis.conf`: the file must be passed to `redis-server` as its first argument,
 as the compose example does.
 
-**Redis version**: run 8.10. v0.1.0 was built, tested and measured on 8.10.1.
+**Redis version**: 8.10 is the supported version; v0.1.0 was built, tested and
+measured on 8.10.1. The binaries do not check the version at startup: what stops
+them is `maxmemory` 0 or a policy other than `noeviction`.
 Check with `redis-cli INFO server | grep redis_version`.
 
 ## Miner does not start
@@ -188,7 +193,7 @@ the unit's `MemoryMax`) and `GOMAXPROCS` equal to its CPU limit.
 | 503 `relayer is not admitting relays right now` | `pricing_unavailable` | no service factor manifest yet | [Relayer up but not ready](#relayer-up-but-not-ready) |
 | 503 `relayer is not admitting relays right now` | `publish_queue_full` | the queue of relays waiting to be written to Redis is full | check Redis latency and health; the queue drains by itself |
 | 429 `relayer is not admitting relays right now` | `validation_queue_full` | an optimistic service's validation queue is full | wait for `Retry-After`; if persistent, raise the service's capacity |
-| 429 `relayer is not admitting relays: storage saturated` | `storage_saturated` | Redis has less than 1 GiB free (or 1/8 of `maxmemory`) | raise `maxmemory`, or let the miner drain; admission reopens at 2 GiB free |
+| 429 `relayer is not admitting relays: storage saturated` | `storage_saturated` | Redis has less than 1 GiB free, or 1/8 of `maxmemory` when that is smaller | raise `maxmemory`, or let the miner drain; admission reopens at twice that line (2 GiB free with a `maxmemory` of 8 GiB or more; 256 MiB free with the compose example's `1gb`) |
 | relay refused before any backend call | `no_local_signer` | the relay names a supplier whose key this relayer does not hold | add the key to `keys.keys_file`, or check the gateway targets the right supplier |
 
 Per-relay rejections log at debug level only; count them with the metric,

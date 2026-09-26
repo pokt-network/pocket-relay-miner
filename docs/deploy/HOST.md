@@ -27,6 +27,12 @@ in [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
 git clone --branch v0.1.0 https://github.com/pokt-network/pocket-relay-miner.git && cd pocket-relay-miner
 ```
 
+**If not**: `Remote branch v0.1.0 not found in upstream origin` → the release
+is not published yet → clone without `--branch`, and in step 1 build from
+source: the release image does not exist either.
+
+**Stop if**: you must run a published release and v0.1.0 is not out yet.
+
 **Stop if**: you do not have the supplier key or the node endpoints. A human
 provides them; do not generate keys or move funds.
 
@@ -68,9 +74,10 @@ sudo install -d -m 0750 -o root -g pocket-relay-miner /etc/pocket-relay-miner
 
 ## Step 2: Redis 8.10
 
-Redis must be 8.10 and must load
-[config.redis.example.conf](../../config.redis.example.conf): `maxmemory` set
-and `maxmemory-policy noeviction`, or both binaries refuse to start.
+8.10 is the supported Redis version. Redis must load
+[config.redis.example.conf](../../config.redis.example.conf): both binaries
+refuse to start when `maxmemory` is 0 or `maxmemory-policy` is anything other
+than `noeviction`. The version itself is not checked at startup.
 
 Distribution packages may ship an older Redis; check before installing. Either
 use the Redis project's packages for 8.10, or run the official image on the
@@ -82,7 +89,10 @@ docker run -d --name relay-miner-redis --restart unless-stopped -p 127.0.0.1:637
 ```
 
 With a packaged Redis, add `include /etc/redis/relay-miner.conf` at the end
-of its `redis.conf` and restart it.
+of its `redis.conf` and restart it. The included file sets
+`maxmemory 13743895347` (12.8 GiB), and being last it wins over `redis.conf`:
+edit that line in `/etc/redis/relay-miner.conf` to fit this host, as sized
+below, before the restart.
 
 Size `maxmemory` for your sessions and leave headroom below the RAM Redis may
 use: the example conf's 12.8 GiB was measured in a 16 GiB container. The
@@ -91,7 +101,7 @@ use: the example conf's 12.8 GiB was measured in a 16 GiB container. The
 **Run**
 
 ```bash
-redis-cli -h 127.0.0.1 INFO server | grep redis_version; redis-cli -h 127.0.0.1 CONFIG GET maxmemory-policy
+redis-cli --raw -h 127.0.0.1 INFO server | grep redis_version; redis-cli --raw -h 127.0.0.1 CONFIG GET maxmemory-policy
 ```
 
 **Expect**
@@ -101,6 +111,10 @@ redis_version:8.10.1
 maxmemory-policy
 noeviction
 ```
+
+No `redis-cli` on the host: with the container above, run the same commands
+as `docker exec relay-miner-redis redis-cli --raw CONFIG GET maxmemory-policy`
+(and likewise for `INFO server`).
 
 **If not**: another policy, or `CONFIG GET maxmemory` returns `0` → the conf
 was not loaded → see [Redis](TROUBLESHOOTING.md#redis).
@@ -160,8 +174,8 @@ config OK: /etc/pocket-relay-miner/miner.yaml would start
 EXIT=0
 ```
 
-**If not**: `Error: config is INVALID: ...` → it names the key and line → fix
-it. See [Config rejected](TROUBLESHOOTING.md#config-rejected).
+**If not**: `Error: config is INVALID: ...` → it names the key (and the line, for an
+unknown or retired key) → fix it and validate again. See [Config rejected](TROUBLESHOOTING.md#config-rejected).
 
 `validate` does not open the keys file, Redis or the chain. Then check that
 every staked service has a backend (this one queries the chain):
@@ -259,10 +273,15 @@ sleep 20; curl -s -w ' HTTP=%{http_code}\n' http://127.0.0.1:8081/ready
 On a real network you need a staked application or a gateway to send a real
 relay. Without one, send a simulated relay: real signature, real backend
 call, never charged or claimed. Set it up with
-[docs/SIMULATED_RELAYS.md](../SIMULATED_RELAYS.md), then:
+[docs/SIMULATED_RELAYS.md](../SIMULATED_RELAYS.md). The relayer reads the
+simulation settings only at startup, so after editing
+`/etc/pocket-relay-miner/relayer.yaml` run step 4's relayer `validate` again
+(`EXIT=0`), then `sudo systemctl restart pocket-relay-miner-relayer` and wait
+for `/ready` as in step 7. Then, with `<sim-keys-file>` the absolute path of
+the simulation keys file you created (a placeholder, like every `<...>` here):
 
 ```bash
-pocket-relay-miner relay jsonrpc --relayer-url http://127.0.0.1:8080 --node <node-grpc-host:port> --grpc-tls --keys-file sim-keys.yaml --service <service-id> --supplier <supplier-address> --simulate --sim-key-id <identity>; echo "EXIT=$?"
+pocket-relay-miner relay jsonrpc --relayer-url http://127.0.0.1:8080 --node <node-grpc-host:port> --grpc-tls --keys-file <sim-keys-file> --service <service-id> --supplier <supplier-address> --simulate --sim-key-id <identity>; echo "EXIT=$?"
 ```
 
 **Expect**: `Status: ✅ SUCCESS`, `Signature: ✅ VALID`, `EXIT=0`.

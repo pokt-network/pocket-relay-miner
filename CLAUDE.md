@@ -14,7 +14,7 @@ You do not need the rest of this file. Start here:
 
 The minimum you must know:
 
-- **Kubernetes is not a supported deployment target.**
+- **Kubernetes is not a supported deployment target in v0.1.0.**
 - **Tilt (`Tiltfile`, `tilt/`) is the DEVELOPMENT environment**, a local kind
   cluster that rebuilds on every file change. It is not a deployment path and
   its configs are not production configs.
@@ -147,8 +147,13 @@ newest by date.
    Consumes Redis Streams, builds SMST trees in Redis, submits claims and proofs.
 3. **Cache** (`cache/`): three tiers with pub/sub invalidation -- L1 local
    (`xsync` map), L2 Redis (shared), L3 chain queries. The distributed-lock retry
-   when several instances repopulate at once sleeps 5 ms (it was 100 ms).
-4. **Rings** (`rings/`): ring signature verification (copied from poktroll).
+   when several instances repopulate at once sleeps 5 ms (it was 100 ms). The
+   case behind it: on a cache invalidation every relayer tried to repopulate L1
+   at once, and the 100 ms sleep made ~43 of 793 load-test requests slow; at
+   5 ms the load test's p50 went from 73 ms to 22 ms (figures as recorded when
+   the change was made, not re-run since).
+4. **Rings** (`rings/`): ring signature verification and application delegation
+   rings (copied from poktroll). Target: <5 ms per verification.
 
 Critical files:
 
@@ -185,14 +190,18 @@ clients, crypto), go-redis v9 (state, streams, pub/sub, locks), Cosmos SDK
 3. **Testing**: `make test`, `make test-coverage`, `make test_miner` (miner with
    race detection), the scripts in `scripts/` and the guides in `docs/testing/`
    (e.g. `./scripts/test-chaos.sh`, or
-   `pocket-relay-miner relay jsonrpc --localnet --service develop-http`).
+   `pocket-relay-miner relay jsonrpc --localnet --service develop-http`). The
+   localnet services are `develop-http`, `develop-websocket`, `develop-grpc` and
+   `develop-stream`.
    NEVER run tests without `make` unless debugging one package.
 4. **Code quality**: `make fmt`, `make lint`, `make tidy`.
 5. **Benchmarks**: `go test -bench=. -benchmem ./miner/` (SMST), `./cache/`.
 6. **Redis**: `redis-cli` works locally (Tilt proxies Redis). For decoded views
    use the `pocket-relay-miner redis ...` subcommands (see "Debugging Redis").
 
-Working order for a change: read the code first (grep, don't assume), write the
+Working order for a change: read the code first (grep, don't assume), check
+what imports the package you touch (`go list -f '{{.ImportPath}}' -deps ./... |
+grep <package>`), run the existing tests first so you have a baseline, write the
 tests first (TDD), implement with error context and logging at key points,
 benchmark critical paths, then run the quality gates.
 
@@ -261,8 +270,8 @@ benchmark critical paths, then run the quality gates.
   in its conclusion -- what outlives a test is a goroutine of its server, not an
   overlapping test. Such a comment is worse than none: it actively discourages
   looking. The class is enforced, not remembered: `internal/conventions` fails on
-  a test assigning a package var declared outside tests, with the pre-existing
-  ones frozen (AST, and it counts `.Store()` too, or making the var atomic would
+  a test assigning a package var declared outside tests, with the 43
+  pre-existing ones frozen (AST, and it counts `.Store()` too, or making the var atomic would
   satisfy the guard without fixing anything).
 
 **Metrics**
@@ -270,7 +279,8 @@ benchmark critical paths, then run the quality gates.
 - Delete unused metrics immediately -- no dead declarations.
 - Record metrics asynchronously on hot paths (the MetricRecorder pattern; the
   relay meter latency histogram `relay_meter_latency_seconds` in
-  `relayer/metrics.go` is recorded this way).
+  `relayer/metrics.go` is recorded this way, in both the eager and the optimistic
+  validation modes).
 
 **Cleanup/shutdown**
 - `Stop()` / `Close()` / `Shutdown()` must be idempotent (`sync.Once` for channel closes).
@@ -289,12 +299,14 @@ benchmark critical paths, then run the quality gates.
   <100ms. These are TARGETS; before quoting any measured figure, re-run the
   benchmark or the load test and cite that run.
 - HTTP pool sizing: required connections = RPS x backend latency (1000 RPS at
-  500 ms needs 500). The defaults are 500/100/500 (`MaxIdleConns` /
+  500 ms needs 500; the old limit of 100 bottlenecked at 100 ms of backend
+  latency). The defaults are 500/100/500 (`MaxIdleConns` /
   `MaxIdleConnsPerHost` / `MaxConnsPerHost`, `DefaultConfig()` in
   `relayer/config.go`, documented in `config.relayer.example.yaml` and validated
   by `config.relayer.schema.yaml`).
 - The load-test client (`cmd/relay/http.go`) verifies the supplier signature and
-  the JSON-RPC error field of every response, so it counts only valid relays;
+  the JSON-RPC error field and relay protocol compliance of every response, so
+  it counts only valid relays;
   that costs throughput and is deliberate.
 
 **Security**
@@ -592,11 +604,13 @@ The authoritative list is the golden table in `transport/redis/namespace_test.go
   existed, had zero readers, and collided with the key above. Do not reintroduce
   a per-supplier key under the plural prefix.
 - **Pub/Sub**: `ha:events:cache:{type}:invalidate` (cache invalidation),
+  `ha:events:cache:invalidate:supplier_params` (supplier module params; a
+  nonstandard, frozen name, `SupplierParamsInvalidateChannel`),
   `ha:events:blocks` (block events), `ha:meter:cleanup` (meter cleanup)
 - **Submission tracking**: `ha:tx:track:{supplier}:{sessionEndHeight}:{sessionID}`
   (JSON: tx hashes, success/failure, error reasons, timing, relays, compute
-  units). TTL 24h by default, `submission_tracking_ttl` in `miner/config.go`
-  (lowered from 7 days).
+  units). TTL 24h by default, `SubmissionTrackingTTL` / `submission_tracking_ttl`
+  in `miner/config.go` (lowered from 7 days).
 
 #### Performance characteristics
 

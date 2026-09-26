@@ -3,7 +3,7 @@
 This is the zero-to-running guide for the local test environment. Tilt spins up
 a full Pocket Network localnet in a **kind** Kubernetes cluster (context
 `kind-kind`): a validator, Redis, the relayer + miner under test, demo backends,
-a PATH gateway, and an observability stack. Once it is up you send relays with
+a gateway, and an observability stack. Once it is up you send relays with
 the `relay` CLI straight at a relayer ([DIRECT_CLI.md](DIRECT_CLI.md)) and run
 the HA/chaos suite against it.
 
@@ -44,14 +44,14 @@ local chain, verified from genesis to a settled claim); its runbook is
 
 ## 2. What you get (pods & replicas)
 
-With the default `tilt_config.yaml` (PATH and observability both enabled) the
+With the default `tilt_config.yaml` (gateway and observability both enabled) the
 cluster brings up:
 
 | Resource | Kind | Replicas | Notes |
 |---|---|---|---|
 | `relayer` | Deployment | **2** | stateless multi-transport proxy (under test) |
 | `miner` | Deployment | **2** | stateful claim/proof, leader-elected |
-| `path` | Deployment | 1 | PATH gateway, centralized mode |
+| `path` | Deployment | 1 | gateway, centralized mode |
 | `validator` | Deployment | 1 | `pocketd` Shannon node (chain-id `pocket`) |
 | `redis` | StatefulSet | 1 | pod `redis-standalone-0` (via Redis operator) |
 | `redis-operator` | Deployment | 1 | Helm-installed operator |
@@ -83,8 +83,8 @@ ports are **not** the container ports.
 | What | Host URL / addr | Container port | Source |
 |---|---|---|---|
 | Tilt UI | <http://localhost:10350> | — | `Tiltfile` |
-| PATH gateway (relay entrypoint) | `http://localhost:3069/v1` | 3069 | `path.Tiltfile`, `defaults.Tiltfile` |
-| PATH metrics | <http://localhost:9096> | 9096 | `path.Tiltfile` |
+| Gateway (relay entrypoint) | `http://localhost:3069/v1` | 3069 | `path.Tiltfile`, `defaults.Tiltfile` |
+| Gateway metrics | <http://localhost:9096> | 9096 | `path.Tiltfile` |
 | **Relayer relay port** (HTTP/WS/gRPC/SSE) | `http://localhost:8180` | 8080 | `relayer.Tiltfile` (`base_port` 8180) |
 | **Relayer metrics** | `http://localhost:9190/metrics` | 9090 | `relayer.Tiltfile` (`metrics_base_port` 9190) |
 | **Relayer health** | `http://localhost:8280/health`, `/ready` | 8081 | `relayer.Tiltfile` (`health_base_port` 8280) |
@@ -117,7 +117,7 @@ ports are **not** the container ports.
 ## 4. Preflight smoke test
 
 One line to confirm the gateway is serving and the whole relay path
-(PATH → relayer → miner-populated cache → backend) is wired. The service is
+(gateway → relayer → miner-populated cache → backend) is wired. The service is
 selected with the `Target-Service-Id` header; `develop-http` is the localnet
 JSON-RPC service.
 
@@ -140,7 +140,7 @@ curl -s -X POST http://localhost:3069/v1 \
 A healthy body looks like
 `{"id":1,"jsonrpc":"2.0","result":{"method":"eth_blockNumber","params":[],"status":"ok"}}`.
 If you get `200` with an empty body, the relayer likely returned a `503` that
-PATH masked — test the relayer directly (see [DIRECT_CLI.md](DIRECT_CLI.md)) to
+the gateway masked — test the relayer directly (see [DIRECT_CLI.md](DIRECT_CLI.md)) to
 see the real error.
 
 ## 5. HA / chaos / resilience suite
@@ -247,8 +247,8 @@ on `:8180`, verifies the supplier signature and the backend's own error field,
 and reports honest per-relay results — for single relays and for sustained load
 alike. See [DIRECT_CLI.md](DIRECT_CLI.md).
 
-The PATH gateway runs in the localnet so the production routing path exists, but
-do **not** measure relays through it: PATH answers a relayer `503` with `200`
+The gateway runs in the localnet so the production routing path exists, but
+do **not** measure relays through it: the gateway answers a relayer `503` with `200`
 and an empty body, so a gateway-side load tool reports success for relays that
 were never mined.
 

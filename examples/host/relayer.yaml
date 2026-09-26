@@ -44,6 +44,13 @@ metrics:
   enabled: true
   addr: "127.0.0.1:9090"
 
+# Profiling server. Left unset, it listens on 0.0.0.0:6060, which exposes
+# heap and goroutine dumps to anyone who can reach the host. Keep it on
+# loopback, or set enabled: false.
+pprof:
+  enabled: true
+  addr: "127.0.0.1:6060"
+
 logging:
   level: "info"
   format: "json"

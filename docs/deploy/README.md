@@ -39,13 +39,14 @@ this topology only.
 
 ## Invariants
 
-A deployment that breaks one of these does not start, or starts and serves
-nothing. Each links to the error it produces.
+Each row says what breaking it does: some stop a binary at startup, some make
+it serve nothing, and some are only unsupported. Each links to the error it
+produces, where there is one.
 
 | # | Invariant | If broken |
 |---|---|---|
 | 1 | Relayer and miner run the same version: `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0`, or binaries built from tag `v0.1.0` | mixed versions are not supported |
-| 2 | Redis 8.10, with `maxmemory` set and `maxmemory-policy noeviction` ([config.redis.example.conf](../../config.redis.example.conf)) | [both refuse to start](TROUBLESHOOTING.md#redis) |
+| 2 | Redis with `maxmemory` set and `maxmemory-policy noeviction` ([config.redis.example.conf](../../config.redis.example.conf)). 8.10 is the supported version; the version is not checked at startup | `maxmemory` 0 or another policy: [both refuse to start](TROUBLESHOOTING.md#redis) |
 | 3 | `GOMEMLIMIT` and `GOMAXPROCS` set, or container / systemd memory and CPU limits | [each process sizes itself from the whole host](TROUBLESHOOTING.md#memory-and-cpu) |
 | 4 | Miner config has `block_time_seconds` and the right `pocket_node.chain_id`, and the node is reachable | [the miner exits](TROUBLESHOOTING.md#miner-does-not-start) |
 | 5 | The miner runs before relays are expected: the relayer's `/ready` is 503 until the miner publishes its service factor manifest | [relayer up, every relay refused](TROUBLESHOOTING.md#relayer-up-but-not-ready) |
@@ -71,11 +72,12 @@ The miner's `block_time_seconds` must match the network: mainnet is roughly
 | relayer | 8080 | relay traffic (`listen_addr`) |
 | relayer | 8081 | `GET /health` (always 200 while running), `GET /ready` (200 only when it can serve) |
 | relayer | 9090 | Prometheus metrics (`metrics.addr`) |
+| relayer | 6060 | pprof profiling (`pprof.addr`). The code default is `0.0.0.0:6060`; both example configs set `127.0.0.1:6060`. Never expose it |
 | miner | 9092 | Prometheus metrics and `GET /health` (`metrics.addr`) |
 | Redis | 6379 | never expose it outside the host or the compose network |
 
 Relayer metrics on 9090 and a node's gRPC on 9090 collide when both run on the
-same host network. The host runbook binds metrics to `127.0.0.1`; move one of
+same host network. The host runbook binds metrics and pprof to `127.0.0.1`; move one of
 them if your node is on the same host.
 
 ## Startup order
@@ -91,5 +93,6 @@ them if your node is on the same host.
 - Upgrade the relayer and the miner together.
 - Validate the new configs with the new binary before switching: retired keys
   fail `validate`.
-- Do not roll back past v0.1.0 while claimed sessions still await their proof:
-  older versions cannot read the compacted trees.
+- v0.1.0 is the first release, so there is no earlier release to roll back to.
+  Builds from before it cannot read the compacted trees: do not switch to one
+  while claimed sessions still await their proof.
