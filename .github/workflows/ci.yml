@@ -99,7 +99,7 @@ jobs:
       # fake, which is exactly why nothing caught that bug: tests that assert on
       # blocking, PEL ageing or eviction have to run against the real server.
       redis:
-        image: redis:8-alpine
+        image: redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-
@@ -156,7 +156,7 @@ jobs:
       # fake, which is exactly why nothing caught that bug: tests that assert on
       # blocking, PEL ageing or eviction have to run against the real server.
       redis:
-        image: redis:8-alpine
+        image: redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-

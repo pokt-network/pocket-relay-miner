@@ -67,7 +67,7 @@ func ExclusiveURL(t testing.TB) string {
 	ctx := context.Background()
 	container, err := testcontainers.GenericContainer(ctx, testcontainers.GenericContainerRequest{
 		ContainerRequest: testcontainers.ContainerRequest{
-			Image:        "redis:8-alpine",
+			Image:        "redis:8.10.1-alpine",
 			ExposedPorts: []string{"6379/tcp"},
 			Cmd: []string{
 				"redis-server",

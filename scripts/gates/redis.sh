@@ -28,7 +28,7 @@
 
 set -uo pipefail
 
-REDIS_TEST_IMAGE="${REDIS_TEST_IMAGE:-redis:8-alpine}"
+REDIS_TEST_IMAGE="${REDIS_TEST_IMAGE:-redis:8.10.1-alpine}"
 REDIS_TEST_PORT="${REDIS_TEST_PORT:-6399}"
 REDIS_TEST_NAME="${REDIS_TEST_NAME:-prm-gate-redis}"
 # Written when this script STARTS the container, so `down` can tell "mine" from
