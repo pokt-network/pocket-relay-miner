@@ -59,8 +59,10 @@ are not checked, and breaking them is unsupported.
 
 ## Rules for an agent running a deployment
 
-- Follow the runbook steps in order. Each step has **Run**, **Expect**,
-  **If not** and **Stop if**. Compare the output with **Expect** before going on.
+- Pick 1 runbook, [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md)
+  or [docs/deploy/HOST.md](docs/deploy/HOST.md), and run its steps in order
+  from Step 0. A step gives **Run** and **Expect**, and **If not** and
+  **Stop if** where they apply. Compare the output with **Expect** before going on.
 - **Stop and ask a human** before using real supplier keys, spending funds,
   staking, or pointing anything at mainnet. The keys in
   `examples/docker-compose/` are public localnet keys: never use them on a real
