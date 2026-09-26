@@ -1,0 +1,76 @@
+# Spanish words that fail the "Spanish in tracked files" check of static.sh.
+#
+# WHY THIS FILE EXISTS. Every tracked text in this repository is English. Accents
+# alone do not catch Spanish: measured on c1cc164^ (the tree before the
+# translation commit), 11 of the 25 files that commit had to translate carried
+# Spanish with no accented letter at all. So the check has two levels -- accented
+# letters and inverted marks, and the whole words below -- and it needs both.
+#
+# THIS FILE IS EXCLUDED FROM THE CHECK BY PATHSPEC, and it is the ONLY file that
+# is. It has to be: every line below is a Spanish word, so the check would fail
+# on its own list. Do not add a second exclusion. An excluded path exempts every
+# future line of that file, which is exactly where a regression would hide; the
+# self-test in lib_test.sh builds its Spanish fixtures at runtime for this reason.
+#
+# HOW IT IS MATCHED: whole words (`git grep -w`), case-insensitive. One word per
+# line, lower-case ASCII letters only -- anything else makes the check refuse to
+# run rather than build a regex from it.
+#
+# HOW TO CHANGE IT. A word here must have ZERO hits in the tracked tree. If one
+# ever collides with legitimate English or code, remove THE WORD, never exempt
+# the file. Measured on 2026-09-26: this list has 0 hits at HEAD (0ca3ed4) and,
+# together with the accent level, flags 25 of 25 files c1cc164 translated and no
+# file it did not touch.
+#
+# LEFT OUT ON PURPOSE (hits in HEAD with -w, measured): del (Redis DEL), con
+# (`con :=`), ha (the `ha:` key prefix), y, no, a, o, me, un, de, le, si, lo, ni,
+# va, es. Left out as English risks, not measured as hits today: son, solo, mas, ya.
+
+# Conjunctions and connectors.
+que
+porque
+pero
+aunque
+cuando
+donde
+mientras
+entonces
+hasta
+desde
+para
+por
+sin
+sobre
+
+# Articles, contractions and demonstratives.
+el
+al
+los
+las
+una
+esto
+eso
+esa
+esta
+cada
+mismo
+misma
+otro
+otra
+
+# Common verbs and adverbs.
+puede
+pueden
+debe
+hace
+tiene
+hay
+siempre
+nunca
+ahora
+muy
+nada
+
+# Words from this repository's own history, written without their accent.
+sesion
+tambien

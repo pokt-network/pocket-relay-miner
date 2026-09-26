@@ -52,10 +52,11 @@ expect 0  "$(gate_served_shortfall 0 0)"   "empty cell"
 # broke", the report is worse than nothing.
 sb_fixture="$(mktemp)"
 prov_repo=''
+sp_root=''
 # One EXIT trap for the whole file: a second bare `trap ... EXIT` REPLACES this
 # one rather than adding to it, and lib_test runs inside the pre-commit hook,
 # where a Ctrl-C mid-commit is ordinary.
-trap 'rm -f "$sb_fixture"; [ -n "$prov_repo" ] && rm -rf "$prov_repo"' EXIT
+trap 'rm -f "$sb_fixture"; [ -n "$prov_repo" ] && rm -rf "$prov_repo"; [ -n "$sp_root" ] && rm -rf "$sp_root"' EXIT
 cat >"$sb_fixture" <<'FIXTURE'
 {"height":"100","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"100\"","num_relays":"\"4\"","num_estimated_relays":"\"4\"","claimed_upokt":"\"1000upokt\"","settled_upokt":"\"1000upokt\"","minted_upokt":"\"1000upokt\"","overservicing_loss_upokt":"\"0\"","deflation_loss_upokt":"\"0\""}}
 {"height":"100","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"100\"","num_relays":"\"6\"","num_estimated_relays":"\"12\"","claimed_upokt":"\"3000upokt\"","settled_upokt":"\"2000upokt\"","minted_upokt":"\"1800upokt\"","overservicing_loss_upokt":"\"1000\"","deflation_loss_upokt":"\"200\""}}
@@ -327,6 +328,116 @@ expect '' "$(gate_settle_timeout_min 20 11 10 1 10 'abc')" \
     "same for a non-numeric block_time"
 expect '' "$(gate_settle_timeout_min '' 11 10 1 10 60)" \
     "an unreadable session-length param must also come back empty, not silently treated as 0 blocks"
+
+# gate_spanish_hits: the "Spanish in tracked files" check of static.sh. Each case
+# gets its own throwaway repository, files are `git add`ed (tracked is what the
+# helper scans) and nothing is committed.
+#
+# This file is scanned by that same check, and the word list is the ONLY
+# exclusion -- so the Spanish fixtures below are written ROT13-encoded and decoded
+# at runtime, and the accented letters as UTF-8 octal bytes. A literal fixture
+# here would turn the gate red on its own self-test.
+#
+# Every call runs under LC_ALL=C: that is the locale in which a bracket class of
+# accented letters degrades into a class of BYTES and starts matching the
+# multiplication sign, so the negative case below only bites there.
+sp_words="$(dirname "${BASH_SOURCE[0]}")/spanish-words.txt"
+sp_root="$(mktemp -d)"
+sp_rot13() { printf '%s' "$1" | tr 'A-Za-z' 'N-ZA-Mn-za-m'; }
+# sp_repo <file> <content> -- a new repository whose only tracked file is <file>.
+# mktemp, not a counter: this runs inside $(...), where a counter increment dies
+# with the subshell and every case would land in the same repository.
+sp_repo() {
+    local d
+    d="$(mktemp -d "$sp_root/r.XXXXXX")" &&
+        mkdir -p "$d/$(dirname "$1")" && git -C "$d" init -q . &&
+        printf '%s' "$2" >"$d/$1" && git -C "$d" add -- "$1" && printf '%s' "$d"
+}
+# sp_expect_hit <what> <repo> <path:line> -- must report exactly that location.
+sp_expect_hit() {
+    local out rc
+    out="$(LC_ALL=C gate_spanish_hits "$2" "$sp_words")"
+    rc=$?
+    expect 1 "$rc" "spanish: $1 -- exit status"
+    case "$out" in
+    "$3":*) ;;
+    *)
+        printf '  FAIL spanish: %s -- want a hit at %s, got: %s\n' "$1" "$3" "$out" >&2
+        failures=$((failures + 1))
+        ;;
+    esac
+}
+# sp_expect_clean <what> <repo> -- must look, and find nothing.
+sp_expect_clean() {
+    local out rc
+    out="$(LC_ALL=C gate_spanish_hits "$2" "$sp_words")"
+    rc=$?
+    expect 0 "$rc" "spanish: $1 -- exit status (got output: $out)"
+    expect '' "$out" "spanish: $1 -- output"
+}
+
+# Positives. The first carries no accent at all: it is the case the word level
+# exists for, and removing that level must turn it red.
+sp_expect_hit "Spanish with no accent" \
+    "$(sp_repo a.go "package a
+// $(sp_rot13 'ab dhvreb dhr rfgb cnfr')
+")" "a.go:2"
+sp_expect_hit "only a tilde n, no listed word" \
+    "$(sp_repo docs/b.md "$(printf 'title\nma\303\261ana\n')")" "docs/b.md:2"
+sp_expect_hit "a listed word capitalised at a sentence start" \
+    "$(sp_repo c.txt "$(sp_rot13 'Cbedhr') it fails")" "c.txt:1"
+
+# Negatives, one repository each so a red names the case. Every one of these
+# collides with a word that is left OUT of the list, or would match a listed
+# word without -w ("request", "close").
+sp_expect_clean "redis DEL"           "$(sp_repo n1.go 'client.Del(ctx, k) // del key')"
+sp_expect_clean "con as an identifier" "$(sp_repo n2.go 'con := dial()')"
+sp_expect_clean "the ha: key prefix"  "$(sp_repo n3.go 'key := "ha:key"')"
+sp_expect_clean "y as an identifier"  "$(sp_repo n4.go 'y := 1')"
+sp_expect_clean "english no"          "$(sp_repo n5.md 'no retries are left')"
+sp_expect_clean "a listed word inside request/close" "$(sp_repo n6.md 'close the request stream')"
+sp_expect_clean "the multiplication sign under LC_ALL=C" "$(sp_repo n7.md "$(printf '3 \303\227 4')")"
+# A shell variable cannot carry a NUL, so the binary file is written directly
+# and the precondition asserted: without a NUL the case would test a text file
+# and pass for the wrong reason.
+sp_bin="$(sp_repo n8.bin '')"
+printf 'x\0tambi\303\251n %s\n' "$(sp_rot13 'cbedhr')" >"$sp_bin/n8.bin"
+git -C "$sp_bin" add n8.bin
+if ! od -An -c "$sp_bin/n8.bin" | grep -q '\\0'; then
+    printf '  FAIL spanish: the binary fixture carries no NUL, so the -I case tests nothing\n' >&2
+    failures=$((failures + 1))
+fi
+sp_expect_clean "a binary file (NUL) with Spanish in it" "$sp_bin"
+
+# --cached reads the INDEX: Spanish only in the working tree is not what the
+# commit contains, and the plain mode must still see it.
+sp_idx="$(sp_repo d.md 'clean text')"
+sp_rot13 'rfgb ab naqn' >"$sp_idx/d.md"
+expect 1 "$(LC_ALL=C gate_spanish_hits "$sp_idx" "$sp_words" >/dev/null; echo $?)" \
+    "spanish: the working tree is scanned without --cached"
+expect 0 "$(LC_ALL=C gate_spanish_hits "$sp_idx" "$sp_words" --cached >/dev/null; echo $?)" \
+    "spanish: --cached scans the index, not the working tree"
+
+# Could not look is status 2, never a clean 0. Zero tracked files -- an empty
+# repository, or one tracking nothing but the excluded word list -- is a broken
+# matcher; so is a word list that would build a regex out of punctuation.
+sp_empty="$sp_root/empty"
+mkdir -p "$sp_empty" && git -C "$sp_empty" init -q .
+expect 2 "$(LC_ALL=C gate_spanish_hits "$sp_empty" "$sp_words" >/dev/null; echo $?)" \
+    "spanish: an empty repository scans 0 files and must not read as clean"
+expect 0 "$(gate_spanish_scanned "$sp_empty")" "spanish: an empty repository counts 0 files"
+sp_only_list="$(sp_repo scripts/gates/spanish-words.txt 'x')"
+expect 2 "$(LC_ALL=C gate_spanish_hits "$sp_only_list" "$sp_words" >/dev/null; echo $?)" \
+    "spanish: a repository tracking only the excluded word list scans 0 files"
+sp_bad_words="$sp_root/bad-words.txt"
+printf 'foo|bar.*\n' >"$sp_bad_words"
+expect 2 "$(LC_ALL=C gate_spanish_hits "$(sp_repo e.md 'x')" "$sp_bad_words" >/dev/null; echo $?)" \
+    "spanish: a word list with regex punctuation is refused"
+expect 2 "$(LC_ALL=C gate_spanish_hits "$(sp_repo f.md 'x')" /nonexistent/words.txt >/dev/null; echo $?)" \
+    "spanish: an unreadable word list is refused"
+
+rm -rf "$sp_root"
+sp_root=''
 
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2

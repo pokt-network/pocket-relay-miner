@@ -46,7 +46,7 @@ level 3 exercises the path that does.
 | script | what it runs |
 |---|---|
 | `lib.sh` | shared output helpers and the verdict. Sourced, not executed. |
-| `static.sh` | gofmt · go build · go vet (twice: plain and `-tags test`) · golangci-lint · tracked-file guard, across **both** Go modules (root and `tilt/backend-server`). `--staged` judges formatting on staged files only — that is how the pre-commit hook calls it. |
+| `static.sh` | gofmt · go build · go vet (twice: plain and `-tags test`) · golangci-lint · tracked-file guard · no Spanish in any tracked file (words in `spanish-words.txt`), across **both** Go modules (root and `tilt/backend-server`). `--staged` judges formatting on staged files only — that is how the pre-commit hook calls it. |
 | `tests.sh` | `go test -tags test`. The `test` tag is not optional: test-only helpers live behind it. |
 | `race.sh` | `go test -race -count=1`. `-count=1` defeats the result cache, which would otherwise satisfy the command with a PASS from a run without `-race`. |
 | `coverage.sh` | the coverage profile — what CI rejects on. |

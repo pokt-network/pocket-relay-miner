@@ -553,3 +553,62 @@ gate_settle_timeout_min() {
     local with_margin_seconds=$(( worst_case_seconds * 3 / 2 ))
     printf '%s' $(( (with_margin_seconds + 59) / 60 ))
 }
+
+# gate_spanish_hits <repo dir> <words file> [--cached]
+#
+# Prints every line of a TRACKED file in <repo dir> that carries Spanish, as
+# `path:line:text`. Two levels, because accents alone miss most of it: measured
+# on c1cc164^, 11 of the 25 files that commit translated had no accented letter.
+#   * the accented vowels, the tilde n and the two inverted marks, written as an
+#     ALTERNATION of whole characters, never a bracket class: a class is a list
+#     of BYTES outside a UTF-8 locale, so under LC_ALL=C it matched the lead byte
+#     of the multiplication sign and flagged 66 files (measured); the alternation
+#     matches the same 0 in both locales. The characters are spelled as UTF-8
+#     octal bytes so this file carries none of them and is scanned like any other;
+#   * the whole words of <words file> (`-w`, case-insensitive). Without `-w` a
+#     short Spanish word matches inside ordinary English ones.
+#
+# `git grep` scans tracked files only, by construction, and `-I` skips binaries.
+# The words file itself is excluded by pathspec -- it is the only exclusion, and
+# every line of it is a Spanish word. --cached reads the index instead of the
+# working tree, which is what the pre-commit hook is about to commit.
+#
+# Returns 0 when nothing matched, 1 when something did, and 2 when it could not
+# look: an unreadable or malformed word list, a git error, or ZERO tracked files
+# to scan -- a broken matcher, not a clean tree. Like every helper here it never
+# calls gate_fail; the caller does, on the status.
+gate_spanish_hits() {
+    local dir="$1" words_file="$2" mode="${3:-}" words accents out rc hits=''
+    local -a src=()
+    local exclude=':(exclude)scripts/gates/spanish-words.txt'
+    [ "$mode" = --cached ] && src=(--cached)
+
+    # a e i o u acute, n tilde, upper then lower case, then inverted ? and !.
+    accents="$(printf '\303\201|\303\211|\303\215|\303\223|\303\232|\303\221|\303\241|\303\251|\303\255|\303\263|\303\272|\303\261|\302\277|\302\241')"
+
+    words="$(grep -v '^[[:space:]]*#' "$words_file" 2>/dev/null | tr -d '[:blank:]' |
+        grep -v '^$' | paste -sd'|' -)"
+    [ -n "$words" ] || return 2
+    case "$words" in *[!a-z\|]*) return 2 ;; esac
+
+    [ "$(gate_spanish_scanned "$dir")" -gt 0 ] || return 2
+
+    out="$(git -C "$dir" grep --no-color -I -n "${src[@]}" -E "$accents" -- . "$exclude" 2>&1)"
+    rc=$?
+    case "$rc" in 0) hits="$out" ;; 1) ;; *) return 2 ;; esac
+
+    out="$(git -C "$dir" grep --no-color -I -n "${src[@]}" -w -i -E "$words" -- . "$exclude" 2>&1)"
+    rc=$?
+    case "$rc" in 0) hits="${hits:+$hits$'\n'}$out" ;; 1) ;; *) return 2 ;; esac
+
+    [ -n "$hits" ] || return 0
+    printf '%s\n' "$hits" | sort -u
+    return 1
+}
+
+# gate_spanish_scanned <repo dir> -- how many tracked files gate_spanish_hits
+# looks at: every tracked path except the word list. Its own helper so the
+# static gate reports the same number the helper refuses to run on when zero.
+gate_spanish_scanned() {
+    git -C "$1" ls-files -- . ':(exclude)scripts/gates/spanish-words.txt' 2>/dev/null | grep -c . || true
+}
