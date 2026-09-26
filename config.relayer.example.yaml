@@ -542,11 +542,12 @@ metrics:
   enabled: true
   addr: "0.0.0.0:9090"
 
-# pprof profiling server. Default: enabled on 0.0.0.0:6060.
-# Production: enabled: false, or addr "localhost:6060" so it is not exposed.
+# pprof profiling server. Default: enabled on 127.0.0.1:6060 (loopback only:
+# it serves heap and goroutine dumps). To reach it from outside the host or
+# container, set addr explicitly, e.g. "0.0.0.0:6060", and firewall the port.
 pprof:
   enabled: true
-  addr: "0.0.0.0:6060"
+  addr: "127.0.0.1:6060"
 
 # Health check server (/health and /ready).
 health_check:

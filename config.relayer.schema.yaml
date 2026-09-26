@@ -482,8 +482,8 @@ properties:
         default: true
       addr:
         type: string
-        description: Pprof HTTP server address (use localhost for security in production)
-        default: "0.0.0.0:6060"
+        description: Pprof HTTP server address. Loopback by default; reaching it from outside the host or container takes an explicit address such as 0.0.0.0:6060
+        default: "127.0.0.1:6060"
         pattern: ^.*:[0-9]+$
 
   health_check:

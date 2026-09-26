@@ -529,11 +529,12 @@ metrics:
   enabled: true
   addr: ":9092"
 
-# pprof profiling server. Default: disabled (":6060" when enabled with no addr).
-# Production: enabled: false, or addr "localhost:6060" so it is not exposed.
+# pprof profiling server. Default: disabled (127.0.0.1:6060, loopback only,
+# when enabled with no addr). To reach it from outside the host or container,
+# set addr explicitly, e.g. "0.0.0.0:6060", and firewall the port.
 pprof:
   enabled: true
-  addr: ":6060"
+  addr: "127.0.0.1:6060"
 
 logging:
   # debug, info, warn or error; any other value fails config load.

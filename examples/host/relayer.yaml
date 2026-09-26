@@ -44,9 +44,9 @@ metrics:
   enabled: true
   addr: "127.0.0.1:9090"
 
-# Profiling server. Left unset, it listens on 0.0.0.0:6060, which exposes
-# heap and goroutine dumps to anyone who can reach the host. Keep it on
-# loopback, or set enabled: false.
+# Profiling server. Left unset, it listens on 127.0.0.1:6060 (loopback): it
+# serves heap and goroutine dumps, so keep it there, or set enabled: false.
+# Reaching it from outside the host or container takes an explicit addr.
 pprof:
   enabled: true
   addr: "127.0.0.1:6060"

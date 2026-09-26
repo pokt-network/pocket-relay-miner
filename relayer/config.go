@@ -744,7 +744,7 @@ func DefaultConfig() Config {
 		},
 		Pprof: config.PprofConfig{
 			Enabled: true, // Enable by default for debugging
-			Addr:    "0.0.0.0:6060",
+			Addr:    config.DefaultPprofAddr,
 		},
 		HealthCheck: HealthCheckConfig{
 			Enabled: true,

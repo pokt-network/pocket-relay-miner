@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	sharedconfig "github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
@@ -54,9 +55,9 @@ type Server struct {
 
 // NewServer creates a new observability server.
 func NewServer(logger logging.Logger, config ServerConfig) *Server {
-	// Default pprof addr to :6060 for security if not specified
+	// An unset pprof address listens on loopback only.
 	if config.PprofAddr == "" {
-		config.PprofAddr = ":6060"
+		config.PprofAddr = sharedconfig.DefaultPprofAddr
 	}
 
 	return &Server{

@@ -461,12 +461,6 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Start observability server (metrics and pprof)
 	if config.Metrics.Enabled || config.Pprof.Enabled {
-		// Default pprof addr to localhost:6060 for security if not specified
-		pprofAddr := config.Pprof.Addr
-		if pprofAddr == "" {
-			pprofAddr = "localhost:6060"
-		}
-
 		// Combine RelayerRegistry and SharedRegistry so cache metrics are exposed
 		combinedRegistry := prometheus.Gatherers{
 			observability.RelayerRegistry,
@@ -477,7 +471,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			MetricsEnabled: config.Metrics.Enabled,
 			MetricsAddr:    config.Metrics.Addr,
 			PprofEnabled:   config.Pprof.Enabled,
-			PprofAddr:      pprofAddr,
+			PprofAddr:      config.Pprof.Addr,
 			Registry:       combinedRegistry,
 		})
 		if err := obsServer.Start(ctx); err != nil {

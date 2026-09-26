@@ -298,8 +298,8 @@ properties:
         default: false
       addr:
         type: string
-        description: Pprof HTTP server address (use localhost for security)
-        default: ":6060"
+        description: Pprof HTTP server address. Loopback when unset; reaching it from outside the host or container takes an explicit address such as 0.0.0.0:6060
+        default: "127.0.0.1:6060"
         pattern: ^.*:[0-9]+$
 
   logging:

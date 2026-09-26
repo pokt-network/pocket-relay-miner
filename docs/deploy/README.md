@@ -72,7 +72,7 @@ The miner's `block_time_seconds` must match the network: mainnet is roughly
 | relayer | 8080 | relay traffic (`listen_addr`) |
 | relayer | 8081 | `GET /health` (always 200 while running), `GET /ready` (200 only when it can serve) |
 | relayer | 9090 | Prometheus metrics (`metrics.addr`) |
-| relayer | 6060 | pprof profiling (`pprof.addr`). The code default is `0.0.0.0:6060`; both example configs set `127.0.0.1:6060`. Never expose it |
+| relayer | 6060 | pprof profiling (`pprof.addr`). The default is `127.0.0.1:6060`, loopback only; in a container that means `docker exec` or an explicit `pprof.addr: "0.0.0.0:6060"` to reach it. Never expose it publicly |
 | miner | 9092 | Prometheus metrics and `GET /health` (`metrics.addr`) |
 | Redis | 6379 | never expose it outside the host or the compose network |
 
