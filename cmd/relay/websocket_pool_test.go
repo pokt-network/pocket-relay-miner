@@ -42,22 +42,30 @@ type rolloverServer struct {
 
 func (s *rolloverServer) handler(t *testing.T) http.HandlerFunc {
 	upgrader := websocket.Upgrader{}
+	// Built here, on the test goroutine: the handler runs on the server's, where
+	// a failed require could not stop the test.
+	expired, success := sessionExpiredResponse(t), successResponse(t)
 	return func(w http.ResponseWriter, r *http.Request) {
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			t.Errorf("upgrade: %v", err)
-			return
-		}
+		// Registered before the upgrade: the client counts a connection as open
+		// the moment it reads the 101, which Upgrade writes, so anything done
+		// after Upgrade can lag the client -- waitForHandlers would return
+		// without this handler and a connection would pick its session after
+		// the border moved.
 		s.handlers.Add(1)
 		defer s.handlers.Done()
-		defer func() { _ = conn.Close() }()
-
 		s.mu.Lock()
 		oldSession := !s.border
 		if !oldSession {
 			s.accepted++
 		}
 		s.mu.Unlock()
+
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		defer func() { _ = conn.Close() }()
 
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -69,7 +77,7 @@ func (s *rolloverServer) handler(t *testing.T) http.HandlerFunc {
 				s.cut++
 				s.mu.Unlock()
 				if !s.closeOnly {
-					_ = conn.WriteMessage(websocket.BinaryMessage, sessionExpiredResponse(t))
+					_ = conn.WriteMessage(websocket.BinaryMessage, expired)
 				}
 				_ = conn.WriteMessage(websocket.CloseMessage, websocket.FormatCloseMessage(4000, "session expired"))
 				// Keep reading until the client hangs up: whatever it still
@@ -85,10 +93,30 @@ func (s *rolloverServer) handler(t *testing.T) http.HandlerFunc {
 			}
 			s.delivered++
 			s.mu.Unlock()
-			if err := conn.WriteMessage(websocket.BinaryMessage, successResponse(t)); err != nil {
+			if err := conn.WriteMessage(websocket.BinaryMessage, success); err != nil {
 				return
 			}
 		}
+	}
+}
+
+// waitForHandlers waits for every handler of a test server to return, and names
+// the defect instead of hanging the package when one does not. A hijacked
+// WebSocket handler outlives ts.Close, and one still running after its test uses
+// a finished t. It is also registered in t.Cleanup, so it runs when a require
+// stops the test before the explicit wait.
+func waitForHandlers(t *testing.T, handlers *sync.WaitGroup) {
+	t.Helper()
+	done := make(chan struct{})
+	go func() {
+		handlers.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Error("a WebSocket handler was still running 10s after the load test returned: " +
+			"the pool left a connection open")
 	}
 }
 
@@ -156,12 +184,13 @@ func TestWebSocketLoad_SurvivesSessionRollover(t *testing.T) {
 			const count, concurrency, beforeBorder = 40, 4, 10
 			srv := &rolloverServer{servedBeforeBorder: beforeBorder, closeOnly: tc.closeOnly}
 			ts := httptest.NewServer(srv.handler(t))
+			t.Cleanup(func() { waitForHandlers(t, &srv.handlers) })
 			defer ts.Close()
 			setLoadGlobals(t, ts.URL, count, concurrency)
 
 			metrics, stats, err := runWebSocketLoad(context.Background(), zerolog.Nop(), fakeChainDeps(), []string{RelaySupplierAddr})
 			require.NoError(t, err)
-			srv.handlers.Wait()
+			waitForHandlers(t, &srv.handlers)
 
 			for msg := range metrics.errors {
 				require.NotContains(t, msg, "close sent",
@@ -205,13 +234,18 @@ func TestWebSocketLoad_BackendGoneIsAnError(t *testing.T) {
 		BodyBz:     []byte(`gone`),
 	}, nil)
 	var accepted atomic.Int64
+	var handlers sync.WaitGroup
 	upgrader := websocket.Upgrader{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Counted before the upgrade, for the reason rolloverServer.handler gives.
+		handlers.Add(1)
+		defer handlers.Done()
+		accepted.Add(1)
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			t.Errorf("upgrade: %v", err)
 			return
 		}
-		accepted.Add(1)
 		defer func() { _ = conn.Close() }()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -222,12 +256,14 @@ func TestWebSocketLoad_BackendGoneIsAnError(t *testing.T) {
 			}
 		}
 	}))
+	t.Cleanup(func() { waitForHandlers(t, &handlers) })
 	defer ts.Close()
 	const count, concurrency = 12, 3
 	setLoadGlobals(t, ts.URL, count, concurrency)
 
 	metrics, stats, err := runWebSocketLoad(context.Background(), zerolog.Nop(), fakeChainDeps(), []string{RelaySupplierAddr})
 	require.NoError(t, err)
+	waitForHandlers(t, &handlers)
 
 	require.Equal(t, count, metrics.errorCount, "every backend 410 is an error")
 	require.Zero(t, stats.lost.Load(), "a backend 410 is not the relayer ending the session")
@@ -243,13 +279,18 @@ func TestWebSocketLoad_BackendGoneIsAnError(t *testing.T) {
 // redialed; the worker does not wait forever.
 func TestWebSocketLoad_UnansweredRelayTimesOut(t *testing.T) {
 	var accepted atomic.Int64
+	var handlers sync.WaitGroup
 	upgrader := websocket.Upgrader{}
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Counted before the upgrade, for the reason rolloverServer.handler gives.
+		handlers.Add(1)
+		defer handlers.Done()
+		accepted.Add(1)
 		conn, err := upgrader.Upgrade(w, r, nil)
 		if err != nil {
+			t.Errorf("upgrade: %v", err)
 			return
 		}
-		accepted.Add(1)
 		defer func() { _ = conn.Close() }()
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {
@@ -257,6 +298,7 @@ func TestWebSocketLoad_UnansweredRelayTimesOut(t *testing.T) {
 			}
 		}
 	}))
+	t.Cleanup(func() { waitForHandlers(t, &handlers) })
 	defer ts.Close()
 	setLoadGlobals(t, ts.URL, 2, 1)
 
@@ -281,6 +323,7 @@ func TestWebSocketLoad_UnansweredRelayTimesOut(t *testing.T) {
 		t.Fatal("a relay the relayer never answered held its worker past its deadline")
 	}
 	require.NoError(t, res.err)
+	waitForHandlers(t, &handlers)
 
 	require.Equal(t, 2, res.metrics.errorCount)
 	for msg := range res.metrics.errors {
