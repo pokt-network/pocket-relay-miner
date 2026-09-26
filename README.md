@@ -118,6 +118,7 @@ every change.
 | I want to... | Read |
 |---|---|
 | fix a deployment that does not start or does not serve | [docs/deploy/TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md) |
+| run Prometheus and Grafana with ready dashboards | [examples/observability/](examples/observability/README.md) |
 | know which metrics to read, in order | [docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md), and [scripts/observability/triage.sh](scripts/observability/triage.sh) to check them against Prometheus |
 | inspect what is in Redis | `pocket-relay-miner redis --help`; what each key holds: [docs/REDIS.md](docs/REDIS.md) |
 | size memory, CPU and Redis for your load | [docs/benchmarks/](docs/benchmarks/README.md): the v0.1.0 capacity report and how to read it |

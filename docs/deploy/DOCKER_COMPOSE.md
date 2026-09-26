@@ -276,6 +276,13 @@ does not mean any supplier is staked: with the public key it serves nothing.
 This is the end of the first half. Relays served, claims and proofs need
 your own staked supplier.
 
+## Dashboards (optional, any time from here)
+
+Prometheus and Grafana with dashboards for money, claims and proofs, relay
+flow, the relayer, storage and memory, suppliers and the chain: run
+[examples/observability/](../../examples/observability/README.md) in the same
+compose project.
+
 ## Step 9: switch to your own keys
 
 **Stop if**: you do not have a staked supplier's private key from a human.

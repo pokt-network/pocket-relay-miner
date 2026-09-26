@@ -273,6 +273,16 @@ else
 fi
 gate_exercised coverage skill_contracts "$skill_count"
 
+gate_step "dashboards"
+# The Grafana dashboards are generated from the metrics the Go code defines.
+# A metric added with no panel, or a JSON file edited by hand, fails here.
+if dash_out=$(python3 scripts/dashboards/generate.py --check 2>&1); then
+    gate_pass "$dash_out"
+else
+    gate_fail "dashboards drifted from the code (python3 scripts/dashboards/generate.py):"
+    printf '%s\n' "$dash_out" | sed 's/^/         /'
+fi
+
 gate_step "unreachable functions"
 
 # A function nobody calls is not merely clutter here: it is how an assertion

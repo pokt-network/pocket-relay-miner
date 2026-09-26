@@ -1,0 +1,53 @@
+# Prometheus, Grafana and a Redis exporter for the compose example.
+#
+# Run it together with the compose example, from the repository root:
+#
+#   docker compose -p prm-example -f examples/docker-compose/docker-compose.yaml \
+#     -f examples/observability/docker-compose.observability.yaml up -d
+#
+# Paths below are relative to examples/docker-compose/, the directory of the
+# first file, which is how compose resolves every file of one project.
+services:
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.74.0
+    environment:
+      REDIS_ADDR: "redis://redis:6379"
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.retention.time=15d"
+    volumes:
+      - ../observability/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      # Loopback only. Prometheus has no authentication.
+      - "127.0.0.1:${PROMETHEUS_PORT:-9091}:9090"
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.1
+    environment:
+      # Change the password on first login, or set it here from a secret.
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/01-money.json
+    volumes:
+      - ../observability/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../observability/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      # Loopback only: reach it through an SSH tunnel or put it behind your proxy.
+      - "127.0.0.1:${GRAFANA_PORT:-3000}:3000"
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  prometheus-data:
+  grafana-data:
