@@ -11,6 +11,16 @@
 #
 # Every key in localnet/ and config/supplier-keys.yaml is a PUBLIC localnet
 # key. Never use one on a real network.
+#
+# The localnet is here to try the relay miner end to end, not to run on. For
+# mainnet or the beta testnet, replace it: drop the validator and account-init
+# services and the ./localnet mount, and point both configs at a full node of
+# that network. The genesis and node configs of each network are in
+# https://github.com/pokt-network/pocket-network-genesis/tree/master/shannon
+# (mainnet, testnet-beta); snapshots and public RPC and gRPC endpoints are
+# listed in https://github.com/pokt-network/pocket-network-resources. Every
+# change, step by step: docs/deploy/DOCKER_COMPOSE.md, "Pointing it at your own
+# node".
 
 services:
   # Single-validator Pocket chain. The genesis already stakes 10 applications,

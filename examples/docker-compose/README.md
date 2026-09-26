@@ -10,6 +10,14 @@ change for a real network, is [docs/deploy/DOCKER_COMPOSE.md](../../docs/deploy/
 Every key in `localnet/` and `config/supplier-keys.yaml` is a public localnet
 key. Never use one on a real network.
 
+The local chain is for trying it out. To run on mainnet or the beta testnet,
+replace `localnet/` with a full node of that network, as
+[Pointing it at your own node](../../docs/deploy/DOCKER_COMPOSE.md#pointing-it-at-your-own-node)
+describes: node configs and genesis per network are in
+[pocket-network-genesis/shannon](https://github.com/pokt-network/pocket-network-genesis/tree/master/shannon),
+snapshots and public endpoints in
+[pocket-network-resources](https://github.com/pokt-network/pocket-network-resources).
+
 ### Files
 
 - `docker-compose.yaml`: the services, their limits and their startup order.

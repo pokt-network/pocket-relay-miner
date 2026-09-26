@@ -371,8 +371,17 @@ sessions of a previous chain does not match a new one.
 
 ## Pointing it at your own node
 
-For a real network, keep the relayer, miner and Redis services and drop the
-local chain. Do each change, then run step 2 (validate) again.
+The local chain is for trying the relay miner out. For a real network, keep the
+relayer, miner and Redis services and replace the local chain with a full node
+of that network. Do each change, then run step 2 (validate) again.
+
+**Your node**: run a full node of the network, or use a public endpoint.
+
+- Genesis, `config.toml`, `app.toml` and seeds per network (`mainnet`,
+  `testnet-beta`):
+  [pocket-network-genesis/shannon](https://github.com/pokt-network/pocket-network-genesis/tree/master/shannon).
+- Snapshots to sync a node faster, and public RPC and gRPC endpoints:
+  [pocket-network-resources](https://github.com/pokt-network/pocket-network-resources).
 
 **Stop if**: you do not have a staked supplier key and a funded account from a
 human. Never use the keys in `examples/docker-compose/` on a real network: they
