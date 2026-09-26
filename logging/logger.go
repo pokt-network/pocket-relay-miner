@@ -69,7 +69,7 @@ func DefaultConfig() Config {
 		Level:              "info",
 		Format:             "json",
 		Async:              true,   // Enable async by default for performance
-		AsyncBufferSize:    100000, // 100KB buffer
+		AsyncBufferSize:    100000, // 100000 messages buffer
 		AsyncPollInterval:  100,    // 100ms poll interval - balances latency vs CPU
 		Sampling:           false,  // Disabled by default, enable for extreme throughput
 		SamplingInitial:    100,    // First 100 messages always logged
@@ -166,7 +166,7 @@ func NewLoggerFromConfig(config Config) Logger {
 	if config.Async {
 		bufferSize := config.AsyncBufferSize
 		if bufferSize <= 0 {
-			bufferSize = 100000 // Default 100KB
+			bufferSize = 100000 // Default 100000 messages
 		}
 
 		pollInterval := config.AsyncPollInterval

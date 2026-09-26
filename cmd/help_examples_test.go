@@ -49,7 +49,7 @@ func TestHelpExamplesRunThisBinary(t *testing.T) {
 }
 
 // exampleLines returns the indented lines that follow an "Example:" line in a
-// Long text, up to the first blank or unindented line.
+// Long text, blank lines included, up to the first unindented line.
 func exampleLines(long string) []string {
 	var out []string
 	inExample := false
@@ -62,7 +62,10 @@ func exampleLines(long string) []string {
 		if !inExample {
 			continue
 		}
-		if trimmed == "" || !strings.HasPrefix(line, " ") {
+		if trimmed == "" {
+			continue
+		}
+		if !strings.HasPrefix(line, " ") && !strings.HasPrefix(line, "\t") {
 			inExample = false
 			continue
 		}

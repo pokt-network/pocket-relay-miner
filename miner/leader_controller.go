@@ -423,6 +423,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 
 // Close shuts down all leader-only resources.
 // This is called when the instance loses leadership.
+
 // balanceMonitorWanted is the one decision to run the balance monitor:
 // balance_monitor.enabled alone. It used to also start whenever the balance
 // threshold was above 0, and the default threshold is 1 POKT, so enabled: false
