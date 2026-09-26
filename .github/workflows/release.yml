@@ -40,9 +40,9 @@ jobs:
 
           # Determine image tags based on ref type and branch
           if [[ $GITHUB_REF == refs/tags/v* ]]; then
-            # Git tag (e.g., v1.0.0) → version tag + latest
-            # Example: v1.0.0 → tags: 1.0.0, latest
-            VERSION_TAG=$(echo $GITHUB_REF | sed 's|refs/tags/v||')
+            # Git tag (e.g., v1.0.0) → the same tag, v included, + latest
+            # Example: v1.0.0 → tags: v1.0.0, latest
+            VERSION_TAG="${GITHUB_REF#refs/tags/}"
             TAGS="ghcr.io/pokt-network/pocket-relay-miner:${VERSION_TAG},ghcr.io/pokt-network/pocket-relay-miner:latest"
             echo "🚀 Production Release: ${VERSION_TAG}"
           elif [[ $GITHUB_REF == refs/heads/main ]]; then
@@ -186,78 +186,29 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Generate changelog
-        id: changelog
+      - name: Write the draft release body
         run: |
-          # Get the previous tag for changelog range
-          PREVIOUS_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")
+          # The release is created as a DRAFT with only the image references.
+          # Its notes are written by hand and published with the release's
+          # attachments; a list generated from git log would replace them.
           CURRENT_TAG="${GITHUB_REF#refs/tags/}"
-
-          if [ -z "$PREVIOUS_TAG" ]; then
-            echo "First release - generating full changelog"
-            RANGE=""
-          else
-            echo "Generating changelog from ${PREVIOUS_TAG} to ${CURRENT_TAG}"
-            RANGE="${PREVIOUS_TAG}..${CURRENT_TAG}"
-          fi
-
-          # Generate changelog content
-          VERSION_NUMBER="${CURRENT_TAG#v}"
           cat > RELEASE_NOTES.md << EOF
-          ## Docker Images
+          ## Docker images
 
-          **Multi-arch images available:**
           \`\`\`bash
-          docker pull ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}
-          docker pull ghcr.io/pokt-network/pocket-relay-miner:latest
+          docker pull ghcr.io/pokt-network/pocket-relay-miner:${CURRENT_TAG}
           \`\`\`
 
-          **Architecture-specific:**
-          - AMD64: \`ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}-amd64\`
-          - ARM64: \`ghcr.io/pokt-network/pocket-relay-miner:${VERSION_NUMBER}-arm64\`
+          Architecture-specific: \`ghcr.io/pokt-network/pocket-relay-miner:${CURRENT_TAG}-amd64\`, \`ghcr.io/pokt-network/pocket-relay-miner:${CURRENT_TAG}-arm64\`.
 
-          ## What's Changed
-
-          EOF
-
-          # Group commits by conventional commit type
-          echo "### 🚀 Features" >> RELEASE_NOTES.md
-          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^feat" >> RELEASE_NOTES.md || echo "_No new features_" >> RELEASE_NOTES.md
-          echo -e "\n" >> RELEASE_NOTES.md
-
-          echo "### 🐛 Bug Fixes" >> RELEASE_NOTES.md
-          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^fix" >> RELEASE_NOTES.md || echo "_No bug fixes_" >> RELEASE_NOTES.md
-          echo -e "\n" >> RELEASE_NOTES.md
-
-          echo "### ⚡ Performance Improvements" >> RELEASE_NOTES.md
-          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^perf" >> RELEASE_NOTES.md || echo "_No performance improvements_" >> RELEASE_NOTES.md
-          echo -e "\n" >> RELEASE_NOTES.md
-
-          echo "### 🔧 Configuration & Build" >> RELEASE_NOTES.md
-          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^build\|^ci\|^chore" >> RELEASE_NOTES.md || echo "_No configuration changes_" >> RELEASE_NOTES.md
-          echo -e "\n" >> RELEASE_NOTES.md
-
-          echo "### 📚 Documentation" >> RELEASE_NOTES.md
-          git log $RANGE --pretty=format:"- %s ([%h](https://github.com/${{ github.repository }}/commit/%H))" --grep="^docs" >> RELEASE_NOTES.md || echo "_No documentation changes_" >> RELEASE_NOTES.md
-          echo -e "\n" >> RELEASE_NOTES.md
-
-          # Add version info footer
-          cat >> RELEASE_NOTES.md << EOF
-          ---
-
-          **Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREVIOUS_TAG}...${CURRENT_TAG}
-
-          **Build Info:**
-          - Version: ${CURRENT_TAG}
-          - Commit: ${{ needs.metadata.outputs.commit }}
-          - Build Date: ${{ needs.metadata.outputs.build_date }}
+          Commit: ${{ needs.metadata.outputs.commit }} · Build date: ${{ needs.metadata.outputs.build_date }}
           EOF
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v3
         with:
           body_path: RELEASE_NOTES.md
-          draft: false
+          draft: true
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
