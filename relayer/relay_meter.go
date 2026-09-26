@@ -40,12 +40,35 @@ type ServiceCache interface {
 	Get(ctx context.Context, serviceID string, force ...bool) (*sharedtypes.Service, error)
 }
 
+// Priced reports whether this meter knows what to charge.
+//
+// A meter without a provider is NOT priced. Reading the factor through
+// GetServiceFactor cannot say this: a nil provider and a provider answering
+// "nothing configured" both yield the base formula, so a mis-wired meter used
+// to charge silently as if the operator had configured nothing. Gating
+// admission on this turns that into a refusal instead of a wrong price.
+//
+// The nil check is not dead code and must not be "simplified" away: a nil
+// provider appears only in the tests that exercise the base formula, and the
+// production wiring is frozen by pricingGateViolations in internal/conventions.
+func (m *RelayMeter) Priced() bool {
+	return m.serviceFactorProvider != nil && m.serviceFactorProvider.Priced()
+}
+
 // ServiceFactorProvider defines the interface for getting service factors.
 // The service factor controls how much of the app stake the supplier will accept for billing.
 type ServiceFactorProvider interface {
 	// GetServiceFactor returns the service factor for a service.
 	// Returns (factor, true) if configured, (0, false) if not configured.
 	GetServiceFactor(ctx context.Context, serviceID string) (float64, bool)
+
+	// Priced reports whether the provider knows what to charge at all.
+	//
+	// It is NOT the negation of GetServiceFactor's second result: (0, false)
+	// means "no factor configured, use the protocol formula", which is a price.
+	// Priced being false means the miner's manifest never arrived, so there is
+	// no price to apply and the relay must be refused instead of guessed at.
+	Priced() bool
 }
 
 // ErrMeterStoreUnavailable marks a metering failure whose cause is the meter's
@@ -68,7 +91,6 @@ var ErrMeterStoreUnavailable = errors.New("relay meter store unavailable")
 // namespace config. A second prefix owned by this component is what made
 // `redis meter --session` read a key nothing writes.
 type RelayMeterConfig struct {
-
 	// CacheTTL is the TTL for all cached Redis data (params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	CacheTTL time.Duration
@@ -148,6 +170,21 @@ type RelayMeter struct {
 	localCache   map[string]*SessionMeterMeta
 	localCacheMu sync.RWMutex
 
+	// Admission view, per consumed counter. seen is the counter's value as this
+	// replica last read or wrote it, inFlight is what admitted relays hold until
+	// they are served or released, and the ledger holds what was served and not
+	// written yet. accMu guards seen, inFlight and dispatcherHealth, and it is
+	// taken BEFORE the ledger's lock, never while holding it.
+	ledger   *redisutil.ChargeLedger
+	accMu    sync.Mutex
+	seen     map[string]int64
+	inFlight map[string]int64
+	// dispatcherHealth asks the batch dispatcher whether what is served now can
+	// still be charged. It answers yes/no with the reason; the meter does no
+	// arithmetic on instants of its own, which is what kept a wall-clock jump
+	// from closing admission.
+	dispatcherHealth func() (bool, error)
+
 	// Lifecycle
 	ctx      context.Context
 	cancelFn context.CancelFunc
@@ -173,7 +210,7 @@ func NewRelayMeter(
 		config.CacheTTL = 2 * time.Hour
 	}
 
-	return &RelayMeter{
+	m := &RelayMeter{
 		logger:                logging.ForComponent(logger, logging.ComponentRelayMeter),
 		config:                config,
 		redisClient:           redisClient,
@@ -185,7 +222,36 @@ func NewRelayMeter(
 		serviceCache:          serviceCache,
 		serviceFactorProvider: serviceFactorProvider,
 		localCache:            make(map[string]*SessionMeterMeta),
+		ledger:                redisutil.NewChargeLedger(),
+		seen:                  make(map[string]int64),
+		inFlight:              make(map[string]int64),
 	}
+	m.ledger.OnWritten(m.chargeWritten)
+	return m
+}
+
+// errDispatcherNotWired is the refusal before SetDispatcherHealth ran: with no
+// dispatcher there is nothing to write what a served relay owes.
+var errDispatcherNotWired = errors.New("batch dispatcher is not wired")
+
+// meterOperationDispatcherHeartbeat is the relay_meter_errors_total operation of
+// a relay refused because the batch dispatcher stopped reaching Redis, on every
+// transport.
+const meterOperationDispatcherHeartbeat = "dispatcher heartbeat"
+
+// ChargeLedger returns the ledger served relays are charged into. The batching
+// publisher writes it to Redis; without that wiring nothing served is charged.
+func (m *RelayMeter) ChargeLedger() *redisutil.ChargeLedger {
+	return m.ledger
+}
+
+// SetDispatcherHealth wires the batch dispatcher's own answer to "can a relay
+// served now still be charged?". Until it is set admission refuses, because
+// nothing would write what is served.
+func (m *RelayMeter) SetDispatcherHealth(healthy func() (bool, error)) {
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	m.dispatcherHealth = healthy
 }
 
 // SetServiceComputeUnitsProvider wires the session-start CUPR provider so the
@@ -234,8 +300,9 @@ func (m *RelayMeter) Start(ctx context.Context) error {
 // correct, and a RevertRelayConsumption existed here for years without a single
 // caller because the case it was written for does not exist.
 //
-// CheckAndConsumeRelay checks if a relay can be served and consumes stake if so.
-// Uses atomic Redis INCRBY for distributed state.
+// CheckAndConsumeRelay admits a relay and charges it in one step, for the
+// callers that charge as they decide: optimistic HTTP, after the relay was
+// served.
 // Returns:
 // - allowed: true if the relay should be served
 // - err: any error that occurred
@@ -249,46 +316,124 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 	sessionEndHeight int64,
 	currentHeight int64,
 ) (allowed bool, err error) {
+	reservation, allowed, err := m.Admit(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionStartHeight, sessionEndHeight, currentHeight)
+	if err != nil || !allowed {
+		return allowed, err
+	}
+	m.Settle(reservation)
+	return true, nil
+}
+
+// Reservation is the cost an admitted relay holds against its pair's budget
+// until the relay is served (Settle) or not (Release). The zero value holds
+// nothing, so releasing or settling it is a no-op.
+type Reservation struct {
+	key      string
+	supplier string
+	cost     int64
+}
+
+// Admit decides whether a relay may be served and, if so, reserves its cost
+// against the (session, supplier) budget. The caller must Settle the
+// reservation once the relay is served and Release it on every other exit.
+//
+// A pair is admitted while its counter as last seen, plus what admitted relays
+// hold, plus what was served and not written yet, plus this relay's cost, fits
+// the budget. Nothing is written here: the batch dispatcher writes what Settle
+// hands to the ledger.
+func (m *RelayMeter) Admit(
+	ctx context.Context,
+	sessionID string,
+	appAddress string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+	sessionEndHeight int64,
+	currentHeight int64,
+) (Reservation, bool, error) {
+	return m.admit(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionStartHeight, sessionEndHeight, currentHeight, true)
+}
+
+// CheckBudget answers what Admit would, and reserves nothing. A WebSocket client
+// frame is checked this way: the frame itself is not a relay, each backend
+// message that answers it is, and those are charged by ChargeServed.
+func (m *RelayMeter) CheckBudget(
+	ctx context.Context,
+	sessionID string,
+	appAddress string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+	sessionEndHeight int64,
+	currentHeight int64,
+) (bool, error) {
+	_, allowed, err := m.admit(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionStartHeight, sessionEndHeight, currentHeight, false)
+	return allowed, err
+}
+
+func (m *RelayMeter) admit(
+	ctx context.Context,
+	sessionID string,
+	appAddress string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+	sessionEndHeight int64,
+	currentHeight int64,
+	reserve bool,
+) (Reservation, bool, error) {
 	m.mu.RLock()
 	if m.closed {
 		m.mu.RUnlock()
-		return false, fmt.Errorf("relay meter is closed")
+		return Reservation{}, false, fmt.Errorf("relay meter is closed")
 	}
 	m.mu.RUnlock()
 
-	// Get relay cost first
+	if alive, err := m.dispatcherHealthy(); !alive {
+		allowed, meterErr := m.handleMeterError(meterOperationDispatcherHeartbeat,
+			fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err))
+		return Reservation{}, allowed, meterErr
+	}
+
 	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldServiceID, serviceID).
 			Msg("failed to get relay cost")
-		return m.handleMeterError("get relay cost", err)
+		allowed, meterErr := m.handleMeterError("get relay cost", err)
+		return Reservation{}, allowed, meterErr
 	}
 
-	// Get or create session meter
 	_, maxStakeUpokt, err := m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight, currentHeight)
 	if err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to get session meter")
-		return m.handleMeterError("get session meter", err)
+		allowed, meterErr := m.handleMeterError("get session meter", err)
+		return Reservation{}, allowed, meterErr
 	}
 
-	// Atomically increment consumed stake in Redis. Key is
-	// per-(session, supplier) so a second supplier serving the same
+	// Per-(session, supplier) key, so a second supplier serving the same
 	// session does not inherit the first supplier's consumed amount.
 	consumedKey := m.consumedKey(sessionID, supplierAddress)
-	newConsumed, err := m.redisClient.IncrBy(ctx, consumedKey, relayCostUpokt).Result()
-	if err != nil {
+	if err := m.loadSeen(ctx, consumedKey); err != nil {
 		m.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
-			Msg("failed to increment consumed stake")
-		return m.handleMeterError("increment consumed", fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err))
+			Msg("failed to read consumed stake")
+		allowed, meterErr := m.handleMeterError("read consumed", err)
+		return Reservation{}, allowed, meterErr
 	}
 
-	// Check if within limits
-	if newConsumed <= maxStakeUpokt {
-		// Within limits
+	m.accMu.Lock()
+	total := m.seen[consumedKey] + m.inFlight[consumedKey] + m.ledger.Pending(consumedKey) + relayCostUpokt
+	if total <= maxStakeUpokt {
+		var reservation Reservation
+		if reserve {
+			m.inFlight[consumedKey] += relayCostUpokt
+			reservation = Reservation{key: consumedKey, supplier: supplierAddress, cost: relayCostUpokt}
+		}
+		m.accMu.Unlock()
 		relayMeterConsumptions.WithLabelValues(serviceID, "within_limit").Inc()
-		return true, nil
+		return reservation, true, nil
 	}
+	m.accMu.Unlock()
 
 	// Over the limit - reject the relay
 	relayMeterConsumptions.WithLabelValues(serviceID, "over_limit").Inc()
@@ -320,17 +465,244 @@ func (m *RelayMeter) CheckAndConsumeRelay(
 			Str(logging.FieldServiceID, serviceID).
 			Str(logging.FieldSessionID, sessionID).
 			Int64("session_end_height", sessionEndHeight).
-			Int64("consumed_upokt", newConsumed).
+			Int64("consumed_upokt", total).
 			Int64("max_stake_upokt", maxStakeUpokt).
 			Int64("app_stake_upokt", appStakeUpokt).
 			Int64("app_min_stake_upokt", minStakeUpokt).
 			Uint64("num_suppliers_in_session", numSuppliers)
 	}).Msg("session relay limit reached: this supplier's claimable portion for the session is fully consumed")
 
-	// Revert the increment since we're rejecting
-	m.redisClient.DecrBy(ctx, consumedKey, relayCostUpokt)
+	return Reservation{}, false, nil
+}
 
-	return false, nil
+// Settle charges a served relay: its reservation moves into the ledger, which
+// the batch dispatcher writes to the pair's counter.
+func (m *RelayMeter) Settle(r Reservation) {
+	if r.cost == 0 {
+		return
+	}
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	m.releaseLocked(r)
+	m.ledger.Add(r.key, r.supplier, r.cost, m.config.CacheTTL)
+}
+
+// Release returns the reservation of a relay that was admitted and then not
+// served. It is not a refund for a served relay; see the note above
+// CheckAndConsumeRelay.
+func (m *RelayMeter) Release(r Reservation) {
+	if r.cost == 0 {
+		return
+	}
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	m.releaseLocked(r)
+}
+
+func (m *RelayMeter) releaseLocked(r Reservation) {
+	left := m.inFlight[r.key] - r.cost
+	if left <= 0 {
+		delete(m.inFlight, r.key)
+		return
+	}
+	m.inFlight[r.key] = left
+}
+
+// ChargeServed charges a relay that was served without an admission of its own,
+// a backend message on a WebSocket, and reports whether the pair is now at or
+// over its budget, so the caller stops serving it.
+//
+// The pair's counter is NOT read here. A pair outside the view, because its
+// session was cleared, is charged and reported under budget: reading the counter
+// back would bring the cleared pair back into the view. An error means nothing
+// was charged.
+func (m *RelayMeter) ChargeServed(
+	ctx context.Context,
+	sessionID string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+) (atBudget bool, err error) {
+	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		return false, fmt.Errorf("relay meter is closed")
+	}
+	m.mu.RUnlock()
+
+	relayCostUpokt, err := m.getRelayCost(ctx, serviceID, sessionStartHeight)
+	if err != nil {
+		return false, err
+	}
+
+	m.localCacheMu.RLock()
+	meta, metaKnown := m.localCache[localCacheKey(sessionID, supplierAddress)]
+	m.localCacheMu.RUnlock()
+
+	consumedKey := m.consumedKey(sessionID, supplierAddress)
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	m.ledger.Add(consumedKey, supplierAddress, relayCostUpokt, m.config.CacheTTL)
+	seen, viewed := m.seen[consumedKey]
+	if !viewed || !metaKnown {
+		return false, nil
+	}
+	total := seen + m.inFlight[consumedKey] + m.ledger.Pending(consumedKey)
+	return total >= meta.MaxStakeUpokt, nil
+}
+
+// DispatcherHealthy reports whether a relay served now would be charged: the
+// batch dispatcher that writes charges is still reaching Redis. The error says
+// why not, for the caller that logs its own refusal.
+func (m *RelayMeter) DispatcherHealthy() (bool, error) {
+	return m.dispatcherHealthy()
+}
+
+// dispatcherHealthy asks the dispatcher. It does NOT compare instants: the
+// dispatcher owns them, decides against its own budget, and answers.
+func (m *RelayMeter) dispatcherHealthy() (bool, error) {
+	m.accMu.Lock()
+	healthy := m.dispatcherHealth
+	m.accMu.Unlock()
+	if healthy == nil {
+		return false, errDispatcherNotWired
+	}
+	return healthy()
+}
+
+// loadSeen reads the pair's consumed counter the first time this replica sees
+// the pair. The read is synchronous: admitting before it would start the pair at
+// zero and let it spend again what another replica, or this one before a
+// restart, already charged.
+func (m *RelayMeter) loadSeen(ctx context.Context, key string) error {
+	m.accMu.Lock()
+	_, known := m.seen[key]
+	m.accMu.Unlock()
+	if known {
+		return nil
+	}
+
+	consumed, err := m.redisClient.Get(ctx, key).Int64()
+	if errors.Is(err, redis.Nil) {
+		consumed, err = 0, nil
+	}
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrMeterStoreUnavailable, err)
+	}
+
+	m.accMu.Lock()
+	if _, known := m.seen[key]; !known {
+		m.seen[key] = consumed
+	}
+	m.accMu.Unlock()
+	return nil
+}
+
+// chargeWritten is the ledger's report of a written charge. The counter's new
+// value updates the view only while the pair is still viewed, so a write that
+// lands after ClearSessionMeter does not bring the pair back.
+//
+// The view only moves up. Two writes of one pair can be in flight at once and
+// their replies can be applied in either order; taking the older reply last
+// would lower the view below what Redis already holds and admit past the
+// budget until the next write.
+func (m *RelayMeter) chargeWritten(key string, amount, consumed int64) {
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	if current, viewed := m.seen[key]; viewed && consumed > current {
+		m.seen[key] = consumed
+	}
+	m.ledger.FinishWrite(key, amount)
+}
+
+// meterWarmupPairsPerRound bounds how many pairs one pipeline reads at startup.
+const meterWarmupPairsPerRound = 100
+
+// WarmFromRedis fills the admission view with the pairs Redis already meters for
+// the suppliers this replica signs for, so the first relay of each after a
+// restart admits from memory instead of reading the pair's meta and consumed
+// counter. It changes speed, not correctness: a pair it misses is read on its
+// first admission, as before.
+//
+// A pair already in the view keeps its value, because the view may have moved
+// past what was read here. A pair whose meta is gone is skipped. A cleanup that
+// lands between the read and the fill leaves that pair in the view as it was
+// read: the memory of one pair, holding a counter no lower than the zero a read
+// after the cleanup would find. It returns how many pairs it added to the view.
+func (m *RelayMeter) WarmFromRedis(ctx context.Context, signsFor func(supplier string) bool) (int, error) {
+	members, err := m.redisClient.SMembers(ctx, m.redisClient.KB().MeterActiveSessionsKey()).Result()
+	if err != nil {
+		return 0, fmt.Errorf("%w: read active meters: %w", ErrMeterStoreUnavailable, err)
+	}
+
+	type pair struct{ sessionID, supplier string }
+	pairs := make([]pair, 0, len(members))
+	for _, member := range members {
+		sessionID, supplier, ok := strings.Cut(member, "|")
+		if !ok || sessionID == "" || supplier == "" || !signsFor(supplier) {
+			continue
+		}
+		pairs = append(pairs, pair{sessionID: sessionID, supplier: supplier})
+	}
+
+	warmed := 0
+	for start := 0; start < len(pairs); start += meterWarmupPairsPerRound {
+		round := pairs[start:min(start+meterWarmupPairsPerRound, len(pairs))]
+		pipe := m.redisClient.Pipeline()
+		metas := make([]*redis.StringCmd, len(round))
+		consumed := make([]*redis.StringCmd, len(round))
+		for i, p := range round {
+			metas[i] = pipe.Get(ctx, m.metaKey(p.sessionID, p.supplier))
+			consumed[i] = pipe.Get(ctx, m.consumedKey(p.sessionID, p.supplier))
+		}
+		// A missing key is a redis.Nil on its own command and is read per pair
+		// below; any other error means the store did not answer.
+		if _, err := pipe.Exec(ctx); err != nil && !errors.Is(err, redis.Nil) {
+			return warmed, fmt.Errorf("%w: read active meters: %w", ErrMeterStoreUnavailable, err)
+		}
+		for i, p := range round {
+			if m.warmPair(p.sessionID, p.supplier, metas[i], consumed[i]) {
+				warmed++
+			}
+		}
+	}
+	return warmed, nil
+}
+
+// warmPair puts one pair read by WarmFromRedis into the view, unless the view
+// already holds it, and reports whether it did.
+func (m *RelayMeter) warmPair(sessionID, supplier string, metaCmd, consumedCmd *redis.StringCmd) bool {
+	metaBytes, err := metaCmd.Bytes()
+	if err != nil {
+		return false
+	}
+	var meta SessionMeterMeta
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		return false
+	}
+	consumed, err := consumedCmd.Int64()
+	if errors.Is(err, redis.Nil) {
+		consumed, err = 0, nil
+	}
+	if err != nil {
+		return false
+	}
+
+	cacheKey := localCacheKey(sessionID, supplier)
+	m.localCacheMu.Lock()
+	if _, known := m.localCache[cacheKey]; !known {
+		m.localCache[cacheKey] = &meta
+	}
+	m.localCacheMu.Unlock()
+
+	consumedKey := m.consumedKey(sessionID, supplier)
+	m.accMu.Lock()
+	defer m.accMu.Unlock()
+	if _, known := m.seen[consumedKey]; known {
+		return false
+	}
+	m.seen[consumedKey] = consumed
+	return true
 }
 
 // CheckRelayHealth is a non-mutating probe of the metering subsystem, used by
@@ -379,6 +751,13 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 	delete(m.localCache, cacheKey)
 	m.localCacheMu.Unlock()
 
+	consumedKey := m.consumedKey(sessionID, supplierAddress)
+	m.accMu.Lock()
+	delete(m.seen, consumedKey)
+	delete(m.inFlight, consumedKey)
+	m.ledger.Drop(consumedKey)
+	m.accMu.Unlock()
+
 	// Remove from active sessions tracking set
 	activeKey := m.redisClient.KB().MeterActiveSessionsKey()
 	if err := m.redisClient.SRem(ctx, activeKey, cacheKey).Err(); err != nil {
@@ -391,7 +770,7 @@ func (m *RelayMeter) ClearSessionMeter(ctx context.Context, sessionID, supplierA
 	// Delete from Redis (shared L2 cache)
 	keys := []string{
 		m.metaKey(sessionID, supplierAddress),
-		m.consumedKey(sessionID, supplierAddress),
+		consumedKey,
 	}
 
 	if err := m.redisClient.Del(ctx, keys...).Err(); err != nil {
@@ -541,9 +920,9 @@ func (m *RelayMeter) getOrCreateSessionMeter(
 		return m.getOrCreateSessionMeter(ctx, sessionID, appAddress, serviceID, supplierAddress, sessionEndHeight, currentHeight)
 	}
 
-	// Initialize consumed counter
-	consumedKey := m.consumedKey(sessionID, supplierAddress)
-	m.redisClient.Set(ctx, consumedKey, 0, m.config.CacheTTL)
+	// The consumed counter is NOT initialized here. A meta can be recreated while
+	// the counter still holds what was charged, and zeroing it would let the pair
+	// spend that again; the first charge creates the counter with its TTL.
 
 	// Track in active sessions set (O(1) counting via SCARD). Use the
 	// per-(session, supplier) cache key so SCARD reflects the number of
@@ -638,8 +1017,8 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 	// at-height value once the session has ended (a past height).
 	//
 	// currentHeight <= 0 means no block has been observed yet (boot window): the
-	// session cannot be PROVEN to have ended, so read live — the same choice
-	// CheckRewardEligibility makes, and the two must not disagree.
+	// session cannot be PROVEN to have ended, so read live rather than pin an
+	// at-height value the boot window cannot justify.
 	var sharedParams *sharedtypes.Params
 	if currentHeight <= 0 || sessionEndHeight >= currentHeight {
 		sharedParams, err = m.sharedParamCache.GetLatestSharedParams(ctx)
@@ -668,9 +1047,7 @@ func (m *RelayMeter) calculateMaxStake(ctx context.Context, appAddress string, s
 	//     ClaimWindowCloseOffsetBlocks +
 	//     ProofWindowOpenOffsetBlocks +
 	//     ProofWindowCloseOffsetBlocks
-	//
-	// See scripts/localonly/SERVICE-FACTOR-FORMULA.md for a worked example with
-	// current mainnet params and the reference tuning table.
+
 	numSuppliers := int64(sessionParams.NumSuppliersPerSession)
 	if numSuppliers == 0 {
 		numSuppliers = 1

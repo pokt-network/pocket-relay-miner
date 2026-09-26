@@ -8,13 +8,13 @@
 #
 # Load is driven by the built-in relay CLI (`pocket-relay-miner relay
 # jsonrpc --localnet`) DIRECTLY against the relayer (localhost:8180), NOT
-# through the PATH gateway: PATH masks relayer 503s as 200 + empty body
+# through the gateway: the gateway masks relayer 503s as 200 + empty body
 # (known issue), which hid a real rejection burst during development. The
 # CLI validates each relay end-to-end (supplier signature, JSON-RPC error
 # field), so its Failed count reports the relayer's true behavior.
 #
 # Requirements: Tilt localnet up (relayer/miner/validator/redis),
-# redis-cli, jq. PATH is NOT required.
+# redis-cli, jq. The gateway is NOT required.
 #
 # Usage: ./scripts/test-cache-cleanup-live.sh [--relays 9000] [--concurrency 10]
 
@@ -78,7 +78,7 @@ only_meter_capped() {
 # run_load <label> <count> <output-file>: runs the CLI load and asserts zero
 # TRUE failures. Retries (next session) when the only failures are 429
 # claimable-cap. The CLI validates supplier signatures and JSON-RPC errors
-# per relay, so Failed>0 here is a REAL relayer-side failure — no PATH
+# per relay, so Failed>0 here is a REAL relayer-side failure — no gateway
 # masking.
 run_load() {
   local label="$1" count="$2" out="$3" attempt failed

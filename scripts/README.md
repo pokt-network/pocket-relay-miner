@@ -11,16 +11,16 @@ reach for deliberately; the gates are what every change passes.
 - [`TILT.md`](../docs/testing/TILT.md) — bring the localnet up, port map, and the HA/chaos suite.
 - [`DIRECT_CLI.md`](../docs/testing/DIRECT_CLI.md) — signed relays straight to the relayer via the `relay` CLI.
 
-> **Scripts that drive PATH (`:3069`) cannot tell you whether relays were
-> mined.** PATH answers a relayer `503` with `200` and an empty body, so a
+> **Scripts that drive the gateway (`:3069`) cannot tell you whether relays
+> were mined.** The gateway answers a relayer `503` with `200` and an empty body, so a
 > status-code check reports success either way — a real run showed
 > `20000/20000 OK` with the WAL at `XLEN 0`. Where a script below sends traffic
-> through PATH, treat its success count as "the gateway replied", and confirm
+> through the gateway, treat its success count as "the gateway replied", and confirm
 > the outcome in Redis (`redis streams`, `redis submissions`) or with the CLI at
 > `:8180`.
 
 This file is just an inventory of what's here. All scripts assume the
-`kind-kind` context and the localnet defaults (PATH `:3069`, relayer `:8180`,
+`kind-kind` context and the localnet defaults (gateway `:3069`, relayer `:8180`,
 Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 `--redis` flag defaults to `redis://localhost:6379`, so it can be omitted.
 
@@ -33,7 +33,7 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 | `test-quantitative-failover.sh` | Mid-flight miner scale-down; asserts on-chain claimed relays == loader successes within a drift budget. |
 | `verify-rebalance-fix.sh` | Rebalancer veto regression (issue #7): both miner replicas must end with non-zero claimed_count. |
 
-## Load / lifecycle (PATH + hey)
+## Load / lifecycle
 
 | Script | What it does |
 |---|---|
@@ -50,6 +50,18 @@ Redis `:6379`, Prometheus `:9091`, Loki `:3100`). The `redis` subcommand's
 ## Subdirectories
 
 - `loadtest/` — backend RPS-ceiling measurement and per-service pool tuning (`backends.sh`). See [`loadtest/README.md`](loadtest/README.md).
-- `ws-test/` — manual WebSocket tester (session rollover, not covered by the CLI `relay websocket` mode).
-- `lib/` — shared bash helpers (`common.sh`).
-- `localonly/` — gitignored; operator-specific config (see the operator-data rule in [`../CLAUDE.md`](../CLAUDE.md)).
+- `ws-test/` — manual WebSocket tester through the gateway, reconnecting on session rollover (the CLI's `relay websocket --load-test` redials on its own).
+- `lib/` — shared bash helpers (`cli-build.sh`: builds the relay CLI once for the scripts that drive the relayer at `:8180`).
+- `observability/` — `triage.sh` evaluates the metric identities of [`../docs/METRICS_TRIAGE.md`](../docs/METRICS_TRIAGE.md) against Prometheus; `triage.conf.example` shows its settings.
+- `localnet/` — localnet tooling: `gen-genesis.go` (a genesis sized for load), `check-account-init.sh` (the accounts derived from the genesis), `check-cpu-limits.sh` (GOMAXPROCS equals each container's CPU limit).
+- `hooks/` — the `pre-commit` and `pre-push` git hooks; install with `make install-hooks`.
+- `localonly/` — gitignored; operator-specific config (see the operator-data rule in [`../CONTRIBUTING.md`](../CONTRIBUTING.md)).
+
+## Repository and session tooling
+
+| Script | What it does |
+|---|---|
+| `check-tracked-files.sh` | Fails when a file that must stay local (a working document, an ignored path) is tracked; `make check-tracked-files` and CI run it. |
+| `handoff-index.sh` | Indexes the session hand-overs in `localonly/` and says which one is canonical. |
+| `queue-audit.sh` | Audits the local work queue against the tree. |
+| `session-start-check.sh` | Reports the machine's state at the start of a session. |

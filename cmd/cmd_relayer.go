@@ -23,18 +23,27 @@ import (
 	// Aliased because runHARelayer binds a local variable named `config` to
 	// the relayer configuration, which would shadow the package name.
 	sharedconfig "github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/observability"
 	"github.com/pokt-network/pocket-relay-miner/query"
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 	"github.com/pokt-network/pocket-relay-miner/rings"
+	"github.com/pokt-network/pocket-relay-miner/transport"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 const (
 	flagRelayerConfig = "config"
-	flagRedisURL      = "redis-url"
+
+	// flagStrictConfig turns the unknown-key diagnostic from a warning into a
+	// refusal to start. Off by default because a rolling deploy lands a new
+	// binary beside an older ConfigMap as a matter of course; on for the
+	// operator who would rather not serve at all than serve with a config the
+	// binary partly ignores.
+	flagStrictConfig = "strict-config"
+	flagRedisURL     = "redis-url"
 
 	// Pocket Network Bech32 address prefix
 	// Reference: poktroll/app/app.go:49
@@ -64,15 +73,16 @@ func initSDKConfig() {
 	config.Seal()
 }
 
-// startRelayerCmd returns the command for starting the HA Relayer component.
+// RelayerCmd returns the command for starting the Relayer component.
 func RelayerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "relayer",
-		Short: "Start the HA Relayer (HTTP/WebSocket proxy)",
-		Long: `Start the High-Availability Relayer component.
+		Short: "Start the Relayer (HTTP/WebSocket proxy)",
+		Long: `Start the Relayer component.
 
-The HA Relayer handles incoming relay requests and forwards them to backend services.
-It is stateless and can be scaled horizontally behind a load balancer.
+The Relayer handles incoming relay requests and forwards them to backend services.
+The relayers and miners of a deployment share one Redis; the relayer keeps no
+session state of its own, all of it lives in Redis.
 
 Features:
 - HTTP and WebSocket relay proxying
@@ -81,13 +91,14 @@ Features:
 - Prometheus metrics at /metrics
 
 Example:
-  pocketd relayminer ha relayer --config /path/to/ha-relayer.yaml --redis-url redis://localhost:6379
+  pocket-relay-miner relayer --config /path/to/relayer.yaml --redis-url redis://localhost:6379
 `,
 		RunE: runHARelayer,
 	}
 
-	cmd.Flags().String(flagRelayerConfig, "", "Path to HA relayer config file (required)")
+	cmd.Flags().String(flagRelayerConfig, "", "Path to relayer config file (required)")
 	cmd.Flags().String(flagRedisURL, "redis://localhost:6379", "Redis connection URL")
+	cmd.Flags().Bool(flagStrictConfig, false, "Refuse to start when the config carries keys this binary does not understand (default: warn and start)")
 
 	_ = cmd.MarkFlagRequired(flagRelayerConfig)
 
@@ -140,14 +151,21 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("config is INVALID: %w", err)
 			}
-			fmt.Printf("config OK: %s would start\n", configPath)
-
-			// Keys the config still carries that no longer do anything. Printed
-			// here as well as at startup because this command exists precisely
-			// so an operator finds out before the rollout, not during it.
-			for _, w := range config.Warnings() {
-				fmt.Printf("warning: %s\n", w)
+			// Validating IS this command's job, so a key the relayer does not
+			// understand is a failure here, with no flag involved. The serving
+			// binary makes the friendlier choice (warn and start, unless
+			// --strict-config); this is the door an operator walks through
+			// deliberately, before the rollout, to be told everything at once.
+			//
+			// Returned rather than printed: cobra renders it and sets a non-zero
+			// exit, which is what a pipeline reads.
+			if unknown := config.Warnings(); len(unknown) > 0 {
+				return fmt.Errorf(
+					"config is INVALID: %d key(s) this relayer does not understand:\n  %s",
+					len(unknown), strings.Join(unknown, "\n  "))
 			}
+
+			fmt.Printf("config OK: %s would start\n", configPath)
 
 			// A disabled simulation block is skipped by Validate, by design.
 			// Report what enabling it would do anyway: otherwise the operator
@@ -184,7 +202,7 @@ Examples:
 			return runCheckStake(cmd.Context(), config, nodeOverride)
 		},
 	}
-	cmd.Flags().String(flagRelayerConfig, "", "Path to HA relayer config file (required)")
+	cmd.Flags().String(flagRelayerConfig, "", "Path to relayer config file (required)")
 	cmd.Flags().Bool(flagCheckStake, false, "Cross-check on-chain stake against configured backends (queries the chain)")
 	cmd.Flags().String(flagNode, "", "Override the gRPC query node URL (default: pocket_node.query_node_grpc_url from config)")
 	_ = cmd.MarkFlagRequired(flagRelayerConfig)
@@ -409,22 +427,40 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
+	memLimit := memlimit.Apply(logger)
 
-	// Retired keys the file still carries. Warn rather than fail: the process
-	// runs correctly, but the file says something that is no longer true, and a
-	// config nobody re-reads is how that survives a year.
-	for _, w := range config.Warnings() {
+	// Capacity planning, not a guard: it says what the validation queues may
+	// hold and starts anyway. This is NOT routed through config.Warnings()
+	// on purpose -- that list is fatal under --strict-config and always fatal
+	// in `relayer validate`, so putting it there would turn "warn and start"
+	// into "refuse to start".
+	logValidationQueueCapacity(logger, config, memLimit)
+
+	// Keys the file carries that this binary does not understand.
+	//
+	// Warn and start, by default and on purpose: the ConfigMap and the binary
+	// roll out separately, so a new binary landing beside an older config is the
+	// NORMAL case of a rolling deploy, not an anomaly. Refusing to boot there
+	// converts a stale key into an outage. Loading a config change is a state
+	// change, not a per-request event, so Warn is the right level.
+	//
+	// --strict-config is for the operator who wants the guarantee instead: same
+	// finding, fatal. `relayer validate` is always strict, with no flag, because
+	// validating is what that command is for.
+	unknown := config.Warnings()
+	for _, w := range unknown {
 		logger.Warn().Msg(w)
+	}
+	if len(unknown) > 0 {
+		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
+			return fmt.Errorf(
+				"--strict-config: refusing to start, %d key(s) this relayer does not understand (listed above)",
+				len(unknown))
+		}
 	}
 
 	// Start observability server (metrics and pprof)
 	if config.Metrics.Enabled || config.Pprof.Enabled {
-		// Default pprof addr to localhost:6060 for security if not specified
-		pprofAddr := config.Pprof.Addr
-		if pprofAddr == "" {
-			pprofAddr = "localhost:6060"
-		}
-
 		// Combine RelayerRegistry and SharedRegistry so cache metrics are exposed
 		combinedRegistry := prometheus.Gatherers{
 			observability.RelayerRegistry,
@@ -435,13 +471,13 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 			MetricsEnabled: config.Metrics.Enabled,
 			MetricsAddr:    config.Metrics.Addr,
 			PprofEnabled:   config.Pprof.Enabled,
-			PprofAddr:      pprofAddr,
+			PprofAddr:      config.Pprof.Addr,
 			Registry:       combinedRegistry,
 		})
 		if err := obsServer.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start observability server: %w", err)
 		}
-		defer func() { _ = obsServer.Stop() }()
+		defer func() { _ = obsServer.Stop() }() //nolint:errcheck // Stop logs every shutdown failure at Error before returning the last one; this deferred caller has nobody to hand it to
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
 
 		// Start runtime metrics collector
@@ -457,6 +493,22 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		logger.Info().Msg("runtime metrics collector started")
 	}
 
+	// The relayer's concurrency budget, computed ONCE here and read by both the
+	// Redis pool below and the master worker pool further down. They describe
+	// the same thing -- how much of this process can be inside a Redis call at
+	// once -- and computing them separately is how they drifted apart.
+	//
+	// GOMAXPROCS(0), not NumCPU(): NumCPU reports the machine's cores and
+	// ignores the container's CPU limit. automaxprocs sets GOMAXPROCS from the
+	// cgroup quota at startup, so this is what the runtime will schedule on.
+	sizing := relayer.ComputeWorkerSizingForProcess()
+
+	// An operator value wins; otherwise the pool follows the workers.
+	redisPoolSize := config.Redis.PoolSize
+	if redisPoolSize <= 0 {
+		redisPoolSize = sizing.RedisPoolSize()
+	}
+
 	// Use Redis URL from config, allow flag override
 	redisURL := config.Redis.URL
 	if cmd.Flags().Changed(flagRedisURL) {
@@ -466,7 +518,7 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// Create wrapped Redis client with KeyBuilder for namespace-aware key construction
 	redisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
 		URL:                    redisURL,
-		PoolSize:               config.Redis.PoolSize,
+		PoolSize:               redisPoolSize,
 		MinIdleConns:           config.Redis.MinIdleConns,
 		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
 		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
@@ -477,6 +529,71 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	}
 	defer func() { _ = redisClient.Close() }()
 	logger.Info().Str("redis_url", redisURL).Msg("connected to Redis")
+
+	// Whether Redis can take writes, answered once for the whole relayer: every
+	// client this process writes through reports refused writes to it, and every
+	// admission path reads it.
+	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "relayer", redistransport.StoreGateAdmission)
+	redisClient.AddHook(storeHealth.Hook())
+	// A Redis with no memory limit, or one that evicts, is refused here: the
+	// relayer would serve relays whose record the store drops or loses.
+	if err := storeHealth.Start(ctx); err != nil {
+		return fmt.Errorf("redis is not configured for this relayer: %w", err)
+	}
+
+	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
+	// files and the redis CLI build clients, and a repeated MustRegister panics.
+	// The collector is also the registry of pools, so a client per supplier can
+	// be added and removed as suppliers are adopted and released.
+	// What the pool ACTUALLY holds, published from the client. See
+	// RegisterEffectivePoolGauges: reading the config here would certify the
+	// request rather than what runs, and the pool timeout is precisely the
+	// value nobody sets and go-redis defaults behind our backs.
+	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
+		observability.SharedRegistry, "relayer", redisClient,
+	); gaugeErr != nil {
+		return fmt.Errorf("failed to register effective Redis pool gauges: %w", gaugeErr)
+	}
+
+	// The pool has to cover the workers that will use it. This compares the
+	// EFFECTIVE size -- what the client holds, not what we asked for -- against
+	// the bounded users, and refuses to start rather than discovering it under
+	// load as a queue nobody can explain.
+	//
+	// WHAT THIS GUARD DOES NOT COVER: in eager validation mode the relay meter
+	// runs inline in the HTTP handler, not inside a subpool, so its concurrency
+	// is whatever the HTTP server admits and no startup number can bound it.
+	// This guard covers the BOUNDED users; the pool metrics show the rest. Read
+	// it as "the floor is right", never as "the pool is sufficient".
+	if eff, ok := redisClient.EffectivePoolOptions(); ok {
+		needed := sizing.Validation + sizing.Publish
+		if eff.PoolSize < needed {
+			return fmt.Errorf(
+				"redis pool too small: the client holds %d connections but the bounded workers that use it "+
+					"need %d (validation %d + publish %d); raise redis.pool_size or lower the worker count",
+				eff.PoolSize, needed, sizing.Validation, sizing.Publish)
+		}
+		logger.Info().
+			Int("pool_size_effective", eff.PoolSize).
+			Int("min_idle_conns_effective", eff.MinIdleConns).
+			Dur("pool_timeout_effective", eff.PoolTimeout).
+			Int("bounded_workers", needed).
+			Msg("Redis pool covers the bounded workers (the eager meter path is NOT bounded by this)")
+	} else {
+		logger.Warn().
+			Msg("could not read the effective Redis pool settings from this client type: " +
+				"the startup pool guard did NOT run")
+	}
+
+	// How long each Redis command really takes from here, pool wait and
+	// go-redis retries included. The pool's own wait series cannot answer that:
+	// they count only waits that ended in a connection, so their mean improves
+	// as the pool starts failing.
+	redisClient.AddHook(redistransport.NewCommandLatencyHook("relayer"))
+
+	redisPools := redistransport.NewPoolCollector("relayer")
+	redisPools.Add("shared", redisClient)
+	observability.SharedRegistry.MustRegister(redisPools)
 
 	// Create supplier cache for checking supplier staking state
 	supplierCache := cache.NewSupplierCache(
@@ -680,29 +797,84 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	// No TTL is passed: relay streams do not expire. relay_meter.cache_ttl still
 	// governs the meter's own per-session keys further down; it used to double as
 	// the stream's lifetime, which deleted un-consumed relays mid-session.
-	publisher := redistransport.NewStreamsPublisher(
+	//
+	// Always batched: one MULTI/EXEC per interval instead of one round trip per
+	// relay, which wakes the miner's blocked reader once per batch. Only the
+	// interval is configurable.
+	//
+	// The batches write through a Redis client of their own, so a busy cache or
+	// meter cannot hold the dispatch back on a shared pool: one connection per
+	// dispatch worker, plus one for the heartbeat PING sent while the queue is
+	// empty.
+	batchWorkers := relayer.BatchDispatchWorkers
+	batchRedisClient, err := redistransport.NewClient(ctx, redistransport.ClientConfig{
+		URL:                    redisURL,
+		PoolSize:               batchWorkers + 1,
+		MinIdleConns:           batchWorkers + 1,
+		PoolTimeoutSeconds:     config.Redis.PoolTimeoutSeconds,
+		ConnMaxIdleTimeSeconds: config.Redis.ConnMaxIdleTimeSeconds,
+		Namespace:              config.Redis.Namespace,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create the batch dispatch Redis client: %w", err)
+	}
+	// Declared before the publisher's deferred Close, so it runs after it: the
+	// final flush writes through this client.
+	defer func() { _ = batchRedisClient.Close() }()
+	if gaugeErr := redistransport.RegisterEffectivePoolGauges(
+		observability.SharedRegistry, "relayer_batch", batchRedisClient,
+	); gaugeErr != nil {
+		return fmt.Errorf("failed to register effective Redis pool gauges for the batch client: %w", gaugeErr)
+	}
+	if eff, ok := batchRedisClient.EffectivePoolOptions(); ok && eff.PoolSize < batchWorkers+1 {
+		return fmt.Errorf(
+			"batch dispatch redis pool too small: the client holds %d connections but %d dispatch workers need %d",
+			eff.PoolSize, batchWorkers, batchWorkers+1)
+	}
+	batchRedisClient.AddHook(redistransport.NewCommandLatencyHook("relayer_batch"))
+	batchRedisClient.AddHook(storeHealth.Hook())
+	redisPools.Add("batch", batchRedisClient)
+
+	batcher := redistransport.NewBatchingPublisher(
 		logger,
-		redisClient.UniversalClient,     // Embedded go-redis client
-		redisClient.KB().StreamPrefix(), // Namespace-aware stream prefix (e.g., "ha:relays")
+		batchRedisClient.UniversalClient, // the dispatch's own client, not the shared pool
+		redisClient.KB().StreamPrefix(),  // Namespace-aware stream prefix (e.g., "ha:relays")
+		config.Redis.BatchPublishInterval(),
+		redistransport.WithDispatchWorkers(batchWorkers),
+		redistransport.WithStoreHealth(storeHealth),
 	)
+	var publisher transport.MinedRelayPublisher = batcher
+	logger.Info().Dur("interval", config.Redis.BatchPublishInterval()).Msg("batched relay publishing")
+	// Before both Redis clients' deferred Close (declared earlier, so they run
+	// after this one): the final flush writes through the batch client, and
+	// closing it first would lose whatever the batch still held.
+	defer func() { _ = publisher.Close() }()
 
 	// Create health checker
 	healthChecker := relayer.NewHealthChecker(logger)
 
 	// Create master worker pool for controlled concurrency
 	// Uses unbounded queue with non-blocking submission to prevent goroutine explosion
-	numCPU := runtime.NumCPU()
-	masterPoolSize := numCPU * 8
+	masterPoolSize := sizing.Master
 	masterPool := pond.NewPool(
 		masterPoolSize,
 		pond.WithQueueSize(pond.Unbounded),
 		pond.WithNonBlocking(true),
 	)
 	defer masterPool.StopAndWait()
+	// Both numbers on purpose: when they differ, the pod has a CPU limit below
+	// the node's cores and gomaxprocs is the one that decided the workers. An
+	// operator reading only num_cpu would compute a pool size this process is
+	// not using.
 	logger.Info().
 		Int("max_workers", masterPoolSize).
-		Int("num_cpu", numCPU).
-		Msg("created master worker pool (unbounded, non-blocking, 8x CPU)")
+		Int("validation_workers", sizing.Validation).
+		Int("publish_workers", sizing.Publish).
+		Int("metrics_workers", sizing.Metrics).
+		Int("redis_pool_size", redisPoolSize).
+		Int("gomaxprocs", runtime.GOMAXPROCS(0)).
+		Int("num_cpu", runtime.NumCPU()).
+		Msg("created master worker pool (unbounded, non-blocking, 8x GOMAXPROCS)")
 
 	// Create proxy server
 	proxy, err := relayer.NewProxyServer(
@@ -714,6 +886,20 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	if err != nil {
 		return fmt.Errorf("failed to create proxy server: %w", err)
 	}
+
+	// Admission stops while the batch holds more than redis.batch_max_queued_mib.
+	// The gate reads the CONCRETE batcher, never the publisher the proxy wraps in
+	// countPublished: one path, independent of decorator order.
+	maxQueuedBytes := config.Redis.BatchMaxQueuedBytes()
+	proxy.SetPublishQueueFull(func() bool {
+		return batcher.QueuedBytes() >= maxQueuedBytes
+	})
+	// batch_queue_bytes reads the same batcher at every scrape. It used to be
+	// written by the gate above, and the queue drains while no admission asks,
+	// so it kept the last size the gate saw -- 3.1 MB hours after a load ended.
+	relayer.SetBatchQueueBytesSource(batcher.QueuedBytes)
+	// Redis being able to take writes is the first gate of every transport.
+	proxy.SetStoreHealth(storeHealth)
 
 	// Event-driven block height updates (replaces 1s polling)
 	// Receives block events from Redis pub/sub for ~1-2ms latency (vs 1s polling)
@@ -779,7 +965,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		signerSync.Lock()
 		defer signerSync.Unlock()
 		responseSigner.ReplaceKeys(supplierSigningKeys(keyManager))
-		return len(responseSigner.GetOperatorAddresses())
+		n := len(responseSigner.GetOperatorAddresses())
+		// Set here rather than in the OnKeyChange callback so the STARTUP
+		// resync publishes it too: a gauge that only appears after the first
+		// reload reads as zero keys on a fleet that never changes.
+		relayer.SetSigningKeysLoaded(n)
+		return n
 	}
 
 	keyManager.OnKeyChange(func(operatorAddr string, added bool) {
@@ -923,6 +1114,11 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 		ringClient,
 		sessionCache,
 		sharedParamCache,
+		// The LIVE chain height, read at each call. The block subscriber above
+		// is its only writer, so the validator now follows the same source of
+		// truth as the rest of the proxy instead of a field that every relay
+		// overwrote with its own arrival height.
+		proxy.CurrentBlockHeight,
 	)
 	proxy.SetValidator(fullValidator)
 	logger.Info().
@@ -961,64 +1157,88 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	proxy.SetRelayProcessor(relayProcessor)
 	logger.Info().Msg("relay processor initialized")
 
-	// Create and wire relay meter for rate limiting based on app stakes
-	if config.RelayMeter.Enabled {
-		relayMeterConfig := relayer.RelayMeterConfig{
-			CacheTTL: config.RelayMeter.CacheTTL,
-		}
-
-		// Create service factor client for reading service factors from Redis
-		// Service factors are published by the miner
-		serviceFactorClient := relayer.NewServiceFactorClient(
-			logger,
-			redisClient,
-		)
-		if err := serviceFactorClient.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start service factor client: %w", err)
-		}
-		defer func() { _ = serviceFactorClient.Close() }()
-
-		// Use the cached application client so app stake changes
-		// land within RefreshIntervalBlocks via the orchestrator's
-		// invalidation pub/sub, and the hot path avoids chain
-		// round-trips on every relay. GetApplication resolves through
-		// the entity cache; GetParams is routed to the query-layer app
-		// client (90s TTL) so the meter's app_min_stake_upokt reflects
-		// the on-chain application MinStake instead of a frozen 0 — the
-		// plain cached client stubs GetParams to (nil, nil).
-		relayMeter := relayer.NewRelayMeter(
-			logger,
-			redisClient,
-			cache.NewCachedApplicationQueryClientWithParams(applicationCache, queryClients.Application()),
-			queryClients.Shared(),
-			queryClients.Session(),
-			blockSubscriber,
-			sharedParamCache,    // L1->L2->L3 cache for shared params (no Redis blocking!)
-			serviceCache,        // L1->L2->L3 cache for service data (no Redis blocking!)
-			serviceFactorClient, // Reads service factors from Redis (published by miner)
-			relayMeterConfig,
-		)
-
-		// Price relays at the session-start CUPR, matching what the relay
-		// processor stamps into the SMST and what the chain settles against.
-		relayMeter.SetServiceComputeUnitsProvider(computeUnitsProvider)
-
-		if err := relayMeter.Start(ctx); err != nil {
-			return fmt.Errorf("failed to start relay meter: %w", err)
-		}
-		defer func() { _ = relayMeter.Close() }()
-
-		proxy.SetRelayMeter(relayMeter)
-		logger.Info().
-			Msg("relay meter initialized and wired")
-	} else {
-		logger.Info().Msg("relay meter disabled in config")
+	// Create and wire the relay meter. It is not optional: a relay the meter cannot
+	// charge is a relay served for free.
+	relayMeterConfig := relayer.RelayMeterConfig{
+		CacheTTL: config.RelayMeter.CacheTTL,
 	}
 
+	// Create service factor client for reading service factors from Redis
+	// Service factors are published by the miner
+	serviceFactorClient := relayer.NewServiceFactorClient(
+		logger,
+		redisClient,
+	)
+	if err := serviceFactorClient.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start service factor client: %w", err)
+	}
+	defer func() { _ = serviceFactorClient.Close() }()
+
+	// Use the cached application client so app stake changes
+	// land within RefreshIntervalBlocks via the orchestrator's
+	// invalidation pub/sub, and the hot path avoids chain
+	// round-trips on every relay. GetApplication resolves through
+	// the entity cache; GetParams is routed to the query-layer app
+	// client (90s TTL) so the meter's app_min_stake_upokt reflects
+	// the on-chain application MinStake instead of a frozen 0 — the
+	// plain cached client stubs GetParams to (nil, nil).
+	relayMeter := relayer.NewRelayMeter(
+		logger,
+		redisClient,
+		cache.NewCachedApplicationQueryClientWithParams(applicationCache, queryClients.Application()),
+		queryClients.Shared(),
+		queryClients.Session(),
+		blockSubscriber,
+		sharedParamCache,    // L1->L2->L3 cache for shared params (no Redis blocking!)
+		serviceCache,        // L1->L2->L3 cache for service data (no Redis blocking!)
+		serviceFactorClient, // Reads service factors from Redis (published by miner)
+		relayMeterConfig,
+	)
+
+	// Price relays at the session-start CUPR, matching what the relay
+	// processor stamps into the SMST and what the chain settles against.
+	relayMeter.SetServiceComputeUnitsProvider(computeUnitsProvider)
+
+	if err := relayMeter.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start relay meter: %w", err)
+	}
+	defer func() { _ = relayMeter.Close() }()
+
+	proxy.SetRelayMeter(relayMeter)
+	// Served relays are charged by the batch dispatcher, and admission closes when
+	// that dispatcher stops reaching Redis. Both come from the concrete batcher,
+	// and until they are wired the meter refuses every relay.
+	batcher.SetChargeLedger(relayMeter.ChargeLedger())
+	relayMeter.SetDispatcherHealth(batcher.DispatcherHealthy)
+	logger.Info().
+		Msg("relay meter initialized and wired")
+
+	// Fill the meter's view with the pairs this replica already meters, so the
+	// first relay of each after a restart does not wait on Redis. Speed only: a
+	// pair it misses is read on its first admission, and a failure here does not
+	// stop the relayer, whose admission stays fail-closed without Redis.
+	if config.CacheWarmup.Enabled {
+		const meterWarmupTimeout = 10 * time.Second
+		warmCtx, cancelWarm := context.WithTimeout(ctx, meterWarmupTimeout)
+		warmed, warmErr := relayMeter.WarmFromRedis(warmCtx, responseSigner.HasSigner)
+		cancelWarm()
+		if warmErr != nil {
+			logger.Warn().Err(warmErr).Int("warmed_pairs", warmed).
+				Msg("relay meter warmup incomplete (continuing)")
+		} else {
+			logger.Info().Int("warmed_pairs", warmed).Msg("relay meter warmed from redis")
+		}
+	}
+
+	// Initialize unified relay pipeline (validation + metering + signing + publishing).
+	// BEFORE the gRPC handler, which copies the pipeline when it is built.
+	if err := proxy.InitializeRelayPipeline(); err != nil {
+		return fmt.Errorf("failed to initialize relay pipeline: %w", err)
+	}
 	// Initialize gRPC handler for gRPC and gRPC-Web requests
-	proxy.InitGRPCHandler()
-	// Initialize unified relay pipeline (validation + metering + signing + publishing)
-	proxy.InitializeRelayPipeline()
+	if err := proxy.InitGRPCHandler(); err != nil {
+		return fmt.Errorf("failed to initialize gRPC handler: %w", err)
+	}
 
 	// Set supplier cache for checking supplier state before accepting relays
 	proxy.SetSupplierCache(supplierCache)
@@ -1073,10 +1293,12 @@ func runHARelayer(cmd *cobra.Command, _ []string) error {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer shutdownCancel()
 
-	_ = proxy.Close()
+	// The 30s budget above is the deadline the drain actually runs under. It used
+	// to be built and thrown away with a comment saying it was "used for graceful
+	// shutdown timing", while the real deadline was a second, hardcoded 30s
+	// inside the proxy that nothing could reach.
+	_ = proxy.Close(shutdownCtx)
 	_ = healthChecker.Close()
-
-	_ = shutdownCtx // Used for graceful shutdown timing
 
 	logger.Info().Msg("HA Relayer stopped")
 	return nil
@@ -1099,7 +1321,7 @@ func startHealthServer(
 	// /health - liveness probe (always returns OK if server is running)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK")) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 	})
 
 	// /ready - readiness probe (checks if supplier cache has data)
@@ -1108,8 +1330,15 @@ func startHealthServer(
 			http.Error(w, "supplier cache not initialized", http.StatusServiceUnavailable)
 			return
 		}
+		// An unpriced relayer refuses every relay it is sent, so reporting it
+		// ready would route traffic it can only reject. It clears by itself
+		// once the miner publishes the service factor manifest.
+		if !proxy.Priced() {
+			http.Error(w, "no service factor manifest: the miner has not published one yet", http.StatusServiceUnavailable)
+			return
+		}
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("READY"))
+		_, _ = w.Write([]byte("READY")) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 	})
 
 	// /ready/{service} - per-service readiness with pool + backend state.
@@ -1201,4 +1430,66 @@ func verifyGRPCConnectivity(ctx context.Context, logger logging.Logger, grpcURL 
 		Msg("gRPC endpoint responded successfully to GetParams query")
 
 	return nil
+}
+
+// logValidationQueueCapacity reports what the per-service validation queues may
+// hold against the memory this process is allowed to use, and never stops the
+// boot.
+//
+// It compares against Base -- what the limit was DERIVED from, the cgroup's
+// memory.max or the host's RAM -- and not against the applied limit, because
+// the applied one already has a margin subtracted from it that is the same size
+// as the threshold below; comparing against it would make the warning fire on a
+// healthy default.
+func logValidationQueueCapacity(logger logging.Logger, config *relayer.Config, limit memlimit.Limit) {
+	base := int64(limit.Base)
+	if base < 0 {
+		base = 0
+	}
+	report := relayer.BuildValidationQueueReport(config, base, limit.Source)
+
+	// A bound the operator wrote that is not the bound in force is the first
+	// thing they need to know, whatever the totals say.
+	for _, svc := range report.RaisedToFloor() {
+		logger.Warn().
+			Str("service_id", svc.ServiceID).
+			Int("configured_mib", svc.ConfiguredMiB).
+			Int64("floor_mib", svc.FloorBytes>>20).
+			Int64("effective_mib", svc.EffectiveBytes>>20).
+			Msg("validation_queue_max_mib is below this service's floor and was RAISED to it: " +
+				"the configured value would have refused every relay of this service")
+	}
+
+	switch {
+	case report.MemoryLimitBytes <= 0:
+		logger.Warn().
+			Int64("validation_queue_total_mib", report.TotalBytes>>20).
+			Int("services", len(report.Services)).
+			Str("memory_source", report.MemorySource).
+			Msg("could not compare the validation queues against a memory limit: capacity NOT checked")
+	case !report.Fits():
+		logger.Warn().
+			Int64("validation_queue_total_mib", report.TotalBytes>>20).
+			Int64("memory_limit_mib", report.MemoryLimitBytes>>20).
+			Int64("margin_mib", report.MarginBytes()>>20).
+			Str("memory_source", report.MemorySource).
+			Int("services", len(report.Services)).
+			Msg(report.String())
+	case report.MarginIsThin():
+		logger.Warn().
+			Int64("validation_queue_total_mib", report.TotalBytes>>20).
+			Int64("memory_limit_mib", report.MemoryLimitBytes>>20).
+			Int64("margin_mib", report.MarginBytes()>>20).
+			Str("memory_source", report.MemorySource).
+			Int("services", len(report.Services)).
+			Msg(report.String())
+	default:
+		logger.Info().
+			Int64("validation_queue_total_mib", report.TotalBytes>>20).
+			Int64("memory_limit_mib", report.MemoryLimitBytes>>20).
+			Int64("margin_mib", report.MarginBytes()>>20).
+			Str("memory_source", report.MemorySource).
+			Int("services", len(report.Services)).
+			Msg("validation queue capacity")
+	}
 }

@@ -43,17 +43,10 @@ type neverCallValidator struct {
 	calls atomic.Int32
 }
 
-func (v *neverCallValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest) error {
+func (v *neverCallValidator) ValidateRelayRequest(context.Context, *servicetypes.RelayRequest, int64) error {
 	v.calls.Add(1)
 	return errors.New("ValidateRelay must never be called for a simulated websocket relay")
 }
-
-func (v *neverCallValidator) CheckRewardEligibility(context.Context, *servicetypes.RelayRequest) error {
-	return nil
-}
-
-func (v *neverCallValidator) GetCurrentBlockHeight() int64 { return 0 }
-func (v *neverCallValidator) SetCurrentBlockHeight(int64)  {}
 
 // newSimWSBackendServer starts a fake WebSocket backend: every message it
 // receives increments hits and gets a canned JSON-RPC-shaped reply, echoed
@@ -70,7 +63,7 @@ func newSimWSBackendServer(t *testing.T) (wsURL string, hits *atomic.Int32, gotT
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		for {
 			mt, _, err := conn.ReadMessage()
 			if err != nil {
@@ -91,7 +84,7 @@ func newSimWSBackendServer(t *testing.T) (wsURL string, hits *atomic.Int32, gotT
 	return "ws" + strings.TrimPrefix(srv.URL, "http"), hits, gotTypes
 }
 
-// newGatewaySideHarness stands in for the PATH gateway's side of the
+// newGatewaySideHarness stands in for the gateway's side of the
 // WebSocket handshake. It returns the relayer-side *websocket.Conn (the value
 // WebSocketHandler would normally get from Upgrade(), passed as gatewayConn
 // into NewWebSocketBridge) and a client-side *websocket.Conn the test uses to
@@ -146,6 +139,7 @@ const simWSTestService = simTestService
 
 func newSimWSFixture(t *testing.T) *simWSFixture {
 	t.Helper()
+	verifyNoBridgeGoroutines(t)
 	logger := testLogger()
 	fixed := time.Unix(1_700_000_000, 0).UTC()
 	clock := func() time.Time { return fixed }
@@ -195,7 +189,7 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 		backendURL,
 		simWSTestService,
 		supplierAddr,
-		1, // arrivalHeight
+		atHeight(1), // the height this connection opened at
 		proc,
 		pub, // NOT nil -- proves the "never publish" guard doesn't depend on nil propagation
 		signer,
@@ -206,11 +200,12 @@ func newSimWSFixture(t *testing.T) *simWSFixture {
 		true, // simulated
 		simVerifier,
 		simTestKeyID,
+		nil, // onBackendDial
+		nil, // queueFull
 	)
 	require.NoError(t, err)
 
-	go bridge.Run()
-	t.Cleanup(func() { _ = bridge.Close() })
+	runBridge(t, bridge)
 
 	return &simWSFixture{
 		gwClient:     gwClient,

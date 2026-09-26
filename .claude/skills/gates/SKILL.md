@@ -25,10 +25,55 @@ that passes alone can still break its callers.
 Level 2 is the floor for "done". Level 1 proves the tree compiles and is tidy;
 it proves nothing about behaviour.
 
+**Level 1 does NOT run `internal/conventions`, and that is the trap.** Those
+checks -- no new bare `go` statements, no new `time.Sleep` in tests, no
+`sync.Map`, keys through the KeyBuilder -- live in the `tests` section, so they
+run at level 2 and later. A commit made on a green level 1 can carry a violation
+of a rule this repository enforces mechanically, and the first thing that says
+so is a level 2 or 3 run, after the commit exists. Measured 2026-09-03: a
+`time.Sleep` in a test written that same session rode through a level-1-green
+commit and was caught by `TestNoNewSleepsInTests` at level 3, tens of minutes
+later. If a commit adds or edits a `_test.go`, or adds a goroutine, run
+`go test -tags test ./internal/conventions/` before it -- it costs seconds.
+
 **Level 3 is not optional for the money path.** A change to relay, claim, proof,
 settlement or metering is not verified by unit tests. If `live.sh` does not
 exist yet, `all.sh` prints it as NOT RUN — say so in your report rather than
 letting level 2's green stand in for it.
+
+## WHO runs it: never the session that wrote the code
+
+When two sessions work one tree, the gate is not a turn to share. It belongs to
+the session that did NOT write the change, and it does not rotate.
+
+The reason is not the resource conflict -- that is a side effect. **A gate run by
+the author measures what the author exercised; the same gate run by the other
+measures the tree.** Sharing the turn leaves verification in the hands of the
+verified half the time, which is the one thing two sessions exist to prevent.
+
+Measured 2026-09-08, and it paid for itself the same afternoon: an author handed
+over a commit with `go build`, `go vet` and their own targeted tests green -- all
+three correctly run. The full package under the gate died with a SIGSEGV in a
+goroutine, taking the whole test binary with it and reporting **zero failed
+tests**, so the failure named nothing. Targeted tests could not have seen it.
+
+The split, and the second half matters as much as the first:
+
+- **The verifier owns**: `make gate LEVEL=*` entire, the run on a clean HEAD after
+  every commit, and the injections that verify committed work.
+- **The author keeps**: `go build`, `go vet`, a `go test -run <Test>` for the test
+  being written, and injections against their own uncommitted tree. None of those
+  is a gate -- they are how you avoid committing something that does not compile.
+
+Leaving the author blind is not the goal, and an author who is told only "you do
+not run gates" will run them anyway.
+
+Same day, same tree: two gates share ONE Redis container on a fixed port, and the
+`down` of whichever finishes first deletes it under the other -- 20 failures, all
+connection-refused, in a run whose result was therefore NULL and not red. One
+runner makes that impossible. The ownership marker does not save you: it answers
+"did I start it?", and ownership TRANSFERS to whoever recreates a container that
+died on its own.
 
 ## Read the result
 
@@ -129,6 +174,56 @@ And when you match against a gate's output, **strip the colour escapes in a
 separate statement after capturing the status**: the runner prints
 `<red>FAIL<reset> level 2`, so no fixed-string match spans it (budgetkit paid for
 that one, 2026-08-26).
+
+## A live run needs TWO controls: what it measured, and whether it measured ONE thing
+
+`Running` pods do not say which binary they serve, and a green level 3 attributed
+to the wrong code is the most expensive kind. Two separate questions, and a run
+needs both answered:
+
+- **Content — "which binary is this?"** Ask the container for the path
+  (`command -v`), never hard-code it: a stale path yields "no such file", and a
+  `2>/dev/null` turns that into "the marker is absent", which reads like a
+  legitimate wait. Use a CONTROL string present in every version alongside the
+  freshness marker, so "does not match" and "could not measure" exit differently.
+  Measured 2026-09-07: seventeen pods `Running` served a binary built from a DIRTY
+  TREE — no commit at all — and only content said so.
+- **Time — "was it the same binary all the way through?"** Record the pod names
+  BEFORE the run and compare them after. Without this, a rebuild midway gives a
+  run that measured two binaries and reports one result: the hardest false green
+  to suspect, because everything else looks right. What makes it a control rather
+  than an observation is that the answer is known in advance.
+
+**The freshness marker AGES, and that is a false green of its own.** A marker
+taken from one commit keeps saying FRESH after the next one lands, because
+"fresh" quietly becomes "has THAT commit" instead of "has HEAD". Give the script a
+guard that compares the commit which INTRODUCED the marker against the newest
+commit touching `.go`, and exit with its own status when they differ — "I cannot
+answer" must not look like "no". Find the introducing commit with
+`git log -S '<literal>' | tail -1`; `head -1` returns the commit that REMOVED it,
+which is the wrong end and has cost time before.
+
+**And when the gate cannot attribute, build the attribution yourself.** A run over
+a dirty tree is reported as NOT attributable to any commit — correctly, because
+the gate reasons about the TREE. You can still state which BINARY it measured,
+which the gate does not know. Do not discard the run; report what it measured and
+how you know.
+
+## Reporting a live result: three parts, and the second is what makes the first mean anything
+
+1. **What it exercised** — with the numbers.
+2. **What it did NOT exercise**, explicitly, naming this change's paths that the
+   run never enters, plus every check the gate itself declares skipped.
+3. **What would have broken had we been wrong** — the only question a
+   non-regression run actually answers.
+
+Measured 2026-09-07: a level 3 passed with 384 relays billed and served == billed
+exact across ten services, and **none of the day's four fixes was exercised** —
+they live on panic, shutdown and failed-hostname paths, none of which occurs in a
+healthy run. Without part 2 that green reads as "the day is validated". What it
+validated is that the happy path did not break, which is worth saying plainly:
+one fix had changed the ORDER of a shutdown and another the NAME under which the
+miner registers in a consumer group, and either one wrong does not yield 384/384.
 
 ## The one-line test for whether this ran
 

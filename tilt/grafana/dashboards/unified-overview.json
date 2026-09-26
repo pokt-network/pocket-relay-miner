@@ -646,8 +646,9 @@
           "refId": "A"
         }
       ],
-      "title": "Proved Losts",
-      "type": "stat"
+      "title": "Failed Attempts (POKT)",
+      "type": "stat",
+      "description": "Counts failed submission ATTEMPTS, not confirmed loss. claim_tx_error and proof_tx_error are retryable: the inclusion reconciler re-sends them and they usually land a block later. The series that says whether anything was actually lost is ha_miner_claim_inclusion_outcome_total / ha_miner_proof_inclusion_outcome_total, written only after querying the chain. Measured 2026-09-17: a run that settled 500 of 500 claims with zero expired and zero slashed reported 3,034,769 relays and 45% of claimed uPOKT under these series."
     },
     {
       "collapsed": false,
@@ -1911,7 +1912,7 @@
       },
       "id": 30,
       "panels": [],
-      "title": "Business Metrics - Lost Sessions",
+      "title": "Business Metrics - Failed Submission Attempts",
       "type": "row"
     },
     {
@@ -1972,7 +1973,7 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
+        "w": 6,
         "x": 0,
         "y": 63
       },
@@ -2007,8 +2008,9 @@
           "refId": "A"
         }
       ],
-      "title": "Lost: Relays by Reason",
-      "type": "timeseries"
+      "title": "Attempts Failed: Relays by Reason",
+      "type": "timeseries",
+      "description": "Counts failed submission ATTEMPTS, not confirmed loss. claim_tx_error and proof_tx_error are retryable: the inclusion reconciler re-sends them and they usually land a block later. The series that says whether anything was actually lost is ha_miner_claim_inclusion_outcome_total / ha_miner_proof_inclusion_outcome_total, written only after querying the chain. Measured 2026-09-17: a run that settled 500 of 500 claims with zero expired and zero slashed reported 3,034,769 relays and 45% of claimed uPOKT under these series."
     },
     {
       "datasource": {
@@ -2068,8 +2070,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 8,
+        "w": 6,
+        "x": 6,
         "y": 63
       },
       "id": 32,
@@ -2103,8 +2105,9 @@
           "refId": "A"
         }
       ],
-      "title": "Lost: Compute Units by Reason",
-      "type": "timeseries"
+      "title": "Attempts Failed: Compute Units by Reason",
+      "type": "timeseries",
+      "description": "Counts failed submission ATTEMPTS, not confirmed loss. claim_tx_error and proof_tx_error are retryable: the inclusion reconciler re-sends them and they usually land a block later. The series that says whether anything was actually lost is ha_miner_claim_inclusion_outcome_total / ha_miner_proof_inclusion_outcome_total, written only after querying the chain. Measured 2026-09-17: a run that settled 500 of 500 claims with zero expired and zero slashed reported 3,034,769 relays and 45% of claimed uPOKT under these series."
     },
     {
       "datasource": {
@@ -2164,8 +2167,8 @@
       },
       "gridPos": {
         "h": 8,
-        "w": 8,
-        "x": 16,
+        "w": 6,
+        "x": 12,
         "y": 63
       },
       "id": 33,
@@ -2199,8 +2202,107 @@
           "refId": "A"
         }
       ],
-      "title": "Lost: uPOKT by Reason",
-      "type": "timeseries"
+      "title": "Attempts Failed: POKT by Reason",
+      "type": "timeseries",
+      "description": "Counts failed submission ATTEMPTS, not confirmed loss. claim_tx_error and proof_tx_error are retryable: the inclusion reconciler re-sends them and they usually land a block later. The series that says whether anything was actually lost is ha_miner_claim_inclusion_outcome_total / ha_miner_proof_inclusion_outcome_total, written only after querying the chain. Measured 2026-09-17: a run that settled 500 of 500 claims with zero expired and zero slashed reported 3,034,769 relays and 45% of claimed uPOKT under these series."
+    },
+    {
+      "datasource": {
+        "type": "prometheus",
+        "uid": "${datasource}"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "color": {
+            "mode": "palette-classic"
+          },
+          "custom": {
+            "axisBorderShow": false,
+            "axisCenteredZero": false,
+            "axisColorMode": "text",
+            "axisLabel": "",
+            "axisPlacement": "auto",
+            "barAlignment": 0,
+            "barWidthFactor": 0.6,
+            "drawStyle": "line",
+            "fillOpacity": 50,
+            "gradientMode": "opacity",
+            "hideFrom": {
+              "legend": false,
+              "tooltip": false,
+              "viz": false
+            },
+            "insertNulls": false,
+            "lineInterpolation": "smooth",
+            "lineWidth": 2,
+            "pointSize": 5,
+            "scaleDistribution": {
+              "type": "linear"
+            },
+            "showPoints": "never",
+            "spanNulls": false,
+            "stacking": {
+              "group": "A",
+              "mode": "normal"
+            },
+            "thresholdsStyle": {
+              "mode": "off"
+            }
+          },
+          "mappings": [],
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green"
+              }
+            ]
+          },
+          "unit": "short"
+        },
+        "overrides": []
+      },
+      "gridPos": {
+        "h": 8,
+        "w": 6,
+        "x": 18,
+        "y": 63
+      },
+      "id": 9331,
+      "options": {
+        "legend": {
+          "calcs": [
+            "mean",
+            "sum"
+          ],
+          "displayMode": "table",
+          "placement": "right",
+          "showLegend": true,
+          "sortBy": "Mean",
+          "sortDesc": true
+        },
+        "tooltip": {
+          "hideZeros": false,
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "pluginVersion": "12.0.2",
+      "targets": [
+        {
+          "expr": "sum by(outcome) (rate(ha_miner_claim_inclusion_outcome_total{supplier=~\"$supplier\", service_id=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "claim {{outcome}}",
+          "refId": "A"
+        },
+        {
+          "expr": "sum by(outcome) (rate(ha_miner_proof_inclusion_outcome_total{supplier=~\"$supplier\", service_id=~\"$service\"}[$__rate_interval]))",
+          "legendFormat": "proof {{outcome}}",
+          "refId": "B"
+        }
+      ],
+      "title": "Confirmed on Chain by Outcome",
+      "type": "timeseries",
+      "description": "What the chain actually answered, written by the inclusion reconciler after polling. on_chain_found is the claim or proof landing; on_chain_missing and on_chain_rejected are real loss. Read this before reading the panels to its left."
     },
     {
       "collapsed": false,

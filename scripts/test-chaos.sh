@@ -42,7 +42,7 @@ log_info()  { echo -e "${GREEN}[INFO]${NC}  $(date +%H:%M:%S) $1"; }
 
 # ─── Chaos Actions ───────────────────────────────────────────
 
-# 1. Kill a random relayer pod (tests HA, PATH re-routing)
+# 1. Kill a random relayer pod (tests HA, gateway re-routing)
 chaos_kill_relayer() {
     local pod=$(kubectl --context "$K8S_CONTEXT" get pods -l app=relayer --no-headers 2>/dev/null | shuf -n1 | awk '{print $1}')
     if [ -n "$pod" ]; then
@@ -90,7 +90,7 @@ chaos_kill_backend() {
 
 # 6. Exhaust relayer connections with rapid connect/disconnect
 chaos_connection_flood() {
-    log_chaos "CONN FLOOD: 500 rapid TCP connections to relayer (:8180 — the old code flooded 3069, which is PATH, not our software)"
+    log_chaos "CONN FLOOD: 500 rapid TCP connections to relayer (:8180 — the old code flooded 3069, which is the gateway, not our software)"
     for i in $(seq 1 500); do
         (echo "" | nc -w1 localhost 8180 2>/dev/null &)
     done
@@ -241,7 +241,7 @@ chaos_pull_signing_key() {
     log_chaos "PULL KEY: secret did NOT return to $before keys — the fleet is short a key, FIX BEFORE CONTINUING"
 }
 
-# 7. PATH is OUT OF SCOPE — never kill it. It's not our software.
+# 7. The gateway is OUT OF SCOPE — never kill it. It's not our software.
 
 # Weighted random chaos selection
 # More frequent: pod kills (tests the HA we care most about)

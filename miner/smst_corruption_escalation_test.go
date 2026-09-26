@@ -44,6 +44,7 @@ func (s *RedisSMSTTestSuite) TestEscalation_BelowThreshold_PreservesRedis() {
 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 			[]byte{byte(i)}, []byte{byte(i + 100)}, 10))
 	}
+	s.checkpoint(mgr, sessionID)
 	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
 	s.Require().True(s.keyExists(nodesKey))
@@ -78,6 +79,7 @@ func (s *RedisSMSTTestSuite) TestEscalation_AtThreshold_PurgesRedis() {
 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 			[]byte{byte(i)}, []byte{byte(i + 100)}, 10))
 	}
+	s.checkpoint(mgr, sessionID)
 
 	claimedKey := s.redisClient.KB().SMSTRootKey(supplier, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
@@ -117,7 +119,7 @@ func (s *RedisSMSTTestSuite) TestEscalation_PostPurge_NextUpdateStartsFresh() {
 	supplier := "pokt1escalation_fresh"
 	sessionID := "session_escalation_fresh"
 
-	mgr := s.createTestRedisSMSTManagerWithInterval(supplier, 1)
+	mgr := s.createTestRedisSMSTManager(supplier)
 	for i := 0; i < 5; i++ {
 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 			[]byte{byte(i)}, []byte{byte(i + 100)}, 10))
@@ -157,15 +159,18 @@ func (s *RedisSMSTTestSuite) TestEscalation_SuccessfulUpdateResetsCounter() {
 	mgr := s.createTestRedisSMSTManager(supplier)
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 		[]byte("k0"), []byte("v0"), 10))
+	s.checkpoint(mgr, sessionID)
 
 	// Drive (threshold-1) evictions — one shy of escalation.
 	for i := 1; i < persistentCorruptionThreshold; i++ {
 		mgr.evictCorruptSession(s.ctx, sessionID, "update_tree_corruption")
 	}
 
-	// Successful UpdateTree in the middle resets the counter.
+	// A successful update and the commit after it reset the counter: the reset
+	// runs where the nodes are written, not on the in-memory update.
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 		[]byte("k1"), []byte("v1"), 10))
+	s.checkpoint(mgr, sessionID)
 
 	// Now drive (threshold-1) more evictions. These must stay below
 	// threshold because the counter was reset by the successful update.
@@ -213,7 +218,13 @@ func (s *RedisSMSTTestSuite) TestEscalation_FailedUpdateDoesNotResetCounter() {
 	fields, err := s.redisClient.HGetAll(s.ctx, nodesKey).Result()
 	s.Require().NoError(err)
 	victims := make([]string, 0, len(fields))
-	for field, val := range fields {
+	for field, stored := range fields {
+		// The kind prefix is a read of the stored format: since item 398 a
+		// value may be one zstd frame, whose first byte is 0x28. Inner nodes
+		// are hashes and do not compress today, so this would keep working by
+		// luck — decode it so it keeps working by construction.
+		val, decErr := decompressNode([]byte(stored))
+		s.Require().NoError(decErr)
 		if len(val) > 0 && val[0] == smstInnerNodePrefix {
 			victims = append(victims, field)
 		}
@@ -247,9 +258,9 @@ func (s *RedisSMSTTestSuite) TestEscalation_FailedUpdateDoesNotResetCounter() {
 			[]byte(fmt.Sprintf("probe_v%04d", i)),
 			uint64(10))
 
-		mgr.treesMu.RLock()
+		mgr.evictionMu.Lock()
 		c := mgr.evictionCounts[sessionID]
-		mgr.treesMu.RUnlock()
+		mgr.evictionMu.Unlock()
 		if c > maxObservedCount {
 			maxObservedCount = c
 		}
@@ -289,9 +300,9 @@ func (s *RedisSMSTTestSuite) TestEscalation_DeleteTree_ClearsEvictionCount() {
 	// Accumulate one eviction (below threshold, so the entry stays
 	// in the evictionCounts map).
 	mgr.evictCorruptSession(s.ctx, sessionID, "update_tree_corruption")
-	mgr.treesMu.RLock()
+	mgr.evictionMu.Lock()
 	_, present := mgr.evictionCounts[sessionID]
-	mgr.treesMu.RUnlock()
+	mgr.evictionMu.Unlock()
 	s.Require().Truef(present,
 		"eviction below threshold must leave an entry in evictionCounts for subsequent accumulation")
 

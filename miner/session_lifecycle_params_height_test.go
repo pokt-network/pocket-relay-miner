@@ -68,9 +68,10 @@ func newParamsHeightTestManager() (*SessionLifecycleManager, *recordingSharedQue
 	}
 
 	m := &SessionLifecycleManager{
-		logger:         logging.NewLoggerFromConfig(logging.DefaultConfig()),
-		sharedClient:   sharedClient,
-		activeSessions: xsync.NewMap[string, *SessionSnapshot](),
+		logger:              logging.NewLoggerFromConfig(logging.DefaultConfig()),
+		sharedClient:        sharedClient,
+		activeSessions:      xsync.NewMap[string, *SessionSnapshot](),
+		resumedUnsentClaims: xsync.NewMap[string, struct{}](),
 	}
 
 	return m, sharedClient

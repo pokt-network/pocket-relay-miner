@@ -52,8 +52,8 @@ func TestRelaysDropped_NoApplicationLabel(t *testing.T) {
 
 	// Two drops on the same service+reason but different apps must collapse
 	// to one series once `application` is no longer a label.
-	relaysDropped.WithLabelValues(svc, reason).Inc()
-	relaysDropped.WithLabelValues(svc, reason).Inc()
+	relaysDropped.WithLabelValues(svc, BackendTypeJSONRPC, reason).Inc()
+	relaysDropped.WithLabelValues(svc, BackendTypeJSONRPC, reason).Inc()
 
 	body := scrapeRelayerRegistry(t)
 	const metric = "ha_relayer_relays_dropped_total"
@@ -70,5 +70,5 @@ func TestRelaysDropped_NoApplicationLabel(t *testing.T) {
 		}
 	}
 	require.Equalf(t, 1, n,
-		"relays_dropped must be bounded by (service_id,reason), got %d series:\n%s", n, fam)
+		"relays_dropped must be bounded by (service_id,rpc_type,reason), got %d series:\n%s", n, fam)
 }

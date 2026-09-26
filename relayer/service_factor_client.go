@@ -5,8 +5,9 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"sync/atomic"
+	"time"
 
-	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
@@ -14,28 +15,52 @@ import (
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
-// ServiceFactorData is the data stored in Redis for a service factor.
-// This struct must match the one in miner/service_factor_registry.go.
-type ServiceFactorData struct {
-	Factor    float64 `json:"factor"`
-	UpdatedAt int64   `json:"updated_at"`
+// ServiceFactorManifest is the complete service factor state published by the
+// miner. This struct must match the one in miner/service_factor_registry.go.
+type ServiceFactorManifest struct {
+	HasDefault    bool               `json:"has_default"`
+	DefaultFactor float64            `json:"default_factor"`
+	Overrides     map[string]float64 `json:"overrides"`
+	UpdatedAt     int64              `json:"updated_at"`
 }
 
-// ServiceFactorClient reads service factor configuration from Redis.
-// The miner publishes service factors, and relayers consume them for relay metering.
+// serviceFactorReloadInterval is how often a relayer without a manifest retries.
+// It also bounds how long this relayer refuses relays after the miner finally
+// publishes one.
+const serviceFactorReloadInterval = 2 * time.Second
+
+// ServiceFactorClient holds the miner's service factor manifest.
+//
+// The whole state arrives in ONE document, loaded at startup and replaced on
+// pub/sub, so resolving a factor never reaches Redis: with nothing configured
+// the previous per-key lookup issued one GET per relay, measured at 1.858 GET/s
+// against 1.855 relays/s on a live run. A service the manifest does not list has
+// no override -- that is data, not a failed lookup.
 type ServiceFactorClient struct {
 	logger      logging.Logger
 	redisClient *redisutil.Client
 
-	// L1 cache for service factors (lock-free)
-	defaultFactorCache *xsync.Map[string, *ServiceFactorData] // Key: "default"
-	serviceFactorCache *xsync.Map[string, *ServiceFactorData] // Key: serviceID
+	// manifest is replaced whole, never mutated: readers take the pointer and
+	// the map inside is only ever written before that pointer is published, so
+	// the hot path needs no lock and no concurrent map.
+	//
+	// IT IS ALSO MONOTONIC, and that is load-bearing, not a convenience: once a
+	// manifest is stored this pointer is never set back to nil, because a failed
+	// reload keeps the last good manifest (see loadManifest). Priced() therefore
+	// only ever goes from false to true.
+	//
+	// The WebSocket FRAME path depends on this and has no gate of its own: a
+	// connection that was upgraded proves this relayer was priced at the time,
+	// and monotonicity is what keeps that true for every frame that follows.
+	// Making a reload failure clear this pointer would silently uncover that
+	// path -- and would also stop admission across the whole fleet at once on a
+	// single blink of Redis.
+	manifest atomic.Pointer[ServiceFactorManifest]
 
 	// Lifecycle
-	ctx      context.Context
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
-	mu       sync.RWMutex
+	mu       sync.Mutex
 	closed   bool
 }
 
@@ -45,43 +70,45 @@ func NewServiceFactorClient(
 	redisClient *redisutil.Client,
 ) *ServiceFactorClient {
 	return &ServiceFactorClient{
-		logger:             logging.ForComponent(logger, logging.ComponentServiceFactorClient),
-		redisClient:        redisClient,
-		defaultFactorCache: xsync.NewMap[string, *ServiceFactorData](),
-		serviceFactorCache: xsync.NewMap[string, *ServiceFactorData](),
+		logger:      logging.ForComponent(logger, logging.ComponentServiceFactorClient),
+		redisClient: redisClient,
 	}
 }
 
-// Start begins the service factor client, subscribing to invalidation events.
+// Start loads the manifest and keeps retrying until it has one.
 //
-// The client does three things on Start:
-//  1. Preloads the default service_factor from Redis into L1 (per-service
-//     overrides are lazy-loaded on first request in GetServiceFactor).
-//  2. Subscribes to the service_factor pub/sub invalidation channel so
-//     that changes published by the miner are reflected immediately in
-//     this relayer's L1 cache. Without this subscription the L1 cache
-//     would serve stale values until the relayer process restarts.
-//  3. The subscription reconnects automatically (via cache.SubscribeToInvalidations)
-//     if Redis goes down and comes back.
+// It does NOT fail the process when the manifest is absent. On any restart of
+// the cluster a relayer can come up before the miner has published, and dying
+// in a loop would be worse than waiting: instead this relayer reports itself
+// unpriced, every transport refuses relays with a counted 503, and admission
+// opens by itself as soon as the manifest appears.
 func (c *ServiceFactorClient) Start(ctx context.Context) error {
 	c.mu.Lock()
 	if c.closed {
 		c.mu.Unlock()
 		return nil
 	}
-
-	c.ctx, c.cancelFn = context.WithCancel(ctx)
+	loopCtx, cancelFn := context.WithCancel(ctx)
+	c.cancelFn = cancelFn
 	c.mu.Unlock()
 
-	// Load initial values from Redis
-	c.refreshAll(c.ctx)
+	if err := c.loadManifest(loopCtx); err != nil {
+		c.logger.Warn().
+			Err(err).
+			Msg("no service factor manifest yet -- relays are refused until the miner publishes one")
 
-	// Subscribe to miner-published invalidation events so hot updates to
-	// service_factor config are picked up without requiring a relayer
-	// restart. The subscription is handled in a goroutine with automatic
-	// reconnection; errors here are only from the initial setup.
+		c.wg.Add(1)
+		go logging.RecoverGoRoutine(c.logger, logging.ComponentServiceFactorClient, func(rc context.Context) {
+			defer c.wg.Done()
+			c.retryUntilLoaded(rc)
+		})(loopCtx)
+	}
+
+	// Subscribe to miner-published invalidation events so a factor change is
+	// picked up without restarting the relayer. The subscription reconnects on
+	// its own if Redis goes down and comes back.
 	if err := cache.SubscribeToInvalidations(
-		c.ctx,
+		loopCtx,
 		c.redisClient,
 		c.logger,
 		cache.ServiceFactorCacheType,
@@ -89,169 +116,127 @@ func (c *ServiceFactorClient) Start(ctx context.Context) error {
 	); err != nil {
 		c.logger.Warn().
 			Err(err).
-			Msg("failed to subscribe to service_factor invalidation events — L1 cache will not hot-reload")
+			Msg("failed to subscribe to service_factor invalidation events — the manifest will not hot-reload")
 	}
 
-	c.logger.Info().Msg("service factor client started")
+	c.logger.Info().Bool("priced", c.Priced()).Msg("service factor client started")
 
 	return nil
 }
 
-// handleInvalidation is the pub/sub message handler for the service_factor
-// invalidation channel. Payload format matches
-// cache.ServiceFactorInvalidationPayload:
-//   - empty service_id → invalidate the default L1 entry
-//   - non-empty service_id → invalidate that specific per-service L1 entry
+// retryUntilLoaded reloads until a manifest lands or the client closes.
+func (c *ServiceFactorClient) retryUntilLoaded(ctx context.Context) {
+	ticker := time.NewTicker(serviceFactorReloadInterval)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := c.loadManifest(ctx); err == nil {
+				c.logger.Info().Msg("service factor manifest loaded -- admitting relays")
+				return
+			}
+		}
+	}
+}
+
+// loadManifest replaces the held manifest with what Redis holds.
 //
-// After invalidation, the next call to GetServiceFactor for the affected
-// key will miss L1, fall through to Redis, and repopulate L1 with the
-// fresh value.
-func (c *ServiceFactorClient) handleInvalidation(_ context.Context, rawPayload string) error {
-	var payload cache.ServiceFactorInvalidationPayload
-	if err := json.Unmarshal([]byte(rawPayload), &payload); err != nil {
-		// Unknown payload shape: be defensive and invalidate everything
-		// so we don't serve stale data.
-		c.InvalidateCache()
-		c.logger.Warn().
-			Err(err).
-			Str("payload", rawPayload).
-			Msg("service_factor invalidation payload could not be parsed — invalidated entire L1 cache as a precaution")
+// A FAILED RELOAD NEVER DROPS A GOOD MANIFEST, and the distinction between the
+// two failures is the whole point. redis.Nil means the miner has not published:
+// there is no price, and this relayer must not serve. Any other error -- a
+// timeout, a lost connection -- says nothing about what Redis holds, and
+// treating it as "no price" would stop admission across the entire fleet on one
+// blink of Redis: a worse failure than the one this design fixes.
+func (c *ServiceFactorClient) loadManifest(ctx context.Context) error {
+	raw, err := c.redisClient.Get(ctx, c.redisClient.KB().ServiceFactorManifestKey()).Bytes()
+	switch {
+	case err == nil:
+		var manifest ServiceFactorManifest
+		if unmarshalErr := json.Unmarshal(raw, &manifest); unmarshalErr != nil {
+			// A document that does not parse is a defect in the producer. The
+			// manifest already held stays: it was valid when it was read.
+			c.logger.Warn().Err(unmarshalErr).Msg("service factor manifest could not be parsed -- keeping the last good one")
+			return unmarshalErr
+		}
+		c.manifest.Store(&manifest)
+		return nil
+
+	case errors.Is(err, redis.Nil):
+		return err
+
+	default:
+		c.logger.Debug().Err(err).Msg("failed to read the service factor manifest from Redis")
+		return err
+	}
+}
+
+// Priced reports whether this relayer knows what to charge.
+//
+// Admission is gated on it: a relay served without a manifest is priced against
+// state nobody published, and a price charged wrong is not recoverable. This is
+// the opposite call from the boot-window optimistic serve, which is about the
+// EXISTENCE of a supplier and is arbitrated afterwards by the miner -- nothing
+// arbitrates a wrong price.
+//
+// It only ever goes from false to true: a failed reload keeps the last good
+// manifest, so a relayer that was pricing does not stop.
+func (c *ServiceFactorClient) Priced() bool {
+	return c.manifest.Load() != nil
+}
+
+// handleInvalidation reloads the whole manifest. The payload names a scope the
+// per-key format needed; one document is replaced entire, so any event means
+// "read it again".
+func (c *ServiceFactorClient) handleInvalidation(ctx context.Context, _ string) error {
+	if err := c.loadManifest(ctx); err != nil {
+		c.logger.Warn().Err(err).Msg("service_factor invalidation arrived but the manifest could not be reloaded")
 		return nil
 	}
-
-	if payload.ServiceID == "" {
-		c.defaultFactorCache.Clear()
-		c.logger.Info().
-			Str("scope", "default").
-			Msg("service_factor L1 cache invalidated via pub/sub — next GetServiceFactor call will reload from Redis")
-	} else {
-		c.serviceFactorCache.Delete(payload.ServiceID)
-		c.logger.Info().
-			Str("scope", "service").
-			Str("service_id", payload.ServiceID).
-			Msg("service_factor L1 cache invalidated via pub/sub — next GetServiceFactor call will reload from Redis")
-	}
+	c.logger.Info().Msg("service factor manifest reloaded via pub/sub")
 	return nil
 }
 
 // GetServiceFactor returns the service factor for a given service ID.
-// It checks L1 cache first, then falls back to L2 (Redis).
-// Returns (factor, true) if found, (0, false) if not configured.
-func (c *ServiceFactorClient) GetServiceFactor(ctx context.Context, serviceID string) (float64, bool) {
-	// Check L1 cache for per-service override
-	if data, ok := c.serviceFactorCache.Load(serviceID); ok {
-		return data.Factor, true
+// Returns (factor, true) if one is configured, (0, false) if none is.
+//
+// This never reaches Redis: the manifest carries the whole state, so a service
+// with no entry is answered from memory instead of costing a GET per relay.
+// (0, false) means the protocol formula applies -- the caller must not read it
+// as "unknown", which is what Priced answers.
+func (c *ServiceFactorClient) GetServiceFactor(_ context.Context, serviceID string) (float64, bool) {
+	manifest := c.manifest.Load()
+	if manifest == nil {
+		return 0, false
 	}
-
-	// Try to fetch from Redis (L2)
-	key := c.serviceFactorServiceKey(serviceID)
-	data, err := c.redisClient.Get(ctx, key).Bytes()
-	if err == nil {
-		var factorData ServiceFactorData
-		if json.Unmarshal(data, &factorData) == nil {
-			// Store in L1 cache
-			c.serviceFactorCache.Store(serviceID, &factorData)
-			return factorData.Factor, true
-		}
-	} else if !errors.Is(err, redis.Nil) {
-		c.logger.Debug().
-			Err(err).
-			Str("service_id", serviceID).
-			Msg("failed to get service factor from Redis")
+	if factor, ok := manifest.Overrides[serviceID]; ok {
+		return factor, true
 	}
-
-	// Check L1 cache for default
-	if d, ok := c.defaultFactorCache.Load("default"); ok {
-		return d.Factor, true
+	if manifest.HasDefault {
+		return manifest.DefaultFactor, true
 	}
-
-	// Try to fetch default from Redis (L2)
-	key = c.serviceFactorDefaultKey()
-	data2, err := c.redisClient.Get(ctx, key).Bytes()
-	if err == nil {
-		var factorData ServiceFactorData
-		if json.Unmarshal(data2, &factorData) == nil {
-			// Store in L1 cache
-			c.defaultFactorCache.Store("default", &factorData)
-			return factorData.Factor, true
-		}
-	} else if !errors.Is(err, redis.Nil) {
-		c.logger.Debug().
-			Err(err).
-			Msg("failed to get default service factor from Redis")
-	}
-
 	return 0, false
-}
-
-// HasServiceFactor returns true if a service factor is configured (either per-service or default).
-func (c *ServiceFactorClient) HasServiceFactor(ctx context.Context, serviceID string) bool {
-	_, found := c.GetServiceFactor(ctx, serviceID)
-	return found
-}
-
-// InvalidateCache clears the L1 cache, forcing the next read to fetch from Redis.
-func (c *ServiceFactorClient) InvalidateCache() {
-	c.defaultFactorCache.Clear()
-	c.serviceFactorCache.Clear()
-
-	c.logger.Debug().Msg("service factor cache invalidated")
-}
-
-// InvalidateServiceCache invalidates the cache for a specific service.
-func (c *ServiceFactorClient) InvalidateServiceCache(serviceID string) {
-	c.serviceFactorCache.Delete(serviceID)
-
-	c.logger.Debug().
-		Str("service_id", serviceID).
-		Msg("service factor cache invalidated for service")
-}
-
-// refreshAll refreshes all service factors from Redis.
-func (c *ServiceFactorClient) refreshAll(ctx context.Context) {
-	// Refresh default
-	key := c.serviceFactorDefaultKey()
-	data, err := c.redisClient.Get(ctx, key).Bytes()
-	if err == nil {
-		var factorData ServiceFactorData
-		if json.Unmarshal(data, &factorData) == nil {
-			c.defaultFactorCache.Store("default", &factorData)
-			c.logger.Debug().
-				Float64("factor", factorData.Factor).
-				Msg("loaded default service factor from Redis")
-		}
-	} else if !errors.Is(err, redis.Nil) {
-		c.logger.Debug().
-			Err(err).
-			Msg("failed to load default service factor from Redis")
-	}
 }
 
 // Close gracefully shuts down the service factor client.
 func (c *ServiceFactorClient) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
 	c.closed = true
+	cancelFn := c.cancelFn
+	c.cancelFn = nil
+	c.mu.Unlock()
 
-	if c.cancelFn != nil {
-		c.cancelFn()
+	if cancelFn != nil {
+		cancelFn()
 	}
-
 	c.wg.Wait()
 
 	c.logger.Info().Msg("service factor client closed")
 	return nil
-}
-
-// Redis key helpers - delegate to KeyBuilder for consistency
-func (c *ServiceFactorClient) serviceFactorDefaultKey() string {
-	return c.redisClient.KB().ServiceFactorDefaultKey()
-}
-
-func (c *ServiceFactorClient) serviceFactorServiceKey(serviceID string) string {
-	return c.redisClient.KB().ServiceFactorServiceKey(serviceID)
 }

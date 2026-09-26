@@ -22,6 +22,6 @@ type PocketNodeConfig struct {
 
 	// ChainID is the blockchain chain ID used for transaction signing.
 	// Required for miner (claim/proof submission).
-	// Examples: "pocket" (mainnet), "pocket-beta" (testnet), "pocket" (localnet)
+	// Examples: "pocket" (mainnet), "pocket-lego-testnet" (beta testnet), "pocket" (localnet)
 	ChainID string `yaml:"chain_id,omitempty"`
 }

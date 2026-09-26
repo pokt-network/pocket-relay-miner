@@ -24,9 +24,9 @@ of times and inflate claims.
 1. **Per-request ring signature** — `ring-go` calls
    `curve.NewRandomScalar()` twice per sign, so any caller that signs the
    request **per inbound message** gets distinct bytes, distinct hashes,
-   distinct leaves. This is what PATH does for JSON-RPC: every HTTP POST
-   goes through `buildAndSignRelayRequest`. Empirically: 10 byte-identical
-   `eth_blockNumber` POSTs through PATH yield 10 unique dedup entries and
+   distinct leaves. This is what a gateway does for JSON-RPC: it signs every
+   HTTP POST it receives. Empirically: 10 byte-identical
+   `eth_blockNumber` POSTs through a gateway yield 10 unique dedup entries and
    10 leaves in the claim.
 
 2. **Per-event response payload (`PayloadHash`)** — for WebSocket
@@ -57,13 +57,13 @@ Two shapes, both protocol-correct:
 
 ## How to observe it
 
-Three metrics in `miner/metrics.go` partition the question:
+Four metrics in `miner/metrics.go` partition the question:
 
 | Metric                                | Meaning                                                                 |
 |---------------------------------------|-------------------------------------------------------------------------|
 | `ha_miner_relays_added_to_smst_total` | `UpdateTree` CALLS that succeeded — counts attempts, not unique leaves. |
-| `ha_miner_claim_num_leaves`           | Distinct leaves in the claim (matches on-chain `num_relays`).           |
-| `ha_miner_claim_relay_attempts`       | Session coordinator `RelayCount` at claim time.                         |
+| `ha_miner_claim_leaves_total`         | Distinct leaves in the claims built (each matches its on-chain `num_relays`). |
+| `ha_miner_claim_relay_attempts_total` | Session coordinator `RelayCount` of the claims built.                   |
 | `ha_miner_claim_leaf_collapse_total`  | Claims where leaves < attempts (dedup collapse fired).                  |
 
 A healthy service has `claim_leaf_collapse_total == 0`. When it ticks up,

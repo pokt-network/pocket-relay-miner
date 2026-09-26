@@ -355,6 +355,17 @@ func (p *KeyringProvider) Kind() string { return "keyring" }
 // of the record, so this failure repeats on every reload forever.
 var ErrNotSecp256k1Key = errors.New("key is not a secp256k1 key")
 
+// ErrKeyRecordUndecodable marks a record that IS on disk and cannot be decoded,
+// as opposed to one that is not there at all.
+//
+// The distinction is not ours to invent: cosmos-sdk already makes it. migrate
+// passes its error through wrapKeyNotFound (v0.53.7 crypto/keyring/keyring.go:532-537,
+// read in the dependency's source), which wraps sdkerrors.ErrKeyNotFound only when
+// the record is absent and returns the raw decode error otherwise. Key() therefore
+// hands back two distinguishable classes and this sentinel names the second one, so
+// the by-name branch can treat it the way List() treats the records it swallows.
+var ErrKeyRecordUndecodable = errors.New("keyring record is present but cannot be decoded")
+
 // isPermanentKeyFailure reports whether a per-key load failure will repeat on
 // every future reload, in which case the record is simply not a signing key and
 // must not stall the reload of the ones that are.
@@ -505,13 +516,36 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 					Err(err).
 					Str("key_name", name).
 					Msg("failed to load key from keyring")
-				if isPermanentKeyFailure(err) {
-					continue
+				switch {
+				case errors.Is(err, ErrKeyRecordUndecodable):
+					// The same class List() swallows, so it is counted the same
+					// way and NOT returned. Owner decision 2026-09-03, and it is
+					// the policy the List branch already documents: a record the
+					// operator damaged takes its own supplier out of service,
+					// loudly, and everything else keeps working -- including the
+					// withdrawal of some other key, which returning here would
+					// block for as long as the broken file sits there.
+					//
+					// No per-key increment: the load-level countLoadFailure below
+					// fires once when swallowedRecords > 0, and List() counts a
+					// swallowed record exactly once. Counting here as well would
+					// make the same fault move the series twice on one branch and
+					// once on the other.
+					swallowedRecords++
+				case isPermanentKeyFailure(err):
+					// Absent, offline, multisig, not secp256k1. A named key the
+					// operator deleted IS a withdrawal and must be applied.
+				default:
+					// The record decoded; something after it failed (export,
+					// unarmor, a keyring briefly locked). That may clear on a
+					// retry, so it stays transient and the reload is abandoned.
+					decodedRecords++
+					keyLoadErrors.WithLabelValues(p.Kind()).Inc()
+					loadErrs = append(loadErrs, fmt.Errorf("key %q: %w", name, err))
 				}
-				keyLoadErrors.WithLabelValues(p.Kind()).Inc()
-				loadErrs = append(loadErrs, fmt.Errorf("key %q: %w", name, err))
 				continue
 			}
+			decodedRecords++
 			keys[addr] = privKey
 			p.logger.Debug().
 				Str("key_name", name).
@@ -595,11 +629,13 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	// there without setting the gauge left it holding a previous value -- zero,
 	// on the first such load -- while the standing condition it exists to expose
 	// was present.
-	// Only the List() branch measures this. With key_names configured nothing
-	// counted the records, so publishing a confident 0 would report "no records
-	// are broken" from a load that never looked -- the same collapse of "found
-	// nothing" into "looked nowhere" that the no-directory case already had.
-	if p.keyringDir != "" && len(p.keyNames) == 0 {
+	// Both branches measure this now. It used to be published only without
+	// key_names, on the ground that nothing counted the records there and a
+	// confident 0 would report "no records are broken" from a load that never
+	// looked. That was right about the 0 and wrong as a remedy: it meant turning
+	// key_names on silently blinded the broken-keyring signal. The by-name branch
+	// counts its own selection instead, so the number is measured on both paths.
+	if p.keyringDir != "" {
 		keyringUndecodableRecords.WithLabelValues(p.Kind()).Set(float64(swallowedRecords))
 	}
 
@@ -645,11 +681,15 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	// the address alive here would only split the fleet between pods that still
 	// hold it in memory and pods that never saw it.
 	//
-	// The by-name branch above needs no guard of its own, and that is a property
-	// of the dependency rather than a choice: Key(uid) calls migrate directly
-	// (keyring.go:603-609) and PROPAGATES the decode error, so a corrupt
-	// selected record already lands in loadErrs and returns above. Only List()
-	// swallows, so only List() counts.
+	// BOTH branches feed these counters, and until 2026-09-03 only List() did.
+	// Key(uid) propagates the decode error instead of swallowing it, and that was
+	// read as "the by-name branch needs no guard of its own" -- true about
+	// SWALLOWING and wrong about the consequence, because propagating put the
+	// record in loadErrs and the manager then abandoned every later reload while
+	// the file stayed broken. That is the same freeze this branch's own history
+	// records as a bug: one damaged record blocking the withdrawal of all the
+	// others. Owner decision the same day: a named record that cannot be decoded
+	// is ignored loudly and the rest are applied, exactly as when listing.
 	//
 	// The unreadable-DIRECTORY case is caught earlier still, by the fingerprint
 	// read at the top of this function.
@@ -675,14 +715,22 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 		countLoadFailure()
 
 		if decodedRecords == 0 {
-			// keys is provably empty here -- this branch is only reachable from
-			// the List() path, where every key comes from a record, and no
-			// record decoded -- so this returns an empty map, not a partial one.
+			// keys is empty on both branches when nothing decoded: every key comes
+			// from a record, and decodedRecords counts the records that produced
+			// one. So this returns an empty map rather than a partial one.
+			// dirEntryCount counts the whole directory, which is the right number
+			// only when the whole directory is what was read. With key_names the
+			// selection is what failed, and reporting the directory's size there
+			// would overstate the damage.
+			scope, count := "holds", dirEntryCount
+			if len(p.keyNames) > 0 {
+				scope, count = "was asked for", len(p.keyNames)
+			}
 			return keys, fmt.Errorf(
-				"keyring directory %s holds %d record file(s) and not one could be decoded: "+
+				"keyring directory %s %s %d record file(s) and not one could be decoded: "+
 					"this is a broken keyring -- a wrong passphrase, or records this process "+
 					"cannot read -- rather than the operator removing keys",
-				p.keyringDir, dirEntryCount)
+				p.keyringDir, scope, count)
 		}
 
 		p.logger.Error().
@@ -736,8 +784,42 @@ func (p *KeyringProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.
 	}
 
 	if p.keyringDir != "" {
+		// The fingerprint above was read BEFORE List and before the argon2id
+		// work -- seconds of it, ~40ms per key twice over -- so storing it
+		// beside what those seconds produced records the pair (state of the
+		// directory then, keys that came out later). Those disagree whenever the
+		// directory changed in between, and the damage lands when it changes
+		// BACK byte for byte: restoring a backup, rolling a Secret back. The
+		// check at the top then matches, and hands out the shorter set. A
+		// supplier present on disk silently stops signing until something else
+		// changes the directory or the process restarts.
+		//
+		// Re-reading and storing the NEW fingerprint would be worse, not better:
+		// the keys are not read at an instant either, so the second reading
+		// describes a third state and the mismatch simply moves -- from the
+		// rollback case, which is rare, to the ordinary forward one, where a key
+		// added during a load would be cached out forever.
+		//
+		// So the fingerprint is only recorded when the directory is provably
+		// unchanged across the whole load, which is the same read-work-reread
+		// shape the record count above already uses. Otherwise the cache is
+		// poisoned rather than emptied: lastFingerprint is set to a value
+		// keyringDirFingerprint can never return -- it always begins with a
+		// count -- so the next load does the full work, while cachedKeys is left
+		// alone because the release/boot alarm below reads its length to tell a
+		// fleet-wide release from a process that never held anything.
+		after, _, ferr := p.keyringDirFingerprint()
+		stored := after
+		if ferr != nil || after != fingerprint {
+			stored = ""
+			keyringCacheDiscarded.WithLabelValues(p.Kind()).Inc()
+			p.logger.Debug().
+				Str("keyring_dir", p.keyringDir).
+				Msg("keyring directory changed while it was being read; not caching this load")
+		}
+
 		p.fingerprintMu.Lock()
-		p.lastFingerprint = fingerprint
+		p.lastFingerprint = stored
 		p.cachedKeys = make(map[string]cryptotypes.PrivKey, len(keys))
 		for addr, key := range keys {
 			p.cachedKeys[addr] = key
@@ -761,7 +843,14 @@ func (p *KeyringProvider) loadKeyByName(name string) (cryptotypes.PrivKey, strin
 	// Get the key record
 	record, err := p.keyring.Key(name)
 	if err != nil {
-		return nil, "", fmt.Errorf("key not found: %w", err)
+		// "key not found" for everything was actively misleading: a record that
+		// is present and corrupt read back as one that is absent, sending the
+		// operator to look for a missing key instead of at the file that is
+		// broken -- and repairing it is the whole of the policy here.
+		if errors.Is(err, sdkerrors.ErrKeyNotFound) {
+			return nil, "", fmt.Errorf("key %q is not in the keyring: %w", name, err)
+		}
+		return nil, "", fmt.Errorf("key %q: %w: %w", name, ErrKeyRecordUndecodable, err)
 	}
 
 	// Get the address

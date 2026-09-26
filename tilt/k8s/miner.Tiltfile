@@ -55,7 +55,7 @@ metadata:
   labels:
     app: miner
 spec:
-  replicas: {}
+  replicas: {replicas}
   selector:
     matchLabels:
       app: miner
@@ -66,7 +66,7 @@ spec:
       annotations:
         # See config_hash in utils.Tiltfile: a mounted ConfigMap change does not
         # roll pods by itself, and the miner reads its config only at startup.
-        pocket-relay-miner/config-hash: "{}"
+        pocket-relay-miner/config-hash: "{config_hash}"
     spec:
       initContainers:
       # Build a cosmos keyring from the SAME hex keys the keys_file holds, so the
@@ -82,7 +82,7 @@ spec:
       # DERIVED from the secret, so there is one source of truth for which keys
       # exist and no second place to update.
       - name: build-keyring
-        image: ghcr.io/pokt-network/pocketd:0.1.34
+        image: ghcr.io/pokt-network/pocketd:0.1.35
         # As the SAME user the app container runs as, so the keyring files are
         # born owned by it. The first attempt chowned them afterwards instead and
         # failed with "Operation not permitted": this image does not run as root,
@@ -180,7 +180,7 @@ spec:
           mountPath: /keyring-pass
       containers:
       - name: miner
-        image: {}
+        image: {image}
         imagePullPolicy: Never
         command:
         - pocket-relay-miner
@@ -192,10 +192,12 @@ spec:
         - containerPort: 6060
           name: pprof
         env:
-        - name: GOMAXPROCS
-          value: "4"  # Match CPU limit - makes runtime.NumCPU() return 4
         - name: LOG_LEVEL
-          value: "{}"
+          value: "{log_level}"
+        # Soft limit for the Go runtime below the container limit, so the GC
+        # tightens before the kernel OOM-kills the pod.
+        - name: GOMEMLIMIT
+          value: "7GiB"
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -214,8 +216,12 @@ spec:
             cpu: "500m"
             memory: "512Mi"
           limits:
-            cpu: "4000m"  # 4 cores - miner is the core component doing SMST, claims, proofs
-            memory: "2Gi"
+            # From miner.cpu_cores. GOMAXPROCS is NOT set: automaxprocs
+            # (main.go:7) derives it from THIS limit, and a present env would make
+            # it return without touching anything (maxprocs.go:105-111). The miner
+            # is the core component doing SMST, claims and proofs.
+            cpu: "{cpu_limit}"
+            memory: "8Gi"
         readinessProbe:
           httpGet:
             path: /health
@@ -253,10 +259,11 @@ spec:
     targetPort: 6060
     name: pprof
 """.format(
-        config["miner"]["count"],
-        miner_config_hash,
-        config["global"]["image"],
-        "debug" if config["global"]["debug"] else "info"
+        replicas=config["miner"]["count"],
+        config_hash=miner_config_hash,
+        image=config["global"]["image"],
+        log_level="debug" if config["global"]["debug"] else "info",
+        cpu_limit="{}000m".format(config["miner"]["cpu_cores"]),
     )
 
     k8s_yaml(blob(miner_yaml))
@@ -279,6 +286,7 @@ def generate_miner_config(config):
     1. Base: config.miner.example.yaml (single source of truth for defaults)
     2. User overrides: tilt_config.yaml miner.config section
     3. K8s overrides: Redis URL, validator URL, keys path, metrics addr
+    4. The localnet clock, which is not the miner's to hold on its own
     """
     # 1. Read example config as base
     base_config = read_miner_example_config()
@@ -290,6 +298,19 @@ def generate_miner_config(config):
     # 3. Apply k8s-specific overrides (service names, paths)
     redis_host = get_redis_host(config.get("redis", {}).get("mode", "standalone"))
     final_config = apply_k8s_overrides_miner(merged_config, redis_host)
+
+    # 4. THE clock, from localnet.block_time_seconds -- the same number that
+    # becomes the validator's timeout_commit. It is forced rather than merged
+    # because two places holding one clock is how they drift, and the miner
+    # derives its claim and proof deadlines from this value: a divergence
+    # miscomputes them with no error anywhere. Forcing an operator's value is
+    # announced, the way the mode matrix in utils.Tiltfile announces its own.
+    block_time = config["localnet"]["block_time_seconds"]
+    stored = final_config.get("block_time_seconds")
+    if stored != block_time:
+        print("localnet clock: forcing miner block_time_seconds {!r} -> {!r} (set localnet.block_time_seconds instead)".format(
+            stored, block_time))
+    final_config["block_time_seconds"] = block_time
 
     return final_config
 

@@ -1,58 +1,123 @@
-# Minimal HA reference deployment: shared Redis, one relayer, one miner.
+# Pocket RelayMiner with Docker Compose: Redis, one relayer and one miner,
+# pointed at the beta testnet (chain id pocket-lego-testnet) through the public
+# Sauron endpoints. No chain runs here: the node is remote.
 #
-# This is DOCUMENTATION, not a dev environment — local development uses the
-# Tilt/Kubernetes localnet (see tilt/README.md), which brings its own chain,
-# backends and observability. This file shows the smallest wiring that is
-# still the HA architecture: every piece of session state lives in Redis, so
-# adding replicas is just scaling the stateless services against the same
-# Redis and the same chain endpoints:
+#   docker compose -p prm-example up -d        # start
+#   docker compose -p prm-example ps           # redis, miner and relayer healthy
+#   docker compose -p prm-example down -v      # stop and delete Redis data
 #
-#   docker compose up -d --scale relayer=2 --scale miner=2
+# The runbook is docs/deploy/DOCKER_COMPOSE.md. As cloned, the stack starts
+# with config/supplier-keys.yaml: 1 PUBLIC, unstaked key that serves nothing
+# and only proves Redis, the node connection and both processes. Never fund or
+# stake it. Before serving relays:
+#   1. Put YOUR keys in config/supplier-keys.local.yaml (gitignored) and point
+#      the two keys mounts below at it.
+#   2. config/relayer.yaml: one entry per service your suppliers are staked for,
+#      each with the URL of your backend.
+#   3. Validate both configs, with --check-stake for the relayer.
 #
-# Before starting:
-#   1. Edit config/relayer.yaml and config/miner.yaml: point pocket_node at
-#      your full node and configure your services/backends.
-#   2. Put your supplier signing keys in config/supplier-keys.yaml
-#      (hex-encoded private keys; see config.relayer.example.yaml for the
-#      schema). NEVER commit that file.
+# Mainnet instead of beta: switch every value marked "Mainnet:" in
+# config/relayer.yaml and config/miner.yaml. The genesis and node configs of
+# each network are in
+# https://github.com/pokt-network/pocket-network-genesis/tree/master/shannon
+# (mainnet, testnet-lego is beta); snapshots and public endpoints are listed in
+# https://github.com/pokt-network/pocket-network-resources.
 
 services:
+  # Shared state for relayer and miner. The server config is the repository's
+  # config.redis.example.conf (maxmemory-policy noeviction: Redis must refuse
+  # writes rather than drop relay data). Never publish its port.
+  #
+  # Sizing: these limits fit a deployment with a few suppliers and ordinary
+  # traffic, not a burst of large relays. The v0.1.0 load run (50 suppliers,
+  # ~2,400 relays/s; docs/benchmarks/v0.1.0/Relay-Miner-Capacity.pdf) used Redis
+  # with a 16 GiB limit and 5 CPUs; it peaked at 4.9 GiB used and at most
+  # 0.7 cores. At that scale drop the two
+  # overrides below so the config file's maxmemory (12.8 GiB) and io-threads (4)
+  # apply, and give it 16g and 5 CPUs. maxmemory stays below mem_limit to leave
+  # room for the snapshot fork.
   redis:
-    image: redis:8.2-alpine
-    command: ["redis-server", "--appendonly", "yes"]
+    image: redis:8.10.1-alpine
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--maxmemory", "3gb", "--io-threads", "1"]
     volumes:
+      - ../../config.redis.example.conf:/usr/local/etc/redis/redis.conf:ro
       - redis-data:/data
+    mem_limit: 4g
+    cpus: 2
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
       timeout: 3s
-      retries: 5
+      retries: 10
+    restart: unless-stopped
 
-  relayer:
-    # config/relayer.yaml must set redis.url: redis://redis:6379 — the
-    # example config's localhost:6379 is THIS container inside compose.
-    image: ghcr.io/pokt-network/pocket-relay-miner:latest
-    command: ["relayer", "--config", "/config/relayer.yaml"]
-    volumes:
-      - ./config/relayer.yaml:/config/relayer.yaml:ro
-      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
-    ports:
-      - "8080:8080" # relay traffic; front with your own LB when scaling
-    depends_on:
-      redis:
-        condition: service_healthy
-
+  # Builds the claim and proof for every served relay and submits them.
+  # Exits if it cannot read the chain at startup, hence restart: on-failure.
   miner:
-    # config/miner.yaml must set redis.url: redis://redis:6379 — the
-    # example config's localhost:6379 is THIS container inside compose.
-    image: ghcr.io/pokt-network/pocket-relay-miner:latest
+    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.0
     command: ["miner", "--config", "/config/miner.yaml"]
     volumes:
       - ./config/miner.yaml:/config/miner.yaml:ro
+      # The public, unstaked key. Switch to ./config/supplier-keys.local.yaml
+      # for your own keys: mode 0600, owned by uid 1000 (the image's uid).
       - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
+    # Sizing: fits a few suppliers, not a burst of large relays. In the v0.1.0
+    # load run (8 GiB limit) the miner peaked at 2.9 GiB, 6.8 GiB during a burst
+    # of 1 MiB relays, and used 0.5 cores; give it 8g (GOMEMLIMIT 7200MiB) at
+    # that scale.
+    mem_limit: 4g
+    cpus: 2
+    environment:
+      # Go runtime soft limit ~10% below mem_limit, so GC tightens before an OOM kill.
+      GOMEMLIMIT: 3600MiB
+      # Equal to cpus.
+      GOMAXPROCS: "2"
     depends_on:
       redis:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:9092/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: on-failure
+
+  # Serves relays: verifies each request, forwards it to your backend, signs
+  # the response and hands the relay to the miner through Redis.
+  relayer:
+    image: ghcr.io/pokt-network/pocket-relay-miner:v0.1.0
+    command: ["relayer", "--config", "/config/relayer.yaml"]
+    volumes:
+      - ./config/relayer.yaml:/config/relayer.yaml:ro
+      # Same keys file as the miner's; switch both together.
+      - ./config/supplier-keys.yaml:/keys/supplier-keys.yaml:ro
+    ports:
+      # Relay traffic. Bound to loopback so nothing outside this host reaches
+      # it by accident. For gateways, bind the address they reach, for example
+      # "0.0.0.0:8180:8080" or "<public-ip>:8180:8080", behind your TLS proxy.
+      - "127.0.0.1:${RELAYER_PORT:-8180}:8080"
+    # Sizing: in the v0.1.0 load run (~2,400 relays/s) the relayer peaked at
+    # 118 MiB, 1.1 GiB during a burst of 1 MiB relays, and used 3.6 cores. Its
+    # CPU scales with relays/s: give it 4 CPUs (and GOMAXPROCS 4) at that rate.
+    mem_limit: 2g
+    cpus: 2
+    environment:
+      # Go runtime soft limit below mem_limit, so GC tightens before an OOM kill.
+      GOMEMLIMIT: 1800MiB
+      # Equal to cpus.
+      GOMAXPROCS: "2"
+    depends_on:
+      redis:
+        condition: service_healthy
+      miner:
+        condition: service_healthy
+    healthcheck:
+      # /ready on the health port answers 200 only once the relayer can serve.
+      test: ["CMD", "curl", "-fsS", "http://localhost:8081/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
 
 volumes:
   redis-data:

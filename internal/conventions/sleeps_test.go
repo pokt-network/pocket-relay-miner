@@ -7,7 +7,7 @@ import (
 	"testing"
 )
 
-// Rule #1 (CLAUDE.md): no time.Sleep for synchronization in tests. The
+// Rule #1 (CONTRIBUTING.md): no time.Sleep for synchronization in tests. The
 // existing sleeps are frozen per file (2026-08-19); the fix is a queued
 // campaign (Go 1.26's testing/synctest makes most of them mechanical). This
 // check only stops NEW ones from landing and forces the list to shrink as

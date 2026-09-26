@@ -15,11 +15,12 @@ import (
 // crashed without acking, or the original copy still buffered in a
 // slow-but-alive consumer after another consumer reclaimed it) are not
 // counted twice. The SMST tree is idempotent on insertions of the same
-// (key, value, weight) tuple, but the side counter
-// `snapshot.TotalComputeUnits` is incremented unconditionally by
-// IncrementRelayCount and must be protected against double-count:
-// over-counting there would inflate the economic-viability prediction and
-// cause unprofitable sessions to be claimed.
+// (key, value, weight) tuple, but the side counters (`relay_count`,
+// `total_compute_units`) are incremented unconditionally by
+// IncrementRelayCount and must be protected against double-count. They do NOT
+// decide money -- the claim and its economic viability are computed from the
+// SMST root -- but they feed the relay metrics and the claim-time comparison of
+// leaves against relays counted, and a double count there hides real loss.
 //
 // The relay worker calls MarkProcessed on EVERY relay and uses its return
 // value as the gate for the counter: the reclaim skips entries owned by this
@@ -39,9 +40,6 @@ type Deduplicator interface {
 	// processing of the same relay already marked it, and the caller must
 	// not increment the per-session counters again.
 	MarkProcessed(ctx context.Context, relayHash []byte, sessionID string) (bool, error)
-
-	// MarkProcessedBatch records multiple relay hashes in a single pipeline.
-	MarkProcessedBatch(ctx context.Context, relayHashes [][]byte, sessionID string) error
 
 	// CleanupSession removes the deduplication set for a session. Called when
 	// a session reaches a terminal state so Redis memory is reclaimed.
@@ -161,33 +159,6 @@ func (d *RedisDeduplicator) MarkProcessed(ctx context.Context, relayHash []byte,
 
 	dedupMarked.Inc()
 	return addCmd.Val() == 1, nil
-}
-
-// MarkProcessedBatch records multiple relay hashes in a single pipeline.
-func (d *RedisDeduplicator) MarkProcessedBatch(ctx context.Context, relayHashes [][]byte, sessionID string) error {
-	if len(relayHashes) == 0 {
-		return nil
-	}
-
-	key := d.sessionKey(sessionID)
-	ttl := d.getTTL()
-
-	members := make([]interface{}, len(relayHashes))
-	for i, h := range relayHashes {
-		members[i] = hashMember(h)
-	}
-
-	pipe := d.redisClient.Pipeline()
-	pipe.SAdd(ctx, key, members...)
-	pipe.Expire(ctx, key, ttl)
-
-	if _, err := pipe.Exec(ctx); err != nil {
-		dedupErrors.WithLabelValues("redis_batch_mark").Inc()
-		return fmt.Errorf("failed to mark batch processed: %w", err)
-	}
-
-	dedupMarked.Add(float64(len(relayHashes)))
-	return nil
 }
 
 // CleanupSession removes the deduplication set for a terminated session.

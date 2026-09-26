@@ -44,6 +44,22 @@ const (
 	defaultSubscriberBufferSize = 100
 )
 
+// SubscribingBlockClient is the block client this project requires: poktroll's,
+// plus the per-block stream every block-driven loop in the miner is built on.
+//
+// It is a TYPE and not a runtime capability check on purpose. The inclusion
+// reconciler used to discover the stream by asserting its block client to an
+// anonymous interface, and a client without Subscribe left the reconciler fully
+// CONSTRUCTED -- pool running, rebroadcast store writing entries into Redis --
+// with no trigger to ever read them, so those entries aged out at their TTL
+// while an Error line in the log was the only sign. That is strictly worse than
+// having no reconciler at all, where a nil store writes nothing. Requiring the
+// capability where the client is wired makes it a build failure instead.
+type SubscribingBlockClient interface {
+	client.BlockClient
+	Subscribe(ctx context.Context, bufferSize int) <-chan *SimpleBlock
+}
+
 // SimpleBlock implements client.Block interface with timestamp support.
 // It is what RedisBlockClientAdapter hands to its subscribers, and what
 // BlockSubscriber emits, to represent a blockchain block.
@@ -488,7 +504,7 @@ func (bs *BlockSubscriber) LastBlock(ctx context.Context) client.Block {
 	block := bs.lastBlock.Load()
 	if block == nil {
 		// If no block yet, try to fetch one
-		_ = bs.fetchLatestBlock(ctx)
+		_ = bs.fetchLatestBlock(ctx) //nolint:errcheck // redundant: the two lines below re-read lastBlock and answer a zero block if it is still nil, which is the same outcome this error would have predicted
 		block = bs.lastBlock.Load()
 		if block == nil {
 			// Return a zero block if still nil

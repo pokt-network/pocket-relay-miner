@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// CLAUDE.md concurrency rule: no unbounded bare goroutines. The accepted
+// CONTRIBUTING.md concurrency rule: no unbounded bare goroutines. The accepted
 // shapes are a worker pool submission (pond's pool.Go — a method call, not a
 // go statement) and `go logging.RecoverGoRoutine(...)(ctx)`, which caps
 // nothing but at least converts a panic into a counted, logged recovery.
@@ -77,7 +77,6 @@ var bareGoroutineAllowlist = map[string]int{
 	"cmd/cmd_relayer.go: runHARelayer":                        1,
 	"cmd/cmd_relayer.go: startHealthServer":                   2,
 	"cmd/relay/common.go: runLoadTest":                        1,
-	"cmd/relay/http.go: runHTTPLoadTest":                      1,
 	"keys/manager.go: Start":                                  1,
 	"keys/supplier_keys_file.go: WatchForChanges":             1,
 	"leader/global_leader.go: Start":                          1,
@@ -93,7 +92,6 @@ var bareGoroutineAllowlist = map[string]int{
 	"miner/supplier_manager.go: Start":                        1,
 	"miner/supplier_manager.go: addSupplierWithData":          1,
 	"miner/supplier_manager.go: handleKeyChange":              1,
-	"miner/supplier_manager.go: onSupplierReleased":           1,
 	"miner/supplier_manager.go: startReconcilerBlockLoop":     1,
 	"miner/supplier_manager.go: startWithDistributedClaiming": 1,
 	"observability/runtime_metrics.go: Start":                 1,
@@ -163,8 +161,51 @@ type C int
 	}
 }
 
-// fatalCalls returns "file: FuncName" entries for logger .Fatal() chains in
-// production code outside func main / the cobra command bootstrap.
+// testingParams returns the names bound to a testing.TB / *testing.T /
+// *testing.B parameter of fn, which is how a test helper receives the handle
+// whose Fatal is SAFE to call.
+func testingParams(fn *ast.FuncDecl) map[string]bool {
+	names := map[string]bool{}
+	if fn.Type.Params == nil {
+		return names
+	}
+	for _, field := range fn.Type.Params.List {
+		typ := field.Type
+		if star, ok := typ.(*ast.StarExpr); ok {
+			typ = star.X
+		}
+		sel, ok := typ.(*ast.SelectorExpr)
+		if !ok {
+			continue
+		}
+		pkg, ok := sel.X.(*ast.Ident)
+		if !ok || pkg.Name != "testing" {
+			continue
+		}
+		switch sel.Sel.Name {
+		case "TB", "T", "B", "F":
+			for _, name := range field.Names {
+				names[name.Name] = true
+			}
+		}
+	}
+	return names
+}
+
+// fatalCalls returns the functions calling a Fatal that ENDS THE PROCESS.
+//
+// The receiver decides, and this used to ignore it. zerolog's Fatal calls
+// os.Exit, which skips every deferred cleanup -- that is the whole reason for
+// this rule. testing.TB's Fatal calls runtime.Goexit, which RUNS the defers
+// and is the idiomatic way for a test helper to fail. Treating them alike
+// forbids correct code: measured 2026-09-18 it went red on
+// internal/testredis/exclusive.go, whose requireDocker(t testing.TB) calls
+// t.Fatal exactly as a helper should. That file is the first non-_test.go in
+// the tree carrying //go:build test, which is why nothing had hit this before.
+//
+// Allowing "any Fatal inside a function that takes a testing.TB" would be the
+// loose version of this, and it would let a genuine logger.Fatal through a
+// test helper. So the receiver has to BE that parameter.
 func fatalCalls(f *ast.File) []string {
 	var hits []string
 	for _, decl := range f.Decls {
@@ -172,9 +213,13 @@ func fatalCalls(f *ast.File) []string {
 		if !ok || fn.Body == nil {
 			continue
 		}
+		safe := testingParams(fn)
 		ast.Inspect(fn.Body, func(n ast.Node) bool {
 			sel, ok := n.(*ast.SelectorExpr)
 			if !ok || sel.Sel.Name != "Fatal" {
+				return true
+			}
+			if recv, ok := sel.X.(*ast.Ident); ok && safe[recv.Name] {
 				return true
 			}
 			hits = append(hits, fn.Name.Name)
@@ -204,5 +249,41 @@ func TestNoLoggerFatalOutsideMain(t *testing.T) {
 	if len(violations) > 0 {
 		t.Fatalf(".Fatal() outside main (os.Exit skips deferred cleanup — propagate an error instead):\n%s",
 			joinLines(violations))
+	}
+}
+
+// TestFatalMatcherSeparatesGoexitFromExit proves the matcher reads the
+// RECEIVER. Without this, "any .Fatal" and "a process-ending .Fatal" are the
+// same check, and the first one forbids every test helper in the tree.
+func TestFatalMatcherSeparatesGoexitFromExit(t *testing.T) {
+	helperFatal := `package x
+
+import "testing"
+
+func requireSomething(t testing.TB) { t.Fatal("no") }
+`
+	loggerFatal := `package x
+
+func serve() { logger.Fatal().Msg("no") }
+`
+	loggerFatalInsideHelper := `package x
+
+import "testing"
+
+func setup(t testing.TB) { logger.Fatal().Msg("no") }
+`
+	for _, tc := range []struct {
+		name string
+		src  string
+		want int
+	}{
+		{"t.Fatal in a helper runs the defers", helperFatal, 0},
+		{"logger.Fatal ends the process", loggerFatal, 1},
+		{"logger.Fatal is not excused by a testing.TB nearby", loggerFatalInsideHelper, 1},
+	} {
+		f, _ := parseSource(t, tc.src)
+		if got := len(fatalCalls(f)); got != tc.want {
+			t.Errorf("%s: fatalCalls returned %d, want %d", tc.name, got, tc.want)
+		}
 	}
 }

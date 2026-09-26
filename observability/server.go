@@ -13,6 +13,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 
+	sharedconfig "github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
@@ -54,9 +55,9 @@ type Server struct {
 
 // NewServer creates a new observability server.
 func NewServer(logger logging.Logger, config ServerConfig) *Server {
-	// Default pprof addr to :6060 for security if not specified
+	// An unset pprof address listens on loopback only.
 	if config.PprofAddr == "" {
-		config.PprofAddr = ":6060"
+		config.PprofAddr = sharedconfig.DefaultPprofAddr
 	}
 
 	return &Server{
@@ -122,7 +123,7 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 	mux.Handle("/metrics", metricsHandler)
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("OK"))
+		_, _ = w.Write([]byte("OK")) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 	})
 	mux.HandleFunc("/ready", func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -139,7 +140,7 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 		}
 
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("Ready"))
+		_, _ = w.Write([]byte("Ready")) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 	})
 
 	s.metricsServer = &http.Server{
@@ -155,10 +156,18 @@ func (s *Server) startMetricsServer(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		s.logger.Info().Msg("stopping metrics server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.metricsServer.Shutdown(shutdownCtx)
+		// Delegate instead of shutting the server down directly. This used to be
+		// a second, parallel shutdown path that discarded its error, so a failure
+		// here left no trace while the same failure through Stop() was logged --
+		// twins with one of them wired. Going through Stop() removes the second
+		// path rather than making it report: it brings the mutex, the `running`
+		// guard and the lastErr accumulation with it, and it makes a double
+		// Shutdown impossible when a context cancellation and an explicit Stop()
+		// race, which they do on every normal shutdown.
+		//
+		// Observable change: "observability servers stopped" now also appears
+		// when the shutdown arrives by context, which today it does not.
+		_ = s.Stop() //nolint:errcheck // Stop reports every shutdown failure at Error before returning it; there is no caller here to hand it to
 	}()
 
 	return nil
@@ -195,10 +204,18 @@ func (s *Server) startPprofServer(ctx context.Context) error {
 
 	go func() {
 		<-ctx.Done()
-		s.logger.Info().Msg("stopping pprof server")
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		_ = s.pprofServer.Shutdown(shutdownCtx)
+		// Delegate instead of shutting the server down directly. This used to be
+		// a second, parallel shutdown path that discarded its error, so a failure
+		// here left no trace while the same failure through Stop() was logged --
+		// twins with one of them wired. Going through Stop() removes the second
+		// path rather than making it report: it brings the mutex, the `running`
+		// guard and the lastErr accumulation with it, and it makes a double
+		// Shutdown impossible when a context cancellation and an explicit Stop()
+		// race, which they do on every normal shutdown.
+		//
+		// Observable change: "observability servers stopped" now also appears
+		// when the shutdown arrives by context, which today it does not.
+		_ = s.Stop() //nolint:errcheck // Stop reports every shutdown failure at Error before returning it; there is no caller here to hand it to
 	}()
 
 	return nil
@@ -209,13 +226,41 @@ func (s *Server) Stop() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// The guard means "nothing is listening", and that has to stay true or the
+	// ctx.Done goroutines below delegate their shutdown into a no-op. TODAY it
+	// holds for two reasons, neither of them stated where they live: startPprof
+	// cannot fail (its only return is nil -- a bind error surfaces inside its
+	// goroutine, not to the caller), and startMetrics closes its listener in a
+	// defer whenever it did not hand it to an http.Server. So a Start that
+	// returns an error has nothing left up. Give either of those a synchronous
+	// failure path and this guard starts lying; the test for it is
+	// TestServer_FailedStartLeavesNothingListening.
 	if !s.running {
 		return nil
 	}
 
+	// Whoever gets past the guard shuts BOTH servers down, so this line is never
+	// the misleading half of a pair -- unlike the per-server "stopping X server"
+	// lines this replaced, which a delegating goroutine would emit without
+	// stopping anything. It is kept because Shutdown waits for connections to go
+	// idle, up to the timeout below: without a line at the START, a shutdown that
+	// hangs leaves the operator with no evidence it even began.
+	s.logger.Info().Msg("stopping observability servers")
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
+	lastErr := s.shutdownServers(ctx)
+
+	s.running = false
+	s.logger.Info().Msg("observability servers stopped")
+
+	return lastErr
+}
+
+// shutdownServers stops whichever servers are up and reports every failure,
+// returning the last one. Callers hold s.mu.
+func (s *Server) shutdownServers(ctx context.Context) error {
 	var lastErr error
 
 	if s.metricsServer != nil {
@@ -231,9 +276,6 @@ func (s *Server) Stop() error {
 			lastErr = err
 		}
 	}
-
-	s.running = false
-	s.logger.Info().Msg("observability servers stopped")
 
 	return lastErr
 }

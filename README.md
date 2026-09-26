@@ -1,242 +1,149 @@
-# Pocket RelayMiner (High Availability)
+# Pocket RelayMiner
 
-Production-grade, horizontally scalable relay mining service for Pocket Network.
+**Every relay you serve, paid on chain.**
 
-## Features
+Pocket RelayMiner is the supplier side of Pocket Network: it serves relays from
+gateways to your backends on every transport, charges each one against the
+application's stake before serving it, and turns what it served into claims and
+proofs that settle on chain -- through crashes, restarts, Redis outages and
+partial rejections.
 
-- **Multi-Transport Support**: JSON-RPC (HTTP), WebSocket, gRPC, REST/Streaming (SSE)
-- **Horizontal Scaling**: Stateless relayers scale independently behind load balancers
-- **High Availability**: Redis-backed shared state with automatic leader election
-- **Relay Validation**: Ring signature verification, session validation, supplier signing
-- **Relay Metering**: Rate limiting based on application stake
-- **Simulated Relays**: Exercise a live relayer end-to-end — real signature, real backend — without minting a claimable relay ([guide](docs/simulated-relays.md))
-- **Observability**: Prometheus metrics, pprof profiling, structured logging
+> **Measured for v0.1.0** on 1 relayer, 1 miner and 1 Redis: **10.7 M relays
+> served at ~2,400 relays/s**, through 4 session windows with 6 sessions of 50
+> suppliers each, and **1,501 of 1,501 claims settled**, with the miner killed
+> twice on purpose along the way. The numbers are in the
+> [capacity report](docs/benchmarks/v0.1.0/Relay-Miner-Capacity.pdf).
 
-## Architecture
+## Why operators run it
+
+**It gets every relay paid**
+- Claims and proofs are submitted automatically for every session, and watched
+  until the chain includes them; what did not land is resubmitted while its
+  window is still open.
+- A claim or a proof is never lost to a crash, a rollout or a batch the chain
+  partly refuses: the message the chain names leaves the batch, the rest goes
+  through.
+- Every relay is charged against the application's stake before it is served,
+  so the relayer does not serve work the session can no longer pay for. If Redis
+  cannot confirm the budget, the relay is refused rather than served for free.
+
+**It serves every transport**
+- JSON-RPC over HTTP, WebSocket, gRPC, REST and streaming (SSE), and CometBFT,
+  routed to your backends per service.
+- Ring signatures and sessions are verified on every relay, and every response
+  is signed with the supplier's key.
+
+**It scales and survives failure**
+- Relayers keep no state of their own: all of it lives in one Redis, which
+  every relayer and miner of a deployment shares.
+- Miners elect a leader through Redis; a standby takes over when it stops.
+- Memory and Redis are bounded at every stage: under pressure it refuses new
+  work cleanly instead of running out of memory.
+
+**It refuses to run unsafe**
+- `validate` checks a config offline and lists every problem in one pass;
+  `--check-stake` finds staked services with no backend.
+- Both processes refuse to start on a Redis that could lose data (no
+  `maxmemory`, an evicting policy, a version older than 8.10).
+
+**It shows you what it is doing**
+- Prometheus metrics with a triage order for incidents
+  ([docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md)).
+- `pocket-relay-miner redis` decodes sessions, streams, claim trees, meters and
+  every claim and proof submission straight from Redis.
+
+**It is built to build on**
+- `pocket-relay-miner relay` sends single relays and load tests on every
+  transport, and **simulated relays** exercise a live relayer end to end without
+  staking or billing anything ([docs/SIMULATED_RELAYS.md](docs/SIMULATED_RELAYS.md)).
+- The bLSAG ring signature a relay carries is documented byte for byte, with
+  working signers in Node.js, Python and Rust and a Go oracle to check yours
+  ([examples/relay-signing/](examples/relay-signing/README.md)).
+- Supplier keys come from a keys file or a keyring and reload without a restart
+  ([docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md)).
+
+## How it fits
 
 ```
-                  ┌─────────────────┐
-                  │  Load Balancer  │
-                  └────────┬────────┘
-           ┌───────────────┼───────────────┐
-           │               │               │
-     ┌─────┴─────┐   ┌─────┴─────┐   ┌─────┴─────┐
-     │ Relayer 1 │   │ Relayer 2 │   │ Relayer N │  (stateless, scales horizontally)
-     └─────┬─────┘   └─────┬─────┘   └─────┬─────┘
-           └───────────────┼───────────────┘
-                           │
-                    ┌──────┴──────┐
-                    │    Redis    │  (shared state)
-                    └──────┬──────┘
-                           │
-              ┌────────────┴────────────┐
-              │                         │
-        ┌─────┴─────┐             ┌─────┴─────┐
-        │   Miner   │             │   Miner   │  (leader election)
-        │ (Leader)  │             │ (Standby) │
-        └───────────┘             └───────────┘
+                 gateways
+                    │
+        ┌───────────┼───────────┐
+        ▼           ▼           ▼
+   ┌─────────┐ ┌─────────┐ ┌─────────┐
+   │ relayer │ │ relayer │ │ relayer │ ──> your backends
+   └────┬────┘ └────┬────┘ └────┬────┘     (stateless: validate, charge, serve, sign)
+        └───────────┼───────────┘
+                    ▼
+               ┌─────────┐
+               │  Redis  │  relays, claim trees, the stake meter
+               └────┬────┘
+            ┌───────┴───────┐
+            ▼               ▼
+      ┌──────────┐    ┌──────────┐
+      │  miner   │    │  miner   │ ──> Pocket chain (claims, proofs)
+      │ (leader) │    │(standby) │
+      └──────────┘    └──────────┘
 ```
 
-**Relayer**: Validates relay requests, signs responses, publishes to Redis Streams
-**Miner**: Consumes relays, builds SMST trees, submits claims/proofs to blockchain
+1 binary, 2 processes, 1 Redis shared by all of them, every process on the same
+version. v0.1.0 was tested on 1 relayer + 1 miner and on 2 relayers + 2 miners
+(the latter at lower load); the load tests and the capacity figures are from
+1 relayer + 1 miner.
 
-## Requirements
+## Where to start
 
-- Go 1.26.5+ (matches `go.mod` and CI)
-- Redis 8.2+ (required for XACKDEL command)
-- Access to Pocket Network Shannon endpoints
+**Deploy.** An AI agent starts at [AGENTS.md](AGENTS.md): the rules and the
+invariants that stop a deployment.
 
-## Quick Start
+| I want to... | Read |
+|---|---|
+| choose a path, check prerequisites and ports | [docs/deploy/README.md](docs/deploy/README.md) |
+| run it with Docker Compose, on beta first | [docs/deploy/DOCKER_COMPOSE.md](docs/deploy/DOCKER_COMPOSE.md) |
+| run it on a host, binary and systemd | [docs/deploy/HOST.md](docs/deploy/HOST.md) |
+| use Kubernetes | no example in v0.1.0; `tilt/` runs the stack on a local kind cluster and is a starting point for your own manifests |
 
-### Build
+**Configure.** The relayer reads its config once, at startup: restart it after
+every change.
 
-```bash
-make build          # Development build
-make build-release  # Optimized release build
-```
+| I want to... | Read |
+|---|---|
+| see every key, its default and why to change it | [config.relayer.example.yaml](config.relayer.example.yaml), [config.miner.example.yaml](config.miner.example.yaml) |
+| check a config against its schema | [config.relayer.schema.yaml](config.relayer.schema.yaml), [config.miner.schema.yaml](config.miner.schema.yaml), and `pocket-relay-miner relayer\|miner validate --config <file>` |
+| set up Redis | [config.redis.example.conf](config.redis.example.conf) |
+| set up supplier keys | [docs/SUPPLIER_KEYS.md](docs/SUPPLIER_KEYS.md) |
+| start from a minimal config that works | [examples/docker-compose/config/](examples/docker-compose/config/), [examples/host/](examples/host/) |
 
-### Run
+**Operate.**
 
-```bash
-# Start miner (claim/proof submission)
-pocket-relay-miner miner --config config.miner.yaml
+| I want to... | Read |
+|---|---|
+| fix a deployment that does not start or does not serve | [docs/deploy/TROUBLESHOOTING.md](docs/deploy/TROUBLESHOOTING.md) |
+| know which metrics to read, in order | [docs/METRICS_TRIAGE.md](docs/METRICS_TRIAGE.md), and [scripts/observability/triage.sh](scripts/observability/triage.sh) to check them against Prometheus |
+| inspect what is in Redis | `pocket-relay-miner redis --help`; what each key holds: [docs/REDIS.md](docs/REDIS.md) |
+| size memory, CPU and Redis for your load | [docs/benchmarks/](docs/benchmarks/README.md): the v0.1.0 capacity report and how to read it |
 
-# Start relayer (relay proxy)
-pocket-relay-miner relayer --config config.relayer.yaml
-```
+**Test and measure.**
 
-## Configuration
+| I want to... | Read |
+|---|---|
+| send a relay or a load test to a relayer, on any transport | [docs/testing/DIRECT_CLI.md](docs/testing/DIRECT_CLI.md) |
+| test a live relayer without staking or billing | [docs/SIMULATED_RELAYS.md](docs/SIMULATED_RELAYS.md) |
+| size the connection pool for each backend | [scripts/loadtest/README.md](scripts/loadtest/README.md) |
+| sign a relay from another language | [examples/relay-signing/](examples/relay-signing/README.md) |
 
-Example configurations with full documentation:
+**Understand.**
 
-- **Relayer**: [`config.relayer.example.yaml`](config.relayer.example.yaml)
-- **Miner**: [`config.miner.example.yaml`](config.miner.example.yaml)
-- **Schema**: [`config.relayer.schema.yaml`](config.relayer.schema.yaml), [`config.miner.schema.yaml`](config.miner.schema.yaml)
+| I want to... | Read |
+|---|---|
+| follow a relay into a claim, a proof and a reward | [docs/CLAIM_PROOF_LIFECYCLE.md](docs/CLAIM_PROOF_LIFECYCLE.md) |
+| know when two relays count as one | [docs/CLAIM_LEAF_MODEL.md](docs/CLAIM_LEAF_MODEL.md) |
+| learn the protocol per entity, and where the money moves | [docs/protocol/](docs/protocol/README.md) |
+| know what a gateway, the relayer and a backend expect of each other | [docs/PROTOCOL_SPEC.md](docs/PROTOCOL_SPEC.md), [docs/WEBSOCKET_HANDSHAKE_PROTOCOL.md](docs/WEBSOCKET_HANDSHAKE_PROTOCOL.md) |
 
-Validate a config before deploying it, and cross-check it against on-chain stake:
-
-```bash
-pocket-relay-miner relayer validate --config config.relayer.yaml
-pocket-relay-miner relayer validate --config config.relayer.yaml --check-stake
-```
-
-> **The relayer reads its config once, at startup.** There is no config watcher:
-> `hot_reload_enabled` appears in both schemas, but it governs **signing keys**,
-> not the config file. A deployment that mounts the config from a Kubernetes
-> ConfigMap must therefore restart the pods on every config change — otherwise
-> the ConfigMap updates, the GitOps controller reports Synced and Healthy, and
-> the process keeps serving the old config.
-
-## Local Development
-
-This project uses [Tilt](https://tilt.dev/) for local development with two environment options.
-
-### Kubernetes (Recommended)
-
-```bash
-# Start Kubernetes dev environment (requires kind cluster)
-make tilt-up-k8s
-
-# Stop environment
-make tilt-down-k8s
-```
-
-### Docker Compose
-
-For environments without Kubernetes:
-
-For a Tilt-free single-replica HA reference (documentation-oriented, not a
-dev loop), see `examples/docker-compose/`.
-
-### Access Services
-
-When running either environment:
-- PATH Gateway: `localhost:3069`
-- Relayer: `localhost:8180`
-- Prometheus: `localhost:9091`
-- Grafana: `localhost:3000`
-
-See [`tilt/README.md`](tilt/README.md) for detailed setup instructions.
-
-## CLI Commands
-
-```bash
-pocket-relay-miner <command>
-
-Commands:
-  relayer       Start the relayer service
-  miner         Start the miner service
-  relay         Test relay requests (supports load testing)
-  redis         Debug Redis state and HA components
-  version       Display version information
-```
-
-### Testing Relays
-
-```bash
-# Single relay test (direct to a relayer replica)
-pocket-relay-miner relay jsonrpc --localnet --service develop-http
-
-# Load test, round-robin across all session suppliers
-pocket-relay-miner relay jsonrpc --localnet --service develop-http \
-  --load-test --count 1000 --concurrency 50 --all-suppliers
-```
-
-Full testing guides — Tilt bring-up, PATH+`hey` load, and direct-CLI testing of
-all five transports (JSON-RPC, WebSocket, gRPC, streaming, CometBFT) — are in
-[`docs/testing/`](docs/testing/README.md).
-
-### Simulated Relays
-
-A simulated relay is signed with a **real ring signature** and served by the
-**real backend**, but it is verified against a ring pinned in the relayer's
-config instead of one read from chain — so **the relayer admits it without any
-chain access**, and no application has to be staked. It is never metered and
-never published, so it never becomes part of a claim and is never paid for. Use
-it to exercise a live relayer end to end.
-
-```bash
-pocket-relay-miner relay jsonrpc --localnet --service develop-http \
-  --supplier <addr> --simulate --sim-key-id sim-http
-```
-
-See [`docs/simulated-relays.md`](docs/simulated-relays.md) for configuration, the
-per-transport key IDs, and how to verify that nothing was charged.
-
-### Debugging Redis State
-
-```bash
-pocket-relay-miner redis leader              # Check leader election
-pocket-relay-miner redis sessions --supplier <addr>  # Inspect sessions
-pocket-relay-miner redis smst --session <id>  # View SMST tree
-pocket-relay-miner redis keys --pattern "ha:*" --stats  # List all keys
-```
-
-## Signing a Relay from Another Language
-
-The CLI above is convenient, but nothing requires it: a relay is just a signed
-request, so any language that can produce the signature can send one. This
-matters if you are building a gateway, or health-check tooling, outside Go.
-
-Relays are signed with a **bLSAG ring signature**, not a plain secp256k1
-signature — and the scheme has no specification other than the behaviour of the
-Go libraries that implement it.
-[`examples/relay-signing/`](examples/relay-signing/README.md) documents it
-byte-for-byte and ships working, verified signers in **Node.js**, **Python** and
-**Rust**, plus a Go **oracle** that checks an implementation of your own against
-the same `ring-go` the relayer runs.
-
-Two things worth knowing before you start:
-
-- **You only need one private key.** The ring is `[application, gateway]`, but it
-  is built from **public** keys and signed by a single private one — the
-  signer's, normally the gateway's. That is what delegation means: a gateway
-  signs for an application without ever holding its key. The keys themselves are
-  plain secp256k1 scalars, 32 bytes of hex — no keyring, no armor, no derivation.
-- **Signing a real relay and a simulated one is the same act.** So the examples
-  use the simulated path to prove a signer works end-to-end against a real
-  relayer, without staking anything or touching a chain.
-
-## Development
-
-### Testing
-
-```bash
-make test              # Run all tests
-make test_miner        # Run miner tests with race detection
-make test-coverage     # Generate coverage report
-```
-
-**Test Quality Standards** (Rule #1 - Cannot be broken):
-- ✅ All tests use real miniredis (no mocks)
-- ✅ All tests pass with `-race` flag (no race conditions)
-- ✅ All tests are deterministic (no flaky behavior)
-- ✅ No arbitrary timeouts or sleeps
-
-### Code Quality
-
-```bash
-make fmt            # Format code
-make lint           # Run linters
-```
-
-See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development workflow and guidelines.
-
-## Documentation
-
-- [`docs/testing/`](docs/testing/README.md) - Testing guides (Tilt bring-up, PATH+hey load, direct-CLI per-protocol)
-- [`docs/simulated-relays.md`](docs/simulated-relays.md) - Simulated relays: what they are, how to enable and fire them, and how to verify nothing was charged
-- [`examples/relay-signing/`](examples/relay-signing/README.md) - Signing a relay in Node.js, Python or Rust: the ring-signature scheme byte-for-byte, working signers, and an oracle to verify your own
-- [`docs/SUPPLIER_KEYS.md`](docs/SUPPLIER_KEYS.md) - Supplier signing keys: the two sources, the keyring
-  backends and why only two are supported, where the passphrase comes from, and how hot reload behaves
-- [`docs/PROTOCOL_SPEC.md`](docs/PROTOCOL_SPEC.md) - Relay protocol specification
-- [`docs/REDIS.md`](docs/REDIS.md) - Redis architecture and key patterns
-- [`docs/CLAIM_PROOF_LIFECYCLE.md`](docs/CLAIM_PROOF_LIFECYCLE.md) - Claim/proof windows and inclusion reconciler
-- [`docs/CLAIM_LEAF_MODEL.md`](docs/CLAIM_LEAF_MODEL.md) - How relays become claim leaves and what a claim commits to
-- [`docs/WEBSOCKET_HANDSHAKE_PROTOCOL.md`](docs/WEBSOCKET_HANDSHAKE_PROTOCOL.md) - WebSocket protocol details
-- [`CLAUDE.md`](CLAUDE.md) - Technical reference for contributors
-- [`CONTRIBUTING.md`](CONTRIBUTING.md) - Contribution guidelines
-- [`tilt/README.md`](tilt/README.md) - Local development setup
+**Develop.** [CONTRIBUTING.md](CONTRIBUTING.md): the package map, the
+development environment, the workflow and every rule for changing the code.
+Testing guides: [docs/testing/](docs/testing/README.md) and
+[scripts/README.md](scripts/README.md).
 
 ## License
 

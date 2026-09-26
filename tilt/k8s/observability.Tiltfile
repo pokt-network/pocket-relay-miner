@@ -122,6 +122,29 @@ data:
       - job_name: 'backend'
         static_configs:
           - targets: ['backend:9095']
+
+      # cAdvisor: CPU and memory PER POD (container_cpu_usage_seconds_total,
+      # container_memory_working_set_bytes, container_cpu_cfs_throttled_periods_total).
+      # Without this there is no per-pod history: Go apps expose their own
+      # process_resident_memory_bytes, but Redis, the validator and any
+      # load-generating pod do not, and nobody else exposes cgroup throttling.
+      # Scraped via the apiserver proxy because the ClusterRole already has
+      # nodes/proxy, so there is no need to open the kubelet's port.
+      - job_name: 'cadvisor'
+        scheme: https
+        tls_config:
+          ca_file: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+          insecure_skip_verify: true
+        bearer_token_file: /var/run/secrets/kubernetes.io/serviceaccount/token
+        kubernetes_sd_configs:
+          - role: node
+        relabel_configs:
+          - target_label: __address__
+            replacement: kubernetes.default.svc:443
+          - source_labels: [__meta_kubernetes_node_name]
+            regex: (.+)
+            target_label: __metrics_path__
+            replacement: /api/v1/nodes/${{1}}/proxy/metrics/cadvisor
 """.format(prom_config["scrape_interval"], prom_config["scrape_interval"])
 
     k8s_yaml(blob(prometheus_config_yaml))

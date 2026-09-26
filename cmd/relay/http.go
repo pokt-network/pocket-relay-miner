@@ -8,20 +8,18 @@ import (
 	"io"
 	"net"
 	"net/http"
-	"sync"
 	"sync/atomic"
 	"time"
 
 	sdktypes "github.com/pokt-network/shannon-sdk/types"
 
-	"github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/pocket-relay-miner/client/relay_client"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
 // Shared HTTP client with connection pooling for load tests.
 // Reuses connections to avoid TCP handshake overhead.
-// IMPORTANT: DisableCompression is false (Go default) to mimic PATH's behavior.
+// IMPORTANT: DisableCompression is false (Go default) to mimic a gateway's behavior.
 // This makes Go automatically add "Accept-Encoding: gzip" and decompress responses.
 var sharedHTTPClient = &http.Client{
 	Timeout: 30 * time.Second, // Default timeout, overridden per-request if needed
@@ -35,7 +33,7 @@ var sharedHTTPClient = &http.Client{
 		}).DialContext,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		DisableCompression:    false, // Mimic PATH: auto-add Accept-Encoding, auto-decompress
+		DisableCompression:    false, // Mimic a gateway: auto-add Accept-Encoding, auto-decompress
 	},
 }
 
@@ -89,79 +87,16 @@ func runHTTPDiagnostic(ctx context.Context, logger logging.Logger, client *relay
 	return nil
 }
 
-// sessionEndTracker holds the current session end height with thread-safe access.
-// Used by the rollover monitor to know when to invalidate the shared session cache
-// so workers get a fresh session on their next BuildRelayRequest call.
-type sessionEndTracker struct {
-	mu               sync.RWMutex
-	sessionEndHeight int64
-}
-
-func (t *sessionEndTracker) get() int64 {
-	t.mu.RLock()
-	defer t.mu.RUnlock()
-	return t.sessionEndHeight
-}
-
-func (t *sessionEndTracker) set(h int64) {
-	t.mu.Lock()
-	defer t.mu.Unlock()
-	t.sessionEndHeight = h
-}
-
 // runHTTPLoadTest sends concurrent HTTP relay requests with performance metrics.
 //
 // Each worker calls BuildRelayRequest itself so the ring signature is generated
 // fresh per relay (ring sigs are randomized — NewRandomScalar). This matches
-// PATH's production behavior (one sign per incoming request) and guarantees
+// what a gateway does in production (one sign per incoming request) and guarantees
 // distinct relay bytes even when the payload is identical, so the SMST stores
 // N unique leaves for N concurrent requests instead of collapsing to one.
-// A background goroutine invalidates the shared session cache at session
-// rollover so the next BuildRelayRequest call fetches a fresh session.
+// BuildRelayRequest reads the session at the chain's current height, so a run
+// longer than a session moves to the next one on its own.
 func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte) error {
-	// Get initial session to extract session end height (for rollover detection)
-	logger.Info().Msg("fetching initial session")
-	initialSession, err := relayClient.GetCurrentSession(ctx, RelayServiceID)
-	if err != nil {
-		return fmt.Errorf("failed to get initial session: %w", err)
-	}
-
-	logger.Info().
-		Str("session_id", initialSession.Header.SessionId).
-		Int64("session_start_height", initialSession.Header.SessionStartBlockHeight).
-		Int64("session_end_height", initialSession.Header.SessionEndBlockHeight).
-		Msg("initial session retrieved")
-
-	tracker := &sessionEndTracker{}
-	tracker.set(initialSession.Header.SessionEndBlockHeight)
-
-	// Create cancellable context for monitor goroutine
-	monitorCtx, cancelMonitor := context.WithCancel(ctx)
-	defer cancelMonitor()
-
-	// Start block subscriber to monitor for session rollover
-	blockSubscriber, err := client.NewBlockSubscriber(logger, client.BlockSubscriberConfig{
-		RPCEndpoint: RelayNodeRPC, // CometBFT RPC endpoint (e.g., http://localhost:26657)
-		UseTLS:      false,
-	})
-	if err != nil {
-		return fmt.Errorf("failed to create block subscriber: %w", err)
-	}
-	defer func() { blockSubscriber.Close() }()
-
-	if err := blockSubscriber.Start(monitorCtx); err != nil {
-		return fmt.Errorf("failed to start block subscriber: %w", err)
-	}
-
-	// Monitor blocks for session rollover in background: invalidate the session
-	// cache so the next worker BuildRelayRequest call picks up the new session.
-	var monitorWg sync.WaitGroup
-	monitorWg.Add(1)
-	go func() {
-		defer monitorWg.Done()
-		invalidateSessionOnRollover(monitorCtx, logger, relayClient, blockSubscriber, tracker)
-	}()
-
 	// Create metrics collector
 	metrics := NewRelayMetrics()
 
@@ -198,7 +133,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 
 			// Build a FRESH relay request for this worker. Ring signatures use
 			// randomness, so each call produces different bytes even for an
-			// identical payload, matching PATH's per-request sign behaviour.
+			// identical payload, as a gateway signs once per request.
 			supplier := supplierAddrs[supplierIdx.Add(1)%uint64(len(supplierAddrs))]
 			_, relayRequestBz, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
 			if err != nil {
@@ -261,74 +196,7 @@ func runHTTPLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 		},
 	)
 
-	// Cancel monitor context now that load test is complete
-	cancelMonitor()
-
-	// Wait for monitor goroutine to finish (will exit immediately after cancel)
-	monitorWg.Wait()
-
 	return nil
-}
-
-// invalidateSessionOnRollover watches blocks and clears the shared session
-// cache when the session boundary is crossed. Workers build their own relay
-// requests per call, so all that's needed is to ensure the next getSession()
-// in the client hits chain and returns the new session header.
-func invalidateSessionOnRollover(
-	ctx context.Context,
-	logger logging.Logger,
-	relayClient *relay_client.RelayClient,
-	blockSubscriber *client.BlockSubscriber,
-	tracker *sessionEndTracker,
-) {
-	var lastRefreshHeight atomic.Int64
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-time.After(1 * time.Second):
-			currentBlock := blockSubscriber.LastBlock(ctx)
-			if currentBlock == nil {
-				continue
-			}
-
-			currentHeight := currentBlock.Height()
-			sessionEndHeight := tracker.get()
-
-			if currentHeight < sessionEndHeight+1 {
-				continue
-			}
-			if lastRefreshHeight.Load() >= currentHeight {
-				continue
-			}
-
-			logger.Warn().
-				Int64("current_height", currentHeight).
-				Int64("session_end_height", sessionEndHeight).
-				Msg("session boundary crossed - invalidating session cache")
-
-			relayClient.ClearSessionCache()
-
-			// Prime tracker with the new session end so we don't re-fire until
-			// the NEXT rollover. We use GetSessionAtHeight to bypass the cache.
-			newSession, err := relayClient.GetSessionAtHeight(ctx, RelayServiceID, currentHeight)
-			if err != nil {
-				logger.Error().
-					Err(err).
-					Int64("current_height", currentHeight).
-					Msg("failed to fetch new session after rollover")
-				continue
-			}
-			tracker.set(newSession.Header.SessionEndBlockHeight)
-			lastRefreshHeight.Store(currentHeight)
-
-			logger.Info().
-				Str("new_session_id", newSession.Header.SessionId).
-				Int64("new_session_end_height", newSession.Header.SessionEndBlockHeight).
-				Msg("session cache invalidated; workers will pick up new session on next BuildRelayRequest")
-		}
-	}
 }
 
 // Rpc-Type header values (Reference: poktroll/x/shared/types/service.pb.go RPCType).
@@ -392,7 +260,7 @@ func sendRelayOverHTTP(ctx context.Context, relayRequestBz []byte, rpcType strin
 
 	// Check status code
 	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body) //nolint:errcheck // the body only enriches an error that is returned either way; on failure it is empty and the status still names the failure
 		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, string(body))
 	}
 

@@ -14,6 +14,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/tx"
 )
 
 // Config is the configuration for the HA Miner service.
@@ -27,6 +28,15 @@ type Config struct {
 	// Keys configuration for loading supplier signing keys.
 	Keys config.KeysConfig `yaml:"keys"`
 
+	// unknownKeys are the keys the file carries that this struct does not
+	// declare, found by the strict second pass in LoadConfig and surfaced by
+	// Warnings().
+	//
+	// Unexported on purpose: it is a property of the FILE this config was loaded
+	// from, not a setting, and nothing may set it from YAML. A Config built in
+	// code rather than loaded from disk correctly reports none.
+	unknownKeys []string
+
 	// Transaction configuration for claim/proof submission.
 	Transaction TransactionConfig `yaml:"transaction,omitempty"`
 
@@ -39,27 +49,9 @@ type Config struct {
 	// Logging configuration.
 	Logging logging.Config `yaml:"logging"`
 
-	// DeduplicationTTLBlocks is how many blocks to keep relay hashes for deduplication.
-	// Default: 10 (session length + grace period + buffer)
-	DeduplicationTTLBlocks int64 `yaml:"deduplication_ttl_blocks"`
-
 	// BatchSize is the number of relays to process in a single batch.
 	// Default: 100
 	BatchSize int64 `yaml:"batch_size"`
-
-	// RemovedHotReloadEnabled is the tombstone for the retired top-level
-	// hot_reload_enabled. The setting now lives at keys.hot_reload_enabled,
-	// which both binaries share, and the top-level field is READ BY NOTHING.
-	//
-	// It has to be a tombstone rather than a silent removal, because that gap
-	// was measured in production shape on 2026-08-22: the deployment set
-	// hot_reload_enabled: true at the top level, the code read
-	// keys.hot_reload_enabled (unset, so false), and the miner ran with key hot
-	// reload OFF while its own config said ON. With a keyring -- which nothing
-	// can watch -- that means a key added or pulled never reaches the miner at
-	// all. A pointer, not a bool, so "the operator wrote it" is distinguishable
-	// from "the field is absent" no matter which value they wrote.
-	RemovedHotReloadEnabled *bool `yaml:"hot_reload_enabled,omitempty"`
 
 	// SessionTTL is the TTL for session state data in Redis.
 	// Default: CacheTTL (2h) - aligned with SMST tree TTL to prevent orphaned sessions.
@@ -70,17 +62,6 @@ type Config struct {
 	// This is a backup safety net - manual cleanup is primary, TTL prevents leaks if cleanup fails.
 	// Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
-
-	// SMSTLiveRootCheckpointInterval is how often (in UpdateTree calls) the
-	// intermediate SMST root is written to Redis so a follower promoted
-	// mid-session can resume the tree. Lower = safer (up to interval-1
-	// relays can be lost on a leader kill between checkpoints) but more
-	// Redis writes. Default: 10 (a 10x reduction in Redis SET load versus
-	// checkpointing every relay, with at most 9 relays lost per kill).
-	// Set to 1 for zero-loss mode. Do not set to 0 in production - 0 means
-	// "use default" and is only honored for config upgrades from older
-	// versions.
-	SMSTLiveRootCheckpointInterval int `yaml:"smst_live_root_checkpoint_interval,omitempty"`
 
 	// SubmissionTrackingTTL is the TTL for claim/proof submission tracking records.
 	// These records are used for debugging failed submissions and auditing.
@@ -127,6 +108,17 @@ type Config struct {
 	// Example: {"eth-mainnet": 0.007, "polygon": 0.003}
 	// If a service has an override, it takes precedence over DefaultServiceFactor.
 	ServiceFactors map[string]float64 `yaml:"service_factors,omitempty"`
+
+	// ServiceFactorRepublishInterval is how often the leader rewrites the
+	// service factor manifest.
+	//
+	// The manifest carries no TTL, so a miner that wrote it while it still
+	// believed itself leader would leave its own config standing forever. The
+	// current leader rewriting on a period bounds that to one interval without
+	// giving the key an expiry -- an expiry is what made the relayer unable to
+	// tell "no factor configured" from "the key aged out".
+	// Default: 5m
+	ServiceFactorRepublishInterval time.Duration `yaml:"service_factor_republish_interval,omitempty"`
 
 	// WorkerPools configures worker pool sizing for parallel processing.
 	// Auto-sizing formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
@@ -193,7 +185,8 @@ type LeaderElectionConfig struct {
 
 // BalanceMonitorConfigYAML contains configuration for balance/stake monitoring.
 type BalanceMonitorConfigYAML struct {
-	// Enabled enables balance/stake monitoring.
+	// Enabled runs the balance and stake monitor; false turns it off entirely,
+	// both the balance warnings and the stake alerts.
 	// Default: true
 	Enabled bool `yaml:"enabled,omitempty"`
 
@@ -203,7 +196,7 @@ type BalanceMonitorConfigYAML struct {
 
 	// BalanceThresholdUpokt is the minimum balance in uPOKT before triggering warnings.
 	// Operators should set this based on their operational needs.
-	// Example: 1000 (1000 uPOKT)
+	// Default: 1000000 (1 POKT)
 	BalanceThresholdUpokt int64 `yaml:"balance_threshold_upokt,omitempty"`
 
 	// StakeWarningProofThreshold is the number of missed proofs remaining before triggering a warning.
@@ -220,9 +213,9 @@ type BalanceMonitorConfigYAML struct {
 
 // BlockHealthConfig contains configuration for block time health monitoring.
 type BlockHealthConfig struct {
-	// Enabled enables block time health monitoring.
-	// Default: false
-	Enabled bool `yaml:"enabled,omitempty"`
+	// Enabled enables block time health monitoring on the leader, which also
+	// feeds the current_block_interval_seconds gauge. Unset means true.
+	Enabled *bool `yaml:"enabled,omitempty"`
 
 	// SlownessThreshold is the multiplier for determining slow blocks.
 	// If actualTime > configuredTime × threshold, a warning is logged.
@@ -274,6 +267,36 @@ type RedisConfig struct {
 	// ClaimIdleTimeoutMs is how long a message can be pending before being claimed.
 	// Default: 60000 (1 minute)
 	ClaimIdleTimeoutMs int64 `yaml:"claim_idle_timeout_ms,omitempty"`
+
+	// RelayBatchFlushIntervalMs is how often each supplier marks, counts and
+	// acknowledges, in one script per session, the relays it already put in
+	// the SMST. Until then those stream entries stay pending, so it must be at
+	// most a quarter of claim_idle_timeout_ms: another miner's reclaim takes an
+	// entry idle past that timeout without asking whether its owner is alive.
+	// Default: 15000 (15 seconds), exactly the ceiling for the default 60 s.
+	RelayBatchFlushIntervalMs int64 `yaml:"relay_batch_flush_interval_ms,omitempty"`
+}
+
+// DefaultRelayBatchFlushInterval is the relay batch flush interval when
+// redis.relay_batch_flush_interval_ms is unset.
+const DefaultRelayBatchFlushInterval = 15 * time.Second
+
+// validateRelayBatchFlushInterval refuses a flush interval longer than a
+// quarter of the reclaim's idle timeout. A batched entry stays pending until
+// its flush, and its idle time also includes the wait in the delivery channel;
+// the quarter keeps the whole of it under the timeout.
+func validateRelayBatchFlushInterval(interval, claimIdleTimeout time.Duration) error {
+	if interval <= 0 {
+		return fmt.Errorf("redis.relay_batch_flush_interval_ms must be positive (got %s)", interval)
+	}
+	if interval > claimIdleTimeout/4 {
+		return fmt.Errorf(
+			"redis.relay_batch_flush_interval_ms (%s) must be at most a quarter of redis.claim_idle_timeout_ms (%s): "+
+				"relays wait unacknowledged until the flush, and an entry idle past the timeout is "+
+				"reclaimed by another miner while this one is still processing it",
+			interval, claimIdleTimeout)
+	}
+	return nil
 }
 
 // TransactionConfig contains configuration for claim/proof transaction submission.
@@ -295,53 +318,42 @@ type TransactionConfig struct {
 	// Default: 1.7
 	GasAdjustment float64 `yaml:"gas_adjustment,omitempty"`
 
-	// DisableClaimBatching disables batching of claim submissions.
-	// When true, each session's claim is submitted in a separate transaction.
-	// When false (default), claims with the same session end height are batched.
-	// WORKAROUND: Set to true if experiencing claim failures due to one invalid claim in a batch.
-	// Default: false (batching enabled for gas efficiency)
-	DisableClaimBatching bool `yaml:"disable_claim_batching,omitempty"`
+	// TxMaxConcurrent caps how many claim/proof broadcasts may be in flight on
+	// the transaction connection at once. Default 32.
+	//
+	// What it bounds is the FULL NODE, not a stream ceiling: with gas
+	// estimation on, each transaction costs a Simulate — which executes the
+	// messages — plus a broadcast. Nobody has measured how much concurrent
+	// simulation a node absorbs, so the default is conservative on purpose.
+	//
+	// Raise it only with evidence, and the evidence is ha_tx_permit_wait_seconds:
+	// if nothing ever waits, the cap costs nothing and raising it buys nothing.
+	TxMaxConcurrent int `yaml:"tx_max_concurrent,omitempty"`
 
-	// DisableProofBatching disables batching of proof submissions.
-	// When true, each session's proof is submitted in a separate transaction.
-	// When false (default), proofs with the same session end height are batched.
-	// WORKAROUND: Set to true if experiencing proof failures due to difficulty validation
-	// or other issues where one invalid proof causes the entire batch to fail.
-	// Default: false (batching enabled for gas efficiency)
-	DisableProofBatching bool `yaml:"disable_proof_batching,omitempty"`
+	// TxRPCTimeoutSeconds bounds ONE broadcast attempt's network work.
+	// Default 30.
+	//
+	// It is deliberately NOT the window timeout: that one says how long the
+	// transaction is worth something on-chain (at least two minutes), while a
+	// healthy node answers a broadcast in milliseconds. A permit held for two
+	// minutes by a transaction that is already dead is a permit the inclusion
+	// reconciler's resend cannot get.
+	//
+	// Tune it from the p99 of ha_tx_broadcast_latency_seconds on your own node.
+	TxRPCTimeoutSeconds int64 `yaml:"tx_rpc_timeout_seconds,omitempty"`
 
-	// TxTimeoutMinSeconds is the floor for window-based TX broadcast deadlines.
-	// Even when the claim/proof window is almost closed the TX still gets at least
-	// this many seconds to land on-chain before the unordered-TX TTL expires.
-	// Default: 120 (2 minutes — restored to the original pre-dynamic-timeout
-	// value; the earlier 30s intermediate default starved claims whose
-	// window was still wide open but per-attempt time was small)
-	TxTimeoutMinSeconds int64 `yaml:"tx_timeout_min_seconds,omitempty"`
-
-	// TxTimeoutMaxSeconds is the cap for window-based TX broadcast deadlines.
-	// Defaults to 500 ms below the cosmos-sdk 10-minute hard limit for
-	// unordered TXs so clock jitter cannot push the TX over the edge and
-	// trigger `unordered tx ttl exceeds 10m0s` CheckTx rejections.
-	// Operators who set this explicitly should stay strictly below 600;
-	// setting exactly 600 will intermittently fail CheckTx. If set to 0
-	// (unset), the default DefaultTxTimeoutMax in tx/tx_client.go is used
-	// (10min - 500ms, sub-second precision).
-	// Default: 600 (and unset falls back to 599.5s internally)
-	TxTimeoutMaxSeconds int64 `yaml:"tx_timeout_max_seconds,omitempty"`
-
-	// TxTimeoutDefaultSeconds is the fallback deadline when no window-based value
-	// can be computed (e.g. block client unavailable, legacy code paths).
-	// Matches the pre-existing hardcoded 2-minute behaviour.
-	// Default: 120
-	TxTimeoutDefaultSeconds int64 `yaml:"tx_timeout_default_seconds,omitempty"`
-
-	// TxTimeoutClockSkewBufferSeconds is subtracted from the raw
-	// window-based TX deadline BEFORE clamping to [Min, Max]. Tune
-	// higher if the miner host's clock drifts from the validator (NTP
-	// glitches, VM steal, large-region topology), lower if hosts are
-	// tightly co-located and synced. Zero/negative picks up the default.
-	// Default: 60
-	TxTimeoutClockSkewBufferSeconds int64 `yaml:"tx_timeout_clock_skew_buffer_seconds,omitempty"`
+	// TxConnProbeIntervalSeconds is how often the miner probes its dedicated
+	// transaction connection while it is idle. Default: 60.
+	//
+	// The connection only carries traffic inside claim and proof windows, and
+	// a flow dropped by a middlebox in between leaves both ends believing it
+	// is healthy -- there are no keepalive pings without streams. The probe is
+	// what turns that into a log line before the window instead of a lost
+	// claim inside it.
+	//
+	// Lower it if probe failures show a small idle_seconds on your network:
+	// that value is how long the connection had been silent when it broke.
+	TxConnProbeIntervalSeconds int64 `yaml:"tx_conn_probe_interval_seconds,omitempty"`
 
 	// DisablePreProofClaimVerification disables the pre-proof GetClaim guard.
 	// The guard queries the chain for each session's claim before proof
@@ -353,26 +365,22 @@ type TransactionConfig struct {
 	// (guard enabled — recommended for production).
 	DisablePreProofClaimVerification bool `yaml:"disable_pre_proof_claim_verification,omitempty"`
 
-	// DisableInclusionReconciler turns off the block-driven inclusion
-	// reconciler (claim + proof on-chain verification + in-window rebroadcast).
-	// When enabled (the default) the miner persists each built claim/proof,
-	// verifies inclusion via x/proof module state once per block (works on
-	// nodes with tx_index=null), records claim/proof_on_chain_outcome on
-	// submission tracker records, emits the inclusion-outcome / rebroadcast
-	// metrics, and re-broadcasts a still-missing claim/proof while its window
-	// is open. This is the fix for silent CLAIM_MISSING / PROOF_MISSING
-	// forfeits. Default: false (reconciler enabled).
-	DisableInclusionReconciler bool `yaml:"disable_inclusion_reconciler,omitempty"`
-
 	// InclusionReconcilerMaxConcurrent bounds the per-block group-reconcile
 	// worker pool (one task per owned supplier per block). Default: 64.
 	InclusionReconcilerMaxConcurrent int `yaml:"inclusion_reconciler_max_concurrent,omitempty"`
 
 	// MaxRebroadcasts caps how many times a still-missing claim/proof is
 	// re-submitted within its window. Pointer so an explicit 0 (observe-only:
-	// verify + record outcomes but never resend) is distinguishable from unset
-	// (default 1: a single mid-window self-try; emergency resends of
-	// never-broadcast messages fire earlier).
+	// verify + record outcomes but never resend) is distinguishable from unset.
+	//
+	// UNSET NOW MEANS NO CAP, and that is a change for every deployment that
+	// never configured this: it used to inherit a cap of 2 with the resends
+	// spaced two blocks apart, and now a still-missing claim is re-sent on every
+	// block its window allows. Setting an explicit number restores a cap; 0
+	// still means observe-only and is unaffected.
+	//
+	// The cost of the new default is one transaction fee per resend (1 upokt),
+	// against a claim that pays nothing at all if it never lands.
 	MaxRebroadcasts *int `yaml:"max_rebroadcasts,omitempty"`
 
 	// RebroadcastSafetyBlocks stops rebroadcasting once the chain is within this
@@ -392,13 +400,12 @@ type TransactionConfig struct {
 // operator set. Callers pass the result to NewInclusionReconciler.
 func (c TransactionConfig) InclusionReconcilerConfig() InclusionReconcilerConfig {
 	cfg := DefaultInclusionReconcilerConfig()
-	cfg.Disabled = c.DisableInclusionReconciler
 	if c.InclusionReconcilerMaxConcurrent > 0 {
 		cfg.MaxConcurrent = c.InclusionReconcilerMaxConcurrent
 	}
 	// Pointers: nil keeps the default; an explicit value (including 0) is honored.
 	if c.MaxRebroadcasts != nil {
-		cfg.MaxRebroadcasts = *c.MaxRebroadcasts
+		cfg.MaxRebroadcasts = c.MaxRebroadcasts
 	}
 	if c.RebroadcastSafetyBlocks != nil {
 		cfg.RebroadcastSafetyBlocks = *c.RebroadcastSafetyBlocks
@@ -406,7 +413,20 @@ func (c TransactionConfig) InclusionReconcilerConfig() InclusionReconcilerConfig
 	if c.InclusionReconcilerPerGroupTimeoutMs > 0 {
 		cfg.PerGroupTimeout = time.Duration(c.InclusionReconcilerPerGroupTimeoutMs) * time.Millisecond
 	}
+	// The pool is capped by the transaction client's permit count, from the
+	// same config field rather than a second constant: a worker above that
+	// number can only start in order to park.
+	cfg.TxMaxConcurrent = c.txMaxConcurrent()
 	return cfg
+}
+
+// txMaxConcurrent is the configured broadcast concurrency, or the tx package's
+// default when unset.
+func (c TransactionConfig) txMaxConcurrent() int {
+	if c.TxMaxConcurrent > 0 {
+		return c.TxMaxConcurrent
+	}
+	return int(tx.DefaultTxMaxConcurrent)
 }
 
 // Validate validates the configuration.
@@ -446,6 +466,12 @@ func (c *Config) Validate() error {
 	if c.Redis.ConnMaxIdleTimeSeconds < 0 {
 		return fmt.Errorf("redis.conn_max_idle_time_seconds must be >= 0 (0 = use default)")
 	}
+	if c.Redis.RelayBatchFlushIntervalMs < 0 {
+		return fmt.Errorf("redis.relay_batch_flush_interval_ms must be >= 0 (0 = use default)")
+	}
+	if err := validateRelayBatchFlushInterval(c.GetRelayBatchFlushInterval(), c.GetClaimIdleTimeout()); err != nil {
+		return err
+	}
 
 	if c.PocketNode.QueryNodeRPCUrl == "" {
 		return fmt.Errorf("pocket_node.query_node_rpc_url is required")
@@ -453,31 +479,6 @@ func (c *Config) Validate() error {
 
 	if c.PocketNode.QueryNodeGRPCUrl == "" {
 		return fmt.Errorf("pocket_node.query_node_grpc_url is required")
-	}
-
-	// The retired keys.keys_dir loaded supplier keys from a directory. A
-	// lenient decoder would drop the field and boot WITHOUT those keys: the
-	// miner claims and proves nothing for those suppliers and the revenue
-	// loss carries no diagnostic. Any non-empty value is therefore a hard error.
-	if c.Keys.RemovedKeysDir != "" {
-		return fmt.Errorf(
-			"keys.keys_dir is no longer supported: migrate the keys in %q to a keys_file "+
-				"(supplier addresses are derived from each private key) or import them into the "+
-				"keyring, then remove the keys_dir line",
-			c.Keys.RemovedKeysDir,
-		)
-	}
-
-	// The retired top-level hot_reload_enabled is read by nothing. Dropping it
-	// silently is how the miner came to run with key hot reload OFF while the
-	// config said ON, so any value at all is a hard error naming the new home.
-	if c.RemovedHotReloadEnabled != nil {
-		return fmt.Errorf(
-			"hot_reload_enabled at the top level is no longer read: the setting moved to "+
-				"keys.hot_reload_enabled, which the miner and the relayer share. Set "+
-				"keys.hot_reload_enabled: %t and delete the top-level line",
-			*c.RemovedHotReloadEnabled,
-		)
 	}
 
 	// Exactly one key source (suppliers are auto-discovered from the keys).
@@ -520,6 +521,32 @@ func (c *Config) Validate() error {
 
 	// Note: Storage validation removed - all session trees now use Redis
 
+	// block_time_seconds is REQUIRED, and refusing to start is the point rather
+	// than an inconvenience.
+	//
+	// It became load-bearing when the transaction deadline stopped being
+	// configurable: the deadline is now the window in blocks times this number,
+	// so a wrong value is a wrong deadline on every claim and every proof. There
+	// used to be a default of 30 to fall back on, and falling back is exactly
+	// what must not happen here -- 30 is right for no network we run on. An
+	// operator on mainnet who set nothing would have had every deadline computed
+	// at half the real block time, and nothing would have looked wrong: the
+	// number is plausible, the transactions still broadcast, and the loss only
+	// shows up as claims that stopped landing late in the window.
+	//
+	// A config that cannot say how fast its chain produces blocks is a config
+	// that cannot be reasoned about, so it stops the process while somebody is
+	// watching, instead of quietly picking a number.
+	if c.BlockTimeSeconds <= 0 {
+		return fmt.Errorf(
+			"block_time_seconds is required and must be positive (got %d): it is the "+
+				"basis of every claim and proof transaction deadline, and there is no "+
+				"safe default -- set it to the measured block time of the network this "+
+				"miner runs against",
+			c.BlockTimeSeconds,
+		)
+	}
+
 	return nil
 }
 
@@ -542,6 +569,14 @@ func (c *Config) GetClaimIdleTimeout() time.Duration {
 	return time.Minute // Default
 }
 
+// GetRelayBatchFlushInterval returns the relay batch flush interval as a duration.
+func (c *Config) GetRelayBatchFlushInterval() time.Duration {
+	if c.Redis.RelayBatchFlushIntervalMs > 0 {
+		return time.Duration(c.Redis.RelayBatchFlushIntervalMs) * time.Millisecond
+	}
+	return DefaultRelayBatchFlushInterval
+}
+
 // GetBatchSize returns the batch size with defaults.
 func (c *Config) GetBatchSize() int64 {
 	if c.BatchSize > 0 {
@@ -562,7 +597,7 @@ func (c *Config) GetTxGasPrice() string {
 	if c.Transaction.GasPrice != "" {
 		return c.Transaction.GasPrice
 	}
-	return "0.00001upokt" // Default: 0.00001 upokt (10x higher than previous default)
+	return tx.DefaultGasPrice
 }
 
 // GetTxGasAdjustment returns the gas adjustment multiplier with defaults.
@@ -574,59 +609,27 @@ func (c *Config) GetTxGasAdjustment() float64 {
 	return 1.7 // Default: 1.7 (adds 70% safety margin to simulated gas)
 }
 
-// GetTxTimeoutMin returns the minimum TX broadcast deadline with defaults.
-// Unset (<= 0) falls back to the canonical default from tx/tx_client.go
-// (2 minutes). A misconfigured tiny value would starve the TX; 2min is
-// the smallest duration that reliably lets a claim/proof land under
-// normal mempool + network latency.
-func (c *Config) GetTxTimeoutMin() time.Duration {
-	if c.Transaction.TxTimeoutMinSeconds > 0 {
-		return time.Duration(c.Transaction.TxTimeoutMinSeconds) * time.Second
-	}
-	return 2 * time.Minute
+// GetTxMaxConcurrent returns the broadcast concurrency cap.
+func (c *Config) GetTxMaxConcurrent() int {
+	return c.Transaction.txMaxConcurrent()
 }
 
-// GetTxTimeoutMax returns the maximum TX broadcast deadline with defaults.
-// Unset (<= 0) falls back to 10s below the cosmos-sdk unordered-TX
-// hard limit (10 minutes). The 10s margin is tuned to the block-time
-// anchor regime: signAndBroadcast anchors timeoutTimestamp on the
-// chain's latest_block_time (see tx.BlockTimeProvider) rather than
-// wall clock, so the only jitter we need to absorb is the race where
-// a new block commits between our anchor read and the validator's
-// CheckTx. See tx.DefaultTxTimeoutMax for the full rationale — this
-// literal duplicates it because importing tx from miner/config would
-// create a cycle.
-func (c *Config) GetTxTimeoutMax() time.Duration {
-	if c.Transaction.TxTimeoutMaxSeconds > 0 {
-		return time.Duration(c.Transaction.TxTimeoutMaxSeconds) * time.Second
+// GetTxRPCTimeout returns the per-attempt broadcast timeout, or zero to let the
+// tx client apply its default.
+func (c *Config) GetTxRPCTimeout() time.Duration {
+	if c.Transaction.TxRPCTimeoutSeconds > 0 {
+		return time.Duration(c.Transaction.TxRPCTimeoutSeconds) * time.Second
 	}
-	return 10*time.Minute - 10*time.Second
+	return 0
 }
 
-// GetTxTimeoutDefault returns the fallback TX broadcast deadline with defaults.
-func (c *Config) GetTxTimeoutDefault() time.Duration {
-	if c.Transaction.TxTimeoutDefaultSeconds > 0 {
-		return time.Duration(c.Transaction.TxTimeoutDefaultSeconds) * time.Second
+// GetTxConnProbeInterval returns the idle-probe interval for the dedicated
+// transaction connection, or zero to let the tx client apply its default.
+func (c *Config) GetTxConnProbeInterval() time.Duration {
+	if c.Transaction.TxConnProbeIntervalSeconds > 0 {
+		return time.Duration(c.Transaction.TxConnProbeIntervalSeconds) * time.Second
 	}
-	return 2 * time.Minute
-}
-
-// GetTxTimeoutClockSkewBuffer returns the duration to subtract from the
-// raw window-based TX deadline before clamping. Unset (<= 0) returns
-// 60s, which covers typical NTP drift across regions.
-func (c *Config) GetTxTimeoutClockSkewBuffer() time.Duration {
-	if c.Transaction.TxTimeoutClockSkewBufferSeconds > 0 {
-		return time.Duration(c.Transaction.TxTimeoutClockSkewBufferSeconds) * time.Second
-	}
-	return 60 * time.Second
-}
-
-// GetDeduplicationTTL returns the deduplication TTL in blocks.
-func (c *Config) GetDeduplicationTTL() int64 {
-	if c.DeduplicationTTLBlocks > 0 {
-		return c.DeduplicationTTLBlocks
-	}
-	return 10 // Default (session length + grace + buffer)
+	return 0
 }
 
 // GetLeaderTTL returns the leader TTL as a duration.
@@ -655,7 +658,7 @@ func (c *Config) GetSessionLifecycleMaxConcurrentTransitions() int {
 
 // GetBalanceMonitorEnabled returns whether balance monitoring is enabled.
 func (c *Config) GetBalanceMonitorEnabled() bool {
-	// Default to true if not explicitly set
+	// DefaultConfig sets it true; a config loaded without the key keeps that.
 	return c.BalanceMonitor.Enabled
 }
 
@@ -696,6 +699,12 @@ func (c *Config) GetBlockTimeSeconds() int64 {
 	return cache.DefaultBlockTimeSeconds
 }
 
+// BlockHealthMonitorEnabled reports whether the leader runs the block health
+// monitor: true unless the config sets block_health_monitor.enabled to false.
+func (c *Config) BlockHealthMonitorEnabled() bool {
+	return c.BlockHealthMonitor.Enabled == nil || *c.BlockHealthMonitor.Enabled
+}
+
 // GetBlockHealthSlownessThreshold returns the slowness threshold for block health monitoring.
 func (c *Config) GetBlockHealthSlownessThreshold() float64 {
 	if c.BlockHealthMonitor.SlownessThreshold > 0 {
@@ -710,6 +719,15 @@ func (c *Config) GetCacheTTL() time.Duration {
 		return c.CacheTTL
 	}
 	return 2 * time.Hour // Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
+}
+
+// GetServiceFactorRepublishInterval returns how often the leader rewrites the
+// service factor manifest.
+func (c *Config) GetServiceFactorRepublishInterval() time.Duration {
+	if c.ServiceFactorRepublishInterval > 0 {
+		return c.ServiceFactorRepublishInterval
+	}
+	return 5 * time.Minute
 }
 
 // GetSubmissionTrackingTTL returns the TTL for submission tracking records.
@@ -780,20 +798,6 @@ const suppliersPerCPUWarnThreshold = 50
 // advisory only (never fatal) and meant to surface in the logs of operators who
 // deploy fast without reading the docs.
 func (c *Config) LogStartupCapacityAdvisory(logger logging.Logger, numSuppliers int) {
-	// Disabling batching is discouraged: at scale, per-session (unbatched)
-	// submission floods the node with thousands of txs per window and is a
-	// primary cause of forfeits. The difficulty-validation bug it once worked
-	// around is resolved.
-	if c.Transaction.DisableClaimBatching || c.Transaction.DisableProofBatching {
-		logger.Warn().
-			Bool("disable_claim_batching", c.Transaction.DisableClaimBatching).
-			Bool("disable_proof_batching", c.Transaction.DisableProofBatching).
-			Int("num_suppliers", numSuppliers).
-			Msg("DISCOURAGED CONFIG: claim/proof batching is DISABLED — at scale this sends one tx per session " +
-				"(hundreds-to-thousands per window) and is a primary cause of CLAIM_MISSING/PROOF_MISSING forfeits. " +
-				"Re-enable batching (remove disable_claim_batching / disable_proof_batching) unless you have a specific reason.")
-	}
-
 	cpu := getEffectiveCPUCount()
 	if cpu > 0 && numSuppliers > cpu*suppliersPerCPUWarnThreshold {
 		logger.Warn().
@@ -944,17 +948,8 @@ func DefaultConfig() *Config {
 			GasLimit:      0,               // 0 = automatic gas estimation via simulation
 			GasPrice:      "0.000001upokt", // Default gas price
 			GasAdjustment: 1.7,             // Default 70% safety margin
-			// Batching is ON by default. It was previously disabled as a workaround
-			// for difficulty-validation failures; that bug is resolved, and at scale
-			// (hundreds of supplier keys) per-session (unbatched) submission floods
-			// the node with thousands of txs per window and is a primary cause of
-			// CLAIM_MISSING/PROOF_MISSING forfeits. Disabling batching is now
-			// discouraged (a startup warning fires if you do).
-			DisableClaimBatching: false,
-			DisableProofBatching: false,
 		},
-		DeduplicationTTLBlocks: 10,
-		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
+		BatchSize: 1000, // Increased from 100 for better throughput (10x more efficient)
 		// Hot reload on by default, in BOTH binaries: an operator who never
 		// thinks about it gets a fleet that picks up a key change on its own,
 		// and one who turns it off is told so at startup by the key manager's
@@ -989,6 +984,15 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
+	// Second pass over the same bytes, diagnostic only: the decode above is
+	// lenient and drops every key this struct does not declare, so the file and
+	// the process can disagree with no signal at all. What to DO with the finding
+	// belongs to the caller -- `validate` fails on it because validating is its
+	// whole job, and the serving binary warns and starts unless --strict-config
+	// was passed, because refusing to boot over a stale key turns a rolling
+	// deploy into an outage. See config.UnknownKeys.
+	cf.unknownKeys = config.UnknownKeys(data, &Config{})
+
 	cf.Redis.ConsumerName = UniqueConsumerName(cf.Redis.ConsumerName)
 
 	if err = cf.Validate(); err != nil {
@@ -996,6 +1000,23 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return cf, nil
+}
+
+// Warnings returns one line per key the file carries that this struct does not
+// declare -- typos, settings this project retired, and keys that were never
+// fields at all.
+//
+// The miner had no channel for this at all, which is why the retired top-level
+// hot_reload_enabled had to be a HARD boot failure: with only "fail" and "say
+// nothing" available, failing was the right call. With a channel, a stale key is
+// a warning at startup and a hard failure under `miner validate` or
+// --strict-config, which is the same rule the relayer follows.
+//
+// The sentence that says what each removal CHANGED for the operator lives in
+// config.retiredKeys and is attached to the generic finding, so deleting the
+// tombstone struct fields lost the fields and not the knowledge.
+func (c *Config) Warnings() []string {
+	return c.unknownKeys
 }
 
 // UniqueConsumerName returns the name this process registers with the Redis
@@ -1016,16 +1037,10 @@ func UniqueConsumerName(configured string) string {
 	if prefix == "" {
 		prefix = "miner"
 	}
-	return fmt.Sprintf("%s-%s-%d", prefix, hostnameOrUnknown(), os.Getpid())
-}
-
-// hostnameOrUnknown never fails: the pid still discriminates within a host, and
-// refusing to start over an unreadable hostname would be worse than a slightly
-// less readable name.
-func hostnameOrUnknown() string {
-	hostname, err := os.Hostname()
-	if err != nil || hostname == "" {
-		return "unknown-host"
-	}
-	return hostname
+	// The discriminator is ProcessIdentity(), shared with the leader-lock value:
+	// one identity with two uses, so they cannot drift apart. It replaced a
+	// local helper whose comment claimed "the pid still discriminates within a
+	// host" -- true as written and false in the deployment this repo has, where
+	// every replica is PID 1 in its own namespace.
+	return fmt.Sprintf("%s-%s", prefix, ProcessIdentity())
 }

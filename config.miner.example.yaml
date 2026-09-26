@@ -1,18 +1,42 @@
-# Pocket RelayMiner Miner Configuration Example
-# This file uses LOCALNET defaults - ready for local development with Tilt.
-# For PRODUCTION, see comments marked [PRODUCTION] for recommended values.
+# ==============================================================================
+# Pocket RelayMiner - Miner Configuration Example
+# ==============================================================================
+# The miner is the stateful claim/proof submitter, with leader election. The
+# relayer has its own example: config.relayer.example.yaml.
 #
-# This is the MINER component (stateful claim/proof submitter with leader election).
-# For the RELAYER component, see config.relayer.example.yaml
+# The values below are LOCALNET values, ready for local development with Tilt.
+# A comment starting with "Production:" gives the value to use in production.
+#
+# Every comment sits ABOVE the key it describes. A commented-out template is
+# enabled by deleting the leading "# " (hash and one space) from each of its
+# lines; a line that is still a comment after that single pass carries a
+# second "#" on purpose -- it is optional, and leaving it commented keeps it
+# unset.
+#
+# ------------------------------------------------------------------------------
+# Before you deploy (REQUIRED)
+# ------------------------------------------------------------------------------
+# CPU and memory budget: set GOMAXPROCS and GOMEMLIMIT in the process
+# environment, or run it in a container with CPU and memory limits (the process
+# reads the container's limits at startup). Without either, the miner sizes its
+# worker pools and its memory bounds against the WHOLE HOST, not against what
+# it is allowed to use.
+#
+# Redis: run Redis 8.10 or newer, with maxmemory set and maxmemory-policy
+# noeviction. The miner refuses to start against a Redis older than 8.10, with
+# no memory limit or with an evicting policy. config.redis.example.conf is a
+# starting point.
 
 # ==============================================================================
 # Redis Configuration (REQUIRED)
 # ==============================================================================
 redis:
-  # Redis connection URL (supports single node, sentinel, cluster)
+  # Connection URL. The scheme selects the client:
+  #   redis:// or rediss:// (TLS)  a single Redis, e.g. "redis://user:password@redis-host:6379/0"
+  #   redis-sentinel://            Sentinel, e.g. "redis-sentinel://sentinel1:26379,sentinel2:26379/mymaster?db=0"
+  #   redis-cluster://             Cluster, e.g. "redis-cluster://node1:6379,node2:6379,node3:6379"
+  # A comma-separated host list under redis:// is NOT a cluster.
   url: "redis://localhost:6379"
-  # [PRODUCTION] url: "redis://user:password@redis-host:6379/0"
-  # [PRODUCTION] url: "redis-sentinel://sentinel1:26379,sentinel2:26379/mymaster?db=0"
 
   # Readable PREFIX only -- "-<hostname>-<pid>" is always appended. Redis
   # identifies a consumer by name alone, so two replicas sharing one name
@@ -20,393 +44,439 @@ redis:
   # stranded deliveries. Leave empty for the default "miner" prefix.
   consumer_name: ""
 
-  # Timeouts
-  # Note: XREADGROUP blocks for one block interval per read (not BLOCK 0, which
-  # could not be interrupted on shutdown) - not configurable
-  claim_idle_timeout_ms: 60000  # Reclaim idle messages after 60s (crashed consumer recovery)
+  # Milliseconds after which a relay delivered to a consumer and not yet
+  # acknowledged is reclaimed (recovery from a crashed consumer). Default: 60000.
+  # The stream read itself blocks for one block interval per read, so a
+  # shutdown is never more than that away; it is not configurable.
+  claim_idle_timeout_ms: 60000
 
-  # Connection pool settings
-  # Pool size must accommodate blocked + non-blocked connections:
+  # How often each supplier marks, counts and acknowledges the relays it already
+  # added to the session tree, in one Redis script per session. Until then their
+  # stream entries stay pending, so it must be at most claim_idle_timeout_ms / 4
+  # (startup fails otherwise). Default: 15000.
+  relay_batch_flush_interval_ms: 15000
+
+  # Connection pool. The pool must hold blocked and non-blocked connections:
   #
   # BLOCKED (held indefinitely):
-  #   - 1 per supplier: XREADGROUP blocking read (stream consumption)
-  #   - 1: Block event pub/sub
-  #   - 2-3: Cache invalidation pub/sub
-  #   - 1: Supplier registry pub/sub
+  #   - 1 per supplier: the blocking stream read
+  #   - 1: block event pub/sub
+  #   - 2-3: cache invalidation pub/sub
+  #   - 1: supplier registry pub/sub
   #
-  # NON-BLOCKED (share pool, fast release):
-  #   - SMST operations, ACK batches, session store, cache, leader heartbeat
+  # NON-BLOCKED (share the pool, released quickly):
+  #   - SMST operations, acknowledgements, session store, cache, leader heartbeat
   #
-  # Formula: pool_size = numSuppliers + 20 overhead
-  #   - 1 supplier:   1 + 20 = 21 connections
-  #   - 10 suppliers: 10 + 20 = 30 connections
+  # Formula: pool_size = number of suppliers + 20
+  #   - 1 supplier:    1 + 20 = 21 connections
+  #   - 10 suppliers:  10 + 20 = 30 connections
   #   - 100 suppliers: 100 + 20 = 120 connections
   #
-  # Default: 50 (handles up to ~30 suppliers)
+  # Default: 50 (enough for about 30 suppliers).
   # pool_size: 50
-  # min_idle_conns: 10               # Warm idle connections
-  # pool_timeout_seconds: 4          # Wait time for connection from pool
-  # conn_max_idle_time_seconds: 300  # Close idle connections after 5 minutes
+  #
+  # Warm idle connections. Default: pool_size / 4.
+  # min_idle_conns: 12
+  #
+  # Seconds a caller waits for a pooled connection. Default: 6.
+  # pool_timeout_seconds: 6
+  #
+  # Close a connection idle for this many seconds. Default (unset or 0): 30
+  # minutes, the Redis client library's own default.
+  # conn_max_idle_time_seconds: 300
 
-  # Namespace configuration (optional)
-  # Only the base prefix is configurable. Every segment below it is fixed in
-  # code, so miner and relayer cannot drift apart on the key layout, and no
-  # family's SCAN pattern can be made to match another family's keys.
+  # Key namespace (optional). Only the base prefix is configurable. Every
+  # segment below it is fixed, so miner and relayer cannot drift apart on the
+  # key layout, and no family's SCAN pattern can match another family's keys.
   # Two base prefixes are two disjoint keyspaces: one Redis, several fleets.
-  # namespace:
-  #   base_prefix: "ha"                # Root prefix for all keys (default: "ha")
+  # It must not contain ':', whitespace, or the characters * ? [ ].
+  # MUST be the same in the miner and every relayer of one fleet.
   #
   # The per-family prefixes (cache_prefix, events_prefix, streams_prefix,
   # miner_prefix, supplier_prefix, meter_prefix, params_prefix,
   # consumer_group_prefix) are RETIRED. Setting one to anything other than its
-  # historical value now fails at startup instead of silently relocating that
-  # data — see docs/REDIS.md.
+  # historical value fails at startup instead of silently relocating that
+  # data -- see docs/REDIS.md.
+  # namespace:
+  #   # Root prefix for all keys. Default: "ha".
+  #   base_prefix: "ha"
 
 # ==============================================================================
 # Pocket Blockchain Connection (REQUIRED)
 # ==============================================================================
 pocket_node:
-  # Query node endpoints (localnet defaults)
-  query_node_rpc_url: "http://localhost:26657"  # RPC for queries, blocks, and TX submission
-  query_node_grpc_url: "localhost:9090"  # gRPC for queries
-  # [PRODUCTION] query_node_rpc_url: "https://rpc.testnet.pokt.network"
-  # [PRODUCTION] query_node_grpc_url: "grpc.testnet.pokt.network:443"
+  # CometBFT RPC endpoint, for queries, blocks and transaction submission.
+  # Production: your full node, e.g. "https://your-full-node:26657".
+  query_node_rpc_url: "http://localhost:26657"
 
-  # Chain ID for transaction signing (CRITICAL for non-mainnet chains)
-  # MUST match the blockchain you're connecting to, otherwise TX signatures will fail!
-  # Examples:
-  #   - "pocket" (mainnet)
-  #   - "pocket-beta" (testnet)
-  #   - "pocket" (localnet)
-  # Default: "pocket" (for backward compatibility)
-  chain_id: "pocket"  # Localnet
-  # [PRODUCTION MAINNET] chain_id: "pocket"
-  # [PRODUCTION TESTNET] chain_id: "pocket-beta"
+  # gRPC endpoint, for queries. Production: your full node, e.g.
+  # "your-full-node:9090".
+  query_node_grpc_url: "localhost:9090"
 
-  # gRPC settings
-  grpc_insecure: true  # Disable TLS for gRPC (localnet)
-  # [PRODUCTION] grpc_insecure: false
+  # Chain ID used to sign transactions. It MUST match the chain you connect
+  # to, or every transaction signature fails. "pocket" is mainnet (and the
+  # localnet), "pocket-lego-testnet" is the beta testnet. Default: "pocket".
+  chain_id: "pocket"
 
-  # Query timeout
-  query_timeout_seconds: 5  # Timeout for blockchain queries (default: 5s)
+  # Disable TLS for gRPC. Localnet: true. Production: false.
+  grpc_insecure: true
+
+  # Seconds allowed for one chain query. Default: 5.
+  query_timeout_seconds: 5
 
 # ==============================================================================
-# Transaction Configuration (Claim/Proof Submission)
+# Transaction Configuration (claim/proof submission)
 # ==============================================================================
+# The transaction's on-chain deadline is NOT configurable. It is the claim or
+# proof window in blocks times block_time_seconds, capped just below the
+# 10-minute ceiling the chain enforces on unordered transactions. The window
+# length comes from the chain's own parameters, so it follows governance. It
+# is the WHOLE window, not the blocks left in it, so every attempt for one
+# claim carries the same deadline; what stops a transaction that really is too
+# late is timeout_height, which the chain enforces at the window close.
+#
+# Four keys used to configure it and were retired: tx_timeout_min_seconds,
+# tx_timeout_max_seconds, tx_timeout_default_seconds and
+# tx_timeout_clock_skew_buffer_seconds. Leaving any of them in a config file
+# is reported at startup, and fails "miner validate" and --strict-config.
+#
+# What to watch instead: ha_tx_timeout_regime_total. "window" and "ceiling" are
+# both healthy and say which of the two bounds is binding on your network;
+# "unknown" means a deadline could not be derived, and should stay at zero once
+# a deploy has settled.
+#
+# Transactions are broadcast unordered, in SYNC mode: the broadcast returns
+# after mempool acceptance, NOT after block inclusion. Inclusion is what the
+# inclusion reconciler (below) verifies.
+
+# Every key in this block is optional; the values shown are the defaults.
 # transaction:
-  # Gas limit for transactions
-  # Set to 0 for automatic gas estimation (simulation) - RECOMMENDED for production
-  # Set to a positive value for a fixed gas limit
-  # Default: 0 (automatic estimation via simulation)
-  # gas_limit: 0
-
-  # Gas price in upokt (1 POKT = 1,000,000 upokt)
-  # Default: "0.00001upokt"
-  # gas_price: "0.00001upokt"
-
-  # Gas adjustment factor (multiplier applied to simulated gas)
-  # Only used when gas_limit=0 (automatic gas estimation via simulation)
-  # Adds safety margin: actual_gas = simulated_gas * gas_adjustment
-  # Default: 1.7 (adds 70% safety margin to simulated gas)
-  # Increase if transactions fail with code 11 (out of gas) despite simulation
-  # gas_adjustment: 1.7
-
-  # TX broadcast deadline — window-based dynamic timeout
-  # The miner computes the remaining blocks in the claim/proof window as
-  # (remaining_blocks * block_time_seconds), SUBTRACTS tx_timeout_clock_skew_buffer_seconds
-  # to leave headroom for clock drift between miner host and validator, then clamps
-  # to [tx_timeout_min_seconds, tx_timeout_max_seconds]. tx_timeout_default_seconds
-  # is used only when no window info is available (legacy paths / tests).
-  #
-  # The cosmos-sdk hard-rejects unordered TXs whose timeoutTimestamp is >10 min
-  # ahead of validator time with `unordered tx ttl exceeds 10m0s`. The default
-  # max is internally set 10s below that ceiling; setting tx_timeout_max_seconds
-  # to 600 here will intermittently fail CheckTx due to clock jitter — stay below.
-  #
-  # tx_timeout_min_seconds: 120               # Floor (default: 120 = 2min)
-  # tx_timeout_max_seconds: 599               # Cap (default: 10min - 500ms when unset)
-  # tx_timeout_default_seconds: 120           # Fallback when window info unavailable (default: 120)
-  # tx_timeout_clock_skew_buffer_seconds: 60  # Subtracted before clamping (default: 60).
-                                              # Raise on hosts with known NTP drift;
-                                              # lower on tightly co-located + synced hosts.
-
-  # NOTE: Unordered transactions with SYNC broadcast mode
-  # We use unordered=true with dynamic timeout_timestamp to eliminate account
-  # sequence mismatch errors. SYNC mode returns immediately after CheckTx (mempool
-  # acceptance) — it does NOT confirm block inclusion. Inclusion is verified
-  # asynchronously by the block-driven inclusion reconciler below.
-
-  # Inclusion reconciler + in-window rebroadcast (fix for silent
-  # CLAIM_MISSING / PROOF_MISSING forfeits)
-  # A code-0 BroadcastTx only means the claim/proof entered the mempool. If it
-  # misses its block and is never re-sent, it is forfeited at settlement even
-  # though later blocks in the window are empty. Once per block the reconciler
-  # verifies inclusion via x/proof module state (AllClaims/AllProofs by supplier —
-  # works on nodes with tx_index=null) and re-broadcasts a still-missing
-  # claim/proof while its window is open. Outcomes land in submission-tracker
-  # records (claim_on_chain_outcome / proof_on_chain_outcome) and the
-  # {claim,proof}_inclusion_outcome_total / {claim,proof}_rebroadcasts_total
-  # metrics. All fields are optional; defaults shown.
-  # disable_inclusion_reconciler: false               # Master switch (default: enabled)
-  # inclusion_reconciler_max_concurrent: 64           # Per-block group-reconcile pool size (default: 64)
-  # max_rebroadcasts: 1                                # In-window re-submits; 0 = observe-only (default: 1)
-  # rebroadcast_safety_blocks: 1                       # Stop rebroadcasting within N blocks of window close (default: 1)
-  # inclusion_reconciler_per_group_timeout_ms: 10000  # Per-supplier reconcile timeout per block (default: 10s)
+#   # Gas limit. 0 estimates gas by simulation (recommended); a positive value
+#   # is a fixed limit.
+#   gas_limit: 0
+#
+#   # Gas price (1 POKT = 1,000,000 upokt).
+#   gas_price: "0.000001upokt"
+#
+#   # Multiplier applied to the simulated gas, only when gas_limit is 0. 1.7
+#   # adds a 70% margin. Raise it if transactions fail with code 11 (out of
+#   # gas) despite simulation.
+#   gas_adjustment: 1.7
+#
+#   # How many claim/proof broadcasts may be in flight at once. It bounds the
+#   # load on the FULL NODE: with gas estimation on, each transaction costs a
+#   # simulation plus a broadcast. Raise it only when
+#   # ha_tx_permit_wait_seconds shows broadcasts waiting.
+#   tx_max_concurrent: 32
+#
+#   # Seconds allowed for ONE broadcast attempt. It is not the transaction's
+#   # on-chain deadline. Tune it from the p99 of
+#   # ha_tx_broadcast_latency_seconds on your own node.
+#   tx_rpc_timeout_seconds: 30
+#
+#   # Seconds between probes of the dedicated transaction connection while it
+#   # is idle. The connection only carries traffic inside claim and proof
+#   # windows, and a connection dropped in between by a network device looks
+#   # healthy to both ends; the probe turns that into a log line before the
+#   # window. Lower it if probe failures report a small idle_seconds.
+#   tx_conn_probe_interval_seconds: 60
+#
+#   # Inclusion reconciler. A transaction accepted by BroadcastTx has only
+#   # entered the mempool; if it misses its block and is never re-sent, the
+#   # claim or proof is forfeited at settlement. Once per block the reconciler
+#   # checks inclusion through the proof module's state (it works on nodes
+#   # with tx_index=null) and re-sends a still-missing claim or proof while its
+#   # window is open. Outcomes are recorded in the submission tracking records
+#   # and in ha_miner_claim_inclusion_outcome_total,
+#   # ha_miner_proof_inclusion_outcome_total, ha_miner_claim_rebroadcasts_total
+#   # and ha_miner_proof_rebroadcasts_total. The reconciler cannot be turned
+#   # off; these keys only tune it.
+#   #
+#   # Worker pool for the per-block reconcile (one task per owned supplier per
+#   # block). Capped at tx_max_concurrent.
+#   inclusion_reconciler_max_concurrent: 64
+#   #
+#   # Milliseconds allowed to reconcile one supplier per block (the chain query
+#   # plus any re-sends).
+#   inclusion_reconciler_per_group_timeout_ms: 10000
+#   #
+#   # Cap on in-window re-sends. Unset: no cap, a still-missing claim or proof
+#   # is re-sent on every block its window allows (each re-send costs one
+#   # transaction fee). 0: observe only -- verify and record, never re-send.
+#   ## max_rebroadcasts: 2
+#   #
+#   # Stop re-sending within this many blocks of the window close. Default: 0
+#   # (the block before the close is the last one a re-send can still land in).
+#   ## rebroadcast_safety_blocks: 0
+#   #
+#   # Diagnostic only. true skips the check that a session's claim is on chain
+#   # before its proof is submitted, which brings back proof submissions for
+#   # claims that never landed and the retry storms they cause. Default: false.
+#   ## disable_pre_proof_claim_verification: false
 
 # ==============================================================================
 # Supplier Keys Configuration (REQUIRED)
 # ==============================================================================
 # Full reference: docs/SUPPLIER_KEYS.md
+#
+# keys_file and keyring are MUTUALLY EXCLUSIVE -- setting both is a startup
+# error. Configure exactly one, so nothing has to decide at runtime which
+# source wins a duplicate or what it means when one of them is unreadable.
 keys:
-  # Reload signing keys while the miner runs, so a key added or pulled takes
-  # effect without a restart. Every key source is covered: keys_file is also
-  # watched (its directory is watched, which is what makes a Kubernetes secret's
-  # ..data swap register) so a change there lands almost at once, while a keyring
-  # cannot be watched and is found by the reload timer within 30s. Setting it to
+  # Reload signing keys while the miner runs, so adding or pulling a key takes
+  # effect without a restart. Default: true.
+  #
+  # Every key source is covered. keys_file is also watched (its directory is
+  # watched, which is what makes a Kubernetes secret's ..data swap register), so
+  # a change there lands almost at once. A keyring cannot be watched, so its
+  # changes are found by the reload timer instead -- within 30s. Setting it to
   # false is logged as a warning at startup, because a key change then needs a
-  # restart. Default: true.
+  # restart.
   hot_reload_enabled: true
 
-  # Option 1: Load from YAML file with hex-encoded keys
+  # Option 1: a YAML file of hex-encoded private keys (simple; suits testing).
   keys_file: "/keys/supplier-keys.yaml"
 
-  # Option 2: Use Cosmos SDK keyring (recommended for production)
+  # Option 2: a Cosmos SDK keyring (recommended for production). Remove
+  # keys_file above when you enable this.
   # keyring:
-  #   backend: "file"  # file (passphrase, piped in) or test (fixed password).
-  #                    # "os" and "memory" are refused at startup -- see
-  #                    # keys.ValidateKeyringBackend for why.
+  #   # "file" (passphrase-protected) or "test" (fixed password). "os" and
+  #   # "memory" are refused at startup: "memory" starts empty and nothing
+  #   # writes to it, and "os" depends on whether a system keychain is
+  #   # reachable.
+  #   backend: "file"
+  #   # Directory CONTAINING the keyring; the file backend reads <dir>/keyring-file.
   #   dir: "/keys/keyring"
   #   app_name: "pocket"
   #   # For backend "file", say WHERE the passphrase is -- never the passphrase
-  #   # itself, so the config stays non-sensitive:
-  #   passphrase_file: "/secrets/keyring-passphrase"   # a mounted secret
-  #   # passphrase_env: "KEYRING_PASSPHRASE"           # or the NAME of an env var
+  #   # itself, so the config stays non-sensitive. A mounted secret:
+  #   passphrase_file: "/secrets/keyring-passphrase"
+  #   # Or the NAME of an environment variable (mutually exclusive with
+  #   # passphrase_file):
+  #   ## passphrase_env: "KEYRING_PASSPHRASE"
   #   # With neither, it is read from stdin:
-  #   #   echo "$SECRET" | pocket-relay-miner relayer --config config.yaml
+  #   #   echo "$SECRET" | pocket-relay-miner miner --config config.yaml
   #   # which suits a terminal or a pipe, but not a container (stdin is /dev/null).
-  #   key_names:  # Optional: specific keys to load (empty = load all)
+  #   # Optional: load only these keys (empty = load all).
+  #   key_names:
   #     - "supplier1"
   #     - "supplier2"
 
 # ==============================================================================
-# Explicit Supplier Configuration (OPTIONAL)
+# Block Time (REQUIRED)
 # ==============================================================================
-# If not specified, suppliers are auto-discovered from keys.
-# Use this for explicit control over which suppliers/services to handle.
-# suppliers:
-#   - operator_address: "pokt1abc..."
-#     signing_key_name: "supplier1"  # Must match key in keyring/keys file
-#     services:  # Optional: filter which services this supplier handles
-#       - "develop"
-#       - "eth-mainnet"
+# Expected block time in seconds. REQUIRED: there is no default, and the miner
+# does not start without it. Every claim and proof transaction deadline is
+# computed from it, so a wrong value is a wrong deadline on every transaction.
+#
+# It is a per-deployment value, not a constant: mainnet, testnet and localnet
+# run different block times, and mainnet's drifts with network conditions.
+# Measure the block time of your target network; beta (pocket-lego-testnet)
+# is roughly 30s, mainnet (pocket) roughly 60s.
+# Localnet runs faster blocks.
+block_time_seconds: 10
 
-# ==============================================================================
-# Block Time Configuration (Feature 1)
-# ==============================================================================
-block_time_seconds: 10  # Expected block time (localnet uses faster blocks)
-# This is a per-DEPLOYMENT value, not a fixed constant -- mainnet, beta/testnet,
-# and localnet all run different real block times, and mainnet's own varies
-# with network conditions (latency, round timing) rather than holding still at
-# any one number. The 30s previously suggested here for [PRODUCTION] was stale:
-# a live mainnet sample on 2026-08-21 measured ~64s/block (100 blocks,
-# height 887111->887211, sauron-api.infra.pocket.network). Measure your own
-# target network before deploying rather than trusting either number blindly.
-# [PRODUCTION MAINNET] block_time_seconds: 60  # round figure -- re-measure periodically, it drifts
-
-# Block health monitoring
+# Block health monitoring: warns when blocks arrive slower than expected (a
+# lagging full node or a network problem).
 block_health_monitor:
-  enabled: true  # Monitor for slow blocks (fullnode lag/network issues)
-  slowness_threshold: 1.5  # Alert if blocks > 1.5× configured time (e.g., >15s for 10s blocks)
+  # Default: true.
+  enabled: true
+  # Warn when a block takes longer than this multiple of block_time_seconds
+  # (1.5 with 10s blocks: slower than 15s). Default: 1.5.
+  slowness_threshold: 1.5
 
 # ==============================================================================
-# Balance and Stake Monitoring (Feature 4)
+# Balance and Stake Monitoring
 # ==============================================================================
 balance_monitor:
-  enabled: true  # Enable proactive balance/stake monitoring
-  check_interval_seconds: 300  # Check every 5 minutes
+  # Runs the balance and stake monitor. false turns it off entirely: no balance
+  # warnings and no stake alerts. Default: true.
+  enabled: true
 
-  # Balance threshold (in upokt: 1 POKT = 1,000,000 upokt)
-  # Set based on your daily TX volume and desired buffer
-  # Example calculation:
-  #   - Average TX fee: 0.5 upokt
-  #   - Daily TXs (claims + proofs): ~1800 (at 5x load with batching)
-  #   - Daily cost: 1800 × 0.5 = 900 upokt
-  #   - Recommended threshold: 2-3 days buffer = 1800-2700 upokt
-  # Default: 1,000,000 upokt (1 POKT) - adjust based on your operations
-  balance_threshold_upokt: 1000000  # Alert if balance < 1 POKT
+  # Seconds between checks. Default: 300.
+  check_interval_seconds: 300
 
-  # Stake health monitoring - alerts based on missed proofs until auto-unstake
-  # Formula: missedProofsRemaining = (currentStake - minStake) / proofMissingPenalty
-  # These thresholds trigger alerts when you're running low on buffer before auto-unstake
+  # Warn when a supplier's balance drops below this, in upokt
+  # (1 POKT = 1,000,000 upokt). Size it from your own transaction cost:
+  # (claims + proofs per day) x average fee paid x the days of buffer you
+  # want. Default: 1000000 (1 POKT).
+  balance_threshold_upokt: 1000000
+
+  # Stake health: alerts on how many missed proofs a supplier can absorb before
+  # it is auto-unstaked.
+  #   missedProofsRemaining = (currentStake - minStake) / proofMissingPenalty
   #
-  # WARNING threshold: Alert when < 1000 missed proofs away from auto-unstake
-  # CRITICAL threshold: Alert when < 100 missed proofs away from auto-unstake
+  # Example:
+  #   - current stake: 60,000,000,000 upokt (60,000 POKT)
+  #   - minimum stake: 59,500,000,000 upokt (59,500 POKT)
+  #   - proof missing penalty: 1 upokt per missed proof
+  #   - buffer: 500,000,000 upokt = 500 million missed proofs (very safe)
   #
-  # Example with mainnet values:
-  #   - Current stake: 60,000,000,000 upokt (60,000 POKT)
-  #   - Minimum stake: 59,500,000,000 upokt (59,500 POKT)
-  #   - Proof missing penalty: 1 upokt per missed proof
-  #   - Buffer: 500,000,000 upokt = 500 million missed proofs (very safe)
-  #   - You'd get WARNING when buffer drops below 1000 missed proofs
-  #   - You'd get CRITICAL when buffer drops below 100 missed proofs
-  stake_warning_proof_threshold: 10   # Warn when < 10 missed proofs remaining
-  stake_critical_proof_threshold: 3    # Critical when < 3 missed proofs remaining
+  # WARNING when fewer than this many missed proofs remain. Default: 10.
+  stake_warning_proof_threshold: 10
+  # CRITICAL when fewer than this many missed proofs remain. Default: 3.
+  stake_critical_proof_threshold: 3
 
 # ==============================================================================
-# Session Lifecycle Configuration
+# Session Lifecycle
 # ==============================================================================
-# NOTE: Session lifecycle is event-driven (uses block events instead of polling)
-# NOTE: Submission timing is handled by the protocol's built-in deterministic spreading
-#       via GetEarliestSupplierClaimCommitHeight() - no manual buffers needed.
+# The session lifecycle is driven by block events, not by polling. Submission
+# timing within a window follows the protocol's own deterministic spreading of
+# suppliers; no manual buffer is needed.
 session_lifecycle:
-  # Concurrent transitions (claim/proof building is parallelized for performance)
-  max_concurrent_transitions: 10  # Limit parallel claim/proof submission batches
+  # Sessions that may build and submit claims/proofs at the same time.
+  # Default: 10.
+  max_concurrent_transitions: 10
 
 # ==============================================================================
-# Worker Pool Configuration
+# Worker Pools
 # ==============================================================================
-# Controls parallelism for claim/proof submission and other background work.
-# Auto-sizing formula: max(cpu × cpu_multiplier, suppliers × workers_per_supplier) + overhead
+# Parallelism for claim/proof submission and other background work.
+# Auto-sizing: max(GOMAXPROCS x cpu_multiplier, suppliers x workers_per_supplier)
+# + query_workers.
 #
-# Example sizing (4 CPU, 78 suppliers):
-#   max(4 × 4, 78 × 2) + 22 = max(16, 156) + 22 = 178 workers
+# Example (4 CPUs, 78 suppliers, defaults):
+#   max(4 x 4, 78 x 6) + 20 = max(16, 468) + 20 = 488 workers
 #
-# For high supplier counts, the pool scales with supplier count to ensure
-# all suppliers can submit claims/proofs in parallel during claim windows.
-#
+# With many suppliers the pool follows the supplier count, so every supplier
+# can submit its claims and proofs in parallel inside a window. The values
+# shown are the defaults.
 # worker_pools:
-#   master_pool_size: 0           # 0 = auto-calculate (recommended)
-#   cpu_multiplier: 4             # CPU multiplier for baseline sizing
-#   workers_per_supplier: 2       # Workers per supplier (claim + proof parallel)
-#   query_workers: 20             # Fixed workers for blockchain queries
+#   # 0 = auto-size (recommended).
+#   master_pool_size: 0
+#   # Per-CPU baseline.
+#   cpu_multiplier: 4
+#   # Workers per supplier (claim and proof building in parallel).
+#   workers_per_supplier: 6
+#   # Fixed workers for chain queries.
+#   query_workers: 20
 
 # ==============================================================================
-# Leader Election Configuration (HA Deployments)
+# Leader Election (HA deployments)
 # ==============================================================================
 leader_election:
-  leader_ttl_seconds: 30  # Leader lock TTL (must renew before expiry)
-  heartbeat_rate_seconds: 10  # Attempt acquire/renew every 10s
+  # Seconds the leader lock lasts; the leader must renew it before then.
+  # Default: 30.
+  leader_ttl_seconds: 30
+  # Seconds between acquire/renew attempts. Default: 10.
+  heartbeat_rate_seconds: 10
 
 # ==============================================================================
-# Supplier Claiming (HA Multi-Miner)
+# Supplier Claiming (HA multi-miner)
 # ==============================================================================
-# Suppliers are automatically distributed across miner replicas using Redis leases.
-# - Single miner: Claims all configured suppliers
-# - Multiple miners: Fair distribution with automatic rebalancing
+# Suppliers are distributed across miner replicas with Redis leases.
+# - Single miner: it claims every configured supplier.
+# - Several miners: a fair share each, rebalanced automatically.
 #
 # How it works:
-#   1. Each miner claims suppliers via Redis SET NX with TTL
-#   2. Miners register in an "active" set with heartbeat
-#   3. Fair share is calculated: ceil(totalSuppliers / activeMiners)
-#   4. Rebalancing releases excess claims when new miners join
-#   5. If a miner crashes, its claims expire after claim_ttl_seconds
+#   1. Each miner claims suppliers with a Redis lease (SET NX with a TTL).
+#   2. Miners register in an "active" set with a heartbeat.
+#   3. Fair share = ceil(totalSuppliers / activeMiners).
+#   4. Rebalancing releases excess claims when a miner joins.
+#   5. When a miner crashes, its claims expire after claim_ttl_seconds.
 #
 # Example with 3 miners and 9 suppliers:
-#   - Fair share = ceil(9/3) = 3 suppliers per miner
-#   - Each miner claims up to 3 suppliers
-#   - If miner-1 crashes, miner-2 and miner-3 claim its 3 suppliers
+#   - fair share = ceil(9/3) = 3 suppliers per miner
+#   - if miner-1 crashes, miner-2 and miner-3 claim its 3 suppliers
 #
-# IMPORTANT: With 500+ suppliers, the renewal loop runs sequentially and can
-# take several seconds per cycle. If claim_ttl_seconds is too low, claims
-# expire before renewal completes, causing duplicate lifecycles and lost rewards.
-# Increase claim_ttl_seconds for high supplier counts.
+# IMPORTANT: with 500+ suppliers the renewal loop runs sequentially and can take
+# several seconds per cycle. If claim_ttl_seconds is too low, claims expire
+# before renewal completes, causing duplicate lifecycles and lost rewards.
+# Raise claim_ttl_seconds for high supplier counts: 120 for 500-1000
+# suppliers, 180 above 1000.
+#
+# Maximum failover time: claim_ttl_seconds + rebalance_interval_seconds.
 supplier_claiming:
-  claim_ttl_seconds: 90      # Lease duration (default: 90s, increase for 500+ suppliers)
-  renew_rate_seconds: 10     # Renewal frequency (default: 10s)
-  rebalance_interval_seconds: 30  # Redistribution check (default: 30s)
-  # [HIGH LOAD 500-1000 suppliers] claim_ttl_seconds: 120
-  # [HIGH LOAD 1000+ suppliers] claim_ttl_seconds: 180
-  # Maximum failover time: claim_ttl_seconds + rebalance_interval_seconds
+  # Lease duration in seconds. Default: 90.
+  claim_ttl_seconds: 90
+  # Seconds between lease renewals. Default: 10.
+  renew_rate_seconds: 10
+  # Seconds between redistribution checks. Default: 30.
+  rebalance_interval_seconds: 30
 
 # ==============================================================================
-# Processing Configuration
+# Processing
 # ==============================================================================
-# NOTE: Session trees (SMST) are always stored in Redis and committed after each relay.
-# Redis streams serve as the WAL for relays, enabling HA compatibility and data durability.
-deduplication_ttl_blocks: 10  # Keep relay hashes for 10 blocks to prevent duplicates
-batch_size: 1000  # Relay batch size for XREADGROUP (increased from 100 for better throughput)
-# NOTE: hot_reload_enabled moved under keys: (see the keys block). At the top
-# level it is now a startup error, on purpose -- it was read by nothing, so a
-# miner could run with key hot reload off while this file said on.
-cache_ttl: "2h"  # TTL for Redis cached data (sessions, SMST trees). Default 2h covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget). Backup safety net if manual cleanup fails.
+# Session trees (SMST) always live in Redis. The Redis streams are the
+# write-ahead log of relays.
 
-# SMST live_root checkpoint interval (in UpdateTree calls).
-# Bounds the relay loss window on mid-session leader kills: up to (interval - 1)
-# relays can land in the Redis nodes hash without a reachable root pointer,
-# so a follower promoted at that moment would not inherit them. Lower = safer
-# (more checkpoint writes), higher = fewer writes. Default 10 at 1000 RPS/
-# supplier yields 100 writes/s (10x reduction vs checkpointing every relay),
-# at most 9 relays lost per mid-session kill. Set to 1 for zero-loss mode.
-smst_live_root_checkpoint_interval: 10
+# Relays read per stream read. Default: 1000.
+batch_size: 1000
 
-# Submission tracking TTL (for debugging claim/proof submissions)
-# Tracks tx hashes, success/failure, errors, and timing for post-mortem analysis.
-# Use `pocket-relay-miner redis submissions` to inspect tracked data.
-submission_tracking_ttl: "24h"  # Default: 24h (covers multiple session windows for debugging)
-# [PRODUCTION] submission_tracking_ttl: "168h"  # 7 days for longer audit trail
+# TTL of the miner's cached Redis data (sessions, SMST trees). A safety net: the
+# miner cleans up after itself, and the TTL only bounds a leak when cleanup
+# fails. Default: 2h, which covers several session lifecycles at a 60s block
+# time.
+cache_ttl: "2h"
 
-# Supplier reconcile interval (seconds). How often the miner polls every
-# keyring supplier's on-chain stake + service list, so operator stake /
-# unstake / service-config changes are picked up without a miner restart.
-# Default: 60. Set a negative value to disable (tests only).
+# TTL of session state in Redis. Default: cache_ttl. Setting it to anything
+# other than cache_ttl lets sessions and their trees expire at different
+# times.
+# session_ttl: "2h"
+
+# TTL of the claim/proof submission tracking records (transaction hashes,
+# success or failure, errors, timing), for post-mortem analysis. Inspect them
+# with `pocket-relay-miner redis submissions`. Default: 24h.
+# Production: "168h" (7 days) for a longer audit trail.
+submission_tracking_ttl: "24h"
+
+# Seconds between polls of every keyring supplier's on-chain stake and service
+# list, so a stake, unstake or service change is picked up without a restart.
+# Lower = faster pickup, more chain queries. Default: 60. A negative value
+# disables the poll (tests only).
 supplier_reconcile_interval_seconds: 60
-# [AGGRESSIVE] supplier_reconcile_interval_seconds: 15   # faster pickup, more chain queries
-# [CONSERVATIVE] supplier_reconcile_interval_seconds: 300  # lower chain load, slower pickup
 
-# Pre-discovered applications (optional - speeds up startup)
+# Applications to discover at startup (optional; speeds up startup). These are
+# the localnet genesis applications.
 known_applications:
-  - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"  # app1
-  - "pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm"  # app2
-  - "pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex"  # app3
-  - "pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst"  # app4
+  - "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z"
+  - "pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm"
+  - "pokt1lqyu4v88vp8tzc86eaqr4lq8rwhssyn6rfwzex"
+  - "pokt1pn64d94e6u5g8cllsnhgrl6t96ysnjw59j5gst"
 
 # ==============================================================================
-# ServiceFactor Configuration (Economic Policy)
+# Service Factor (economic policy)
 # ==============================================================================
-# ServiceFactor controls the per-session relay cap the meter applies to each
-# (app, supplier) pair. Relays served beyond the cap are dropped from the
-# mining pipeline with reason "stake_exhausted" — the client still gets a
-# response, but the relay never enters a claim.
+# The service factor sets the per-session stake cap the relay meter applies to
+# each (application, supplier) pair. What happens to a relay beyond the cap
+# depends on the service's validation mode: in optimistic mode it is served
+# but not mined (dropped with reason "stake_exhausted"); in eager mode it is
+# refused with HTTP 429.
 #
-# Configured on the MINER only. Published to Redis on leader election.
-#
-# CAVEAT: As of today, the relayer's ServiceFactorClient caches values in an
-# L1 map that is NOT invalidated at runtime (no pub/sub, no TTL, no refresh
-# loop). To roll out a new value, restart BOTH the miner (to re-publish)
-# AND all relayers (to reload from Redis). A hot-reload fix is tracked
-# separately; when it lands, a miner restart alone will suffice.
+# Configured on the MINER only. The leader publishes it to Redis when it is
+# elected and every service_factor_republish_interval, and relayers reload it
+# on change without a restart. A relayer refuses relays until the first
+# published value exists, so start the miner first.
 #
 # ------------------------------------------------------------------------------
-# Formula (matches canonical poktroll upstream exactly)
+# Formula
 # ------------------------------------------------------------------------------
 #
-#   if service_factor is SET:
-#       effectiveLimit_uPOKT = appStake_uPOKT × service_factor
-#   else (use baseLimit):
-#       appStakePerSupplier   = appStake_uPOKT / numSuppliersPerSession
-#       pendingSessions       = ceil(SessionEndToProofWindowCloseBlocks /
-#                                    numBlocksPerSession) + 1
-#       baseLimit_uPOKT       = appStakePerSupplier / pendingSessions
+#   if a service factor is SET:
+#       effectiveLimit = appStake x service_factor
+#   else (baseLimit):
+#       appStakePerSupplier = appStake / num_suppliers_per_session
+#       pendingSessions     = ceil(sessionEndToProofWindowCloseBlocks /
+#                                  num_blocks_per_session) + 1
+#       baseLimit           = appStakePerSupplier / pendingSessions
 #
-#   SessionEndToProofWindowCloseBlocks =
-#       ClaimWindowOpenOffsetBlocks +
-#       ClaimWindowCloseOffsetBlocks +
-#       ProofWindowOpenOffsetBlocks +
-#       ProofWindowCloseOffsetBlocks
+#   sessionEndToProofWindowCloseBlocks =
+#       claim_window_open_offset_blocks + claim_window_close_offset_blocks +
+#       proof_window_open_offset_blocks + proof_window_close_offset_blocks
 #
-# Sources (read these if you need to verify):
-#   - relayer/relay_meter.go::calculateMaxStake
-#   - poktroll/pkg/relayer/proxy/relay_meter.go::getAppStakePortionPayableToSessionSupplier
-#   - poktroll/x/shared/types/session.go::GetSessionEndToProofWindowCloseBlocks
-#   - poktroll/x/tokenomics/keeper/token_logic_modules.go::ensureClaimAmountLimits
-#     (chain settlement cap — what actually gets paid at the end of the session)
+# baseLimit is what the protocol guarantees a supplier. Expressed as a factor
+# it is 1 / num_suppliers_per_session / pendingSessions, for any application.
+# The relayer logs a warning ("serviceFactor results in limit exceeding
+# protocol guarantee") whenever effectiveLimit is above baseLimit: that work
+# may not be paid. Claims above the chain's settlement cap are accepted but
+# trimmed to it; over-servicing is not penalized, it is just not paid.
 #
 # ------------------------------------------------------------------------------
-# Worked example — mainnet, 2026-04-15, block 714921
+# Worked example
 # ------------------------------------------------------------------------------
-#
-# Chain parameters (from `pocketd q shared params` + `pocketd q session params`):
-#     num_blocks_per_session              = 60
+# Query your network's shared and session parameters and recompute; these are
+# mainnet's at the time of writing:
+#     num_blocks_per_session              = 20
 #     claim_window_open_offset_blocks     = 11
 #     claim_window_close_offset_blocks    = 10
 #     proof_window_open_offset_blocks     = 1
@@ -414,111 +484,85 @@ known_applications:
 #     num_suppliers_per_session           = 50
 #
 # Derived:
-#     SessionEndToProofWindowCloseBlocks = 11 + 10 + 1 + 10 = 32
-#     numClosedSessionsAwaitingSettlement = ceil(32 / 60)    = 1
-#     pendingSessions                     = 1 + 1            = 2
+#     sessionEndToProofWindowCloseBlocks = 11 + 10 + 1 + 10 = 32
+#     pendingSessions                    = ceil(32 / 20) + 1 = 3
+#     baseLimit as a factor              = 1 / 50 / 3 = 0.0067
 #
-# baseLimit as an implicit factor (valid for ANY app under these params):
-#     baseLimit / appStake = 1 / numSuppliersPerSession / pendingSessions
-#                          = 1 / 50 / 2
-#                          = 0.01
+# Example application with 5,874.70 POKT staked:
+#     appStakePerSupplier = 5,874.70 / 50 = 117.49 POKT
+#     baseLimit           = 117.49 / 3    =  39.16 POKT per session per supplier
 #
-# Example app (stake = 5,874,696,563 uPOKT = 5,874.70 POKT):
-#     appStakePerSupplier = 5,874,696,563 / 50  = 117,493,931 uPOKT
-#     baseLimit           = 117,493,931 / 2     =  58,746,965 uPOKT
-#                         ≈                        58.75 POKT per session per supplier
+# Under those parameters a factor of 0.0067 or less stays within what the
+# protocol guarantees, and anything above it triggers the relayer's warning.
+# Do not go above the baseLimit factor without data: for each service, measure
+# how many distinct suppliers actually claim per session over the last few
+# settled sessions. If that mean N is below num_suppliers_per_session, the
+# guaranteed factor is roughly 1 / N / pendingSessions.
 #
-# Any service_factor value applied to the same stake:
-#     factor 0.005 → effectiveLimit = 29,373,482 uPOKT ≈ 29.37 POKT  (low)
-#     factor 0.010 → effectiveLimit = 58,746,965 uPOKT ≈ 58.75 POKT  (mid, = baseLimit)
-#     factor 0.020 → effectiveLimit = 117,493,931 uPOKT ≈ 117.49 POKT (high, = chain cap)
-#     factor 0.030 → effectiveLimit = 176,240,896 uPOKT ≈ 176.24 POKT (gambling, chain trims)
-#
-# ------------------------------------------------------------------------------
-# Reference tuning table
-# ------------------------------------------------------------------------------
-#
-#   Assumes current mainnet params (numSuppliersPerSession=50, pendingSessions=2
-#   from the derivation above). If those params change, recompute from scratch.
-#
-#   +---------------+--------+--------------------------------------------+---------------------------+
-#   | tuning label  | factor | meaning                                    | risk profile              |
-#   +---------------+--------+--------------------------------------------+---------------------------+
-#   | gambling      | 0.030  | Bets that NOT all 50 suppliers in a       | Chain trims anything     |
-#   |               |        | session actually deliver a claim. Needs   | above stake × 0.02 —     |
-#   |               |        | empirical data (last 2-3 settled sessions)| overservice events,      |
-#   |               |        | showing mean claiming suppliers << 50.    | unpaid work.             |
-#   +---------------+--------+--------------------------------------------+---------------------------+
-#   | high opt      | 0.020  | Matches the chain's canonical settlement  | Minor overservice risk   |
-#   |               |        | cap exactly (stake / 50 / 1). Max         | during in-flight session |
-#   |               |        | claimable without chain trim.             | transitions.             |
-#   +---------------+--------+--------------------------------------------+---------------------------+
-#   | mid opt       | 0.010  | Matches the poktroll upstream relay       | Medium rejection of      |
-#   | (default)     |        | meter baseLimit. 50% safety margin below  | stake_exhausted for apps |
-#   |               |        | chain cap. Recommended default when in    | that demand > 1% of      |
-#   |               |        | doubt. No overservice risk.               | stake per session.       |
-#   +---------------+--------+--------------------------------------------+---------------------------+
-#   | low opt       | 0.005  | 75% safety margin. Extremely              | High rejection. Many     |
-#   |               |        | conservative.                             | apps hit stake_exhausted.|
-#   +---------------+--------+--------------------------------------------+---------------------------+
-#
-# When in doubt, use mid (0.01). It matches the upstream library and cannot
-# cause unpaid work.
-#
-# Do NOT raise above 0.02 without empirical data: for each staked service,
-# measure distinct(supplier_operator_address) per session over the last
-# 2-3 fully-settled sessions. If the mean N < 50, the safe ceiling is
-# approximately 1 / N / pendingSessions. Without that data, 0.03 leaves
-# money on the table via chain trim events.
-#
-# ------------------------------------------------------------------------------
-# Notes on the formula
-# ------------------------------------------------------------------------------
-#
-# 1. The chain settlement at x/tokenomics/keeper/token_logic_modules.go uses
-#    a slightly different divisor (GetNumPendingSessions, no +1), but under
-#    current mainnet params both formulas converge on the same number. The
-#    relayer meter is deliberately more conservative by the +1 margin as a
-#    safety against in-flight session transitions.
-#
-# 2. The protocol NEVER guarantees any payment amount. Claims above the
-#    chain's maxClaimableAmt are accepted but TRIMMED to the cap, with an
-#    EventApplicationOverserviced event emitted. Over-servicing is not
-#    penalized, it just means the relayer did work that won't be paid.
-#
-# 3. The relayer logs a warning when effectiveLimit > baseLimit
-#    ("serviceFactor results in limit exceeding protocol guarantee"). Use
-#    that log to detect when your factor is in the gambling zone.
+# Leaving the factor unset (or 0) uses baseLimit, which follows the chain's
+# parameters by itself when governance changes them.
 
-# Global default (applies to all services unless overridden below):
-default_service_factor: 0.01   # mid opt — matches poktroll upstream baseLimit
+# Global service factor, for every service without an override below.
+# Default: unset (baseLimit). 0.01 is a localnet value: the localnet genesis
+# has 15 suppliers per session and 20-block sessions, so its baseLimit factor
+# is 1 / 15 / 3 = 0.022. On mainnet (worked example above) 0.01 is above
+# baseLimit.
+default_service_factor: 0.01
 
-# Per-service overrides (simple map, NOT full service config)
-# Use when a specific chain's apps have a very different
-# "observed suppliers claiming per session" profile.
+# Per-service overrides: service ID -> factor (a plain map, not a service
+# config). Use one when a service's apps see a very different number of
+# suppliers claiming per session.
 # service_factors:
-#   eth: 0.020     # high opt — only if you have data backing it
-#   poly: 0.015    # between mid and high
+#   eth: 0.006
+#   poly: 0.005
+
+# How often the leader rewrites the service factor in Redis. The published
+# value carries no expiry -- relayers must be able to tell "no factor
+# configured" from "nothing published yet", and an expiring key cannot say
+# which. This rewrite is what bounds how long a miner that lost leadership can
+# leave its own config standing. Default: 5m.
+# service_factor_republish_interval: "5m"
 
 # ==============================================================================
 # Observability Configuration
 # ==============================================================================
+# Prometheus metrics server.
 metrics:
   enabled: true
-  addr: ":9092"  # Prometheus metrics HTTP server
+  addr: ":9092"
 
+# pprof profiling server. Default: disabled (127.0.0.1:6060, loopback only,
+# when enabled with no addr). 6060 is also the relayer's default, so a miner
+# and a relayer on 1 host need different ports: this example uses 6065. To
+# reach it from outside the host or container, set addr explicitly, e.g.
+# "0.0.0.0:6065", and firewall the port.
 pprof:
-  enabled: true  # Enable pprof profiling (for debugging, disable in production)
-  addr: ":6060"  # Pprof HTTP server (use localhost for security)
+  enabled: true
+  addr: "127.0.0.1:6065"
 
 logging:
-  level: "debug"  # debug, info, warn, error (localnet uses debug; anything else fails config load)
-  format: "json"  # json, text (json required for Loki log level detection; always stderr)
-  async: true  # Enable async logging for better performance
-  async_buffer_size: 100000  # Async log buffer size (bytes)
-  async_poll_interval: 100  # Async writer flush interval (ms); 10-50 for high-throughput production
-  enable_caller: false  # Add caller file:line to logs (~14% alloc overhead, disable in production)
-  # sampling: false  # GLOBAL log sampling for extreme throughput; drops state-change logs too.
-  # sampling_initial: 100  # lines always written before sampling kicks in
-  # sampling_thereafter: 10  # then 1 in N lines
-  # [PRODUCTION] level: "info", enable_caller: false
+  # debug, info, warn or error; any other value fails config load.
+  # Localnet uses debug. Production: info.
+  level: "debug"
+  # json or text. json is what a log pipeline can parse levels from. Logs go
+  # to stderr.
+  format: "json"
+  # Non-blocking logging through a ring buffer; recommended. Default: true.
+  async: true
+  # Ring buffer size, in log MESSAGES (not bytes). When it is full, the oldest
+  # messages are dropped and the drop is reported.
+  async_buffer_size: 100000
+  # Milliseconds between flushes of the ring buffer. 10-50 for high-throughput
+  # production.
+  async_poll_interval: 100
+  # Add caller file:line to each line (about 14% more allocations). Production:
+  # false.
+  enable_caller: false
+  # GLOBAL log sampling for extreme throughput: it samples every component and
+  # level alike, state-change logs included. Leave off unless log volume is a
+  # measured problem.
+  # sampling: false
+  # Lines always written before sampling starts.
+  # sampling_initial: 100
+  # Then one line in N.
+  # sampling_thereafter: 10

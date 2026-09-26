@@ -3,16 +3,13 @@ package query
 import (
 	"bytes"
 	"context"
-	"crypto/tls"
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"google.golang.org/grpc/backoff"
-	"google.golang.org/grpc/keepalive"
 
 	"github.com/cosmos/cosmos-sdk/codec"
 	codectypes "github.com/cosmos/cosmos-sdk/codec/types"
@@ -23,6 +20,7 @@ import (
 	accounttypes "github.com/cosmos/cosmos-sdk/x/auth/types"
 	banktypes "github.com/cosmos/cosmos-sdk/x/bank/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	"github.com/pokt-network/poktroll/pkg/client"
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
@@ -32,10 +30,9 @@ import (
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/puzpuzpuz/xsync/v4"
+	"golang.org/x/sync/singleflight"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/credentials"
-	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 )
 
@@ -69,6 +66,13 @@ type ClientConfig struct {
 	// Set to true when connecting to endpoints on port 443 or with TLS enabled.
 	// Default: false (insecure connection)
 	UseTLS bool
+
+	// ConnRole labels this connection in ha_grpc_stream_queue_seconds.
+	// Empty means "query". The miner runs TWO of these in one process --
+	// the supplier worker's and the leader controller's, the second one
+	// mostly idle -- so a single value would merge two connections whose
+	// queueing means different things. The leader's passes "query_leader".
+	ConnRole grpcconn.Role
 }
 
 // Clients provide access to all on-chain query clients.
@@ -106,51 +110,16 @@ func NewQueryClients(
 		config.QueryTimeout = defaultQueryTimeout
 	}
 
-	// Establish gRPC connection with appropriate credentials
-	var transportCreds credentials.TransportCredentials
-	if config.UseTLS {
-		transportCreds = credentials.NewTLS(&tls.Config{
-			MinVersion: tls.VersionTLS12,
-		})
-	} else {
-		transportCreds = insecure.NewCredentials()
+	connRole := config.ConnRole
+	if connRole == "" {
+		connRole = grpcconn.RoleQuery
 	}
 
-	// Production-optimized gRPC connection for high-volume queries
-	grpcConn, err := grpc.NewClient(
-		config.GRPCEndpoint,
-		grpc.WithTransportCredentials(transportCreds),
-
-		// Keepalive: Prevent connection timeouts and detect broken connections
-		// Note: Servers enforce minimum ping intervals (often 5 minutes).
-		// Pinging too frequently triggers ENHANCE_YOUR_CALM / GoAway.
-		grpc.WithKeepaliveParams(keepalive.ClientParameters{
-			Time:                60 * time.Second, // Send keepalive ping every 60s if no activity
-			Timeout:             10 * time.Second, // Wait 10s for ping ack before considering connection dead
-			PermitWithoutStream: false,            // Only ping when there are active RPCs
-		}),
-
-		// Initial window size: Improve throughput for large query responses
-		grpc.WithInitialWindowSize(1<<20), // 1MB (default 64KB)
-
-		// Connection window size: Control flow control for the connection
-		grpc.WithInitialConnWindowSize(1<<20), // 1MB
-
-		// Max message size: Allow larger responses for bulk queries
-		grpc.WithDefaultCallOptions(
-			grpc.MaxCallRecvMsgSize(10*1024*1024), // 10MB max receive
-		),
-
-		// Connection backoff: Graceful reconnection on network issues
-		grpc.WithConnectParams(grpc.ConnectParams{
-			Backoff: backoff.Config{
-				BaseDelay:  1.0 * time.Second,
-				Multiplier: 1.6,
-				Jitter:     0.2,
-				MaxDelay:   30 * time.Second,
-			},
-			MinConnectTimeout: 5 * time.Second, // Fail fast on dead nodes
-		}),
+	// One constructor for every outbound node connection: see transport/grpcconn
+	// for why the tx path may not build its own.
+	grpcConn, err := grpcconn.New(
+		grpcconn.Target{Endpoint: config.GRPCEndpoint, UseTLS: config.UseTLS},
+		connRole,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create gRPC connection: %w", err)
@@ -199,8 +168,36 @@ func (qc *Clients) Supplier() SupplierQueryClient {
 	return qc.supplierClient
 }
 
+// ProofQueryClient is the proof query client THIS project requires: poktroll's,
+// plus the two supplier-indexed inclusion reads the inclusion reconciler runs
+// once per block. It is declared here because poktroll's interface belongs to
+// poktroll and cannot grow methods from our side.
+//
+// It exists as a TYPE rather than a runtime check on purpose. The reconciler
+// used to activate by type-asserting this client to a miner-layer interface,
+// guarded by a hand-copied mirror of that interface in this package -- and the
+// mirror could not do what its comment promised: it pinned the signatures of
+// *proofQueryClient, so it caught a signature drift, but a method ADDED on the
+// miner side left the mirror compiling and green while the runtime assert
+// failed and the miner ran fire-once with one Error line as its only notice.
+// Naming the requirement in the field's type moves that failure to the build,
+// at the single place the client is wired (miner/supplier_worker.go).
+//
+// Both inclusion signals read x/proof module state via the AllClaims supplier
+// secondary index, NOT proofs: a submitted proof is validated and REMOVED in the
+// EndBlocker of its submission block, so proof inclusion has to be read from the
+// claim's ProofValidationStatus, which is durable until settlement.
+type ProofQueryClient interface {
+	client.ProofQueryClient
+	// GetSupplierSessionStates: every session with a claim on-chain for this
+	// supplier, mapped to what the chain says about that claim's proof. One walk
+	// answers both phases -- presence is the claim signal, the value is the proof
+	// signal.
+	GetSupplierSessionStates(ctx context.Context, supplier string) (map[string]SessionClaim, error)
+}
+
 // Proof returns the proof module query client.
-func (qc *Clients) Proof() client.ProofQueryClient {
+func (qc *Clients) Proof() ProofQueryClient {
 	return qc.proofClient
 }
 
@@ -282,6 +279,12 @@ type sharedQueryClient struct {
 	// Entries carry a fetch time so the immutableCacheTTLFloor expires them (mandate).
 	paramsAtHeightCache   map[int64]paramsAtHeightEntry
 	paramsAtHeightCacheMu sync.RWMutex
+
+	// paramsAtHeightFlight collapses concurrent misses for one height into one
+	// ParamsAtHeight RPC. Sessions of every supplier end on the same heights, so
+	// when they end every supplier asks for the same height at once, and each
+	// caller that missed the cache would otherwise send its own identical RPC.
+	paramsAtHeightFlight singleflight.Group
 }
 
 // paramsAtHeightEntry is an immutable params-at-height value plus its fetch time,
@@ -497,13 +500,10 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 	// Serve from the height-keyed cache when present and within the TTL floor
 	// (entries are immutable, see field doc; the floor only forces an occasional
 	// re-query to satisfy the cache-TTL mandate).
-	c.paramsAtHeightCacheMu.RLock()
-	if e, ok := c.paramsAtHeightCache[queryHeight]; ok && time.Since(e.cachedAt) < immutableCacheTTLFloor {
-		c.paramsAtHeightCacheMu.RUnlock()
+	if params, ok := c.cachedParamsAtHeight(queryHeight); ok {
 		queryCacheHits.WithLabelValues("shared", "params_at_height").Inc()
-		return e.params, nil
+		return params, nil
 	}
-	c.paramsAtHeightCacheMu.RUnlock()
 
 	queryCacheMisses.WithLabelValues("shared", "params_at_height").Inc()
 
@@ -516,17 +516,44 @@ func (c *sharedQueryClient) GetParamsAtHeight(ctx context.Context, queryHeight i
 	// exists for. ParamsAtHeight is authoritative: the chain returns the live params for
 	// a current-epoch height (no history entry <= height) and the historical snapshot
 	// for an older-epoch height.
-	queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
-	defer cancel()
+	//
+	// Concurrent misses for one height share one RPC. It runs detached from the
+	// caller that started it, bounded by the query timeout, so one caller giving
+	// up does not fail the others waiting on the same height; each caller still
+	// stops waiting when its own context ends.
+	ch := c.paramsAtHeightFlight.DoChan(strconv.FormatInt(queryHeight, 10), func() (any, error) {
+		queryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), c.queryTimeout)
+		defer cancel()
 
-	res, err := c.queryClient.ParamsAtHeight(queryCtx, &sharedtypes.QueryParamsAtHeightRequest{Height: queryHeight})
-	if err != nil {
-		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
+		res, err := c.queryClient.ParamsAtHeight(queryCtx, &sharedtypes.QueryParamsAtHeightRequest{Height: queryHeight})
+		if err != nil {
+			return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, err)
+		}
+		params := &res.Params
+		c.storeParamsAtHeight(queryHeight, params)
+		return params, nil
+	})
+	select {
+	case r := <-ch:
+		if r.Err != nil {
+			return nil, r.Err
+		}
+		return r.Val.(*sharedtypes.Params), nil
+	case <-ctx.Done():
+		return nil, fmt.Errorf("failed to query shared params at height %d: %w", queryHeight, ctx.Err())
 	}
+}
 
-	params := &res.Params
-	c.storeParamsAtHeight(queryHeight, params)
-	return params, nil
+// cachedParamsAtHeight returns the cached params at height while they are
+// inside the TTL floor.
+func (c *sharedQueryClient) cachedParamsAtHeight(height int64) (*sharedtypes.Params, bool) {
+	c.paramsAtHeightCacheMu.RLock()
+	defer c.paramsAtHeightCacheMu.RUnlock()
+	e, ok := c.paramsAtHeightCache[height]
+	if !ok || time.Since(e.cachedAt) >= immutableCacheTTLFloor {
+		return nil, false
+	}
+	return e.params, true
 }
 
 // storeParamsAtHeight caches an immutable params-at-height entry, evicting the lowest
@@ -1163,19 +1190,6 @@ func (c *proofQueryClient) GetClaim(ctx context.Context, supplierOperatorAddress
 	return claim, nil
 }
 
-// supplierInclusionQuerier mirrors the miner-layer InclusionQueryClient
-// interface that the inclusion reconciler type-asserts ProofQueryClient to. The
-// reconciler activates via a runtime assertion (interfaces can't cross the
-// miner→query import boundary the other way); this compile-time check ensures
-// *proofQueryClient keeps the exact method set + signatures, so a signature
-// drift fails the build instead of silently disabling the reconciler at runtime.
-type supplierInclusionQuerier interface {
-	GetSupplierClaimSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
-	GetSupplierProvenSessions(ctx context.Context, supplier string) (map[string]struct{}, error)
-}
-
-var _ supplierInclusionQuerier = (*proofQueryClient)(nil)
-
 // inclusionPageLimit bounds each AllProofs/AllClaims page. A supplier serves at
 // most a few dozen sessions per window (NumSuppliersPerSession-bounded across a
 // handful of services, plus a few not-yet-pruned prior epochs), so one page
@@ -1188,60 +1202,100 @@ const inclusionPageLimit = 100
 // far above any legitimate response.
 const maxInclusionPages = 10000
 
-// GetSupplierProvenSessions returns the set of session IDs for which the given
-// supplier's claim has been PROVEN — i.e. a proof was submitted and validated
-// on-chain (the claim's ProofValidationStatus == VALIDATED). It is the
-// per-supplier PROOF inclusion signal for the block-driven inclusion reconciler.
+// SessionProofState is what the chain says about ONE session's claim, in this
+// project's vocabulary rather than poktroll's. The mapping happens here, at the
+// query->miner boundary, for two reasons and the second is the one that matters:
+// the reconciler stops depending on poktroll's enum numbering, and a status this
+// build does not recognise becomes SessionProofUnknown -- which every caller must
+// treat as "not proven, keep trying" and never as a rejection. A fourth value
+// added upstream and read as a rejection by elimination would silently stop
+// resending something that was still worth resending.
+type SessionProofState uint8
+
+const (
+	// SessionProofUnknown is a status this build does not recognise. Zero on
+	// purpose: it is also what a lookup of an absent session yields, and both
+	// mean the same thing to a caller -- nothing here justifies giving up.
+	SessionProofUnknown SessionProofState = iota
+	// SessionProofPending is PENDING_VALIDATION, which does NOT distinguish "no
+	// proof was ever submitted" from "a proof is submitted and not yet judged":
+	// it is the enum's zero value on chain too.
+	SessionProofPending
+	// SessionProofValidated is VALIDATED: the proof landed and the EndBlocker
+	// accepted it. The only state that confirms proof inclusion.
+	SessionProofValidated
+	// SessionProofRejected is INVALID: a proof reached the chain and the
+	// EndBlocker condemned it. Note this is NOT sticky on chain -- validateProof
+	// overwrites the status without reading the previous one, so a different,
+	// valid proof inside the window still flips it to VALIDATED.
+	SessionProofRejected
+)
+
+// SessionClaim is what the chain holds for ONE session's claim: the proof verdict
+// and the root that claim committed to.
 //
-// Why this reads CLAIMS, not proofs: in poktroll a submitted proof is validated
-// and then DELETED from module state in the EndBlocker of its submission height
-// (x/proof/module/abci.go EndBlocker → ValidateSubmittedProofs → RemoveProof,
-// every block). A proof therefore lives in queryable state for less than one
-// block, so AllProofs/GetProof by supplier almost always returns empty even for
-// a proof that landed and validated successfully — querying proofs to confirm
-// proof inclusion produces a false "missing" for every proof. The durable record
-// of proof inclusion is the CLAIM: the EndBlocker sets ProofValidationStatus to
-// VALIDATED (or INVALID), and the claim persists until settlement. A claim still
-// in PENDING_VALIDATION after the proof window opened means the proof is
-// genuinely missing and should be (re)submitted.
+// The root travels WITH the state, from the same read, and that is the point.
+// Fetching it later when a rejection is seen would be a second observation at a
+// different instant, and INVALID is not sticky on chain -- validateProof
+// overwrites the status without reading the previous one -- so a corrected proof
+// landing in between would leave us comparing the root of a claim whose verdict
+// is no longer the one that prompted the comparison. Two observations presented
+// as one. It costs no extra request either: the root is already in the paginated
+// response and was being discarded.
+type SessionClaim struct {
+	ProofState SessionProofState
+	// RootHash is the claim's committed SMST root. Compared against the root the
+	// miner stored for that session, it separates "what we hold is not what we
+	// claimed" from the construction and signature causes.
+	RootHash []byte
+}
+
+// GetSupplierSessionStates returns, for one supplier, every session that has a
+// claim on chain, mapped to what the chain says about that claim's proof.
+//
+// It replaces the pair of queries that used to answer the claim side and the
+// proof side separately. Both walked THIS SAME index and differed only in a
+// predicate, so the reconciler was paginating identical bytes once per group per
+// phase -- and groups are keyed by (supplier, session end), so a supplier with
+// pending entries at several session ends paid for each of them. One walk now
+// answers every question: presence of the key is the claim signal, and the value
+// is the proof signal.
 //
 // Intentionally uncached, index-safe (reads module state via the AllClaims
 // supplier secondary index, NOT the Tendermint tx indexer, so it works on
-// tx_index=null / pruned nodes), and pagination-complete — same properties as
-// GetSupplierClaimSessions.
-func (c *proofQueryClient) GetSupplierProvenSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
-	// Only a VALIDATED claim confirms the proof landed. PENDING_VALIDATION (proof not
-	// yet submitted/validated) and INVALID (proof rejected) are both "not proven" —
-	// the accept predicate rejects them so the reconciler treats them as missing.
-	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims (proven)",
-		func(claim *prooftypes.Claim) bool {
-			return claim.GetProofValidationStatus() == prooftypes.ClaimProofStatus_VALIDATED
-		})
+// tx_index=null / pruned nodes), and pagination-complete.
+//
+// Both signals come from the CLAIM. A submitted proof is validated and REMOVED in
+// the EndBlocker of its own block, so proof inclusion cannot be read from proofs;
+// the claim's ProofValidationStatus is what survives until settlement.
+func (c *proofQueryClient) GetSupplierSessionStates(ctx context.Context, supplierOperatorAddress string) (map[string]SessionClaim, error) {
+	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims")
 }
 
-// GetSupplierClaimSessions returns the set of session IDs for which a claim
-// exists on-chain for the given supplier, read from x/proof module state via the
-// AllClaims supplier secondary index. Proof-side analogue is
-// GetSupplierProvenSessions (which also reads claims — see that method for why
-// proof inclusion can't be read from proofs); same uncached + index-safe
-// (tx_index=null) + full-pagination semantics. It is the per-supplier inclusion
-// signal for the claim phase of the block-driven inclusion reconciler.
-func (c *proofQueryClient) GetSupplierClaimSessions(ctx context.Context, supplierOperatorAddress string) (map[string]struct{}, error) {
-	// Every claim counts for the claim-inclusion signal (no status filter).
-	return c.paginateSupplierClaims(ctx, supplierOperatorAddress, "all claims",
-		func(*prooftypes.Claim) bool { return true })
+// stateFromClaimStatus maps poktroll's enum into ours. The default arm is load
+// bearing: an unrecognised value must land on Unknown, which callers read as "not
+// proven", never on Rejected.
+func stateFromClaimStatus(st prooftypes.ClaimProofStatus) SessionProofState {
+	switch st {
+	case prooftypes.ClaimProofStatus_VALIDATED:
+		return SessionProofValidated
+	case prooftypes.ClaimProofStatus_INVALID:
+		return SessionProofRejected
+	case prooftypes.ClaimProofStatus_PENDING_VALIDATION:
+		return SessionProofPending
+	default:
+		return SessionProofUnknown
+	}
 }
 
 // paginateSupplierClaims walks the AllClaims supplier secondary index to completion
-// and returns the set of session IDs whose claim satisfies accept. It is the shared
-// pagination body for GetSupplierProvenSessions and GetSupplierClaimSessions, which
-// differ ONLY in their accept predicate (and the human-readable desc used in errors).
+// and returns every session it carries, mapped to its claim's proof state.
 //
-// CRITICAL: the VALIDATED-only proof-inclusion filter lives entirely in the caller's
-// accept predicate — paginateSupplierClaims itself applies no status filter and only
-// skips nil SessionHeaders, exactly as both original loops did. A claim is included
-// iff accept(claim) is true AND it carries a non-nil SessionHeader; the proof-inclusion
-// reconciler depends on the proven variant passing accept = (status == VALIDATED).
+// It applies NO status filter, and that is the change: it used to take an accept
+// predicate, and the two callers differed only in theirs -- one accepting every
+// claim, one accepting VALIDATED only -- which meant walking identical bytes twice
+// to classify them differently. Discrimination moved to the value, so one walk
+// serves both questions.
 //
 // Index-safe (reads module state via the AllClaims supplier index, NOT the Tendermint
 // tx indexer, so it works on tx_index=null / pruned nodes), pagination-complete, and
@@ -1250,9 +1304,8 @@ func (c *proofQueryClient) paginateSupplierClaims(
 	ctx context.Context,
 	supplierOperatorAddress string,
 	desc string,
-	accept func(claim *prooftypes.Claim) bool,
-) (map[string]struct{}, error) {
-	sessions := make(map[string]struct{})
+) (map[string]SessionClaim, error) {
+	sessions := make(map[string]SessionClaim)
 	var nextKey []byte
 	for page := 0; page < maxInclusionPages; page++ {
 		queryCtx, cancel := context.WithTimeout(ctx, c.queryTimeout)
@@ -1267,11 +1320,15 @@ func (c *proofQueryClient) paginateSupplierClaims(
 			return nil, fmt.Errorf("failed to query %s for supplier %s: %w", desc, supplierOperatorAddress, err)
 		}
 		for i := range res.Claims {
-			if !accept(&res.Claims[i]) {
-				continue
-			}
+			// A claim with no session header cannot be keyed, so it is skipped --
+			// unchanged from the two loops this replaced. There is no status
+			// filter here on purpose: filtering is what forced two walks, and the
+			// callers now discriminate on the value instead of on membership.
 			if sh := res.Claims[i].GetSessionHeader(); sh != nil {
-				sessions[sh.GetSessionId()] = struct{}{}
+				sessions[sh.GetSessionId()] = SessionClaim{
+					ProofState: stateFromClaimStatus(res.Claims[i].GetProofValidationStatus()),
+					RootHash:   res.Claims[i].GetRootHash(),
+				}
 			}
 		}
 		if res.Pagination == nil || len(res.Pagination.NextKey) == 0 {

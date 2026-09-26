@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -72,12 +73,41 @@ type StreamsConsumer struct {
 	config     transport.ConsumerConfig
 	streamName string // Single stream per supplier: ha:relays:{supplierAddr}
 
+	// ownPendingAfter and ownPendingDone are the read loop's progress through
+	// the entries pending under this consumer's name when it started (see
+	// deliverOwnPending). Only the read loop's goroutine touches them.
+	ownPendingAfter string
+	ownPendingDone  bool
+
+	// largestEntry is the biggest `data` field read lately, decaying slowly
+	// (see noteLargestEntry); zero until the first read. Atomic because the
+	// reclaim sizes its pages from it on another goroutine.
+	largestEntry atomic.Int64
+
+	// channelBytes is the relay bytes parsed and waiting in msgCh, the value
+	// consumer_channel_bytes shows, kept here so the read can size itself and
+	// a producer can wait while it is at readBudgetBytes (send).
+	channelBytes atomic.Int64
+
+	// sendWaitHook is nil in production; a test sets it before Consume to
+	// learn that a producer is waiting in send.
+	sendWaitHook func()
+
+	// space is signalled, without blocking, each time a relay leaves msgCh
+	// (MarkDelivered), to wake a producer waiting in send. One slot: a signal
+	// sent while nobody waits is kept for the next waiter, so none is lost.
+	space chan struct{}
+
 	// Message channel
 	msgCh chan transport.StreamMessage
 
-	// Claiming rate limit (prevent excessive claiming when stream is idle)
-	lastClaimTime time.Time
-	claimMu       sync.Mutex
+	// health, when set, pauses reading and reclaiming while Redis cannot take
+	// writes: entries stay in the stream and in the PEL, unacked and undeleted.
+	health *StoreHealth
+
+	// pause, when set, holds reading and reclaiming while it is Paused, for a
+	// condition of the process rather than of Redis.
+	pause IngestionPause
 
 	// Lifecycle management
 	mu       sync.RWMutex
@@ -134,6 +164,7 @@ func NewStreamsConsumer(
 		config:     config,
 		streamName: streamName,
 		msgCh:      make(chan transport.StreamMessage, channelBufferSize),
+		space:      make(chan struct{}, 1),
 	}, nil
 }
 
@@ -172,9 +203,8 @@ func (c *StreamsConsumer) Consume(ctx context.Context) <-chan transport.StreamMe
 	// real server, so it was unreachable: a relay
 	// delivered to a consumer whose pod died before acking sat in that dead
 	// consumer's PEL forever, and its supplier's whole claim silently vanished
-	// (issue #25). The ticker runs regardless of what the read loop is doing;
-	// the lastClaimTime guard inside claimPendingMessages' caller path keeps
-	// the two triggers from stacking.
+	// (issue #25). The ticker runs regardless of what the read loop is doing,
+	// and it is the only trigger.
 	c.wg.Add(1)
 	go func() {
 		defer c.wg.Done()
@@ -213,23 +243,91 @@ func (c *StreamsConsumer) ensureConsumerGroup(ctx context.Context) error {
 // reclaimLoop periodically recovers messages stuck in dead consumers' PELs.
 // It runs as a producer on msgCh alongside consumeLoop; the channel close is
 // owned by the coordinator in Consume, never by either producer.
+//
+// It sweeps as soon as it starts and then every quarter of the idle timeout.
+// The first sweep used to come one full idle timeout after start, so a consumer
+// that lived less than that -- a supplier claimed and released every ~32 s, as
+// the L3 of df5441c saw on 2026-09-11 -- never swept at all, and entries it
+// released (unowned, by XNACK) waited for whoever outlived the timeout.
+// Sweeping more often takes nothing younger: the sweep itself only claims
+// entries idle past ClaimIdleTimeout. Reaping dead consumers stays on the full
+// timeout.
+// SetStoreHealth pauses this consumer while health says Redis cannot take writes.
+// Call it before Consume.
+func (c *StreamsConsumer) SetStoreHealth(health *StoreHealth) {
+	c.health = health
+}
+
+// IngestionPause holds a consumer's reads while Paused. PauseChanged returns a
+// channel closed the next time Paused may have changed.
+type IngestionPause interface {
+	Paused() bool
+	PauseChanged() <-chan struct{}
+}
+
+// SetIngestionPause holds this consumer's reads and reclaims while pause is
+// Paused. Call it before Consume.
+func (c *StreamsConsumer) SetIngestionPause(pause IngestionPause) {
+	c.pause = pause
+}
+
+// operable reports whether the consumer may read: Redis can take writes and
+// nothing holds ingestion.
+func (c *StreamsConsumer) operable() bool {
+	return c.health.Operable() && (c.pause == nil || !c.pause.Paused())
+}
+
+// waitOperable returns once Redis can take writes and nothing holds ingestion,
+// or with ctx's error. Reading is not refused under maxmemory, but what the
+// miner does with a read relay is a write, so reading while full only moves
+// relays from the stream into a PEL they cannot leave.
+func (c *StreamsConsumer) waitOperable(ctx context.Context) error {
+	for {
+		changed := c.health.Changed()
+		var pauseChanged <-chan struct{}
+		if c.pause != nil {
+			pauseChanged = c.pause.PauseChanged()
+		}
+		if c.operable() {
+			return nil
+		}
+		select {
+		case <-changed:
+		case <-pauseChanged:
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+}
+
 func (c *StreamsConsumer) reclaimLoop(ctx context.Context) {
-	interval := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+	idle := time.Duration(c.config.ClaimIdleTimeout) * time.Millisecond
+
+	// The read loop creates the group too, on its own goroutine, and may not
+	// have yet: a sweep against a missing group fails as "stream not found",
+	// which claimPendingMessages skips in silence, so the first sweep would do
+	// nothing. Creating it is idempotent.
+	if err := c.ensureConsumerGroup(ctx); err != nil && ctx.Err() == nil {
+		c.logger.Debug().Err(err).Msg("failed to ensure consumer group before the first reclaim sweep")
+	}
+	if c.operable() {
+		c.claimPendingMessages(ctx)
+	}
+
+	sweep := time.NewTicker(idle / 4)
+	defer sweep.Stop()
+	reap := time.NewTicker(idle)
+	defer reap.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-ticker.C:
-			c.claimMu.Lock()
-			due := time.Since(c.lastClaimTime) >= interval
-			if due {
-				c.lastClaimTime = time.Now()
-			}
-			c.claimMu.Unlock()
-			if due {
+		case <-sweep.C:
+			if c.operable() {
 				c.claimPendingMessages(ctx)
+			}
+		case <-reap.C:
+			if c.health.Operable() {
 				c.reapDeadConsumers(ctx)
 			}
 		}
@@ -250,8 +348,12 @@ func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
 		func(ctx context.Context) error {
 			return c.ensureConsumerGroup(ctx)
 		},
-		// runFn: Consume messages until error or context cancellation
+		// runFn: hand over what is already pending under this consumer's
+		// name, once, then consume new messages until error or cancellation
 		func(ctx context.Context) error {
+			if err := c.deliverOwnPending(ctx); err != nil {
+				return err
+			}
 			return c.consumeMessagesUntilError(ctx)
 		},
 	)
@@ -272,6 +374,9 @@ func (c *StreamsConsumer) consumeLoop(ctx context.Context) {
 // This is the most efficient approach - no polling, pure push.
 func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 	for {
+		if err := c.waitOperable(ctx); err != nil {
+			return err
+		}
 		// Still push, not polling: the read returns the INSTANT data arrives, so
 		// delivery latency is unchanged by the block interval. The interval only
 		// bounds how long an IDLE read sits there.
@@ -288,11 +393,13 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 		// Kubernetes runs out of grace and SIGKILLs the pod.
 		//
 		// Each blocked call holds one connection from the pool.
+		count := c.readCount()
+		consumerReadRequestedCount.WithLabelValues(c.config.SupplierOperatorAddress).Set(float64(count))
 		streams, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
 			Group:    c.config.ConsumerGroup,
 			Consumer: c.config.ConsumerName,
 			Streams:  []string{c.streamName, ">"},
-			Count:    c.config.BatchSize,
+			Count:    count,
 			Block:    blockInterval,
 		}).Result()
 		if err != nil {
@@ -337,6 +444,10 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			continue
 		}
 
+		replyBytes := consumerReadReplyBytes.WithLabelValues(c.config.SupplierOperatorAddress)
+		total, largest := payloadStats(streams[0].Messages)
+		replyBytes.Set(float64(total))
+		c.noteLargestEntry(largest)
 		for _, message := range streams[0].Messages {
 			msg, parseErr := c.parseMessage(message, c.streamName)
 			if parseErr != nil {
@@ -378,13 +489,12 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 				msg.Message.ServiceId,
 			).Inc()
 
-			// Send to channel (blocks if channel is full)
-			select {
-			case c.msgCh <- msg:
-			case <-ctx.Done():
-				return ctx.Err()
+			if err := c.send(ctx, msg); err != nil {
+				replyBytes.Set(0)
+				return err
 			}
 		}
+		replyBytes.Set(0)
 	}
 }
 
@@ -421,13 +531,16 @@ func (c *StreamsConsumer) claimIdleFromOtherConsumers(
 	// so a young entry filtered out here is simply not examined this pass --
 	// and it was not claimable anyway. claimPendingMessages restarts every
 	// drain from "0-0", so nothing is permanently skipped.
+	// The page size and the last-page test below must agree, so both read
+	// this one value.
+	pageSize := c.pageSize()
 	pending, err := c.client.XPendingExt(ctx, &redis.XPendingExtArgs{
 		Stream: c.streamName,
 		Group:  c.config.ConsumerGroup,
 		Idle:   minIdle,
 		Start:  start,
 		End:    "+",
-		Count:  pendingPageSize,
+		Count:  pageSize,
 	}).Result()
 	if err != nil {
 		if !isStreamNotFoundError(err) {
@@ -453,7 +566,7 @@ func (c *StreamsConsumer) claimIdleFromOtherConsumers(
 	// "<ms>-<seq>" is "<ms>-<seq+1>"; computing it avoids the exclusive-range
 	// syntax "(", which not every Redis implementation accepts.
 	next = nextStreamID(pending[len(pending)-1].ID)
-	if len(pending) < pendingPageSize {
+	if int64(len(pending)) < pageSize {
 		next = "0-0" // last page
 	}
 
@@ -624,9 +737,7 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 			}
 			msg.IsReclaim = true
 
-			select {
-			case c.msgCh <- msg:
-			case <-ctx.Done():
+			if c.send(ctx, msg) != nil {
 				return
 			}
 		}
@@ -651,6 +762,114 @@ func (c *StreamsConsumer) claimPendingMessages(ctx context.Context) {
 	}
 }
 
+// deliverOwnPending hands the read loop, once, every entry already pending under
+// this consumer's name when it starts, before it reads anything new.
+//
+// The name is per process (miner.UniqueConsumerName), so a supplier this
+// process releases and takes again gets a consumer with the SAME name, and what
+// the previous one could not hand back on its way out is this one's. Nothing
+// else reads it: ">" returns only new entries, and the reclaim skips an entry
+// its own consumer owns as an in-flight delivery. It waited for the process to
+// restart under another name.
+//
+// Once, not on every reconnection: past the first pass, what is pending under
+// the name is what this consumer delivered itself -- in the buffer, or being
+// processed. A pass cut short by an error resumes after the last entry it
+// handed over, so none is handed over twice.
+func (c *StreamsConsumer) deliverOwnPending(ctx context.Context) error {
+	if c.ownPendingDone {
+		return nil
+	}
+	if err := c.waitOperable(ctx); err != nil {
+		return err
+	}
+	after, err := c.eachOwnPending(ctx, c.ownPendingAfter, func(msg transport.StreamMessage) error {
+		return c.send(ctx, msg)
+	})
+	c.ownPendingAfter = after
+	if err != nil {
+		return err
+	}
+	c.ownPendingDone = true
+	return nil
+}
+
+// EachOwnPending calls fn with every entry pending under this consumer's name,
+// oldest first, parsed and marked a reclaim; fn owns the message. Each entry is
+// visited once, whatever fn does with it. It is meant for a consumer whose
+// producers have stopped (Stop): with nothing adding to the list, what it
+// visits is all that is left there.
+func (c *StreamsConsumer) EachOwnPending(ctx context.Context, fn func(transport.StreamMessage)) error {
+	_, err := c.eachOwnPending(ctx, "0", func(msg transport.StreamMessage) error {
+		fn(msg)
+		return nil
+	})
+	return err
+}
+
+// eachOwnPending pages through the entries pending under this consumer's name
+// with IDs after the given one ("" meaning from the start), calling fn with
+// each one that parses; one no longer in the stream is acknowledged, and one
+// that does not parse is acknowledged and deleted, as the read loop does. It stops at fn's first error and returns it, with the ID of
+// the last entry finished -- the point to resume from.
+func (c *StreamsConsumer) eachOwnPending(
+	ctx context.Context,
+	after string,
+	fn func(transport.StreamMessage) error,
+) (string, error) {
+	if after == "" {
+		after = "0"
+	}
+	for {
+		// An ID instead of ">" reads this consumer's own pending list and hands
+		// over nothing new. No BLOCK: go-redis sends one only for Block >= 0.
+		streams, err := c.client.XReadGroup(ctx, &redis.XReadGroupArgs{
+			Group:    c.config.ConsumerGroup,
+			Consumer: c.config.ConsumerName,
+			Streams:  []string{c.streamName, after},
+			Count:    c.pageSize(),
+			Block:    -1,
+		}).Result()
+		if err == redis.Nil {
+			return after, nil
+		}
+		if err != nil {
+			return after, fmt.Errorf("failed to read the pending entries of consumer %s: %w", c.config.ConsumerName, err)
+		}
+		if len(streams) == 0 || len(streams[0].Messages) == 0 {
+			return after, nil
+		}
+		for _, message := range streams[0].Messages {
+			if len(message.Values) == 0 {
+				// Deleted from the stream while still pending -- TrimStream's
+				// XTRIM leaves the pending entry behind. Nothing to hand over,
+				// and no producer's defect: the trim is where it went.
+				if ackErr := c.client.XAck(ctx, c.streamName, c.config.ConsumerGroup, message.ID).Err(); ackErr != nil {
+					c.logger.Debug().Err(ackErr).Str(logging.FieldMessageID, message.ID).Msg("failed to XAck a pending entry no longer in the stream")
+				} else {
+					c.logger.Debug().Str(logging.FieldMessageID, message.ID).Msg("dropped a pending entry no longer in the stream")
+				}
+				after = message.ID
+				continue
+			}
+			msg, parseErr := c.parseMessage(message, c.streamName)
+			if parseErr != nil {
+				deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
+				if delErr := c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID).Err(); delErr != nil {
+					c.logger.Debug().Err(delErr).Str(logging.FieldMessageID, message.ID).Msg("failed to XAckDel bad message")
+				}
+				after = message.ID
+				continue
+			}
+			msg.IsReclaim = true // the worker runs its duplicate check: it may have been processed
+			if fnErr := fn(msg); fnErr != nil {
+				return after, fnErr
+			}
+			after = message.ID
+		}
+	}
+}
+
 // parseMessage deserializes a Redis Stream message into a StreamMessage.
 // The streamName parameter is required for acknowledgment in multi-stream consumption.
 //
@@ -667,6 +886,7 @@ func (c *StreamsConsumer) parseMessage(message redis.XMessage, streamName string
 	if !ok {
 		return transport.StreamMessage{}, fmt.Errorf("message 'data' field is not a string")
 	}
+	consumerReadBytesTotal.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(len(dataStr)))
 
 	// Deserialize from protobuf binary format into a pooled MinedRelayMessage
 	// so we recycle the struct across relays instead of burning GC cycles on
@@ -700,23 +920,15 @@ func (c *StreamsConsumer) parseMessage(message redis.XMessage, streamName string
 // doing so removes the entry from the pending list the reclaim reads, so nothing
 // can rescue it.
 //
-// Two paths, both MEASURED against real servers on 2026-09-01:
+// It is XNACK SILENT (Redis 8.8.0 and newer; this release refuses to start on
+// anything older than 8.10). It marks the entry unowned and sets its delivery
+// time to 0, so it is claimable immediately regardless of any min-idle -- by
+// every consumer, including the one that let go, whose reclaim skips only the
+// entries it still owns. SILENT is the mode Redis documents for a consumer that
+// is shutting down: the delivery "did not count".
 //
-//   - XNACK SILENT, from Redis 8.8.0. Marks the entry unowned and sets its
-//     delivery time to 0, so it is claimable immediately regardless of any
-//     min-idle. SILENT is the mode Redis documents for a consumer that is
-//     shutting down: the delivery "did not count".
-//   - Older servers (the deployed cluster is 8.4.6) have no XNACK, so the entry
-//     is claimed BY ITSELF with a high IDLE, which makes it look idle enough for
-//     the next XAUTOCLAIM to take it right away. This goes through a raw Do
-//     because XClaimArgs does not expose IDLE in any go-redis version.
-//
-// A NOPERM is NOT treated as "unsupported": an ACL that forbids XNACK is a
-// deliberate operator decision, and degrading past it silently would hide it.
-// releaseIdleMillis is what the pre-8.8 fallback writes as the entry's idle
-// time: large enough that any reclaim's min-idle is already satisfied.
-const releaseIdleMillis = 24 * 60 * 60 * 1000
-
+// A NOPERM is reported as such: an ACL that forbids XNACK is a deliberate
+// operator decision, not a server that lacks the command.
 func (c *StreamsConsumer) ReleaseMessage(ctx context.Context, msg transport.StreamMessage) error {
 	// Same guard AckMessage keeps: a closed consumer must not claim to have
 	// handed anything over. The caller counts a failure here as abandoned, which
@@ -742,24 +954,10 @@ func (c *StreamsConsumer) ReleaseMessage(ctx context.Context, msg transport.Stre
 		return nil
 	}
 
-	errText := err.Error()
-	if strings.Contains(errText, "NOPERM") {
+	if strings.Contains(err.Error(), "NOPERM") {
 		return fmt.Errorf("XNACK is forbidden by ACL for this user, which is configuration rather than server version: %w", err)
 	}
-	if !strings.Contains(errText, "unknown command") {
-		return fmt.Errorf("failed to release message %s: %w", msg.ID, err)
-	}
-
-	// Pre-8.8 fallback. The IDLE is the whole trick: without it the entry stays
-	// young and a reclaim with a positive min-idle skips it.
-	claim := []any{
-		"XCLAIM", msg.StreamName, c.config.ConsumerGroup, c.config.ConsumerName, 0,
-		msg.ID, "IDLE", releaseIdleMillis, "JUSTID",
-	}
-	if claimErr := c.client.Do(ctx, claim...).Err(); claimErr != nil {
-		return fmt.Errorf("failed to release message %s via XCLAIM fallback: %w", msg.ID, claimErr)
-	}
-	return nil
+	return fmt.Errorf("failed to release message %s: %w", msg.ID, err)
 }
 
 // AckMessage acknowledges a StreamMessage using its embedded stream name.
@@ -786,6 +984,34 @@ func (c *StreamsConsumer) AckMessage(ctx context.Context, msg transport.StreamMe
 
 	ackedTotal.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
 	return nil
+}
+
+// StreamName is the one stream this consumer reads, and so the stream every
+// message it delivers must be acknowledged on.
+func (c *StreamsConsumer) StreamName() string { return c.streamName }
+
+// ConsumerGroup is the group this consumer reads and acknowledges in.
+func (c *StreamsConsumer) ConsumerGroup() string { return c.config.ConsumerGroup }
+
+// LastGeneratedID returns the stream's last-generated-id (XINFO STREAM), the
+// highest ID ever appended -- including entries not yet delivered to any
+// consumer. A caller comparing it against what it has already handled uses it
+// to tell "nothing more has ever been written" from "more exists, waiting to
+// be delivered or reclaimed".
+func (c *StreamsConsumer) LastGeneratedID(ctx context.Context) (string, error) {
+	info, err := c.client.XInfoStream(ctx, c.streamName).Result()
+	if err != nil {
+		return "", fmt.Errorf("failed to get stream info for %s: %w", c.streamName, err)
+	}
+	return info.LastGeneratedID, nil
+}
+
+// RecordAcked counts n messages acknowledged outside AckMessage -- by a script
+// that deletes them in the same call as other writes -- on the same series
+// AckMessage counts on, so the metric keeps meaning "acknowledged" whichever
+// path did it.
+func (c *StreamsConsumer) RecordAcked(n int) {
+	ackedTotal.WithLabelValues(c.config.SupplierOperatorAddress).Add(float64(n))
 }
 
 // TrimStream removes entries older than the specified duration using MINID.
@@ -827,25 +1053,162 @@ func (c *StreamsConsumer) TrimStream(ctx context.Context, maxAge time.Duration) 
 	return trimmed, nil
 }
 
+// Stop ends the consumer's producers -- the read loop and the reclaim -- and
+// waits for them, without closing it: AckMessage and ReleaseMessage still work
+// afterwards, which is what a teardown needs to hand back what is left under
+// this consumer's name once nothing can add to it. Idempotent; Close calls it.
+func (c *StreamsConsumer) Stop() {
+	c.mu.RLock()
+	cancel := c.cancelFn
+	c.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+	c.wg.Wait()
+}
+
 // Close gracefully shuts down the consumer.
 func (c *StreamsConsumer) Close() error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
-
 	if c.closed {
+		c.mu.Unlock()
 		return nil
 	}
-
 	c.closed = true
+	c.mu.Unlock()
 
-	// Cancel context to stop goroutines
-	if c.cancelFn != nil {
-		c.cancelFn()
-	}
-
-	// Wait for goroutines to finish
-	c.wg.Wait()
+	c.Stop()
 
 	c.logger.Info().Msg("Redis Streams consumer closed")
 	return nil
+}
+
+// readBudgetBytes is how many relay bytes one supplier's read may bring in,
+// counting what already waits in the delivery channel. XREADGROUP bounds a
+// read in entries only, so the COUNT is derived from it (readCount): with
+// relays of a MiB a fixed COUNT of 1000 read a GiB at once. It is per
+// supplier, so a miner holds up to this times its suppliers: a supplier only
+// needs what it consumes in one read round trip, a few MiB at the most.
+const readBudgetBytes = 8 << 20
+
+// readCount is the COUNT of the next read: what fits in readBudgetBytes, minus
+// the channel's bytes, at the largest entry seen lately, between 1 and
+// BatchSize. The first read asks for one entry, whatever its size; relays of a
+// few KiB get BatchSize from the second read on. It never returns 0: the read
+// is sized, not paused.
+func (c *StreamsConsumer) readCount() int64 {
+	largest := c.largestEntry.Load()
+	if largest <= 0 {
+		return 1
+	}
+	n := (readBudgetBytes - c.channelBytes.Load()) / largest
+	return min(max(n, 1), c.config.BatchSize)
+}
+
+// pageSize is the COUNT of one reclaim or own-pending page: pendingPageSize
+// entries, or fewer when entries are big -- the same budget as readCount, so a
+// page of 1 MiB relays does not bring in 50 MiB outside the channel's count.
+// Before any read it is pendingPageSize.
+func (c *StreamsConsumer) pageSize() int64 {
+	largest := c.largestEntry.Load()
+	if largest <= 0 {
+		return pendingPageSize
+	}
+	return min(max(readBudgetBytes/largest, 1), pendingPageSize)
+}
+
+// noteLargestEntry folds the largest entry of the last read into largestEntry:
+// a bigger one takes over at once, a smaller one lets it fall by a sixteenth
+// per read, so one big relay does not size a supplier's reads forever. An
+// empty read changes nothing.
+func (c *StreamsConsumer) noteLargestEntry(largest int64) {
+	if largest <= 0 {
+		return
+	}
+	prev := c.largestEntry.Load()
+	c.largestEntry.Store(max(largest, prev-prev/16))
+}
+
+// payloadStats is the total and the largest size of the `data` fields of a
+// read reply: the total is what the reply holds on the heap until it has been
+// parsed, the largest sizes the next read.
+func payloadStats(msgs []redis.XMessage) (total, largest int64) {
+	for _, m := range msgs {
+		if d, ok := m.Values["data"].(string); ok {
+			n := int64(len(d))
+			total += n
+			largest = max(largest, n)
+		}
+	}
+	return total, largest
+}
+
+// channelBytesOf is what one delivered relay adds to consumer_channel_bytes.
+// trackChannelSend adds it and MarkDelivered subtracts it, so both must read
+// the same size: the relay bytes the message carries, before the miner clears
+// them after the SMST update. Both fields, because a relay the relayer
+// compressed waits in the channel as RelayBytesS2 with RelayBytes empty.
+func channelBytesOf(msg transport.StreamMessage) (string, float64) {
+	if msg.Message == nil {
+		return "", 0
+	}
+	return msg.Message.SupplierOperatorAddress, float64(len(msg.Message.RelayBytes) + len(msg.Message.RelayBytesS2))
+}
+
+// send hands a parsed relay to the delivery channel, waiting while the channel
+// already holds readBudgetBytes -- "X bytes or N relays": the channel's
+// capacity bounds entries and this bounds bytes. The wait is soft: a relay is
+// let in as soon as the channel drops below the budget, whatever its own size,
+// and always when the channel is empty, so a relay bigger than the budget
+// passes and a drifted count can never wedge a producer. Up to the three
+// producers can pass the check together, so the channel can exceed the budget
+// by at most three relays. On ctx's end the relay is not handed over: it is
+// released to its pool and ctx's error returned.
+func (c *StreamsConsumer) send(ctx context.Context, msg transport.StreamMessage) error {
+	for c.channelBytes.Load() >= readBudgetBytes && len(c.msgCh) > 0 {
+		if c.sendWaitHook != nil {
+			c.sendWaitHook()
+		}
+		select {
+		case <-c.space:
+		case <-ctx.Done():
+			transport.ReleaseMinedRelayMessage(msg.Message)
+			return ctx.Err()
+		}
+	}
+	c.trackChannelSend(msg)
+	select {
+	case c.msgCh <- msg:
+		return nil
+	case <-ctx.Done():
+		// Parsed from the pool and never handed over.
+		c.MarkDelivered(msg)
+		transport.ReleaseMinedRelayMessage(msg.Message)
+		return ctx.Err()
+	}
+}
+
+// trackChannelSend counts a relay as waiting in the delivery channel. It runs
+// BEFORE the send: counting after it would let the receiver's MarkDelivered
+// land first and take the count below zero.
+func (c *StreamsConsumer) trackChannelSend(msg transport.StreamMessage) {
+	supplier, n := channelBytesOf(msg)
+	c.channelBytes.Add(int64(n))
+	consumerChannelBytes.WithLabelValues(supplier).Add(n)
+}
+
+// MarkDelivered is called by whoever takes a message from the channel Consume
+// returns, as soon as it takes it, so the channel's byte count stops counting
+// it. A nil consumer does nothing.
+func (c *StreamsConsumer) MarkDelivered(msg transport.StreamMessage) {
+	if c == nil {
+		return
+	}
+	supplier, n := channelBytesOf(msg)
+	c.channelBytes.Add(-int64(n))
+	consumerChannelBytes.WithLabelValues(supplier).Sub(n)
+	select {
+	case c.space <- struct{}{}:
+	default:
+	}
 }

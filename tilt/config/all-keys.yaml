@@ -1,20 +1,20 @@
 accounts:
   - name: faucet
-    address: pokt1awtlw5sjmw2f5lgj8ekdkaqezphgz88rdk93sk
-    private_key: 173f4a0aac81d4d4f5f27c6753130e6279d8b6a6a24a49f045217b0aa6e84b4b
-    mnemonic: "baby advance work soap slow exclude blur humble lucky rough teach wide chuckle captain rack laundry butter main very cannon donate armor dress follow"
+    address: pokt1n49vq2cjtn49epxvq9mkrm9vhhr3ca8nen6cf4
+    private_key: 18b23d48c22da485b835a168fbb54d42467318acd0c76820b1ec1ca56ff8258d
+    mnemonic: "outer dust proud leg gas cactus address excite merit lecture movie blouse tide eagle cruise foil jar shrimp tuna swarm virus obscure click junk"
   - name: pnf
-    address: pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw
-    private_key: f4086e33e2450fc9f102abfe3f2df511ce221a0d65414154f728f29930ccad30
-    mnemonic: "crumble shrimp south strategy speed kick green topic stool seminar track stand rhythm almost bubble pet knock steel pull flag weekend country major blade"
+    address: pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g
+    private_key: 6574b9560cadf928abcf7f9f40c369e906f694a0f6edb8d9d79179d620857406
+    mnemonic: "rain parade fragile call park attract rebel shallow torch regular response actor laundry quote confirm drink edge super angle kid shrug more drip drama"
   - name: validator1
     address: pokt18kk3aqe2pjz7x7993qp2pjt95ghurra9682tyn
     private_key: cc3b85b08ca33957246edbcb8b63fe8b24b1dc12a8fcd57cdd26d88eab74cd3d
     mnemonic: "creek path rule retire evolve vehicle bargain champion roof whisper prize endorse unknown anchor fashion energy club sauce elder parent cotton old affair visa"
   - name: app1
-    address: pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
-    private_key: 2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a
-    mnemonic: "mention spy involve verb exercise fiction catalog order agent envelope mystery text defy sing royal fringe return face alpha knife wonder vocal virus drum"
+    address: pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z
+    private_key: c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda
+    mnemonic: "drift fame pelican room future target acoustic fringe member tree when finger lunch any faint weekend average melody detail junk pioneer travel cost upset"
   - name: app2
     address: pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm
     private_key: 7e7571a8c61b0887ff8a9017bb4ad83c016b193234f9dc8b6a8ce10c7c483600
@@ -32,9 +32,9 @@ accounts:
     private_key: 50058b14b956cd3071aad111f3f2a0d9a00b7028edde6c713e838b7522a626de
     mnemonic: "arena please come track field recycle purse logic tail boil maple jump country seat ritual move cheap claw antique old castle test upon alert"
   - name: supplier1
-    address: pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj
-    private_key: cd41a98ac7ac3b190c345b88e2885422d7bb553c59bca03c6e2618d49f8b1c06
-    mnemonic: "cool industry busy tumble funny relax error state height like board wing goat emerge visual idle never unveil announce hill primary okay spatial frog"
+    address: pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj
+    private_key: 238ced09f61420f8553cae1e0b5cdf917fa75cc4185e7ae81ce2f56aae959d84
+    mnemonic: "merit vivid curve news clip heart cycle pizza audit one perfect settle position icon plunge ahead thrive true document rigid plunge crumble absurd rather"
   - name: supplier2
     address: pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa
     private_key: 7b2d353bf74a0aade09bf21928a9e195b54fd1309d19b11e63e16f92efdb610c
@@ -94,9 +94,9 @@ accounts:
   # FAKE SUPPLIERS (app keys) - for testing staking validation
   # These are APPLICATION addresses, NOT staked as suppliers - should be SKIPPED
   - name: supplier16_fake_app1
-    address: pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
-    private_key: 2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a
-    mnemonic: "mention spy involve verb exercise fiction catalog order agent envelope mystery text defy sing royal fringe return face alpha knife wonder vocal virus drum"
+    address: pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z
+    private_key: c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda
+    mnemonic: "drift fame pelican room future target acoustic fringe member tree when finger lunch any faint weekend average melody detail junk pioneer travel cost upset"
   - name: supplier17_fake_app2
     address: pokt184zvylazwu4queyzpl0gyz9yf5yxm2kdhh9hpm
     private_key: 7e7571a8c61b0887ff8a9017bb4ad83c016b193234f9dc8b6a8ce10c7c483600

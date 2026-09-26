@@ -88,8 +88,7 @@ const (
 	ComponentBalanceMonitor     = "balance_monitor"
 	ComponentBlockHealth        = "block_health_monitor"
 
-	ComponentRedisPublisher = "redis_streams_publisher"
-	ComponentRedisConsumer  = "redis_streams_consumer"
+	ComponentRedisConsumer = "redis_streams_consumer"
 
 	ComponentKeyManager       = "key_manager"
 	ComponentKeyRingProvider  = "keyring_provider"

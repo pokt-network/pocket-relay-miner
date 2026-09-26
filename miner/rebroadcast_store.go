@@ -29,6 +29,37 @@ type RebroadcastGroup struct {
 	SessionEnd int64
 }
 
+// RebroadcastStorage is the persistence the inclusion reconciler needs, stated
+// as a contract instead of as a Redis client.
+//
+// NOTHING IN THESE FIVE SIGNATURES IS REDIS-SHAPED, and that is the finding
+// rather than the design: they already spoke only in domain types --
+// RebroadcastPhase, supplier, session end, session id, payload bytes -- so the
+// abstraction was there and merely undeclared. Declaring it is not a redesign
+// and deliberately changes no semantics, no TTL and no error behaviour.
+//
+// Why it is declared over the WHOLE store and not over the part being added
+// today: a store with one injectable half and one half nailed to Redis is worse
+// than either extreme, because whoever writes a second backing can substitute
+// one half and not the other and ends up running two backings for one object.
+// Half an abstraction costs more than none.
+//
+// The contract that is easy to lose when reimplementing it: List returns an
+// empty map and no error for a group that does not exist -- absence is a normal
+// state here, not a failure -- and Delete of something absent is a no-op for the
+// same reason. Both are relied on by the reconciler on its ordinary path.
+type RebroadcastStorage interface {
+	Put(ctx context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64, sessionID string, payload []byte) error
+	List(ctx context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64) (map[string][]byte, error)
+	Delete(ctx context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64, sessionID string) error
+	CleanupIfEmpty(ctx context.Context, phase RebroadcastPhase, supplier string, sessionEnd int64) error
+	ActiveGroups(ctx context.Context, phase RebroadcastPhase) ([]RebroadcastGroup, error)
+}
+
+// The Redis implementation. The assertion sits here so that changing either the
+// interface or this type fails at compile time rather than at wiring.
+var _ RebroadcastStorage = (*RebroadcastStore)(nil)
+
 // RebroadcastStore persists the already-built MsgCreateClaim / MsgSubmitProof
 // bytes so the inclusion reconciler can re-broadcast an accepted-but-not-yet
 // included claim/proof while its window is open — without rebuilding from the
@@ -187,12 +218,23 @@ func (s *RebroadcastStore) ActiveGroups(ctx context.Context, phase RebroadcastPh
 	for _, m := range members {
 		// member = "{supplier}:{sessionEnd}". sessionEnd is the suffix after the
 		// last ':'; supplier (bech32) contains no ':'.
+		// A member this loop cannot parse means the GROUP it names is never
+		// reconciled again -- every pending claim or proof under it stops being
+		// checked, silently, for as long as the malformed member sits in the
+		// index. Both skips were bare continues.
+		//
+		// The signal is a metric and not a log because this store carries no
+		// logger, and because a metric is what an operator can alert on: the
+		// condition is bounded by a producer defect existing, so it must be
+		// visible without turning on debug logging.
 		idx := strings.LastIndex(m, ":")
 		if idx < 0 {
+			inclusionGroupAbandonedTotal.WithLabelValues(string(phase), abandonCauseIndexMalformed).Inc()
 			continue
 		}
 		sessionEnd, convErr := strconv.ParseInt(m[idx+1:], 10, 64)
 		if convErr != nil {
+			inclusionGroupAbandonedTotal.WithLabelValues(string(phase), abandonCauseIndexMalformed).Inc()
 			continue
 		}
 		groups = append(groups, RebroadcastGroup{Supplier: m[:idx], SessionEnd: sessionEnd})

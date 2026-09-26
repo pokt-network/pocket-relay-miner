@@ -3,17 +3,19 @@ package miner
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/hashicorp/go-version"
+	localclient "github.com/pokt-network/pocket-relay-miner/client"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
 // Compile-time interface assertions so the unused linter counts these types as used.
 var (
-	_ client.SharedQueryClient = (*mockSharedQueryClient)(nil)
-	_ client.BlockClient       = (*mockBlockClient)(nil)
-	_ client.Block             = (*mockBlock)(nil)
+	_ client.SharedQueryClient           = (*mockSharedQueryClient)(nil)
+	_ localclient.SubscribingBlockClient = (*mockBlockClient)(nil)
+	_ client.Block                       = (*mockBlock)(nil)
 )
 
 // mockSharedQueryClient implements client.SharedQueryClient for testing.
@@ -76,15 +78,30 @@ type mockBlockClient struct {
 	mu            sync.RWMutex
 	currentHeight int64
 	blockHash     []byte
+
+	// heightSequence, if non-empty, overrides currentHeight: the N-th LastBlock
+	// call returns heightSequence[N-1], clamped to the last entry once calls
+	// exceed its length. This lets a test move the height forward on a known
+	// call count instead of racing a background goroutine against a sleep.
+	heightSequence []int64
+	calls          atomic.Int32
 }
 
 func (m *mockBlockClient) LastBlock(ctx context.Context) client.Block {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
-	return &mockBlock{
-		height: m.currentHeight,
-		hash:   m.blockHash,
+	seq := m.heightSequence
+	hash := m.blockHash
+	height := m.currentHeight
+	m.mu.RUnlock()
+
+	if len(seq) > 0 {
+		idx := int(m.calls.Add(1)) - 1
+		if idx >= len(seq) {
+			idx = len(seq) - 1
+		}
+		height = seq[idx]
 	}
+	return &mockBlock{height: height, hash: hash}
 }
 
 func (m *mockBlockClient) CommittedBlocksSequence(ctx context.Context) client.BlockReplayObservable {
@@ -92,6 +109,14 @@ func (m *mockBlockClient) CommittedBlocksSequence(ctx context.Context) client.Bl
 }
 
 func (m *mockBlockClient) Close() {}
+
+// Subscribe delivers no blocks: these tests do not drive the block-driven loops.
+// The channel is left open rather than closed because a closed one makes the
+// coalescing loop report its trigger as lost, which would be a lie here; the
+// loop's own ctx.Done() case is what ends it.
+func (m *mockBlockClient) Subscribe(context.Context, int) <-chan *localclient.SimpleBlock {
+	return make(chan *localclient.SimpleBlock)
+}
 
 func (m *mockBlockClient) GetChainVersion() *version.Version {
 	v, _ := version.NewVersion("0.1.0")

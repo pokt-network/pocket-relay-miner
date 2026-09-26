@@ -9,10 +9,37 @@ def get_defaults():
 
             "debug": True,
         },
+        "localnet": {
+            # Which genesis and keys the stack starts from: "default" is
+            # tilt/config, "scale" is what scripts/localnet/gen-genesis.go writes
+            # to tilt/config/scale. Switching it on a running chain needs a
+            # fresh validator.
+            "profile": "default",
+
+            # THE localnet clock. One number feeds both the validator's
+            # timeout_commit and the miner's block_time_seconds, so they cannot
+            # drift apart -- and the miner derives its claim and proof deadlines
+            # from its value, so a divergence would miscompute them silently.
+            #
+            # 30s is beta's clock, and that is the reason it is the default
+            # (Jorge): beta is the fastest clock this software has to cope with,
+            # so the localnet runs there rather than somewhere no deployment
+            # lives. NOT VERIFIED, and offered only as a second reason: at 10s a
+            # load is believed never to have crossed target_num_relays (100k per
+            # service and session, the same number here and on mainnet), so the
+            # difficulty would never have been exercised -- nobody measured that.
+            #
+            # Loads that measure against mainnet raise it to 60 in
+            # tilt_config.yaml, which is gitignored -- that is the point of the
+            # knob: changing the clock for a run leaves the tree clean, and
+            # scripts/localonly/_state/loadgen/run-base111.sh refuses to run on
+            # a dirty tree.
+            "block_time_seconds": 30,
+        },
         "validator": {
             "enabled": True,
             "image": "ghcr.io/pokt-network/pocketd",
-            "tag": "0.1.34",
+            "tag": "0.1.35",
             "chain_id": "pocket",
 
             "ports": {
@@ -29,9 +56,28 @@ def get_defaults():
                 "redisFollower": 3,
             },
             "max_memory": "512Mi",
+            # Redis CPU, requests == limit. io-threads counts the main thread,
+            # so io-threads 4 is main + 3 I/O threads and leaves one core of
+            # this limit for the RDB fork child (redis.conf asks for one spare
+            # core). A contended host cannot take it below this.
+            "cpu_limit": "5000m",
         },
         "relayer": {
             "count": 2,
+
+            # THE relayer's CPU. One integer renders both the container's CPU
+            # limit and GOMAXPROCS, so they cannot drift apart -- which is
+            # exactly what had happened: the limit was raised to 8 cores and the
+            # GOMAXPROCS literal stayed at 4, under a comment that claimed they
+            # matched. The pod was allowed 8 cores and the Go runtime scheduled
+            # on 4, so a load ramp hitting that ceiling would have reported the
+            # runtime's limit as this software's.
+            #
+            # Cores, not a k8s quantity: GOMAXPROCS is an integer >= 1, so
+            # "500m" has no honest rendering, while an integer renders "8" and
+            # "8000m" with no arithmetic. requests.cpu stays a literal in the
+            # template -- it serves the scheduler, not the runtime.
+            "cpu_cores": 4,
             "base_port": 8180,  # Avoid conflict with redis_commander (8081)
             "metrics_base_port": 9190,  # Avoid conflict with validator_grpc (9090)
             "health_base_port": 8280,
@@ -39,13 +85,16 @@ def get_defaults():
             "config": {
                 "listen_addr": "0.0.0.0:8080",
                 "validation_mode": "optimistic",
-                "relay_meter": {
-                    "enabled": True,
-                },
             },
         },
         "miner": {
             "count": 2,
+
+            # THE miner's CPU -- see relayer.cpu_cores above for why this is one
+            # number. 4 is what the miner already had in BOTH places, so this
+            # changes nothing about how it runs: it only removes the second
+            # place that could have gone stale.
+            "cpu_cores": 4,
             "metrics_base_port": 9092,
             "pprof_port": 6065,  # Start at 6065 to avoid conflict with relayer pprof (6060-6064)
             "config": {},  # Config loaded from example file, overridden by tilt_config.yaml
@@ -79,5 +128,8 @@ def get_defaults():
             "tag": "feat-unified-qos",  # Configurable for speed
             "port": 3069,  # PATH HTTP port
             "metrics_port": 9096,
+            # Load and e2e go straight to the relayer, not through PATH, so it
+            # stays deployable but runs no pod unless a config asks for one.
+            "replicas": 0,
         },
     }

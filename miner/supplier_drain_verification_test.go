@@ -181,7 +181,8 @@ func TestOnSupplierReleased_DrainsEvenWhenStaked(t *testing.T) {
 
 	beforeStaked := testutil.ToFloat64(supplierDrainDecisionTotal.WithLabelValues("rebalance_release", "staked"))
 
-	err := mgr.onSupplierReleased(context.Background(), "pokt1staked")
+	err := mgr.onSupplierReleased(context.Background(), "pokt1staked", triggerRebalanceRelease)
+	mgr.waitDrains()
 	require.NoError(t, err, "rebalance release must not be vetoed by on-chain staking status")
 
 	afterStaked := testutil.ToFloat64(supplierDrainDecisionTotal.WithLabelValues("rebalance_release", "staked"))
@@ -248,7 +249,8 @@ func TestDrainMetric_RebalanceRelease(t *testing.T) {
 	beforeStaked := testutil.ToFloat64(supplierDrainDecisionTotal.WithLabelValues("rebalance_release", "staked"))
 
 	// Drain proceeds (issue #7) but the audit metric is still recorded.
-	_ = mgr.onSupplierReleased(context.Background(), "pokt1staked")
+	_ = mgr.onSupplierReleased(context.Background(), "pokt1staked", triggerRebalanceRelease)
+	mgr.waitDrains()
 
 	afterStaked := testutil.ToFloat64(supplierDrainDecisionTotal.WithLabelValues("rebalance_release", "staked"))
 	assert.Equal(t, beforeStaked+1, afterStaked,
@@ -347,3 +349,14 @@ func TestDrainMetric_RegisteredInMinerRegistry(t *testing.T) {
 	}
 	assert.True(t, found, "supplier_drain_decision_total should be registered in MinerRegistry")
 }
+
+// waitDrains blocks until every drain goroutine this manager started has
+// finished, so a test can assert on the audit without polling a clock.
+//
+// It lives in test code because that is the only thing that calls it, and the
+// dead-code gate is right to refuse a production method nothing in production
+// reaches. NOTE, and it is a decision NOT taken here: Close does not wait for a
+// drain either, so the audit log can still be lost on the way out. Making Close
+// wait would make shutdown as slow as the slowest blocked XREAD -- a trade for
+// the owner to make, not for this change.
+func (m *SupplierManager) waitDrains() { m.drainWG.Wait() }

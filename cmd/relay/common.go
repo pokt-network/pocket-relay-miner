@@ -264,7 +264,7 @@ func DisplayDiagnosticResult(client *relay_client.RelayClient, result *RelayResu
 			// Try to pretty-print JSON
 			var jsonData interface{}
 			if err := json.Unmarshal(result.Response.Payload, &jsonData); err == nil {
-				prettyJSON, _ := json.MarshalIndent(jsonData, "", "  ")
+				prettyJSON, _ := json.MarshalIndent(jsonData, "", "  ") //nolint:errcheck // Marshal fails only on channels, funcs, complex, NaN/Inf or cycles (encoding/json); none is reachable from this value
 				fmt.Printf("%s\n", prettyJSON)
 			} else {
 				// Not JSON or parse error - print raw

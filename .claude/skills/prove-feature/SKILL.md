@@ -81,6 +81,27 @@ than diagnosing from memory.
 - **If the criterion turned out to be wrong**, fix the criterion and say that you
   did, never silently after seeing what got built.
 
+## The coverage verdict is itself audited, or it is a prediction in a table
+
+The rows of a coverage table are written fast, from memory of what the tests are
+called. **A row filled in by READING is a prediction wearing the format of a
+measurement** -- and it lands in the one artifact whose entire job is to say what
+was measured, so it contaminates the only thing separating measured from assumed.
+
+Measured 2026-09-07, by the author against his own table. A criterion -- "nothing
+resends inside the safety margin" -- was credited to the test whose NAME matched
+it. That test seeds an entry without the field the new code keys on, so it never
+exercises the new mechanism at all: it covers the guard as it stood BEFORE the
+feature. The risk the criterion now names was introduced by the feature itself,
+and the test that actually covers it was a different one, credited to a different
+row.
+
+The check that catches this, and it is cheap: for each row, ask **which property
+of that observer does the work**, and whether the observer touches the code path
+the feature ADDED. A test that predates the feature can only cover the criterion
+as it was before -- if the feature changed what the criterion is exposed to, a
+pre-existing test is evidence about the old shape.
+
 ## The one-line test for whether this ran
 
 The report lists every acceptance criterion with the observer that exercises it,

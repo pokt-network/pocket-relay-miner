@@ -21,6 +21,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/transport"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // recordingProcessor is a RelayProcessor test double that captures the exact
@@ -109,9 +110,10 @@ func (m *mockServerStream) RecvMsg(msg interface{}) error {
 }
 
 // grpcPublishFixture wires a RelayGRPCService with a real signer, a recording
-// processor and publisher, and a pool that resolves to backendURL. relayPipeline
-// is left nil so ring-signature validation and metering are skipped -- the
-// publish routing under test runs regardless.
+// processor and publisher, a pool that resolves to backendURL, and a relay
+// pipeline whose validator accepts and whose meter is real: the service refuses
+// every relay without one. The request names ownerTestAppAddr, the only app that
+// meter knows, so relays are charged rather than served unmetered.
 type grpcPublishFixture struct {
 	svc       *RelayGRPCService
 	proc      *recordingProcessor
@@ -119,6 +121,9 @@ type grpcPublishFixture struct {
 	stream    *mockServerStream
 	supplier  string
 	serviceID string
+	pipeline  *RelayPipeline
+	redis     *redisutil.Client
+	charges   *chargeWriter
 }
 
 func newGRPCPublishFixture(t *testing.T, backendURL string) *grpcPublishFixture {
@@ -143,11 +148,14 @@ func newGRPCPublishFixture(t *testing.T, backendURL string) *grpcPublishFixture 
 		"first_healthy(test)",
 	)
 
+	pipeline, redisClient, _, charges := newOwnerTestPipelineWithCharges(t)
+
 	svc := NewRelayGRPCService(testLogger(), RelayGRPCServiceConfig{
 		ServiceConfigs: map[string]ServiceConfig{serviceID: {}},
 		ResponseSigner: rs,
 		Publisher:      pub,
 		RelayProcessor: proc,
+		RelayPipeline:  pipeline,
 		GetPool: func(string, string) *pool.Pool {
 			return healthyPool
 		},
@@ -165,7 +173,7 @@ func newGRPCPublishFixture(t *testing.T, backendURL string) *grpcPublishFixture 
 	relayRequest := &servicetypes.RelayRequest{
 		Meta: servicetypes.RelayRequestMetadata{
 			SessionHeader: &sessiontypes.SessionHeader{
-				ApplicationAddress:      "pokt1testapplication",
+				ApplicationAddress:      ownerTestAppAddr,
 				ServiceId:               serviceID,
 				SessionId:               "test-session-id",
 				SessionStartBlockHeight: 100,
@@ -186,6 +194,9 @@ func newGRPCPublishFixture(t *testing.T, backendURL string) *grpcPublishFixture 
 		stream:    &mockServerStream{ctx: ctx, req: relayRequest},
 		supplier:  supplier,
 		serviceID: serviceID,
+		pipeline:  pipeline,
+		redis:     redisClient,
+		charges:   charges,
 	}
 }
 

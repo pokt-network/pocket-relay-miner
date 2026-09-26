@@ -5,7 +5,7 @@ package relay
 // Exported so cmd package can bind them, and relay package files can use them directly.
 var (
 	RelayAppPrivKey     string
-	RelayGatewayPrivKey string // Gateway private key for ring signing (matches PATH's approach)
+	RelayGatewayPrivKey string // Gateway private key for ring signing (as a gateway signs)
 	// Key sources that avoid raw hex on the command line (resolved to the hex
 	// fields above, in memory, before signing). See resolveRelayKeys.
 	RelayKeyringBackend string // Cosmos keyring backend: file|test (keys.ValidateKeyringBackend)
@@ -31,6 +31,16 @@ var (
 	RelayVerbose        bool
 	RelayLocalnet       bool
 	RelayAllSuppliers   bool
+
+	// WebSocket handshake shape and adversarial cases. The two gateways in the
+	// wild do NOT send the same handshake, and until this existed the CLI could
+	// only produce one of them: it always names the supplier up front, which is
+	// the v2 shape. The other gateway sends only Target-Service-Id, App-Address
+	// and Rpc-Type, so the supplier arrives inside the first RelayRequest instead
+	// (v1) -- measured 2026-09-03 against both gateways. That is the path the relayer's
+	// owner-adoption rule exists for, and no gate at any level reached it.
+	RelayWSHandshake string // --ws-handshake: v1 (no supplier header) or v2
+	RelayWSCase      string // --ws-case: one adversarial scenario, asserted
 
 	// gRPC-mode targeting. Without these, `relay grpc` can only reach the
 	// localnet demo backend, so the one transport this CLI could not validate

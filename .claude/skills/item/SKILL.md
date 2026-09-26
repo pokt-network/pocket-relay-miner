@@ -24,12 +24,14 @@ each step DOES differs where the products differ.
    a restore. Automation does not make a missing criterion cheaper; it repeats
    the mistake once per item.
 
-   Jorge, same day, on being asked what he had to repeat: *"solo lo de karpathy,
-   que sigo teniendo que recordarlo"*. It had already been the finding of
+   Jorge, same day, on being asked what he had to repeat: *"just the karpathy
+   thing, which I keep having to remind you of"*. It had already been the finding of
    2026-08-25. A rule that fires only when someone remembers it is not a rule,
    which is why it is step one here and not advice.
-2. **A finding is not recorded until it is in `scripts/localonly/QUEUE-deep-cleanup.md`.**
-   A hand-over, a digest and a task list feel like three records and are none.
+2. **A finding is not recorded until it is proposed to the maintainer** (the
+   hand-over's "Proposed findings" section) with two questions: add it to
+   `scripts/localonly/QUEUE.md` or not, open an issue or not. Nothing is queued or
+   filed without his answer.
 3. **The work ends at asking for push and PR**, not at the hand-over. See
    `close-session`.
 
@@ -48,6 +50,41 @@ FAIL" had never been executed.
 
 If the item came from a review or an issue, re-derive the claim from the code.
 Somebody else's finding is a claim until you reproduce it.
+
+### WALK ONE CONCRETE CASE, AND REPRODUCE IT, BEFORE SIZING OR CHOOSING
+
+Jorge, 2026-09-03: *"we should always walk the example, to understand what and where
+it is happening, reproduce it — that gives us understanding and perspective; only
+that way do we see what is being attempted and look for the best solution."*
+
+Not "read the code": take ONE operator, ONE file, ONE request, and follow it hop by
+hop to the consequence — then RUN it. A probe, a failing test, a bare container. The
+reproduction is what turns a claim into a thing you can see.
+
+**"It is small" is a conclusion, and it needs measuring like any other.** Reading
+sizes the SYMPTOM; walking sizes the DEFECT, and they are routinely different by an
+order of magnitude. Three times in one session, 2026-09-02/03:
+
+- An inherited item said two keys collide and money is lost. Walked with a probe:
+  valid keys never collide, the trigger is ~1 in 10^39, and the outcome is
+  fail-closed. It was correctly SHRUNK, and the owner dropped it.
+- The same item's sibling was reported as "a misleading label, about three lines".
+  Walking one corrupt `.info` through both branches found TWO CONTRADICTORY POLICIES,
+  each written down and justified in the repo, one of which BLOCKED KEY WITHDRAWALS
+  — money. The three-line reading was the symptom.
+- A release fix looked provable against the gate's Redis. Running it against the
+  version the cluster actually runs showed the test would have passed without ever
+  reaching the line the fix changed.
+
+**It also fixes the council.** The council reads the space of approaches, and that
+space is only as good as the question. A question written from a symptom sends four
+members to deliberate where the defect is not — the failure this skill already warns
+about under "the question must carry the STRUCTURE". Walking the case IS how the
+structure is obtained.
+
+So the order is: walk one case → reproduce it → size it → only then invoke the
+council. And if the walk cannot be done, say so and say why; that is a finding about
+the item, not a licence to skip to the fix.
 
 ## Step 1c — list the assertions that already govern what you are about to change
 
@@ -69,12 +106,12 @@ not add a bare `go` statement, do not reach for `sync.Map`.
 
 **Invoke the council before the first edit of ANY issue or feature.** Not when the
 space looks wide, not when the fix looks hard, not only for product code — every
-item. Jorge, 2026-08-29, after a session skipped it: *"claramente te instrui que
-para cualquier fix usaras el council, porque? simple, para que la solucion sea la
-mejor, no la primera que se te ocurrio, para que te hagan dudar, re-pensar el
-caso."* And the reasoning behind it, his words: *"2 piensan mejor que 1 y 3 mejor
-que 2; aveces es ruido, pero del ruido filtrado, salen otros puntos importantes
-que ayudan a considerar la mejor solucion."*
+item. Jorge, 2026-08-29, after a session skipped it: *"I clearly instructed you to
+use the council for any fix — why? Simple: so the solution is the best one, not
+the first one that occurred to you, so they make you doubt, rethink the
+case."* And the reasoning behind it, his words: *"2 think better than 1, and 3
+better than 2; sometimes it's noise, but from the filtered noise come other
+important points that help arrive at the best solution."*
 
 **The council is not the review.** A review reads code you already wrote; the
 council reads the SPACE OF APPROACHES before you pick one. They do not substitute
@@ -134,8 +171,9 @@ than had been measured:
 - a clamp comment reasoning only about removals, when an addition in the same
   window produces the same reading.
 
-Jorge, that day: *"eso te pasa por no revisarte lo que vas a ir a escribir, te vas
-a escribir o hacer fix sin consultar alguien que te evalúe a vos."* The council
+Jorge, that day: *"that happens to you because you don't review what you're about
+to write; you go write it or make the fix without consulting someone who
+evaluates YOU."* The council
 evaluates the PLAN. Nothing was evaluating the author.
 
 So, before `git commit`, and on the diff you are about to commit:
@@ -188,6 +226,14 @@ not for the file you remember.
 
 ## Step 5 — the gates, bare
 
+**Bring your own test Redis DOWN first (`scripts/gates/redis.sh down`).** The gate
+starts its own on the same port with the same name, and one you left running from
+a targeted test run collides with it. What makes this worth a line rather than a
+footnote: the gate then fails on RACE, so the symptom names a category — a data
+race in the code just written — that has nothing to do with the cause. It does not
+merely fail to point at the problem, it points away from it. Measured 2026-09-05,
+one review away from reporting a race that did not exist.
+
 Use `gates`. Level 2 is the floor for "done"; level 3 is not optional for relay,
 claim, proof, settlement or metering. Report what did NOT run.
 
@@ -197,6 +243,77 @@ Name the angles in writing BEFORE reading: removed behaviour, cross-file callers
 double-counted metrics, language pitfalls, efficiency. Measured 2026-08-26, that
 pass over a 17-commit branch found a real defect the gates could not: a gate
 reporting its units in one mode and not the other.
+
+**INSERTING is the trigger, not moving — and it is mechanical.** Four orphaned
+comments in one session, and all four came from the same act: putting something
+new immediately BEFORE a declaration. The new code lands between a comment and
+the thing it documents, so the comment now heads the wrong symbol and the right
+one has none. The fourth was the sharpest: the displaced comment carried the very
+example being cited in the new code's own rationale, so the explanation ended up
+attached to the fix and torn off the metric that suffers the problem.
+
+No gate sees any of this — the result is syntactically fine, gofmt has no opinion,
+and this repo's linters run with documentation rules excluded. So it is not a care
+to remember, it is a command to run: after any insertion, diff the untouched
+region against HEAD and expect ZERO removed lines.
+
+**AND IT RECURRED ON 2026-09-08, from a session with this paragraph in context.**
+A type was inserted immediately before `func (qc *Clients) Proof()`, so godoc
+showed the new type's documentation opening with "Proof returns the proof module
+query client." and `Proof()` had none. The peer session found it by reading the
+diff; the command above was never run. **A rule that says "run this" and is
+enforced by nobody is read, not obeyed** — the same finding this repository has
+already paid for twice.
+
+It is also MECHANICAL, which is the part nobody had measured. Go's own convention
+is that a doc comment begins with the name of the thing it documents, so an
+orphaned comment is detectable by AST: parse every exported declaration that has
+a doc, compare the first word to the declared name. Measured that day across this
+tree: **17 violations out of 1077 documented exported declarations** — small
+enough to fix rather than freeze — and two of them are exactly this defect still
+live (`miner/metrics.go:1199` documents `RecordShutdownDrainedRelay` above
+`RecordRelayDroppedNoKey`; `miner/supplier_worker.go:854` documents
+`GetSupplierManager` above `GetSupplierCache`). The probe is kept at
+`scripts/localonly/probes/doccheck.go.txt`. Until it is wired into
+`internal/conventions`, this remains a paragraph, and the paragraph has now
+failed three times.
+
+**REPLACING A RUNTIME CHECK WITH A TYPE: enumerate what the check was ALSO
+doing.** A static type is stronger than a runtime assertion at the one question
+it answers, and it silently answers FEWER questions. Measured 2026-09-08: a
+`x.(interface{ Subscribe(...) })` assertion was replaced by declaring the field's
+type to require `Subscribe`, which is a real improvement — a drift now fails the
+build instead of disabling a subsystem at runtime. But a type-assert on a NIL
+interface returns `ok=false`, so that one `if !ok` had been covering two cases,
+and a nil interface satisfies any interface field. The replacement shipped with
+build, vet and targeted tests green, and died under the full gate with a
+`SIGSEGV` that took the whole package binary down reporting ZERO failed tests.
+
+The check is cheap and it is a question, not a habit: **write down every input
+the old check rejected, then confirm the type rejects each one.** For an
+interface the list always includes nil, and nil is the one a compiler cannot help
+with. The same shape applies to a `switch` replaced by a map, a validated string
+replaced by an enum, a runtime range check replaced by an unsigned type.
+
+**After MOVING code, `diff` against `HEAD` the part you did not mean to touch.**
+Inserting a function or a branch lands it next to somebody else's comment, and
+the failure is invisible to every gate because it is syntactically fine: measured
+twice on 2026-09-05, once between a doc comment and the type it documented — so
+the new function's doc opened by describing a different symbol and the type was
+left with none — and once inside a function body, where a new branch absorbed the
+explanation belonging to the branch below it. Neither `gofmt` nor `golangci-lint`
+sees this (no `.golangci.yml` in this repo means defaults, and the linters with
+documentation rules are not among them). The check that catches it costs one
+command:
+
+```
+diff <(git show HEAD:<file> | sed -n '/<start of the untouched block>/,/<end>/p') \
+     <(sed -n '/<start>/,/<end>/p' <file>)
+```
+
+Empty output means the neighbour is untouched. It found a blank line inserted by
+the move itself, between a comment and its `if`, that had not been there before —
+and it needs no maintenance, which a scanner for the same class would.
 
 **When you change how DATA IS PRODUCED, enumerate the consumers and walk each one
 separately.** Naming the angle is not doing it: measured 2026-08-29, "the
@@ -226,9 +343,9 @@ N rather than one that the two rounds above cost.
 
 **A finding that re-enters a DECIDED topic is not a finding — it is the decision
 being re-litigated, and it is branch 3.** Jorge, 2026-08-31, after three rounds
-each opened with a HIGH about the same tension: *"así dejamos de tener ya estas
-preguntaderas de HIGH, por el mismo topic. En realidad no son findings, es dar
-vuelta sobre lo mismo."*
+each opened with a HIGH about the same tension: *"that way we stop having these
+HIGH interrogations over and over, on the same topic. They're not really
+findings, it's just going in circles on the same thing."*
 
 The three rounds that day reported, as three separate HIGHs, three doorways into
 one room: a key source that reports a failure makes the manager hold its previous
@@ -251,9 +368,9 @@ So, when a round raises something whose ROOT is already decided:
   proof of it.
 
 **And the sharper half, which is what actually ended it** (Jorge, 2026-08-31,
-answering what he had to repeat): *"justamente el tema este de seguir trayendo
-items como HIGH que eran preguntas, se solucionaron presentando un caso y
-pidiendo claridad/opinion a mi."*
+answering what he had to repeat): *"exactly this thing of continuing to bring
+items as HIGH that were actually questions — those got solved by presenting a
+case and asking me for clarity/an opinion."*
 
 The three HIGHs of that day were not re-litigations of a DECIDED topic — nothing
 had been decided. They were **questions with no owner**, reported as defects

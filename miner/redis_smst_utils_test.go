@@ -135,6 +135,14 @@ func (s *RedisSMSTTestSuite) createTestRedisSMSTManager(supplierAddr string) *Re
 	return NewRedisSMSTManager(logger, s.redisClient, config)
 }
 
+// checkpoint commits the session's tree and writes its live_root, as the relay
+// batch does before it acknowledges: an update alone writes nothing to Redis.
+func (s *RedisSMSTTestSuite) checkpoint(mgr *RedisSMSTManager, sessionID string) {
+	resident, _, err := mgr.CheckpointLiveRoot(s.ctx, sessionID)
+	s.Require().NoError(err)
+	s.Require().True(resident)
+}
+
 // createInMemorySMST creates an in-memory SMST for comparison testing.
 // This uses the same hash functions as Redis SMST to ensure root hash equivalence.
 func (s *RedisSMSTTestSuite) createInMemorySMST() smt.SparseMerkleSumTrie {

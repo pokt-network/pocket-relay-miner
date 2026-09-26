@@ -40,8 +40,8 @@ func awaitBackendFrameType(t *testing.T, f *simWSFixture) int {
 // Each hop echoes the type it just read from that side; the two hops are
 // asserted independently because they cannot be paired -- one eth_subscribe
 // request yields N backend pushes. This mirrors poktroll
-// (pkg/relayer/proxy/websockets/bridge.go) and PATH (websockets/bridge.go),
-// both of which preserve symmetrically.
+// (pkg/relayer/proxy/websockets/bridge.go) and the gateway, both of which
+// preserve symmetrically.
 func assertFrameTypeRoundTrip(t *testing.T, frameType int) {
 	t.Helper()
 	f := newSimWSFixture(t)

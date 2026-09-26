@@ -35,7 +35,7 @@ func TestQueryCacheHitMissMetrics(t *testing.T) {
 			QueryTimeout: 5 * time.Second,
 		})
 		require.NoError(t, err)
-		defer qc.Close()
+		defer func() { _ = qc.Close() }()
 		ctx := context.Background()
 
 		// First call: cache cold → miss.
@@ -76,7 +76,7 @@ func TestQueryCacheHitMissMetrics(t *testing.T) {
 			QueryTimeout: 5 * time.Second,
 		})
 		require.NoError(t, err)
-		defer qc.Close()
+		defer func() { _ = qc.Close() }()
 		ctx := context.Background()
 
 		// shared/params is a single-slot cache (not a map), so the gauge is Set(1)
@@ -113,7 +113,7 @@ func TestQueryCacheHitMissMetrics(t *testing.T) {
 			QueryTimeout: 5 * time.Second,
 		})
 		require.NoError(t, err)
-		defer qc.Close()
+		defer func() { _ = qc.Close() }()
 		ctx := context.Background()
 
 		missBefore := testutil.ToFloat64(queryCacheMisses.WithLabelValues("session", "session"))

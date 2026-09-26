@@ -1,4 +1,4 @@
-// Test WebSocket relay through PATH gateway with session rollover handling
+// Test WebSocket relay through the gateway with session rollover handling
 // Usage: go run scripts/ws-test/main.go [service-id] [message-count]
 //
 // Examples:
@@ -166,7 +166,7 @@ func (c *wsClient) connect() error {
 func (c *wsClient) close() {
 	if c.conn != nil {
 		closeMsg := websocket.FormatCloseMessage(websocket.CloseNormalClosure, "client closing")
-		_ = c.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(time.Second))
+		_ = c.conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(time.Second)) //nolint:errcheck // best-effort courtesy frame on a connection that is going away; the close below does not depend on it
 		_ = c.conn.Close()
 		c.conn = nil
 	}

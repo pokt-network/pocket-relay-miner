@@ -41,6 +41,24 @@ func shrinkWSMaxMessageBytes(t *testing.T, limit int64) {
 // load-bearing assertion: with no read limit the oversized frame is forwarded
 // to the backend, so this test fails without the fix rather than passing on a
 // technicality.
+// establishConnection sends one valid signed relay and reads its response, so
+// the bridge has an owner and a dialled backend. Every raw-frame test below
+// needs it: a frame that does not parse as a RelayRequest is only forwarded once
+// a relay has established the connection, and the backend is not dialled at all
+// before that.
+func establishConnection(t *testing.T, f *simWSFixture) {
+	t.Helper()
+	rr := f.buildSignedRelay(t, FormatSimSessionID(f.clock(), "establish"))
+	bz, err := rr.Marshal()
+	require.NoError(t, err)
+	require.NoError(t, f.gwClient.WriteMessage(websocket.BinaryMessage, bz))
+	require.NoError(t, f.gwClient.SetReadDeadline(time.Now().Add(10*time.Second)))
+	_, _, err = f.gwClient.ReadMessage()
+	require.NoError(t, err, "the establishing relay must be served")
+	require.Equal(t, websocket.BinaryMessage, awaitBackendFrameType(t, f),
+		"the establishing relay must reach the backend")
+}
+
 func TestWebSocketBridge_OversizedGatewayFrameRejected(t *testing.T) {
 	// The cap under test is a threshold, not a magnitude: what matters is that a
 	// frame ABOVE it is refused. Exercising that at the production 15MB made the
@@ -50,6 +68,13 @@ func TestWebSocketBridge_OversizedGatewayFrameRejected(t *testing.T) {
 	shrinkWSMaxMessageBytes(t, 64*1024)
 
 	f := newSimWSFixture(t)
+
+	// The connection is established with a real relay FIRST. Without it the
+	// oversized frame would be refused by the raw-frame gate before the read
+	// limit ever ran, and this test would pass for a reason that has nothing to
+	// do with the cap it exists to pin.
+	establishConnection(t, f)
+	hitsAfterEstablish := f.backendHits.Load()
 
 	// 0xFF bytes cannot decode as a protobuf RelayRequest (0xFF is an unending
 	// varint continuation), guaranteeing the raw-forward path.
@@ -72,7 +97,7 @@ func TestWebSocketBridge_OversizedGatewayFrameRejected(t *testing.T) {
 	require.True(t, websocket.IsCloseError(err, CloseMessageTooBig),
 		"connection must close with 1009 (message too big), got: %v", err)
 
-	require.Equal(t, int32(0), f.backendHits.Load(),
+	require.Equal(t, hitsAfterEstablish, f.backendHits.Load(),
 		"an oversized frame must never reach the backend")
 }
 
@@ -85,6 +110,7 @@ func TestWebSocketBridge_MaxSizeFrameStillAccepted(t *testing.T) {
 	shrinkWSMaxMessageBytes(t, 64*1024)
 
 	f := newSimWSFixture(t)
+	establishConnection(t, f)
 
 	// Just under the cap — the tightest frame that must still be served, which is
 	// the boundary an off-by-one or an order-of-magnitude slip would break.
@@ -116,7 +142,7 @@ func TestCloseInfoForReadError(t *testing.T) {
 	}{
 		{
 			// A peer close frame must win: this is what carries session rollover
-			// (4000 SessionExpired from PATH) through to the backend.
+			// (4000 SessionExpired from the gateway) through to the backend.
 			name:     "peer close frame propagates its own code",
 			err:      &websocket.CloseError{Code: CloseSessionExpired, Text: "session ended"},
 			wantCode: CloseSessionExpired,

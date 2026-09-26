@@ -49,7 +49,7 @@ metadata:
   labels:
     app: relayer
 spec:
-  replicas: {}
+  replicas: {replicas}
   selector:
     matchLabels:
       app: relayer
@@ -62,7 +62,7 @@ spec:
         # pods on its own, and the relayer reads its config only at startup, so
         # without this a config edit would update the ConfigMap and leave the
         # running relayers on the old one.
-        pocket-relay-miner/config-hash: "{}"
+        pocket-relay-miner/config-hash: "{config_hash}"
     spec:
       initContainers:
       # Build a cosmos keyring from the SAME hex keys the keys_file holds, so the
@@ -78,7 +78,7 @@ spec:
       # DERIVED from the secret, so there is one source of truth for which keys
       # exist and no second place to update.
       - name: build-keyring
-        image: ghcr.io/pokt-network/pocketd:0.1.34
+        image: ghcr.io/pokt-network/pocketd:0.1.35
         # As the SAME user the app container runs as, so the keyring files are
         # born owned by it. The first attempt chowned them afterwards instead and
         # failed with "Operation not permitted": this image does not run as root,
@@ -176,7 +176,7 @@ spec:
           mountPath: /keyring-pass
       containers:
       - name: relayer
-        image: {}
+        image: {image}
         imagePullPolicy: Never
         command:
         - pocket-relay-miner
@@ -192,10 +192,39 @@ spec:
         - containerPort: 6060
           name: pprof
         env:
-        - name: GOMAXPROCS
-          value: "4"  # Match CPU limit - makes runtime.NumCPU() return 4
         - name: LOG_LEVEL
-          value: "{}"
+          value: "{log_level}"
+        # Soft limit for the Go runtime below the container limit, so the GC
+        # tightens before the kernel OOM-kills the pod. Same 7GiB/8Gi ratio the
+        # miner uses (miner.Tiltfile), which is why the miner survived the load
+        # of 2026-09-16 while Redis did not.
+        #
+        # NOTE: this is a SOFT limit -- GOMEMLIMIT makes the GC work harder, it
+        # does not refuse work. What refuses work is a cap, and there are two:
+        # the validation queue at maxValidationQueuedBytes = 256 MiB
+        # (proxy.go:2427), which answers 429 with Retry-After and counts
+        # rejectReasonValidationQueueFull; and an admission gate on the publish
+        # side at redis.batch_max_queued_mib (default 512 MiB, queueFull(),
+        # proxy.go:1097).
+        #
+        # MEASURED 2026-09-19 (run l3p, two miners), and it is why this limit is
+        # 8Gi rather than the sum of those caps: only the VALIDATION cap held.
+        # The relayer peaked at 6.793 GiB, 83% of this container, with the
+        # validation queue pinned at exactly 256,03 MiB and 1.965.145 relays
+        # refused -- that cap is what kept the pod alive. The publish gate never
+        # fired once (zero series for reason="publish_queue_full", against
+        # 1.965.145 for the validation one, so the query looked), because it
+        # reads batcher.QueuedBytes() -- the stage AFTER the publish worker pool
+        # -- while the backlog piles up BEFORE it: 2.214.146 tasks waiting in the
+        # publish subpool holding 1.324 MiB of bodies, which is 2,6x the gate's
+        # own threshold in a place the gate cannot see. Queue item 368.
+        #
+        # So do not size this container from "both caps held at once". The
+        # accounted payload at the peak was ~1,58 GiB and the working set was
+        # 6,79 GiB -- 4,3x, not the 2x rule of thumb, because a queued task costs
+        # far more than the body it is accounted for.
+        - name: GOMEMLIMIT
+          value: "7GiB"
         - name: POD_NAME
           valueFrom:
             fieldRef:
@@ -214,8 +243,12 @@ spec:
             cpu: "2000m"
             memory: "1Gi"
           limits:
-            cpu: "8000m"  # 8 cores - handles relay validation and signing at high RPS
-            memory: "4Gi"
+            # From relayer.cpu_cores. GOMAXPROCS is NOT set: automaxprocs
+            # (main.go:7) derives it from THIS limit, and a present env would make
+            # it return without touching anything (maxprocs.go:105-111). Handles
+            # relay validation and signing at high RPS.
+            cpu: "{cpu_limit}"
+            memory: "8Gi"
         readinessProbe:
           httpGet:
             path: /ready
@@ -265,10 +298,11 @@ spec:
     targetPort: 6060
     name: pprof
 """.format(
-        config["relayer"]["count"],
-        relayer_config_hash,
-        config["global"]["image"],
-        "debug" if config["global"]["debug"] else "info"
+        replicas=config["relayer"]["count"],
+        config_hash=relayer_config_hash,
+        image=config["global"]["image"],
+        log_level="debug" if config["global"]["debug"] else "info",
+        cpu_limit="{}000m".format(config["relayer"]["cpu_cores"]),
     )
 
     k8s_yaml(blob(relayer_yaml))

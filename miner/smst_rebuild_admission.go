@@ -1,0 +1,490 @@
+package miner
+
+// Rebuilding a compacted tree holds all of it in the heap: every leaf value
+// twice (the decoded frame, and the leaf node that copies it) and every inner
+// node. A cohort of sessions reaches its proof window at the same height, so
+// without a bound the process rebuilds as many trees at once as it has rebuild
+// workers, whatever they weigh.
+//
+// RebuildAdmission loads one tree at a time. The next is asked only once the
+// previous one is loaded, so its memory is already in the process when the
+// question is asked: does what this tree's load allocates, its estimate times
+// rebuildAllocatedHalvesPerRetained halves, fit between the heap and the
+// process's memory limit, less rebuildHeadroomBytes? The first answer reads the
+// heap's objects, which every allocation updates and which include garbage: a yes
+// never misses the tree loaded last. On a no, the question is asked again of
+// the live heap, measured by a GC that ended within recentGCWindow or by one
+// forced now, so garbage alone does not keep a tree waiting. The forced GC runs
+// with the admission unlocked: a collection of gigabytes takes seconds, and
+// the consumers and the metrics read the admission meanwhile. If it still does
+// not fit, or if the runtime is already over its limit, the tree waits for a
+// rebuild in flight to end. With nothing in flight it is admitted whatever it
+// weighs, so no proof is ever given up for memory.
+//
+// Proofs go first, the one that claims the most compute units first; a
+// compaction starts only when no proof waits. While a proof waits, the stream
+// consumers stop reading, so ingestion does not grow the heap the proof is
+// waiting for -- except a supplier's whose claim is waiting to drain its
+// stream, since that claim seals at its height cap with or without the relays.
+// The ingestion memory brake holds the consumers through the same pause.
+
+import (
+	"context"
+	"runtime"
+	"runtime/debug"
+	"runtime/metrics"
+	"slices"
+	"sync"
+	"sync/atomic"
+	"time"
+
+	"github.com/prometheus/client_golang/prometheus"
+
+	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
+	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/pokt-network/pocket-relay-miner/observability"
+)
+
+const (
+	// rebuildHeadroomBytes is what admission leaves free under the memory limit.
+	rebuildHeadroomBytes = 512 << 20
+
+	// recentGCWindow is how old a GC may be for the live heap it measured to
+	// stand in for a forced one.
+	recentGCWindow = 5 * time.Second
+
+	// rebuildLeafOverheadBytes is the heap a rebuilt leaf holds besides its
+	// value's two copies: its inner nodes, map entries and slice headers.
+	// Derived from a synthetic measurement (~2.1 KB per leaf with 700 B
+	// values, 1k-100k leaves) less those copies; rounded up.
+	rebuildLeafOverheadBytes = 1 << 10
+
+	// rebuildAllocatedHalvesPerRetained is, in halves, how many bytes a load
+	// allocates per byte its tree keeps: 3.5, from a synthetic probe that
+	// decoded and rebuilt trees of 1k-100k leaves and measured allocated over
+	// live retained. It is not a measured peak; the heap growth each load
+	// observes, ha_smst_rebuild_heap_growth_over_estimate, is what replaces it.
+	rebuildAllocatedHalvesPerRetained = 7
+
+	// compactionLeafEstimateBytes is what a compaction holds per leaf before
+	// its size is known: the leaves read from the hash, the encoded frame, and
+	// the rebuild that verifies it. Not calibrated for large relay values.
+	compactionLeafEstimateBytes = 4 << 10
+)
+
+// Admission kinds, used as a metric label.
+const (
+	rebuildKindProof      = "proof"
+	rebuildKindCompaction = "compaction"
+)
+
+// processRebuildAdmission is the process's admission, read by the oldest
+// proof wait gauge.
+var processRebuildAdmission atomic.Pointer[RebuildAdmission]
+
+var _ = observability.MinerFactory.NewGaugeFunc(
+	prometheus.GaugeOpts{
+		Namespace: metricsNamespace,
+		Subsystem: "smst",
+		Name:      "rebuild_oldest_proof_wait_seconds",
+		Help:      "How long the proof that has waited longest for memory to rebuild its compacted SMST has waited; 0 when none waits",
+	},
+	func() float64 { return processRebuildAdmission.Load().oldestProofWait().Seconds() },
+)
+
+// RebuildAdmission is shared by every supplier's SMST manager in a process. A
+// nil *RebuildAdmission admits everything at once.
+type RebuildAdmission struct {
+	logger logging.Logger
+	processMemory
+	// admitted, when set, runs on the admitted caller's goroutine before
+	// acquire returns. Tests only.
+	admitted func(kind string, value uint64)
+
+	mu       sync.Mutex
+	loading  bool
+	inFlight int
+	// generation moves when a tree loads or a rebuild ends. collectedAt is the
+	// generation a GC for a tree that did not fit started in, and collecting
+	// is set while that GC runs: until the generation moves another GC finds
+	// nothing new to free.
+	generation  uint64
+	collectedAt uint64
+	collecting  bool
+	waiting     []*rebuildWaiter
+	seq         uint64
+	proofs      int
+	flushes     map[string]int
+	changed     chan struct{}
+	// brakeClosed is the ingestion memory brake, closed since brakeClosedAt.
+	brakeClosed   bool
+	brakeClosedAt time.Time
+	// brakeOverages counts the evaluations in a row that found the runtime over
+	// its limit; brakeWithinSince is when a closed brake last started finding
+	// the process within its reopen thresholds. Only the brake's goroutine
+	// reads and writes them.
+	brakeOverages    int
+	brakeWithinSince time.Time
+
+	// gcMu serializes forced GCs.
+	gcMu sync.Mutex
+}
+
+// processMemory reads the process's memory. objects reads the heap's objects,
+// live and dead; live the heap the last GC marked; mapped the memory the
+// runtime's limit bounds; limit the runtime's memory limit; lastGC when the
+// last GC ended; gc runs a collection.
+type processMemory struct {
+	objects func() uint64
+	mapped  func() uint64
+	live    func() uint64
+	limit   func() uint64
+	lastGC  func() time.Time
+	gc      func()
+	now     func() time.Time
+}
+
+type rebuildWaiter struct {
+	kind     string
+	estimate uint64
+	value    uint64
+	seq      uint64
+	since    time.Time
+	ready    chan struct{}
+	granted  bool
+}
+
+// NewRebuildAdmission reads the runtime's heap and memory limit, and becomes
+// the one the process's metrics report. The limit is the one the process set
+// when it started; without one every tree fits, and trees still load one at a
+// time.
+func NewRebuildAdmission(logger logging.Logger) *RebuildAdmission {
+	a := newRebuildAdmission(logger, processMemory{
+		objects: runtimeHeapObjects,
+		live:    runtimeHeapLive,
+		mapped:  memlimit.Mapped,
+		limit:   runtimeMemoryLimit,
+		lastGC:  runtimeLastGC,
+		gc:      runtime.GC,
+		now:     time.Now,
+	})
+	processRebuildAdmission.Store(a)
+	return a
+}
+
+func newRebuildAdmission(logger logging.Logger, memory processMemory) *RebuildAdmission {
+	return &RebuildAdmission{
+		logger:        logging.ForComponent(logger, "smst_rebuild_admission"),
+		processMemory: memory,
+		generation:    1,
+		flushes:       make(map[string]int),
+		changed:       make(chan struct{}),
+	}
+}
+
+func runtimeHeapObjects() uint64 { return readRuntimeBytes("/memory/classes/heap/objects:bytes") }
+
+func runtimeHeapLive() uint64 { return readRuntimeBytes("/gc/heap/live:bytes") }
+
+func runtimeLastGC() time.Time {
+	var stats debug.GCStats
+	debug.ReadGCStats(&stats)
+	return stats.LastGC
+}
+
+func readRuntimeBytes(name string) uint64 {
+	sample := []metrics.Sample{{Name: name}}
+	metrics.Read(sample)
+	if sample[0].Value.Kind() != metrics.KindUint64 {
+		return 0
+	}
+	return sample[0].Value.Uint64()
+}
+
+func runtimeMemoryLimit() uint64 {
+	return uint64(debug.SetMemoryLimit(-1))
+}
+
+// acquire waits until a tree of estimate bytes may load. It returns loaded,
+// which the caller runs once the tree is in memory so the next one may be
+// asked, and release, which the caller runs when the tree is dropped. Both are
+// safe to run more than once, and release also ends a load that never
+// finished. Proofs are ordered by value, highest first; compactions come after
+// every proof. If ctx ends first it returns ctx's error and nothing to release.
+func (a *RebuildAdmission) acquire(ctx context.Context, kind string, estimate, value uint64) (loaded, release func(), err error) {
+	if a == nil {
+		return func() {}, func() {}, nil
+	}
+	w := &rebuildWaiter{kind: kind, estimate: estimate, value: value, since: time.Now(), ready: make(chan struct{})}
+
+	a.mu.Lock()
+	a.seq++
+	w.seq = a.seq
+	a.enqueue(w)
+	a.unlockAndDispatch()
+
+	select {
+	case <-w.ready:
+	case <-ctx.Done():
+		a.mu.Lock()
+		granted := w.granted
+		if !granted {
+			a.remove(w)
+			a.unlockAndDispatch()
+		} else {
+			a.mu.Unlock()
+		}
+		if granted {
+			_, release := a.slot(nil)
+			release()
+		}
+		return nil, nil, ctx.Err()
+	}
+
+	observability.SMSTRebuildWaitSeconds.WithLabelValues(kind).Observe(time.Since(w.since).Seconds())
+	if a.admitted != nil {
+		a.admitted(kind, value)
+	}
+	before := a.objects()
+	loaded, release = a.slot(func() {
+		after := a.objects()
+		observability.SMSTRebuildHeapGrowthOverEstimate.WithLabelValues(kind).
+			Observe(float64(after-min(after, before)) / float64(max(estimate, 1)))
+	})
+	return loaded, release, nil
+}
+
+// slot returns the loaded and release functions of one admitted tree.
+//
+// onLoaded, when set, runs once the tree is loaded.
+func (a *RebuildAdmission) slot(onLoaded func()) (loaded, release func()) {
+	var mu sync.Mutex
+	isLoaded, isReleased := false, false
+	loaded = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if isLoaded || isReleased {
+			return
+		}
+		isLoaded = true
+		// Read before the next tree is asked, which may force a GC.
+		if onLoaded != nil {
+			onLoaded()
+		}
+		a.mu.Lock()
+		a.loading = false
+		a.generation++
+		a.unlockAndDispatch()
+	}
+	release = func() {
+		mu.Lock()
+		defer mu.Unlock()
+		if isReleased {
+			return
+		}
+		isReleased = true
+		a.mu.Lock()
+		if !isLoaded {
+			a.loading = false
+		}
+		a.inFlight--
+		a.generation++
+		a.unlockAndDispatch()
+	}
+	return loaded, release
+}
+
+// enqueue places w by priority: proofs before compactions, a proof by value
+// descending, ties and compactions in arrival order.
+func (a *RebuildAdmission) enqueue(w *rebuildWaiter) {
+	i := len(a.waiting)
+	for j, queued := range a.waiting {
+		if admitsBefore(w, queued) {
+			i = j
+			break
+		}
+	}
+	a.waiting = slices.Insert(a.waiting, i, w)
+	if w.kind == rebuildKindProof {
+		a.proofs++
+		a.signal()
+	}
+	observability.SMSTRebuildWaiting.WithLabelValues(w.kind).Inc()
+}
+
+// admitsBefore reports whether x goes ahead of y.
+func admitsBefore(x, y *rebuildWaiter) bool {
+	if (x.kind == rebuildKindProof) != (y.kind == rebuildKindProof) {
+		return x.kind == rebuildKindProof
+	}
+	if x.kind == rebuildKindProof && x.value != y.value {
+		return x.value > y.value
+	}
+	return x.seq < y.seq
+}
+
+func (a *RebuildAdmission) remove(w *rebuildWaiter) {
+	i := slices.Index(a.waiting, w)
+	if i < 0 {
+		return
+	}
+	a.waiting = slices.Delete(a.waiting, i, i+1)
+	if w.kind == rebuildKindProof {
+		a.proofs--
+		a.signal()
+	}
+	observability.SMSTRebuildWaiting.WithLabelValues(w.kind).Dec()
+}
+
+// unlockAndDispatch dispatches, releases a.mu, and runs the GC dispatch asks
+// for with a.mu released, dispatching again after it. a.mu must be held.
+func (a *RebuildAdmission) unlockAndDispatch() {
+	for {
+		collect, started := a.dispatch(), a.generation
+		a.mu.Unlock()
+		if !collect {
+			return
+		}
+
+		a.collect(gcReasonRebuildAdmission)
+
+		a.mu.Lock()
+		a.collecting = false
+		a.collectedAt = started
+	}
+}
+
+// dispatch admits the head of the queue when no tree is loading and it fits,
+// or when nothing is in flight. The head blocks the rest: a smaller tree
+// behind it does not jump ahead. It reports whether the head needs a GC to be
+// asked again; the caller runs it without a.mu.
+func (a *RebuildAdmission) dispatch() (collect bool) {
+	if a.loading || a.collecting || len(a.waiting) == 0 {
+		return false
+	}
+	w := a.waiting[0]
+	// The runtime over its limit is collecting all it can: no GC makes room,
+	// so the tree waits for a rebuild in flight to end. A compaction waits even
+	// with nothing in flight -- only a proof is admitted whatever it weighs --
+	// and the memory brake's evaluation asks again once the runtime is back
+	// within its limit.
+	if a.mapped() > a.limit() && (a.inFlight > 0 || w.kind == rebuildKindCompaction) {
+		return false
+	}
+	if a.inFlight > 0 && !a.fits(w.estimate, a.objects) {
+		if a.collectedAt != a.generation {
+			a.collecting = true
+			return true
+		}
+		if !a.fits(w.estimate, a.live) {
+			return false
+		}
+	}
+	a.remove(w)
+	a.loading = true
+	a.inFlight++
+	w.granted = true
+	close(w.ready)
+	return false
+}
+
+// collect makes the live heap recent: it forces a GC unless one ended within
+// recentGCWindow, which a forced one also does.
+func (a *RebuildAdmission) collect(reason string) {
+	a.gcMu.Lock()
+	defer a.gcMu.Unlock()
+	if a.now().Sub(a.lastGC()) <= recentGCWindow {
+		return
+	}
+	a.gc()
+	forcedGCs.WithLabelValues(reason).Inc()
+}
+
+func (a *RebuildAdmission) fits(estimate uint64, heap func() uint64) bool {
+	limit := a.limit()
+	if limit <= rebuildHeadroomBytes {
+		return false
+	}
+	return heap()+estimate*rebuildAllocatedHalvesPerRetained/2 <= limit-rebuildHeadroomBytes
+}
+
+// signal wakes whoever waits on the pause changing.
+func (a *RebuildAdmission) signal() {
+	close(a.changed)
+	a.changed = make(chan struct{})
+}
+
+func (a *RebuildAdmission) oldestProofWait() time.Duration {
+	if a == nil {
+		return 0
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var oldest time.Time
+	for _, w := range a.waiting {
+		if w.kind == rebuildKindProof && (oldest.IsZero() || w.since.Before(oldest)) {
+			oldest = w.since
+		}
+	}
+	if oldest.IsZero() {
+		return 0
+	}
+	return time.Since(oldest)
+}
+
+// claimFlushWaiting records that supplier's claim is waiting for its stream to
+// drain, which lets that supplier's consumer read while proofs wait. The
+// returned function ends it.
+func (a *RebuildAdmission) claimFlushWaiting(supplier string) (done func()) {
+	if a == nil {
+		return func() {}
+	}
+	a.mu.Lock()
+	a.flushes[supplier]++
+	a.signal()
+	a.mu.Unlock()
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			a.mu.Lock()
+			if a.flushes[supplier]--; a.flushes[supplier] <= 0 {
+				delete(a.flushes, supplier)
+			}
+			a.signal()
+			a.mu.Unlock()
+		})
+	}
+}
+
+// IngestionPause returns supplier's view of the pause, for its stream consumer.
+func (a *RebuildAdmission) IngestionPause(supplier string) IngestionPauseView {
+	return IngestionPauseView{a: a, supplier: supplier}
+}
+
+// IngestionPauseView holds one supplier's stream consumer while a proof waits
+// for memory or the ingestion memory brake is closed, unless that supplier's
+// claim is waiting for its stream.
+type IngestionPauseView struct {
+	a        *RebuildAdmission
+	supplier string
+}
+
+// Paused reports whether the supplier's consumer must not read.
+func (v IngestionPauseView) Paused() bool {
+	if v.a == nil {
+		return false
+	}
+	v.a.mu.Lock()
+	defer v.a.mu.Unlock()
+	return (v.a.proofs > 0 || v.a.brakeClosed) && v.a.flushes[v.supplier] == 0
+}
+
+// PauseChanged returns a channel closed the next time Paused may have changed.
+func (v IngestionPauseView) PauseChanged() <-chan struct{} {
+	if v.a == nil {
+		return nil
+	}
+	v.a.mu.Lock()
+	defer v.a.mu.Unlock()
+	return v.a.changed
+}

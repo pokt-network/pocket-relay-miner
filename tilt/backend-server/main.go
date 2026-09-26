@@ -315,9 +315,10 @@ func handleWebSocket(cfg *Config) http.HandlerFunc {
 
 					requestsTotal.WithLabelValues("websocket", method).Inc()
 
-					// Check for test instructions (repeat_count and delay_ms)
+					// Check for test instructions (repeat_count, delay_ms, abrupt_close)
 					repeatCount := 1
 					delayMs := 0
+					abruptClose := false
 					if params, ok := jsonMsg["params"].([]interface{}); ok && len(params) > 0 {
 						if testParams, ok := params[0].(map[string]interface{}); ok {
 							if rc, ok := testParams["repeat_count"].(float64); ok {
@@ -326,7 +327,26 @@ func handleWebSocket(cfg *Config) http.HandlerFunc {
 							if dm, ok := testParams["delay_ms"].(float64); ok {
 								delayMs = int(dm)
 							}
+							if ac, ok := testParams["abrupt_close"].(bool); ok {
+								abruptClose = ac
+							}
 						}
+					}
+
+					// abrupt_close kills the TCP connection with no WebSocket
+					// close frame at all, which is what makes the relayer's
+					// gorilla reader manufacture CloseError{1006} locally.
+					// NetConn().Close() rather than conn.Close(): both skip the
+					// close frame, but going through the raw net.Conn states the
+					// intent. Used by the relay CLI's backend-abrupt-close case
+					// to prove the relayer never forwards a reserved close code
+					// to the gateway. A pod delete would NOT do: an RST gives
+					// "connection reset by peer", not the silent EOF gorilla
+					// turns into 1006.
+					if abruptClose {
+						log.Printf("abrupt_close requested: dropping TCP with no close frame")
+						_ = conn.NetConn().Close()
+						return
 					}
 
 					// Send multiple responses if instructed (simulates subscriptions)

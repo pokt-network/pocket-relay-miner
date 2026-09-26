@@ -21,6 +21,9 @@ func (s staticServiceFactor) GetServiceFactor(_ context.Context, _ string) (floa
 	return s.f, true
 }
 
+// Priced is always true here: a static factor is a price by construction.
+func (s staticServiceFactor) Priced() bool { return true }
+
 // TestCheckAndConsumeRelay_PerSupplierIsolation proves that two suppliers
 // serving the SAME session get INDEPENDENT meter state. The bug this
 // test guards against: a prior schema keyed the consumed counter and the
@@ -72,6 +75,7 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 	)
 	require.NoError(t, meter.Start(ctx))
 	defer func() { _ = meter.Close() }()
+	charges := newChargeWriter(t, meter, redisClient)
 
 	sessionID := "sess-shared"
 	supplierA := "pokt1supplier_a"
@@ -92,6 +96,8 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 	allowed, err := meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierA, sessionStartHeight, sessionEndHeight, 0)
 	require.NoError(t, err)
 	require.False(t, allowed, "supplier A must be rejected after %d relays (at cap)", perSupplierCap)
+
+	charges.flush()
 
 	// Inspect per-(session, supplier) state in Redis directly. A must be
 	// at its cap, B must be zero (or absent).
@@ -129,6 +135,8 @@ func TestCheckAndConsumeRelay_PerSupplierIsolation(t *testing.T) {
 	allowed, err = meter.CheckAndConsumeRelay(ctx, sessionID, appAddr, serviceID, supplierB, sessionStartHeight, sessionEndHeight, 0)
 	require.NoError(t, err)
 	require.False(t, allowed, "supplier B must be rejected after consuming its own per-supplier cap")
+
+	charges.flush()
 
 	// Final sanity: A and B counters live in distinct keys, both at cap.
 	consumedA, err = redisClient.Get(ctx, meter.consumedKey(sessionID, supplierA)).Int64()
@@ -169,6 +177,7 @@ func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
 	)
 	require.NoError(t, meter.Start(ctx))
 	defer func() { _ = meter.Close() }()
+	charges := newChargeWriter(t, meter, redisClient)
 
 	sessionID := "sess-cleanup"
 	supplierA, supplierB := "pokt1sa", "pokt1sb"
@@ -180,6 +189,8 @@ func TestClearSessionMeter_PerSupplierIsolation(t *testing.T) {
 		require.NoError(t, err)
 		require.True(t, allowed)
 	}
+
+	charges.flush()
 
 	// Clear ONLY A's meter.
 	require.NoError(t, meter.ClearSessionMeter(ctx, sessionID, supplierA))

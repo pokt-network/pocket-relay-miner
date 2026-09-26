@@ -33,8 +33,8 @@ session ends (E) ──► claim window [open … close] ──► proof window 
 4. **Settle** — on success the SMST and session state are cleaned up.
 
 Submission is **batched by session-end height** (one tx per supplier per window,
-not one per session) — the default. Disabling batching is discouraged: at scale
-it floods the node with txs and is a primary cause of missed windows.
+not one per session). There is no switch to disable it: 1 transaction per
+session would flood the node at scale and is a primary cause of missed windows.
 
 ### Inclusion reconciler (the in-window safety net)
 
@@ -48,7 +48,8 @@ owns, it:
    `MsgSubmitProof`, persisted to Redis at submit time).
 2. Checks on-chain inclusion (see below).
 3. **Present** → record `on_chain_found`, drop the persisted message.
-   **Missing + window open** → re-broadcast once (a single bounded self-try).
+   **Missing + window open** → re-broadcast (by default on every block the
+   window allows; see the cadence below).
    **Missing + window closed** → record `on_chain_missing`.
 
 Inclusion is resolved from **x/proof module state**, never the tx indexer, so it
@@ -62,12 +63,12 @@ works on nodes running `tx_index=null`:
   queryable afterwards — the durable signal lives on the claim, which the
   EndBlocker marks `VALIDATED` / `INVALID` (else `PENDING_VALIDATION`).
 
-Rebroadcast cadence is a **single self-try**, not per-block: txs are unordered
-with a window-spanning timeout, so re-sending every block just floods the mempool
-with duplicates. A proof that was broadcast-OK but evicted resends once at the
-window midpoint; a proof that was *built but never broadcast* (submit failed)
-resends early as an emergency self-heal. The resend count is persisted, so the
-cap holds across blocks and across failover.
+Rebroadcast cadence: by default there is **no cap**. A claim or proof still
+missing is re-sent on every block after the one it was submitted in, up to the
+block before its window closes (`rebroadcast_safety_blocks`, default 0, moves
+that earlier). Each re-send costs 1 transaction fee. `max_rebroadcasts` caps the
+re-sends per session (`0` = observe only: verify and record, never re-send). The
+resend count is persisted, so the cap holds across blocks and across failover.
 
 ### HA
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/pokt-network/pocket-relay-miner/miner"
 	"os"
 	"sort"
 	"text/tabwriter"
@@ -167,15 +168,8 @@ func listSubmissions(ctx context.Context, client *DebugRedisClient, supplier, se
 		if app != "" && record.Application != app {
 			continue
 		}
-		if failedOnly {
-			if record.ClaimSuccess && record.ProofSuccess {
-				continue // Skip successful
-			}
-		}
-		if successOnly {
-			if !record.ClaimSuccess || !record.ProofSuccess {
-				continue // Skip failed
-			}
+		if !matchesOutcomeFilters(record, failedOnly, successOnly) {
+			continue
 		}
 
 		records = append(records, record)
@@ -213,6 +207,39 @@ func listSubmissions(ctx context.Context, client *DebugRedisClient, supplier, se
 	return nil
 }
 
+// matchesOutcomeFilters applies --failed-only and --success-only.
+//
+// A claim nobody reported on is neither failed nor successful: it is unknown.
+// Counting unknown as failed is how 250 claims that had been broadcast and paid
+// showed up as failures in the command an operator runs during an incident.
+func matchesOutcomeFilters(r submissionRecord, failedOnly, successOnly bool) bool {
+	outcome := claimOutcome(r)
+	if failedOnly && outcome != miner.ClaimBroadcastRejected && r.ProofSuccess {
+		return false
+	}
+	if successOnly && (outcome != miner.ClaimBroadcastAccepted || !r.ProofSuccess) {
+		return false
+	}
+	return true
+}
+
+// claimOutcome reads what this miner was told about the claim broadcast,
+// falling back to the older boolean for records written by a binary that did
+// not have the field yet. A record with neither says nothing, and is rendered
+// and filtered as unknown.
+func claimOutcome(r submissionRecord) string {
+	if r.ClaimBroadcastOutcome != "" {
+		return r.ClaimBroadcastOutcome
+	}
+	if r.ClaimSuccess {
+		return miner.ClaimBroadcastAccepted
+	}
+	if r.ClaimTxHash != "" || r.ClaimErrorReason != "" {
+		return miner.ClaimBroadcastRejected
+	}
+	return ""
+}
+
 func printSubmissionsTable(records []submissionRecord) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	defer func() { _ = w.Flush() }()
@@ -221,9 +248,14 @@ func printSubmissionsTable(records []submissionRecord) {
 	_, _ = fmt.Fprintf(w, "-----------\t-------\t------------\t------------\t------\t--\t----------\n")
 
 	for _, r := range records {
-		claimStatus := "✗ FAILED"
-		if r.ClaimSuccess {
+		// Same three-way shape the proof side below already uses: "-" is "no
+		// answer yet", which is not the same as a failure.
+		claimStatus := "-"
+		switch claimOutcome(r) {
+		case miner.ClaimBroadcastAccepted:
 			claimStatus = "✓ SUCCESS"
+		case miner.ClaimBroadcastRejected:
+			claimStatus = "✗ FAILED"
 		}
 
 		proofStatus := "-"
@@ -280,6 +312,12 @@ func printSubmissionDetail(r *submissionRecord) {
 	}
 	fmt.Printf("Claim Height:      %d\n", r.ClaimSubmitHeight)
 	fmt.Printf("Current Height:    %d\n", r.ClaimCurrentHeight)
+	// Printed only when non-zero, like every other optional field here: a zero
+	// would read as "measured, and it was none" on the far more common record
+	// that was never resent at all.
+	if r.ClaimRebroadcasts > 0 {
+		fmt.Printf("Claim Resends:     %d\n", r.ClaimRebroadcasts)
+	}
 	if r.ClaimSubmitTimeUTC != "" {
 		fmt.Printf("Claim Time (UTC):  %s\n", r.ClaimSubmitTimeUTC)
 	} else if r.ClaimSubmitTimestamp > 0 {
@@ -290,6 +328,9 @@ func printSubmissionDetail(r *submissionRecord) {
 		fmt.Println("\n--- PROOF SUBMISSION ---")
 		if r.ProofHash != "" {
 			fmt.Printf("Proof Hash:        %s\n", r.ProofHash)
+		}
+		if r.ProofSizeBytes > 0 {
+			fmt.Printf("Proof Size:        %d bytes\n", r.ProofSizeBytes)
 		}
 		if r.ProofTxHash != "" {
 			fmt.Printf("Proof TX Hash:     %s\n", r.ProofTxHash)
@@ -304,6 +345,9 @@ func printSubmissionDetail(r *submissionRecord) {
 			fmt.Printf("Proof Height:      %d\n", r.ProofSubmitHeight)
 			fmt.Printf("Current Height:    %d\n", r.ProofCurrentHeight)
 		}
+		if r.ProofRebroadcasts > 0 {
+			fmt.Printf("Proof Resends:     %d\n", r.ProofRebroadcasts)
+		}
 		if r.ProofSubmitTimeUTC != "" {
 			fmt.Printf("Proof Time (UTC):  %s\n", r.ProofSubmitTimeUTC)
 		} else if r.ProofSubmitTimestamp > 0 {
@@ -314,32 +358,16 @@ func printSubmissionDetail(r *submissionRecord) {
 	fmt.Println("================================================================================")
 }
 
-// submissionRecord mirrors the SubmissionTrackingRecord from miner/submission_tracker.go
-type submissionRecord struct {
-	Supplier             string `json:"supplier"`
-	Service              string `json:"service"`
-	Application          string `json:"application"`
-	SessionID            string `json:"session_id"`
-	SessionStart         int64  `json:"session_start"`
-	SessionEnd           int64  `json:"session_end"`
-	ClaimHash            string `json:"claim_hash"`
-	ClaimTxHash          string `json:"claim_tx_hash"`
-	ClaimSuccess         bool   `json:"claim_success"`
-	ClaimErrorReason     string `json:"claim_error_reason,omitempty"`
-	ClaimSubmitHeight    int64  `json:"claim_submit_height"`
-	ClaimSubmitTimestamp int64  `json:"claim_submit_timestamp"`
-	ClaimSubmitTimeUTC   string `json:"claim_submit_time_utc"`
-	ClaimCurrentHeight   int64  `json:"claim_current_height"`
-	ProofHash            string `json:"proof_hash,omitempty"`
-	ProofTxHash          string `json:"proof_tx_hash,omitempty"`
-	ProofSuccess         bool   `json:"proof_success"`
-	ProofErrorReason     string `json:"proof_error_reason,omitempty"`
-	ProofSubmitHeight    int64  `json:"proof_submit_height,omitempty"`
-	ProofSubmitTimestamp int64  `json:"proof_submit_timestamp,omitempty"`
-	ProofSubmitTimeUTC   string `json:"proof_submit_time_utc,omitempty"`
-	ProofCurrentHeight   int64  `json:"proof_current_height,omitempty"`
-	NumRelays            int64  `json:"num_relays"`
-	ComputeUnits         int64  `json:"compute_units"`
-	ProofRequired        bool   `json:"proof_required"`
-	ProofRequirementSeed string `json:"proof_requirement_seed,omitempty"`
-}
+// The record IS the miner's, aliased rather than copied. It used to be a
+// hand-maintained mirror whose comment said "mirrors ..." and never said WHY,
+// and an unexplained duplication cannot be reviewed: nobody could judge whether
+// it was still necessary, because nobody had said it ever was. It drifted by
+// five fields — both on-chain outcomes, both inclusion heights and the proof
+// rejection cause — so this command could not show whether a claim had reached
+// a block, which is most of what the inclusion reconciler exists to determine.
+//
+// Sharing the type IS the check. There is no cycle to justify a copy: miner
+// imports nothing from cmd/, and streams.go in this very package already
+// imports miner. A field added to the record now reaches this command by
+// compiling, not by someone remembering.
+type submissionRecord = miner.SubmissionTrackingRecord

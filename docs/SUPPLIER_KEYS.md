@@ -24,7 +24,7 @@ keys:
 ```yaml
 # /keys/supplier-keys.yaml
 keys:
-  - 2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a
+  - c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda
   - fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
 ```
 
@@ -32,8 +32,9 @@ The operator address of each supplier is **derived from the key**, so the file
 lists key material only — there is nothing to keep in sync and no way for an
 address and its key to disagree.
 
-Mount it as a Kubernetes Secret or a compose secret. This is the simplest option
-and the one the local stack runs by default.
+Mount it read-only into the container (the compose example bind-mounts
+`supplier-keys.yaml`), or install it with mode 0600 on a host. This is the
+simplest option and the one the local stack runs by default.
 
 ### `keyring` — a Cosmos SDK keyring
 
@@ -196,7 +197,7 @@ serving those suppliers and make the miner drain their pipelines, on a transient
 read error, every 30 seconds.
 
 **An emptied key FILE is refused, and an emptied KEYRING is not.** The two
-sources answer this differently, on purpose. A `supplier.yaml` with no keys is
+sources answer this differently, on purpose. A `supplier-keys.yaml` with no keys is
 far more often a truncated write or a bad template than a request to stop
 serving, so it is refused and the previous keys are kept; to stop serving,
 unstake or stop the process.
@@ -267,6 +268,7 @@ resolved was usable.
 
 ```bash
 echo "$SECRET" | pocket-relay-miner relay jsonrpc --service <svc> \
+  --node <host:port> --chain-id <id> \
   --keyring-backend file --keyring-dir ~/.pocket \
   --app-key <name> --gateway-key <name>
 ```

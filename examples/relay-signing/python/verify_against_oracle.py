@@ -53,7 +53,7 @@ from typing import List, NamedTuple, Optional, Tuple
 import sign
 
 # The oracle's throwaway test keys (examples/relay-signing/oracle/main.go).
-APP_PRIV = bytes.fromhex("2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a")
+APP_PRIV = bytes.fromhex("c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda")
 GW_PRIV = bytes.fromhex("1a11ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ab11")
 
 # ring = [app, gateway]; the gateway holds the key, so it signs at index 1.

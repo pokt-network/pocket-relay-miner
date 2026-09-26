@@ -425,6 +425,30 @@ gate_unexplained_shortfall() {
     printf '%s' "$unexplained"
 }
 
+# gate_exact_cell_state SENT BILLED ANNOUNCED_DROPS
+#
+# The ONE verdict on a cell whose model is one request = one billed relay. The
+# settlement wait and the final assertion both call it, so they cannot disagree:
+# they used to, and a shortfall that was fully announced kept the wait going
+# until its timeout while the final assertion would have accepted it.
+#   settled    billed == sent
+#   over       billed > sent (foreign traffic or a double count)
+#   accounted  every missing relay was announced by the miner
+#   short      relays are missing that nobody announced: still pending while
+#              the wait runs, LOST once it is over
+gate_exact_cell_state() {
+    local sent="${1:-0}" billed="${2:-0}" dropped="${3:-0}"
+    if [ "$billed" -eq "$sent" ]; then
+        printf 'settled'
+    elif [ "$billed" -gt "$sent" ]; then
+        printf 'over'
+    elif [ "$(gate_unexplained_shortfall "$sent" "$billed" "$dropped")" -eq 0 ]; then
+        printf 'accounted'
+    else
+        printf 'short'
+    fi
+}
+
 # gate_served_shortfall EXPECTED SERVED
 #
 # Prints how many relays a cell asked for and did not get. A relay that never
@@ -463,4 +487,129 @@ gate_counter_delta() {
         return
     fi
     printf '%s' "$(( after - before ))"
+}
+
+# gate_expected_timeout_regime WINDOW_BLOCKS BLOCK_TIME_SECONDS
+#
+# Prints which regime (tx.TimeoutRegimeWindow or tx.TimeoutRegimeCeiling) a
+# broadcast on THIS localnet must fall into. Mirrors tx.WindowTimeout's own
+# min(window, ceiling) rule exactly, in milliseconds so no floating point
+# creeps in on either side: a fixed "ceiling must be 0" was only ever true at
+# the 30s-per-block clock this gate happened to be written against, and it is
+# FALSE by construction once block_time_seconds passes ~59s (10 blocks x 60s
+# is 600s against the ceiling below).
+#
+# The three ms constants are a SECOND copy of tx/tx_client.go's own
+# txTimeoutHardCeiling / txTimeoutSafetyMargin / txNonceSpread (which
+# tx_window_timeout_test.go already pins DefaultTxTimeoutMax to, as a Go
+# value) -- not a re-derivation from anything read at runtime. lib_test.sh
+# extracts both copies with sed and asserts they agree, so a change to either
+# side is caught there instead of drifting silently.
+gate_expected_timeout_regime() {
+    local window_blocks="${1:?window_blocks required}" block_time_s="${2:?block_time_seconds required}"
+    # Bash arithmetic treats a bare non-numeric token as a VARIABLE NAME, and
+    # an unset one as 0 -- "$(( 10 * abc * 1000 ))" is 0, not an error. A
+    # caller that passes something un-numeric (a stray "60.0", a value that
+    # never got read) would silently get a real regime back instead of
+    # anything a guard downstream could catch, so both arguments are checked
+    # here, not trusted from the caller.
+    case "$window_blocks" in '' | *[!0-9]* | 0) printf ''; return ;; esac
+    case "$block_time_s" in '' | *[!0-9]* | 0) printf ''; return ;; esac
+    local hard_ceiling_ms=600000
+    local safety_margin_ms=10000
+    local nonce_spread_ms=10
+    local ceiling_ms=$(( hard_ceiling_ms - safety_margin_ms - nonce_spread_ms ))
+    local window_ms=$(( window_blocks * block_time_s * 1000 ))
+    if [ "$window_ms" -gt "$ceiling_ms" ]; then
+        printf 'ceiling'
+    else
+        printf 'window'
+    fi
+}
+
+# gate_settle_timeout_min SESSION_BLOCKS CLAIM_OPEN CLAIM_CLOSE PROOF_OPEN PROOF_CLOSE BLOCK_TIME_S
+#
+# Prints, in whole minutes rounded UP, how long the live gate should wait for
+# a session to settle -- or an empty string if any input is not a positive
+# integer (same validation as gate_expected_timeout_regime, and for the same
+# reason: an un-numeric argument reaching bash arithmetic silently resolves to
+# 0 instead of erroring). Worst case: a session that has JUST started must
+# first run its full length (SESSION_BLOCKS), then wait out the claim window
+# (CLAIM_OPEN + CLAIM_CLOSE blocks after session end) and the proof window
+# that follows it (PROOF_OPEN + PROOF_CLOSE more) before an EndBlocker settles
+# it. A fixed default in minutes was only ever right at the clock it was
+# written against; the number MUST MOVE WITH THE CLOCK. 50% headroom on top
+# of the worst case absorbs poll granularity and the occasional slow block
+# without hard-coding a second clock-specific number.
+gate_settle_timeout_min() {
+    local session_blocks="${1:-}" claim_open="${2:-}" claim_close="${3:-}"
+    local proof_open="${4:-}" proof_close="${5:-}" block_time_s="${6:-}"
+    local v
+    for v in "$session_blocks" "$claim_open" "$claim_close" "$proof_open" "$proof_close" "$block_time_s"; do
+        case "$v" in '' | *[!0-9]* | 0) printf ''; return ;; esac
+    done
+    local worst_case_blocks=$(( session_blocks + claim_open + claim_close + proof_open + proof_close ))
+    local worst_case_seconds=$(( worst_case_blocks * block_time_s ))
+    local with_margin_seconds=$(( worst_case_seconds * 3 / 2 ))
+    printf '%s' $(( (with_margin_seconds + 59) / 60 ))
+}
+
+# gate_spanish_hits <repo dir> <words file> [--cached]
+#
+# Prints every line of a TRACKED file in <repo dir> that carries Spanish, as
+# `path:line:text`. Two levels, because accents alone miss most of it: measured
+# on c1cc164^, 11 of the 25 files that commit translated had no accented letter.
+#   * the accented vowels, the tilde n and the two inverted marks, written as an
+#     ALTERNATION of whole characters, never a bracket class: a class is a list
+#     of BYTES outside a UTF-8 locale, so under LC_ALL=C it matched the lead byte
+#     of the multiplication sign and flagged 66 files (measured); the alternation
+#     matches the same 0 in both locales. The characters are spelled as UTF-8
+#     octal bytes so this file carries none of them and is scanned like any other;
+#   * the whole words of <words file> (`-w`, case-insensitive). Without `-w` a
+#     short Spanish word matches inside ordinary English ones.
+#
+# `git grep` scans tracked files only, by construction, and `-I` skips binaries.
+# The words file itself is excluded by pathspec -- it is the only exclusion, and
+# every line of it is a Spanish word. --cached reads the index instead of the
+# working tree, which is what the pre-commit hook is about to commit.
+#
+# Returns 0 when nothing matched, 1 when something did, and 2 when it could not
+# look: an unreadable or malformed word list, a git error, or ZERO tracked files
+# to scan -- a broken matcher, not a clean tree. Like every helper here it never
+# calls gate_fail; the caller does, on the status.
+gate_spanish_hits() {
+    local dir="$1" words_file="$2" mode="${3:-}" words accents out rc hits=''
+    local -a src=()
+    local exclude=':(exclude)scripts/gates/spanish-words.txt'
+    [ "$mode" = --cached ] && src=(--cached)
+
+    # a e i o u acute, n tilde, upper then lower case, u and U diaeresis, then
+    # inverted ? and !.
+    accents="$(printf '\303\201|\303\211|\303\215|\303\223|\303\232|\303\221|\303\241|\303\251|\303\255|\303\263|\303\272|\303\261|\303\274|\303\234|\302\277|\302\241')"
+
+    words="$(grep -v '^[[:space:]]*#' "$words_file" 2>/dev/null | tr -d '[:blank:]' |
+        grep -v '^$' | paste -sd'|' -)"
+    [ -n "$words" ] || return 2
+    case "$words" in *[!a-z\|]*) return 2 ;; esac
+
+    [ "$(gate_spanish_scanned "$dir")" -gt 0 ] || return 2
+
+    out="$(git -C "$dir" grep --no-color -I -n "${src[@]}" -E "$accents" -- . "$exclude" 2>&1)"
+    rc=$?
+    case "$rc" in 0) hits="$out" ;; 1) ;; *) return 2 ;; esac
+
+    out="$(git -C "$dir" grep --no-color -I -n "${src[@]}" -w -i -E "$words" -- . "$exclude" 2>&1)"
+    rc=$?
+    case "$rc" in 0) hits="${hits:+$hits$'\n'}$out" ;; 1) ;; *) return 2 ;; esac
+
+    [ -n "$hits" ] || return 0
+    printf '%s\n' "$hits" | sort -u
+    return 1
+}
+
+# gate_spanish_scanned <repo dir> -- how many tracked files gate_spanish_hits
+# looks at: every tracked path except the word list. Its own helper so the
+# static gate reports the same number the helper refuses to run on when zero.
+gate_spanish_scanned() {
+    git -C "$1" ls-files -- . ':(exclude)scripts/gates/spanish-words.txt' 2>/dev/null | grep -c . || true
 }

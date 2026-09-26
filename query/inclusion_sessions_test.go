@@ -27,27 +27,36 @@ func newProofClientForTest(t *testing.T, address string) *proofQueryClient {
 	return pc
 }
 
+// The root is derived from the session id so an assertion can tell WHICH claim's
+// root travelled. A shared literal would pass even if every entry carried the
+// same root, which is the mistake the reconciler would then make silently: it
+// compares that root against the one the miner stored for that session.
 func claimWithSession(supplier, sessionID string) prooftypes.Claim {
 	return prooftypes.Claim{
 		SupplierOperatorAddress: supplier,
 		SessionHeader:           &sessiontypes.SessionHeader{SessionId: sessionID},
-		RootHash:                []byte("root"),
+		RootHash:                []byte("root-" + sessionID),
 	}
 }
 
-// claimWithStatus builds a claim carrying a ProofValidationStatus — the field
-// GetSupplierProvenSessions filters on (only VALIDATED counts as proof-included).
+// claimWithStatus builds a claim carrying a ProofValidationStatus — the field the
+// proof phase discriminates on (only VALIDATED confirms proof inclusion).
 func claimWithStatus(supplier, sessionID string, status prooftypes.ClaimProofStatus) prooftypes.Claim {
 	c := claimWithSession(supplier, sessionID)
 	c.ProofValidationStatus = status
 	return c
 }
 
-// Happy path: only claims whose proof is VALIDATED count as proven. A proof is
-// removed from module state in the EndBlocker of its submission block, so proof
-// inclusion is read from the claim's ProofValidationStatus — PENDING_VALIDATION
-// (proof not yet validated) and INVALID (proof rejected) must NOT appear.
-func TestGetSupplierProvenSessions_Success(t *testing.T) {
+// The whole point of the unified read: one walk carries THREE distinct answers,
+// where the pair of queries it replaced could only carry a yes/no each. A proof
+// is removed from module state in the EndBlocker of its own block, so proof
+// inclusion is read from the claim's ProofValidationStatus.
+//
+// Asserting the VALUES and not membership is deliberate. The old proven-set test
+// could only say "sess-invalid is absent", which is true both when the status is
+// read correctly and when it is dropped on the floor; here a rejected claim has
+// to be PRESENT and carry SessionProofRejected, which only one of those does.
+func TestGetSupplierSessionStates_EachStatusKeepsItsOwnMeaning(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()
 
@@ -65,19 +74,39 @@ func TestGetSupplierProvenSessions_Success(t *testing.T) {
 	}
 
 	pc := newProofClientForTest(t, address)
-	got, err := pc.GetSupplierProvenSessions(context.Background(), supplier)
+	got, err := pc.GetSupplierSessionStates(context.Background(), supplier)
 	require.NoError(t, err)
-	require.Len(t, got, 1, "only the VALIDATED claim is proven")
-	_, hasValidated := got["sess-validated"]
-	require.True(t, hasValidated, "VALIDATED claim must be in the proven set")
-	_, hasPending := got["sess-pending"]
-	require.False(t, hasPending, "PENDING_VALIDATION claim must NOT be proven (proof still missing)")
-	_, hasInvalid := got["sess-invalid"]
-	require.False(t, hasInvalid, "INVALID claim must NOT be proven (proof was rejected)")
+
+	require.Equal(t, map[string]SessionClaim{
+		"sess-validated": {ProofState: SessionProofValidated, RootHash: []byte("root-sess-validated")},
+		"sess-pending":   {ProofState: SessionProofPending, RootHash: []byte("root-sess-pending")},
+		"sess-invalid":   {ProofState: SessionProofRejected, RootHash: []byte("root-sess-invalid")},
+	}, got, "every claim is carried, and each keeps the status AND the root the chain gave it")
 }
 
-// Pagination is followed to completion across multiple pages.
-func TestGetSupplierProvenSessions_FollowsPagination(t *testing.T) {
+// An unrecognised status must become Unknown, NEVER Rejected. This is the whole
+// reason the enum is translated at this boundary instead of being handed through:
+// callers treat Unknown as "not proven, keep trying", and a fourth value added
+// upstream that arrived as a rejection would silently stop resends that were
+// still worth making. Driven through the mapper rather than the wire because a
+// value poktroll has not defined yet cannot be built from its own enum.
+func TestStateFromClaimStatus_AnUnrecognisedStatusIsUnknownNotRejected(t *testing.T) {
+	require.Equal(t, SessionProofValidated, stateFromClaimStatus(prooftypes.ClaimProofStatus_VALIDATED))
+	require.Equal(t, SessionProofRejected, stateFromClaimStatus(prooftypes.ClaimProofStatus_INVALID))
+	require.Equal(t, SessionProofPending, stateFromClaimStatus(prooftypes.ClaimProofStatus_PENDING_VALIDATION))
+
+	for _, raw := range []int32{3, 4, 99, -1} {
+		got := stateFromClaimStatus(prooftypes.ClaimProofStatus(raw))
+		require.Equal(t, SessionProofUnknown, got,
+			"status %d must map to Unknown so callers keep resending; mapping it to "+
+				"Rejected by elimination would abandon a session the chain never condemned", raw)
+	}
+}
+
+// Pagination is followed to completion, and the state survives the page boundary
+// — a second page whose claims lost their status would be invisible to a test
+// that only counted sessions.
+func TestGetSupplierSessionStates_FollowsPagination(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()
 
@@ -95,24 +124,27 @@ func TestGetSupplierProvenSessions_FollowsPagination(t *testing.T) {
 		}
 		require.Equal(t, []byte("next"), req.GetPagination().GetKey())
 		return &prooftypes.QueryAllClaimsResponse{
-			Claims: []prooftypes.Claim{claimWithStatus(supplier, "p2", prooftypes.ClaimProofStatus_VALIDATED)},
+			Claims: []prooftypes.Claim{claimWithStatus(supplier, "p2", prooftypes.ClaimProofStatus_INVALID)},
 		}, nil
 	}
 
 	pc := newProofClientForTest(t, address)
-	got, err := pc.GetSupplierProvenSessions(context.Background(), supplier)
+	got, err := pc.GetSupplierSessionStates(context.Background(), supplier)
 	require.NoError(t, err)
 	require.Equal(t, 2, calls, "pagination must be followed across both pages")
-	require.Len(t, got, 2)
-	_, has1 := got["p1"]
-	_, has2 := got["p2"]
-	require.True(t, has1)
-	require.True(t, has2)
+	require.Equal(t, map[string]SessionClaim{
+		"p1": {ProofState: SessionProofValidated, RootHash: []byte("root-p1")},
+		"p2": {ProofState: SessionProofRejected, RootHash: []byte("root-p2")},
+	}, got, "state and root both survive the page boundary")
 }
 
-// Errors from the chain are surfaced (so the reconciler can fall back to a
-// poll_error outcome rather than silently treating everything as missing).
-func TestGetSupplierProvenSessions_Error(t *testing.T) {
+// Errors from the chain are surfaced, so the reconciler takes its degraded path
+// rather than silently treating every session as missing.
+//
+// There used to be a second, identical error test for the claim-side query. Both
+// methods were the same pagination body under different predicates, so the pair
+// exercised one code path twice; with one method there is one test.
+func TestGetSupplierSessionStates_Error(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()
 
@@ -121,50 +153,13 @@ func TestGetSupplierProvenSessions_Error(t *testing.T) {
 	}
 
 	pc := newProofClientForTest(t, address)
-	_, err := pc.GetSupplierProvenSessions(context.Background(), "pokt1supplier")
+	_, err := pc.GetSupplierSessionStates(context.Background(), "pokt1supplier")
 	require.Error(t, err)
 }
 
-func TestGetSupplierClaimSessions_FollowsPagination(t *testing.T) {
-	_, address, cleanup, mock := setupMockQueryServer(t)
-	defer cleanup()
-
-	const supplier = "pokt1supplier"
-	var calls int
-	mock.allClaimsFunc = func(_ context.Context, req *prooftypes.QueryAllClaimsRequest) (*prooftypes.QueryAllClaimsResponse, error) {
-		calls++
-		if len(req.GetPagination().GetKey()) == 0 {
-			return &prooftypes.QueryAllClaimsResponse{
-				Claims:     []prooftypes.Claim{claimWithSession(supplier, "c1")},
-				Pagination: &sdkquery.PageResponse{NextKey: []byte("next")},
-			}, nil
-		}
-		require.Equal(t, []byte("next"), req.GetPagination().GetKey())
-		return &prooftypes.QueryAllClaimsResponse{Claims: []prooftypes.Claim{claimWithSession(supplier, "c2")}}, nil
-	}
-
-	pc := newProofClientForTest(t, address)
-	got, err := pc.GetSupplierClaimSessions(context.Background(), supplier)
-	require.NoError(t, err)
-	require.Equal(t, 2, calls)
-	require.Len(t, got, 2)
-}
-
-func TestGetSupplierClaimSessions_Error(t *testing.T) {
-	_, address, cleanup, mock := setupMockQueryServer(t)
-	defer cleanup()
-
-	mock.allClaimsFunc = func(_ context.Context, _ *prooftypes.QueryAllClaimsRequest) (*prooftypes.QueryAllClaimsResponse, error) {
-		return nil, status.Error(codes.Unavailable, "node down")
-	}
-	pc := newProofClientForTest(t, address)
-	_, err := pc.GetSupplierClaimSessions(context.Background(), "pokt1supplier")
-	require.Error(t, err)
-}
-
-// A VALIDATED claim with a nil SessionHeader is skipped safely (no panic, no
-// phantom session id) — covers the only branch that dereferences the header.
-func TestGetSupplierProvenSessions_NilHeaderSkipped(t *testing.T) {
+// A claim with a nil SessionHeader is skipped safely (no panic, no phantom
+// session id) — it covers the only branch that dereferences the header.
+func TestGetSupplierSessionStates_NilHeaderSkipped(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()
 
@@ -177,12 +172,19 @@ func TestGetSupplierProvenSessions_NilHeaderSkipped(t *testing.T) {
 		}, nil
 	}
 	pc := newProofClientForTest(t, address)
-	got, err := pc.GetSupplierProvenSessions(context.Background(), "pokt1supplier")
+	got, err := pc.GetSupplierSessionStates(context.Background(), "pokt1supplier")
 	require.NoError(t, err)
 	require.Empty(t, got, "nil-header claim contributes no session id")
 }
 
-func TestGetSupplierClaimSessions_Success(t *testing.T) {
+// TestPaginateSupplierClaims_AppliesNoStatusFilter is the guard on the shared
+// pagination body, and its job INVERTED with the unified read. It used to prove
+// that the VALIDATED-only filter lived in the caller's predicate and not in the
+// loop; there is no predicate any more, so what has to be proved is that the loop
+// filters NOTHING — every claim with a session header comes back, carrying its
+// own state. A status filter reintroduced here would silently re-break the claim
+// phase, which needs the rejected and pending ones present.
+func TestPaginateSupplierClaims_AppliesNoStatusFilter(t *testing.T) {
 	_, address, cleanup, mock := setupMockQueryServer(t)
 	defer cleanup()
 
@@ -191,67 +193,25 @@ func TestGetSupplierClaimSessions_Success(t *testing.T) {
 		require.Equal(t, supplier, req.GetSupplierOperatorAddress())
 		return &prooftypes.QueryAllClaimsResponse{
 			Claims: []prooftypes.Claim{
-				claimWithSession(supplier, "csess-a"),
-				claimWithSession(supplier, "csess-b"),
-			},
-		}, nil
-	}
-
-	pc := newProofClientForTest(t, address)
-	got, err := pc.GetSupplierClaimSessions(context.Background(), supplier)
-	require.NoError(t, err)
-	require.Len(t, got, 2)
-	_, hasA := got["csess-a"]
-	require.True(t, hasA)
-}
-
-// TestPaginateSupplierClaims_AcceptPredicateFiltering is the DRY-refactor guard for
-// the shared paginateSupplierClaims helper: it must apply ONLY the caller's accept
-// predicate (plus the nil-SessionHeader skip), so the VALIDATED-only proof-inclusion
-// filter the reconciler depends on still excludes PENDING_VALIDATION and INVALID
-// claims. It drives the helper directly with the same mixed-status page over two
-// predicates to prove the filter lives in the predicate, not the loop.
-func TestPaginateSupplierClaims_AcceptPredicateFiltering(t *testing.T) {
-	_, address, cleanup, mock := setupMockQueryServer(t)
-	defer cleanup()
-
-	const supplier = "pokt1supplier"
-	mixedPage := func(_ context.Context, req *prooftypes.QueryAllClaimsRequest) (*prooftypes.QueryAllClaimsResponse, error) {
-		require.Equal(t, supplier, req.GetSupplierOperatorAddress())
-		return &prooftypes.QueryAllClaimsResponse{
-			Claims: []prooftypes.Claim{
 				claimWithStatus(supplier, "sess-validated", prooftypes.ClaimProofStatus_VALIDATED),
 				claimWithStatus(supplier, "sess-pending", prooftypes.ClaimProofStatus_PENDING_VALIDATION),
 				claimWithStatus(supplier, "sess-invalid", prooftypes.ClaimProofStatus_INVALID),
+				// A claim built without touching the field at all: the chain's
+				// own zero value, which is PENDING_VALIDATION and not "unset".
+				claimWithSession(supplier, "sess-default"),
 			},
 		}, nil
 	}
 
 	pc := newProofClientForTest(t, address)
-
-	// VALIDATED-only predicate (the proven-sessions accept): PENDING/INVALID excluded.
-	mock.allClaimsFunc = mixedPage
-	validatedOnly, err := pc.paginateSupplierClaims(context.Background(), supplier, "all claims (proven)",
-		func(c *prooftypes.Claim) bool {
-			return c.GetProofValidationStatus() == prooftypes.ClaimProofStatus_VALIDATED
-		})
+	all, err := pc.paginateSupplierClaims(context.Background(), supplier, "all claims")
 	require.NoError(t, err)
-	require.Len(t, validatedOnly, 1, "VALIDATED-only predicate must exclude non-validated claims")
-	_, hasValidated := validatedOnly["sess-validated"]
-	require.True(t, hasValidated, "VALIDATED claim must pass the filter")
-	_, hasPending := validatedOnly["sess-pending"]
-	require.False(t, hasPending, "PENDING_VALIDATION must be filtered out by the accept predicate")
-	_, hasInvalid := validatedOnly["sess-invalid"]
-	require.False(t, hasInvalid, "INVALID must be filtered out by the accept predicate")
-
-	// Accept-all predicate (the claim-sessions accept): every claim with a header is kept.
-	mock.allClaimsFunc = mixedPage
-	all, err := pc.paginateSupplierClaims(context.Background(), supplier, "all claims",
-		func(*prooftypes.Claim) bool { return true })
-	require.NoError(t, err)
-	require.Len(t, all, 3, "accept-all predicate must keep every claim with a session header")
-	for _, id := range []string{"sess-validated", "sess-pending", "sess-invalid"} {
-		_, ok := all[id]
-		require.True(t, ok, "accept-all must include %s", id)
-	}
+	require.Equal(t, map[string]SessionClaim{
+		"sess-validated": {ProofState: SessionProofValidated, RootHash: []byte("root-sess-validated")},
+		"sess-pending":   {ProofState: SessionProofPending, RootHash: []byte("root-sess-pending")},
+		"sess-invalid":   {ProofState: SessionProofRejected, RootHash: []byte("root-sess-invalid")},
+		"sess-default":   {ProofState: SessionProofPending, RootHash: []byte("root-sess-default")},
+	}, all, "the loop keeps every claim with a header, applies no status filter of its own, "+
+		"and carries each claim's OWN root -- the rejection diagnosis compares that root "+
+		"against what the miner stored, so a shared or dropped one would misdiagnose")
 }

@@ -699,7 +699,7 @@ func TestSetSupplierState_WritesABoundedTTL(t *testing.T) {
 	require.LessOrEqual(t, ttl, configuredTTL,
 		"the key's remaining TTL must not exceed what was configured")
 
-	// The actual expiry, not just the metadata. Rule #1 (CLAUDE.md) forbids
+	// The actual expiry, not just the metadata. Rule #1 (CONTRIBUTING.md) forbids
 	// time.Sleep for synchronization, so the remaining TTL is driven to 0
 	// directly (PExpire) rather than waited out — the key vanishing on a
 	// TTL of 0 is the same Redis guarantee a real elapsed TTL relies on, with

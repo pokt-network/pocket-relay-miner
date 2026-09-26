@@ -72,7 +72,11 @@ else
     gate_fail "tests failed:"
     # `tail` on the fallback, and the raw output kept: see the comment on
     # gate_keep_evidence -- a red whose cause the gate deleted forces a re-run.
-    gate_detail "$(gate_json_output "$json_out" | grep -E '^(---|FAIL|panic|\s+.*_test\.go:)' || gate_json_output "$json_out" | tail -40)" 40
+    #
+    # Same pattern as race.sh, deliberately identical: two gates that print
+    # differently for one failure is a divergence nobody reads until it lies.
+    # race.sh carries the full reasoning and the measured counts.
+    gate_detail "$(gate_json_output "$json_out" | grep -B1 -E 'DATA RACE|^\s*--- FAIL|^(FAIL|panic)' || gate_json_output "$json_out" | tail -40)" 40
     gate_keep_evidence "$json_out" tests
 fi
 rm -f "$json_out"

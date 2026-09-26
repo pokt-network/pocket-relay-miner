@@ -46,6 +46,11 @@ type RedisBlockClientAdapter struct {
 	// Fan-out subscribers for Subscribe() method
 	subscribersMu sync.RWMutex
 	subscribers   []chan *localclient.SimpleBlock
+
+	// afterLoadHook, when set, runs in advance between reading the held block
+	// and replacing it: the window where another writer's higher height is lost
+	// unless the replace is a compare-and-swap. Nil outside tests.
+	afterLoadHook func()
 }
 
 // NewRedisBlockClientAdapter creates an adapter for relayer block client.
@@ -100,12 +105,13 @@ func (a *RedisBlockClientAdapter) Start(ctx context.Context) error {
 					return
 				}
 
-				// Update cached last block atomically
-				block := &simpleBlock{
-					height: event.Height,
-					hash:   event.Hash,
+				// Only a height above the one held moves the adapter; anything
+				// else is neither stored nor forwarded. See advance.
+				block, ignored := a.advance(event.Height, event.Hash)
+				if ignored != "" {
+					blockEventsIgnored.WithLabelValues(ignored).Inc()
+					continue
 				}
-				a.lastBlock.Store(block)
 
 				// Forward to blockEventsCh ONLY if a component has wired up
 				// BlockEvents() as a consumer (relayer yes, miner no). With no
@@ -149,6 +155,57 @@ func (a *RedisBlockClientAdapter) LastBlock(ctx context.Context) client.Block {
 		return &simpleBlock{height: 0, hash: nil}
 	}
 	return block
+}
+
+// Why a block event did not move the height. Bounded: two values.
+const (
+	blockIgnoredRepeated = "repeated"
+	blockIgnoredRewound  = "rewound"
+)
+
+// advance makes height the last block only when it is above the height already
+// held, and otherwise says why not. The subscriber forwards every event it
+// receives, including a repeated or late delivery, and a lower height taken as
+// current makes the miner admit relays for a session whose claim it had already
+// stopped taking relays for.
+// A higher height is taken whatever the gap: a jump is also what an operator
+// switching from a lagging node to a synced one looks like.
+//
+// Compare-and-swap, not load-then-store: the startup seed and the event loop
+// both write, and a store landing between another writer's load and its store
+// would lose the higher of the two.
+func (a *RedisBlockClientAdapter) advance(height int64, hash []byte) (*simpleBlock, string) {
+	next := &simpleBlock{height: height, hash: hash}
+	for {
+		current := a.lastBlock.Load()
+		if a.afterLoadHook != nil {
+			a.afterLoadHook()
+		}
+		var currentHeight int64
+		if current != nil {
+			currentHeight = current.height
+		}
+		switch {
+		case height == currentHeight:
+			return nil, blockIgnoredRepeated
+		case height < currentHeight:
+			return nil, blockIgnoredRewound
+		}
+		if a.lastBlock.CompareAndSwap(current, next) {
+			return next, ""
+		}
+	}
+}
+
+// SeedHeight sets the last block from a height read off the chain, so the
+// process knows where the chain is before the first block event reaches it. It
+// follows the same rule as an event, so a seed below what an event already
+// brought is dropped, and it reports whether it moved the height. The seed
+// carries no hash: the block hashes the miner uses, the proof seeds, are read at
+// their own height through GetBlockAtHeight.
+func (a *RedisBlockClientAdapter) SeedHeight(height int64) bool {
+	_, ignored := a.advance(height, nil)
+	return ignored == ""
 }
 
 // GetBlockAtHeight queries the blockchain for a specific block by height.

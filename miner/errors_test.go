@@ -81,6 +81,24 @@ func TestIsRetryableError(t *testing.T) {
 			want: true,
 		},
 		{
+			// A bare errors.New in go-redis: not a net.Error, not a
+			// context error, not ErrClosed. Nothing else in the function
+			// can see it, and the flush path wraps it in a PERMANENT
+			// sentinel -- so classifying it here is the whole fix.
+			name: "redis.ErrPoolTimeout is retryable",
+			err:  redis.ErrPoolTimeout,
+			want: true,
+		},
+		{
+			// The exact shape smst_manager.go:679 builds. Double %w, so
+			// errors.Is has to walk past ErrSMSTCommitFailed to find it:
+			// the OOM row above uses %v in the second position and never
+			// exercises that walk.
+			name: "ErrSMSTCommitFailed-wrapped pool timeout is retryable",
+			err:  fmt.Errorf("%w: flush pipeline: %w", ErrSMSTCommitFailed, redis.ErrPoolTimeout),
+			want: true,
+		},
+		{
 			name: "plain string error is not retryable",
 			err:  errors.New("something went wrong"),
 			want: false,

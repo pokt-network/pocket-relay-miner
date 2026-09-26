@@ -37,10 +37,13 @@ def deploy_backend(config):
             "pb/demo.pb.go",
             "pb/demo_grpc.pb.go",
         ],
-        live_update=[
-            # Sync Go source changes
-            sync("tilt/backend-server/main.go", "/app/main.go"),
-        ],
+        # NO live_update. There used to be one, and it synced
+        # tilt/backend-server/main.go to /app/main.go with no run() step to
+        # rebuild -- so the source landed in the container, the compiled binary
+        # never changed, and Tilt reported update=ok either way. Measured
+        # 2026-09-03: an edit to main.go sat unbuilt for 46 minutes while every
+        # Tilt status said the resource was fine; only grepping the binary for a
+        # new string showed it. A full image build is slower and honest.
     )
 
     # Backend Deployment

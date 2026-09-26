@@ -1,474 +1,309 @@
 # Contributing to Pocket RelayMiner
 
-Thank you for your interest in contributing to Pocket RelayMiner! This document provides guidelines and standards for contributing to the project.
+These rules apply to everyone who changes this repository, human or AI. To
+deploy the relay miner instead, start at [AGENTS.md](AGENTS.md).
 
-## Table of Contents
+## What you are working on
 
-- [Development Workflow](#development-workflow)
-- [Commit Message Format](#commit-message-format)
-- [Code Standards](#code-standards)
-- [What Gets Committed](#what-gets-committed)
-- [Testing Requirements](#testing-requirements)
-- [Pull Request Process](#pull-request-process)
-- [Getting Help](#getting-help)
+Production software that handles real value. The relayer targets 1000+ RPS per
+replica, so every millisecond on the hot path counts; the miner turns served
+relays into claims and proofs that get the supplier paid.
 
-## Development Workflow
+- **Language**: Go, the version in `go.mod` (CI builds with the same).
+- **State**: all session state is in Redis. No component keeps it on local disk.
+- **Two processes, one binary**: the relayer is a stateless multi-transport
+  proxy that validates relays, signs responses and publishes them to Redis
+  Streams, routing to backends by the `Rpc-Type` header (1=gRPC, 2=WebSocket,
+  3=JSON_RPC, 4=REST, 5=CometBFT). The miner consumes those streams, builds SMST
+  trees in Redis and submits claims and proofs. Relayers receive block events
+  only through Redis pub/sub, published by the miner.
 
-We follow a **dev → main → release** workflow:
+| Package | What it holds |
+|---|---|
+| `main.go`, `cmd/` | the CLI: `relayer`, `miner`, `redis` (debug subcommands in `cmd/redis/`), `relay` (the load-test client in `cmd/relay/`), `version` |
+| `relayer/` | the relayer: proxy, relay validation, metering, signing, WebSocket bridge, health checks |
+| `miner/` | the miner: stream consumption, SMST in Redis, session lifecycle, claims and proofs, supplier management |
+| `cache/` | L1 local (`xsync`), L2 Redis and L3 chain caches, with pub/sub invalidation |
+| `rings/` | ring signature verification and application delegation rings |
+| `keys/` | supplier key providers (keys file, keyring) and their hot reload |
+| `leader/` | the miner's global leader election over a Redis lock |
+| `tx/` | the transaction client: claims and proofs broadcast, permits, inclusion reads |
+| `query/` | on-chain query clients |
+| `client/` | the block subscriber the miner requires, and `relay_client/`, which builds and signs relays for the CLI |
+| `transport/` | the mined-relay types and codec; `redis/` holds streams, the publisher, the consumer, store health and the KeyBuilder (`namespace.go`); `grpcconn/` builds every gRPC connection to a full node |
+| `pool/` | backend endpoint pools with selection and a circuit breaker |
+| `config/` | configuration shared by both binaries, and the retired-key table |
+| `observability/` | the metrics and pprof server and shared registries |
+| `logging/` | structured logging and goroutine panic recovery |
+| `internal/` | `memlimit` (memory limit at startup), `testredis` (the real Redis for tests), `conventions` (tests that enforce these rules) |
+| `proto/` | protobuf definitions |
+| `docs/`, `examples/`, `scripts/`, `tilt/` | operator docs, runnable examples, test and ops scripts, the Tilt dev environment |
 
-### Branch Strategy
+Design with the gateways that send relays in mind: how they pick suppliers,
+retry, hold WebSocket sessions and read our errors decides what a change to the
+relayer means for the traffic it serves. Public docs describe only this
+repository's behaviour and name no other product; say "the gateway/client that
+sends relays".
 
-```
-dev (development) → main (release candidate) → vX.Y.Z (production)
-```
+## Development environment
 
-**Development Branch (`dev`):**
-- Active development happens here
-- Push frequently for continuous integration
-- Docker image tag: `dev`
-- Use for: Feature development, bug fixes, experiments
+Development runs on [Tilt](https://tilt.dev/) over a local kind cluster: a
+localnet chain, Redis, the relayer and the miner, test backends, Prometheus and
+Grafana. Tilt watches the tree, rebuilds and restarts pods on every change, and
+proxies every port.
 
-**Main Branch (`main`):**
-- Stable, tested code ready for production
-- Merge via Pull Request from `dev`
-- Docker image tags: `<commit>`, `rc`
-- Use for: Pre-production testing, staging
-
-**Release Tags (`v1.0.0`):**
-- Production releases
-- Created from `main` branch
-- Docker image tags: `1.0.0`, `latest`
-- Use for: Production deployments
-
-### Making Changes
-
-1. **Start from dev branch:**
-   ```bash
-   git checkout dev
-   git pull origin dev
-   git checkout -b feature/your-feature-name
-   ```
-
-2. **Install pre-commit hooks (first time only):**
-   ```bash
-   make install-hooks
-   ```
-
-   This installs a git pre-commit hook that automatically runs `make fmt` and `make lint` before each commit. The hook will:
-   - Format your code automatically
-   - Catch linting errors before they reach CI
-   - Prevent commits with code quality issues
-
-   **Note**: The hook will reject commits that fail linting. Fix the issues before committing.
-
-3. **Make your changes** following our [Code Standards](#code-standards)
-
-4. **Test thoroughly:**
-   ```bash
-   make fmt      # Format code (also runs automatically via pre-commit hook)
-   make lint     # Run linters (also runs automatically via pre-commit hook)
-   make test     # Run tests
-   make build    # Verify build
-   ```
-
-   **Note**: If you installed pre-commit hooks (recommended), `make fmt` and `make lint` run automatically on each commit.
-
-5. **Commit with conventional format** (see below)
-
-6. **Push and create PR to `dev`:**
-   ```bash
-   git push origin feature/your-feature-name
-   # Create PR targeting 'dev' branch
-   ```
-
-7. **After merge to dev**, changes will be promoted to main and eventually released
-
-## Commit Message Format
-
-We use [Conventional Commits](https://www.conventionalcommits.org/) for automated changelog generation and release notes.
-
-### Format
-
-```
-<type>(<scope>): <subject>
-
-<body>
-
-<footer>
+```bash
+make tilt-up-k8s     # start (requires a kind cluster)
+make tilt-down-k8s   # stop
 ```
 
-### Types
+With Tilt up, the relayer is at `localhost:8180` (the target of every direct CLI
+and load test), Prometheus at `localhost:9091`, Grafana at `localhost:3000`.
+Setup: [tilt/README.md](tilt/README.md), [docs/testing/TILT.md](docs/testing/TILT.md);
+direct CLI tests of every transport: [docs/testing/DIRECT_CLI.md](docs/testing/DIRECT_CLI.md).
 
-- **feat**: New feature
-- **fix**: Bug fix
-- **perf**: Performance improvement
-- **docs**: Documentation changes
-- **build**: Build system or dependency changes
-- **ci**: CI/CD configuration changes
-- **chore**: Maintenance tasks
-- **refactor**: Code restructuring without behavior change
-- **test**: Adding or updating tests
+While Tilt runs: never `kubectl port-forward`, never build by hand, never delete
+pods. Logs: `kubectl logs -l app=<service>`.
 
-### Examples
-
-**Feature:**
-```
-feat(cache): add warmup for faster cold starts
-
-Implement pond-based worker pool for parallel cache warming.
-Eliminates L3 chain queries on first relay, reducing latency
-from ~100ms to <1ms.
-
-- Created pond worker pool (configurable concurrency)
-- Added Stop() method for cleanup
-- Wired into relayer startup
-
-Closes #123
+```bash
+make build          # development build: ./bin/pocket-relay-miner
+make build-release  # optimized, statically linked
+make install-hooks  # once: pre-commit runs the static gate, pre-push runs level 2
 ```
 
-**Bug Fix:**
-```
-fix(balance): correct stake warning field mismatch
+Build binaries with `make`, never `go build` (the Makefile sets flags and the
+version). Run tests with `make` too, except when debugging one package.
 
-Fixed critical config issue where YAML used stake_warning_ratio
-but code expected stake_warning_proof_threshold.
+## Workflow
 
-- Updated example configs with correct field names
-- Added validation in DefaultConfig()
-- Updated schema to match code
+1. Branch from `main`.
+2. Commit with [Conventional Commits](https://www.conventionalcommits.org/):
+   `<type>(<scope>): <subject>`, types `feat`, `fix`, `perf`, `refactor`,
+   `docs`, `test`, `build`, `ci`, `chore`. A title plus at most one paragraph;
+   a message that needs more is a commit doing more than one thing.
+3. No AI attribution in commits or PR bodies: no `Co-Authored-By` for an AI, no
+   "Generated with" footer.
+4. Open a PR to `main`. The title uses the commit format; the description is
+   bullets: what changed, how it was tested, what breaks.
+5. PRs are squash-merged.
+6. A `vX.Y.Z` tag on `main` publishes `ghcr.io/pokt-network/pocket-relay-miner:vX.Y.Z`
+   plus `latest`, and opens a draft release.
 
-Fixes #456
-```
+Everything tracked is in English: code, comments, docs, skills, scripts, commit
+messages. The static gate fails on Spanish in any tracked file.
 
-**Performance:**
-```
-perf(ci): use native ARM64 runners for 8-10x faster builds
+## Code standards
 
-Replaced QEMU-emulated ARM builds with native GitHub ARM runners.
+**Errors**
+- Always check them; wrap with `fmt.Errorf("context: %w", err)`.
+- Never `panic()` in production code.
+- Startup errors propagate through error channels, not `os.Exit`; never
+  `logger.Fatal` in a goroutine.
 
-- Split docker-build into separate AMD64/ARM64 jobs
-- ARM build time: 40min → 3-5min
-- Parallel execution for faster CI feedback
-```
+**Logging** (structured: `logger.Info().Str("key", value).Msg("message")`)
+- Anything that fires once per relay, message or connection -- rejections,
+  meter denials, backend failures included -- logs at `Debug` only. Its
+  alertable signal is a metric with a bounded `reason` label.
+- State changes (failover, config reload, circuit breaker, rebalance,
+  reconnect) log at `Info` or `Warn`: they fire once per change.
+- A per-message condition that reveals a producer defect (a malformed stream
+  message) may stay at `Warn`.
+- `Error` only for what needs immediate attention.
+- Never log private keys or credentials.
 
-### Scope Guidelines
+**Concurrency**
+- Bounded concurrency with `github.com/alitto/pond/v2`. Never an unbounded
+  `go func()`: use a pool, or wrap a long-lived goroutine in
+  `go logging.RecoverGoRoutine(logger, "name", fn)(ctx)`.
+- `xsync.Map` (puzpuzpuz/xsync/v4) for concurrent maps, never `sync.Map`.
+- `context.Context` for cancellation; always defer `Close()` or cleanup.
+- `Stop()` / `Close()` / `Shutdown()` are idempotent (`sync.Once` for channel
+  closes). Close a replaced connection before overwriting a pool entry.
+- A package var a test overrides needs a happens-before edge between the test's
+  write and every read. Reading it on the constructor's goroutine is not that
+  edge: the caller can be another test's server goroutine. When a test's
+  server outlives `srv.Close()` (a hijacked WebSocket handler does), the test
+  waits for its own handler to return.
 
-Common scopes:
-- `cache`: Caching system (L1/L2/L3)
-- `miner`: Miner component (SMST, claims, proofs)
-- `relayer`: Relayer component (relay processing, validation)
-- `config`: Configuration system
-- `ci`: CI/CD workflows
-- `docs`: Documentation
-- `leader`: Leader election
-- `redis`: Redis-related changes
+`internal/conventions` enforces the pool, `xsync`, panic, sleep, metric-label,
+miniredis and Redis-key rules, and freezes the pre-existing exceptions.
 
-## Code Standards
+**Metrics**
+- No high-cardinality labels: no URLs, no session IDs.
+- Delete an unused metric at once.
+- Record metrics asynchronously on hot paths (the MetricRecorder pattern).
 
-### Mandatory Requirements
+**Performance**
+- Profile before optimizing (`go test -cpuprofile=cpu.prof -bench .`, then
+  `go tool pprof cpu.prof`) and prove the change with benchmark numbers.
+- Redis pipelining for batches, pre-allocated slices, no allocations on hot paths.
+- Targets per replica: relay validation and signing < 1 ms, SMST update
+  < 100 µs, cache L1 hit < 100 ns, L2 < 2 ms, L3 miss < 100 ms. These are
+  targets: quote a measured figure only from a run you cite.
+- HTTP pool sizing: connections needed = RPS × backend latency. The defaults
+  are in `DefaultConfig()` in `relayer/config.go`.
 
-1. **Error Handling**
-   - Always check errors
-   - Use `fmt.Errorf("context: %w", err)` for wrapping
-   - Log errors with context using structured logging
-   - Never use `panic()` in production code paths
+**Failure behaviour**
+- Redis unavailable: the relayer fails closed on admission; a relay whose budget
+  the meter cannot verify is refused (`ErrMeterStoreUnavailable`). A chain query
+  blinking is different: that relay is served and the miner arbitrates.
+- Chain unreachable: the miner retries with exponential backoff.
 
-2. **Logging**
-   - Use structured logging: `logger.Info().Str("key", value).Msg("message")`
-   - Include relevant context fields for debugging
-   - Use appropriate levels: Debug, Info, Warn, Error
-   - Never log sensitive data (private keys, credentials)
+**Security**: validate all external input, compare secrets in constant time,
+sanitize errors returned to clients.
 
-3. **Concurrency**
-   - Use `xsync.MapOf` for lock-free concurrent maps
-   - Protect shared state with `sync.RWMutex` when necessary
-   - Use `context.Context` for cancellation and timeouts
-   - ALWAYS defer `Close()` or cleanup functions
-
-4. **Code Quality**
-   ```bash
-   make fmt     # Must pass (gofmt -s)
-   make lint    # Must pass (golangci-lint)
-   make test    # All tests must pass
-   ```
-
-   **Enforce automatically**: Run `make install-hooks` to install a pre-commit hook that runs `fmt` and `lint` before each commit.
-
-5. **Performance**
-   - Profile before optimizing: `go test -bench . -benchmem`
-   - Use Redis pipelining for batch operations
-   - Pre-allocate slices when size is known
-   - Avoid allocations in hot paths
-
-### Code Style
-
-**Good Example:**
 ```go
 func ProcessRelay(ctx context.Context, relay *Relay) error {
-    logger := logging.ForComponent(logger, "relay_processor")
-
     if err := relay.Validate(); err != nil {
-        logger.Warn().
-            Err(err).
-            Str("session_id", relay.SessionID).
-            Msg("relay validation failed")
+        // Per-request rejection: Debug plus a metric, never Warn.
+        relaysRejected.WithLabelValues(relay.ServiceID, rejectReasonValidationFailed).Inc()
+        logger.Debug().Err(err).Str("session_id", relay.SessionID).Msg("relay validation failed")
         return fmt.Errorf("validation failed: %w", err)
     }
-
     result, err := processWithTimeout(ctx, relay)
     if err != nil {
         return fmt.Errorf("processing failed: %w", err)
     }
-
-    logger.Debug().
-        Str("session_id", relay.SessionID).
-        Int64("compute_units", result.ComputeUnits).
-        Msg("relay processed successfully")
-
+    logger.Debug().Str("session_id", relay.SessionID).
+        Int64("compute_units", result.ComputeUnits).Msg("relay processed")
     return nil
 }
 ```
 
-**Bad Example:**
-```go
-func ProcessRelay(relay *Relay) {
-    relay.Validate()  // Not checking error
-    process(relay)    // No error handling, no logging
-}
-```
+## Redis
 
-## What Gets Committed
+### Keys and channels: the KeyBuilder STRONG RULE
 
-**The only documentation this repository tracks is documentation written for
-the people who run this software.** If a reader who was not part of your work
-would not benefit from a file, it does not belong in a commit.
+Every Redis key and pub/sub channel is built through the KeyBuilder
+(`transport/redis/namespace.go`, reached with `client.KB()`). No exceptions.
 
-**Tracked:**
+- Never `fmt.Sprintf("ha:...")` or any hardcoded prefix, in code, the CLI or
+  script docs.
+- One KeyBuilder method per key pattern and per channel. Publisher and
+  subscriber call the same method; a channel with no method gets one.
+- Only `base_prefix` is configurable. Every segment below it is a constant, so
+  a new family is a new method, never a new config knob.
+- The golden table in `transport/redis/namespace_test.go` pins every method's
+  output and is the authoritative key list. Changing a constant is a breaking
+  change across versions. `TestKeyBuilder_NoTwoMethodsCollideUnderAnyNamespace`
+  and `TestKeyBuilder_PatternsMatchOnlyTheirOwnFamily` guard collisions; they
+  pass uniform arguments, so they cannot see a collision that needs specific ones.
 
-- `docs/` — protocol references, Redis architecture, testing guides, and a
-  usage guide per feature (see `docs/simulated-relays.md` for the shape:
-  what it does, how to run it, written for an operator).
-- `README.md`, `CONTRIBUTING.md`, `CLAUDE.md`, and the `scripts/` READMEs.
-- Code, tests, configs, and example configs with placeholder values.
-- `.claude/skills/` — this repository's agent instructions. **Reviewed as
-  code**: written in English like the rest of the repository, no personal
-  paths, no operator data, no machine-specific assumptions. A skill states how
-  work is done here, so it is as much a contract as the code it describes.
+### Inspecting Redis
 
-**Never tracked — keep these on disk, under `scripts/localonly/`:**
-
-- Plans, specs, brainstorms, design notes, phase summaries, handoffs, and
-  review reports. These are working artifacts; they go stale as soon as the
-  work they describe ships.
-- Editor and IDE configuration (`.idea/`, `.vscode/`).
-- The rest of `.claude/` — `settings.local.json` is a per-machine permission
-  allowlist that accumulates operator hostnames and personal paths, and
-  `worktrees/` is agent scratch. Only `skills/` is shared.
-- Operator-specific data — hostnames, IPs, ssh aliases, supplier addresses,
-  internal URLs, keys. See the operator-data rules in `CLAUDE.md`.
-
-**A stray `.go` file under `scripts/localonly/` compiles into the build**, even
-though git ignores it — `go test ./...` walks the filesystem, not the index.
-Keep saved code under a `_`-prefixed directory such as
-`scripts/localonly/_rescued/`; the Go toolchain ignores `_` and `.` prefixes.
-
-Note that **`.gitignore` does not protect you here**: it has no effect on a
-file that is already tracked. That is precisely how `.planning/` and `.idea/`
-stayed in this repository long after both were listed in `.gitignore`. The
-enforcement is:
+Use this product's `pocket-relay-miner redis` subcommands first: they build keys
+through the KeyBuilder and decode what raw Redis cannot. `redis-cli` is the
+fallback.
 
 ```bash
-make check-tracked-files
+pocket-relay-miner redis leader
+pocket-relay-miner redis sessions --supplier pokt1abc... --state active
+pocket-relay-miner redis smst --session <id>
+pocket-relay-miner redis streams --supplier pokt1abc...
+pocket-relay-miner redis cache --type application --list
+pocket-relay-miner redis keys --pattern "ha:*" --stats
+pocket-relay-miner redis pubsub --channel "ha:events:cache:application:invalidate"
+pocket-relay-miner redis dedup --session <id>
+pocket-relay-miner redis supplier --list
+pocket-relay-miner redis meter --session <id>      # without --session: every meter
+pocket-relay-miner redis submissions --supplier pokt1abc... [--failed-only]
+pocket-relay-miner redis flush --pattern "ha:test:*"   # destructive, asks first
 ```
 
-CI runs it on every pull request. It fails on any file that is both tracked
-and ignored, and on known working-document paths. When it fires, untrack the
-file — keeping it on disk — with `git rm -r --cached <path>`. Do not reach
-for `git add -f` to get past it.
+## Tests
 
-## Testing Requirements
+Every change passes `make fmt lint test` before it is done. A feature that spans
+components is tested at three levels:
 
-### Before Submitting PR
+1. **Unit**: happy paths with production-shaped data; error paths with equal
+   weight (malformed, empty, nil, not found, refused, canceled, timeout, gRPC
+   codes); edge cases (zero, negative, boundaries, overflow); every field of a
+   returned struct checked; errors checked with `errors.Is` against the
+   sentinel; no branching on the test's name.
+2. **Integration**: wired as production wires it, testing the pipeline and the
+   state transitions (active → claiming → claimed → proved).
+3. **Live**: on Tilt, after any change to startup wiring, config parsing or
+   relay routing, and for anything touching relay, claim, proof, settlement or
+   metering.
 
-One command runs every gate CI will run:
+**Rule #1 (cannot be broken):**
+- Every test passes `go test -race` with no warnings.
+- Every test is deterministic: no `time.Sleep()` for synchronization, no
+  dependency on an ordering that is not guaranteed.
+- A test that fails once in 1000 runs is fixed or deleted. "Pre-existing" is
+  not an excuse.
 
-```bash
-make gate            # level 2: static + tests + race + coverage
-```
+**Redis in tests is a real Redis.** `internal/testredis` gives each test a
+client and a key prefix on the Redis 8.10.1 that `scripts/gates/redis.sh up`
+starts on `127.0.0.1:6399`. miniredis is not used: it answers a blocking
+`XREADGROUP` at once, never ages the pending list and approximates expiry.
+`internal/conventions` freezes the files still on it and fails on a new one.
 
-The gates live in `scripts/gates/` as plain scripts, so a human, CI and an
-agent all run the same implementation. They report, they never fix; each exits
-non-zero on failure and prints its verdict on the last line.
+Also: use real implementations rather than mocks; put test-only code behind
+`-tags test`; give every store or shared state a concurrent read+write test
+under `-race`; test every optional component as nil; check that each assertion
+proves what you meant (`len(result) != 0` is not `result[0].Address == want`).
+Benchmarks for SMST and cache: `go test -bench=. -benchmem ./miner/` and
+`./cache/`.
 
-| level | command | cost | covers |
-|---|---|---|---|
-| 1 | `make gate LEVEL=1` | seconds | gofmt, build, vet, golangci-lint, tracked files — both Go modules |
-| 2 | `make gate` | minutes | the above, plus the test suite, the race detector, and the coverage run |
-| 3 | `make gate LEVEL=3` | tens of minutes | the above, plus live validation on Tilt with claim and proof verified on-chain |
+## Quality gates
 
-Narrow any level to one package with `PKG=miner make gate`. The pre-commit hook
-(`make install-hooks`) runs level 1 on every commit.
+The gates are scripts in `scripts/gates/`, so a human, CI and an agent run the
+same implementation. They report and never fix.
 
-Three points worth knowing:
+| level | command | covers |
+|---|---|---|
+| 1 | `make gate LEVEL=1` | gofmt, build, vet, golangci-lint, tracked files, Spanish, unreachable functions -- both Go modules |
+| 2 | `make gate LEVEL=2` (the default of `make gate`) | level 1 plus the test suite (including `internal/conventions`), the race detector and the coverage run |
+| 3 | `make gate LEVEL=3` | level 2 plus live validation on Tilt, claim and proof verified on chain |
 
-- **`make fmt` rewrites your files; it is not a check.** The gate reports which
-  files are unformatted and leaves them alone, because a check that rewrites
-  the tree after git has snapshotted the index puts the unformatted version in
-  your commit.
-- **The coverage run is not the same run as the test suite.** Instrumentation
-  widens timing and surfaces flakes a plain `go test` hides, and it is what CI
-  rejects on. Passing `tests` and failing `coverage` is a real result.
-- **A skipped gate is not a passed gate.** If a tool is missing the gate says
-  so and the summary names it as NOT RUN. Do not read that as green.
+Narrow a level to one package with `PKG=miner make gate`.
 
-**Anything touching relay, claim, proof, settlement or metering needs level 3.**
-Unit tests do not prove a relay was mined and paid.
+- `make fmt` rewrites files; the gate only reports them.
+- The coverage run is what CI rejects on, and instrumentation widens timing: a
+  green suite with a red coverage run is a real red.
+- A skipped gate prints NOT RUN. That is not green.
+- A red gate is diagnosed, not re-run until green: a red that goes away on a
+  re-run is a schedule the test does not control.
 
-### Writing Tests
+## What gets committed
 
-- Unit tests for all business logic
-- Benchmarks for critical paths (SMST ops, validation, signing)
-- Integration tests with miniredis for Redis operations
-- Use `-tags test` build constraint for test-only code
+The only documentation this repository tracks is written for the people who run
+the software: `README.md`, `AGENTS.md`, `CONTRIBUTING.md`, `CLAUDE.md`, `docs/`
+(a feature's usage doc looks like `docs/SIMULATED_RELAYS.md`), the `scripts/`
+READMEs, and `.claude/skills/` (reviewed as code: English, no personal paths, no
+operator data).
 
-### Performance Benchmarks
+Never tracked; keep on disk under `scripts/localonly/` (gitignored):
 
-For performance-critical code:
+- plans, specs, brainstorms, design notes, hand-overs, review reports;
+- operator infrastructure data: hostnames, IPs, ssh aliases, supplier addresses,
+  internal URLs, topology, keys. A tracked script that needs such data reads it
+  from `scripts/localonly/<area>/`, with a placeholder `.example` beside the
+  script (`scripts/loadtest/backends.sh` and `backends.conf.example` are the
+  model). Before editing a tracked file, grep it for operator strings;
+- editor configuration and the rest of `.claude/`.
 
-```go
-func BenchmarkCriticalFunction(b *testing.B) {
-    // Setup
-    for i := 0; i < b.N; i++ {
-        // Code to benchmark
-    }
-}
-```
+A `.go` file under `scripts/localonly/` compiles into `go test ./...`; keep saved
+code under a `_`-prefixed directory, which the toolchain ignores.
 
-Run benchmarks:
-```bash
-go test -bench=BenchmarkCriticalFunction -benchmem ./package
-```
+`.gitignore` does not untrack a file already tracked. `make check-tracked-files`
+(run by CI) fails on a tracked-and-ignored file or a working-document path;
+untrack with `git rm -r --cached <path>`, never `git add -f`.
 
-## Pull Request Process
+Code comments state constraints the code cannot show, and never point at a
+design doc.
 
-### Before Creating PR
+## Common tasks
 
-1. ✅ Rebase on latest `dev` branch
-2. ✅ All tests pass (`make test`)
-3. ✅ Code is formatted (`make fmt` - automatic if you installed pre-commit hooks)
-4. ✅ Linters pass (`make lint` - automatic if you installed pre-commit hooks)
-5. ✅ Commit messages follow conventional format
-6. ✅ Added/updated tests for new functionality
+**A new cache type**: the interface in `cache/interface.go`; the L2 layer with
+pub/sub and KeyBuilder keys; wiring in `cache/orchestrator.go`; the leader's
+refresh; metrics in `cache/metrics.go`; tests on `internal/testredis`.
 
-**Tip**: Install pre-commit hooks (`make install-hooks`) to automatically enforce formatting and linting on every commit.
-
-### PR Requirements
-
-1. **Title**: Use conventional commit format
-   - Good: `feat(cache): add warmup for faster cold starts`
-   - Bad: `Added cache warmup`
-
-2. **Description**: Include:
-   - What changed and why
-   - How to test the changes
-   - Any breaking changes
-   - Related issues (Closes #123)
-
-3. **Testing**: Describe how you tested:
-   - Unit tests added/updated
-   - Manual testing performed
-   - Performance impact (if applicable)
-
-4. **Reviews**:
-   - At least 1 approval required
-   - Address all review comments
-   - Keep PR focused and reasonably sized
-
-### PR Template Example
-
-```markdown
-## What Changed
-
-Brief description of the change and motivation.
-
-## How to Test
-
-1. Steps to test the change
-2. Expected behavior
-3. Screenshots/logs if applicable
-
-## Checklist
-
-- [ ] Tests added/updated
-- [ ] Documentation updated
-- [ ] Commits follow conventional format
-- [ ] All CI checks pass
-
-## Related Issues
-
-Closes #123
-```
-
-## Getting Help
-
-### Documentation
-
-- **README.md**: Project overview and quick start
-- **CLAUDE.md**: Development guidelines (if using Claude Code)
-- **Architecture docs**: See `docs/` directory (if available)
-
-### Communication
-
-- **Issues**: Report bugs or request features
-- **Discussions**: Ask questions or propose ideas
-- **Pull Requests**: Code contributions
-
-### Development Tools
-
-**Required:**
-- Go 1.26.5+ (matches `go.mod` and CI)
-- Docker + Docker Buildx
-- Make
-
-**Recommended:**
-- Tilt (for local Kubernetes development)
-- kubectl (for debugging)
-- Redis CLI (for debugging)
-
-**IDE Setup:**
-- VSCode: Install Go extension
-- GoLand: Built-in Go support
-- Vim/Neovim: Use vim-go or coc-go
-
-### Debugging
-
-Use the built-in redis-debug tool:
-
-```bash
-# Check leader election
-./bin/pocket-relay-miner redis-debug leader
-
-# Inspect sessions
-./bin/pocket-relay-miner redis-debug sessions --supplier <address>
-
-# View SMST tree
-./bin/pocket-relay-miner redis-debug smst --session <session_id>
-
-# Monitor Redis Streams
-./bin/pocket-relay-miner redis-debug streams --supplier <address>
-```
-
-## Code of Conduct
-
-- Be respectful and inclusive
-- Provide constructive feedback
-- Focus on the code, not the person
-- Help others learn and grow
+**Per-service backend pool sizing**: `scripts/loadtest/backends.sh` measures each
+backend's ceiling and the concurrency that keeps p99 under a budget; see
+[scripts/loadtest/README.md](scripts/loadtest/README.md).
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the same license as the project (see LICENSE file).
-
----
-
-**Thank you for contributing to Pocket RelayMiner!** 🚀
+Contributions are licensed under the project's license (see [LICENSE](LICENSE)).

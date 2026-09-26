@@ -37,18 +37,18 @@ func (s *RedisSMSTTestSuite) TestFlushOrphansWithLiveRoot_RefreshesTTL() {
 	const cacheTTL = 30 * time.Second
 
 	config := RedisSMSTManagerConfig{
-		SupplierAddress:            supplier,
-		CacheTTL:                   cacheTTL,
-		LiveRootCheckpointInterval: 1, // checkpoint every update
+		SupplierAddress: supplier,
+		CacheTTL:        cacheTTL,
 	}
 	mgr := NewRedisSMSTManager(zerolog.Nop(), s.redisClient, config)
 
 	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
 
-	// First update creates the tree AND hits the checkpoint branch
-	// (updateCount == 1). Both keys should have TTL ≈ cacheTTL.
+	// The first update, and the checkpoint the relay batch runs after it. Both
+	// keys should have TTL ≈ cacheTTL.
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k1"), []byte("v1"), 10))
+	s.checkpoint(mgr, sessionID)
 
 	s.requireTTLNear(nodesKey, cacheTTL, "first checkpoint must refresh nodes-hash TTL to cache_ttl")
 	s.requireTTLNear(liveKey, cacheTTL, "first checkpoint must refresh live_root TTL to cache_ttl")
@@ -60,6 +60,7 @@ func (s *RedisSMSTTestSuite) TestFlushOrphansWithLiveRoot_RefreshesTTL() {
 
 	// Another checkpoint MUST push the TTL back out to cache_ttl.
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k2"), []byte("v2"), 10))
+	s.checkpoint(mgr, sessionID)
 
 	s.requireTTLNear(nodesKey, cacheTTL, "subsequent checkpoint must refresh nodes-hash TTL")
 	s.requireTTLNear(liveKey, cacheTTL, "subsequent checkpoint must refresh live_root TTL")
@@ -75,6 +76,7 @@ func (s *RedisSMSTTestSuite) TestFlushOrphansWithLiveRoot_NoTTLWhenCacheTTLZero(
 
 	mgr := s.createTestRedisSMSTManager(supplier) // CacheTTL=0 by default
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k1"), []byte("v1"), 10))
+	s.checkpoint(mgr, sessionID)
 
 	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
@@ -98,6 +100,7 @@ func (s *RedisSMSTTestSuite) TestEvictCorruptSession_PreservesRedisState() {
 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 			[]byte{byte(i)}, []byte{byte(i + 100)}, 10))
 	}
+	s.checkpoint(mgr, sessionID)
 
 	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
@@ -120,19 +123,19 @@ func (s *RedisSMSTTestSuite) TestEvictCorruptSession_PreservesRedisState() {
 // TestEvictCorruptSession_ResumePathRecoversIntactState closes the loop:
 // after a memory-only eviction on a non-corrupt Redis state, the next
 // UpdateTree must resume the tree via resumeTreeFromRedisLocked and
-// preserve the pre-eviction relay count, modulo the expected
-// interval-1 checkpoint-window loss. Interval=1 isolates the eviction
-// behavior from the checkpoint behavior so the count is exact.
+// preserve the pre-eviction relay count. The seed is checkpointed before
+// the eviction, so the count is exact.
 func (s *RedisSMSTTestSuite) TestEvictCorruptSession_ResumePathRecoversIntactState() {
 	supplier := "pokt1evict_resume"
 	sessionID := "session_evict_resume"
 
-	mgr := s.createTestRedisSMSTManagerWithInterval(supplier, 1)
+	mgr := s.createTestRedisSMSTManager(supplier)
 	const preEvictionUpdates = 5
 	for i := 0; i < preEvictionUpdates; i++ {
 		s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID,
 			[]byte{byte(i)}, []byte{byte(i + 100)}, 10))
 	}
+	s.checkpoint(mgr, sessionID)
 
 	mgr.evictCorruptSession(s.ctx, sessionID, "test_manual")
 
@@ -146,8 +149,8 @@ func (s *RedisSMSTTestSuite) TestEvictCorruptSession_ResumePathRecoversIntactSta
 	s.Require().NoError(err)
 	count, sum, err := mgr.GetTreeStats(sessionID)
 	s.Require().NoError(err)
-	// With interval=1 every update checkpoints, so live_root =
-	// R_{preEvictionUpdates} at eviction time. Resume picks up there
+	// The checkpoint after the seed wrote live_root =
+	// R_{preEvictionUpdates} before the eviction. Resume picks up there
 	// and adds the post-eviction relay, total = 6.
 	s.Require().Equal(uint64(preEvictionUpdates+1), count,
 		"memory-only eviction must let the next UpdateTree resume and preserve pre-eviction count")

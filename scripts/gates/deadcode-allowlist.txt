@@ -24,9 +24,33 @@
 # The honest alternative is to move them behind `//go:build test`. They are kept
 # here instead because the move is a bigger change than the problem, and because
 # a seam that is DECLARED is not a seam that deceives.
+# TxWindowFrom is not a seam added FOR a test: it is the missing half of a pair
+# that shipped half-declared. WithTxWindowTimeout has been exported since it
+# existed and the context key is private, so a budget could be written into a
+# context from anywhere and read back from nowhere. That made "the budget
+# travelled" impossible to EXPRESS outside tx, not merely hard to check -- which
+# is why nothing ever asserted it. effectiveTxTimeout cannot be its production
+# caller: it needs the whole txWindow including computedAt, and routing it through
+# here to look wired would be dressing a seam up as a refactor. That today's only
+# caller lives in another package is the consequence of the defect, not its cause.
+tx/tx_client.go TxWindowFrom                                    # reads the window budget a context carries; the writer was always public and the reader was not (tx/tx_window_from_test.go)
 keys/keyring_provider.go NewKeyringProviderWithKeyring          # injects a prepared keyring; production builds its own (keys/keyring_provider_test.go)
 observability/runtime_metrics.go RuntimeMetricsCollector.CollectNow  # forces a collection that production does on a ticker (observability/runtime_metrics_test.go)
 observability/runtime_metrics.go RuntimeMetricsCollector.LastMallocs # reads collector state a test asserts on (observability/runtime_metrics_test.go)
 observability/server.go Server.IsRunning                        # lets a test observe lifecycle without racing on the listener (observability/server_test.go)
+# KEPT ON PURPOSE THOUGH IT IS NO LONGER REPORTED (2026-09-12, item 224). deadcode
+# stopped listing this one when the shutdown drain landed, and `deadcode -whylive`
+# answers why: "reachable only through reflection". That is a category deadcode
+# excludes from its dead list, so the function was NOT wired up -- a reflection edge
+# now reaches it and the scan simply stops mentioning it. Its only real caller is
+# still a test (relayer/proxy_simulation_test.go), and the gate runs deadcode
+# without -test.
+#
+# Kept because that edge is incidental: if it goes, the function is reported again,
+# and an allowlist missing its entry turns that into a gate failure reading "new
+# unreachable function" -- a confusing failure for whoever receives it. Keeping it
+# costs the gate nothing. Note the general shape, which is worth more than this one
+# entry: deadcode's dead list SHRINKS SILENTLY when a reflection edge appears, so a
+# genuinely dead function can stop being reported without anyone touching it. The
+# check that sees that drift is `comm -13`, which static.sh does not run (item 209).
 relayer/simulation.go SimulationVerifier.Reload                 # reconfigures the verifier between cases; production wires it once via SetSimulationVerifier and has NO hot-reload path, so changing simulation config needs a restart (relayer/simulation_test.go, 6 uses)
-relayer/websocket.go WebSocketBridge.Close                      # closes a bridge in-test; production closes with closeWithReason and a specific cause, 13 call sites (relayer/websocket_simulation_test.go)

@@ -1,0 +1,10 @@
+# The one configuration `make lint`, scripts/gates/static.sh and the CI lint job
+# read. It sets a single thing: most test files here, and the helpers they share,
+# carry //go:build test, and without the tag golangci-lint never loads them --
+# eight unchecked Close calls piled up in test cleanups that no gate reported.
+# Linters stay golangci-lint's defaults. `make lint-blank` passes its own
+# --config and does not read this.
+version: "2"
+run:
+  build-tags:
+    - test

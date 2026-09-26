@@ -2,13 +2,14 @@ package redis
 
 import (
 	"context"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"strings"
 	"text/tabwriter"
 
 	"github.com/spf13/cobra"
+
+	"github.com/pokt-network/pocket-relay-miner/miner"
 )
 
 func SMSTCmd() *cobra.Command {
@@ -125,16 +126,24 @@ func displaySMSTTree(ctx context.Context, client *DebugRedisClient, key string, 
 
 	for i, keyHex := range sampleKeys {
 		var valueSize int
+		var note string
 		if i < len(sampleValues) {
-			// Decode hex to get actual size
-			decoded, err := hex.DecodeString(sampleValues[i])
-			if err == nil {
-				valueSize = len(decoded)
+			// A stored value may be one zstd frame of the node (item 398, the
+			// miner's node codec). The size an operator needs is the NODE's:
+			// printing the frame's length under a column that says VALUE SIZE
+			// would report the compressed size as the node's.
+			//
+			// The previous code hex-decoded this value, which was never hex —
+			// the fields are hex, the values are raw bytes — so it always fell
+			// through to the length of the string.
+			node, decErr := miner.DecodeStoredNode([]byte(sampleValues[i]))
+			if decErr != nil {
+				valueSize, note = len(sampleValues[i]), " (stored; could not be decoded)"
 			} else {
-				valueSize = len(sampleValues[i])
+				valueSize = len(node)
 			}
 		}
-		_, _ = fmt.Fprintf(w, "%s\t%d bytes\n", keyHex, valueSize)
+		_, _ = fmt.Fprintf(w, "%s\t%d bytes%s\n", keyHex, valueSize, note)
 	}
 
 	_ = w.Flush()

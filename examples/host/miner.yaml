@@ -1,0 +1,37 @@
+# Miner config for a host deployment (systemd). Minimal on purpose: every key
+# not set here takes its default; config.miner.example.yaml at the repository
+# root lists all of them. Replace every value marked CHANGE before starting.
+# Check it with:
+#   pocket-relay-miner miner validate --config /etc/pocket-relay-miner/miner.yaml
+
+# The same Redis as the relayer's.
+redis:
+  url: "redis://127.0.0.1:6379"
+
+# The chain node the miner reads from and submits claims and proofs to.
+pocket_node:
+  # CHANGE: your node's CometBFT RPC.
+  query_node_rpc_url: "https://rpc.node.example.com"
+  # CHANGE: your node's gRPC, host:port.
+  query_node_grpc_url: "grpc.node.example.com:443"
+  # "pocket" is mainnet, "pocket-lego-testnet" the beta testnet. The miner
+  # refuses to start if the node reports another network.
+  chain_id: "pocket"
+  grpc_insecure: false
+
+# Same keys as the relayer's.
+keys:
+  keys_file: "/etc/pocket-relay-miner/supplier-keys.yaml"
+
+# CHANGE: the measured block time of your network, in seconds. Mainnet is
+# roughly 60, beta roughly 30. Required: the miner refuses to start without it.
+block_time_seconds: 60
+
+# Prometheus metrics, and GET /health.
+metrics:
+  enabled: true
+  addr: "127.0.0.1:9092"
+
+logging:
+  level: "info"
+  format: "json"

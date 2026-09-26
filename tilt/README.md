@@ -5,9 +5,9 @@ This directory contains Tilt-based development environments for Pocket RelayMine
 ## Directory Structure
 
 ```
+Tiltfile                    # Entry point, at the repository root
 tilt/
 ├── k8s/                    # Kubernetes Tilt environment
-│   ├── Tiltfile            # Main entry point for K8s
 │   ├── config.Tiltfile     # Config loading & validation
 │   ├── defaults.Tiltfile   # Default values
 │   ├── ports.Tiltfile      # Centralized port registry
@@ -17,18 +17,21 @@ tilt/
 │   ├── miner.Tiltfile      # Miner deployment
 │   ├── relayer.Tiltfile    # Relayer deployment
 │   ├── backend.Tiltfile    # Backend server
-│   ├── observability.Tiltfile  # Prometheus + Grafana
+│   ├── nginx-backend.Tiltfile  # Static JSON-RPC backend for load tests
+│   ├── observability.Tiltfile  # Prometheus, Grafana, Loki and Promtail
 │   ├── path.Tiltfile       # PATH gateway (optional)
-│   └── account-init.Tiltfile   # Account initialization
+│   ├── account-init.Tiltfile   # Account initialization
+│   └── accounts.star       # Accounts account-init initializes, derived from the genesis
 ├── config/                 # Shared configuration files
 │   ├── genesis.json        # Pocket Network genesis
 │   ├── all-keys.yaml       # All account keys
 │   ├── *.toml              # Validator configs
-│   └── *.json              # Validator keys
+│   ├── *.json              # Validator keys
+│   └── scale/              # Genesis and keys sized for load (scripts/localnet/gen-genesis.go)
 ├── backend-server/         # Demo backend server
-├── grafana/                # Grafana dashboards
-│   ├── dashboards/         # JSON dashboard files
-│   └── provisioning/       # Grafana provisioning
+├── grafana/
+│   └── dashboards/         # unified-overview.json
+├── local-registry.sh       # Local image registry for kind
 └── README.md               # This file
 ```
 
@@ -68,12 +71,10 @@ Configuration files for the K8s environment:
 | `config.toml` | Validator CometBFT config |
 | `app.toml` | Validator app config |
 
-### Grafana Dashboards (`grafana/`)
+### Grafana Dashboard (`grafana/`)
 
-Pre-configured dashboards for monitoring:
-- Business Economics - Revenue and stake metrics
-- Operational Health - System health and errors
-- Service Performance - Latency and throughput
+One dashboard, `dashboards/unified-overview.json`: service and protocol
+performance, claims, proofs, settlement, failed submissions and the cache.
 
 ## Services
 
@@ -91,6 +92,17 @@ Pre-configured dashboards for monitoring:
 | Grafana | 3000 | Dashboards |
 
 ## Testing Relays
+
+The check that counts is a relay sent straight to the relayer, which verifies
+the signature and the backend's answer
+([docs/testing/DIRECT_CLI.md](../docs/testing/DIRECT_CLI.md)):
+
+```bash
+# Expect: Status: ✅ SUCCESS
+pocket-relay-miner relay jsonrpc --localnet --service develop-http
+```
+
+Through the gateway, which only confirms it is wired:
 
 ```bash
 # Send a test relay via PATH

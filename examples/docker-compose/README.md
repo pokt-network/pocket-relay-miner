@@ -1,47 +1,59 @@
-## Docker Compose HA reference
+## Docker Compose example
 
-The smallest deployment that is still the HA architecture: one stateless
-relayer, one miner and the shared Redis that holds every piece of session
-state. It exists as **documentation** — the supported development environment
-is the Tilt/Kubernetes localnet (`tilt/README.md`), which brings a chain,
-backends and observability with it. This compose file brings none of that:
-you point it at your own Pocket full node and your own service backends.
+Redis, 1 relayer and 1 miner, pointed at the beta testnet
+(`pocket-lego-testnet`) through the public Sauron endpoints. No chain runs
+here: the node is remote. For a local chain to develop on, use Tilt
+([docs/testing/TILT.md](../../docs/testing/TILT.md)).
+
+The step-by-step runbook, with the expected output of every step, is
+[docs/deploy/DOCKER_COMPOSE.md](../../docs/deploy/DOCKER_COMPOSE.md). It also
+says what to switch for mainnet: every network-specific value in `config/` has
+its mainnet value in a comment right above it, marked `Mainnet:`.
+
+### Files
+
+- `docker-compose.yaml`: the services, their limits and their startup order.
+- `config/relayer.yaml`, `config/miner.yaml`: minimal configs; every key not
+  set takes its default (see `config.relayer.example.yaml` and
+  `config.miner.example.yaml` at the repository root for all of them).
+  `config/relayer.yaml` declares 1 placeholder service, `my-service`, with a
+  placeholder backend URL: replace both with yours.
+- `config/supplier-keys.yaml`: 1 PUBLIC key that is not staked, so the stack
+  starts as cloned and serves nothing. Never fund or stake it.
+- `config/supplier-keys.local.yaml`: where YOUR keys go. It is gitignored
+  (`.gitignore` here); point the 2 keys mounts in `docker-compose.yaml` at it.
+- Redis uses `config.redis.example.conf` from the repository root, with
+  `maxmemory` lowered to 3 GiB for a 4 GiB container. Its port is never published.
+- The limits (Redis and miner 4 GiB, relayer 2 GiB, 2 CPUs each, about 10 GiB in
+  total) fit a few suppliers; the comments above each one give what the v0.1.0
+  load run used ([capacity report](../../docs/benchmarks/v0.1.0/Relay-Miner-Capacity.pdf),
+  [how to read it](../../docs/benchmarks/README.md)).
 
 ### Run it
 
-```bash
-cp ../../config.relayer.example.yaml config/relayer.yaml
-cp ../../config.miner.example.yaml config/miner.yaml
-cp config/supplier-keys.yaml.example config/supplier-keys.yaml
-```
-
-Then edit the copies — every step is required:
-
-1. **Set `redis.url: redis://redis:6379` in BOTH `config/relayer.yaml` and
-   `config/miner.yaml`.** The example configs dial `redis://localhost:6379`,
-   which inside a container is the container itself — both services
-   crash-loop until this points at the compose service name.
-2. Set `keys.keys_file: /keys/supplier-keys.yaml` in both configs (the path
-   the compose file mounts the keys at).
-3. In `config/relayer.yaml`: point `pocket_node` at your full node and
-   configure your services/backends.
-4. In `config/miner.yaml`: point `pocket_node` at your full node and set the
-   chain id.
-5. In `config/supplier-keys.yaml`: replace the placeholder with your real
-   hex-encoded supplier private keys — **never commit this file**.
+The relayer and miner run `ghcr.io/pokt-network/pocket-relay-miner:v0.1.0`.
+If that tag is not published yet, build it from the repository root first:
 
 ```bash
-docker compose up -d
-docker compose logs -f relayer miner
+docker build -t ghcr.io/pokt-network/pocket-relay-miner:v0.1.0 .
 ```
 
-### Scaling is the whole point
+Then, from this directory:
 
 ```bash
-docker compose up -d --scale relayer=3 --scale miner=2
+docker compose -p prm-example up -d
+docker compose -p prm-example ps -a
 ```
 
-Nothing else changes: relayers are stateless, miners elect a leader through
-Redis, and any replica can pick up another's in-flight work. When scaling
-relayers, remove the fixed `ports:` mapping and front them with your own
-load balancer.
+Expected: `redis`, `miner` and `relayer` are `healthy`. With the public key the
+miner reports the supplier as not staked, and nothing is served until you put
+your own keys and services in place (runbook steps 9 to 12).
+
+### Reset
+
+```bash
+docker compose -p prm-example down -v
+```
+
+`-v` deletes the Redis data, including relays not yet claimed and claim trees
+not yet proved.

@@ -50,15 +50,20 @@ type RedisMapStore struct {
 	ctx         context.Context
 
 	// Pipeline buffers — separated because they have different lifetimes.
-	//   pipelineBuffer is reset on every BeginPipeline and flushed by every
-	//   FlushPipeline (one round-trip per UpdateTree).
+	//   pipelineBuffer is flushed by every FlushPipeline (one round-trip per
+	//   UpdateTree) and emptied only by a write that succeeded, so the nodes
+	//   of a failed flush go with the next one.
 	//   orphanBuffer accumulates across Updates until FlushOrphansWithLiveRoot
 	//   at a checkpoint boundary, so live_root always references nodes that
 	//   are still present in the hash.
 	pipelineMu      sync.Mutex
-	pipelineEnabled bool                // true when buffering Set()/Delete() calls
-	pipelineBuffer  map[string][]byte   // field -> value (new-node writes)
-	orphanBuffer    map[string]struct{} // field set (orphan deletes pending checkpoint)
+	pipelineEnabled bool // true when buffering Set()/Delete() calls
+	// pipelineBuffer holds field -> value for new-node writes until a flush
+	// writes them. A node leaves it only through a successful flush or an
+	// orphan Delete: commitLocked compacts a leaf before the flush, so a
+	// buffered node can be the only copy of a leaf, and Get serves it from here.
+	pipelineBuffer map[string][]byte
+	orphanBuffer   map[string]struct{} // field set (orphan deletes pending checkpoint)
 }
 
 // NewRedisMapStore creates a new Redis-backed MapStore for a (supplier, session) pair.
@@ -90,6 +95,55 @@ func NewRedisMapStore(
 	}
 }
 
+// newRedisMapStoreForHash is NewRedisMapStore for a caller that already holds
+// the hash key rather than the (supplier, session) pair that names it. It
+// exists so the cold path reads nodes through this store -- the one place that
+// knows how a node is stored -- instead of talking to Redis itself.
+func newRedisMapStoreForHash(ctx context.Context, redisClient *redisutil.Client, hashKey string) *RedisMapStore {
+	return &RedisMapStore{
+		redisClient:    redisClient,
+		hashKey:        hashKey,
+		ctx:            ctx,
+		pipelineBuffer: make(map[string][]byte),
+		orphanBuffer:   make(map[string]struct{}),
+	}
+}
+
+// RangeNodes calls fn for every field of the nodes hash, with the node already
+// decompressed and with the number of bytes it occupies in Redis.
+//
+// Both are given because they answer different questions and only one of them
+// is the node: storedBytes is what the hash COSTS -- the figure the cold
+// compaction reports as what it frees -- while node is what the tree holds. A
+// caller handed only the decompressed node would report the uncompressed size
+// as the hash's, and would be wrong by exactly what this change saves.
+//
+// HSCAN may return a field twice; this passes both through, because what a
+// repeat means belongs to the caller.
+func (s *RedisMapStore) RangeNodes(ctx context.Context, fn func(field string, node []byte, storedBytes int) error) error {
+	var cursor uint64
+	for {
+		kvs, next, err := s.redisClient.HScan(ctx, s.hashKey, cursor, "", coldLeavesScanCount).Result()
+		if err != nil {
+			return err
+		}
+		for i := 0; i+1 < len(kvs); i += 2 {
+			field, stored := kvs[i], kvs[i+1]
+			node, decErr := decompressNode([]byte(stored))
+			if decErr != nil {
+				return fmt.Errorf("field=%s hash=%s: %w", field, s.hashKey, decErr)
+			}
+			if fnErr := fn(field, node, len(stored)); fnErr != nil {
+				return fnErr
+			}
+		}
+		cursor = next
+		if cursor == 0 {
+			return nil
+		}
+	}
+}
+
 // Get retrieves a value from the Redis hash.
 //
 // The key is hex-encoded before being used as a Redis hash field name,
@@ -117,7 +171,23 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 	// Convert key to hex string for Redis field name
 	field := hex.EncodeToString(key)
 
-	val, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
+	// A node Set buffered and no FlushPipeline has written yet is read from
+	// the buffer: a leaf is compacted as soon as Commit hands its node over,
+	// before the HSET, so until the flush succeeds -- or after it failed, since
+	// the buffer is kept for the next one -- the buffer is the only place that
+	// node exists. Returned as a copy because the buffer owns its slice and
+	// smt appends to a leaf value in place when it has room.
+	s.pipelineMu.Lock()
+	if pending, ok := s.pipelineBuffer[field]; ok {
+		val := make([]byte, len(pending))
+		copy(val, pending)
+		s.pipelineMu.Unlock()
+		observability.SMSTStoreOperations.WithLabelValues("get", "success").Inc()
+		return val, nil
+	}
+	s.pipelineMu.Unlock()
+
+	stored, err := s.redisClient.HGet(s.ctx, s.hashKey, field).Bytes()
 	if err == redis.Nil {
 		observability.SMSTStoreOperations.WithLabelValues("get", "not_found").Inc()
 		return nil, fmt.Errorf("%w: field=%s hash=%s", ErrSMSTNodeMissing, field, s.hashKey)
@@ -126,6 +196,15 @@ func (s *RedisMapStore) Get(key []byte) ([]byte, error) {
 		observability.SMSTStoreOperations.WithLabelValues("get", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("get", "store_error").Inc()
 		return nil, err
+	}
+	// The value may be one zstd frame; see smst_node_codec.go for why the
+	// first byte says which. Decompressing HERE and not in each caller is what
+	// keeps the format private to this store.
+	val, err := decompressNode(stored)
+	if err != nil {
+		observability.SMSTStoreOperations.WithLabelValues("get", "error").Inc()
+		observability.SMSTStoreErrors.WithLabelValues("get", "store_error").Inc()
+		return nil, fmt.Errorf("field=%s hash=%s: %w", field, s.hashKey, err)
 	}
 	// Defense-in-depth: a zero-length payload would also panic the smt
 	// library (data[:1] in isLeafNode). Reject explicitly so we never
@@ -152,11 +231,13 @@ func (s *RedisMapStore) Set(key, value []byte) error {
 	// Check if we're in pipeline mode
 	s.pipelineMu.Lock()
 	if s.pipelineEnabled {
-		// Buffer the operation instead of executing immediately.
-		// Make a copy of value to avoid memory aliasing issues.
-		valueCopy := make([]byte, len(value))
-		copy(valueCopy, value)
-		s.pipelineBuffer[field] = valueCopy
+		// Buffer the operation instead of executing immediately. The store
+		// takes ownership of value, uncopied: the smt library is the only
+		// caller, it encodes every node into a fresh slice and never touches
+		// it after Set. A copy here doubled every big relay (a 1 MiB leaf
+		// encodes to a 1 MiB node) for as long as the batch waited for its
+		// HSET.
+		s.pipelineBuffer[field] = value
 		// If the field was previously marked for deletion (unlikely — SMT
 		// node digests are content-addressed — but possible on hash reuse),
 		// un-orphan it so the pending HDEL doesn't wipe the value we just
@@ -182,7 +263,7 @@ func (s *RedisMapStore) Set(key, value []byte) error {
 		observability.SMSTStoreOperationDuration.WithLabelValues("set").Observe(time.Since(start).Seconds())
 	}()
 
-	err := s.redisClient.HSet(s.ctx, s.hashKey, field, value).Err()
+	err := s.redisClient.HSet(s.ctx, s.hashKey, field, compressNode(value)).Err()
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("set", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("set", "store_error").Inc()
@@ -271,6 +352,12 @@ func (s *RedisMapStore) ClearAll() error {
 		observability.SMSTStoreOperationDuration.WithLabelValues("clear_all").Observe(time.Since(start).Seconds())
 	}()
 
+	// Nodes still buffered belong to the hash being deleted: kept, Get would
+	// keep serving them after the clear.
+	s.pipelineMu.Lock()
+	s.pipelineBuffer = make(map[string][]byte)
+	s.pipelineMu.Unlock()
+
 	err := s.redisClient.Del(s.ctx, s.hashKey).Err()
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("clear_all", "error").Inc()
@@ -292,10 +379,18 @@ func (s *RedisMapStore) BeginPipeline() {
 	defer s.pipelineMu.Unlock()
 
 	s.pipelineEnabled = true
-	// Reset the per-Update Set buffer. The orphan buffer must persist across
-	// BeginPipeline calls — it is owned by the checkpoint cycle, not the
-	// Update cycle. Clearing it here would silently drop pending HDELs.
-	s.pipelineBuffer = make(map[string][]byte)
+	// The orphan buffer must persist across BeginPipeline calls — it is owned
+	// by the checkpoint cycle, not the Update cycle. Clearing it here would
+	// silently drop pending HDELs.
+	//
+	// The Set buffer used to be reset here too. It no longer is: a buffer that
+	// is not empty at this point holds the nodes of a FlushPipeline that
+	// failed. Commit marked those nodes persisted once Set accepted them into
+	// this buffer, so the trie never sends them again, and compaction trusts
+	// that mark to drop a leaf's in-memory value -- reset here, that leaf ends
+	// up in neither memory nor Redis and its proof fails. Kept, they go with
+	// this Update's flush.
+	// s.pipelineBuffer = make(map[string][]byte)
 }
 
 // FlushPipeline executes all buffered Set() operations in a single Redis HSET command.
@@ -311,9 +406,50 @@ func (s *RedisMapStore) FlushPipeline() error {
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
 
-	// If no buffered operations, nothing to do
+	// Pipeline mode ends whether or not the write succeeds.
+	s.pipelineEnabled = false
+	if err := s.writePendingNodesLocked(); err != nil {
+		return fmt.Errorf("failed to flush pipeline: %w", err)
+	}
+	return nil
+}
+
+// FlushPendingNodes wrote the nodes a failed FlushPipeline left buffered, for a
+// writer of a root to call before storing the root. Every such writer now
+// commits the tree first (RedisSMSTManager.commitLocked), and that commit's
+// FlushPipeline writes the whole buffer, the failed write's nodes included.
+//
+// func (s *RedisMapStore) FlushPendingNodes() error {
+// 	s.pipelineMu.Lock()
+// 	defer s.pipelineMu.Unlock()
+// 	return s.writePendingNodesLocked()
+// }
+
+// nodesWriteChunkBytes bounds the bytes one HSET of a nodes write carries. A
+// relay batch commits up to relayBatchCap leaves at once, each holding the raw
+// relay bytes, and a single HSET of all of them is one command the
+// single-threaded Redis runs start to end before serving anyone else. Split,
+// other clients' commands interleave between the pieces, which still travel in
+// one round trip.
+//
+// The size is chosen against the relayer's latency, measured under load at
+// CONC=64 with the tree committed once per relay batch (smst_manager.go
+// commitLocked, this file's writePendingNodesLocked) and pieces of 256 KiB: the
+// Redis slowlog showed these HSETs at p50 13 ms and up to 97 ms, while the
+// relayer's meter GET went from p50 34 ms to 64 ms against the load before the
+// batch commit. Those pieces were the one Redis-side change between the two
+// loads; that they held the relayer's commands back is inferred, not measured.
+// 32 KiB is what a single piece may now carry; its effect has to be measured in
+// the next load.
+const nodesWriteChunkBytes = 32 << 10
+
+// writePendingNodesLocked sends pipelineBuffer to the nodes hash, as HSETs of at
+// most nodesWriteChunkBytes each in one round trip, and empties it only if every
+// piece was written; on failure the nodes stay buffered for the next write, and
+// the pieces that did land are written again, which HSET makes harmless. The
+// caller holds pipelineMu.
+func (s *RedisMapStore) writePendingNodesLocked() error {
 	if len(s.pipelineBuffer) == 0 {
-		s.pipelineEnabled = false
 		return nil
 	}
 
@@ -324,28 +460,46 @@ func (s *RedisMapStore) FlushPipeline() error {
 
 	// Build field-value pairs for HSET
 	// Redis HSET accepts: HSET key field1 value1 field2 value2 ...
+	var chunks [][]interface{}
 	args := make([]interface{}, 0, len(s.pipelineBuffer)*2)
+	chunkBytes := 0
 	for field, value := range s.pipelineBuffer {
-		args = append(args, field, value)
+		// Compressed on the way out, so the buffer keeps raw nodes and the
+		// chunking counts the bytes that actually travel.
+		stored := compressNode(value)
+		if len(args) > 0 && chunkBytes+len(field)+len(stored) > nodesWriteChunkBytes {
+			chunks = append(chunks, args)
+			args = make([]interface{}, 0, len(s.pipelineBuffer)*2-len(args))
+			chunkBytes = 0
+		}
+		args = append(args, field, stored)
+		chunkBytes += len(field) + len(stored)
 	}
+	chunks = append(chunks, args)
 
 	// Execute batched HSET
-	err := s.redisClient.HSet(s.ctx, s.hashKey, args...).Err()
+	var err error
+	if len(chunks) == 1 {
+		err = s.redisClient.HSet(s.ctx, s.hashKey, chunks[0]...).Err()
+	} else {
+		_, err = s.redisClient.Pipelined(s.ctx, func(pipe redis.Pipeliner) error {
+			for _, chunk := range chunks {
+				pipe.HSet(s.ctx, s.hashKey, chunk...)
+			}
+			return nil
+		})
+	}
 	if err != nil {
 		observability.SMSTStoreOperations.WithLabelValues("flush_pipeline", "error").Inc()
 		observability.SMSTStoreErrors.WithLabelValues("flush_pipeline", "store_error").Inc()
-		s.pipelineEnabled = false
-		return fmt.Errorf("failed to flush pipeline: %w", err)
+		return err
 	}
 
 	// Track metrics (count as bulk operation)
 	observability.SMSTStoreOperations.WithLabelValues("flush_pipeline", "success").Inc()
 	observability.SMSTStoreOperations.WithLabelValues("set", "success").Add(float64(len(s.pipelineBuffer)))
 
-	// Clear buffer and disable pipeline mode
 	s.pipelineBuffer = make(map[string][]byte)
-	s.pipelineEnabled = false
-
 	return nil
 }
 
@@ -383,6 +537,15 @@ func (s *RedisMapStore) FlushOrphansWithLiveRoot(
 ) error {
 	s.pipelineMu.Lock()
 	defer s.pipelineMu.Unlock()
+
+	// Nodes before the root. A failed FlushPipeline can have left nodes that
+	// this root references only in the buffer; they are written first, outside
+	// the MULTI below, because nodes no root points at are harmless and a root
+	// without its nodes is not. If they cannot be written, nothing else is
+	// sent: the orphans are kept and live_root stays at its previous value.
+	if err := s.writePendingNodesLocked(); err != nil {
+		return fmt.Errorf("write buffered nodes before live_root: %w", err)
+	}
 
 	start := time.Now()
 	defer func() {

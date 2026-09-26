@@ -93,7 +93,7 @@ than being obvious.
 ## Step 1 — read, in this order
 
 1. The canonical hand-over that Step 0b named.
-2. `scripts/localonly/QUEUE-deep-cleanup.md` — the index of everything pending.
+2. `scripts/localonly/QUEUE.md` — the items the maintainer approved; nothing else is pending work.
 
 ## Step 2 — recite the gates, at the START
 
@@ -139,8 +139,8 @@ that will rediscover something already written down.
 
 ## Step 4 — survey the open work, SIZE it, and agree the order BEFORE executing
 
-Jorge's standing rule: *"quizás debemos explorar los topics, buscar el mejor
-orden y luego empezar el trabajo realmente."* Following a discovery mid-flight is
+Jorge's standing rule: *"maybe we should explore the topics, look for the best
+order, and only then actually start the work."* Following a discovery mid-flight is
 still right when it earns it; what must not be emergent is the ORDER.
 
 Restate the working order in one line after two or three reorderings and get it

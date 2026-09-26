@@ -30,9 +30,9 @@ type Config struct {
 	// Default: true
 	Async bool `yaml:"async"`
 
-	// AsyncBufferSize is the size of the async ring buffer (in bytes).
-	// Larger buffer = more buffering capacity but more memory usage.
-	// Default: 100000 (100KB)
+	// AsyncBufferSize is the number of log messages the async ring buffer holds.
+	// A larger buffer drops fewer messages under a burst and uses more memory.
+	// Default: 100000 messages
 	AsyncBufferSize int `yaml:"async_buffer_size"`
 
 	// AsyncPollInterval is how often the async writer polls for messages (in milliseconds).
@@ -69,7 +69,7 @@ func DefaultConfig() Config {
 		Level:              "info",
 		Format:             "json",
 		Async:              true,   // Enable async by default for performance
-		AsyncBufferSize:    100000, // 100KB buffer
+		AsyncBufferSize:    100000, // 100000 messages buffer
 		AsyncPollInterval:  100,    // 100ms poll interval - balances latency vs CPU
 		Sampling:           false,  // Disabled by default, enable for extreme throughput
 		SamplingInitial:    100,    // First 100 messages always logged
@@ -166,7 +166,7 @@ func NewLoggerFromConfig(config Config) Logger {
 	if config.Async {
 		bufferSize := config.AsyncBufferSize
 		if bufferSize <= 0 {
-			bufferSize = 100000 // Default 100KB
+			bufferSize = 100000 // Default 100000 messages
 		}
 
 		pollInterval := config.AsyncPollInterval
@@ -183,7 +183,7 @@ func NewLoggerFromConfig(config Config) Logger {
 			// makes dropped logs invisible to alerting.
 			if missed > 0 {
 				LogMessagesDroppedTotal.Add(float64(missed))
-				_, _ = os.Stderr.WriteString("WARN: dropped log messages due to full buffer\n")
+				_, _ = os.Stderr.WriteString("WARN: dropped log messages due to full buffer\n") //nolint:errcheck // last-resort output: the logger cannot be used here (recursion) and the loss is ALREADY counted in LogMessagesDroppedTotal on the line above, so discarding this does not make it silent
 			}
 		})
 	}
