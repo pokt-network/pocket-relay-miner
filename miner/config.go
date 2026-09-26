@@ -597,7 +597,7 @@ func (c *Config) GetTxGasPrice() string {
 	if c.Transaction.GasPrice != "" {
 		return c.Transaction.GasPrice
 	}
-	return "0.00001upokt" // Default: 0.00001 upokt (10x higher than previous default)
+	return tx.DefaultGasPrice
 }
 
 // GetTxGasAdjustment returns the gas adjustment multiplier with defaults.

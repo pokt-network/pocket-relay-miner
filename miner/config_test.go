@@ -480,3 +480,12 @@ func TestConfig_Validate_BlockTimeSecondsIsRequired(t *testing.T) {
 	require.NoError(t, otherwiseValid(60).Validate(),
 		"the same config with a positive block time must be valid")
 }
+
+// The gas price fallback is the mainnet minimum gas price, the same value
+// DefaultConfig carries. It used to return 0.00001upokt, 10 times that, when
+// transaction.gas_price was set to an empty string.
+func TestConfig_GetTxGasPrice_FallbackIsMainnetMinimum(t *testing.T) {
+	const mainnetMinGasPrice = "0.000001upokt"
+	require.Equal(t, mainnetMinGasPrice, (&Config{}).GetTxGasPrice(), "empty gas_price falls back to the mainnet minimum")
+	require.Equal(t, mainnetMinGasPrice, DefaultConfig().GetTxGasPrice(), "the default config carries the same value")
+}
