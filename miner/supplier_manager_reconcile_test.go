@@ -10,7 +10,6 @@ import (
 	"time"
 
 	sdkmath "cosmossdk.io/math"
-	"github.com/alicebob/miniredis/v2"
 	"github.com/alitto/pond/v2"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
@@ -80,17 +78,10 @@ func (t *toggleableSupplierQueryClient) InvalidateSupplier(string) {}
 // After the fix, the periodic reconcile observes the stake transition and
 // pushes the supplier into the claimer.
 func TestSupplierManager_Reconcile_PicksUpStakedAfterStart(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = redisClient.Close() }()
+	redisClient, _ := newTestRedis(t)
 
 	supplierAddr := "pokt1supplier_under_test"
 	km := &fakeKeyManager{addrs: []string{supplierAddr}}
@@ -163,17 +154,10 @@ func TestSupplierManager_Reconcile_PicksUpStakedAfterStart(t *testing.T) {
 //  5. Session transitions to a terminal state (proved).
 //  6. reconcile now removes the supplier — the pipeline can be torn down.
 func TestSupplierManager_Reconcile_DefersRemovalWhilePendingSessions(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = redisClient.Close() }()
+	redisClient, _ := newTestRedis(t)
 
 	supplierAddr := "pokt1supplier_pending_drain"
 	km := &fakeKeyManager{addrs: []string{supplierAddr}}

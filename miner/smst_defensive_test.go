@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/require"
 
@@ -43,7 +42,6 @@ func validRoot() []byte {
 type defensiveHarness struct {
 	t           *testing.T
 	ctx         context.Context
-	miniRedis   *miniredis.Miniredis
 	redisClient *redisutil.Client
 	manager     *RedisSMSTManager
 	supplier    string
@@ -51,27 +49,21 @@ type defensiveHarness struct {
 
 func newDefensiveHarness(t *testing.T) *defensiveHarness {
 	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
+	client, _ := newTestRedis(t)
 	supplier := "pokt1defensive_supplier_addr"
 	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
 		SupplierAddress: supplier,
 		CacheTTL:        0,
 	})
 	return &defensiveHarness{
-		t: t, ctx: ctx, miniRedis: mr,
+		t: t, ctx: ctx,
 		redisClient: client, manager: mgr, supplier: supplier,
 	}
 }
 
 func (h *defensiveHarness) cleanup() {
 	_ = h.redisClient.Close()
-	h.miniRedis.Close()
 }
 
 func (h *defensiveHarness) claimedRootKey(sessionID string) string {

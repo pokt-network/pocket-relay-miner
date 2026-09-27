@@ -32,8 +32,8 @@ import (
 func (s *RedisSMSTTestSuite) TestFlushOrphansWithLiveRoot_RefreshesTTL() {
 	supplier := "pokt1sliding_ttl"
 	sessionID := "session_sliding_ttl"
-	// Short cache TTL so the refresh is observable without real-time
-	// sleeps. miniredis.FastForward lets us age keys deterministically.
+	// Short cache TTL so the refresh is observable without real-time sleeps:
+	// the key's remaining TTL is set directly rather than waited out.
 	const cacheTTL = 30 * time.Second
 
 	config := RedisSMSTManagerConfig{
@@ -50,28 +50,19 @@ func (s *RedisSMSTTestSuite) TestFlushOrphansWithLiveRoot_RefreshesTTL() {
 	// (updateCount == 1). Both keys should have TTL ≈ cacheTTL.
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k1"), []byte("v1"), 10))
 
-	ttlNodes := s.miniRedis.TTL(nodesKey)
-	ttlLive := s.miniRedis.TTL(liveKey)
-	s.Require().Equalf(cacheTTL, ttlNodes,
-		"first checkpoint must refresh nodes-hash TTL to cache_ttl (got %s)", ttlNodes)
-	s.Require().Equalf(cacheTTL, ttlLive,
-		"first checkpoint must refresh live_root TTL to cache_ttl (got %s)", ttlLive)
+	s.requireTTLNear(nodesKey, cacheTTL, "first checkpoint must refresh nodes-hash TTL to cache_ttl")
+	s.requireTTLNear(liveKey, cacheTTL, "first checkpoint must refresh live_root TTL to cache_ttl")
 
 	// Age both keys most of the way to expiry without crossing it.
-	s.miniRedis.FastForward(cacheTTL - 5*time.Second)
-	ttlNodesAged := s.miniRedis.TTL(nodesKey)
-	s.Require().Lessf(ttlNodesAged, cacheTTL-time.Second,
-		"after fast-forward the TTL must have decayed (got %s)", ttlNodesAged)
+	s.ageKeyTo(nodesKey, 5*time.Second)
+	s.ageKeyTo(liveKey, 5*time.Second)
+	s.requireTTLNear(nodesKey, 5*time.Second, "the aged key must be near expiry before the refresh")
 
 	// Another checkpoint MUST push the TTL back out to cache_ttl.
 	s.Require().NoError(mgr.UpdateTree(s.ctx, sessionID, []byte("k2"), []byte("v2"), 10))
 
-	ttlNodesRefreshed := s.miniRedis.TTL(nodesKey)
-	ttlLiveRefreshed := s.miniRedis.TTL(liveKey)
-	s.Require().Equalf(cacheTTL, ttlNodesRefreshed,
-		"subsequent checkpoint must refresh nodes-hash TTL (got %s)", ttlNodesRefreshed)
-	s.Require().Equalf(cacheTTL, ttlLiveRefreshed,
-		"subsequent checkpoint must refresh live_root TTL (got %s)", ttlLiveRefreshed)
+	s.requireTTLNear(nodesKey, cacheTTL, "subsequent checkpoint must refresh nodes-hash TTL")
+	s.requireTTLNear(liveKey, cacheTTL, "subsequent checkpoint must refresh live_root TTL")
 }
 
 // TestFlushOrphansWithLiveRoot_NoTTLWhenCacheTTLZero verifies that
@@ -88,10 +79,8 @@ func (s *RedisSMSTTestSuite) TestFlushOrphansWithLiveRoot_NoTTLWhenCacheTTLZero(
 	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
 
-	s.Require().Equalf(time.Duration(0), s.miniRedis.TTL(nodesKey),
-		"cache_ttl=0 must leave nodes-hash without a TTL")
-	s.Require().Equalf(time.Duration(0), s.miniRedis.TTL(liveKey),
-		"cache_ttl=0 must leave live_root without a TTL")
+	s.requirePersistent(nodesKey, "cache_ttl=0 must leave nodes-hash without a TTL")
+	s.requirePersistent(liveKey, "cache_ttl=0 must leave live_root without a TTL")
 }
 
 // TestEvictCorruptSession_PreservesRedisState verifies that the
@@ -113,8 +102,8 @@ func (s *RedisSMSTTestSuite) TestEvictCorruptSession_PreservesRedisState() {
 	nodesKey := s.redisClient.KB().SMSTNodesKey(supplier, sessionID)
 	liveKey := s.redisClient.KB().SMSTLiveRootKey(supplier, sessionID)
 
-	s.Require().True(s.miniRedis.Exists(nodesKey), "nodes hash must exist after seeding")
-	s.Require().True(s.miniRedis.Exists(liveKey), "live_root must exist after seeding")
+	s.Require().True(s.keyExists(nodesKey), "nodes hash must exist after seeding")
+	s.Require().True(s.keyExists(liveKey), "live_root must exist after seeding")
 	s.Require().Equal(1, mgr.GetTreeCount(), "one in-memory tree before eviction")
 
 	// Trigger eviction directly (bypassing the corruption path).
@@ -122,9 +111,9 @@ func (s *RedisSMSTTestSuite) TestEvictCorruptSession_PreservesRedisState() {
 
 	s.Require().Equal(0, mgr.GetTreeCount(),
 		"eviction must drop the in-memory tree")
-	s.Require().Truef(s.miniRedis.Exists(nodesKey),
+	s.Require().Truef(s.keyExists(nodesKey),
 		"eviction MUST preserve the nodes hash so resume can recover (got missing)")
-	s.Require().Truef(s.miniRedis.Exists(liveKey),
+	s.Require().Truef(s.keyExists(liveKey),
 		"eviction MUST preserve live_root so resume can recover (got missing)")
 }
 

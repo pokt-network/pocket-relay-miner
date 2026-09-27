@@ -4,10 +4,8 @@ package miner
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	sdk "github.com/cosmos/cosmos-sdk/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
@@ -181,7 +179,6 @@ func TestGetClaimReward_PropagatesQueryErrors(t *testing.T) {
 type economicViabilityHarness struct {
 	t            *testing.T
 	ctx          context.Context
-	miniRedis    *miniredis.Miniredis
 	redisClient  *redisutil.Client
 	sharedParams *sharedtypes.Params
 	targetHash   []byte
@@ -194,14 +191,8 @@ func newEconomicViabilityHarness(
 ) *economicViabilityHarness {
 	t.Helper()
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err, "miniredis")
-
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err, "redis client")
+	client, _ := newTestRedis(t)
 
 	params := &sharedtypes.Params{
 		ComputeUnitsToTokensMultiplier: cuttm,
@@ -215,7 +206,6 @@ func newEconomicViabilityHarness(
 	return &economicViabilityHarness{
 		t:            t,
 		ctx:          ctx,
-		miniRedis:    mr,
 		redisClient:  client,
 		sharedParams: params,
 		targetHash:   targetHash,
@@ -225,9 +215,6 @@ func newEconomicViabilityHarness(
 func (h *economicViabilityHarness) cleanup() {
 	if h.redisClient != nil {
 		_ = h.redisClient.Close()
-	}
-	if h.miniRedis != nil {
-		h.miniRedis.Close()
 	}
 }
 

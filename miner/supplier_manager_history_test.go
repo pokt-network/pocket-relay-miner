@@ -10,7 +10,6 @@ import (
 	"time"
 
 	sdkmath "cosmossdk.io/math"
-	"github.com/alicebob/miniredis/v2"
 	"github.com/alitto/pond/v2"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/hashicorp/go-version"
@@ -18,7 +17,6 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	"github.com/pokt-network/poktroll/pkg/client"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -116,18 +114,15 @@ func servicesForSupplierFromCache(t *testing.T, sc *cache.SupplierCache, addr st
 
 func newManagerForHistoryTest(t *testing.T, km *fakeKeyManager, qc *historySupplierQueryClient, bc *fakeBlockClient) (*SupplierManager, *cache.SupplierCache, func()) {
 	t.Helper()
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{URL: fmt.Sprintf("redis://%s", mr.Addr())})
-	require.NoError(t, err)
+	redisClient, _ := newTestRedis(t)
 
 	supplierCache := cache.NewSupplierCache(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		redisClient,
-		cache.SupplierCacheConfig{KeyPrefix: "ha:supplier"},
+		cache.SupplierCacheConfig{KeyPrefix: redisClient.KB().SupplierKeyPrefix()},
 	)
 	require.NoError(t, supplierCache.Start(ctx))
 
@@ -161,7 +156,6 @@ func newManagerForHistoryTest(t *testing.T, km *fakeKeyManager, qc *historySuppl
 		_ = redisClient.Close()
 		pool.StopAndWait()
 		cancel()
-		mr.Close()
 	}
 	return mgr, supplierCache, cleanup
 }

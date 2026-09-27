@@ -26,12 +26,9 @@ package miner
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/crypto/protocol"
 	"github.com/pokt-network/smt"
 	"github.com/rs/zerolog"
@@ -46,15 +43,8 @@ import (
 // claimed_root from outliving the nodes hash on a crash between claim
 // and proof submission.
 func TestFlushTree_ClaimedRootHonoursCacheTTL(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = client.Close() }()
+	client, _ := newTestRedis(t)
 
 	supplier := "pokt1claimed_root_ttl"
 	sessionID := "session_claimed_root_ttl"
@@ -68,24 +58,22 @@ func TestFlushTree_ClaimedRootHonoursCacheTTL(t *testing.T) {
 
 	// Build a real tree and flush it to write claimed_root + stats.
 	require.NoError(t, mgr.UpdateTree(ctx, sessionID, []byte("k1"), []byte("v1"), 10))
-	_, err = mgr.FlushTree(ctx, sessionID)
+	_, err := mgr.FlushTree(ctx, sessionID)
 	require.NoError(t, err)
 
 	rootKey := client.KB().SMSTRootKey(supplier, sessionID)
 	statsKey := client.KB().SMSTStatsKey(supplier, sessionID)
 
-	// Immediately after flush, TTL must be ~cacheTTL. miniredis TTL is exact.
-	require.Equalf(t, cacheTTL, mr.TTL(rootKey),
-		"FlushTree MUST persist claimed_root with CacheTTL so it cannot outlive the nodes hash (got %s)", mr.TTL(rootKey))
-	require.Equalf(t, cacheTTL, mr.TTL(statsKey),
-		"FlushTree MUST persist stats with CacheTTL for the same reason (got %s)", mr.TTL(statsKey))
-
-	// Fast-forward past TTL and confirm claimed_root is gone. This is the
-	// behavioural proof that the TTL is enforced; if the bug re-appears
-	// (TTL=0) the key would still exist.
-	mr.FastForward(cacheTTL + time.Second)
-	require.Falsef(t, mr.Exists(rootKey),
-		"claimed_root MUST expire after CacheTTL elapses (bug: TTL=0 would leave it persistent)")
+	// Immediately after flush both keys must carry ~cacheTTL.
+	//
+	// This IS the proof against the bug, on its own. The old test also wound
+	// miniredis past the expiry to watch the key vanish; a real server has no
+	// clock to wind, and forcing the expiry by hand would delete the key
+	// whether or not a TTL was ever set, which is the opposite of a test. The
+	// regression is TTL=0 — a persistent key — and against a real server that
+	// answers PTTL -1, so these two assertions fail on exactly that.
+	requireTTLNear(t, client, rootKey, cacheTTL)
+	requireTTLNear(t, client, statsKey, cacheTTL)
 }
 
 // TestLoadTreeFromRedis_RefreshesClaimedRootTTL verifies that a
@@ -93,15 +81,8 @@ func TestFlushTree_ClaimedRootHonoursCacheTTL(t *testing.T) {
 // the claimed_root's TTL. A long-running proof-retry loop must not
 // allow the key to age out mid-flight.
 func TestLoadTreeFromRedis_RefreshesClaimedRootTTL(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = client.Close() }()
+	client, _ := newTestRedis(t)
 
 	supplier := "pokt1claimed_root_refresh"
 	sessionID := "session_claimed_root_refresh"
@@ -114,17 +95,21 @@ func TestLoadTreeFromRedis_RefreshesClaimedRootTTL(t *testing.T) {
 	})
 
 	require.NoError(t, mgr.UpdateTree(ctx, sessionID, []byte("k1"), []byte("v1"), 10))
-	_, err = mgr.FlushTree(ctx, sessionID)
+	_, err := mgr.FlushTree(ctx, sessionID)
 	require.NoError(t, err)
 
 	rootKey := client.KB().SMSTRootKey(supplier, sessionID)
 	statsKey := client.KB().SMSTStatsKey(supplier, sessionID)
 
-	// Age the key part-way to expiry without crossing it.
-	mr.FastForward(cacheTTL / 2)
-	ttlBefore := mr.TTL(rootKey)
-	require.Lessf(t, ttlBefore, cacheTTL-time.Second,
-		"TTL should have decayed after fast-forward (got %s)", ttlBefore)
+	// Age BOTH keys part-way to expiry without crossing it. Ageing only the
+	// root would leave stats carrying its full TTL from FlushTree, and the
+	// stats assertion below would then pass whether or not the resume path
+	// refreshes it — miniredis's FastForward aged the whole server at once,
+	// so this is a hazard the fake did not have.
+	ageKeyTo(t, client, rootKey, cacheTTL/2)
+	ageKeyTo(t, client, statsKey, cacheTTL/2)
+	requireTTLNear(t, client, rootKey, cacheTTL/2)
+	requireTTLNear(t, client, statsKey, cacheTTL/2)
 
 	// Simulate a proof-submission retry path: drop the in-memory tree,
 	// then lazy-load from Redis. loadTreeFromRedis must refresh the TTL.
@@ -136,18 +121,12 @@ func TestLoadTreeFromRedis_RefreshesClaimedRootTTL(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, loaded)
 
-	ttlAfter := mr.TTL(rootKey)
-	require.Equalf(t, cacheTTL, ttlAfter,
-		"loadTreeFromRedis MUST refresh claimed_root TTL on resume (got %s)", ttlAfter)
-	require.Equalf(t, cacheTTL, mr.TTL(statsKey),
-		"loadTreeFromRedis MUST refresh stats TTL on resume (got %s)", mr.TTL(statsKey))
-
-	// After a further aging pass that would have expired the pre-refresh
-	// TTL, the key must still be alive — proving the refresh actually
-	// extended lifetime, not just touched it.
-	mr.FastForward(cacheTTL - time.Second)
-	require.Truef(t, mr.Exists(rootKey),
-		"claimed_root MUST survive post-refresh aging (bug: no refresh would let it expire)")
+	// Back out to the full window. Without the refresh the key would still be
+	// sitting at the halved TTL set above, so this fails on exactly the bug —
+	// the extra aging pass the old test did afterwards proved nothing this
+	// does not.
+	requireTTLNear(t, client, rootKey, cacheTTL)
+	requireTTLNear(t, client, statsKey, cacheTTL)
 }
 
 // --- BUG 2: WarmupFromRedis resume paths ---
@@ -159,15 +138,8 @@ func TestLoadTreeFromRedis_RefreshesClaimedRootTTL(t *testing.T) {
 // bug: NewSparseMerkleSumTrie was called unconditionally, silently
 // discarding the in-progress session's relays on any warmup call.
 func TestWarmupFromRedis_ResumesFromLiveRoot(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = client.Close() }()
+	client, _ := newTestRedis(t)
 
 	supplier := "pokt1warmup_live"
 	sessionID := "session_warmup_live"
@@ -186,8 +158,8 @@ func TestWarmupFromRedis_ResumesFromLiveRoot(t *testing.T) {
 	}
 
 	// Sanity: live_root exists, claimed_root does NOT.
-	require.True(t, mr.Exists(client.KB().SMSTLiveRootKey(supplier, sessionID)))
-	require.False(t, mr.Exists(client.KB().SMSTRootKey(supplier, sessionID)))
+	require.True(t, keyExists(t, client, client.KB().SMSTLiveRootKey(supplier, sessionID)))
+	require.False(t, keyExists(t, client, client.KB().SMSTRootKey(supplier, sessionID)))
 
 	// Fresh manager performs warmup. The bug: this used to build an empty
 	// tree, so the next UpdateTree would see 1 relay instead of 6.
@@ -218,15 +190,8 @@ func TestWarmupFromRedis_ResumesFromLiveRoot(t *testing.T) {
 // imports the tree with claimedRoot set so late updates are correctly
 // rejected with ErrSessionClaimed.
 func TestWarmupFromRedis_ResumesFromClaimedRoot(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = client.Close() }()
+	client, _ := newTestRedis(t)
 
 	supplier := "pokt1warmup_claimed"
 	sessionID := "session_warmup_claimed"
@@ -239,7 +204,7 @@ func TestWarmupFromRedis_ResumesFromClaimedRoot(t *testing.T) {
 		[]byte("k1"), []byte("v1"), 10))
 	expectedRoot, err := seedMgr.FlushTree(ctx, sessionID)
 	require.NoError(t, err)
-	require.True(t, mr.Exists(client.KB().SMSTRootKey(supplier, sessionID)))
+	require.True(t, keyExists(t, client, client.KB().SMSTRootKey(supplier, sessionID)))
 
 	warmMgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
 		SupplierAddress: supplier,
@@ -265,15 +230,8 @@ func TestWarmupFromRedis_ResumesFromClaimedRoot(t *testing.T) {
 // is ImportSparseMerkleSumTrie which panics on malformed roots; the
 // fix must wrap it in runSMSTSafely and fall through on failure.
 func TestWarmupFromRedis_HandlesCorruptLiveRoot(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = client.Close() }()
+	client, _ := newTestRedis(t)
 
 	supplier := "pokt1warmup_corrupt"
 	sessionID := "session_warmup_corrupt"
@@ -298,7 +256,7 @@ func TestWarmupFromRedis_HandlesCorruptLiveRoot(t *testing.T) {
 	}, "WarmupFromRedis MUST NOT propagate ImportSparseMerkleSumTrie panics")
 
 	// The corrupt live_root should have been deleted by the fall-through.
-	require.False(t, mr.Exists(liveKey),
+	require.False(t, keyExists(t, client, liveKey),
 		"corrupt live_root MUST be deleted so subsequent resumes don't re-trip")
 }
 
@@ -310,15 +268,8 @@ func TestWarmupFromRedis_HandlesCorruptLiveRoot(t *testing.T) {
 // this, the new code cannot find the checkpoint and silently creates
 // a fresh tree on the next relay — losing all pre-migration relays.
 func TestMigrateLegacySMSTKeys_RenamesLiveRoot(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = client.Close() }()
+	client, _ := newTestRedis(t)
 
 	sessionID := "session_live_root_migration"
 	owner := "pokt1live_root_owner"
@@ -359,7 +310,7 @@ func TestMigrateLegacySMSTKeys_RenamesLiveRoot(t *testing.T) {
 	if ok, _ := client.Exists(ctx, newLive).Result(); ok > 0 {
 		require.NoError(t, client.Rename(ctx, newLive, legacyLive).Err())
 	}
-	require.True(t, mr.Exists(legacyLive),
+	require.True(t, keyExists(t, client, legacyLive),
 		"legacy live_root must exist pre-migration (seed checkpointed it)")
 
 	// Seed session metadata so owner-lookup finds the supplier.
@@ -372,18 +323,18 @@ func TestMigrateLegacySMSTKeys_RenamesLiveRoot(t *testing.T) {
 	require.Equal(t, 1, stats.SessionsMigrated)
 
 	// All four keys must be renamed to per-supplier form.
-	require.False(t, mr.Exists(legacyRoot),
+	require.False(t, keyExists(t, client, legacyRoot),
 		"legacy root must be renamed")
-	require.False(t, mr.Exists(legacyNodes),
+	require.False(t, keyExists(t, client, legacyNodes),
 		"legacy nodes must be renamed")
-	require.False(t, mr.Exists(legacyStats),
+	require.False(t, keyExists(t, client, legacyStats),
 		"legacy stats must be renamed")
-	require.Falsef(t, mr.Exists(legacyLive),
+	require.Falsef(t, keyExists(t, client, legacyLive),
 		"legacy live_root MUST be renamed (bug: it was left orphaned)")
 
-	require.True(t, mr.Exists(newRoot), "new root must exist")
-	require.True(t, mr.Exists(newNodes), "new nodes must exist")
-	require.Truef(t, mr.Exists(newLive),
+	require.True(t, keyExists(t, client, newRoot), "new root must exist")
+	require.True(t, keyExists(t, client, newNodes), "new nodes must exist")
+	require.Truef(t, keyExists(t, client, newLive),
 		"new live_root MUST exist after migration (bug: previously lost)")
 }
 
@@ -396,15 +347,8 @@ func TestMigrateLegacySMSTKeys_RenamesLiveRoot(t *testing.T) {
 // mid-session). The test asserts the bytes do NOT accumulate
 // indefinitely: after migration, the legacy live_root is gone.
 func TestMigrateLegacySMSTKeys_DeletesOrphanedLiveRootOnly(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
-	client, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = client.Close() }()
+	client, _ := newTestRedis(t)
 
 	sessionID := "session_orphan_live_root"
 	legacyPrefix := client.KB().SMSTNodesPrefix()
@@ -427,7 +371,7 @@ func TestMigrateLegacySMSTKeys_DeletesOrphanedLiveRootOnly(t *testing.T) {
 	require.Greaterf(t, stats.LegacyKeysDeleted+stats.SessionsMigrated, 0,
 		"mid-session-only legacy state must be handled (migrated or deleted), got deleted=%d migrated=%d",
 		stats.LegacyKeysDeleted, stats.SessionsMigrated)
-	require.Falsef(t, mr.Exists(legacyLive),
+	require.Falsef(t, keyExists(t, client, legacyLive),
 		"legacy live_root must be removed (migrated or deleted) to prevent Redis memory leak across upgrades")
 }
 

@@ -4,50 +4,33 @@ package miner
 
 import (
 	"context"
-	"fmt"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/rs/zerolog"
 	"github.com/stretchr/testify/suite"
 )
 
 // SupplierClaimerTestSuite tests the SupplierClaimer functionality.
-// Uses miniredis for real Redis operations (Rule #1: no mocks).
+// Uses a real Redis 8 (Rule #1: no fakes, no mocks).
 type SupplierClaimerTestSuite struct {
 	suite.Suite
-	miniRedis   *miniredis.Miniredis
+	redisPrefix string
 	redisClient *redisutil.Client
 	ctx         context.Context
 }
 
 func (s *SupplierClaimerTestSuite) SetupSuite() {
-	mr, err := miniredis.Run()
-	s.Require().NoError(err, "failed to create miniredis")
-	s.miniRedis = mr
 	s.ctx = context.Background()
-
-	redisURL := fmt.Sprintf("redis://%s", mr.Addr())
-	client, err := redisutil.NewClient(s.ctx, redisutil.ClientConfig{
-		URL: redisURL,
-	})
-	s.Require().NoError(err, "failed to create Redis client")
-	s.redisClient = client
+	s.redisClient, s.redisPrefix = newTestRedis(s.T())
 }
 
+// SetupTest clears this suite's OWN subtree between tests, never FLUSHALL:
+// the server is shared with the packages running in parallel.
 func (s *SupplierClaimerTestSuite) SetupTest() {
-	s.miniRedis.FlushAll()
-}
-
-func (s *SupplierClaimerTestSuite) TearDownSuite() {
-	if s.miniRedis != nil {
-		s.miniRedis.Close()
-	}
-	if s.redisClient != nil {
-		_ = s.redisClient.Close()
-	}
+	testredis.DeletePrefix(s.T(), s.redisClient, s.redisPrefix)
 }
 
 // createTestClaimer creates a SupplierClaimer for testing.
