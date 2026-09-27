@@ -10,6 +10,7 @@ import (
 
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -783,4 +784,218 @@ func TestWarmupFromRedis_DiscoversEveryKeyItScans(t *testing.T) {
 				"dropped it, which leaves L1 empty and sends every relay to L2 -- "+
 				"degraded silently, and invisible to the live gate", addr)
 	}
+}
+
+// countInvalidationsUntilFence returns how many invalidation messages the
+// subscription holds up to a sentinel the caller publishes itself.
+//
+// It is deterministic without a sleep: PublishInvalidation is synchronous (it
+// waits for the server's reply before SetSupplierState returns), so by the time
+// the test publishes the fence, any invalidation the code under test produced is
+// already queued ahead of it on the same server.
+func countInvalidationsUntilFence(
+	t *testing.T,
+	client *redisutil.Client,
+	msgs <-chan *goredis.Message,
+) int {
+	t.Helper()
+
+	const fence = `{"operator_address": "__fence__"}`
+	channel := client.KB().EventChannel(supplierCacheType, "invalidate")
+	require.NoError(t, client.Publish(context.Background(), channel, fence).Err())
+
+	count := 0
+	for {
+		select {
+		case msg := <-msgs:
+			if msg.Payload == fence {
+				return count
+			}
+			count++
+		case <-time.After(10 * time.Second):
+			t.Fatalf("fence never arrived on %s after %d messages", channel, count)
+		}
+	}
+}
+
+// TestSetSupplierStateDoesNotInvalidateWhenNothingChanged pins the difference
+// between "the entry is current" and "the entry was just republished".
+//
+// Measured on a clean stack (2026-08-21): 34 invalidations/min per relayer at
+// rest with 17 suppliers and 2 miners -- exactly 17 x 2 / 60s, i.e. every
+// reconcile rewriting and republishing every supplier with nothing changed.
+// Each one drops that supplier's L1 on every relayer. At 594 suppliers it is
+// ~1200/min of pure churn.
+//
+// The TTL must still be refreshed on the no-change path: it is what keeps the
+// entry alive, and an expired entry makes the relayer serve optimistically,
+// which quietly disables the per-service gate for the most stable suppliers --
+// the ones that by definition never trigger a rewrite.
+//
+// This counts messages on the invalidation channel, NOT cacheInvalidations:
+// SetSupplierState increments no counter (the supplier counter is bumped by
+// DeleteSupplierState and by the subscriber's handler), so a metric assertion
+// here would read 0 both before and after the fix.
+func TestSetSupplierStateDoesNotInvalidateWhenNothingChanged(t *testing.T) {
+	cache, client := newTestSupplierCache(t)
+	ctx := context.Background()
+
+	sub := client.Subscribe(ctx, client.KB().EventChannel(supplierCacheType, "invalidate"))
+	t.Cleanup(func() { _ = sub.Close() })
+	_, err := sub.Receive(ctx) // wait for the subscription to be established
+	require.NoError(t, err)
+	msgs := sub.Channel()
+
+	state := &SupplierState{
+		OperatorAddress: "pokt1nochange",
+		Status:          SupplierStatusActive,
+		Staked:          true,
+		Services:        []string{"svc1"},
+	}
+	require.NoError(t, cache.SetSupplierState(ctx, state))
+	require.Equal(t, 1, countInvalidationsUntilFence(t, client, msgs),
+		"premise: the first write of an entry must publish")
+
+	key := client.KB().SupplierStateKey(state.OperatorAddress)
+	ttlBefore, err := client.TTL(ctx, key).Result()
+	require.NoError(t, err)
+	require.Greater(t, ttlBefore, time.Duration(0), "premise: the entry carries a TTL")
+
+	// Same content, written again -- what every reconcile of every miner does.
+	require.NoError(t, cache.SetSupplierState(ctx, state))
+	require.Equal(t, 0, countInvalidationsUntilFence(t, client, msgs),
+		"re-writing identical state must not publish an invalidation: every one of "+
+			"these drops the entry's L1 on every relayer for no reason")
+
+	ttlAfter, err := client.TTL(ctx, key).Result()
+	require.NoError(t, err)
+	require.Greater(t, ttlAfter, time.Duration(0),
+		"the TTL must still be refreshed: an expired entry makes the relayer serve "+
+			"optimistically, which disables the per-service gate exactly for the "+
+			"suppliers stable enough never to trigger a rewrite")
+
+	// And a real change must still publish.
+	changed := *state
+	changed.Services = []string{"svc1", "svc2"}
+	require.NoError(t, cache.SetSupplierState(ctx, &changed))
+	require.Equal(t, 1, countInvalidationsUntilFence(t, client, msgs),
+		"a genuine change must still invalidate, or relayers keep serving stale services")
+}
+
+// TestSetSupplierStateComparesContentNotStoredBytes is the guard for the way
+// this suppression is easiest to get wrong, and to get wrong INVISIBLY.
+//
+// SetSupplierState stamps state.LastUpdated with the current second before
+// marshalling, so comparing the stored bytes as-is can never find two writes
+// equal in production, where reconcile passes are 60s apart -- the suppression
+// would be dead code. A test that writes twice in a row would not notice: both
+// writes land in the same second, the bytes match by accident, and it passes
+// against an implementation that does nothing.
+//
+// So this drives the case the naive comparison gets wrong: an entry whose stored
+// timestamp is older than the one being written, with identical content.
+func TestSetSupplierStateComparesContentNotStoredBytes(t *testing.T) {
+	cache, client := newTestSupplierCache(t)
+	ctx := context.Background()
+
+	state := &SupplierState{
+		OperatorAddress: "pokt1oldtimestamp",
+		Status:          SupplierStatusActive,
+		Staked:          true,
+		Services:        []string{"svc1"},
+		LastUpdated:     time.Now().Add(-2 * time.Hour).Unix(),
+	}
+	writeSupplierToRedis(t, client, state)
+
+	// SetSupplierState stamps state.LastUpdated in place, so the pre-call value
+	// has to be captured here or the assertion below compares it to itself.
+	storedBefore := state.LastUpdated
+
+	sub := client.Subscribe(ctx, client.KB().EventChannel(supplierCacheType, "invalidate"))
+	t.Cleanup(func() { _ = sub.Close() })
+	_, err := sub.Receive(ctx)
+	require.NoError(t, err)
+	msgs := sub.Channel()
+
+	// Same content, two hours later. Only the timestamp differs.
+	require.NoError(t, cache.SetSupplierState(ctx, state))
+	require.Equal(t, 0, countInvalidationsUntilFence(t, client, msgs),
+		"a fresher timestamp on identical content is not a change: comparing raw "+
+			"stored bytes would republish here, which is every reconcile in production")
+
+	key := client.KB().SupplierStateKey(state.OperatorAddress)
+
+	ttl, err := client.TTL(ctx, key).Result()
+	require.NoError(t, err)
+	require.Greater(t, ttl, time.Duration(0),
+		"and the entry written without a TTL by an older version must gain one")
+
+	// Suppressing the PUBLISH is the point; suppressing the write is not. Only
+	// the write refreshes last_updated, which is what `redis supplier` reports
+	// as "Last Updated" -- freeze it and a healthy supplier that has not changed
+	// in hours reads as one nothing is tracking.
+	raw, err := client.Get(ctx, key).Bytes()
+	require.NoError(t, err)
+
+	var stored SupplierState
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	require.Greater(t, stored.LastUpdated, storedBefore,
+		"the unchanged path must still refresh last_updated: it is the operator's "+
+			"only signal that this entry is still being tracked")
+}
+
+// TestSetSupplierStateIgnoresTheWriterWhenComparing is the regression test for a
+// suppression that was correct in a one-miner test and inert in the real fleet.
+//
+// Every write stamps UpdatedBy with the miner's own instance ID (it exists "for
+// debugging", per the field's own comment). With two miners both reconciling all
+// suppliers, that field ALTERNATES: miner A writes and sees B's value, miner B
+// writes and sees A's. Comparing it makes every pass look like a change, so both
+// miners republish every supplier every interval and the invalidation rate does
+// not move at all.
+//
+// Measured live on a clean stack (2026-08-21) with the comparison including
+// UpdatedBy: 37.3 invalidations/min per side against a 34/min baseline, i.e. the
+// fix bought nothing, while the stored value provably differed only in
+// last_updated and updated_by. No single-writer test can see this.
+func TestSetSupplierStateIgnoresTheWriterWhenComparing(t *testing.T) {
+	cache, client := newTestSupplierCache(t)
+	ctx := context.Background()
+
+	state := &SupplierState{
+		OperatorAddress: "pokt1twowriters",
+		Status:          SupplierStatusActive,
+		Staked:          true,
+		Services:        []string{"svc1"},
+		UpdatedBy:       "miner-a",
+	}
+	require.NoError(t, cache.SetSupplierState(ctx, state))
+
+	sub := client.Subscribe(ctx, client.KB().EventChannel(supplierCacheType, "invalidate"))
+	t.Cleanup(func() { _ = sub.Close() })
+	_, err := sub.Receive(ctx)
+	require.NoError(t, err)
+	msgs := sub.Channel()
+
+	// The second miner, same supplier, same state, different writer.
+	fromB := *state
+	fromB.UpdatedBy = "miner-b"
+	require.NoError(t, cache.SetSupplierState(ctx, &fromB))
+	require.Equal(t, 0, countInvalidationsUntilFence(t, client, msgs),
+		"a different miner writing the same supplier state is not a change: comparing "+
+			"UpdatedBy makes every reconcile of every miner republish everything")
+
+	// And back to the first miner, which is what actually alternates in a fleet.
+	require.NoError(t, cache.SetSupplierState(ctx, state))
+	require.Equal(t, 0, countInvalidationsUntilFence(t, client, msgs),
+		"and alternating back is not a change either")
+
+	// The field is still recorded: it is how an operator sees who wrote last.
+	raw, err := client.Get(ctx, client.KB().SupplierStateKey(state.OperatorAddress)).Bytes()
+	require.NoError(t, err)
+
+	var stored SupplierState
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	require.Equal(t, "miner-a", stored.UpdatedBy,
+		"ignoring the writer for the comparison must not stop recording it")
 }

@@ -61,6 +61,11 @@ var survivingSupplierKeys = []string{
 // negativeControlKeys are state keys (registry, sessions, SMST, WAL, leader,
 // tx-tracking) outside the ha:cache:* and ha:supplier:* patterns. The cleanup
 // must never touch them.
+//
+// ha:suppliers:pokt1healthy is no longer written by anything: it is the orphan
+// an upgrade leaves behind, and the cleanup must leave it alone too -- clearing
+// it is a deliberate operator step (docs/REDIS.md), not something cleanup-all
+// does on the way past.
 var negativeControlKeys = []string{
 	"ha:suppliers:index",
 	"ha:suppliers:pokt1healthy",

@@ -61,7 +61,7 @@ redis:
     events_prefix: "events"     # Pub/sub channels
     streams_prefix: "relays"    # Redis Streams (WAL)
     miner_prefix: "miner"       # Miner state
-    supplier_prefix: "supplier" # Supplier registry
+    supplier_prefix: "supplier" # Supplier state replica
     meter_prefix: "meter"       # Relay metering
     params_prefix: "params"     # Cached params
 ```
@@ -105,6 +105,50 @@ Reference: `transport/redis/namespace.go`
 
 **Loss Impact**: Cannot generate proofs → revenue loss
 
+---
+
+## Supplier state: one entity key, one fleet set
+
+Two prefixes differ by one letter, and they are not two views of the same thing:
+
+- **`ha:supplier:{address}`** — singular, one entity. The replica of that
+  supplier's on-chain state: staked, status, services, declared endpoints. The
+  miner writes it every reconcile pass; the relayer reads it to decide whether
+  to serve a relay. It carries a TTL of `2 × num_blocks_per_session × block_time`
+  (~42 min on mainnet), which is the only thing that ever clears it, so a
+  decommissioned supplier cannot freeze as "still active".
+- **`ha:suppliers:index`** — plural, a set. The addresses THIS FLEET handles.
+  Read by the balance monitor and by orphan-stream detection. Membership only:
+  it says nothing about the supplier's state on the network.
+
+The `redis supplier` subcommand reads the singular family, and the
+`Last Updated` it shows is refreshed on every reconcile pass even when nothing
+changed, so a stale timestamp means nothing is tracking that supplier — not that
+it has not changed.
+
+### Clearing the orphans left by versions before this one
+
+Earlier versions also wrote a per-supplier JSON value at
+`ha:suppliers:{address}`, **with no expiration**. Nothing read it, and it is no
+longer written, but the entries already in Redis stay there forever. Clear them
+once:
+
+```bash
+pocket-relay-miner redis keys --pattern "ha:suppliers:*" --stats   # look first
+pocket-relay-miner redis flush --pattern "ha:suppliers:*"          # asks to confirm
+```
+
+`ha:suppliers:index` matches that pattern too, so **do not run the flush with
+the fleet up** — deleting the index makes the balance monitor and orphan-stream
+detection see no suppliers until a miner restarts and repopulates it. Either
+delete each `ha:suppliers:{address}` individually, or do it with the fleet
+stopped.
+
+Note that `redis cache cleanup-all` never touches `ha:suppliers:*` by design
+(`cmd/redis/cache_all.go`), so it will not clear these for you.
+
+
+
 ### Rebuildable Data (Optional Persist)
 
 | Pattern                    | Type   | Purpose                     |
@@ -112,6 +156,8 @@ Reference: `transport/redis/namespace.go`
 | `ha:cache:application:*`   | String | App cache (rebuild from L3) |
 | `ha:cache:service:*`       | String | Service cache               |
 | `ha:cache:*_params`        | String | Params cache                |
+| `ha:supplier:{address}`    | String | Supplier state replica (TTL) |
+| `ha:suppliers:index`       | Set    | Addresses this fleet handles |
 | `ha:miner:global_leader`   | String | Leader lock (30s TTL)       |
 | `ha:miner:dedup:session:*` | Set    | Relay deduplication         |
 

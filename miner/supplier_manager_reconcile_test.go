@@ -5,12 +5,14 @@ package miner
 import (
 	"context"
 	"fmt"
+	"slices"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	sdkmath "cosmossdk.io/math"
 	"github.com/alitto/pond/v2"
+	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
 	"github.com/redis/go-redis/v9"
@@ -32,8 +34,16 @@ type fakeKeyManager struct{ addrs []string }
 
 func (f *fakeKeyManager) ListSuppliers() []string              { return f.addrs }
 func (f *fakeKeyManager) OnKeyChange(_ keys.KeyChangeCallback) {}
-func (f *fakeKeyManager) GetSigner(string) (cryptotypes.PrivKey, error) {
-	return nil, fmt.Errorf("n/a")
+
+// GetSigner agrees with ListSuppliers: an address this fake holds resolves, and
+// anything else errors the way the real manager does for a key it does not have.
+// teardownCanFinishWork asks exactly this question.
+func (f *fakeKeyManager) GetSigner(operatorAddr string) (cryptotypes.PrivKey, error) {
+	if slices.Contains(f.addrs, operatorAddr) {
+		return secp256k1.GenPrivKey(), nil
+	}
+
+	return nil, fmt.Errorf("no key for %s", operatorAddr)
 }
 func (f *fakeKeyManager) HasKey(string) bool                       { return false }
 func (f *fakeKeyManager) AddKey(string, cryptotypes.PrivKey) error { return nil }

@@ -87,17 +87,6 @@ func TestMinerSessionKeys_MatchSessionsPrefixConcatenation(t *testing.T) {
 	}
 }
 
-func TestSupplierRegistryKey_MatchesRegistryPrefixPlusAddress(t *testing.T) {
-	const addr = "pokt1registry_equivalence"
-	for _, ns := range namespaces() {
-		builder := kb(t, ns)
-		require.Equal(t,
-			fmt.Sprintf("%s:%s", builder.SuppliersRegistryPrefix(), addr),
-			builder.SupplierRegistryKey(addr),
-			"miner/supplier_registry.go built this by hand in three places")
-	}
-}
-
 func TestStreamKey_MatchesStreamPrefixPlusSupplier(t *testing.T) {
 	const supplier = "pokt1stream_equivalence"
 	for _, ns := range namespaces() {
