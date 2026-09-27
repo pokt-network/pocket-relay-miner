@@ -125,7 +125,9 @@ Pocket Network docs, [Supplier staking](https://docs.pocket.network/node-operato
 the minimum stake is a governance parameter of the network. Each `service_id`
 must be a service registered on that network, spelled exactly:
 `pocketd query service all-services --network beta` (or `--network main`)
-lists them.
+lists them; so does
+`https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000`
+(`sauron-api.infra.pocket.network` for mainnet).
 
 **The endpoint URL is where gateways on the internet reach your relayer**, not
 your backend node. It is a public DNS name or IP, normally `https://` through a

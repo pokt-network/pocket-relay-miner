@@ -84,6 +84,15 @@ are not checked, and breaking them is unsupported.
   that run), and [TROUBLESHOOTING.md, Memory and CPU](docs/deploy/TROUBLESHOOTING.md#memory-and-cpu).
   Then tell the human to watch memory as traffic grows: it follows request
   sizes and live sessions, and no example can size it for every mix.
+- **Follow the runbook with the example's own files.** Edit the files in
+  `examples/docker-compose/` (or install `examples/host/`) as the steps say;
+  do not write a compose file or configs of your own, or the runbook's checks
+  no longer apply to what you run.
+- **Service ids come from the chain; never invent one.** Map what the human
+  wants to serve to an id the network has registered:
+  `curl -s 'https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000'`
+  (`sauron-api.infra.pocket.network` for mainnet) lists them. If none matches,
+  say so; do not guess one.
 - **Check that the ports are free before starting, and that every check
   reaches your own stack.** Another program on 8180, 9091 or 3000 answers a
   health or dashboard check in place of yours: the runbook's step 0 checks the

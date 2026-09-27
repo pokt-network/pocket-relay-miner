@@ -4,9 +4,13 @@
 
 @CONTRIBUTING.md
 
+**Deploying or operating the relay miner? Only AGENTS.md applies to you:
+follow it and its runbook, and skip the rest of this file and CONTRIBUTING.md,
+which are for changing the code.**
+
 AGENTS.md routes a deployer or an operator; CONTRIBUTING.md holds every rule for
-changing the code, and all of it applies to you. This file adds only what is
-specific to an agent working here.
+changing the code, and all of it applies to you when you change it. This file
+adds only what is specific to an agent working here.
 
 ## How to work
 

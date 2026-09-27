@@ -344,8 +344,9 @@ was checked.
 
 In `config/relayer.yaml`, replace `my-service` with the on-chain service id
 your supplier is staked for (ids are registered on chain, never invented: list
-them with `pocketd query service all-services --network beta`, or
-`--network main`; mainnet has `eth` and `base`, beta has its own list), and its `backends.jsonrpc.url` with your
+them with `curl -s 'https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000' | grep -o '"id":"[^"]*"'`, or with `sauron-api.infra.pocket.network` for
+mainnet, or `pocketd query service all-services`; mainnet has `eth` and
+`base`, beta has its own list), and its `backends.jsonrpc.url` with your
 backend's URL, reachable from inside the relayer container. Add 1 entry under
 `services:` per staked service; [config.relayer.example.yaml](../../config.relayer.example.yaml)
 documents every option, including the other transports.
