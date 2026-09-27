@@ -203,6 +203,22 @@ relayer	Up About a minute (healthy)
 [Miner does not start](TROUBLESHOOTING.md#miner-does-not-start).
 `relayer ... (unhealthy)` → its `/ready` stays 503 → step 8.
 
+**Run**, to check the relay port reached this stack:
+
+```bash
+$C ps --format '{{.Service}}\t{{.Ports}}' | grep relayer
+```
+
+**Expect**: `relayer	127.0.0.1:8180->8080/tcp` (or the `RELAYER_PORT` you
+exported), and the same `127.0.0.1:<port>->` form for Prometheus and Grafana
+when the dashboards run.
+
+**If not**: `relayer	8080/tcp` with no `127.0.0.1:...->` → the port was
+taken and Docker started the container without publishing it, with no error
+(measured 2026-09-26). Anything answering on that port is another program:
+`$C down -v`, go back to step 0's port check, export free ports, and start
+again.
+
 ## Step 6: Redis runs with the required memory settings
 
 **Run**
