@@ -12,6 +12,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -777,23 +778,33 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("redis.url is required")
 	}
 
+	// The namespace is validated here rather than where keys are built, because
+	// the failure it catches is a config that would relocate the whole keyspace:
+	// it has to stop startup, not surface as a cache miss.
+	if err := c.Redis.Namespace.Validate(); err != nil {
+		return err
+	}
+
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
 	}
 
 	// The retired relay_meter.redis_key_prefix documented where meter keys
 	// USED to live: "{retired}:meter:...". Compare that against where the
-	// effective namespace puts them now ("{base}:{meter}:..."): equal means
-	// the keys do not move and the stale line is harmless; different means
-	// upgrading would silently relocate meter meta/consumed keys mid-session
-	// (each replica re-creating a fresh budget at the new location), so it is
-	// a hard error. The comparison is on the FULL meter prefix, not just the
-	// base: a custom redis.namespace.meter_prefix moves the keys even when
-	// the base prefix matches the retired value.
+	// effective namespace puts them now: equal means the keys do not move and
+	// the stale line is harmless; different means upgrading would silently
+	// relocate meter meta/consumed keys mid-session (each replica re-creating a
+	// fresh budget at the new location), so it is a hard error.
+	//
+	// It compares the FULL meter prefix through the KeyBuilder rather than
+	// against the base alone. That is now the same thing -- the meter segment is
+	// a constant, and a config that still sets meter_prefix is rejected by
+	// Namespace.Validate above, before reaching here -- but building the prefix
+	// here by hand is exactly how this check silently started comparing against
+	// "ha:" when the segment stopped coming from config.
 	if c.RelayMeter.RemovedRedisKeyPrefix != "" {
-		ns := c.Redis.Namespace.WithDefaults()
 		legacyMeterPrefix := c.RelayMeter.RemovedRedisKeyPrefix + ":meter"
-		effectiveMeterPrefix := ns.BasePrefix + ":" + ns.MeterPrefix
+		effectiveMeterPrefix := redisutil.NewKeyBuilder(c.Redis.Namespace).MeterPrefix()
 		if legacyMeterPrefix != effectiveMeterPrefix {
 			return fmt.Errorf(
 				"relay_meter.redis_key_prefix is no longer supported: meter keys now derive from redis.namespace. "+

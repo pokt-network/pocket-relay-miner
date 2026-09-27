@@ -22,25 +22,19 @@ redis:
   # pool_timeout_seconds: 4          # Wait time for connection from pool
   # conn_max_idle_time_seconds: 300  # Close idle connections after 5 minutes
 
-  # Namespace configuration (optional - defaults match historical "ha:" prefix structure)
-  # All Redis key prefixes are derived from this config.
-  # Must match miner configuration for proper operation.
-  # WARNING: changing any prefix on a LIVE deployment relocates the keys it
-  # governs (WAL streams, meter budgets, cache, sessions). In-flight meter
-  # counters are re-created from zero at the new location and old/new replicas
-  # enforce separate budgets during a rolling deploy. Only change prefixes on
-  # a drained fleet (no in-flight sessions), and update relayer and miner
-  # configs together.
+  # Namespace configuration (optional)
+  # Only the base prefix is configurable. Every segment below it is fixed in
+  # code, so miner and relayer cannot drift apart on the key layout, and no
+  # family's SCAN pattern can be made to match another family's keys.
+  # Two base prefixes are two disjoint keyspaces: one Redis, several fleets.
   # namespace:
   #   base_prefix: "ha"                # Root prefix for all keys (default: "ha")
-  #   cache_prefix: "cache"            # Cache data: ha:cache:* (default: "cache")
-  #   events_prefix: "events"          # Pub/sub channels: ha:events:* (default: "events")
-  #   streams_prefix: "relays"         # Relay streams: ha:relays:* (default: "relays")
-  #   miner_prefix: "miner"            # Miner state: ha:miner:* (default: "miner")
-  #   supplier_prefix: "supplier"      # Supplier data: ha:supplier:* (default: "supplier")
-  #   meter_prefix: "meter"            # Metering data: ha:meter:* (default: "meter")
-  #   params_prefix: "params"          # Cached params: ha:params:* (default: "params")
-  #   consumer_group_prefix: "miners"  # Consumer group: ha-miners (default: "miners")
+  #
+  # The per-family prefixes (cache_prefix, events_prefix, streams_prefix,
+  # miner_prefix, supplier_prefix, meter_prefix, params_prefix,
+  # consumer_group_prefix) are RETIRED. Setting one to anything other than its
+  # historical value now fails at startup instead of silently relocating that
+  # data — see docs/REDIS.md.
 
 # Pocket blockchain connection
 pocket_node:

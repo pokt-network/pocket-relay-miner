@@ -72,17 +72,19 @@ func TestValidate_RemovedRedisKeyPrefix(t *testing.T) {
 		requireSafeRemediation(t, err)
 	})
 
-	t.Run("custom meter_prefix moves the keys even with a matching base", func(t *testing.T) {
-		// "ha" == base prefix, but meter keys land at ha:metering:* instead of
-		// ha:meter:* — the keys DO move, so "retired equals base" is not enough.
+	t.Run("a custom meter_prefix is now rejected by the namespace itself", func(t *testing.T) {
+		// This case used to reach the redis_key_prefix tombstone: the base
+		// matched but meter_prefix moved the keys, so "retired equals base" was
+		// not enough. meter_prefix is no longer a knob at all, so the namespace
+		// guard rejects it FIRST — with the same duty, to say which line moves
+		// which data rather than starting against an empty keyspace.
 		c := minimalValidConfig()
 		c.Redis.Namespace = config.RedisNamespaceConfig{MeterPrefix: "metering"}
 		c.RelayMeter.RemovedRedisKeyPrefix = "ha"
 		err := c.Validate()
 		require.Error(t, err)
-		require.True(t, strings.Contains(err.Error(), "redis_key_prefix"),
-			"the error must name the retired key: %v", err)
-		requireSafeRemediation(t, err)
+		require.True(t, strings.Contains(err.Error(), `meter_prefix: "metering"`),
+			"the error must name the offending line: %v", err)
 	})
 }
 

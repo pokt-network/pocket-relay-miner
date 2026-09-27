@@ -38,15 +38,14 @@ func kb(t *testing.T, ns config.RedisNamespaceConfig) *redisutil.KeyBuilder {
 // an equivalence that only holds for "ha" would hide a method that ignores a
 // configured sub-prefix.
 func namespaces() []config.RedisNamespaceConfig {
+	// Only the base varies, because only the base is configurable. This used to
+	// also vary miner/supplier/streams/cache prefixes; those are constants now,
+	// so listing them would suggest this test covers an axis that no longer
+	// exists -- and a config that sets them is rejected at startup.
 	return []config.RedisNamespaceConfig{
 		{},
-		{
-			BasePrefix:     "prod",
-			MinerPrefix:    "mining",
-			SupplierPrefix: "suppliers-state",
-			StreamsPrefix:  "wal",
-			CachePrefix:    "caching",
-		},
+		{BasePrefix: "prod"},
+		{BasePrefix: "ha-2"},
 	}
 }
 

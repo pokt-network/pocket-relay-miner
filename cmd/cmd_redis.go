@@ -40,6 +40,11 @@ Examples:
 	// Add global flags and bind to redis package variables
 	cmd.PersistentFlags().StringVar(&redis.RedisURL, "redis", "", "Redis connection URL (optional if using --config)")
 	cmd.PersistentFlags().StringVar(&redis.RedisConfig, "config", "", "Path to miner/relayer config file (inherits namespace settings)")
+	cmd.PersistentFlags().StringVar(&redis.RedisBasePrefix, "base-prefix", "",
+		"Inspect a keyspace by base prefix, without a config file. This is the way in when a config "+
+			"no longer starts: config validation rejects a namespace whose keys this version would "+
+			"relocate, and without this flag the tool the remediation tells you to use would be "+
+			"unreachable too")
 
 	// Add subcommands
 	cmd.AddCommand(redis.SessionsCmd())

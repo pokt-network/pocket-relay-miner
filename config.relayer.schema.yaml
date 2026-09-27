@@ -51,44 +51,16 @@ properties:
         minimum: 0
       namespace:
         type: object
-        description: Redis key namespace configuration (must match miner configuration)
+        description: >-
+          Redis key namespace. Only base_prefix is configurable; every segment
+          below it is fixed in code so miner and relayer cannot drift, and no
+          family's SCAN pattern can match another family's keys.
         properties:
           base_prefix:
             type: string
-            description: Root prefix for all Redis keys
+            description: Root prefix for all Redis keys. Two base prefixes are two disjoint keyspaces.
+            pattern: "^[a-zA-Z0-9_-]+$"
             default: ha
-          cache_prefix:
-            type: string
-            description: "Cache data prefix (full key: {base_prefix}:{cache_prefix}:*)"
-            default: cache
-          events_prefix:
-            type: string
-            description: "Pub/sub channels prefix (full key: {base_prefix}:{events_prefix}:*)"
-            default: events
-          streams_prefix:
-            type: string
-            description: "Relay streams prefix (full key: {base_prefix}:{streams_prefix}:*)"
-            default: relays
-          miner_prefix:
-            type: string
-            description: "Miner state prefix (full key: {base_prefix}:{miner_prefix}:*)"
-            default: miner
-          supplier_prefix:
-            type: string
-            description: "Supplier data prefix (full key: {base_prefix}:{supplier_prefix}:*)"
-            default: supplier
-          meter_prefix:
-            type: string
-            description: "Metering data prefix (full key: {base_prefix}:{meter_prefix}:*)"
-            default: meter
-          params_prefix:
-            type: string
-            description: "Cached params prefix (full key: {base_prefix}:{params_prefix}:*)"
-            default: params
-          consumer_group_prefix:
-            type: string
-            description: "Consumer group name suffix (full name: {base_prefix}-{consumer_group_prefix})"
-            default: miners
 
   pocket_node:
     type: object
