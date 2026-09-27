@@ -24,6 +24,13 @@ Each one was broken by an agent in a real first-time run.
 8. You have a shell on this machine: run the runbook's commands yourself.
    Ask the human only for decisions and for what only they can do (their
    key, their funds, their stake).
+9. After you edit any config, run both `validate` commands (runbook step 3)
+   and get exit 0 before you restart anything. It catches a key in the wrong
+   place and a key that does not exist.
+10. To switch keys or networks, follow the runbook's section for it (step 9,
+    "Switching to mainnet") line by line, not from memory: the keys file
+    also has to be mounted in `docker-compose.yaml`, and the mainnet values
+    are listed there.
 
 ## What this is
 
