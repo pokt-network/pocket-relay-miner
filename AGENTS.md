@@ -86,8 +86,8 @@ the claim and the proof from the served relays and submits them to the chain.
      Beta: `--network beta`, POKT from <https://faucet.beta.pocket.network>.
      The human puts the exported key in `config/supplier-keys.local.yaml`
      (runbook step 9), never in your chat.
-     Facts they will ask about: beta POKT is free from the faucet (mainnet
-     POKT is bought); the minimum stake is large, read it from the chain
+     Facts they will ask about: beta POKT is free from the faucet (100,000
+     POKT per request, at most 2 per account; mainnet POKT is bought); the minimum stake is large, read it from the chain
      (59,500 POKT on 2026-09-26, per supplier, not per service; divide upokt
      by 1,000,000); the URL in the
      stake is the relayer's public `https://` address, on a DNS name, behind

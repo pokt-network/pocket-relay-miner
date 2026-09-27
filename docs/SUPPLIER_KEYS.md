@@ -121,7 +121,8 @@ mnemonic. Write the mnemonic down offline: it is the only way to recover the key
 
 **3. Fund and stake the supplier.** The account needs POKT for the stake and for
 the fee of every claim and proof. On beta, request test POKT for the address
-from the faucet, <https://faucet.beta.pocket.network>. On mainnet there is no
+from the faucet, <https://faucet.beta.pocket.network>: 100,000 POKT per request,
+at most 2 requests per account, which covers the minimum stake and the fees. On mainnet there is no
 faucet: POKT is bought, and sent to the address from an account you control.
 
 Staking is a chain transaction. Its config file (owner and operator addresses,
