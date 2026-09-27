@@ -186,6 +186,35 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract the binaries from the published images
+        run: |
+          # The attached binaries are the ones inside the images, not a second
+          # build: one recipe (the Dockerfile), the same bytes in both places.
+          # The per-arch images are single-platform and never started, so the
+          # arm64 one is read on this amd64 runner without emulation.
+          set -euo pipefail
+          TAG="${GITHUB_REF#refs/tags/}"
+          IMAGE=ghcr.io/pokt-network/pocket-relay-miner:${{ needs.metadata.outputs.version }}
+          mkdir -p dist
+          for ARCH in amd64 arm64; do
+            id=$(docker create --platform "linux/${ARCH}" "${IMAGE}-${ARCH}")
+            mkdir -p "dist/${ARCH}"
+            docker cp "${id}:/usr/local/bin/pocket-relay-miner" "dist/${ARCH}/pocket-relay-miner"
+            docker rm "${id}" >/dev/null
+            file "dist/${ARCH}/pocket-relay-miner" | grep -q 'statically linked'
+            tar -czf "dist/pocket-relay-miner_${TAG}_linux_${ARCH}.tar.gz" \
+              --owner=0 --group=0 --numeric-owner -C "dist/${ARCH}" pocket-relay-miner
+          done
+          dist/amd64/pocket-relay-miner version | grep -F "${TAG}"
+          (cd dist && sha256sum pocket-relay-miner_*.tar.gz > checksums.txt)
+
       - name: Skip if the release already exists
         id: existing
         env:
@@ -233,3 +262,12 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload the release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Runs on a re-run too: --clobber replaces the assets and leaves the
+          # hand-written body alone.
+          gh release upload "${GITHUB_REF#refs/tags/}" --repo "${{ github.repository }}" \
+            --clobber dist/pocket-relay-miner_*.tar.gz dist/checksums.txt
