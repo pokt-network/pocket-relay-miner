@@ -5,13 +5,11 @@ package relayer
 import (
 	"context"
 	"encoding/hex"
-	"fmt"
 	"net/http"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
@@ -21,6 +19,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/metadata"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -35,7 +34,7 @@ type simFixture struct {
 	supplierAddr string
 	cfg          *SimulationConfig
 	verifier     *SimulationVerifier
-	mr           *miniredis.Miniredis
+	failRedis    *testredis.FailSwitch
 	redisClient  *redisutil.Client
 	clock        func() time.Time
 }
@@ -44,8 +43,9 @@ const simTestKeyID = "k1"
 const simTestService = "svc-test"
 
 // newSimFixture builds a verifier with one enabled identity, a loaded supplier
-// signer, a fixed clock, and a fresh miniredis. serviceIDs includes svc-test
-// and other-svc so service-binding tests can distinguish unknown vs not-allowed.
+// signer, a fixed clock, and a namespace of its own on the real Redis.
+// serviceIDs includes svc-test and other-svc so service-binding tests can
+// distinguish unknown vs not-allowed.
 func newSimFixture(t *testing.T) *simFixture {
 	t.Helper()
 	fixed := time.Unix(1_700_000_000, 0).UTC()
@@ -71,10 +71,8 @@ func newSimFixture(t *testing.T) *simFixture {
 	}
 	require.NoError(t, cfg.Validate())
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	rc, err := redisutil.NewClient(context.Background(), redisutil.ClientConfig{URL: fmt.Sprintf("redis://%s", mr.Addr())})
-	require.NoError(t, err)
+	rc, _ := newTestRedis(t)
+	failRedis := testredis.NewFailSwitch(rc)
 
 	signer, err := NewResponseSigner(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
@@ -91,9 +89,8 @@ func newSimFixture(t *testing.T) *simFixture {
 
 	f := &simFixture{
 		appPriv: appPriv, gwPriv: gwPriv, supplierPriv: supplierPriv, supplierAddr: supplierAddr,
-		cfg: cfg, verifier: v, mr: mr, redisClient: rc, clock: clock,
+		cfg: cfg, verifier: v, failRedis: failRedis, redisClient: rc, clock: clock,
 	}
-	t.Cleanup(func() { _ = rc.Close(); mr.Close() })
 	return f
 }
 
@@ -224,7 +221,7 @@ func TestSimVerify_Replay(t *testing.T) {
 
 func TestSimVerify_CrossReplicaReplay(t *testing.T) {
 	f := newSimFixture(t)
-	// A second verifier sharing the SAME miniredis (HA fleet).
+	// A second verifier sharing the SAME Redis namespace (HA fleet).
 	signer, err := NewResponseSigner(
 		logging.NewLoggerFromConfig(logging.DefaultConfig()),
 		map[string]cryptotypes.PrivKey{f.supplierAddr: f.supplierPriv},
@@ -253,17 +250,17 @@ func TestSimVerify_DedupUnavailableFailsClosed(t *testing.T) {
 	f := newSimFixture(t)
 	rr := f.validRelay(t)
 
-	// SetError rather than Close. Closing miniredis was the whole setup here,
-	// and it made this test flaky: the dial then fails, go-redis retries it
-	// five times with backoff, and while it retries the freed port is up for
-	// grabs. Package test binaries run concurrently (`go test -p 4`), each
-	// starting its own miniredis on a kernel-assigned port, so one of them can
-	// bind the address this fixture just released -- at which point SetNX
-	// lands on a FOREIGN Redis, succeeds, and Verify returns nil. Proven by
-	// binding a second miniredis to the freed address: the assertion below
-	// fails with "got nil". A pre-hook error keeps the connection and breaks
-	// every command, so there is no port to race for.
-	f.mr.SetError("LOADING Redis is loading the dataset in memory")
+	// Break the COMMANDS, never the server. Taking the server away was the
+	// original setup here and it made this test flaky: the dial fails,
+	// go-redis retries it five times with backoff, and the freed port is up
+	// for grabs meanwhile. Package test binaries run concurrently, so another
+	// one can bind the address this fixture just released -- at which point
+	// SetNX lands on a FOREIGN Redis, succeeds, and Verify returns nil.
+	// Proven back then by binding a second server to the freed address: the
+	// assertion below failed with "got nil". The switch keeps the connection
+	// and fails every command, so there is no port to race for. It matters
+	// more now, not less: the server is shared with every other package.
+	f.failRedis.Fail("LOADING Redis is loading the dataset in memory")
 
 	err := f.verifier.Verify(context.Background(), simTestKeyID, rr)
 	require.ErrorIs(t, err, ErrSimDedupUnavailable, "replay dedup must fail closed when Redis is unreachable")

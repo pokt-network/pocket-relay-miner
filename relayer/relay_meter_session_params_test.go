@@ -4,17 +4,14 @@ package relayer
 
 import (
 	"context"
-	"fmt"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/pokt-network/poktroll/pkg/client"
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // fakeSessionClient implements client.SessionQueryClient by embedding the
@@ -34,16 +31,9 @@ func (f *fakeSessionClient) GetParams(_ context.Context) (*sessiontypes.Params, 
 // change to NumSuppliersPerSession, not serve a value frozen in the
 // ha:params:session Redis key (whose only proactive writer is dead code).
 func TestGetSessionParams_ReflectsChangedNumSuppliers(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
 	ctx := context.Background()
 
-	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL: fmt.Sprintf("redis://%s", mr.Addr()),
-	})
-	require.NoError(t, err)
-	defer func() { _ = redisClient.Close() }()
+	redisClient, _ := newTestRedis(t)
 
 	sess := &fakeSessionClient{numSuppliers: 2}
 	meter := NewRelayMeter(

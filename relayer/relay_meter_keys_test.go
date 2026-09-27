@@ -5,14 +5,14 @@ package relayer
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
@@ -34,23 +34,31 @@ import (
 // must derive from one namespace. It fails if a component reintroduces a
 // prefix of its own.
 func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
+	testredis.Client(t) // fail fast with the "start one with ..." message
 	ctx := context.Background()
 
 	// Deliberately non-default on BOTH segments the meter keys are built from.
+	// The base carries this test's isolation prefix as well: the server is
+	// shared, and a bare "prod" would collide with any other test that picked
+	// the same obvious placeholder.
+	prefix := testredis.Prefix(t)
+	base := prefix + ":prod"
 	ns := config.RedisNamespaceConfig{
-		BasePrefix:  "prod",
+		BasePrefix:  base,
 		MeterPrefix: "metering",
 	}
 
 	redisClient, err := redisutil.NewClient(ctx, redisutil.ClientConfig{
-		URL:       fmt.Sprintf("redis://%s", mr.Addr()),
+		URL:       testredis.URL(),
 		Namespace: ns,
 	})
 	require.NoError(t, err)
 	defer func() { _ = redisClient.Close() }()
+
+	// The session id is unique to this run so that the "nothing was written
+	// under the pre-KeyBuilder shape" check below stays valid on a shared
+	// server: ha:meter:{sessionID} is a key only this test could have created.
+	sessionID := "sess-ns-" + strings.ReplaceAll(prefix, ":", "_")
 
 	app := &fakeAppClient{addr: "pokt1app_ns"}
 	app.stakeUpokt.Store(int64(1000))
@@ -75,7 +83,6 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 	defer func() { _ = meter.Close() }()
 
 	const (
-		sessionID = "sess-ns"
 		supplier  = "pokt1supplier_ns"
 		serviceID = "svc-ns"
 	)
@@ -93,25 +100,25 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 
 	// 1. The writer's keys are exactly the KeyBuilder's, under this namespace.
 	metaKey := kb.MeterMetaKey(sessionID, supplier)
-	require.Equal(t, "prod:metering:"+sessionID+":"+supplier+":meta", metaKey,
+	require.Equal(t, base+":metering:"+sessionID+":"+supplier+":meta", metaKey,
 		"the meta key must follow the configured namespace, not a component prefix")
-	require.True(t, mr.Exists(metaKey), "the meter must WRITE the key the KeyBuilder names: %s", metaKey)
+	requireKeyExists(t, redisClient, metaKey, "the meter must WRITE the key the KeyBuilder names: %s", metaKey)
 
 	consumedKey := kb.MeterConsumedKey(sessionID, supplier)
-	require.Equal(t, "prod:metering:"+sessionID+":"+supplier+":consumed", consumedKey)
-	require.True(t, mr.Exists(consumedKey), "consumed counter missing at %s", consumedKey)
+	require.Equal(t, base+":metering:"+sessionID+":"+supplier+":consumed", consumedKey)
+	requireKeyExists(t, redisClient, consumedKey, "consumed counter missing at %s", consumedKey)
 
 	// The CLI contract: both keys are plain STRINGS -- the meta a JSON blob,
 	// the consumed a counter. The first version of `redis meter` read the meta
 	// with HGETALL and failed with WRONGTYPE against real data, which no
 	// existence check catches. Pin the readable shape, not just the address.
-	rawMeta, err := mr.Get(metaKey)
+	rawMeta, err := redisClient.Get(ctx, metaKey).Result()
 	require.NoError(t, err, "the meta key must be readable as a string (GET)")
 	var meta map[string]any
 	require.NoError(t, json.Unmarshal([]byte(rawMeta), &meta),
 		"the meta value must be the SessionMeterMeta JSON")
 	require.Equal(t, supplier, meta["supplier_address"])
-	rawConsumed, err := mr.Get(consumedKey)
+	rawConsumed, err := redisClient.Get(ctx, consumedKey).Result()
 	require.NoError(t, err, "the consumed key must be readable as a string (GET)")
 	require.Regexp(t, `^[0-9]+$`, rawConsumed, "consumed must be a plain integer counter")
 
@@ -120,18 +127,19 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 	for _, stale := range []string{
 		"ha:meter:" + sessionID,
 		"ha:meter:" + sessionID + ":" + supplier + ":meta",
-		"prod:metering:" + sessionID,
+		base + ":metering:" + sessionID,
 	} {
-		require.False(t, mr.Exists(stale),
-			"nothing may be written at the pre-KeyBuilder key %s", stale)
+		n, err := redisClient.Exists(ctx, stale).Result()
+		require.NoError(t, err)
+		require.Zero(t, n, "nothing may be written at the pre-KeyBuilder key %s", stale)
 	}
 
 	// 3. The CLI's discovery pattern finds what the writer wrote. This is the
 	//    reader half of the contract: `redis meter --session` scans this exact
 	//    pattern, so a match here is the command working.
-	keys := mr.Keys()
+	keys := testredis.Keys(t, redisClient, prefix)
 	pattern := kb.MeterSessionMetaPattern(sessionID)
-	require.Equal(t, "prod:metering:"+sessionID+":*:meta", pattern)
+	require.Equal(t, base+":metering:"+sessionID+":*:meta", pattern)
 
 	var matched []string
 	for _, k := range keys {
@@ -141,4 +149,12 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 	}
 	require.Equal(t, []string{metaKey}, matched,
 		"the CLI scan pattern must find the supplier's meter and nothing else")
+}
+
+// requireKeyExists fails unless key is present, and says which key.
+func requireKeyExists(t *testing.T, client *redisutil.Client, key, msg string, args ...any) {
+	t.Helper()
+	n, err := client.Exists(context.Background(), key).Result()
+	require.NoError(t, err)
+	require.Equalf(t, int64(1), n, msg, args...)
 }

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	cosmostypes "github.com/cosmos/cosmos-sdk/types"
@@ -26,7 +25,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/rings"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 // newSimGRPCService wires a RelayGRPCService with an ENABLED simulation verifier
@@ -58,11 +56,7 @@ func newSimGRPCService(t *testing.T, backendURL string) (*RelayGRPCService, *rec
 	}
 	require.NoError(t, simCfg.Validate())
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	rc, err := redisutil.NewClient(t.Context(), redisutil.ClientConfig{URL: "redis://" + mr.Addr()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = rc.Close(); mr.Close() })
+	rc, _ := newTestRedis(t)
 
 	simVerifier, err := NewSimulationVerifier(logger, &simCfg, rc, signer, map[string]struct{}{serviceID: {}}, clock)
 	require.NoError(t, err)

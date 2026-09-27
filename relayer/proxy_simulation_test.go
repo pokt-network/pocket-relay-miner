@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	"github.com/alitto/pond/v2"
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
@@ -26,7 +25,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
 type simHTTPFixture struct {
@@ -99,11 +97,7 @@ func newSimHTTPFixture(t *testing.T, backendURL string, validationMode Validatio
 	signer, err := NewResponseSigner(logger, map[string]cryptotypes.PrivKey{supplierAddr: supplierPriv})
 	require.NoError(t, err)
 
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	rc, err := redisutil.NewClient(t.Context(), redisutil.ClientConfig{URL: "redis://" + mr.Addr()})
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = rc.Close(); mr.Close() })
+	rc, _ := newTestRedis(t)
 
 	simVerifier, err := NewSimulationVerifier(logger, &simCfg, rc, signer,
 		map[string]struct{}{simTestService: {}}, clock)
