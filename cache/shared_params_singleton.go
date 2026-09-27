@@ -320,7 +320,8 @@ func (c *sharedParamsCache) WarmupFromRedis(ctx context.Context) error {
 func (c *sharedParamsCache) queryChainWithLock(ctx context.Context) (*sharedtypes.Params, error) {
 	lockKey := c.redisClient.KB().ParamsSharedLockKey()
 	// Try to acquire distributed lock
-	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", 5*time.Second).Result()
+	lockToken := newLockToken()
+	locked, err := c.redisClient.SetNX(ctx, lockKey, lockToken, 5*time.Second).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -330,7 +331,7 @@ func (c *sharedParamsCache) queryChainWithLock(ctx context.Context) (*sharedtype
 	// and re-fire the duplicate chain query the lock exists to prevent
 	// (same fix as cache/keyed_query_lock.go).
 	if locked {
-		defer releaseCacheLock(ctx, c.redisClient, lockKey)
+		defer releaseCacheLock(ctx, c.redisClient, lockKey, lockToken)
 	}
 
 	if !locked {

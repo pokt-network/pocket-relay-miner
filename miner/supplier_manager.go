@@ -1843,15 +1843,29 @@ func (m *SupplierManager) Close() error {
 		_ = m.inclusionReconciler.Close()
 	}
 
-	// Wait for all suppliers to finish. Range is safe under concurrent
-	// mutation in xsync.Map; we LoadAndDelete each entry so a parallel
-	// claimer release doesn't double-close the resources.
+	// Signal EVERY supplier to stop before waiting on any of them.
+	//
+	// The waits below are not instant: a stream consumer parked on a blocking
+	// XREADGROUP only notices the cancellation when its block elapses, because
+	// go-redis sets no read deadline from the context. Cancelling and waiting
+	// in the same pass makes those waits SERIAL -- one block interval per
+	// supplier -- and this miner has already run ~594 suppliers on one
+	// instance, which is hours of shutdown and a SIGKILL long before the end.
+	// Cancelled together, the intervals overlap and the whole teardown costs
+	// one of them.
+	m.suppliers.Range(func(_ string, state *SupplierState) bool {
+		state.cancelFn()
+		return true
+	})
+
+	// Now collect. Range is safe under concurrent mutation in xsync.Map; we
+	// LoadAndDelete each entry so a parallel claimer release doesn't
+	// double-close the resources.
 	m.suppliers.Range(func(addr string, _ *SupplierState) bool {
 		state, ok := m.suppliers.LoadAndDelete(addr)
 		if !ok {
 			return true
 		}
-		state.cancelFn()
 		state.wg.Wait()
 
 		if state.LifecycleManager != nil {

@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/alicebob/miniredis/v2"
 	goredis "github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/testredis"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/transport"
 )
@@ -49,6 +49,27 @@ func strandInPEL(t *testing.T, rdb *goredis.Client, stream, group, deadConsumer 
 	}).Result()
 	require.NoError(t, err)
 	require.Len(t, res[0].Messages, n, "the dead consumer must hold all entries in its PEL")
+
+	ageOutPEL(t, rdb, stream, group, deadConsumer, res[0].Messages)
+}
+
+// ageOutPEL makes the stranded entries look old, deterministically.
+//
+// A reclaim only hands over entries idle past its threshold, so a test about
+// WHICH entries move has to control their age. Sleeping past a 1ms threshold
+// is how this used to be done, and that is a race dressed as a setup step. A
+// real server takes XCLAIM's IDLE option, which sets the idle time outright --
+// the entries stay with the dead consumer (JUSTID, same owner) and simply
+// become an hour old. miniredis has no equivalent; this is one of the reasons
+// the fake could not carry these tests.
+func ageOutPEL(t *testing.T, rdb *goredis.Client, stream, group, owner string, msgs []goredis.XMessage) {
+	t.Helper()
+	args := []any{"XCLAIM", stream, group, owner, 0}
+	for _, m := range msgs {
+		args = append(args, m.ID)
+	}
+	args = append(args, "IDLE", 3_600_000, "JUSTID")
+	require.NoError(t, rdb.Do(context.Background(), args...).Err())
 }
 
 // TestClaimPendingMessages_DrainsWholePEL pins that ONE reclaim invocation
@@ -58,19 +79,15 @@ func strandInPEL(t *testing.T, rdb *goredis.Client, stream, group, deadConsumer 
 // would drain slower than the claim window closes, silently losing the tail
 // — the exact issue-#25 loss the reclaim exists to prevent.
 func TestClaimPendingMessages_DrainsWholePEL(t *testing.T) {
-	mr, err := miniredis.Run()
-	require.NoError(t, err)
-	defer mr.Close()
-
-	rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
-	defer func() { _ = rdb.Close() }()
+	rdb := testredis.Client(t)
 
 	const (
 		supplier = "pokt1drain_test"
-		group    = "ha-miners"
-		stream   = "ha:relays:" + supplier
 		stranded = 120 // needs 3 pending pages at XPENDING Count=50
 	)
+	prefix := testredis.Prefix(t)
+	group := prefix + ":ha-miners"
+	stream := prefix + ":" + supplier
 
 	strandInPEL(t, rdb, stream, group, "dead-pod-consumer", stranded)
 
@@ -78,18 +95,18 @@ func TestClaimPendingMessages_DrainsWholePEL(t *testing.T) {
 		logging.NewLoggerFromConfig(logging.Config{Level: "error", Format: "json"}),
 		rdb,
 		transport.ConsumerConfig{
-			StreamPrefix:            "ha:relays",
+			StreamPrefix:            prefix,
 			SupplierOperatorAddress: supplier,
 			ConsumerGroup:           group,
 			ConsumerName:            "alive-pod-consumer",
 			BatchSize:               10,
-			ClaimIdleTimeout:        1, // ms; everything stranded is already eligible
+			// The stranded entries were aged to an hour by strandInPEL, so any
+			// sane threshold lets all of them through. It used to be 1ms with
+			// a sleep to outlast it: a race dressed as a setup step.
+			ClaimIdleTimeout: 1000,
 		},
 	)
 	require.NoError(t, err)
-
-	// Let the stranded entries exceed the (1ms) min-idle threshold.
-	time.Sleep(5 * time.Millisecond)
 
 	// One reclaim invocation, called directly: no timing, no ticker.
 	consumer.claimPendingMessages(context.Background())
@@ -118,25 +135,29 @@ func TestClaimPendingMessages_DrainsWholePEL(t *testing.T) {
 // channel, then cancels; the old code panicked here ~50% of the time per
 // run, so the loop makes a regression effectively certain to be caught.
 func TestConsume_CloseDoesNotPanicWithReclaimInFlight(t *testing.T) {
+	rdb := testredis.Client(t)
+	basePrefix := testredis.Prefix(t)
+
+	// Shorten the idle block so a run does not spend an interval per iteration
+	// waiting for the read loop to come back.
+	restoreBlock := blockInterval
+	blockInterval = 100 * time.Millisecond
+	t.Cleanup(func() { blockInterval = restoreBlock })
+
 	for i := 0; i < 10; i++ {
-		mr, err := miniredis.Run()
-		require.NoError(t, err)
-
-		rdb := goredis.NewClient(&goredis.Options{Addr: mr.Addr()})
-
-		const (
-			supplier = "pokt1close_test"
-			group    = "ha-miners"
-			stream   = "ha:relays:" + supplier
-		)
+		const supplier = "pokt1close_test"
+		// A prefix of its own per iteration: the entries of one round must not
+		// be visible to the next.
+		prefix := fmt.Sprintf("%s:r%d", basePrefix, i)
+		group := prefix + ":ha-miners"
+		stream := prefix + ":" + supplier
 
 		// Stranded entries for the reclaim ticker to recover and send.
 		strandInPEL(t, rdb, stream, group, "dead-pod-consumer", 3)
 
 		// Fresh (undelivered) messages so the read loop parks on a channel
-		// send rather than inside XREADGROUP: miniredis does not interrupt a
-		// blocked XREADGROUP on context cancellation, and a send parked on a
-		// full channel is exactly the state the close must not race.
+		// send rather than inside XREADGROUP: a send blocked on a full channel
+		// is exactly the state the close must not race.
 		ctx := context.Background()
 		for i := 0; i < 5; i++ {
 			relay := &transport.MinedRelayMessage{
@@ -158,7 +179,7 @@ func TestConsume_CloseDoesNotPanicWithReclaimInFlight(t *testing.T) {
 			logging.NewLoggerFromConfig(logging.Config{Level: "error", Format: "json"}),
 			rdb,
 			transport.ConsumerConfig{
-				StreamPrefix:            "ha:relays",
+				StreamPrefix:            prefix,
 				SupplierOperatorAddress: supplier,
 				ConsumerGroup:           group,
 				ConsumerName:            "alive-pod-consumer",
@@ -189,7 +210,5 @@ func TestConsume_CloseDoesNotPanicWithReclaimInFlight(t *testing.T) {
 			}
 		}
 
-		_ = rdb.Close()
-		mr.Close()
 	}
 }

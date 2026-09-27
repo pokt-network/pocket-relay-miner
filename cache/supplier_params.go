@@ -170,7 +170,8 @@ func (c *RedisSupplierParamCache) queryAndCacheParams(ctx context.Context, key s
 	lockKey := c.redisClient.KB().ParamsSupplierLockKey()
 
 	// Try to acquire lock
-	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", c.config.LockTimeout).Result()
+	lockToken := newLockToken()
+	locked, err := c.redisClient.SetNX(ctx, lockKey, lockToken, c.config.LockTimeout).Result()
 	if err != nil {
 		return nil, fmt.Errorf("failed to acquire lock: %w", err)
 	}
@@ -178,7 +179,7 @@ func (c *RedisSupplierParamCache) queryAndCacheParams(ctx context.Context, key s
 	if locked {
 		// We got the lock - query chain
 		lockAcquisitions.WithLabelValues("supplier_params", "acquired").Inc()
-		defer releaseCacheLock(ctx, c.redisClient, lockKey)
+		defer releaseCacheLock(ctx, c.redisClient, lockKey, lockToken)
 
 		chainQueries.WithLabelValues("supplier_params").Inc()
 		chainStart := time.Now()

@@ -76,6 +76,12 @@ func TestConsumeSendsAFiniteBlockOnTheWire(t *testing.T) {
 	blockInterval = 200 * time.Millisecond
 	t.Cleanup(func() { blockInterval = restore })
 
+	// Namespaced: the server is shared with the packages running alongside, and
+	// production-shaped keys here would land in whatever Redis REDIS_TEST_URL
+	// points at.
+	testredis.Client(t) // fail fast with the "start one with..." message
+	prefix := testredis.Prefix(t)
+
 	// A client of our own so the hook sees only this test's traffic.
 	opt, err := redis.ParseURL(testredis.URL())
 	require.NoError(t, err)
@@ -88,9 +94,9 @@ func TestConsumeSendsAFiniteBlockOnTheWire(t *testing.T) {
 		logging.NewLoggerFromConfig(logging.Config{Level: "error", Format: "json"}),
 		client,
 		transport.ConsumerConfig{
-			StreamPrefix:            "ha:relays",
+			StreamPrefix:            prefix,
 			SupplierOperatorAddress: "pokt1block_arg",
-			ConsumerGroup:           "ha-miners",
+			ConsumerGroup:           prefix + ":ha-miners",
 			ConsumerName:            "c1",
 			BatchSize:               10,
 			ClaimIdleTimeout:        30000,
@@ -138,6 +144,7 @@ func TestConsumeSendsAFiniteBlockOnTheWire(t *testing.T) {
 // looked like in production too.
 func TestCloseReturnsWhileTheStreamIsIdle(t *testing.T) {
 	client := testredis.Client(t)
+	prefix := testredis.Prefix(t)
 
 	restore := blockInterval
 	blockInterval = 200 * time.Millisecond
@@ -147,9 +154,9 @@ func TestCloseReturnsWhileTheStreamIsIdle(t *testing.T) {
 		logging.NewLoggerFromConfig(logging.Config{Level: "error", Format: "json"}),
 		client,
 		transport.ConsumerConfig{
-			StreamPrefix:            "ha:relays",
+			StreamPrefix:            prefix,
 			SupplierOperatorAddress: "pokt1idle_close",
-			ConsumerGroup:           "ha-miners",
+			ConsumerGroup:           prefix + ":ha-miners",
 			ConsumerName:            "c1",
 			BatchSize:               10,
 			ClaimIdleTimeout:        30000,
