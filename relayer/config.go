@@ -10,6 +10,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
@@ -212,7 +213,7 @@ type Config struct {
 
 	// Keys configuration for supplier signing keys.
 	// Required for signing relay responses.
-	Keys KeysConfig `yaml:"keys"`
+	Keys config.KeysConfig `yaml:"keys"`
 
 	// Services is a map of service configurations keyed by service ID.
 	Services map[string]ServiceConfig `yaml:"services"`
@@ -603,39 +604,6 @@ type HealthCheckConfig struct {
 	Addr string `yaml:"addr"`
 }
 
-// KeysConfig contains key provider configuration for supplier signing keys.
-type KeysConfig struct {
-	// KeysFile is the path to a supplier-keys.yaml file with hex-encoded keys.
-	KeysFile string `yaml:"keys_file,omitempty"`
-
-	// Keyring configuration for Cosmos SDK keyring.
-	Keyring *KeyringConfig `yaml:"keyring,omitempty"`
-
-	// RemovedKeysDir is the tombstone for the retired keys_dir setting. The
-	// YAML decoder drops unknown fields silently, so a config still carrying
-	// keys_dir would boot without those supplier keys — the relayer serves
-	// and signs nothing for them, which is revenue loss with no diagnostic.
-	// Validate() turns that case into a hard, explicit error instead.
-	RemovedKeysDir string `yaml:"keys_dir,omitempty"`
-}
-
-// KeyringConfig contains Cosmos SDK keyring configuration.
-type KeyringConfig struct {
-	// Backend is the keyring backend type: "file", "os", "test", "memory"
-	Backend string `yaml:"backend"`
-
-	// Dir is the directory containing the keyring (for "file" backend).
-	Dir string `yaml:"dir,omitempty"`
-
-	// AppName is the application name for the keyring.
-	// Default: "pocket"
-	AppName string `yaml:"app_name,omitempty"`
-
-	// KeyNames is a list of key names to load from the keyring.
-	// If empty, all keys are loaded.
-	KeyNames []string `yaml:"key_names,omitempty"`
-}
-
 // RelayMeterYAMLConfig contains YAML configuration for the relay meter.
 // This is converted to relayer.RelayMeterConfig when instantiating the RelayMeter.
 type RelayMeterYAMLConfig struct {
@@ -693,6 +661,9 @@ func DefaultConfig() Config {
 		ListenAddr: "0.0.0.0:8080",
 		Redis: RedisConfig{
 			URL: "redis://localhost:6379",
+		},
+		Keys: config.KeysConfig{
+			HotReloadEnabled: true,
 		},
 		DefaultValidationMode:        ValidationModeOptimistic,
 		DefaultRequestTimeoutSeconds: 30,
@@ -848,6 +819,31 @@ func (c *Config) Validate() error {
 				"keyring, then remove the keys_dir line",
 			c.Keys.RemovedKeysDir,
 		)
+	}
+
+	// Exactly one key source. See keys.ValidateKeySources: both is refused so
+	// nothing has to pick a winner at runtime, and zero is refused because a
+	// relayer with no signing key rejects every relay while looking healthy.
+	keyringBackend := ""
+	if c.Keys.Keyring != nil {
+		keyringBackend = c.Keys.Keyring.Backend
+	}
+	if err := keys.ValidateKeySources(c.Keys.KeysFile, keyringBackend); err != nil {
+		return err
+	}
+	// The relayer validated the backend nowhere: a typo surfaced later as
+	// "unsupported keyring backend" from the provider, without saying what is
+	// valid. Same check as the miner, from the same list.
+	if keyringBackend != "" {
+		if err := keys.ValidateKeyringBackend(keyringBackend); err != nil {
+			return err
+		}
+		if err := keys.ValidatePassphraseSource(keyringBackend, keys.PassphraseSource{
+			File: c.Keys.Keyring.PassphraseFile,
+			Env:  c.Keys.Keyring.PassphraseEnv,
+		}); err != nil {
+			return err
+		}
 	}
 
 	// Validate Redis pool settings (all are optional, 0 = use defaults)

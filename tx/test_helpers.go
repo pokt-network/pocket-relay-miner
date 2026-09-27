@@ -284,6 +284,10 @@ func (m *mockKeyProvider) Name() string {
 	return "mock"
 }
 
+func (m *mockKeyProvider) Kind() string {
+	return "mock"
+}
+
 func (m *mockKeyProvider) LoadKeys(ctx context.Context) (map[string]cryptotypes.PrivKey, error) {
 	return m.keys, nil
 }

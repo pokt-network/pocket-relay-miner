@@ -7,8 +7,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	cryptotypes "github.com/cosmos/cosmos-sdk/crypto/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -33,17 +35,55 @@ type Signer interface {
 	Sign(msg [32]byte) (signature []byte, err error)
 }
 
-// ResponseSigner handles signing of relay responses.
-// It manages multiple supplier signing keys and can sign responses on behalf of any
-// supplier whose key is loaded.
-type ResponseSigner struct {
-	logger logging.Logger
-
+// signerSet is an immutable snapshot of the loaded signing keys.
+//
+// Immutable is the whole point: a reload swaps the snapshot instead of mutating
+// it, so a reader that has loaded the pointer keeps one consistent view of the
+// key set for the rest of its call. Nothing here is ever written after the
+// snapshot is published.
+type signerSet struct {
 	// signers maps supplier operator address -> signer
 	signers map[string]Signer
 
-	// operatorAddresses is the list of loaded operator addresses
+	// operatorAddresses is the sorted list of loaded operator addresses. Sorted
+	// because it is rendered into the "no signer for operator X (available:
+	// ...)" error an operator reads while diagnosing a key problem, and a list
+	// that reorders between two runs of the same config reads as a change.
 	operatorAddresses []string
+}
+
+func newSignerSet(keys map[string]cryptotypes.PrivKey) *signerSet {
+	s := &signerSet{
+		signers:           make(map[string]Signer, len(keys)),
+		operatorAddresses: make([]string, 0, len(keys)),
+	}
+	for operatorAddr, privKey := range keys {
+		s.signers[operatorAddr] = &privKeySigner{privKey: privKey}
+		s.operatorAddresses = append(s.operatorAddresses, operatorAddr)
+	}
+	sort.Strings(s.operatorAddresses)
+	return s
+}
+
+// ResponseSigner handles signing of relay responses.
+// It manages multiple supplier signing keys and can sign responses on behalf of any
+// supplier whose key is loaded.
+//
+// The key set is mutable through ReplaceKeys, and it has to be mutable HERE
+// rather than by handing out a fresh ResponseSigner: this pointer is captured
+// at startup by six independent holders -- ProxyServer, RelayGRPCService, the
+// WebSocket handler, the HTTP streaming handler, SimulationVerifier and
+// ResponseSignerAdapter. Replacing one holder's field would leave the other
+// five signing with retired keys and nothing would report it.
+type ResponseSigner struct {
+	logger logging.Logger
+
+	// set holds the current snapshot. Copy-on-write via an atomic pointer, not
+	// a mutex: HasSigner runs once per relay on the hot path
+	// (ProxyServer.decideSupplierServe), so readers pay one atomic load and
+	// never contend with each other, while a reload is rare enough that
+	// rebuilding the whole map costs nothing that matters.
+	set atomic.Pointer[signerSet]
 }
 
 // NewResponseSigner creates a new ResponseSigner from a map of operator address to private key.
@@ -52,20 +92,8 @@ func NewResponseSigner(
 	logger logging.Logger,
 	keys map[string]cryptotypes.PrivKey,
 ) (*ResponseSigner, error) {
-	rs := &ResponseSigner{
-		logger:            logger,
-		signers:           make(map[string]Signer, len(keys)),
-		operatorAddresses: make([]string, 0, len(keys)),
-	}
-
-	for operatorAddr, privKey := range keys {
-		rs.signers[operatorAddr] = &privKeySigner{privKey: privKey}
-		rs.operatorAddresses = append(rs.operatorAddresses, operatorAddr)
-
-		logger.Debug().
-			Str("operator_address", operatorAddr).
-			Msg("loaded signing key")
-	}
+	rs := &ResponseSigner{logger: logger}
+	rs.set.Store(newSignerSet(keys))
 
 	logger.Info().
 		Int("count", len(keys)).
@@ -74,14 +102,36 @@ func NewResponseSigner(
 	return rs, nil
 }
 
+// ReplaceKeys swaps the whole signing key set, which is what a key file rewrite
+// or a Kubernetes secret update actually is: keys added and keys removed, in one
+// step, with the rest untouched.
+//
+// The whole set and not a patch per address, because the untouched keys are the
+// ones that must not blink: swapping an immutable snapshot means a reader sees
+// either the entire old set or the entire new one, never a moment where a
+// supplier nobody touched has no signer.
+//
+// Every holder of this *ResponseSigner sees the new set on its next call, and a
+// relay already in flight finishes against the snapshot it loaded.
+func (rs *ResponseSigner) ReplaceKeys(keys map[string]cryptotypes.PrivKey) {
+	rs.set.Store(newSignerSet(keys))
+
+	// A key set change is a state change, not a per-request event: it fires
+	// once per reload and it is what an operator reads when a removal or a
+	// rotation did or did not take effect.
+	rs.logger.Info().
+		Int("count", len(keys)).
+		Msg("signing keys replaced")
+}
+
 // GetOperatorAddresses returns the list of operator addresses that can sign.
 func (rs *ResponseSigner) GetOperatorAddresses() []string {
-	return rs.operatorAddresses
+	return rs.set.Load().operatorAddresses
 }
 
 // HasSigner returns true if a signer exists for the given operator address.
 func (rs *ResponseSigner) HasSigner(operatorAddress string) bool {
-	_, ok := rs.signers[operatorAddress]
+	_, ok := rs.set.Load().signers[operatorAddress]
 	return ok
 }
 
@@ -91,9 +141,10 @@ func (rs *ResponseSigner) SignRelayResponse(
 	relayResponse *servicetypes.RelayResponse,
 	supplierOperatorAddr string,
 ) error {
-	signer, ok := rs.signers[supplierOperatorAddr]
+	set := rs.set.Load()
+	signer, ok := set.signers[supplierOperatorAddr]
 	if !ok {
-		return fmt.Errorf("no signer for operator %s (available: %v)", supplierOperatorAddr, rs.operatorAddresses)
+		return fmt.Errorf("no signer for operator %s (available: %v)", supplierOperatorAddr, set.operatorAddresses)
 	}
 
 	// Ensure payload hash is set
@@ -126,9 +177,10 @@ func (rs *ResponseSigner) SignRelayResponseWithContext(
 	relayResponse *servicetypes.RelayResponse,
 	supplierOperatorAddr string,
 ) ([]byte, error) {
-	signer, ok := rs.signers[supplierOperatorAddr]
+	set := rs.set.Load()
+	signer, ok := set.signers[supplierOperatorAddr]
 	if !ok {
-		return nil, fmt.Errorf("no signer for operator %s (available: %v)", supplierOperatorAddr, rs.operatorAddresses)
+		return nil, fmt.Errorf("no signer for operator %s (available: %v)", supplierOperatorAddr, set.operatorAddresses)
 	}
 
 	// Ensure payload hash is set

@@ -15,6 +15,12 @@ func loadFullConfig(t *testing.T, y string) *Config {
 	t.Helper()
 	var cfg Config
 	require.NoError(t, yaml.Unmarshal([]byte(y), &cfg))
+	// These fixtures are about backend resolution, not keys. Validate requires
+	// exactly one key source (keys.ValidateKeySources), so one is supplied here
+	// rather than repeated in every YAML literal below.
+	if cfg.Keys.KeysFile == "" && cfg.Keys.Keyring == nil {
+		cfg.Keys.KeysFile = "/keys/supplier-keys.yaml"
+	}
 	return &cfg
 }
 

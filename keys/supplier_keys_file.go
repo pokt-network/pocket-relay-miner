@@ -143,6 +143,10 @@ func (p *SupplierKeysFileProvider) Name() string {
 	return "supplier_keys_file:" + p.filePath
 }
 
+// Kind returns the provider family, for metric labels. Deliberately without the
+// path that Name() carries: a metric label must be bounded.
+func (p *SupplierKeysFileProvider) Kind() string { return "supplier_keys_file" }
+
 // LoadKeys loads all keys from the supplier.yaml file.
 // The operator address is derived from each private key.
 //
@@ -180,7 +184,7 @@ func (p *SupplierKeysFileProvider) LoadKeys(ctx context.Context) (map[string]cry
 				Err(err).
 				Int("index", i).
 				Msg("failed to parse key from supplier.yaml")
-			keyLoadErrors.WithLabelValues("supplier_keys_file").Inc()
+			keyLoadErrors.WithLabelValues(p.Kind()).Inc()
 			continue
 		}
 
@@ -223,12 +227,11 @@ func parseHexKeyWithAddress(hexKey string) (cryptotypes.PrivKey, string, error) 
 
 	privKey := &secp256k1.PrivKey{Key: keyBytes}
 
-	// Derive the operator address from the public key using "pokt" bech32 prefix
+	// Derive the operator address from the public key using Pocket's bech32 prefix
 	pubKey := privKey.PubKey()
 	addr := cosmostypes.AccAddress(pubKey.Address())
 
-	// Convert to "pokt" prefix (Pocket Network uses "pokt" instead of "cosmos")
-	operatorAddr, err := cosmostypes.Bech32ifyAddressBytes("pokt", addr)
+	operatorAddr, err := OperatorAddress(addr)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to encode address with pokt prefix: %w", err)
 	}

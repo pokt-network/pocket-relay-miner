@@ -68,6 +68,116 @@ spec:
         # roll pods by itself, and the miner reads its config only at startup.
         pocket-relay-miner/config-hash: "{}"
     spec:
+      initContainers:
+      # Build a cosmos keyring from the SAME hex keys the keys_file holds, so the
+      # stack can be run against either source without changing what suppliers
+      # exist. The "test" backend needs no passphrase and stores to disk; pocketd
+      # writes /keyring/keyring-test/<name>.info, which is exactly what a
+      # KeyringProvider with backend "test" and dir /keyring reads.
+      #
+      # No curly braces below: this YAML is rendered through Starlark's
+      # .format(), which reads them as placeholders and fails the Tiltfile.
+      #
+      # An emptyDir, rebuilt on every pod start, on purpose: the keyring is
+      # DERIVED from the secret, so there is one source of truth for which keys
+      # exist and no second place to update.
+      - name: build-keyring
+        image: ghcr.io/pokt-network/pocketd:0.1.34
+        # As the SAME user the app container runs as, so the keyring files are
+        # born owned by it. The first attempt chowned them afterwards instead and
+        # failed with "Operation not permitted": this image does not run as root,
+        # so it could not hand ownership to anyone. Before that the files were
+        # simply unreadable to the app, which loaded ZERO keys.
+        securityContext:
+          runAsUser: 1000
+          runAsGroup: 1000
+        env:
+        # pocketd writes a client config under $HOME on startup, and as a
+        # non-root user in this image $HOME is not writable: it tried /.pocket
+        # and failed with "permission denied", which surfaced as a failed key
+        # import until the error stopped being swallowed.
+        - name: HOME
+          value: /tmp
+        command:
+        - sh
+        - -c
+        - |
+          set -eu
+          # Derived data, rebuilt from scratch. An emptyDir survives a container
+          # RESTART, and import-hex refuses a name that already exists, so a
+          # retry after any failure would die on supplier1 "already exists" --
+          # reporting the retry instead of the cause. Measured: that is exactly
+          # what a CrashLoopBackOff here looked like.
+          # The CONTENTS, not the directory: /keyring is the mount point and
+          # removing it fails with "Permission denied". Named explicitly rather
+          # than globbed, because these are the only two subdirectories cosmos-sdk
+          # creates and a glob would need a shell brace this YAML cannot carry.
+          rm -rf /keyring/keyring-file /keyring/keyring-test
+          mkdir -p /keyring
+          # Read the backend from the RENDERED config rather than taking it as a
+          # parameter: the keyring must be built in the same format the process
+          # will open, and reading the one file that decides that makes them
+          # agree by construction. No keyring block (keys_file mode) means the
+          # keyring is still built, in the default format, so switching source
+          # later is a config change and nothing else.
+          # No braces and no backslashes anywhere in this script. This YAML goes
+          # through Starlark's .format() (which reads a brace as a placeholder)
+          # inside a triple-quoted Starlark string (where a backslash-n becomes
+          # a REAL newline -- that one produced a YAML "unknown directive"
+          # because the fragment after it started with a percent sign). Two
+          # greps instead of awk or sed for exactly that reason.
+          # The two greps must not be allowed to fail the script: under set -e an
+          # assignment from a failing pipeline aborts immediately, and in
+          # keys_file mode there IS no backend line, so the init container died
+          # before printing anything and the fallback below never ran. Measured
+          # 2026-08-22, switching the fleet back to keys_file.
+          BACKEND=$(grep -oE 'backend: *"?(file|test)' /config/config.yaml | head -1 | grep -oE 'file|test' || true)
+          if [ -z "$BACKEND" ]; then BACKEND=test; fi
+          # The passphrase, twice, in a file: cosmos-sdk asks once and then a
+          # second time to confirm when it is CREATING the keyring (no keyhash
+          # file yet), so feeding two lines covers both cases. A file rather
+          # than a printf because printf would need a backslash-n.
+          PASS=$(cat /keyring-pass/passphrase)
+          echo "$PASS" > /tmp/pp
+          echo "$PASS" >> /tmp/pp
+          i=0
+          # The hex keys are one per line in the mounted secret. Selecting them by
+          # LENGTH instead of a regex quantifier keeps this free of a yq
+          # dependency in the pocketd image and free of curly braces, which the
+          # Starlark .format() that renders this YAML reads as placeholders.
+          for hex in $(grep -oiE '[0-9a-f]+' /keys/supplier-keys.yaml | awk 'length == 64'); do
+            i=$((i+1))
+            # The spare second line dies with the process; the test backend
+            # ignores stdin entirely. pocketd's own error is PRINTED, not
+            # swallowed: discarding it once already hid the real cause behind a
+            # generic failure line.
+            if ! pocketd keys import-hex "supplier$i" "$hex" \
+              --keyring-backend "$BACKEND" --keyring-dir /keyring < /tmp/pp >/dev/null; then
+              echo "failed to import supplier$i into the $BACKEND keyring (error above)" >&2
+              exit 1
+            fi
+          done
+          # No chown and no chmod: runAsUser above makes these files the app
+          # user's, and cosmos-sdk writes them 0600 already. Touching the mount
+          # point itself is not permitted to a non-root user anyway.
+          # Importing nothing is a failure, not a quiet success. When the
+          # supplier-keys Secret went missing this printed "imported 0 keys" and
+          # exited 0, and the problem only surfaced two layers down as the app
+          # refusing to start. Fail where the cause is.
+          if [ "$i" -eq 0 ]; then
+            echo "no 64-character hex keys in /keys/supplier-keys.yaml: the supplier-keys secret is missing or empty" >&2
+            exit 1
+          fi
+          echo "imported $i keys into the $BACKEND keyring at /keyring, owned by uid 1000"
+        volumeMounts:
+        - name: config
+          mountPath: /config
+        - name: keys
+          mountPath: /keys
+        - name: keyring
+          mountPath: /keyring
+        - name: keyring-pass
+          mountPath: /keyring-pass
       containers:
       - name: miner
         image: {}
@@ -95,6 +205,10 @@ spec:
           mountPath: /config
         - name: keys
           mountPath: /keys
+        - name: keyring
+          mountPath: /keyring
+        - name: keyring-pass
+          mountPath: /keyring-pass
         resources:
           requests:
             cpu: "500m"
@@ -116,6 +230,11 @@ spec:
         secret:
           secretName: supplier-keys
           optional: true
+      - name: keyring
+        emptyDir: {{}}
+      - name: keyring-pass
+        secret:
+          secretName: keyring-passphrase
 ---
 apiVersion: v1
 kind: Service

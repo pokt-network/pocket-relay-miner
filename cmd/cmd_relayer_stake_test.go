@@ -16,6 +16,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/relayer"
 )
 
@@ -88,7 +89,7 @@ func stakeCheckConfig(t *testing.T, grpcAddr string, backends map[string][]strin
 	}
 	return &relayer.Config{
 		Services: services,
-		Keys:     relayer.KeysConfig{KeysFile: writeSupplierKeysFile(t)},
+		Keys:     config.KeysConfig{KeysFile: writeSupplierKeysFile(t)},
 		PocketNode: relayer.PocketNodeConfig{
 			QueryNodeGRPCUrl: grpcAddr,
 			GRPCInsecure:     true,

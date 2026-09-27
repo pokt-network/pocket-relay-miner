@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"gopkg.in/yaml.v3"
 
+	"github.com/pokt-network/pocket-relay-miner/config"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/rings"
 )
@@ -494,6 +495,9 @@ func minimalValidRelayerConfig() *Config {
 		Redis:                 RedisConfig{URL: "redis://localhost:6379"},
 		PocketNode:            PocketNodeConfig{QueryNodeRPCUrl: "http://x", QueryNodeGRPCUrl: "x:9090"},
 		DefaultValidationMode: ValidationModeOptimistic,
+		// Validate requires exactly one key source (keys.ValidateKeySources);
+		// these cases are about the simulation block.
+		Keys: config.KeysConfig{KeysFile: "/keys/supplier-keys.yaml"},
 		Services: map[string]ServiceConfig{
 			"op": {
 				DefaultBackend: "jsonrpc",
@@ -573,6 +577,10 @@ redis:
 pocket_node:
   query_node_rpc_url: "http://x"
   query_node_grpc_url: "x:9090"
+# Exactly one key source is required (keys.ValidateKeySources); these cases are
+# about the simulation block, so this is the minimum that reaches it.
+keys:
+  keys_file: "/keys/supplier-keys.yaml"
 default_validation_mode: optimistic
 services:
   op:

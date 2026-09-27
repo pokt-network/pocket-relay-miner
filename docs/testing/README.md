@@ -8,6 +8,10 @@ two guides:
 | **[TILT.md](TILT.md)** | Bring the localnet up in kind, confirm it's healthy, the port map, and the HA/chaos suite. **Start here.** |
 | **[DIRECT_CLI.md](DIRECT_CLI.md)** | Signed relays sent **straight to the relayer** (`:8180`) with the `relay` CLI — correctness, error paths, and load. |
 
+For how the relayer and the miner GET their supplier keys — the two sources, the
+keyring backends, the passphrase, and hot reload — see
+**[../SUPPLIER_KEYS.md](../SUPPLIER_KEYS.md)**.
+
 ## Which one do I want?
 
 - **First time / nothing running** → [TILT.md](TILT.md) to bring it up.

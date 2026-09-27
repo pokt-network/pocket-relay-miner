@@ -413,6 +413,11 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 			c.logger.Debug().
 				Str(logging.FieldSupplierOperator, operatorAddress).
 				Msg("fail-open: treating supplier as active due to cache error")
+			// Its OWN series. cacheGetLatency{level="l2_error"} is shared with
+			// the fail-closed and unmarshal branches, so it cannot answer "am I
+			// serving suppliers I could not verify?" -- which is the question
+			// that costs money.
+			supplierFailOpen.WithLabelValues("l2_error").Inc()
 			cacheGetLatency.WithLabelValues(supplierCacheType, "l2_error").Observe(time.Since(start).Seconds())
 			return &SupplierState{
 				Status:          SupplierStatusActive,
@@ -668,6 +673,7 @@ func (c *SupplierCache) IsSupplierActiveForService(
 				Str("operator_address", operatorAddress).
 				Str("service_id", serviceID).
 				Msg("fail-open: supplier not in cache, treating as active")
+			supplierFailOpen.WithLabelValues("not_cached").Inc()
 			return true, nil
 		}
 		return false, nil

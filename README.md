@@ -213,6 +213,8 @@ See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development workflow and guidelines
 - [`docs/testing/`](docs/testing/README.md) - Testing guides (Tilt bring-up, PATH+hey load, direct-CLI per-protocol)
 - [`docs/simulated-relays.md`](docs/simulated-relays.md) - Simulated relays: what they are, how to enable and fire them, and how to verify nothing was charged
 - [`examples/relay-signing/`](examples/relay-signing/README.md) - Signing a relay in Node.js, Python or Rust: the ring-signature scheme byte-for-byte, working signers, and an oracle to verify your own
+- [`docs/SUPPLIER_KEYS.md`](docs/SUPPLIER_KEYS.md) - Supplier signing keys: the two sources, the keyring
+  backends and why only two are supported, where the passphrase comes from, and how hot reload behaves
 - [`docs/PROTOCOL_SPEC.md`](docs/PROTOCOL_SPEC.md) - Relay protocol specification
 - [`docs/REDIS.md`](docs/REDIS.md) - Redis architecture and key patterns
 - [`docs/CLAIM_PROOF_LIFECYCLE.md`](docs/CLAIM_PROOF_LIFECYCLE.md) - Claim/proof windows and inclusion reconciler

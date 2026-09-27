@@ -649,15 +649,19 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 	// with the cache TTL (~42 min on mainnet). Checked further down, that
 	// supplier keeps being served for tens of minutes.
 	//
-	// WHEN this bites, measured live 2026-08-21: THIS process loads its signing
-	// keys once at startup (cmd_relayer.go builds the ResponseSigner from the
-	// providers and closes them; there is no KeyManager and no hot-reload here,
-	// unlike the miner). So pulling a key from the mounted secret does NOT stop a
-	// running relayer -- it keeps the key in memory and keeps serving. The guard
-	// covers the case that actually reaches a relayer: one that does not hold the
-	// key at the moment it starts, which is any replica restarted or rolled after
-	// the key was removed, and any replica whose key set differs from the fleet's.
-	// A key removal that must take effect now still needs the relayers restarted.
+	// WHEN this bites: HasSigner reads the LIVE key set. cmd_relayer.go holds the
+	// keys through a MultiProviderKeyManager and applies every change to the
+	// ResponseSigner in place, so pulling a key from the mounted secret stops
+	// this running process from serving that supplier -- it does not wait for a
+	// restart. Until 2026-08-22 it did: the keys were loaded once and the
+	// providers closed, so a removal only reached a replica that restarted
+	// afterwards.
+	//
+	// The promptness differs per key SOURCE, and the difference is latency only:
+	// keys_file is watched, so a change there lands almost at once; a keyring
+	// cannot be watched, so a change there is found by the reload timer within
+	// one interval (keys.DefaultReloadInterval). Every source reloads. The
+	// relayer states which is which at startup.
 	//
 	// A nil responseSigner is folded in deliberately: no signer means no key for
 	// anybody, so the answer is still no. In production that branch is
@@ -2195,10 +2199,14 @@ func (p *ProxyServer) SetRelayProcessor(processor RelayProcessor) {
 	p.relayProcessor = processor
 }
 
-// TODO: this should use a sync map with a lock, since if we need to update on keys hot reload this will panic
-
 // SetResponseSigner sets the response signer for signing relay responses.
 // This is REQUIRED for proper relay handling - clients expect signed RelayResponse protobufs.
+//
+// Called once, during startup, before the server accepts traffic. A key reload
+// does NOT come back through here: it calls ResponseSigner.ReplaceKeys, which
+// swaps the key set inside the signer so that all six holders of the pointer
+// see it. Swapping this field instead would update one holder and leave the
+// other five signing with retired keys.
 func (p *ProxyServer) SetResponseSigner(signer *ResponseSigner) {
 	p.responseSigner = signer
 }

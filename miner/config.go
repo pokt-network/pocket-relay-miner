@@ -12,6 +12,7 @@ import (
 
 	"github.com/pokt-network/pocket-relay-miner/cache"
 	"github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
@@ -46,9 +47,19 @@ type Config struct {
 	// Default: 100
 	BatchSize int64 `yaml:"batch_size"`
 
-	// HotReloadEnabled enables hot-reload of keys.
-	// Default: true
-	HotReloadEnabled bool `yaml:"hot_reload_enabled"`
+	// RemovedHotReloadEnabled is the tombstone for the retired top-level
+	// hot_reload_enabled. The setting now lives at keys.hot_reload_enabled,
+	// which both binaries share, and the top-level field is READ BY NOTHING.
+	//
+	// It has to be a tombstone rather than a silent removal, because that gap
+	// was measured in production shape on 2026-08-22: the deployment set
+	// hot_reload_enabled: true at the top level, the code read
+	// keys.hot_reload_enabled (unset, so false), and the miner ran with key hot
+	// reload OFF while its own config said ON. With a keyring -- which nothing
+	// can watch -- that means a key added or pulled never reaches the miner at
+	// all. A pointer, not a bool, so "the operator wrote it" is distinguishable
+	// from "the field is absent" no matter which value they wrote.
+	RemovedHotReloadEnabled *bool `yaml:"hot_reload_enabled,omitempty"`
 
 	// SessionTTL is the TTL for session state data in Redis.
 	// Default: CacheTTL (2h) - aligned with SMST tree TTL to prevent orphaned sessions.
@@ -457,16 +468,37 @@ func (c *Config) Validate() error {
 		)
 	}
 
-	// Keys config is required (suppliers are auto-discovered from keys)
-	if !c.HasKeySource() {
-		return fmt.Errorf("keys config is required (at least one of: keys_file or keyring)")
+	// The retired top-level hot_reload_enabled is read by nothing. Dropping it
+	// silently is how the miner came to run with key hot reload OFF while the
+	// config said ON, so any value at all is a hard error naming the new home.
+	if c.RemovedHotReloadEnabled != nil {
+		return fmt.Errorf(
+			"hot_reload_enabled at the top level is no longer read: the setting moved to "+
+				"keys.hot_reload_enabled, which the miner and the relayer share. Set "+
+				"keys.hot_reload_enabled: %t and delete the top-level line",
+			*c.RemovedHotReloadEnabled,
+		)
+	}
+
+	// Exactly one key source (suppliers are auto-discovered from the keys).
+	keyringBackend := ""
+	if c.Keys.Keyring != nil {
+		keyringBackend = c.Keys.Keyring.Backend
+	}
+	if err := keys.ValidateKeySources(c.Keys.KeysFile, keyringBackend); err != nil {
+		return err
 	}
 
 	// Validate keyring config if provided
 	if c.Keys.Keyring != nil && c.Keys.Keyring.Backend != "" {
-		validBackends := map[string]bool{"file": true, "os": true, "test": true, "memory": true}
-		if !validBackends[c.Keys.Keyring.Backend] {
-			return fmt.Errorf("invalid keys.keyring.backend: %s", c.Keys.Keyring.Backend)
+		if err := keys.ValidateKeyringBackend(c.Keys.Keyring.Backend); err != nil {
+			return err
+		}
+		if err := keys.ValidatePassphraseSource(c.Keys.Keyring.Backend, keys.PassphraseSource{
+			File: c.Keys.Keyring.PassphraseFile,
+			Env:  c.Keys.Keyring.PassphraseEnv,
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -923,7 +955,13 @@ func DefaultConfig() *Config {
 		},
 		DeduplicationTTLBlocks: 10,
 		BatchSize:              1000, // Increased from 100 for better throughput (10x more efficient)
-		HotReloadEnabled:       true,
+		// Hot reload on by default, in BOTH binaries: an operator who never
+		// thinks about it gets a fleet that picks up a key change on its own,
+		// and one who turns it off is told so at startup by the key manager's
+		// own warning.
+		Keys: config.KeysConfig{
+			HotReloadEnabled: true,
+		},
 		// SessionTTL: 0 means use CacheTTL (default 2h) - ensures SMST trees and sessions expire together
 		// This prevents orphaned sessions causing "SMST missing but relay count > 0" warnings
 		CacheTTL:              2 * time.Hour,  // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
@@ -948,13 +986,13 @@ func LoadConfig(path string) (*Config, error) {
 	cf := DefaultConfig()
 
 	if err = yaml.Unmarshal(data, cf); err != nil {
-		return nil, fmt.Errorf("failed to parse cf file: %w", err)
+		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
 
 	cf.Redis.ConsumerName = UniqueConsumerName(cf.Redis.ConsumerName)
 
 	if err = cf.Validate(); err != nil {
-		return nil, fmt.Errorf("invalid cf: %w", err)
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	return cf, nil
@@ -990,10 +1028,4 @@ func hostnameOrUnknown() string {
 		return "unknown-host"
 	}
 	return hostname
-}
-
-// HasKeySource returns true if at least one key source is configured.
-func (c *Config) HasKeySource() bool {
-	return c.Keys.KeysFile != "" ||
-		(c.Keys.Keyring != nil && c.Keys.Keyring.Backend != "")
 }

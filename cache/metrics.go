@@ -72,6 +72,26 @@ var (
 		[]string{"source"}, // source: l1_read, l2_read, warmup_skip
 	)
 
+	// supplierFailOpen counts the times the supplier cache could not verify a
+	// supplier and served the relay anyway, fabricating an active state.
+	//
+	// It has its own series because the alternative was reading it off
+	// cacheGetLatency{level="l2_error"}, a label this path SHARES with the
+	// fail-closed branch and the unmarshal branch -- so a dashboard could not
+	// tell "I am serving unverified suppliers" from "I am rejecting them". The
+	// distinction is money: under fail_open the relayer serves suppliers it
+	// could not check, unstaked and jailed ones included, and those relays are
+	// never claimable.
+	supplierFailOpen = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "supplier_fail_open_total",
+			Help:      "Supplier states fabricated as active because the cache could not be read (relays served that may never be claimable)",
+		},
+		[]string{"source"}, // source: l2_error, unmarshal_error
+	)
+
 	// Chain query metrics
 	chainQueries = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{

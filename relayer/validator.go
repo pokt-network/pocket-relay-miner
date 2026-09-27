@@ -36,9 +36,19 @@ type RelayValidator interface {
 
 // ValidatorConfig contains configuration for the relay validator.
 type ValidatorConfig struct {
-	// AllowedSupplierAddresses is a list of supplier operator addresses
-	// that this relayer is authorized to serve relays for.
-	AllowedSupplierAddresses []string
+	// OwnsSupplierKey reports whether this relayer holds the signing key for a
+	// supplier operator address, and so is authorized to serve relays for it.
+	//
+	// A function and not a list of addresses: the key set changes while the
+	// process runs (hot reload of the signing keys), and a slice copied at
+	// startup would keep rejecting a supplier whose key was added afterwards --
+	// removals would take effect and additions would not, which is a worse
+	// state than no hot reload at all. cmd_relayer wires this to
+	// ResponseSigner.HasSigner, which reads the live key set.
+	//
+	// Nil means "serve any supplier", which is what an empty address list meant
+	// before: the gate is off, and the signing key itself is the backstop.
+	OwnsSupplierKey func(operatorAddr string) bool
 }
 
 // relayValidator implements RelayValidator.
@@ -59,8 +69,9 @@ type relayValidator struct {
 	currentBlockHeight int64
 	blockHeightMu      sync.RWMutex
 
-	// allowedSuppliers is a set of allowed supplier operator addresses.
-	allowedSuppliers map[string]struct{}
+	// ownsSupplierKey is the live check for "is this relayer authorized to
+	// serve this supplier". See ValidatorConfig.OwnsSupplierKey.
+	ownsSupplierKey func(operatorAddr string) bool
 }
 
 // NewRelayValidator creates a new relay validator.
@@ -71,18 +82,13 @@ func NewRelayValidator(
 	sessionCache cache.SessionCache,
 	sharedParamCache cache.SharedParamCache,
 ) RelayValidator {
-	allowedSuppliers := make(map[string]struct{})
-	for _, addr := range config.AllowedSupplierAddresses {
-		allowedSuppliers[addr] = struct{}{}
-	}
-
 	return &relayValidator{
 		logger:           logging.ForComponent(logger, logging.ComponentRelayValidator),
 		config:           config,
 		ringClient:       ringClient,
 		sessionCache:     sessionCache,
 		sharedParamCache: sharedParamCache,
-		allowedSuppliers: allowedSuppliers,
+		ownsSupplierKey:  config.OwnsSupplierKey,
 	}
 }
 
@@ -103,7 +109,7 @@ func (rv *relayValidator) ValidateRelayRequest(
 
 	// Check if the supplier is allowed
 	supplierAddr := meta.GetSupplierOperatorAddress()
-	if _, ok := rv.allowedSuppliers[supplierAddr]; !ok && len(rv.allowedSuppliers) > 0 {
+	if rv.ownsSupplierKey != nil && !rv.ownsSupplierKey(supplierAddr) {
 		return fmt.Errorf("supplier %s is not allowed by this relayer", supplierAddr)
 	}
 

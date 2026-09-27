@@ -19,6 +19,10 @@ func minimalValidConfig() *Config {
 	c.Redis.URL = "redis://localhost:6379"
 	c.PocketNode.QueryNodeRPCUrl = "http://localhost:26657"
 	c.PocketNode.QueryNodeGRPCUrl = "localhost:9090"
+	// Exactly one key source is required (keys.ValidateKeySources): a relayer
+	// with none rejects every relay while looking healthy, so Validate refuses
+	// it rather than letting it boot.
+	c.Keys.KeysFile = "/keys/supplier-keys.yaml"
 	c.Services = map[string]ServiceConfig{
 		"svc-test": {
 			DefaultBackend: BackendTypeJSONRPC,

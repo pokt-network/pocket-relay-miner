@@ -167,6 +167,22 @@ else:
     print("WARNING: No supplier keys found in all-keys.yaml")
     print("         Relayers/miners will fail to start without supplier keys")
 
+# Passphrase for the "file" keyring backend, which is what production uses and
+# which is passphrase-protected. A LOCALNET value on purpose: it guards a keyring
+# built from keys that are already in a plaintext secret two lines above, so it
+# protects nothing and pretending otherwise would be theatre. It exists so the
+# passphrase-protected code path -- the one that panicked until 0b3b929 -- is
+# actually exercised. Must be >= 8 chars (cosmos-sdk input.MinPassLength).
+k8s_yaml(blob("""
+apiVersion: v1
+kind: Secret
+metadata:
+  name: keyring-passphrase
+type: Opaque
+stringData:
+  passphrase: "localnet-keyring-passphrase"
+"""))
+
 # Deploy infrastructure (order matters: Redis → Validator → Account Init → Miners → Relayers)
 print("Deploying infrastructure...")
 deploy_redis(config)
