@@ -25,6 +25,20 @@ var PanicRecoveriesTotal = prometheus.NewCounterVec(
 	[]string{"component"},
 )
 
+// LogMessagesDroppedTotal counts log lines the async (diode) writer dropped
+// because its ring buffer was full. The drop callback also writes one line
+// straight to stderr, but stderr is invisible to Prometheus — without this
+// counter, log loss under load cannot be alerted on. Registered into the
+// observability SharedRegistry alongside PanicRecoveriesTotal (same import
+// cycle constraint, see above).
+var LogMessagesDroppedTotal = prometheus.NewCounter(
+	prometheus.CounterOpts{
+		Namespace: "ha",
+		Name:      "log_messages_dropped_total",
+		Help:      "Log lines dropped by the async log writer because its buffer was full",
+	},
+)
+
 // RecoverGoRoutine wraps a goroutine with panic recovery and structured logging.
 // Use this for ALL spawned goroutines to prevent crashes from propagating.
 //

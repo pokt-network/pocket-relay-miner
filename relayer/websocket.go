@@ -370,7 +370,7 @@ func (b *WebSocketBridge) Run() {
 	// Wait for all goroutines to finish
 	b.wg.Wait()
 
-	b.logger.Info().Msg("websocket bridge stopped")
+	b.logger.Debug().Msg("websocket bridge stopped")
 }
 
 // readLoop reads messages from a WebSocket connection.
@@ -405,7 +405,7 @@ func (b *WebSocketBridge) readLoop(conn *websocket.Conn, source wsMessageSource)
 		// This is critical for long-running subscriptions where the backend
 		// sends frequent data messages but may not respond to pings
 		if err := conn.SetReadDeadline(time.Now().Add(wsPongWait)); err != nil {
-			b.logger.Warn().Err(err).Str(logging.FieldSource, string(source)).Msg("failed to reset read deadline")
+			b.logger.Debug().Err(err).Str(logging.FieldSource, string(source)).Msg("failed to reset read deadline")
 		}
 
 		b.logger.Debug().
@@ -480,7 +480,9 @@ func (b *WebSocketBridge) handleSessionExpiration(sessionEndHeight, graceEndHeig
 		return
 	}
 
-	b.logger.Warn().
+	// Session expiry is normal protocol behaviour, once per connection —
+	// at session rollover every open connection emits this at once.
+	b.logger.Debug().
 		Int64("current_height", currentHeight).
 		Int64("session_end_height", sessionEndHeight).
 		Int64("grace_end_height", graceEndHeight).
@@ -489,7 +491,7 @@ func (b *WebSocketBridge) handleSessionExpiration(sessionEndHeight, graceEndHeig
 
 	// Send session expiration message to client
 	if err := b.sendSessionExpirationMessage(); err != nil {
-		b.logger.Warn().Err(err).Msg("failed to send session expiration message")
+		b.logger.Debug().Err(err).Msg("failed to send session expiration message")
 	}
 
 	// Close the connection with session expired code
@@ -567,7 +569,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	// Extract session parameters from first request and register with global monitor
 	if b.sessionEndHeight == 0 && relayReq.Meta.SessionHeader != nil {
 		b.sessionEndHeight = relayReq.Meta.SessionHeader.SessionEndBlockHeight
-		b.logger.Info().
+		b.logger.Debug().
 			Int64("session_end_height", b.sessionEndHeight).
 			Msg("session parameters initialized from first relay request")
 
@@ -595,7 +597,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		release, ok := b.simVerifier.AcquireGlobal()
 		if !ok {
 			recordSim(SimResultRateLimited)
-			b.logger.Warn().Msg("simulation concurrency limit reached - closing connection")
+			b.logger.Debug().Msg("simulation concurrency limit reached - closing connection")
 			_ = b.closeWithReason(CloseTryAgainLater, "simulation concurrency limit reached", wsCloseInitiatorRelayer)
 			return
 		}
@@ -603,7 +605,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 
 		if err := b.simVerifier.Verify(b.ctx, b.simKeyID, relayReq); err != nil {
 			recordSim(SimResultForError(err))
-			b.logger.Warn().Err(err).Msg("simulated relay admission failed - closing connection")
+			b.logger.Debug().Err(err).Msg("simulated relay admission failed - closing connection")
 			_ = b.closeWithReason(CloseValidationFailed, "simulation rejected", wsCloseInitiatorRelayer)
 			return
 		}
@@ -612,7 +614,7 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		// public key_id cannot be used pre-auth to starve a legit connection).
 		if !b.simVerifier.AllowKey(b.simKeyID) {
 			recordSim(SimResultRateLimited)
-			b.logger.Warn().Msg("simulation rate limit reached - closing connection")
+			b.logger.Debug().Msg("simulation rate limit reached - closing connection")
 			_ = b.closeWithReason(CloseTryAgainLater, "simulation rate limit reached", wsCloseInitiatorRelayer)
 			return
 		}
@@ -620,17 +622,17 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		// Validate and meter the relay if pipeline is available
 		// Build relay context for validation/metering
 		relayCtx := &RelayContext{
-			Request:         relayReq,
-			ServiceID:       b.serviceID,
-			SupplierAddress: b.supplierAddress,
-			SessionID:       relayReq.Meta.SessionHeader.SessionId,
-
+			Request:            relayReq,
+			ServiceID:          b.serviceID,
+			SupplierAddress:    b.supplierAddress,
+			SessionID:          relayReq.Meta.SessionHeader.SessionId,
 			ArrivalBlockHeight: b.arrivalHeight,
 		}
 
 		// Validate relay request (ring signature + session)
 		if err := b.relayPipeline.ValidateRelay(b.ctx, relayCtx); err != nil {
-			b.logger.Warn().
+			relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonValidationFailed).Inc()
+			b.logger.Debug().
 				Err(err).
 				Str("session_id", relayCtx.SessionID).
 				Msg("relay validation failed - closing connection")
@@ -641,14 +643,16 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 		// Meter relay (check stake before serving)
 		allowed, meterErr := b.relayPipeline.MeterRelay(b.ctx, relayCtx)
 		if meterErr != nil {
-			// Fail-open: log warning but allow relay
-			b.logger.Warn().
+			// Fail-open: log but allow relay (issue #23 tracks honouring
+			// fail_behavior here; only the log level changed in this pass)
+			b.logger.Debug().
 				Err(meterErr).
 				Str("session_id", relayCtx.SessionID).
 				Msg("relay metering error (fail-open: allowing relay)")
 		} else if !allowed {
 			// Stake limit exceeded - reject relay
-			b.logger.Warn().
+			relaysRejected.WithLabelValues(b.serviceID, "websocket", rejectReasonStakeExhausted).Inc()
+			b.logger.Debug().
 				Str("session_id", relayCtx.SessionID).
 				Msg("relay rejected - stake limit exceeded")
 			_ = b.closeWithReason(CloseStakeLimitExceeded, "stake limit exceeded", wsCloseInitiatorRelayer)
@@ -665,7 +669,6 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 
 	b.logger.Debug().
 		Int("payload_size", len(relayReq.Payload)).
-		Str("payload_preview", string(relayReq.Payload[:min(50, len(relayReq.Payload))])).
 		Msg("forwarding payload to backend")
 
 	// Forward payload to backend echoing the frame type the client sent.
@@ -675,14 +678,13 @@ func (b *WebSocketBridge) handleGatewayMessage(msg wsMessage) {
 	// frames. Matches poktroll, PATH, and the raw forwarding paths below.
 	err := b.writeToBackend(msg.messageType, relayReq.Payload)
 	if err != nil {
-		b.logger.Warn().Err(err).Msg("failed to forward to backend")
+		b.logger.Debug().Err(err).Msg("failed to forward to backend")
 		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
 		return
 	}
 
 	b.logger.Debug().
 		Int("bytes_sent", len(relayReq.Payload)).
-		Str("sent_to_backend", string(relayReq.Payload[:min(50, len(relayReq.Payload))])).
 		Msg("successfully forwarded payload to backend")
 }
 
@@ -702,7 +704,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 		// No request yet - just forward raw data
 		err := b.writeToGateway(msg.messageType, msg.data)
 		if err != nil {
-			b.logger.Warn().Err(err).Msg("failed to forward to client (PATH)")
+			b.logger.Debug().Err(err).Msg("failed to forward to client (PATH)")
 			_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		}
 		return
@@ -722,7 +724,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 		msg.data, // Raw WebSocket payload (e.g., JSON-RPC response)
 	)
 	if signErr != nil {
-		b.logger.Warn().Err(signErr).Msg("failed to sign websocket response")
+		b.logger.Debug().Err(signErr).Msg("failed to sign websocket response")
 		// Fall back to unsigned on signing error only (not nil signer)
 		relayResp = &servicetypes.RelayResponse{
 			Meta: servicetypes.RelayResponseMetadata{
@@ -742,7 +744,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 	// doing JSON.parse(e.data) needs text to survive the round trip.
 	writeErr := b.writeToGateway(msg.messageType, respBytes)
 	if writeErr != nil {
-		b.logger.Warn().Err(writeErr).Msg("failed to forward signed response to client (PATH)")
+		b.logger.Debug().Err(writeErr).Msg("failed to forward signed response to client (PATH)")
 		_ = b.closeWithReason(CloseInternalError, "client write failed", wsCloseInitiatorRelayer)
 		return
 	}
@@ -763,7 +765,7 @@ func (b *WebSocketBridge) handleBackendMessage(msg wsMessage) {
 func (b *WebSocketBridge) forwardToBackend(msg wsMessage) {
 	err := b.writeToBackend(msg.messageType, msg.data)
 	if err != nil {
-		b.logger.Warn().Err(err).Msg("failed to forward raw message to backend")
+		b.logger.Debug().Err(err).Msg("failed to forward raw message to backend")
 		_ = b.closeWithReason(CloseInternalError, "backend write failed", wsCloseInitiatorRelayer)
 	}
 }
@@ -810,7 +812,8 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	}
 
 	if supplierAddr == "" {
-		logging.WithSessionContext(b.logger.Warn(), sessionCtx).
+		relaysDropped.WithLabelValues(b.serviceID, dropReasonNoSupplier).Inc()
+		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Msg("no supplier address available for websocket relay")
 		return
 	}
@@ -818,7 +821,8 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	// Marshal the original request body for relay processing
 	reqBytes, err := req.Marshal()
 	if err != nil {
-		logging.WithSessionContext(b.logger.Warn(), sessionCtx).
+		relaysDropped.WithLabelValues(b.serviceID, dropReasonMarshalFailed).Inc()
+		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Err(err).
 			Msg("failed to marshal relay request")
 		return
@@ -836,7 +840,8 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 		b.arrivalHeight,
 	)
 	if procErr != nil {
-		logging.WithSessionContext(b.logger.Warn(), sessionCtx).
+		relaysDropped.WithLabelValues(b.serviceID, dropReasonProcessFailed).Inc()
+		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Err(procErr).
 			Msg("failed to process websocket relay")
 		return
@@ -849,7 +854,8 @@ func (b *WebSocketBridge) emitRelay(req *servicetypes.RelayRequest, resp *servic
 	}
 
 	if pubErr := b.publisher.Publish(b.ctx, msg); pubErr != nil {
-		logging.WithSessionContext(b.logger.Warn(), sessionCtx).
+		relaysDropped.WithLabelValues(b.serviceID, dropReasonPublishFailed).Inc()
+		logging.WithSessionContext(b.logger.Debug(), sessionCtx).
 			Err(pubErr).
 			Msg("failed to publish websocket relay")
 		return
@@ -896,7 +902,7 @@ func (b *WebSocketBridge) sendSessionExpirationMessage() error {
 		return err
 	}
 
-	b.logger.Info().
+	b.logger.Debug().
 		Str("session_id", latestReq.Meta.SessionHeader.SessionId).
 		Msg("sent session expiration message to client")
 
@@ -963,7 +969,7 @@ func (b *WebSocketBridge) logCloseError(err error, source wsMessageSource) {
 	}
 
 	// Not a close error - log as unexpected error
-	b.logger.Warn().
+	b.logger.Debug().
 		Err(err).
 		Str("initiated_by", string(source)).
 		Msg("websocket read error (not a close frame)")
@@ -1160,7 +1166,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 		// Upgrade HTTP connection to WebSocket
 		gatewayConn, err := WebSocketUpgrader.Upgrade(w, r, nil)
 		if err != nil {
-			p.logger.Warn().Err(err).Msg("failed to upgrade to websocket")
+			p.logger.Debug().Err(err).Msg("failed to upgrade to websocket")
 			return
 		}
 
@@ -1233,7 +1239,7 @@ func (p *ProxyServer) WebSocketHandler() http.HandlerFunc {
 			bridgeSimKeyID,
 		)
 		if err != nil {
-			p.logger.Warn().Err(err).Msg("failed to create websocket bridge")
+			p.logger.Debug().Err(err).Msg("failed to create websocket bridge")
 			_ = gatewayConn.Close()
 
 			// Record connection error for circuit breaker
@@ -1294,7 +1300,7 @@ func (p *ProxyServer) validateAndLogWebSocketHandshake(r *http.Request, serviceI
 
 	if !hasV2Headers {
 		// PATH v1 - no validation headers present
-		p.logger.Info().
+		p.logger.Debug().
 			Str(logging.FieldServiceID, serviceID).
 			Str("remote_addr", r.RemoteAddr).
 			Str("app_address", appAddress).
@@ -1304,7 +1310,7 @@ func (p *ProxyServer) validateAndLogWebSocketHandshake(r *http.Request, serviceI
 	}
 
 	// PATH v2 - validation headers present, attempt verification
-	p.logger.Info().
+	p.logger.Debug().
 		Str(logging.FieldServiceID, serviceID).
 		Str("remote_addr", r.RemoteAddr).
 		Str("session_id", sessionID).

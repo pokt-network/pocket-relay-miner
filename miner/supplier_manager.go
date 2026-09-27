@@ -1595,7 +1595,7 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 			}()
 
 			if processErr != nil {
-				m.logger.Warn().
+				m.logger.Debug().
 					Err(processErr).
 					Str(logging.FieldSupplier, state.OperatorAddr).
 					Str("session_id", sessionID).
@@ -1607,7 +1607,7 @@ func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *Supplie
 			// ACK immediately after successful processing
 			// This prevents race conditions where XAUTOCLAIM reclaims already-processed messages
 			if err := state.Consumer.AckMessage(ctx, msg); err != nil {
-				m.logger.Warn().
+				m.logger.Debug().
 					Err(err).
 					Str(logging.FieldSupplier, state.OperatorAddr).
 					Str("message_id", msg.ID).

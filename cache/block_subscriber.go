@@ -150,7 +150,7 @@ func (s *RedisBlockSubscriber) runBlockPubSubLoop(ctx context.Context) error {
 
 			var event BlockEvent
 			if err := json.Unmarshal([]byte(msg.Payload), &event); err != nil {
-				s.logger.Error().Err(err).Str("payload", msg.Payload).Msg("invalid block event")
+				s.logger.Warn().Err(err).Int("payload_bytes", len(msg.Payload)).Msg("invalid block event")
 				continue
 			}
 

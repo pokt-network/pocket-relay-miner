@@ -288,7 +288,9 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			}
 
 			consumeErrorsTotal.WithLabelValues(c.config.SupplierOperatorAddress, "read_error").Inc()
-			c.logger.Error().Err(err).Msg("error reading from stream")
+			// Per-iteration under a Redis outage; the outage state is logged
+			// by the reconnection loop this return feeds into.
+			c.logger.Debug().Err(err).Msg("error reading from stream")
 			return err
 		}
 
@@ -301,13 +303,16 @@ func (c *StreamsConsumer) consumeMessagesUntilError(ctx context.Context) error {
 			msg, parseErr := c.parseMessage(message, c.streamName)
 			if parseErr != nil {
 				deserializationErrors.WithLabelValues(c.config.SupplierOperatorAddress).Inc()
-				c.logger.Error().
+				// Warn, not Error: the message is ACKed and deleted (handled),
+				// but a malformed message signals a producer bug or version
+				// skew worth seeing without debug logging on.
+				c.logger.Warn().
 					Err(parseErr).
 					Str(logging.FieldMessageID, message.ID).
 					Msg("failed to parse message")
 				// Acknowledge AND delete bad message to avoid redelivery and keep stream clean
 				if err := c.client.XAckDel(ctx, c.streamName, c.config.ConsumerGroup, "DELREF", message.ID).Err(); err != nil {
-					c.logger.Warn().Err(err).Str(logging.FieldMessageID, message.ID).Msg("failed to XAckDel bad message")
+					c.logger.Debug().Err(err).Str(logging.FieldMessageID, message.ID).Msg("failed to XAckDel bad message")
 				}
 				continue
 			}

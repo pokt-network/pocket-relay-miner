@@ -12,6 +12,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/puzpuzpuz/xsync/v4"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -53,8 +55,8 @@ func (c *RedisSessionCache) storeSession(key string, height int64, session *sess
 	if cutoff <= 0 {
 		return
 	}
-	c.sessionCache.Range(func(k, v any) bool {
-		if e, ok := v.(sessionCacheL1Entry); ok && e.height < cutoff {
+	c.sessionCache.Range(func(k string, e sessionCacheL1Entry) bool {
+		if e.height < cutoff {
 			c.sessionCache.Delete(k)
 		}
 		return true
@@ -72,10 +74,9 @@ type RedisSessionCache struct {
 
 	// L1 local cache for sessions, TTL-bounded by sessionCacheL1TTL so an entry
 	// is never frozen for the process lifetime.
-	sessionCache sync.Map // map[string]sessionCacheL1Entry
+	sessionCache *xsync.Map[string, sessionCacheL1Entry]
 
 	// Cache keys helper
-	keys CacheKeys
 
 	// Lifecycle
 	mu       sync.RWMutex
@@ -93,9 +94,6 @@ func NewRedisSessionCache(
 	blockClient client.BlockClient,
 	config CacheConfig,
 ) *RedisSessionCache {
-	if config.CachePrefix == "" {
-		config.CachePrefix = redisClient.KB().CachePrefix()
-	}
 	if config.BlockTimeSeconds == 0 {
 		config.BlockTimeSeconds = 6
 	}
@@ -104,13 +102,13 @@ func NewRedisSessionCache(
 	}
 
 	return &RedisSessionCache{
+		sessionCache:  xsync.NewMap[string, sessionCacheL1Entry](),
 		logger:        logging.ForComponent(logger, logging.ComponentSessionCache),
 		redisClient:   redisClient,
 		sessionClient: sessionClient,
 		sharedClient:  sharedClient,
 		blockClient:   blockClient,
 		config:        config,
-		keys:          CacheKeys{Prefix: config.CachePrefix},
 	}
 }
 
@@ -140,13 +138,13 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 	}
 	c.mu.RUnlock()
 
-	key := c.keys.Session(appAddress, serviceId, height)
+	key := c.redisClient.KB().SessionCacheKey(appAddress, serviceId, height)
 
 	// L1: Check local cache. Only a fresh entry (within sessionCacheL1TTL) is a
 	// hit; a stale one falls through to L2/L3 so the entry can never be frozen
 	// for the process lifetime.
-	if cached, ok := c.sessionCache.Load(key); ok {
-		if entry := cached.(sessionCacheL1Entry); time.Since(entry.cachedAt) < sessionCacheL1TTL {
+	if entry, ok := c.sessionCache.Load(key); ok {
+		if time.Since(entry.cachedAt) < sessionCacheL1TTL {
 			cacheHits.WithLabelValues("session", CacheLevelL1).Inc()
 			cacheGetLatency.WithLabelValues("session", CacheLevelL1).Observe(time.Since(start).Seconds())
 			c.logger.Debug().
@@ -215,10 +213,11 @@ func (c *RedisSessionCache) GetSession(ctx context.Context, appAddress, serviceI
 			Str("sha256", hex.EncodeToString(hash[:])).
 			Msg("session fetched from chain")
 		if err = c.redisClient.Set(ctx, key, data, ttl).Err(); err != nil {
-			c.logger.Warn().Err(err).Msg("failed to cache session in Redis")
+			c.logger.Debug().Err(err).Msg("failed to cache session in Redis")
 		}
 	} else {
-		c.logger.Error().Err(err).Msg("failed to marshal session for caching in Redis (L2)")
+		// Per-L3-miss; the session is still served and cached in L1.
+		c.logger.Warn().Err(err).Msg("failed to marshal session for caching in Redis (L2)")
 	}
 
 	// Cache in L1

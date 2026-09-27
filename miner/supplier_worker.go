@@ -395,7 +395,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 	if !ok {
 		// Supplier state not found - this can happen during shutdown or if supplier was removed.
 		// This is a permanent condition (retrying won't help), so ACK and discard the relay.
-		w.logger.Warn().
+		w.logger.Debug().
 			Str("supplier", supplierAddr).
 			Str("session_id", msg.Message.SessionId).
 			Msg("supplier state not found - discarding relay (supplier may have been removed)")
@@ -413,7 +413,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		snapshot, storeErr := state.SessionStore.Get(ctx, msg.Message.SessionId)
 		if storeErr == nil && snapshot != nil {
 			if snapshot.State.IsTerminal() {
-				w.logger.Info().
+				w.logger.Debug().
 					Str("session_id", msg.Message.SessionId).
 					Str("supplier", supplierAddr).
 					Str("session_state", string(snapshot.State)).
@@ -497,7 +497,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		}
 		// Check for permanent SMST errors (late relays, sealed/claimed sessions)
 		if IsPermanentSMSTError(err) {
-			w.logger.Info().
+			w.logger.Debug().
 				Err(err).
 				Str("session_id", msg.Message.SessionId).
 				Str("supplier", supplierAddr).
@@ -585,7 +585,7 @@ func (w *SupplierWorker) handleRelay(ctx context.Context, supplierAddr string, m
 		msg.Message.SessionStartHeight,
 		msg.Message.SessionEndHeight,
 	); err != nil {
-		w.logger.Warn().
+		w.logger.Debug().
 			Err(err).
 			Str("session_id", msg.Message.SessionId).
 			Str("supplier", supplierAddr).

@@ -82,6 +82,9 @@ func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, thre
 			// and we return nil (no duplicate transition event).
 			if ep.healthy.CompareAndSwap(true, false) {
 				ep.unhealthySinceNano.Store(time.Now().UnixNano())
+				// A pending (unreported) auto-recovery dies with the new
+				// outage: the operator sees this DOWN, not a stale UP.
+				ep.pendingRecovery.Store(false)
 				return &TransitionEvent{
 					Endpoint:   ep,
 					OldHealthy: true,
@@ -109,6 +112,9 @@ func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, thre
 			downtime = time.Since(time.Unix(0, unhealthySince))
 		}
 		ep.unhealthySinceNano.Store(0)
+		// This traffic-driven CAS won the transition, so any pending
+		// auto-recovery mark is stale bookkeeping.
+		ep.pendingRecovery.Store(false)
 		return &TransitionEvent{
 			Endpoint:         ep,
 			OldHealthy:       false,
@@ -116,6 +122,28 @@ func (p *Pool) RecordResult(ep *BackendEndpoint, statusCode int, err error, thre
 			Failures:         0,
 			StatusCode:       statusCode,
 			DowntimeDuration: downtime,
+		}
+	}
+
+	// The endpoint may have auto-recovered inside IsHealthy (half-open
+	// timeout), which runs on the selection path and has no way to report
+	// the transition. The first success after it carries the event here, so
+	// "BACKEND UP" is logged for auto-recoveries too. CAS ensures exactly
+	// one goroutine reports it.
+	if ep.pendingRecovery.CompareAndSwap(true, false) {
+		var downtime time.Duration
+		if unhealthySince := ep.unhealthySinceNano.Load(); unhealthySince > 0 {
+			downtime = time.Since(time.Unix(0, unhealthySince))
+		}
+		ep.unhealthySinceNano.Store(0)
+		return &TransitionEvent{
+			Endpoint:         ep,
+			OldHealthy:       false,
+			NewHealthy:       true,
+			Failures:         0,
+			StatusCode:       statusCode,
+			DowntimeDuration: downtime,
+			AutoRecovered:    true,
 		}
 	}
 

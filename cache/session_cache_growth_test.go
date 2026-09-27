@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	sessiontypes "github.com/pokt-network/poktroll/x/session/types"
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/stretchr/testify/require"
 )
 
@@ -15,7 +16,7 @@ import (
 // newest so the sync.Map stays bounded instead of growing one entry per distinct
 // session served for the process lifetime.
 func TestSessionCacheL1_BoundedGrowth(t *testing.T) {
-	c := &RedisSessionCache{keys: CacheKeys{Prefix: "ha:cache"}}
+	c := &RedisSessionCache{sessionCache: xsync.NewMap[string, sessionCacheL1Entry]()}
 
 	const total = sessionCacheL1KeepHeights + 800
 	for h := int64(1); h <= total; h++ {
@@ -23,7 +24,7 @@ func TestSessionCacheL1_BoundedGrowth(t *testing.T) {
 	}
 
 	n := 0
-	c.sessionCache.Range(func(_, _ any) bool {
+	c.sessionCache.Range(func(_ string, _ sessionCacheL1Entry) bool {
 		n++
 		return true
 	})

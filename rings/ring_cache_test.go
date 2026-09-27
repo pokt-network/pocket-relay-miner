@@ -64,7 +64,7 @@ func newTestRingClientForCache(t *testing.T) (*ringClient, string) {
 // rangeCount counts live entries in the ring points cache.
 func rangeCount(rc *ringClient) int {
 	n := 0
-	rc.ringPointsCache.Range(func(_, _ any) bool {
+	rc.ringPointsCache.Range(func(_ ringPointsCacheKey, _ ringPointsCacheEntry) bool {
 		n++
 		return true
 	})

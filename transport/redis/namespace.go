@@ -97,6 +97,42 @@ func (kb *KeyBuilder) CachePrefix() string {
 	return fmt.Sprintf("%s:%s", kb.ns.BasePrefix, kb.ns.CachePrefix)
 }
 
+// ParamsSharedAtHeightKey builds the relayer-side shared-params cache key for
+// one block height (immutable snapshot; ParamsSharedCacheKey is the miner-side
+// singleton holding the latest value).
+// Format: {base}:{cache}:params:shared:{height}
+func (kb *KeyBuilder) ParamsSharedAtHeightKey(height int64) string {
+	return fmt.Sprintf("%s:%s:params:shared:%d", kb.ns.BasePrefix, kb.ns.CachePrefix, height)
+}
+
+// ParamsSharedAtHeightLockKey builds the distributed-lock key guarding one
+// height's shared-params refresh.
+// Format: {base}:{cache}:lock:params:shared:{height}
+func (kb *KeyBuilder) ParamsSharedAtHeightLockKey(height int64) string {
+	return fmt.Sprintf("%s:%s:lock:params:shared:%d", kb.ns.BasePrefix, kb.ns.CachePrefix, height)
+}
+
+// ParamsSupplierKey builds the relayer-side supplier-params cache key
+// (singleton, not height-based).
+// Format: {base}:{cache}:params:supplier
+func (kb *KeyBuilder) ParamsSupplierKey() string {
+	return fmt.Sprintf("%s:%s:params:supplier", kb.ns.BasePrefix, kb.ns.CachePrefix)
+}
+
+// ParamsSupplierLockKey builds the distributed-lock key guarding the
+// supplier-params refresh.
+// Format: {base}:{cache}:lock:params:supplier
+func (kb *KeyBuilder) ParamsSupplierLockKey() string {
+	return fmt.Sprintf("%s:%s:lock:params:supplier", kb.ns.BasePrefix, kb.ns.CachePrefix)
+}
+
+// SessionCacheKey builds the relayer-side session cache key for an
+// (application, service) pair at a session-start height.
+// Format: {base}:{cache}:session:{app}:{service}:{height}
+func (kb *KeyBuilder) SessionCacheKey(appAddr, serviceID string, height int64) string {
+	return fmt.Sprintf("%s:%s:session:%s:%s:%d", kb.ns.BasePrefix, kb.ns.CachePrefix, appAddr, serviceID, height)
+}
+
 // MinerSessionsPrefix returns the prefix for miner session store.
 // Format: {base}:{miner}:sessions
 // Example: "ha:miner:sessions"

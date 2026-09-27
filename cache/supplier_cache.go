@@ -290,8 +290,9 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 			return nil, nil
 		}
 
-		// Redis error
-		c.logger.Warn().
+		// Redis error — per-relay under an outage; the cache error rate is
+		// in the cache metrics and the outage state in the reconnect logs.
+		c.logger.Debug().
 			Err(err).
 			Str(logging.FieldSupplierOperator, operatorAddress).
 			Bool("fail_open", c.failOpen).
@@ -299,7 +300,7 @@ func (c *SupplierCache) GetSupplierState(ctx context.Context, operatorAddress st
 
 		if c.failOpen {
 			// Return synthetic active state to avoid blocking traffic
-			c.logger.Warn().
+			c.logger.Debug().
 				Str(logging.FieldSupplierOperator, operatorAddress).
 				Msg("fail-open: treating supplier as active due to cache error")
 			cacheGetLatency.WithLabelValues(supplierCacheType, "l2_error").Observe(time.Since(start).Seconds())
@@ -441,7 +442,7 @@ func (c *SupplierCache) IsSupplierActiveForService(
 	if state == nil {
 		// Supplier not in cache
 		if c.failOpen {
-			c.logger.Warn().
+			c.logger.Debug().
 				Str("operator_address", operatorAddress).
 				Str("service_id", serviceID).
 				Msg("fail-open: supplier not in cache, treating as active")

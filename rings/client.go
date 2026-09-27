@@ -3,7 +3,6 @@ package rings
 import (
 	"context"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/cosmos/cosmos-sdk/crypto/keys/secp256k1"
@@ -12,6 +11,8 @@ import (
 	ringtypes "github.com/pokt-network/go-dleq/types"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/ring-go"
+
+	"github.com/puzpuzpuz/xsync/v4"
 
 	"github.com/pokt-network/poktroll/pkg/client"
 	"github.com/pokt-network/poktroll/pkg/crypto"
@@ -99,7 +100,7 @@ type ringClient struct {
 	// Bounded by ringPointsCacheKeepHeights (window eviction on store) and
 	// ringPointsCacheTTL (max-age floor on read) so it never grows or freezes
 	// for the process lifetime.
-	ringPointsCache sync.Map // map[ringPointsCacheKey]ringPointsCacheEntry
+	ringPointsCache *xsync.Map[ringPointsCacheKey, ringPointsCacheEntry]
 }
 
 // NewRingClient creates a new RingClient with the provided query clients.
@@ -112,6 +113,7 @@ func NewRingClient(
 ) crypto.RingClient {
 	return &ringClient{
 		logger:             logger,
+		ringPointsCache:    xsync.NewMap[ringPointsCacheKey, ringPointsCacheEntry](),
 		applicationQuerier: applicationQuerier,
 		accountQuerier:     accountQuerier,
 		sharedQuerier:      sharedQuerier,
@@ -303,8 +305,8 @@ func (rc *ringClient) getRingPointsForAddressAtHeight(
 
 	// Check cache first. Treat an entry past its TTL floor as a miss so a stale
 	// one-time compute self-heals instead of being frozen for the process lifetime.
-	if cached, ok := rc.ringPointsCache.Load(cacheKey); ok {
-		if entry, ok := cached.(ringPointsCacheEntry); ok && time.Since(entry.cachedAt) < ringPointsCacheTTL {
+	if entry, ok := rc.ringPointsCache.Load(cacheKey); ok {
+		if time.Since(entry.cachedAt) < ringPointsCacheTTL {
 			return entry.points, nil
 		}
 	}
@@ -353,8 +355,8 @@ func (rc *ringClient) storeRingPoints(key ringPointsCacheKey, points map[string]
 	if cutoff <= 0 {
 		return
 	}
-	rc.ringPointsCache.Range(func(k, v any) bool {
-		if e, ok := v.(ringPointsCacheEntry); ok && e.sessionEndHeight < cutoff {
+	rc.ringPointsCache.Range(func(k ringPointsCacheKey, e ringPointsCacheEntry) bool {
+		if e.sessionEndHeight < cutoff {
 			rc.ringPointsCache.Delete(k)
 		}
 		return true

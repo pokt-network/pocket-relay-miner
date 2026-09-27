@@ -754,6 +754,10 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("listen_addr is required")
 	}
 
+	if err := c.Logging.Validate(); err != nil {
+		return err
+	}
+
 	if c.Redis.URL == "" {
 		return fmt.Errorf("redis.url is required")
 	}

@@ -37,11 +37,17 @@ Use --stats to show type and TTL information.`,
 			}
 			defer func() { _ = client.Close() }()
 
+			// The default pattern comes from the KeyBuilder at run time so a
+			// custom namespace.base_prefix scans its own keys, not "ha:*".
+			if pattern == "" {
+				pattern = client.KB().AllKeysPattern()
+			}
+
 			return listKeys(ctx, client, pattern, limit, stats)
 		},
 	}
 
-	cmd.Flags().StringVar(&pattern, "pattern", "ha:*", "Key pattern (supports * and ?)")
+	cmd.Flags().StringVar(&pattern, "pattern", "", "Key pattern (supports * and ?); defaults to every key under the configured namespace")
 	cmd.Flags().Int64Var(&limit, "limit", 100, "Maximum number of keys to return")
 	cmd.Flags().BoolVar(&stats, "stats", false, "Show type and TTL for each key")
 

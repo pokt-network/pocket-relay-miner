@@ -193,7 +193,6 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.config.RedisClient,
 		c.queryClients.Supplier(),
 		cache.CacheConfig{
-			CachePrefix:      c.config.RedisClient.KB().CachePrefix(),
 			TTLBlocks:        100,
 			BlockTimeSeconds: blockTimeSeconds,
 			LockTimeout:      5,

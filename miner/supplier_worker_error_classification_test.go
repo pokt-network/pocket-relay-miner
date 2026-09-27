@@ -70,7 +70,6 @@ func newHandlerTestFixture(t *testing.T, supplierAddr string) *handlerTestFixtur
 		CacheTTL:        0,
 	})
 	dedup := NewRedisDeduplicator(logger, client, DeduplicatorConfig{
-		KeyPrefix:        "ha:miner:dedup",
 		TTLBlocks:        10,
 		BlockTimeSeconds: 30,
 	})

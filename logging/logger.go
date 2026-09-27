@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"fmt"
 	"io"
 	"os"
 	"strings"
@@ -77,6 +78,24 @@ func DefaultConfig() Config {
 	}
 }
 
+// Validate rejects configuration values the logger would otherwise silence:
+// parseLevel falls back to Info on anything it does not recognise, so a
+// typo'd level ("warning", "trace") must fail at config load, not run the
+// process at the wrong verbosity without a word.
+func (c Config) Validate() error {
+	switch strings.ToLower(c.Level) {
+	case "", "debug", "info", "warn", "error":
+	default:
+		return fmt.Errorf("logging.level %q is not one of debug|info|warn|error", c.Level)
+	}
+	switch strings.ToLower(c.Format) {
+	case "", "json", "text":
+	default:
+		return fmt.Errorf("logging.format %q is not one of json|text", c.Format)
+	}
+	return nil
+}
+
 // NewLoggerFromConfig creates a high-performance logger from configuration.
 // Performance optimizations:
 // - Async writing via diode (non-blocking ring buffer)
@@ -139,7 +158,10 @@ func NewLoggerFromConfig(config Config) Logger {
 		output = diode.NewWriter(output, bufferSize, time.Duration(pollInterval)*time.Millisecond, func(missed int) {
 			// This callback is rarely hit in practice, only when buffer overflows
 			// We can't use the logger here (recursion), so write directly to stderr
+			// AND count the loss where Prometheus can see it — stderr alone
+			// makes dropped logs invisible to alerting.
 			if missed > 0 {
+				LogMessagesDroppedTotal.Add(float64(missed))
 				_, _ = os.Stderr.WriteString("WARN: dropped log messages due to full buffer\n")
 			}
 		})

@@ -182,7 +182,7 @@ func (h *StreamingResponseHandler) HandleStreamingResponse(
 	// Check if writer supports flushing (required for streaming)
 	flusher, canFlush := w.(http.Flusher)
 	if !canFlush {
-		h.logger.Warn().Msg("ResponseWriter does not support flushing, streaming may have high latency")
+		h.logger.Debug().Msg("ResponseWriter does not support flushing, streaming may have high latency")
 	}
 
 	// Buffer to collect full response for relay publishing
@@ -211,7 +211,7 @@ func (h *StreamingResponseHandler) HandleStreamingResponse(
 			if batch.totalChunks > 0 {
 				size, err := h.flushBatch(batch, resp.StatusCode, w, flusher)
 				if err != nil {
-					h.logger.Error().Err(err).Msg("failed to flush final batch on context cancellation")
+					h.logger.Debug().Err(err).Msg("failed to flush final batch on context cancellation")
 				}
 				totalResponseSize += size
 			}

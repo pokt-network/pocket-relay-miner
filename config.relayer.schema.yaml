@@ -414,6 +414,25 @@ properties:
         description: Async log buffer size
         default: 100000
         minimum: 1000
+      async_poll_interval:
+        type: integer
+        description: How often the async writer flushes buffered log lines (milliseconds). Lower = less latency, more CPU; higher = batches more. 10-50 for high-throughput production.
+        default: 100
+        minimum: 1
+      sampling:
+        type: boolean
+        description: Enable log sampling to cap volume under extreme throughput. GLOBAL - samples every component and level equally, state-change logs included. Leave off unless log volume is a measured problem.
+        default: false
+      sampling_initial:
+        type: integer
+        description: With sampling on, number of log lines always written before sampling kicks in
+        default: 100
+        minimum: 1
+      sampling_thereafter:
+        type: integer
+        description: With sampling on, write 1 in N log lines after the initial burst
+        default: 10
+        minimum: 1
       enable_caller:
         type: boolean
         description: "Add caller file:line to log events. Useful for debugging but adds ~14% allocation overhead under high throughput. Disable in production."

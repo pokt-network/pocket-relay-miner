@@ -31,6 +31,12 @@ type BackendEndpoint struct {
 	// Zero means no auto-recovery (rely on health checks or successful requests).
 	recoveryTimeout    time.Duration
 	unhealthySinceNano atomic.Int64
+
+	// pendingRecovery marks that IsHealthy auto-recovered this endpoint
+	// (half-open timeout) with no way to report it. RecordResult turns the
+	// mark into a TransitionEvent on the first success, so "BACKEND UP" is
+	// logged for auto-recoveries too, not only for traffic-driven ones.
+	pendingRecovery atomic.Bool
 }
 
 // NewBackendEndpoint creates a new BackendEndpoint from a name and raw URL string.
@@ -89,10 +95,14 @@ func (ep *BackendEndpoint) IsHealthy() bool {
 	if ep.recoveryTimeout > 0 {
 		unhealthySince := ep.unhealthySinceNano.Load()
 		if unhealthySince > 0 && time.Since(time.Unix(0, unhealthySince)) >= ep.recoveryTimeout {
-			// Auto-recover: CAS ensures only one goroutine triggers recovery
+			// Auto-recover: CAS ensures only one goroutine triggers recovery.
+			// This runs on the selection path, which has nowhere to report a
+			// transition — leave a pending mark (and keep unhealthySinceNano
+			// so the downtime survives) for RecordResult to publish as a
+			// TransitionEvent on the first success.
 			if ep.healthy.CompareAndSwap(false, true) {
 				ep.consecutiveFailures.Store(0)
-				ep.unhealthySinceNano.Store(0)
+				ep.pendingRecovery.Store(true)
 			}
 			return ep.healthy.Load()
 		}
@@ -101,16 +111,30 @@ func (ep *BackendEndpoint) IsHealthy() bool {
 	return false
 }
 
+// CurrentlyHealthy is the pure read of the health flag: no half-open
+// auto-recovery, no side effects. Observers (the active health checker, the
+// status API) MUST use this instead of IsHealthy — computing "was it
+// unhealthy?" with IsHealthy() mutates the very state being observed and
+// swallows the observer's own recovery transition.
+func (ep *BackendEndpoint) CurrentlyHealthy() bool {
+	return ep.healthy.Load()
+}
+
 // SetHealthy marks this endpoint as healthy and clears the unhealthy timestamp.
+// Callers (the active health checker) log their own transition, so any pending
+// auto-recovery report is dropped to avoid a duplicate "BACKEND UP".
 func (ep *BackendEndpoint) SetHealthy() {
 	ep.unhealthySinceNano.Store(0)
+	ep.pendingRecovery.Store(false)
 	ep.healthy.Store(true)
 }
 
 // SetUnhealthy marks this endpoint as unhealthy and records the timestamp
-// for recovery timeout tracking.
+// for recovery timeout tracking. A pending (unreported) auto-recovery dies
+// with the new outage — the operator sees the DOWN, not a stale UP.
 func (ep *BackendEndpoint) SetUnhealthy() {
 	ep.unhealthySinceNano.Store(time.Now().UnixNano())
+	ep.pendingRecovery.Store(false)
 	ep.healthy.Store(false)
 }
 

@@ -9,6 +9,8 @@ import (
 
 	"github.com/redis/go-redis/v9"
 
+	"github.com/puzpuzpuz/xsync/v4"
+
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	"github.com/pokt-network/poktroll/pkg/client"
@@ -46,8 +48,8 @@ func (c *RedisSharedParamCache) storeLocal(key string, height int64, params *sha
 	if cutoff <= 0 {
 		return
 	}
-	c.localCache.Range(func(k, v any) bool {
-		if e, ok := v.(sharedParamLocalEntry); ok && e.height < cutoff {
+	c.localCache.Range(func(k string, e sharedParamLocalEntry) bool {
+		if e.height < cutoff {
 			c.localCache.Delete(k)
 		}
 		return true
@@ -65,10 +67,9 @@ type RedisSharedParamCache struct {
 	// L1 local cache, keyed by height. Values are sharedParamLocalEntry so each
 	// is TTL-floored and the map is pruned to a bounded height window (it used to
 	// grow ~1 entry/block forever — only the latest few heights are ever read).
-	localCache sync.Map // map[string]sharedParamLocalEntry
+	localCache *xsync.Map[string, sharedParamLocalEntry]
 
 	// Cache keys helper
-	keys CacheKeys
 
 	// Lifecycle
 	mu     sync.RWMutex
@@ -83,9 +84,6 @@ func NewRedisSharedParamCache(
 	blockClient client.BlockClient,
 	config CacheConfig,
 ) *RedisSharedParamCache {
-	if config.CachePrefix == "" {
-		config.CachePrefix = redisClient.KB().CachePrefix()
-	}
 	if config.TTLBlocks == 0 {
 		config.TTLBlocks = 1
 	}
@@ -97,12 +95,12 @@ func NewRedisSharedParamCache(
 	}
 
 	return &RedisSharedParamCache{
+		localCache:   xsync.NewMap[string, sharedParamLocalEntry](),
 		logger:       logging.ForComponent(logger, logging.ComponentSharedParamCache),
 		redisClient:  redisClient,
 		sharedClient: sharedClient,
 		blockClient:  blockClient,
 		config:       config,
-		keys:         CacheKeys{Prefix: config.CachePrefix},
 	}
 }
 
@@ -134,11 +132,11 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 	}
 	c.mu.RUnlock()
 
-	key := c.keys.SharedParams(height)
+	key := c.redisClient.KB().ParamsSharedAtHeightKey(height)
 
 	// L1: Check local cache (fresh within the TTL floor only).
-	if cached, ok := c.localCache.Load(key); ok {
-		if e, ok := cached.(sharedParamLocalEntry); ok && time.Since(e.cachedAt) < sharedParamsLocalTTL {
+	if e, ok := c.localCache.Load(key); ok {
+		if time.Since(e.cachedAt) < sharedParamsLocalTTL {
 			cacheHits.WithLabelValues("shared_params", CacheLevelL1).Inc()
 			cacheGetLatency.WithLabelValues("shared_params", CacheLevelL1).Observe(time.Since(start).Seconds())
 			return e.params, nil
@@ -185,7 +183,7 @@ func (c *RedisSharedParamCache) GetSharedParams(ctx context.Context, height int6
 // (For the latest height the two are equivalent, which is why this was invisible
 // while GetLatestSharedParams was the only caller.)
 func (c *RedisSharedParamCache) queryAndCacheParams(ctx context.Context, height int64, key string) (*sharedtypes.Params, error) {
-	lockKey := c.keys.SharedParamsLock(height)
+	lockKey := c.redisClient.KB().ParamsSharedAtHeightLockKey(height)
 
 	// Try to acquire lock
 	locked, err := c.redisClient.SetNX(ctx, lockKey, "1", c.config.LockTimeout).Result()
@@ -267,7 +265,7 @@ func (c *RedisSharedParamCache) WarmupFromRedis(ctx context.Context) error {
 	height := latestBlock.Height()
 
 	// Try to load from Redis into L1
-	key := c.keys.SharedParams(height)
+	key := c.redisClient.KB().ParamsSharedAtHeightKey(height)
 	data, err := c.redisClient.Get(ctx, key).Bytes()
 	if err != nil {
 		if err == redis.Nil {

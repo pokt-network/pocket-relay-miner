@@ -122,7 +122,7 @@ func TestSessionCache_L1RefreshesAfterTTL(t *testing.T) {
 	// The chain now returns a different session for the same height, and the L2
 	// entry is removed so a stale-L1 re-read would have to fall through to L3.
 	sq.frozenID = "session-B"
-	key := sc.keys.Session(appAddr, serviceID, height)
+	key := redisClient.KB().SessionCacheKey(appAddr, serviceID, height)
 	require.NoError(t, redisClient.Del(ctx, key).Err())
 
 	// Within the (huge) L1 TTL: GetSession must still serve the cached session,

@@ -8,6 +8,7 @@ import (
 	"gopkg.in/yaml.v3"
 
 	"github.com/pokt-network/pocket-relay-miner/config"
+	"github.com/pokt-network/pocket-relay-miner/logging"
 )
 
 func TestDefaultConfig(t *testing.T) {
@@ -320,4 +321,23 @@ worker_pools:
 	require.Equal(t, 6, cfg.GetCPUMultiplier())
 	require.Equal(t, 3, cfg.GetWorkersPerSupplier())
 	require.Equal(t, 25, cfg.GetQueryWorkers())
+}
+
+// TestConfig_Validate_RejectsBadLoggingLevel pins that logging validation is
+// wired into the miner's Validate: a typo'd level used to silently run the
+// process at Info.
+func TestConfig_Validate_RejectsBadLoggingLevel(t *testing.T) {
+	cfg := &Config{
+		Redis: RedisConfig{
+			RedisConfig: config.RedisConfig{
+				URL: "redis://localhost:6379",
+			},
+			ConsumerName: "miner-1",
+		},
+		Logging: logging.Config{Level: "warning"},
+	}
+
+	err := cfg.Validate()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "logging.level")
 }

@@ -31,7 +31,6 @@ func setupTestDeduplicator(t *testing.T) (*RedisDeduplicator, *miniredis.Minired
 	require.NoError(t, err)
 
 	d := NewRedisDeduplicator(testLogger(), client, DeduplicatorConfig{
-		KeyPrefix:        "ha:miner:dedup",
 		TTLBlocks:        10,
 		BlockTimeSeconds: 30,
 	})
