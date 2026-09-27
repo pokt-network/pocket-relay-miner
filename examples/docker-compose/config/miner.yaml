@@ -1,0 +1,50 @@
+# Miner config for the docker compose example, pointed at the beta testnet.
+#
+# Minimal on purpose: every key not set here takes its default. The full list
+# of keys, with their defaults, is in config.miner.example.yaml at the
+# repository root. Check a config before starting it with:
+#   pocket-relay-miner miner validate --config <file>
+#
+# Mainnet: switch every value marked "Mainnet:" below.
+
+# Redis that holds all shared state (relay streams, SMST trees, sessions).
+# Relayer and miner must point at the same Redis.
+redis:
+  # "redis" is the compose service name.
+  url: "redis://redis:6379"
+
+# The chain node the miner reads from and submits claims and proofs to. These
+# are the public Sauron endpoints; your own full node is the better choice for
+# claims and proofs you are paid for.
+pocket_node:
+  # CometBFT RPC: blocks, and transaction submission.
+  # Mainnet: "https://sauron-rpc.infra.pocket.network"
+  query_node_rpc_url: "https://sauron-rpc.beta.infra.pocket.network"
+  # gRPC: chain queries (params, sessions, suppliers), as host:port.
+  # Mainnet: "sauron-grpc.infra.pocket.network:443"
+  query_node_grpc_url: "sauron-grpc.beta.infra.pocket.network:443"
+  # The miner refuses to start if the node reports a different chain id.
+  # Mainnet: "pocket"
+  chain_id: "pocket-lego-testnet"
+  # TLS gRPC (port 443). true only for a plain-text node.
+  grpc_insecure: false
+
+# The suppliers this miner claims and proves for.
+keys:
+  # Mounted by the compose file; same file as the relayer's.
+  keys_file: "/keys/supplier-keys.yaml"
+
+# Expected seconds per block. Must match the chain: beta commits a block about
+# every 30 seconds.
+# Mainnet: 60 (about 61 seconds per block)
+block_time_seconds: 30
+
+# Prometheus metrics, and GET /health for the container healthcheck.
+metrics:
+  enabled: true
+  addr: "0.0.0.0:9092"
+
+# Log level and format; logs go to stderr.
+logging:
+  level: "info"
+  format: "json"

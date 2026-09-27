@@ -23,8 +23,8 @@ import (
 // computed with 30. On mainnet that produced TTLBlocks(10)*30s=5min instead
 // of the intended ~10.7min, so a relay redelivered between 5 and 10.7
 // minutes after the first copy would no longer be recognised as a duplicate
-// and would be counted twice -- the exact over-count the deduplicator's own
-// doc comment warns inflates the economic-viability prediction.
+// and would be counted twice -- the exact over-count the deduplicator exists
+// to prevent.
 //
 // Asserts the CONSEQUENCE (the Redis key's actual TTL after a real
 // MarkProcessed call), not the wiring mechanism, so it cannot be satisfied

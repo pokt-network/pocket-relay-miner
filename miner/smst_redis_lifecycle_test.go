@@ -51,9 +51,8 @@ func TestFlushTree_ClaimedRootHonoursCacheTTL(t *testing.T) {
 	const cacheTTL = 30 * time.Second
 
 	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
-		SupplierAddress:            supplier,
-		CacheTTL:                   cacheTTL,
-		LiveRootCheckpointInterval: 1,
+		SupplierAddress: supplier,
+		CacheTTL:        cacheTTL,
 	})
 
 	// Build a real tree and flush it to write claimed_root + stats.
@@ -89,9 +88,8 @@ func TestLoadTreeFromRedis_RefreshesClaimedRootTTL(t *testing.T) {
 	const cacheTTL = 30 * time.Second
 
 	mgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
-		SupplierAddress:            supplier,
-		CacheTTL:                   cacheTTL,
-		LiveRootCheckpointInterval: 1,
+		SupplierAddress: supplier,
+		CacheTTL:        cacheTTL,
 	})
 
 	require.NoError(t, mgr.UpdateTree(ctx, sessionID, []byte("k1"), []byte("v1"), 10))
@@ -144,18 +142,19 @@ func TestWarmupFromRedis_ResumesFromLiveRoot(t *testing.T) {
 	supplier := "pokt1warmup_live"
 	sessionID := "session_warmup_live"
 
-	// Seed a mid-session tree via a first manager that checkpoints on every
-	// update. Do NOT flush — we want only live_root, no claimed_root.
+	// Seed a mid-session tree via a first manager, checkpointed the way its
+	// relay batch would. Do NOT flush — we want only live_root, no claimed_root.
 	seedMgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
-		SupplierAddress:            supplier,
-		CacheTTL:                   0,
-		LiveRootCheckpointInterval: 1,
+		SupplierAddress: supplier,
+		CacheTTL:        0,
 	})
 	const preWarmupUpdates = 5
 	for i := 0; i < preWarmupUpdates; i++ {
 		require.NoError(t, seedMgr.UpdateTree(ctx, sessionID,
 			[]byte{byte(i)}, []byte{byte(i + 100)}, 10))
 	}
+	_, _, cpErr := seedMgr.CheckpointLiveRoot(ctx, sessionID)
+	require.NoError(t, cpErr)
 
 	// Sanity: live_root exists, claimed_root does NOT.
 	require.True(t, keyExists(t, client, client.KB().SMSTLiveRootKey(supplier, sessionID)))
@@ -164,9 +163,8 @@ func TestWarmupFromRedis_ResumesFromLiveRoot(t *testing.T) {
 	// Fresh manager performs warmup. The bug: this used to build an empty
 	// tree, so the next UpdateTree would see 1 relay instead of 6.
 	warmMgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
-		SupplierAddress:            supplier,
-		CacheTTL:                   0,
-		LiveRootCheckpointInterval: 1,
+		SupplierAddress: supplier,
+		CacheTTL:        0,
 	})
 	loaded, err := warmMgr.WarmupFromRedis(ctx)
 	require.NoError(t, err)
@@ -277,14 +275,15 @@ func TestMigrateLegacySMSTKeys_RenamesLiveRoot(t *testing.T) {
 	// Build a real tree under the new schema, then flush — we need a
 	// real claimed_root so the owner-lookup resolves to this supplier.
 	seedMgr := NewRedisSMSTManager(zerolog.Nop(), client, RedisSMSTManagerConfig{
-		SupplierAddress:            owner,
-		CacheTTL:                   0,
-		LiveRootCheckpointInterval: 1,
+		SupplierAddress: owner,
+		CacheTTL:        0,
 	})
 	require.NoError(t, seedMgr.UpdateTree(ctx, sessionID,
 		[]byte("ka"), []byte("va"), 100))
 	require.NoError(t, seedMgr.UpdateTree(ctx, sessionID,
 		[]byte("kb"), []byte("vb"), 200))
+	_, _, cpErr := seedMgr.CheckpointLiveRoot(ctx, sessionID)
+	require.NoError(t, cpErr)
 	ownerRoot, err := seedMgr.FlushTree(ctx, sessionID)
 	require.NoError(t, err)
 
@@ -306,7 +305,7 @@ func TestMigrateLegacySMSTKeys_RenamesLiveRoot(t *testing.T) {
 	if ok, _ := client.Exists(ctx, newStats).Result(); ok > 0 {
 		require.NoError(t, client.Rename(ctx, newStats, legacyStats).Err())
 	}
-	// The seed manager used interval=1 so live_root was checkpointed. Move it too.
+	// The seed checkpointed live_root. Move it too.
 	if ok, _ := client.Exists(ctx, newLive).Result(); ok > 0 {
 		require.NoError(t, client.Rename(ctx, newLive, legacyLive).Err())
 	}

@@ -295,7 +295,7 @@ func listCacheKeys(ctx context.Context, client *DebugRedisClient, cacheType stri
 func confirmProceed() bool {
 	fmt.Printf("Type 'y' to proceed (or use --yes to bypass): ")
 	reader := bufio.NewReader(os.Stdin)
-	resp, _ := reader.ReadString('\n')
+	resp, _ := reader.ReadString('\n') //nolint:errcheck // bufio.ReadString returns an error IF AND ONLY IF the data does not end in the delimiter, so a piped answer without a trailing newline is valid data plus io.EOF; TrimSpace normalises both and an empty read fails the comparison below
 	return strings.TrimSpace(resp) == "y"
 }
 

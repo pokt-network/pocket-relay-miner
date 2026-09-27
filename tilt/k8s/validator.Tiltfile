@@ -49,6 +49,15 @@ spec:
     metadata:
       labels:
         app: validator
+      annotations:
+        # See config_hash in utils.Tiltfile: a mounted ConfigMap change does not
+        # roll pods by itself, and CometBFT reads config.toml only at startup.
+        # This one carries the localnet clock (localnet.block_time_seconds), so
+        # without it a new clock would sit in the ConfigMap while the validator
+        # kept committing at the old one. NOTE: the validator's home is an
+        # emptyDir, so rolling it restarts the chain from genesis -- run
+        # `tilt trigger account-init` afterwards.
+        pocket-relay-miner/config-hash: "{}"
     spec:
       securityContext:
         runAsUser: 0
@@ -119,7 +128,7 @@ spec:
           mountPath: /home/pocket/.pocket/config/app.toml
           subPath: app.toml
           readOnly: true
-        - name: validator-keys
+        - name: validator-config
           mountPath: /home/pocket/.pocket/config/config.toml
           subPath: config.toml
           readOnly: true
@@ -158,7 +167,13 @@ spec:
           secretName: validator-keys
           optional: true
           defaultMode: 0644
+      - name: validator-config
+        configMap:
+          name: validator-config
+          optional: true
+          defaultMode: 0644
 """.format(
+        config["validator"].get("config_hash", ""),
         validator_config["image"],
         validator_config["tag"],
         validator_config["chain_id"],
@@ -176,6 +191,7 @@ spec:
         objects=[
             "genesis-config:configmap",
             "all-keys-config:configmap",
+            "validator-config:configmap",
             "validator-keys:secret"
         ],
         port_forwards=[

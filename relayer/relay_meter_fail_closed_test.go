@@ -40,6 +40,7 @@ func newFailClosedMeter(t *testing.T, appAddrTheClientKnows string) (*RelayMeter
 	)
 	require.NoError(t, meter.Start(context.Background()))
 	t.Cleanup(func() { _ = meter.Close() })
+	newChargeWriter(t, meter, redisClient)
 
 	// Breaking the store means closing the client: the test Redis is shared, so
 	// stopping the server would take the rest of the suite with it.

@@ -4,6 +4,7 @@ package observability
 
 import (
 	"context"
+	"net"
 	"testing"
 	"time"
 
@@ -320,4 +321,16 @@ func TestServer_IsRunning(t *testing.T) {
 	err = server.Stop()
 	require.NoError(t, err)
 	require.False(t, server.IsRunning(), "Server should not be running after stop")
+}
+
+// A pprof server configured with no address listens on loopback only: it serves
+// heap and goroutine dumps. The miner reaches this fallback whenever its config
+// enables pprof without an addr.
+func TestNewServer_UnsetPprofAddrIsLoopback(t *testing.T) {
+	server := NewServer(logging.NewLoggerFromConfig(logging.DefaultConfig()), ServerConfig{PprofEnabled: true})
+	host, _, err := net.SplitHostPort(server.config.PprofAddr)
+	require.NoError(t, err)
+	ip := net.ParseIP(host)
+	require.NotNil(t, ip, "LINK pprof-fallback-loopback: %q has no IP literal host, so it listens on every interface", server.config.PprofAddr)
+	require.True(t, ip.IsLoopback(), "LINK pprof-fallback-loopback: %q is not loopback", server.config.PprofAddr)
 }

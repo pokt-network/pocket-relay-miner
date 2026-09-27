@@ -26,8 +26,8 @@ The Relayer acts as a proxy that:
 |-------------------|----------|--------------------------------------------------------------|
 | `Content-Type`    | No       | Not validated (typically `application/json`)                 |
 | `Accept`          | No       | Echoed in response Content-Type (default: `application/json`)|
-| `Rpc-Type`        | Yes      | Backend routing: `3` (JSON_RPC), `4` (REST), `5` (COMET_BFT) |
-| `Accept-Encoding` | No       | `gzip` to request compressed responses                       |
+| `Rpc-Type`        | No       | Backend routing: `3` (JSON_RPC), `4` (REST), `5` (COMET_BFT). Absent: the service's `default_backend`, else JSON-RPC |
+| `Accept-Encoding` | No       | `gzip` to accept a compressed response (only honoured with `response_compression.enabled`) |
 
 **Body**: Protobuf-encoded `RelayRequest` (always, regardless of Content-Type header)
 - `Meta`: Session header, supplier address, signature
@@ -38,7 +38,7 @@ The Relayer acts as a proxy that:
 | Header             | Condition    | Description                                            |
 |--------------------|--------------|--------------------------------------------------------|
 | `Content-Type`     | Always       | Echoes client's `Accept` (default: `application/json`) |
-| `Content-Encoding` | If requested | `gzip` (when client sent `Accept-Encoding: gzip`)      |
+| `Content-Encoding` | If enabled   | `gzip` when `response_compression.enabled` is true (default false), the client sent `Accept-Encoding: gzip` and the response is at least `min_size_bytes` |
 
 **Body**: Protobuf-encoded `RelayResponse` (always, regardless of Content-Type header)
 - `Meta`: Session header, supplier signature
@@ -49,7 +49,7 @@ The Relayer acts as a proxy that:
 | Header               | Sent | Description                                       |
 |----------------------|------|---------------------------------------------------|
 | `Content-Type`       | Yes  | From `POKTHTTPRequest` (e.g., `application/json`) |
-| `Accept-Encoding`    | Yes  | `gzip` (request compressed responses)             |
+| `Accept-Encoding`    | Yes  | `identity` (asks the backend for an uncompressed response) |
 | `Pocket-Supplier`    | Yes  | Supplier operator address                         |
 | `Pocket-Service`     | Yes  | Service ID                                        |
 | `Pocket-Application` | Yes  | Application address                               |
@@ -58,13 +58,11 @@ The Relayer acts as a proxy that:
 
 ### Backend → Relayer (Incoming)
 
-| Header             | Description                               |
-|--------------------|-------------------------------------------|
-| `Content-Encoding` | `gzip` if backend compressed the response |
-
 **Body**: Raw backend response (JSON-RPC, REST, etc.)
 
-**Note**: Relayer decompresses gzipped responses before signing. The `POKTHTTPResponse.BodyBz` always contains uncompressed data so the gateway can parse it.
+**Note**: The relayer asks for an uncompressed response (`Accept-Encoding:
+identity`) and does not decompress: a backend that compresses anyway has its
+bytes signed and passed through as they came.
 
 ---
 
@@ -107,10 +105,9 @@ gRPC passthrough with metadata:
 
 | Header                     | Required | Description                                     |
 |----------------------------|----------|-------------------------------------------------|
-| `Pocket-Service-Id`        | Yes      | Service ID for routing                          |
+| `Target-Service-Id`        | Yes      | Service ID for routing (`Pocket-Service-Id` is read as a legacy fallback) |
 | `Pocket-Supplier-Address`  | No       | Preferred supplier                              |
-| `Rpc-Type`                 | Yes      | `2` (WEBSOCKET)                                 |
-| `Sec-WebSocket-Extensions` | No       | `permessage-deflate` for compression (RFC 7692) |
+| `Rpc-Type`                 | No       | `2` (WEBSOCKET); the upgrade request itself selects the WebSocket path |
 
 ### Gateway → Relayer (Messages)
 
@@ -124,7 +121,8 @@ gRPC passthrough with metadata:
 
 **Body**: Protobuf-encoded `RelayResponse` where `Payload` contains raw backend response
 
-**Compression**: Per-message deflate (RFC 7692) if negotiated during handshake.
+**Compression**: none. `permessage-deflate` is disabled on both sides (the
+relayer's upgrader and its backend dialer).
 
 ### Relayer → Backend (Connection)
 
@@ -132,7 +130,6 @@ gRPC passthrough with metadata:
 |----------------------------|--------------------------------------------|
 | `Pocket-Supplier`          | Supplier operator address                  |
 | `Pocket-Service`           | Service ID                                 |
-| `Sec-WebSocket-Extensions` | `permessage-deflate` (compression enabled) |
 
 ### Message Flow
 
@@ -168,9 +165,9 @@ Reference: `poktroll/x/shared/types/service.pb.go`
 
 | Protocol  | Standard  | Client Request                                 | Server Response          |
 |-----------|-----------|------------------------------------------------|--------------------------|
-| HTTP      | RFC 7231  | `Accept-Encoding: gzip`                        | `Content-Encoding: gzip` |
+| HTTP      | RFC 7231  | `Accept-Encoding: gzip`                        | `Content-Encoding: gzip`, only with `response_compression.enabled` (default false) |
 | gRPC      | gRPC spec | `grpc-encoding: gzip`                          | `grpc-encoding: gzip`    |
-| WebSocket | RFC 7692  | `Sec-WebSocket-Extensions: permessage-deflate` | Negotiated per-message   |
+| WebSocket | —         | not supported                                  | none                     |
 
 ---
 

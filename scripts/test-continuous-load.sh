@@ -4,8 +4,8 @@
 # interrupted, and reports Redis memory / session / stream growth on an
 # interval so leaks show up as a trend, not a crash.
 #
-# This used to drive hey against the PATH gateway and count HTTP 200s — the
-# exact signal PATH falsifies (it answers a relayer 503 with 200 and an empty
+# This used to drive hey against the gateway and count HTTP 200s — the
+# exact signal the gateway falsifies (it answers a relayer 503 with 200 and an empty
 # body). Every relay below goes through `relay jsonrpc --load-test`, which
 # ring-signs each request and verifies the supplier signature on each
 # response; the success number is relays actually served, not statuses.

@@ -60,7 +60,7 @@ func TestRefineSupplierCacheTTLSurvivesWorkerQueryClientsGoingNil(t *testing.T) 
 		QueryTimeout: time.Second,
 	})
 	require.NoError(t, err)
-	defer qc.Close()
+	defer func() { _ = qc.Close() }()
 
 	w := &SupplierWorker{
 		logger: logger,

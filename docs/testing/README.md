@@ -20,7 +20,7 @@ keyring backends, the passphrase, and hot reload — see
   transports (JSON-RPC, WebSocket, gRPC, streaming, CometBFT) and carries
   sustained load with `--load-test`.
 
-> **Do not measure relays through the PATH gateway.** PATH answers a relayer
+> **Do not measure relays through a gateway.** A gateway can answer a relayer
 > `503` with `200` and an empty body, so any tool that reads status codes counts
 > relays that were never mined: a real run reported `20000/20000 OK` with the
 > WAL at `XLEN 0`. This is not confined to error paths — it invalidates

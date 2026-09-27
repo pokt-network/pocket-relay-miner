@@ -3,6 +3,12 @@ package relay_client
 import (
 	"context"
 	"fmt"
+	"math"
+	"sync"
+	"time"
+
+	nodeservice "github.com/cosmos/cosmos-sdk/client/grpc/node"
+	"google.golang.org/grpc"
 
 	"github.com/pokt-network/ring-go"
 
@@ -19,7 +25,7 @@ import (
 )
 
 // ringCacheKey identifies a cached ring by app address and session end height.
-// This matches PATH's caching approach where rings are valid for an entire session.
+// A gateway caches rings the same way: a ring is valid for an entire session.
 type ringCacheKey struct {
 	appAddress       string
 	sessionEndHeight int64
@@ -43,14 +49,21 @@ type RelayClient struct {
 	appAddress   string
 
 	// gatewayMode indicates whether we're signing with a gateway key on behalf of the app.
-	// This matches PATH's approach where gateway signs relays for delegated apps.
+	// This is how a gateway signs: it signs relays for the apps that delegate to it.
 	gatewayMode bool
 
-	// Cached session for reuse in load tests
-	cachedSession *sessiontypes.Session
+	// sessions answers which session the app is in at a height. It is always
+	// asked with the chain's current height, never 0: the query client caches a
+	// session under the start height of the height it was asked for, so height
+	// 0 is one constant key that keeps answering the first session it saw for
+	// as long as that cache keeps it, long after the session ended.
+	sessions sessionGetter
+
+	// height is the chain's current height, read at most once per maxAge.
+	height *latestHeight
 
 	// ringCache stores rings keyed by (appAddress, sessionEndHeight).
-	// This matches PATH's caching approach where rings are built once per session
+	// As a gateway does, rings are built once per session
 	// and reused for all requests within that session.
 	// Thread-safe via sync.Map for concurrent load testing.
 	ringCache *xsync.Map[ringCacheKey, *ring.Ring]
@@ -76,12 +89,12 @@ type Config struct {
 	AppPrivateKeyHex string
 
 	// GatewayPrivateKeyHex is the gateway's private key in hex format (optional).
-	// When provided, enables "gateway mode" matching PATH's approach:
+	// When provided, enables "gateway mode", signing the way a gateway does:
 	//   - The gateway signs relay requests on behalf of the application
 	//   - The ring is still constructed from app + delegated gateways
 	//   - The gateway must be in app.DelegateeGatewayAddresses to be valid
 	//
-	// This allows testing the full PATH-compatible signing flow where gateways
+	// This allows testing the full gateway signing flow where gateways
 	// sign relays for their delegated applications.
 	GatewayPrivateKeyHex string
 
@@ -96,12 +109,12 @@ type Config struct {
 //   - Creates a signer from the provided hex private key (app or gateway)
 //   - Derives the application address from the app private key
 //   - Sets up a ring client for signature operations
-//   - Prepares for session caching to optimize load testing
+//   - Reads sessions at the chain's current height, so a long run follows them
 //
 // Gateway Mode (when GatewayPrivateKeyHex is provided):
 //   - The gateway's private key is used for signing
 //   - The app's address is still used for session/ring construction
-//   - This matches PATH's approach where gateways sign for delegated apps
+//   - This is how a gateway signs for the apps that delegate to it
 //
 // Parameters:
 //   - config: Configuration with private key and query clients (both required)
@@ -114,14 +127,14 @@ type Config struct {
 // Example (app mode):
 //
 //	relayClient, err := NewRelayClient(relay_client.Config{
-//	    AppPrivateKeyHex: "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a",
+//	    AppPrivateKeyHex: "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda",
 //	    QueryClients:     queryClients,
 //	}, logger)
 //
-// Example (gateway mode - matches PATH):
+// Example (gateway mode - signs as a gateway does):
 //
 //	relayClient, err := NewRelayClient(relay_client.Config{
-//	    AppPrivateKeyHex:     "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a",
+//	    AppPrivateKeyHex:     "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda",
 //	    GatewayPrivateKeyHex: "cf09805c952fa999e9a63a9f434147b0a5abfd10f268879694c6b5a70e1ae177",
 //	    QueryClients:         queryClients,
 //	}, logger)
@@ -147,7 +160,7 @@ func NewRelayClient(config Config, logger logging.Logger) (*RelayClient, error) 
 	gatewayMode := false
 
 	if config.GatewayPrivateKeyHex != "" {
-		// Gateway mode: sign with gateway key on behalf of app (matches PATH)
+		// Gateway mode: sign with gateway key on behalf of app, as a gateway does
 		gatewaySigner, err := NewSignerFromHex(config.GatewayPrivateKeyHex)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create gateway signer: %w", err)
@@ -180,7 +193,76 @@ func NewRelayClient(config Config, logger logging.Logger) (*RelayClient, error) 
 		signer:       signer,
 		appAddress:   appAddress,
 		gatewayMode:  gatewayMode,
+		sessions:     config.QueryClients.Session(),
+		height:       &latestHeight{maxAge: heightMaxAge, fetch: committedHeight(config.QueryClients.GRPCConnection())},
 	}, nil
+}
+
+// committedHeight reads the height of the node's last committed state
+// (cosmos.base.node.v1beta1.Service/Status answers sdkCtx.BlockHeight()). That
+// is the height the chain's session query checks a requested height against,
+// and it only grows, so a session asked for at it is never ahead of the node.
+// The node's latest BLOCK is not: while a block is being committed it is
+// already one ahead, and a session asked for there is refused.
+func committedHeight(conn *grpc.ClientConn) func(ctx context.Context) (int64, error) {
+	node := nodeservice.NewServiceClient(conn)
+	return func(ctx context.Context) (int64, error) {
+		res, err := node.Status(ctx, &nodeservice.StatusRequest{})
+		if err != nil {
+			return 0, err
+		}
+		if res.GetHeight() > math.MaxInt64 {
+			return 0, fmt.Errorf("the node reported height %d, beyond int64", res.GetHeight())
+		}
+		return int64(res.GetHeight()), nil
+	}
+}
+
+// heightMaxAge is how long a read of the chain's height is reused: a load test
+// asks the node once per maxAge whatever its rate, and after a session border
+// it can keep signing for the session that just ended for up to maxAge.
+const heightMaxAge = time.Second
+
+// sessionGetter is what RelayClient asks of a session query client.
+type sessionGetter interface {
+	GetSession(ctx context.Context, appAddress, serviceID string, height int64) (*sessiontypes.Session, error)
+}
+
+// latestHeight is the chain's current height, read from the node at most once
+// per maxAge and shared by every concurrent relay build.
+type latestHeight struct {
+	fetch  func(ctx context.Context) (int64, error)
+	maxAge time.Duration
+
+	mu     sync.Mutex
+	height int64
+	readAt time.Time
+}
+
+// get returns the current height; it never returns 0 without an error. A failed
+// read keeps answering the last height it had, and is retried after maxAge
+// rather than on every call, so a node blip does not turn into one query per
+// relay.
+func (h *latestHeight) get(ctx context.Context) (int64, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	if h.height > 0 && time.Since(h.readAt) < h.maxAge {
+		return h.height, nil
+	}
+	height, err := h.fetch(ctx)
+	h.readAt = time.Now()
+	if err == nil && height > 0 {
+		h.height = height
+		return height, nil
+	}
+	if h.height > 0 {
+		return h.height, nil
+	}
+	if err == nil {
+		err = fmt.Errorf("the node reported height %d", height)
+	}
+	return 0, fmt.Errorf("failed to read the chain's current height: %w", err)
 }
 
 // BuildRelayRequest builds and signs a relay request for the given service.
@@ -221,8 +303,8 @@ func (c *RelayClient) BuildRelayRequest(
 		return nil, nil, fmt.Errorf("failed to fetch application %s: %w", c.appAddress, err)
 	}
 
-	// 2. Get current session (use cached if available, height=0)
-	session, err := c.getSession(ctx, &app, serviceID, 0)
+	// 2. Get the session at the chain's current height
+	session, err := c.currentSession(ctx, serviceID)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to get session: %w", err)
 	}
@@ -259,7 +341,7 @@ func (c *RelayClient) BuildRelayRequest(
 }
 
 // getOrCreateRing returns a cached ring or creates a new one for the given app and session.
-// This matches PATH's caching approach where rings are built once per session and reused.
+// As a gateway does, rings are built once per session and reused.
 // Thread-safe via sync.Map for concurrent load testing.
 func (c *RelayClient) getOrCreateRing(
 	ctx context.Context,
@@ -290,31 +372,18 @@ func (c *RelayClient) getOrCreateRing(
 	return actual, nil
 }
 
-// getSession fetches the current session for the app and service.
-// Caches the session for reuse in load tests.
-func (c *RelayClient) getSession(
-	ctx context.Context,
-	app *apptypes.Application,
-	serviceID string,
-	height int64,
-) (*sessiontypes.Session, error) {
-	// Return cached session if available and still valid
-	// NOTE: Cache only used when height=0 (default behavior)
-	if height == 0 && c.cachedSession != nil && c.cachedSession.Header.ServiceId == serviceID {
-		return c.cachedSession, nil
-	}
-
-	// Fetch session from chain at specific height
-	session, err := c.queryClients.Session().GetSession(ctx, c.appAddress, serviceID, height)
+// currentSession returns the app's session for serviceID at the chain's current
+// height. A run longer than a session moves to the next one as soon as the
+// height crosses the border.
+func (c *RelayClient) currentSession(ctx context.Context, serviceID string) (*sessiontypes.Session, error) {
+	height, err := c.height.get(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to fetch session: %w", err)
+		return nil, err
 	}
-
-	// Cache for reuse (only if height=0, default behavior)
-	if height == 0 {
-		c.cachedSession = session
+	session, err := c.sessions.GetSession(ctx, c.appAddress, serviceID, height)
+	if err != nil {
+		return nil, fmt.Errorf("failed to fetch session at height %d: %w", height, err)
 	}
-
 	return session, nil
 }
 
@@ -325,13 +394,13 @@ func (c *RelayClient) getSession(
 // In gateway mode, this is still the app's address (not the gateway's).
 //
 // Returns:
-//   - string: Application address (e.g., "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4")
+//   - string: Application address (e.g., "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z")
 func (c *RelayClient) GetAppAddress() string {
 	return c.appAddress
 }
 
 // IsGatewayMode returns true if the client is configured to sign with a gateway key.
-// This matches PATH's approach where gateways sign relays on behalf of delegated apps.
+// This is how a gateway signs relays on behalf of the apps that delegate to it.
 func (c *RelayClient) IsGatewayMode() bool {
 	return c.gatewayMode
 }
@@ -341,78 +410,6 @@ func (c *RelayClient) IsGatewayMode() bool {
 // In standard mode, this returns the app address.
 func (c *RelayClient) GetSignerAddress() string {
 	return c.signer.GetAddress()
-}
-
-// GetCurrentSession fetches the current session without building a full relay request.
-//
-// Useful for extracting session metadata like session end height for monitoring
-// session boundaries. The session is cached for reuse in subsequent BuildRelayRequest calls.
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeouts
-//   - serviceID: Service identifier to fetch session for
-//
-// Returns:
-//   - *Session: Current session with header and supplier list
-//   - error: If application fetch fails or session query fails
-func (c *RelayClient) GetCurrentSession(ctx context.Context, serviceID string) (*sessiontypes.Session, error) {
-	// Fetch application from chain
-	app, err := c.queryClients.Application().GetApplication(ctx, c.appAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch application %s: %w", c.appAddress, err)
-	}
-
-	// Get current session (height=0 means latest block)
-	session, err := c.getSession(ctx, &app, serviceID, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get session: %w", err)
-	}
-
-	return session, nil
-}
-
-// GetSessionAtHeight fetches the session for a specific block height.
-//
-// This method is used when you need to explicitly query the session at a specific
-// height (e.g., when forcing session rollover during load tests). It bypasses the
-// cache and queries the blockchain directly with the given height.
-//
-// Parameters:
-//   - ctx: Context for cancellation and timeout
-//   - serviceID: Service identifier (e.g., "develop", "eth-mainnet")
-//   - height: Block height to query the session for
-//
-// Returns:
-//   - *sessiontypes.Session: The session at the specified height
-//   - error: Any error that occurred during the query
-func (c *RelayClient) GetSessionAtHeight(ctx context.Context, serviceID string, height int64) (*sessiontypes.Session, error) {
-	// Fetch application from chain
-	app, err := c.queryClients.Application().GetApplication(ctx, c.appAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch application %s: %w", c.appAddress, err)
-	}
-
-	// Get session at specific height (forces fresh query, no cache)
-	session, err := c.getSession(ctx, &app, serviceID, height)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get session at height %d: %w", height, err)
-	}
-
-	return session, nil
-}
-
-// ClearSessionCache clears the cached session.
-//
-// Forces the next BuildRelayRequest call to fetch a fresh session from the blockchain
-// instead of using the cached session. This is essential when:
-//   - Testing across session boundaries (when block height crosses session end)
-//   - Simulating session rollovers in load tests
-//   - Recovering from session-related errors
-//
-// Thread-safe but should be called when no concurrent BuildRelayRequest calls are active
-// to avoid race conditions.
-func (c *RelayClient) ClearSessionCache() {
-	c.cachedSession = nil
 }
 
 // VerifyRelayResponse verifies the supplier's signature on the relay response.
@@ -459,11 +456,7 @@ func (c *RelayClient) VerifyRelayResponse(
 // relays across the whole session instead of exhausting a single supplier's
 // per-session claimable budget.
 func (c *RelayClient) SessionSupplierAddresses(ctx context.Context, serviceID string) ([]string, error) {
-	app, err := c.queryClients.Application().GetApplication(ctx, c.appAddress)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch application %s: %w", c.appAddress, err)
-	}
-	session, err := c.getSession(ctx, &app, serviceID, 0)
+	session, err := c.currentSession(ctx, serviceID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get session: %w", err)
 	}

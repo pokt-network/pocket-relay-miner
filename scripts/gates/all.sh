@@ -96,6 +96,17 @@ skipped_gates=()
 # coverage: a gate whose infra was absent has not disproved anything.
 vacuous_gates=()
 
+# Announce this run to any other on this workstation, for as long as it lasts.
+# Shared, so runs do not exclude each other -- they are allowed to share the
+# container; what they must not do is delete it while another is testing. The
+# descriptor stays open for the whole run and the KERNEL releases it when this
+# process dies, SIGKILL included, which is the case that defeats every trap.
+if [ "$level" -ge 2 ] && command -v flock >/dev/null 2>&1; then
+    if exec 9>"$("$GATES_DIR/redis.sh" lockpath)"; then
+        flock -s 9 || true
+    fi
+fi
+
 for gate in "${gates[@]}"; do
     name="$(basename "$gate" .sh)"
 
@@ -154,6 +165,10 @@ done
 # The shared test Redis is this run's, not the machine's: take it down again so
 # a developer box is not left with a container it did not ask for.
 if [ "$level" -ge 2 ]; then
+    # Release our own shared lock FIRST: `down` asks for the exclusive one to
+    # find out whether anybody else is still running, and holding ours here
+    # would make it answer "yes, me" and never clean up.
+    exec 9>&- 2>/dev/null || true
     "$GATES_DIR/redis.sh" down || true
 fi
 

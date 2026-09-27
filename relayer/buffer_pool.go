@@ -92,24 +92,38 @@ func (bp *BufferPool) putBuffer(buf *bytes.Buffer) {
 	bp.pool.Put(buf)
 }
 
-// ReadWithBuffer reads from an io.Reader using a pooled buffer.
-// Returns the read data and any error encountered.
-// The returned byte slice is an independent copy safe for use after the function returns.
-func (bp *BufferPool) ReadWithBuffer(r io.Reader) ([]byte, error) {
+// ReadWithBufferLimit reads from an io.Reader using a pooled buffer, bounded by
+// the caller's limit.
+//
+// The limit is a PARAMETER and not a property of the pool, because the two are
+// unrelated: pooled buffers start at DefaultInitialBufferSize and grow as they
+// read, and are dropped above DefaultMaxBufferSize -- none of which involves the
+// limit. It lived on the pool only because there was one bound for everyone, and
+// that is what made a per-service response limit look like it needed a pool per
+// service. It does not: one pool, many limits.
+//
+// The returned byte slice is an independent copy safe for use after the function
+// returns.
+func (bp *BufferPool) ReadWithBufferLimit(r io.Reader, limit int64) ([]byte, error) {
+	if limit <= 0 {
+		limit = bp.maxReaderSize
+	}
+
 	buf := bp.getBuffer()
 	defer bp.putBuffer(buf)
 
-	// Limit reading to maxReaderSize to prevent unbounded memory consumption
-	limitedReader := io.LimitReader(r, bp.maxReaderSize)
+	// Read one byte past the limit so "exactly at the limit" and "over it" can be
+	// told apart. Reading exactly `limit` and calling that an overflow rejects a
+	// body of precisely the configured size -- an operator who sets 10 MiB means
+	// 10 MiB is allowed. This is the same idiom the request side already uses.
+	limitedReader := io.LimitReader(r, limit+1)
 	n, err := buf.ReadFrom(limitedReader)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read from reader: %w", err)
 	}
 
-	// Check if we hit the size limit
-	// If we read exactly maxReaderSize bytes, there might be more data available
-	if n == bp.maxReaderSize {
-		return nil, fmt.Errorf("response size exceeded limit of %d bytes", bp.maxReaderSize)
+	if n > limit {
+		return nil, fmt.Errorf("response size exceeded limit of %d bytes", limit)
 	}
 
 	// Return independent copy to avoid data races

@@ -1,0 +1,75 @@
+# Relayer config for a host deployment (systemd). Minimal on purpose: every key
+# not set here takes its default; config.relayer.example.yaml at the repository
+# root lists all of them. Pointed at the beta testnet: for mainnet, switch every
+# value marked "Mainnet:". Replace every value marked CHANGE before starting.
+# Check it with:
+#   pocket-relay-miner relayer validate --config /etc/pocket-relay-miner/relayer.yaml
+
+# Address the relay server listens on (relay traffic from gateways).
+listen_addr: "0.0.0.0:8080"
+
+# The same Redis as the miner's.
+redis:
+  url: "redis://127.0.0.1:6379"
+
+# The chain node the relayer reads applications, sessions and params from.
+pocket_node:
+  # The public Sauron endpoints of beta; your own full node is the better
+  # choice for claims and proofs you are paid for.
+  # CometBFT RPC. Mainnet: "https://sauron-rpc.infra.pocket.network"
+  query_node_rpc_url: "https://sauron-rpc.beta.infra.pocket.network"
+  # gRPC, host:port. Mainnet: "sauron-grpc.infra.pocket.network:443"
+  query_node_grpc_url: "sauron-grpc.beta.infra.pocket.network:443"
+  # TLS gRPC. Set true only for a plain-text node.
+  grpc_insecure: false
+
+# The suppliers this relayer signs responses for. Same keys as the miner's.
+keys:
+  keys_file: "/etc/pocket-relay-miner/supplier-keys.yaml"
+
+# CHANGE: one entry per service your suppliers are staked for, keyed by
+# on-chain service id.
+services:
+  my-service:
+    validation_mode: eager
+    default_backend: jsonrpc
+    backends:
+      jsonrpc:
+        # CHANGE: the backend node that answers this service.
+        url: "http://127.0.0.1:8545"
+        # Active health check: strongly recommended on every HTTP backend
+        # (jsonrpc, rest, cometbft); never on websocket or grpc, where the HTTP
+        # probe always fails. Without it a dead
+        # backend is found only by failing real relays. CHANGE the probe to
+        # one your node answers: this one is for an EVM JSON-RPC node.
+        # docs/deploy/README.md, "Backend health checks".
+        health_check:
+          enabled: true
+          endpoint: "/"
+          method: "POST"
+          request_body: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+          expected_body: '"result"'
+          interval_seconds: 10
+          timeout_seconds: 5
+          unhealthy_threshold: 3
+          healthy_threshold: 2
+
+# GET /ready answers 200 once the relayer can serve relays.
+health_check:
+  enabled: true
+  addr: "127.0.0.1:8081"
+
+metrics:
+  enabled: true
+  addr: "127.0.0.1:9090"
+
+# Profiling server. Left unset, it listens on 127.0.0.1:6060 (loopback): it
+# serves heap and goroutine dumps, so keep it there, or set enabled: false.
+# Reaching it from outside the host or container takes an explicit addr.
+pprof:
+  enabled: true
+  addr: "127.0.0.1:6060"
+
+logging:
+  level: "info"
+  format: "json"

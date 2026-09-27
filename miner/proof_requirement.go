@@ -26,6 +26,24 @@ import (
 // an invalid claim payload.
 var ErrClaimedRootUnavailable = errors.New("claimed root hash unavailable for session")
 
+// ErrClaimedRootUnreadable is returned instead of ErrClaimedRootUnavailable
+// when the root could not be READ rather than being absent: Redis did not
+// answer, the pool timed out, or the process is shutting down. The tree is
+// still in Redis and the proof is buildable a block later, so the caller
+// must defer the session instead of marking it terminal — a proof that is
+// never sent costs the whole claim plus a flat slash, while one more block
+// of waiting costs nothing.
+//
+// It deliberately does NOT unwrap to ErrClaimedRootUnavailable: the two
+// callers in lifecycle_callback.go branch on that sentinel to mark a
+// session terminal, and a transient failure must not reach that branch.
+//
+// Declared risk: an eviction or corruption error also lands on this side of
+// the classifier, so such a session is retried once per block against a
+// tree that no longer exists. That is bounded by the proof window and costs
+// one GET per block, and it is the safe direction of the trade.
+var ErrClaimedRootUnreadable = errors.New("claimed root hash could not be read for session")
+
 // ClaimedRootProvider is the minimal seam used by ProofRequirementChecker to
 // rehydrate a SessionSnapshot's ClaimedRootHash when the value stored in
 // Redis is missing. It is satisfied by the full SMSTManager as well as by
@@ -224,8 +242,17 @@ func (c *ProofRequirementChecker) resolveClaimedRoot(
 
 	rehydrated, err := c.rootProvider.GetTreeRoot(ctx, snapshot.SessionID)
 	if err != nil {
+		// Classify: a root we could not READ is deferrable, a root that is
+		// not THERE is terminal. IsRetryableError alone is not the whole
+		// predicate — it deliberately excludes context.Canceled (see its
+		// doc), so on a graceful shutdown every in-flight session would be
+		// marked terminal with its claim already on chain.
+		if IsRetryableError(err) || IsShutdownCancelError(err) {
+			logger.Warn().Err(err).Msg("could not read claimed root from SMST; session is deferrable")
+			return nil, fmt.Errorf("%w: %w", ErrClaimedRootUnreadable, err)
+		}
 		logger.Warn().Err(err).Msg("failed to rehydrate claimed root from SMST")
-		return nil, fmt.Errorf("%w: %v", ErrClaimedRootUnavailable, err)
+		return nil, fmt.Errorf("%w: %w", ErrClaimedRootUnavailable, err)
 	}
 	if len(rehydrated) == 0 {
 		logger.Warn().Msg("SMST has no root for session; cannot rehydrate claimed root")

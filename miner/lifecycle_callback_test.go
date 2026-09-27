@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
-	"sync"
 	"testing"
 
 	"github.com/pokt-network/smt"
@@ -30,10 +29,6 @@ func (m *mockDeduplicator) IsDuplicate(_ context.Context, _ []byte, _ string) (b
 
 func (m *mockDeduplicator) MarkProcessed(_ context.Context, _ []byte, _ string) (bool, error) {
 	return true, nil
-}
-
-func (m *mockDeduplicator) MarkProcessedBatch(_ context.Context, _ [][]byte, _ string) error {
-	return nil
 }
 
 func (m *mockDeduplicator) CleanupSession(_ context.Context, sessionID string) error {
@@ -76,10 +71,9 @@ func (m *mockSMSTManager) DeleteTree(_ context.Context, sessionID string) error 
 func createTestLifecycleCallback(smstManager SMSTManager) *LifecycleCallback {
 	logger := logging.NewLoggerFromConfig(logging.DefaultConfig())
 	return &LifecycleCallback{
-		logger:       logger,
-		config:       DefaultLifecycleCallbackConfig(),
-		smstManager:  smstManager,
-		sessionLocks: make(map[string]*sync.Mutex),
+		logger:      logger,
+		config:      DefaultLifecycleCallbackConfig(),
+		smstManager: smstManager,
 	}
 }
 

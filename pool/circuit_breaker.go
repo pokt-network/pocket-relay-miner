@@ -52,7 +52,7 @@ type TransitionEvent struct {
 //
 // What is NOT a failure:
 //   - context.Canceled: the caller cut the request short (client timeout,
-//     PATH disconnect). That's the client's budget, not the backend's fault.
+//     gateway disconnect). That's the client's budget, not the backend's fault.
 //   - context.DeadlineExceeded / net.Error with Timeout()=true: slow but
 //     possibly healthy backend; tripping on timeouts blackholes traffic.
 //   - HTTP 1xx-4xx: application-level responses from a working backend.

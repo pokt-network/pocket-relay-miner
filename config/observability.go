@@ -19,6 +19,14 @@ type PprofConfig struct {
 	Enabled bool `yaml:"enabled,omitempty"`
 
 	// Addr is the address for pprof server.
-	// Default: "localhost:6060" (localhost only for security)
+	// Default: DefaultPprofAddr.
 	Addr string `yaml:"addr,omitempty"`
 }
+
+// DefaultPprofAddr is where pprof listens when no address is configured, in
+// both binaries. Loopback, because pprof serves heap and goroutine dumps to
+// anyone who can reach it. 127.0.0.1 and not "localhost": the name goes
+// through the resolver and can come back as ::1, or not at all in a minimal
+// container. Reaching it from outside the host or container takes an explicit
+// addr (for example "0.0.0.0:6060").
+const DefaultPprofAddr = "127.0.0.1:6060"

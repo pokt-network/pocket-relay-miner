@@ -3,17 +3,22 @@
 # Audit the work queue against reality, so a DISCARDED item stops reading like a
 # pending one.
 #
-# Why this exists (Jorge, 2026-08-31): "por eso no logro tener el stack completo,
-# porque volver a traerme items descartados". A session read the queue, reported
+# Why this exists (Jorge, 2026-08-31): "that's why I can't get the whole stack
+# together -- because discarded items keep getting brought back to me." A session read the queue, reported
 # issue #25 as open work, and it had been closed that same day -- along with #43,
 # #7 and #8. The queue is the only durable record of what is pending, and nothing
 # was checking it against the world, so every session re-litigated closed work and
 # the stack never converged.
 #
 # It reports; it never edits. Exit 1 when something needs a human decision.
+#
+# The markers are English, and so must be the queue entries that carry them:
+# evidence is a file:line, a backticked commit, "verified", "measured", or
+# "Jorge's decision/request/ruling"; a settled entry says CLOSED, DISCARDED,
+# DEFERRED, IGNORED, DEAD or NOT REPRODUCIBLE, in capitals.
 set -u
 
-QUEUE="${QUEUE:-scripts/localonly/QUEUE-deep-cleanup.md}"
+QUEUE="${QUEUE:-scripts/localonly/QUEUE.md}"
 RED=$'\033[31m'; YEL=$'\033[33m'; GRN=$'\033[32m'; BOLD=$'\033[1m'; OFF=$'\033[0m'
 
 [ -f "$QUEUE" ] || { printf 'queue not found: %s\n' "$QUEUE" >&2; exit 2; }
@@ -52,9 +57,12 @@ items = [(parts[i], parts[i + 1], parts[i + 2]) for i in range(1, len(parts), 3)
 EVIDENCE = re.compile(
     r"[A-Za-z0-9_./-]+\.(go|sh|json|yaml|yml|md):\d+"   # file:line
     r"|`[0-9a-f]{7,40}`"                                  # a commit
-    r"|verificad|medid|VERIFICADO|MEDIDO"
-    r"|Decisi[oó]n de Jorge|Pedido de Jorge|Ruling de Jorge", re.I)
-SETTLED = re.compile(r"CERRADO|DESCARTADO|DIFERIDO|SE IGNORA|MUERTO|NO REPRODUCIBLE", re.I)
+    r"|(?<!not )(?<!un)(?:verified|measured)\b"
+    r"|Jorge's decision|Jorge's request|Jorge's ruling", re.I)
+# Whole words, capitals only: a settled mark is written in capitals, while
+# "deadline", "closed-loop" or claim_window_closed are prose and must not
+# silence a stale item.
+SETTLED = re.compile(r"\b(?:CLOSED|DISCARDED|DEFERRED|IGNORED|DEAD|NOT REPRODUCIBLE)\b")
 
 stale, unmarked, ok = [], [], 0
 for num, title, body in items:

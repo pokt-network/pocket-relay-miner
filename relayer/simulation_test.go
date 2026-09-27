@@ -42,6 +42,14 @@ type simFixture struct {
 const simTestKeyID = "k1"
 const simTestService = "svc-test"
 
+// simTestService2 is the second service every fixture carries, so a test can
+// say something about ONE service without saying it about the relayer.
+const simTestService2 = "svc-test-2"
+
+// simTestService2QueueMiB is the second service's own validation-queue bound,
+// deliberately different from the default the first one takes.
+const simTestService2QueueMiB = 64
+
 // newSimFixture builds a verifier with one enabled identity, a loaded supplier
 // signer, a fixed clock, and a namespace of its own on the real Redis.
 // serviceIDs includes svc-test and other-svc so service-binding tests can

@@ -23,14 +23,30 @@ type RelayMetrics struct {
 	startTime time.Time
 	endTime   time.Time
 
-	// Error tracking
-	errors map[string]int // error message -> count
+	// Error tracking: error message -> how many, and when it was first and last seen
+	errors map[string]*errorStat
+
+	// now is the clock every timestamp above is read from; tests fix it.
+	now func() time.Time
 }
+
+// errorStat is one line of the error breakdown. first and last say WHEN a
+// failure happened, which a count alone cannot: forty refused dials inside one
+// second and forty spread over an hour are different failures.
+type errorStat struct {
+	count       int
+	first, last time.Time
+}
+
+// errorTimeLayout prints breakdown times in UTC to the millisecond, so they can
+// be lined up against Loki and Prometheus.
+const errorTimeLayout = "2006-01-02T15:04:05.000Z07:00"
 
 // NewRelayMetrics creates a new metrics collector.
 func NewRelayMetrics() *RelayMetrics {
 	return &RelayMetrics{
-		errors: make(map[string]int),
+		errors: make(map[string]*errorStat),
+		now:    time.Now,
 	}
 }
 
@@ -38,14 +54,14 @@ func NewRelayMetrics() *RelayMetrics {
 func (m *RelayMetrics) Start() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.startTime = time.Now()
+	m.startTime = m.now()
 }
 
 // End marks the end of the load test.
 func (m *RelayMetrics) End() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.endTime = time.Now()
+	m.endTime = m.now()
 }
 
 // RecordSuccess records a successful relay request.
@@ -66,9 +82,15 @@ func (m *RelayMetrics) RecordError(err error) {
 	m.totalRequests++
 	m.errorCount++
 
-	// Track error types
-	errMsg := err.Error()
-	m.errors[errMsg]++
+	// Track error types, and when each was first and last seen
+	at := m.now()
+	stat, ok := m.errors[err.Error()]
+	if !ok {
+		stat = &errorStat{first: at}
+		m.errors[err.Error()] = stat
+	}
+	stat.count++
+	stat.last = at
 }
 
 // GetSummary returns a formatted summary of the load test results.
@@ -146,12 +168,12 @@ func (m *RelayMetrics) getErrorBreakdown() string {
 
 	// Sort errors by count (descending)
 	type errorCount struct {
-		msg   string
-		count int
+		msg string
+		*errorStat
 	}
 	var errors []errorCount
-	for msg, count := range m.errors {
-		errors = append(errors, errorCount{msg, count})
+	for msg, stat := range m.errors {
+		errors = append(errors, errorCount{msg, stat})
 	}
 	sort.Slice(errors, func(i, j int) bool {
 		return errors[i].count > errors[j].count
@@ -164,7 +186,8 @@ func (m *RelayMetrics) getErrorBreakdown() string {
 	}
 
 	for i := 0; i < limit; i++ {
-		breakdown += fmt.Sprintf("  %d: %s\n", errors[i].count, errors[i].msg)
+		breakdown += fmt.Sprintf("  %d: %s (first %s, last %s)\n", errors[i].count, errors[i].msg,
+			errors[i].first.UTC().Format(errorTimeLayout), errors[i].last.UTC().Format(errorTimeLayout))
 	}
 
 	if len(errors) > 10 {

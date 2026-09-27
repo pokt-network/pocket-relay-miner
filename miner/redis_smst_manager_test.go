@@ -445,6 +445,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_DeleteTree() {
 	// Create tree
 	err := manager.UpdateTree(s.ctx, sessionID, []byte("key1"), []byte("value1"), 100)
 	s.Require().NoError(err)
+	s.checkpoint(manager, sessionID)
 
 	// Verify exists
 	s.Require().Equal(1, manager.GetTreeCount())
@@ -476,6 +477,7 @@ func (s *RedisSMSTTestSuite) TestRedisSMSTManager_SetTreeTTL() {
 	// Create tree
 	err := manager.UpdateTree(s.ctx, sessionID, []byte("key1"), []byte("value1"), 100)
 	s.Require().NoError(err)
+	s.checkpoint(manager, sessionID)
 
 	// Set TTL (use miniredis which supports TTL commands)
 	ttl := 60 * time.Second // 60 seconds (won't actually expire in test, just verify command works)

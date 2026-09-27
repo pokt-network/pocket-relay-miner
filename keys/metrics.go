@@ -91,6 +91,24 @@ var (
 		},
 	)
 
+	// keyringCacheDiscarded counts loads that refused to record a reload cache
+	// because the keyring directory changed while they were reading it.
+	//
+	// Without it the safe behaviour is a silent one: the cache exists to skip
+	// seconds of argon2id, and a directory that keeps changing during loads
+	// turns it off indefinitely with nothing to say so. A rising count means
+	// loads are racing writes -- a Secret rollout, an operator mid-rotation --
+	// and a count that never falls back to flat means it is not a rollout.
+	keyringCacheDiscarded = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "keyring_cache_discarded_total",
+			Help:      "Total key loads that declined to cache because the keyring directory changed mid-load",
+		},
+		[]string{"provider"},
+	)
+
 	keyLoadErrors = observability.SharedFactory.NewCounterVec(
 		prometheus.CounterOpts{
 			Namespace: metricsNamespace,

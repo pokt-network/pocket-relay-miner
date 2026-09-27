@@ -1,5 +1,5 @@
 // Package conventions is a test-only package that mechanically enforces the
-// repository's written conventions (CLAUDE.md "Code Standards" and the
+// repository's written conventions (CONTRIBUTING.md "Code standards" and the
 // KeyBuilder STRONG RULE). It contains no production code on purpose: the
 // checks run wherever `go test ./...` runs — the level-2 gates and CI pick
 // them up with no wiring.

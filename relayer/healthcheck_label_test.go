@@ -17,7 +17,7 @@ import (
 //
 // The label falls back to BackendURL when no pool endpoint is attached, and a
 // backend URL carries operator topology plus, in the path and query, provider
-// API keys — CLAUDE.md forbids URLs as labels, and a TSDB keeps a leaked one
+// API keys — CONTRIBUTING.md forbids URLs as labels, and a TSDB keeps a leaked one
 // for the retention period. RegisterPool always attaches an endpoint today, so
 // this is a latent path; the guard makes the leak impossible rather than
 // improbable.

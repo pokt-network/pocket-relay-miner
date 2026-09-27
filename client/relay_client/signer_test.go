@@ -11,9 +11,9 @@ import (
 
 const (
 	// Valid test private key (32 bytes hex)
-	testPrivKeyHex = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a"
+	testPrivKeyHex = "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda"
 	// Expected address derived from testPrivKeyHex
-	testExpectedAddress = "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
+	testExpectedAddress = "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z"
 )
 
 // TestNewSignerFromHex_ValidKey tests signer creation with a valid private key.

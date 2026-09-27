@@ -37,10 +37,11 @@ func TestSubmitProofs_SyncAcceptIsSuccess_NoInclusionCheck(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -53,7 +54,7 @@ func TestSubmitProofs_SyncAcceptIsSuccess_NoInclusionCheck(t *testing.T) {
 	}
 
 	// CheckTx accepts (broadcastCode defaults to 0). SubmitProofs reports success.
-	txHash, err := tc.SubmitProofs(ctx, supplierAddr, 1000, proofs)
+	txHash, _, err := tc.SubmitProofs(ctx, supplierAddr, 1000, proofs)
 	require.NoError(t, err, "SYNC code-0 (mempool acceptance) is reported as success")
 	require.NotEmpty(t, txHash)
 
@@ -86,10 +87,11 @@ func TestSubmitProofs_OnlyCheckTxErrorsAreSurfaced(t *testing.T) {
 	defer func() { _ = km.Close() }()
 
 	config := TxClientConfig{
-		GRPCEndpoint: testServer.address,
-		ChainID:      "test-chain",
-		GasLimit:     100000,
-		GasPrice:     parseGasPrice(t, "0.001upokt"),
+		BlockTimeProvider: testBlockTime(),
+		GRPCEndpoint:      testServer.address,
+		ChainID:           "test-chain",
+		GasLimit:          100000,
+		GasPrice:          parseGasPrice(t, "0.001upokt"),
 	}
 
 	tc, err := NewTxClient(logger, km, config)
@@ -101,7 +103,7 @@ func TestSubmitProofs_OnlyCheckTxErrorsAreSurfaced(t *testing.T) {
 		generateTestProof(t, supplierAddr, "session-1"),
 	}
 
-	_, err = tc.SubmitProofs(ctx, supplierAddr, 1000, proofs)
+	_, _, err = tc.SubmitProofs(ctx, supplierAddr, 1000, proofs)
 	require.Error(t, err, "CheckTx-level rejection is surfaced as an error (retryable)")
 	require.Contains(t, err.Error(), "out of gas")
 

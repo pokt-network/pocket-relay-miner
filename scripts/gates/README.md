@@ -46,7 +46,7 @@ level 3 exercises the path that does.
 | script | what it runs |
 |---|---|
 | `lib.sh` | shared output helpers and the verdict. Sourced, not executed. |
-| `static.sh` | gofmt · go build · go vet (twice: plain and `-tags test`) · golangci-lint · tracked-file guard, across **both** Go modules (root and `tilt/backend-server`). `--staged` judges formatting on staged files only — that is how the pre-commit hook calls it. |
+| `static.sh` | gofmt · go build · go vet (twice: plain and `-tags test`) · no stray Go files under `scripts/localonly` · tracked-file guard · no Spanish in any tracked file (words in `spanish-words.txt`) · golangci-lint · the gate self-tests · skill output contracts · unreachable functions (`deadcode`, production mains as roots), across **both** Go modules (root and `tilt/backend-server`). `--staged` judges formatting on staged files only — that is how the pre-commit hook calls it. |
 | `tests.sh` | `go test -tags test`. The `test` tag is not optional: test-only helpers live behind it. |
 | `race.sh` | `go test -race -count=1`. `-count=1` defeats the result cache, which would otherwise satisfy the command with a PASS from a run without `-race`. |
 | `coverage.sh` | the coverage profile — what CI rejects on. |
@@ -108,15 +108,18 @@ Passing requires at least one claim settled as proven, zero expiries, zero
 slashing and zero discards. Nothing settling at all is a failure, not a pass:
 the run proved nothing about payment.
 
-These come from the validator directly and **not** from the miner's settlement
-metrics, because `settlement_monitor.enabled` defaults to false — the block is
-commented out in `config.miner.example.yaml`, which is the file Tilt renders its
-config from, so on a stock localnet those series are empty and asserting on them
-would be asserting on nothing.
+These come from the validator directly: the miner exports no series for a
+claim's settlement (expiry, slashing, discard; its `*_inclusion_outcome`
+counters stop at inclusion), so the chain's own events are the only source that
+says whether the relays were paid.
 
-`cache` and `miner` run sequentially when targeted on their own: their tests
-share a single miniredis fixture, so parallelism races the fixture instead of
-testing the code.
+`cache`, `miner` and `relayer` run sequentially (`-p 1 -parallel 1`) when
+targeted on their own with `PKG=`: their tests mutate process-wide state
+(Prometheus counters read as before/after deltas, the cache's L1 TTL globals)
+and the miner suites clear a suite-wide key prefix, so parallel tests read each
+other's writes. The guard is `TestNoTestParallelWhereStateIsShared` in
+`internal/conventions`; the flags are only a second layer (`gate_parallelism` in
+`lib.sh`).
 
 ## Gotchas paid for
 

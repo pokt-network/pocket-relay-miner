@@ -36,7 +36,7 @@ use pocket_relay_signing::{
 };
 
 /// Throwaway test keys, matching `oracle vectors`. Not used to hold anything.
-const APP_PRIV_HEX: &str = "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a";
+const APP_PRIV_HEX: &str = "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda";
 const GW_PRIV_HEX: &str = "1a11ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ab11";
 
 /// A Pocket ring is `[app, gateway]`, in that order, unsorted. The gateway

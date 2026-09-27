@@ -189,7 +189,7 @@ func (rp *relayProcessor) ProcessRelay(
 		sessionCtx := logging.SessionContextPartial(sessionID, serviceID, supplierAddr, appAddress, sessionEndHeight)
 		logging.WithSessionContext(rp.logger.Debug(), sessionCtx).
 			Msg("relay does not meet mining difficulty, skipping")
-		relaysSkippedDifficulty.WithLabelValues(serviceID).Inc()
+		relaysSkippedDifficulty.WithLabelValues(serviceID, RPCTypeFrom(ctx)).Inc()
 		return nil, nil
 	}
 

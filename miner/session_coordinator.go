@@ -107,11 +107,30 @@ func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTermin
 	c.onSessionTerminal = callback
 }
 
+// SessionRead is what a caller already learned about a session from the store,
+// handed to EnsureSession so it does not read the same session again.
+//
+// The zero value means the caller learned nothing -- it did not read, or its
+// read failed -- and EnsureSession reads for itself. The two must not be
+// confused: "the read failed" says nothing about the session, while "the store
+// answered and there is no snapshot" means it does not exist and is created.
+type SessionRead struct {
+	// Snapshot is what the store returned; nil with Answered means absent.
+	Snapshot *SessionSnapshot
+	// Answered is true when the store answered the read without an error.
+	Answered bool
+}
+
 // EnsureSession creates the session snapshot if it does not exist yet.
 //
+// read carries the caller's own read of the session, when it made one; see
+// SessionRead. The relay path makes no read of its own and passes the zero
+// value; it calls this only until it reports the session exists (handleRelay).
+//
 // It is separate from OnRelayProcessed because the two have different gates.
-// Counting a relay must happen exactly once — a relay counted twice inflates
-// the claim — so the caller gates it on the deduplicator. Creating the session
+// Counting a relay must happen exactly once — a relay counted twice skews the
+// relay_count the claim-time comparison with the tree's leaves reads — so the
+// caller gates it on the deduplicator. Creating the session
 // must happen on EVERY delivery, because a redelivery can be the only chance
 // left to do it: the consumer that first processed the relay can die between
 // MarkProcessed and telling the coordinator anything, and then the consumer
@@ -125,12 +144,19 @@ func (c *SessionCoordinator) SetOnSessionTerminalCallback(callback SessionTermin
 //
 // Failures are logged, not returned: the caller's relay is already in the SMST
 // and must be ACKed either way.
+//
+// exists reports whether the session is known to exist when this returns: the
+// store answered with its snapshot, or CreateIfAbsent created it or found it
+// there. false says nothing about the session -- a closed coordinator, missing
+// metadata, or a read and a create that both failed -- and the caller must ask
+// again next time.
 func (c *SessionCoordinator) EnsureSession(
 	ctx context.Context,
+	read SessionRead,
 	sessionID string,
 	supplierAddress, serviceID, applicationAddress string,
 	sessionStartHeight, sessionEndHeight int64,
-) {
+) (exists bool) {
 	// Same guard as its siblings. Without it a relay still in flight at
 	// shutdown does a Redis Get, then OnSessionCreated returns "closed", and
 	// the failure is logged Warn once PER RELAY — a per-request Warn, which
@@ -139,28 +165,32 @@ func (c *SessionCoordinator) EnsureSession(
 	closed := c.closed
 	c.mu.Unlock()
 	if closed {
-		return
+		return false
 	}
 
-	// The Get is an optimisation that skips the CreateIfAbsent round-trip on
+	// The read is an optimisation that skips the CreateIfAbsent round-trip on
 	// the hot path where the session already exists; correctness does not
-	// depend on it.
-	snapshot, err := c.sessionStore.Get(ctx, sessionID)
-	if err != nil {
-		c.logger.Warn().
-			Err(err).
-			Str(logging.FieldSessionID, sessionID).
-			Msg("failed to check session existence")
+	// depend on it. It is made here only when the caller did not make one.
+	snapshot := read.Snapshot
+	if !read.Answered {
+		var err error
+		snapshot, err = c.sessionStore.Get(ctx, sessionID)
+		if err != nil {
+			c.logger.Warn().
+				Err(err).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to check session existence")
+		}
 	}
 	if snapshot != nil {
-		return
+		return true
 	}
 
 	if supplierAddress == "" || serviceID == "" {
 		c.logger.Warn().
 			Str(logging.FieldSessionID, sessionID).
 			Msg("session not found and missing metadata to create it")
-		return
+		return false
 	}
 	if err := c.OnSessionCreated(ctx, sessionID, supplierAddress, serviceID,
 		applicationAddress, sessionStartHeight, sessionEndHeight); err != nil {
@@ -168,7 +198,9 @@ func (c *SessionCoordinator) EnsureSession(
 			Err(err).
 			Str(logging.FieldSessionID, sessionID).
 			Msg("failed to create session")
+		return false
 	}
+	return true
 }
 
 // OnRelayProcessed should be called when a relay is successfully processed and
@@ -338,6 +370,96 @@ func (c *SessionCoordinator) OnSessionClaimed(
 	return nil
 }
 
+// ErrClaimRootUnusable reports that a claim observed on-chain came with a root
+// that cannot be stored or proved from. It is PERMANENT — a malformed root does
+// not become well-formed on the next block — so callers must stop retrying
+// rather than hold the observation open until it times out.
+var ErrClaimRootUnusable = errors.New("claimed root hash is unusable")
+
+// OnClaimObservedOnChain is called when the InclusionReconciler has OBSERVED
+// this session's claim on-chain — which can happen after the broadcast
+// reported failure and the session was already marked claim_tx_error.
+//
+// That combination is not academic: it is the path that turns a lost reward
+// into a SLASH. The self-heal persists the built MsgCreateClaim on any
+// broadcast failure, the reconciler re-sends it, the claim lands, and without
+// this edge nobody tells the lifecycle — so the session stays terminal, the
+// proof never goes out, and the chain penalises a claim we did submit.
+//
+// A state is terminal only when it rests on an OBSERVATION of the chain.
+// claim_tx_error rests on a broadcast REPORT, and a report can be wrong; this
+// method is where the observation overrides it.
+//
+// The write is a single guarded round-trip (see ReactivateClaimed), and the
+// snapshot is RE-READ afterwards before re-tracking: TrackSession saves what
+// it is handed, and Save HDELs empty optional fields, so handing it anything
+// but the stored snapshot would erase the claim fields just written.
+func (c *SessionCoordinator) OnClaimObservedOnChain(
+	ctx context.Context,
+	sessionID string,
+	claimedRootHash []byte,
+	claimTxHash string,
+) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	createdCallback := c.onSessionCreated
+	c.mu.Unlock()
+
+	// Without a well-formed root the session is unprovable, and it fails LATE
+	// and quietly: decodeSnapshot drops a wrong-length root (it would panic the
+	// smt library on import), so the session would come back `claimed` with no
+	// root, resolveClaimedRoot would fall back to the SMST, and a rehydration
+	// miss ends in proof_tx_error. Refuse loudly instead of reactivating
+	// something that cannot produce a proof.
+	if len(claimedRootHash) != SMSTRootLen {
+		return fmt.Errorf(
+			"%w: session %s root is %d bytes, want %d",
+			ErrClaimRootUnusable, sessionID, len(claimedRootHash), SMSTRootLen,
+		)
+	}
+
+	reactivated, err := c.sessionStore.ReactivateClaimed(ctx, sessionID, claimedRootHash, claimTxHash)
+	if err != nil {
+		return fmt.Errorf("failed to reactivate session %s: %w", sessionID, err)
+	}
+	if !reactivated {
+		// Already at or past claimed. Not an error and not a no-op worth
+		// logging above Debug: a failed clear in the reconciler re-delivers
+		// the same observation on the next block.
+		c.logger.Debug().
+			Str(logging.FieldSessionID, sessionID).
+			Msg("claim observed on-chain but session already at or past claimed")
+		return nil
+	}
+
+	if createdCallback == nil {
+		// Redis says claimed but nothing re-tracks it in memory. The row is
+		// recoverable by loadExistingSessions on the next start/handoff, so
+		// this is degraded, not silent.
+		c.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Msg("session reactivated in Redis but no lifecycle callback is wired; proof depends on a restart")
+		return nil
+	}
+
+	snapshot, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("failed to re-read reactivated session %s: %w", sessionID, err)
+	}
+	if snapshot == nil {
+		return fmt.Errorf("reactivated session %s vanished before re-tracking", sessionID)
+	}
+
+	if err := createdCallback(ctx, snapshot); err != nil {
+		return fmt.Errorf("failed to re-track reactivated session %s: %w", sessionID, err)
+	}
+
+	return nil
+}
+
 // OnProofSubmitted should be called when a session's proof TX is broadcast.
 // It stores the proof TX hash for deduplication and tracking.
 func (c *SessionCoordinator) OnProofSubmitted(
@@ -426,6 +548,11 @@ func (c *SessionCoordinator) OnClaimWindowClosed(ctx context.Context, sessionID 
 	c.mu.Unlock()
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimWindowClosed); err != nil {
+		if errors.Is(err, ErrClaimAlreadyOnChain) {
+			c.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
+				Msg("not marking claim_window_closed: the session holds its claim")
+			return err
+		}
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_window_closed")
 		return err
@@ -478,6 +605,11 @@ func (c *SessionCoordinator) OnClaimTxError(ctx context.Context, sessionID strin
 	}
 
 	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimTxError); err != nil {
+		if errors.Is(err, ErrClaimAlreadyOnChain) {
+			c.logger.Debug().Err(err).Str(logging.FieldSessionID, sessionID).
+				Msg("not marking claim_tx_error: the session holds its claim")
+			return err
+		}
 		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
 			Msg("failed to update session state to claim_tx_error")
 		return err
@@ -620,6 +752,59 @@ func (c *SessionCoordinator) OnProofTxError(ctx context.Context, sessionID strin
 	}
 
 	c.logger.Debug().Str(logging.FieldSessionID, sessionID).Msg("proof tx error")
+	return nil
+}
+
+// OnProofDeferred returns a session to SessionStateClaimed after a proof
+// attempt was abandoned for a reason that will not still be true next block
+// — Redis unreachable while reading the claimed root, or a shutdown cancel.
+//
+// It is OnProofTxError minus the terminal callback, and that omission is the
+// whole point. onSessionTerminal is wired to RemoveSession
+// (supplier_manager.go), so marking a session terminal drops it from
+// activeSessions and nothing looks at it again; its claim is already on
+// chain, and a required proof that never arrives costs the entire claim plus
+// a flat slash.
+//
+// Writing claimed rather than leaving the session in proving is also
+// deliberate: a session in proving can only leave through
+// proof_window_closed (session_lifecycle.go), which is the same money lost,
+// just more quietly. From claimed, checkSessionTransition returns Proving
+// again on every block while currentHeight is inside the proof window, and
+// stops on its own at proofWindowClose. No new loop, no new state.
+func (c *SessionCoordinator) OnProofDeferred(ctx context.Context, sessionID string) error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return fmt.Errorf("session coordinator is closed")
+	}
+	c.mu.Unlock()
+
+	// Same guard as OnProofTxError: another miner may already have proved
+	// this session, and rewinding it to claimed would make this miner
+	// submit a duplicate proof.
+	current, err := c.sessionStore.Get(ctx, sessionID)
+	if err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to read session state before deferring proof")
+	} else if current != nil && (current.State == SessionStateProved || current.State == SessionStateProbabilisticProved || current.ProofTxHash != "") {
+		c.logger.Warn().
+			Str(logging.FieldSessionID, sessionID).
+			Str("current_state", string(current.State)).
+			Str("proof_tx_hash", current.ProofTxHash).
+			Msg("NOT deferring proof: session already proved by another miner")
+		return nil
+	}
+
+	if err := c.sessionStore.UpdateState(ctx, sessionID, SessionStateClaimed); err != nil {
+		c.logger.Warn().Err(err).Str(logging.FieldSessionID, sessionID).
+			Msg("failed to return session to claimed after deferring proof")
+		return err
+	}
+
+	c.logger.Info().
+		Str(logging.FieldSessionID, sessionID).
+		Msg("proof deferred: session returned to claimed, will retry next block inside the proof window")
 	return nil
 }
 

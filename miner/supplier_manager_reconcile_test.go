@@ -299,6 +299,9 @@ func TestSupplierManager_Reconcile_ReleasesLeaseOnceUnconfigured(t *testing.T) {
 	// Establish the LEASE directly. mgr.Start does attempt an initial claim, but in
 	// this fixture the claim callback cannot complete, so the supplier ends up
 	// configured and not leased — which would make every assertion below vacuous.
+	// That failed claim is released, and its drain must end first: until then the
+	// supplier is draining, and nothing in production claims it again.
+	mgr.waitDrains()
 	// Seeding claimed + the Redis key is the precondition the production rebalance
 	// would have produced, stated explicitly so the test cannot silently test nothing.
 	claimKey := redisClient.KB().MinerClaimKey(supplierAddr)
@@ -319,6 +322,8 @@ func TestSupplierManager_Reconcile_ReleasesLeaseOnceUnconfigured(t *testing.T) {
 			"be dropped from the configured list: the lease is what keeps its pipeline alive and what "+
 			"stops another miner from taking over")
 
+	// The key goes when the drain the release started ends.
+	mgr.waitDrains()
 	owner, err := redisClient.Get(ctx, claimKey).Result()
 	require.ErrorIs(t, err, redis.Nil,
 		"the Redis claim key must be deleted so another miner can claim the supplier; it currently reads %q", owner)
@@ -390,7 +395,9 @@ func TestSupplierManager_KeyRemoval_ReleasesTheLease(t *testing.T) {
 	defer func() { _ = mgr.Close() }()
 
 	// Seed the lease this instance holds, which is the precondition the
-	// production rebalance would have produced.
+	// production rebalance would have produced -- once the drain of Start's
+	// failed initial claim is over, as it would be.
+	mgr.waitDrains()
 	claimKey := redisClient.KB().MinerClaimKey(supplierAddr)
 	require.NoError(t, redisClient.Set(ctx, claimKey, mgr.claimer.instanceID, time.Hour).Err())
 	mgr.claimer.claimedMu.Lock()
@@ -398,8 +405,10 @@ func TestSupplierManager_KeyRemoval_ReleasesTheLease(t *testing.T) {
 	mgr.claimer.claimedMu.Unlock()
 	require.Contains(t, mgr.claimer.ClaimedSuppliers(), supplierAddr, "premise: the lease is held")
 
-	// The operator removes the signing key.
+	// The operator removes the signing key. The key goes when the drain the
+	// release started ends.
 	mgr.handleKeyChange(ctx, supplierAddr, false)
+	mgr.waitDrains()
 
 	owner, err := redisClient.Get(ctx, claimKey).Result()
 	require.ErrorIs(t, err, redis.Nil,

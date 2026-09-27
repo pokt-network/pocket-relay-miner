@@ -32,7 +32,7 @@ func newStalledPeerConn(t *testing.T) *websocket.Conn {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		// Deliberately never call ReadMessage. Block until the test is done so
 		// the connection stays open rather than being torn down by the handler
 		// returning -- a closed peer would produce a write error for the wrong
@@ -102,7 +102,7 @@ func TestWriteDataFrame_DeadlineDoesNotBreakHealthyWrites(t *testing.T) {
 		if err != nil {
 			return
 		}
-		defer conn.Close()
+		defer func() { _ = conn.Close() }()
 		defer close(readerDone)
 		for {
 			if _, _, err := conn.ReadMessage(); err != nil {

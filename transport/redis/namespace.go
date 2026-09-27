@@ -350,6 +350,23 @@ func (kb *KeyBuilder) SMSTLiveRootKey(supplierAddress, sessionID string) string 
 	return fmt.Sprintf("%s:smst:%s:%s:live_root", kb.ns.BasePrefix, supplierAddress, sessionID)
 }
 
+// SMSTAllPattern builds the SCAN pattern matching every key of every SMST:
+// nodes, root, stats, live_root and leaves, for all suppliers and sessions.
+// Format: {base}:smst:*
+// Example: "ha:smst:*"
+func (kb *KeyBuilder) SMSTAllPattern() string {
+	return fmt.Sprintf("%s:smst:*", kb.ns.BasePrefix)
+}
+
+// SMSTLeavesKey builds the key for a claimed SMST stored as its leaves only: a
+// versioned header and a compressed frame of every leaf, written once the claim
+// is sent so the nodes hash can be deleted. A proof rebuilds the tree from it.
+// Format: {base}:smst:{supplierAddress}:{sessionID}:leaves
+// Example: "ha:smst:pokt1abc:session123:leaves"
+func (kb *KeyBuilder) SMSTLeavesKey(supplierAddress, sessionID string) string {
+	return fmt.Sprintf("%s:smst:%s:%s:leaves", kb.ns.BasePrefix, supplierAddress, sessionID)
+}
+
 // ServiceFactorDefaultKey builds the key for the default service factor.
 // Format: {base}:service_factor:default
 // Example: "ha:service_factor:default"
@@ -362,6 +379,20 @@ func (kb *KeyBuilder) ServiceFactorDefaultKey() string {
 // Example: "ha:service_factor:service:eth-mainnet"
 func (kb *KeyBuilder) ServiceFactorServiceKey(serviceID string) string {
 	return fmt.Sprintf("%s:service_factor:service:%s", kb.ns.BasePrefix, serviceID)
+}
+
+// ServiceFactorManifestKey builds the key for the complete service factor state.
+// Format: {base}:service_factor:manifest
+// Example: "ha:service_factor:manifest"
+//
+// One document carrying the WHOLE state, so that "the operator configured no
+// factor" is a value the relayer reads rather than a key it fails to find. The
+// two keys above cannot carry it: with nothing configured the miner writes
+// neither of them, so "not configured" and "never published" are the same
+// absent byte. This key is written without a TTL -- it is replaced, never
+// expired.
+func (kb *KeyBuilder) ServiceFactorManifestKey() string {
+	return fmt.Sprintf("%s:service_factor:manifest", kb.ns.BasePrefix)
 }
 
 // MinerClaimKey builds the key for supplier claim locks.

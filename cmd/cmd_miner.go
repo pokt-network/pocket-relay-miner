@@ -5,11 +5,14 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/spf13/cobra"
 
+	"github.com/pokt-network/pocket-relay-miner/internal/memlimit"
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
@@ -18,6 +21,13 @@ import (
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
+// minerShutdownTimeout bounds the graceful shutdown of the supplier worker.
+// Mirrors the relayer's GracefulShutdownTimeout rather than introducing a
+// second number. NOT calibrated against the deployment's own grace period --
+// that manifest is not in this tree -- but any finite ceiling beats a wait
+// with none.
+const minerShutdownTimeout = 30 * time.Second
+
 const (
 	flagMinerConfig  = "config"
 	flagConsumerName = "consumer-name"
@@ -25,14 +35,14 @@ const (
 	flagSessionTTL   = "session-ttl"
 )
 
-// MinerCmd returns the command for starting the HA Miner component.
+// MinerCmd returns the command for starting the Miner component.
 func MinerCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "miner",
-		Short: "Start the HA Miner (SMST builder and claim/proof submitter)",
-		Long: `Start the High-Availability Miner component.
+		Short: "Start the Miner (SMST builder and claim/proof submitter)",
+		Long: `Start the Miner component.
 
-The HA Miner consumes mined relays from Redis Streams and builds SMST trees.
+The relayers and miners of a deployment share one Redis. The Miner consumes mined relays from Redis Streams and builds SMST trees.
 It supports multiple suppliers and dynamically adds/removes them based on key changes.
 
 Configuration:
@@ -49,13 +59,14 @@ Features:
 - Prometheus metrics at /metrics
 
 Example:
-  pocketd relayminer ha miner --config /path/to/miner-config.yaml
+  pocket-relay-miner miner --config /path/to/miner.yaml
 
 `,
 		RunE: runHAMiner,
 	}
 
 	cmd.Flags().String(flagMinerConfig, "", "Path to miner config YAML file (required)")
+	cmd.Flags().Bool(flagStrictConfig, false, "Refuse to start when the config carries keys this binary does not understand (default: warn and start)")
 
 	// Redis flags (can override config)
 	cmd.Flags().String(flagRedisURL, "", "Redis connection URL (overrides config)")
@@ -94,6 +105,34 @@ Example:
 			if err := validateMinerConfig(config); err != nil {
 				return fmt.Errorf("config is INVALID: %w", err)
 			}
+
+			// Validating IS this command's job, so a key the miner does not
+			// understand is a failure here, with no flag involved. The serving
+			// binary makes the friendlier choice (warn and start, unless
+			// --strict-config); this is the door an operator walks through
+			// deliberately, before the rollout, to be told everything at once.
+			//
+			// Returned rather than printed: cobra renders it and sets a non-zero
+			// exit, which is what a pipeline reads.
+			if unknown := config.Warnings(); len(unknown) > 0 {
+				return fmt.Errorf(
+					"config is INVALID: %d key(s) this miner does not understand:\n  %s",
+					len(unknown), strings.Join(unknown, "\n  "))
+			}
+
+			// Not a failure and deliberately NOT part of Warnings(), which exits
+			// non-zero: the config is fine, the ENVIRONMENT is degraded, and a
+			// config check should not go red for that. Reported because this
+			// command's job is pre-flight -- staying silent would hand back a
+			// green for a deployment whose process identity will fall back.
+			//
+			// The limit, so nobody reads this as a guarantee: run on a laptop,
+			// this reproduces the laptop's hostname, not the pod's. It catches
+			// the case where the host cannot be read HERE, not there.
+			if miner.ProcessIdentityUsedFallback() {
+				fmt.Printf("NOTE: hostname unavailable here; process identity would fall back to a random discriminator\n")
+			}
+
 			configPath, _ := cmd.Flags().GetString(flagMinerConfig)
 			fmt.Printf("config OK: %s would start\n", configPath)
 			return nil
@@ -123,6 +162,31 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 
 	// Set up logger from config
 	logger := logging.NewLoggerFromConfig(config.Logging)
+	memlimit.Apply(logger)
+
+	// Keys the file carries that this binary does not understand.
+	//
+	// Warn and start, by default and on purpose: the ConfigMap and the binary
+	// roll out separately, so a new binary landing beside an older config is the
+	// NORMAL case of a rolling deploy, not an anomaly. Refusing to boot there
+	// converts a stale key into an outage. Loading a config is a state change,
+	// not a per-request event, so Warn is the right level.
+	//
+	// The miner had no channel for this at all until now, which is why the
+	// retired top-level hot_reload_enabled had to be a hard boot failure: with
+	// only "fail" and "say nothing" on offer, failing was correct. It now has
+	// the same three doors as the relayer.
+	unknownConfigKeys := config.Warnings()
+	for _, w := range unknownConfigKeys {
+		logger.Warn().Msg(w)
+	}
+	if len(unknownConfigKeys) > 0 {
+		if strict, _ := cmd.Flags().GetBool(flagStrictConfig); strict {
+			return fmt.Errorf(
+				"--strict-config: refusing to start, %d key(s) this miner does not understand (listed above)",
+				len(unknownConfigKeys))
+		}
+	}
 
 	// Validate configuration before starting components
 	if err := validateMinerConfig(config); err != nil {
@@ -149,7 +213,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		if err := obsServer.Start(ctx); err != nil {
 			return fmt.Errorf("failed to start observability server: %w", err)
 		}
-		defer func() { _ = obsServer.Stop() }()
+		defer func() { _ = obsServer.Stop() }() //nolint:errcheck // Stop logs every shutdown failure at Error before returning the last one; this deferred caller has nobody to hand it to
 		logger.Info().Str("addr", config.Metrics.Addr).Msg("observability server started")
 
 		// Start runtime metrics collector (not started automatically when using custom registry)
@@ -190,6 +254,34 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Str("consumer_name", config.Redis.ConsumerName).
 		Msg("connected to Redis")
 
+	// Redis pool statistics. Registered HERE and not in NewClient: fifteen test
+	// files and the redis CLI build clients, and a repeated MustRegister panics.
+	// The collector is also the registry of pools, so a client per supplier can
+	// be added and removed as suppliers are adopted and released.
+	//
+	// The miner is where this is most needed: checkPoolSize only WARNS about a
+	// short pool, once, at startup -- and that warning sat in Loki through a
+	// whole load run with nobody reading it.
+	// See the relayer for why this is a hook and not go-redis's own wait
+	// callback: the callback has the same survivorship bias as the pool's
+	// counters, and a hook sits outside the retry loop so it sees the whole cost.
+	redisClient.AddHook(redistransport.NewCommandLatencyHook("miner"))
+
+	// Whether Redis can take writes, answered once for the whole miner; the same
+	// component the relayer uses.
+	storeHealth := redistransport.NewStoreHealth(logger, redisClient.UniversalClient, "miner", redistransport.StoreGateIngestion)
+	redisClient.AddHook(storeHealth.Hook())
+	// A Redis with no memory limit, or one that evicts, is refused here: the
+	// miner would serve relays it cannot claim, and find out at the settlement.
+	if err := storeHealth.Start(ctx); err != nil {
+		return fmt.Errorf("redis is not configured for this miner: %w", err)
+	}
+	miner.RecordStoreMemoryOnClose(ctx, logger, redisClient, storeHealth)
+
+	redisPools := redistransport.NewPoolCollector("miner")
+	redisPools.Add("shared", redisClient)
+	observability.SharedRegistry.MustRegister(redisPools)
+
 	// Set readiness check to verify Redis connectivity via PING
 	if obsServer != nil {
 		obsServer.SetReadinessCheck(func(ctx context.Context) error {
@@ -223,9 +315,22 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		Int("count", len(keyManager.ListSuppliers())).
 		Msg("loaded supplier keys")
 
-	// Generate unique instance ID for global leader election
-	hostname, _ := os.Hostname()
-	instanceID := fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	// The leader-lock value and the Redis consumer name are the SAME identity,
+	// computed once in miner.ProcessIdentity(). The hostname used to be read
+	// here with its error discarded, which mattered because the renew script is
+	// "extend only if the value is still mine": two replicas with equal values
+	// renew against each other's key and neither learns it lost the lease.
+	instanceID := miner.ProcessIdentity()
+	if miner.ProcessIdentityUsedFallback() {
+		// Warn, not Error: it happens once at startup and the process is
+		// correct afterwards -- the random fallback is what makes the
+		// degradation safe. It is reported because a degradation that leaves no
+		// trace is one nobody can act on; the identity itself carries the
+		// marker, this says why.
+		logger.Warn().
+			Str("instance_id", instanceID).
+			Msg("hostname unavailable: process identity fell back to a random discriminator")
+	}
 
 	// Create global leader elector FIRST to determine replica status before other components start
 	leaderConfig := leader.GlobalLeaderElectorConfig{
@@ -274,6 +379,7 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 	supplierWorker := miner.NewSupplierWorker(miner.SupplierWorkerConfig{
 		Logger:           logger,
 		RedisClient:      redisClient,
+		StoreHealth:      storeHealth,
 		KeyManager:       keyManager,
 		Config:           config,
 		QueryNodeRPCUrl:  config.PocketNode.QueryNodeRPCUrl,
@@ -286,8 +392,26 @@ func runHAMiner(cmd *cobra.Command, _ []string) (err error) {
 		return fmt.Errorf("failed to start supplier worker: %w", err)
 	}
 	defer func() {
-		if closeErr := supplierWorker.Close(); closeErr != nil {
-			logger.Error().Err(closeErr).Msg("failed to close supplier worker")
+		// Bounded, because Close() now quiesces: it waits for every in-flight
+		// broadcast before the transaction connection goes. That wait is what
+		// keeps a claim from being cut off mid-flight, and it is also what
+		// makes an unbounded shutdown dangerous -- if the supervisor's SIGKILL
+		// arrives first, the broadcast Close() was protecting is lost anyway.
+		// The relayer already bounds its own shutdown; this mirrors it.
+		done := make(chan error, 1)
+		go logging.RecoverGoRoutine(logger, "miner_shutdown", func(context.Context) {
+			done <- supplierWorker.Close()
+		})(context.Background())
+
+		select {
+		case closeErr := <-done:
+			if closeErr != nil {
+				logger.Error().Err(closeErr).Msg("failed to close supplier worker")
+			}
+		case <-time.After(minerShutdownTimeout):
+			logger.Error().
+				Dur("timeout", minerShutdownTimeout).
+				Msg("supplier worker did not shut down in time; in-flight transactions may be lost")
 		}
 	}()
 

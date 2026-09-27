@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// The KeyBuilder STRONG RULE (CLAUDE.md): every Redis key and pub/sub channel
+// The KeyBuilder STRONG RULE (CONTRIBUTING.md): every Redis key and pub/sub channel
 // is built through transport/redis/namespace.go. Two shapes reintroduce
 // hand-built keys and both already caused real bugs (two caches listening on
 // different channels; a meter whose writer and reader disagreed on segments):

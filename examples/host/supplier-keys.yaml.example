@@ -1,0 +1,8 @@
+# Supplier signing keys for keys.keys_file. Install as
+# /etc/pocket-relay-miner/supplier-keys.yaml, mode 0600, owned by the
+# pocket-relay-miner user. Never commit the real file.
+#
+# Format: a `keys:` list of hex-encoded secp256k1 private keys (64 hex
+# characters, optional 0x prefix). The supplier address is derived from each key.
+keys:
+  - "REPLACE_WITH_YOUR_64_HEX_CHARACTER_SUPPLIER_PRIVATE_KEY"

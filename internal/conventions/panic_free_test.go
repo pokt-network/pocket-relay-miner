@@ -25,8 +25,8 @@ func panicCalls(f *ast.File, fset *token.FileSet) []string {
 	return hits
 }
 
-// TestNoPanicInProductionCode enforces CLAUDE.md: "Never use panic() in
-// production code paths". Zero exemptions today (measured 2026-08-19: the
+// TestNoPanicInProductionCode enforces CONTRIBUTING.md: "Never `panic()` in
+// production code". Zero exemptions today (measured 2026-08-19: the
 // only three panic calls in the tree are in _test.go files, which this walk
 // does not visit).
 func TestNoPanicInProductionCode(t *testing.T) {
@@ -39,7 +39,7 @@ func TestNoPanicInProductionCode(t *testing.T) {
 		}
 	}
 	if len(violations) > 0 {
-		t.Fatalf("panic() in production code (CLAUDE.md forbids it — return an error instead):\n%s",
+		t.Fatalf("panic() in production code (CONTRIBUTING.md forbids it — return an error instead):\n%s",
 			joinLines(violations))
 	}
 }

@@ -93,13 +93,19 @@ jobs:
   test:
     name: Test
     runs-on: ubuntu-latest
+    env:
+      # The runner is discarded after the job, and every container with it, so
+      # the testcontainers reaper protects nothing here; waiting for it to
+      # report ready failed a run on its own. Off CI it stays required
+      # (internal/testredis/exclusive.go).
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     services:
       # Real Redis, because miniredis is not Redis where it matters. The
       # XREADGROUP BLOCK semantics that hung shutdown behave differently in the
       # fake, which is exactly why nothing caught that bug: tests that assert on
       # blocking, PEL ageing or eviction have to run against the real server.
       redis:
-        image: redis:8-alpine
+        image: redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-
@@ -139,7 +145,7 @@ jobs:
         env:
           CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
 
-  # CLAUDE.md calls the race detector Rule #1 and says it cannot be broken.
+  # CONTRIBUTING.md calls the race detector Rule #1 and says it cannot be broken.
   # Until this job existed the rule was declared but never executed here: `make
   # test` and `make test-coverage` do not pass -race, and the only target that
   # did (`test_miner`) covered ./miner/... alone and was never invoked by CI.
@@ -150,13 +156,19 @@ jobs:
   race:
     name: Race Detector
     runs-on: ubuntu-latest
+    env:
+      # The runner is discarded after the job, and every container with it, so
+      # the testcontainers reaper protects nothing here; waiting for it to
+      # report ready failed a run on its own. Off CI it stays required
+      # (internal/testredis/exclusive.go).
+      TESTCONTAINERS_RYUK_DISABLED: "true"
     services:
       # Real Redis, because miniredis is not Redis where it matters. The
       # XREADGROUP BLOCK semantics that hung shutdown behave differently in the
       # fake, which is exactly why nothing caught that bug: tests that assert on
       # blocking, PEL ageing or eviction have to run against the real server.
       redis:
-        image: redis:8-alpine
+        image: redis:8.10.1-alpine
         ports:
           - 6379:6379
         options: >-

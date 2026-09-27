@@ -40,7 +40,7 @@
 # Payload selection:
 #   The default `light` preset sends a minimal `eth_blockNumber`-shaped
 #   request (~70 B). That's fine for "does the backend respond?" but it
-#   wildly underestimates real PATH traffic for chains where batch calls
+#   wildly underestimates real gateway traffic for chains where batch calls
 #   and heavy methods dominate. In production, batch-heavy chains routinely
 #   observe p95 request bodies in the multi-KB range — orders of magnitude
 #   over the light payload.
@@ -57,7 +57,7 @@
 # `optimal` and `sweep-optimal` find the **best** concurrency: the highest
 # RPS where p99 is still ≤ MAX_P99_MS (default 200 ms). That's the value
 # you'd want to set as the per-service pool cap — past that point the
-# backend gets more RPS but PATH penalises latency, so net revenue
+# backend gets more RPS but the gateway penalises latency, so net revenue
 # probably drops.
 #
 # Model: we don't ask for a target RPS — we tell hey "send N requests with
@@ -118,7 +118,7 @@ RAMP_CONNS="${RAMP_CONNS:-10 50 100 250 500 1000}"
 FAIL_ON_P99_MS="${FAIL_ON_P99_MS:-2000}"
 FAIL_ON_SUCCESS_PCT="${FAIL_ON_SUCCESS_PCT:-98}"
 # Maximum acceptable p99 (ms) for the `optimal` finder. Above this we
-# assume PATH's quality router would penalise the supplier and any
+# assume the gateway's quality router would penalise the supplier and any
 # extra RPS isn't worth chasing.
 MAX_P99_MS="${MAX_P99_MS:-200}"
 

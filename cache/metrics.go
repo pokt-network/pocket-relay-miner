@@ -136,6 +136,20 @@ var (
 		},
 	)
 
+	// blockEventsIgnored counts block events the RedisBlockClientAdapter did not
+	// take as its current height because they were not above it: "repeated" is
+	// the same height delivered again, "rewound" a lower height published after a
+	// higher one.
+	blockEventsIgnored = observability.SharedFactory.NewCounterVec(
+		prometheus.CounterOpts{
+			Namespace: metricsNamespace,
+			Subsystem: metricsSubsystem,
+			Name:      "block_events_ignored_total",
+			Help:      "Block events not taken as the current height because they were not above it, by reason (repeated, rewound)",
+		},
+		[]string{"reason"},
+	)
+
 	currentBlockHeight = observability.SharedFactory.NewGauge(
 		prometheus.GaugeOpts{
 			Namespace: metricsNamespace,

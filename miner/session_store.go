@@ -61,7 +61,12 @@ const (
 	// SessionStateProbabilisticProved means proof was not required and the claim will be settled by protocol.
 	SessionStateProbabilisticProved SessionState = "probabilistic_proved"
 
-	// SessionStateProofWindowClosed means the proof window closed before the proof was submitted.
+	// SessionStateProofWindowClosed means the proof window closed with no proof
+	// transaction ever submitted for this session -- ProofTxHash is empty. A
+	// session whose proof WAS submitted ends in `proved`, even when the callback
+	// that normally writes it never ran. This comment used to say "before the
+	// proof was submitted" while nothing checked that, and sessions whose proof
+	// was already on chain landed here.
 	SessionStateProofWindowClosed SessionState = "proof_window_closed"
 
 	// SessionStateProofTxError means the proof transaction failed (RPC error, gas, etc).
@@ -84,6 +89,31 @@ func (s SessionState) IsTerminal() bool {
 		return false
 	}
 }
+
+// HoldsClaimOnChain reports whether the session is at or past `claimed`: its
+// claim was accepted, whatever happened to the proof after it. A claim-phase
+// failure (claim_window_closed, claim_tx_error) must never be written over such
+// a state -- see ErrClaimAlreadyOnChain. luaHoldsClaimOnChain is its Lua twin.
+func (s SessionState) HoldsClaimOnChain() bool {
+	switch s {
+	case SessionStateClaimed,
+		SessionStateProving,
+		SessionStateProved,
+		SessionStateProbabilisticProved,
+		SessionStateProofWindowClosed,
+		SessionStateProofTxError:
+		return true
+	default:
+		return false
+	}
+}
+
+// ErrClaimAlreadyOnChain is UpdateState refusing a claim-phase failure over a
+// session that already holds its claim. The lifecycle can book a session
+// claim_window_closed on a negative chain read while the inclusion reconciler
+// books the same session claimed on a positive one; whichever lands second must
+// not undo the claim, because the failure deletes the session's tree.
+var ErrClaimAlreadyOnChain = errors.New("session already holds its claim on chain")
 
 // IsSuccess returns true if the state represents a successful terminal outcome.
 func (s SessionState) IsSuccess() bool {
@@ -185,6 +215,15 @@ type SessionStore interface {
 	// UpdateState atomically updates the state of a session.
 	UpdateState(ctx context.Context, sessionID string, newState SessionState) error
 
+	// ReactivateClaimed atomically returns a session to SessionStateClaimed
+	// after the chain was observed to hold its claim, filling the claimed root
+	// hash and (when known) the claim tx hash in the same write.
+	//
+	// Returns (true, nil) when this caller performed the flip, (false, nil)
+	// when the session was already at or past `claimed` and nothing was
+	// written, and (false, err) on Redis failure.
+	ReactivateClaimed(ctx context.Context, sessionID string, claimedRootHash []byte, claimTxHash string) (bool, error)
+
 	// IncrementRelayCount atomically increments the relay count and compute units.
 	IncrementRelayCount(ctx context.Context, sessionID string, computeUnits uint64) error
 
@@ -194,7 +233,6 @@ type SessionStore interface {
 
 // SessionStoreConfig contains configuration for the session store.
 type SessionStoreConfig struct {
-
 	// SupplierAddress is the supplier this store is for.
 	SupplierAddress string
 
@@ -599,7 +637,10 @@ func (s *RedisSessionStore) CreateIfAbsent(ctx context.Context, snapshot *Sessio
 func (s *RedisSessionStore) getHash(ctx context.Context, key string) (*SessionSnapshot, error) {
 	fields, err := s.redisClient.HGetAll(ctx, key).Result()
 	if err != nil {
-		return nil, fmt.Errorf("failed to hgetall session snapshot: %w", err)
+		// The key is in the message on purpose: without the TYPE probe that
+		// used to run first, a bare WRONGTYPE from go-redis no longer says
+		// which key was the wrong type, and that is what an operator needs.
+		return nil, fmt.Errorf("failed to hgetall session snapshot %s: %w", key, err)
 	}
 	return decodeSnapshot(fields)
 }
@@ -614,7 +655,7 @@ func (s *RedisSessionStore) getLegacyJSON(ctx context.Context, key string) (*Ses
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("failed to get legacy session snapshot: %w", err)
+		return nil, fmt.Errorf("failed to get legacy session snapshot %s: %w", key, err)
 	}
 	var snapshot SessionSnapshot
 	if err := json.Unmarshal(data, &snapshot); err != nil {
@@ -627,25 +668,33 @@ func (s *RedisSessionStore) getLegacyJSON(ctx context.Context, key string) (*Ses
 // both the new Hash layout and the legacy JSON string layout during rolling
 // upgrade (Option B in HANDOFF-WAVE-3-HINCRBY.md). Remove the legacy branch
 // in a follow-up PR after breeze has cycled through one session window.
+//
+// ONE round trip, not two. This used to ask TYPE first and then read whatever
+// the type said. It runs once per relay (supplier_worker.go), on a consumer
+// that handles its supplier's relays ONE AT A TIME (the per-supplier consume
+// loop in supplier_manager.go), so a supplier's ceiling is roughly its relay
+// latency inverted -- every trip taken off this path raises it. Measured under
+// load on 2026-09-11: of the miner goroutines parked on a Redis command inside
+// the relay path, TYPE was between a third and a half of them.
+//
+// HGETALL carries the "key does not exist" case by itself: it answers with an
+// empty map rather than an error, and decodeSnapshot returns (nil, nil) for an
+// empty map. So only a legacy STRING key costs a second trip.
 func (s *RedisSessionStore) Get(ctx context.Context, sessionID string) (*SessionSnapshot, error) {
 	key := s.sessionKey(sessionID)
 
-	keyType, err := s.redisClient.Type(ctx, key).Result()
-	if err != nil {
-		return nil, fmt.Errorf("failed to check session key type: %w", err)
+	snapshot, err := s.getHash(ctx, key)
+	if err == nil {
+		return snapshot, nil
 	}
-
-	switch keyType {
-	case "none":
-		return nil, nil
-	case "hash":
-		return s.getHash(ctx, key)
-	case "string":
-		// Legacy JSON blob, written by pre-Wave-3 miners.
-		return s.getLegacyJSON(ctx, key)
-	default:
-		return nil, fmt.Errorf("unexpected redis type for session key %s: %s", key, keyType)
+	// ONLY a WRONGTYPE means "this key holds the legacy JSON string". Anything
+	// else -- a dead connection, a read timeout, a pool timeout -- must not be
+	// retried as a legacy read: that turns one failed trip into two and reports
+	// the second error, hiding the first.
+	if !isWrongTypeErr(err) {
+		return nil, err
 	}
+	return s.getLegacyJSON(ctx, key)
 }
 
 // GetBySupplier retrieves all sessions for a supplier.
@@ -743,6 +792,9 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		if strings.Contains(errMsg, "session not found") {
 			return fmt.Errorf("session not found: %s", sessionID)
 		}
+		if strings.Contains(errMsg, "claim already on chain") {
+			return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
+		}
 		if strings.Contains(errMsg, "legacy key") {
 			// Legacy JSON string key — fall back to Get→Save migration path
 			snapshot, getErr := s.Get(ctx, sessionID)
@@ -751,6 +803,9 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 			}
 			if snapshot == nil {
 				return fmt.Errorf("session not found: %s", sessionID)
+			}
+			if (newState == SessionStateClaimWindowClosed || newState == SessionStateClaimTxError) && snapshot.State.HoldsClaimOnChain() {
+				return fmt.Errorf("%w: %s to %s", ErrClaimAlreadyOnChain, sessionID, newState)
 			}
 			snapshot.State = newState
 			return s.Save(ctx, snapshot)
@@ -763,18 +818,7 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		return nil
 	}
 
-	// Update state indexes (add to new, remove from old)
-	pipe := s.redisClient.TxPipeline()
-	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)
-	pipe.Expire(ctx, s.stateIndexKey(newState), s.config.SessionTTL)
-	if oldState != "" {
-		pipe.SRem(ctx, s.stateIndexKey(oldState), sessionID)
-	}
-	if _, err := pipe.Exec(ctx); err != nil {
-		s.logger.Warn().Err(err).
-			Str("session_id", sessionID).
-			Msg("failed to update state indexes after state change")
-	}
+	s.reindexState(ctx, sessionID, oldState, newState)
 
 	s.logger.Debug().
 		Str("session_id", sessionID).
@@ -783,6 +827,76 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 		Msg("updated session state")
 
 	return nil
+}
+
+// reindexState moves a session between the per-state index sets after its
+// state changed. Best-effort: the hash is the source of truth and the index
+// is a lookup accelerator, so a failure here is logged, not returned.
+func (s *RedisSessionStore) reindexState(ctx context.Context, sessionID string, oldState, newState SessionState) {
+	pipe := s.redisClient.TxPipeline()
+	pipe.SAdd(ctx, s.stateIndexKey(newState), sessionID)
+	pipe.Expire(ctx, s.stateIndexKey(newState), s.config.SessionTTL)
+	if oldState != "" && oldState != newState {
+		pipe.SRem(ctx, s.stateIndexKey(oldState), sessionID)
+	}
+	if _, err := pipe.Exec(ctx); err != nil {
+		s.logger.Warn().Err(err).
+			Str("session_id", sessionID).
+			Msg("failed to update state indexes after state change")
+	}
+}
+
+// ReactivateClaimed implements SessionStore. See the interface for the
+// contract and reactivateClaimedScript for the guard.
+func (s *RedisSessionStore) ReactivateClaimed(
+	ctx context.Context,
+	sessionID string,
+	claimedRootHash []byte,
+	claimTxHash string,
+) (bool, error) {
+	key := s.sessionKey(sessionID)
+	now := time.Now().Format(time.RFC3339Nano)
+
+	oldStateStr, err := reactivateClaimedScript.Run(
+		ctx,
+		s.redisClient,
+		[]string{key},
+		claimedRootHash,
+		claimTxHash,
+		now,
+		int64(s.config.SessionTTL.Seconds()),
+	).Text()
+	if err != nil {
+		errMsg := err.Error()
+		if strings.Contains(errMsg, "session not found") {
+			return false, fmt.Errorf("session not found: %s", sessionID)
+		}
+		if strings.Contains(errMsg, "legacy key") {
+			// Legacy JSON string keys predate the hash codec and cannot be
+			// guarded atomically. They are not worth a second, racy write
+			// path here: a session old enough to still be a legacy key is
+			// long past its proof window.
+			return false, fmt.Errorf("session %s is a legacy key; not reactivating", sessionID)
+		}
+		return false, fmt.Errorf("failed to reactivate session: %w", err)
+	}
+
+	if oldStateStr == "" {
+		// Already at or past `claimed` — another observation won, or the
+		// session advanced on its own. Nothing written, nothing to track.
+		return false, nil
+	}
+
+	s.reindexState(ctx, sessionID, SessionState(oldStateStr), SessionStateClaimed)
+
+	s.logger.Info().
+		Str("session_id", sessionID).
+		Str("old_state", oldStateStr).
+		Str("claim_tx_hash", claimTxHash).
+		Int("root_hash_len", len(claimedRootHash)).
+		Msg("session reactivated to claimed: the chain holds this claim")
+
+	return true, nil
 }
 
 // updateStateScript atomically reads the old state and sets the new state
@@ -794,8 +908,10 @@ func (s *RedisSessionStore) UpdateState(ctx context.Context, sessionID string, n
 // ARGV[2] = RFC3339Nano timestamp for last_updated_at
 // ARGV[3] = TTL seconds
 //
-// Returns: old state string, or error "session not found" / "legacy key"
-var updateStateScript = redis.NewScript(`
+// Returns: old state string, or error "session not found" / "legacy key" /
+// "claim already on chain" (a claim-phase failure over a session that holds its
+// claim: nothing is written, see ErrClaimAlreadyOnChain).
+var updateStateScript = redis.NewScript(luaHoldsClaimOnChain + `
 if redis.call('EXISTS', KEYS[1]) == 0 then
 	return redis.error_reply('session not found')
 end
@@ -804,10 +920,85 @@ if ktype ~= 'hash' then
 	return redis.error_reply('legacy key')
 end
 local old_state = redis.call('HGET', KEYS[1], 'state')
+if (ARGV[1] == 'claim_window_closed' or ARGV[1] == 'claim_tx_error') and holds_claim_on_chain(old_state) then
+	return redis.error_reply('claim already on chain')
+end
 redis.call('HSET', KEYS[1], 'state', ARGV[1], 'last_updated_at', ARGV[2])
 redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 return old_state
 `)
+
+// reactivateClaimedScript is the first-writer-wins gate behind
+// ReactivateClaimed. It flips a session to `claimed` and fills the claim
+// fields in ONE round-trip, refusing every state that is already at or past
+// `claimed`.
+//
+// The guard cannot be expressed as "not terminal": `claim_tx_error` IS
+// terminal and is precisely the state this must accept. What it rejects is a
+// state that would be a REGRESSION — re-observing an inclusion after the
+// session already advanced (the reconciler records the outcome and clears the
+// entry in two separate operations, so a failed clear re-delivers the same
+// observation on the next block).
+//
+// Writing the fields inside the same script is not a convenience: a later
+// Save() with an empty snapshot HDELs `claimed_root_hash`/`claim_tx_hash`
+// (see Save), so the fields must land atomically with the state, not after it.
+//
+// KEYS[1] = session hash key
+// ARGV[1] = claimed root hash (raw bytes)
+// ARGV[2] = claim tx hash, or "" to leave the field untouched
+// ARGV[3] = RFC3339Nano timestamp for last_updated_at
+// ARGV[4] = TTL seconds
+//
+// Returns: the OLD state when this caller flipped it, "" when refused, or an
+// error reply "session not found" / "legacy key".
+var reactivateClaimedScript = redis.NewScript(`
+if redis.call('EXISTS', KEYS[1]) == 0 then
+	return redis.error_reply('session not found')
+end
+local ktype = redis.call('TYPE', KEYS[1])['ok']
+if ktype ~= 'hash' then
+	return redis.error_reply('legacy key')
+end
+local old_state = redis.call('HGET', KEYS[1], 'state')
+if old_state ~= 'active' and old_state ~= 'claiming'
+	and old_state ~= 'claim_window_closed' and old_state ~= 'claim_tx_error'
+	and old_state ~= 'claim_missing' then
+	return ''
+end
+redis.call('HSET', KEYS[1], 'state', 'claimed',
+	'claimed_root_hash', ARGV[1], 'last_updated_at', ARGV[3])
+if ARGV[2] ~= '' then
+	redis.call('HSET', KEYS[1], 'claim_tx_hash', ARGV[2])
+end
+redis.call('EXPIRE', KEYS[1], tonumber(ARGV[4]))
+return old_state
+`)
+
+// luaHoldsClaimOnChain defines holds_claim_on_chain(state), the Lua twin of
+// SessionState.HoldsClaimOnChain(); TestLuaHoldsClaimOnChainMatchesGo fails if
+// the two diverge.
+const luaHoldsClaimOnChain = `
+local function holds_claim_on_chain(state)
+	return state == 'claimed' or state == 'proving' or state == 'proved'
+		or state == 'probabilistic_proved'
+		or state == 'proof_window_closed' or state == 'proof_tx_error'
+end
+`
+
+// luaIsTerminal defines is_terminal(state), the Lua twin of
+// SessionState.IsTerminal(), for every script that must refuse a terminal
+// session. One copy for all of them: a state added to IsTerminal() and missed
+// here would let a script count relays into a finished session.
+const luaIsTerminal = `
+local function is_terminal(state)
+	return state == 'proved' or state == 'probabilistic_proved'
+		or state == 'claim_window_closed' or state == 'claim_tx_error'
+		or state == 'claim_missing'
+		or state == 'proof_window_closed' or state == 'proof_tx_error'
+		or state == 'claim_skipped'
+end
+`
 
 // incrementRelayCountScript atomically increments relay_count and
 // total_compute_units on a session hash key, guarded by the terminal-state
@@ -824,19 +1015,15 @@ return old_state
 //	1 = session not found
 //	2 = session in terminal state
 //
-// Terminal states MUST match SessionState.IsTerminal() in Go. When adding
-// a new terminal state, update both places.
-var incrementRelayCountScript = redis.NewScript(`
+// The terminal check is luaIsTerminal, shared with relayBatchScript;
+// TestLuaIsTerminalMatchesIsTerminal fails if it and IsTerminal() diverge.
+var incrementRelayCountScript = redis.NewScript(luaIsTerminal + `
 if redis.call('EXISTS', KEYS[1]) == 0 then
 	return 1
 end
 
 local state = redis.call('HGET', KEYS[1], 'state')
-if state == 'proved' or state == 'probabilistic_proved'
-	or state == 'claim_window_closed' or state == 'claim_tx_error'
-	or state == 'claim_missing'
-	or state == 'proof_window_closed' or state == 'proof_tx_error'
-	or state == 'claim_skipped' then
+if is_terminal(state) then
 	return 2
 end
 

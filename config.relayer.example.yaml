@@ -1,86 +1,118 @@
-# Pocket RelayMiner Relayer Configuration Example
-# This file uses LOCALNET defaults - ready for local development with Tilt.
-# For PRODUCTION, see comments marked [PRODUCTION] for recommended values.
+# ==============================================================================
+# Pocket RelayMiner - Relayer Configuration Example
+# ==============================================================================
+# The relayer is the stateless proxy (JSON-RPC, WebSocket, gRPC, REST/SSE,
+# CometBFT). The miner has its own example: config.miner.example.yaml.
 #
-# The relayer is a stateless HTTP/WebSocket/gRPC/Streaming proxy
+# The values below are LOCALNET values, ready for local development with Tilt.
+# A comment starting with "Production:" gives the value to use in production.
+#
+# Every comment sits ABOVE the key it describes. A commented-out template is
+# enabled by deleting the leading "# " (hash and one space) from each of its
+# lines; a line that is still a comment after that single pass carries a
+# second "#" on purpose -- it is optional, and leaving it commented keeps it
+# unset.
+#
+# ------------------------------------------------------------------------------
+# Before you deploy (REQUIRED)
+# ------------------------------------------------------------------------------
+# CPU and memory budget: set GOMAXPROCS and GOMEMLIMIT in the process
+# environment, or run it in a container with CPU and memory limits (the process
+# reads the container's limits at startup). Without either, the relayer sizes
+# its worker pools, its Redis connection pool and its validation-queue memory
+# against the WHOLE HOST, not against what it is allowed to use.
+#
+# Redis: run Redis 8.10 or newer, with maxmemory set and maxmemory-policy
+# noeviction. The relayer refuses to start against a Redis older than 8.10, with
+# no memory limit or with an evicting policy. config.redis.example.conf is a
+# starting point.
 
-# HTTP server listen address
+# ==============================================================================
+# HTTP Server
+# ==============================================================================
+# Listen address for relay traffic.
 listen_addr: "0.0.0.0:8080"
 
-# Redis connection (required for publishing relays to miners)
+# ==============================================================================
+# Redis Configuration (REQUIRED)
+# ==============================================================================
 redis:
-  # Single Redis instance
+  # Connection URL. The scheme selects the client:
+  #   redis:// or rediss:// (TLS)  a single Redis
+  #   redis-sentinel://            Sentinel, e.g. "redis-sentinel://sentinel1:26379,sentinel2:26379/mymaster"
+  #   redis-cluster://             Cluster, e.g. "redis-cluster://node1:6379,node2:6379,node3:6379"
+  # A comma-separated host list under redis:// is NOT a cluster.
   url: "redis://localhost:6379"
 
-  # OR Redis Cluster (comment out url above, uncomment below)
-  # url: "redis://redis-node1:6379,redis-node2:6379,redis-node3:6379"
+  # Connection pool. Omit these to use the defaults.
+  #
+  # Default: sized from the relayer's worker pools, about 7.2 x GOMAXPROCS + 20.
+  # Set it only to override that.
+  # pool_size: 160
+  #
+  # Warm idle connections. Default: pool_size / 4.
+  # min_idle_conns: 40
+  #
+  # Seconds a caller waits for a pooled connection. Default: 6.
+  # pool_timeout_seconds: 6
+  #
+  # Close a connection idle for this many seconds. Default (unset or 0): 30
+  # minutes, the Redis client library's own default.
+  # conn_max_idle_time_seconds: 300
 
-  # Connection pool settings (2x go-redis defaults for production)
-  # Omit these to use defaults (auto-calculated based on CPU cores)
-  # pool_size: 320                   # Max connections (default: 20 × runtime.GOMAXPROCS)
-  # min_idle_conns: 80               # Warm idle connections (default: pool_size / 4)
-  # pool_timeout_seconds: 4          # Wait time for connection from pool
-  # conn_max_idle_time_seconds: 300  # Close idle connections after 5 minutes
+  # Batched relay publishing interval, in milliseconds. The batch is always on:
+  # mined relays are written with one MULTI/EXEC per interval. 0 or absent means
+  # the default, 1000. Any other value must be between 500 and 10000: below that
+  # a batch stops being a batch, and above it the delay a served relay waits
+  # before it is written starts to matter against the chain's block time.
+  # batch_publish_interval_ms: 1000
 
-  # Namespace configuration (optional)
-  # Only the base prefix is configurable. Every segment below it is fixed in
-  # code, so miner and relayer cannot drift apart on the key layout, and no
-  # family's SCAN pattern can be made to match another family's keys.
+  # How many MiB of mined relays the batch may hold before the relayer stops
+  # admitting new relays (they are refused, never dropped once queued). 0 or
+  # absent means the default, 512. Any other value must be between 64 and 8192.
+  # batch_max_queued_mib: 512
+
+  # Key namespace (optional). Only the base prefix is configurable. Every
+  # segment below it is fixed, so miner and relayer cannot drift apart on the
+  # key layout, and no family's SCAN pattern can match another family's keys.
   # Two base prefixes are two disjoint keyspaces: one Redis, several fleets.
-  # namespace:
-  #   base_prefix: "ha"                # Root prefix for all keys (default: "ha")
+  # It must not contain ':', whitespace, or the characters * ? [ ].
+  # MUST be the same in the miner and every relayer of one fleet.
   #
   # The per-family prefixes (cache_prefix, events_prefix, streams_prefix,
   # miner_prefix, supplier_prefix, meter_prefix, params_prefix,
   # consumer_group_prefix) are RETIRED. Setting one to anything other than its
-  # historical value now fails at startup instead of silently relocating that
-  # data — see docs/REDIS.md.
+  # historical value fails at startup instead of silently relocating that
+  # data -- see docs/REDIS.md.
+  # namespace:
+  #   # Root prefix for all keys. Default: "ha".
+  #   base_prefix: "ha"
 
-# Pocket blockchain connection
+# ==============================================================================
+# Pocket Blockchain Connection (REQUIRED)
+# ==============================================================================
+# The relayer receives block events from the miner through Redis. These
+# endpoints serve chain queries (sessions, applications, services) and the
+# startup health checks.
 pocket_node:
-  # RPC endpoint for block subscriptions and queries (localnet defaults)
+  # CometBFT RPC endpoint. Production: your full node, e.g. "https://your-full-node:26657".
   query_node_rpc_url: "http://localhost:26657"
-  # [PRODUCTION] query_node_rpc_url: "https://rpc.testnet.pokt.network"
 
-  # gRPC endpoint for queries (sessions, applications, services)
+  # gRPC endpoint. Production: your full node, e.g. "your-full-node:9090".
   query_node_grpc_url: "localhost:9090"
-  # [PRODUCTION] query_node_grpc_url: "grpc.testnet.pokt.network:443"
 
-  # gRPC settings
-  grpc_insecure: true  # Disable TLS for gRPC (localnet)
-  # [PRODUCTION] grpc_insecure: false
+  # Disable TLS for gRPC. Localnet: true. Production: false.
+  grpc_insecure: true
 
-  # NOTE: Relayers always use Redis pub/sub for block events (synchronized with miner).
-  # RPC/gRPC endpoints are used for health checks and fallback queries only.
-
-# Supplier signing keys (required for signing relay responses)
+# ==============================================================================
+# Supplier Keys Configuration (REQUIRED)
+# ==============================================================================
+# Full reference: docs/SUPPLIER_KEYS.md
+#
+# keys_file and keyring are MUTUALLY EXCLUSIVE -- setting both is a startup
+# error. Configure exactly one, so nothing has to decide at runtime which
+# source wins a duplicate or what it means when one of them is unreadable.
 keys:
-  # Full reference: docs/SUPPLIER_KEYS.md
-  # keys_file and keyring are MUTUALLY EXCLUSIVE -- setting both is a startup
-  # error. Configure exactly one, so nothing has to decide at runtime which
-  # source wins a duplicate or what it means when one of them is unreadable.
-
-  # Option 1: Load from YAML file (simple, recommended for testing)
-  keys_file: "/keys/supplier-keys.yaml"
-
-  # Option 2: Use Cosmos SDK keyring (recommended for production)
-  # keyring:
-  #   backend: "file"  # file (passphrase, piped in) or test (fixed password).
-  #                    # "os" and "memory" are refused at startup -- see
-  #                    # keys.ValidateKeyringBackend for why.
-  #   dir: "/path/to/keyring"
-  #   app_name: "pocket"
-  #   # For backend "file", say WHERE the passphrase is -- never the passphrase
-  #   # itself, so the config stays non-sensitive:
-  #   passphrase_file: "/secrets/keyring-passphrase"   # a mounted secret
-  #   # passphrase_env: "KEYRING_PASSPHRASE"           # or the NAME of an env var
-  #   # With neither, it is read from stdin:
-  #   #   echo "$SECRET" | pocket-relay-miner relayer --config config.yaml
-  #   # which suits a terminal or a pipe, but not a container (stdin is /dev/null).
-  #   key_names:  # Optional: specific keys to load
-  #     - "supplier1"
-  #     - "supplier2"
-
   # Reload signing keys while the relayer runs, so adding or pulling a key takes
   # effect on a RUNNING relayer instead of only on the next restart.
   # Default: true.
@@ -92,20 +124,53 @@ keys:
   # which sources are watched and which rely on the timer at startup.
   hot_reload_enabled: true
 
-# Service configurations (map of service_id -> config)
-# Genesis defines 4 services: develop-http, develop-websocket, develop-stream, develop-grpc
-# Each has 15 suppliers staked for it.
+  # Option 1: a YAML file of hex-encoded private keys (simple; suits testing).
+  keys_file: "/keys/supplier-keys.yaml"
+
+  # Option 2: a Cosmos SDK keyring (recommended for production). Remove
+  # keys_file above when you enable this.
+  # keyring:
+  #   # "file" (passphrase-protected) or "test" (fixed password). "os" and
+  #   # "memory" are refused at startup: "memory" starts empty and nothing
+  #   # writes to it, and "os" depends on whether a system keychain is
+  #   # reachable.
+  #   backend: "file"
+  #   # Directory CONTAINING the keyring; the file backend reads <dir>/keyring-file.
+  #   dir: "/keys/keyring"
+  #   app_name: "pocket"
+  #   # For backend "file", say WHERE the passphrase is -- never the passphrase
+  #   # itself, so the config stays non-sensitive. A mounted secret:
+  #   passphrase_file: "/secrets/keyring-passphrase"
+  #   # Or the NAME of an environment variable (mutually exclusive with
+  #   # passphrase_file):
+  #   ## passphrase_env: "KEYRING_PASSPHRASE"
+  #   # With neither, it is read from stdin:
+  #   #   echo "$SECRET" | pocket-relay-miner relayer --config config.yaml
+  #   # which suits a terminal or a pipe, but not a container (stdin is /dev/null).
+  #   # Optional: load only these keys (empty = load all).
+  #   key_names:
+  #     - "supplier1"
+  #     - "supplier2"
+
+# ==============================================================================
+# Services (REQUIRED)
+# ==============================================================================
+# Map of service_id -> service configuration. The localnet genesis stakes 15
+# suppliers on each develop-* service.
 services:
-  # HTTP/JSON-RPC service (localnet) - multi-backend example
+  # HTTP/JSON-RPC service - multi-backend example.
   develop-http:
     validation_mode: eager
     timeout_profile: fast
-    # pool_profile selects a per-service HTTP connection pool from the
-    # pool_profiles block below. Options: low / medium / high, or a custom
-    # name. Omit to inherit the global http_transport defaults.
+    # Selects a per-service HTTP connection pool from pool_profiles below
+    # (low / medium / high, or a name you define). Omit it to use the global
+    # http_transport settings.
     pool_profile: low
-    max_body_size_bytes: 10485760  # 10MB
-    default_backend: jsonrpc  # Use jsonrpc for proper protocol labeling
+    # 10 MiB. Both body directions fall back to this; see the body size
+    # section below.
+    max_body_size_bytes: 10485760
+    # Backend used when a relay carries no Rpc-Type header. Default: jsonrpc.
+    default_backend: jsonrpc
     backends:
       # Backends are keyed by TRANSPORT TYPE. The key must be exactly one of:
       #   jsonrpc | rest | websocket | grpc | cometbft
@@ -116,36 +181,26 @@ services:
       #
       # Each backend is health-checked independently.
       jsonrpc:
-        load_balancing: round_robin  # first_healthy (default) or round_robin
+        # round_robin or first_healthy. Unset: round_robin with two or more
+        # urls, first_healthy with one.
+        load_balancing: round_robin
+        # url (one backend) and urls (a pool) are mutually exclusive. A urls
+        # entry is a plain URL or a {name, url} pair; the name is used in logs
+        # and metrics.
         urls:
           - "http://backend:8545"
           - name: backup
             url: "http://backend-2:8545"
-        # Optional headers/auth (shared across all backends in this pool):
-        # headers:
-        #   X-Custom-Header: "value"
-        # authentication:
-        #   bearer_token: "your-token"
+        # Retries of a failed backend request, 0 to 3. Default: 1.
+        # max_retries: 1
         #
-        # Active health checks (recommended for production):
-        # health_check:
-        #   enabled: true
-        #   endpoint: "/health"
-        #   interval_seconds: 10
-        #   timeout_seconds: 5
-        #   unhealthy_threshold: 5
-        #   healthy_threshold: 3
-        #   # Probe-only headers, merged over the pool headers above (probe wins
-        #   # on conflict). Use for a health-check token not sent on real relays:
-        #   headers:
-        #     X-Health-Token: "probe-only-secret"
-        #
-        # Recovery timeout: auto-recover circuit-breaker-tripped backends after N seconds.
-        # Prevents death spiral when all backends are unhealthy and no health checks are configured.
-        # Default: 30 seconds. Set to 0 to disable (requires active health checks for recovery).
+        # Seconds after which a backend tripped by the circuit breaker is
+        # tried again. Prevents a pool with no active health checks from
+        # staying down forever. Default: 30. 0 disables it, so only an active
+        # health check can bring a backend back.
         # recovery_timeout_seconds: 30
 
-  # WebSocket service (localnet)
+  # WebSocket service.
   develop-websocket:
     validation_mode: eager
     timeout_profile: fast
@@ -154,20 +209,19 @@ services:
     backends:
       websocket:
         url: "ws://backend:8545/ws"
-        # [PRODUCTION] url: "ws://eth-node:8545/ws"
 
-  # Streaming/SSE service (localnet)
+  # Streaming/SSE service.
   develop-stream:
     validation_mode: eager
-    timeout_profile: streaming  # 10 min timeout for streaming responses
+    # 10-minute request timeout, no response-header timeout.
+    timeout_profile: streaming
     max_body_size_bytes: 10485760
     default_backend: rest
     backends:
       rest:
         url: "http://backend:8545/stream/sse"
-        # [PRODUCTION] url: "http://eth-node:8545/stream/sse"
 
-  # gRPC service (localnet)
+  # gRPC service.
   develop-grpc:
     validation_mode: eager
     timeout_profile: fast
@@ -176,9 +230,8 @@ services:
     backends:
       grpc:
         url: "backend:50051"
-        # [PRODUCTION] url: "eth-node:50051"
 
-  # CometBFT service (localnet) — routes RPCType 5 to the validator's CometBFT RPC.
+  # CometBFT service: RPC type 5, routed to the validator's CometBFT RPC.
   # CometBFT RPC is JSON-RPC over HTTP, so the backend is a plain HTTP endpoint.
   develop-cometbft:
     validation_mode: eager
@@ -188,108 +241,206 @@ services:
     backends:
       cometbft:
         url: "http://validator:26657"
-        # [PRODUCTION] url: "http://cometbft-node:26657"
 
-  # Example: text-generation service with streaming profile
-  # This demonstrates using the "streaming" timeout profile for long-running LLM requests
-  # The profile defines request_timeout_seconds (600s) and response_header_timeout (0 for streaming)
+  # Template: a production JSON-RPC service with authentication, a JSON-RPC
+  # health check (for a backend with no /health endpoint), a path prefix, and
+  # its own body and validation-queue bounds.
+  # evm-chain:
+  #   validation_mode: optimistic
+  #   pool_profile: medium
+  #   # Per-service body bounds; each falls back to max_body_size_bytes, then
+  #   # to the root defaults.
+  #   max_request_body_size_bytes: 1048576
+  #   max_response_body_size_bytes: 10485760
+  #   # 0 or unset: default_validation_queue_max_mib. Otherwise 64 to 8192.
+  #   validation_queue_max_mib: 256
+  #   default_backend: jsonrpc
+  #   backends:
+  #     jsonrpc:
+  #       url: "https://evm-node.example.com"
+  #       # Path the backend expects on every request. It is prepended to a
+  #       # request path that does not already start with it, and it wins over
+  #       # any path in url/urls.
+  #       base_path: "/ext/bc/C/rpc"
+  #       # Headers sent on every request to this pool.
+  #       headers:
+  #         X-Custom-Header: "value"
+  #       # One of: bearer_token ("Authorization: Bearer <token>"),
+  #       # plain_token ("Authorization: <token>"), or username + password.
+  #       authentication:
+  #         bearer_token: "your-token"
+  #         ## plain_token: "your-token"
+  #         ## username: "user"
+  #         ## password: "secret"
+  #       # Active health checks (recommended for production).
+  #       health_check:
+  #         enabled: true
+  #         # Probe path. Optional when base_path is set: the probe then uses
+  #         # base_path.
+  #         endpoint: "/"
+  #         interval_seconds: 10
+  #         timeout_seconds: 5
+  #         unhealthy_threshold: 5
+  #         healthy_threshold: 3
+  #         # HTTP method. Default: GET. Use POST for a JSON-RPC probe.
+  #         method: "POST"
+  #         request_body: '{"jsonrpc":"2.0","method":"eth_blockNumber","params":[],"id":1}'
+  #         # Default: application/json when request_body starts with { or [.
+  #         content_type: "application/json"
+  #         # Substring the response body must contain. Unset: body not checked.
+  #         expected_body: '"result"'
+  #         # Accepted status codes. Unset: any 2xx.
+  #         expected_status: [200]
+  #         # Probe-only headers, merged over the pool headers above (probe
+  #         # wins on conflict). Use for a health-check token not sent on
+  #         # real relays.
+  #         headers:
+  #           X-Health-Token: "probe-only-secret"
+
+  # Template: a long-running LLM service on the "streaming" timeout profile
+  # (600s request timeout, no response-header timeout).
   # text-generation:
   #   validation_mode: eager
-  #   timeout_profile: streaming  # 10 min request timeout, no header timeout for streaming
+  #   timeout_profile: streaming
   #   backends:
   #     jsonrpc:
   #       url: "https://llm-backend.example.com"
   #       authentication:
   #         bearer_token: "your-api-key"
 
-  # Example: eth-mainnet service
-  # eth-mainnet:
+  # Template: a slow service on a custom timeout profile ("slow", defined in
+  # the timeout_profiles template below), with a WebSocket backend beside the
+  # JSON-RPC one.
+  # slow-chain:
   #   validation_mode: optimistic
+  #   timeout_profile: slow
   #   default_backend: jsonrpc
   #   backends:
   #     jsonrpc:
-  #       url: "https://mainnet.infura.io/v3/YOUR_PROJECT_ID"
-  #       authentication:
-  #         bearer_token: "YOUR_API_KEY"
+  #       url: "https://slow-chain.example.com"
   #     websocket:
-  #       url: "wss://mainnet.infura.io/ws/v3/YOUR_PROJECT_ID"
+  #       url: "wss://slow-chain.example.com/ws"
 
-  # Example: Solana service
-  # solana-mainnet:
-  #   validation_mode: eager
-  #   request_timeout_seconds: 60  # Solana can be slower
-  #   default_backend: jsonrpc
-  #   backends:
-  #     jsonrpc:
-  #       url: "https://api.mainnet-beta.solana.com"
-
-# Default validation mode (used when not specified per-service)
-# Options: "eager" | "optimistic"
+# ==============================================================================
+# Service Defaults
+# ==============================================================================
+# Validation mode for services that do not set one: "eager" validates the relay
+# before serving it, "optimistic" serves first and validates afterwards.
 default_validation_mode: optimistic
 
-# Default request timeout in seconds (used when not specified per-service)
+# Fallback request timeout, in seconds, for a service whose timeout profile
+# sets request_timeout_seconds to 0. It also takes part in sizing the relayer's
+# own HTTP server read timeout (the largest timeout of any service). The
+# timeout a service normally uses comes from its timeout profile.
 default_request_timeout_seconds: 30
 
-# Default max body size in bytes (used when not specified per-service)
-default_max_body_size_bytes: 10485760  # 10MB
+# Default max body size in bytes (10 MiB), used when a service sets none.
+default_max_body_size_bytes: 10485760
 
-# Metrics server (Prometheus)
-metrics:
-  enabled: true
-  addr: "0.0.0.0:9090"
+# The two directions can be set apart. Either key unset inherits
+# default_max_body_size_bytes above, so an existing config keeps its behaviour.
+#
+# They are not alike. A REQUEST body is held for the whole validation queue and
+# then again inside the SMST leaf until the claim -- roughly forty blocks -- so
+# it is what Redis is sized against. A RESPONSE is read, signed and dropped.
+#
+# Both accept a per-service override -- services.<id>.max_request_body_size_bytes
+# and services.<id>.max_response_body_size_bytes (see the evm-chain template) --
+# and both fall back to that service's max_body_size_bytes before reaching the
+# defaults below.
+#
+# One value per key, the same for every RPC type: a service allows what it
+# allows whether the relay arrives over JSON-RPC, REST, gRPC or a stream.
+#
+# The relayer logs both effective values and the key each came from at startup
+# ("body size limits in force"). If the key you wrote is not the one named
+# there, a more specific one is winning.
+#
+# HOW TO SIZE REDIS AGAINST THE REQUEST BOUND. A relay costs roughly 450 bytes
+# of Redis that never change (the tree's interior nodes, the field name -- a
+# digest in hex, so 96 bytes that cannot shrink -- and Redis's own per-entry
+# overhead) PLUS the request payload. Only the payload grows. Over the ~40
+# blocks a tree stays alive, a 12.8 GiB Redis therefore sustains roughly:
+#
+#   request payload    sustained rps
+#   1 KB                     ~3,900
+#   120 KB                      ~47
+#   1 MB                         ~5.5
+#   4 MB                         ~1.4
+#
+# Read those as orders of magnitude, not precise figures: more suppliers means
+# more trees and more interior nodes, and a deployment with many suppliers has
+# measured about 1.5x the per-relay cost.
+#
+# The rule: size Redis against (peak rps x average REQUEST size x 40 blocks).
+# Raising the request bound does not only admit bigger requests -- it lowers
+# the rps the same Redis can sustain, proportionally. Raising the RESPONSE
+# bound costs bandwidth and relayer memory, and no Redis at all.
+# default_max_request_body_size_bytes: 10485760
+# default_max_response_body_size_bytes: 10485760
 
-# Pprof profiling (for debugging, disable in production)
-pprof:
-  enabled: true  # Enabled by default for localnet debugging
-  addr: "0.0.0.0:6060"
-  # [PRODUCTION] enabled: false
-  # [PRODUCTION] addr: "localhost:6060"
+# How many MiB of request and response bodies EACH service's optimistic relays
+# may hold between being served and being validated. Applies to every service
+# that does not set its own validation_queue_max_mib.
+#
+# 0 MEANS THE DEFAULT (128), NOT UNLIMITED. Any other value must be between 64
+# and 8192. There is no way to switch this off: an unbounded validation queue
+# is what this bound exists to prevent.
+#
+# It is raised automatically when it is below what ONE relay of that service can
+# retain, and the relayer says so at startup instead of refusing to boot.
+#
+# The relayer also prints, at startup, the SUM of these bounds against the
+# memory it is allowed to use: with no global bound above them, that sum is the
+# ceiling the validation queues can reach together.
+# default_validation_queue_max_mib: 128
 
-# Health check endpoint
-health_check:
-  enabled: true
-  addr: "0.0.0.0:8081"
-
-# Relay meter (rate limiting based on app stakes)
+# ==============================================================================
+# Relay Meter
+# ==============================================================================
 relay_meter:
-  # Enable metering and rate limiting
-  enabled: true
-
-
-
-  # Cache TTL for all Redis data (streams, params, app stakes, meters)
-  # Redis TTL handles automatic expiration - no cleanup goroutines needed.
-  # Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
+  # TTL of the relay meter's per-session keys in Redis (the metering metadata,
+  # the consumed-stake counters and the active-session markers). Redis expiry
+  # cleans them up; no cleanup goroutine is needed. Default: 2h, which covers
+  # several session lifecycles at a 60s block time.
   cache_ttl: 2h
 
-# HTTP transport settings (connection pooling and timeouts for backend requests)
-# These settings optimize connection reuse and prevent resource exhaustion.
-# Defaults are tuned for 1000+ RPS - override based on your backend characteristics.
+# ==============================================================================
+# Backend HTTP Transport
+# ==============================================================================
+# Connection pooling and timeouts for requests to backends. The defaults are
+# sized for 1000+ RPS; override them for your backends. The values shown are
+# the defaults.
 http_transport:
-  # Connection pool limits (5x increased for high throughput)
-  max_idle_conns: 500  # Total idle connections across all backends (default: 500)
-  max_idle_conns_per_host: 100  # Idle connections per backend (default: 100)
-  max_conns_per_host: 500  # Total connections per backend to prevent port exhaustion (default: 500, 0 = unlimited)
-
-  # Connection timeout settings
-  idle_conn_timeout_seconds: 90  # How long to keep idle connections alive (default: 90)
-  dial_timeout_seconds: 5  # Timeout for establishing new connection (default: 5)
-  tls_handshake_timeout_seconds: 10  # Timeout for TLS handshake (default: 10)
-  response_header_timeout_seconds: 30  # Timeout waiting for response headers (default: 30)
-  expect_continue_timeout_seconds: 1  # Timeout for 100-continue response (default: 1)
-  tcp_keep_alive_seconds: 30  # TCP keepalive period for active connections (default: 30, 0 = disabled)
-
-  # Content handling
-  disable_compression: true  # Don't modify content encoding (required for relay protocol)
+  # Idle connections kept across all backends.
+  max_idle_conns: 500
+  # Idle connections kept per backend.
+  max_idle_conns_per_host: 100
+  # Connections per backend, active and idle. 0 = unlimited.
+  max_conns_per_host: 500
+  # Seconds an idle connection is kept alive.
+  idle_conn_timeout_seconds: 90
+  # Seconds to establish a new connection.
+  dial_timeout_seconds: 5
+  # Seconds for the TLS handshake.
+  tls_handshake_timeout_seconds: 10
+  # Seconds to wait for response headers.
+  response_header_timeout_seconds: 30
+  # Seconds to wait for a 100-continue response.
+  expect_continue_timeout_seconds: 1
+  # TCP keepalive period in seconds. 0 = disabled.
+  tcp_keep_alive_seconds: 30
+  # Leave the backend's content encoding untouched (required by the relay
+  # protocol, which signs the exact bytes).
+  disable_compression: true
 
 # ==============================================================================
-# Response Compression (gzip of signed relay responses)
+# Response Compression
 # ==============================================================================
-# Off by default. The relayer does NOT gzip the signed relay responses it
-# returns to the gateway unless this is explicitly enabled. gzip was shown
-# to consume ~9% of relayer CPU at 200 RPS on the Apr 14 2026 pprof profile
-# from breeze, so the default prioritises CPU over bandwidth. The gateway
-# still negotiates compression with downstream clients independently.
+# gzip of the signed relay responses the relayer returns to its caller. It is
+# off by default because gzip costs a measurable share of relayer CPU (in the
+# order of 10% at a few hundred RPS), so the default prioritises CPU over
+# bandwidth.
 #
 # When enabled, compression only actually runs when both:
 #   - the client sent `Accept-Encoding: gzip`
@@ -301,98 +452,146 @@ response_compression:
   min_size_bytes: 1024
 
 # ==============================================================================
-# HTTP Timeout Profiles (Advanced)
+# Timeout Profiles
 # ==============================================================================
-# Define timeout profiles for different service types.
-# Each profile defines request_timeout_seconds and HTTP client timeouts.
-# Services select a profile via the timeout_profile field.
-# Auto-populated with "fast" and "streaming" defaults if not specified.
+# A service selects one through its timeout_profile field (default: "fast").
+# "fast" and "streaming" are built in with the values below; a profile you
+# define is added to them, and redefining a built-in name replaces it. A
+# profile's unset dial and TLS timeouts fall back to http_transport.
 timeout_profiles:
-  # Fast profile for standard RPC services (default for all services)
+  # Standard RPC services.
   fast:
-    request_timeout_seconds: 30  # Overall request timeout (30s default)
-    response_header_timeout_seconds: 30  # Timeout waiting for response headers
-    dial_timeout_seconds: 5  # Timeout for establishing connection
-    tls_handshake_timeout_seconds: 10  # Timeout for TLS handshake
+    # Overall request timeout.
+    request_timeout_seconds: 30
+    # Seconds to wait for response headers.
+    response_header_timeout_seconds: 30
+    dial_timeout_seconds: 5
+    tls_handshake_timeout_seconds: 10
 
-  # Streaming profile for long-running services (LLMs, AI models)
+  # Long-running services (LLMs, streams).
   streaming:
-    request_timeout_seconds: 600  # 10 minute timeout for LLM completions
-    response_header_timeout_seconds: 0  # No header timeout for streaming responses
-    dial_timeout_seconds: 10  # Allow more time for connection
-    tls_handshake_timeout_seconds: 15  # Allow more time for TLS
+    request_timeout_seconds: 600
+    # 0 = no response-header timeout, for streaming responses.
+    response_header_timeout_seconds: 0
+    dial_timeout_seconds: 10
+    tls_handshake_timeout_seconds: 15
+
+  # Template: a custom profile, used by the slow-chain service template.
+  # slow:
+  #   request_timeout_seconds: 60
+  #   response_header_timeout_seconds: 60
 
 # ==============================================================================
-# HTTP Pool Profiles (Advanced — per-service connection pool sizing)
+# Pool Profiles (per-service connection pools)
 # ==============================================================================
-# Each service gets its own *http.Client / *http.Transport so connection pool
-# budgets are isolated. One slow backend cannot starve slots from healthy
-# services.
+# Each service gets its own HTTP client and connection pool, so one slow
+# backend cannot starve healthy services of connections.
 #
-# Services select a profile via the `pool_profile` field. If unset, the
-# service inherits the global http_transport defaults. Auto-populated with
-# "low" / "medium" / "high" defaults if not specified.
+# A service selects one through its pool_profile field; with no pool_profile it
+# uses the global http_transport settings. "low", "medium" and "high" are built
+# in with the values below; a profile you define is added to them, and
+# redefining a built-in name replaces it. A field left at 0 inherits the
+# http_transport value.
 #
-# The tier values below come from a sweep-optimal loadtest (2026-04-14)
-# targeting p99 <= 100ms for each backend. Re-run `scripts/loadtest/backends.sh
-# sweep-optimal` on your own infra to retune — operator-specific.
+# The built-in tiers were sized for a p99 of 100 ms or less. Measure your own
+# backends with `scripts/loadtest/backends.sh sweep-optimal` to retune them.
 pool_profiles:
-  # Fast backends (sub-5ms p99): avax, sui, eth, poly, boba, bera, zksync-era,
-  # xrplevm-testnet, eth-sepolia. Tiny pool because requests complete so fast
-  # that few slots are ever in use; more slots just waste memory + FDs.
+  # Fast backends (p99 under 5 ms): requests complete so quickly that few
+  # slots are ever in use; more slots only cost memory and file descriptors.
   low:
     max_conns_per_host: 10
     max_idle_conns_per_host: 5
     idle_conn_timeout_seconds: 90
 
-  # Moderately latent backends (tens of ms p99): xrplevm, opbnb.
+  # Moderately latent backends (p99 in the tens of ms).
   medium:
     max_conns_per_host: 100
     max_idle_conns_per_host: 20
     idle_conn_timeout_seconds: 90
 
-  # Slow backends that need many in-flight to sustain RPS (hundreds of ms p99
-  # with occasional slower calls): op, fuse.
+  # Slow backends that need many requests in flight to sustain their RPS (p99
+  # in the hundreds of ms).
   high:
     max_conns_per_host: 250
     max_idle_conns_per_host: 50
     idle_conn_timeout_seconds: 90
 
-# Cache warmup (optional - preload application data at startup)
+# ==============================================================================
+# Cache Warmup
+# ==============================================================================
+# Preload application data at startup so the first relays do not pay for it.
 cache_warmup:
-  # Enable cache warmup (speeds up first requests)
+  # Default: true.
   enabled: true
 
-  # Known applications to pre-load (if you know your app addresses)
+  # Application addresses to preload, if you know them. This one is a localnet
+  # genesis application.
   # known_applications:
-  #   - "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4"
-  #   - "pokt1abc..."
+  #   - "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z"
 
-  # Concurrency for warmup operations (higher = faster but more load)
+  # Parallel warmup operations (higher = faster, more load). Default: 10.
   warmup_concurrency: 10
 
-  # Timeout per application warmup
+  # Seconds allowed to warm each application. Default: 5.
   warmup_timeout_seconds: 5
 
-# Logging configuration
-logging:
-  level: "debug"  # debug, info, warn, error (localnet uses debug; anything else fails config load)
-  format: "json"  # json, text (json required for Loki log level detection; always stderr)
-  async: true  # Enable async logging for better performance
-  async_buffer_size: 100000  # Async log buffer size (bytes)
-  async_poll_interval: 100  # Async writer flush interval (ms); 10-50 for high-throughput production
-  enable_caller: false  # Add caller file:line to logs (~14% alloc overhead, disable in production)
-  # sampling: false  # GLOBAL log sampling for extreme throughput; drops state-change logs too.
-  # sampling_initial: 100  # lines always written before sampling kicks in
-  # sampling_thereafter: 10  # then 1 in N lines
-  # [PRODUCTION] level: "info", enable_caller: false
+# ==============================================================================
+# Observability Configuration
+# ==============================================================================
+# Prometheus metrics server.
+metrics:
+  enabled: true
+  addr: "0.0.0.0:9090"
 
-# Simulated relays (optional - disabled by default)
+# pprof profiling server. Default: enabled on 127.0.0.1:6060 (loopback only:
+# it serves heap and goroutine dumps). To reach it from outside the host or
+# container, set addr explicitly, e.g. "0.0.0.0:6060", and firewall the port.
+pprof:
+  enabled: true
+  addr: "127.0.0.1:6060"
+
+# Health check server (/health and /ready).
+health_check:
+  enabled: true
+  addr: "0.0.0.0:8081"
+
+# The relayer does NOT apply logging defaults to fields left out of this block:
+# without `async: true` it logs synchronously. Keep the block.
+logging:
+  # debug, info, warn or error; any other value fails config load.
+  # Localnet uses debug. Production: info.
+  level: "debug"
+  # json or text. json is what a log pipeline can parse levels from. Logs go
+  # to stderr.
+  format: "json"
+  # Non-blocking logging through a ring buffer; recommended.
+  async: true
+  # Ring buffer size, in log MESSAGES (not bytes). When it is full, the oldest
+  # messages are dropped and the drop is reported.
+  async_buffer_size: 100000
+  # Milliseconds between flushes of the ring buffer. 10-50 for high-throughput
+  # production.
+  async_poll_interval: 100
+  # Add caller file:line to each line (about 14% more allocations). Production:
+  # false.
+  enable_caller: false
+  # GLOBAL log sampling for extreme throughput: it samples every component and
+  # level alike, state-change logs included. Leave off unless log volume is a
+  # measured problem.
+  # sampling: false
+  # Lines always written before sampling starts.
+  # sampling_initial: 100
+  # Then one line in N.
+  # sampling_thereafter: 10
+
+# ==============================================================================
+# Simulated Relays (optional, disabled by default)
+# ==============================================================================
 # Serves synthetic relays for pinned (application, gateway-ring) identities,
 # verified against config-pinned public keys instead of an on-chain session.
 # SECURITY: app_pubkey_hex and every entry in gateway_pubkeys_hex are
 # rejected at startup if they match the deterministic ring placeholder key
-# (its private half is publicly derivable from a well-known seed) — pinning
+# (its private half is publicly derivable from a well-known seed) -- pinning
 # it would let anyone forge simulated relays for that identity.
 simulation:
   # Enable the simulated-relay feature. Default: false.
@@ -414,7 +613,7 @@ simulation:
   # the template are illustrative and are NOT valid secp256k1 public keys -
   # a config carrying them is rejected at startup once `simulation.enabled`
   # is true. Generate your own dedicated simulation app and gateway key
-  # pairs and pin their public halves here; see docs/simulated-relays.md
+  # pairs and pin their public halves here; see docs/SIMULATED_RELAYS.md
   # for the provisioning steps.
   #
   # TO PIN AN IDENTITY: delete the leading "# " (hash and one space) from
@@ -423,8 +622,10 @@ simulation:
   # "#" on purpose: they are OPTIONAL fields, and leaving them commented is
   # what keeps them unset. Uncomment only the ones you actually want.
   # identities:
-  #   - key_id: "my-sim-identity"      # sent as the Pocket-Simulation-Key-Id header
-  #     enabled: true                  # per-identity switch (required to activate)
+  #     # Sent as the Pocket-Simulation-Key-Id header.
+  #   - key_id: "my-sim-identity"
+  #     # Per-identity switch (required to activate).
+  #     enabled: true
   #
   #     # Compressed secp256k1 pubkey (hex, 33 bytes) of the simulated
   #     # application. Must be a real public key you generated.

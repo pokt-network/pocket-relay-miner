@@ -899,7 +899,18 @@ func TestAFrozenReloadNeverGoesQuiet(t *testing.T) {
 	require.NoError(t, m.Start(context.Background()))
 	require.Len(t, m.ListSuppliers(), 2, "precondition: both selected keys held")
 
+	// EVERY selected record, not one of them. Owner decision 2026-09-03: a
+	// selection where SOME records still decode is applied, not refused -- the
+	// broken one takes its own supplier out of service and the rest keep working.
+	// What still refuses, on both branches, is a load where nothing decoded at
+	// all, because applying that would be a fleet-wide removal nobody performed
+	// and a rotated passphrase produces it with no corrupt byte on disk.
+	//
+	// This test's subject is unchanged and is not the freeze: a source that
+	// reports a failure must go on reporting it, tick after tick, instead of
+	// falling quiet and looking healthy.
 	corruptRecord(t, recordsDir, "app2")
+	corruptRecord(t, recordsDir, "app.")
 
 	base := testutil.ToFloat64(keyLoadErrors.WithLabelValues(p.Kind()))
 	const ticks = 5

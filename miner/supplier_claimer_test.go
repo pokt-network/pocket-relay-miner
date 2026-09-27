@@ -74,7 +74,7 @@ func (s *SupplierClaimerTestSuite) TestReleaseExcess_NewestFirst() {
 
 	// Track release order
 	var releasedOrder []string
-	claimer.onReleaseFn = func(_ context.Context, supplier string) error {
+	claimer.onReleaseFn = func(_ context.Context, supplier, _ string) error {
 		releasedOrder = append(releasedOrder, supplier)
 		return nil
 	}
@@ -122,7 +122,7 @@ func (s *SupplierClaimerTestSuite) TestReleaseExcess_NewestFirst_AllReleased() {
 	claimer.claimedMu.Unlock()
 
 	var releasedOrder []string
-	claimer.onReleaseFn = func(_ context.Context, supplier string) error {
+	claimer.onReleaseFn = func(_ context.Context, supplier, _ string) error {
 		releasedOrder = append(releasedOrder, supplier)
 		return nil
 	}

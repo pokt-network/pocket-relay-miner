@@ -68,7 +68,7 @@ func createTestMessageJSON(b *testing.B) redis.XMessage {
 		ComputeUnitsPerRelay:    100,
 		SessionId:               "session_abc123_height_12345_app_pokt1abc_svc_develop",
 		SessionEndHeight:        12345,
-		SupplierOperatorAddress: "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+		SupplierOperatorAddress: "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
 		ServiceId:               "develop",
 		PublishedAtUnixNano:     1234567890,
 	}
@@ -95,7 +95,7 @@ func createTestMessageProtobuf(b *testing.B) redis.XMessage {
 		ComputeUnitsPerRelay:    100,
 		SessionId:               "session_abc123_height_12345_app_pokt1abc_svc_develop",
 		SessionEndHeight:        12345,
-		SupplierOperatorAddress: "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+		SupplierOperatorAddress: "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
 		ServiceId:               "develop",
 		PublishedAtUnixNano:     1234567890,
 	}
@@ -171,7 +171,7 @@ func BenchmarkParseMessage_LargeRelay(b *testing.B) {
 		ComputeUnitsPerRelay:    1000,
 		SessionId:               "session_abc123_height_12345_app_pokt1abc_svc_develop",
 		SessionEndHeight:        12345,
-		SupplierOperatorAddress: "pokt19a3t4yunp0dlpfjrp7qwnzwlrzd5fzs2gjaaaj",
+		SupplierOperatorAddress: "pokt1600zxkjujmckypws608sd0782r6dta0jpj58yj",
 		ServiceId:               "develop",
 		PublishedAtUnixNano:     1234567890,
 	}

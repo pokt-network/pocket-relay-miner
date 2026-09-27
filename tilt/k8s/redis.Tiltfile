@@ -39,8 +39,19 @@ def install_redis_operator():
     # v0.23.0 (Jan 2025) - supports Redis >=6 (including Redis 8.x)
     # See: https://github.com/OT-CONTAINER-KIT/redis-operator/releases
     # NOTE: GenerateConfigInInitContainer is needed to load additionalRedisConfig.
-    # Issue #1542 affects maxMemoryPercentOfLimit + additionalRedisConfig combo,
-    # but we only use additionalRedisConfig, so it should work.
+    #
+    # The line that used to sit here said issue #1542 (maxMemoryPercentOfLimit +
+    # additionalRedisConfig) did not affect us "because we only use
+    # additionalRedisConfig". That is FALSE, measured on the live pod 2026-09-18:
+    # the ConfigMap carries maxmemory 9663676416 (9 GiB), the pod DOES read it at
+    # /etc/redis/external.conf.d/redis-additional.conf:17, and the server runs
+    # with 8589934592 -- exactly 80% of the 10Gi container limit, which is the
+    # operator applying its own percentage on top. So the 1 GiB-per-step ladder
+    # in tilt_config.yaml collapses: the ingestion brake closes at 8 GiB and
+    # Redis refuses writes at 8 GiB, the same point, with no margin between them.
+    # Queue item 363 carries the evidence and the options; do not "fix" it here
+    # without reading it, because raising memory_limit and pinning the percentage
+    # move the same number in opposite directions.
     helm_resource(
         "redis-operator",
         "ot-helm/redis-operator",
@@ -59,7 +70,7 @@ def deploy_redis_standalone(redis_config):
 
     # ConfigMap with Redis config
     # SPEED-OPTIMIZED configuration for pocket-relay-miner:
-    # - RDB snapshots every 60s (acceptable 1-2 min data loss from 40 min sessions)
+    # - RDB snapshots at 900s/1 change and 300s/10 changes
     # - AOF disabled (RDB is sufficient, avoids write amplification)
     # - IO threads enabled for parallel network I/O
     # - Lazyfree enabled for non-blocking deletions
@@ -77,17 +88,28 @@ metadata:
   name: redis-standalone-config
 data:
   redis-additional.conf: |
-    # === PERSISTENCE: RDB snapshots (1-2 min acceptable loss) ===
-    save 60 1
+    # === PERSISTENCE: RDB snapshots ===
+    # The operator's base redis.conf already declares save 900 1 / 300 10 /
+    # 60 10000, and save lines ACCUMULATE across its include of this file
+    # (config.c setConfigSaveOption), so "save 60 1" here ran four rules
+    # and forked every ~76 s under load. "" clears the inherited list only;
+    # the next line keeps snapshots on.
+    save ""
+    save 900 1 300 10
     appendonly no
     rdbcompression yes
     rdbchecksum no
     # === MEMORY MANAGEMENT ===
-    maxmemory 1887436800
-    maxmemory-policy allkeys-lru
+    # Comes from the config (gitignored) because a fixed cap with allkeys-lru
+    # SILENTLY EVICTS: all state lives here (SMST nodes, meter, tracking), so
+    # an eviction looks like lost claims, not like "Redis is full". Set 0 to
+    # measure how much memory Redis ASKS FOR instead of how much we grant it.
+    maxmemory {maxmemory}
+    maxmemory-policy {maxmemory_policy}
     # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
+    # Counts the main thread: 4 = main + 3 I/O threads. io-threads-do-reads
+    # is deprecated and ignored since 8.x, so it is not set.
     io-threads 4
-    io-threads-do-reads yes
     lazyfree-lazy-eviction yes
     lazyfree-lazy-expire yes
     lazyfree-lazy-server-del yes
@@ -98,8 +120,22 @@ data:
     timeout 0
     tcp-keepalive 300
     activerehashing yes
-    slowlog-log-slower-than -1
-"""
+    # -1 turns off the slowlog: `SLOWLOG GET` returns empty and reads as "no
+    # slow commands happened" without ever having looked. Configurable so
+    # Redis can be named as the bottleneck instead of inferred from its
+    # caller's timeout.
+    slowlog-log-slower-than {slowlog_us}
+    # 128 entries were overwritten within seconds under load, which lost the
+    # slow commands of the window being measured.
+    slowlog-max-len 10000
+    # 0 disables LATENCY LATEST/HISTORY; 10 ms records the stalls that
+    # clients see as a slow GET without enabling it by hand after a restart.
+    latency-monitor-threshold 10
+""".format(
+        maxmemory=redis_config.get("maxmemory", "1887436800"),
+        maxmemory_policy=redis_config.get("maxmemory_policy", "noeviction"),
+        slowlog_us=redis_config.get("slowlog_log_slower_than_us", "-1"),
+    )
 
     # Redis CR for standalone
     redis_cr = """
@@ -109,15 +145,17 @@ metadata:
   name: redis-standalone
 spec:
   kubernetesConfig:
-    image: redis:8.4-alpine
+    image: redis:8.10.1-alpine
     imagePullPolicy: IfNotPresent
     resources:
       requests:
-        cpu: 100m
+        # Equal to the limit: under host contention a 100m request let
+        # Redis wait for CPU while every client waited on Redis.
+        cpu: {cpu_limit}
         memory: 256Mi
       limits:
-        cpu: 2000m
-        memory: 2Gi
+        cpu: {cpu_limit}
+        memory: {memory_limit}
     serviceType: ClusterIP
   redisConfig:
     additionalRedisConfig: redis-standalone-config
@@ -131,7 +169,10 @@ spec:
   redisExporter:
     enabled: true
     image: quay.io/opstree/redis-exporter:v1.44.0
-"""
+""".format(
+        cpu_limit=redis_config.get("cpu_limit", "2000m"),
+        memory_limit=redis_config.get("memory_limit", "2Gi"),
+    )
 
     k8s_yaml(blob(redis_configmap))
     k8s_yaml(blob(redis_cr))
@@ -157,7 +198,7 @@ def deploy_redis_cluster(redis_config):
 
     # ConfigMap with Redis cluster config
     # SPEED-OPTIMIZED configuration for pocket-relay-miner:
-    # - RDB snapshots every 60s (acceptable 1-2 min data loss from 40 min sessions)
+    # - RDB snapshots at 900s/1 change and 300s/10 changes
     # - AOF disabled (RDB is sufficient, avoids write amplification)
     # - IO threads enabled for parallel network I/O
     # - Lazyfree enabled for non-blocking deletions
@@ -175,17 +216,26 @@ metadata:
   name: redis-cluster-config
 data:
   redis-additional.conf: |
-    # === PERSISTENCE: RDB snapshots (1-2 min acceptable loss) ===
-    save 60 1
+    # === PERSISTENCE: RDB snapshots ===
+    # The operator's base redis.conf (read on the standalone pod) declares save 900 1 / 300 10 /
+    # 60 10000, and save lines ACCUMULATE across its include of this file
+    # (config.c setConfigSaveOption), so "save 60 1" here ran four rules
+    # and forked every ~76 s under load. "" clears the inherited list only;
+    # the next line keeps snapshots on.
+    save ""
+    save 900 1 300 10
     appendonly no
     rdbcompression yes
     rdbchecksum no
     # === MEMORY MANAGEMENT ===
     maxmemory 471859200
-    maxmemory-policy allkeys-lru
+    # noeviction and NOT allkeys-lru: the SMST nodes are the proof preimage, so
+    # evicting them looks like lost claims instead of "Redis is full".
+    maxmemory-policy noeviction
     # === REDIS 8.x PERFORMANCE OPTIMIZATIONS ===
+    # Counts the main thread: 4 = main + 3 I/O threads. io-threads-do-reads
+    # is deprecated and ignored since 8.x, so it is not set.
     io-threads 4
-    io-threads-do-reads yes
     lazyfree-lazy-eviction yes
     lazyfree-lazy-expire yes
     lazyfree-lazy-server-del yes
@@ -215,7 +265,7 @@ spec:
   clusterVersion: v7
   persistenceEnabled: true
   kubernetesConfig:
-    image: redis:8.4-alpine
+    image: redis:8.10.1-alpine
     imagePullPolicy: IfNotPresent
     resources:
       requests:

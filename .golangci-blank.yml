@@ -1,0 +1,11 @@
+version: "2"
+run:
+  build-tags:
+    - test
+linters:
+  settings:
+    errcheck:
+      check-blank: true
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0

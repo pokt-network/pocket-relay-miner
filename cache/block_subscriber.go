@@ -382,6 +382,30 @@ func (s *RedisBlockSubscriber) LatestBlockTime() time.Time {
 	return s.currentTime
 }
 
+// SeedBlockTime sets the block time read off the chain at startup, so the
+// process anchors its transactions on chain time before the first block event
+// reaches it. In the process that wins the election the leader that publishes
+// those events only starts later, so without this the anchor is the zero time
+// for as long as a block lasts.
+//
+// It seeds the TIME only, never currentHeight: handleBlockEvent advances on a
+// strictly greater height, so a seed from a node one block ahead would make the
+// events that follow look old and be dropped.
+//
+// An event always wins over a seed, whichever arrives first: the seed applies
+// only while no event has been seen (currentHeight == 0), so a seed that lost a
+// race against the pub/sub cannot rewind the time an event brought. It reports
+// whether it was applied.
+func (s *RedisBlockSubscriber) SeedBlockTime(blockTime time.Time) bool {
+	s.heightMu.Lock()
+	defer s.heightMu.Unlock()
+	if s.currentHeight > 0 || blockTime.IsZero() {
+		return false
+	}
+	s.currentTime = blockTime
+	return true
+}
+
 // Close gracefully shuts down the subscriber.
 func (s *RedisBlockSubscriber) Close() error {
 	s.mu.Lock()

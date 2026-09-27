@@ -13,7 +13,6 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/keys"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
-	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 )
 
@@ -247,6 +246,15 @@ type Config struct {
 	// Required for signing relay responses.
 	Keys config.KeysConfig `yaml:"keys"`
 
+	// unknownKeys are the keys the file carries that this struct does not
+	// declare, found by the strict second pass in LoadConfig and surfaced by
+	// Warnings().
+	//
+	// Unexported on purpose: it is a property of the FILE this config was loaded
+	// from, not a setting, and nothing may set it from YAML. A Config built in
+	// code rather than loaded from disk correctly reports none.
+	unknownKeys []string
+
 	// Services is a map of service configurations keyed by service ID.
 	Services map[string]ServiceConfig `yaml:"services"`
 
@@ -258,22 +266,38 @@ type Config struct {
 	DefaultRequestTimeoutSeconds int64 `yaml:"default_request_timeout_seconds"`
 
 	// DefaultMaxBodySizeBytes is the default max body size for requests/responses.
+	//
+	// It is the ORIGINAL single knob and it still works: it is the fallback both
+	// directions resolve through, so a config that names only this key keeps the
+	// behaviour it had. The two keys below split it, because the directions are
+	// not alike -- a request body is retained for the whole validation queue and
+	// then again in the SMST leaf until the claim, while a response is read,
+	// signed and dropped.
 	DefaultMaxBodySizeBytes int64 `yaml:"default_max_body_size_bytes"`
 
-	// RemovedGracePeriodExtraBlocks is the tombstone for the retired
-	// grace_period_extra_blocks. It widened the window in which a relay for an
-	// ended session was still served, beyond the on-chain grace period -- and
-	// it did so on ONE side only: getTargetSessionBlockHeight accepted those
-	// relays while CheckRewardEligibility still judged them by the chain's
-	// window, so they were served and could never be paid. Grace now follows
-	// the on-chain parameter exactly.
+	// DefaultMaxRequestBodySizeBytes is the default bound on a RELAY REQUEST
+	// body. Unset (0) inherits DefaultMaxBodySizeBytes.
+	DefaultMaxRequestBodySizeBytes int64 `yaml:"default_max_request_body_size_bytes"`
+
+	// DefaultMaxResponseBodySizeBytes bounds a BACKEND RESPONSE body for every
+	// service that does not override it. Unset (0) inherits
+	// DefaultMaxBodySizeBytes.
+	DefaultMaxResponseBodySizeBytes int64 `yaml:"default_max_response_body_size_bytes"`
+
+	// DefaultValidationQueueMaxMiB bounds, PER SERVICE, the request and response
+	// bodies that service's optimistic relays hold between being served and
+	// being validated. It applies to every service that does not override it.
 	//
-	// Kept as a field because the YAML decoder drops unknown keys in silence.
-	// Without it, an operator carrying the old default would upgrade into a
-	// grace window shorter than the one they configured and see relays start
-	// being rejected at the session boundary with nothing in their config to
-	// explain it. A pointer so "absent" and "explicitly 0" are distinguishable.
-	RemovedGracePeriodExtraBlocks *int `yaml:"grace_period_extra_blocks,omitempty"`
+	// The bound is per service and not global on purpose: with one global bound
+	// the relay that ARRIVES pays for the bytes another service is HOLDING, so
+	// a single heavy service refuses everyone. Per service, a service is
+	// refused because IT is over ITS own quota, which also makes the rejection
+	// attributable by construction.
+	//
+	// 0 means the default (DefaultValidationQueueMaxMiB), NEVER unlimited --
+	// the same convention as redis.batch_max_queued_mib. Read it through
+	// ValidationQueueMaxBytes, which also applies the per-service floor.
+	DefaultValidationQueueMaxMiB int `yaml:"default_validation_queue_max_mib,omitempty"`
 
 	// Metrics configuration
 	Metrics MetricsConfig `yaml:"metrics"`
@@ -367,7 +391,7 @@ type HTTPTransportConfig struct {
 }
 
 // ResponseCompressionConfig controls gzip compression of signed relay responses
-// returned from the relayer to the gateway (PATH).
+// returned from the relayer to the gateway.
 //
 // Historical context: gzip was enabled unconditionally and consumed ~9% of
 // relayer CPU at 200 RPS per the Apr 14 2026 pprof profile (60-67% CPU is
@@ -397,8 +421,8 @@ type RedisConfig struct {
 	URL string `yaml:"url"`
 
 	// PoolSize is the maximum number of socket connections.
-	// Default: 20 × runtime.GOMAXPROCS (2x go-redis default for production)
-	// Set to 0 to use go-redis default (10 × GOMAXPROCS)
+	// Default (0): sized from the relayer's validation and publish workers,
+	// which follow GOMAXPROCS (WorkerSizing.RedisPoolSize).
 	PoolSize int `yaml:"pool_size,omitempty"`
 
 	// MinIdleConns is the minimum number of idle connections to maintain.
@@ -408,15 +432,34 @@ type RedisConfig struct {
 	MinIdleConns int `yaml:"min_idle_conns,omitempty"`
 
 	// PoolTimeout is the amount of time to wait for a connection from the pool.
-	// Default: 4 seconds
-	// Set to 0 to wait indefinitely
+	// Default (0): config.DefaultPoolTimeoutSeconds (6 seconds).
 	PoolTimeoutSeconds int `yaml:"pool_timeout_seconds,omitempty"`
 
 	// ConnMaxIdleTime is the maximum amount of time a connection can be idle.
 	// Idle connections older than this are closed.
-	// Default: 5 minutes
-	// Set to 0 to disable (connections never closed due to idle time)
+	// Default (0): the go-redis default, 30 minutes.
 	ConnMaxIdleTimeSeconds int `yaml:"conn_max_idle_time_seconds,omitempty"`
+
+	// BatchPublishIntervalMs sets how often the relayer writes its batch of mined
+	// relays. The batch is always on: mined relays go out with MULTI/EXEC, which
+	// wakes the miner's blocked reader ONCE per batch instead of once per relay.
+	//
+	// 0 means the default (DefaultBatchPublishIntervalMs), as it does for the
+	// other optional fields of this struct. Read it through BatchPublishInterval.
+	//
+	// Bounds: 500ms to 10s. Below that a batch stops being a batch; above it the
+	// added delay starts to matter against the chain's block time.
+	BatchPublishIntervalMs int `yaml:"batch_publish_interval_ms,omitempty"`
+
+	// BatchMaxQueuedMiB bounds the mined relays the batch may hold before the
+	// relayer STOPS ADMITTING new relays. It never drops what is already queued:
+	// every relay in the queue was served. The bound is in bytes and not in
+	// entries because each entry retains the relay's payload, and a few large
+	// responses exhaust memory long before any entry count would notice.
+	//
+	// 0 means the default (DefaultBatchMaxQueuedMiB). Read it through
+	// BatchMaxQueuedBytes. Bounds: 64 MiB to 8192 MiB.
+	BatchMaxQueuedMiB int `yaml:"batch_max_queued_mib,omitempty"`
 
 	// Namespace configures Redis key prefixes for all data types.
 	// All components (miner, relayer, cache) read from this config to build keys.
@@ -461,7 +504,20 @@ type ServiceConfig struct {
 	PoolProfile string `yaml:"pool_profile,omitempty"`
 
 	// MaxBodySizeBytes overrides the default max body size for this service.
+	// It is the fallback MaxRequestBodySizeBytes resolves through.
 	MaxBodySizeBytes int64 `yaml:"max_body_size_bytes,omitempty"`
+
+	// MaxRequestBodySizeBytes overrides the request bound for this service.
+	// 0 means "fall back", never unlimited.
+	MaxRequestBodySizeBytes int64 `yaml:"max_request_body_size_bytes,omitempty"`
+
+	// MaxResponseBodySizeBytes overrides the response bound for this service.
+	// 0 means "fall back", never unlimited.
+	MaxResponseBodySizeBytes int64 `yaml:"max_response_body_size_bytes,omitempty"`
+
+	// ValidationQueueMaxMiB overrides default_validation_queue_max_mib for this
+	// service. 0 means "use the default", never unlimited.
+	ValidationQueueMaxMiB int `yaml:"validation_queue_max_mib,omitempty"`
 
 	// DefaultBackend specifies which backend to use when no Rpc-Type header is provided.
 	// Must match one of the keys in the Backends map.
@@ -639,41 +695,10 @@ type HealthCheckConfig struct {
 // RelayMeterYAMLConfig contains YAML configuration for the relay meter.
 // This is converted to relayer.RelayMeterConfig when instantiating the RelayMeter.
 type RelayMeterYAMLConfig struct {
-	// Enabled enables relay metering and rate limiting.
-	// Default: true
-	Enabled bool `yaml:"enabled"`
-
-	// RemovedFailBehavior is the tombstone for the retired fail_behavior, which
-	// let a deployment choose to SERVE relays whose budget could not be checked.
-	// There is no choice now: admission refuses what it cannot verify, and
-	// accounting never throws away work the miner can still resolve.
-	//
-	// It is kept as a field because the YAML decoder is lenient -- an unknown
-	// key is dropped without a word -- so deleting it outright would let a
-	// config that still says "open" boot as closed, with the file and the
-	// process disagreeing and nothing saying so.
-	//
-	// Unlike the other three tombstones in this file it does NOT fail the boot,
-	// and that is deliberate rather than an oversight: the owner chose a warning
-	// so a fleet mid-rollout is not held back by a line that no longer does
-	// anything. See Config.Warnings.
-	RemovedFailBehavior string `yaml:"fail_behavior,omitempty"`
-
 	// CacheTTL is the TTL for all cached Redis data (streams, params, app stakes, meters).
 	// Redis TTL handles automatic expiration - no cleanup goroutines needed.
 	// Default: 2h -- covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 	CacheTTL time.Duration `yaml:"cache_ttl"`
-
-	// RemovedRedisKeyPrefix is the tombstone for the retired redis_key_prefix
-	// setting. Meter keys and the cleanup channel are now built by the shared
-	// KeyBuilder from redis.namespace, so this field configures nothing -- but
-	// the YAML decoder is lenient (unknown fields are silently dropped), and a
-	// config still carrying a non-default value here would otherwise upgrade
-	// into a silent key migration: meter meta/consumed keys move namespaces
-	// mid-session, in-flight consumed counters reset to a fresh budget, and a
-	// rolling deploy meters one session under two different keys. Validate()
-	// turns that case into a hard, explicit error instead.
-	RemovedRedisKeyPrefix string `yaml:"redis_key_prefix,omitempty"`
 }
 
 // CacheWarmupConfig contains configuration for cache pre-warming at startup.
@@ -702,7 +727,9 @@ func DefaultConfig() Config {
 	cfg := Config{
 		ListenAddr: "0.0.0.0:8080",
 		Redis: RedisConfig{
-			URL: "redis://localhost:6379",
+			URL:                    "redis://localhost:6379",
+			BatchPublishIntervalMs: DefaultBatchPublishIntervalMs,
+			BatchMaxQueuedMiB:      DefaultBatchMaxQueuedMiB,
 		},
 		Keys: config.KeysConfig{
 			HotReloadEnabled: true,
@@ -710,20 +737,20 @@ func DefaultConfig() Config {
 		DefaultValidationMode:        ValidationModeOptimistic,
 		DefaultRequestTimeoutSeconds: 30,
 		DefaultMaxBodySizeBytes:      10 * 1024 * 1024, // 10MB
+		DefaultValidationQueueMaxMiB: DefaultValidationQueueMaxMiB,
 		Metrics: MetricsConfig{
 			Enabled: true,
 			Addr:    "0.0.0.0:9090",
 		},
 		Pprof: config.PprofConfig{
 			Enabled: true, // Enable by default for debugging
-			Addr:    "0.0.0.0:6060",
+			Addr:    config.DefaultPprofAddr,
 		},
 		HealthCheck: HealthCheckConfig{
 			Enabled: true,
 			Addr:    "0.0.0.0:8081",
 		},
 		RelayMeter: RelayMeterYAMLConfig{
-			Enabled:  true,
 			CacheTTL: 2 * time.Hour, // Covers ~6 session lifecycles at a rough 60s/block mainnet estimate (20 blocks/session; real block time drifts with network conditions and differs per network -- this is illustrative margin, not a precise budget)
 		},
 		HTTPTransport: HTTPTransportConfig{
@@ -776,28 +803,23 @@ func DefaultConfig() Config {
 	return cfg
 }
 
-// Warnings returns deprecation notices for a config that LOADS but contains
-// keys that no longer do anything.
+// Warnings returns one line per key the file carries that this struct does not
+// declare -- typos, settings this project retired, and keys that were never
+// fields at all.
 //
-// It exists because there was nowhere to put one: LoadConfig has no logger and
-// Validate returns only an error, so the choice used to be "fail the boot" or
-// "say nothing". Callers -- the relayer at startup and `relayer validate` --
-// log each line. A retired key that changes behaviour by its absence belongs
-// here or in Validate, never in neither: the decoder drops unknown keys
-// silently, so the file and the process would disagree with no signal at all.
+// It exists because there was nowhere to put such a notice: LoadConfig has no
+// logger and Validate returns only an error, so the choice used to be "fail the
+// boot" or "say nothing". Callers -- the relayer at startup and
+// `relayer validate` -- decide what the finding means.
+//
+// This used to be a hand-written branch per retired setting, one tombstone
+// struct field each. Those fields were deleted: a field per retired key is
+// config that configures nothing, and it could never cover the case that
+// actually bit us, which was a key that was never a field. The sentence that
+// says what each removal CHANGED for the operator now lives in
+// config.retiredKeys and is attached to the generic finding.
 func (c *Config) Warnings() []string {
-	var warnings []string
-
-	if c.RelayMeter.RemovedFailBehavior != "" {
-		warnings = append(warnings, fmt.Sprintf(
-			"relay_meter.fail_behavior is no longer supported (found %q) and is ignored: the relayer "+
-				"now refuses a relay whose budget it cannot verify, and never chooses to serve one. "+
-				"Remove the line. If it said \"open\", expect relays to be rejected during an outage "+
-				"of the meter's store that were previously served unbilled",
-			c.RelayMeter.RemovedFailBehavior))
-	}
-
-	return warnings
+	return c.unknownKeys
 }
 
 // Validate validates the configuration and returns an error if invalid.
@@ -823,67 +845,6 @@ func (c *Config) Validate() error {
 
 	if _, err := url.Parse(c.Redis.URL); err != nil {
 		return fmt.Errorf("invalid redis.url: %w", err)
-	}
-
-	// The retired relay_meter.redis_key_prefix documented where meter keys
-	// USED to live: "{retired}:meter:...". Compare that against where the
-	// effective namespace puts them now: equal means the keys do not move and
-	// the stale line is harmless; different means upgrading would silently
-	// relocate meter meta/consumed keys mid-session (each replica re-creating a
-	// fresh budget at the new location), so it is a hard error.
-	//
-	// It compares the FULL meter prefix through the KeyBuilder rather than
-	// against the base alone. That is now the same thing -- the meter segment is
-	// a constant, and a config that still sets meter_prefix is rejected by
-	// Namespace.Validate above, before reaching here -- but building the prefix
-	// here by hand is exactly how this check silently started comparing against
-	// "ha:" when the segment stopped coming from config.
-	if c.RelayMeter.RemovedRedisKeyPrefix != "" {
-		legacyMeterPrefix := c.RelayMeter.RemovedRedisKeyPrefix + ":meter"
-		effectiveMeterPrefix := redisutil.NewKeyBuilder(c.Redis.Namespace).MeterPrefix()
-		if legacyMeterPrefix != effectiveMeterPrefix {
-			return fmt.Errorf(
-				"relay_meter.redis_key_prefix is no longer supported: meter keys now derive from redis.namespace. "+
-					"Your config would move them from %q to %q, silently resetting in-flight session budgets. "+
-					"Remove the relay_meter.redis_key_prefix line; if your meter keys really live under %q, "+
-					"drain in-flight sessions before upgrading (meter keys are ephemeral and session-scoped, "+
-					"so a drained fleet migrates with no data to move). Do NOT point redis.namespace.base_prefix "+
-					"at the retired value to preserve them: that would relocate the relayer's ENTIRE keyspace, "+
-					"including the WAL stream the miner consumes from",
-				legacyMeterPrefix, effectiveMeterPrefix, legacyMeterPrefix,
-			)
-		}
-		// Equal full meter prefix: nothing moves. Accepted so that configs
-		// shipped with the old default ("ha") upgrade without editing.
-	}
-
-	// The retired grace_period_extra_blocks widened the serve window past the
-	// chain's grace period, which meant serving relays that could never be
-	// paid. Zero is accepted so a config that spelled out "no extra" upgrades
-	// untouched; anything else is a real narrowing the operator must see.
-	if c.RemovedGracePeriodExtraBlocks != nil && *c.RemovedGracePeriodExtraBlocks != 0 {
-		return fmt.Errorf(
-			"grace_period_extra_blocks is no longer supported (found %d): it extended the serve window "+
-				"beyond the chain's grace period on the admission side only, so relays admitted in those "+
-				"extra blocks were served and then judged ineligible for rewards -- served for free. "+
-				"Grace now follows the on-chain grace_period_end_offset_blocks exactly. Remove the line; "+
-				"expect relays arriving in those %d block(s) after the grace period to be rejected as "+
-				"expired instead of served unpaid",
-			*c.RemovedGracePeriodExtraBlocks, *c.RemovedGracePeriodExtraBlocks,
-		)
-	}
-
-	// The retired keys.keys_dir loaded supplier keys from a directory. A
-	// lenient decoder would drop the field and boot WITHOUT those keys: the
-	// relayer signs nothing for those suppliers and the revenue loss carries
-	// no diagnostic. Any non-empty value is therefore a hard error.
-	if c.Keys.RemovedKeysDir != "" {
-		return fmt.Errorf(
-			"keys.keys_dir is no longer supported: migrate the keys in %q to a keys_file "+
-				"(supplier addresses are derived from each private key) or import them into the "+
-				"keyring, then remove the keys_dir line",
-			c.Keys.RemovedKeysDir,
-		)
 	}
 
 	// Exactly one key source. See keys.ValidateKeySources: both is refused so
@@ -918,6 +879,18 @@ func (c *Config) Validate() error {
 	if c.Redis.MinIdleConns < 0 {
 		return fmt.Errorf("redis.min_idle_conns must be >= 0 (0 = use default)")
 	}
+	if c.Redis.BatchPublishIntervalMs != 0 &&
+		(c.Redis.BatchPublishIntervalMs < 500 || c.Redis.BatchPublishIntervalMs > 10000) {
+		return fmt.Errorf(
+			"redis.batch_publish_interval_ms must be 0 (the default, %d) or between 500 and 10000, got %d",
+			DefaultBatchPublishIntervalMs, c.Redis.BatchPublishIntervalMs)
+	}
+	if c.Redis.BatchMaxQueuedMiB != 0 &&
+		(c.Redis.BatchMaxQueuedMiB < 64 || c.Redis.BatchMaxQueuedMiB > 8192) {
+		return fmt.Errorf(
+			"redis.batch_max_queued_mib must be 0 (the default, %d) or between 64 and 8192, got %d",
+			DefaultBatchMaxQueuedMiB, c.Redis.BatchMaxQueuedMiB)
+	}
 	if c.Redis.PoolTimeoutSeconds < 0 {
 		return fmt.Errorf("redis.pool_timeout_seconds must be >= 0 (0 = use default)")
 	}
@@ -945,6 +918,28 @@ func (c *Config) Validate() error {
 
 	if c.DefaultValidationMode != ValidationModeEager && c.DefaultValidationMode != ValidationModeOptimistic {
 		return fmt.Errorf("invalid default_validation_mode: %s", c.DefaultValidationMode)
+	}
+
+	// The validation-queue bounds, global and per service. Out of range is an
+	// error and not a silent clamp: a number the operator wrote and the relayer
+	// ignored is how a bound ends up meaning something other than it says.
+	if c.DefaultValidationQueueMaxMiB != 0 &&
+		(c.DefaultValidationQueueMaxMiB < MinValidationQueueMaxMiB ||
+			c.DefaultValidationQueueMaxMiB > MaxValidationQueueMaxMiB) {
+		return fmt.Errorf(
+			"default_validation_queue_max_mib must be 0 (the default, %d) or between %d and %d, got %d",
+			DefaultValidationQueueMaxMiB, MinValidationQueueMaxMiB, MaxValidationQueueMaxMiB,
+			c.DefaultValidationQueueMaxMiB)
+	}
+	for id, svc := range c.Services {
+		if svc.ValidationQueueMaxMiB != 0 &&
+			(svc.ValidationQueueMaxMiB < MinValidationQueueMaxMiB ||
+				svc.ValidationQueueMaxMiB > MaxValidationQueueMaxMiB) {
+			return fmt.Errorf(
+				"services.%s.validation_queue_max_mib must be 0 (the default, %d) or between %d and %d, got %d",
+				id, DefaultValidationQueueMaxMiB, MinValidationQueueMaxMiB, MaxValidationQueueMaxMiB,
+				svc.ValidationQueueMaxMiB)
+		}
 	}
 
 	// Validate and auto-populate timeout profiles
@@ -1094,12 +1089,167 @@ func (c *Config) GetServiceTimeoutProfile(serviceID string) *TimeoutProfile {
 	return nil
 }
 
-// GetServiceMaxBodySize returns the max body size for a service.
+// DefaultValidationQueueMaxMiB is the per-service validation-queue bound used
+// when the config leaves default_validation_queue_max_mib at 0 or omits it, and
+// when a service does not override it.
+const DefaultValidationQueueMaxMiB = 128
+
+// MinValidationQueueMaxMiB and MaxValidationQueueMaxMiB bound what an operator
+// may configure, like the publish queue's 64..8192. The floor below is derived
+// per service on top of this one and can raise it further.
+const (
+	MinValidationQueueMaxMiB = 64
+	MaxValidationQueueMaxMiB = 8192
+)
+
+// ValidationQueueFloorBytes is the smallest bound that still lets a service
+// serve ONE relay of its largest allowed size.
+//
+// A single queued relay retains the request body TWICE -- once as the body and
+// once as the RelayRequest's Payload, which the unmarshal COPIES rather than
+// aliases (poktroll x/service/types/relay.pb.go, `m.Payload = append(...)`) --
+// plus one response, bounded by that same service (the pool is shared, the
+// limit is not).
+// Below this, the service refuses relays it was configured to accept: its own
+// traffic, rejected by its own bound.
+func (c *Config) ValidationQueueFloorBytes(serviceID string) int64 {
+	return 2*c.GetServiceMaxRequestBodySize(serviceID) + c.GetServiceMaxResponseBodySize(serviceID)
+}
+
+// ValidationQueueMaxBytes is the EFFECTIVE bound for one service: its override
+// if it has one, otherwise the default, raised to the floor when it sits below
+// it.
+//
+// Raised, not refused. A bound under the floor makes that service reject 100%
+// of its relays forever, and refusing to start would turn one dead service into
+// a dead relayer. The caller that wants to TELL the operator uses
+// ValidationQueueReport, which reports the same computation.
+func (c *Config) ValidationQueueMaxBytes(serviceID string) int64 {
+	mib := c.DefaultValidationQueueMaxMiB
+	if svc, ok := c.Services[serviceID]; ok && svc.ValidationQueueMaxMiB > 0 {
+		mib = svc.ValidationQueueMaxMiB
+	}
+	if mib <= 0 {
+		mib = DefaultValidationQueueMaxMiB
+	}
+	configured := int64(mib) << 20
+	if floor := c.ValidationQueueFloorBytes(serviceID); configured < floor {
+		return floor
+	}
+	return configured
+}
+
+// GetServiceMaxBodySize returns the max body size for a service under the
+// original single knob. Both directions resolve through it, so it is the reason
+// a config written before the split keeps the behaviour it had.
 func (c *Config) GetServiceMaxBodySize(serviceID string) int64 {
 	if svc, ok := c.Services[serviceID]; ok && svc.MaxBodySizeBytes > 0 {
 		return svc.MaxBodySizeBytes
 	}
 	return c.DefaultMaxBodySizeBytes
+}
+
+// BodySizeSource names where an effective bound came from. It exists so the
+// startup log can answer the only question an operator has about a new key:
+// whether the one they wrote is the one that applied.
+type BodySizeSource string
+
+const (
+	// BodySizeFromServiceRequestOverride: services.<id>.max_request_body_size_bytes.
+	BodySizeFromServiceRequestOverride BodySizeSource = "service.max_request_body_size_bytes"
+	// BodySizeFromServiceResponseOverride: services.<id>.max_response_body_size_bytes.
+	BodySizeFromServiceResponseOverride BodySizeSource = "service.max_response_body_size_bytes"
+	// BodySizeFromServiceLegacy: services.<id>.max_body_size_bytes, the pre-split key.
+	BodySizeFromServiceLegacy BodySizeSource = "service.max_body_size_bytes"
+	// BodySizeFromDefaultRequest: default_max_request_body_size_bytes.
+	BodySizeFromDefaultRequest BodySizeSource = "default_max_request_body_size_bytes"
+	// BodySizeFromDefaultResponse: default_max_response_body_size_bytes.
+	BodySizeFromDefaultResponse BodySizeSource = "default_max_response_body_size_bytes"
+	// BodySizeFromLegacyDefault: default_max_body_size_bytes, the pre-split key.
+	BodySizeFromLegacyDefault BodySizeSource = "default_max_body_size_bytes"
+)
+
+// ResolveMaxRequestBodySize returns the request bound for one service and the
+// key it came from, most specific first.
+func (c *Config) ResolveMaxRequestBodySize(serviceID string) (int64, BodySizeSource) {
+	if svc, ok := c.Services[serviceID]; ok {
+		if svc.MaxRequestBodySizeBytes > 0 {
+			return svc.MaxRequestBodySizeBytes, BodySizeFromServiceRequestOverride
+		}
+		if svc.MaxBodySizeBytes > 0 {
+			return svc.MaxBodySizeBytes, BodySizeFromServiceLegacy
+		}
+	}
+	if c.DefaultMaxRequestBodySizeBytes > 0 {
+		return c.DefaultMaxRequestBodySizeBytes, BodySizeFromDefaultRequest
+	}
+	return c.DefaultMaxBodySizeBytes, BodySizeFromLegacyDefault
+}
+
+// GetServiceMaxRequestBodySize is ResolveMaxRequestBodySize without the source,
+// for the hot path that only needs the number.
+func (c *Config) GetServiceMaxRequestBodySize(serviceID string) int64 {
+	size, _ := c.ResolveMaxRequestBodySize(serviceID)
+	return size
+}
+
+// ResolveMaxResponseBodySize returns the response bound for one service and the
+// key it came from, most specific first -- the mirror of the request side.
+//
+// The shared BufferPool is not an obstacle to this being per-service: the pool
+// recycles buffers, and the bound is a limit passed per read
+// (BufferPool.ReadWithBufferLimit). Only the pool's own fallback bound is
+// fleet-wide, and that is MaxResponseBodySizeAcrossServices.
+func (c *Config) ResolveMaxResponseBodySize(serviceID string) (int64, BodySizeSource) {
+	if svc, ok := c.Services[serviceID]; ok {
+		if svc.MaxResponseBodySizeBytes > 0 {
+			return svc.MaxResponseBodySizeBytes, BodySizeFromServiceResponseOverride
+		}
+		if svc.MaxBodySizeBytes > 0 {
+			return svc.MaxBodySizeBytes, BodySizeFromServiceLegacy
+		}
+	}
+	if c.DefaultMaxResponseBodySizeBytes > 0 {
+		return c.DefaultMaxResponseBodySizeBytes, BodySizeFromDefaultResponse
+	}
+	return c.DefaultMaxBodySizeBytes, BodySizeFromLegacyDefault
+}
+
+// GetServiceMaxResponseBodySize is ResolveMaxResponseBodySize without the source.
+func (c *Config) GetServiceMaxResponseBodySize(serviceID string) int64 {
+	size, _ := c.ResolveMaxResponseBodySize(serviceID)
+	return size
+}
+
+// MaxResponseBodySizeAcrossServices is the largest response bound any service
+// allows. It is the buffer pool's own fallback bound, for a read that names no
+// service.
+func (c *Config) MaxResponseBodySizeAcrossServices() int64 {
+	max, _ := c.ResolveMaxResponseBodySize("")
+	for serviceID := range c.Services {
+		if size := c.GetServiceMaxResponseBodySize(serviceID); size > max {
+			max = size
+		}
+	}
+	return max
+}
+
+// MaxRequestBodySizeAcrossServices is the largest request bound any service
+// allows.
+//
+// It is the bound the FIRST read of an HTTP relay body uses, and it has to be
+// the maximum rather than the default: the service is not known until the body
+// has been read and parsed, so a first stage bounded by the default rejects --
+// as unknown/unknown, before the service ID exists -- every relay of a service
+// that legitimately allows more.
+func (c *Config) MaxRequestBodySizeAcrossServices() int64 {
+	max, _ := c.ResolveMaxRequestBodySize("")
+	for serviceID := range c.Services {
+		if size := c.GetServiceMaxRequestBodySize(serviceID); size > max {
+			max = size
+		}
+	}
+	return max
 }
 
 // getMaxServiceTimeout returns the maximum timeout across all services.
@@ -1450,12 +1600,26 @@ func LoadConfig(path string) (*Config, error) {
 		return nil, fmt.Errorf("failed to read config file: %w", err)
 	}
 
+	// Second pass over the same bytes, diagnostic only: the yaml.Unmarshal below
+	// is lenient and drops every key this struct does not declare, so the file
+	// and the process can disagree with no signal at all. What to DO with the
+	// finding belongs to the caller -- `validate` fails on it because validating
+	// is its whole job, and the serving binary warns and starts unless
+	// --strict-config was passed, because refusing to boot over a stale key turns
+	// a rolling deploy into an outage. See config.UnknownKeys.
+	//
+	// Computed here, ahead of the local named `config`, because that local
+	// shadows the shared package of the same name for the rest of the function.
+	unknownKeys := config.UnknownKeys(data, &Config{})
+
 	// Start with defaults
 	config := DefaultConfig()
 
 	if err := yaml.Unmarshal(data, &config); err != nil {
 		return nil, fmt.Errorf("failed to parse config file: %w", err)
 	}
+
+	config.unknownKeys = unknownKeys
 
 	if err := config.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid config: %w", err)
@@ -1466,4 +1630,37 @@ func LoadConfig(path string) (*Config, error) {
 	}
 
 	return &config, nil
+}
+
+// DefaultBatchPublishIntervalMs is the batch interval used when the config leaves
+// redis.batch_publish_interval_ms at 0 or omits it.
+const DefaultBatchPublishIntervalMs = 1000
+
+// BatchPublishInterval is the effective batch interval: BatchPublishIntervalMs, or
+// DefaultBatchPublishIntervalMs when that is 0. It is the only reader of the field,
+// so a config built without DefaultConfig -- a test, or a YAML that omits the key
+// and is decoded without defaults -- still gets a batch and never a zero interval.
+func (r RedisConfig) BatchPublishInterval() time.Duration {
+	ms := r.BatchPublishIntervalMs
+	if ms == 0 {
+		ms = DefaultBatchPublishIntervalMs
+	}
+	return time.Duration(ms) * time.Millisecond
+}
+
+// DefaultBatchMaxQueuedMiB is the batch queue bound used when the config leaves
+// redis.batch_max_queued_mib at 0 or omits it. The dispatcher's heartbeat closes
+// admission after 3 s without Redis answering, so an outage alone fits: a 1000 rps
+// relayer for 3 s at 100 KB per relay is about 300 MB. The bound trips only on a
+// Redis that is up and slow for a sustained period.
+const DefaultBatchMaxQueuedMiB = 512
+
+// BatchMaxQueuedBytes is the effective queue bound in bytes: BatchMaxQueuedMiB, or
+// DefaultBatchMaxQueuedMiB when that is 0.
+func (r RedisConfig) BatchMaxQueuedBytes() int {
+	mib := r.BatchMaxQueuedMiB
+	if mib == 0 {
+		mib = DefaultBatchMaxQueuedMiB
+	}
+	return mib << 20
 }

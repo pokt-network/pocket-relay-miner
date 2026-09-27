@@ -52,10 +52,11 @@ expect 0  "$(gate_served_shortfall 0 0)"   "empty cell"
 # broke", the report is worse than nothing.
 sb_fixture="$(mktemp)"
 prov_repo=''
+sp_root=''
 # One EXIT trap for the whole file: a second bare `trap ... EXIT` REPLACES this
 # one rather than adding to it, and lib_test runs inside the pre-commit hook,
 # where a Ctrl-C mid-commit is ordinary.
-trap 'rm -f "$sb_fixture"; [ -n "$prov_repo" ] && rm -rf "$prov_repo"' EXIT
+trap 'rm -f "$sb_fixture"; [ -n "$prov_repo" ] && rm -rf "$prov_repo"; [ -n "$sp_root" ] && rm -rf "$sp_root"' EXIT
 cat >"$sb_fixture" <<'FIXTURE'
 {"height":"100","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"100\"","num_relays":"\"4\"","num_estimated_relays":"\"4\"","claimed_upokt":"\"1000upokt\"","settled_upokt":"\"1000upokt\"","minted_upokt":"\"1000upokt\"","overservicing_loss_upokt":"\"0\"","deflation_loss_upokt":"\"0\""}}
 {"height":"100","type":"pocket.tokenomics.EventClaimSettled","attrs":{"session_end_block_height":"\"100\"","num_relays":"\"6\"","num_estimated_relays":"\"12\"","claimed_upokt":"\"3000upokt\"","settled_upokt":"\"2000upokt\"","minted_upokt":"\"1800upokt\"","overservicing_loss_upokt":"\"1000\"","deflation_loss_upokt":"\"200\""}}
@@ -237,6 +238,206 @@ expect 6  "$(gate_counter_delta 10 16)"    "counter advanced normally"
 expect 16 "$(gate_counter_delta 0 16)"     "counter started at zero"
 expect 4  "$(gate_counter_delta 10 4)"     "RESET: after < before, the honest delta is what it has seen since"
 expect 0  "$(gate_counter_delta 10 0)"     "reset with no traffic since -- zero, never -10"
+
+# sent billed dropped -> the verdict BOTH the settlement wait and the final
+# assertion of live.sh read. The L3 of df5441c (2026-09-11) is the 59/60 row:
+# with its redelivered drops no longer announced, nothing explains the missing
+# relay, so the wait keeps it pending and the end reports it LOST.
+expect settled   "$(gate_exact_cell_state 60 60 0)" "every relay billed"
+expect settled   "$(gate_exact_cell_state 60 60 3)" "billed in full: drops elsewhere do not matter"
+expect over      "$(gate_exact_cell_state 60 61 0)" "billed more than sent"
+expect accounted "$(gate_exact_cell_state 60 58 2)" "every missing relay announced: the wait may stop"
+expect accounted "$(gate_exact_cell_state 60 58 9)" "more announced than missing"
+expect short     "$(gate_exact_cell_state 60 59 0)" "the L3 of df5441c: one relay missing, nothing announced"
+expect short     "$(gate_exact_cell_state 60 57 2)" "announced drops explain only part of it"
+expect short     "$(gate_exact_cell_state 5 0 0)"   "everything lost, nothing said"
+expect settled   "$(gate_exact_cell_state 0 0 0)"   "empty cell"
+
+# One verdict, two readers: the wait (services_pending) and the final assertion
+# must both call gate_exact_cell_state, or they drift apart again -- a wait that
+# stops on a rule the assertion does not accept, or waits on one it does.
+live_sh="$(dirname "${BASH_SOURCE[0]}")/live.sh"
+# shellcheck disable=SC2016 # the pattern is the literal call text, not an expansion
+uses="$(grep -c '$(gate_exact_cell_state ' "$live_sh" 2>/dev/null || true)"
+expect 2 "${uses:-0}" "live.sh must read gate_exact_cell_state in the wait AND in the final assertion"
+
+# The reasons live.sh accepts as announced, matched the way PromQL matches a
+# label regex (anchored): a redelivered copy must never explain a missing relay,
+# and neither may a relay dropped because its tree was already sealed.
+reasons="$(sed -n "s/^announced_drop_reasons='\(.*\)'$/\1/p" "$live_sh")"
+accepts() { [[ "$1" =~ ^(${reasons})$ ]] && printf yes || printf no; }
+expect no  "$(accepts session_sealed)"                  "a sealed tree with nothing late to wait for is a loss, not an announcement"
+expect yes "$(accepts claim_window_closed)"             "a relay past its claim window is announced"
+expect no  "$(accepts session_sealed_redelivered)"      "a redelivered copy is not an announcement"
+expect no  "$(accepts claim_window_closed_redelivered)" "nor past the window"
+
+# gate_expected_timeout_regime: window_blocks x block_time_seconds against the
+# SDK ceiling (589.99s). Localnet's own clock knob (localnet.block_time_seconds
+# in tilt_config.yaml) moves this boundary at runtime -- 30s stays under it,
+# 60s (mainnet's clock) goes over it -- so a fixed "ceiling must be 0"
+# expectation is wrong at exactly the clock this gate needs to pass under.
+expect window  "$(gate_expected_timeout_regime 10 30)" "10 blocks x 30s = 300s, well under the ceiling"
+expect window  "$(gate_expected_timeout_regime 10 58)" "580s, just under"
+expect ceiling "$(gate_expected_timeout_regime 10 59)" "590s > 589.99s, just over -- the boundary itself"
+expect ceiling "$(gate_expected_timeout_regime 10 60)" "600s, mainnet's clock"
+
+# The ceiling gate_expected_timeout_regime hard-codes (600000/10000/10 ms) is a
+# SECOND, independent copy of tx.DefaultTxTimeoutMax's own three numbers
+# (txTimeoutHardCeiling / txTimeoutSafetyMargin / txNonceSpread in
+# tx/tx_client.go) -- not a re-derivation from anything read at runtime. Extract
+# BOTH copies with sed and compare them: tx_window_timeout_test.go already pins
+# the Go side as a Go value, but nothing before this test would have caught the
+# two copies saying different numbers.
+tx_client_go="$(dirname "${BASH_SOURCE[0]}")/../../tx/tx_client.go"
+go_hard_ceiling_min="$(sed -n 's/^\ttxTimeoutHardCeiling = \([0-9]*\) \* time\.Minute$/\1/p' "$tx_client_go")"
+go_safety_margin_s="$(sed -n 's/^\ttxTimeoutSafetyMargin = \([0-9]*\) \* time\.Second$/\1/p' "$tx_client_go")"
+go_nonce_spread_ms="$(sed -n 's/^const txNonceSpread = \([0-9]*\) \* time\.Millisecond$/\1/p' "$tx_client_go")"
+
+lib_sh="$(dirname "${BASH_SOURCE[0]}")/lib.sh"
+lib_hard_ceiling_ms="$(sed -n 's/^[[:space:]]*local hard_ceiling_ms=\([0-9]*\)$/\1/p' "$lib_sh")"
+lib_safety_margin_ms="$(sed -n 's/^[[:space:]]*local safety_margin_ms=\([0-9]*\)$/\1/p' "$lib_sh")"
+lib_nonce_spread_ms="$(sed -n 's/^[[:space:]]*local nonce_spread_ms=\([0-9]*\)$/\1/p' "$lib_sh")"
+
+if [ -z "$go_hard_ceiling_min" ] || [ -z "$go_safety_margin_s" ] || [ -z "$go_nonce_spread_ms" ] ||
+    [ -z "$lib_hard_ceiling_ms" ] || [ -z "$lib_safety_margin_ms" ] || [ -z "$lib_nonce_spread_ms" ]; then
+    printf '  FAIL timeout-ceiling drift check: could not extract one of the six numbers (go: %s/%s/%s, lib: %s/%s/%s) -- either side''s source changed shape and the sed pattern no longer matches\n' \
+        "$go_hard_ceiling_min" "$go_safety_margin_s" "$go_nonce_spread_ms" \
+        "$lib_hard_ceiling_ms" "$lib_safety_margin_ms" "$lib_nonce_spread_ms" >&2
+    failures=$((failures + 1))
+else
+    expect "$(( go_hard_ceiling_min * 60 * 1000 ))" "$lib_hard_ceiling_ms" \
+        "hard ceiling: tx_client.go's 10 * time.Minute vs lib.sh's copy"
+    expect "$(( go_safety_margin_s * 1000 ))" "$lib_safety_margin_ms" \
+        "safety margin: tx_client.go's 10 * time.Second vs lib.sh's copy"
+    expect "$go_nonce_spread_ms" "$lib_nonce_spread_ms" \
+        "nonce spread: tx_client.go's 10 * time.Millisecond vs lib.sh's copy"
+fi
+
+# gate_settle_timeout_min: this localnet's own shared params (20 session
+# blocks, 11/10 claim open/close, 1/10 proof open/close) at two clocks. The
+# derived minutes must MOVE with the clock, not sit fixed.
+expect 39 "$(gate_settle_timeout_min 20 11 10 1 10 30)" \
+    "this localnet's params at 30s: (20+11+10+1+10)*30=1560s, x1.5=2340s -> 39min"
+expect 78 "$(gate_settle_timeout_min 20 11 10 1 10 60)" \
+    "same params at 60s: 3120s, x1.5=4680s -> 78min"
+expect 2 "$(gate_settle_timeout_min 20 11 10 1 10 1)" \
+    "a 1s clock: 52s, x1.5=78s -> rounds UP to 2min, never down into the window"
+expect '' "$(gate_settle_timeout_min 20 11 10 1 10 '60.0')" \
+    "a non-integer block_time reaches bash arithmetic as 0 unless rejected first -- must come back empty, not a wrong number"
+expect '' "$(gate_settle_timeout_min 20 11 10 1 10 'abc')" \
+    "same for a non-numeric block_time"
+expect '' "$(gate_settle_timeout_min '' 11 10 1 10 60)" \
+    "an unreadable session-length param must also come back empty, not silently treated as 0 blocks"
+
+# gate_spanish_hits: the "Spanish in tracked files" check of static.sh. Each case
+# gets its own throwaway repository, files are `git add`ed (tracked is what the
+# helper scans) and nothing is committed.
+#
+# This file is scanned by that same check, and the word list is the ONLY
+# exclusion -- so the Spanish fixtures below are written ROT13-encoded and decoded
+# at runtime, and the accented letters as UTF-8 octal bytes. A literal fixture
+# here would turn the gate red on its own self-test.
+#
+# Every call runs under LC_ALL=C: that is the locale in which a bracket class of
+# accented letters degrades into a class of BYTES and starts matching the
+# multiplication sign, so the negative case below only bites there.
+sp_words="$(dirname "${BASH_SOURCE[0]}")/spanish-words.txt"
+sp_root="$(mktemp -d)"
+sp_rot13() { printf '%s' "$1" | tr 'A-Za-z' 'N-ZA-Mn-za-m'; }
+# sp_repo <file> <content> -- a new repository whose only tracked file is <file>.
+# mktemp, not a counter: this runs inside $(...), where a counter increment dies
+# with the subshell and every case would land in the same repository.
+sp_repo() {
+    local d
+    d="$(mktemp -d "$sp_root/r.XXXXXX")" &&
+        mkdir -p "$d/$(dirname "$1")" && git -C "$d" init -q . &&
+        printf '%s' "$2" >"$d/$1" && git -C "$d" add -- "$1" && printf '%s' "$d"
+}
+# sp_expect_hit <what> <repo> <path:line> -- must report exactly that location.
+sp_expect_hit() {
+    local out rc
+    out="$(LC_ALL=C gate_spanish_hits "$2" "$sp_words")"
+    rc=$?
+    expect 1 "$rc" "spanish: $1 -- exit status"
+    case "$out" in
+    "$3":*) ;;
+    *)
+        printf '  FAIL spanish: %s -- want a hit at %s, got: %s\n' "$1" "$3" "$out" >&2
+        failures=$((failures + 1))
+        ;;
+    esac
+}
+# sp_expect_clean <what> <repo> -- must look, and find nothing.
+sp_expect_clean() {
+    local out rc
+    out="$(LC_ALL=C gate_spanish_hits "$2" "$sp_words")"
+    rc=$?
+    expect 0 "$rc" "spanish: $1 -- exit status (got output: $out)"
+    expect '' "$out" "spanish: $1 -- output"
+}
+
+# Positives. The first carries no accent at all: it is the case the word level
+# exists for, and removing that level must turn it red.
+sp_expect_hit "Spanish with no accent" \
+    "$(sp_repo a.go "package a
+// $(sp_rot13 'ab dhvreb dhr rfgb cnfr')
+")" "a.go:2"
+sp_expect_hit "only a tilde n, no listed word" \
+    "$(sp_repo docs/b.md "$(printf 'title\nma\303\261ana\n')")" "docs/b.md:2"
+sp_expect_hit "a listed word capitalised at a sentence start" \
+    "$(sp_repo c.txt "$(sp_rot13 'Cbedhr') it fails")" "c.txt:1"
+
+# Negatives, one repository each so a red names the case. Every one of these
+# collides with a word that is left OUT of the list, or would match a listed
+# word without -w ("request", "close").
+sp_expect_clean "redis DEL"           "$(sp_repo n1.go 'client.Del(ctx, k) // del key')"
+sp_expect_clean "con as an identifier" "$(sp_repo n2.go 'con := dial()')"
+sp_expect_clean "the ha: key prefix"  "$(sp_repo n3.go 'key := "ha:key"')"
+sp_expect_clean "y as an identifier"  "$(sp_repo n4.go 'y := 1')"
+sp_expect_clean "english no"          "$(sp_repo n5.md 'no retries are left')"
+sp_expect_clean "a listed word inside request/close" "$(sp_repo n6.md 'close the request stream')"
+sp_expect_clean "the multiplication sign under LC_ALL=C" "$(sp_repo n7.md "$(printf '3 \303\227 4')")"
+# A shell variable cannot carry a NUL, so the binary file is written directly
+# and the precondition asserted: without a NUL the case would test a text file
+# and pass for the wrong reason.
+sp_bin="$(sp_repo n8.bin '')"
+printf 'x\0tambi\303\251n %s\n' "$(sp_rot13 'cbedhr')" >"$sp_bin/n8.bin"
+git -C "$sp_bin" add n8.bin
+if ! od -An -c "$sp_bin/n8.bin" | grep -q '\\0'; then
+    printf '  FAIL spanish: the binary fixture carries no NUL, so the -I case tests nothing\n' >&2
+    failures=$((failures + 1))
+fi
+sp_expect_clean "a binary file (NUL) with Spanish in it" "$sp_bin"
+
+# --cached reads the INDEX: Spanish only in the working tree is not what the
+# commit contains, and the plain mode must still see it.
+sp_idx="$(sp_repo d.md 'clean text')"
+sp_rot13 'rfgb ab naqn' >"$sp_idx/d.md"
+expect 1 "$(LC_ALL=C gate_spanish_hits "$sp_idx" "$sp_words" >/dev/null; echo $?)" \
+    "spanish: the working tree is scanned without --cached"
+expect 0 "$(LC_ALL=C gate_spanish_hits "$sp_idx" "$sp_words" --cached >/dev/null; echo $?)" \
+    "spanish: --cached scans the index, not the working tree"
+
+# Could not look is status 2, never a clean 0. Zero tracked files -- an empty
+# repository, or one tracking nothing but the excluded word list -- is a broken
+# matcher; so is a word list that would build a regex out of punctuation.
+sp_empty="$sp_root/empty"
+mkdir -p "$sp_empty" && git -C "$sp_empty" init -q .
+expect 2 "$(LC_ALL=C gate_spanish_hits "$sp_empty" "$sp_words" >/dev/null; echo $?)" \
+    "spanish: an empty repository scans 0 files and must not read as clean"
+expect 0 "$(gate_spanish_scanned "$sp_empty")" "spanish: an empty repository counts 0 files"
+sp_only_list="$(sp_repo scripts/gates/spanish-words.txt 'x')"
+expect 2 "$(LC_ALL=C gate_spanish_hits "$sp_only_list" "$sp_words" >/dev/null; echo $?)" \
+    "spanish: a repository tracking only the excluded word list scans 0 files"
+sp_bad_words="$sp_root/bad-words.txt"
+printf 'foo|bar.*\n' >"$sp_bad_words"
+expect 2 "$(LC_ALL=C gate_spanish_hits "$(sp_repo e.md 'x')" "$sp_bad_words" >/dev/null; echo $?)" \
+    "spanish: a word list with regex punctuation is refused"
+expect 2 "$(LC_ALL=C gate_spanish_hits "$(sp_repo f.md 'x')" /nonexistent/words.txt >/dev/null; echo $?)" \
+    "spanish: an unreadable word list is refused"
+
+rm -rf "$sp_root"
+sp_root=''
 
 if [ "$failures" -ne 0 ]; then
     printf 'lib_test: %s failure(s)\n' "$failures" >&2

@@ -1,0 +1,14 @@
+# A PUBLIC localnet key: this file is in a public repository, so anyone can
+# sign with it. It is not staked and holds no funds on beta or mainnet
+# (checked 2026-09-26), and it is here only so the stack starts as cloned and
+# proves Redis, the node connection and both processes.
+#
+# Never fund or stake it. Before serving, stop and ask, then put YOUR keys in
+# config/supplier-keys.local.yaml (gitignored) and mount that file instead;
+# see docs/deploy/DOCKER_COMPOSE.md.
+#
+# Format: a `keys:` list of hex-encoded secp256k1 private keys (64 hex
+# characters, optional 0x prefix). The supplier address is derived from each key.
+keys:
+  # localnet supplier2, pokt1re27pw4llwnatx4sq7rlggqzcm6j3f39epq2wa
+  - "7b2d353bf74a0aade09bf21928a9e195b54fd1309d19b11e63e16f92efdb610c"

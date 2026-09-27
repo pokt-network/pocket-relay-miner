@@ -1,9 +1,14 @@
 package miner
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"fmt"
+	"hash/fnv"
 	"runtime/debug"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -24,6 +29,7 @@ import (
 	prooftypes "github.com/pokt-network/poktroll/x/proof/types"
 	sharedtypes "github.com/pokt-network/poktroll/x/shared/types"
 	suppliertypes "github.com/pokt-network/poktroll/x/supplier/types"
+	"github.com/pokt-network/smt"
 )
 
 // SupplierQueryClient queries supplier information from the blockchain.
@@ -86,6 +92,33 @@ const (
 	drainKeyRemoved
 )
 
+// SupplierTxClient is what this manager needs from a supplier's tx client, and
+// it is declared so the manager can be exercised without one.
+//
+// The reason is a specific test that could not be written: the resend budget
+// degrades inside ResubmitMessage -- an absent budget falls to the ceiling under
+// the `unknown` regime -- and NOTHING asserted it. The proof is that forcing
+// that branch to always fall through left ./miner/ entirely green. It could not
+// be asserted because the method returns early when the supplier has no client,
+// so the branch is unreachable without one, and *tx.HASupplierClient is a
+// concrete struct whose fields belong to another package: there was nothing to
+// substitute. Not a missing test -- a missing seam.
+//
+// FOUR METHODS, WHICH IS ALL OF THE THIRTEEN THAT miner/ ACTUALLY CALLS. The
+// count is the point: an interface holding the whole surface would declare
+// capability nobody uses, and the next reader could not tell what this manager
+// depends on from what the client happens to offer.
+type SupplierTxClient interface {
+	CreateClaimsReturningHash(ctx context.Context, timeoutHeight int64, claimMsgs ...client.MsgCreateClaim) (string, tx.SignedTxPayload, error)
+	SubmitProofsReturningHash(ctx context.Context, timeoutHeight int64, proofMsgs ...client.MsgSubmitProof) (string, tx.SignedTxPayload, error)
+	BroadcastRawReturningHash(ctx context.Context, txType string, p tx.SignedTxPayload) (string, error)
+	LatestBlockTime() time.Time
+}
+
+// The production implementation. The assertion sits here so that changing either
+// side fails at compile time rather than at wiring.
+var _ SupplierTxClient = (*tx.HASupplierClient)(nil)
+
 type SupplierState struct {
 	OperatorAddr string
 
@@ -105,14 +138,89 @@ type SupplierState struct {
 	// SMST management (for building and managing session trees)
 	SMSTManager *RedisSMSTManager
 
+	// relayBatch finishes, per session, the relays already in the SMST: dedup
+	// mark, counters and stream acknowledgement in one script. nil means every
+	// relay is finished on its own.
+	relayBatch *relayBatch
+
+	// maxNonReclaimHandledMsgID is the highest stream ID this supplier's
+	// worker has finished handling among LIVE deliveries (msg.IsReclaim ==
+	// false). It excludes reclaims and self-pending redeliveries on purpose:
+	// those can carry an older ID than one already handled, and updating on
+	// them would make the watermark go backwards.
+	maxNonReclaimHandledMsgID atomic.Pointer[streamMsgID]
+
 	// Lifecycle management (for claim/proof submission with timing spread)
 	LifecycleManager  *SessionLifecycleManager
 	LifecycleCallback *LifecycleCallback
-	SupplierClient    *tx.HASupplierClient
+	SupplierClient    SupplierTxClient
 
 	// Lifecycle
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
+}
+
+// streamMsgID is a parsed Redis stream entry ID ("<ms>-<seq>"), kept as two
+// int64s so watermark comparisons are numeric, never lexicographic ("999-0"
+// sorts after "1000-0" as a string, backwards from its real order).
+type streamMsgID struct {
+	ms  int64
+	seq int64
+}
+
+// parseStreamMsgID parses a Redis stream entry ID of the form "<ms>-<seq>".
+func parseStreamMsgID(id string) (streamMsgID, error) {
+	dash := strings.IndexByte(id, '-')
+	if dash < 0 {
+		return streamMsgID{}, fmt.Errorf("malformed stream id %q: no '-'", id)
+	}
+	ms, err := strconv.ParseInt(id[:dash], 10, 64)
+	if err != nil {
+		return streamMsgID{}, fmt.Errorf("malformed stream id %q: %w", id, err)
+	}
+	seq, err := strconv.ParseInt(id[dash+1:], 10, 64)
+	if err != nil {
+		return streamMsgID{}, fmt.Errorf("malformed stream id %q: %w", id, err)
+	}
+	return streamMsgID{ms: ms, seq: seq}, nil
+}
+
+// before reports whether id sorts before other under Redis' stream ordering.
+func (id streamMsgID) before(other streamMsgID) bool {
+	if id.ms != other.ms {
+		return id.ms < other.ms
+	}
+	return id.seq < other.seq
+}
+
+// atLeast reports whether id is equal to or after other.
+func (id streamMsgID) atLeast(other streamMsgID) bool {
+	return !id.before(other)
+}
+
+// recordNonReclaimHandled advances the supplier's live-delivery watermark to
+// id, monotonically: a CAS loop that only ever moves it forward, so an older
+// ID arriving after a newer one cannot walk it back.
+func (s *SupplierState) recordNonReclaimHandled(id streamMsgID) {
+	for {
+		cur := s.maxNonReclaimHandledMsgID.Load()
+		if cur != nil && cur.atLeast(id) {
+			return
+		}
+		if s.maxNonReclaimHandledMsgID.CompareAndSwap(cur, &id) {
+			return
+		}
+	}
+}
+
+// loadMaxNonReclaimHandledMsgID returns the current watermark and whether
+// this supplier has handled any live delivery yet.
+func (s *SupplierState) loadMaxNonReclaimHandledMsgID() (streamMsgID, bool) {
+	p := s.maxNonReclaimHandledMsgID.Load()
+	if p == nil {
+		return streamMsgID{}, false
+	}
+	return *p, true
 }
 
 // LoadStatus returns the current supplier status.
@@ -139,6 +247,10 @@ type SupplierManagerConfig struct {
 	// Redis connection
 	RedisClient *redistransport.Client
 
+	// StoreHealth pauses stream consumption and tracking writes while Redis
+	// cannot take writes. nil never pauses.
+	StoreHealth *redistransport.StoreHealth
+
 	// Stream configuration
 	StreamPrefix  string
 	ConsumerGroup string
@@ -150,12 +262,6 @@ type SupplierManagerConfig struct {
 	// CacheTTL is the TTL for cached data (SMST trees, params, etc.)
 	CacheTTL time.Duration
 
-	// SMSTLiveRootCheckpointInterval bounds the relay loss window on
-	// mid-session leader kills. Zero means use the SMST manager default
-	// (DefaultLiveRootCheckpointInterval). See config.Config docs for
-	// the operator-facing trade-off.
-	SMSTLiveRootCheckpointInterval int
-
 	// Batch configuration
 	BatchSize int64 // Number of messages to fetch per XREADGROUP
 
@@ -163,6 +269,11 @@ type SupplierManagerConfig struct {
 	// Note: stream consumption blocks for one block interval per XREADGROUP
 	// (not BLOCK 0, which could not be interrupted on shutdown) - not configurable
 	ClaimIdleTimeout time.Duration // How long a message can be pending before being claimed
+
+	// RelayBatchFlushInterval is how often each supplier flushes its relay
+	// batch. Zero disables the tick, leaving the size cap, the claim transition
+	// and the supplier's exit as the only flushes (tests construct it that way).
+	RelayBatchFlushInterval time.Duration
 
 	// SupplierCache for publishing supplier state to relayers
 	SupplierCache *cache.SupplierCache
@@ -178,8 +289,11 @@ type SupplierManagerConfig struct {
 	// This is a shared client for all suppliers
 	TxClient *tx.TxClient
 
-	// BlockClient for monitoring block heights (claim/proof timing)
-	BlockClient client.BlockClient
+	// BlockClient for monitoring block heights (claim/proof timing) and for the
+	// per-block stream the inclusion reconciler runs on. The type demands
+	// Subscribe so a client that cannot deliver blocks fails the build at the
+	// wiring site rather than leaving a constructed reconciler with no trigger.
+	BlockClient localclient.SubscribingBlockClient
 
 	// SharedClient for querying shared parameters (claim/proof windows)
 	SharedClient client.SharedQueryClient
@@ -193,11 +307,16 @@ type SupplierManagerConfig struct {
 
 	// ProofQueryClient is used by the pre-proof GetClaim guard to verify each
 	// session's claim exists on-chain before proof submission, and by the
-	// the inclusion reconciler to record the real on-chain outcome after each claim
+	// inclusion reconciler to record the real on-chain outcome after each claim
 	// broadcast. If nil, the guard is skipped (legacy behavior, unsafe in
 	// production — sessions whose claim tx was evicted from mempool will
 	// trigger "claim not found" FailedPrecondition storms).
-	ProofQueryClient client.ProofQueryClient
+	//
+	// The type is query.ProofQueryClient and not poktroll's: the reconciler
+	// needs the two supplier-indexed inclusion reads as well, and requiring them
+	// HERE is what makes a client that lacks them a build failure at the wiring
+	// site instead of a reconciler that silently does not start.
+	ProofQueryClient query.ProofQueryClient
 
 	// InclusionReconcilerConfig controls the block-driven claim+proof inclusion
 	// reconciler + rebroadcaster. See miner.InclusionReconcilerConfig for fields.
@@ -219,20 +338,10 @@ type SupplierManagerConfig struct {
 	// Used for distributed supplier claiming across multiple miners via Redis leases.
 	ClaimerConfig SupplierClaimerConfig
 
-	// DisableClaimBatching disables batching of claim submissions.
-	// WORKAROUND: Set to true to avoid cross-contamination where one invalid claim
-	// causes the entire batch to fail.
-	DisableClaimBatching bool
-
 	// DisablePreProofClaimVerification turns off the pre-proof GetClaim guard.
 	// See LifecycleCallbackConfig.DisablePreProofClaimVerification for details.
 	// Default: false (guard enabled).
 	DisablePreProofClaimVerification bool
-
-	// DisableProofBatching disables batching of proof submissions.
-	// WORKAROUND: Set to true to avoid cross-contamination where one invalid proof
-	// (e.g., difficulty validation failure) causes the entire batch to fail.
-	DisableProofBatching bool
 
 	// SubmissionTrackingTTL is the TTL for claim/proof submission tracking records.
 	// Default: 24h
@@ -260,6 +369,31 @@ type SupplierManagerConfig struct {
 // on-chain stake reconciler.
 const DefaultSupplierReconcileInterval = 60 * time.Second
 
+// supplierDrainAuditTimeout bounds the observational chain query the drain
+// records. It matches the 5s that verifySupplierUnstaked already applies; it is
+// named here because the drain now owns the context rather than borrowing the
+// caller's, and an unbounded one would keep a shutdown goroutine alive.
+const supplierDrainAuditTimeout = 5 * time.Second
+
+// drainLeaseCallTimeout bounds each lease call a drain makes -- extending the
+// lease at its start, deleting it at its end. Detached from the caller's
+// context, which Close may already have cancelled.
+const drainLeaseCallTimeout = 5 * time.Second
+
+// drainLeaseBudget is how long a released supplier's lease is kept while its
+// drain runs: the audit, the batch release, the delivery-buffer drain, the
+// entries left under the consumer's name and the exit checkpoint of its trees
+// (each bounded by shutdownDrainWindow), the consumer's blocked read, which
+// returns within one block interval (transport/redis blockInterval, 5 s), and a
+// margin.
+// A drain that outlives it gives the lease up when the key expires. A func
+// because shutdownDrainWindow is a var a test may shrink.
+func drainLeaseBudget() time.Duration {
+	const consumerBlockInterval = 5 * time.Second
+	const margin = 10 * time.Second
+	return supplierDrainAuditTimeout + 4*shutdownDrainWindow + consumerBlockInterval + margin
+}
+
 // SupplierManager manages multiple suppliers in the HA Miner.
 // It handles dynamic addition/removal of suppliers based on key changes.
 type SupplierManager struct {
@@ -277,8 +411,50 @@ type SupplierManager struct {
 	// Message processing callback
 	onRelay func(ctx context.Context, supplierAddr string, msg *transport.StreamMessage) error
 
+	// consumeLoopFlushHook, when set, runs at every flush tick of every
+	// supplier's consume loop, before the flush. For tests only: nil in
+	// production. It is how a test makes the loop itself panic -- no path known
+	// today reaches the loop's recover, because handleStreamMessage and
+	// relayBatch.flushSession recover what they call. The restart and the
+	// panic budget are a defence against a defect that is not there yet.
+	consumeLoopFlushHook func()
+
+	// consumeLoopByteFlushedHook, when set, runs right after the consume loop's
+	// byte-triggered flush returns, on the loop's goroutine. Nil in production;
+	// a test sets it before the loop starts, to learn that the flush is over.
+	consumeLoopByteFlushedHook func()
+
+	// firstFlushTimer, when set, stands in for the timer of a consume loop's
+	// first flush. For tests only: nil in production.
+	firstFlushTimer func(d time.Duration) (fire <-chan time.Time, stop func() bool)
+
+	// afterReleaseAfterPanicHook, when set, runs once in consumeForSupplier
+	// right after releaseBatchAfterPanic returns and strictly before
+	// runConsumeLoop is called again. For tests only: nil in production. The
+	// point of running here, and not from inside the flush hook, is that
+	// nothing else can have called relayBatch.Add or touched this consumer's
+	// PEL between the release and this call: runConsumeLoop -- the only
+	// reader of msgChan -- has not been invoked yet, so a test observing state
+	// here sees exactly what the release left, with no race against
+	// deliverOwnPending or the reclaimLoop's own sweep (item 263).
+	afterReleaseAfterPanicHook func()
+
+	// drainWG tracks the drain goroutines onSupplierReleased starts, so a
+	// test can await the audit without polling a clock. See waitDrains for
+	// what it deliberately does NOT do.
+	drainWG sync.WaitGroup
+
 	// Pond subpool for bounded supplier queries (prevents unbounded goroutine spawning)
 	querySubpool pond.Pool
+
+	// Subpool shared by every supplier's SMST manager for cold tree
+	// compaction. Nil only without a WorkerPool (tests), where the manager
+	// runs it inline.
+	coldCompactionPool pond.Pool
+
+	// rebuildAdmission bounds the trees proofs and compactions load, and
+	// holds every supplier's stream consumer while a proof waits for it.
+	rebuildAdmission *RebuildAdmission
 
 	// Distributed claiming (optional)
 	claimer *SupplierClaimer
@@ -295,11 +471,16 @@ type SupplierManager struct {
 	inclusionReconciler *InclusionReconciler
 
 	// rebroadcastStore persists built claim/proof messages for the reconciler.
-	rebroadcastStore *RebroadcastStore
+	rebroadcastStore RebroadcastStorage
 
 	// reconcilerCancel stops the block-subscription loop driving the reconciler.
 	reconcilerCancel context.CancelFunc
 	reconcilerWG     sync.WaitGroup
+
+	// poolResizeCancel stops the block-subscription loop that sizes the
+	// transaction connection pool.
+	poolResizeCancel context.CancelFunc
+	poolResizeWG     sync.WaitGroup
 
 	// sharedSubmissionTracker + sharedTrackersOnce make the submission tracker,
 	// rebroadcast store, and inclusion reconciler process-wide singletons (one
@@ -350,6 +531,14 @@ func NewSupplierManager(
 		querySubpool: querySubpool,
 	}
 
+	// Sizes are not measured under load: a 100k-leaf rebuild took 0.34 s on a
+	// synthetic tree, and holds its leaves and every node in memory while it
+	// runs.
+	if config.WorkerPool != nil {
+		mgr.coldCompactionPool = CreateBoundedSubpool(componentLogger, config.WorkerPool, coldCompactionWorkers, "smst_cold_compaction")
+		mgr.rebuildAdmission = NewRebuildAdmission(componentLogger)
+	}
+
 	// Construct a shared deduplicator if we have a Redis client. Falls back to
 	// nil if Redis is absent (e.g. tests) — handleRelay treats nil as fail-open.
 	if config.RedisClient != nil {
@@ -393,6 +582,10 @@ func (m *SupplierManager) Start(ctx context.Context) error {
 	}
 	m.ctx, m.cancelFn = context.WithCancel(ctx)
 	m.mu.Unlock()
+
+	if m.rebuildAdmission != nil {
+		go logging.RecoverGoRoutine(m.logger, "ingestion_memory_brake", m.rebuildAdmission.RunMemoryBrake)(m.ctx)
+	}
 
 	// Register for key changes
 	m.keyManager.OnKeyChange(m.onKeyChange)
@@ -454,6 +647,8 @@ func (m *SupplierManager) startWithDistributedClaiming(ctx context.Context, supp
 		return fmt.Errorf("failed to start supplier claimer: %w", err)
 	}
 
+	m.startConnPoolResizeLoop()
+
 	m.logger.Info().
 		Int("claimed", m.claimer.ClaimedCount()).
 		Int("staked_suppliers", len(stakedSuppliers)).
@@ -495,10 +690,10 @@ func (m *SupplierManager) reconcile(ctx context.Context) {
 // cannot target a specific dropped address, and it only fires when the instance
 // holds MORE than its share.
 //
-// Release is cheap here and does not serialise: onSupplierReleased hands the
-// actual teardown to its own goroutine, so this loop does a Lua CAS-delete per
-// supplier and returns. The drain window each teardown then spends is paid in
-// parallel, not one after another.
+// Release is cheap here and does not serialise: it makes no Redis call, and
+// onSupplierReleased hands the actual teardown -- and the delete of the lease at
+// its end -- to its own goroutine. The drain window each teardown then spends is
+// paid in parallel, not one after another.
 //
 // Suppliers with pending sessions are NOT dropped by the filter in the first
 // place (it keeps them so claim and proof can finish), so nothing here can cut
@@ -521,7 +716,16 @@ func (m *SupplierManager) releaseUnconfigured(ctx context.Context, configured []
 		m.logger.Info().
 			Str(logging.FieldSupplier, addr).
 			Msg("releasing lease: supplier is no longer staked or no longer configured")
-		if err := m.claimer.Release(ctx, addr); err != nil {
+		// Two causes arrive here and only one is a removed key: a supplier that
+		// unstaked still has its key, and the fleet can still sign its pending
+		// work, so it is handed over. One whose key is gone is torn down as a key
+		// removal -- this is also where a key-change release that kept its claim
+		// is retried.
+		trigger := triggerRebalanceRelease
+		if !m.teardownCanFinishWork(addr) {
+			trigger = triggerKeyRemoval
+		}
+		if err := m.claimer.Release(ctx, addr, trigger); err != nil {
 			// Release already logged the reason and kept the claim; the next
 			// reconcile pass retries. Nothing is stranded by a single failure.
 			m.logger.Warn().
@@ -850,6 +1054,15 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 		Str("supplier", supplier).
 		Msg("claimed supplier, starting handoff validation")
 
+	// Added now, the supplier would start after Close collected the others,
+	// and nothing would tear it down.
+	m.mu.RLock()
+	closed := m.closed
+	m.mu.RUnlock()
+	if closed {
+		return fmt.Errorf("supplier manager is closed")
+	}
+
 	// Check if we already have this supplier
 	if _, exists := m.suppliers.Load(supplier); exists {
 		m.logger.Debug().Str("supplier", supplier).Msg("supplier already initialized")
@@ -870,7 +1083,7 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 // onSupplierReleased is called when a supplier claim is released.
 //
 // All callsites of SupplierClaimer.Release that invoke this callback
-// (rebalance, shutdown, claim-callback-failure) operate on suppliers that
+// (rebalance, claim-callback-failure) operate on suppliers that
 // are expected to remain staked on-chain — the release is an internal
 // handoff between miner instances, not a chain-level unstake. Issue #7:
 // vetoing drains here when the supplier is still staked permanently
@@ -879,25 +1092,114 @@ func (m *SupplierManager) onSupplierClaimed(ctx context.Context, supplier string
 // drain-decision metric retains its observability value, but the result
 // no longer vetoes the drain.
 //
-// The drain itself runs in its own goroutine because Consumer.Close can
-// sit on a blocked XREAD for tens of seconds while the consumer
-// goroutine notices ctx cancellation; running drains synchronously here
-// would block the claimer's rebalance loop and stall the next Lua DEL,
-// preventing other miners from seeing the released claim key. This
-// mirrors the key_removal path.
-func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier string) error {
-	_, verifyResult := m.verifySupplierUnstaked(ctx, supplier, "rebalance_release")
-	supplierDrainDecisionTotal.WithLabelValues("rebalance_release", verifyResult).Inc()
+// The supplier leaves the map and its consume loop is cancelled HERE, before
+// the release returns -- both local and instant -- so the old loop stops
+// writing now. The rest of the drain runs in its own goroutine because
+// Consumer.Close can sit on a blocked XREAD for tens of seconds while the
+// consumer goroutine notices ctx cancellation; running it synchronously here
+// would block the claimer's rebalance and renewal loops. The lease stays this
+// instance's until that goroutine ends and deletes it (FinishRelease), so no
+// peer writes the supplier's tree or acknowledges its relays while the old loop
+// still does.
+func (m *SupplierManager) onSupplierReleased(ctx context.Context, supplier, trigger string) error {
+	// No release is a shutdown: Close tears its suppliers down itself.
+	reason := drainRebalance
+	if trigger == triggerKeyRemoval {
+		// With a claimer -- every manager past Start -- this is how the key-change
+		// callback takes a removed key to the teardown. Mapped to a rebalance, the
+		// batch and the delivery buffer were RELEASED to a fleet that cannot sign
+		// them, and relays_dropped_no_key never counted.
+		reason = drainKeyRemoved
+	}
 
-	m.logger.Info().
-		Str("supplier", supplier).
-		Str("drain_trigger", "rebalance_release").
-		Str("on_chain_result", verifyResult).
-		Str("instance_id", m.config.MinerID).
-		Msg("drain decision audit")
+	// The key-removal path already ran this exact verification one call up
+	// (see the "Key removed" branch), on a supplier an operator touched by
+	// hand. Two 5s chain queries for one decision bought nothing.
+	audit := trigger != triggerKeyRemoval
 
-	go m.removeSupplier(supplier, drainRebalance)
+	// The audit is observational: its bool is discarded and the comment on
+	// verifySupplierUnstaked says the result no longer vetoes the drain. It
+	// must therefore not sit in front of anything. It used to run inline, and
+	// the renewal loop -- which is SERIAL over every supplier -- now calls
+	// this on lease loss: K lost leases would have cost up to K*5s inside a
+	// loop with 90s of total headroom, and the event that loses leases (Redis
+	// blinking, a slow full node) is the same one that makes this query slow.
+	// One lost lease would have cascaded into more.
+	//
+	// The context is deliberately NOT inherited from a cancellable parent:
+	// Close cancels the manager context while drains started before it may
+	// still be running, and every one of them would record "error".
+	auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), supplierDrainAuditTimeout)
+
+	// Checked and added under the lock Close takes to set closed: no drain is
+	// added once Close is waiting for them. A release refused here is undone
+	// by the claimer, and Close tears the supplier down and deletes its lease.
+	m.mu.RLock()
+	if m.closed {
+		m.mu.RUnlock()
+		cancelAudit()
+		return fmt.Errorf("supplier manager is closed")
+	}
+	m.drainWG.Add(1)
+	m.mu.RUnlock()
+
+	state, exists := m.stopSupplier(supplier, reason)
+
+	drain := func(context.Context) {
+		defer m.drainWG.Done()
+		defer cancelAudit()
+		// Deferred so it runs even if the teardown panics: a supplier left
+		// draining could never be claimed by this instance again.
+		defer m.finishDrainLease(ctx, supplier)
+		m.extendDrainLease(ctx, supplier)
+		if audit {
+			_, verifyResult := m.verifySupplierUnstaked(auditCtx, supplier, trigger)
+			supplierDrainDecisionTotal.WithLabelValues(trigger, verifyResult).Inc()
+
+			m.logger.Info().
+				Str("supplier", supplier).
+				Str("drain_trigger", trigger).
+				Str("on_chain_result", verifyResult).
+				Str("instance_id", m.config.MinerID).
+				Msg("drain decision audit")
+		}
+		if exists {
+			m.teardownSupplier(state)
+		}
+	}
+
+	go logging.RecoverGoRoutine(m.logger, "supplier_drain", drain)(auditCtx)
 	return nil
+}
+
+// extendDrainLease keeps a released supplier's lease for the drain budget.
+func (m *SupplierManager) extendDrainLease(ctx context.Context, supplier string) {
+	if m.claimer == nil {
+		return
+	}
+	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainLeaseCallTimeout)
+	defer cancel()
+	if err := m.claimer.ExtendDrainLease(callCtx, supplier, drainLeaseBudget()); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, supplier).
+			Msg("failed to extend the lease of a draining supplier; it keeps its current TTL")
+	}
+}
+
+// finishDrainLease deletes a released supplier's lease once its drain is over.
+func (m *SupplierManager) finishDrainLease(ctx context.Context, supplier string) {
+	if m.claimer == nil {
+		return
+	}
+	callCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), drainLeaseCallTimeout)
+	defer cancel()
+	if err := m.claimer.FinishRelease(callCtx, supplier); err != nil {
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, supplier).
+			Msg("failed to delete the lease of a drained supplier; it expires on its drain budget")
+	}
 }
 
 // warmupSingleSupplier queries chain data for a single supplier.
@@ -1067,8 +1369,10 @@ func (m *SupplierManager) addSupplierWithHandoff(ctx context.Context, supplier s
 		terminalCount := 0
 		missingSmstCount := 0
 		for _, session := range sessions {
-			// Sessions that have already been claimed/proved don't need SMST anymore.
-			// The SMST was deleted after the root hash was computed and submitted.
+			// A session whose claim is sent or being sent takes no more relays, so
+			// a missing SMST is not a defect here. It is not gone either: its
+			// proof is built from it, and it is deleted only when the session
+			// reaches a terminal state (DeleteTree, from the lifecycle callback).
 			if session.State.IsTerminal() || session.State == SessionStateClaimed || session.State == SessionStateClaiming {
 				terminalCount++
 				continue
@@ -1225,18 +1529,19 @@ func (m *SupplierManager) handleKeyChange(ctx context.Context, operatorAddr stri
 
 		// Release rather than calling removeSupplier directly. Both tear the
 		// pipeline down -- Release reaches it through onSupplierReleased -- but
-		// only Release deletes this instance's claim key and drops the address
-		// from the leased set. Going straight to removeSupplier left the lease
-		// behind, and renewAllClaims iterates the leased set, so the miner kept
-		// EXPIREing ha:miner:claim:{addr} forever for a supplier it no longer had
-		// any state for. No other instance could take that supplier over while
-		// the key kept being renewed.
+		// only Release, through the drain it starts, deletes this instance's
+		// claim key and drops the address from the leased set. Going straight
+		// to removeSupplier left the lease behind, and renewAllClaims iterates
+		// the leased set, so the miner kept EXPIREing ha:miner:claim:{addr}
+		// forever for a supplier it no longer had any state for. No other
+		// instance could take that supplier over while the key kept being
+		// renewed.
 		//
-		// The audit above already recorded the "key_removal" decision;
-		// onSupplierReleased records its own under "rebalance_release", which
-		// costs one extra on-chain verification on a path an operator triggers by
-		// hand. Cheap, and the two entries together show the whole sequence.
-		if err := m.claimer.Release(ctx, operatorAddr); err != nil {
+		// The audit above is the ONLY one for this path: onSupplierReleased
+		// skips its own when the trigger is key_removal, because it would be
+		// the same 5s chain query about the same supplier for the same
+		// decision. There is one drain_decision entry here, not two.
+		if err := m.claimer.Release(ctx, operatorAddr, triggerKeyRemoval); err != nil {
 			m.logger.Warn().
 				Err(err).
 				Str(logging.FieldSupplier, operatorAddr).
@@ -1293,6 +1598,9 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 			// Note: blocks for one block interval per read - hardcoded in consumer
 		},
 	)
+	if err == nil {
+		consumer.SetStoreHealth(m.config.StoreHealth)
+	}
 	if err != nil {
 		cancelFn()
 		return fmt.Errorf("failed to create consumer for %s: %w", operatorAddr, err)
@@ -1303,10 +1611,17 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		m.logger,
 		m.config.RedisClient,
 		RedisSMSTManagerConfig{
-			SupplierAddress:            operatorAddr,
-			CacheTTL:                   m.config.CacheTTL,
-			LiveRootCheckpointInterval: m.config.SMSTLiveRootCheckpointInterval,
+			SupplierAddress:    operatorAddr,
+			CacheTTL:           m.config.CacheTTL,
+			ColdCompactionPool: m.coldCompactionPool,
+			RebuildAdmission:   m.rebuildAdmission,
 		},
+	)
+
+	// Built before the lifecycle manager, whose claim transition flushes it.
+	relayBatch := newRelayBatch(
+		m.logger, m.config.RedisClient, operatorAddr,
+		sessionStore, m.deduplicator, smstManager, sessionCoordinator, consumer,
 	)
 
 	// SMST trees are lazy-loaded from Redis on-demand:
@@ -1335,8 +1650,6 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		// Create lifecycle callback for claim/proof submission
 		lifecycleCallbackConfig := DefaultLifecycleCallbackConfig()
 		lifecycleCallbackConfig.SupplierAddress = operatorAddr
-		lifecycleCallbackConfig.DisableClaimBatching = m.config.DisableClaimBatching
-		lifecycleCallbackConfig.DisableProofBatching = m.config.DisableProofBatching
 		lifecycleCallbackConfig.BlockTimeSeconds = m.config.BlockTimeSeconds
 		lifecycleCallbackConfig.DisablePreProofClaimVerification = m.config.DisablePreProofClaimVerification
 		lifecycleCallback = NewLifecycleCallback(
@@ -1433,6 +1746,60 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		)
 		lifecycleManager.SetMeterCleanupPublisher(meterCleanupPublisher)
 
+		// A session about to be claimed gets its batched relays counted first,
+		// so the relay_count the claim transition refreshes includes them.
+		// Set before Start: the transitions read it on their own goroutines.
+		if relayBatch != nil {
+			lifecycleManager.SetPendingRelayFlusher(relayBatch.FlushSessions)
+		}
+	} else {
+		m.logger.Warn().
+			Str(logging.FieldSupplier, operatorAddr).
+			Msg("lifecycle management disabled - TxClient, BlockClient, or SharedClient not configured")
+	}
+
+	state := &SupplierState{
+		OperatorAddr:       operatorAddr,
+		Consumer:           consumer,
+		SessionStore:       sessionStore,
+		SessionCoordinator: sessionCoordinator,
+		SMSTManager:        smstManager,
+		relayBatch:         relayBatch,
+		LifecycleManager:   lifecycleManager,
+		LifecycleCallback:  lifecycleCallback,
+		SupplierClient:     supplierClient,
+		cancelFn:           cancelFn,
+	}
+	state.StoreStatus(SupplierStatusActive)
+	m.wireRebuildAdmission(operatorAddr, consumer, lifecycleManager)
+
+	if lifecycleManager != nil {
+		// Conditional flush delay -- wired BEFORE Start(), not alongside
+		// the other lifecycleManager.Set* calls above: it needs `state`,
+		// which this function only builds once every other supplier
+		// component is ready. Wiring it AFTER Start() would race a session
+		// this instance loads already in SessionStateClaiming (an HA
+		// handoff, or a restart): its first transition check can run the
+		// moment Start's background loop begins, on another goroutine,
+		// reading these fields while this one is still writing them.
+		lifecycleManager.SetMaxNonReclaimHandledMsgIDLookup(state.loadMaxNonReclaimHandledMsgID)
+		if consumer != nil {
+			lifecycleManager.SetLastGeneratedMsgIDLookup(func(ctx context.Context) (streamMsgID, bool, error) {
+				idStr, lastGenErr := consumer.LastGeneratedID(ctx)
+				if lastGenErr != nil {
+					return streamMsgID{}, false, lastGenErr
+				}
+				if idStr == "" || idStr == "0-0" {
+					return streamMsgID{}, false, nil
+				}
+				id, parseErr := parseStreamMsgID(idStr)
+				if parseErr != nil {
+					return streamMsgID{}, false, parseErr
+				}
+				return id, true, nil
+			})
+		}
+
 		// Start lifecycle manager
 		if startErr := lifecycleManager.Start(supplierCtx); startErr != nil {
 			m.logger.Warn().
@@ -1440,6 +1807,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 				Str(logging.FieldSupplier, operatorAddr).
 				Msg("failed to start lifecycle manager, continuing without lifecycle management")
 			lifecycleManager = nil
+			state.LifecycleManager = nil
 		} else {
 			// Wire up callback so session coordinator notifies lifecycle manager of new sessions
 			// This is critical for tracking sessions created after startup
@@ -1458,24 +1826,7 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 				Str(logging.FieldSupplier, operatorAddr).
 				Msg("session_lifecycle_callbacks_wired: creation and terminal callbacks registered for atomic state updates")
 		}
-	} else {
-		m.logger.Warn().
-			Str(logging.FieldSupplier, operatorAddr).
-			Msg("lifecycle management disabled - TxClient, BlockClient, or SharedClient not configured")
 	}
-
-	state := &SupplierState{
-		OperatorAddr:       operatorAddr,
-		Consumer:           consumer,
-		SessionStore:       sessionStore,
-		SessionCoordinator: sessionCoordinator,
-		SMSTManager:        smstManager,
-		LifecycleManager:   lifecycleManager,
-		LifecycleCallback:  lifecycleCallback,
-		SupplierClient:     supplierClient,
-		cancelFn:           cancelFn,
-	}
-	state.StoreStatus(SupplierStatusActive)
 
 	// Atomic insert. If another goroutine raced us and stored its own
 	// state, drop ours (and tear down the resources we just constructed)
@@ -1522,6 +1873,20 @@ func (m *SupplierManager) addSupplierWithData(ctx context.Context, operatorAddr 
 		Msg("supplier added and consuming")
 
 	return nil
+}
+
+// wireRebuildAdmission holds the supplier's consumer while a proof waits for
+// memory, and lets its claim's flush delay release that hold. Called before
+// the consumer and the lifecycle manager start.
+func (m *SupplierManager) wireRebuildAdmission(operatorAddr string, consumer *redistransport.StreamsConsumer, lifecycleManager *SessionLifecycleManager) {
+	if m.rebuildAdmission == nil {
+		return
+	}
+	admission := m.rebuildAdmission
+	consumer.SetIngestionPause(admission.IngestionPause(operatorAddr))
+	if lifecycleManager != nil {
+		lifecycleManager.SetClaimFlushWaiting(func() func() { return admission.claimFlushWaiting(operatorAddr) })
+	}
 }
 
 // supplierDataSource describes how we obtained (or failed to obtain)
@@ -1679,17 +2044,6 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 	return ownerAddr, services, endpoints
 }
 
-// consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
-// Each message is ACK'd immediately after successful processing to prevent race conditions
-// with the reclaim taking messages that were already processed but not yet ACK'd.
-//
-// Belt-and-suspenders defense: even though every SMT boundary inside
-// handleRelay is wrapped with runSMSTSafely, any panic from unrelated
-// code paths (nil pointer, map corruption, pool misuse) must not kill
-// this consumer goroutine — losing it stops every relay for the
-// supplier until a restart. We cannot use logging.RecoverGoRoutine
-// directly because this loop must keep running after a single relay
-// panics, not exit. Instead we recover *per iteration* below.
 // shutdownDrainWindow bounds how long a supplier's graceful shutdown spends
 // finishing relays already sitting in its delivery buffer.
 //
@@ -1703,50 +2057,386 @@ func (m *SupplierManager) resolveAndPublishSupplierState(
 // A var, not a const, only so a test can shrink it: nothing in production writes it.
 var shutdownDrainWindow = 5 * time.Second
 
+// consumeLoopPanicBudget is the consume-loop panic at which a supplier is let
+// go for another instance to take: the panics before it are recovered and the
+// loop runs again on the same delivery channel, and at this one it stops, since
+// a loop that keeps panicking here would keep its lease and consume nothing.
+// The count is not replenished: a supplier that panics this often has a
+// defect, and restarting it forever would hide it.
+const consumeLoopPanicBudget = 3
+
+// consumeForSupplier runs the consume loop for a single supplier with immediate ACK.
+// Each message is ACK'd immediately after successful processing to prevent race conditions
+// with the reclaim taking messages that were already processed but not yet ACK'd.
+//
+// A panic in the loop must not end this goroutine: with it gone, the supplier
+// stays in the map and its lease keeps being renewed while nothing reads its
+// stream, and no other instance can take it -- until a restart. A relay's
+// processing and a batch's flush recover their own panics (handleStreamMessage,
+// relayBatch.flushSession); runConsumeLoop recovers whatever reaches the loop
+// itself, and this runs it again until the consumeLoopPanicBudget-th panic.
 func (m *SupplierManager) consumeForSupplier(ctx context.Context, state *SupplierState) {
 	defer state.wg.Done()
 
+	msgChan := state.Consumer.Consume(ctx)
+	for panics := 1; ; panics++ {
+		if !m.runConsumeLoop(ctx, state, msgChan) {
+			return
+		}
+		// The panic may have left the batch half-built: it goes back before
+		// the loop runs again. A panic while it goes back ends the restarts.
+		ok := m.releaseBatchAfterPanic(ctx, state)
+		if m.afterReleaseAfterPanicHook != nil {
+			m.afterReleaseAfterPanicHook()
+		}
+		if !ok || panics >= consumeLoopPanicBudget {
+			m.letGoAfterPanics(ctx, state)
+			return
+		}
+	}
+}
+
+// unloadEndedSessionTrees drops from memory the trees of this supplier's
+// sessions past their grace period and before their claim window, keeping them
+// in Redis. At a claim height
+// under load, the relays those sessions held put their trees at about half the
+// live heap (estimated from relays consumed, not profiled per session), twelve
+// blocks after their last relay. It runs right after the flush, on the consume loop's
+// goroutine, so the relays of those sessions are checkpointed and acknowledged
+// by then.
+//
+// From the claim window on it leaves them: the claim leaves its tree unloaded
+// (FlushTree), and a proof may hold a tree's lock while it waits for memory,
+// which would hold this loop, and the supplier's relays, behind it.
+func (m *SupplierManager) unloadEndedSessionTrees(ctx context.Context, state *SupplierState) {
+	if state.LifecycleManager == nil || state.SMSTManager == nil || m.config.BlockClient == nil || m.config.SharedClient == nil {
+		return
+	}
+	block := m.config.BlockClient.LastBlock(ctx)
+	if block == nil {
+		return
+	}
+	height := block.Height()
+	type unloadedAtEnd struct {
+		graceEnd, claimOpen         int64
+		trees, leaves, computeUnits uint64
+	}
+	var unloaded map[int64]*unloadedAtEnd
+	state.LifecycleManager.activeSessions.Range(func(sessionID string, session *SessionSnapshot) bool {
+		if session.SessionEndHeight <= 0 || session.SessionEndHeight >= height {
+			return true
+		}
+		params, err := m.config.SharedClient.GetParamsAtHeight(ctx, session.SessionEndHeight)
+		if err != nil || params == nil {
+			return true
+		}
+		graceEnd := sharedtypes.GetSessionGracePeriodEndHeight(params, session.SessionEndHeight)
+		claimOpen := sharedtypes.GetClaimWindowOpenHeight(params, session.SessionEndHeight)
+		if height <= graceEnd || height >= claimOpen {
+			return true
+		}
+		root, err := state.SMSTManager.UnloadTree(ctx, sessionID)
+		if err != nil {
+			m.logger.Debug().Err(err).
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str(logging.FieldSessionID, sessionID).
+				Msg("failed to unload an ended session's tree: it stays in memory")
+			return true
+		}
+		if root == nil {
+			return true
+		}
+		// The count and the sum are in the root's bytes: nothing is read.
+		leaves, _ := smt.MerkleSumRoot(root).Count()
+		computeUnits, _ := smt.MerkleSumRoot(root).Sum()
+		m.logger.Debug().
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Str(logging.FieldSessionID, sessionID).
+			Int64("height", height).
+			Int64("session_end_height", session.SessionEndHeight).
+			Uint64("leaves", leaves).
+			Uint64("compute_units", computeUnits).
+			Msg("unloaded an ended session's tree from memory")
+		if unloaded == nil {
+			unloaded = make(map[int64]*unloadedAtEnd)
+		}
+		at := unloaded[session.SessionEndHeight]
+		if at == nil {
+			at = &unloadedAtEnd{graceEnd: graceEnd, claimOpen: claimOpen}
+			unloaded[session.SessionEndHeight] = at
+		}
+		at.trees++
+		at.leaves += leaves
+		at.computeUnits += computeUnits
+		return true
+	})
+	for sessionEnd, at := range unloaded {
+		m.logger.Info().
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Int64("height", height).
+			Int64("session_end_height", sessionEnd).
+			Int64("grace_period_end_height", at.graceEnd).
+			Int64("claim_window_open_height", at.claimOpen).
+			Uint64("trees", at.trees).
+			Uint64("leaves", at.leaves).
+			Uint64("compute_units", at.computeUnits).
+			Msg("unloaded ended sessions' trees from memory")
+	}
+}
+
+// flushPhase is how long a supplier's first flush waits: its address hashed
+// into [0, interval), so suppliers started together flush apart.
+func flushPhase(supplier string, interval time.Duration) time.Duration {
+	h := fnv.New64a()
+	_, _ = h.Write([]byte(supplier))
+	return time.Duration(h.Sum64() % uint64(interval))
+}
+
+func (m *SupplierManager) newFirstFlushTimer(d time.Duration) (<-chan time.Time, func() bool) {
+	if m.firstFlushTimer != nil {
+		return m.firstFlushTimer(d)
+	}
+	timer := time.NewTimer(d)
+	return timer.C, timer.Stop
+}
+
+// runConsumeLoop consumes until the delivery channel closes or ctx ends, and
+// reports whether it stopped on a recovered panic instead.
+func (m *SupplierManager) runConsumeLoop(
+	ctx context.Context,
+	state *SupplierState,
+	msgChan <-chan transport.StreamMessage,
+) (panicked bool) {
 	defer func() {
 		if r := recover(); r != nil {
+			panicked = true
 			logging.PanicRecoveriesTotal.WithLabelValues("supplier_consume_loop").Inc()
 			m.logger.Error().
 				Str(logging.FieldSupplier, state.OperatorAddr).
 				Str("panic_value", fmt.Sprintf("%v", r)).
 				Str("stack_trace", string(debug.Stack())).
-				Msg("PANIC RECOVERED in consumeForSupplier — consumer goroutine would have died")
+				Msg("PANIC RECOVERED in the consume loop -- running it again")
 		}
 	}()
 
-	msgChan := state.Consumer.Consume(ctx)
+	// The flush tick runs on this goroutine, between deliveries, so a flush
+	// never races the relays being added: the lifecycle's claim transition is
+	// the only other caller, and the batch serialises it.
+	//
+	// Every supplier's loop starts at once, and a flush commits every node the
+	// relays since the last one dirtied: with the tickers in phase, all the
+	// suppliers' commits allocated together, hundreds of MiB within a second.
+	// The first flush waits a phase of the interval taken from the supplier's
+	// address, and the ticker starts from there.
+	var flushTick <-chan time.Time
+	var flushTicker *time.Ticker
+	interval := m.config.RelayBatchFlushInterval
+	if state.relayBatch != nil && interval > 0 {
+		fire, stop := m.newFirstFlushTimer(flushPhase(state.OperatorAddr, interval))
+		defer stop()
+		flushTick = fire
+		defer func() {
+			if flushTicker != nil {
+				flushTicker.Stop()
+			}
+		}()
+	}
 
 	for {
 		select {
 		case msg, ok := <-msgChan:
 			if !ok {
 				// Channel closed, exit
-				return
+				m.releaseRelayBatchOnExit(ctx, state)
+				return false
 			}
+			state.Consumer.MarkDelivered(msg)
 			m.handleStreamMessage(ctx, state, msg)
+			// The byte trigger: a supplier of big relays flushes when its
+			// leaves took relayBatchFlushBytes, instead of holding a whole
+			// interval of them. Only the flush -- ending sessions are left to
+			// the tick, which asks the chain about each one.
+			if state.relayBatch != nil && state.SMSTManager != nil &&
+				state.SMSTManager.LeafBytesSinceFlush() >= relayBatchFlushBytes {
+				RecordRelayBatchFlush(state.OperatorAddr, relayBatchFlushBytesTrigger)
+				state.relayBatch.FlushAll(ctx)
+				if m.consumeLoopByteFlushedHook != nil {
+					m.consumeLoopByteFlushedHook()
+				}
+			}
+
+		case <-flushTick:
+			if flushTicker == nil {
+				flushTicker = time.NewTicker(interval)
+				flushTick = flushTicker.C
+			}
+			if m.consumeLoopFlushHook != nil {
+				m.consumeLoopFlushHook()
+			}
+			RecordRelayBatchFlush(state.OperatorAddr, relayBatchFlushTime)
+			state.relayBatch.FlushAll(ctx)
+			m.unloadEndedSessionTrees(ctx, state)
 
 		case <-ctx.Done():
+			// The batch goes back first, while the exit budget is whole.
+			m.releaseRelayBatchOnExit(ctx, state)
 			// Do NOT abandon what is already in the delivery buffer. Those
 			// relays were handed over by XREADGROUP, so they are in this
 			// consumer's pending list under a name that embeds the pid and
 			// will not exist after a restart.
 			m.drainDeliveryBuffer(ctx, state, msgChan)
-			return
+			return false
 		}
+	}
+}
+
+// releaseBatchAfterPanic hands the supplier's relay batch back after a
+// recovered consume-loop panic, and reports whether it got through without
+// panicking itself.
+func (m *SupplierManager) releaseBatchAfterPanic(ctx context.Context, state *SupplierState) (ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			ok = false
+			logging.PanicRecoveriesTotal.WithLabelValues("supplier_consume_loop").Inc()
+			m.logger.Error().
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str("panic_value", fmt.Sprintf("%v", r)).
+				Str("stack_trace", string(debug.Stack())).
+				Msg("PANIC RECOVERED handing the relay batch back after a consume-loop panic")
+		}
+	}()
+	m.releaseRelayBatchOnExit(ctx, state)
+	return true
+}
+
+// letGoAfterPanics lets a supplier whose consume loop keeps panicking go, for
+// another instance to take: through the claimer, which keeps the lease until
+// the drain ends, or, with no claimer, straight to the drain. It is called on
+// the loop's own goroutine and does not wait: onSupplierReleased cancels the
+// supplier and runs the teardown on a goroutine of its own, which waits for
+// this one to return. removeSupplier would wait for it here, on itself.
+func (m *SupplierManager) letGoAfterPanics(ctx context.Context, state *SupplierState) {
+	m.logger.Error().
+		Str(logging.FieldSupplier, state.OperatorAddr).
+		Msg("the consume loop keeps panicking; letting the supplier go for another instance to take")
+	var err error
+	if m.claimer != nil {
+		err = m.claimer.Release(ctx, state.OperatorAddr, triggerConsumeLoopPanicked)
+	} else {
+		err = m.onSupplierReleased(ctx, state.OperatorAddr, triggerConsumeLoopPanicked)
+	}
+	if err != nil {
+		m.logger.Error().
+			Err(err).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Msg("could not let go of a supplier whose consume loop keeps panicking")
+	}
+}
+
+// releaseRelayBatchOnExit hands the supplier's relay batch back to the group,
+// unflushed, as its consume loop ends -- shutdown, rebalance or key removal --
+// which is before removeSupplier and Close close the consumer, so the releases
+// can still be sent. It releases rather than flushes because flushing every
+// held session does not fit the exit window (Jorge, 2026-09-10); the relays are
+// already in the tree and were never marked, so the next consumer counts them
+// once.
+//
+// The exception is a removed key, decided the way drainDeliveryBuffer decides
+// it: nobody in this fleet can claim those relays, so the batch is acknowledged
+// and counted as dropped for want of a key instead of left pending forever.
+//
+// Like drainDeliveryBuffer it detaches from the supplier's context, which is
+// already cancelled, and bounds itself by shutdownDrainWindow.
+func (m *SupplierManager) releaseRelayBatchOnExit(ctx context.Context, state *SupplierState) {
+	if state.relayBatch == nil {
+		return
+	}
+	exitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), shutdownDrainWindow)
+	defer cancel()
+	if drainReason(state.drainReason.Load()) == drainKeyRemoved {
+		state.relayBatch.AckAllAsLost(exitCtx)
+		return
+	}
+	state.relayBatch.ReleaseAll(exitCtx)
+}
+
+// handBackOnExit settles one entry a stopping supplier holds and will not
+// process, and reports whether Redis took it. With the key removed nobody in
+// this fleet can build an SMST, a claim or a proof for the relay, so it is
+// acknowledged deliberately and counted as LOSS: left pending, the next
+// consumer would only rediscover the same dead end. Otherwise someone else can
+// still finish it, so it is RELEASED, never acknowledged -- acknowledging
+// deletes it from the stream and takes it out of reach of the reclaim. Either
+// way the pooled message goes back.
+func (m *SupplierManager) handBackOnExit(ctx context.Context, state *SupplierState, msg transport.StreamMessage) bool {
+	defer transport.ReleaseMinedRelayMessage(msg.Message)
+	if drainReason(state.drainReason.Load()) == drainKeyRemoved {
+		if err := state.Consumer.AckMessage(ctx, msg); err != nil {
+			return false
+		}
+		RecordRelayDroppedNoKey(state.OperatorAddr, msg.Message.ServiceId)
+		return true
+	}
+	if err := state.Consumer.ReleaseMessage(ctx, msg); err != nil {
+		return false
+	}
+	RecordShutdownDrainedRelay(state.OperatorAddr)
+	return true
+}
+
+// releaseOwnPendingOnExit stops the supplier's consumer and settles, with
+// handBackOnExit, every entry still pending under its name: what the consume
+// loop's exit did not reach -- the relay being processed when the supplier was
+// cancelled, if settling it failed on that context; the rest of a read batch
+// or of a reclaim page the consumer's producers were handing over when they
+// stopped; whatever a delivery-buffer drain cut short by its window left in
+// the channel. The name belongs to this process, so an entry left there waits
+// until the process takes the supplier again or restarts. Stopped first, the
+// producers add nothing after the pass. On a context of its own, bounded by
+// shutdownDrainWindow like the rest of the exit.
+func (m *SupplierManager) releaseOwnPendingOnExit(state *SupplierState) {
+	state.Consumer.Stop()
+
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainWindow)
+	defer cancel()
+	settled, failed := 0, 0
+	err := state.Consumer.EachOwnPending(ctx, func(msg transport.StreamMessage) {
+		if m.handBackOnExit(ctx, state, msg) {
+			settled++
+		} else {
+			failed++
+		}
+	})
+	RecordShutdownAbandonedRelays(state.OperatorAddr, failed)
+	if err != nil || failed > 0 {
+		// Once per supplier torn down, not per relay.
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Int("settled", settled).
+			Int("failed", failed).
+			Msg("could not settle every entry left under this consumer's name; they stay pending until this process takes the supplier again or restarts")
+		return
+	}
+	if settled > 0 {
+		m.logger.Info().
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Int("settled", settled).
+			Msg("settled the entries left under this consumer's name")
 	}
 }
 
 // handleStreamMessage runs one delivered relay to completion: process, release
 // the pooled message, and acknowledge on success. Returns whether the message
-// was actually acknowledged -- false on a processing failure (by design: the
-// entry must stay pending for the reclaim) OR an AckMessage error (Redis
-// hiccup, connection reset), which a caller MUST check before treating the
-// relay as done rather than assuming success from "handleStreamMessage
-// returned" (review 2026-08-21: the shutdown drain's metric used to do
-// exactly that).
+// was actually acknowledged -- true when the relay was processed, and also when
+// it was LOST to a recovered panic (deterministic, so it is acked and counted
+// rather than retried forever); false on any other processing failure, where the
+// entry is handed back for a later delivery, for a relay handed to the relay
+// batch (acknowledged when the batch flushes, not by this call), OR on an
+// AckMessage error (Redis hiccup, connection reset), which a caller MUST check
+// before treating the relay as done rather than assuming success from
+// "handleStreamMessage returned" (review 2026-08-21: the shutdown drain's
+// metric used to do exactly that).
 //
 // It takes its own ctx rather than closing over the supplier's, because the
 // graceful-shutdown drain calls it with a context that is deliberately still
@@ -1756,6 +2446,24 @@ func (m *SupplierManager) handleStreamMessage(
 	state *SupplierState,
 	msg transport.StreamMessage,
 ) (acked bool) {
+	// Advance the live-delivery watermark on every exit path (defer, not "at
+	// the end") -- this function has several early returns below, and a
+	// watermark only updated on the happy path would never move on a
+	// transient error, permanently understating what this supplier already
+	// handled. Reclaims and self-pending redeliveries (msg.IsReclaim) never
+	// touch it: see streamMsgID / recordNonReclaimHandled.
+	if !msg.IsReclaim {
+		if id, parseErr := parseStreamMsgID(msg.ID); parseErr == nil {
+			defer state.recordNonReclaimHandled(id)
+		} else {
+			m.logger.Warn().
+				Err(parseErr).
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str("message_id", msg.ID).
+				Msg("malformed stream message id, flush watermark not advanced for this message")
+		}
+	}
+
 	// Track relay consumed from Redis Stream (relayer → miner)
 	RecordRelayConsumedFromStream(state.OperatorAddr, msg.Message.ServiceId)
 
@@ -1781,6 +2489,7 @@ func (m *SupplierManager) handleStreamMessage(
 	serviceID := msg.Message.ServiceId
 	sessionID := msg.Message.SessionId
 	var processErr error
+	batched := false
 	func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -1791,12 +2500,18 @@ func (m *SupplierManager) handleStreamMessage(
 					Str("panic_value", fmt.Sprintf("%v", r)).
 					Str("stack_trace", string(debug.Stack())).
 					Msg("PANIC RECOVERED during relay processing — relay dropped, consumer continuing")
-				processErr = fmt.Errorf("panic recovered in relay processing: %v", r)
+				processErr = fmt.Errorf("%w: %v", ErrRelayPanicRecovered, r)
 			}
 		}()
 		if m.onRelay != nil {
 			startTime := time.Now()
 			processErr = m.onRelay(ctx, state.OperatorAddr, &msg)
+			// Processed, and its acknowledgement belongs to the relay batch:
+			// a success, not a failure to hand back.
+			if errors.Is(processErr, ErrRelayBatched) {
+				batched = true
+				processErr = nil
+			}
 			status := "success"
 			if processErr != nil {
 				status = "error"
@@ -1813,13 +2528,68 @@ func (m *SupplierManager) handleStreamMessage(
 	}()
 
 	if processErr != nil {
+		// A recovered panic is ACKed rather than handed back: a panic that is a
+		// pure function of the relay bytes repeats on every redelivery, so
+		// returning the entry only spends the failure on a loop. The relay was
+		// already served -- the backend did the work and the client has its
+		// answer -- so it is lost work, and it is counted as such. The loud
+		// Error log with the stack lives at the recover() above; this is the
+		// accounting half, which did not exist.
+		//
+		// NOT VERIFIED that every panic arriving here is deterministic, and the
+		// guard above says why: it deliberately also covers paths that are
+		// state-dependent (pool release, deduplicator, session_store access). One
+		// of those failing while a component is torn down could panic for one
+		// in-flight relay on this replica and not on another. AckMessage is
+		// XAckDel with DELREF, so this DELETES the entry and no replica can
+		// rescue it afterwards.
+		//
+		// Losing that relay rather than risking a loop is an owner decision, not
+		// a property of the code (Jorge, 2026-09-02: "the panic must
+		// unfortunately be lost... or it will stay alive without billing"). It
+		// is written here so it is not re-litigated and not read as something
+		// that was measured.
+		if errors.Is(processErr, ErrRelayPanicRecovered) {
+			RecordRelayLostToPanic(state.OperatorAddr, serviceID)
+			if ackErr := state.Consumer.AckMessage(ctx, msg); ackErr != nil {
+				m.logger.Warn().
+					Err(ackErr).
+					Str(logging.FieldSupplier, state.OperatorAddr).
+					Str("session_id", sessionID).
+					Msg("failed to ack a relay lost to a panic; it will be redelivered and panic again")
+				return false
+			}
+			return true
+		}
+
 		m.logger.Debug().
 			Err(processErr).
 			Str(logging.FieldSupplier, state.OperatorAddr).
 			Str("session_id", sessionID).
 			Msg("failed to process relay")
-		// Don't ACK on processing failure - let the reclaim retry
+
+		// Everything else is the transient class -- the worker already ACKs and
+		// counts the permanent ones before they reach here (see
+		// supplier_worker.go: IsRetryableError / IsPermanentSMSTError). Hand the
+		// entry BACK so a later delivery retries it.
+		//
+		// Not simply "leave it pending": measured 2026-09-02, the reclaim skips
+		// any entry still owned by this consumer, so on a single-miner fleet a
+		// pending entry is stranded until the process restarts and its name
+		// changes. Releasing leaves it unowned (XNACK), which is what makes it
+		// visible again.
+		if relErr := state.Consumer.ReleaseMessage(ctx, msg); relErr != nil {
+			m.logger.Warn().
+				Err(relErr).
+				Str(logging.FieldSupplier, state.OperatorAddr).
+				Str("session_id", sessionID).
+				Msg("failed to release a relay after a processing error; it stays pending until this process restarts")
+		}
 		return false
+	}
+
+	if batched {
+		return false // not acknowledged by this call: the batch acknowledges it when it flushes
 	}
 
 	// ACK immediately after successful processing
@@ -1883,6 +2653,7 @@ func (m *SupplierManager) drainDeliveryBuffer(
 				m.reportDrain(state, drained, abandoned)
 				return
 			}
+			state.Consumer.MarkDelivered(msg)
 			select {
 			case <-drainCtx.Done():
 				// Out of time. Release the pooled message so the slot returns,
@@ -1893,32 +2664,12 @@ func (m *SupplierManager) drainDeliveryBuffer(
 				continue
 			default:
 			}
-			// The key is gone: no SMST, no claim, no proof is possible for
-			// this relay by anyone in this fleet, so it is acknowledged
-			// deliberately -- and counted as LOSS. Leaving it pending would
-			// only make the next consumer rediscover the same dead end.
-			if drainReason(state.drainReason.Load()) == drainKeyRemoved {
-				if ackErr := state.Consumer.AckMessage(drainCtx, msg); ackErr == nil {
-					RecordRelayDroppedNoKey(state.OperatorAddr, msg.Message.ServiceId)
-					drained++
-				} else {
-					abandoned++
-				}
-				continue
-			}
-
-			// Shutdown or rebalance: someone else can still finish this, so it
-			// is RELEASED, never acknowledged. Acknowledging deletes it from the
-			// stream and takes it out of reach of the reclaim.
-			if relErr := state.Consumer.ReleaseMessage(drainCtx, msg); relErr == nil {
-				RecordShutdownDrainedRelay(state.OperatorAddr)
+			if m.handBackOnExit(drainCtx, state, msg) {
 				drained++
 			} else {
-				// Processing failed, or it succeeded but AckMessage itself
-				// did not (Redis hiccup near the deadline): either way the
-				// entry is still PENDING, same as anything the window ran
-				// out on -- counting it as drained would tell an operator
-				// this finished when Redis says otherwise.
+				// The entry is still PENDING, same as anything the window ran
+				// out on -- counting it as drained would tell an operator this
+				// finished when Redis says otherwise.
 				abandoned++
 			}
 
@@ -1958,11 +2709,10 @@ func (m *SupplierManager) reportDrain(state *SupplierState, drained, abandoned i
 // happen. That line is what an operator reads mid-incident.
 //
 // It asks the key manager instead of taking the caller's word, because the
-// caller does not always know which case it is: in distributed mode an operator
-// removing a key tears the supplier down through the claimer's release path
-// (onSupplierReleased), the very same path a plain rebalance uses, so a reason
-// threaded down from there would report a key removal as a rebalance in exactly
-// the mode production runs. The key manager is local and authoritative.
+// caller's reason names what STARTED the teardown, not whether the key still
+// exists: a rebalance or a lost lease can tear down a supplier whose key the
+// operator removed meanwhile (not observed, but nothing orders the two). The key
+// manager is local and authoritative.
 //
 // A nil key manager (tests only) answers true, which keeps the message it had
 // before this distinction existed.
@@ -2028,14 +2778,13 @@ func (m *SupplierManager) publishUnstakingState(ctx context.Context, state *Supp
 //
 // Drain-window semantics (post commit 8eb604c):
 //
-//  1. We cancel the supplier's context (state.cancelFn) BEFORE removing
-//     it from m.suppliers. This ordering is deliberate: the cancel
-//     signal must reach every in-flight handleRelay/UpdateTree before
-//     the map delete, otherwise a goroutine that still holds a pointer
-//     to SupplierState could race with cleanup below (Consumer.Close,
-//     SMSTManager.Close, etc.).
+//  1. The state leaves m.suppliers and its context (state.cancelFn) is
+//     cancelled in one synchronous step, stopSupplier, before anything
+//     slow: the cancel signal must reach every in-flight
+//     handleRelay/UpdateTree before the cleanup in teardownSupplier
+//     (Consumer.Close, SMSTManager.Close, etc.).
 //
-//  2. Between cancelFn() firing and the map delete, a concurrent
+//  2. Once cancelFn() fires, a concurrent
 //     handleRelay call may already be mid-way through a Redis write
 //     (UpdateTree, ACK, dedup set insert). Those calls now operate
 //     with a cancelled context. Each such Redis operation returns a
@@ -2067,6 +2816,35 @@ func (m *SupplierManager) publishUnstakingState(ctx context.Context, state *Supp
 // supplier — no mid-flight writer can resurrect state after the map
 // delete.
 func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason) {
+	if state, ok := m.stopSupplier(operatorAddr, reason); ok {
+		m.teardownSupplier(state)
+	}
+}
+
+// stopSupplier takes the supplier out of the map and cancels its consume loop.
+// It makes no network call, so a release can run it before returning.
+//
+// Atomic remove-and-take: the state leaves the map FIRST so the slow
+// per-supplier teardown (Consumer.Close -> wg.Wait can sit on a blocked XREAD
+// for tens of seconds) holds no map coordination at all. A later claim of the
+// same supplier on this miner sees an empty slot and constructs a fresh state;
+// the old state's resources are private to its teardown.
+func (m *SupplierManager) stopSupplier(operatorAddr string, reason drainReason) (*SupplierState, bool) {
+	state, exists := m.suppliers.LoadAndDelete(operatorAddr)
+	if !exists {
+		return nil, false
+	}
+	state.drainReason.Store(int32(reason))
+	state.StoreStatus(SupplierStatusDraining)
+	state.cancelFn()
+	return state, true
+}
+
+// teardownSupplier waits for a stopped supplier's consume loop and closes
+// everything it owned.
+func (m *SupplierManager) teardownSupplier(state *SupplierState) {
+	operatorAddr := state.OperatorAddr
+
 	// Capture the lifecycle context once under m.mu.RLock. removeSupplier
 	// can run concurrently with Close() (Close() writes m.ctx under m.mu),
 	// so every direct `m.ctx` read inside this function would be a data
@@ -2081,20 +2859,6 @@ func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason
 		// runs on a best-effort basis rather than panicking downstream.
 		ctx = context.Background()
 	}
-
-	// Atomic remove-and-take. We pull the state out of the map FIRST so the
-	// slow per-supplier teardown below (Consumer.Close → wg.Wait can sit on
-	// a blocked XREAD for tens of seconds) holds no map coordination at all.
-	// A subsequent claim of the same supplier on this miner will see an
-	// empty slot and construct a fresh state — the old state's resources
-	// are private to this goroutine and torn down independently.
-	state, exists := m.suppliers.LoadAndDelete(operatorAddr)
-	if !exists {
-		return
-	}
-
-	state.drainReason.Store(int32(reason))
-	state.StoreStatus(SupplierStatusDraining)
 
 	m.publishUnstakingState(ctx, state)
 
@@ -2111,8 +2875,8 @@ func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason
 
 	// Wait for pending work (TODO: implement proper tracking)
 	// For now, just wait for consumer to finish.
-	// No global lock — the state was already atomically removed from the map.
-	state.cancelFn()
+	// No global lock — the state was already atomically removed from the map,
+	// and its context cancelled, by stopSupplier.
 	state.wg.Wait()
 
 	if state.LifecycleManager != nil {
@@ -2120,6 +2884,9 @@ func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason
 			m.logger.Warn().Err(err).Str(logging.FieldSupplier, operatorAddr).Msg("error closing lifecycle manager")
 		}
 	}
+
+	m.releaseOwnPendingOnExit(state)
+	m.checkpointTreesOnExit(state)
 
 	if state.SMSTManager != nil {
 		if err := state.SMSTManager.Close(); err != nil {
@@ -2183,6 +2950,38 @@ func (m *SupplierManager) removeSupplier(operatorAddr string, reason drainReason
 		Msg("supplier gracefully removed")
 }
 
+// checkpointTreesOnExit writes the covering live_root of every tree a stopped
+// supplier still holds, once its consume loop and its lifecycle have stopped
+// and before this instance deletes its lease. The next owner resumes from live_root, and the
+// relays finished one at a time since the last checkpoint are already
+// acknowledged: nothing redelivers them. On a context of its own, because the
+// supplier's is cancelled, and during Close so is the manager's.
+func (m *SupplierManager) checkpointTreesOnExit(state *SupplierState) {
+	if state.SMSTManager == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), shutdownDrainWindow)
+	defer cancel()
+	written, failed, err := state.SMSTManager.CheckpointAllOnExit(ctx)
+	// Added even when zero, so a supplier that has been torn down exports the
+	// series and a query can tell "none failed" from "not exported".
+	smstExitCheckpointFailedTotal.WithLabelValues(state.OperatorAddr).Add(float64(failed))
+	if err != nil {
+		// Once per supplier torn down, not per relay.
+		m.logger.Warn().
+			Err(err).
+			Str(logging.FieldSupplier, state.OperatorAddr).
+			Int("written", written).
+			Int("failed", failed).
+			Msg("could not checkpoint every tree on exit; the next owner may resume without relays this one acknowledged")
+		return
+	}
+	m.logger.Debug().
+		Str(logging.FieldSupplier, state.OperatorAddr).
+		Int("written", written).
+		Msg("checkpointed trees on exit")
+}
+
 // GetSupplierState returns the state for a specific supplier.
 func (m *SupplierManager) GetSupplierState(operatorAddr string) (*SupplierState, bool) {
 	return m.suppliers.Load(operatorAddr)
@@ -2212,12 +3011,21 @@ func (m *SupplierManager) Close() error {
 	}
 	m.mu.Unlock()
 
-	// Stop the claimer first (releases all claims)
+	// Stop the claimer's loops first -- no rebalance, renewal or orphan claim
+	// may change the supplier set under the teardown -- but release NOTHING yet:
+	// every lease stays ours until its supplier's consume loop has stopped
+	// writing, and FinishShutdown deletes them at the end.
 	if m.claimer != nil {
-		if err := m.claimer.Stop(context.Background()); err != nil {
-			m.logger.Warn().Err(err).Msg("failed to stop supplier claimer")
-		}
+		m.claimer.StopLoops()
 	}
+
+	// Stop growing the connection pool before anything starts closing it: a
+	// resize landing during teardown would dial members that the shutdown
+	// already walked past.
+	if m.poolResizeCancel != nil {
+		m.poolResizeCancel()
+	}
+	m.poolResizeWG.Wait()
 
 	// Stop the reconciler BEFORE tearing down suppliers, so an in-flight
 	// OnBlock pass cannot reconcile / ResubmitMessage against a supplier whose
@@ -2262,6 +3070,8 @@ func (m *SupplierManager) Close() error {
 		if state.LifecycleManager != nil {
 			_ = state.LifecycleManager.Close()
 		}
+		m.releaseOwnPendingOnExit(state)
+		m.checkpointTreesOnExit(state)
 		if state.SMSTManager != nil {
 			_ = state.SMSTManager.Close()
 		}
@@ -2271,9 +3081,21 @@ func (m *SupplierManager) Close() error {
 		return true
 	})
 
+	// Drains released before Close delete their own leases when they end;
+	// only then is every writer gone and the rest of the leases safe to delete.
+	m.drainWG.Wait()
+	if m.claimer != nil {
+		m.claimer.FinishShutdown(context.Background())
+	}
+
 	// Stop query subpool gracefully (drains queued tasks)
 	if m.querySubpool != nil {
 		m.querySubpool.StopAndWait()
+	}
+	// Every SMST manager is closed by now, so a queued compaction returns on
+	// its closed flag instead of starting.
+	if m.coldCompactionPool != nil {
+		m.coldCompactionPool.StopAndWait()
 	}
 
 	m.logger.Info().Msg("supplier manager closed")
@@ -2370,14 +3192,35 @@ func (m *SupplierManager) trimAllSupplierStreams(ctx context.Context, maxAge tim
 
 	// Wait for all trim operations to complete.
 	//
-	// Every task submitted above absorbs its own error and returns nil
-	// (failures are logged inline per-supplier and the outer loop must not
-	// abort the remaining trims for one bad supplier). As a result
-	// group.Wait() is invariant-nil, and the explicit `_ =` discards the
-	// zero-value interface by design. If you change a submitted task to
-	// propagate an error, replace this with a Warn/Debug log of the Wait
-	// result rather than silently dropping it.
-	_ = group.Wait()
+	// The previous comment called this Wait invariant-nil and it was not. It
+	// reasoned only about task errors -- tasks go in via SubmitErr(func() error)
+	// and the only one that exists swallows its own with `return nil // Don't fail
+	// the group for individual stream errors`, so that half was right -- and never
+	// mentioned panics: pond recovers them by default (pool.go:534) and delivers
+	// them through this same channel, so the old `_ =` made a panic in TrimStream
+	// vanish with no log, no metric and no crash, against the repo's convention
+	// that a recovered panic is counted AND logged (logging/recovery.go).
+	//
+	// The rule below is deliberately a rule and not a list, because this channel
+	// carries more than those two: ErrPoolStopped for a Submit made after the pool
+	// stopped (result.go:77-83), ErrGroupStopped for a stopped group (group.go:12),
+	// and the context error if the pool's context is cancelled -- and this pool is
+	// stopped on shutdown (StopAndWait, :2375). Enumerating them ages badly. Only a
+	// recovered panic is counted and raised; anything else this channel brings is
+	// shutdown, and shutdown at Error would spend the very signal this handling
+	// exists to create on every rollout that lands in that window.
+	//
+	// PanicRecoveriesTotal is enough and no loss-specific counter is added, because
+	// the work is retried: trimming runs off a ticker, so the next tick covers
+	// whatever this pass dropped.
+	if err := group.Wait(); err != nil {
+		if errors.Is(err, pond.ErrPanic) {
+			logging.PanicRecoveriesTotal.WithLabelValues("supplier_stream_trim").Inc()
+			m.logger.Error().Err(err).Msg("stream trimming: a trim task panicked")
+		} else {
+			m.logger.Debug().Err(err).Msg("stream trimming: pass abandoned (pool shutting down)")
+		}
+	}
 
 	if totalTrimmed > 0 {
 		m.logger.Info().
@@ -2407,23 +3250,45 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			m.logger.Warn().Msg("no proof query client; inclusion reconciler disabled (fire-once claim/proof, no rebroadcast)")
 			return
 		}
-		inclusionQuery, ok := m.config.ProofQueryClient.(InclusionQueryClient)
-		if !ok {
-			// Misconfiguration, not a benign default: without this the silent
-			// CLAIM_MISSING/PROOF_MISSING forfeits the reconciler exists to fix
-			// go unobserved and unrecovered. Error, not Warn.
-			m.logger.Error().
-				Msg("proof query client does not expose AllProofs/AllClaims by supplier; inclusion reconciler DISABLED — claims/proofs are fire-once with no verification or rebroadcast")
+		// The TYPE guarantees a block client can Subscribe; it cannot guarantee
+		// there IS one, and a nil interface satisfies any interface field. This
+		// check is not defensive padding: without it the reconciler is built with
+		// a live store and its loop dereferences nil one line into the goroutine,
+		// which is a SIGSEGV rather than a missing feature. It belongs here and
+		// not in the loop for the reason the comment above gives -- a reconciler
+		// with no trigger still writes rebroadcast entries nothing will ever read.
+		if m.config.BlockClient == nil {
+			m.logger.Warn().Msg("no block client; inclusion reconciler disabled (fire-once claim/proof, no rebroadcast)")
 			return
 		}
-		if m.config.InclusionReconcilerConfig.Disabled {
-			m.logger.Info().Msg("inclusion reconciler disabled by config; claims/proofs are fire-once (no verification or rebroadcast)")
-			return
-		}
+		inclusionQuery := m.config.ProofQueryClient
 		m.rebroadcastStore = NewRebroadcastStore(m.config.RedisClient, 0) // 0 → default TTL
 
-		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, _, outcome string, inclusionHeight int64) {
+		recordClaimOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, _ int64, sessionID, outcome string, inclusionHeight int64) error {
+			if outcome == inclusionFound {
+				// The chain holds this claim. Whatever the broadcast reported,
+				// the session must go back to `claimed` or its proof never goes
+				// out — and a claim on-chain without a proof is a SLASH,
+				// strictly worse than the lost reward the resend was meant to
+				// avoid.
+				//
+				// This runs BEFORE the counter and the tracker on purpose. A
+				// failure here keeps the pending entry, so the reconciler
+				// re-delivers this same observation on the next block; counting
+				// first would tally one claim once per retry.
+				if err := m.reactivateClaimedSession(ctx, supplier, sessionID, e); err != nil {
+					return err
+				}
+			}
 			claimInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
+			// After the counter and after reactivation, for the same reason
+			// reactivation runs first: a failure above keeps the entry and the
+			// observation is re-delivered next block, and the ledger must not be
+			// moved once per retry.
+			m.settleLedgerOutcome(ctx, RebroadcastPhaseClaim, e, supplier, sessionID, outcome)
+			if outcome == inclusionMissing {
+				m.recordMissingCause(ctx, RebroadcastPhaseClaim, e, supplier, sessionID)
+			}
 			if m.sharedSubmissionTracker != nil {
 				// Claim outcome is matched by the ORIGINAL submit tx hash (the one
 				// stored on the submission record); a rebroadcast changes the
@@ -2432,18 +3297,56 @@ func (m *SupplierManager) ensureSharedTrackers() {
 				if origHash == "" {
 					origHash = e.TxHash
 				}
-				_ = m.sharedSubmissionTracker.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
+				// Logged HERE because the error does NOT rise: this closure returns
+				// nil after this block, so a caller cannot see it and cannot decide
+				// on it. Reporting is all that is left, and a submission outcome
+				// that goes unrecorded with nothing said is a gap an operator can
+				// never reconstruct -- the chain remembers the claim, not our
+				// ledger's opinion of it.
+				//
+				// Warn, and the volume is bounded: the reconciler runs one pass per
+				// block over the sessions THIS replica owns, so the ceiling is
+				// pending-sessions-per-block, not per relay. A flood needs a
+				// PARTIAL Redis failure -- reads working, tracker writes failing --
+				// because a total outage fails ActiveGroups first and the pass
+				// returns after a single line.
+				//
+				// If item 37 ever gives this closure an error path, look at the
+				// caller before adding a second line: today there is none to
+				// double up with.
+				if err := m.sharedSubmissionTracker.UpdateClaimOnChainOutcome(ctx, ClaimOnChainUpdate{
 					Supplier:        supplier,
 					TxHash:          origHash,
 					Outcome:         outcome,
 					InclusionHeight: inclusionHeight,
-				})
+					Rebroadcasts:    e.Rebroadcasts,
+				}); err != nil {
+					m.logger.Warn().Err(err).
+						Str("supplier", supplier).
+						Str(logging.FieldSessionID, sessionID).
+						Str("outcome", outcome).
+						Msg("claim on-chain outcome observed but not recorded in the submission tracker")
+				}
 			}
+			return nil
 		}
-		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) {
+		recordProofOutcome := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID, outcome string, inclusionHeight int64) error {
 			proofInclusionOutcomeTotal.WithLabelValues(supplier, e.ServiceID, outcome).Inc()
+			// Closes the `unresolved` balance this session's submission failure
+			// opened, and names where the money went. on_chain_rejected settles
+			// it as lost like on_chain_missing does: the chain executed the proof
+			// and refused it, so nothing further will answer, and without this
+			// branch a rejected proof's balance would never come down.
+			m.settleLedgerOutcome(ctx, RebroadcastPhaseProof, e, supplier, sessionID, outcome)
+			if outcome == inclusionMissing {
+				m.recordMissingCause(ctx, RebroadcastPhaseProof, e, supplier, sessionID)
+			}
 			if m.sharedSubmissionTracker != nil {
-				_ = m.sharedSubmissionTracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
+				// Same as the claim side above: the error does not rise, so this
+				// line is the only record of it. Bounded the same way, per block
+				// and per owned session, and a flood needs a PARTIAL Redis failure
+				// because a total one fails ActiveGroups first.
+				if err := m.sharedSubmissionTracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
 					Supplier:        supplier,
 					SessionEnd:      sessionEnd,
 					SessionID:       sessionID,
@@ -2451,28 +3354,119 @@ func (m *SupplierManager) ensureSharedTrackers() {
 					InclusionHeight: inclusionHeight,
 					NewProofTxHash:  e.TxHash,
 					Rebroadcasts:    e.Rebroadcasts,
-				})
+				}); err != nil {
+					m.logger.Warn().Err(err).
+						Str("supplier", supplier).
+						Str(logging.FieldSessionID, sessionID).
+						Str("outcome", outcome).
+						Msg("proof on-chain outcome observed but not recorded in the submission tracker")
+				}
 			}
+			// Metric + tracker only, and that is a GAP rather than a property:
+			// proof_tx_error has the same anatomy as claim_tx_error — the
+			// broadcast can report failure while the proof lands — and there IS
+			// a state to restore, `proved`. It does not cost a slash (the proof
+			// is on-chain), so it is not fixed here; it leaves the session in a
+			// failed state and the ledger counting it lost. Queue item 37.
+			return nil
 		}
 
 		claimPhase := reconcilePhase{
 			phase:             RebroadcastPhaseClaim,
 			windowCloseHeight: sharedtypes.GetClaimWindowCloseHeight,
-			onChainSessions:   inclusionQuery.GetSupplierClaimSessions,
+			verdict:           claimPhaseVerdict,
 			recordOutcome:     recordClaimOutcome,
 			recordRebroadcast: func(supplier, serviceID, result string) {
 				claimRebroadcastsTotal.WithLabelValues(supplier, serviceID, result).Inc()
 			},
 		}
+		// diagnoseProofRejection answers the one question about a rejection that
+		// can be answered from here, and says so when it cannot.
+		//
+		// The chain does not expose WHY it refused a proof: the reason lives in
+		// the FailureReason of an EndBlocker event, the claim itself carries four
+		// fields and none of them is the reason, and reading events would require
+		// the transaction indexer this whole reconciler exists to work without.
+		// What IS available is the root the claim committed to, which came back
+		// from the same read that produced the verdict. Comparing it against the
+		// root this miner stored separates one cause from the other six: a
+		// mismatch means what we hold is not what we claimed and no proof built
+		// from it can ever pass, while a match means the claim was right and the
+		// proof failed on construction or a signature.
+		//
+		// Warn and not Debug: it fires once per rejected session -- the entry is
+		// cleared immediately after -- so it is bounded by the defect existing,
+		// and it is money.
+		diagnoseProofRejection := func(ctx context.Context, e rebroadcastEntry, supplier string, sessionEnd int64, sessionID string, height int64, onChainRoot []byte) {
+			cause := rejectionRootUnknown
+			// The session store is per supplier, held on the SupplierState this
+			// replica owns -- the same map the reconciler's ownership filter
+			// reads, so a supplier whose rejection reaches this closure always
+			// has one.
+			st, owned := m.suppliers.Load(supplier)
+			if owned && st.SessionStore != nil && len(onChainRoot) > 0 {
+				// A missing snapshot is EXPECTED, not exceptional. Nothing
+				// deletes a session record -- there is no production caller of
+				// the store's Delete -- so it lives until SessionTTL expires it,
+				// refreshed on every write. Two hours against a proof window of
+				// minutes is comfortable with mainnet parameters, and both of
+				// those numbers are configurable, so the margin is a bound and
+				// never a guarantee. When the snapshot is gone the honest answer
+				// is that the comparison could not be made, which is why
+				// root_unknown is a first-class cause and not an error.
+				snapshot, sErr := st.SessionStore.Get(ctx, sessionID)
+				switch {
+				case sErr != nil:
+					m.logger.Debug().Err(sErr).Str("session_id", sessionID).
+						Msg("proof rejected: could not read the session to compare roots")
+				case snapshot == nil || len(snapshot.ClaimedRootHash) == 0:
+					// Nothing to compare against; cause stays root_unknown.
+				case bytes.Equal(snapshot.ClaimedRootHash, onChainRoot):
+					cause = rejectionRootMatch
+				default:
+					cause = rejectionRootMismatch
+				}
+			}
+			proofRejectionDiagnosisTotal.WithLabelValues(cause).Inc()
+
+			m.logger.Warn().
+				Str("supplier", supplier).
+				Str("session_id", sessionID).
+				Int64("session_end", sessionEnd).
+				Int64("observed_at_height", height).
+				Str("tx_hash", e.TxHash).
+				Str("cause", cause).
+				Msg("proof rejected on-chain: it reached the chain and the EndBlocker refused it; it will not be re-sent")
+
+			if m.sharedSubmissionTracker == nil {
+				return
+			}
+			if err := m.sharedSubmissionTracker.UpdateProofOnChainOutcome(ctx, ProofOnChainUpdate{
+				Supplier:        supplier,
+				SessionEnd:      sessionEnd,
+				SessionID:       sessionID,
+				Outcome:         inclusionRejected,
+				InclusionHeight: height,
+				RejectionCause:  cause,
+			}); err != nil {
+				// Same shape as its siblings: the error does not rise, so this
+				// line is the only record of it.
+				m.logger.Warn().Err(err).Str("session_id", sessionID).
+					Msg("proof rejection diagnosis not recorded in the submission tracker")
+			}
+		}
+
 		proofPhase := reconcilePhase{
 			phase:             RebroadcastPhaseProof,
 			windowCloseHeight: sharedtypes.GetProofWindowCloseHeight,
 			// Proof inclusion is read from the claim's ProofValidationStatus
 			// (VALIDATED), not from proofs: a submitted proof is validated and
 			// deleted in the EndBlocker of its submission block, so it is not
-			// queryable afterwards. See query.GetSupplierProvenSessions.
-			onChainSessions: inclusionQuery.GetSupplierProvenSessions,
-			recordOutcome:   recordProofOutcome,
+			// queryable afterwards. See query.GetSupplierSessionStates.
+			//
+			verdict:           proofPhaseVerdict,
+			diagnoseRejection: diagnoseProofRejection,
+			recordOutcome:     recordProofOutcome,
 			recordRebroadcast: func(supplier, serviceID, result string) {
 				proofRebroadcastsTotal.WithLabelValues(supplier, serviceID, result).Inc()
 			},
@@ -2485,6 +3479,7 @@ func (m *SupplierManager) ensureSharedTrackers() {
 			m, // SupplierManager implements MessageResubmitter
 			claimPhase,
 			proofPhase,
+			inclusionQuery.GetSupplierSessionStates,
 			m.config.InclusionReconcilerConfig,
 		)
 		// Per-supplier ownership: only reconcile suppliers this replica controls
@@ -2498,21 +3493,74 @@ func (m *SupplierManager) ensureSharedTrackers() {
 	})
 }
 
+// startConnPoolResizeLoop keeps the transaction connection pool sized for the
+// suppliers this replica currently holds a lease on.
+//
+// It takes its OWN subscription rather than riding the reconciler's loop, which
+// looks like the obvious place to hang it. That loop never starts when the
+// reconciler was not built -- no proof query client, or no block client at all --
+// so sharing it would silently tie the size of the connection pool to whether
+// the inclusion reconciler happens to be configured, two things with no
+// relationship to each other.
+//
+// The trigger is every block, and the resize is level-triggered, so a takeover
+// that moves leases mid-window is picked up on the next block rather than
+// whenever the previous holder's lease finally expires.
+func (m *SupplierManager) startConnPoolResizeLoop() {
+	if m.config.TxClient == nil {
+		return
+	}
+
+	// Presence only: the field's type already guarantees Subscribe, so what is
+	// left to check is whether a client was wired at all -- a nil one is a
+	// supported configuration for tooling and tests.
+	//
+	// Warn and not Error: the pool keeps the floor it was built with, which is
+	// what every replica ran with before it could grow at all. Claims still
+	// submit; a replica holding many leases just runs with fewer connections
+	// than it should.
+	if m.config.BlockClient == nil {
+		m.logger.Warn().Msg("no block client; transaction connection pool will stay at its startup size")
+		return
+	}
+
+	m.mu.RLock()
+	parent := m.ctx
+	m.mu.RUnlock()
+	if parent == nil {
+		parent = context.Background()
+	}
+	loopCtx, cancel := context.WithCancel(parent)
+	m.poolResizeCancel = cancel
+	m.poolResizeWG.Add(1)
+
+	resize := func(ctx context.Context) {
+		defer m.poolResizeWG.Done()
+
+		blockCh := m.config.BlockClient.Subscribe(ctx, blockEventSubscriberBuffer)
+		runCoalescingBlockLoop(ctx, blockCh, func(int64) {
+			claimer := m.claimer
+			if claimer == nil {
+				return
+			}
+			if err := m.config.TxClient.ResizeConnPool(ctx, claimer.ClaimedCount()); err != nil {
+				// Warn, not Error: this fires once per block at worst and only
+				// when a grow failed, and the pool keeps every connection it
+				// already had, so the failure costs capacity rather than
+				// correctness.
+				m.logger.Warn().Err(err).Msg("could not resize the transaction connection pool")
+			}
+		})
+	}
+
+	go logging.RecoverGoRoutine(m.logger, "conn_pool_resize", resize)(loopCtx)
+}
+
 // startReconcilerBlockLoop drives reconciler.OnBlock once per new block from the
 // block client's event stream (the same stream the lifecycle uses). Runs on
 // every replica; the reconciler's per-supplier ownership filter ensures each
 // replica only acts on its own suppliers.
 func (m *SupplierManager) startReconcilerBlockLoop() {
-	subscriber, ok := m.config.BlockClient.(interface {
-		Subscribe(ctx context.Context, bufferSize int) <-chan *localclient.SimpleBlock
-	})
-	if !ok {
-		// Without a per-block trigger the reconciler never verifies/rebroadcasts —
-		// the forfeits it exists to fix go unrecovered. Error, not Warn.
-		m.logger.Error().Msg("block client does not support Subscribe(); inclusion reconciler will NOT run (no per-block trigger)")
-		return
-	}
-
 	// Derive from the manager lifecycle ctx so the loop also stops if the parent
 	// is canceled (not only via Close); fall back to Background if unset.
 	m.mu.RLock()
@@ -2535,7 +3583,7 @@ func (m *SupplierManager) startReconcilerBlockLoop() {
 		// checks pending claims/proofs against the current height), so coalescing
 		// redundant ticks never skips work, and the single processor matches
 		// OnBlock's own single-flight guard.
-		blockCh := subscriber.Subscribe(loopCtx, blockEventSubscriberBuffer)
+		blockCh := m.config.BlockClient.Subscribe(loopCtx, blockEventSubscriberBuffer)
 		runCoalescingBlockLoop(loopCtx, blockCh, m.inclusionReconciler.OnBlock)
 		// A return with the loop context still live means the block channel closed
 		// under us: the reconciler loses its per-block trigger, so the claim/proof
@@ -2549,44 +3597,346 @@ func (m *SupplierManager) startReconcilerBlockLoop() {
 	}()
 }
 
+// settleLedgerOutcome moves a session's money to its final door once the chain
+// has answered for it. It is the only place the ledger CLOSES a balance, and the
+// counterpart to the places that open one.
+//
+// THE DISCRIMINATOR IS e.OrigTxHash, AND IT IS A FACT THE ENTRY ALREADY CARRIES.
+// persistRebroadcastEntry is its only writer and it is never rewritten, so it is
+// the original submission's tx hash for as long as the entry lives. EMPTY means
+// the submission was never confirmed -- the self-heal persists on the failure
+// paths pass "" precisely to mark that -- which is exactly the case where
+// RecordRevenueClaimed / RecordRevenueProved did NOT run at submission time.
+// NON-EMPTY means the transaction was accepted and the revenue was already
+// counted, so there is nothing to add here and adding it would count the session
+// twice. Without this test, crediting every on_chain_found would double every
+// normal claim and proof, because the success paths persist an entry too.
+//
+// OWNERSHIP IS NOT RE-DECIDED HERE. The weight comes from the session store on
+// the SupplierState this replica holds, which is the same m.suppliers.Load that
+// the reconciler's own ownership filter reads. Two predicates answering the same
+// question is how they drift apart, and only the replica that owns a supplier
+// may report its accounting -- otherwise two replicas report the same money.
+//
+// KNOWN GAP, deliberately not closed here: a CONFIRMED proof the chain turns out
+// not to hold was already counted into upokt_proved_total at submission. This
+// function cannot subtract it -- a counter does not go down -- so `proved`
+// overstates by that amount and proof_inclusion_outcome_total is what reveals
+// it. That is the success side of the ledger and it is a separate change.
+func (m *SupplierManager) settleLedgerOutcome(
+	ctx context.Context,
+	phase RebroadcastPhase,
+	e rebroadcastEntry,
+	supplier, sessionID, outcome string,
+) {
+	// poll_error is not an answer: the entry is kept and asked again next block.
+	if outcome == inclusionPollErr {
+		return
+	}
+	if e.OrigTxHash != "" {
+		return
+	}
+
+	st, owned := m.suppliers.Load(supplier)
+	if !owned || st.SessionStore == nil {
+		return
+	}
+	snapshot, err := st.SessionStore.Get(ctx, sessionID)
+	if err != nil || snapshot == nil {
+		// No snapshot, no weight, and inventing one would be worse than the
+		// absence. The session's own failure is already in sessions_failed_total;
+		// what is missing is the money, and an unresolved balance that never
+		// closes is exactly the visible signal this family exists to give.
+		m.logger.Debug().Err(err).
+			Str("supplier", supplier).
+			Str(logging.FieldSessionID, sessionID).
+			Str("phase", string(phase)).
+			Str("outcome", outcome).
+			Msg("inclusion outcome not settled into the ledger: no session snapshot to weigh it with")
+		return
+	}
+
+	relays := snapshot.RelayCount
+	computeUnits := int64(snapshot.TotalComputeUnits)
+
+	switch phase {
+	case RebroadcastPhaseClaim:
+		// Nothing was opened as unresolved on the claim side: this money was
+		// never in the book, so there was no balance to hold. The chain's answer
+		// decides whether it enters the book or is written off.
+		if outcome == inclusionFound {
+			// The chain HOLDS this claim, so "uPOKT claimed" is literally true.
+			// This is the write the recovery path was missing: the submission
+			// never confirmed, so nothing counted it, and the session goes on to
+			// be proved -- crediting `proved` revenue that `claimed` never had.
+			RecordRevenueClaimed(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays)
+			return
+		}
+		RecordRevenueForgone(supplier, snapshot.ServiceID, outcome, relays, computeUnits)
+
+	case RebroadcastPhaseProof:
+		// This money IS in the book and is waiting in `unresolved`, opened by the
+		// same failure path that wrote this entry. Close that balance first, then
+		// name where it went.
+		RecordSessionUnresolvedResolved(supplier, snapshot.ServiceID, string(phase), relays, computeUnits)
+		if outcome == inclusionFound {
+			RecordRevenueProved(supplier, snapshot.ServiceID, snapshot.TotalComputeUnits, relays)
+			return
+		}
+		RecordRevenueLost(supplier, snapshot.ServiceID, outcome, relays, computeUnits)
+	}
+}
+
+// recordMissingCause splits an on_chain_missing verdict by what the chain says
+// about the transaction itself, and changes NOTHING else.
+//
+// It is deliberately an instrument and not a decision. The read cannot authorise
+// acting differently, because its own negative answer -- the index does not hold
+// this hash -- still covers a transaction sitting in the mempool, and resending
+// on that would sign a second one while the first is alive. So the resend gate
+// above is untouched: this only says WHY the session was missing.
+//
+// The chain's codespace and code go in the LOG, never in a label: they come from
+// the chain, so their value set is unbounded.
+func (m *SupplierManager) recordMissingCause(
+	ctx context.Context,
+	phase RebroadcastPhase,
+	e rebroadcastEntry,
+	supplier, sessionID string,
+) {
+	if m.config.TxClient == nil {
+		return
+	}
+
+	cause, res := m.config.TxClient.ReadInclusionForEntry(ctx, e.OrigTxHash, e.TxHash)
+
+	cause = resolveMissingCause(cause, e.Rebroadcasts)
+	inclusionMissingCauseTotal.WithLabelValues(string(phase), cause.String()).Inc()
+
+	event := m.logger.Debug()
+	if res != nil {
+		event = event.Uint32("tx_code", res.Code).Str("tx_codespace", res.Codespace).Str("raw_log", res.RawLog)
+	}
+	event.
+		Str("phase", string(phase)).
+		Str(logging.FieldSupplier, supplier).
+		Str(logging.FieldSessionID, sessionID).
+		Str("cause", cause.String()).
+		Msg("inclusion reconcile: missing session classified by post-inclusion read")
+}
+
+// resolveMissingCause refuses to name a cause the entry's hashes cannot justify.
+//
+// The entry remembers two hashes -- the original and the LATEST resend -- so
+// past one resend the hash of every middle attempt has been overwritten. The
+// read is then answering about a strict subset of the transactions that were
+// actually broadcast, and only one of its verdicts is unsafe under that: a
+// NotInBlock derived from hashes that are all absent says nothing about the
+// one it was never given, which may well have been included and failed. That
+// would not be an incomplete label, it would be an INVERTED one, pointing the
+// operator at "it never reached a block" when the truth is "it did and was
+// rejected" -- the opposite diagnosis.
+//
+// Unknown already means exactly this ("did not answer in a way that can be
+// decided"), and the cause only feeds a label and a Debug log, so declining
+// to name it costs no behaviour. Preferring not to know over knowing wrong is
+// the cheaper error here. The default sets no cap (MaxRebroadcasts nil), so any
+// entry with two counted resends reaches it; only an explicit cap of 1 makes it
+// unreachable.
+func resolveMissingCause(cause tx.TxInclusion, rebroadcasts int) tx.TxInclusion {
+	if cause == tx.TxInclusionNotInBlock && rebroadcasts > 1 {
+		return tx.TxInclusionUnknown
+	}
+	return cause
+}
+
+// reactivateClaimedSession returns a session to `claimed` after the reconciler
+// OBSERVED its claim on-chain, so the lifecycle resumes and submits the proof.
+//
+// The claimed root comes from the persisted MsgCreateClaim, not from the SMST:
+// those bytes are the message that was signed and accepted, they are never
+// mutated by a rebroadcast, and reading them costs no Redis round-trip and does
+// not depend on the tree's TTL still being alive.
+func (m *SupplierManager) reactivateClaimedSession(
+	ctx context.Context,
+	supplier, sessionID string,
+	e rebroadcastEntry,
+) error {
+	state, ok := m.suppliers.Load(supplier)
+	if !ok || state.SessionCoordinator == nil {
+		// Ownership moved between the reconcile pass and here. Returning an
+		// error keeps the pending entry so the new owner still sees the
+		// observation instead of it being cleared away by a replica that can
+		// no longer act on it.
+		return fmt.Errorf("supplier %s no longer owned by this replica", supplier)
+	}
+
+	var msg prooftypes.MsgCreateClaim
+	if err := msg.Unmarshal(e.MsgBytes); err != nil {
+		// A corrupt payload cannot be fixed by retrying, so this returns nil
+		// and lets the entry clear. Error level, not Warn: the session stays
+		// terminal with its claim on-chain, which is the slash this whole path
+		// exists to prevent, and it is bounded by the defect existing.
+		m.logger.Error().Err(err).
+			Str(logging.FieldSupplier, supplier).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("claim observed on-chain but its stored message will not unmarshal; session stays terminal and will be slashed")
+		return nil
+	}
+
+	// The last hash we broadcast. Both fields are written from the same value
+	// (lifecycle_callback.go:312-313) and only a rebroadcast ever changes
+	// TxHash, so there is nothing for OrigTxHash to fall back to. The
+	// reconciler reads inclusion from module state, not from this hash, so
+	// treat it as provenance rather than as a verified on-chain tx.
+	err := state.SessionCoordinator.OnClaimObservedOnChain(ctx, sessionID, msg.RootHash, e.TxHash)
+	if errors.Is(err, ErrClaimRootUnusable) {
+		// Permanent, exactly like a payload that will not unmarshal: retrying
+		// cannot make a malformed root well-formed, and returning an error here
+		// would keep the entry and re-fire this every block until its TTL. Same
+		// level and same reasoning as the unmarshal case above.
+		m.logger.Error().Err(err).
+			Str(logging.FieldSupplier, supplier).
+			Str(logging.FieldSessionID, sessionID).
+			Msg("claim observed on-chain but its root is unusable; session stays terminal and will be slashed")
+		return nil
+	}
+	return err
+}
+
 // ResubmitMessage implements MessageResubmitter: it routes a re-broadcast to the
 // owning supplier's tx client. Returns an error (not a panic) for suppliers this
 // replica does not control — the reconciler's ownership filter normally prevents
 // reaching here for non-owned suppliers.
-func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, timeoutHeight int64) (string, error) {
+func (m *SupplierManager) ResubmitMessage(ctx context.Context, phase RebroadcastPhase, supplier string, msgBytes []byte, cached tx.SignedTxPayload, timeoutHeight int64, timeout time.Duration, regime string) (string, tx.SignedTxPayload, error) {
 	state, ok := m.suppliers.Load(supplier)
 	if !ok || state.SupplierClient == nil {
-		return "", fmt.Errorf("no tx client for supplier %s (not owned by this replica)", supplier)
+		return "", tx.SignedTxPayload{}, fmt.Errorf("no tx client for supplier %s (not owned by this replica)", supplier)
 	}
 
-	// Replicate the lifecycle's window-anchored tx deadline: a resend must carry
-	// a timeout that keeps it inside the remaining window.
-	blkTime := m.config.BlockTimeSeconds
-	if blkTime <= 0 {
-		blkTime = cache.DefaultBlockTimeSeconds
+	// The resend INHERITS the budget its original submission was born with; it
+	// does not derive one. Recomputing here meant "the blocks left in the
+	// window", which shrank on every attempt -- so the transaction replacing a
+	// lost one carried LESS time than the one it replaced, precisely when more
+	// was wanted. It cannot be recomputed correctly on this side anyway: the
+	// window length is a chain parameter and this type has no access to shared
+	// params.
+	//
+	// A missing budget means an entry written before the field existed, or one
+	// an older binary rewrote and stripped. The ceiling is used, with the regime
+	// saying so out loud -- counted by tx where a transaction is SIGNED, so a
+	// re-injection, which replays a derivation already counted, counts nothing.
+	//
+	// THAT FALLBACK IS ONLY SAFE BECAUSE THE TRANSACTION CARRIES A
+	// timeout_height. A timestamp longer than the window is inert once the chain
+	// enforces a height: the height cuts first, at the close. Without it this
+	// same fallback would hand a resend a deadline that OUTLIVES its own window
+	// -- precisely the defect the window budget exists to prevent -- so a change
+	// that stops setting timeout_height must revisit this line, not just the one
+	// that sets it. The ceiling also sits below the SDK's 600 s limit, so it
+	// cannot be rejected as an over-long unordered TTL either.
+	resendTimeout, resendRegime := timeout, regime
+	if resendTimeout <= 0 {
+		resendTimeout, resendRegime = tx.WindowTimeout(0, 0)
 	}
-	remaining := timeoutHeight - m.config.BlockClient.LastBlock(ctx).Height()
-	if remaining < 1 {
-		remaining = 1
+	ctx = tx.WithTxWindowTimeout(ctx, resendTimeout, resendRegime)
+
+	// A resend must not queue for a broadcast permit. Its budget is the
+	// reconciler's per-group timeout, and spending that budget waiting means
+	// leaving without reaching the chain -- in saturation, which is exactly
+	// when the resend exists. Failing fast costs one block: the payload stays
+	// in the store and the reconciler runs again next block.
+	ctx = tx.WithoutPermitWait(ctx)
+
+	// RE-INJECT before signing anything.
+	//
+	// The same bytes carry the same unordered nonce, so the node recognises the
+	// duplicate and discards it by itself; signing again would put a SECOND live
+	// transaction for one claim into the gossip, and behind a load balancer each
+	// attempt can land on a different node that never saw the others. Signing is
+	// the fallback, not the default.
+	if reusable(cached, state.SupplierClient.LatestBlockTime()) {
+		hash, err := state.SupplierClient.BroadcastRawReturningHash(ctx, string(phase), cached)
+		// The payload goes back unchanged: nothing was signed, so the entry must
+		// keep exactly the bytes it already had.
+		return hash, cached, err
 	}
-	ctx = tx.WithTxWindowTimeout(ctx, time.Duration(remaining)*time.Duration(blkTime)*time.Second)
 
 	switch phase {
 	case RebroadcastPhaseClaim:
 		var msg prooftypes.MsgCreateClaim
 		if err := msg.Unmarshal(msgBytes); err != nil {
-			return "", fmt.Errorf("unmarshal MsgCreateClaim: %w", err)
+			return "", tx.SignedTxPayload{}, fmt.Errorf("unmarshal MsgCreateClaim: %w", err)
 		}
-		return state.SupplierClient.CreateClaimsReturningHash(ctx, timeoutHeight, &msg)
+		hash, signed, err := state.SupplierClient.CreateClaimsReturningHash(ctx, timeoutHeight, &msg)
+		return hash, signed, err
 	case RebroadcastPhaseProof:
 		var msg prooftypes.MsgSubmitProof
 		if err := msg.Unmarshal(msgBytes); err != nil {
-			return "", fmt.Errorf("unmarshal MsgSubmitProof: %w", err)
+			return "", tx.SignedTxPayload{}, fmt.Errorf("unmarshal MsgSubmitProof: %w", err)
 		}
-		return state.SupplierClient.SubmitProofsReturningHash(ctx, timeoutHeight, &msg)
+		if m.proofAlreadyJudged(ctx, supplier, msg.GetSessionHeader().GetSessionId()) {
+			return "", tx.SignedTxPayload{}, ErrProofAlreadyJudged
+		}
+		hash, signed, err := state.SupplierClient.SubmitProofsReturningHash(ctx, timeoutHeight, &msg)
+		return hash, signed, err
 	default:
-		return "", fmt.Errorf("unknown rebroadcast phase %q", phase)
+		return "", tx.SignedTxPayload{}, fmt.Errorf("unknown rebroadcast phase %q", phase)
 	}
+}
+
+// ErrProofAlreadyJudged is a resend that would sign a NEW proof transaction for
+// a claim whose proof the chain already validated or rejected. poktroll deletes
+// a proof once its EndBlocker judges it and SubmitProof does not read the
+// claim's verdict, so a second proof is accepted and charged again: the fee is
+// the whole cost and nothing is gained.
+var ErrProofAlreadyJudged = errors.New("the chain already judged this claim's proof")
+
+// proofAlreadyJudged asks the chain, uncached, whether the claim's proof was
+// already validated or rejected. It is asked only where a resend would SIGN a
+// new transaction -- a re-injection carries the original nonce and cannot be
+// charged twice. An unanswered question is not a verdict: the proof is sent,
+// because a missed proof costs the claim and a duplicate costs one fee.
+// GetClaim is not used here: it is cached for liveEntityCacheTTL, long enough
+// to still answer "pending" for a proof validated since.
+func (m *SupplierManager) proofAlreadyJudged(ctx context.Context, supplier, sessionID string) bool {
+	if m.config.ProofQueryClient == nil || sessionID == "" {
+		return false
+	}
+	states, err := m.config.ProofQueryClient.GetSupplierSessionStates(ctx, supplier)
+	if err != nil {
+		m.logger.Debug().Err(err).Str("session_id", sessionID).
+			Msg("resend: could not read the proof's verdict before signing; sending it")
+		return false
+	}
+	claim, ok := states[sessionID]
+	return ok && (claim.ProofState == query.SessionProofValidated || claim.ProofState == query.SessionProofRejected)
+}
+
+// reusable answers whether the transaction an entry already carries is still
+// worth sending again.
+//
+// The deadline check is the precondition the whole re-injection rests on and it
+// cannot be skipped: a signed transaction seals its own timeout_timestamp, so
+// past that instant the ante handler refuses it no matter how healthy
+// everything else is. On mainnet the derived budget sits just under the SDK
+// ceiling while the window is barely longer, so bytes dying BEFORE their window
+// closes is the ordinary end of a window rather than an edge case.
+//
+// It compares against the CHAIN's clock, the same one that produced the
+// deadline when this was signed. The wall clock disagrees with it exactly when
+// the chain runs behind, which is when the answer matters most. A zero clock is
+// UNKNOWN and must answer no: re-injecting on a guess spends the attempt on
+// bytes the chain may already refuse, and the cost of the opposite mistake is
+// one signature.
+func reusable(cached tx.SignedTxPayload, chainNow time.Time) bool {
+	if len(cached.Bytes) == 0 || cached.TimeoutAt.IsZero() {
+		return false
+	}
+	if chainNow.IsZero() {
+		return false
+	}
+	return chainNow.Before(cached.TimeoutAt)
 }
 
 // claimWindowClosedAt reports whether the claim window for a session ending at
@@ -2630,4 +3980,58 @@ func (m *SupplierManager) claimWindowClosedAt(ctx context.Context, sessionEndHei
 		return false
 	}
 	return currentHeight >= sharedtypes.GetClaimWindowCloseHeight(params, sessionEndHeight)
+}
+
+// Why the entry drops a relay its session's claim no longer waits for. Closed is
+// kept apart because a closed claim window is also one past the flush cap, and
+// the live gate excuses a relay dropped past the close by that name.
+const (
+	claimWindowReasonOpen   = "claim_window_open"
+	claimWindowReasonClosed = "claim_window_closed"
+)
+
+// claimWindowReached reports whether a relay for a session ending at
+// sessionEndHeight arrives, at the height this miner last observed, too late
+// for that session's claim, and names why: claimWindowReasonClosed once the
+// claim window has closed, claimWindowReasonOpen from claimFlushCapBlocks past
+// its opening, when the claim flush stops waiting for relays. Before that the
+// relay is admitted, because the flush may still take it.
+//
+// It answers "" whenever it cannot tell, for the reason claimWindowClosedAt
+// does: the caller discards on the answer. A params read that fails is counted,
+// because an entry cut that silently stopped cutting looks the same as one with
+// nothing late to cut.
+//
+// It reads no Redis: the height is the observed block, and the params come from
+// the query client's height cache or one RPC shared by every caller asking for
+// the same height.
+func (m *SupplierManager) claimWindowReached(ctx context.Context, sessionEndHeight int64) string {
+	if m.config.BlockClient == nil || m.config.SharedClient == nil || sessionEndHeight <= 0 {
+		return ""
+	}
+	block := m.config.BlockClient.LastBlock(ctx)
+	if block == nil {
+		return ""
+	}
+	currentHeight := block.Height()
+
+	// A session that has not ended cannot be past its claim window, and asking
+	// for the params at a future height would cache today's params under it; see
+	// claimWindowClosedAt.
+	if sessionEndHeight >= currentHeight {
+		return ""
+	}
+
+	params, err := m.config.SharedClient.GetParamsAtHeight(ctx, sessionEndHeight)
+	if err != nil || params == nil {
+		RecordClaimWindowOpenUnchecked()
+		return ""
+	}
+	switch {
+	case currentHeight >= sharedtypes.GetClaimWindowCloseHeight(params, sessionEndHeight):
+		return claimWindowReasonClosed
+	case currentHeight >= sharedtypes.GetClaimWindowOpenHeight(params, sessionEndHeight)+claimFlushCapBlocks:
+		return claimWindowReasonOpen
+	}
+	return ""
 }

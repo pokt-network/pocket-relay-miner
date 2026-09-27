@@ -128,7 +128,7 @@ func flushKeys(ctx context.Context, client *DebugRedisClient, pattern string, fo
 
 		fmt.Printf("To confirm, type 'DELETE' (all caps): ")
 		reader := bufio.NewReader(os.Stdin)
-		confirmation, _ := reader.ReadString('\n')
+		confirmation, _ := reader.ReadString('\n') //nolint:errcheck // bufio.ReadString returns an error IF AND ONLY IF the data does not end in the delimiter, so a piped answer without a trailing newline is valid data plus io.EOF; TrimSpace normalises both and an empty read fails the comparison below
 		confirmation = strings.TrimSpace(confirmation)
 
 		if confirmation != "DELETE" {

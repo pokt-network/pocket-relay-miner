@@ -21,7 +21,9 @@ import (
 //     fine. MarkProcessed now returns added=false, because A's entry is there.
 //
 // The dedup result gates the coordinator call, which is right for the RELAY
-// COUNTER: counting the same relay twice inflates the claim. But that same
+// COUNTER: counting the same relay twice over-counts relay_count, which the
+// relay metrics and the claim-time comparison of leaves against relays counted
+// read (the claim itself is built from the tree). But that same
 // call also CREATES the session when it does not exist yet
 // (OnRelayProcessed -> OnSessionCreated -> CreateIfAbsent). Skipping it on a
 // redelivery therefore skips the creation too — and if that relay was the
@@ -69,7 +71,8 @@ func TestHandleRelay_RedeliveryStillCreatesTheSession(t *testing.T) {
 
 // TestHandleRelay_RedeliveryDoesNotDoubleCount pins the other half of the
 // contract, so the fix above cannot be made by simply removing the gate: the
-// relay counter feeds the claim, and counting one relay twice inflates it.
+// relay counter feeds the relay metrics and the claim-time comparison of leaves
+// against relays counted, and counting one relay twice would hide real loss.
 func TestHandleRelay_RedeliveryDoesNotDoubleCount(t *testing.T) {
 	f := newHandlerTestFixture(t, "pokt1nodouble")
 	const sessionID = "sess-no-double"
@@ -98,7 +101,7 @@ func TestHandleRelay_RedeliveryDoesNotDoubleCount(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, second)
 	require.Equal(t, int64(1), second.RelayCount,
-		"a redelivered relay must not be counted twice — the count feeds the claim")
+		"a redelivered relay must not be counted twice — the count is compared with the claim's leaves")
 	require.Equal(t, first.TotalComputeUnits, second.TotalComputeUnits,
 		"nor may its compute units be added twice")
 }

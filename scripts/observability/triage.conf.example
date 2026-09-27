@@ -1,0 +1,19 @@
+# Operator configuration for triage.sh.
+#
+# Copy to scripts/localonly/observability/triage.conf (gitignored) and edit.
+# Every value can also be passed as an environment variable, which wins over
+# this file:
+#
+#   mkdir -p scripts/localonly/observability
+#   cp scripts/observability/triage.conf.example scripts/localonly/observability/triage.conf
+#   $EDITOR scripts/localonly/observability/triage.conf
+#
+# Point TRIAGE_CONF at another path to use a different file.
+
+# Prometheus that scrapes the miner and the relayer.
+PROM_URL=http://prometheus.my-namespace.svc:9090
+
+# A full node's CometBFT RPC. Only used when SETTLEMENTS is passed, to ask the
+# chain how many settled claims required a proof — our own counter records
+# decisions, not sessions, so it is not a denominator.
+CHAIN_URL=http://my-fullnode.internal:26657

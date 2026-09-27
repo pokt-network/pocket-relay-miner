@@ -24,16 +24,17 @@ keys:
 ```yaml
 # /keys/supplier-keys.yaml
 keys:
-  - 2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a
-  - fedcba9876543210fedcba9876543210fedcba9876543210fedcba9876543210
+  - <64 hex characters: supplier 1's private key>
+  - <64 hex characters: supplier 2's private key>
 ```
 
 The operator address of each supplier is **derived from the key**, so the file
 lists key material only — there is nothing to keep in sync and no way for an
 address and its key to disagree.
 
-Mount it as a Kubernetes Secret or a compose secret. This is the simplest option
-and the one the local stack runs by default.
+Mount it read-only into the container (the compose example bind-mounts
+`supplier-keys.yaml`), or install it with mode 0600 on a host. This is the
+simplest option and the one the local stack runs by default.
 
 ### `keyring` — a Cosmos SDK keyring
 
@@ -74,6 +75,134 @@ looks like this mistake.
 
 If you want a passphrase-protected keyring on a bare VM, say `file`. You get the
 behaviour you asked for on every host.
+
+## Creating a supplier key, and staking it
+
+The relay miner does not create keys or stake: `pocketd`, the Pocket Network
+CLI, does. Run these on a machine you trust, and never paste a private key, a
+mnemonic or a passphrase into a chat or an AI agent. Flags below are from
+`pocketd` 0.1.35.
+
+**0. Install `pocketd`.** From the [poktroll v0.1.35 release](https://github.com/pokt-network/poktroll/releases/tag/v0.1.35)
+(`pocket_linux_arm64.tar.gz` on ARM, the `darwin` archives on macOS; check
+them against `release_checksum` on the same page):
+
+```bash
+curl -sLO https://github.com/pokt-network/poktroll/releases/download/v0.1.35/pocket_linux_amd64.tar.gz
+tar -xzf pocket_linux_amd64.tar.gz      # extracts a single file: pocketd
+sudo install pocketd /usr/local/bin/
+pocketd version                         # prints 0.1.35
+```
+
+**1. Create the key in a passphrase-protected keyring.**
+
+```bash
+pocketd keys add supplier1 --keyring-backend file --keyring-dir ~/.pocket
+```
+
+It asks for a passphrase twice, then prints the address (`pokt1...`) and a
+mnemonic. Write the mnemonic down offline: it is the only way to recover the key.
+
+**2. Give the key to the relay miner, one of two ways.**
+
+- **The keyring itself.** Copy `~/.pocket/keyring-file/` to the server and point
+  `keys.keyring.dir` at its PARENT, with `backend: file` and the passphrase in a
+  file ([the `keyring` source](#keyring--a-cosmos-sdk-keyring),
+  [the passphrase](#the-passphrase-for-backend-file)).
+- **A hex key in the keys file.** Export the private key and put its 64 hex
+  characters under `keys:` in `supplier-keys.yaml` (mode 0600;
+  [the `keys_file` source](#keys_file--a-yaml-file-of-hex-private-keys)):
+
+  ```bash
+  pocketd keys export supplier1 --unarmored-hex --unsafe --keyring-backend file --keyring-dir ~/.pocket
+  ```
+
+  The supplier address is derived from the key: nothing else to write down.
+
+**3. Fund and stake the supplier.** The account needs POKT for the stake and for
+the fee of every claim and proof. On beta, request test POKT for the address
+from the faucet, <https://faucet.beta.pocket.network>: 100,000 POKT per request,
+at most 2 requests per account, which covers the minimum stake and the fees. On mainnet there is no
+faucet: POKT is bought, and sent to the address from an account you control.
+
+Staking is a chain transaction. Its config file (owner and operator addresses,
+stake amount, and each service with its endpoint URL) is described in the
+Pocket Network docs, [Supplier staking](https://docs.pocket.network/node-operators/supplier-staking/);
+the minimum stake is a governance parameter of the network. Each `service_id`
+must be a service registered on that network, spelled exactly:
+`pocketd query service all-services --network beta` (or `--network main`)
+lists them; so does
+`https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/service/service?pagination.limit=1000`
+(`sauron-api.infra.pocket.network` for mainnet).
+
+A minimal `stake_config.yaml`, in the format of that page (the addresses are
+yours; 1 endpoint per transport you serve for a service, `rpc_type` one of
+`JSON_RPC`, `REST`, `WEBSOCKET`):
+
+```yaml
+owner_address: pokt1...
+operator_address: pokt1...
+stake_amount: 59500000000upokt
+services:
+  - service_id: <a service id registered on this network>
+    endpoints:
+      - publicly_exposed_url: https://relayer.example.com
+        rpc_type: JSON_RPC
+      - publicly_exposed_url: https://relayer.example.com
+        rpc_type: WEBSOCKET
+  - service_id: <another service id>
+    endpoints:
+      - publicly_exposed_url: https://relayer.example.com
+        rpc_type: JSON_RPC
+```
+
+**1 supplier, 1 stake file with every service it serves.** Staking again
+replaces the list: a service missing from the new file is deactivated at the
+next session (poktroll v0.1.35, `x/supplier/keeper/msg_server_stake_supplier.go`).
+To add a service later, stake again with the full list.
+
+`stake_amount` is in `upokt` (1 POKT = 1,000,000 upokt) and at least the
+network's `min_stake`, which governance can change. It is per supplier, not
+per service: 1 supplier staked for 2 services needs the minimum once. Read it before staking
+with `curl -s https://sauron-api.beta.infra.pocket.network/pokt-network/poktroll/supplier/params`
+(`sauron-api.infra.pocket.network` for mainnet; it read `59500000000` on both
+on 2026-09-26, which is **59,500 POKT**: divide upokt by 1,000,000). The account also needs POKT left over for fees. Beta registers
+its own services, not mainnet's: if the one you want to serve is not on beta,
+the test on beta stops at the running stack, and staking it needs mainnet.
+
+**The endpoint URL is where gateways on the internet reach your relayer**, not
+your backend node. It is a public DNS name or IP, normally `https://` through a
+TLS proxy in front of the relayer's relay port (8080 in the relayer's config;
+the compose example publishes it on the host as 8180, bound to loopback until
+you change it). Never `localhost` or a private address (`10.x`, `172.16-31.x`,
+`192.168.x`): gateways cannot reach it, and the supplier gets no relays. A
+server at home needs a public address, or a port forward on the router to the
+TLS proxy.
+
+The URL is written on chain and must stay the same: changing it takes a new
+stake transaction. Use a DNS name you control, with a certificate for it on the
+TLS proxy (a bare IP rarely gets one). A tunnel or address whose URL changes on
+restart breaks the stake every time it changes.
+
+On beta:
+
+```bash
+pocketd tx supplier stake-supplier --config stake_config.yaml --from supplier1 \
+  --keyring-backend file --keyring-dir ~/.pocket --network beta
+pocketd query supplier show-supplier <pokt1-address> --network beta
+```
+
+On mainnet (the network's name for `--network` is `main`, not `mainnet`):
+
+```bash
+pocketd tx supplier stake-supplier --config stake_config.yaml --from supplier1 \
+  --keyring-backend file --keyring-dir ~/.pocket --network main
+pocketd query supplier show-supplier <pokt1-address> --network main
+```
+
+Once staked,
+`pocket-relay-miner relayer validate --config <file> --check-stake` confirms every
+staked service has a backend in your relayer config.
 
 ## The passphrase, for `backend: file`
 
@@ -196,7 +325,7 @@ serving those suppliers and make the miner drain their pipelines, on a transient
 read error, every 30 seconds.
 
 **An emptied key FILE is refused, and an emptied KEYRING is not.** The two
-sources answer this differently, on purpose. A `supplier.yaml` with no keys is
+sources answer this differently, on purpose. A `supplier-keys.yaml` with no keys is
 far more often a truncated write or a bad template than a request to stop
 serving, so it is refused and the previous keys are kept; to stop serving,
 unstake or stop the process.
@@ -267,6 +396,7 @@ resolved was usable.
 
 ```bash
 echo "$SECRET" | pocket-relay-miner relay jsonrpc --service <svc> \
+  --node <host:port> --chain-id <id> \
   --keyring-backend file --keyring-dir ~/.pocket \
   --app-key <name> --gateway-key <name>
 ```

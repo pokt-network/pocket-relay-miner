@@ -33,6 +33,24 @@ func NewRelayPipeline(
 	}
 }
 
+// Priced reports whether the pipeline knows what to charge.
+//
+// The gRPC and WebSocket transports reach the meter only through this pipeline,
+// so this is how their admission checks ask the same question the HTTP path asks
+// the meter directly.
+//
+// It is also the ONLY method here that tolerates a nil meter, and that is a
+// fact about the code rather than a courtesy: MeterRelay and AdmitRelay both
+// dereference p.relayMeter with no guard, and RelayMeter has 37 pointer-receiver methods of
+// which none checks m == nil -- admit takes m.mu.RLock() on its first executable
+// line. So a pipeline built without a meter does not serve relays free of
+// charge: it panics as soon as one reaches that path. A caller passing a nil
+// meter is declaring those paths unreachable for itself, which is exactly what
+// the session-expired and simulation fixtures state in their own comments.
+func (p *RelayPipeline) Priced() bool {
+	return p.relayMeter != nil && p.relayMeter.Priced()
+}
+
 // RelayContext contains all information needed to process a relay.
 type RelayContext struct {
 	// Request is the relay request from the gateway client
@@ -62,8 +80,19 @@ func (p *RelayPipeline) ValidateRelay(
 		Str("supplier", relayCtx.SupplierAddress).
 		Msg("validating relay request")
 
-	// Validate relay request (ring signature + session)
-	if err := p.validator.ValidateRelayRequest(ctx, relayCtx.Request); err != nil {
+	// Validate relay request (ring signature + session) at the height THIS relay
+	// arrived at.
+	//
+	// This handover is the whole of the defect it replaced: the arrival height
+	// was already in RelayContext and was never passed on, so the two transports
+	// that reach the validator ONLY through here -- WebSocket (websocket.go) and
+	// gRPC (relay_grpc_service.go) -- had it judge every relay against whatever
+	// the last HTTP relay left in a shared field, or against 0, which
+	// getTargetSessionBlockHeight reads as "session active". The grace period was
+	// therefore never evaluated on either transport: relays long past their grace
+	// window validated as live, were served, and were mined into claims the chain
+	// does not pay.
+	if err := p.validator.ValidateRelayRequest(ctx, relayCtx.Request, relayCtx.ArrivalBlockHeight); err != nil {
 		p.logger.Debug().
 			Err(err).
 			Str("service_id", relayCtx.ServiceID).
@@ -80,8 +109,8 @@ func (p *RelayPipeline) ValidateRelay(
 	return nil
 }
 
-// MeterRelay checks and consumes relay stake (rate limiting).
-// Returns (allowed, error).
+// MeterRelay checks a relay against its budget without reserving or charging
+// anything. Returns (allowed, error).
 func (p *RelayPipeline) MeterRelay(
 	ctx context.Context,
 	relayCtx *RelayContext,
@@ -100,8 +129,8 @@ func (p *RelayPipeline) MeterRelay(
 	sessionStartHeight := sessionHeader.SessionStartBlockHeight
 	sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
-	// Check and consume relay stake
-	allowed, err := p.relayMeter.CheckAndConsumeRelay(
+	// Check the relay stake, reserving and charging nothing
+	allowed, err := p.relayMeter.CheckBudget(
 		ctx,
 		sessionID,
 		appAddress,
@@ -134,4 +163,61 @@ func (p *RelayPipeline) MeterRelay(
 	}
 
 	return allowed, nil
+}
+
+// AdmitRelay reserves a relay's cost before it is served. The caller must
+// SettleRelay the reservation once the relay is served and ReleaseRelay it on
+// every other exit. Errors carry the same allowed as MeterRelay.
+func (p *RelayPipeline) AdmitRelay(
+	ctx context.Context,
+	relayCtx *RelayContext,
+) (Reservation, bool, error) {
+	sessionHeader := relayCtx.Request.Meta.SessionHeader
+	reservation, allowed, err := p.relayMeter.Admit(
+		ctx,
+		sessionHeader.SessionId,
+		sessionHeader.ApplicationAddress,
+		relayCtx.ServiceID,
+		relayCtx.SupplierAddress,
+		sessionHeader.SessionStartBlockHeight,
+		sessionHeader.SessionEndBlockHeight,
+		relayCtx.ArrivalBlockHeight,
+	)
+	if err != nil {
+		p.logger.Debug().
+			Err(err).
+			Str("service_id", relayCtx.ServiceID).
+			Str("session_id", relayCtx.SessionID).
+			Msg("relay metering failed")
+		return reservation, allowed, fmt.Errorf("metering failed: %w", err)
+	}
+	return reservation, allowed, nil
+}
+
+// SettleRelay charges a served relay's reservation.
+func (p *RelayPipeline) SettleRelay(reservation Reservation) {
+	p.relayMeter.Settle(reservation)
+}
+
+// ReleaseRelay gives back the reservation of a relay that was not served.
+func (p *RelayPipeline) ReleaseRelay(reservation Reservation) {
+	p.relayMeter.Release(reservation)
+}
+
+// ChargeServedRelay charges a relay served without an admission of its own and
+// reports whether its pair is now at or over the budget.
+func (p *RelayPipeline) ChargeServedRelay(
+	ctx context.Context,
+	sessionID string,
+	serviceID string,
+	supplierAddress string,
+	sessionStartHeight int64,
+) (bool, error) {
+	return p.relayMeter.ChargeServed(ctx, sessionID, serviceID, supplierAddress, sessionStartHeight)
+}
+
+// DispatcherHealthy reports whether a relay served now would be charged, and
+// why not when it would not.
+func (p *RelayPipeline) DispatcherHealthy() (bool, error) {
+	return p.relayMeter.DispatcherHealthy()
 }

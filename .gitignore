@@ -65,3 +65,6 @@ examples/relay-signing/rust/oracle
 # `go build ./examples/relay-signing/oracle` from the repo root drops a 5 MB
 # binary here. Root-anchored, so it cannot swallow the source dir above.
 /oracle
+
+# Python bytecode (scripts/dashboards)
+__pycache__/

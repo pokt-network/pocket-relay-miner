@@ -473,7 +473,7 @@ mod tests {
     // Pinned against `oracle vectors`. These are the deterministic pieces
     // underneath a (randomised, undiffable) signature: if the harness fails,
     // bisect here first.
-    const APP_PUB_HEX: &str = "0397896e9b106df70124a856861cc9be52fac9980e2c7a118a36c19d0198692cc5";
+    const APP_PUB_HEX: &str = "02f8a265f0e802f1cd6ca87c4c90614178d2f426b2d2417cfe172d120a480335bb";
     const GW_PUB_HEX: &str = "02bbbf99abdcddac27350bca272d7146187c091aacfc1c6f90819c9b6daf4fe846";
 
     fn hex32(s: &str) -> [u8; 32] {
@@ -592,7 +592,7 @@ mod tests {
         for (input, want) in [
             (
                 APP_PUB_HEX,
-                "02f72a1f27fa696323f979f608a525372567ad7c532736465db78c7d7118ce46e0",
+                "02f83935b85c75377bf319117c2f24b7749fc2bb303a9b31552651c487f387050a",
             ),
             (
                 GW_PUB_HEX,
@@ -708,7 +708,7 @@ mod tests {
     /// The `[app, gateway]` ring from `oracle vectors`, and the gateway key.
     fn test_ring() -> (PublicKey, PublicKey, SecretKey) {
         let app = SecretKey::from_slice(&hex32(
-            "2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a",
+            "c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda",
         ))
         .unwrap();
         let gw = SecretKey::from_slice(&hex32(

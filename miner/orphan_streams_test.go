@@ -132,7 +132,7 @@ func TestKnownSupplierAddressesReadsAMissingIndexAsEmpty(t *testing.T) {
 // with Set(..., 0) directly, on purpose, to exercise the union regardless of
 // TTL -- not a claim that production entries are still permanent.)
 //
-// ageKeyTo(..., 0), not a sleep: Rule #1 (CLAUDE.md) forbids time.Sleep for
+// ageKeyTo(..., 0), not a sleep: Rule #1 (CONTRIBUTING.md) forbids time.Sleep for
 // synchronization, and internal/conventions' sleep allowlist would reject a
 // new one. The remaining TTL is the observable this test is about, and
 // setting it to 0 collapses "wait for the TTL to elapse" into "the key is

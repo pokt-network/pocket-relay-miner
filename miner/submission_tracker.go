@@ -2,11 +2,16 @@ package miner
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/pokt-network/pocket-relay-miner/logging"
+	"github.com/redis/go-redis/v9"
+
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 )
 
@@ -27,24 +32,56 @@ type SubmissionTrackingRecord struct {
 	SessionEnd   int64  `json:"session_end"`
 
 	// Claim tracking
-	ClaimHash            string `json:"claim_hash"`
-	ClaimTxHash          string `json:"claim_tx_hash"`
-	ClaimSuccess         bool   `json:"claim_success"` // BROADCAST acceptance only — not on-chain
-	ClaimErrorReason     string `json:"claim_error_reason,omitempty"`
-	ClaimSubmitHeight    int64  `json:"claim_submit_height"`
-	ClaimSubmitTimestamp int64  `json:"claim_submit_timestamp"` // Unix timestamp
-	ClaimSubmitTimeUTC   string `json:"claim_submit_time_utc"`  // RFC3339 UTC time
-	ClaimCurrentHeight   int64  `json:"claim_current_height"`   // Current block at submission
+	ClaimHash   string `json:"claim_hash"`
+	ClaimTxHash string `json:"claim_tx_hash"`
+	// ClaimSuccess is a MIRROR IN RETREAT of ClaimBroadcastOutcome, kept only so
+	// that a binary from before that field can still read this record: it cannot
+	// express "not known yet", and a zero bool reported 250 claims that had been
+	// broadcast and paid as failed. Written whenever the outcome is known; delete
+	// it once the fleet has rotated (queued in the deep-cleanup list).
+	ClaimSuccess bool `json:"claim_success"` // BROADCAST acceptance only — not on-chain
+	// ClaimBroadcastOutcome is what this miner was told about the claim
+	// broadcast: ClaimBroadcastAccepted, ClaimBroadcastRejected, or empty when
+	// nobody has said -- the record was created by the proof path, which knows
+	// nothing about the claim. Same shape as ClaimOnChainOutcome below, for the
+	// same reason: the absence of an answer is not an answer.
+	//
+	// MIXED FLEET: an older binary that re-marshals this record drops the field
+	// its struct cannot see, and falls back to reading ClaimSuccess, which the
+	// new binary writes alongside it whenever the outcome is known.
+	ClaimBroadcastOutcome string `json:"claim_broadcast_outcome,omitempty"`
+	ClaimErrorReason      string `json:"claim_error_reason,omitempty"`
+	ClaimSubmitHeight     int64  `json:"claim_submit_height"`
+	ClaimSubmitTimestamp  int64  `json:"claim_submit_timestamp"` // Unix timestamp
+	ClaimSubmitTimeUTC    string `json:"claim_submit_time_utc"`  // RFC3339 UTC time
+	ClaimCurrentHeight    int64  `json:"claim_current_height"`   // Current block at submission
 
 	// Claim on-chain outcome (populated by the inclusion reconciler after polling
 	// GetClaim). One of: "", "on_chain_found", "on_chain_missing",
-	// "poll_error", "poll_dropped". Empty string = poll hasn't resolved yet
+	// "poll_error". Empty string = poll hasn't resolved yet
 	// (or the tracker was disabled).
 	ClaimOnChainOutcome  string `json:"claim_on_chain_outcome,omitempty"`
 	ClaimInclusionHeight int64  `json:"claim_inclusion_height,omitempty"`
+	// ClaimRebroadcasts is the claim-side analogue of ProofRebroadcasts. The
+	// counter and its metric (claim_rebroadcasts_total) already existed; what did
+	// not was writing it down, so `redis submissions` reported zero resends for a
+	// claim that had been resent, and an operator reading the ledger concluded
+	// none had happened.
+	//
+	// MIXED FLEET: an older binary that re-marshals this record drops the field
+	// its struct cannot see, so a resend counted by a new miner and re-written by
+	// an old one comes back zero. The degradation is benign on purpose — this is
+	// a diagnostic counter, never money, and nothing reads it to make a decision.
+	ClaimRebroadcasts int `json:"claim_rebroadcasts,omitempty"`
 
 	// Proof tracking
+	// ProofHash is the hex SHA-256 of the proof bytes sent, and ProofSizeBytes
+	// their length. It used to hold the proof itself in hex: 4.2 MB per record
+	// with 1 MiB relays, since a closest proof carries the relay. The hash is
+	// reproducible from the proof transaction, and it tells which proof is which
+	// inside a transaction that carries several.
 	ProofHash            string `json:"proof_hash,omitempty"`
+	ProofSizeBytes       int64  `json:"proof_size_bytes,omitempty"`
 	ProofTxHash          string `json:"proof_tx_hash,omitempty"`
 	ProofSuccess         bool   `json:"proof_success"` // BROADCAST acceptance only — not on-chain
 	ProofErrorReason     string `json:"proof_error_reason,omitempty"`
@@ -55,13 +92,16 @@ type SubmissionTrackingRecord struct {
 
 	// Proof on-chain outcome (populated by the inclusion reconciler after polling
 	// GetProof). One of: "", "on_chain_found", "on_chain_missing",
-	// "poll_error", "poll_dropped". Empty string = poll hasn't resolved yet
+	// "poll_error". Empty string = poll hasn't resolved yet
 	// (or the tracker was disabled). This is the proof-side analogue of
 	// ClaimOnChainOutcome — without it, a CheckTx-accepted-but-never-included
 	// proof was indistinguishable from a settled one (silent PROOF_MISSING).
 	ProofOnChainOutcome  string `json:"proof_on_chain_outcome,omitempty"`
 	ProofInclusionHeight int64  `json:"proof_inclusion_height,omitempty"`
-	ProofRebroadcasts    int    `json:"proof_rebroadcasts,omitempty"` // # of in-window re-submissions attempted
+	// ProofRejectionCause accompanies a proof_on_chain_outcome of
+	// on_chain_rejected: root_mismatch, root_match or root_unknown.
+	ProofRejectionCause string `json:"proof_rejection_cause,omitempty"`
+	ProofRebroadcasts   int    `json:"proof_rebroadcasts,omitempty"` // # of in-window re-submissions attempted
 
 	// Metadata
 	NumRelays            int64  `json:"num_relays"`
@@ -70,11 +110,42 @@ type SubmissionTrackingRecord struct {
 	ProofRequirementSeed string `json:"proof_requirement_seed,omitempty"` // Hex-encoded seed block hash
 }
 
+// What this miner was told about a claim or proof broadcast. Empty means
+// nobody has said yet, which is why these are strings and not a bool.
+const (
+	ClaimBroadcastAccepted = "accepted"
+	ClaimBroadcastRejected = "rejected"
+)
+
+// claimBroadcastOutcome renders a known broadcast result.
+func claimBroadcastOutcome(success bool) string {
+	if success {
+		return ClaimBroadcastAccepted
+	}
+	return ClaimBroadcastRejected
+}
+
 // SubmissionTracker tracks claim/proof submissions to Redis for debugging.
 type SubmissionTracker struct {
 	logger      logging.Logger
 	redisClient *redistransport.Client
 	ttl         time.Duration
+}
+
+// countWriteFailure counts a tracking write Redis refused, telling an
+// out-of-memory refusal from anything else.
+//
+// The tracker does not ask the store gate whether to write. Every record here
+// describes a claim or a proof already broadcast, so skipping it does not save
+// the work it describes -- it only loses the evidence of it -- and the memory
+// reserve that closes the gate exists so these writes still fit. What the store
+// itself refuses is counted here and returned to the caller, which logs it.
+func countWriteFailure(kind string, err error) {
+	reason := "other"
+	if redistransport.IsOOMError(err) {
+		reason = "oom"
+	}
+	trackingWritesFailed.WithLabelValues(kind, reason).Inc()
 }
 
 // NewSubmissionTracker creates a new submission tracker.
@@ -114,24 +185,25 @@ func (t *SubmissionTracker) TrackClaimSubmission(
 
 	now := time.Now()
 	record := SubmissionTrackingRecord{
-		Supplier:             supplier,
-		Service:              service,
-		Application:          application,
-		SessionID:            sessionID,
-		SessionStart:         sessionStart,
-		SessionEnd:           sessionEnd,
-		ClaimHash:            claimHash,
-		ClaimTxHash:          claimTxHash,
-		ClaimSuccess:         success,
-		ClaimErrorReason:     errorReason,
-		ClaimSubmitHeight:    submitHeight,
-		ClaimSubmitTimestamp: now.Unix(),
-		ClaimSubmitTimeUTC:   now.UTC().Format(time.RFC3339),
-		ClaimCurrentHeight:   currentHeight,
-		NumRelays:            numRelays,
-		ComputeUnits:         computeUnits,
-		ProofRequired:        proofRequired,
-		ProofRequirementSeed: proofRequirementSeed,
+		Supplier:              supplier,
+		Service:               service,
+		Application:           application,
+		SessionID:             sessionID,
+		SessionStart:          sessionStart,
+		SessionEnd:            sessionEnd,
+		ClaimHash:             claimHash,
+		ClaimTxHash:           claimTxHash,
+		ClaimSuccess:          success,
+		ClaimBroadcastOutcome: claimBroadcastOutcome(success),
+		ClaimErrorReason:      errorReason,
+		ClaimSubmitHeight:     submitHeight,
+		ClaimSubmitTimestamp:  now.Unix(),
+		ClaimSubmitTimeUTC:    now.UTC().Format(time.RFC3339),
+		ClaimCurrentHeight:    currentHeight,
+		NumRelays:             numRelays,
+		ComputeUnits:          computeUnits,
+		ProofRequired:         proofRequired,
+		ProofRequirementSeed:  proofRequirementSeed,
 	}
 
 	data, err := json.Marshal(record)
@@ -140,6 +212,7 @@ func (t *SubmissionTracker) TrackClaimSubmission(
 	}
 
 	if err := t.redisClient.Set(ctx, key, data, t.ttl).Err(); err != nil {
+		countWriteFailure("claim", err)
 		return fmt.Errorf("failed to store tracking record: %w", err)
 	}
 
@@ -158,7 +231,7 @@ func (t *SubmissionTracker) TrackProofSubmission(
 	supplier string,
 	sessionEnd int64,
 	sessionID string,
-	proofHash string,
+	proof []byte,
 	proofTxHash string,
 	success bool,
 	errorReason string,
@@ -168,6 +241,9 @@ func (t *SubmissionTracker) TrackProofSubmission(
 	proofRequirementSeed string,
 ) error {
 	key := t.makeKey(supplier, sessionEnd, sessionID)
+	proofDigest := sha256.Sum256(proof)
+	proofHash := hex.EncodeToString(proofDigest[:])
+	proofSize := int64(len(proof))
 
 	// Get existing record
 	data, err := t.redisClient.Get(ctx, key).Bytes()
@@ -184,6 +260,7 @@ func (t *SubmissionTracker) TrackProofSubmission(
 			SessionID:            sessionID,
 			SessionEnd:           sessionEnd,
 			ProofHash:            proofHash,
+			ProofSizeBytes:       proofSize,
 			ProofTxHash:          proofTxHash,
 			ProofSuccess:         success,
 			ProofErrorReason:     errorReason,
@@ -199,6 +276,7 @@ func (t *SubmissionTracker) TrackProofSubmission(
 		}
 
 		if setErr := t.redisClient.Set(ctx, key, newData, t.ttl).Err(); setErr != nil {
+			countWriteFailure("proof", setErr)
 			return fmt.Errorf("failed to store new tracking record: %w", setErr)
 		}
 
@@ -213,6 +291,7 @@ func (t *SubmissionTracker) TrackProofSubmission(
 
 	now := time.Now()
 	record.ProofHash = proofHash
+	record.ProofSizeBytes = proofSize
 	record.ProofTxHash = proofTxHash
 	record.ProofSuccess = success
 	record.ProofErrorReason = errorReason
@@ -312,6 +391,7 @@ type ClaimOnChainUpdate struct {
 	TxHash          string
 	Outcome         string
 	InclusionHeight int64
+	Rebroadcasts    int
 }
 
 // UpdateClaimOnChainOutcome finds every submission record for the given
@@ -338,6 +418,9 @@ func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u Cla
 		}
 		record.ClaimOnChainOutcome = u.Outcome
 		record.ClaimInclusionHeight = u.InclusionHeight
+		if u.Rebroadcasts > 0 {
+			record.ClaimRebroadcasts = u.Rebroadcasts
+		}
 
 		key := t.makeKey(record.Supplier, record.SessionEnd, record.SessionID)
 		data, marshalErr := json.Marshal(record)
@@ -347,11 +430,27 @@ func (t *SubmissionTracker) UpdateClaimOnChainOutcome(ctx context.Context, u Cla
 			continue
 		}
 		if setErr := t.redisClient.Set(ctx, key, data, t.ttl).Err(); setErr != nil {
+			countWriteFailure("claim_outcome", setErr)
 			t.logger.Warn().Err(setErr).Str("session_id", record.SessionID).
 				Msg("failed to persist updated claim on-chain outcome record")
 			continue
 		}
 		updated++
+	}
+
+	if updated == 0 {
+		// The reconciler polls a tx until it resolves and then stops, so an
+		// outcome with no record to annotate is lost for good. Warn, not Debug:
+		// this is once per session, not per relay, and after the tracker stopped
+		// skipping writes it should not happen at all -- when it does, the
+		// record it wanted is missing and only these two fields say which.
+		trackingOutcomesWithoutRecord.WithLabelValues("claim").Inc()
+		t.logger.Warn().
+			Str("supplier", u.Supplier).
+			Str("tx_hash", u.TxHash).
+			Str("outcome", u.Outcome).
+			Msg("claim on-chain outcome found no submission record to annotate; the outcome is lost")
+		return nil
 	}
 
 	t.logger.Debug().
@@ -377,6 +476,10 @@ type ProofOnChainUpdate struct {
 	InclusionHeight int64
 	NewProofTxHash  string // set when a rebroadcast produced a fresh hash; "" to leave unchanged
 	Rebroadcasts    int
+	// RejectionCause is set only when Outcome is on_chain_rejected: it says
+	// whether the root the chain holds matches the one this miner stored, which
+	// is the only part of a rejection readable from here.
+	RejectionCause string
 }
 
 // UpdateProofOnChainOutcome overwrites the proof-on-chain fields of the record
@@ -386,12 +489,28 @@ type ProofOnChainUpdate struct {
 func (t *SubmissionTracker) UpdateProofOnChainOutcome(ctx context.Context, u ProofOnChainUpdate) error {
 	record, err := t.GetRecord(ctx, u.Supplier, u.SessionEnd, u.SessionID)
 	if err != nil {
-		// No record to annotate — nothing to do.
-		return nil
+		// The previous version returned nil on ANY error here, under "no record
+		// to annotate — nothing to do". That reads as a decision and merges two
+		// different answers: "there is no record" and "I could not read whether
+		// there is a record". Only the first is nothing to do; the second is a
+		// failure, and swallowing it made a Redis outage indistinguishable from
+		// a session that was never tracked.
+		//
+		// redis.Nil is what tells them apart, and it is the ONLY case that keeps
+		// the old behaviour. Everything else now reaches the caller, which logs
+		// it -- without this, that log was unreachable for the failure that
+		// actually happens.
+		if errors.Is(err, redis.Nil) {
+			return nil
+		}
+		return err
 	}
 
 	record.ProofOnChainOutcome = u.Outcome
 	record.ProofInclusionHeight = u.InclusionHeight
+	if u.RejectionCause != "" {
+		record.ProofRejectionCause = u.RejectionCause
+	}
 	if u.Rebroadcasts > 0 {
 		record.ProofRebroadcasts = u.Rebroadcasts
 	}

@@ -15,6 +15,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/leader"
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/query"
+	"github.com/pokt-network/pocket-relay-miner/transport/grpcconn"
 	redistransport "github.com/pokt-network/pocket-relay-miner/transport/redis"
 
 	apptypes "github.com/pokt-network/poktroll/x/application/types"
@@ -134,6 +135,11 @@ func (c *LeaderController) Start(ctx context.Context) error {
 			GRPCEndpoint: c.config.QueryNodeGRPCUrl,
 			QueryTimeout: c.config.Config.GetQueryTimeout(),
 			UseTLS:       !c.config.GRPCInsecure,
+			// The miner runs this controller AND the supplier worker in one
+			// process, so both connections would report as conn="query" and
+			// their queueing would be summed. This one is mostly idle; the
+			// worker's is not.
+			ConnRole: grpcconn.RoleQueryLeader,
 		},
 	)
 	if err != nil {
@@ -334,10 +340,10 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		ServiceFactorRegistryConfig{
 			DefaultServiceFactor: c.config.Config.DefaultServiceFactor,
 			ServiceFactors:       c.config.Config.ServiceFactors,
-			CacheTTL:             c.config.Config.GetCacheTTL(),
+			RepublishInterval:    c.config.Config.GetServiceFactorRepublishInterval(),
 		},
 	)
-	if err = c.serviceFactorRegistry.PublishServiceFactors(ctx); err != nil {
+	if err = c.serviceFactorRegistry.Start(ctx); err != nil {
 		c.cleanup()
 		return fmt.Errorf("failed to publish service factors: %w", err)
 	}
@@ -357,7 +363,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	// it to SupplierManager; LeaderController has no consumer for it.
 
 	// Start block health monitor if enabled
-	if c.config.Config.BlockHealthMonitor.Enabled {
+	if c.config.Config.BlockHealthMonitorEnabled() {
 		c.blockHealthMonitor = NewBlockHealthMonitor(
 			c.logger,
 			c.blockSubscriber,
@@ -374,8 +380,7 @@ func (c *LeaderController) Start(ctx context.Context) error {
 		c.logger.Info().Msg("block health monitor started (leader-only)")
 	}
 
-	// Start balance monitor if enabled
-	if c.config.Config.GetBalanceMonitorEnabled() || c.config.Config.GetBalanceMonitorThreshold() > 0 {
+	if balanceMonitorWanted(c.config.Config) {
 		c.balanceMonitor = NewBalanceMonitor(
 			c.logger,
 			BalanceMonitorConfig{
@@ -414,6 +419,14 @@ func (c *LeaderController) Start(ctx context.Context) error {
 	c.active = true
 	c.logger.Info().Msg("leader controller started - all resources active")
 	return nil
+}
+
+// balanceMonitorWanted is the one decision to run the balance monitor:
+// balance_monitor.enabled alone. It used to also start whenever the balance
+// threshold was above 0, and the default threshold is 1 POKT, so enabled: false
+// never turned it off.
+func balanceMonitorWanted(cfg *Config) bool {
+	return cfg.GetBalanceMonitorEnabled()
 }
 
 // Close shuts down all leader-only resources.
@@ -459,9 +472,17 @@ func (c *LeaderController) cleanup() {
 		c.blockHealthMonitor = nil
 	}
 
-	// ServiceFactorRegistry doesn't have a Close method - it just holds config
-	// Keys will expire based on Redis TTL or stay until overwritten
-	c.serviceFactorRegistry = nil
+	// The registry runs a republish loop, and closing it is what stops this
+	// miner rewriting the manifest once it is no longer the leader. The keys it
+	// wrote stay in Redis until the next leader replaces them: they carry no
+	// TTL, because an expiring key is indistinguishable from one that was never
+	// published, which is the ambiguity the manifest exists to remove.
+	if c.serviceFactorRegistry != nil {
+		if err := c.serviceFactorRegistry.Close(); err != nil {
+			c.logger.Error().Err(err).Msg("failed to close service factor registry")
+		}
+		c.serviceFactorRegistry = nil
+	}
 
 	if c.blockPublisher != nil {
 		if err := c.blockPublisher.Close(); err != nil {

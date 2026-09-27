@@ -45,7 +45,7 @@ var (
 	// Each additional leading-zero bit halves the fraction of relays
 	// that satisfy the target (bits=0 → every hash passes; bits=1 →
 	// 1/2; bits=2 → 1/4; …). This is the single number that explains
-	// why ha_relayer_relays_mined_total / relays_served_total varies
+	// why ha_relayer_relays_published_total / relays_served_total varies
 	// across services.
 	//
 	// Updated whenever the chain is consulted: every call to the (uncached)

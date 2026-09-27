@@ -73,6 +73,7 @@ func TestEnsureSession_ConcurrentFirstRelay_ExactlyOneCreateCallback(t *testing.
 			// one of them would leave half the contract unpinned.
 			coord.EnsureSession(
 				ctx,
+				SessionRead{}, // no prior read: every goroutine races the create
 				sessionID,
 				supplierAddress,
 				serviceID,

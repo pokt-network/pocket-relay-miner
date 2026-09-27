@@ -35,6 +35,7 @@ import (
 	"github.com/pokt-network/pocket-relay-miner/logging"
 	"github.com/pokt-network/pocket-relay-miner/pool"
 	"github.com/pokt-network/pocket-relay-miner/transport"
+	redisutil "github.com/pokt-network/pocket-relay-miner/transport/redis"
 	servicetypes "github.com/pokt-network/poktroll/x/service/types"
 )
 
@@ -82,28 +83,60 @@ const (
 	rejectReasonSupplierCacheNotConfigured  = "supplier_cache_not_configured"
 	rejectReasonUnknownService              = "unknown_service"
 	rejectReasonMissingSupplierAddress      = "missing_supplier_address"
-	rejectReasonSupplierCacheError          = "supplier_cache_error"
-	rejectReasonNoLocalSigner               = "no_local_signer"
-	rejectReasonSupplierInactive            = "supplier_inactive"
-	rejectReasonNoServices                  = "no_services"
-	rejectReasonWrongService                = "wrong_service"
-	rejectReasonMeterError                  = "meter_error"
-	rejectReasonStakeExhausted              = "stake_exhausted"
-	rejectReasonValidationFailed            = "validation_failed"
-	rejectReasonImplausibleSession          = "implausible_session_heights"
-	rejectReasonClientDisconnected          = "client_disconnected"
-	rejectReasonBackendTimeout              = "backend_timeout"
-	rejectReasonBackendNetworkError         = "backend_network_error"
-	rejectReasonBackend5xx                  = "backend_5xx"
-	rejectReasonSigningError                = "signing_error"
+	// rejectReasonSupplierChanged marks a WebSocket frame naming a supplier
+	// other than the one that owns the connection. Bounded label: it is the
+	// name of one gate, not client-supplied text.
+	rejectReasonSupplierChanged = "supplier_changed"
+	// rejectReasonNoRelayYet marks a raw (non-RelayRequest) WebSocket frame
+	// arriving before any relay has established the connection.
+	rejectReasonNoRelayYet = "no_relay_yet"
+	// rejectReasonBackendDialFailed marks a WebSocket frame that passed
+	// admission and then could not reach the backend.
+	rejectReasonBackendDialFailed   = "backend_dial_failed"
+	rejectReasonSupplierCacheError  = "supplier_cache_error"
+	rejectReasonNoLocalSigner       = "no_local_signer"
+	rejectReasonSupplierInactive    = "supplier_inactive"
+	rejectReasonNoServices          = "no_services"
+	rejectReasonWrongService        = "wrong_service"
+	rejectReasonMeterError          = "meter_error"
+	rejectReasonStakeExhausted      = "stake_exhausted"
+	rejectReasonValidationFailed    = "validation_failed"
+	rejectReasonImplausibleSession  = "implausible_session_heights"
+	rejectReasonClientDisconnected  = "client_disconnected"
+	rejectReasonBackendTimeout      = "backend_timeout"
+	rejectReasonBackendNetworkError = "backend_network_error"
+	rejectReasonBackend5xx          = "backend_5xx"
+	rejectReasonSigningError        = "signing_error"
+	// rejectReasonSessionExpired marks a relay that arrived after its
+	// session's grace period elapsed -- see relayer.ErrSessionExpired.
+	// Previously folded into the generic validation_failed reason.
+	rejectReasonSessionExpired = "session_expired"
 
 	// Drop reasons (for relaysDropped metric)
 	dropReasonValidationFailed = "validation_failed"
-	dropReasonStakeExhausted   = "stake_exhausted"
-	dropReasonNoSupplier       = "no_supplier"
-	dropReasonMarshalFailed    = "marshal_failed"
-	dropReasonProcessFailed    = "process_failed"
-	dropReasonPublishFailed    = "publish_failed"
+
+	// dropReasonSessionExpired is the optimistic twin of
+	// rejectReasonSessionExpired: a relay already SERVED whose session had
+	// outlived its grace window.
+	//
+	// Without it the optimistic path books an expired session as a signature
+	// failure, which is not a coarser label but a misleading one -- and it makes
+	// the grace period unobservable exactly where it matters. WebSocket already
+	// tells them apart (websocket.go, errors.Is on ErrSessionExpired); the eager
+	// HTTP path does too. This is the last one that did not.
+	dropReasonSessionExpired = "session_expired"
+	dropReasonStakeExhausted = "stake_exhausted"
+	dropReasonNoSupplier     = "no_supplier"
+	dropReasonMarshalFailed  = "marshal_failed"
+	dropReasonProcessFailed  = "process_failed"
+	dropReasonPublishFailed  = "publish_failed"
+	// dropReasonNoPublisher: mined, but this relayer has no publisher to hand
+	// it to the store.
+	dropReasonNoPublisher = "no_publisher"
+
+	// overBudgetReasonPushAtBudget: a WebSocket backend message, charged after it
+	// was served, left its session at or over the budget.
+	overBudgetReasonPushAtBudget = "push_at_budget"
 )
 
 // defaultGzipMinCompressSize is the fallback minimum response size worth
@@ -138,18 +171,44 @@ type publishTask struct {
 	supplierAddr       string
 	sessionID          string
 	applicationAddr    string
+	// rpcType labels this relay's counters: the drops read it from here, and
+	// executePublish puts it on the context (WithRPCType) for the publish and
+	// difficulty counters, which are shared by every transport.
+	rpcType string
 }
 
 // ProxyServer handles incoming relay requests and forwards them to backends.
 type ProxyServer struct {
-	logger         logging.Logger
-	config         *Config
-	publisher      transport.MinedRelayPublisher
-	validator      RelayValidator
-	relayProcessor RelayProcessor
-	responseSigner *ResponseSigner
-	supplierCache  *cache.SupplierCache
-	relayMeter     *RelayMeter
+	logger    logging.Logger
+	config    *Config
+	publisher transport.MinedRelayPublisher
+	// publishQueueFull reports that the batch holds more mined relays than
+	// redis.batch_max_queued_mib allows. nil admits everything.
+	publishQueueFull func() bool
+	validator        RelayValidator
+	relayProcessor   RelayProcessor
+	responseSigner   *ResponseSigner
+	supplierCache    *cache.SupplierCache
+	relayMeter       *RelayMeter
+
+	// storeOperable reports whether Redis can take writes (StoreHealth.Operable).
+	// nil admits everything.
+	storeOperable func() bool
+
+	// validationQueues holds ONE entry per service whose optimistic relays can
+	// reach the validation queue, each with its own bytes and its own bound.
+	//
+	// LIFETIME: built in NewProxyServer and never written again -- so it is read
+	// without a lock, the way the hot path already reads config.Services. It
+	// cannot grow at runtime because a service that is not in the config is
+	// refused with 404 before admission, which is also why it cannot leak: it
+	// is born with the process and dies with it.
+	//
+	// PER SERVICE and not global: under one global bound the relay that ARRIVES
+	// pays for the bytes another service is HOLDING. Here a service is refused
+	// because IT is over ITS own quota, so the rejection is attributable by
+	// construction rather than by instrumentation.
+	validationQueues map[string]*serviceValidationQueue
 
 	// warnedUndeclaredTransport dedups the "served a transport the supplier did
 	// not declare on-chain" warning to once per (supplier, service, transport).
@@ -175,6 +234,12 @@ type ProxyServer struct {
 	// Buffer pool for reading backend responses without blowing up RAM
 	// Reuses buffers across requests to minimize GC pressure
 	bufferPool *BufferPool
+
+	// maxRequestBodySizeAcrossServices bounds the first read of an HTTP relay
+	// body, before the service is known. Resolved once: the relayer has no hot
+	// config reload, and walking the services map per relay is work on the
+	// hottest path there is.
+	maxRequestBodySizeAcrossServices int64
 
 	// HTTP server
 	server *http.Server
@@ -213,6 +278,81 @@ type ProxyServer struct {
 	closed   bool
 	cancelFn context.CancelFunc
 	wg       sync.WaitGroup
+
+	// Live WebSocket bridges, and the count of them still running.
+	//
+	// They need their own registry and their own counter because they are
+	// HIJACKED connections: http.Server.Shutdown does not track them, so the
+	// drain that covers every other request covers none of them. And they are
+	// the transport that publishes LAST -- a bridge keeps serving relays for as
+	// long as its client stays connected.
+	//
+	// Not SessionMonitor's map, which is the obvious candidate and the wrong
+	// one: RegisterBridge sits behind two guards (websocket.go, sessionEndHeight
+	// == 0 && SessionHeader != nil), so a bridge whose first frame carries no
+	// session header never enters it, and one still parked in awaitFirstFrame
+	// has not reached it yet. Those are exactly the bridges a shutdown finds.
+	bridges  *xsync.Map[*WebSocketBridge, struct{}]
+	bridgeWG sync.WaitGroup
+}
+
+// maxRequestBodySize is the bound on the FIRST read of an HTTP relay body,
+// before the service is known.
+//
+// It reads the field the constructor resolved, and falls back to computing it
+// when that field is zero. The fallback is a guard, not a convenience: thirty
+// test fixtures build ProxyServer as a struct literal rather than through
+// NewProxyServer, so a value wired only in the constructor is zero on every one
+// of them -- and a zero bound does not fail loudly, it truncates every body to
+// nothing and answers 413 to relays that are fine. The same shape already cost
+// this package once, which is why newValidationQueues was extracted.
+//
+// In production the field is always set, so the fallback never runs.
+func (p *ProxyServer) maxRequestBodySize() int64 {
+	if p.maxRequestBodySizeAcrossServices > 0 {
+		return p.maxRequestBodySizeAcrossServices
+	}
+	return p.config.MaxRequestBodySizeAcrossServices()
+}
+
+// logBodySizeLimits states, at startup, which body bounds ended up in force and
+// which key each one came from.
+//
+// It exists because a config key that is read but never confirmed is
+// indistinguishable from one that was ignored: max_request_body_size_bytes falls
+// back through two older keys, and an operator who writes it has no other way to
+// find out whether theirs is the one that applied.
+//
+// One line per service would be one line per service on a fleet of fifty, so it
+// names the defaults once and then only the services that DEPART from them --
+// which is exactly the set the operator wrote by hand and wants confirmed.
+func logBodySizeLimits(logger zerolog.Logger, config *Config) {
+	defaultRequest, defaultRequestSource := config.ResolveMaxRequestBodySize("")
+	defaultResponse, defaultResponseSource := config.ResolveMaxResponseBodySize("")
+
+	logger.Info().
+		Int64("default_max_request_body_size_bytes", defaultRequest).
+		Str("default_max_request_body_size_source", string(defaultRequestSource)).
+		Int64("default_max_response_body_size_bytes", defaultResponse).
+		Str("default_max_response_body_size_source", string(defaultResponseSource)).
+		Int64("max_request_body_size_across_services_bytes", config.MaxRequestBodySizeAcrossServices()).
+		Msg("body size limits in force")
+
+	for serviceID := range config.Services {
+		request, requestSource := config.ResolveMaxRequestBodySize(serviceID)
+		response, responseSource := config.ResolveMaxResponseBodySize(serviceID)
+		if request == defaultRequest && requestSource == defaultRequestSource &&
+			response == defaultResponse && responseSource == defaultResponseSource {
+			continue
+		}
+		logger.Info().
+			Str(logging.FieldServiceID, serviceID).
+			Int64("max_request_body_size_bytes", request).
+			Str("max_request_body_size_source", string(requestSource)).
+			Int64("max_response_body_size_bytes", response).
+			Str("max_response_body_size_source", string(responseSource)).
+			Msg("service overrides a body size limit")
+	}
 }
 
 // NewProxyServer creates a new HTTP proxy server.
@@ -225,28 +365,32 @@ func NewProxyServer(
 	// Build HTTP client pool (one client per service, plus fallback).
 	clientPool, clientPoolFallback := buildClientPool(config, &config.HTTPTransport)
 
-	// Create subpools with dynamic worker allocation based on master pool size
-	// This scales with available hardware
-	// Note: Master pool is NumCPU * 8 for high concurrency
+	// The subpool split comes from the SAME function that sized the Redis pool
+	// at startup (relayer/sizing.go), derived here from the capacity of the pool
+	// this proxy was handed. A second copy of the 70/20/10 split is exactly how
+	// the split and the pool size would drift apart again.
 	masterPoolSize := workerPool.MaxConcurrency()
-	validationWorkers := int(float64(masterPoolSize) * 0.7) // 70% for CPU-intensive ring signatures
-	publishWorkers := int(float64(masterPoolSize) * 0.2)    // 20% for I/O-bound Redis writes
-	metricsWorkers := int(float64(masterPoolSize) * 0.1)    // 10% for low-priority observability
-
-	// Ensure at least 1 worker per subpool
-	if validationWorkers < 1 {
-		validationWorkers = 1
-	}
-	if publishWorkers < 1 {
-		publishWorkers = 1
-	}
-	if metricsWorkers < 1 {
-		metricsWorkers = 1
-	}
+	sizing := SizingFromMaster(masterPoolSize)
+	validationWorkers := sizing.Validation
+	publishWorkers := sizing.Publish
+	metricsWorkers := sizing.Metrics
 
 	validationSubpool := workerPool.NewSubpool(validationWorkers)
 	publishSubpool := workerPool.NewSubpool(publishWorkers)
 	metricsSubpool := workerPool.NewSubpool(metricsWorkers)
+
+	// The subpools had no metrics at all until now, which is why a relayer
+	// queueing thousands of tasks looked identical to an idle one.
+	workerPoolMaxWorkers.WithLabelValues("validation").Set(float64(validationWorkers))
+	workerPoolMaxWorkers.WithLabelValues("publish").Set(float64(publishWorkers))
+	workerPoolMaxWorkers.WithLabelValues("metrics").Set(float64(metricsWorkers))
+	if qErr := registerWorkerQueueDepth(map[string]pond.Pool{
+		"validation": validationSubpool,
+		"publish":    publishSubpool,
+		"metrics":    metricsSubpool,
+	}); qErr != nil {
+		return nil, qErr
+	}
 
 	logger.Info().
 		Int("validation_workers", validationWorkers).
@@ -259,38 +403,44 @@ func NewProxyServer(
 	metricRecorder := NewMetricRecorder(logger, metricsSubpool)
 	metricRecorder.Start()
 
-	// Initialize buffer pool for reading backend responses
-	// Find the maximum body size across all services to ensure we can handle any response
-	maxBodySize := config.DefaultMaxBodySizeBytes
-	for _, svc := range config.Services {
-		if svc.MaxBodySizeBytes > maxBodySize {
-			maxBodySize = svc.MaxBodySizeBytes
-		}
+	// Initialize buffer pool for reading backend responses. The pool is shared by
+	// every service on both transports because it recycles BUFFERS; the bound it
+	// is built with is only the fallback for a read that names no service. Each
+	// read passes its own service's limit. The computation lives in config so
+	// this and ValidationQueueFloorBytes cannot drift apart -- they did, as two
+	// copies of the same loop.
+	maxResponseBodySize := config.MaxResponseBodySizeAcrossServices()
+	if maxResponseBodySize <= 0 {
+		maxResponseBodySize = DefaultMaxResponseSize // Fallback to 200MB if not configured
 	}
-	if maxBodySize <= 0 {
-		maxBodySize = DefaultMaxResponseSize // Fallback to 200MB if not configured
-	}
-	bufferPool := NewBufferPool(maxBodySize)
+	bufferPool := NewBufferPool(maxResponseBodySize)
 
 	logger.Info().
-		Int64("max_body_size_bytes", maxBodySize).
-		Int64("max_body_size_mb", maxBodySize/(1024*1024)).
+		Int64("max_response_body_size_across_services_bytes", maxResponseBodySize).
 		Msg("initialized buffer pool for backend response reading")
+
+	logBodySizeLimits(logger, config)
+
+	validationQueues := newValidationQueues(config)
 
 	proxy := &ProxyServer{
 		logger:             logging.ForComponent(logger, logging.ComponentProxyServer),
 		config:             config,
-		publisher:          publisher,
+		publisher:          countPublished(publisher),
 		clientPool:         clientPool,
 		clientPoolFallback: clientPoolFallback,
 		bufferPool:         bufferPool,
-		workerPool:         workerPool,
-		validationSubpool:  validationSubpool,
-		publishSubpool:     publishSubpool,
-		metricsSubpool:     metricsSubpool,
-		metricRecorder:     metricRecorder,
+
+		maxRequestBodySizeAcrossServices: config.MaxRequestBodySizeAcrossServices(),
+		workerPool:                       workerPool,
+		validationSubpool:                validationSubpool,
+		publishSubpool:                   publishSubpool,
+		metricsSubpool:                   metricsSubpool,
+		metricRecorder:                   metricRecorder,
+		validationQueues:                 validationQueues,
 
 		warnedUndeclaredTransport: xsync.NewMap[string, struct{}](),
+		bridges:                   xsync.NewMap[*WebSocketBridge, struct{}](),
 	}
 
 	// Log pool summary at startup for visibility into backend configuration
@@ -639,8 +789,8 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 	// The dumb check, first and unconditional: do we hold this supplier's
 	// signing key? Without it nothing else matters — we cannot sign the relay
 	// response, so serving means paying for a backend call and failing anyway,
-	// and the client gets a signing error instead of a clean 503, which PATH
-	// penalises.
+	// and the client gets a signing error instead of a clean 503, which the
+	// gateway penalises.
 	//
 	// It has to be FIRST rather than another case further down, because the
 	// miner's teardown writes {unstaking, staked: true, services: [...]} when an
@@ -704,7 +854,7 @@ func (p *ProxyServer) decideSupplierServe(state *cache.SupplierState, supplierOp
 // (service, transport) the supplier did NOT declare on-chain. The relay is still
 // served and remains claimable — the chain keys claims by (supplier, session)
 // and never sees the transport — so this is deliberately a WARN, never a reject:
-// the operator should declare the endpoint on-chain so PATH routes it on purpose
+// the operator should declare the endpoint on-chain so a gateway routes it on purpose
 // and the network has an accurate view of what each supplier serves.
 //
 // Skipped only when state is nil (boot/optimistic). An empty per-transport view
@@ -729,7 +879,7 @@ func (p *ProxyServer) warnUndeclaredTransport(state *cache.SupplierState, suppli
 		Str("transport", backendType).
 		Msg("serving a relay for a (service, transport) this supplier's cached stake does not declare; " +
 			"still served and claimable. Either the endpoint is genuinely undeclared on-chain -- declare it " +
-			"so PATH routes it deliberately -- or the miner writing this supplier's state is too old to " +
+			"so a gateway routes it deliberately -- or the miner writing this supplier's state is too old to " +
 			"publish the per-transport view, in which case upgrade it rather than restaking")
 }
 
@@ -755,7 +905,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	defer activeConnections.Dec()
 
 	// Record the inbound protocol so we can detect any migration to h2c.
-	// r.TLS is always nil on this deployment (PATH hits us over plain HTTP),
+	// r.TLS is always nil on this deployment (the gateway hits us over plain HTTP),
 	// so the proto label collapses to "http1" or "h2c" based on ProtoMajor.
 	proto := "http1"
 	if r.ProtoMajor == 2 {
@@ -792,8 +942,23 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read request body first (we need it to extract service ID from relay request)
-	maxBodySize := p.config.DefaultMaxBodySizeBytes
+	// The FIRST gate: nothing enters while Redis cannot take writes. A relay let
+	// in now would be served and its publish and charge then refused, which is
+	// work given away. It runs before the body is read, before the meter, pricing,
+	// the queue and the backend. WebSocket and gRPC were routed above and ask the
+	// same question first thing in their own handlers.
+	if p.storeSaturated() {
+		p.rejectStorageSaturated(w, metricLabelUnknown, metricLabelUnknown)
+		return
+	}
+
+	// Read request body first (we need it to extract service ID from relay
+	// request). The bound is the LARGEST any service allows, not the default: the
+	// service is unknown until this body is parsed, so a default-sized first
+	// stage rejects -- as unknown/unknown, before the service ID exists -- every
+	// relay of a service configured to allow more. The service's own, smaller
+	// bound is applied below, once it is known.
+	maxBodySize := p.maxRequestBodySize()
 
 	// Read request body
 	body, err := io.ReadAll(io.LimitReader(r.Body, maxBodySize+1))
@@ -806,8 +971,18 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 	if int64(len(body)) > maxBodySize {
 		p.sendError(w, http.StatusRequestEntityTooLarge, "request body too large")
-		relaysReceived.WithLabelValues(metricLabelUnknown, metricLabelUnknown).Inc()
-		relaysRejected.WithLabelValues(metricLabelUnknown, metricLabelUnknown, rejectReasonBodyTooLarge).Inc()
+		// The body is cut at the limit, but its metadata is at the front: attribute the refusal to
+		// its service so an operator can tell which one needs a larger limit. Only a CONFIGURED
+		// service is used as a label -- the value comes from the client, and an arbitrary one
+		// would give the metric unbounded cardinality.
+		serviceLabel := metricLabelUnknown
+		if id := serviceIDFromRelayRequestPrefix(body); id != "" {
+			if _, configured := p.config.Services[id]; configured {
+				serviceLabel = id
+			}
+		}
+		relaysReceived.WithLabelValues(serviceLabel, metricLabelUnknown).Inc()
+		relaysRejected.WithLabelValues(serviceLabel, metricLabelUnknown, rejectReasonBodyTooLarge).Inc()
 		return
 	}
 
@@ -963,7 +1138,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 	// rejection reason could not be emitted. Its own NOTE said as much.
 
 	// Check service-specific body size limit
-	serviceMaxBodySize := p.config.GetServiceMaxBodySize(serviceID)
+	serviceMaxBodySize := p.config.GetServiceMaxRequestBodySize(serviceID)
 	if int64(len(body)) > serviceMaxBodySize {
 		p.sendError(w, http.StatusRequestEntityTooLarge, "request body too large for service")
 		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonBodyTooLarge).Inc()
@@ -1001,6 +1176,70 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		Str("validation_mode", string(validationMode)).
 		Msg("relay received")
 
+	// Refuse what nothing would charge. BEFORE both modes: optimistic meters after the
+	// response is sent, so its own nil check could only serve the relay for free. And
+	// before the queue gate, so a process wired without a meter says so.
+	if p.relayMeter == nil {
+		p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonMeteringNotConfigured).Inc()
+		return
+	}
+
+	// Refuse what cannot be priced. The miner's service factor manifest has not
+	// arrived, so this relay would be charged against state nobody published.
+	// This is NOT the boot-window optimistic serve: that one is about whether a
+	// supplier EXISTS, and the miner arbitrates it afterwards by refusing to
+	// claim a supplier that is not staked. Nothing arbitrates a price, so a
+	// relay served at the wrong one is revenue that never comes back.
+	if !p.relayMeter.Priced() {
+		p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonPricingUnavailable).Inc()
+		return
+	}
+
+	// Stop admitting while the batch queue is full. BEFORE the eager meter, so a
+	// refused relay is never charged, and before the backend, so it costs the
+	// operator nothing.
+	if p.queueFull() {
+		p.sendError(w, http.StatusServiceUnavailable, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonPublishQueueFull).Inc()
+		return
+	}
+
+	// An optimistic relay is served BEFORE it is validated and charged, so the
+	// only place it can be refused without being given away is here, before the
+	// backend. Eager relays are validated before serving and never wait in that
+	// queue, so they are not refused by it.
+	// 429 with Retry-After, like storage_saturated: the relayer is not failing,
+	// it is refusing work until it has room.
+	//
+	// THE MODE IS NOT ASKED AGAIN HERE, AND RE-ADDING IT WOULD BE A REGRESSION.
+	// Having a queue IS being optimistic: serviceQueuesForValidation decides it
+	// once, at construction, and a service that cannot queue has no queue to be
+	// full. Asking a second oracle for the same fact is what made this gate
+	// capable of disagreeing with the builder -- and a disagreement here fails
+	// OPEN, because full() on a nil queue is false, so an optimistic service
+	// that somehow lost its queue would be admitted without any bound at all,
+	// in silence. One fact, one place.
+	svcQueue := p.validationQueueFor(serviceID)
+	if svcQueue.full() {
+		w.Header().Set("Retry-After", "1")
+		p.sendError(w, http.StatusTooManyRequests, "relayer is not admitting relays right now")
+		relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonValidationQueueFull).Inc()
+		return
+	}
+
+	// What an eager relay holds against its budget between admission and serving.
+	// Every exit that does not serve it gives the reservation back; serving it
+	// turns it into a charge.
+	var reservation Reservation
+	settled := false
+	defer func() {
+		if !settled {
+			p.relayMeter.Release(reservation)
+		}
+	}()
+
 	// For eager validation, validate before forwarding
 	if validationMode == ValidationModeEager {
 		// Set when the meter could not answer for a reason that still allows
@@ -1017,7 +1256,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			sessionEndHeight := sessionHeader.SessionEndBlockHeight
 
 			meterStart := time.Now()
-			allowed, meterErr := p.relayMeter.CheckAndConsumeRelay(
+			res, allowed, meterErr := p.relayMeter.Admit(
 				r.Context(),
 				sessionID,
 				appAddress,
@@ -1027,6 +1266,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 				sessionEndHeight,
 				arrivalBlockHeight,
 			)
+			reservation = res
 			meterDuration := time.Since(meterStart)
 
 			// Record relay meter latency asynchronously
@@ -1071,9 +1311,13 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		}
 
 		eagerStart := time.Now()
-		if validationErr := p.validateRelayRequest(r.Context(), r, body, arrivalBlockHeight); validationErr != nil {
+		if validationErr := p.validateRelayRequest(r.Context(), body, arrivalBlockHeight); validationErr != nil {
 			p.sendError(w, http.StatusForbidden, validationErr.Error())
-			relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonValidationFailed).Inc()
+			reason := rejectReasonValidationFailed
+			if errors.Is(validationErr, ErrSessionExpired) {
+				reason = rejectReasonSessionExpired
+			}
+			relaysRejected.WithLabelValues(serviceID, rpcType, reason).Inc()
 			validationFailures.WithLabelValues(serviceID, "signature").Inc()
 			return
 		}
@@ -1285,6 +1529,11 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			Msg("sent signed relay response")
 	}
 
+	// Served: the eager reservation becomes a charge. Optimistic holds none; it is
+	// charged by its own meter call after the response.
+	p.relayMeter.Settle(reservation)
+	settled = true
+
 	// ALWAYS increment relaysServed when we send a response to the client
 	// Use actual backend status code (200, 400, etc.) for visibility into backend behavior
 	// In optimistic mode, some served relays may later be dropped (not mined)
@@ -1316,26 +1565,58 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 		Bool("is_streaming", isStreaming).
 		Msg("relay served")
 
-	// Track streaming metrics
-	if isStreaming {
-		streamingRelaysServed.WithLabelValues(serviceID).Inc()
-	}
-
 	// For optimistic validation, validate after serving (in background using pond subpool)
 	if validationMode == ValidationModeOptimistic {
-		// Capture variables for closure (avoid race conditions)
+		// Captured for the closure.
+		//
+		// The *http.Request is deliberately NOT among them. It used to be, and
+		// it was retention nobody could account for: a Request is a graph --
+		// headers, context, body reader, TLS state -- so no honest number can be
+		// put on what it holds, and the two functions it was handed to never
+		// read it.
+		//
+		// The bodies are no longer copied either. Both are already private
+		// allocations -- the request body comes from io.ReadAll and the response
+		// from BufferPool.ReadWithBufferLimit, which returns "an independent copy
+		// safe for use after the function returns". The eager path has passed
+		// these same slices straight through for as long as it has existed; the
+		// copies here bought a second allocation and a memcpy per optimistic
+		// relay and protected nothing.
 		capturedRequest := relayRequest
-		capturedHTTPReq := r
-		capturedReqBody := make([]byte, len(body))
-		copy(capturedReqBody, body)
-		capturedRespBody := make([]byte, len(respBody))
-		copy(capturedRespBody, respBody)
+		capturedReqBody := body
+		capturedRespBody := respBody
 		capturedBlockHeight := arrivalBlockHeight
 		capturedServiceID := serviceID
+		capturedRPCType := rpcType
 		capturedSessionCtx := sessionCtx
 
-		// Submit to validation subpool (non-blocking, unbounded queue)
+		// Submit to validation subpool (non-blocking; admission bounds it by bytes).
+		// The gauge is moved with Add/Sub and not with Set(counter.Add(...)):
+		// the request goroutine adds and the validation worker subtracts, so
+		// publishing a value READ between the two can leave the series holding
+		// a number that was never the total. publishQueueBytes already does it
+		// this way.
+		retainedBytes := optimisticRetainedBytes(capturedReqBody, capturedRespBody, capturedRequest)
+		capturedQueue := svcQueue
+		if capturedQueue == nil {
+			// A service that reaches this accounting has a queue by
+			// construction: only a relay the gate above admitted gets here, and
+			// serviceQueuesForValidation gave a queue to every service whose
+			// relays can enter it. So this is unreachable rather than defensive
+			// -- but reaching it would be a nil dereference on the serving path,
+			// and the honest degradation is to account nothing rather than to
+			// crash the relayer.
+			p.logger.Warn().Str(logging.FieldServiceID, capturedServiceID).
+				Msg("optimistic relay with no validation queue: not accounted")
+			return
+		}
+		capturedQueue.queued.Add(retainedBytes)
+		capturedQueue.bytesGauge.Add(float64(retainedBytes))
 		p.validationSubpool.Submit(func() {
+			defer func() {
+				capturedQueue.queued.Add(-retainedBytes)
+				capturedQueue.bytesGauge.Sub(float64(retainedBytes))
+			}()
 			logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 				Str("validation_mode", "optimistic").
 				Msg("starting optimistic validation (background)")
@@ -1351,9 +1632,21 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 
 			// ONLY measure validation time, NOT meter or miner submit
 			optimisticStart := time.Now()
-			if err := p.validateRelayRequest(context.Background(), capturedHTTPReq, capturedReqBody, capturedBlockHeight); err != nil {
-				validationFailures.WithLabelValues(capturedServiceID, "signature").Inc()
-				relaysDropped.WithLabelValues(capturedServiceID, dropReasonValidationFailed).Inc()
+			if err := p.validateRelayRequest(context.Background(), capturedReqBody, capturedBlockHeight); err != nil {
+				// An expired session is not a signature failure, and calling it
+				// one is what kept the grace period invisible here: the eager
+				// path has told them apart since rejectReasonSessionExpired
+				// existed, this one folded both into validation_failed and
+				// counted every one as a signature error. An operator reading
+				// that sees broken crypto where the truth is a relay served
+				// after its session closed.
+				reason := dropReasonValidationFailed
+				if errors.Is(err, ErrSessionExpired) {
+					reason = dropReasonSessionExpired
+				} else {
+					validationFailures.WithLabelValues(capturedServiceID, "signature").Inc()
+				}
+				relaysDropped.WithLabelValues(capturedServiceID, capturedRPCType, reason).Inc()
 				logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 					Err(err).
 					Str("validation_mode", "optimistic").
@@ -1413,7 +1706,7 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 						Str("validation_mode", "optimistic").
 						Msg("relay served and submitted without being metered; the miner arbitrates")
 				} else if !allowed {
-					relaysDropped.WithLabelValues(capturedServiceID, dropReasonStakeExhausted).Inc()
+					relaysDropped.WithLabelValues(capturedServiceID, capturedRPCType, dropReasonStakeExhausted).Inc()
 					logging.WithSessionContext(p.logger.Debug(), capturedSessionCtx).
 						Str("validation_mode", "optimistic").
 						Msg("relay served but NOT mined: session relay limit reached, relay dropped after serving")
@@ -1426,12 +1719,12 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 			// Submit publish task to worker pool (after successful validation AND metering)
 			// Only publish relays that are within stake limits
 			// Note: relaysServed already incremented when we sent response
-			p.submitPublishTask(capturedRequest, capturedHTTPReq, capturedReqBody, capturedRespBody, capturedBlockHeight, capturedServiceID)
+			p.submitPublishTask(capturedRequest, capturedReqBody, capturedRespBody, capturedBlockHeight, capturedServiceID, capturedRPCType)
 		})
 	} else {
 		// For eager validation, submit publish task to worker pool
 		// If we reached here, the relay was allowed by the meter (stake not exhausted)
-		p.submitPublishTask(relayRequest, r, body, respBody, arrivalBlockHeight, serviceID)
+		p.submitPublishTask(relayRequest, body, respBody, arrivalBlockHeight, serviceID, rpcType)
 	}
 }
 
@@ -1439,10 +1732,10 @@ func (p *ProxyServer) handleRelay(w http.ResponseWriter, r *http.Request) {
 // This is non-blocking and uses the server context, not the request context.
 func (p *ProxyServer) submitPublishTask(
 	relayRequest *servicetypes.RelayRequest,
-	r *http.Request,
 	reqBody, respBody []byte,
 	arrivalBlockHeight int64,
 	serviceID string,
+	rpcType string,
 ) {
 	// Get supplier address from relay request if available
 	var supplierAddr string
@@ -1464,7 +1757,7 @@ func (p *ProxyServer) submitPublishTask(
 	if supplierAddr == "" {
 		// Create minimal session context from what we have
 		sessionCtx := logging.SessionContextPartial("", serviceID, "", "", 0)
-		relaysDropped.WithLabelValues(serviceID, dropReasonNoSupplier).Inc()
+		relaysDropped.WithLabelValues(serviceID, rpcType, dropReasonNoSupplier).Inc()
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("no supplier address available, skipping relay publication")
 		return
@@ -1482,9 +1775,17 @@ func (p *ProxyServer) submitPublishTask(
 		return
 	}
 
+	// Bodies this task will hold until it runs. Counted BEFORE the submit and
+	// released when the task finishes, so the gauge reflects what the queue is
+	// retaining rather than what it has processed. Task COUNT cannot stand in
+	// for this: the queue is unbounded and a task's cost is its payload.
+	retained := int64(len(reqBody) + len(respBody))
+	publishQueueBytes.Add(float64(retained))
+
 	// Submit publish task to pond worker pool (non-blocking, unbounded queue)
 	// Uses context.Background() since publish should complete even if request context is cancelled
-	p.publishSubpool.Submit(func() {
+	_, submitted := p.publishSubpool.TrySubmit(func() {
+		defer publishQueueBytes.Sub(float64(retained))
 		task := publishTask{
 			reqBody:            reqBody,
 			respBody:           respBody,
@@ -1493,9 +1794,17 @@ func (p *ProxyServer) submitPublishTask(
 			supplierAddr:       supplierAddr,
 			sessionID:          sessionID,
 			applicationAddr:    applicationAddr,
+			rpcType:            rpcType,
 		}
 		p.executePublish(context.Background(), task)
 	})
+	// TrySubmit and not Submit, for the bool: a refused task never runs, so its
+	// defer never fires and the bytes would be counted forever -- a gauge that
+	// only ever climbs. Submit returns a Task interface whose nil-ness is not a
+	// reliable signal; this one says so outright.
+	if !submitted {
+		publishQueueBytes.Sub(float64(retained))
+	}
 }
 
 // parseRelayRequest parses the relay request protobuf body and extracts the service ID
@@ -1553,7 +1862,7 @@ func (p *ProxyServer) parseRelayRequest(body []byte) (*servicetypes.RelayRequest
 // extractServiceID extracts the service ID from request headers or path.
 // This is a fallback method for non-relay traffic or when the body cannot be parsed.
 func (p *ProxyServer) extractServiceID(r *http.Request) string {
-	// Try Target-Service-Id header (PATH gateway uses this)
+	// Try Target-Service-Id header (the gateway sends this)
 	if serviceID := r.Header.Get("Target-Service-Id"); serviceID != "" {
 		return serviceID
 	}
@@ -1848,7 +2157,7 @@ func (p *ProxyServer) forwardToBackendWithStreaming(
 
 	// Read response body using buffer pool to avoid RAM exhaustion
 	// Handles responses from 10KB to 200MB+ without allocating unbounded memory
-	respBody, err := p.bufferPool.ReadWithBuffer(resp.Body)
+	respBody, err := p.bufferPool.ReadWithBufferLimit(resp.Body, p.config.GetServiceMaxResponseBodySize(serviceID))
 	if err != nil {
 		return nil, nil, 0, false, endpoint, backendPool, fmt.Errorf("failed to read response: %w", err)
 	}
@@ -1914,7 +2223,7 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 
 	if serviceID == "" {
 		w.WriteHeader(http.StatusBadRequest)
-		_ = json.NewEncoder(w).Encode(readyServiceResponse{
+		_ = json.NewEncoder(w).Encode(readyServiceResponse{ //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 			Error: "service_id path parameter is required",
 		})
 		return
@@ -1923,7 +2232,7 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 	svcCfg, exists := p.config.Services[serviceID]
 	if !exists {
 		w.WriteHeader(http.StatusNotFound)
-		_ = json.NewEncoder(w).Encode(readyServiceResponse{
+		_ = json.NewEncoder(w).Encode(readyServiceResponse{ //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 			ServiceID: serviceID,
 			Ready:     false,
 			Error:     "unknown service",
@@ -1994,7 +2303,7 @@ func (p *ProxyServer) handleReadyService(w http.ResponseWriter, serviceID string
 		status = http.StatusServiceUnavailable
 	}
 	w.WriteHeader(status)
-	_ = json.NewEncoder(w).Encode(resp)
+	_ = json.NewEncoder(w).Encode(resp) //nolint:errcheck // the status code already went out (WriteHeader above), so a failed body write means the client is gone: nothing left to act on
 }
 
 // gaugeValue reads the current value of a prometheus Gauge. The prom
@@ -2022,8 +2331,8 @@ func gaugeValue(g prometheus.Gauge) float64 {
 //  3. backend_network_error — any other transport error
 //
 // When err is nil, the HTTP status class decides: 5xx -> backend_5xx,
-// anything else -> success (2xx/3xx/4xx are valid relays that PATH gets
-// paid for).
+// anything else -> success (2xx/3xx/4xx are valid relays that the gateway
+// gets paid for).
 func classifyBackendOutcome(err error, respStatus int) string {
 	if err != nil {
 		errMsg := err.Error()
@@ -2245,6 +2554,187 @@ func (p *ProxyServer) SetRelayMeter(meter *RelayMeter) {
 	p.relayMeter = meter
 }
 
+// rejectReasonPublishQueueFull refuses a relay while the batch queue is over
+// redis.batch_max_queued_mib. Already queued relays are never dropped.
+const rejectReasonPublishQueueFull = "publish_queue_full"
+
+// rejectReasonMeteringNotConfigured refuses a relay that nothing would charge: the
+// meter, or the pipeline that carries it, was never wired.
+const rejectReasonMeteringNotConfigured = "metering_not_configured"
+
+// Priced reports whether this relayer knows what to charge, for the readiness
+// probe. A relayer that is up but unpriced refuses every relay, so reporting it
+// ready would send it traffic it can only reject.
+func (p *ProxyServer) Priced() bool {
+	return p.relayMeter != nil && p.relayMeter.Priced()
+}
+
+// rejectReasonPricingUnavailable refuses a relay the relayer cannot price: the
+// miner's service factor manifest has not been published, or has never been
+// read. Distinct from metering_not_configured, which is a wiring defect and is
+// permanent; this one clears itself the moment the miner publishes.
+const rejectReasonPricingUnavailable = "pricing_unavailable"
+
+// rejectReasonValidationQueueFull refuses an optimistic relay while the relays
+// served and not yet validated hold maxValidationQueuedBytes.
+const rejectReasonValidationQueueFull = "validation_queue_full"
+
+// optimisticRetainedBytes is what one queued validation actually holds alive.
+//
+// The two bodies are the obvious part. The parsed RelayRequest is the part the
+// counter used to miss, and it is not a rounding error: gogoproto's generated
+// Unmarshal COPIES bytes fields rather than aliasing the buffer it decodes --
+// `m.Payload = append(m.Payload[:0], dAtA[iNdEx:postIndex]...)` in poktroll's
+// relay.pb.go -- so the request carries its own second copy of the payload.
+// Counting only the bodies bounded the queue by roughly two thirds of what it
+// was holding, and that number is what an operator sizes memory against.
+//
+// What is left out is bounded and small by construction: the session header's
+// strings and the struct headers themselves. An `*http.Request` is left out
+// too, and that one is deliberate in the other direction -- it is no longer
+// retained at all, because there is no honest way to price a graph of headers,
+// context and TLS state, and nothing read it.
+func optimisticRetainedBytes(reqBody, respBody []byte, req *servicetypes.RelayRequest) int64 {
+	retained := int64(len(reqBody)) + int64(len(respBody))
+	if req == nil {
+		return retained
+	}
+	return retained + int64(len(req.Payload)) + int64(len(req.Meta.Signature))
+}
+
+// serviceValidationQueue is one service's share of the bound: what its
+// optimistic relays are holding between being served and being validated, and
+// the most it may hold.
+//
+// The bound is resolved ONCE, at construction, by the same config function
+// `relayer validate` calls, so the number enforced here and the number the
+// startup warning printed cannot drift apart. There is no hot reload of this
+// config, so there is nothing to recompute per relay.
+type serviceValidationQueue struct {
+	// queued is the bytes currently held. It is the gate's number, so it stays
+	// an atomic the gate can compare exactly.
+	queued atomic.Int64
+	// maxBytes is the effective bound for this service: its configured value or
+	// the default, raised to the floor of one relay of its largest size.
+	maxBytes int64
+	// bytesGauge is this service's child of the occupancy gauge, resolved at
+	// construction so the hot path never looks a label up.
+	bytesGauge prometheus.Gauge
+}
+
+// newValidationQueues builds one queue per service whose relays can enter it.
+//
+// WHO GETS A QUEUE IS NOT DECIDED HERE: it is serviceQueuesForValidation, the
+// same predicate BuildValidationQueueReport uses to decide who is counted in
+// the memory the operator provisions. Asking it rather than restating it is
+// what keeps the set of queues, the set of published ceiling series and the
+// startup warning's total from being three different answers.
+//
+// IT IS A FUNCTION AND NOT INLINE IN THE CONSTRUCTOR, and that is the point:
+// the tests assemble a ProxyServer as a struct literal, so any wiring that
+// lives only in NewProxyServer is silently absent there. A test proxy with no
+// queues admits every relay and passes -- not because the bound works, but
+// because the fixture turned it off. Whoever adds a field to ProxyServer that
+// the serving path depends on has to add it here, or to the fixture, and this
+// function is what keeps those two from drifting apart.
+//
+// Both series of every service are created here so they exist at zero from the
+// first scrape. A gauge that is absent and a gauge at zero read the same on a
+// dashboard and mean opposite things.
+func newValidationQueues(config *Config) map[string]*serviceValidationQueue {
+	queues := make(map[string]*serviceValidationQueue, len(config.Services))
+	for serviceID := range config.Services {
+		if !serviceQueuesForValidation(config, serviceID) {
+			continue
+		}
+		maxBytes := config.ValidationQueueMaxBytes(serviceID)
+		queues[serviceID] = &serviceValidationQueue{
+			maxBytes:   maxBytes,
+			bytesGauge: validationQueueBytes.WithLabelValues(serviceID),
+		}
+		validationQueueMaxBytes.WithLabelValues(serviceID).Set(float64(maxBytes))
+	}
+	return queues
+}
+
+// validationQueueFor returns the queue of a service, or nil when that service
+// cannot queue -- it is eager, or it is served by a transport that never enters
+// this queue.
+func (p *ProxyServer) validationQueueFor(serviceID string) *serviceValidationQueue {
+	return p.validationQueues[serviceID]
+}
+
+// validationQueueFull reports that THIS service's optimistic relays already
+// hold its whole bound. A service with no queue is never full: it does not
+// queue at all.
+func (q *serviceValidationQueue) full() bool {
+	return q != nil && q.queued.Load() >= q.maxBytes
+}
+
+// rejectReasonStorageSaturated refuses a relay while Redis cannot take writes.
+const rejectReasonStorageSaturated = "storage_saturated"
+
+// errStorageSaturated is the cause a live relay is cancelled with when Redis
+// stops taking writes.
+var errStorageSaturated = errors.New("storage saturated")
+
+// SetStoreHealth makes Redis's ability to take writes the first gate of every
+// transport, and cuts every live WebSocket bridge and gRPC relay the moment it is
+// lost: a backend keeps pushing messages on an open socket, and each would have
+// to be published and charged.
+func (p *ProxyServer) SetStoreHealth(h *redisutil.StoreHealth) {
+	p.storeOperable = h.Operable
+	h.OnChange(func(operable bool) {
+		if !operable {
+			p.cutLiveConnections()
+		}
+	})
+}
+
+// storeSaturated reports that Redis cannot take writes. It reads the field at
+// call time, like queueFull.
+func (p *ProxyServer) storeSaturated() bool {
+	return p.storeOperable != nil && !p.storeOperable()
+}
+
+// rejectStorageSaturated answers 429: the relayer is not failing, it is refusing
+// work until Redis has room.
+func (p *ProxyServer) rejectStorageSaturated(w http.ResponseWriter, serviceID, rpcType string) {
+	w.Header().Set("Retry-After", "1")
+	p.sendError(w, http.StatusTooManyRequests, "relayer is not admitting relays: storage saturated")
+	relaysReceived.WithLabelValues(serviceID, rpcType).Inc()
+	relaysRejected.WithLabelValues(serviceID, rpcType, rejectReasonStorageSaturated).Inc()
+}
+
+// cutLiveConnections closes every live WebSocket bridge and cancels every gRPC
+// relay in flight. It only signals: each teardown runs on its own handler
+// goroutine, so it does not block the transition that calls it.
+func (p *ProxyServer) cutLiveConnections() {
+	p.bridges.Range(func(b *WebSocketBridge, _ struct{}) bool {
+		_ = b.closeWithReason(CloseTryAgainLater, "storage saturated", wsCloseInitiatorRelayer)
+		liveConnectionsCut.WithLabelValues(BackendTypeWebSocket).Inc()
+		return true
+	})
+	p.grpcMu.RLock()
+	svc := p.grpcRelayService
+	p.grpcMu.RUnlock()
+	if svc != nil {
+		liveConnectionsCut.WithLabelValues(BackendTypeGRPC).Add(float64(svc.cutLiveRelays(errStorageSaturated)))
+	}
+}
+
+// SetPublishQueueFull wires the admission gate on the batch queue.
+func (p *ProxyServer) SetPublishQueueFull(full func() bool) {
+	p.publishQueueFull = full
+}
+
+// queueFull is the gate every transport asks before a new relay costs anything.
+// It reads the field at call time, so a transport handed the method value before
+// SetPublishQueueFull still sees the gate once it is set.
+func (p *ProxyServer) queueFull() bool {
+	return p.publishQueueFull != nil && p.publishQueueFull()
+}
+
 // SetSimulationVerifier wires the simulated-relay admission component. Optional:
 // when nil or disabled, simulation headers are ignored and all relays take the
 // normal path.
@@ -2380,15 +2870,14 @@ func (p *ProxyServer) serveSimulatedHTTP(
 // InitializeRelayPipeline initializes the unified relay processing pipeline.
 // This should be called AFTER all dependencies are set (validator, relayMeter, responseSigner, relayProcessor).
 // The pipeline consolidates validation, metering, signing, and publishing logic for all relay protocols.
-func (p *ProxyServer) InitializeRelayPipeline() {
+//
+// A missing dependency is an error, not a warning: without the pipeline the gRPC and
+// WebSocket transports have nothing to validate or charge a relay with, and a
+// relayer that starts anyway refuses every relay on them.
+func (p *ProxyServer) InitializeRelayPipeline() error {
 	if p.validator == nil || p.relayMeter == nil || p.responseSigner == nil || p.relayProcessor == nil {
-		p.logger.Warn().
-			Bool("has_validator", p.validator != nil).
-			Bool("has_meter", p.relayMeter != nil).
-			Bool("has_signer", p.responseSigner != nil).
-			Bool("has_processor", p.relayProcessor != nil).
-			Msg("cannot initialize relay pipeline - missing dependencies")
-		return
+		return fmt.Errorf("cannot initialize relay pipeline: has_validator=%t has_meter=%t has_signer=%t has_processor=%t",
+			p.validator != nil, p.relayMeter != nil, p.responseSigner != nil, p.relayProcessor != nil)
 	}
 
 	p.relayPipeline = NewRelayPipeline(
@@ -2398,11 +2887,18 @@ func (p *ProxyServer) InitializeRelayPipeline() {
 	)
 
 	p.logger.Info().Msg("relay pipeline initialized successfully")
+	return nil
 }
 
 // InitGRPCHandler initializes the gRPC proxy handler for handling gRPC and gRPC-Web requests.
-// This should be called after SetRelayProcessor and SetResponseSigner.
-func (p *ProxyServer) InitGRPCHandler() {
+// It must be called after InitializeRelayPipeline: the service copies the pipeline
+// when it is built, so building it first leaves every gRPC relay without validation
+// or metering. It refuses to build the service without one.
+func (p *ProxyServer) InitGRPCHandler() error {
+	if p.relayPipeline == nil {
+		return fmt.Errorf("cannot initialize gRPC handler: the relay pipeline is not initialized")
+	}
+
 	p.grpcMu.Lock()
 	defer p.grpcMu.Unlock()
 
@@ -2410,20 +2906,24 @@ func (p *ProxyServer) InitGRPCHandler() {
 	p.grpcRelayService = NewRelayGRPCService(
 		p.logger,
 		RelayGRPCServiceConfig{
-			ServiceConfigs:     p.config.Services,
-			ResponseSigner:     p.responseSigner,
-			Publisher:          p.publisher,
-			RelayProcessor:     p.relayProcessor,
-			RelayPipeline:      p.relayPipeline, // Unified relay processing pipeline
-			SimVerifier:        p.simVerifier,
-			RelayMeter:         p.relayMeter,
-			CurrentBlockHeight: &p.currentBlockHeight,
-			MaxBodySize:        p.config.DefaultMaxBodySizeBytes,
-			BufferPool:         p.bufferPool, // Share buffer pool for efficient memory usage
-			GetHTTPClient:      p.getClientForService,
-			GetServiceTimeout:  p.config.GetServiceTimeout, // Timeout from profile
-			GetPool:            p.config.GetPool,
-			GetBackendConfig:   p.config.GetBackendConfig,
+			ServiceConfigs:                   p.config.Services,
+			ResponseSigner:                   p.responseSigner,
+			Publisher:                        p.publisher,
+			RelayProcessor:                   p.relayProcessor,
+			RelayPipeline:                    p.relayPipeline, // Unified relay processing pipeline
+			SimVerifier:                      p.simVerifier,
+			PublishQueueFull:                 p.queueFull,
+			StoreSaturated:                   p.storeSaturated,
+			RelayMeter:                       p.relayMeter,
+			CurrentBlockHeight:               &p.currentBlockHeight,
+			MaxRequestBodySizeAcrossServices: p.config.MaxRequestBodySizeAcrossServices(),
+			GetServiceMaxRequestBodySize:     p.config.GetServiceMaxRequestBodySize,
+			GetServiceMaxResponseBodySize:    p.config.GetServiceMaxResponseBodySize,
+			BufferPool:                       p.bufferPool, // Share buffer pool for efficient memory usage
+			GetHTTPClient:                    p.getClientForService,
+			GetServiceTimeout:                p.config.GetServiceTimeout, // Timeout from profile
+			GetPool:                          p.config.GetPool,
+			GetBackendConfig:                 p.config.GetBackendConfig,
 		},
 	)
 
@@ -2440,13 +2940,13 @@ func (p *ProxyServer) InitGRPCHandler() {
 	)
 
 	p.logger.Info().Msg("gRPC relay service and handlers initialized")
+	return nil
 }
 
 // validateRelayRequest validates the relay request.
 // If no validator is configured, validation is skipped (but body must still be valid RelayRequest).
 func (p *ProxyServer) validateRelayRequest(
 	ctx context.Context,
-	r *http.Request,
 	body []byte,
 	arrivalBlockHeight int64,
 ) error {
@@ -2465,29 +2965,15 @@ func (p *ProxyServer) validateRelayRequest(
 		return nil
 	}
 
-	// Set the block height for the validator
-	p.validator.SetCurrentBlockHeight(arrivalBlockHeight)
-
-	// Validate the relay request
-	if err := p.validator.ValidateRelayRequest(ctx, relayRequest); err != nil {
+	// Validate the relay request at the height THIS relay arrived at.
+	//
+	// An argument rather than state set on the validator a line earlier: the
+	// validator is shared by every worker, so "set then validate" was two
+	// operations with a gap, and one worker's height could decide another
+	// worker's grace branch. A mutex made each half safe and the pair was still
+	// wrong, which is why -race never reported it.
+	if err := p.validator.ValidateRelayRequest(ctx, relayRequest, arrivalBlockHeight); err != nil {
 		return fmt.Errorf("relay validation failed: %w", err)
-	}
-
-	// Check reward eligibility (for eager validation, we do this now)
-	if err := p.validator.CheckRewardEligibility(ctx, relayRequest); err != nil {
-		// Served but unclaimable: backend capacity spent for no reward. The
-		// line is Debug (per-request), so this counter is the only signal an
-		// operator gets that a gateway is sending past the grace-period
-		// cutoff.
-		svcID := metricLabelUnknown
-		if relayRequest.Meta.SessionHeader != nil && relayRequest.Meta.SessionHeader.ServiceId != "" {
-			svcID = relayRequest.Meta.SessionHeader.ServiceId
-		}
-		relaysNotRewardable.WithLabelValues(svcID).Inc()
-		p.logger.Debug().
-			Err(err).
-			Msg("relay not eligible for rewards (continuing to serve)")
-		// Don't return error - we still serve the relay, just won't get rewards
 	}
 
 	return nil
@@ -2496,6 +2982,10 @@ func (p *ProxyServer) validateRelayRequest(
 // executePublish processes a publish task and publishes the relay to Redis.
 // This is called by worker goroutines with the server context.
 func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
+	// ProcessRelay and the counting publisher are shared by every transport and
+	// read the transport label from the context.
+	ctx = WithRPCType(ctx, task.rpcType)
+
 	// Create session context from task metadata
 	sessionCtx := logging.SessionContextPartial(
 		task.sessionID,
@@ -2506,6 +2996,7 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 	)
 
 	if p.publisher == nil {
+		relaysDropped.WithLabelValues(task.serviceID, task.rpcType, dropReasonNoPublisher).Inc()
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Msg("no publisher configured, skipping relay publication")
 		return
@@ -2522,7 +3013,7 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 			task.arrivalBlockHeight,
 		)
 		if err != nil {
-			relaysDropped.WithLabelValues(task.serviceID, dropReasonProcessFailed).Inc()
+			relaysDropped.WithLabelValues(task.serviceID, task.rpcType, dropReasonProcessFailed).Inc()
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("failed to process relay")
@@ -2538,15 +3029,13 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 
 		// Publish the mined relay
 		if err := p.publisher.Publish(ctx, msg); err != nil {
-			relaysDropped.WithLabelValues(task.serviceID, dropReasonPublishFailed).Inc()
+			relaysDropped.WithLabelValues(task.serviceID, task.rpcType, dropReasonPublishFailed).Inc()
 			logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 				Err(err).
 				Msg("failed to publish mined relay")
 			return
 		}
 
-		relaysPublished.WithLabelValues(task.serviceID, task.supplierAddr).Inc()
-		relaysMinedSuccessfully.WithLabelValues(task.serviceID).Inc()
 		return
 	}
 
@@ -2569,14 +3058,12 @@ func (p *ProxyServer) executePublish(ctx context.Context, task publishTask) {
 	msg.SetPublishedAt()
 
 	if err := p.publisher.Publish(ctx, msg); err != nil {
-		relaysDropped.WithLabelValues(task.serviceID, dropReasonPublishFailed).Inc()
+		relaysDropped.WithLabelValues(task.serviceID, task.rpcType, dropReasonPublishFailed).Inc()
 		logging.WithSessionContext(p.logger.Debug(), sessionCtx).
 			Err(err).
 			Msg("failed to publish mined relay")
 		return
 	}
-
-	relaysPublished.WithLabelValues(task.serviceID, task.supplierAddr).Inc()
 }
 
 // sendServiceUnavailable sends a 503 fast-fail response when all backends are unhealthy.
@@ -2601,20 +3088,48 @@ func (p *ProxyServer) SetBlockHeight(height int64) {
 	currentBlockHeight.Set(float64(height))
 }
 
-// Close gracefully shuts down the proxy server.
-func (p *ProxyServer) Close() error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+// CurrentBlockHeight is the chain height this process last saw, for collaborators
+// that need the LIVE height rather than a relay's arrival height.
+//
+// The block subscriber is its only writer (SetBlockHeight, driven by one
+// goroutine), so this is a single-writer value and reading it costs an atomic
+// load. It is exported because the validator takes it as a function at
+// construction: handing it the value once would freeze it, and handing it a
+// setter is what let per-relay heights be written onto shared state.
+func (p *ProxyServer) CurrentBlockHeight() int64 {
+	return p.currentBlockHeight.Load()
+}
 
+// Close drains the proxy and shuts it down, bounded by ctx.
+//
+// It used to return without waiting for anything in flight. p.wg covers only the
+// ListenAndServe goroutine, and ListenAndServe returns IMMEDIATELY when Shutdown
+// is called -- the standard library says so and warns about exactly this: "Make
+// sure the program doesn't exit and waits instead for Shutdown to return." So a
+// relay already being served could still reach Publish after the caller had gone
+// on to close the publisher and the Redis client beneath it.
+//
+// ctx is the shutdown budget and it is the ONLY deadline here. There used to be
+// a second one, a hardcoded 30s inside the goroutine that calls Shutdown, while
+// the 30s context built for this in cmd_relayer was discarded with a comment
+// claiming it was "used for graceful shutdown timing".
+func (p *ProxyServer) Close(ctx context.Context) error {
+	p.mu.Lock()
 	if p.closed {
+		p.mu.Unlock()
 		return nil
 	}
-
 	p.closed = true
+	// Unlocked EXPLICITLY, not deferred: the WebSocket handler takes this same
+	// mutex to join the bridge counter, so waiting on that counter while holding
+	// it deadlocks against a handshake that is in flight right now.
+	p.mu.Unlock()
 
 	if p.cancelFn != nil {
 		p.cancelFn()
 	}
+
+	_ = p.drain(ctx)
 
 	// Stop global session monitor
 	if p.sessionMonitor != nil {
@@ -2637,10 +3152,148 @@ func (p *ProxyServer) Close() error {
 		p.metricsSubpool.StopAndWait()
 	}
 
+	// Fast by now: the only goroutine in here is ListenAndServe, which returned
+	// when Shutdown closed the listeners.
 	p.wg.Wait()
 
 	p.logger.Info().Msg("proxy server closed")
 	return nil
+}
+
+// drain stops accepting work and waits for what is already in flight, bounded by
+// ctx.
+//
+// The two waits run CONCURRENTLY and share one deadline. In sequence the first
+// one can spend the whole budget and the second starts with none, so the cut at
+// the end would take bridges that were about to finish on their own.
+// It reports whether it had to CUT, which is the one thing about a shutdown a
+// test can ask without reaching into the clock.
+func (p *ProxyServer) drain(ctx context.Context) (cut bool) {
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go logging.RecoverGoRoutine(p.logger, "proxy_drain_http", func(ctx context.Context) {
+		defer wg.Done()
+		// Called HERE rather than through the goroutine in Start: that one exists
+		// to react to the context being cancelled by somebody else, and it brings
+		// a deadline of its own that nobody chose. Both may run at once --
+		// net/http's Shutdown closes no channel, it sets a flag, closes the
+		// listeners under its mutex and polls until the connections are idle.
+		//
+		// For HTTP/1 this drains the handlers. For gRPC it also drains, because
+		// the h2c here is the standard library's own (SetUnencryptedHTTP2) and not
+		// the x/net shim that hijacks: Shutdown tracks these connections and sends
+		// the GOAWAY that stops new streams from being created on them.
+		// The returned error is logged and NOT used to decide anything. It can
+		// be non-nil on a drain that finished perfectly: Shutdown ends with
+		// `if s.closeIdleConns() { return lnerr }`, and lnerr comes from closing
+		// every listener still in s.listeners -- a listener is removed from that
+		// map only when Serve returns, so the goroutine in Start racing this call
+		// can close the same one twice and collect "use of closed network
+		// connection". Cutting live gRPC streams over that would be cutting them
+		// because a listener closed twice.
+		if err := p.server.Shutdown(ctx); err != nil {
+			p.logger.Debug().Err(err).Msg("http shutdown returned an error")
+		}
+	})(ctx)
+
+	wg.Add(1)
+	go logging.RecoverGoRoutine(p.logger, "proxy_drain_bridges", func(context.Context) {
+		defer wg.Done()
+		p.signalBridges()
+		p.bridgeWG.Wait()
+	})(ctx)
+
+	done := make(chan struct{})
+	go logging.RecoverGoRoutine(p.logger, "proxy_drain_join", func(context.Context) {
+		wg.Wait()
+		close(done)
+	})(ctx)
+	select {
+	case <-done:
+		// Everything in flight finished inside the budget. Nothing to cut.
+		return false
+	case <-ctx.Done():
+	}
+
+	// Past the budget: from here everything is a CUT, and it is reached only once
+	// the deadline has already expired, so anything it interrupts was over budget
+	// anyway.
+	p.logger.Warn().
+		Err(ctx.Err()).
+		Msg("shutdown budget expired with work still in flight; cutting what is left")
+
+	// The bridges first. A signal asks a bridge to wind down and a bridge that
+	// does not answer holds the drain open forever -- WaitGroup.Wait cannot be
+	// cancelled, so the two goroutines above stay parked on it for the life of
+	// the process.
+	//
+	// Close() only SIGNALS, like every other caller: it cancels the bridge's
+	// context, messageLoop selects on exactly that, Run returns, and Run's
+	// deferred release is what tears the connections down. Closing them unblocks
+	// the read loops release then WAITS for -- a step inside the teardown, not
+	// the thing that triggers it. Said the other way round, as it was here, the
+	// close inside release reads as redundant to the next person cleaning up.
+	p.bridges.Range(func(b *WebSocketBridge, _ struct{}) bool {
+		_ = b.Close()
+		return true
+	})
+
+	// Then the gRPC streams that ignored the GOAWAY: over this h2c transport
+	// GracefulStop's Drain is Close(closedCh), which ends the stream rather than
+	// waiting it out.
+	p.grpcMu.RLock()
+	grpcServer := p.grpcRelayServer
+	p.grpcMu.RUnlock()
+	if grpcServer != nil {
+		grpcServer.GracefulStop()
+	}
+	return true
+}
+
+// signalBridges tells every live bridge to wind down, without waiting for any of
+// them.
+//
+// The signal is what makes a bridge cost a shutdown budget instead of its own:
+// left alone, one parked in awaitFirstFrame is bounded only by wsFirstFrameWait,
+// four times this whole budget. closeWithReason cancels the bridge's context and
+// expires its read deadline, which is what unblocks a ReadMessage that observes
+// no context at all.
+//
+// Signalling is not waiting on purpose: each bridge's teardown runs on its own
+// handler goroutine, so the settles overlap and the cost is one settle, not N.
+func (p *ProxyServer) signalBridges() {
+	p.bridges.Range(func(b *WebSocketBridge, _ struct{}) bool {
+		_ = b.closeWithReason(CloseGoingAway, "relayer shutting down", wsCloseInitiatorRelayer)
+		return true
+	})
+}
+
+// trackBridge joins a bridge to the shutdown drain, and reports whether it was
+// admitted. A false means the proxy is already closing and the caller must not
+// run the bridge.
+//
+// The Add happens under p.mu while reading p.closed, which is not a style
+// choice: an Add that races a Wait which has already reached zero is documented
+// misuse of sync.WaitGroup and panics. Holding the mutex makes "we are still
+// open" and "you are counted" one decision.
+func (p *ProxyServer) trackBridge(b *WebSocketBridge) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.bridges.Store(b, struct{}{})
+	p.bridgeWG.Add(1)
+	return true
+}
+
+// untrackBridge is the other half, called when the bridge's Run returns -- which
+// is after release() and its b.wg.Wait(), so after the last relay that bridge
+// could publish.
+func (p *ProxyServer) untrackBridge(b *WebSocketBridge) {
+	p.bridges.Delete(b)
+	p.bridgeWG.Done()
 }
 
 // compressGzip compresses data using gzip compression.

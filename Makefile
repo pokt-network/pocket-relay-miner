@@ -1,4 +1,4 @@
-.PHONY: build test clean install help docker-build docker-push build-backend proto-backend \
+.PHONY: build test clean install help docker-build docker-push build-backend proto-backend proto-transport \
 	tilt-up-k8s tilt-down-k8s
 
 # Binary name
@@ -86,6 +86,11 @@ lint: ## Run golangci-lint
 	@golangci-lint run
 	@cd $(BACKEND_DIR) && golangci-lint run
 
+lint-blank: ## Report discarded errors (`_ = f()`); informational, never fails the build
+	@echo "Reporting discarded errors..."
+	@golangci-lint run --config .golangci-blank.yml --issues-exit-code=0
+	@cd $(BACKEND_DIR) && golangci-lint run --config ../../.golangci-blank.yml --issues-exit-code=0
+
 check-tracked-files: ## Verify no local-only files (planning docs, IDE config, secrets) are tracked
 	@./scripts/check-tracked-files.sh
 
@@ -123,6 +128,14 @@ proto-backend: ## Generate protobuf code for backend server
 	@echo "Generating protobuf code for backend server..."
 	@cd $(BACKEND_DIR) && protoc --go_out=. --go_opt=paths=source_relative --go-grpc_out=. --go-grpc_opt=paths=source_relative pb/demo.proto
 	@echo "Protobuf generation complete"
+
+# The descriptor keeps the file name pocket/ha/mined_relay.proto and the go_package it was
+# first generated with, so an unchanged .proto regenerates the committed file byte for byte.
+proto-transport: ## Regenerate transport/mined_relay.pb.go from proto/pocket/ha/mined_relay.proto
+	@tmp=$$(mktemp -d) && gogo=$$(go list -m -f '{{.Dir}}' github.com/cosmos/gogoproto) && \
+		protoc -I proto -I $$gogo -I $$gogo/protobuf --gocosmos_out=paths=source_relative:$$tmp proto/pocket/ha/mined_relay.proto && \
+		sed 's/^package ha$$/package transport/' $$tmp/pocket/ha/mined_relay.pb.go | goimports > transport/mined_relay.pb.go; \
+		status=$$?; rm -rf $$tmp; exit $$status
 
 build-backend: proto-backend ## Build the backend test server
 	@echo "Building backend test server..."

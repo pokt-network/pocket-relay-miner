@@ -212,8 +212,8 @@ func runGRPCDiagnostic(ctx context.Context, logger logging.Logger, relayClient *
 // runGRPCLoadTest sends concurrent gRPC relay requests with performance metrics.
 //
 // Each worker calls BuildRelayRequest itself so the ring signature is generated
-// fresh per relay (ring sigs are randomized). This matches PATH's production
-// behavior (one sign per incoming request) and guarantees distinct relay bytes
+// fresh per relay (ring sigs are randomized). This matches what a gateway does
+// in production (one sign per incoming request) and guarantees distinct relay bytes
 // per call, so the SMST stores one leaf per request instead of collapsing.
 func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *relay_client.RelayClient, payloadBz []byte, requireNonEmpty bool) error {
 	// Create gRPC connection (reuse across workers)
@@ -248,6 +248,9 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 		logger.Info().Int("suppliers", len(supplierAddrs)).Msg("round-robining across session suppliers")
 	}
 	var supplierIdx atomic.Uint64
+	// Spaces relays out while the relayer refuses them (RESOURCE_EXHAUSTED,
+	// UNAVAILABLE); see loadBackoff.
+	grpcBackoff := newLoadBackoff()
 
 	runLoadTest(RelayCount, RelayConcurrency, RelayRPS, metrics,
 		func() {
@@ -264,7 +267,7 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 
 			// Build a FRESH relay request for this worker. Ring signatures use
 			// randomness, so each call yields distinct bytes even for an
-			// identical payload — matches PATH's per-request sign behaviour.
+			// identical payload — as a gateway signs once per request.
 			supplier := supplierAddrs[supplierIdx.Add(1)%uint64(len(supplierAddrs))]
 			relayRequest, _, err := buildRelayRequest(requestCtx, relayClient, RelayServiceID, supplier, payloadBz)
 			if err != nil {
@@ -286,8 +289,12 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 					Err(err).
 					Int("request_num", reqNum).
 					Msg("gRPC relay request failed (network error)")
+				if isGRPCRefusal(err) {
+					grpcBackoff.refused()
+				}
 				return
 			}
+			grpcBackoff.succeeded()
 
 			// Verify relay response signature against the supplier this relay
 			// was addressed to (round-robin aware).
@@ -333,6 +340,7 @@ func runGRPCLoadTest(ctx context.Context, logger logging.Logger, relayClient *re
 				Msg("gRPC relay request succeeded")
 		},
 	)
+	fmt.Printf("gRPC backoff waits: %d\n", grpcBackoff.Waits())
 
 	return nil
 }

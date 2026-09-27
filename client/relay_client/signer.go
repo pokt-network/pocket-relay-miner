@@ -38,11 +38,11 @@ type Signer struct {
 //
 // Example:
 //
-//	signer, err := NewSignerFromHex("2d00ef074d9b51e46886dc9a1df11e7b986611d0f336bdcf1f0adce3e037ec0a")
+//	signer, err := NewSignerFromHex("c188c43496351a963762a5d9de78ff887ac66b4ba5de5967efd55a6d1e71ddda")
 //	if err != nil {
 //	    return fmt.Errorf("failed to create signer: %w", err)
 //	}
-//	address := signer.GetAddress() // pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4
+//	address := signer.GetAddress() // pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z
 func NewSignerFromHex(privKeyHex string) (*Signer, error) {
 	if privKeyHex == "" {
 		return nil, fmt.Errorf("private key hex is empty")
@@ -81,15 +81,15 @@ func NewSignerFromHex(privKeyHex string) (*Signer, error) {
 // "pokt" prefix and is derived from the secp256k1 public key.
 //
 // Returns:
-//   - string: Bech32 address (e.g., "pokt1mrqt5f7qh8uxs27cjm9t7v9e74a9vvdnq5jva4")
+//   - string: Bech32 address (e.g., "pokt1pyr6a2yz9rrdhlgg8ff0xqhlsv3qsxcmm3yp8z")
 func (s *Signer) GetAddress() string {
 	return s.address
 }
 
 // SignRelayRequestWithRing signs a relay request using a pre-built ring.
 //
-// The ring is fetched and cached by the caller (once per session, matching
-// PATH's caching approach) rather than per request.
+// The ring is fetched and cached by the caller (once per session, as a
+// gateway caches it) rather than per request.
 //
 // The ring should be built from the app's address + delegated gateways using
 // RingClient.GetRingForAddressAtHeight(). The signer's private key is used for signing,

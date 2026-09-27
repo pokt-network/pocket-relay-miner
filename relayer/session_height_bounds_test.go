@@ -126,12 +126,13 @@ func validRelayRequest(sessionStart, sessionEnd int64) *servicetypes.RelayReques
 func TestValidateRelayRequest_RejectsImplausibleHeightsBeforeAnyChainRead(t *testing.T) {
 	const currentH = int64(1_000_000)
 
-	v, paramCache := newEpochValidator(10, 10, currentH)
-	v.SetCurrentBlockHeight(currentH)
+	// currentH as the LIVE height: this bound is about what the chain is doing
+	// now, not about when one relay arrived.
+	v, paramCache := newEpochValidator(10, 10, currentH, currentH)
 
 	// Genesis-era heights: structurally valid (so ValidateBasic passes) but far
 	// outside any window this relayer could serve.
-	err := v.ValidateRelayRequest(context.Background(), validRelayRequest(1, 21))
+	err := v.ValidateRelayRequest(context.Background(), validRelayRequest(1, 21), currentH)
 
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "implausible session heights")
@@ -153,10 +154,11 @@ func TestValidateRelayRequest_PlausibleHeightsReachSessionTiming(t *testing.T) {
 		sessionEnd   = int64(999_970) // grace (10) ended at 999_979, well before now
 	)
 
-	v, paramCache := newEpochValidator(10, 10, currentH)
-	v.SetCurrentBlockHeight(currentH)
+	// currentH as the LIVE height: this bound is about what the chain is doing
+	// now, not about when one relay arrived.
+	v, paramCache := newEpochValidator(10, 10, currentH, currentH)
 
-	err := v.ValidateRelayRequest(context.Background(), validRelayRequest(sessionStart, sessionEnd))
+	err := v.ValidateRelayRequest(context.Background(), validRelayRequest(sessionStart, sessionEnd), currentH)
 
 	require.Error(t, err)
 	require.NotContains(t, err.Error(), "implausible session heights",

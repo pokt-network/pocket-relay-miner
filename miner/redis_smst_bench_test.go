@@ -17,9 +17,8 @@ import (
 //
 // These now measure against a REAL Redis over a socket, not an in-process
 // fake. The numbers are therefore larger and they mean something different:
-// what an operator's Redis costs, rather than what a Go map costs. The old
-// results in CLAUDE.md carry the caveat "miniredis (in-process), production
-// adds ~1-2ms" precisely because the fake could not answer that question.
+// what an operator's Redis costs, rather than what a Go map costs, which is
+// the question an in-process fake could not answer.
 
 type RedisSMSTBenchSuite struct {
 	redisPrefix string

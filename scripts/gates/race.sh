@@ -8,7 +8,7 @@
 #   scripts/gates/race.sh             # whole tree
 #   PKG=miner scripts/gates/race.sh   # one package
 #
-# CLAUDE.md calls this Rule #1 and says it cannot be broken. Until this gate
+# CONTRIBUTING.md calls this Rule #1 and says it cannot be broken. Until this gate
 # existed the only target that passed -race was `test_miner`, covering
 # ./miner/... alone, and CI invoked neither -- the rule was declared and never
 # executed.
@@ -62,7 +62,30 @@ else
     # `tail`, not the head the fallback used to print: when the grep matches
     # nothing the interesting part is the END of the run, and the head is a wall
     # of passes that says nothing about the failure (measured 2026-08-27).
-    gate_detail "$(gate_json_output "$json_out" | grep -E 'DATA RACE|^(---|FAIL|panic)' || gate_json_output "$json_out" | tail -40)" 40
+    #
+    # The `---` is anchored to FAIL. Bare, it also matches `--- PASS`, and since
+    # `-json` implies verbose those are always present: measured on the red run
+    # of 2026-09-09, the old pattern matched 2349 lines and the FIRST 40 -- all
+    # gate_detail keeps -- were 40 of 40 `--- PASS`. The operator read a wall of
+    # green out of a gate that had just failed. Anchored, the same log prints 6.
+    #
+    # `DATA RACE` stays loose and must not be folded into the FAIL alternative:
+    # a race in a goroutine outliving its test can leave every test `--- PASS`,
+    # which is the case this gate exists for (reported by the council, not
+    # measured here).
+    #
+    # -B1 because the line saying WHY printed just above its `--- FAIL`:
+    # in that same log the anchor gave `--- FAIL: TestQueuedCaller...` and the
+    # preceding `tx_permits_test.go:146: the queued caller never returned`.
+    # -B1 takes whatever precedes a match, so a `FAIL` line whose predecessor is
+    # green yields a `--- PASS` in the output, and grep inserts its own `--`
+    # between non-adjacent groups: on that log, 1 of the 6 lines is each. Both
+    # are expected; the defect this replaced was 40 of 40 green.
+    # Matching `_test.go:` outright instead would drag in every t.Log of every
+    # PASSING test -- 15 such lines that day, 14 of them from tests that did not
+    # fail -- a count bounded by how much the tree logs, not by the failure, so
+    # it re-creates this same defect once the tree logs enough.
+    gate_detail "$(gate_json_output "$json_out" | grep -B1 -E 'DATA RACE|^\s*--- FAIL|^(FAIL|panic)' || gate_json_output "$json_out" | tail -40)" 40
     gate_keep_evidence "$json_out" race
 fi
 rm -f "$json_out"

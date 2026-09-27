@@ -86,6 +86,7 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 	)
 	require.NoError(t, meter.Start(ctx))
 	defer func() { _ = meter.Close() }()
+	charges := newChargeWriter(t, meter, redisClient)
 
 	const (
 		supplier  = "pokt1supplier_ns"
@@ -100,6 +101,7 @@ func TestRelayMeter_KeysFollowConfiguredNamespace(t *testing.T) {
 	)
 	require.NoError(t, err)
 	require.True(t, allowed, "the relay must be served for the meter to write anything")
+	charges.flush()
 
 	kb := redisClient.KB()
 

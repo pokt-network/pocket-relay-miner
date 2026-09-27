@@ -1,0 +1,27 @@
+# Scrapes the relayer, the miner and Redis of the compose example. On a host
+# deployment, replace the targets with 127.0.0.1:9090 (relayer) and
+# 127.0.0.1:9092 (miner) and run a Redis exporter next to Redis.
+#
+# The dashboards select processes by job (relayers, miners) and by the
+# instance label, which is set here to the process name so that it reads the
+# same on every deployment.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: relayers
+    static_configs:
+      - targets: ["relayer:9090"]
+        labels:
+          instance: relayer
+
+  - job_name: miners
+    static_configs:
+      - targets: ["miner:9092"]
+        labels:
+          instance: miner
+
+  - job_name: redis
+    static_configs:
+      - targets: ["redis-exporter:9121"]

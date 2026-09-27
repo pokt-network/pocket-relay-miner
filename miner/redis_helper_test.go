@@ -43,6 +43,27 @@ func newTestRedis(t testing.TB) (*redisutil.Client, string) {
 	return client, prefix
 }
 
+// newExclusiveTestRedis is newTestRedis against a Redis of this test's own, for
+// a test that configures the SERVER rather than writing keys. maxmemory and
+// maxmemory-policy are not namespaced, so the base prefix above does nothing to
+// contain them: on the shared server they reach every other package.
+//
+// The prefix is kept anyway, so keys read the same as everywhere else and a
+// test can move between the two helpers without its key-building changing.
+func newExclusiveTestRedis(t testing.TB) (*redisutil.Client, string) {
+	t.Helper()
+
+	url := testredis.ExclusiveURL(t)
+	prefix := testredis.Prefix(t)
+	client, err := redisutil.NewClient(context.Background(), redisutil.ClientConfig{
+		URL:       url,
+		Namespace: config.RedisNamespaceConfig{BasePrefix: prefix},
+	})
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = client.Close() })
+	return client, prefix
+}
+
 // keyExists reports whether key is present, replacing miniredis's Exists.
 func keyExists(t *testing.T, client *redisutil.Client, key string) bool {
 	t.Helper()

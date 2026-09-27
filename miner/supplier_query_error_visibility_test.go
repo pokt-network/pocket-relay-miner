@@ -27,7 +27,7 @@ import (
 //     did not.
 //   - the only signal was one Warn line PER SUPPLIER per reconcile pass. With a
 //     large key set and an unreachable fullnode that is one line per supplier
-//     every reconcile interval — the log flood CLAUDE.md forbids for exactly this
+//     every reconcile interval — the log flood CONTRIBUTING.md forbids for exactly this
 //     shape, and the reason per-entity conditions belong at Debug plus a metric.
 //
 // Skipping the write is correct (the stale entry beats a wrong one). Skipping it

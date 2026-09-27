@@ -4,11 +4,14 @@
 # transactions in PARALLEL for fast startup (~5 seconds vs ~60 seconds).
 
 load("./ports.Tiltfile", "get_port")
+load("./accounts.star", "staked_account_names")
 
-def deploy_account_init(config):
+def deploy_account_init(config, all_keys_path = "tilt/config/all-keys.yaml", genesis_path = "tilt/config/genesis.json"):
     """Deploy job to initialize account public keys"""
     if not config["validator"]["enabled"]:
         return
+
+    accounts = " ".join(staked_account_names(read_yaml(all_keys_path), read_json(genesis_path)))
 
     # Job to initialize all accounts by sending a tx
     # This registers their public keys on-chain
@@ -56,7 +59,7 @@ spec:
         - |
           set -e
           VALIDATOR_RPC="http://validator:26657"
-          PNF_ADDRESS="pokt1eeeksh2tvkh7wzmfrljnhw4wrhs55lcuvmekkw"
+          PNF_ADDRESS="pokt12vxfedye7hmamrxq0yvkmsxpxhfmtraaahy90g"
 
           # Create necessary directories
           mkdir -p /tmp/pocket/data
@@ -65,7 +68,8 @@ spec:
           cd /keys
 
           # All accounts that need pubkey initialization
-          ACCOUNTS="app1 app2 app3 app4 app5 app_develop-http-eager app_develop-websocket-optimistic app_develop-grpc-optimistic app_develop-stream-optimistic app_develop-cometbft-optimistic supplier1 supplier2 supplier3 supplier4 supplier5 supplier6 supplier7 supplier8 supplier9 supplier10 supplier11 supplier12 supplier13 supplier14 supplier15 gateway1"
+          ACCOUNTS="{}"
+          BLOCK_TIME_SECONDS="{}"
 
           echo "================================================"
           echo "PHASE 1: Importing all accounts to keyring"
@@ -156,61 +160,44 @@ spec:
 
           echo ""
           echo "================================================"
-          echo "PHASE 4: Waiting for block confirmation..."
+          echo "PHASE 4: Verifying pubkeys on-chain"
           echo "================================================"
-
-          # Get current block height
-          START_HEIGHT=$(curl -s http://validator:26657/status 2>/dev/null | grep -o '"latest_block_height":"[0-9]*"' | grep -o '[0-9]*' || echo "0")
-          echo "Current block height: $START_HEIGHT"
-          echo "Waiting for 3 blocks to be mined to ensure all transactions are included..."
-
-          # Wait for at least 3 blocks to be mined (block time ~2s, so 3 blocks = 6s + buffer)
-          TARGET_HEIGHT=$((START_HEIGHT + 3))
-          TIMEOUT=30
+          # A transaction is included in a later block, and a block takes the
+          # validator's block time (localnet.block_time_seconds, which sets its
+          # timeout_commit). So the wait is counted in blocks of that clock: check
+          # until every account has its pubkey, or until the chain has advanced 5
+          # blocks, and give up after 8 block times if the chain stops advancing.
+          height() {{
+            curl -s http://validator:26657/status 2>/dev/null | grep -o '"latest_block_height":"[0-9]*"' | grep -o '[0-9]*' || echo "0"
+          }}
+          START_HEIGHT=$(height)
+          DEADLINE_HEIGHT=$((START_HEIGHT + 5))
+          DEADLINE_SECONDS=$((BLOCK_TIME_SECONDS * 8))
           ELAPSED=0
-
           while true; do
-            CURRENT_HEIGHT=$(curl -s http://validator:26657/status 2>/dev/null | grep -o '"latest_block_height":"[0-9]*"' | grep -o '[0-9]*' || echo "0")
-
-            if [ "$CURRENT_HEIGHT" -ge "$TARGET_HEIGHT" ] 2>/dev/null; then
-              echo "✓ Reached block $CURRENT_HEIGHT (target: $TARGET_HEIGHT)"
+            SUCCESS=0
+            FAILED=0
+            MISSING=""
+            for ACC_NAME in $ACCOUNTS; do
+              ADDR=$(grep -A 4 "name: $ACC_NAME$" all-keys.yaml | grep "address:" | awk '{{print $2}}')
+              if [ -z "$ADDR" ]; then
+                continue
+              fi
+              VERIFY_INFO=$(timeout 5 pocketd query auth account "$ADDR" --node "$VALIDATOR_RPC" --chain-id pocket --output json 2>&1 || echo "{{}}")
+              if echo "$VERIFY_INFO" | grep -q '"public_key"'; then
+                SUCCESS=$((SUCCESS + 1))
+              else
+                FAILED=$((FAILED + 1))
+                MISSING="$MISSING $ACC_NAME"
+              fi
+            done
+            CURRENT_HEIGHT=$(height)
+            if [ "$FAILED" -eq 0 ] || [ "$CURRENT_HEIGHT" -ge "$DEADLINE_HEIGHT" ] 2>/dev/null || [ "$ELAPSED" -ge "$DEADLINE_SECONDS" ]; then
               break
             fi
-
-            if [ "$ELAPSED" -ge "$TIMEOUT" ]; then
-              echo "⚠ Timeout waiting for blocks, but continuing (current: $CURRENT_HEIGHT, target: $TARGET_HEIGHT)"
-              break
-            fi
-
-            echo "Waiting... (current: $CURRENT_HEIGHT, target: $TARGET_HEIGHT)"
-            sleep 2
-            ELAPSED=$((ELAPSED + 2))
-          done
-
-          # Extra buffer to ensure indexing is complete
-          echo "Waiting 2 more seconds for indexing..."
-          sleep 2
-
-          echo ""
-          echo "================================================"
-          echo "PHASE 5: Verifying pubkeys on-chain"
-          echo "================================================"
-          SUCCESS=0
-          FAILED=0
-          for ACC_NAME in $ACCOUNTS; do
-            ADDR=$(grep -A 4 "name: $ACC_NAME$" all-keys.yaml | grep "address:" | awk '{{print $2}}')
-            if [ -z "$ADDR" ]; then
-              continue
-            fi
-
-            VERIFY_INFO=$(timeout 5 pocketd query auth account "$ADDR" --node "$VALIDATOR_RPC" --chain-id pocket --output json 2>&1 || echo "{{}}")
-            if echo "$VERIFY_INFO" | grep -q '"public_key"'; then
-              echo "[$ACC_NAME] ✓ Pubkey verified on-chain"
-              SUCCESS=$((SUCCESS + 1))
-            else
-              echo "[$ACC_NAME] ✗ Pubkey NOT found on-chain"
-              FAILED=$((FAILED + 1))
-            fi
+            echo "block $CURRENT_HEIGHT: $FAILED account(s) without a pubkey yet; checking again until block $DEADLINE_HEIGHT (at most $DEADLINE_SECONDS s)"
+            sleep 5
+            ELAPSED=$((ELAPSED + 5))
           done
 
           echo ""
@@ -218,8 +205,9 @@ spec:
           echo "SUMMARY: $SUCCESS successful, $FAILED failed"
           echo "================================================"
 
-          if [ $FAILED -gt 0 ]; then
-            echo "⚠ Some accounts failed, but continuing anyway..."
+          if [ "$FAILED" -gt 0 ]; then
+            echo "✗ No pubkey on-chain by block $CURRENT_HEIGHT (started at $START_HEIGHT) for:$MISSING"
+            exit 1
           fi
 
           echo "Account initialization complete!"
@@ -247,7 +235,9 @@ spec:
             path: client.toml
 """.format(
         config["validator"]["image"],
-        config["validator"]["tag"]
+        config["validator"]["tag"],
+        accounts,
+        config["localnet"]["block_time_seconds"],
     )
 
     k8s_yaml(blob(init_job))

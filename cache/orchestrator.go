@@ -661,13 +661,13 @@ func (o *CacheOrchestrator) warmupCaches(ctx context.Context) error {
 
 	// Warmup singleton caches (params)
 	if shared, ok := o.sharedParamsCache.(*sharedParamsCache); ok {
-		_ = shared.WarmupFromRedis(ctx)
+		_ = shared.WarmupFromRedis(ctx) //nolint:errcheck // WarmupFromRedis logs the failure at Warn before returning it, and warmup is best-effort: a cache that did not warm is populated on demand
 	}
 	if proof, ok := o.proofParamsCache.(*proofParamsCache); ok {
-		_ = proof.WarmupFromRedis(ctx)
+		_ = proof.WarmupFromRedis(ctx) //nolint:errcheck // WarmupFromRedis logs the failure at Warn before returning it, and warmup is best-effort: a cache that did not warm is populated on demand
 	}
 	if supplier, ok := o.supplierParamsCache.(*RedisSupplierParamCache); ok {
-		_ = supplier.WarmupFromRedis(ctx)
+		_ = supplier.WarmupFromRedis(ctx) //nolint:errcheck // WarmupFromRedis logs the failure at Warn before returning it, and warmup is best-effort: a cache that did not warm is populated on demand
 	}
 
 	o.logger.Info().Msg("cache warmup complete")
